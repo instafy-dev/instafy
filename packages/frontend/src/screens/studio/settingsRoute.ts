@@ -3,11 +3,30 @@ import { useLocation, useNavigate } from "react-router-dom";
 import type { SettingsTab } from "./types";
 
 export type ProjectSettingsCategory = "overview" | "access" | "providers" | "ai" | "danger";
+export type OrganizationSettingsCategory = "profile" | "members" | "ai" | "billing" | "danger";
+
+export function resolveOrganizationSettingsCategory(search: string): OrganizationSettingsCategory | null {
+  const category = new URLSearchParams(search).get("settingsCategory");
+  return category === "profile" || category === "members" || category === "ai" || category === "billing" || category === "danger"
+    ? category : null;
+}
+
+export function buildOrganizationSettingsCategorySearch(
+  search: string,
+  category: OrganizationSettingsCategory,
+  organizationId: string | null,
+): string {
+  const params = new URLSearchParams(buildSettingsSectionSearch(search, "org", category));
+  const selectedId = organizationId?.trim();
+  if (selectedId) params.set("settingsOrgId", selectedId);
+  else params.delete("settingsOrgId");
+  return params.toString();
+}
 
 const categoriesByTab = {
-  org: ["members", "ai", "billing", "danger"],
+  org: ["profile", "members", "ai", "billing", "danger"],
   project: ["overview", "access", "providers", "ai", "danger"],
-  profile: ["account", "preferences"],
+  profile: ["account", "preferences", "notifications"],
 } as const;
 
 export function isSettingsCategory(tab: SettingsTab, category: string): boolean {
@@ -47,6 +66,7 @@ export function buildSettingsSectionSearch(
   const params = new URLSearchParams(search);
   params.set("panel", "settings");
   params.set("settingsTab", tab);
+  if (tab !== "org") params.delete("settingsOrgId");
   if (category === categoriesByTab[tab][0]) params.delete("settingsCategory");
   else params.set("settingsCategory", category);
   params.delete("settingsItem");

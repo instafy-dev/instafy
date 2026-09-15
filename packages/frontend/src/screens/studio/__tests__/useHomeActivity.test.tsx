@@ -33,12 +33,12 @@ describe("useHomeActivity", () => {
   let container: HTMLDivElement;
   let current: ReturnType<typeof useHomeActivity>;
 
-  function Harness({ userId }: { userId: string | null }) {
-    current = useHomeActivity(userId, 2);
+  function Harness({ userId, shouldMarkSeen }: { userId: string | null; shouldMarkSeen: boolean }) {
+    current = useHomeActivity(userId, 2, shouldMarkSeen);
     return <div>{current.activityItems.map((entry) => entry.id).join(",")}</div>;
   }
-  const render = async (userId: string | null = "user-a") => {
-    await act(async () => root.render(<Harness userId={userId} />));
+  const render = async (userId: string | null = "user-a", shouldMarkSeen = true) => {
+    await act(async () => root.render(<Harness userId={userId} shouldMarkSeen={shouldMarkSeen} />));
   };
   const tick = async () => { await act(async () => { await vi.advanceTimersByTimeAsync(20_000); }); };
   const loadMore = async () => {
@@ -240,5 +240,40 @@ describe("useHomeActivity", () => {
     expect(current.activityLoading).toBe(false);
     expect(await current.loadMoreActivity()).toBe(false);
     expect(await current.retryActivity()).toBe(false);
+  });
+
+  it("loads, paginates, polls and retries Team activity without advancing the Home seen cursor", async () => {
+    list.mockResolvedValueOnce(page(["12", "11"], { hasMore: true, nextBefore: "11", lastSeenEventId: "4" }));
+    list.mockResolvedValueOnce(page(["10"]));
+    list.mockResolvedValueOnce({ success: false, error: "Refresh interrupted" });
+    list.mockResolvedValueOnce(page(["13"], { lastSeenEventId: "8" }));
+    await render("user-a", false);
+    expect(await loadMore()).toBe(true);
+    await tick();
+    expect(current.activityError).toBe("Refresh interrupted");
+    await act(async () => { expect(await current.retryActivity()).toBe(true); });
+    expect(list.mock.calls.map(([params]) => params)).toEqual([
+      { limit: 4 }, { before: "11", limit: 2 },
+      { since: "12", limit: 200 }, { since: "12", limit: 200 },
+    ]);
+    expect(current.activityItems.map((entry) => entry.id)).toEqual(["13", "12", "11", "10"]);
+    expect(current.serverLastSeenEventId).toBe("4");
+    expect(current.activityError).toBeNull();
+    expect(markSeen).not.toHaveBeenCalled();
+  });
+
+  it("does not mark a canceled Home response after switching to a read-only Team visit", async () => {
+    const pendingHome = deferred<ListMyActivityResult>();
+    list.mockReturnValueOnce(pendingHome.promise);
+    list.mockResolvedValueOnce(page(["12"], { lastSeenEventId: "4" }));
+    await render();
+    await render("user-a", false);
+    await act(async () => { pendingHome.resolve(page(["99"])); });
+    expect(current.activityItems.map((entry) => entry.id)).toEqual(["12"]);
+    expect(markSeen).not.toHaveBeenCalled();
+
+    list.mockResolvedValueOnce(page(["13"], { lastSeenEventId: "4" }));
+    await render("user-a", true);
+    expect(markSeen).toHaveBeenCalledExactlyOnceWith({ lastSeenEventId: "13" });
   });
 });

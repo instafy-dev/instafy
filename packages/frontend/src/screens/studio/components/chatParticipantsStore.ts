@@ -65,8 +65,9 @@ export interface ParticipantSubscriptionUsage {
 }
 
 export interface ParticipantAgent extends ConversationRosterAgent {
-  /** Controller agent id — present when the agent is editable in place. */
+  /** Exact observed or configured controller identity; does not itself grant editing. */
   agentId?: string | null;
+  canEditProfile?: boolean;
   /** Effective AI provider id (e.g. "openai"), for model options + gating. */
   providerId?: string | null;
   /** Resolved model id, e.g. "gpt-5.5". */

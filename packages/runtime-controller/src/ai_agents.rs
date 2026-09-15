@@ -15,12 +15,16 @@ use uuid::Uuid;
 use crate::active_job_auth::{
     authorize_active_job_if_scoped, ActiveJobAuthorization, ActiveJobProjectAccess,
 };
-use crate::auth::{authenticate_request, require_user_session};
-use crate::projects::{ensure_project_access, ensure_project_write_access, load_project_record};
+use crate::auth::{authenticate_request, require_user_session, RequestContext};
+use crate::projects::{
+    ensure_project_access, ensure_project_read_access, ensure_project_write_access,
+    load_project_record,
+};
 use crate::{bad_request, forbidden, internal_error, not_found, ApiError, AppState};
 
 const MAX_HANDLE_LEN: usize = 20;
 const MAX_DESCRIPTION_LEN: usize = 800;
+const MAX_BIO_LEN: usize = 500;
 const MAX_MODEL_LEN: usize = 120;
 
 const PROVIDER_OPENAI: &str = "openai";
@@ -36,6 +40,7 @@ pub(crate) struct AgentProfile {
     handle: String,
     display_name: Option<String>,
     description: Option<String>,
+    bio: Option<String>,
     avatar_seed: String,
     provider: String,
     model: Option<String>,
@@ -60,6 +65,7 @@ pub(crate) struct CreateAgentBody {
     handle: Option<String>,
     display_name: Option<String>,
     description: Option<String>,
+    bio: Option<String>,
     avatar_seed: Option<String>,
     provider: Option<String>,
     model: Option<String>,
@@ -89,6 +95,8 @@ pub(crate) struct UpdateAgentBody {
     #[serde(default, deserialize_with = "double_option")]
     description: Option<Option<String>>,
     #[serde(default, deserialize_with = "double_option")]
+    bio: Option<Option<String>>,
+    #[serde(default, deserialize_with = "double_option")]
     avatar_seed: Option<Option<String>>,
     #[serde(default, deserialize_with = "double_option")]
     credential_id: Option<Option<String>>,
@@ -103,10 +111,77 @@ pub(crate) struct UpdateAgentBody {
 
 pub(crate) fn router() -> Router<AppState> {
     Router::new()
+        .route(
+            "/projects/:project_id/agents/:agent_id/profile",
+            get(get_project_agent_profile),
+        )
         .route("/me/agents", get(list_my_agents))
         .route("/me/agents", post(create_my_agent))
         .route("/me/agents/:agent_id", patch(update_my_agent))
         .route("/me/agents/:agent_id", delete(delete_my_agent))
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PublicAgentProfile {
+    id: Uuid,
+    handle: String,
+    display_name: Option<String>,
+    avatar_seed: String,
+    bio: Option<String>,
+}
+
+async fn get_project_agent_profile(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    AxumPath((project_id_raw, agent_id_raw)): AxumPath<(String, String)>,
+) -> Result<Json<PublicAgentProfile>, (StatusCode, Json<ApiError>)> {
+    let context = authenticate_request(&state.config, &headers).await?;
+    require_user_session(&context)?;
+    let project_id = Uuid::from_str(project_id_raw.trim())
+        .map_err(|_| bad_request("projectId must be a valid UUID"))?;
+    let agent_id = Uuid::from_str(agent_id_raw.trim())
+        .map_err(|_| bad_request("agentId must be a valid UUID"))?;
+    let mut connection = state
+        .pool
+        .get()
+        .await
+        .map_err(|error| internal_error(format!("failed to get connection: {error}")))?;
+    let transaction = connection
+        .transaction()
+        .await
+        .map_err(|error| internal_error(format!("failed to start transaction: {error}")))?;
+    let project = load_project_record(&transaction, &project_id).await?;
+    ensure_project_read_access(&transaction, &project, &context, None).await?;
+    let row = transaction
+        .query_opt(
+            "select id, user_id, handle, display_name, avatar_seed, bio
+             from user_agents where id = $1 and deleted_at is null",
+            &[&agent_id],
+        )
+        .await
+        .map_err(|error| internal_error(format!("failed to load agent profile: {error}")))?
+        .ok_or_else(|| not_found("agent profile not found"))?;
+    // An old message or membership in another space does not make the
+    // owner's current public profile available in this project.
+    let owner_context = RequestContext {
+        user_id: Some(row.get("user_id")),
+        is_service_role: false,
+        scoped_claims: None,
+    };
+    ensure_project_read_access(&transaction, &project, &owner_context, None).await?;
+    let profile = PublicAgentProfile {
+        id: row.get("id"),
+        handle: row.get("handle"),
+        display_name: row.get("display_name"),
+        avatar_seed: row.get("avatar_seed"),
+        bio: row.get("bio"),
+    };
+    transaction
+        .commit()
+        .await
+        .map_err(|error| internal_error(format!("failed to finish agent profile read: {error}")))?;
+    Ok(Json(profile))
 }
 
 fn normalize_handle(input: &str) -> Result<String, (StatusCode, Json<ApiError>)> {
@@ -157,6 +232,19 @@ fn normalize_optional_description(
                 MAX_DESCRIPTION_LEN
             )));
         }
+    }
+    Ok(normalized)
+}
+
+fn normalize_optional_bio(
+    value: Option<String>,
+) -> Result<Option<String>, (StatusCode, Json<ApiError>)> {
+    let normalized = normalize_optional_text(value);
+    if normalized
+        .as_ref()
+        .is_some_and(|bio| bio.chars().count() > MAX_BIO_LEN)
+    {
+        return Err(bad_request("bio is too long (max 500 characters)"));
     }
     Ok(normalized)
 }
@@ -524,6 +612,7 @@ async fn list_my_agents(
                     ua.handle,
                     ua.display_name,
                     ua.description,
+                    ua.bio,
                     ua.avatar_seed,
                     ua.provider,
                     ua.model,
@@ -553,6 +642,7 @@ async fn list_my_agents(
             let handle: String = row.get("handle");
             let display_name: Option<String> = row.get("display_name");
             let description: Option<String> = row.get("description");
+            let bio: Option<String> = row.get("bio");
             let avatar_seed: String = row.get("avatar_seed");
             let provider: String = row.get("provider");
             let model: Option<String> = row.get("model");
@@ -568,6 +658,7 @@ async fn list_my_agents(
                 handle,
                 display_name,
                 description,
+                bio,
                 avatar_seed,
                 provider,
                 model,
@@ -609,6 +700,7 @@ async fn create_my_agent(
 
     let display_name = normalize_optional_text(body.display_name);
     let description = normalize_optional_description(body.description)?;
+    let bio = normalize_optional_bio(body.bio)?;
     let model = normalize_optional_model(body.model)?;
     let reasoning_effort = normalize_optional_reasoning_effort(body.reasoning_effort);
 
@@ -693,9 +785,21 @@ async fn create_my_agent(
         .await?
     };
 
+    // Credential-created defaults also accept public profile text without
+    // feeding it into the runtime description or credential bootstrap path.
+    if bio.is_some() {
+        transaction
+            .execute(
+                "update user_agents set bio = $3 where id = $1 and user_id = $2",
+                &[&agent_id, &user_id, &bio],
+            )
+            .await
+            .map_err(|error| internal_error(format!("failed to save agent bio: {error}")))?;
+    }
+
     let row = transaction
         .query_one(
-            "select id, handle, display_name, description, avatar_seed, provider, model, reasoning_effort, credential_id, deleted_at, created_at, updated_at
+            "select id, handle, display_name, description, bio, avatar_seed, provider, model, reasoning_effort, credential_id, deleted_at, created_at, updated_at
              from user_agents
              where id = $1 and user_id = $2
              limit 1",
@@ -713,6 +817,7 @@ async fn create_my_agent(
     let handle: String = row.get("handle");
     let display_name: Option<String> = row.get("display_name");
     let description: Option<String> = row.get("description");
+    let bio: Option<String> = row.get("bio");
     let avatar_seed: String = row.get("avatar_seed");
     let provider: String = row.get("provider");
     let model: Option<String> = row.get("model");
@@ -727,6 +832,7 @@ async fn create_my_agent(
         handle,
         display_name,
         description,
+        bio,
         avatar_seed,
         provider,
         model,
@@ -756,6 +862,9 @@ async fn update_my_agent(
         .as_deref()
         .map(|value| normalize_handle(value))
         .transpose()?;
+    let bio_update = body.bio.map(normalize_optional_bio).transpose()?;
+    let update_bio = bio_update.is_some();
+    let next_bio = bio_update.flatten();
 
     let mut connection = state
         .pool
@@ -997,9 +1106,10 @@ async fn update_my_agent(
                  provider = $8,
                  model = $9,
                  reasoning_effort = $10,
+                 bio = case when $12 then $11 else bio end,
                  updated_at = now()
              where id = $1 and user_id = $2 and deleted_at is null
-             returning id, handle, display_name, description, avatar_seed, provider, model, reasoning_effort, credential_id, deleted_at, created_at, updated_at",
+             returning id, handle, display_name, description, bio, avatar_seed, provider, model, reasoning_effort, credential_id, deleted_at, created_at, updated_at",
             &[
                 &agent_id,
                 &user_id,
@@ -1011,6 +1121,8 @@ async fn update_my_agent(
                 &next_provider,
                 &next_model,
                 &next_reasoning_effort,
+                &next_bio,
+                &update_bio,
             ],
         )
         .await
@@ -1029,6 +1141,7 @@ async fn update_my_agent(
     let handle: String = row.get("handle");
     let display_name: Option<String> = row.get("display_name");
     let description: Option<String> = row.get("description");
+    let bio: Option<String> = row.get("bio");
     let avatar_seed: String = row.get("avatar_seed");
     let provider: String = row.get("provider");
     let model: Option<String> = row.get("model");
@@ -1043,6 +1156,7 @@ async fn update_my_agent(
         handle,
         display_name,
         description,
+        bio,
         avatar_seed,
         provider,
         model,
@@ -1126,10 +1240,44 @@ async fn delete_my_agent(
 
 #[cfg(test)]
 mod tests {
-    use super::agent_runtime_is_selectable;
     use super::UpdateAgentBody;
+    use super::{agent_runtime_is_selectable, normalize_optional_bio, CreateAgentBody};
     use serde_json::json;
     use uuid::Uuid;
+
+    #[test]
+    fn agent_bio_normalizes_blank_and_counts_unicode_code_points() {
+        assert_eq!(normalize_optional_bio(None).unwrap(), None);
+        assert_eq!(normalize_optional_bio(Some(" \n ".into())).unwrap(), None);
+        assert_eq!(
+            normalize_optional_bio(Some(" About this bot \n".into())).unwrap(),
+            Some("About this bot".into())
+        );
+        assert_eq!(
+            normalize_optional_bio(Some("🤖".repeat(500))).unwrap(),
+            Some("🤖".repeat(500))
+        );
+        assert!(normalize_optional_bio(Some("🤖".repeat(501))).is_err());
+        // Combining marks count individually, matching PostgreSQL char_length.
+        assert!(normalize_optional_bio(Some("a\u{0301}".repeat(251))).is_err());
+    }
+
+    #[test]
+    fn agent_bio_patch_distinguishes_omitted_clear_and_public_text() {
+        let absent: UpdateAgentBody = serde_json::from_value(json!({})).unwrap();
+        assert_eq!(absent.bio, None);
+        let clear: UpdateAgentBody = serde_json::from_value(json!({"bio": null})).unwrap();
+        assert_eq!(clear.bio, Some(None));
+        let update: UpdateAgentBody = serde_json::from_value(json!({
+            "bio": "I help with builds.", "description": "Use focused tests."
+        }))
+        .unwrap();
+        assert_eq!(update.bio, Some(Some("I help with builds.".into())));
+        assert_eq!(update.description, Some(Some("Use focused tests.".into())));
+        let create: CreateAgentBody = serde_json::from_value(json!({"bio": null})).unwrap();
+        assert_eq!(create.bio, None);
+        assert!(serde_json::from_value::<UpdateAgentBody>(json!({"bio": 42})).is_err());
+    }
 
     #[test]
     fn agent_runtime_preference_requires_attested_self_hosted_owner() {

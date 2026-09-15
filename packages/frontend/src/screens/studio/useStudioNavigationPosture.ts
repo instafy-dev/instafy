@@ -20,8 +20,8 @@ export function useStudioNavigationPosture() {
   const isLargeScreen = useStudioDesktopLayout();
   const touchLikeInput = useTouchLikeInput();
 
-  // Preserve the existing compact mouse-window control. Touch layouts use
-  // the focused header and keep navigation out of the composer.
+  // Both compact postures use the same header. Mouse windows also retain the
+  // composer shortcut; touch keeps navigation out of the composer.
   const showComposerNavigationButton = !isLargeScreen && !touchLikeInput;
   const showTouchBottomDock = touchLikeInput && !isLargeScreen;
   // This is layout eligibility, not dock visibility: only overview surfaces

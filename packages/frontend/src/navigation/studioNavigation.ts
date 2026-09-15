@@ -1,31 +1,69 @@
 import type { SettingsTab, StudioPanel } from "../screens/studio/types";
 
+export interface StudioNavigationOptions {
+  forceNewVisit?: boolean;
+  /** Replace the URL entry while giving the destination a fresh scroll identity. */
+  replace?: boolean;
+  /** Opaque reference to an account-owned, in-memory search checkpoint. */
+  searchOriginToken?: string;
+}
+
+export function readStudioSearchOriginToken(state: unknown): string | null {
+  if (!state || typeof state !== "object") return null;
+  const value = (state as Record<string, unknown>).instafySearchOriginToken;
+  return typeof value === "string" && value.length > 0 && value.length <= 128 ? value : null;
+}
+
 export type StudioDestination =
+  | {
+      /** Show or close navigation beside the current destination without changing its scope. */
+      kind: "drawer";
+      workspaceTab: "history" | "files" | "sourceControl" | "workspaces" | null;
+    }
+  | {
+      /** Restore a previously visited Studio URL, with a fresh history/scroll entry. */
+      kind: "route";
+      search: string;
+    }
   | {
       kind: "conversation";
       projectId: string;
       conversationId?: string | null;
       conversationControllerId?: string | null;
       jobId?: string | null;
+      messageId?: string | null;
     }
   | {
       kind: "panel";
       panel: StudioPanel;
       settingsTab?: SettingsTab;
       settingsCategory?: string | null;
+      settingsOrgId?: string | null;
+      teamId?: string | null;
       workspaceTab?: "history" | "files" | "sourceControl" | "workspaces" | null;
     };
 
 /** A destination is written once; route hydration selects the corresponding UI. */
 export function buildStudioDestinationSearch(search: string, destination: StudioDestination): string {
+  if (destination.kind === "route") {
+    const restored = new URLSearchParams(destination.search).toString();
+    return restored ? `?${restored}` : "";
+  }
   const params = new URLSearchParams(search);
-  for (const key of ["jobId", "reviewTab", "workspaceTab", "settingsTab", "settingsCategory", "settingsItem", "view"]) {
+  if (destination.kind === "drawer") {
+    if (destination.workspaceTab) params.set("workspaceTab", destination.workspaceTab);
+    else params.delete("workspaceTab");
+    const next = params.toString();
+    return next ? `?${next}` : "";
+  }
+  const currentTeam = params.get("teamId") ?? params.get("settingsOrgId");
+  for (const key of ["jobId", "messageId", "reviewTab", "workspaceTab", "settingsTab", "settingsCategory", "settingsItem", "settingsOrgId", "teamId", "view"]) {
     params.delete(key);
   }
   if (destination.kind === "conversation") {
     params.set("projectId", destination.projectId);
     params.delete("panel");
-    for (const key of ["conversationId", "conversationControllerId", "jobId"] as const) {
+    for (const key of ["conversationId", "conversationControllerId", "jobId", "messageId"] as const) {
       const value = destination[key]?.trim();
       if (value) params.set(key, value);
       else params.delete(key);
@@ -40,6 +78,14 @@ export function buildStudioDestinationSearch(search: string, destination: Studio
     if (destination.panel === "settings") {
       params.set("settingsTab", destination.settingsTab ?? "org");
       if (destination.settingsCategory) params.set("settingsCategory", destination.settingsCategory);
+      if ((destination.settingsTab ?? "org") === "org" && destination.settingsOrgId) {
+        params.set("settingsOrgId", destination.settingsOrgId);
+      }
+    }
+    if (destination.panel === "home" || destination.panel === "team" ||
+        (destination.panel === "settings" && destination.settingsTab === "profile")) {
+      const teamId = destination.teamId === undefined ? currentTeam : destination.teamId;
+      if (teamId) params.set("teamId", teamId);
     }
     if (destination.workspaceTab) params.set("workspaceTab", destination.workspaceTab);
   }

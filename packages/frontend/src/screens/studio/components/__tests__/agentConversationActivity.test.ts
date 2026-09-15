@@ -74,6 +74,30 @@ function derive(
 }
 
 describe("deriveAgentConversationActivity", () => {
+  it("keeps activity separate for two owners with the same bot handle", () => {
+    const activity = derive([
+      makeConversation({ localId: "peer-owned", ownerAgent: { id: "peer-bot", handle: "scout" } }),
+      makeConversation({ localId: "own-owned", ownerAgent: { id: "own-bot", handle: "scout" } }),
+      makeConversation({ localId: "handle-only", extraAgentHandles: ["scout"] }),
+      makeConversation({ localId: "peer-run", controllerId: "peer-conversation" }),
+      makeConversation({ localId: "own-run", controllerId: "own-conversation" }),
+      makeConversation({ localId: "legacy-run", controllerId: "legacy-conversation" }),
+      makeConversation({ localId: "peer-delegated", delegatedByAgentId: "peer-bot" }),
+    ], [
+      makeRun({ id: "peer", conversationId: "peer-conversation", metadata: { agent: { id: "peer-bot", handle: "scout-renamed" } } }),
+      makeRun({ id: "own", conversationId: "own-conversation", metadata: { agent: { id: "own-bot", handle: "scout" } } }),
+      makeRun({ id: "legacy", conversationId: "legacy-conversation" }),
+    ], { agentId: "peer-bot" });
+    expect(activity.entries.map((entry) => entry.localId).sort()).toEqual(["peer-delegated", "peer-owned", "peer-run"]);
+    expect(activity.entries.find((entry) => entry.localId === "peer-run")?.workingNow).toBe(true);
+  });
+
+  it("keeps an exact owner's activity after its handle changes", () => {
+    const activity = derive([
+      makeConversation({ localId: "renamed", ownerAgent: { id: "peer-bot", handle: "old-handle" } }),
+    ], [], { agentId: "peer-bot", agentHandle: "new-handle" });
+    expect(activity.entries.map((entry) => entry.localId)).toEqual(["renamed"]);
+  });
   it("lists threads the agent owns", () => {
     const activity = derive([
       makeConversation({

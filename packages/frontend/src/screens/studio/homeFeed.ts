@@ -2,18 +2,21 @@ import { getOrgDisambiguator, getOrgDisplayName, isPersonalOrgName } from "../..
 import type { ConversationState } from "../../conversations/ConversationsProvider";
 import { homeFailureStatusLabel, type HomeAttentionEntry, type HomeFailureStatusLabel } from "./homeAttention";
 import type { ActivityItem } from "../../services/runtimeController/activity";
+import type { ProductNotification } from "../../notifications/notificationContract";
+import { getHomeNotificationTarget, homeNotificationIsUnread, mergeHomeNotificationEvents } from "./homeNotifications";
+import type { HomeSupportReport } from "./homeSupportReports";
 
 /**
  * Home as one cross-team feed. Everything here is pure so the shape of the
  * page — lanes, team chips, day groups, the "since you were here" cut — can
- * be tested without React. Sources are what the app already has today:
- * attention entries (running / queued / replies across every team the user
- * belongs to) and the recent-conversations fetch; Phase 2 replaces both with
- * a user-level activity feed from the controller.
+ * be tested without React. Local and inbox attention, recent conversations,
+ * controller activity, and durable account notifications share destinations
+ * while retaining their exact acknowledgement sources.
  */
 
 export type HomeFeedLane = "needs" | "activity";
-export type HomeFeedKind = "running" | "queued" | "reply" | "conversation" | "run_finished" | "run_failed";
+export type HomeFeedKind = "running" | "queued" | "reply" | "conversation" | "run_finished" | "run_failed" |
+  "support_reply" | "support_resolved" | "automation_completed" | "automation_failed";
 
 export interface HomeFeedTeam {
   /** Org id, or "personal" for spaces without an org. */
@@ -49,6 +52,8 @@ export interface HomeFeedEvent {
   isNew: boolean;
   testId: string;
   dismissible: boolean;
+  /** Exact durable events represented by this row, for bounded acknowledgement. */
+  notifications?: ProductNotification[];
   /**
    * One row per conversation: this event is the thread's newest ledger row
    * and stands for `count` rows, `newCount` of them newer than the cut.
@@ -58,7 +63,9 @@ export interface HomeFeedEvent {
     | { type: "conversation"; localConversationId: string; entry: HomeAttentionEntry }
     | { type: "inbox"; entry: HomeAttentionEntry }
     | { type: "recent"; recent: HomeFeedRecentConversation }
-    | { type: "activity"; item: ActivityItem };
+    | { type: "activity"; item: ActivityItem }
+    | { type: "notification"; item: ProductNotification }
+    | { type: "support"; report: HomeSupportReport };
 }
 
 export interface HomeFeedDay {
@@ -119,6 +126,10 @@ interface BuildHomeFeedOptions {
   teamFilter: string;
   /** Rows from the controller's activity ledger (GET /me/activity). */
   activity?: ActivityItem[];
+  /** Account-owned durable alerts, merged with their existing Home destinations. */
+  notifications?: ProductNotification[];
+  /** Unread support summaries also cover updates from before the durable ledger. */
+  supportReports?: HomeSupportReport[];
   /** The server-side cut for ledger rows: ids above it are new. */
   serverLastSeenEventId?: string | null;
   /** Previous visit's cut (epoch ms) for device-local rows; null on a first visit. */
@@ -223,6 +234,11 @@ function conversationTimestamp(conversation: ConversationState): number {
 }
 
 function dedupeKeyFor(event: HomeFeedEvent): string {
+  if (event.source.type === "support") return `support:${event.source.report.id.toLowerCase()}`;
+  if (event.source.type === "notification") {
+    const target = getHomeNotificationTarget(event.source.item);
+    return target?.kind === "conversation" ? target.conversationId! : target?.key ?? event.key;
+  }
   if (event.source.type === "recent") {
     return (
       event.source.recent.conversationId?.trim().toLowerCase() ||
@@ -292,8 +308,8 @@ function isLiveKind(kind: HomeFeedKind): boolean {
 }
 
 // Work in flight sits at the top of Recent as a live group: running before
-// queued, then newest first. "Needs you" is replies only, newest first — never
-// "whichever space happens to be open" first.
+// queued, then newest first. Unread conversation and notification destinations
+// stay newest first, regardless of which space is open.
 const LIVE_KIND_RANK: Record<HomeFeedKind, number> = {
   running: 0,
   queued: 1,
@@ -301,6 +317,10 @@ const LIVE_KIND_RANK: Record<HomeFeedKind, number> = {
   conversation: 3,
   run_finished: 3,
   run_failed: 3,
+  support_reply: 3,
+  support_resolved: 3,
+  automation_completed: 3,
+  automation_failed: 3,
 };
 export const HOME_LIVE_DAY_KEY = "live";
 
@@ -309,6 +329,8 @@ export function buildHomeFeed({
   recentConversations,
   organizations = [],
   activity: ledger = [],
+  notifications = [],
+  supportReports = [],
   serverLastSeenEventId = null,
   projects,
   activeProject,
@@ -454,7 +476,7 @@ export function buildHomeFeed({
       newestServerEventByConversation.set(key, event);
     }
   }
-  const needsAll: HomeFeedEvent[] = attentionAll
+  let needsAll: HomeFeedEvent[] = attentionAll
     .filter((event) => !isLiveKind(event.kind))
     .map((event) => {
       const latest = newestServerEventByConversation.get(canonicalKey(event));
@@ -513,8 +535,6 @@ export function buildHomeFeed({
     ...singles,
   ];
 
-  const needsKeys = new Set([...needsAll, ...liveAll].map(canonicalKey));
-
   const recentEvents: HomeFeedEvent[] = recentConversations
     .map((recent): HomeFeedEvent => {
       rememberTeam(recent.orgId, recent.orgName);
@@ -541,7 +561,112 @@ export function buildHomeFeed({
         source: { type: "recent", recent },
       };
     });
-  const activityAll: HomeFeedEvent[] = [...recentEvents, ...serverRecent]
+  // The durable ledger deliberately contains no user content or org names.
+  // Resolve scope from loaded, authorized metadata; an unresolved project or
+  // account-wide support report must not be invented as a Personal space.
+  const notificationProjects = new Map<string, HomeFeedProjectRef>();
+  const rememberNotificationProject = (project: HomeFeedProjectRef) => {
+    notificationProjects.set(project.id.toLowerCase(), project);
+  };
+  recentConversations.forEach((recent) => rememberNotificationProject({
+    id: recent.projectId, name: recent.projectName, orgId: recent.orgId, orgName: recent.orgName,
+  }));
+  ledger.forEach((item) => {
+    if (item.project) rememberNotificationProject({
+      id: item.project.id, name: item.project.name ?? "", orgId: item.org?.id ?? null, orgName: item.org?.name ?? "",
+    });
+  });
+  attentionEntries.forEach((entry) => {
+    if (entry.source === "inbox") rememberNotificationProject({
+      id: entry.inboxItem.projectId, name: entry.inboxItem.projectName ?? "",
+      orgId: entry.inboxItem.orgId ?? null, orgName: entry.inboxItem.orgName ?? "",
+    });
+  });
+  projects.forEach(rememberNotificationProject);
+  if (activeProject) rememberNotificationProject(activeProject);
+
+  const notificationGroups = new Map<string, ProductNotification[]>();
+  for (const item of notifications) {
+    const target = getHomeNotificationTarget(item);
+    if (item.archivedAt || !target) continue;
+    const group = notificationGroups.get(target.key) ?? [];
+    if (!group.some((existing) => existing.id === item.id)) group.push(item);
+    notificationGroups.set(target.key, group);
+  }
+  const supportById = new Map(supportReports.map(report => [report.id.toLowerCase(), report]));
+  // Older installations did not backfill support alerts. A newer report
+  // update still needs a row even if an older durable alert was read/archived.
+  const legacySupport = new Map([...supportById].filter(([id, report]) => {
+    const at = parseTimestamp(report.activityAt);
+    return !notifications.some(item => {
+      const target = getHomeNotificationTarget(item);
+      const notificationAt = parseTimestamp(item.occurredAt);
+      return target?.supportReportId === id && at !== null && notificationAt !== null && notificationAt >= at;
+    });
+  }));
+  const notificationKinds: Record<ProductNotification["eventName"], { kind: HomeFeedKind; title: string }> = {
+    "conversation.reply": { kind: "reply", title: "New conversation reply" },
+    "run.failed": { kind: "run_failed", title: "Run failed" },
+    "support.reply": { kind: "support_reply", title: "Support replied" },
+    "support.resolved": { kind: "support_resolved", title: "Report resolved" },
+    "automation.completed": { kind: "automation_completed", title: "Automation completed" },
+    "automation.failed": { kind: "automation_failed", title: "Automation failed" },
+  };
+  const notificationEvents: HomeFeedEvent[] = [...notificationGroups.entries()].filter(([, items]) => {
+    const reportId = getHomeNotificationTarget(items[0])?.supportReportId;
+    return !reportId || !legacySupport.has(reportId);
+  }).map(([key, items]) => {
+    items.sort((a, b) => (parseTimestamp(b.occurredAt) ?? 0) - (parseTimestamp(a.occurredAt) ?? 0));
+    const item = items[0];
+    const target = getHomeNotificationTarget(item)!;
+    const project = target.projectId ? notificationProjects.get(target.projectId) : null;
+    if (project) rememberTeam(project.orgId, project.orgName);
+    const teamKey = project ? resolveTeamKey(project.orgId) : HOME_TEAM_FILTER_ALL;
+    const unread = items.some(homeNotificationIsUnread);
+    return {
+      key: `notification:${key}`,
+      lane: unread ? "needs" : "activity",
+      ...notificationKinds[item.eventName],
+      title: (target.supportReportId ? supportById.get(target.supportReportId)?.title.trim() : null) || notificationKinds[item.eventName].title,
+      preview: item.body || null,
+      statusLabel: homeFailureStatusLabel(item.eventName),
+      at: parseTimestamp(item.occurredAt),
+      project: { id: target.projectId ?? "", name: project ? getSpaceLabel(project.name) : "" },
+      team: { key: teamKey, name: project ? teamNameFor(teamKey, getOrgDisplayName(project.orgName)) : "All teams" },
+      actor: null,
+      isNew: false,
+      testId: `home-notification-${item.id}`,
+      dismissible: unread,
+      notifications: items,
+      source: { type: "notification", item },
+    };
+  });
+  const supportEvents: HomeFeedEvent[] = [...legacySupport.entries()].map(([id, report]) => {
+    const resolved = report.hasUnreadResolution &&
+      (parseTimestamp(report.resolvedAt) ?? 0) >= (parseTimestamp(report.supportLastMessageAt) ?? 0);
+    return {
+      key: `support:${id}`,
+      lane: "needs",
+      kind: resolved ? "support_resolved" : "support_reply",
+      title: report.title.trim() || "Support report",
+      preview: resolved ? "Your support report was resolved." : "Support replied to your report.",
+      at: parseTimestamp(report.activityAt),
+      project: { id: "", name: "" },
+      team: { key: HOME_TEAM_FILTER_ALL, name: "All teams" },
+      actor: null,
+      isNew: false,
+      testId: `home-support-${id}`,
+      // Legacy support uses an observed report cursor: opening the report
+      // acknowledges it; a generic read action must not guess that cursor.
+      dismissible: false,
+      notifications: notificationGroups.get(`support:${id}`),
+      source: { type: "support", report },
+    };
+  });
+  const merged = mergeHomeNotificationEvents([...needsAll, ...recentEvents, ...serverRecent, ...supportEvents], notificationEvents, canonicalKey);
+  needsAll = merged.filter((event) => event.lane === "needs").sort((a, b) => (b.at ?? 0) - (a.at ?? 0));
+  const needsKeys = new Set([...needsAll, ...liveAll].map(canonicalKey));
+  const activityAll: HomeFeedEvent[] = merged.filter((event) => event.lane === "activity")
     // Something already waiting on you is not also "recent activity".
     .filter((event) => !needsKeys.has(dedupeKeyFor(event)))
     .sort((a, b) => (b.at ?? 0) - (a.at ?? 0));

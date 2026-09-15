@@ -6,11 +6,12 @@ export type ChatScrollHistoryVisit = {
   projectId: string;
   conversationId: string;
   jobId?: string | null;
+  messageId?: string | null;
 };
 
 export function chatScrollSnapshotKey(visit: ChatScrollHistoryVisit | null): string | null {
   if (!visit) return null;
-  return JSON.stringify([visit.userId, visit.projectId, visit.conversationId, visit.jobId ?? null, visit.key]);
+  return JSON.stringify([visit.userId, visit.projectId, visit.conversationId, visit.jobId ?? null, visit.messageId ?? null, visit.key]);
 }
 
 /** A route may be ahead of (or behind) the hydrated project/conversation providers. */
@@ -41,5 +42,6 @@ export function resolveChatScrollHistoryVisit({
   const jobId = jobThread?.jobId.trim() || null;
   if ((params.get("jobId")?.trim() || null) !== jobId ||
       (jobThread && jobThread.conversationId !== conversationId)) return null;
-  return { key: getStudioVisitKey(location), userId, projectId, conversationId, jobId };
+  const messageId = params.get("messageId")?.trim() || null;
+  return { key: getStudioVisitKey(location), userId, projectId, conversationId, jobId, messageId };
 }

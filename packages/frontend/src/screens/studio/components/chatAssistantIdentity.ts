@@ -9,6 +9,7 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 }
 
 export type AssistantAgentIdentity = {
+  id?: string;
   handle: string;
   avatarSeed: string;
 };
@@ -24,6 +25,17 @@ export type AssistantTypingAgent = AssistantAgentIdentity & {
   displayName: string;
   isThinking: boolean;
 };
+
+/** Keep an observed agent ID when a display-only identity precedes its message/run metadata. */
+export function resolveObservedAgentIdentity(
+  ...identities: Array<AssistantAgentIdentity | null | undefined>
+): AssistantAgentIdentity | null {
+  const identity = identities.find((candidate) => candidate != null);
+  if (!identity) return null;
+  if (identity.id) return identity;
+  const identified = identities.find((candidate) => candidate?.id && candidate.handle === identity.handle);
+  return identified?.id ? { ...identity, id: identified.id } : identity;
+}
 
 export function extractAgentIdentityFromMetadata(
   metadata: Record<string, unknown> | null | undefined,
@@ -50,7 +62,8 @@ export function extractAgentIdentityFromMetadata(
     typeof avatarSeedRaw === "string" && avatarSeedRaw.trim().length > 0
       ? avatarSeedRaw.trim()
       : normalizedHandle;
-  return { handle: normalizedHandle, avatarSeed };
+  const id = typeof agent.id === "string" ? agent.id.trim() : "";
+  return { handle: normalizedHandle, avatarSeed, ...(id ? { id } : {}) };
 }
 
 export function extractAgentHandleFromMetadata(

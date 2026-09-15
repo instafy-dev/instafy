@@ -2,8 +2,11 @@
 
 The controller owns a durable, account-scoped notification center. Conversation
 replies, support replies and resolutions, failed runs, and automation outcomes use
-one event ledger and delivery queue. Home's conversation “Needs you” and support
-badges keep their existing semantics and acknowledgement cursors.
+one event ledger and delivery queue. Home combines conversation attention, support
+updates and automation outcomes in one account-wide feed. Octo/Home is the catch-up
+entry point; alert preferences live in
+Your settings → Notifications. Source cursors and the event ledger are reconciled
+using explicit observed snapshots, rather than clearing whatever arrived most recently.
 
 ## Storage and transaction boundaries
 
@@ -148,12 +151,46 @@ another account's presentation and pending navigation. Offline sign-out cannot
 guarantee immediate server cleanup; generic lock-screen content and account
 checks limit exposure until cleanup succeeds.
 
-## Center and navigation
+## Home and navigation
 
-Studio's bell opens paginated All and Unread views, with read, read-all, archive,
-and preference controls. The server owns monotonic seen/read/archive timestamps;
-a stale device cannot unread or unarchive a notification. Mark-all uses the page
-watermark. Toasts are transient presentation, not durable state.
+Home is the single catch-up surface on browser, mobile and Desktop. Unread updates
+appear in its existing Unread lane; read updates appear in Recent activity, newest
+first. Conversation replies share a row with the existing conversation summary;
+support updates group by report and automation outcomes by automation identity.
+The Octo badge counts unread destinations using the same grouping. Unknown and
+account-wide support updates appear under All, not an inferred organization.
+Older unread support reports remain visible even when they predate the ledger.
+
+Home's Mark all read applies only to the currently loaded, filtered unread rows,
+using their exact notification IDs. It does not mark new arrivals or other teams
+read. Legacy support rows without a safe notification snapshot clear by opening
+the report; they are excluded from Mark all read. Older pages retain their loaded
+boundary as new activity arrives. Failed loads remain retryable and are not
+presented as an empty account. There is no
+separate notification bell or notification dialog. Existing external alerts and
+toasts continue to use the controller-owned event ledger and preferences.
+
+The profile picture opens an account popover on desktop and a compact sheet on
+narrow screens. Both offer Your settings, Support and Sign out. Support unread
+badges stay in Home rather than also appearing on the profile picture. Device
+alert permission and channel controls live together under Your settings →
+Notifications; the account menu does not toggle device permissions. Profile,
+Preferences and Notifications remain visible as category tabs on narrow screens.
+Appearance choices (System, Light and Dark) live under Preferences.
+
+The server owns monotonic seen/read/archive timestamps; a stale device cannot
+unread or unarchive a notification. Existing API read-all/archive operations
+remain compatible. Toasts are transient presentation, not durable state.
+
+`POST /me/notifications/inbox/ack-snapshot` acknowledges at most 100 explicitly
+supplied notification IDs for the authenticated account and conversation. The
+`expectedUserId` must match that account. An optional `expectedLastMessageId`
+advances the legacy inbox cursor only when that exact observed message is still
+latest; a concurrent reply leaves it unread and returns `inboxAcknowledged: false`.
+The original `/inbox/ack` remains available to older clients. New clients use the
+separate snapshot route so older servers reject it without silently acknowledging
+newer activity. Mutation callers pin their account and access token across async
+work and reject a substituted controller credential.
 
 Reading a normal conversation acknowledges only persisted message IDs actually
 visible in the chat viewport while the document and chat pane are visible.
@@ -175,9 +212,17 @@ validated navigation. Clicks append `notificationEventId` and
 these IDs without fetching report metadata while logged out. The destination
 opens and acknowledges the notification only for the matching signed-in account;
 successful acknowledgement removes the receipt from the URL and refreshes the
-center. Delivery alone never marks an event read. Opening a report updates the
-support cursor through the existing support workflow; reading a center entry
-alone does not.
+Home feed. Delivery alone never marks an event read. Explicitly reading a durable
+support update advances its source cursor only when that update is still the
+report's current support activity. Reading a conversation notification similarly
+advances its source inbox only when its exact source message is current; unrelated
+and newer updates remain unread.
+
+Report detail acknowledges exact loaded support message IDs and the observed
+`resolutionNotificationId` returned with that detail snapshot. It does not use a
+timestamp range to mark durable events read, so concurrent or backdated replies
+remain unread. The existing customer support cursor still records the displayed
+report timeline. These additions require no database migration.
 
 ## Configuration and operational verification
 

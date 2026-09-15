@@ -1,4 +1,4 @@
-import { useId, useState } from "react";
+import { useEffect, useId, useState } from "react";
 import { DialogTrigger, Heading } from "react-aria-components";
 import { EditPencil } from "iconoir-react";
 import { ChatsIcon } from "../../../components/AppIcons";
@@ -9,7 +9,7 @@ import { StudioDialogPopover } from "../../../components/aria/StudioPopover";
 import type { ConversationState } from "../../../conversations/conversationState";
 import { DARK_ACTIVE_BG_CLASS } from "../../../theme/darkSurfaces";
 
-export const SIDEBAR_RECENT_CHAT_LIMIT = 6;
+export const SIDEBAR_RECENT_CHAT_LIMIT = 3;
 
 export interface StudioRecentChatsProps {
   conversations: ConversationState[];
@@ -42,7 +42,14 @@ export function StudioRecentChats({
 }: StudioRecentChatsProps) {
   const listId = useId();
   const [popoverOpen, setPopoverOpen] = useState(false);
-  const visibleConversations = conversations.slice(0, SIDEBAR_RECENT_CHAT_LIMIT);
+  useEffect(() => {
+    // Switching rail width replaces the popover with the inline list. Do not
+    // reopen an old popover when the user later collapses the sidebar again.
+    setPopoverOpen(false);
+  }, [collapsed]);
+  const priority = (conversation: ConversationState) => conversation.pendingRunIds.length > 0 || conversation.awaitingLeaseRunIds.length > 0
+    ? 2 : conversation.localId === activeConversationId ? 1 : 0;
+  const visibleConversations = [...conversations].sort((a, b) => priority(b) - priority(a)).slice(0, SIDEBAR_RECENT_CHAT_LIMIT);
 
   const recentList = (
     <div id={listId} data-testid="sidebar-recent-chats-list">
@@ -125,6 +132,7 @@ export function StudioRecentChats({
       fullWidth
       data-testid="sidebar-nav-history"
       aria-label={collapsed ? "Open chats" : "Chats"}
+      title={collapsed ? "Open chats" : undefined}
       aria-expanded={collapsed ? popoverOpen : expanded}
       aria-controls={!collapsed && expanded ? listId : undefined}
       onPress={collapsed ? undefined : () => onExpandedChange(!expanded)}

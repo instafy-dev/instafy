@@ -651,7 +651,7 @@ export function WorkspaceTabs({
           aria-hidden="true"
           className={`pointer-events-none absolute inset-x-0 bottom-0 z-0 h-px bg-slate-200/70 ${DARK_DIVIDER_CLASS}`}
         />
-        {leading ? <div className="relative z-10 flex flex-none items-end">{leading}</div> : null}
+        {leading ? <div className="relative z-10 flex flex-none items-end empty:hidden">{leading}</div> : null}
         <HorizontalTabStrip
           className="relative z-10"
           testId="workspace-tabs-strip"

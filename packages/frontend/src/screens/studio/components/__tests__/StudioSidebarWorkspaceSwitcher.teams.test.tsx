@@ -119,6 +119,17 @@ describe("StudioSidebarWorkspaceSwitcher team rows", () => {
     expect(rows[0].textContent).toBe("PPersonalCurrent");
   });
 
+  it("limits the context picker to spaces without duplicating team switching or creation", async () => {
+    const onCreateProject = vi.fn();
+    await render(root, { mode: "spaces", onCreateOrg: vi.fn(), onOpenOrgSettings: vi.fn(), onCreateProject });
+    expect(container.querySelector('[data-testid="sidebar-org-selector"]')).toBeNull();
+    expect(container.querySelector('[data-testid="sidebar-org-new"]')).toBeNull();
+    expect(container.querySelector('[data-testid="sidebar-org-settings-button"]')).toBeNull();
+    expect(container.textContent).toContain("Spaces");
+    await act(async () => container.querySelector<HTMLButtonElement>('[data-testid="sidebar-project-new"]')?.click());
+    expect(onCreateProject).toHaveBeenCalledOnce();
+  });
+
   it("distinguishes an unmatched space search from an empty space list", async () => {
     await render(root, {
       canSearchSpaces: true,

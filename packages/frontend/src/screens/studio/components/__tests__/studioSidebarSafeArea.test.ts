@@ -31,7 +31,7 @@ describe("studio sidebar clears the macOS window buttons", () => {
     expect(nav).toMatch(/mobileOverlay\s*\? "overflow-hidden"\s*: titleBarFree/);
     expect(source).toContain("const titleBarFree = !mobileOverlay && desktopTitleBarFree()");
     const layout = fs.readFileSync(path.join(__dirname, "..", "..", "..", "StudioLayout.tsx"), "utf8");
-    expect(layout).toMatch(/<StudioMobileSidebarOverlay[^>]*>[\s\S]*?<StudioSidebar\s+mobileOverlay/);
+    expect(layout).toMatch(/<StudioMobileSidebarOverlay[^>]*>[\s\S]*?<StudioSidebar\b[^>]*\bmobileOverlay/);
   });
 
   it("starts the rail surface on the tab baseline when the title bar is free", () => {

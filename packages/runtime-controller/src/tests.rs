@@ -69,6 +69,18 @@ mod conversation_notification_http_tests;
 #[path = "notification_conversation_read_tests.rs"]
 mod notification_conversation_read_tests;
 
+#[path = "project_identity_tests.rs"]
+mod project_identity_tests;
+
+#[path = "human_profile_http_tests.rs"]
+mod human_profile_http_tests;
+
+#[path = "agent_profile_http_tests.rs"]
+mod agent_profile_http_tests;
+
+#[path = "message_search_http_tests.rs"]
+mod message_search_http_tests;
+
 struct TestOriginKeyPair {
     private_pem: String,
     public_pem: String,
@@ -1912,6 +1924,8 @@ async fn create_conversation_tables(client: &mut tokio_postgres::Client) -> anyh
                 id uuid PRIMARY KEY,
                 org_id uuid,
                 name text,
+                icon text,
+                color text,
                 sandbox_session_id uuid,
                 project_type text,
                 owner_user_id uuid,
@@ -1986,6 +2000,8 @@ async fn setup_origin_test_pool_with_max_size(max_size: u32) -> anyhow::Result<O
                 id uuid PRIMARY KEY,
                 org_id uuid,
                 name text,
+                icon text,
+                color text,
                 sandbox_session_id uuid,
                 project_type text,
                 owner_user_id uuid,

@@ -240,6 +240,18 @@ describe("customer support report client", () => {
     });
   });
 
+  it("pins exact support source IDs and rejects account changes while resolving", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(jsonResponse({ acknowledgedThrough: "2026-09-05T11:00:00Z", hasUnreadSupportActivity: false, hasUnreadResolution: false }));
+    vi.stubGlobal("fetch", fetchMock);
+    const snapshot = { messageIds: ["33333333-3333-4333-8333-333333333333"], resolutionNotificationId: "44444444-4444-4444-8444-444444444444", expectedUserId: USER_ID, isCurrent: () => true };
+    await acknowledgeControllerBugReportActivity(REPORT_ID, "2026-09-05T11:00:00Z", snapshot);
+    expect(JSON.parse(fetchMock.mock.calls[0][1].body)).toEqual({ seenThrough: "2026-09-05T11:00:00Z", messageIds: snapshot.messageIds, resolutionNotificationId: snapshot.resolutionNotificationId, expectedUserId: USER_ID });
+    let active = true;
+    resolveControllerRequestContextMock.mockImplementationOnce(async () => { active = false; return defaultRequestContext; });
+    await expect(acknowledgeControllerBugReportActivity(REPORT_ID, "2026-09-05T11:00:00Z", { ...snapshot, isCurrent: () => active })).rejects.toThrow("session changed");
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
   it("uses stable paired cursors for older report and message pages", async () => {
     const reportCursor = {
       activityAt: "2026-09-05T11:00:00Z",

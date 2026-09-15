@@ -19,8 +19,27 @@ export async function listProductNotifications(params: { view?: "all" | "unread"
   }
   return { items, nextCursor: typeof page.nextCursor === "string" ? page.nextCursor : null, unreadCount: Math.max(0, page.unreadCount), asOf: page.asOf };
 }
-export async function updateProductNotificationState(params: { id: string; action: "seen" | "read" | "archive"; accessToken?: string }): Promise<void> {
-  const result = await controllerJsonRequest({ path: "/me/notifications/state", method: "POST", accessToken: params.accessToken, body: { id: params.id, action: params.action }, fallbackError: "Unable to update notification" });
+export async function updateProductNotificationState(params: {
+  id: string;
+  action: "seen" | "read" | "archive";
+  accessToken?: string;
+  expectedUserId?: string;
+  isCurrent?: () => boolean;
+}): Promise<void> {
+  const pinned = params.expectedUserId !== undefined;
+  if (pinned && (!UUID_PATTERN.test(params.expectedUserId!) || !params.accessToken?.trim() || !params.isCurrent?.())) {
+    throw new Error("The notification session changed.");
+  }
+  const requestContext = pinned ? await resolveControllerRequestContext(params.accessToken!) : undefined;
+  if (pinned && (!params.isCurrent?.() || requestContext?.accessToken !== params.accessToken)) {
+    throw new Error("The notification session changed.");
+  }
+  const result = await controllerJsonRequest({
+    path: "/me/notifications/state", method: "POST", accessToken: params.accessToken,
+    ...(requestContext ? { requestContext } : {}),
+    body: { id: params.id, action: params.action, ...(pinned ? { expectedUserId: params.expectedUserId } : {}) },
+    fallbackError: "Unable to update notification",
+  });
   if (!result.success) throw new Error(result.error);
 }
 export async function readAllProductNotifications(params: { before: string; accessToken?: string }): Promise<void> {

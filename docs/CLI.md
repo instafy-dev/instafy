@@ -79,6 +79,46 @@ instafy conversation show 123e4567-e89b-12d3-a456-426614174000
 
 Use this when you want to reuse context from an earlier chat without manually hunting through the Studio UI.
 
+`conversation search` inspects recent titles/previews and recent messages in at most 12
+conversations. It does not search all persisted message content. For exact evidence in older
+messages, use `conversation grep` and then `conversation context`:
+
+```bash
+instafy conversation grep "fruit discussion" --json
+instafy conversation grep "fruit discussion" --org <orgId> --limit 20 --json
+instafy conversation context <conversationId> <messageId> --before 20 --after 20 --json
+rg "fruit discussion" .
+```
+
+`grep` searches authorized persisted user/assistant message text through the controller; `rg`
+searches local files. The query is a literal, case-insensitive substring of 2–200 characters, not a
+regular expression. The default scope is the linked space or `SPACE_ID`; select exactly one of
+`--space <id>`, `--org <id>`, `--personal` (spaces without an organization), or `--all` to override it.
+Space access, private conversation membership, and hidden/deleted conversation visibility still
+apply. No runtime is started to search.
+
+`grep` returns newest-first pages of 30 results by default (`--limit 1..50`). JSON contains
+`matches`, `hasMore`, and `nextCursor`. Each match has project/conversation/message IDs, role,
+timestamp, a plain-text snippet, and `matchRanges` using JavaScript UTF-16 offsets into that
+snippet. Continue with the same query and scope and `--cursor <nextCursor>`. Human output uses
+`spaceId:conversationId:messageId:role:timestamp: snippet`, one escaped line per match, with paging
+hints on stderr. Exit status is 0 for matches, 1 for no matches, and 2 for errors (including parse
+errors); `--json` emits an empty result page on no matches and nothing on errors.
+
+`context` reads an exact message directly, with 20 older and 20 newer messages by default
+(`--before 0..50`, `--after 0..50`). JSON preserves canonical messages newest first, includes
+`anchorMessageId`, and supplies `olderCursor`/`newerCursor` with `hasOlder`/`hasNewer`. Use the
+appropriate cursor as the next message ID: `--before 40 --after 0` for older context or
+`--before 0 --after 40` for newer context. Deduplicate the repeated anchor by message ID. Human
+output is chronological and marks the target with `>`. Missing or inaccessible targets are errors.
+
+These two commands require a signed-in user session and a controller with the message
+search/context APIs. They use saved login/profile credentials, an explicit user `--access-token`,
+or `INSTAFY_ACCESS_TOKEN`/`SUPABASE_ACCESS_TOKEN`; they do not fall back to runtime-agent, origin,
+or service tokens, or mint runtime credentials. A local agent using your CLI login has your read
+access. An unattended runtime agent's scoped token does not gain that access. An unavailable API
+is reported explicitly instead of silently searching only recent messages.
+
 Coordinate agents through normal conversations and linked threads:
 
 ```bash
@@ -103,12 +143,13 @@ Agent context cards are optional compact coordination hints/cache, not the prima
 
 Use context cards for soft work focus instead of a first-class ownership ledger. A useful card says which agent/thread is investigating which area, paths, open questions, and where focused follow-up should go. It is a hint for coordination, not a lock. For concurrent file edits, the separate structured `writeScope` metadata still controls safety.
 
-For cross-chat context recovery, search cards first, then conversation/thread history:
+For cross-chat context recovery, inspect optional context cards, then recover exact message evidence
+using a signed-in CLI session:
 
 ```bash
 instafy agents context list --query "auth session" --json
-instafy conversation search "auth session" --include-threads --json
-instafy conversation show <conversationId> --json
+instafy conversation grep "auth session" --json
+instafy conversation context <conversationId> <messageId> --json
 ```
 
 A same-handle agent in a new chat should not assume it has global memory from old threads. Reuse or message the old thread when that thread should keep owning the topic; otherwise answer from recovered evidence and cite the conversation, thread, message, or context card.
@@ -177,6 +218,8 @@ Public commands use an interactive user token from `instafy login` (or an explic
 token). Hosted service credentials belong to the separate `instafy-ops` distribution. A runtime
 may still pass its narrowly scoped child-process credential to commands invoked inside an active
 agent job; that internal runtime contract is not a public shell credential fallback.
+`conversation grep` and `conversation context` specifically require a user session and reject
+that runtime child-process credential, even if it is explicitly supplied.
 
 ### How token minting works
 

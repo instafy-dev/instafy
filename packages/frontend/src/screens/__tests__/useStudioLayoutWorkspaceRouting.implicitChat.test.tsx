@@ -87,6 +87,19 @@ describe("implicit chat route rendered-tab reconciliation", () => {
   const render = () => act(async () => root.render(<BrowserRouter><Harness /></BrowserRouter>));
   const rendered = () => container.querySelector('[data-testid="rendered-tab"]')?.textContent;
 
+  it("retains an exact message through canonical hydration and clears it for a normal chat-tab visit", async () => {
+    window.history.replaceState(window.history.state, "", `/studio?projectId=${PROJECT}&conversationControllerId=${CONTROLLER}&messageId=target-message`);
+    await render();
+    expect(new URLSearchParams(window.location.search).get("messageId")).toBe("target-message");
+    expect(new URLSearchParams(window.location.search).get("conversationId")).toBe(LOCAL);
+    expect(window.history.state.idx).toBe(4);
+    pendingIntent = "push";
+    await act(async () => restoreTab({ ...chatTab }, "chat"));
+    expect(new URLSearchParams(window.location.search).has("messageId")).toBe(false);
+    expect(window.history.state.idx).toBe(5);
+    expect(rendered()).toBe("conversation");
+  });
+
   it.each([
     { panel: "chat", withController: true }, { panel: "projects", withController: true },
     { panel: "chat", withController: false }, { panel: "projects", withController: false },

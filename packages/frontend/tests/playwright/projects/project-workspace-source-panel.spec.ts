@@ -1,8 +1,9 @@
 import { test, expect, type Page } from "@playwright/test";
+import { openTeamDirectory } from "../utils/sidebar.js";
 import { prepareStudio, resetRuntimeUserState } from "../utils/harness.js";
 
 async function openProjectSettings(page: Page) {
-  await page.getByTestId("sidebar-project-button").click();
+  await openTeamDirectory(page);
   await expect(page.getByTestId("sidebar-project-switcher-menu")).toBeVisible();
   await page.getByTestId("sidebar-project-settings").click();
   await expect(page.getByTestId("settings-panel")).toBeVisible();

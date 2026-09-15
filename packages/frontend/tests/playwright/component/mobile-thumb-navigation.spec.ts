@@ -132,8 +132,12 @@ for (const layout of [
     const openPicker = () => header.getByTestId("mobile-header-picker").tap();
     const goBack = () => header.getByTestId("mobile-header-back").tap();
     const goForward = async () => {
-      await openPicker();
-      await sheet.getByRole("button", { name: "Forward", exact: true }).tap();
+      // Forward must remain available without opening navigation: a real
+      // sidebar entry would truncate the branch that Forward needs.
+      await header.getByTestId("mobile-header-more").tap();
+      await page.getByTestId("mobile-header-forward").tap();
+      await expect(sheet).toHaveCount(0);
+      await expect(page.getByTestId("mobile-header-actions")).toHaveCount(0);
     };
     const initialKey = await page.evaluate(() => history.state.key);
     await expect(dock).toHaveCount(0);

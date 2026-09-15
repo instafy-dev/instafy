@@ -49,6 +49,7 @@ import {
   useFilesPanelCreateEntries,
 } from "./useFilesPanelCreateEntries";
 import { useFilesPanelMarkdownState } from "./useFilesPanelMarkdownState";
+import { useFilesPanelSaveShortcut } from "./useFilesPanelSaveShortcut";
 import {
   type OpenWorkspaceFileEventDetail,
   type ViewerState,
@@ -58,6 +59,7 @@ import { resolveViewerStateWithoutActiveFile } from "./filesPanelViewerSync";
 import { FilesExplorerTree } from "./FilesExplorerTree";
 import { type DirectoryEntries, useFilesPanelWorkspaceTree } from "./useFilesPanelWorkspaceTree";
 import type { FilesPanelMobileView } from "../../studioFilesMobileView";
+import { getStudioWorkspaceOwnerKey, type StudioDirectoryListingListener } from "../useStudioKnownFiles";
 
 const runtimeControllerEnabled = controllerClient.core.enabled;
 
@@ -74,6 +76,7 @@ interface FilesPanelProps {
   onMobileViewChange?: (value: FilesPanelMobileView) => void;
   onRequestOpenExplorer?: () => void;
   onRequestCloseExplorer?: () => void;
+  onDirectoryEntriesLoaded?: StudioDirectoryListingListener;
 }
 
 const IMAGE_EXTENSIONS = new Set([
@@ -444,6 +447,7 @@ export function FilesPanel({
   onMobileViewChange,
   onRequestOpenExplorer,
   onRequestCloseExplorer,
+  onDirectoryEntriesLoaded,
 }: FilesPanelProps) {
   const { workspace, setActiveFile, updateFileContent, updateWorkspace, replaceWorkspace } = useCode();
   const {
@@ -453,6 +457,7 @@ export function FilesPanel({
     localWorkspace,
     desktopOrigin,
   } = useRuntime();
+  const workspaceOwnerKey = getStudioWorkspaceOwnerKey({ effectiveRuntimeId, localWorkspace, desktopOrigin });
   const { showStatus } = useStatus();
   const { activeProjectId, projectCapabilitiesResolved, canWriteProject } = useProject();
   const projectWriteDisabled =
@@ -796,6 +801,9 @@ export function FilesPanel({
     setViewerStateRef: setViewerStateBridgeRef,
     waitingForPreferredRuntime,
     workspaceBrowseReady,
+    workspaceOwnerId: previewOwnerId,
+    workspaceOwnerKey,
+    onDirectoryEntriesLoaded,
     readOnly: projectWriteDisabled,
   });
 
@@ -1053,6 +1061,7 @@ export function FilesPanel({
     openUnsupportedFile,
     openFileFromEvent,
   } = useFilesPanelViewerState({
+    workspaceOwnerKey,
     acceptExternalOpenEvents: renderMode !== "portal",
     activeFile,
     activeProjectId,
@@ -1195,36 +1204,8 @@ export function FilesPanel({
     [activeProjectId, markdownView, openFileFromEvent]
   );
 
-  useEffect(() => {
-    if (typeof window === "undefined") {
-      return;
-    }
-    const handleKeyDown = (event: KeyboardEvent) => {
-      if (event.defaultPrevented) {
-        return;
-      }
-      const key = event.key?.toLowerCase?.();
-      if (key !== "s") {
-        return;
-      }
-      if (!(event.metaKey || event.ctrlKey) || event.altKey) {
-        return;
-      }
-      if (viewerStateRef.current.mode !== "text") {
-        return;
-      }
-      event.preventDefault();
-      event.stopPropagation();
-      const handler = event.shiftKey ? saveDraftShortcutHandlerRef.current : saveVersionShortcutHandlerRef.current;
-      if (handler) {
-        void handler();
-      }
-    };
-    window.addEventListener("keydown", handleKeyDown, true);
-    return () => {
-      window.removeEventListener("keydown", handleKeyDown, true);
-    };
-  }, [viewerStateRef]);
+  useFilesPanelSaveShortcut({ editorContainerRef, markdownPreviewContainerRef, viewerStateRef,
+    saveDraftHandlerRef: saveDraftShortcutHandlerRef, saveVersionHandlerRef: saveVersionShortcutHandlerRef });
 
   const handleSelectEntry = useCallback(
     async (entry: ControllerWorkspaceEntry, options?: { viaSearch?: boolean }) => {
@@ -1232,7 +1213,7 @@ export function FilesPanel({
       setFileViewerReturnTarget(null);
       if (entry.kind === "directory") {
         if (options?.viaSearch) {
-          await ensureEntryVisible(entry);
+          if (!await ensureEntryVisible(entry)) return;
         }
         setViewerState({ mode: "directory", entry, error: null });
         if (!isLargeScreen) {
@@ -1243,7 +1224,7 @@ export function FilesPanel({
       }
 
       if (options?.viaSearch) {
-        await ensureEntryVisible(entry);
+        if (!await ensureEntryVisible(entry)) return;
       }
 
       if (isImageEntry(entry)) {

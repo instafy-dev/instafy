@@ -135,6 +135,15 @@ describe("DeferredChatMessageRow", () => {
     return Array.from(container.querySelectorAll<HTMLElement>('[data-testid="chat-message-row"]'));
   }
 
+  it("remounts an already deferred row when it becomes an explicit eager message target", async () => {
+    await render();
+    await intersection(false);
+    expect(rows().every((row) => row.dataset.chatRowDeferred === "true")).toBe(true);
+    await render({ eager: true });
+    expect(rows().every((row) => !row.dataset.chatRowDeferred)).toBe(true);
+    expect(container.querySelectorAll("[data-body]")).toHaveLength(3);
+  });
+
   async function intersection(visible: boolean, targets = rows()) {
     await act(async () => {
       for (const observer of ControlledIntersectionObserver.instances) {

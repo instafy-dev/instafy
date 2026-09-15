@@ -281,6 +281,8 @@ enum StateAction {
 struct StateBody {
     id: Uuid,
     action: StateAction,
+    #[serde(rename = "expectedUserId")]
+    expected_user_id: Option<Uuid>,
 }
 #[derive(Serialize)]
 struct OkBody {
@@ -294,16 +296,68 @@ async fn change_state(
 ) -> ApiResult<OkBody> {
     let context = authenticate_request(&state.config, &headers).await?;
     let user = require_user_session(&context)?;
+    if body
+        .expected_user_id
+        .is_some_and(|expected| expected != user)
+    {
+        return Err((
+            StatusCode::CONFLICT,
+            Json(ApiError::new(
+                "Notification session changed; refresh and try again",
+            )),
+        ));
+    }
     let (read, archive) = (
         matches!(body.action, StateAction::Read | StateAction::Archive),
         matches!(body.action, StateAction::Archive),
     );
-    let connection = state
+    let mut connection = state
         .pool
         .get()
         .await
         .map_err(|_| internal_error("Notification database unavailable"))?;
-    let changed = connection.execute(
+    let transaction = connection
+        .transaction()
+        .await
+        .map_err(|_| internal_error("Unable to start notification acknowledgement"))?;
+    // A Home support row acknowledges its source only when the explicitly
+    // selected event is still the report's current activity. Lock in the same
+    // order as support producers; concurrent replies retain their source badge.
+    let support = if read {
+        transaction
+            .query_opt(
+                "select b.id, b.support_last_message_at, e.occurred_at
+               from bug_reports b join notification_events e on e.resource_id=b.id
+              where e.id=$1 and e.resource_type='support_report' and b.user_id=$2
+                and (e.event_name<>'support.resolved' or e.producer_key='support.resolved:'||b.id::text||':'||b.notification_resolution_sequence::text)
+                and notification_recipient_authorized(e.id,$2)
+              for update of b",
+                &[&body.id, &user],
+            )
+            .await
+            .map_err(|_| internal_error("Unable to inspect support notification"))?
+    } else {
+        None
+    };
+    let conversation = if read {
+        transaction
+            .query_opt(
+                "select c.id, c.created_by, c.last_message_id, m.id as source_message_id
+               from notification_events e
+               join conversation_messages m on e.producer_key='conversation.reply:'||m.id::text
+               join conversations c on c.id=m.conversation_id and c.project_id=m.project_id
+              where e.id=$1 and e.event_name='conversation.reply' and e.resource_type='conversation'
+                and e.resource_id=c.id and e.conversation_id=c.id and e.project_id=c.project_id
+                and notification_recipient_authorized(e.id,$2)
+              for update of c",
+                &[&body.id, &user],
+            )
+            .await
+            .map_err(|_| internal_error("Unable to inspect conversation notification"))?
+    } else {
+        None
+    };
+    let changed = transaction.execute(
         "update notification_recipients set seen_at = coalesce(seen_at, clock_timestamp()),
           read_at = case when $3 then coalesce(read_at, clock_timestamp()) else read_at end,
           archived_at = case when $4 then coalesce(archived_at, clock_timestamp()) else archived_at end
@@ -313,6 +367,44 @@ async fn change_state(
     if changed == 0 {
         return Err(not_found("Notification not found"));
     }
+    if let Some(conversation) = conversation {
+        let message_id: Uuid = conversation.get("source_message_id");
+        if conversation.get::<_, Option<Uuid>>("last_message_id") == Some(message_id) {
+            let conversation_id: Uuid = conversation.get("id");
+            // A one-off mention does not subscribe its recipient to later replies.
+            if conversation.get::<_, Option<Uuid>>("created_by") == Some(user) {
+                transaction.execute(
+                    "insert into conversation_participants(conversation_id,user_id,role,added_by)
+                     values($1,$2,'owner',$2) on conflict(conversation_id,user_id) do nothing",
+                    &[&conversation_id, &user],
+                ).await.map_err(|_| internal_error("Unable to acknowledge conversation owner"))?;
+            }
+            transaction.execute(
+                "update conversation_participants set last_seen_message_id=$3,last_seen_at=now()
+                  where conversation_id=$1 and user_id=$2",
+                &[&conversation_id, &user, &message_id],
+            ).await.map_err(|_| internal_error("Unable to acknowledge conversation activity"))?;
+        }
+    }
+    if let Some(support) = support {
+        let occurred_at: DateTime<Utc> = support.get("occurred_at");
+        if support.get::<_, Option<DateTime<Utc>>>("support_last_message_at") == Some(occurred_at) {
+            let report_id: Uuid = support.get("id");
+            transaction
+                .execute(
+                    "update bug_reports
+                    set customer_last_seen_support_at=greatest(customer_last_seen_support_at,$2)
+                  where id=$1",
+                    &[&report_id, &occurred_at],
+                )
+                .await
+                .map_err(|_| internal_error("Unable to acknowledge support activity"))?;
+        }
+    }
+    transaction
+        .commit()
+        .await
+        .map_err(|_| internal_error("Unable to finalize notification acknowledgement"))?;
     Ok(Json(OkBody { ok: true }))
 }
 
@@ -342,17 +434,34 @@ async fn read_conversation_messages(
     if body.message_ids.len() > 100 {
         return Err(bad_request("messageIds permits at most 100 message IDs"));
     }
-    let connection = state
+    let mut connection = state
         .pool
         .get()
         .await
         .map_err(|_| internal_error("Notification database unavailable"))?;
+    let transaction = connection
+        .transaction()
+        .await
+        .map_err(|_| internal_error("Unable to start conversation acknowledgement"))?;
+    // Serialize the source cursor with new messages and other readers. An old
+    // viewport retry can acknowledge its own events but cannot regress a newer
+    // legacy cursor. Reading never enrolls a one-off mentioned recipient.
+    let source = transaction
+        .query_opt(
+            "select last_message_id from conversations where id=$1
+           and notification_conversation_authorized($1,$2) for update",
+            &[&body.conversation_id, &user],
+        )
+        .await
+        .map_err(|_| internal_error("Unable to inspect conversation activity"))?
+        .ok_or_else(|| not_found("Conversation not found"))?;
+    let latest: Option<Uuid> = source.get("last_message_id");
     // Only exact persisted messages from the client's visible snapshot qualify.
     // A server-latest or timestamp cutoff could swallow an unseen message that
     // arrived during loading, including a late commit with an older timestamp.
     // Authorization and mutation share one statement snapshot. Neither support
     // cursors nor another recipient's notification state are modified here.
-    let result = connection
+    let result = transaction
         .query_one(
             "with access as materialized (
            select notification_conversation_authorized($1, $2) as allowed
@@ -379,6 +488,20 @@ async fn read_conversation_messages(
     if !result.get::<_, bool>("allowed") {
         return Err(not_found("Conversation not found"));
     }
+    if latest.is_some_and(|id| body.message_ids.contains(&id)) {
+        transaction
+            .execute(
+                "update conversation_participants set last_seen_message_id=$3,last_seen_at=now()
+              where conversation_id=$1 and user_id=$2",
+                &[&body.conversation_id, &user, &latest],
+            )
+            .await
+            .map_err(|_| internal_error("Unable to acknowledge conversation activity"))?;
+    }
+    transaction
+        .commit()
+        .await
+        .map_err(|_| internal_error("Unable to finalize conversation acknowledgement"))?;
     Ok(Json(OkBody { ok: true }))
 }
 

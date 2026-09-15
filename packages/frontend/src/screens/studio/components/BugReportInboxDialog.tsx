@@ -18,6 +18,7 @@ import {
 } from "../../../sdk/instafy";
 import { writeClipboardText } from "../../../runtime/runtimeMenuShared";
 import { useStatus } from "../../../status/useStatus";
+import { NOTIFICATION_RECEIVED_EVENT } from "../../../notifications/notificationPresentation";
 
 const {
   get: getControllerBugReport,
@@ -153,7 +154,7 @@ export function BugReportInboxDialog({
   const inFlightReplyRef = useRef<SupportReplyAttempt | null>(null);
   const retryRequestIdsRef = useRef(new Map<string, string>());
   const reportsRequestGenerationRef = useRef(0);
-  const acknowledgementAttemptsRef = useRef(new Set<string>());
+  const acknowledgementAttemptsRef = useRef(new Map<string, symbol>());
   const mountedRef = useRef(true);
 
   selectedReportIdRef.current = selectedReportId;
@@ -342,7 +343,6 @@ export function BugReportInboxDialog({
       !isOpen ||
       !selectedReport ||
       selectedReport.id !== selectedReportId ||
-      !selectedReport.hasUnreadSupportActivity ||
       !selectedReport.supportLastMessageAt ||
       loadingMessages ||
       messagesError ||
@@ -352,13 +352,41 @@ export function BugReportInboxDialog({
     }
     const reportId = selectedReport.id;
     const seenThrough = selectedReport.supportLastMessageAt;
-    const attemptKey = `${reportId}:${seenThrough}`;
+    // A later page may expose previously unread replies after the source badge
+    // cleared. Only actual loaded support rows and the shown resolution qualify.
+    const messageIds = messages.filter(message => message.authorType === "support").map(message => message.id);
+    const resolutionNotificationId = selectedReport.status === "resolved" ? selectedReport.resolutionNotificationId : null;
+    const attemptKey = JSON.stringify([reportId, seenThrough, messageIds, resolutionNotificationId]);
     if (acknowledgementAttemptsRef.current.has(attemptKey)) return;
-    acknowledgementAttemptsRef.current.add(attemptKey);
+    const attempt = Symbol(attemptKey);
+    acknowledgementAttemptsRef.current.set(attemptKey, attempt);
+    const releaseAttempt = () => {
+      if (acknowledgementAttemptsRef.current.get(attemptKey) === attempt) acknowledgementAttemptsRef.current.delete(attemptKey);
+    };
     let cancelled = false;
-    void acknowledgeControllerBugReportActivity(reportId, seenThrough)
+    let completed = false;
+    const isCurrent = () => !cancelled && isUserSessionCurrent(currentUserId) &&
+      selectedReportIdRef.current === reportId && document.visibilityState === "visible";
+    void (async () => {
+      let result: Awaited<ReturnType<typeof acknowledgeControllerBugReportActivity>> | null = null;
+      for (let offset = 0; offset < Math.max(1, messageIds.length); offset += 100) {
+        if (!isCurrent()) return null;
+        result = await acknowledgeControllerBugReportActivity(reportId, seenThrough, {
+          messageIds: messageIds.slice(offset, offset + 100),
+          resolutionNotificationId: offset === 0 ? resolutionNotificationId : null,
+          expectedUserId: currentUserId,
+          isCurrent,
+        });
+      }
+      return result;
+    })()
       .then((result) => {
-        if (cancelled || selectedReportIdRef.current !== reportId) return;
+        if (!result || !isCurrent()) {
+          releaseAttempt();
+          return;
+        }
+        completed = true;
+        window.dispatchEvent(new Event(NOTIFICATION_RECEIVED_EVENT));
         setSelectedReport((current) =>
           current?.id === reportId
             ? {
@@ -386,14 +414,18 @@ export function BugReportInboxDialog({
         }
       })
       .catch(() => {
-        acknowledgementAttemptsRef.current.delete(attemptKey);
+        releaseAttempt();
       });
     return () => {
       cancelled = true;
+      if (!completed) releaseAttempt();
     };
   }, [
+    currentUserId,
+    isUserSessionCurrent,
     isOpen,
     loadReports,
+    messages,
     loadingMessages,
     messagesError,
     onSupportActivityAcknowledged,

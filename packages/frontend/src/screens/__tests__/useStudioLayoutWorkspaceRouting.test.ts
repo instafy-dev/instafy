@@ -149,6 +149,14 @@ describe("resolvePendingUrlSearchSync", () => {
 });
 
 describe("resolveWorkspaceUrlSyncBaseSearch", () => {
+  it.each([null, "replace"] as const)("does not overwrite a newer explicit destination with a settled old route (%s)", (pendingNavigationMode) => {
+    expect(resolveWorkspaceUrlSyncBaseSearch({
+      browserSearch: "?projectId=project-1",
+      lastHydratedSearch: "?projectId=project-1&panel=home",
+      routedSearch: "?projectId=project-1&panel=home",
+      pendingNavigationMode,
+    })).toBeNull();
+  });
   it("chains a rapid second push from the URL already committed by the browser", () => {
     expect(
       resolveWorkspaceUrlSyncBaseSearch({

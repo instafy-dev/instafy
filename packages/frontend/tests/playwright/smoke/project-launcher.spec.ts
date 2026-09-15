@@ -1,5 +1,6 @@
 import { test, expect } from "@playwright/test";
 import { prepareStudio, resetRuntimeUserState } from "../utils/harness.js";
+import { openTeamDirectory } from "../utils/sidebar.js";
 
 test.describe("Project launcher", () => {
   test.afterEach(async ({ page }) => {
@@ -12,8 +13,7 @@ test.describe("Project launcher", () => {
 
     await prepareStudio(page, { waitForHostedRuntime: false });
 
-    const projectButton = page.getByTestId("sidebar-project-button");
-    await projectButton.click();
+    await openTeamDirectory(page);
     const projectMenu = page.getByTestId("sidebar-project-switcher-menu");
     await expect(projectMenu).toBeVisible();
 
@@ -25,7 +25,7 @@ test.describe("Project launcher", () => {
     await page.keyboard.press("Escape");
     await expect(page.getByTestId("project-launcher-close")).toHaveCount(0);
 
-    await projectButton.click();
+    await openTeamDirectory(page);
     await expect(projectMenu).toBeVisible();
     await projectMenu.getByTestId("sidebar-project-new").click();
     const overlay = page.getByTestId("project-launcher-overlay");

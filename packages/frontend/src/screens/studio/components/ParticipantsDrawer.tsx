@@ -1,4 +1,6 @@
 import { useEffect, useRef, useState } from "react";
+import { HumanAvatar } from "../../../components/HumanAvatar";
+import { HumanProfilePopover } from "../../../profile/HumanProfilePopover";
 import { Cpu, Cube, NavArrowRight, Xmark } from "iconoir-react";
 import {
   Button as AriaButton,
@@ -48,14 +50,6 @@ import { formatReset, windowLabel } from "./subscriptionUsageFormat";
  * one box, and becomes per-machine group headers only when real topology
  * exists (several machines / native / dedicated).
  */
-
-function humanInitials(label: string): string {
-  const parts = label.trim().split(/\s+/).filter(Boolean);
-  if (parts.length === 0) return "?";
-  const first = parts[0]?.[0] ?? "";
-  const last = parts.length > 1 ? (parts[parts.length - 1]?.[0] ?? "") : "";
-  return `${first}${last}`.toUpperCase() || first.toUpperCase();
-}
 
 function AgentAvatar({ agent }: { agent: ParticipantAgent }) {
   return (
@@ -561,8 +555,10 @@ function MachineFooter({
 export function ParticipantsDrawer({
   onClose,
   onOpenMachine,
+  projectId,
 }: {
   onClose: () => void;
+  projectId?: string | null;
   /** Deep-link a machine into the Machines page; rows stay plain without it. */
   onOpenMachine?: (runtimeId: string) => void;
 }) {
@@ -601,6 +597,7 @@ export function ParticipantsDrawer({
       // The token menus (model/reasoning) portal outside the drawer; a click
       // inside one must not be read as a click-away that closes the drawer.
       if (target.closest("[data-studio-popover]")) return;
+      if (target.closest("[data-human-profile-card]")) return;
       onClose();
     };
     window.addEventListener("pointerdown", onPointerDown, true);
@@ -716,15 +713,16 @@ export function ParticipantsDrawer({
               People
             </Text>
             {humans.map((human) => (
-              <div
+              <HumanProfilePopover
                 key={human.userId}
-                className="flex items-center gap-2.5 py-1.5"
+                projectId={projectId}
+                userId={human.userId}
+                displayName={human.label}
+                className="flex min-h-11 w-full items-center gap-2.5 rounded-lg py-1.5 text-left hover:bg-slate-100 dark:hover:bg-white/[0.06]"
               >
-                <span className="inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-slate-500 text-3xs font-semibold text-white dark:bg-slate-600">
-                  {humanInitials(human.label)}
-                </span>
+                <HumanAvatar userId={human.userId} displayName={human.label} className="h-7 w-7 text-xxs" />
                 <Text
-                  as="div"
+                  as="span"
                   variant="caption"
                   tone="secondary"
                   className="min-w-0 flex-1 truncate text-xs font-medium"
@@ -736,7 +734,7 @@ export function ParticipantsDrawer({
                     </span>
                   ) : null}
                 </Text>
-              </div>
+              </HumanProfilePopover>
             ))}
           </section>
         ) : null}
@@ -769,7 +767,7 @@ export function ParticipantsDrawer({
                 >
                   {group.agents.map((agent) => {
                     const credential = notableCredentialLine(agent);
-                    const isEditable = editing != null && agent.agentId != null;
+                    const isEditable = editing != null && agent.agentId != null && agent.canEditProfile === true;
                     // Read-only fallback: the same sentence, as plain text.
                     const readOnlyMeta = [
                       agent.model,
@@ -826,8 +824,10 @@ export function ParticipantsDrawer({
                           </AriaButton>
                           <AgentProfilePopoverCard
                             placement="bottom start"
+                            projectId={projectId}
                             agentHandle={agent.handle}
                             agentId={agent.agentId}
+                            canEditProfile={agent.canEditProfile === true}
                             agentAvatarSeed={agent.avatarSeed}
                             displayName={agent.displayName}
                             pinnedRuntimeId={

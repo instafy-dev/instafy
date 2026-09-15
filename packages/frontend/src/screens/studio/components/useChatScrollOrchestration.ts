@@ -25,7 +25,7 @@ const HISTORY_SCROLL_USER_MOVE_THRESHOLD_PX = 4;
 // HISTORY_AUTO_FILL_SAFETY_CAP_PAGES is the hard backstop that bounds a
 // pathological thread which keeps growing just enough to look like progress, so
 // the loop can never fetch unboundedly. Either brake marks auto-fill exhausted,
-// which is what surfaces the manual "View earlier messages" button.
+// which is what surfaces the manual "Load older messages" button.
 const HISTORY_AUTO_FILL_SAFETY_CAP_PAGES = 15;
 const HISTORY_AUTO_FILL_MAX_STALLED_PAGES = 2;
 const HISTORY_AUTO_FILL_MIN_PROGRESS_PX = 4;
@@ -33,18 +33,24 @@ const HISTORY_UNDERFILL_THRESHOLD_PX = 4;
 const CHAT_SCROLL_MESSAGE_SELECTOR = "[data-chat-scroll-message-id]";
 const MAX_CHAT_SCROLL_SNAPSHOTS = 200;
 
+function readTranscriptTopInset(node: HTMLDivElement): number {
+  const inset = Number.parseFloat(getComputedStyle(node).scrollPaddingTop);
+  return Number.isFinite(inset) ? Math.max(0, inset) : 0;
+}
+
 type MessageScrollAnchor = { messageId: string; offset: number };
 
 function readVisibleMessageAnchor(node: HTMLDivElement): MessageScrollAnchor | null {
   const rows = node.querySelectorAll<HTMLElement>(CHAT_SCROLL_MESSAGE_SELECTOR);
   const viewport = node.getBoundingClientRect();
+  const readableTop = viewport.top + readTranscriptTopInset(node);
   // Rows remain in transcript order, including any deferred-rendering shells.
   // Find the first visible one without measuring every earlier message.
   let low = 0;
   let high = rows.length;
   while (low < high) {
     const middle = Math.floor((low + high) / 2);
-    if (rows[middle].getBoundingClientRect().bottom <= viewport.top) low = middle + 1;
+    if (rows[middle].getBoundingClientRect().bottom <= readableTop) low = middle + 1;
     else high = middle;
   }
   const row = rows[low];
@@ -79,6 +85,7 @@ type UseChatScrollControllerOptions = {
 };
 
 type UseChatAutoScrollSyncOptions = {
+  followLatest?: boolean;
   aiOnboardingOpen: boolean;
   autoScrollSuspendedRef: MutableRefObject<boolean>;
   autoScrollPendingRef: MutableRefObject<boolean>;
@@ -102,6 +109,7 @@ type ConversationScrollSnapshot = {
   clientHeight: number;
   wasAtBottom: boolean;
   anchor: MessageScrollAnchor | null;
+  revealedMessageId: string | null;
 };
 
 const conversationScrollSnapshots = new Map<string, ConversationScrollSnapshot>();
@@ -128,6 +136,8 @@ export function useChatScrollController({
   const [layoutRevision, setLayoutRevision] = useState(0);
   const [historyWindowUnderfilled, setHistoryWindowUnderfilled] = useState(false);
   const [historyAutoFillExhausted, setHistoryAutoFillExhausted] = useState(false);
+  const [highlightedMessageId, setHighlightedMessageId] = useState<string | null>(null);
+  const highlightTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const autoScrollSuspendedRef = useRef(false);
   const shouldAutoScrollRef = useRef(true);
   const autoScrollPendingRef = useRef(false);
@@ -158,6 +168,8 @@ export function useChatScrollController({
   // Only a committed, route/data-matched visit can own geometry. During route
   // hydration this is null, even if the old transcript is still on screen.
   const activeSnapshotKeyRef = useRef<string | null>(null);
+  const activeMessageTargetRef = useRef<string | null>(null);
+  const pendingMessageTargetRef = useRef<string | null>(null);
   const restoredSnapshotKeyRef = useRef<string | null>(null);
   const restoringInitialHistoryRef = useRef(false);
   const historyScrollAnchorRef = useRef<{
@@ -179,17 +191,19 @@ export function useChatScrollController({
   const saveCurrentConversationScrollSnapshot = useCallback(() => {
     const snapshotKey = activeSnapshotKeyRef.current;
     const node = scrollContainerRef.current;
-    if (!snapshotKey || !node || node.clientHeight <= 0 || autoScrollSuspendedRef.current || autoScrollPendingRef.current) {
+    if (!snapshotKey || !node || node.clientHeight <= 0 || pendingMessageTargetRef.current || autoScrollSuspendedRef.current || autoScrollPendingRef.current) {
       return;
     }
     const distanceFromBottom = node.scrollHeight - (node.scrollTop + node.clientHeight);
+    const followsBottom = !activeMessageTargetRef.current && distanceFromBottom <= AUTO_SCROLL_BOTTOM_THRESHOLD_PX;
     conversationScrollSnapshots.delete(snapshotKey);
     conversationScrollSnapshots.set(snapshotKey, {
       scrollTop: node.scrollTop,
       scrollHeight: node.scrollHeight,
       clientHeight: node.clientHeight,
-      wasAtBottom: distanceFromBottom <= AUTO_SCROLL_BOTTOM_THRESHOLD_PX,
-      anchor: distanceFromBottom <= AUTO_SCROLL_BOTTOM_THRESHOLD_PX ? null : readVisibleMessageAnchor(node),
+      wasAtBottom: followsBottom,
+      anchor: followsBottom ? null : readVisibleMessageAnchor(node),
+      revealedMessageId: activeMessageTargetRef.current,
     });
     if (conversationScrollSnapshots.size > MAX_CHAT_SCROLL_SNAPSHOTS) {
       const oldest = conversationScrollSnapshots.keys().next().value;
@@ -208,8 +222,10 @@ export function useChatScrollController({
 
   const setAutoScrollSuspended = useCallback(
     (suspended: boolean) => {
+      const wasSuspended = autoScrollSuspendedRef.current;
       autoScrollSuspendedRef.current = suspended;
       if (!suspended) {
+        if (wasSuspended && pendingMessageTargetRef.current) setLayoutRevision((revision) => revision + 1);
         return;
       }
       cancelScrollAnimation();
@@ -287,7 +303,7 @@ export function useChatScrollController({
 
   const scrollToBottom = useCallback((options?: ScrollToBottomOptions) => {
     const node = scrollContainerRef.current;
-    if (!node || !activeSnapshotKeyRef.current) {
+    if (!node || !activeSnapshotKeyRef.current || activeMessageTargetRef.current || pendingMessageTargetRef.current) {
       return;
     }
     if (autoScrollSuspendedRef.current) {
@@ -369,11 +385,21 @@ export function useChatScrollController({
   useLayoutEffect(() => {
     const conversationChanged = restoredSnapshotKeyRef.current !== scrollSnapshotKey;
     activeSnapshotKeyRef.current = scrollSnapshotKey;
+    activeMessageTargetRef.current = historyVisit?.messageId ?? null;
     restoredSnapshotKeyRef.current = scrollSnapshotKey;
     if (conversationChanged) {
+      const requestedMessageId = activeMessageTargetRef.current;
+      const saved = scrollSnapshotKey ? conversationScrollSnapshots.get(scrollSnapshotKey) : null;
+      // A placeholder's bottom position must never count as having revealed
+      // an explicit target. Only snapshots captured after that reveal can
+      // restore a later reading position on Back/Forward.
+      pendingMessageTargetRef.current = scrollSnapshotKey && requestedMessageId && saved?.revealedMessageId !== requestedMessageId
+        ? requestedMessageId : null;
       historyPaginationRef.current = { pending: false, scrollHeight: 0 };
       clearHistoryScrollAnchor();
       cancelScrollAnimation();
+      if (highlightTimerRef.current) clearTimeout(highlightTimerRef.current);
+      setHighlightedMessageId(null);
     }
     const node = scrollContainerRef.current;
     if (!node || !scrollSnapshotKey) {
@@ -401,6 +427,38 @@ export function useChatScrollController({
       restoringInitialHistoryRef.current = true;
       return;
     }
+    const targetMessageId = pendingMessageTargetRef.current;
+    if (targetMessageId) {
+      cancelScrollAnimation();
+      shouldAutoScrollRef.current = false;
+      const anchor = { messageId: targetMessageId, offset: readTranscriptTopInset(node) + 24 };
+      const row = findMessageAnchorRow(node, anchor);
+      if (!row || row.dataset.chatRowDeferred === "true") {
+        autoScrollPendingRef.current = true;
+        restoringInitialHistoryRef.current = true;
+        return;
+      }
+      restoringInitialHistoryRef.current = false;
+      node.scrollTop = Math.max(0, Math.min(
+        node.scrollTop + row.getBoundingClientRect().top - node.getBoundingClientRect().top - anchor.offset,
+        node.scrollHeight - node.clientHeight,
+      ));
+      lastScrollHeightRef.current = node.scrollHeight;
+      pendingMessageTargetRef.current = null;
+      startHistoryScrollAnchor(node, anchor);
+      saveCurrentConversationScrollSnapshot();
+      setHighlightedMessageId(targetMessageId);
+      highlightTimerRef.current = setTimeout(() => setHighlightedMessageId(null), 3_000);
+      // Selecting a search result unmounts its focused button. Give that empty
+      // focus position a destination without overriding a control the reader
+      // deliberately focused while this message's context was loading.
+      const ownerDocument = row.ownerDocument;
+      const focusedElement = ownerDocument.activeElement;
+      if (!focusedElement || focusedElement === ownerDocument.body || focusedElement === ownerDocument.documentElement) {
+        row.focus({ preventScroll: true });
+      }
+      return;
+    }
     if (!conversationChanged && !restoringInitialHistoryRef.current) {
       // Pagination already owns its prepend/settle correction. Otherwise only
       // reanchor a reader; normal new-message bottom-following stays with the
@@ -419,6 +477,12 @@ export function useChatScrollController({
     if (historyPaginationRef.current.pending) return;
     if (!snapshot || snapshot.wasAtBottom) {
       cancelScrollAnimation();
+      if (activeMessageTargetRef.current) {
+        shouldAutoScrollRef.current = false;
+        node.scrollTop = Math.max(0, Math.min(snapshot?.scrollTop ?? node.scrollTop, node.scrollHeight - node.clientHeight));
+        lastScrollHeightRef.current = node.scrollHeight;
+        return;
+      }
       shouldAutoScrollRef.current = true;
       scrollToBottom({ behavior: "auto" });
       return;
@@ -438,7 +502,9 @@ export function useChatScrollController({
     lastScrollHeightRef.current = node.scrollHeight;
     if (anchorRow && snapshot.anchor) startHistoryScrollAnchor(node, snapshot.anchor);
     saveCurrentConversationScrollSnapshot();
-  }, [scrollSnapshotKey, applyHistoryScrollAnchor, cancelScrollAnimation, clearHistoryScrollAnchor, isInitialHistoryLoading, layoutRevision, measureHistoryWindowUnderfill, messages, saveCurrentConversationScrollSnapshot, scrollToBottom, startHistoryScrollAnchor]);
+  }, [scrollSnapshotKey, historyVisit?.messageId, applyHistoryScrollAnchor, cancelScrollAnimation, clearHistoryScrollAnchor, isInitialHistoryLoading, layoutRevision, measureHistoryWindowUnderfill, messages, saveCurrentConversationScrollSnapshot, scrollToBottom, startHistoryScrollAnchor]);
+
+  useEffect(() => () => { if (highlightTimerRef.current) clearTimeout(highlightTimerRef.current); }, []);
 
   const handleScrollContentRef = useCallback((node: HTMLDivElement | null) => {
     setScrollContentNode(node);
@@ -547,7 +613,7 @@ export function useChatScrollController({
       if (applyHistoryScrollAnchor()) {
         return;
       }
-      if (autoScrollSuspendedRef.current) {
+      if (autoScrollSuspendedRef.current || activeMessageTargetRef.current) {
         shouldAutoScrollRef.current = false;
         lastScrollHeightRef.current = node.scrollHeight;
         return;
@@ -607,8 +673,16 @@ export function useChatScrollController({
     container.scrollTop = container.scrollTop + delta;
     lastScrollHeightRef.current = container.scrollHeight;
     historyPaginationRef.current = { pending: false, scrollHeight: 0 };
-    startHistoryScrollAnchor(container);
-  }, [isHistoryLoading, messages, startHistoryScrollAnchor]);
+    if (activeMessageTargetRef.current) {
+      // Target windows may next append newer messages. A height-only prepend
+      // settle would mistake that growth for older content and move the reader.
+      const messageAnchor = readVisibleMessageAnchor(container);
+      if (messageAnchor) startHistoryScrollAnchor(container, messageAnchor);
+      else clearHistoryScrollAnchor();
+    } else {
+      startHistoryScrollAnchor(container);
+    }
+  }, [clearHistoryScrollAnchor, isHistoryLoading, messages, startHistoryScrollAnchor]);
 
   useLayoutEffect(() => {
     if (historyAutoFillRef.current.snapshotKey === scrollSnapshotKey) {
@@ -688,10 +762,17 @@ export function useChatScrollController({
   const showHistoryLoadButton =
     hasMoreHistory && (!historyWindowUnderfilled || historyAutoFillExhausted);
 
+  const isHistoryReadingReady = useCallback(() => Boolean(scrollSnapshotKey
+    && activeSnapshotKeyRef.current === scrollSnapshotKey && !pendingMessageTargetRef.current
+    && !restoringInitialHistoryRef.current && !autoScrollPendingRef.current && !autoScrollSuspendedRef.current), [scrollSnapshotKey]);
+
   return {
     autoScrollSuspendedRef,
     autoScrollPendingRef,
     handleScrollContentRef,
+    highlightedMessageId,
+    isHistoryReadingReady,
+    followLatest: !historyVisit?.messageId,
     historyWindowUnderfilled,
     lastComposerScrollTopRef,
     lastScrollHeightRef,
@@ -707,6 +788,7 @@ export function useChatScrollController({
 }
 
 export function useChatAutoScrollSync({
+  followLatest = true,
   aiOnboardingOpen,
   autoScrollSuspendedRef,
   autoScrollPendingRef,
@@ -724,7 +806,7 @@ export function useChatAutoScrollSync({
   shouldAutoScrollRef,
 }: UseChatAutoScrollSyncOptions) {
   useLayoutEffect(() => {
-    if (autoScrollSuspendedRef.current) {
+    if (!followLatest || autoScrollSuspendedRef.current) {
       shouldAutoScrollRef.current = false;
       return;
     }
@@ -751,6 +833,7 @@ export function useChatAutoScrollSync({
     autoScrollPendingRef,
     credentialGateStateForBubble,
     displayedMessages,
+    followLatest,
     isAssistantTyping,
     lastScrollHeightRef,
     notificationsNudgeAnchorTimestamp,
@@ -763,14 +846,14 @@ export function useChatAutoScrollSync({
 
   useLayoutEffect(() => {
     if (
-      autoScrollSuspendedRef.current ||
+      !followLatest || autoScrollSuspendedRef.current ||
       composerOverlayHeight <= 0 ||
       !shouldAutoScrollRef.current
     ) {
       return;
     }
     scrollToBottom();
-  }, [autoScrollSuspendedRef, composerOverlayHeight, scrollToBottom, shouldAutoScrollRef]);
+  }, [autoScrollSuspendedRef, composerOverlayHeight, followLatest, scrollToBottom, shouldAutoScrollRef]);
 
   useEffect(() => {
     if (typeof window === "undefined") {
@@ -783,7 +866,7 @@ export function useChatAutoScrollSync({
 
     let frameId: number | null = null;
     const handleViewportResize = () => {
-      if (autoScrollSuspendedRef.current || !shouldAutoScrollRef.current) {
+      if (!followLatest || autoScrollSuspendedRef.current || !shouldAutoScrollRef.current) {
         return;
       }
       if (frameId !== null) {
@@ -809,5 +892,5 @@ export function useChatAutoScrollSync({
         window.cancelAnimationFrame(frameId);
       }
     };
-  }, [autoScrollSuspendedRef, composerAutoHidden, scrollToBottom, shouldAutoScrollRef]);
+  }, [autoScrollSuspendedRef, composerAutoHidden, followLatest, scrollToBottom, shouldAutoScrollRef]);
 }

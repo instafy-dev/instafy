@@ -4,9 +4,25 @@ import { describe, expect, it } from "vitest";
 import {
   OPEN_AGENT_PROFILE_EVENT,
   requestAgentProfile,
+  type OpenAgentProfileDetail,
 } from "../agentProfileOpen";
 
 describe("requestAgentProfile", () => {
+  it("preserves the observed bot ID and avatar through a handle collision", () => {
+    const seen: OpenAgentProfileDetail[] = [];
+    const handler = (event: Event) => seen.push((event as CustomEvent<OpenAgentProfileDetail>).detail);
+    window.addEventListener(OPEN_AGENT_PROFILE_EVENT, handler);
+    try {
+      requestAgentProfile("@Build", { id: " teammate-bot ", avatarSeed: "peer-photo" });
+      requestAgentProfile("build");
+    } finally {
+      window.removeEventListener(OPEN_AGENT_PROFILE_EVENT, handler);
+    }
+    expect(seen).toEqual([
+      { handle: "build", agentId: "teammate-bot", avatarSeed: "peer-photo" },
+      { handle: "build" },
+    ]);
+  });
   it("dispatches normalized handles and drops empty ones", () => {
     const seen: string[] = [];
     const handler = (event: Event) => {

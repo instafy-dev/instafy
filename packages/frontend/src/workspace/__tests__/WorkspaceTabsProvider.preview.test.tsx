@@ -6,7 +6,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createInitialConversation, type ConversationState } from "../../conversations/conversationState";
 import type { StudioPanel } from "../../screens/studio/types";
 import { WorkspaceTabsProvider, useWorkspaceTabs } from "../WorkspaceTabsProvider";
-import { getTabIdForConversation } from "../workspaceTabFactories";
+import { getTabIdForConversation, getTabIdForJobThread, getTabIdForPanel } from "../workspaceTabFactories";
 import { loadPersistedWorkspaceTabs, persistWorkspaceTabsState } from "../workspaceTabPersistence";
 import { studioPerformance, type StudioPerformanceSample } from "../../telemetry/studioPerformance";
 
@@ -230,6 +230,8 @@ describe("conversation preview tabs", () => {
     await render();
     await openPreview("b");
     await act(async () => api.moveTab(getTabIdForConversation("b"), 0));
+    expect(api.activeTabId).toBe(getTabIdForConversation("b"));
+    expect(previews()).toEqual([]);
     await openPreview("c");
     expect(ids()).toEqual(["b", "a", "c"]);
     await act(async () => api.closeTab(getTabIdForConversation("c")));
@@ -237,6 +239,94 @@ describe("conversation preview tabs", () => {
     await render();
     expect(ids()).toEqual(["b", "a"]);
     expect(previews()).toEqual([]);
+  });
+
+  it("selects an inactive Machines tab and reorders it without changing the selection", async () => {
+    save(["a"]);
+    await render();
+    await act(async () => api.openPanelTab("machines", { activate: false }));
+    const chatId = getTabIdForConversation("a");
+    const machinesId = getTabIdForPanel("machines");
+    expect(api.tabs.map((tab) => tab.id)).toEqual([chatId, machinesId]);
+    expect(api.activeTabId).toBe(chatId);
+
+    await act(async () => api.focusTab(machinesId));
+    expect(api.activeTabId).toBe(machinesId);
+    expect(fixture.activePanel).toBe("machines");
+    await act(async () => api.moveTab(machinesId, 0));
+    expect(api.tabs.map((tab) => tab.id)).toEqual([machinesId, chatId]);
+    expect(api.activeTab).toMatchObject({ id: machinesId, kind: "panel", panel: "machines" });
+    expect(fixture.activePanel).toBe("machines");
+
+    await act(async () => api.moveTab(machinesId, 1));
+    expect(api.tabs.map((tab) => tab.id)).toEqual([chatId, machinesId]);
+    expect(api.activeTabId).toBe(machinesId);
+  });
+
+  it.each([
+    { position: "before chats", index: 0, order: [getTabIdForPanel("machines"), getTabIdForConversation("a"), getTabIdForConversation("b")] },
+    { position: "between chats", index: 1, order: [getTabIdForConversation("a"), getTabIdForPanel("machines"), getTabIdForConversation("b")] },
+  ])("keeps Machines $position when conversation titles and unread counts refresh", async ({ index, order }) => {
+    save(["a", "b"]);
+    await render();
+    await act(async () => api.openPanelTab("machines"));
+    await act(async () => api.moveTab(getTabIdForPanel("machines"), index));
+    expect(api.tabs.map((tab) => tab.id)).toEqual(order);
+
+    fixture.conversations = fixture.conversations.map((entry) => entry.localId === "a"
+      ? { ...entry, title: "Renamed chat" }
+      : entry.localId === "b" ? { ...entry, unreadCount: 3 } : entry);
+    await render();
+
+    expect(api.tabs.map((tab) => tab.id)).toEqual(order);
+    expect(api.tabs.find((tab) => tab.id === getTabIdForConversation("a"))?.title).toBe("Renamed chat");
+    expect(api.tabs.find((tab) => tab.id === getTabIdForConversation("b"))?.badge).toBe("3");
+    expect(api.activeTab).toMatchObject({ id: getTabIdForPanel("machines"), kind: "panel", panel: "machines" });
+    expect(fixture.activePanel).toBe("machines");
+    expect(loadPersistedWorkspaceTabs()?.projects[projectA]?.conversations).toEqual(["a", "b"]);
+  });
+
+  it("removes a deleted chat without moving a surviving chat across Machines", async () => {
+    save(["a", "b"]);
+    await render();
+    await act(async () => api.openPanelTab("machines"));
+    const machinesId = getTabIdForPanel("machines");
+    await act(async () => api.moveTab(machinesId, 1));
+    expect(api.tabs.map((tab) => tab.id)).toEqual([getTabIdForConversation("a"), machinesId, getTabIdForConversation("b")]);
+
+    fixture.conversations = fixture.conversations.filter((entry) => entry.localId !== "a");
+    await render();
+
+    expect(api.tabs.map((tab) => tab.id)).toEqual([machinesId, getTabIdForConversation("b")]);
+    expect(api.activeTabId).toBe(machinesId);
+    expect(fixture.activePanel).toBe("machines");
+  });
+
+  it("reorders a run tab while keeping its selected conversation and parent chat", async () => {
+    save(["a"]);
+    await render();
+    await openPreview("b");
+    await act(async () => api.openJobThreadTab({ conversationId: "b", jobId: "run-b" }));
+    const chatA = getTabIdForConversation("a");
+    const chatB = getTabIdForConversation("b");
+    const runId = getTabIdForJobThread("run-b");
+    expect(api.tabs.map((tab) => tab.id)).toEqual([chatA, chatB, runId]);
+
+    await act(async () => api.moveTab(runId, 0));
+    expect(api.tabs.map((tab) => tab.id)).toEqual([runId, chatA, chatB]);
+    expect(api.activeTab).toMatchObject({ id: runId, kind: "jobThread", conversationId: "b", jobId: "run-b" });
+    expect(fixture.activeConversationId).toBe("b");
+    expect(fixture.activePanel).toBe("chat");
+    expect(previews()).toEqual([]);
+
+    await openPreview("c");
+    expect(api.tabs.filter((tab) => tab.id !== getTabIdForConversation("c")).map((tab) => tab.id)).toEqual([runId, chatA, chatB]);
+    expect(previews()).toEqual(["c"]);
+    expect(api.activeTabId).toBe(getTabIdForConversation("c"));
+    await openPreview("d");
+    expect(api.tabs.filter((tab) => tab.id !== getTabIdForConversation("d")).map((tab) => tab.id)).toEqual([runId, chatA, chatB]);
+    expect(previews()).toEqual(["d"]);
+    expect(api.activeTabId).toBe(getTabIdForConversation("d"));
   });
 
   it("retains saved tabs during partial history hydration even if a panel opens first", async () => {

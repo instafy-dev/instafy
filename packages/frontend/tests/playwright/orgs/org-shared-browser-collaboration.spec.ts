@@ -1,4 +1,5 @@
 import { expect, test, type BrowserContext, type Page } from "@playwright/test";
+import { openTeamDirectory } from "../utils/sidebar.js";
 import { parseSharedBrowserCollaborationServerMessage } from "../../../src/screens/studio/components/sharedBrowserCollaboration.js";
 
 import {
@@ -140,7 +141,7 @@ function memberCursorWireState(
 }
 
 async function openProjectSettings(page: Page) {
-  await page.getByTestId("sidebar-project-button").click();
+  await openTeamDirectory(page);
   await page.getByTestId("sidebar-project-settings").click();
   await expect(page.getByTestId("settings-panel")).toBeVisible({ timeout: 30_000 });
   await page.getByTestId("settings-category-project-access").click();

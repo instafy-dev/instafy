@@ -58,7 +58,7 @@ function initialState(viewerUserId: string | null): ActivityState {
 }
 
 /** One Home visit's ledger and previous-visit cut, isolated to the signed-in user. */
-export function useHomeActivity(viewerUserId: string | null, pageSize = 24) {
+export function useHomeActivity(viewerUserId: string | null, pageSize = 24, markSeen = true) {
   const [state, setState] = useState(() => initialState(viewerUserId));
   const actionsRef = useRef<{
     viewerUserId: string;
@@ -88,6 +88,7 @@ export function useHomeActivity(viewerUserId: string | null, pageSize = 24) {
       setState(snapshot);
     };
     const advanceSeen = () => {
+      if (!markSeen) return;
       const newest = numericCursor(newestActivityId(snapshot.activityItems));
       if (newest === null || (seenAdvancedTo !== null && newest <= seenAdvancedTo)) return;
       seenAdvancedTo = newest;
@@ -230,7 +231,7 @@ export function useHomeActivity(viewerUserId: string | null, pageSize = 24) {
       actionsRef.current = null;
       window.clearInterval(timer);
     };
-  }, [pageSize, viewerUserId]);
+  }, [markSeen, pageSize, viewerUserId]);
 
   const loadMoreActivity = useCallback(() => {
     const actions = actionsRef.current;

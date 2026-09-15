@@ -1,4 +1,5 @@
 import { _electron as electron, expect, type Page } from "@playwright/test";
+import { openTeamDirectory } from "../utils/sidebar.js";
 import { createRequire } from "node:module";
 import fs from "node:fs";
 import os from "node:os";
@@ -139,7 +140,7 @@ function escapedRegExp(value: string) {
 }
 
 async function openProjectSettings(page: Page) {
-  await page.getByTestId("sidebar-project-button").click();
+  await openTeamDirectory(page);
   await page.getByTestId("sidebar-project-settings").click();
   await expect(page.getByTestId("settings-panel")).toBeVisible({ timeout: 30_000 });
   await page.getByTestId("settings-category-project-access").click();

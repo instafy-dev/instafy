@@ -1,12 +1,14 @@
-import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { desktopTitleBarFree } from "../../../lib/desktopShell";
 import { DialogTrigger } from "react-aria-components";
 import {
   Cube,
+  Clock,
   MoreHoriz,
+  NavArrowLeft,
+  NavArrowRight,
   NavArrowUp,
   Pin,
-  SidebarCollapse,
   SidebarExpand,
   Xmark
 } from "iconoir-react";
@@ -14,10 +16,15 @@ import { StudioHistoryControls, studioHistoryControlsAvailable } from "../../../
 import { Button, IconButton } from "../../../components/Button";
 import { Badge } from "../../../components/Badge";
 import { Text } from "../../../components/Text";
+import { OctoMark } from "../../../components/OctoMark";
 import { StudioDialogPopover } from "../../../components/aria/StudioPopover";
+import { useProfile } from "../../../profile/ProfileProvider";
+import { HumanAvatar } from "../../../components/HumanAvatar";
+import { getOrgInitials } from "../../../org/orgNaming";
 import { useAuth } from "../../../providers/AuthProvider";
 import { MobileStudioNavigationHeader } from "./MobileStudioNavigationHeader";
 import type { StudioHistory } from "../../../navigation/useStudioHistory";
+import { useNativeBackButtonAction } from "../../../native/useNativeBackButtonAction";
 import { useProject } from "../../../projects/useProject";
 import { useProjects } from "../../../projects/useProjects";
 import { useRuntime } from "../../../runtime/useRuntime";
@@ -48,10 +55,11 @@ import { useStudioNavigationPosture } from "../useStudioNavigationPosture";
 import { StudioNewChatButton } from "./StudioNewChatButton";
 
 const COMPACT_TAB_SELECTOR_CLASS =
-  "h-10 min-w-0 justify-between gap-2 rounded-xl !border-transparent !bg-slate-100 px-2.5 !text-slate-950 !shadow-none hover:!bg-slate-100 data-[hovered]:!bg-slate-100 focus-visible:ring-white/16 focus-visible:ring-offset-white max-[375px]:min-h-11 dark:!bg-white/[0.06] dark:!text-slate-50 dark:hover:!bg-white/[0.09] dark:data-[hovered]:!bg-white/[0.09] dark:focus-visible:ring-white/16 dark:focus-visible:ring-offset-[var(--color-studio-dark-rail)]";
+  "h-10 min-w-0 justify-between gap-2 rounded-xl !border-transparent !bg-slate-100 px-2.5 !text-slate-950 hover:!bg-slate-100 data-[hovered]:!bg-slate-100 focus-visible:ring-primary-600 focus-visible:ring-offset-white max-[375px]:min-h-11 dark:!bg-white/[0.06] dark:!text-slate-50 dark:hover:!bg-white/[0.09] dark:data-[hovered]:!bg-white/[0.09] dark:focus-visible:ring-primary-400 dark:focus-visible:ring-offset-[var(--color-studio-dark-rail)]";
 
 export interface StudioTopBarProps {
-  notificationBell?: ReactNode;
+  newChatInSidebar?: boolean;
+  contextHeaderAbove?: boolean;
   mobileNavigation?: {
     history: StudioHistory;
     visitKey: string;
@@ -60,7 +68,7 @@ export interface StudioTopBarProps {
   };
 }
 
-export function StudioTopBar({ notificationBell, mobileNavigation }: StudioTopBarProps = {}) {
+export function StudioTopBar({ mobileNavigation, newChatInSidebar = false, contextHeaderAbove = false }: StudioTopBarProps = {}) {
   const {
     activeProjectName,
     onStartNewConversation,
@@ -68,14 +76,23 @@ export function StudioTopBar({ notificationBell, mobileNavigation }: StudioTopBa
     onToggleSidebar,
     sidebarOpen,
     onOpenProjectSettings,
+    onOpenProfileSettings,
+    onOpenHome,
+    onOpenTeamSwitcher,
+    onNavigateBack,
+    navigationPage = "workspace",
+    activeTeamName,
+    activeTeamAvatarUrl,
     topbarLocationOverride,
   } = useWorkspaceControls();
   const { activeProjectId } = useProjects();
   const { user } = useAuth();
   const currentUserId = user?.id ?? null;
   const { projectAccessBlocked } = useProject();
+  const { profile } = useProfile();
 
   const [tabMenuOpen, setTabMenuOpen] = useState(false);
+  const [historyMenuOpen, setHistoryMenuOpen] = useState(false);
   const [desktopVoiceHostStatus, setDesktopVoiceHostStatus] = useState<DesktopVoiceHostBridgeStatus | null>(null);
   const [desktopSpeechTunnelStatus, setDesktopSpeechTunnelStatus] = useState<DesktopSpeechTunnelBridgeStatus | null>(null);
   const [desktopVoiceStatusLoading, setDesktopVoiceStatusLoading] = useState(false);
@@ -84,12 +101,18 @@ export function StudioTopBar({ notificationBell, mobileNavigation }: StudioTopBa
   const { conversations } = useConversations();
   const { runtime } = useRuntime();
   const controllerProjectMissing = runtime.controllerProjectMissing || projectAccessBlocked;
-  const shouldShowNewChat = showChatActions && Boolean(onStartNewConversation);
+  const shouldShowNewChat = !newChatInSidebar && showChatActions && Boolean(onStartNewConversation);
   const { isLargeScreen, showTouchBottomDock } = useStudioNavigationPosture();
+  const hasCompactNavigation = !isLargeScreen && Boolean(mobileNavigation);
+  const isGlobalPage = navigationPage !== "workspace";
+  const globalHistoryAvailable = !isLargeScreen && isGlobalPage && showTouchBottomDock &&
+    Boolean(mobileNavigation?.history.canGoBack || mobileNavigation?.history.canGoForward);
+  useNativeBackButtonAction(globalHistoryAvailable && historyMenuOpen, () => setHistoryMenuOpen(false));
 
   useEffect(() => {
-    if (showTouchBottomDock) setTabMenuOpen(false);
-  }, [activeProjectId, currentUserId, mobileNavigation?.visitKey, showTouchBottomDock]);
+    setHistoryMenuOpen(false);
+    if (hasCompactNavigation) setTabMenuOpen(false);
+  }, [activeProjectId, currentUserId, hasCompactNavigation, mobileNavigation?.visitKey, navigationPage, showTouchBottomDock]);
 
   const activeWorkspaceTab = useMemo(() => {
     if (!activeTabId) {
@@ -110,9 +133,6 @@ export function StudioTopBar({ notificationBell, mobileNavigation }: StudioTopBa
     }
     return conversations.find((conversation) => conversation.controllerId === parentId || conversation.localId === parentId) ?? null;
   }, [activeConversation?.parentConversationId, conversations]);
-  const topbarLocationIcon = topbarLocationOverride?.icon ?? activeWorkspaceTab?.icon ?? (
-    <Cube className="text-[16px]" aria-hidden="true" />
-  );
   const topbarLocationTitle = topbarLocationOverride?.title ?? activeWorkspaceTab?.title ?? "Space";
   const handleOpenParentConversation = useCallback(() => {
     if (!parentConversation) {
@@ -220,7 +240,7 @@ export function StudioTopBar({ notificationBell, mobileNavigation }: StudioTopBa
                 ].join(" ")}
                 aria-current={isActive ? "page" : undefined}
               >
-                <span aria-hidden="true" className="shrink-0 text-slate-400 dark:text-slate-400">
+                <span aria-hidden="true" className="shrink-0 text-slate-600 dark:text-slate-400">
                   {tab.icon}
                 </span>
                 <span className={`min-w-0 flex-1 truncate text-left ${isLargeScreen && tab.kind === "conversation" && tab.preview ? "italic" : ""}`}>{tab.title}</span>
@@ -273,6 +293,7 @@ export function StudioTopBar({ notificationBell, mobileNavigation }: StudioTopBa
   const titleBarFree = useDesktopTabChrome && desktopTitleBarFree();
   const hasDesktopTabs = useDesktopTabChrome && workspaceTabs.length > 0;
   const resolvedProjectName = activeProjectName || "Untitled Space";
+  const resolvedTeamName = activeTeamName?.trim() || "Team & spaces";
   const projectNameText = (
     <Text as="span" variant="bodyStrong" tone="primary" className="truncate">
       {resolvedProjectName}
@@ -280,7 +301,7 @@ export function StudioTopBar({ notificationBell, mobileNavigation }: StudioTopBa
   );
   const projectNameLabel = (
     <div className="flex min-w-0 items-center gap-2">
-      <Cube className="text-base text-slate-400 dark:text-slate-400" aria-hidden="true" />
+      <Cube className="text-base text-slate-600 dark:text-slate-400" aria-hidden="true" />
       {projectNameText}
       {desktopVoiceStatusSummary ? (
         <Button
@@ -305,7 +326,7 @@ export function StudioTopBar({ notificationBell, mobileNavigation }: StudioTopBa
       className="inline-flex h-[48px] items-center gap-2 px-4 text-sm font-medium text-slate-900 dark:text-slate-50"
       data-testid="workspace-tabs-empty-state"
     >
-      <Cube className="text-base text-slate-400 dark:text-slate-400" aria-hidden="true" />
+      <Cube className="text-base text-slate-600 dark:text-slate-400" aria-hidden="true" />
       <span className="truncate">{resolvedProjectName}</span>
     </div>
   );
@@ -325,7 +346,7 @@ export function StudioTopBar({ notificationBell, mobileNavigation }: StudioTopBa
   ) : null;
 
   const desktopTabActionButtonClassName =
-    `h-[48px] w-12 flex-none rounded-none border border-transparent px-0 text-slate-500 transition-colors hover:bg-slate-100/80 hover:text-slate-900 data-[hovered]:bg-slate-100/80 data-[hovered]:text-slate-900 focus-visible:ring-white/16 focus-visible:ring-offset-white dark:text-slate-300 dark:hover:text-slate-50 dark:data-[hovered]:text-slate-50 dark:focus-visible:ring-white/16 dark:focus-visible:ring-offset-[var(--color-studio-dark-rail)] [aria-expanded=true]:dark:bg-white/[0.05] ${DARK_RAIL_HOVER_CLASS}`;
+    `h-[48px] w-12 flex-none rounded-none border border-transparent px-0 text-slate-500 transition-colors hover:bg-slate-100/80 hover:text-slate-900 data-[hovered]:bg-slate-100/80 data-[hovered]:text-slate-900 focus-visible:ring-primary-600 focus-visible:ring-offset-white dark:text-slate-300 dark:hover:text-slate-50 dark:data-[hovered]:text-slate-50 dark:focus-visible:ring-primary-400 dark:focus-visible:ring-offset-[var(--color-studio-dark-rail)] [aria-expanded=true]:dark:bg-white/[0.05] ${DARK_RAIL_HOVER_CLASS}`;
   const desktopParentConversationButton = parentConversation ? (
     <IconButton
       onPress={handleOpenParentConversation}
@@ -340,10 +361,24 @@ export function StudioTopBar({ notificationBell, mobileNavigation }: StudioTopBa
       <NavArrowUp className="h-5 w-5" aria-hidden="true" />
     </IconButton>
   ) : null;
+  const mobileBackButton = (
+    <IconButton
+      onPress={onNavigateBack}
+      isDisabled={!onNavigateBack}
+      variant="ghost"
+      radius="full"
+      size="md"
+      aria-label="Back"
+      data-testid="topbar-back-button"
+      className={`h-10 w-10 shrink-0 text-slate-600 max-[375px]:h-11 max-[375px]:w-11 dark:text-slate-200 ${DARK_RAIL_HOVER_CLASS}`}
+    >
+      <NavArrowLeft className="h-5 w-5" aria-hidden="true" />
+    </IconButton>
+  );
 
   return (
       <header
-        aria-label={`${resolvedProjectName} workspace navigation`}
+        aria-label={isGlobalPage ? "Team navigation" : `${resolvedProjectName} workspace navigation`}
         className={[
           "sticky top-0 z-40",
           // On a shell that has vacated the title bar the tab strip IS the
@@ -353,7 +388,7 @@ export function StudioTopBar({ notificationBell, mobileNavigation }: StudioTopBa
           // rail absorbs the buttons instead. Everywhere else (iOS notches,
           // older shells) the inset still applies and must: it is the same
           // variable.
-          titleBarFree ? "" : "pt-[var(--instafy-safe-area-inset-top)]",
+          titleBarFree || contextHeaderAbove ? "" : "pt-[var(--instafy-safe-area-inset-top)]",
           // With the shell's drag strip reduced to a corner, this row is the
           // window's drag handle. The class also opts interactive descendants
           // back out of dragging -- see instafy-titlebar-drag in tailwind.css.
@@ -390,7 +425,7 @@ export function StudioTopBar({ notificationBell, mobileNavigation }: StudioTopBa
       {useDesktopTabChrome ? (
         <WorkspaceTabs
           leading={<><StudioHistoryControls />{desktopParentConversationButton}</>}
-          className="bg-transparent pr-0 pt-0 dark:bg-transparent"
+          className={`bg-transparent pr-0 pt-0 dark:bg-transparent ${contextHeaderAbove ? "studio-context-tab-rail" : ""}`}
           emptyStateContent={!hasDesktopTabs ? desktopEmptyStateTab : undefined}
           tabStripActions={
             shouldShowNewChat ? (
@@ -405,7 +440,6 @@ export function StudioTopBar({ notificationBell, mobileNavigation }: StudioTopBa
           actions={
             hasDesktopTabs ? (
               <div className="flex items-center">
-                {notificationBell}
                 <DialogTrigger
                   isOpen={tabMenuOpen}
                   onOpenChange={(open) => setTabMenuOpen((current) => (open && current ? false : open))}
@@ -423,78 +457,105 @@ export function StudioTopBar({ notificationBell, mobileNavigation }: StudioTopBa
                   {tabsMenu}
                 </DialogTrigger>
               </div>
-            ) : notificationBell
+            ) : null
           }
         />
       ) : isLargeScreen ? (
-        <div className="flex flex-wrap items-center gap-2 px-4 py-2 sm:flex-nowrap sm:px-5">
-          <div className="flex min-w-0 flex-none items-center gap-2">
-            <StudioHistoryControls />
-            {!isLargeScreen && onToggleSidebar ? (
-              <IconButton
-                onPress={onToggleSidebar}
-                variant="ghost"
-                radius="full"
-                size="md"
-                aria-label="Toggle sidebar"
-                aria-expanded={sidebarOpen ?? false}
-                data-testid="topbar-sidebar-toggle"
-                className="h-10 w-10"
-              >
-                {sidebarOpen ? (
-                  <SidebarCollapse className="h-5 w-5" aria-hidden="true" />
-                ) : (
-                  <SidebarExpand className="h-5 w-5" aria-hidden="true" />
-                )}
-              </IconButton>
-            ) : null}
-            {parentConversationButton}
-            {isLargeScreen ? projectNameLabel : null}
-          </div>
-
-          <div className="flex min-w-0 flex-1 flex-wrap items-center justify-end gap-2 sm:flex-nowrap">
-            {!isLargeScreen && workspaceTabs.length > 0 && !controllerProjectMissing ? (
-              <DialogTrigger
-                isOpen={tabMenuOpen}
-                onOpenChange={(open) => setTabMenuOpen((current) => (open && current ? false : open))}
-              >
-                <Button
+        <div className="flex items-center gap-2 px-4 py-2 sm:px-5">
+          <StudioHistoryControls />
+          {parentConversationButton}
+          <div className="min-w-0 flex-1">{projectNameLabel}</div>
+          {shouldShowNewChat ? <StudioNewChatButton /> : null}
+        </div>
+      ) : isGlobalPage ? (
+        <div className="flex items-center gap-2 px-4 py-2 max-[375px]:gap-1 max-[375px]:px-3" data-testid="topbar-global-navigation">
+          <IconButton
+            onPress={onOpenHome}
+            isDisabled={!onOpenHome}
+            variant="ghost"
+            radius="full"
+            size="md"
+            aria-label="Home — all teams"
+            title="Home — all teams"
+            aria-current={navigationPage === "home" ? "page" : undefined}
+            data-testid="topbar-home-button"
+            className={`!min-h-12 !min-w-12 shrink-0 text-slate-600 dark:text-slate-200 ${DARK_RAIL_HOVER_CLASS} aria-[current=page]:bg-primary-50 aria-[current=page]:text-primary-600 dark:aria-[current=page]:bg-primary-500/15 dark:aria-[current=page]:text-primary-400`}
+          >
+            <span aria-hidden="true"><OctoMark className="h-6 w-6 text-brand-ink dark:text-brand-paper" /></span>
+          </IconButton>
+          <Button
+            onPress={onToggleSidebar ?? onOpenTeamSwitcher}
+            isDisabled={!onOpenTeamSwitcher && !onToggleSidebar}
+            variant="ghost"
+            size="sm"
+            radius="lg"
+            aria-label={`${onToggleSidebar ? "Open navigation" : "Choose team"}: ${resolvedTeamName}`}
+            aria-expanded={sidebarOpen ?? false}
+            data-testid="topbar-team-selector"
+            className={`!min-h-12 min-w-0 max-w-72 justify-start gap-2 px-1.5 text-left text-slate-900 dark:text-slate-100 ${DARK_RAIL_HOVER_CLASS}`}
+          >
+            <span aria-hidden="true" data-testid="topbar-team-avatar"
+              className="flex h-7 w-7 shrink-0 items-center justify-center overflow-hidden rounded-lg bg-slate-200 text-2xs font-semibold text-slate-700 max-[375px]:hidden dark:bg-white/10 dark:text-slate-200">
+              {activeTeamAvatarUrl ? <img src={activeTeamAvatarUrl} alt="" className="h-full w-full object-cover" /> : getOrgInitials(resolvedTeamName)}
+            </span>
+            <span className="min-w-0 truncate text-sm font-semibold" data-testid="topbar-team-name">{resolvedTeamName}</span>
+            <SidebarExpand className="h-4 w-4 shrink-0 text-slate-600 dark:text-slate-400" aria-hidden="true" />
+          </Button>
+          <div className="ml-auto flex shrink-0 items-center gap-1">
+              {globalHistoryAvailable && mobileNavigation ? (
+              <DialogTrigger isOpen={historyMenuOpen} onOpenChange={setHistoryMenuOpen}>
+                <IconButton
                   variant="ghost"
-                  size="xs"
                   radius="full"
-                  data-testid="topbar-tab-selector"
-                  className={`${COMPACT_TAB_SELECTOR_CLASS} flex-1 sm:max-w-[min(11rem,55vw)]`}
-                  aria-haspopup="dialog"
-                  aria-label="Open tab switcher"
+                  size="md"
+                  aria-label="Navigation history"
+                  data-testid="topbar-history-menu-trigger"
+                  className={`!min-h-12 !min-w-12 shrink-0 text-slate-600 dark:text-slate-200 ${DARK_RAIL_HOVER_CLASS}`}
                 >
-                  <span className="flex min-w-0 items-center gap-2">
-                    <span aria-hidden="true" className="shrink-0">
-                      {topbarLocationIcon}
-                    </span>
-                    <span className="truncate text-xs font-semibold">
-                      {topbarLocationTitle}
-                    </span>
-                  </span>
-                </Button>
-                {tabsMenu}
+                  <Clock className="h-5 w-5" aria-hidden="true" />
+                </IconButton>
+                <StudioDialogPopover placement="bottom end" offset={4} className="w-48 max-w-[calc(100vw-1.5rem)] p-2" data-testid="topbar-history-menu">
+                  <div className="flex flex-col gap-1">
+                    <Button variant="ghost" className="!min-h-12 !min-w-12 justify-start gap-2 px-3" aria-label="Go back"
+                      data-testid="topbar-history-back" isDisabled={!mobileNavigation.history.canGoBack}
+                      onPress={() => { setHistoryMenuOpen(false); mobileNavigation.history.goBack(); }}>
+                      <NavArrowLeft className="h-5 w-5" aria-hidden="true" />Back
+                    </Button>
+                    <Button variant="ghost" className="!min-h-12 !min-w-12 justify-start gap-2 px-3" aria-label="Go forward"
+                      data-testid="topbar-history-forward" isDisabled={!mobileNavigation.history.canGoForward}
+                      onPress={() => { setHistoryMenuOpen(false); mobileNavigation.history.goForward(); }}>
+                      <NavArrowRight className="h-5 w-5" aria-hidden="true" />Forward
+                    </Button>
+                  </div>
+                </StudioDialogPopover>
               </DialogTrigger>
             ) : null}
-
-            {shouldShowNewChat ? (
-              <StudioNewChatButton />
-            ) : null}
-            {notificationBell}
+            <IconButton
+              onPress={onOpenProfileSettings}
+              isDisabled={!onOpenProfileSettings}
+              variant="ghost"
+              radius="full"
+              size="md"
+              aria-label="Open profile settings"
+              aria-current={navigationPage === "account" ? "page" : undefined}
+              data-testid="topbar-profile-button"
+              className="!min-h-12 !min-w-12 shrink-0 p-1"
+            >
+              <HumanAvatar userId={user?.id} displayName={profile?.fullName} avatarUrl={profile?.avatarUrl} />
+            </IconButton>
           </div>
         </div>
-      ) : showTouchBottomDock && mobileNavigation ? (
+      ) : mobileNavigation ? (
         <StudioNewChatButton
           dismissalKey={mobileNavigation.visitKey}
           renderTrigger={({ onNewChat, onNewPrivateChat }) => (
             <MobileStudioNavigationHeader
               key={JSON.stringify([currentUserId, activeProjectId, mobileNavigation.visitKey])}
               {...mobileNavigation}
+              onOpenPicker={onToggleSidebar ?? mobileNavigation.onOpenPicker}
               title={topbarLocationTitle}
               spaceName={resolvedProjectName}
+              showSpaceName={!contextHeaderAbove}
               onOpenSidebar={onToggleSidebar}
               sidebarOpen={sidebarOpen}
               onOpenSettings={onOpenProjectSettings}
@@ -504,7 +565,6 @@ export function StudioTopBar({ notificationBell, mobileNavigation }: StudioTopBa
                 title: parentConversation.title || "Conversation",
                 onOpen: handleOpenParentConversation,
               } : undefined}
-              notificationBell={notificationBell}
               onMoreOpenChange={(open) => { if (!open) setTabMenuOpen(false); }}
               tabsAction={workspaceTabs.length > 0 && !controllerProjectMissing ? (
                 <DialogTrigger isOpen={tabMenuOpen} onOpenChange={setTabMenuOpen}>
@@ -518,68 +578,50 @@ export function StudioTopBar({ notificationBell, mobileNavigation }: StudioTopBa
           )}
         />
       ) : (
-        <div className="grid grid-cols-[auto_minmax(0,1fr)_auto] items-center gap-2 px-4 py-2 max-[375px]:px-3 max-[375px]:py-1">
-          <div className="flex min-w-0 items-center gap-2">
-            {/* Keep navigation reachable while the chat composer hides during scrolling. */}
-            {onToggleSidebar ? (
-              <IconButton
-                onPress={onToggleSidebar}
-                variant="ghost"
-                radius="full"
-                size="md"
-                aria-label="Toggle sidebar"
-                aria-expanded={sidebarOpen ?? false}
-                data-testid="topbar-sidebar-toggle"
-                className="h-10 w-10"
-              >
-                {sidebarOpen ? (
-                  <SidebarCollapse className="h-5 w-5" aria-hidden="true" />
-                ) : (
-                  <SidebarExpand className="h-5 w-5" aria-hidden="true" />
-                )}
-              </IconButton>
-            ) : null}
+        <div className="flex min-w-0 items-center gap-1 px-3 py-2 max-[375px]:px-2" data-testid="topbar-workspace-navigation">
+          {mobileBackButton}
+          <Button
+            onPress={onToggleSidebar ?? onOpenTeamSwitcher}
+            isDisabled={!onToggleSidebar && !onOpenTeamSwitcher}
+            variant="ghost"
+            size="sm"
+            radius="xl"
+            aria-label={`Open space navigation: ${resolvedProjectName}`}
+            aria-expanded={sidebarOpen ?? false}
+            data-testid="topbar-sidebar-toggle"
+            className={`${COMPACT_TAB_SELECTOR_CLASS} flex-1 text-left`}
+          >
+            <SidebarExpand className="h-4 w-4 shrink-0" aria-hidden="true" />
+            <span className="min-w-0 flex-1">
+              {!contextHeaderAbove ? <span className="block truncate text-2xs font-normal text-slate-600 dark:text-slate-400">{resolvedProjectName}</span> : null}
+              <span className="block truncate text-xs font-semibold">{topbarLocationTitle}</span>
+            </span>
+          </Button>
+          <div className="flex shrink-0 items-center">
             {parentConversationButton}
-          </div>
-
-          <div className="flex min-w-0 flex-1 justify-start">
             {workspaceTabs.length > 0 && !controllerProjectMissing ? (
               <DialogTrigger
                 isOpen={tabMenuOpen}
                 onOpenChange={(open) => setTabMenuOpen((current) => (open && current ? false : open))}
               >
-                <Button
+                <IconButton
                   variant="ghost"
-                  size="xs"
+                  size="md"
                   radius="full"
                   data-testid="topbar-tab-selector"
-                  className={`${COMPACT_TAB_SELECTOR_CLASS} max-w-full text-left`}
-                  aria-haspopup="dialog"
-                  aria-label="Open tab switcher"
+                  className="h-10 w-10"
+                  aria-label="Browse tabs"
                 >
-                  <span className="flex min-w-0 items-center gap-2">
-                    <span aria-hidden="true" className="shrink-0">
-                      {topbarLocationIcon}
-                    </span>
-                    <span className="truncate text-xs font-semibold">
-                      {topbarLocationTitle}
-                    </span>
-                  </span>
-                </Button>
+                  <MoreHoriz className="h-5 w-5" aria-hidden="true" />
+                </IconButton>
                 {tabsMenu}
               </DialogTrigger>
             ) : null}
-          </div>
-
-          <div className="flex items-center justify-end">
-            {notificationBell}
-            {shouldShowNewChat ? (
-              <StudioNewChatButton />
-            ) : null}
-          </div>
+            {shouldShowNewChat ? <StudioNewChatButton /> : null}
+            </div>
         </div>
       )}
-      {!isLargeScreen && !showTouchBottomDock && studioHistoryControlsAvailable() ? (
+      {!isLargeScreen && !showTouchBottomDock && (!hasCompactNavigation || isGlobalPage) && studioHistoryControlsAvailable() ? (
         <div className={`flex items-center border-t border-slate-200/70 px-3 ${DARK_DIVIDER_BORDER_CLASS}`} data-testid="studio-mobile-history-bar">
           <StudioHistoryControls />
         </div>

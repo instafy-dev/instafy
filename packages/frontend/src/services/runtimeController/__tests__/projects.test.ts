@@ -42,6 +42,7 @@ import {
   listControllerOrganizations,
   listControllerOrgMembers,
   listControllerProjectMembers,
+  updateControllerProjectIdentity,
 } from "../projects";
 
 const defaultRequestContext = Object.freeze({
@@ -49,6 +50,26 @@ const defaultRequestContext = Object.freeze({
   accessToken: "token-123",
   credentialSource: "ambient" as const,
   generation: 1,
+});
+
+describe("space identity updates", () => {
+  beforeEach(() => resetControllerMocks());
+  afterEach(() => vi.unstubAllGlobals());
+  it("preserves omitted fields and sends null to clear a selected value", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify({ projectId: "project-1", projectIcon: null, projectColor: "blue" }), { status: 200 }));
+    vi.stubGlobal("fetch", fetchMock);
+    await expect(updateControllerProjectIdentity({ projectId: "project-1", projectIcon: null })).resolves.toMatchObject({ projectIcon: null, projectColor: "blue" });
+    expect(JSON.parse(fetchMock.mock.calls[0][1].body)).toEqual({ projectIcon: null });
+    expect(fetchMock.mock.calls[0][0]).toBe("http://controller.test/projects/project-1");
+    expect(fetchMock.mock.calls[0][1].method).toBe("PATCH");
+  });
+  it("rejects arbitrary styling and exposes failed saves instead of a success", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify({ message: "Write access required" }), { status: 403 }));
+    vi.stubGlobal("fetch", fetchMock);
+    await expect(updateControllerProjectIdentity({ projectId: "project-1", projectColor: "url(bad)" as never })).rejects.toThrow("Unsupported projectColor");
+    expect(fetchMock).not.toHaveBeenCalled();
+    await expect(updateControllerProjectIdentity({ projectId: "project-1", projectColor: "blue" })).rejects.toThrow("Write access required");
+  });
 });
 
 function resetControllerMocks() {

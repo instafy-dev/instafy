@@ -1,4 +1,5 @@
 import { test, expect } from "@playwright/test";
+import { openTeamDirectory } from "../utils/sidebar.js";
 import { resolvePlaywrightControllerUrl } from "../utils/controllerUrl.js";
 import { prepareStudio, resetRuntimeUserState } from "../utils/harness.js";
 
@@ -91,7 +92,7 @@ test.describe.serial("Space switcher", () => {
       .poll(() => Promise.resolve(new URL(page.url()).searchParams.get("projectId")))
       .toBe(createdProjectId);
 
-    await page.getByTestId("sidebar-project-button").click();
+    await openTeamDirectory(page);
     const projectMenu = page.getByTestId("sidebar-project-switcher-menu");
     await expect(projectMenu).toBeVisible();
 

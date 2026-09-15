@@ -4,6 +4,7 @@ import type {
   DragEventHandler,
   FormEventHandler,
   KeyboardEventHandler,
+  ReactNode,
   RefObject,
 } from "react";
 import { useCallback, useEffect, useRef, useState } from "react";
@@ -71,6 +72,7 @@ type ChatComposerSurfaceProps = {
   browserDockProps: ComponentProps<typeof ChatBrowserDock>;
   composerOverlayRef: RefObject<HTMLDivElement | null>;
   composerAutoHidden: boolean;
+  aboveComposer?: ReactNode;
   browserModeActive?: boolean;
   compactBrowserViewport: boolean;
   onSubmit: FormEventHandler<HTMLFormElement>;
@@ -206,6 +208,7 @@ export function ChatComposerSurface({
   browserDockProps,
   composerOverlayRef,
   composerAutoHidden,
+  aboveComposer,
   browserModeActive = false,
   compactBrowserViewport,
   onSubmit,
@@ -986,6 +989,9 @@ export function ChatComposerSurface({
             : undefined
         }
       >
+        {aboveComposer ? <div className="pointer-events-none absolute inset-x-0 bottom-full flex justify-center pb-2">
+          {aboveComposer}
+        </div> : null}
         <form
           onSubmit={onSubmit}
           className={

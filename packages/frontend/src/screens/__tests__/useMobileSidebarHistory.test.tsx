@@ -79,6 +79,32 @@ describe("mobile sidebar browser history", () => {
     expect(api.mobileSidebarNavigation.view).toBe("workspace");
   });
 
+  it("opens the global team picker directly and Back returns to the original global visit", async () => {
+    await act(async () => api.mobileSidebarNavigation.openView("workspace"));
+    expect(api.mobileSidebarNavigation.view).toBe("workspace");
+    expect(window.history.state.idx).toBe(1);
+    expect(currentLocation.state.instafyVisitKey).toBe("visit-a");
+    await act(async () => api.mobileSidebarNavigation.back());
+    await wait(() => expect(currentLocation.key).toBe("base"));
+    expect(api.mobileSidebarOpen).toBe(false);
+    await pop(1);
+    expect(api.mobileSidebarNavigation.view).toBe("workspace");
+  });
+
+  it("a direct team picker selection replaces its branch with one destination visit", async () => {
+    await act(async () => api.mobileSidebarNavigation.openView("workspace"));
+    const action = vi.fn(() => { void navigate("/studio?panel=team&teamId=empty-team", { state: null }); });
+    await act(async () => api.runAfterSidebarClose(action));
+    await wait(() => expect(action).toHaveBeenCalledTimes(1));
+    expect(window.history.state.idx).toBe(1);
+    expect(api.mobileSidebarOpen).toBe(false);
+    await pop(-1);
+    expect(currentLocation.key).toBe("base");
+    await pop(1);
+    expect(currentLocation.search).toBe("?panel=team&teamId=empty-team");
+    expect(api.mobileSidebarOpen).toBe(false);
+  });
+
   it("collapses before one destination push, so Back never resurrects the selected drawer", async () => {
     await act(async () => api.setMobileSidebarOpen(true));
     await act(async () => api.mobileSidebarNavigation.openView("workspace"));

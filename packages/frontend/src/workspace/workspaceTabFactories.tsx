@@ -9,6 +9,7 @@ import {
   Folder,
   GitBranch,
   Globe,
+  Group,
   Lock,
   Page,
   Puzzle,
@@ -146,6 +147,11 @@ export const PANEL_META: Record<
     icon: <HomeIcon className={HOME_TAB_ICON_CLASS} />,
     closable: true,
   },
+  team: {
+    title: "Team",
+    icon: <Group className={TAB_ICON_CLASS} aria-hidden="true" />,
+    closable: true,
+  },
   chat: {
     title: "Assistant",
     icon: <ChatLines className={TAB_ICON_CLASS} aria-hidden="true" />,
@@ -177,7 +183,7 @@ export const PANEL_META: Record<
     closable: true,
   },
   ai: {
-    title: "AI",
+    title: "Your AI",
     icon: <Cpu className={TAB_ICON_CLASS} aria-hidden="true" />,
     closable: true,
   },
@@ -239,7 +245,7 @@ export function createTabForPanel(panel: StudioPanel): WorkspacePanelTabState {
     closable: meta.closable,
     dirty: false,
     badge: null,
-    draggable: false,
+    draggable: true,
   };
 }
 
@@ -311,7 +317,7 @@ export function createTabForJobThread(params: {
     closable: true,
     dirty: false,
     badge: null,
-    draggable: false,
+    draggable: true,
   };
 }
 

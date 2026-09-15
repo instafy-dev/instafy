@@ -412,3 +412,165 @@ async fn resolution_viewed_before_poll_never_emits_a_late_alert() -> anyhow::Res
     assert_eq!(claim["claimedCount"], 0);
     case.cleanup().await
 }
+
+#[tokio::test]
+async fn notification_support_snapshot_read_marks_exact_messages_and_shown_resolution(
+) -> anyhow::Result<()> {
+    let case = SupportCase::create("support notification exact read", false).await?;
+    let shown = Uuid::new_v4();
+    let backdated = Uuid::new_v4();
+    let resolution_at = DateTime::from_timestamp(Utc::now().timestamp(), 0).unwrap();
+    let connection = case.pool.get().await?;
+    connection.execute("insert into bug_report_messages(id,bug_report_id,author_type,body) values($1,$2,'support','Shown reply')", &[&shown,&case.report_id]).await?;
+    connection.execute("update bug_reports set status='resolved',resolved_at=$2,support_last_message_at=$2 where id=$1", &[&case.report_id,&resolution_at]).await?;
+    drop(connection);
+    let (status, detail) = case
+        .request(
+            "GET",
+            &format!("/support/reports/{}", case.report_id),
+            &case.owner_token,
+            json!({}),
+        )
+        .await?;
+    assert_eq!(status, StatusCode::OK);
+    let resolution_id = Uuid::parse_str(
+        detail["resolutionNotificationId"]
+            .as_str()
+            .expect("detail must carry exact resolution ID"),
+    )?;
+    let connection = case.pool.get().await?;
+    connection.execute("insert into bug_report_messages(id,bug_report_id,author_type,body,created_at) values($1,$2,'support','Late commit with old timestamp',$3)", &[&backdated,&case.report_id,&(resolution_at-chrono::Duration::hours(1))]).await?;
+    drop(connection);
+    let body = json!({"seenThrough":detail["supportLastMessageAt"],"messageIds":[shown],"resolutionNotificationId":resolution_id,"expectedUserId":case.owner_id});
+    let (status, _) = case
+        .request(
+            "POST",
+            &format!("/support/reports/{}/acknowledge", case.report_id),
+            &case.owner_token,
+            body.clone(),
+        )
+        .await?;
+    assert_eq!(status, StatusCode::OK);
+    let connection = case.pool.get().await?;
+    for (key, expected_read) in [
+        (format!("support.reply:{shown}"), true),
+        (format!("support.reply:{backdated}"), false),
+    ] {
+        let read=connection.query_one("select r.read_at is not null from notification_recipients r join notification_events e on e.id=r.event_id where e.producer_key=$1 and r.user_id=$2",&[&key,&case.owner_id]).await?.get::<_,bool>(0);
+        assert_eq!(read, expected_read);
+    }
+    assert!(connection.query_one("select read_at is not null from notification_recipients where event_id=$1 and user_id=$2",&[&resolution_id,&case.owner_id]).await?.get::<_,bool>(0));
+    // A distinct resolution remains unread even if it repeats the old timestamp.
+    connection
+        .execute(
+            "update bug_reports set status='open' where id=$1",
+            &[&case.report_id],
+        )
+        .await?;
+    connection.execute("update bug_reports set status='resolved',resolved_at=$2,support_last_message_at=$2 where id=$1",&[&case.report_id,&resolution_at]).await?;
+    drop(connection);
+    assert_eq!(
+        case.request(
+            "POST",
+            &format!("/support/reports/{}/acknowledge", case.report_id),
+            &case.owner_token,
+            body
+        )
+        .await?
+        .0,
+        StatusCode::OK
+    );
+    let connection = case.pool.get().await?;
+    assert_eq!(connection.query_one("select count(*) from notification_recipients r join notification_events e on e.id=r.event_id where e.resource_id=$1 and e.event_name='support.resolved' and r.user_id=$2 and r.read_at is null",&[&case.report_id,&case.owner_id]).await?.get::<_,i64>(0),1);
+    drop(connection);
+    case.cleanup().await
+}
+
+#[tokio::test]
+async fn notification_home_support_read_advances_only_the_current_source_snapshot(
+) -> anyhow::Result<()> {
+    let case = SupportCase::create("Home support acknowledgement", false).await?;
+    let old = Uuid::new_v4();
+    let latest = Uuid::new_v4();
+    let old_at = Utc::now() - chrono::Duration::minutes(1);
+    let latest_at = DateTime::from_timestamp(Utc::now().timestamp(), 0).unwrap();
+    let connection = case.pool.get().await?;
+    for (id, at) in [(old, old_at), (latest, latest_at)] {
+        connection.execute("insert into bug_report_messages(id,bug_report_id,author_type,body,created_at) values($1,$2,'support','Support update',$3)",&[&id,&case.report_id,&at]).await?;
+    }
+    connection
+        .execute(
+            "update bug_reports set support_last_message_at=$2 where id=$1",
+            &[&case.report_id, &latest_at],
+        )
+        .await?;
+    let old_event: Uuid = connection
+        .query_one(
+            "select id from notification_events where producer_key=$1",
+            &[&format!("support.reply:{old}")],
+        )
+        .await?
+        .get(0);
+    let latest_event: Uuid = connection
+        .query_one(
+            "select id from notification_events where producer_key=$1",
+            &[&format!("support.reply:{latest}")],
+        )
+        .await?
+        .get(0);
+    drop(connection);
+    let wrong = json!({"id":latest_event,"action":"read","expectedUserId":case.operator_id});
+    assert_eq!(
+        case.request("POST", "/me/notifications/state", &case.owner_token, wrong)
+            .await?
+            .0,
+        StatusCode::CONFLICT
+    );
+    let read_old = json!({"id":old_event,"action":"read","expectedUserId":case.owner_id});
+    assert_eq!(
+        case.request(
+            "POST",
+            "/me/notifications/state",
+            &case.owner_token,
+            read_old
+        )
+        .await?
+        .0,
+        StatusCode::OK
+    );
+    assert!(case
+        .pool
+        .get()
+        .await?
+        .query_one(
+            "select customer_last_seen_support_at is null from bug_reports where id=$1",
+            &[&case.report_id]
+        )
+        .await?
+        .get::<_, bool>(0));
+    let read_latest = json!({"id":latest_event,"action":"read","expectedUserId":case.owner_id});
+    assert_eq!(
+        case.request(
+            "POST",
+            "/me/notifications/state",
+            &case.owner_token,
+            read_latest
+        )
+        .await?
+        .0,
+        StatusCode::OK
+    );
+    assert_eq!(
+        case.pool
+            .get()
+            .await?
+            .query_one(
+                "select customer_last_seen_support_at from bug_reports where id=$1",
+                &[&case.report_id]
+            )
+            .await?
+            .get::<_, Option<DateTime<Utc>>>(0),
+        Some(latest_at)
+    );
+    case.cleanup().await
+}

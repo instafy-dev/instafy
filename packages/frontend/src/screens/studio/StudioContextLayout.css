@@ -1,0 +1,53 @@
+/* Working context is independent of the inner navigation's width. */
+.studio-context-layout { --studio-context-height: 48px; }
+.studio-context-header {
+  position: absolute;
+  left: calc(64px + var(--instafy-safe-area-inset-left));
+  right: var(--instafy-safe-area-inset-right);
+  top: var(--studio-context-top);
+  height: var(--studio-context-height);
+  z-index: 45;
+  display: flex;
+  align-items: center;
+  padding: 0 14px;
+  border-bottom: 1px solid var(--color-slate-200);
+  background: var(--color-slate-50);
+  -webkit-app-region: drag;
+}
+.studio-context-header .studio-search-control, .studio-context-header button, .studio-context-header input, .studio-context-header select { -webkit-app-region: no-drag; }
+.studio-context-slot { width: 100%; min-width: 0; max-width: 940px; }
+.studio-context-layout[data-wide="true"] [data-testid="sidebar-context-navigation"],
+.studio-context-layout[data-wide="true"] .studio-context-drawer {
+  margin-top: calc(var(--studio-context-height) + var(--studio-context-top));
+  height: calc(100% - var(--studio-context-height) - var(--studio-context-top));
+  padding-top: 0;
+}
+.studio-context-layout[data-wide="true"] [data-testid="sidebar-context-navigation"] > [data-rail-surface] { top: 0 !important; }
+.studio-context-layout[data-wide="true"] .studio-context-workspace,
+.studio-context-layout[data-wide="true"] .studio-context-search-screen { padding-top: calc(var(--studio-context-height) + var(--studio-context-top)); }
+.studio-context-layout[data-search-open="true"] [data-testid="sidebar-context-navigation"],
+.studio-context-layout[data-search-open="true"] .studio-context-drawer,
+.studio-context-workspace[hidden],
+[data-testid="mobile-left-drawer-overlay"][hidden] { display: none; }
+.studio-context-search-screen { display: flex; flex-direction: column; flex: 1; min-width: 0; min-height: 0; overflow: hidden; }
+.studio-context-search-mobile { padding: calc(8px + var(--instafy-safe-area-inset-top)) 8px 8px; background: var(--color-slate-50); border-bottom: 1px solid var(--color-slate-200); }
+.studio-context-mobile-picker { display: flex; flex: none; min-width: 0; padding: 4px 12px; border-bottom: 1px solid var(--color-slate-200); }
+.dark .studio-context-header, .dark .studio-context-search-mobile { background: var(--color-studio-dark-rail); border-color: var(--color-studio-dark-divider); color: var(--color-slate-100); }
+/* Draw the dark seam at the tab's top edge instead of a second line above it. */
+.dark .studio-context-header { border-bottom-color: transparent; }
+.dark .studio-context-tab-rail::before {
+  content: "";
+  position: absolute;
+  inset-inline: 0;
+  /* Active tabs sit 1px lower to cover the tab-to-panel baseline. */
+  top: 1px;
+  height: 1px;
+  z-index: 0;
+  pointer-events: none;
+  background: var(--color-studio-dark-divider);
+}
+.dark .studio-context-mobile-picker { border-color: var(--color-studio-dark-divider); }
+@media (pointer: coarse) {
+  .studio-context-layout { --studio-context-height: 64px; }
+  .studio-context-slot .studio-search-field { min-height: 48px; }
+}

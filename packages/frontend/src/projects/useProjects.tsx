@@ -1,3 +1,4 @@
+import type { ProjectIdentity } from "@instafy/sdk/project-identity";
 import { useCallback, useMemo } from "react";
 import type { SiteBuilderState } from "../types";
 import { useProjectState } from "./ProjectStateProvider";
@@ -5,7 +6,7 @@ import { controllerClient } from "../sdk/instafy";
 import { getOrgDisplayName } from "../org/orgNaming";
 import { writePendingProjectSwitch } from "../screens/pendingProjectSwitch";
 
-export interface ProjectListItem {
+export interface ProjectListItem extends ProjectIdentity {
   id: string;
   name: string;
   orgId: string | null;
@@ -29,6 +30,8 @@ export function useProjects() {
     return Object.entries(projects).map(([id, state]) => ({
       id,
       name: state.metadata.projectName ?? "Untitled Space",
+      projectIcon: state.metadata.projectIcon,
+      projectColor: state.metadata.projectColor,
       orgId: state.org?.id ?? null,
       orgName: getOrgDisplayName(state.org?.name),
       state

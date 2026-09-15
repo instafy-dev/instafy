@@ -301,6 +301,17 @@ describe("ParticipantsDrawer", () => {
     expect(container.querySelector('[data-testid="drawer-agent-model-select-octo"]')).toBeNull();
   });
 
+  it("does not turn a teammate's observed bot ID into permission to edit", async () => {
+    const saveAgent = vi.fn().mockResolvedValue(true);
+    await act(async () => publishChatParticipants(snapshot({
+      editing: { credentials: [], saveAgent },
+      agents: [{ ...snapshot().agents[0], agentId: "teammate-bot", canEditProfile: false }],
+    })));
+    await render();
+    expect(container.querySelector('[data-testid="participants-agent-controls"]')).toBeNull();
+    expect(saveAgent).not.toHaveBeenCalled();
+  });
+
   it("renders model + reasoning as inline editable tokens with an editing context", async () => {
     const saveAgent = vi.fn().mockResolvedValue(true);
     await act(async () => {
@@ -313,6 +324,7 @@ describe("ParticipantsDrawer", () => {
               displayName: "Octo",
               avatarSeed: "octo",
               agentId: "agent-1",
+              canEditProfile: true,
               providerId: "openai",
               model: "gpt-5.5",
               reasoningEffort: "high",

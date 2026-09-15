@@ -165,10 +165,13 @@ export function ProjectAccessProvider({ children }: { children: ReactNode }) {
   }, [projects]);
 
   useEffect(() => {
+    // The account-reset effect below clears old workspace state. Do not copy
+    // its active space into a newly signed-in account before that reset runs.
+    if (lastUserIdRef.current !== (user?.id ?? null) || (hasSupabaseConfig && !projectInitialized)) return;
     if (activeProjectId && isUUID(activeProjectId)) {
-      recordProjectOpened(activeProjectId);
+      recordProjectOpened(activeProjectId, undefined, user?.email ?? null);
     }
-  }, [activeProjectId]);
+  }, [activeProjectId, projectInitialized, user?.email, user?.id]);
 
   useEffect(() => {
     projectAccessPendingRef.current = projectAccessPending;
@@ -478,6 +481,7 @@ export function ProjectAccessProvider({ children }: { children: ReactNode }) {
           });
         }
 
+        if (projectSummary) useWorkspaceStore.getState().setProjectIdentity(targetProjectId, projectSummary);
         const resolvedOrgId = mintedProject?.orgId ?? projectSummary?.orgId ?? null;
         const resolvedOrgName = mintedProject?.orgName ?? projectSummary?.orgName ?? null;
         if (resolvedOrgId) {
@@ -639,6 +643,7 @@ export function ProjectAccessProvider({ children }: { children: ReactNode }) {
         if (resolvedCapabilities) {
           setProjectCapabilities({ projectId: targetProjectId, value: resolvedCapabilities });
         }
+        useWorkspaceStore.getState().setProjectIdentity(targetProjectId, summary);
         const resolvedName = summary.projectName?.trim() ?? "";
         if (resolvedName) {
           setProjectName(targetProjectId, resolvedName);
@@ -760,6 +765,7 @@ export function ProjectAccessProvider({ children }: { children: ReactNode }) {
           return;
         }
 
+        useWorkspaceStore.getState().setProjectIdentity(targetProjectId, result.summary);
         const refreshedCapabilities = resolveProjectCapabilities(result.summary, user.id);
         setProjectCapabilities(
           refreshedCapabilities

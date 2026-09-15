@@ -71,14 +71,125 @@ and interactive file references retain their behavior. Explicit fenced code bloc
 their source whitespace and scroll horizontally when needed.
 
 ## Header
-The Studio header is owner-first: `Team/Personal > Space`, followed by runtime status and the user menu.
+On wide screens, a slim global rail selects Home or a team. A persistent context/search
+field above the workspace contains selectable team and space chips separated by a muted slash.
+It stays in place when the inner sidebar collapses or search opens. The adjacent sidebar
+contains recent chats and workspace tools. Its expand/collapse control stays at the same
+position in either width, with **New chat** beside it when expanded and below it when compact.
+New chat stays available for the active accessible space when another tab, including personal
+Settings, is selected. It is unavailable on Home or when no space in the selected team is active.
+Existing saved collapse preferences are preserved.
 
-In wide desktop browsers, **Get desktop app** sits above the sidebar profile and becomes
-an icon with a tooltip when the sidebar is collapsed. Compact desktop browser windows keep
+Narrow layouts keep Home, the team/space path, Search and the signed-in profile in the context
+header. Home remains available from a workspace, and team/space controls remain available on
+Home. Workspace history, tab selection and secondary actions remain in the working header
+below it. Global pages provide an explicit Open navigation control. The navigation drawer
+shares the same team/space path and uses the sidebar-close icon in the fixed Close/New chat
+row. Expanded drawers show secondary destinations directly when their measured height allows
+it. On shorter screens, remaining destinations use an ellipsis-labelled More entry. Directories
+and overflow remain drill-ins with Back, without stacking navigation drawers. Opening navigation does not
+change the page behind it. Team overview/settings do not replace a space's remembered work.
+
+Navigation uses a solid warm off-white surface in light mode and the dark rail
+surface in dark mode. The drawer and its team/space directory or More view keep
+the same background; dimming and blur belong to the backdrop. Content panels and
+floating menus retain their separate surface colours and elevation.
+
+In wide desktop browsers, **Get desktop app** sits above the rail profile as
+an icon with a tooltip. Compact desktop browser windows keep
 the action in the profile menu. It appears only when a verified desktop release is available.
 Mobile browsers show **Get the app · Soon** in the profile menu, linking to the mobile
 availability section; iOS and Android downloads are marked coming soon. Native apps hide
 these acquisition actions and retain their existing update controls.
+
+The space chip opens an anchored picker with up to six named space shortcuts and
+**Browse all spaces**. Recent visits choose which accessible spaces appear; the selected
+set is displayed alphabetically, with the current space highlighted in its alphabetical
+position. Choosing a shortcut does not move it to the front. Visiting another space can
+replace the oldest shortcut. Recent visits are remembered per account on this device.
+Chats retains its inline collapsible recent list scoped to the current space.
+
+Space icons use the same numbered unread badges as Home and the full space directory:
+chats with unread assistant replies for the signed-in user, excluding the visible chat.
+Zero is hidden and counts over nine display as **9+**. These badges describe personal unread
+activity, not all unfinished jobs or decisions needing approval.
+
+## Scoped search
+
+Focusing Search opens a temporary results page, keeping the workspace mounted so drafts,
+tabs and scroll survive dismissal. Desktop search uses the same input and context chips
+before and after focus. Narrow layouts open one full results screen and return focus to the
+Search button when dismissed. Escape/Close returns to the workspace; Android system Back
+also closes search. Selecting a result opens its normal Studio destination.
+
+Search starts within the working space. Empty Backspace broadens it to the team, then all
+teams; chip removal buttons and the Scope selector provide the same controls. These changes
+do not switch the working space. Home starts across teams. Personal settings opened with an
+active space retain its navigation and default search context; without a space, they start
+across teams. Clicking a team/space chip's
+picker still performs normal navigation. Desktop dismissal clears the query and restores the
+working scope.
+
+Search reads authenticated accessible-space and conversation summaries. It matches recent
+chat titles, opened file paths, file names from already-loaded Explorer listings in the
+current space, and space/team settings or automation destinations;
+it does not search message bodies or file contents. Reads cover up to 200 chats per space
+and 40 spaces per request, with explicit coverage, loading, error and retry feedback. Results
+initially show 100 rows with Show more; queries still match the full retrieved set. Unloaded
+folders are not searched. Explorer listings contribute only safe relative paths in memory;
+switching account, working space or workspace origin discards that metadata. Search never
+starts runtimes or reads files in the background. Scope/account changes and access refresh
+discard stale results.
+File results wait for the authorized destination space to hydrate. Listed files open through
+the normal file loader; later navigation, account/access changes and workspace-origin changes
+cancel pending reads before they can update another workspace.
+
+## Team experience
+
+The global rail keeps Home fixed above a scrollable team list, with New team,
+Browse teams and the account controls below it. Browse teams shows the signed-in
+account's accessible teams and spaces; it is not a public team directory.
+Invitation links continue to use the existing invitation acceptance flow.
+Home uses the static Instafy mark with the label and tooltip “Home — all teams”,
+in dark ink on light surfaces and white on dark surfaces. The selected Home or
+team has a persistent side marker as well as its background highlight.
+
+The team chip opens an anchored menu for Switch team, Team overview and Team settings.
+The space chip beside it changes the working space. Less frequent tools, personal AI
+connections and Credits appear in navigation when space permits, with remaining destinations
+available through More. Desktop and mobile both use available height; no destination is
+permanently kept in More. The desktop space picker shows only
+the selected team's spaces; Browse teams retains the full team-and-space directory.
+Home hides the team-specific desktop sidebar. Personal settings opened alongside a space keep
+the sidebar and its saved expanded/compact state, while profile changes remain account-wide.
+Personal settings without an active space use only the global rail.
+
+An empty team's overview and settings can be selected independently of the
+current project. They do not display the previous team's space tools or activity.
+An unavailable team does not silently fall back to a different team. Personal
+spaces have their own overview. Team/Home context is represented by `teamId` in
+the URL, while workspace tools remain scoped to the active project's team.
+Returning from Home restores the team's last visited work in the current window;
+browser Back retains its normal chronological history.
+
+**Team** connects the selected team's people, accessible spaces and recent work. Agent profiles
+appear only when observed in activity visible to the signed-in account. This is a recent activity
+view, not an inventory or health check of every worker. Private conversations keep their existing
+access rules. A completed turn does not certify that its task was fixed or released. Opening Team
+does not advance the Home activity visit marker.
+
+**Team settings → Team profile** exposes the name and picture together. Owners and admins can
+edit them; other roles can see why editing is unavailable. Team selection is independent of the
+active space, so a new team can have its profile set before it has any spaces. Both New team
+entry points offer an optional picture; an upload failure can be retried without creating another
+team, or the user can continue without the picture.
+
+Space settings offers **Space appearance**, with an optional emoji and color. These persist with
+the space and appear in navigation and the space picker. Existing spaces keep an initials fallback;
+editing uses the existing permission to write to the space.
+
+**Your AI** identifies account-owned connections and agent profiles. The Team view shows their
+visible work; it does not expose or transfer another person's provider credentials.
 
 ## Switching teams and chats
 
@@ -87,14 +198,15 @@ alphabetical order. Accessible spaces are cached for the signed-in user during t
 so changing teams can use the existing list immediately. Authentication, access changes and
 returning to the app refresh discovery in the background. First-time discovery still needs the
 controller. Failed discovery preserves the saved list, retries three times with backoff, and
-offers Retry. The current-team indicator changes only when the destination space becomes active.
+offers Retry. The current-team indicator changes when the destination space becomes active
+or the selected empty team's overview opens.
 An unmatched space search shows **No matching spaces**, distinct from an empty space list.
 Space discovery, organization lists, access summaries and conversation lists have a 10-second
 deadline covering authentication and response reads; navigation cancels superseded reads.
 Failed conversation-list reads show an error and Retry after the first failed attempt while
 automatic recovery continues. Cached chats stay visible during refresh failures.
 
-On desktop and wide browser layouts, **Team & spaces** opens in the same resizable side
+On desktop and wide browser layouts, **Browse teams** and the space picker open in the same resizable side
 panel as **All chats**, Files and Changes. These panels share one slot, so opening one
 replaces the other while the current conversation stays visible. Team and space selection
 keeps its existing grouped list; choosing a space closes the picker. The close control or
@@ -140,25 +252,27 @@ full history overview, not the compact picker. Conversations (including empty ch
 threads), editors and settings details have no bottom navigation row. The full history overview
 owns its destination bar rather than covering a second one underneath it.
 
-The touch header provides Back and a tappable current title/space that opens the compact
-Chats/Spaces picker. At a direct entry with no known previous visit, it offers an explicitly
+Inside a working area, the touch header provides Back and a current title/space with a navigation
+icon that opens the shared left drawer. Home, team and account pages retain their global
+Home/team/profile controls. At a direct working-area entry with no known previous visit, it offers an explicitly
 labeled Chats destination instead of a misleading Back action. Secondary actions, including
-sidebar/settings access, new chat and notifications, are in the header menu. Forward remains a
-secondary action in the picker; there is no duplicate top history row on these layouts.
+sidebar/settings access, new chat and notifications, are in the working header menu.
+Forward is also available in that menu. Global touch pages offer Back and Forward in a compact
+history menu beside the profile action. Opening either menu leaves the forward route intact;
+opening navigation itself creates a drawer visit.
 Ordinary desktop web keeps its browser controls. App controls do not leave the app from its
 first known entry; Forward becomes available after visiting a later entry in the current mounted
 session. The separate Personal/Shared browser has its own page history.
 
-The mobile picker opens from the bottom, fits short lists and caps long lists with scrolling.
-Search and navigation controls sit below its results. While the keyboard is open, only search
-and Close remain in the footer, leaving room to see matching results even in landscape; dismiss
-the keyboard to restore section switching and Forward. Chats searches the current space's loaded active conversations; All chats opens the
-full history surface. Spaces discovers accessible spaces across teams only when that section
-opens. Selecting a different space records its URL as a new visit, without carrying the old
-chat or browser-session target; Back restores the previous chat. Search does not autofocus or
-summon the keyboard on opening. The picker is transient:
-Close, Escape, backdrop or Android Back dismisses it; a route/account/space change or desktop
-resize also closes it, without adding a synthetic history destination.
+The mobile drawer keeps team selection and space navigation in one surface. Search does not
+autofocus or summon the keyboard on opening; its results stay scrollable when the keyboard is
+visible. Back from a drill-in returns one level, and Close returns to the underlying visit.
+The global team button opens its picker directly as one drawer visit, so Back returns to the
+global page. Opening that picker from inside space navigation adds a drill-in instead.
+Selecting a destination first collapses the owned drawer history and then pushes the destination
+once. A different space never inherits the old chat or browser-session target; Back restores the
+previous work. Team settings and empty-team overviews retain the selected team independently
+of the loaded space. Desktop resize closes the mobile history branch.
 
 The overview dock yields space when a focused text editor and actual viewport occlusion indicate
 a software keyboard. Focus with a hardware keyboard alone does not hide it. Chat never adds the
@@ -197,23 +311,22 @@ app visit, or removes only the picker from a direct-entry URL. Ordinary mobile s
 still use their own one-level Back behavior. Compact fine-pointer windows retain their existing
 composer navigation control; touch layouts use the focused header instead.
 
-The sidebar's **Chats** section starts expanded and shows up to six recently visited active
+The sidebar's **Chats** section starts expanded and shows up to three recently visited active
 conversations in the current space. Selecting a row opens a preview or focuses its existing tab;
 closing a tab does not remove the conversation from recent chats. **Browse all chats** opens
 the existing searchable history. New chat creation lives in the top bar and full chat history;
 the sidebar Chats row only expands or collapses its recent list. Visit order is stored locally
-per account and space. Quick-list rows stay in place while switching among listed chats,
-including when reopening mobile navigation. Opening a chat outside the list adds it at the
-top, replacing the least recently visited row if the list is full. History refreshes and
-title or status updates preserve the remaining row order. The full history has an always-visible search field with its status
+per account and space. Running or queued chats and the selected chat take priority in the
+bounded list; the remaining rows keep visit order. Other chats remain available through
+Browse all chats. The full history has an always-visible search field with its status
 filter inside, and New chat and Close actions beside the title. A non-default filter changes
 the heading and marks the filter icon; counts live in the filter menu. Starting a chat clears
 the search and returns to active chats. Per-chat actions, including closing an open tab,
 live in its More menu.
 
 In fine-pointer windows below 900px, the composer's lower-left menu opens the navigation drawer
-with Chats expanded. Touch layouts instead open their compact picker from the header. Selecting
-a chat closes either surface, making chat switching two taps. On wider layouts, the expanded
+with Chats expanded. Touch layouts open the same drawer from the header. Selecting
+a chat closes navigation, making chat switching two taps. On wider layouts, the expanded
 sidebar offers direct selection; a collapsed sidebar opens the same list in a popover. Home
 remains in the sidebar, and the top menu remains available when the composer is hidden while
 scrolling.
@@ -227,6 +340,11 @@ drafts, queued or running work, or open job threads remain protected. Replacing 
 changes the tab: the conversation remains available in Chats. Previously open tabs stay open,
 and the preview state is remembered per space alongside them. Mobile chat selection uses the
 same preview behavior without adding another step to the two-tap switching flow.
+
+All workspace tabs can be reordered, including panels such as Machines and Settings and run
+threads. Select a tab and drag it to its new position; keyboard users can press Space to pick
+it up, use Left/Right to move it, and press Space to drop it or Escape to cancel. Chat title
+and unread updates preserve the order of tabs across different kinds of content.
 
 ## Home activity
 
@@ -260,6 +378,25 @@ do not add history entries.
 Settings cards use the shared Studio surfaces and control styling. Lists own one internal
 gutter, invitation counts stay beside their heading, and narrow profile forms place Save
 below the helper text. Secrets has a labeled **Create secret** action.
+
+Personal profiles include a display name, picture and optional **About** introduction (up to
+500 Unicode characters). About is plain text, saved explicitly with the other profile fields,
+and can be cleared. A teammate's avatar or name in a conversation or the participants list
+opens their profile card; the card shows public profile fields only after the controller
+confirms both people still have access to the selected space. Narrow screens use the shared
+compact profile dialog, while desktop uses an anchored card. Profile cards are not a public
+user directory and do not expose email addresses.
+
+Agent profiles have the same optional **About** introduction. Their separate **Style guidance**
+field continues to influence responses; About never enters runtime prompts. Agent profile
+cards fetch public fields by exact agent ID and space, with current access required for both
+the viewer and the agent owner. A cleared bio disappears from the card.
+
+The Studio corner-radius scale uses 6px for compact search scope chips, 8px for menu rows,
+12px for form controls and profile actions, and 16px for cards and dialogs. Avatars remain
+circular and settings category tabs retain their flat underline. Default selects match input
+heights: 44px for narrow/touch layouts and 38px for wider fine-pointer layouts; explicit
+compact selects keep their existing size.
 
 On mobile, installed skill titles open the skill file directly, the enable toggle remains
 visible, and other actions live in the row menu. Skill discovery keeps search on one row

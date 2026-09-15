@@ -14,6 +14,7 @@ import { openExternalUrl } from "../../../utils/openExternalUrl";
 import { getOrgDisambiguator, getOrgDisplayName } from "../../../org/orgNaming";
 import { type ControllerOrgSummary } from "../../../sdk/instafy";
 import { useDeviceAuthFlow } from "./device-auth/useDeviceAuthFlow";
+import { NewTeamDialog } from "./NewTeamDialog";
 
 export interface ProjectLauncherProps {
   open: boolean;
@@ -47,9 +48,8 @@ export function ProjectLauncher({
   const [orgs, setOrgs] = useState<ControllerOrgSummary[]>([]);
   const [orgLoading, setOrgLoading] = useState(false);
   const [orgError, setOrgError] = useState<string | null>(null);
-  const [selectedOrgId, setSelectedOrgId] = useState<string | "new" | null>(null);
-  const [newOrgName, setNewOrgName] = useState("");
-  const [newOrgSlug, setNewOrgSlug] = useState("");
+  const [selectedOrgId, setSelectedOrgId] = useState<string | null>(null);
+  const [newTeamOpen, setNewTeamOpen] = useState(false);
   const [isProcessing, setIsProcessing] = useState(false);
   const [processingStartedAt, setProcessingStartedAt] = useState<number | null>(null);
   const [processingElapsedSeconds, setProcessingElapsedSeconds] = useState(0);
@@ -99,8 +99,7 @@ export function ProjectLauncher({
       setProcessingStartedAt(null);
       setProcessingElapsedSeconds(0);
       setOrgError(null);
-      setNewOrgName("");
-      setNewOrgSlug("");
+      setNewTeamOpen(false);
       setSelectedOrgId(null);
       setOrgLoading(true);
       controllerClient.organizations.list()
@@ -139,14 +138,14 @@ export function ProjectLauncher({
       return;
     }
     const handleKeyDown = (event: KeyboardEvent) => {
-      if (event.key === "Escape") {
+      if (event.key === "Escape" && !newTeamOpen) {
         event.preventDefault();
         onClose();
       }
     };
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [onClose, open]);
+  }, [newTeamOpen, onClose, open]);
 
   const beginGithubDeviceAuth = useCallback(async () => {
     if (isProcessing) {
@@ -191,26 +190,7 @@ export function ProjectLauncher({
       showStatus("Please enter a space name.", "warning", 3000);
       return;
     }
-    let orgPayload: { orgId?: string | null; orgSlug?: string | null; orgName?: string | null } =
-      {};
-    if (selectedOrgId && selectedOrgId !== "new") {
-      orgPayload = { orgId: selectedOrgId };
-    } else if (selectedOrgId === "new") {
-      const orgName = newOrgName.trim();
-      const orgSlugRaw = newOrgSlug.trim();
-      const orgSlug =
-        orgSlugRaw.length > 0
-          ? orgSlugRaw
-          : orgName
-              .toLowerCase()
-              .replace(/[^a-z0-9]+/gi, "-")
-              .replace(/^-+|-+$/g, "");
-      if (!orgName || !orgSlug) {
-        showStatus("Please enter a team name and slug.", "warning", 3000);
-        return;
-      }
-      orgPayload = { orgName, orgSlug };
-    }
+    const orgPayload = selectedOrgId ? { orgId: selectedOrgId } : {};
     setIsProcessing(true);
     try {
       if (mode === "github") {
@@ -248,6 +228,7 @@ export function ProjectLauncher({
   };
 
   return (
+    <>
     <div
       className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-slate-900/40 backdrop-blur-sm pb-[max(var(--instafy-safe-area-inset-bottom),2rem)] pl-[max(var(--instafy-safe-area-inset-left),0.75rem)] pr-[max(var(--instafy-safe-area-inset-right),0.75rem)] pt-[max(var(--instafy-safe-area-inset-top),2rem)] sm:items-center sm:pl-[max(var(--instafy-safe-area-inset-left),1.25rem)] sm:pr-[max(var(--instafy-safe-area-inset-right),1.25rem)]"
       data-testid="project-launcher-overlay"
@@ -330,11 +311,12 @@ export function ProjectLauncher({
             <div className="space-y-1.5">
               <Select
                 id="project-launcher-org-select"
-                disabled={orgLoading}
+                disabled={orgLoading || isProcessing}
                 value={selectedOrgId ?? ""}
                 onChange={(event) => {
                   const value = event.target.value;
-                  setSelectedOrgId(value === "" ? null : (value as string));
+                  if (value === "new") setNewTeamOpen(true);
+                  else setSelectedOrgId(value || null);
                 }}
                 data-testid="project-launcher-org-select"
               >
@@ -346,28 +328,6 @@ export function ProjectLauncher({
                 ))}
                 <option value="new">+ Create new team</option>
               </Select>
-              {selectedOrgId === "new" ? (
-                <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
-                  <Field label="Team name" htmlFor="project-launcher-org-name" size="xs">
-                    <Input
-                      id="project-launcher-org-name"
-                      value={newOrgName}
-                      onChange={(e) => setNewOrgName(e.target.value)}
-                      placeholder="e.g. Weekend crew"
-                      data-testid="project-launcher-org-name-input"
-                    />
-                  </Field>
-                  <Field label="Team slug" htmlFor="project-launcher-org-slug" size="xs">
-                    <Input
-                      id="project-launcher-org-slug"
-                      value={newOrgSlug}
-                      onChange={(e) => setNewOrgSlug(e.target.value)}
-                      placeholder="my-team"
-                      data-testid="project-launcher-org-slug-input"
-                    />
-                  </Field>
-                </div>
-              ) : null}
             </div>
           </Field>
 
@@ -576,5 +536,11 @@ export function ProjectLauncher({
         </form>
       </Surface>
     </div>
+    <NewTeamDialog open={newTeamOpen} allowCustomSlug onClose={() => setNewTeamOpen(false)}
+      onCreated={(organization) => {
+        setOrgs((previous) => [...previous.filter((org) => org.id !== organization.id), organization]);
+        setSelectedOrgId(organization.id);
+      }} />
+    </>
   );
 }

@@ -1,3 +1,4 @@
+import { normalizeSpaceIcon, normalizeSpaceColor, type ProjectIdentity, type ProjectIdentityUpdate } from "@instafy/sdk/project-identity";
 import {
   ControllerApiError,
   normalizeUuidParam,
@@ -43,7 +44,7 @@ export interface ControllerOrgSummary {
   role?: string | null;
 }
 
-export interface ControllerProjectSummary {
+export interface ControllerProjectSummary extends ProjectIdentity {
   projectId: string;
   projectName?: string | null;
   orgId: string | null;
@@ -705,6 +706,33 @@ export async function getControllerProjectSummaryResult(
   } finally {
     budget.dispose();
   }
+}
+
+export async function updateControllerProjectIdentity(params: ProjectIdentityUpdate): Promise<ControllerProjectSummary | null> {
+  if (!runtimeControllerEnabled) return null;
+  const projectId = normalizeUuidParam(params.projectId);
+  if (!projectId) return null;
+  const payload: ProjectIdentity = {};
+  for (const key of ["projectIcon", "projectColor"] as const) {
+    if (params[key] === undefined) continue;
+    const normalize = key === "projectIcon" ? normalizeSpaceIcon : normalizeSpaceColor;
+    if (params[key] !== null && normalize(params[key]) === null) {
+      throw new Error(`Unsupported ${key}.`);
+    }
+    Object.assign(payload, { [key]: params[key] });
+  }
+  if (Object.keys(payload).length === 0) throw new Error("Choose an icon or color to update.");
+  const context = await resolveControllerRequestContext(null);
+  if (!context.accessToken) return null;
+  const response = await fetch(`${context.baseUrl}/projects/${encodeURIComponent(projectId)}`, {
+    method: "PATCH",
+    headers: { authorization: `Bearer ${context.accessToken}`, "content-type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  if (!response.ok) throw new Error(await readControllerError(response, "Unable to save space appearance", context));
+  const body = await response.json() as ControllerProjectSummary;
+  if (body.projectId !== projectId) throw new Error("Space appearance response did not match this space.");
+  return body;
 }
 
 export async function updateControllerProjectName(params: {

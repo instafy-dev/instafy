@@ -5,6 +5,7 @@ import type {
   AssistantAgentIdentity,
   AssistantAvatarMotion,
 } from "./chatAssistantIdentity";
+import { extractAgentIdentityFromMetadata, resolveObservedAgentIdentity } from "./chatAssistantIdentity";
 import { normalizeAssistantHandleLabel } from "./assistantSpeakerIdentity";
 import { formatSpeakerTimestamp } from "./chatSpeakerTimestamp";
 
@@ -102,11 +103,11 @@ export function AssistantSpeakerIdentityLabel({
       className="inline-flex max-w-full items-center gap-2 text-xs text-slate-500 dark:text-slate-400"
       data-agent-handle={normalizedHandle}
     >
-      {/* Where the gutter is collapsed this label is the transcript's profile
-          door — ChatPanel hosts the card by handle. */}
+      {/* Preserve the exact observed agent when the avatar gutter is collapsed. */}
       <button
         type="button"
-        onClick={() => requestAgentProfile(normalizedHandle)}
+        onClick={() => requestAgentProfile(normalizedHandle,
+          resolveObservedAgentIdentity(agentIdentity, extractAgentIdentityFromMetadata(metadata)))}
         aria-label={`View profile for ${normalizedHandle}`}
         data-testid="chat-speaker-agent-profile"
         className={`flex-none rounded-full outline-none focus-visible:ring-2 focus-visible:ring-primary-500/40 ${
