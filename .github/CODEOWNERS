@@ -1,4 +1,9 @@
-# Public-boundary controls require an independent security-maintainer review.
+# Outside contributions require review from an existing trusted code owner.
+# Keep the branch's blanket approval count at zero: the owners' own bot PRs
+# retain their existing automation. Do not replace this with bot auto-approval.
+* @instafy-bot @instafy-bot-2
+
+# Explicitly retain ownership of the public-boundary controls, including this file.
 /.github/ @instafy-bot
 /scripts/check-public-boundary.mjs @instafy-bot
 /scripts/check-public-boundary.test.mjs @instafy-bot
