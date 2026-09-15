@@ -4,8 +4,15 @@ import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { CredentialsSettingsCard } from "../CredentialsSettingsCard";
+import { clearPendingAgentProfileTarget, readPendingAgentProfileTarget, setPendingAgentProfileTarget } from "../agentProfileDeepLink";
+
+vi.mock("../../useStudioDesktopLayout", () => ({
+  useStudioDesktopLayout: () => mocks.isDesktop,
+}));
 
 const mocks = vi.hoisted(() => ({
+  isDesktop: true,
+  user: { id: "user-1", email: "playwright@instafy.dev" },
   clearDefaultCredential: vi.fn(),
   createCodexCredential: vi.fn(),
   deleteAgent: vi.fn(),
@@ -21,7 +28,7 @@ const mocks = vi.hoisted(() => ({
 
 vi.mock("../../../../providers/AuthProvider", () => ({
   useAuth: () => ({
-    user: { id: "user-1", email: "playwright@instafy.dev" },
+    user: mocks.user,
   }),
 }));
 
@@ -78,15 +85,9 @@ const oldCredential = {
   updatedAt: "2026-01-01T00:00:00.000Z",
 };
 
-const TOKEN_EXPIRED_ERROR = `unexpected status 502 Bad Gateway: upstream request failed (credential_source=claim, endpoint=chatgpt.com/backend-api/codex/responses, requested_model=gpt-5.1-codex-max, resolved_model=gpt-5.1-codex-max): backend responded with 401 Unauthorized: {
-  "error": {
-    "message": "Provided authentication token is expired. Please try signing in again.",
-    "type": null,
-    "code": "token_expired",
-    "param": null
-  },
-  "status": 401
-}, url: http://proxy:8789/v1/responses`;
+// Mirrors the proxy's terminal 424 response and Codex's extracted error.message.
+// The nested body follows openai-proxy-server/src/auth.rs's expired-token contract.
+const TOKEN_EXPIRED_ERROR = 'unexpected status 424 Failed Dependency: upstream request failed (credential_source=static, requested_model=test-model): upstream request failed (endpoint=example.invalid/v1/responses, requested_model=test-model, resolved_model=test-model): backend responded with 401 Unauthorized for https://example.invalid/v1/responses: {"error":{"code":"token_expired","message":"Provided authentication token is expired."}}';
 
 async function flush(): Promise<void> {
   await Promise.resolve();
@@ -100,6 +101,12 @@ describe("CredentialsSettingsCard", () => {
   beforeEach(() => {
     (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
     container = document.createElement("div");
+    clearPendingAgentProfileTarget();
+    mocks.isDesktop = true;
+    vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockImplementation(function (this: HTMLElement) {
+      return new DOMRect(0, 0, this.dataset.testid === "credentials-settings-card" ? 960 : 0, 0);
+    });
+    vi.stubGlobal("CSS", { escape: (value: string) => value.replace(/[^a-zA-Z0-9_-]/g, "\\$&") });
     document.body.appendChild(container);
     root = createRoot(container);
 
@@ -137,7 +144,164 @@ describe("CredentialsSettingsCard", () => {
       root.unmount();
     });
     container.remove();
+    vi.restoreAllMocks();
+    vi.unstubAllGlobals();
+    clearPendingAgentProfileTarget();
     delete (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT;
+  });
+
+  it("separates providers and agents with the shared settings navigation", async () => {
+    await act(async () => {
+      root.render(<CredentialsSettingsCard />);
+      await flush();
+    });
+
+    expect(container.querySelector('[data-testid="credentials-add-connection"]')).not.toBeNull();
+    expect(container.querySelector('[data-testid="bots-create"]')).toBeNull();
+    const agents = container.querySelector<HTMLButtonElement>('[data-testid="settings-category-agents"]');
+    expect(agents).not.toBeNull();
+    await act(async () => { agents!.click(); await flush(); });
+    expect(container.querySelector('[data-testid="bots-create"]')).not.toBeNull();
+    expect(container.querySelector('[data-testid="credentials-add-connection"]')).toBeNull();
+
+    const providers = container.querySelector<HTMLButtonElement>('[data-testid="settings-category-providers"]');
+    await act(async () => { providers!.click(); await flush(); });
+    expect(container.querySelector('[data-testid="credentials-add-connection"]')).not.toBeNull();
+    expect(container.querySelector('[data-testid="bots-create"]')).toBeNull();
+    expect(mocks.listCredentials).toHaveBeenCalledTimes(1);
+    expect(mocks.listAgents).toHaveBeenCalledTimes(1);
+  });
+
+  it("starts on agents for a pending profile target, even when the agent is unavailable", async () => {
+    setPendingAgentProfileTarget("missing-bot");
+    await act(async () => {
+      root.render(<CredentialsSettingsCard />);
+      await flush();
+    });
+    expect(container.textContent).toContain("No bots yet");
+    expect(container.querySelector('[data-testid="credentials-add-connection"]')).toBeNull();
+    expect(container.querySelector('[data-testid="settings-category-providers"]')).not.toBeNull();
+    expect(readPendingAgentProfileTarget()).toBe("missing-bot");
+    expect(document.querySelector('[data-testid="agent-profile-modal"]')).toBeNull();
+  });
+
+  it.each(["octo", "test-bot"])("opens and consumes a pending %s profile after agents load", async (handle) => {
+    let resolveAgents!: (value: unknown) => void;
+    mocks.listAgents.mockReturnValue(new Promise((resolve) => { resolveAgents = resolve; }));
+    setPendingAgentProfileTarget(`@${handle.toUpperCase()}`);
+
+    await act(async () => {
+      root.render(<CredentialsSettingsCard />);
+      await flush();
+    });
+    expect(container.querySelector('[data-testid="settings-category-agents"]')?.getAttribute("aria-current"))
+      .toBe("page");
+    expect(container.querySelector('[data-testid="credentials-add-connection"]')).toBeNull();
+    expect(document.querySelector('[data-testid="agent-profile-modal"]')).toBeNull();
+    expect(readPendingAgentProfileTarget()).toBe(handle);
+
+    await act(async () => {
+      resolveAgents({ success: true, agents: [{
+        id: `agent-${handle}`,
+        handle,
+        displayName: "Test agent",
+        description: "Synthetic profile",
+        avatarSeed: "test-avatar",
+        provider: "openai",
+        model: null,
+        reasoningEffort: null,
+        credentialId: null,
+        runtimeId: null,
+        createdAt: "2026-01-01T00:00:00.000Z",
+        updatedAt: "2026-01-01T00:00:00.000Z",
+      }] });
+      await flush();
+    });
+    const modal = document.querySelector('[data-testid="agent-profile-modal"]');
+    expect(modal).not.toBeNull();
+    expect(modal?.querySelector<HTMLInputElement>('[data-testid="agent-profile-display-name-input"]')?.value)
+      .toBe("Test agent");
+    expect(readPendingAgentProfileTarget()).toBeNull();
+
+    const close = modal?.querySelector<HTMLButtonElement>('[aria-label="Close"]');
+    expect(close).not.toBeNull();
+    await act(async () => { close!.click(); await flush(); });
+    expect(document.querySelector('[data-testid="agent-profile-modal"]')).toBeNull();
+    await act(async () => { root.render(<CredentialsSettingsCard />); await flush(); });
+    expect(document.querySelector('[data-testid="agent-profile-modal"]')).toBeNull();
+    expect(readPendingAgentProfileTarget()).toBeNull();
+    expect(mocks.listAgents).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([false, true])("offers the shared category picker in a narrow pane (desktop: %s)", async (isDesktop) => {
+    mocks.isDesktop = isDesktop;
+    vi.mocked(HTMLElement.prototype.getBoundingClientRect).mockReturnValue(new DOMRect(0, 0, 480, 0));
+    await act(async () => {
+      root.render(<CredentialsSettingsCard />);
+      await flush();
+    });
+    const picker = container.querySelector<HTMLButtonElement>('[data-testid="settings-category-nav-picker"]');
+    expect(picker?.textContent).toContain("Providers");
+    await act(async () => { picker!.click(); await flush(); });
+    const agents = Array.from(document.querySelectorAll<HTMLElement>('[role^="menuitem"]'))
+      .find((item) => item.textContent?.includes("Agents"));
+    expect(agents).toBeDefined();
+    await act(async () => { agents!.click(); await flush(); });
+    expect(picker?.textContent).toContain("Agents");
+    expect(container.querySelector('[data-testid="bots-create"]')).not.toBeNull();
+    expect(container.querySelector('[data-testid="credentials-add-connection"]')).toBeNull();
+  });
+
+  it.each(["failure", "rejection"])("preserves deferred credential %s feedback across section switches", async (outcome) => {
+    let finishTest!: () => void;
+    mocks.testCredential.mockReturnValueOnce(new Promise((resolve, reject) => {
+      finishTest = () => {
+        if (outcome === "rejection") {
+          reject(new Error(TOKEN_EXPIRED_ERROR));
+        } else {
+          resolve({ success: false, error: TOKEN_EXPIRED_ERROR });
+        }
+      };
+    }));
+    await act(async () => {
+      root.render(<CredentialsSettingsCard />);
+      await flush();
+    });
+    const testButton = () => container.querySelector<HTMLButtonElement>(
+      '[data-testid="credentials-connection-test-cred-old"]',
+    );
+    expect(testButton()).not.toBeNull();
+    await act(async () => { testButton()!.click(); await flush(); });
+    expect(testButton()!.disabled).toBe(true);
+    await act(async () => {
+      container.querySelector<HTMLButtonElement>('[data-testid="settings-category-agents"]')!.click();
+      await flush();
+    });
+    expect(testButton()).toBeNull();
+    expect(container.querySelector('[data-testid="bots-create"]')).not.toBeNull();
+    await act(async () => { finishTest(); await flush(); });
+    expect(container.querySelector('[data-testid="bots-create"]')).not.toBeNull();
+    await act(async () => {
+      container.querySelector<HTMLButtonElement>('[data-testid="settings-category-providers"]')!.click();
+      await flush();
+    });
+    expect(container.textContent).toContain("Needs reconnect");
+    expect(container.textContent).toContain("The saved AI login is stale. Reconnect it below, then test again.");
+    expect(testButton()!.disabled).toBe(false);
+    const reconnect = container.querySelector<HTMLButtonElement>(
+      '[data-testid="credentials-connection-reconnect-cred-old"]',
+    );
+    expect(reconnect).not.toBeNull();
+    expect(reconnect!.disabled).toBe(false);
+    expect(mocks.listCredentials).toHaveBeenCalledTimes(1);
+    expect(mocks.testCredential).toHaveBeenCalledTimes(1);
+
+    mocks.testCredential.mockResolvedValueOnce({ success: true, ok: true });
+    await act(async () => { testButton()!.click(); await flush(); });
+    expect(mocks.testCredential).toHaveBeenCalledTimes(2);
+    expect(mocks.testCredential).toHaveBeenLastCalledWith("cred-old");
+    expect(container.textContent).not.toContain("Needs reconnect");
+    expect(testButton()!.disabled).toBe(false);
   });
 
   it("shows failed auth.json test feedback and an explicit reconnect action", async () => {
