@@ -7,9 +7,11 @@ use tokio::task::JoinHandle;
 use tracing::warn;
 
 use crate::active_turn_input::ActiveTurnInputReceiver;
+use crate::codex::CodexProxyAuth;
 use crate::config::Config;
 use crate::controller::{ControllerClient, LeaseJob, Registration};
 use crate::job_cancel::JobCancelSignal;
+use crate::job_proxy_auth::JobProxyAuth;
 use crate::jobs::{JobExecution, JobMessage, JobProcessor, JobProgress};
 use crate::origin::LocalOriginSync;
 
@@ -46,6 +48,25 @@ impl AgentExecutor {
         lease_lost_signal: Option<JobCancelSignal>,
         active_turn_input: Option<ActiveTurnInputReceiver>,
     ) -> Result<JobExecution> {
+        // Auth failure must stop the whole job even when an embedding caller
+        // did not supply its own lease-loss signal.
+        let lease_lost_signal = Some(lease_lost_signal.unwrap_or_default());
+        let proxy_auth = if job.proxy.is_some() || registration.proxy.is_some() {
+            Some(JobProxyAuth::new(
+                client.clone(),
+                registration,
+                job,
+                lease_lost_signal.clone(),
+            )?)
+        } else {
+            None
+        };
+        // This guard belongs to the entire parent job, including preflight and
+        // retries. Helpers only receive the auth Arc and cannot extend its life.
+        let (proxy_auth, _proxy_auth_guard) = match proxy_auth {
+            Some((auth, guard)) => (Some(CodexProxyAuth::new(auth)), Some(guard)),
+            None => (None, None),
+        };
         let (progress_tx, progress_status, progress_task) =
             spawn_progress_dispatch(client, registration, job.id, lease_lost_signal.clone());
         let progress_handle = JobProgress {
@@ -55,13 +76,14 @@ impl AgentExecutor {
 
         let result = self
             .processor
-            .run_apply_job(
+            .run_apply_job_with_proxy_auth(
                 registration,
                 job,
                 true,
                 Some(progress_handle),
                 lease_lost_signal.clone(),
                 active_turn_input,
+                proxy_auth,
             )
             .await;
 

@@ -21,9 +21,9 @@ use codex_exec_server::{EnvironmentManager, LOCAL_ENVIRONMENT_ID, LOCAL_FS};
 use codex_extension_api::empty_extension_registry;
 use codex_features::Feature;
 use codex_git_utils::resolve_root_git_project_for_trust;
-use codex_login::AuthManager;
 use codex_login::default_client::set_default_originator;
-use codex_model_provider_info::WireApi;
+use codex_login::{AuthManager, ExternalAuth};
+use codex_model_provider_info::{ModelProviderInfo, WireApi};
 use codex_protocol::ThreadId;
 use codex_protocol::config_types::{
     EnvironmentVariablePattern, SandboxMode, ShellEnvironmentPolicy, TrustLevel, WebSearchMode,
@@ -589,6 +589,22 @@ pub struct CodexRunOutput {
     pub provider_conversation_state: Option<JsonValue>,
 }
 
+/// In-memory, job-scoped auth shared by the parent Codex thread and its native helpers.
+#[derive(Clone)]
+pub struct CodexProxyAuth(Arc<dyn ExternalAuth>);
+
+impl CodexProxyAuth {
+    pub fn new(auth: Arc<dyn ExternalAuth>) -> Self {
+        Self(auth)
+    }
+}
+
+impl std::fmt::Debug for CodexProxyAuth {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("CodexProxyAuth([redacted])")
+    }
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct CodexRunOptions {
     pub disable_shell_tool: bool,
@@ -611,6 +627,7 @@ pub struct CodexRunOptions {
     pub require_first_tool_call: bool,
     pub cancel_signal: Option<JobCancelSignal>,
     pub active_turn_input: Option<ActiveTurnInputReceiver>,
+    pub proxy_auth: Option<CodexProxyAuth>,
 }
 
 async fn run_on_fresh_task<T, F>(future: F) -> T
@@ -1231,7 +1248,19 @@ impl CodexClient {
                 config.codex_home.display()
             )
         })?;
+        if options.proxy_auth.is_some() {
+            bind_job_proxy_auth_provider(&mut config.model_provider)?;
+            if let Some(provider) = config.model_providers.get_mut(&config.model_provider_id) {
+                bind_job_proxy_auth_provider(provider)?;
+            }
+        }
         let auth_manager = AuthManager::shared_from_config(&config, true).await;
+        if let Some(proxy_auth) = options.proxy_auth.as_ref() {
+            auth_manager
+                .set_external_auth(Arc::clone(&proxy_auth.0))
+                .await
+                .map_err(|_| anyhow!("failed to initialize job-scoped proxy authentication"))?;
+        }
         // runtime-agent embeds Codex as a library, so there is no Codex CLI executable
         // available to back exec-server helper re-entry points here.
         let environment_manager = Arc::new(EnvironmentManager::default_for_tests());
@@ -2425,6 +2454,27 @@ fn apply_runtime_proxy_model_provider_overrides(config: &mut Config) {
         supports_websockets = config.model_provider.supports_websockets,
         "applied runtime proxy model provider overrides"
     );
+}
+
+fn bind_job_proxy_auth_provider(provider: &mut ModelProviderInfo) -> Result<()> {
+    if provider.aws.is_some() || provider.is_amazon_bedrock() {
+        return Err(anyhow!(
+            "job-scoped proxy authentication requires an OpenAI-compatible provider"
+        ));
+    }
+    // These provider-local credentials take precedence over AuthManager and would retain the
+    // initial lease token even after ExternalAuth renews it. Keep one in-memory auth authority.
+    provider.env_key = None;
+    provider.env_key_instructions = None;
+    provider.experimental_bearer_token = None;
+    provider.auth = None;
+    provider.requires_openai_auth = true;
+    for headers in [&mut provider.http_headers, &mut provider.env_http_headers] {
+        if let Some(headers) = headers.as_mut() {
+            headers.retain(|name, _| !name.eq_ignore_ascii_case("authorization"));
+        }
+    }
+    Ok(())
 }
 
 fn runtime_chatgpt_base_url_from_env() -> Option<String> {
@@ -3859,6 +3909,102 @@ mod tests {
         fn drop(&mut self) {
             self.0.store(true, Ordering::SeqCst);
         }
+    }
+
+    struct MutableProxyAuth(Mutex<Option<&'static str>>);
+
+    impl ExternalAuth for MutableProxyAuth {
+        fn resolve(&self) -> codex_login::ExternalAuthFuture<'_, codex_login::CodexAuth> {
+            Box::pin(async {
+                self.0
+                    .lock()
+                    .expect("test auth lock")
+                    .map(codex_login::CodexAuth::from_api_key)
+                    .ok_or_else(|| std::io::Error::other("job lease is no longer active"))
+            })
+        }
+
+        fn refresh(
+            &self,
+            _context: codex_login::ExternalAuthRefreshContext,
+        ) -> codex_login::ExternalAuthFuture<'_, codex_login::CodexAuth> {
+            self.resolve()
+        }
+    }
+
+    #[tokio::test]
+    async fn job_proxy_auth_follows_shared_renewal_and_clears_failed_auth() {
+        let source = Arc::new(MutableProxyAuth(Mutex::new(Some(
+            "inert-initial-proxy-token",
+        ))));
+        let proxy_auth = CodexProxyAuth::new(source.clone());
+        let manager = AuthManager::from_auth_for_testing(codex_login::CodexAuth::from_api_key(
+            "inert-static-fallback",
+        ));
+        manager
+            .set_external_auth(proxy_auth.0.clone())
+            .await
+            .expect("install job auth");
+        let helper_manager = manager.clone();
+        assert_eq!(
+            manager.auth().await.expect("initial auth").api_key(),
+            Some("inert-initial-proxy-token")
+        );
+
+        *source.0.lock().expect("test auth lock") = Some("inert-renewed-proxy-token");
+        assert_eq!(
+            helper_manager.auth().await.expect("renewed auth").api_key(),
+            Some("inert-renewed-proxy-token")
+        );
+        assert_eq!(
+            manager.auth_cached().expect("shared auth cache").api_key(),
+            Some("inert-renewed-proxy-token")
+        );
+
+        *source.0.lock().expect("test auth lock") = None;
+        assert!(helper_manager.auth().await.is_none());
+        assert!(manager.auth_cached().is_none());
+        assert_eq!(format!("{proxy_auth:?}"), "CodexProxyAuth([redacted])");
+    }
+
+    #[test]
+    fn job_proxy_auth_removes_provider_credentials_without_changing_route() {
+        let mut provider: ModelProviderInfo = serde_json::from_value(json!({
+            "name": "instafy-proxy",
+            "base_url": "https://proxy.example.invalid/v1",
+            "env_key": "INERT_STATIC_PROXY_TOKEN",
+            "experimental_bearer_token": "inert-stale-token",
+            "auth": {"command": "must-never-run"},
+            "http_headers": {"aUtHoRiZaTiOn": "Bearer inert-stale-token", "x-test": "preserve"},
+            "env_http_headers": {"AUTHORIZATION": "INERT_STATIC_PROXY_TOKEN"}
+        }))
+        .expect("provider fixture");
+
+        bind_job_proxy_auth_provider(&mut provider).expect("bind job auth");
+        provider.validate().expect("valid provider after binding");
+        assert!(provider.api_key().expect("no static env lookup").is_none());
+        assert!(provider.experimental_bearer_token.is_none());
+        assert!(provider.auth.is_none());
+        assert!(provider.requires_openai_auth);
+        let api_provider = provider.to_api_provider(None).expect("API provider");
+        assert_eq!(api_provider.base_url, "https://proxy.example.invalid/v1");
+        assert!(!api_provider.headers.contains_key("authorization"));
+        assert_eq!(
+            api_provider.headers.get("x-test").expect("custom header"),
+            "preserve"
+        );
+    }
+
+    #[test]
+    fn job_proxy_auth_rejects_incompatible_provider_before_mutating_it() {
+        let mut provider: ModelProviderInfo = serde_json::from_value(json!({
+            "name": "bedrock",
+            "aws": {"region": "us-east-1"}
+        }))
+        .expect("provider fixture");
+        let original = provider.clone();
+        assert!(bind_job_proxy_auth_provider(&mut provider).is_err());
+        assert_eq!(provider, original);
     }
 
     #[tokio::test]

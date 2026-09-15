@@ -10,8 +10,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use crate::active_turn_input::ActiveTurnInputReceiver;
 use crate::codex::{
-    CodexClient, CodexFallbackSummaryKind, CodexFinalOutputSchema, CodexRunOptions, CodexRunOutput,
-    classify_internal_codex_fallback_summary,
+    CodexClient, CodexFallbackSummaryKind, CodexFinalOutputSchema, CodexProxyAuth, CodexRunOptions,
+    CodexRunOutput, classify_internal_codex_fallback_summary,
 };
 use crate::config::Config;
 use crate::controller::{LeaseJob, Registration};
@@ -2711,6 +2711,44 @@ fn parse_agent_routing_preflight_route(raw: &str) -> Option<AgentRoutingPrefligh
     .into()
 }
 
+fn ensure_job_execution_active(cancel_signal: Option<&JobCancelSignal>) -> Result<()> {
+    if cancel_signal.is_some_and(JobCancelSignal::is_canceled) {
+        bail!("lease lost or job canceled before execution");
+    }
+    Ok(())
+}
+
+fn resolve_agent_routing_preflight_result(
+    result: Result<JsonValue>,
+    job_id: Uuid,
+    cancel_signal: Option<&JobCancelSignal>,
+) -> Result<Option<AgentRoutingPreflight>> {
+    // A rejected proxy renewal also cancels the job. That failure must not be
+    // swallowed by the ordinary best-effort routing fallback below.
+    ensure_job_execution_active(cancel_signal)?;
+    match result {
+        Ok(final_json) => {
+            let preflight = parse_agent_routing_preflight(&final_json);
+            if preflight.is_none() {
+                warn!(
+                    %job_id,
+                    final_json = %compact_json_for_log(&final_json, CODEX_RUN_LOG_COMPACT_STRING_MAX_CHARS),
+                    "agent routing preflight returned an unrecognized route; continuing direct"
+                );
+            }
+            Ok(preflight)
+        }
+        Err(error) => {
+            warn!(
+                %job_id,
+                error = %error,
+                "agent routing preflight failed; continuing direct"
+            );
+            Ok(None)
+        }
+    }
+}
+
 fn parse_agent_routing_preflight(value: &JsonValue) -> Option<AgentRoutingPreflight> {
     let object = value.as_object()?;
     let route = object.get("route").and_then(JsonValue::as_str)?;
@@ -4676,6 +4714,28 @@ impl JobProcessor {
         cancel_signal: Option<JobCancelSignal>,
         active_turn_input: Option<ActiveTurnInputReceiver>,
     ) -> Result<JobExecution> {
+        self.run_apply_job_with_proxy_auth(
+            registration,
+            job,
+            commit_to_workspace,
+            progress,
+            cancel_signal,
+            active_turn_input,
+            None,
+        )
+        .await
+    }
+
+    pub(crate) async fn run_apply_job_with_proxy_auth(
+        &self,
+        registration: &Registration,
+        job: &LeaseJob,
+        commit_to_workspace: bool,
+        progress: Option<JobProgress>,
+        cancel_signal: Option<JobCancelSignal>,
+        active_turn_input: Option<ActiveTurnInputReceiver>,
+        proxy_auth: Option<CodexProxyAuth>,
+    ) -> Result<JobExecution> {
         let proxy_envelope = job.proxy.as_ref().or(registration.proxy.as_ref());
 
         let proxy_source = if job.proxy.is_some() {
@@ -4687,11 +4747,9 @@ impl JobProcessor {
         };
 
         if let Some(envelope) = proxy_envelope {
-            let preview: String = envelope.token.chars().take(8).collect();
             debug!(
                 proxy_source,
                 proxy_url = %envelope.url,
-                token_preview = %preview,
                 "applying proxy envelope for Codex session"
             );
         }
@@ -4948,53 +5006,34 @@ impl JobProcessor {
             }
         };
 
-        let routing_preflight = if should_run_agent_routing_preflight_for_execution(
-            job,
-            prompt_text,
-        ) {
-            let active_plan_group_id = latest_plan_group_id_from_payload(&job.payload);
-            let preflight_prompt = build_agent_routing_preflight_prompt(
-                &workspace_dir,
-                prompt_text,
-                active_plan_group_id.as_deref(),
-            );
-            let preflight_options = CodexRunOptions {
-                disable_shell_tool: true,
-                disable_final_output_json_schema: false,
-                final_output_schema: CodexFinalOutputSchema::RoutingPreflight,
-                suppress_contextual_instructions: true,
-                persist_conversation_thread: false,
-                cancel_signal: cancel_signal.clone(),
-                ..CodexRunOptions::default()
+        let routing_preflight =
+            if should_run_agent_routing_preflight_for_execution(job, prompt_text) {
+                let active_plan_group_id = latest_plan_group_id_from_payload(&job.payload);
+                let preflight_prompt = build_agent_routing_preflight_prompt(
+                    &workspace_dir,
+                    prompt_text,
+                    active_plan_group_id.as_deref(),
+                );
+                let preflight_options = CodexRunOptions {
+                    proxy_auth: proxy_auth.clone(),
+                    disable_shell_tool: true,
+                    disable_final_output_json_schema: false,
+                    final_output_schema: CodexFinalOutputSchema::RoutingPreflight,
+                    suppress_contextual_instructions: true,
+                    persist_conversation_thread: false,
+                    cancel_signal: cancel_signal.clone(),
+                    ..CodexRunOptions::default()
+                };
+                let _codex_guard = CODEX_EXECUTION_LOCK.lock().await;
+                let result = codex
+                    .execute_with_options(&preflight_prompt, None, preflight_options)
+                    .await
+                    .map(|output| output.final_json);
+                resolve_agent_routing_preflight_result(result, job.id, cancel_signal.as_ref())?
+            } else {
+                None
             };
-            let _codex_guard = CODEX_EXECUTION_LOCK.lock().await;
-            match codex
-                .execute_with_options(&preflight_prompt, None, preflight_options)
-                .await
-            {
-                Ok(output) => {
-                    let preflight = parse_agent_routing_preflight(&output.final_json);
-                    if preflight.is_none() {
-                        warn!(
-                            job_id = %job.id,
-                            final_json = %compact_json_for_log(&output.final_json, CODEX_RUN_LOG_COMPACT_STRING_MAX_CHARS),
-                            "agent routing preflight returned an unrecognized route; continuing direct"
-                        );
-                    }
-                    preflight
-                }
-                Err(error) => {
-                    warn!(
-                        job_id = %job.id,
-                        error = %error,
-                        "agent routing preflight failed; continuing direct"
-                    );
-                    None
-                }
-            }
-        } else {
-            None
-        };
+        ensure_job_execution_active(cancel_signal.as_ref())?;
         let routed_job_storage;
         let job = if let Some(preflight) = routing_preflight.as_ref() {
             routed_job_storage = job_with_agent_routing_preflight(job, preflight);
@@ -5058,6 +5097,7 @@ impl JobProcessor {
             CodexFinalOutputSchema::Default
         };
         let mut codex_run_options = CodexRunOptions {
+            proxy_auth,
             disable_shell_tool: explicit_personal_browser_execution
                 || explicit_shared_browser_execution,
             disable_final_output_json_schema: final_output_mode.disable_final_output_json_schema(),
@@ -5171,6 +5211,7 @@ impl JobProcessor {
             }
         }
 
+        ensure_job_execution_active(cancel_signal.as_ref())?;
         if !explicit_personal_browser_execution
             && read_only_scoped_worker_preobserved
             && let Some(observation) = scoped_worker_path_observation.as_ref()
@@ -16790,6 +16831,41 @@ mod tests {
             json!(false)
         );
         assert!(!runtime_job_expectations(&routed.payload).command_execution);
+    }
+
+    #[test]
+    fn canceled_routing_preflight_cannot_fall_back_to_direct_execution() {
+        let signal = JobCancelSignal::new();
+        signal.cancel();
+        for result in [
+            Err(anyhow!("job proxy token renewal rejected (status=409)")),
+            Ok(json!({"route": "direct"})),
+        ] {
+            let error =
+                resolve_agent_routing_preflight_result(result, Uuid::new_v4(), Some(&signal))
+                    .expect_err("cancellation must stop routing before any direct fallback");
+            assert!(error.to_string().contains("lease lost or job canceled"));
+        }
+    }
+
+    #[test]
+    fn active_routing_preflight_failure_preserves_best_effort_fallback() {
+        let signal = JobCancelSignal::new();
+        let fallback = resolve_agent_routing_preflight_result(
+            Err(anyhow!("inert ordinary routing failure")),
+            Uuid::new_v4(),
+            Some(&signal),
+        )
+        .expect("a live job may continue after an ordinary routing failure");
+        assert!(fallback.is_none());
+        let parsed = resolve_agent_routing_preflight_result(
+            Ok(json!({"route": "direct"})),
+            Uuid::new_v4(),
+            Some(&signal),
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(parsed.route, AgentRoutingPreflightRoute::Direct);
     }
 
     #[test]
