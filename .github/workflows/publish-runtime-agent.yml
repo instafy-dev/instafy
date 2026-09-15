@@ -317,7 +317,7 @@ jobs:
             org.opencontainers.image.revision=${{ needs.authorize.outputs.commit_sha }}
             org.opencontainers.image.version=${{ needs.authorize.outputs.commit_sha }}
           cache-from: type=gha,scope=publish-runtime-agent-${{ matrix.flavor }}-${{ matrix.architecture }}
-          cache-to: type=gha,scope=publish-runtime-agent-${{ matrix.flavor }}-${{ matrix.architecture }},mode=max
+          cache-to: type=gha,scope=publish-runtime-agent-${{ matrix.flavor }}-${{ matrix.architecture }},mode=max${{ runner.environment == 'self-hosted' && ',timeout=2m,ignore-error=true' || '' }}
           tags: instafy-runtime-audit:${{ matrix.flavor }}-${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.architecture }}
           load: true
           push: false

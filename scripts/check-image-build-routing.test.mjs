@@ -169,7 +169,27 @@ test("only self-hosted x86 image builds select the pinned x86 BuildKit instead o
   }
 });
 
-test("removing only the finite routing, builder and scanner-host delta reconstructs every original workflow byte", () => {
+test("only self-hosted image cache exports are bounded and optional, without retaining builder volumes", () => {
+  const services = read(files[0]);
+  const runtime = read(files[1]);
+  const serviceExpression = services.match(/^          CACHE_EXPORT_OPTIONS: (.+)$/mu)[1];
+  const runtimeExpression = runtime.match(/^          cache-to: .*(\$\{\{ runner.environment .*\}\})$/mu)[1];
+  for (const environment of ["self-hosted", "SELF-HOSTED", "github-hosted", "", undefined]) {
+    const values = { runner: { environment } };
+    const expected = environment?.toLowerCase() === "self-hosted" ? ",timeout=2m,ignore-error=true" : "";
+    assert.equal(expression(serviceExpression, values), expected);
+    assert.equal(expression(runtimeExpression, values), expected);
+  }
+  assert.ok(services.includes('--cache-to "type=gha,scope=production-${CACHE_KEY},mode=max${CACHE_EXPORT_OPTIONS}"'));
+  for (const file of files.slice(0, 2)) {
+    assert.doesNotMatch(read(file), /keep-state:|cleanup: false|continue-on-error:/u);
+    assert.throws(() => withoutImageBuildRouting(file, read(file).replace("timeout=2m", "timeout=20m")));
+    assert.notEqual(withoutImageBuildRouting(file, read(file).replace("--exit-code 1", "--exit-code 0")),
+      withoutImageBuildRouting(file, read(file)), "the inverse must not erase a weakened security scan");
+  }
+});
+
+test("removing only the finite routing, builder, cache and scanner-host delta reconstructs every original workflow byte", () => {
   const pins = ["bf62fdc525afaa581c15984a6aa1f5c93376b3df7809fd33ce846230a82bf7a5",
     "4e9a90476ec106fa63f9e3fbaa7324102bb4513e27d3aca59ecf18142d321e16", "155bcac7d887060def84b8bec489190b9dd04090bb7fabbb5e5ff73ead16cd2a"];
   for (const [index, file] of files.entries()) assert.equal(createHash("sha256").update(withoutImageBuildRouting(file, read(file))).digest("hex"), pins[index]);

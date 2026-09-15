@@ -259,6 +259,14 @@ with an actual target compiler build and execution before enrollment; a builder
 label or `buildx inspect` alone is insufficient. Do not restart the Docker VM or
 change system-wide emulation while image jobs are active.
 
+Self-hosted image jobs give the optional GitHub cache export two minutes and
+ignore cache-export errors only. Compilation, image loading, security scans,
+registry pushes and manifest checks still fail closed. Hosted jobs retain their
+existing cache settings. Builders remain ephemeral: retaining Docker volumes
+would violate the current BUILD runner's clean-daemon admission check. This
+bound limits upload delays; it does not establish a persistent local cache or
+guarantee a warm build after an interrupted export.
+
 Before enabling this route, an operator must deliberately enroll this repository
 and these three exact `@refs/heads/main` workflow refs in the BUILD group's
 protected workflow allowlist and its existing registration policy. Qualify actual

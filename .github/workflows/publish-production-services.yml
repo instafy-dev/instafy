@@ -240,6 +240,7 @@ jobs:
           IMAGE_REPOSITORY: ${{ matrix.repository }}
           RELEASE_COMMIT: ${{ needs.authorize.outputs.commit_sha }}
           CACHE_KEY: ${{ matrix.key }}
+          CACHE_EXPORT_OPTIONS: ${{ runner.environment == 'self-hosted' && ',timeout=2m,ignore-error=true' || '' }}
         run: |
           set -euo pipefail
           release_tag="ghcr.io/instafy-dev/${IMAGE_REPOSITORY}:${RELEASE_COMMIT}"
@@ -250,7 +251,7 @@ jobs:
             --label "org.opencontainers.image.source=https://github.com/instafy-dev/instafy" \
             --label "org.opencontainers.image.revision=${RELEASE_COMMIT}" \
             --cache-from "type=gha,scope=production-${CACHE_KEY}" \
-            --cache-to "type=gha,scope=production-${CACHE_KEY},mode=max" \
+            --cache-to "type=gha,scope=production-${CACHE_KEY},mode=max${CACHE_EXPORT_OPTIONS}" \
             --load \
             "$CONTEXT"
           echo "RELEASE_TAG=$release_tag" >> "$GITHUB_ENV"

@@ -31,6 +31,12 @@ Build locally:
 - Base: `pnpm build:image:agent`
 - Webdev: `pnpm build:image:agent:webdev`
 
+The Debian base target explicitly refreshes gzip, PCRE2 and SQLite alongside
+Chromium and checks committed minimum security versions. Installing only their
+dependents can leave vulnerable packages inherited from the pinned base image.
+The final image must still pass the publication vulnerability and secret scan;
+version-floor checks are not a substitute for scanning.
+
 ## GHCR publication
 
 The manual publication workflow builds both targets for `linux/amd64` and

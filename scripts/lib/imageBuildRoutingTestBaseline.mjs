@@ -67,6 +67,19 @@ export function withoutImageBuildRouting(file, source) {
   if (!["publish-production-services.yml", "publish-runtime-agent.yml"].includes(file)) return source;
   assert.equal(source.split(builderDeltas[file]).length, 2);
   source = source.replace(builderDeltas[file], "");
+  const cacheOptions = "${{ runner.environment == 'self-hosted' && ',timeout=2m,ignore-error=true' || '' }}";
+  const cacheDeltas = file === "publish-production-services.yml" ? [
+    [`          CACHE_EXPORT_OPTIONS: ${cacheOptions}\n`, ""],
+    ['--cache-to "type=gha,scope=production-${CACHE_KEY},mode=max${CACHE_EXPORT_OPTIONS}"',
+      '--cache-to "type=gha,scope=production-${CACHE_KEY},mode=max"'],
+  ] : [
+    [`          cache-to: type=gha,scope=publish-runtime-agent-\${{ matrix.flavor }}-\${{ matrix.architecture }},mode=max${cacheOptions}\n`,
+      "          cache-to: type=gha,scope=publish-runtime-agent-${{ matrix.flavor }}-${{ matrix.architecture }},mode=max\n"],
+  ];
+  for (const [added, original] of cacheDeltas) {
+    assert.equal(source.split(added).length, 2);
+    source = source.replace(added, original);
+  }
   const ordinary = imageBuildSelector(file, "'ubuntu-latest'");
   assert.equal(source.split(ordinary).length, file === "publish-production-services.yml" ? 5 : 4);
   let normalized = source.replaceAll(ordinary, "    runs-on: ubuntu-latest\n");
