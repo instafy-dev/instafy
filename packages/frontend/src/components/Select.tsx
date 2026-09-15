@@ -1,4 +1,5 @@
 import { forwardRef } from "react";
+import { textControlSizes } from "../styles/typography";
 import { ControlChevron } from "./ControlChevron";
 
 type ControlSize = "xs" | "sm" | "md" | "lg";
@@ -9,10 +10,10 @@ const BASE =
   "min-w-0 appearance-none border text-midnight outline-none transition pointer-coarse:min-h-11 focus-visible:ring-2 focus-visible:ring-primary-400/40 focus-visible:border-primary-400 disabled:cursor-not-allowed disabled:bg-slate-100 disabled:text-slate-400 dark:text-slate-100 dark:disabled:bg-[var(--color-studio-dark-active)] dark:disabled:text-slate-500";
 
 const SIZE_CLASSES: Record<ControlSize, string> = {
-  xs: "px-2.5 py-1 text-base sm:text-xs",
-  sm: "px-3 py-1.5 text-base sm:text-sm",
-  md: "px-3.5 py-2 text-base sm:text-sm",
-  lg: "px-4 py-2.5 text-base",
+  xs: `px-2.5 py-1 ${textControlSizes.xs}`,
+  sm: `px-3 py-1.5 ${textControlSizes.sm}`,
+  md: `px-3.5 py-2 ${textControlSizes.md}`,
+  lg: `px-4 py-2.5 ${textControlSizes.lg}`,
 };
 
 const ICON_PADDING: Record<ControlSize, string> = {

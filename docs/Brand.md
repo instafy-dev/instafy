@@ -64,6 +64,32 @@ as the standard Octo color, or pure black as a brand background. Do not redraw,
 rotate, stretch, crop, or recolor individual pieces. The four detached nodes
 are part of the mark, not optional decoration.
 
+## Typography
+
+The web UI and the shared Desktop/mobile workspace use the native system sans-serif font.
+`--font-sans` in [the shared stylesheet](../packages/frontend/src/styles/tailwind.css) is the authority; `--font-instafy` is a compatibility
+alias. No external UI font download is required. Native camera and operating-system controls
+continue to use their platform fonts.
+
+Code, logs, paths, and the file editor use the shared `--font-mono` stack. The editor resolves
+that CSS value into a font-family string because its canvas measurements cannot use `var()`.
+
+Use the shared roles in [typography.ts](../packages/frontend/src/styles/typography.ts) through `Text`, `Heading`, `Field`, and the
+common controls. Keep typography separate from component padding and layout:
+
+| Role | Default size / line height | Use |
+| --- | --- | --- |
+| Body | 14px / 21px at 900px and above; 14px / 22.75px below | Chat and reading text |
+| Control | 14px / 20px | Buttons, menus, compact navigation |
+| Caption | 12px / 16px | Secondary labels and hints |
+| Text entry | 14px / 20px on desktop; 16px / 20px below 640px | Standard inputs and composer |
+| Headings | Existing `Heading` / `Text` variants | Preserve the page and section hierarchy |
+
+Extra-small text-entry controls use 12px / 16px on desktop and the same phone minimum as
+standard inputs. The composer overlays share its text-entry role so placeholders, suggestions,
+and recording indicators stay aligned. Its 20px lines also match the existing growth limits.
+Keep the 16px mobile text-entry minimum and the existing focus/touch-target rules.
+
 ## Product motion
 
 The canonical inline Octo may use the opt-in `thinking` motion state when Octo

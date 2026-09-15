@@ -15,6 +15,9 @@ const CONTENT = [
   `Run \`${COMMAND}\`.`,
   `Run \`${COMMAND}\`, then inspect the result.`,
   `Inspect \`${MULTILINE}\`.`,
+  "- Read the report.\n- Check the result.",
+  "> Quoted context stays readable.",
+  "```sh\necho ready\n```",
 ].join("\n\n");
 
 async function mountFixture(page: Page, dark: boolean): Promise<void> {
@@ -110,7 +113,7 @@ async function expectAttachedPunctuation(code: Locator, expectedText: string, pu
   expect(result.punctuationFollowsCode).toBe(true);
 }
 
-for (const width of [360, 1024]) {
+for (const width of [360, 899, 900, 1024]) {
   for (const dark of [false, true]) {
     test(`chat reading remains contained at ${width}px in ${dark ? "dark" : "light"} mode`, async ({ page }, testInfo) => {
       await page.setViewportSize({ width, height: 900 });
@@ -124,11 +127,19 @@ for (const width of [360, 1024]) {
           const first = nodes[0].getBoundingClientRect();
           const second = nodes[1].getBoundingClientRect();
           const style = getComputedStyle(nodes[0]);
-          return { gap: second.top - first.bottom, fontSize: style.fontSize, lineHeight: style.lineHeight };
+          return { gap: second.top - first.bottom, fontSize: style.fontSize, lineHeight: style.lineHeight, fontFamily: style.fontFamily };
         });
         expect(metrics.gap).toBeCloseTo(16, 1);
         expect(metrics.fontSize).toBe("14px");
-        expect(metrics.lineHeight).toBe("22.75px");
+        expect(metrics.lineHeight).toBe(width >= 900 ? "21px" : "22.75px");
+        expect(metrics.fontFamily.split(",")[0].trim()).toBe("-apple-system");
+        expect(metrics.fontFamily).toContain("system-ui");
+        expect(metrics.fontFamily).not.toContain("Inter");
+        for (const prose of [body.locator("li").first(), body.locator("blockquote p")]) {
+          await expect(prose).toHaveCSS("font-family", metrics.fontFamily);
+          await expect(prose).toHaveCSS("font-size", metrics.fontSize);
+          await expect(prose).toHaveCSS("line-height", metrics.lineHeight);
+        }
         await expect(body.locator("strong")).toHaveText("Reading details.");
         await expect(body.locator("h1, h2, h3, h4, h5, h6")).toHaveCount(0);
         expect(await body.locator("strong").evaluate((node) => getComputedStyle(node).display)).toBe("inline");
@@ -143,6 +154,9 @@ for (const width of [360, 1024]) {
         expect(quietCode.border).toBe("0px");
         expect(quietCode.shadow).toBe("none");
         expect(quietCode.fontSize).toBeCloseTo(14 * 0.92, 1);
+        for (const code of [codes.nth(0), body.getByTestId("chat-message-code-block")]) {
+          expect(await code.evaluate((node) => getComputedStyle(node).fontFamily)).toContain("monospace");
+        }
         await expect(codes.nth(1)).toHaveAttribute("data-code-layout", "inline");
         await expectAttachedPunctuation(codes.nth(1), IDENTIFIER, ".");
         await expectAttachedPunctuation(codes.nth(2), COMMAND, ".");

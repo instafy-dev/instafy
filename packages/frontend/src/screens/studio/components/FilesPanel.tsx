@@ -13,6 +13,7 @@ import { type MarkdownOutlineItem } from "../../../components/markdownOutline";
 import { LoadingStatus } from "../../../components/LoadingStatus";
 import { Surface } from "../../../components/Surface";
 import { Text } from "../../../components/Text";
+import { resolveMonospaceFontFamily } from "../../../styles/typography";
 import { SearchInput } from "../../../components/SearchInput";
 import { LIST_ROW_SURFACE_BASE } from "../../../components/listRowStyles";
 import { useCode } from "../../../code/useCode";
@@ -2330,7 +2331,7 @@ export function FilesPanel({
           readOnly: projectWriteDisabled,
           domReadOnly: projectWriteDisabled,
           minimap: { enabled: false },
-          fontFamily: "'JetBrains Mono', ui-monospace, SFMono-Regular",
+          fontFamily: resolveMonospaceFontFamily(),
           fontSize: 14,
           lineNumbers: shouldShowEditorLineNumbers(activeFile.path) ? "on" : "off",
           inlineSuggest: { enabled: true },

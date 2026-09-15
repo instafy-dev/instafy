@@ -1,4 +1,5 @@
 import { forwardRef, useCallback, type ForwardedRef } from "react";
+import { textVariants } from "../styles/typography";
 import {
   Button as AriaButton,
   composeRenderProps,
@@ -29,9 +30,9 @@ const VARIANT_CLASSES: Record<ButtonVariant, string> = {
 // targets meet the accessibility guideline; fine pointers (desktop) keep the
 // compact density unchanged.
 const SIZE_CLASSES: Record<ButtonSize, string> = {
-  xs: "px-2 py-1 text-xs pointer-coarse:min-h-11",
-  sm: "px-2.5 py-1.5 text-sm pointer-coarse:min-h-11",
-  md: "px-3.5 py-2 text-sm",
+  xs: `px-2 py-1 ${textVariants.caption} pointer-coarse:min-h-11`,
+  sm: `px-2.5 py-1.5 ${textVariants.control} pointer-coarse:min-h-11`,
+  md: `px-3.5 py-2 ${textVariants.control}`,
   lg: "px-4 py-2.5 text-base",
   icon: "p-0 text-sm"
 };

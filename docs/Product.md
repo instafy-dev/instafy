@@ -63,11 +63,18 @@ is offscreen, the browser tab is hidden, or reduced motion is enabled. Header ma
 
 ## Chat readability
 
+The product UI uses the native system font across chat, navigation, settings, and forms.
+Chat and shared body text use 14px type with a 21px line height at viewport widths of 900px
+and above; narrower layouts retain the more open 22.75px reading line height.
+Compact controls and the composer use 20px lines, with 16px text entry on phones. Code, logs,
+and the file editor share one monospace font stack. See [Typography](Brand.md#typography)
+for the shared text roles.
+
 Chat messages separate paragraphs with 16px of space and use a soft background for inline code.
 Code snippets longer than 80 characters or containing a newline appear in a bounded, wrapping
 block; short snippets stay inline. This presentation preserves the original message and code
-text, including punctuation. Existing fonts, line height, heading structure, list indentation,
-and interactive file references retain their behavior. Explicit fenced code blocks preserve
+text, including punctuation. Heading structure, list indentation, monospace code, and
+interactive file references retain their behavior. Explicit fenced code blocks preserve
 their source whitespace and scroll horizontally when needed.
 
 ## Header

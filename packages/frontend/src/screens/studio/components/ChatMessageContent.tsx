@@ -19,6 +19,7 @@ import {
   listBuiltInAssistantHandles,
 } from "../../../assistants/localBuiltInAssistantCatalog";
 import { Text } from "../../../components/Text";
+import { textVariants } from "../../../styles/typography";
 import { controllerClient } from "../../../sdk/instafy";
 import { useStatus } from "../../../status/useStatus";
 import {
@@ -146,8 +147,8 @@ function inlineCodeNeedsBlock(value: string): boolean {
 }
 // Comfortable reading measure for prose only (#207): even after the bubble
 // shell stops overflowing, its own max-width still lets a line run to ~96
-// characters. 70ch keeps paragraphs and list items in the 45–75ch range
-// `leading-relaxed` was tuned for. Deliberately not applied to code blocks,
+// characters. 70ch keeps paragraphs and list items at a readable line length.
+// Deliberately not applied to code blocks,
 // command/output blocks, diff or file-change lists, tables, or image rows —
 // those want the full bubble width.
 const PROSE_MEASURE_CLASS = "max-w-[70ch]";
@@ -1787,7 +1788,12 @@ const MessageContentBody = memo(function MessageContentBody({
   };
 
   return (
-    <div className={className ?? "text-sm leading-relaxed break-words [overflow-wrap:anywhere]"}>
+    <div
+      className={className ?? [
+        textVariants.body,
+        "break-words [overflow-wrap:anywhere]",
+      ].join(" ")}
+    >
       {contentBlocks.map((block, blockIndex) => {
         const blockSpacingClassName = blockIndex > 0 ? "mt-2" : block.kind === "list" ? "mt-1" : "";
         const teamFlow = block.kind === "paragraph" ? parseTeamFlowLine(block.line) : null;
