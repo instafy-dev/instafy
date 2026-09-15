@@ -23,13 +23,28 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
     cargo build --profile ${BUILD_PROFILE} --manifest-path packages/git-service/Cargo.toml --bin git-shard --locked
 
 FROM ${RUNTIME_BASE} AS runtime
+# Refresh inherited security packages even when no new dependency requests them.
+ARG GZIP_MIN_VERSION=1.13-1+deb13u1
+ARG PCRE2_MIN_VERSION=10.46-1~deb13u2
+ARG SQLITE3_MIN_VERSION=3.46.1-7+deb13u2
+ARG PERL_BASE_MIN_VERSION=5.40.1-6+deb13u1
 RUN apt-get update && apt-get install -y --no-install-recommends \
       bsdutils \
       ca-certificates \
       git \
+      gzip \
+      libpcre2-8-0 \
+      libsqlite3-0 \
       login \
       mount \
+      perl-base \
       util-linux \
+    && test -n "${GZIP_MIN_VERSION}" && test -n "${PCRE2_MIN_VERSION}" \
+    && test -n "${SQLITE3_MIN_VERSION}" && test -n "${PERL_BASE_MIN_VERSION}" \
+    && dpkg --compare-versions "$(dpkg-query -W -f='${Version}' gzip)" ge "${GZIP_MIN_VERSION}" \
+    && dpkg --compare-versions "$(dpkg-query -W -f='${Version}' libpcre2-8-0)" ge "${PCRE2_MIN_VERSION}" \
+    && dpkg --compare-versions "$(dpkg-query -W -f='${Version}' libsqlite3-0)" ge "${SQLITE3_MIN_VERSION}" \
+    && dpkg --compare-versions "$(dpkg-query -W -f='${Version}' perl-base)" ge "${PERL_BASE_MIN_VERSION}" \
     && rm -rf /var/lib/apt/lists/*
 ARG BUILD_ARTIFACT_DIR=release
 COPY --from=builder /src/packages/git-service/target/${BUILD_ARTIFACT_DIR}/git-shard /usr/local/bin/git-shard
