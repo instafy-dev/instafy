@@ -247,6 +247,18 @@ runner matrix selections and scanner pins are unchanged. The five-minute
 coordinator never waits for child publishers, so it releases a shared BUILD
 runner before those jobs need it.
 
+Self-hosted amd64 image cells select the digest-pinned **amd64** BuildKit
+v0.32.2 image, even when the Docker daemon itself is ARM64. This lets a
+Rosetta-enabled Docker VM use its registered x86 translator. An ARM BuildKit
+daemon can fail its x86 capability probe and silently inject its bundled QEMU
+instead; a Rust compiler crash mentioning `/dev/.buildkit_qemu_emulator` is
+evidence of that fallback, not proof of an application defect. ARM image cells
+and hosted builders keep their native/default builder. This selection does not
+install Rosetta or make an unsupported host compatible. Qualify each runner
+with an actual target compiler build and execution before enrollment; a builder
+label or `buildx inspect` alone is insufficient. Do not restart the Docker VM or
+change system-wide emulation while image jobs are active.
+
 Before enabling this route, an operator must deliberately enroll this repository
 and these three exact `@refs/heads/main` workflow refs in the BUILD group's
 protected workflow allowlist and its existing registration policy. Qualify actual

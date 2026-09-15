@@ -252,6 +252,9 @@ jobs:
         uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
         with:
           version: v0.35.0
+          # Only x86 targets need the amd64 BuildKit v0.32.2 image on BUILD.
+          # Keep ARM targets and hosted builders native; never force ARM via QEMU.
+          driver-opts: ${{ runner.environment == 'self-hosted' && matrix.architecture == 'amd64' && 'image=moby/buildkit@sha256:040d34121c27906c4ff9ac152a30d52bf2c5d328d3bb748916bb3d2743c02528' || '' }}
 
       - name: Resolve image references
         id: refs
