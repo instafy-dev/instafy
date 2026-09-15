@@ -136,6 +136,21 @@ describe("ProjectSettingsSections", () => {
     ).toBe(true);
   });
 
+  it("labels the space name and gates submit/cancel while retaining keyboard reset", async () => {
+    const props = createProps({ showProjectBasics: true, activeProjectId: null, projectNameDirty: true });
+    await act(async () => root.render(<ProjectSettingsSections {...props} />));
+    const input = container.querySelector<HTMLInputElement>('[data-testid="project-settings-name-input"]')!;
+    expect(input.labels?.[0]?.textContent).toBe("Name");
+    await act(async () => input.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true })));
+    expect(props.onProjectNameCancel).toHaveBeenCalledOnce();
+    await act(async () => input.form!.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true })));
+    expect(props.onProjectNameSave).toHaveBeenCalledOnce();
+    await act(async () => root.render(<ProjectSettingsSections {...props} projectNameInvalid />));
+    await act(async () => input.form!.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true })));
+    expect(props.onProjectNameSave).toHaveBeenCalledOnce();
+    expect(container.querySelector<HTMLButtonElement>('[data-testid="project-settings-name-save"]')?.disabled).toBe(true);
+  });
+
   it("keeps guest rows visible while refreshing the same space", async () => {
     const members = [{ userId: "guest-1", email: "guest@example.com", fullName: "A guest", role: "viewer", createdAt: "2026-09-06" }];
     await act(async () => root.render(<ProjectSettingsSections {...createProps({

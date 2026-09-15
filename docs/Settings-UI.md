@@ -33,10 +33,21 @@ without a photo. Agent/Octo identities and shared-browser cursor colors retain t
 treatments.
 
 Simple forms use `SettingsFormLayout`: a bounded reading width on the page surface, with
-spacing between sections and outlines on individual controls. Profile, personal preferences
-and team profile share this layout. Reserve cards for distinct collections, summaries,
+spacing between sections and outlines on individual controls. Profile, personal preferences,
+team profile and space basics share this layout. Reserve cards for distinct collections, summaries,
 warnings or other content that needs grouping; do not wrap an entire ordinary form in a
-second rounded surface.
+second rounded surface. The space name and appearance editors sit directly on this page
+surface, with no enclosing `SettingsSurface`. Team and personal name/photo rows share
+`SettingsIdentityRow`.
+
+Explicit-save forms use `SettingsFormActions`: one quiet divider, a secondary Cancel action
+and a primary Save action, with the same radius and touch targets. Save stays disabled for
+unchanged, invalid or pending edits; Cancel restores saved values without writing. Space
+name and space appearance remain separately saved sections. Enter submits the name form;
+Escape resets its draft without dismissing the surrounding settings navigation. Personal
+display names may be empty; team and space names remain required. Permissions remain
+scope-specific: people edit their profile, owners/admins edit team identity, and writable
+members edit space identity.
 
 Use `Field` for persistent labels above controls. Default labels are 13px medium-weight
 secondary text; hints stay 12px muted text. A vertical layout provides an actual 8px gap
@@ -96,8 +107,10 @@ saved; a missing current space shows the Choose space prompt without a stale ide
 People, teams and spaces share `IdentityPhotoButton`: a labeled photo button with a pencil
 badge opens the native file picker. People stay circular and team/space pictures use rounded
 squares. Removing a space picture preserves its fallback icon and color. Space uploads are
-previewed locally until Save appearance; Cancel discards the draft. Team uploads retain their
-existing immediate-save behavior and do not discard unfinished name/color edits.
+previewed locally until Save appearance; Cancel discards the draft. Team uploads follow the
+same draft behavior: name, picture and color save together through Save profile. Cancel
+restores the latest saved identity, including updates received while editing. Uploads are
+validated before preview, and a failed metadata save can retry its uploaded URL.
 
 Team and space uploads accept PNG, JPEG and WebP up to 2 MB. They use the public
 `identity-images` Supabase Storage bucket with immutable random filenames; these pictures
@@ -130,7 +143,7 @@ actions and notification counts on their existing semantic colors.
 
 Color choices have 44px targets, native radio keyboard behavior and a selected border, so
 selection does not depend on hue alone. The selector preview reflects unsaved name and color
-edits. Save profile persists those changes; existing picture upload behavior is independent.
+edits. Save profile persists those changes together with the picture.
 Only owners and admins can update team identity. Personal and existing teams without a
 chosen accent use neutral styling.
 

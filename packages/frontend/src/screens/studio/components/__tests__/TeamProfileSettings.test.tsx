@@ -19,9 +19,10 @@ describe("team profile editing", () => {
     mocks.update.mockReset().mockResolvedValue(true);
     mocks.upload.mockReset().mockResolvedValue("https://example.test/new.png");
     mocks.showStatus.mockReset();
+    vi.stubGlobal("URL", class extends URL { static createObjectURL = vi.fn(() => "blob:team-preview"); static revokeObjectURL = vi.fn(); });
     container = document.createElement("div"); document.body.append(container); root = createRoot(container);
   });
-  afterEach(async () => { await act(async () => root.unmount()); container.remove(); });
+  afterEach(async () => { await act(async () => root.unmount()); container.remove(); vi.unstubAllGlobals(); });
   async function render(role: string | null = "owner") {
     await act(async () => root.render(<TeamProfileSettings organization={organization} role={role} />));
   }
@@ -67,24 +68,59 @@ describe("team profile editing", () => {
     expect(container.querySelector('[data-testid="org-avatar-preview"] img')).toBeNull();
     expect(container.querySelector('[data-testid="org-avatar-preview"]')?.textContent).toBe("ET");
   });
-  it("retains the current picture when removal is not saved", async () => {
-    mocks.update.mockResolvedValue(false);
-    await render();
-    await act(async () => container.querySelector<HTMLButtonElement>('[data-testid="org-avatar-remove"]')!.click());
-    expect(container.querySelector('[data-testid="org-avatar-preview"] img')?.getAttribute("src")).toBe(organization.avatarUrl);
-    expect(mocks.showStatus).toHaveBeenCalledWith(expect.stringContaining("Couldn't remove"), "error", 5000);
-  });
-  it("uploads a replacement picture to the displayed team's ID", async () => {
-    await render();
+  async function choosePhoto() {
     const file = new File(["image"], "team.png", { type: "image/png" });
     await act(async () => {
       const input = container.querySelector<HTMLInputElement>('[data-testid="org-avatar-file-input"]')!;
-      Object.defineProperty(input, "files", { value: [file] });
+      Object.defineProperty(input, "files", { configurable: true, value: [file] });
       input.dispatchEvent(new Event("change", { bubbles: true }));
     });
+    return file;
+  }
+  async function cancel() {
+    await act(async () => [...container.querySelectorAll("button")].find(button => button.textContent === "Cancel")!.click());
+  }
+  it("previews removal, preserves the saved image on failure, and restores it on Cancel", async () => {
+    mocks.update.mockResolvedValue(false);
+    await render();
+    await act(async () => container.querySelector<HTMLButtonElement>('[data-testid="org-avatar-remove"]')!.click());
+    expect(container.querySelector('[data-testid="org-avatar-preview"] img')).toBeNull();
+    expect(mocks.update).not.toHaveBeenCalled();
+    await submit();
+    expect(mocks.update).toHaveBeenCalledExactlyOnceWith("empty-team", { avatarUrl: "" });
+    expect(container.querySelector('[role="alert"]')?.textContent).toContain("could not be saved");
+    await cancel();
+    expect(container.querySelector('[data-testid="org-avatar-preview"] img')?.getAttribute("src")).toBe(organization.avatarUrl);
+  });
+  it("saves picture, name and color together for the displayed team only after Save", async () => {
+    await render(); await changeName(); await chooseColor("violet");
+    const file = await choosePhoto();
+    expect(mocks.upload).not.toHaveBeenCalled();
+    expect(mocks.update).not.toHaveBeenCalled();
+    expect(container.querySelector('[data-testid="org-avatar-preview"] img')?.getAttribute("src")).toBe("blob:team-preview");
+    await submit();
     expect(mocks.upload).toHaveBeenCalledExactlyOnceWith({ orgId: "empty-team", file });
-    expect(mocks.update).toHaveBeenCalledExactlyOnceWith("empty-team", { avatarUrl: "https://example.test/new.png" });
+    expect(mocks.update).toHaveBeenCalledExactlyOnceWith("empty-team", { name: "Renamed team", accentColor: "violet", avatarUrl: "https://example.test/new.png" });
     expect(container.querySelector('[data-testid="org-avatar-preview"] img')?.getAttribute("src")).toBe("https://example.test/new.png");
+    expect(container.querySelector<HTMLButtonElement>('[data-testid="team-profile-save"]')?.disabled).toBe(true);
+  });
+  it("cancels all identity drafts without writing and uses the latest saved identity on refresh", async () => {
+    await render(); await changeName(); await chooseColor("teal"); await choosePhoto();
+    await act(async () => root.render(<TeamProfileSettings organization={{ ...organization, avatarUrl: "https://example.test/elsewhere.png" }} role="owner" />));
+    expect(container.querySelector('[data-testid="org-avatar-preview"] img')?.getAttribute("src")).toBe("blob:team-preview");
+    await cancel();
+    expect(mocks.upload).not.toHaveBeenCalled(); expect(mocks.update).not.toHaveBeenCalled();
+    expect(container.querySelector<HTMLInputElement>('[data-testid="team-profile-name"]')?.value).toBe("Empty team");
+    expect(container.querySelector('[data-testid="org-avatar-preview"] img')?.getAttribute("src")).toBe("https://example.test/elsewhere.png");
+    expect(URL.revokeObjectURL).toHaveBeenCalledWith("blob:team-preview");
+  });
+  it("retries a metadata failure without uploading the same picture twice", async () => {
+    await render(); await choosePhoto(); mocks.update.mockResolvedValueOnce(false);
+    await submit();
+    expect(container.querySelector('[role="alert"]')).not.toBeNull();
+    await submit();
+    expect(mocks.upload).toHaveBeenCalledTimes(1); expect(mocks.update).toHaveBeenCalledTimes(2);
+    expect(container.querySelector('[role="status"]')?.textContent).toBe("Team profile saved.");
   });
   it.each(["owner", "admin", "builder"])("lets %s start a space in the displayed empty team", async (role) => {
     const onCreateSpace = vi.fn();

@@ -1,7 +1,8 @@
 import { useCallback, useEffect, useState } from "react";
 import { IdentityPhotoButton } from "../components/IdentityPhotoButton";
 import { Button } from "../components/Button";
-import { SettingsFormLayout } from "../components/SettingsFormLayout";
+import { SettingsFormLayout, SettingsIdentityRow } from "../components/SettingsFormLayout";
+import { SettingsFormActions } from "../components/SettingsFormActions";
 import { Field } from "../components/Field";
 import { Input } from "../components/Input";
 import { PROFILE_BIO_MAX_LENGTH } from "@instafy/sdk/human-profiles";
@@ -68,7 +69,7 @@ export function ProfileEditor({ variant = "panel", onDone }: ProfileEditorProps)
       showStatus("Sign in to update your profile.", "error", 3500);
       return;
     }
-    if (bioTooLong) return;
+    if (bioTooLong || saving || profileUnavailable || !hasChanges) return;
     const trimmedName = displayName.trim();
     const trimmedAvatar = avatarUrl.trim();
     setSaving(true);
@@ -84,7 +85,7 @@ export function ProfileEditor({ variant = "panel", onDone }: ProfileEditorProps)
       onDone?.();
     }
     setSaving(false);
-  }, [avatarUrl, bio, bioTooLong, displayName, onDone, showStatus, updateProfile, user]);
+  }, [avatarUrl, bio, bioTooLong, displayName, hasChanges, onDone, profileUnavailable, saving, showStatus, updateProfile, user]);
 
   return (
     <SettingsFormLayout className="@container/profile-editor" data-testid="profile-editor">
@@ -107,7 +108,7 @@ export function ProfileEditor({ variant = "panel", onDone }: ProfileEditorProps)
         </div>
       ) : null}
       <div className="flex flex-col gap-4">
-        <div className="grid grid-cols-[auto_minmax(0,1fr)] items-center gap-4">
+        <SettingsIdentityRow>
           <IdentityPhotoButton label={avatarPreview ? "Change profile photo" : "Upload profile photo"}
             disabled={profileUnavailable || saving} onSelect={handleFileUpload}>
             <HumanAvatar
@@ -123,12 +124,12 @@ export function ProfileEditor({ variant = "panel", onDone }: ProfileEditorProps)
             <Input
               id="profile-display-name"
               type="text"
-              disabled={profileUnavailable}
+              disabled={profileUnavailable || saving}
               value={displayName}
               onChange={(event) => setDisplayName(event.target.value)}
             />
           </Field>
-        </div>
+        </SettingsIdentityRow>
         {avatarPreview ? (
           <Button
             onPress={() => {
@@ -149,22 +150,13 @@ export function ProfileEditor({ variant = "panel", onDone }: ProfileEditorProps)
             {uploadError}
           </Text>
         ) : null}
-        <ProfileBioField id="profile-bio" value={bio} onChange={setBio} disabled={profileUnavailable} />
-        <div className="flex flex-col gap-3 border-t border-slate-200/70 pt-3 dark:border-[color:var(--color-studio-dark-divider)] @min-[32rem]/profile-editor:flex-row @min-[32rem]/profile-editor:items-center @min-[32rem]/profile-editor:justify-between">
-          <Text as="p" variant="caption" tone="muted">
-            {loading ? "Loading profile…" : "Visible to teammates who share a space with you."}
-          </Text>
-          <Button
-            onPress={handleSave}
-            isDisabled={!hasChanges || saving || profileUnavailable || bioTooLong}
-            variant="primary"
-            size="sm"
-            radius="xl"
-            className="min-h-11 w-full shrink-0 sm:pointer-fine:min-h-9 @min-[32rem]/profile-editor:w-auto"
-          >
-            {saving ? "Saving…" : "Save profile"}
-          </Button>
-        </div>
+        <ProfileBioField id="profile-bio" value={bio} onChange={setBio} disabled={profileUnavailable || saving} />
+        <SettingsFormActions saveLabel="Save profile" onSave={() => void handleSave()}
+          saving={saving} disabled={!hasChanges || profileUnavailable || bioTooLong}
+          cancelDisabled={!hasChanges || profileUnavailable} onCancel={() => {
+            setDisplayName(profile?.fullName ?? ""); setAvatarUrl(profile?.avatarUrl ?? "");
+            setBio(profile?.bio ?? ""); setUploadError(null);
+          }} hint={loading ? "Loading profile…" : "Visible to teammates who share a space with you."} />
       </div>
     </SettingsFormLayout>
   );

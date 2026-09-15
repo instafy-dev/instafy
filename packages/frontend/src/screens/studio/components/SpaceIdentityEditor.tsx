@@ -8,7 +8,7 @@ import { controllerClient } from "../../../sdk/instafy";
 import { useWorkspaceStore } from "../../../store";
 import { PROJECT_ACCESS_REFRESH_EVENT } from "../../../projects/projectAccessEvents";
 import { SettingsSection } from "./SettingsSection";
-import { SettingsSurface } from "./SettingsSurface";
+import { SettingsFormActions } from "../../../components/SettingsFormActions";
 
 const ICON_NAMES = ["Rocket", "Tools", "Idea", "Seedling", "Art", "Books", "Science", "Target", "World", "Lightning", "Home", "Puzzle"];
 
@@ -101,7 +101,7 @@ function SpaceIdentityForm({ projectId, name, canWrite, enabled }: SpaceIdentity
   };
 
   return <SettingsSection title="Space appearance" description="Choose a picture, icon and color to recognize this space in your team." data-testid="space-identity-editor">
-    <SettingsSurface>
+    <div className="space-y-4">
       <div className="flex items-center gap-4">
         {canWrite ? <IdentityPhotoButton square accept={IDENTITY_IMAGE_ACCEPT} disabled={disabled}
           label={previewUrl || avatarUrl ? "Change space picture" : "Upload space picture"}
@@ -134,15 +134,15 @@ function SpaceIdentityForm({ projectId, name, canWrite, enabled }: SpaceIdentity
           {SPACE_COLORS.map((value) => <button key={value} type="button" aria-label={`${value[0].toUpperCase()}${value.slice(1)} color`} aria-pressed={color === value} onClick={() => setColor(value)} className={`rounded-lg border p-0.5 disabled:opacity-50 ${color === value ? "border-primary-500 ring-1 ring-primary-500" : "border-transparent"}`}><SpaceIdentity name={name} icon={icon} color={value} /></button>)}
         </div>
       </fieldset>
-      <div className="mt-4 flex flex-wrap gap-2">
-        <Button onPress={() => void save()} isDisabled={disabled || !dirty} variant="outline" size="sm" data-testid="space-identity-save">{saving ? "Saving…" : "Save appearance"}</Button>
-        <Button onPress={() => { setIcon(null); setColor(null); setAvatarUrl(null); setImageFile(null); }} isDisabled={disabled || (icon === null && color === null && !avatarUrl && !imageFile)} variant="ghost" size="sm">Clear appearance</Button>
-        <Button onPress={() => { setIcon(normalizeSpaceIcon(saved.projectIcon)); setColor(normalizeSpaceColor(saved.projectColor)); setAvatarUrl(normalizeSpaceAvatarUrl(saved.projectAvatarUrl)); setImageFile(null); setError(null); }} isDisabled={disabled || !dirty} variant="ghost" size="sm">Cancel</Button>
-      </div>
+      <SettingsFormActions saveLabel="Save appearance" onSave={() => void save()} saving={saving}
+        disabled={disabled || !dirty} saveTestId="space-identity-save"
+        onCancel={() => { setIcon(normalizeSpaceIcon(saved.projectIcon)); setColor(normalizeSpaceColor(saved.projectColor)); setAvatarUrl(normalizeSpaceAvatarUrl(saved.projectAvatarUrl)); setImageFile(null); setError(null); }}
+        cancelDisabled={disabled || !dirty}
+        secondary={<Button onPress={() => { setIcon(null); setColor(null); setAvatarUrl(null); setImageFile(null); }} isDisabled={disabled || (icon === null && color === null && !avatarUrl && !imageFile)} variant="ghost" size="sm" radius="xl" className="min-h-11 sm:pointer-fine:min-h-9">Clear appearance</Button>} />
       {loading ? <p role="status" className="mt-2 text-xs text-slate-500">Loading appearance…</p> : null}
       {error ? <p role="alert" className="mt-2 text-sm text-rose-600 dark:text-rose-400">{error}</p> : null}
       {loadFailed ? <Button onPress={() => setLoadAttempt((value) => value + 1)} variant="ghost" size="sm">Retry</Button> : null}
       {notice && !dirty ? <p role="status" className="mt-2 text-xs text-slate-500">{notice}</p> : null}
-    </SettingsSurface>
+    </div>
   </SettingsSection>;
 }

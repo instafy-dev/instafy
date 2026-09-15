@@ -1,3 +1,6 @@
+import { Field } from "../../../components/Field";
+import { SettingsFormLayout } from "../../../components/SettingsFormLayout";
+import { SettingsFormActions } from "../../../components/SettingsFormActions";
 import { Button } from "../../../components/Button";
 import { HumanAvatar } from "../../../components/HumanAvatar";
 import { Input } from "../../../components/Input";
@@ -150,59 +153,32 @@ export function ProjectSettingsSections({
   return (
     <div className="space-y-4">
       {showProjectBasics ? (
-        <>
+        <SettingsFormLayout>
           <SettingsSection
             title="Space name"
             description="Rename this space. Guests will see the updated name in the studio header and invite links."
           >
-            <SettingsSurface>
-              <div className="grid gap-2 @min-[32rem]/settings-content:grid-cols-[minmax(0,1fr)_auto_auto] @min-[32rem]/settings-content:items-end">
-                <div className="min-w-0">
-                  <Text variant="caption" tone="muted">
-                    Name
-                  </Text>
-                  <Input
-                    value={projectNameDraft}
-                    onChange={(event) => onProjectNameChange(event.target.value)}
-                    onKeyDown={(event) => {
-                      if (event.key === "Enter") {
-                        event.preventDefault();
-                        onProjectNameSave();
-                      }
-                      if (event.key === "Escape") {
-                        event.preventDefault();
-                        onProjectNameCancel();
-                      }
-                    }}
-                    disabled={!canWriteProject || projectNameSaving}
-                    data-testid="project-settings-name-input"
-                    className="mt-1"
-                  />
-                </div>
-                <Button
-                  onPress={onProjectNameSave}
-                  isDisabled={!canWriteProject || projectNameSaving || projectNameInvalid || !projectNameDirty}
-                  variant="outline"
-                  size="sm"
-                  radius="xl"
-                  data-testid="project-settings-name-save"
-                  className="w-full @min-[32rem]/settings-content:w-auto"
-                >
-                  {projectNameSaving ? "Saving…" : "Save"}
-                </Button>
-                <Button
-                  onPress={onProjectNameCancel}
-                  isDisabled={!canWriteProject || projectNameSaving || !projectNameDirty}
-                  variant="ghost"
-                  size="sm"
-                  radius="xl"
-                  data-testid="project-settings-name-cancel"
-                  className="w-full @min-[32rem]/settings-content:w-auto"
-                >
-                  Cancel
-                </Button>
-              </div>
-            </SettingsSurface>
+            <form className="space-y-4" onSubmit={event => {
+              event.preventDefault();
+              if (canWriteProject && !projectNameSaving && !projectNameInvalid && projectNameDirty) onProjectNameSave();
+            }}>
+              <Field label="Name" htmlFor="project-settings-name">
+                <Input id="project-settings-name" value={projectNameDraft}
+                  onChange={event => onProjectNameChange(event.target.value)}
+                  onKeyDown={event => {
+                    if (event.key === "Escape" && !projectNameSaving) {
+                      event.preventDefault(); event.stopPropagation(); onProjectNameCancel();
+                    }
+                  }}
+                  disabled={!canWriteProject || projectNameSaving}
+                  aria-invalid={projectNameDirty && projectNameInvalid || undefined}
+                  data-testid="project-settings-name-input" />
+              </Field>
+              <SettingsFormActions saveLabel="Save name" saving={projectNameSaving}
+                disabled={!canWriteProject || projectNameInvalid || !projectNameDirty}
+                onCancel={onProjectNameCancel} cancelDisabled={!canWriteProject || !projectNameDirty}
+                saveTestId="project-settings-name-save" cancelTestId="project-settings-name-cancel" />
+            </form>
           </SettingsSection>
 
           {activeProjectId ? <SpaceIdentityEditor key={activeProjectId} projectId={activeProjectId} name={activeProjectName} canWrite={canWriteProject} enabled={runtimeControllerEnabled} /> : null}
@@ -236,7 +212,7 @@ export function ProjectSettingsSections({
               </div>
             </SettingsSurface>
           </SettingsSection>
-        </>
+        </SettingsFormLayout>
       ) : null}
 
       {showGuestAccess ? (
