@@ -2,6 +2,14 @@ FROM node:22-bookworm-slim@sha256:6c74791e557ce11fc957704f6d4fe134a7bc8d6f5ca440
 
 LABEL org.opencontainers.image.source="https://github.com/instafy-dev/instafy"
 
+# Explicitly refresh inherited PCRE2; this image has no other apt install step.
+ARG PCRE2_MIN_VERSION=10.42-1+deb12u1
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      libpcre2-8-0 \
+    && test -n "${PCRE2_MIN_VERSION}" \
+    && dpkg --compare-versions "$(dpkg-query -W -f='${Version}' libpcre2-8-0)" ge "${PCRE2_MIN_VERSION}" \
+    && rm -rf /var/lib/apt/lists/*
+
 WORKDIR /app
 
 COPY packages/provider-contract/package.json /app/node_modules/@instafy/provider-contract/package.json

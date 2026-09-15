@@ -247,6 +247,14 @@ runner matrix selections and scanner pins are unchanged. The five-minute
 coordinator never waits for child publishers, so it releases a shared BUILD
 runner before those jobs need it.
 
+Debian service final stages explicitly refresh inherited security packages and
+check distribution-specific minimum versions after installation. Installing an
+unrelated package does not refresh every vulnerable base package. Bookworm
+services enforce the PCRE2 floor; Trixie services additionally enforce gzip,
+SQLite and Perl-base floors. `node --test scripts/check-production-image-inputs.test.mjs`
+checks every Debian publisher cell plus the standalone speech-host image.
+These source checks do not replace the unchanged scan-before-publication gate.
+
 Self-hosted amd64 image cells select the digest-pinned **amd64** BuildKit
 v0.32.2 image, even when the Docker daemon itself is ARM64. This lets a
 Rosetta-enabled Docker VM use its registered x86 translator. An ARM BuildKit

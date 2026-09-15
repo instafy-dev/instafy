@@ -72,7 +72,14 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
 ########################
 FROM ${RUNTIME_BASE} AS runtime
 LABEL org.opencontainers.image.source="https://github.com/instafy-dev/instafy"
-RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates curl \
+# Explicitly refresh inherited PCRE2; installing another package does not upgrade it.
+ARG PCRE2_MIN_VERSION=10.42-1+deb12u1
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      ca-certificates \
+      curl \
+      libpcre2-8-0 \
+    && test -n "${PCRE2_MIN_VERSION}" \
+    && dpkg --compare-versions "$(dpkg-query -W -f='${Version}' libpcre2-8-0)" ge "${PCRE2_MIN_VERSION}" \
     && rm -rf /var/lib/apt/lists/*
 ARG BUILD_ARTIFACT_DIR=release
 COPY --from=builder /src/packages/openai-proxy-server/target/${BUILD_ARTIFACT_DIR}/proxy /usr/local/bin/openai-proxy
