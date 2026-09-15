@@ -55,6 +55,20 @@ describe("new team picture onboarding", () => {
     expect(onCreated).toHaveBeenCalledExactlyOnceWith(created);
     expect(onClose).toHaveBeenCalledTimes(1);
   });
+  it("opens the native chooser from the team picture and keeps it disabled while creating", async () => {
+    await render();
+    const input = container.querySelector<HTMLInputElement>('[data-testid="new-team-picture-input"]')!;
+    const chooseFile = vi.spyOn(input, "click");
+    const photo = container.querySelector<HTMLButtonElement>('[aria-label="Upload team picture"]')!;
+    await act(async () => photo.click());
+    expect(chooseFile).toHaveBeenCalledOnce();
+    let resolve!: (value: typeof created) => void;
+    mocks.create.mockReturnValue(new Promise((done) => { resolve = done; }));
+    await submit();
+    expect(photo.disabled).toBe(true);
+    expect(input.disabled).toBe(true);
+    await act(async () => resolve(created));
+  });
   it("preserves optional custom slugs for creation from the space launcher", async () => {
     await render(true); await input("project-launcher-org-slug-input", "my-custom-team"); await submit();
     expect(mocks.create).toHaveBeenCalledWith({ orgName: "New team", orgSlug: "my-custom-team" });

@@ -21,7 +21,7 @@ vi.mock("../../../../status/useStatus", () => ({ useStatus: () => ({ showStatus:
 vi.mock("../../../../workspace/WorkspaceTabsProvider", () => ({ useWorkspaceTabs: () => ({ openConversationTab: mocks.openConversationTab, requestUrlPush: mocks.requestUrlPush }) }));
 vi.mock("../../../../sdk/instafy", () => ({ controllerClient: { automations: { listForProject: mocks.list }, runs: { fetch: mocks.fetchRuns } } }));
 vi.mock("../SettingsShell", () => ({ SettingsShell: ({ children, actions }: { children: ReactNode; actions: ReactNode }) => <div>{actions}{children}</div> }));
-vi.mock("../../../../components/aria/StudioModal", () => ({ StudioDialogModal: () => null }));
+vi.mock("../../../../components/aria/StudioModal", () => ({ StudioDialogModal: ({ isOpen, children }: { isOpen: boolean; children: ReactNode }) => isOpen ? <div role="dialog">{children}</div> : null }));
 
 const automation: ControllerAutomation = {
   id: "automation-a", projectId: "project-a", userId: "user-a", name: "Check reports",
@@ -103,6 +103,27 @@ describe("automation activity and thread navigation", () => {
     });
   }
   const status = () => container.querySelector('[data-testid="automation-run-status-automation-a"]')?.textContent;
+
+  it("keeps automation fields visibly labelled as the schedule changes", async () => {
+    await render();
+    await act(async () => container.querySelector<HTMLButtonElement>('[data-testid="automations-create-button"]')!.click());
+    const once = [...container.querySelectorAll("button")].find(button => button.textContent === "Once")!;
+    await act(async () => once.click());
+    for (const [testId, label] of [
+      ["automation-name-input", "Name"],
+      ["automation-timezone-input", "Timezone"],
+      ["automation-prompt-input", "Prompt"],
+      ["automation-runat-input", "Run at"],
+      ["automation-runtime-provider-input", "Runtime provider (optional)"],
+    ]) {
+      const control = container.querySelector<HTMLInputElement | HTMLTextAreaElement>(`[data-testid="${testId}"]`);
+      expect(control?.labels?.[0]?.textContent).toBe(label);
+    }
+    const weekly = [...container.querySelectorAll("button")].find(button => button.textContent === "Weekly")!;
+    await act(async () => weekly.click());
+    expect(container.querySelector<HTMLInputElement>('[data-testid="automation-byhour-input"]')?.labels?.[0]?.textContent).toBe("Hour (0-23)");
+    expect(container.querySelector<HTMLInputElement>('[data-testid="automation-byminute-input"]')?.labels?.[0]?.textContent).toBe("Minute (0-59)");
+  });
 
   it("makes the thread directly reachable and requests URL navigation before activation", async () => {
     await render();

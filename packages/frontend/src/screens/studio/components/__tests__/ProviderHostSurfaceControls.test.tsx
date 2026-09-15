@@ -129,6 +129,7 @@ describe("ProviderHostSurfaceControls", () => {
 
     expect(readLocalProviderResourceMock).toHaveBeenCalledWith("demo", "instafy://demo/status");
     expect(select?.value).toBe("provider");
+    expect(select?.labels?.[0]?.textContent).toBe("Speech route");
 
     await act(async () => {
       select!.value = "device";

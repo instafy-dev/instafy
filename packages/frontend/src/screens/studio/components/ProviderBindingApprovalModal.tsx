@@ -1,10 +1,11 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useId, useMemo, useState } from "react";
 import type {
   ProjectContentCapability,
   ProviderProjectBinding,
 } from "@instafy/sdk/provider-project-binding";
 import { Button } from "../../../components/Button";
 import { Checkbox } from "../../../components/Checkbox";
+import { Field } from "../../../components/Field";
 import { Input } from "../../../components/Input";
 import { Text } from "../../../components/Text";
 import {
@@ -68,6 +69,7 @@ export function ProviderBindingApprovalModal({
   onClose,
   onSaved,
 }: ProviderBindingApprovalModalProps) {
+  const fieldId = useId();
   const { showStatus } = useStatus();
   const [providerId, setProviderId] = useState("");
   const [purpose, setPurpose] = useState("");
@@ -193,9 +195,9 @@ export function ProviderBindingApprovalModal({
       <StudioDialogBody className="space-y-4">
         <div className="space-y-3">
           <div className="grid gap-3 sm:grid-cols-2">
-            <div className="min-w-0">
-              <StudioDialogSectionLabel>Provider</StudioDialogSectionLabel>
+            <Field label="Provider" htmlFor={`${fieldId}-provider`}>
               <Input
+                id={`${fieldId}-provider`}
                 value={providerId}
                 onChange={(event) => {
                   setProviderId(event.target.value);
@@ -205,13 +207,12 @@ export function ProviderBindingApprovalModal({
                 }}
                 disabled={providerIdLocked || savePending}
                 placeholder="provider-id"
-                className="mt-1"
                 data-testid="provider-binding-provider-id"
               />
-            </div>
-            <div className="min-w-0">
-              <StudioDialogSectionLabel>Storage folder</StudioDialogSectionLabel>
+            </Field>
+            <Field label="Storage folder" htmlFor={`${fieldId}-prefix`}>
               <Input
+                id={`${fieldId}-prefix`}
                 value={prefix}
                 onChange={(event) => {
                   setPrefix(event.target.value);
@@ -221,15 +222,14 @@ export function ProviderBindingApprovalModal({
                 }}
                 disabled={savePending}
                 placeholder={defaultPrefix}
-                className="mt-1"
                 data-testid="provider-binding-prefix"
               />
-            </div>
+            </Field>
           </div>
 
-          <div className="min-w-0">
-            <StudioDialogSectionLabel>Purpose</StudioDialogSectionLabel>
+          <Field label="Purpose" htmlFor={`${fieldId}-purpose`}>
             <Input
+              id={`${fieldId}-purpose`}
               value={purpose}
               onChange={(event) => {
                 setPurpose(event.target.value);
@@ -239,14 +239,13 @@ export function ProviderBindingApprovalModal({
               }}
               disabled={savePending}
               placeholder="Store learned state and project summaries."
-              className="mt-1"
               data-testid="provider-binding-purpose"
             />
-          </div>
+          </Field>
 
-          <div className="min-w-0">
-            <StudioDialogSectionLabel>Workspace root</StudioDialogSectionLabel>
+          <Field label="Workspace root" htmlFor={`${fieldId}-root`} hint="Optional. Leave blank to use the linked local workspace when one is available.">
             <Input
+              id={`${fieldId}-root`}
               value={rootUri}
               onChange={(event) => {
                 setRootUri(event.target.value);
@@ -256,13 +255,9 @@ export function ProviderBindingApprovalModal({
               }}
               disabled={savePending}
               placeholder="file:///home/name/project or /home/name/project"
-              className="mt-1"
               data-testid="provider-binding-root-uri"
             />
-            <Text variant="caption" tone="muted" className="mt-1">
-              Optional. Leave blank to use the linked local workspace when one is available.
-            </Text>
-          </div>
+          </Field>
 
           <div className="space-y-2">
             <StudioDialogSectionLabel>Access</StudioDialogSectionLabel>

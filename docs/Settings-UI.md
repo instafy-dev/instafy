@@ -49,7 +49,16 @@ display names may be empty; team and space names remain required. Permissions re
 scope-specific: people edit their profile, owners/admins edit team identity, and writable
 members edit space identity.
 
-Use `Field` for persistent labels above controls. Default labels are 13px medium-weight
+One-off operations use `SettingsActionRow`: one heading, one explanation and an action on
+the page surface. At smaller widths the action moves below the explanation instead of
+shrinking its label onto multiple lines. Managed defaults and device alert permissions use
+this pattern. Notification categories use plain groups with quiet separators; invitation,
+AI/voice and provider setup forms use the same field spacing as profile settings. Preserve
+list cards and permission warnings where their boundary carries meaning.
+
+Use `Field` for persistent labels above controls. Connect `htmlFor` to the control's `id`;
+text that only looks like a label is insufficient. Do not wrap secondary buttons inside a
+label. Keep visible labels in automation, import and provider setup dialogs as well. Default labels are 13px medium-weight
 secondary text; hints stay 12px muted text. A vertical layout provides an actual 8px gap
 between label, control and helper text. Explicit extra-small fields keep a compact 6px gap.
 The label should identify the field without relying on placeholder text; omit placeholders

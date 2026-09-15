@@ -92,10 +92,10 @@ function NewTeamDialogForm({ onClose, onCreated, allowCustomSlug = false }: Omit
           <TeamAccentPicker value={created ? created.accentColor : color} onChange={setColor} disabled={pending || Boolean(created)} />
           {error ? <Text as="p" role="alert" variant="body" tone="danger">{error}</Text> : null}
           <div className="flex flex-wrap items-center justify-end gap-2">
-            <Button type="button" variant="ghost" size="sm" radius="full" onPress={close} isDisabled={pending}>
+            <Button type="button" variant="ghost" size="sm" radius="xl" onPress={close} isDisabled={pending}>
               {created ? "Continue without picture" : "Cancel"}
             </Button>
-            <Button type="submit" variant="primary" size="sm" radius="full"
+            <Button type="submit" variant="primary" size="sm" radius="xl"
               isDisabled={!name.trim() || pending} data-testid="sidebar-new-team-create">
               {pending ? (created ? "Saving picture…" : "Creating…") : created ? (file ? "Retry picture" : "Continue") : "Create team"}
             </Button>

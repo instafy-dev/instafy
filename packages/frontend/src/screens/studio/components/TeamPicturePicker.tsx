@@ -1,4 +1,6 @@
-import { useEffect, useRef, useState } from "react";
+import { IdentityPhotoButton } from "../../../components/IdentityPhotoButton";
+import { IDENTITY_IMAGE_ACCEPT } from "../../../lib/identityImages";
+import { useEffect, useState } from "react";
 import { Button } from "../../../components/Button";
 import { Text } from "../../../components/Text";
 import { OrgIdentity } from "../../../components/OrgIdentity";
@@ -14,7 +16,6 @@ export function TeamPicturePicker({
   disabled?: boolean;
   testId?: string;
 }) {
-  const input = useRef<HTMLInputElement>(null);
   const [preview, setPreview] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   useEffect(() => {
@@ -27,22 +28,18 @@ export function TeamPicturePicker({
     <div className="space-y-2" data-testid={testId}>
       <Text variant="caption" tone="muted">Team picture (optional)</Text>
       <div className="flex flex-wrap items-center gap-3">
-        <OrgIdentity name={name} avatarUrl={preview} accentColor={accentColor} className="h-12 w-12 text-sm" />
-        <input ref={input} type="file" accept="image/*" className="hidden" disabled={disabled}
-          data-testid={`${testId}-input`} onChange={(event) => {
-            const next = event.target.files?.[0];
-            event.target.value = "";
-            if (!next) return;
-            const invalid = validateTeamAvatar(next);
-            setError(invalid);
+        <IdentityPhotoButton square label={file ? "Change team picture" : "Upload team picture"}
+          accept={IDENTITY_IMAGE_ACCEPT} disabled={disabled} inputTestId={`${testId}-input`}
+          onSelect={next => {
+            const invalid = validateTeamAvatar(next); setError(invalid);
             if (!invalid) onChange(next);
-          }} />
-        <Button type="button" variant="outline" size="xs" radius="full" isDisabled={disabled}
-          onPress={() => input.current?.click()}>{file ? "Change picture" : "Add picture"}</Button>
+          }}>
+          <OrgIdentity name={name} avatarUrl={preview} accentColor={accentColor} className="h-16 w-16 text-base" />
+        </IdentityPhotoButton>
         {file ? <Button type="button" variant="ghost" size="xs" isDisabled={disabled}
           onPress={() => { onChange(null); setError(null); }}>Remove</Button> : null}
       </div>
-      <Text variant="caption" tone="muted">Images up to 2 MB. You can change this later in Team profile.</Text>
+      <Text variant="caption" tone="muted">PNG, JPEG or WebP, up to 2 MB. You can change this later in Team profile.</Text>
       {error ? <p role="alert" className="text-sm text-rose-600 dark:text-rose-400">{error}</p> : null}
     </div>
   );

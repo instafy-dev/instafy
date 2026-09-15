@@ -1,7 +1,8 @@
+import { useId } from "react";
+import { Field } from "../../../components/Field";
 import { Button } from "../../../components/Button";
 import { Input } from "../../../components/Input";
 import { Spinner } from "../../../components/Spinner";
-import { Text } from "../../../components/Text";
 import { Toggle } from "../../../components/Toggle";
 import { StudioDialogHeader } from "../../../components/aria/StudioDialogLayout";
 import { StudioDialogModal } from "../../../components/aria/StudioModal";
@@ -35,6 +36,7 @@ export function SkillsImportModal({
   onOpenAssistant,
   onSubmitImport,
 }: SkillsImportModalProps) {
+  const fieldId = useId();
   return (
     <StudioDialogModal
       isOpen={isOpen}
@@ -51,29 +53,25 @@ export function SkillsImportModal({
       />
 
       <div className="space-y-4 px-5 py-4">
-        <label className="space-y-1">
-          <Text as="span" variant="caption" tone="muted">
-            Source
-          </Text>
-          <Input
+        <Field label="Source" htmlFor={`${fieldId}-skills-import-source`}>
+          <Input id={`${fieldId}-skills-import-source`}
             value={importSource}
             onChange={(event) => onImportSourceChange(event.target.value)}
             placeholder="https://github.com/owner/repo/tree/main/path/to/skill"
+            disabled={importPending}
             data-testid="skills-import-source"
           />
-        </label>
+        </Field>
 
-        <label className="space-y-1">
-          <Text as="span" variant="caption" tone="muted">
-            Optional skill name
-          </Text>
-          <Input
+        <Field label="Optional skill name" htmlFor={`${fieldId}-skills-import-name`}>
+          <Input id={`${fieldId}-skills-import-name`}
             value={importName}
             onChange={(event) => onImportNameChange(event.target.value)}
             placeholder="playwright-review"
+            disabled={importPending}
             data-testid="skills-import-name"
           />
-        </label>
+        </Field>
 
         <Toggle
           size="sm"

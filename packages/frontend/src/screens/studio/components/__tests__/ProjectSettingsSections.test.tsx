@@ -136,6 +136,24 @@ describe("ProjectSettingsSections", () => {
     ).toBe(true);
   });
 
+  it("labels invite fields and locks their drafts while preparing an invite", async () => {
+    const props = createProps();
+    await act(async () => root.render(<ProjectSettingsSections {...props} />));
+    const email = container.querySelector<HTMLInputElement>('[data-testid="project-member-invite-email"]')!;
+    const access = container.querySelector<HTMLSelectElement>('[data-testid="project-member-invite-role"]')!;
+    const linkRole = container.querySelector<HTMLSelectElement>('[data-testid="org-invite-link-role"]')!;
+    expect(email.labels?.[0]?.textContent).toBe("Email");
+    expect(access.labels?.[0]?.textContent).toBe("Access");
+    expect(linkRole.labels?.[0]?.textContent).toBe("Access for replacement link");
+    expect(email.disabled).toBe(false);
+    await act(async () => root.render(<ProjectSettingsSections {...props} projectInvitePending />));
+    expect(email.disabled).toBe(true);
+    expect(access.disabled).toBe(true);
+    await act(async () => root.render(<ProjectSettingsSections {...props} canShareProject={false} />));
+    expect(email.disabled).toBe(true);
+    expect(access.disabled).toBe(true);
+  });
+
   it("labels the space name and gates submit/cancel while retaining keyboard reset", async () => {
     const props = createProps({ showProjectBasics: true, activeProjectId: null, projectNameDirty: true });
     await act(async () => root.render(<ProjectSettingsSections {...props} />));
