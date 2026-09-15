@@ -60,6 +60,12 @@ Controller service-role operations are the only intentional exception. They rema
 
 Origin registration is part of the same runtime generation. Mutation tokens must carry a runtime ID; managed runtimes may register only their exact preallocated active runtime/lease origin instance, while a private self-hosted runtime must use its controller-issued signed runtime UUID as the origin ID. An unbound private preallocation is bound to that UUID rather than trusting a caller-selected origin. The stable hosted-gateway namespace is therefore unreachable to private registrations, an origin ID can never move between projects, and workspace-origin creation plus instance binding happens in one locked transaction. Presence and commit receipts recheck that same runtime/origin binding.
 
+Stopping a runtime retains its released origin binding. A live, unleased private runtime may
+reactivate that canonical binding after its owner authorizes a successor generation, preserving
+the runtime and origin IDs. Registration still rejects the old generation, another owner, a
+different project/runtime binding, and released managed or lease-bound allocations. Presence
+alone cannot reactivate a released binding; successful origin registration must happen first.
+
 Private local startup does not call the hosted `/runtime/request` allocator or create an allocator lease. The CLI first mints the owner-bound unleased runtime token, the runtime registers that exact signed identity, and only then the runtime-agent requests `/tunnels/request` with its runtime ID and no lease ID. The controller revalidates the private owner, signed generation, live runtime status, and exact target before issuing the tunnel. Provider-managed agents retain their explicit lease-bound tunnel flow; omitting that lease fails closed for them.
 
 ## Workspace path containment
