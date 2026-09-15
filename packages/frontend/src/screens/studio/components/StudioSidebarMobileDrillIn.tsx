@@ -1,5 +1,5 @@
 import { NavArrowLeft } from "iconoir-react";
-import type { ReactNode } from "react";
+import { useLayoutEffect, useRef, type ReactNode } from "react";
 import { IconButton } from "../../../components/Button";
 import { Text } from "../../../components/Text";
 import { DRAWER_ICON_BUTTON_TONE_CLASS } from "../../../components/listRowStyles";
@@ -23,13 +23,26 @@ export function StudioSidebarMobileDrillIn({
   onBack,
   children,
 }: StudioSidebarMobileDrillInProps) {
+  const panelRef = useRef<HTMLDivElement | null>(null);
+  useLayoutEffect(() => {
+    if (open) panelRef.current?.focus();
+  }, [open]);
+
   if (!open) {
     return null;
   }
 
   return (
     <div
-      className="absolute inset-0 z-30 flex flex-col border-r border-slate-200/70 bg-slate-50/95 px-3 pb-4 pt-2 backdrop-blur-sm dark:border-[color:var(--color-studio-dark-divider)] dark:bg-[var(--color-studio-dark-rail-muted)]"
+      ref={panelRef}
+      tabIndex={-1}
+      onKeyDown={(event) => {
+        if (event.key !== "Escape" || event.defaultPrevented) return;
+        event.preventDefault();
+        event.stopPropagation();
+        onBack();
+      }}
+      className="absolute inset-0 z-30 flex flex-col border-r border-slate-200/70 bg-slate-50/95 px-3 pb-4 pt-2 outline-none backdrop-blur-sm dark:border-[color:var(--color-studio-dark-divider)] dark:bg-[var(--color-studio-dark-rail-muted)]"
       data-testid={testId}
     >
       <div className="flex shrink-0 items-center gap-2 pb-2">

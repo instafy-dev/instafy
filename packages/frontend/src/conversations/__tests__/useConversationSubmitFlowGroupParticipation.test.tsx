@@ -12,6 +12,12 @@ const sendPromptToControllerMock = vi.hoisted(() => vi.fn());
 const queueAutoTitleConversationMock = vi.hoisted(() => vi.fn());
 const resolveLocalCapabilityHandleMock = vi.hoisted(() => vi.fn());
 const runLocalCapabilityConversationFlowMock = vi.hoisted(() => vi.fn());
+const uploadImagesMock = vi.hoisted(() => vi.fn());
+
+vi.mock("../conversationSubmitHelpers", async () => ({
+  ...await vi.importActual<typeof import("../conversationSubmitHelpers")>("../conversationSubmitHelpers"),
+  uploadConversationImageAttachments: uploadImagesMock,
+}));
 
 const controllerDispatchMock = vi.hoisted(() => ({
   resolveProjectId: vi.fn(),
@@ -141,6 +147,7 @@ describe("useConversationSubmitFlow group participation", () => {
     queueAutoTitleConversationMock.mockReset();
     resolveLocalCapabilityHandleMock.mockReset();
     runLocalCapabilityConversationFlowMock.mockReset();
+    uploadImagesMock.mockReset();
     controllerDispatchMock.resolveProjectId.mockReset();
     controllerDispatchMock.resolveRuntimeTarget.mockReset();
     controllerDispatchMock.ensureConversation.mockReset();
@@ -181,6 +188,25 @@ describe("useConversationSubmitFlow group participation", () => {
     });
     container.remove();
     delete (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT;
+  });
+
+  it("does not publish a failed image upload and retries with exactly one complete message", async () => {
+    resolveParticipationMock.mockResolvedValue("unsupported");
+    let failUpload!: (error: Error) => void;
+    uploadImagesMock.mockImplementationOnce(() => new Promise((_, reject) => { failUpload = reject; }));
+    const options = { imageFiles: [new File(["image"], "photo.png", { type: "image/png" })] };
+    let pending!: ReturnType<SubmitFlow["handleSubmit"]>;
+    await act(async () => { pending = flow!.handleSubmit(conversation.localId, "Inspect this image", options); });
+    expect(appendMessages).not.toHaveBeenCalled();
+    await act(async () => failUpload(new Error("origin access denied")));
+    expect(await pending).toEqual({ ok: false, reason: "image_upload_failed" });
+    expect(appendMessages).not.toHaveBeenCalled();
+    expect(sendPromptToControllerMock).not.toHaveBeenCalled();
+    const attachments = [{ kind: "image", workspacePath: "uploaded.png", mimeType: "image/png" }];
+    uploadImagesMock.mockResolvedValueOnce(attachments);
+    await act(async () => { await flow!.handleSubmit(conversation.localId, "Inspect this image", options); });
+    expect(appendMessages).toHaveBeenCalledTimes(1);
+    expect(appendMessages.mock.calls[0][1]).toEqual([expect.objectContaining({ content: "Inspect this image", metadata: expect.objectContaining({ attachments }) })]);
   });
 
   it("records a silent human turn without dispatching or starting a runtime", async () => {

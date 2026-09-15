@@ -99,7 +99,9 @@ panel as **All chats**, Files and Changes. These panels share one slot, so openi
 replaces the other while the current conversation stays visible. Team and space selection
 keeps its existing grouped list; choosing a space closes the picker. The close control or
 Escape returns to the sidebar. On narrow layouts the picker remains a drill-in inside
-navigation, with Back returning to the recent chats list. Browser history remembers the
+navigation, with Back returning to the recent chats list. Android's system Back dismisses
+the focused picker or topmost dialog first, then navigation, without reversing a team or
+space switch. Browser history remembers the
 picker through `workspaceTab=workspaces`.
 
 Open conversation tabs are remembered per space in the current browser. Previously loaded chat
@@ -128,6 +130,10 @@ Reading position follows the first visible message and its offset, including aft
 pages are trimmed. If that message is no longer loaded, the view starts at the oldest available
 message, where earlier history can be requested. Conversations left at the bottom keep following
 new messages.
+When reading above the latest messages, a **Jump to latest** button stays above the composer.
+It changes to **New messages** when visible messages (including attachments) arrive, without moving
+their reading position. Jumping or scrolling to the bottom clears the notice and resumes
+following. Initial history loads and older-page prepends do not count as new arrivals.
 
 ## Navigation and reading positions
 
@@ -271,21 +277,45 @@ Automations uses a flat empty state on the shared panel surface, with a labeled
 
 ## Composer
 
-The composer uses one compact, rounded writing row on phones and wider screens. It grows
-with the draft, then scrolls within the editor. Image upload and other message tools live
-in the `+` menu.
+The composer uses one compact, rounded writing row for short drafts on phones and wider
+screens. When text wraps or contains a newline, the editor takes the full width above a
+separate row of navigation, message tools, and Send controls. Shortening the draft to fit
+beside the controls restores the compact row without replacing the editor or losing focus.
+Long drafts grow to the existing line limit, then scroll within the editor. Image upload
+and other message tools live in the `+` menu.
+The action menu scrolls within the available screen height. On Android, Back dismisses
+the current composer menu, saved-message popover, or image preview before leaving the chat.
+Selected images appear in one horizontally scrolling thumbnail strip above the text field.
+Each image has its own remove control and a larger preview; adding more images does not
+grow the strip vertically. Removing an image keeps the remaining attachments and text.
+Selected images and markup originals remain available when switching Studio panels, chats,
+or spaces within the same signed-in session. They are kept in memory, scoped to the user,
+space, and chat, and are released on sign-out or Studio session teardown. Across drafts,
+at most 32 selected images and 50 MiB of File data (including markup originals) are retained;
+new additions or edits that exceed this limit show an error and preserve existing drafts.
+Keyboard focus moves to the next remove control (or back to the editor when none remain),
+and image previews contain focus until closed, then return it to the originating thumbnail.
+
+Image submissions keep their draft and previews while uploading. A failed upload leaves
+them available to retry and does not add an unsent message to the transcript. Successful
+uploads clear only the submitted images and unchanged source draft, including when the
+user has switched to another conversation or space in the meantime.
+While the send is pending, the strip shows **Uploading images…** and disables removal;
+removing a local preview cannot cancel an upload already included in the send.
 
 On clients with voice input, the trailing action is the microphone for an empty draft and
 Send or Steer for a text or image draft. Recording and transcription keep the microphone
 available until capture finishes. Use **Dictate message** in `+` to start voice input with
 an existing draft. Clients without voice input retain the Send control.
+Image attachments require an accompanying text message: an image-only draft shows this
+requirement and disables Send until text is added. Images cannot be queued or used to steer.
 
 ### Delivery actions
 
 The composer exposes three one-shot actions instead of a persistent delivery mode:
 
 - **Steer** adds the message to the matching agent's active turn. While that turn is active,
-  `Enter` and the primary send control steer it.
+  the primary send control steers it, as does `Enter` with a desktop keyboard.
 - **Queue** saves the message for the matching agent's next turn. Use `Cmd+Enter` on macOS or
   `Ctrl+Enter` elsewhere. If there is no matching active turn, the controller may dispatch it
   immediately rather than leave an idle queue entry behind.
@@ -294,8 +324,9 @@ The composer exposes three one-shot actions instead of a persistent delivery mod
   composer actions. Stashes never auto-send, remain private to their author, and are capped per
   author and conversation at 50 drafts and 5 MiB of serialized draft data.
 
-`Shift+Enter` always inserts a newline. When no matching agent is active, ordinary `Enter` sends a
-new turn. A queued message's edit action is named **Edit**, reserving **Steer** for genuine active-
+On touch-oriented devices, ordinary `Enter` adds a line; use the send control to send or steer.
+`Shift+Enter` always inserts a newline. With a desktop keyboard and no matching active agent,
+ordinary `Enter` sends a new turn. A queued message's edit action is named **Edit**, reserving **Steer** for genuine active-
 turn input.
 
 ## Scope Guardrails

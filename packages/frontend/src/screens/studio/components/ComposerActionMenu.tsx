@@ -21,6 +21,7 @@ import { Button, IconButton } from "../../../components/Button";
 import { Text } from "../../../components/Text";
 import { StudioDialogPopover } from "../../../components/aria/StudioPopover";
 import { CHAT_SLASH_COMMANDS } from "../../../conversations/slashCommands";
+import { useNativeBackButtonAction } from "../../../native/useNativeBackButtonAction";
 
 type ComposerActionMenuView = "main" | "commands";
 
@@ -97,6 +98,7 @@ export function ComposerActionMenu({
   triggerIconClassName,
   mutationDisabled = false,
   inviteActionLabel = "Invite teammates",
+  touchLikeInput = false,
 }: {
   disabled?: boolean;
   showBrowserAction?: boolean;
@@ -128,6 +130,7 @@ export function ComposerActionMenu({
   triggerIconClassName: string;
   mutationDisabled?: boolean;
   inviteActionLabel?: string;
+  touchLikeInput?: boolean;
 }) {
   const [open, setOpen] = useState(false);
   const [view, setView] = useState<ComposerActionMenuView>("main");
@@ -143,6 +146,11 @@ export function ComposerActionMenu({
     setOpen(false);
     setView("main");
   }, []);
+
+  useNativeBackButtonAction(open, () => {
+    if (view === "commands") setView("main");
+    else closeMenu();
+  });
 
   const visibleCommands = useMemo(
     () => CHAT_SLASH_COMMANDS.filter((command) => !command.hidden),
@@ -301,7 +309,7 @@ export function ComposerActionMenu({
                   className="px-3 pb-1 pt-0.5 text-xxs text-slate-400 dark:text-slate-500"
                   data-testid="composer-action-menu-enter-hint"
                 >
-                  Enter sends or steers · ⇧Enter adds a line
+                  {touchLikeInput ? "Enter adds a line · Use the send button to send or steer" : "Enter sends or steers · ⇧Enter adds a line"}
                 </p>
                 <div
                   role="separator"

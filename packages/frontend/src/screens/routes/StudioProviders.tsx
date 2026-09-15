@@ -13,8 +13,11 @@ import { ProjectAccessProvider } from "../../projects/ProjectAccessProvider";
 import { ProjectStateProvider } from "../../projects/ProjectStateProvider";
 import { RequireAuth } from "../../components/RequireAuth";
 import { NativeExtensionRequestProvider } from "../../extensions/NativeExtensionRequestProvider";
+import { ChatAttachmentDraftsProvider } from "../../conversations/ChatAttachmentDraftsProvider";
+import { useAuth } from "../../providers/AuthProvider";
 
 export function StudioProviders({ children }: { children: ReactNode }) {
+  const { user } = useAuth();
   return (
     <RequireAuth>
       <StatusProvider>
@@ -28,7 +31,9 @@ export function StudioProviders({ children }: { children: ReactNode }) {
                       <CreditsProvider>
                         <RuntimeProvider>
                           <NativeExtensionRequestProvider>
-                            <ConversationsProvider>{children}</ConversationsProvider>
+                            <ChatAttachmentDraftsProvider sessionKey={user?.id ?? null}>
+                              <ConversationsProvider>{children}</ConversationsProvider>
+                            </ChatAttachmentDraftsProvider>
                           </NativeExtensionRequestProvider>
                         </RuntimeProvider>
                       </CreditsProvider>

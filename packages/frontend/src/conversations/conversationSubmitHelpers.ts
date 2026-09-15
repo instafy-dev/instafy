@@ -124,6 +124,13 @@ export function mimeTypeToExtension(mimeType: string): string {
 
 export function shouldRetryChatImageUploadError(message: string): boolean {
   const lower = (message ?? "").toLowerCase();
+  const statusMatch = lower.match(/(?:origin apply|request origin access token) failed \((\d+)\)/);
+  if (statusMatch) {
+    const status = Number(statusMatch[1]);
+    // A permanent rejection must not be retried just because its detail mentions
+    // an offline runtime or a network timeout.
+    return status === 408 || status === 429 || (status >= 500 && status <= 599);
+  }
   if (
     lower.includes("failed to fetch") ||
     lower.includes("networkerror") ||
@@ -134,13 +141,6 @@ export function shouldRetryChatImageUploadError(message: string): boolean {
     lower.includes("aborterror")
   ) {
     return true;
-  }
-  const match = lower.match(/origin apply failed \((\d+)\)/);
-  if (match) {
-    const status = Number(match[1]);
-    if (status === 408 || status === 429 || (status >= 500 && status <= 599)) {
-      return true;
-    }
   }
   return (
     lower.includes("no origin available") ||
@@ -203,67 +203,98 @@ export async function uploadConversationImageAttachments(args: {
     mimeType: string | null;
     sizeBytes: number;
   }> = [];
+  // Only this submission's unpredictable paths are eligible for rollback.
+  // The service returns the actual target even when an upload reply is lost.
+  const attemptedPaths = new Set<string>();
+  let target: Awaited<ReturnType<typeof applyWorkspaceChangesViaOrigin>>["target"];
 
-  for (const imageFile of imageFiles) {
-    const safeName = sanitizeChatUploadFileName(imageFile.name || "image");
-    const ext = safeName.includes(".") ? "" : mimeTypeToExtension(imageFile.type);
-    const fileName = ext ? `${safeName}.${ext}` : safeName;
-    const uploadId =
-      typeof crypto !== "undefined" && "randomUUID" in crypto
-        ? crypto.randomUUID()
-        : `${Date.now()}-${Math.random().toString(16).slice(2)}`;
-    const workspacePath = `chat-upload-${Date.now()}-${uploadId}-${fileName}`;
+  try {
+    for (const imageFile of imageFiles) {
+      const safeName = sanitizeChatUploadFileName(imageFile.name || "image");
+      const ext = safeName.includes(".") ? "" : mimeTypeToExtension(imageFile.type);
+      const fileName = ext ? `${safeName}.${ext}` : safeName;
+      const uploadId =
+        typeof crypto !== "undefined" && "randomUUID" in crypto
+          ? crypto.randomUUID()
+          : `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+      const workspacePath = `chat-upload-${Date.now()}-${uploadId}-${fileName}`;
 
-    const bytes = new Uint8Array(await imageFile.arrayBuffer());
-    const uploadDeadline = Date.now() + 60_000;
-    let uploadAttempt = 0;
-    let result = await applyWorkspaceChangesViaOrigin({
-      projectId,
-      files: [
-        {
-          path: workspacePath,
-          bytes,
-          encoding: "binary",
-        },
-      ],
-      deletes: [],
-      runtimeId,
-      preferRuntime: runtimeId,
-      accessToken: null,
-    });
-    while (!result.ok && Date.now() < uploadDeadline) {
-      const errorMessage = result.error ?? "Failed to upload image.";
-      if (!shouldRetryChatImageUploadError(errorMessage)) {
-        break;
+      const bytes = new Uint8Array(await imageFile.arrayBuffer());
+      const uploadDeadline = Date.now() + 60_000;
+      let uploadAttempt = 0;
+      const upload = async () => {
+        attemptedPaths.add(workspacePath);
+        const result = await applyWorkspaceChangesViaOrigin({
+          projectId,
+          files: [{ path: workspacePath, bytes, encoding: "binary" }],
+          deletes: [],
+          runtimeId,
+          preferRuntime: runtimeId,
+          accessToken: null,
+          target,
+          timeoutMs: Math.max(1, Math.min(30_000, uploadDeadline - Date.now())),
+        });
+        target ??= result.target;
+        return result;
+      };
+      let result = await upload();
+      while (!result.ok && Date.now() < uploadDeadline) {
+        const errorMessage = result.error ?? "Failed to upload image.";
+        if (!shouldRetryChatImageUploadError(errorMessage)) {
+          break;
+        }
+        uploadAttempt += 1;
+        await sleep(Math.max(0, Math.min(500 * uploadAttempt, 2_000, uploadDeadline - Date.now())));
+        if (Date.now() >= uploadDeadline) break;
+        result = await upload();
       }
-      uploadAttempt += 1;
-      await sleep(Math.min(500 * uploadAttempt, 2_000));
-      result = await applyWorkspaceChangesViaOrigin({
-        projectId,
-        files: [
-          {
-            path: workspacePath,
-            bytes,
-            encoding: "binary",
-          },
-        ],
-        deletes: [],
-        runtimeId,
-        preferRuntime: runtimeId,
-        accessToken: null,
+      if (!result.ok) {
+        throw new Error(result.error ?? "Failed to upload image.");
+      }
+
+      attachments.push({
+        kind: "image",
+        workspacePath,
+        fileName,
+        mimeType: imageFile.type || null,
+        sizeBytes: imageFile.size,
       });
     }
-    if (!result.ok) {
-      throw new Error(result.error ?? "Failed to upload image.");
+  } catch (uploadError) {
+    if (target && attemptedPaths.size > 0) {
+      // An aborted response can still have written its file. Include that path,
+      // and retry briefly if the origin is finishing the previous transaction.
+      const cleanupDeadline = Date.now() + 5_000;
+      let cleaned = false;
+      while (Date.now() < cleanupDeadline) {
+        try {
+          const result = await applyWorkspaceChangesViaOrigin({
+            projectId,
+            files: [],
+            deletes: [...attemptedPaths],
+            runtimeId,
+            preferRuntime: runtimeId,
+            target,
+            timeoutMs: Math.max(1, cleanupDeadline - Date.now()),
+          });
+          if (result.ok) {
+            cleaned = true;
+            break;
+          }
+          const error = result.error ?? "";
+          if (!shouldRetryChatImageUploadError(error) &&
+            !/origin apply failed \(409\).*workspace is already applying changes/i.test(error)) break;
+        } catch (_cleanupError) {
+          break;
+        }
+        await sleep(Math.max(0, Math.min(250, cleanupDeadline - Date.now())));
+      }
+      if (!cleaned) {
+        const message = uploadError instanceof Error ? uploadError.message : String(uploadError);
+        throw Object.assign(new Error(`${message} Cleanup could not finish; some uploaded files may remain in the workspace.`), { cause: uploadError });
+      }
     }
-
-    attachments.push({
-      kind: "image",
-      workspacePath,
-      fileName,
-      mimeType: imageFile.type || null,
-      sizeBytes: imageFile.size,
-    });
+    throw uploadError;
   }
 
   return attachments;

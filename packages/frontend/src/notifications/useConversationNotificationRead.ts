@@ -3,6 +3,7 @@ import { readConversationProductNotifications } from "../services/runtimeControl
 import { UUID_PATTERN } from "./notificationContract";
 import { getNotificationSession, isNotificationSessionCurrent } from "./notificationSession";
 import { NOTIFICATION_RECEIVED_EVENT } from "./notificationPresentation";
+import { isAppForeground, subscribeAppForeground } from "../native/appForeground";
 
 const MESSAGE_SELECTOR = "[data-chat-message-id]";
 const BATCH_SIZE = 100;
@@ -53,6 +54,7 @@ export function useConversationNotificationRead({
     let inFlight = false;
     let failures = 0;
     let timer: number | null = null;
+    let exposureGeneration = 0;
     const observed = new Map<Element, string>();
     const visible = new Set<Element>();
     const acknowledged = new Set<string>();
@@ -83,33 +85,35 @@ export function useConversationNotificationRead({
       .map((element) => observed.get(element))
       .filter((id): id is string => Boolean(id && !acknowledged.has(id))))].slice(0, BATCH_SIZE);
     const schedule = (delay = COALESCE_MS) => {
-      if (!current() || document.visibilityState !== "visible" || inFlight || timer !== null || visibleIds().length === 0) return;
+      if (!current() || !isAppForeground() || inFlight || timer !== null || visibleIds().length === 0) return;
       timer = window.setTimeout(() => { timer = null; void flush(); }, delay);
     };
     const flush = async () => {
-      if (!current() || document.visibilityState !== "visible" || inFlight) return;
+      if (!current() || !isAppForeground() || inFlight) return;
       const messageIds = visibleIds();
       if (!messageIds.length) return;
       inFlight = true;
+      const generation = exposureGeneration;
       let retryDelay: number | null = null;
       try {
         await readConversationProductNotifications({
           conversationId, messageIds, expectedUserId: currentUserId,
           accessToken: session.accessToken,
-          isCurrent: () => current() && document.visibilityState === "visible",
+          isCurrent: () => current() && generation === exposureGeneration && isAppForeground(),
         });
-        if (!current()) return;
+        if (!current() || generation !== exposureGeneration || !isAppForeground()) return;
         messageIds.forEach((id) => acknowledged.add(id));
         failures = 0;
         window.dispatchEvent(new Event(NOTIFICATION_RECEIVED_EVENT));
         retryDelay = COALESCE_MS;
       } catch {
-        if (!current()) return;
+        if (!current() || generation !== exposureGeneration) return;
         failures += 1;
         if (failures < MAX_ATTEMPTS) retryDelay = 1_000 * 2 ** (failures - 1);
       } finally {
         inFlight = false;
         if (retryDelay !== null) schedule(retryDelay);
+        else if (generation !== exposureGeneration) schedule();
       }
     };
     // A viewport root accounts for both the chat's scroll clipping and whether
@@ -118,7 +122,7 @@ export function useConversationNotificationRead({
       if (!current()) return;
       for (const entry of entries) {
         if (!observed.has(entry.target)) continue;
-        if (document.visibilityState === "visible" && entry.isIntersecting &&
+        if (isAppForeground() && entry.isIntersecting &&
           entry.intersectionRect.width > 0 && entry.intersectionRect.height > 0) {
           visible.add(entry.target);
         } else visible.delete(entry.target);
@@ -148,17 +152,18 @@ export function useConversationNotificationRead({
     const mutations = new MutationObserver(synchronize);
     mutations.observe(root, { childList: true, subtree: true, attributes: true, attributeFilter: ["data-chat-message-id"] });
     const refreshVisibility = () => {
+      exposureGeneration += 1;
       clearTimer();
       visible.clear();
       failures = 0;
       observer.disconnect();
-      if (document.visibilityState === "visible" && current()) {
+      if (isAppForeground() && current()) {
         // Require a fresh browser observation after backgrounding; stale
         // intersections must not acknowledge a newly selected hidden pane.
         for (const element of observed.keys()) observer.observe(element);
       }
     };
-    document.addEventListener("visibilitychange", refreshVisibility);
+    const unsubscribeForeground = subscribeAppForeground(refreshVisibility);
     window.addEventListener("focus", refreshVisibility);
     window.addEventListener("online", refreshVisibility);
     const reconsiderExposure = () => { failures = 0; schedule(); };
@@ -170,7 +175,7 @@ export function useConversationNotificationRead({
       clearTimer();
       observer.disconnect();
       mutations.disconnect();
-      document.removeEventListener("visibilitychange", refreshVisibility);
+      unsubscribeForeground();
       window.removeEventListener("focus", refreshVisibility);
       window.removeEventListener("online", refreshVisibility);
       root.removeEventListener("scroll", reconsiderExposure);

@@ -6,7 +6,8 @@ import type {
   KeyboardEventHandler,
   RefObject,
 } from "react";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useId, useRef, useState } from "react";
+import { useNativeBackButtonAction } from "../../../native/useNativeBackButtonAction";
 import {
   Archery,
   Bookmark,
@@ -28,7 +29,6 @@ import { StudioPopover } from "../../../components/aria/StudioPopover";
 import {
   DARK_PANEL_BORDER_CLASS,
   DARK_PANEL_SHADOW_CLASS,
-  DARK_PANEL_SOFT_BG_CLASS,
   DARK_RAISED_CONTROL_BG_CLASS,
   DARK_RAISED_CONTROL_CLASS,
 } from "../../../theme/darkSurfaces";
@@ -66,6 +66,7 @@ import type { PendingChatImageAttachment } from "./useChatComposerAttachments";
 import { CHAT_COMPOSER_COLUMN_CLASS_NAME } from "./ChatColumn";
 import { useTouchSendModePicker } from "./useTouchSendModePicker";
 import type { TouchSendModePickerOutcome } from "./touchSendModePicker";
+import { useComposerMultilineLayout } from "./useComposerMultilineLayout";
 
 type ChatComposerSurfaceProps = {
   browserDockProps: ComponentProps<typeof ChatBrowserDock>;
@@ -73,6 +74,7 @@ type ChatComposerSurfaceProps = {
   composerAutoHidden: boolean;
   browserModeActive?: boolean;
   compactBrowserViewport: boolean;
+  touchLikeInput?: boolean;
   onSubmit: FormEventHandler<HTMLFormElement>;
   queueSurfaceProps: ComponentProps<typeof ChatSendQueueSurface>;
   stashTrayProps?: ComponentProps<typeof ChatMessageStashTray> | null;
@@ -208,6 +210,7 @@ export function ChatComposerSurface({
   composerAutoHidden,
   browserModeActive = false,
   compactBrowserViewport,
+  touchLikeInput = false,
   onSubmit,
   queueSurfaceProps,
   stashTrayProps = null,
@@ -289,6 +292,9 @@ export function ChatComposerSurface({
   const showVoiceSecondaryStatus = showVoicePrimaryAction && showVoiceStatus;
   const composerHasUsablePayload =
     chatInputProps.value.trim().length > 0 || imageAttachments.length > 0;
+  const imageOnlyDraft = imageAttachments.length > 0 && chatInputProps.value.trim().length === 0;
+  const imageMessageHintId = useId();
+  const primarySendDisabled = sendButtonDisabled || imageOnlyDraft;
   const voiceInputAvailable = showVoicePrimaryAction || showVoiceSecondaryAction;
   const voiceCaptureInProgress =
     voiceConversationActionStripProps.voiceActionActive ||
@@ -386,19 +392,25 @@ export function ChatComposerSurface({
         : null;
   const visiblePrimaryActionMode = visibleDesktopSendModifierMode ?? primaryActionMode;
   const primaryActionLabel =
-    visibleDesktopSendModifierMode === "queue"
+    imageOnlyDraft
+      ? "Add a message to send images"
+      : visibleDesktopSendModifierMode === "queue"
       ? "Queue message (Command or Ctrl plus Enter)"
       : visibleDesktopSendModifierMode === "stash"
         ? "Stash draft (Command or Ctrl plus Shift plus Enter)"
         : primaryActionMode === "steer"
-          ? "Steer current reply (Enter)"
+          ? touchLikeInput ? "Steer current reply" : "Steer current reply (Enter)"
           : "Send message";
   const primaryActionStatus =
-    visibleDesktopSendModifierMode === "queue"
+    imageOnlyDraft
+      ? "Add a message to send with your images."
+      : visibleDesktopSendModifierMode === "queue"
       ? "Queue selected. Press Enter or click to queue the message."
       : visibleDesktopSendModifierMode === "stash"
         ? "Stash selected. Press Enter or click to stash the draft."
-        : primaryActionMode === "steer"
+        : touchLikeInput
+          ? "Enter adds a line. Use the send button to send or steer."
+          : primaryActionMode === "steer"
           ? "Enter steers the current reply."
           : "Enter sends the message.";
   // Hold-to-talk must keep the same microphone DOM node from press through
@@ -457,8 +469,33 @@ export function ChatComposerSurface({
   // Keep Lexical in the same tree position while its primary action changes.
   // The editor grows line by line, capped per viewport in chatInputGrowth.ts.
   const composerInlineControlsInTextRow = !browserComposerCondensed && !showVoiceActiveStrip;
+  const composerTextRowRef = useRef<HTMLDivElement | null>(null);
+  const composerMultiline = useComposerMultilineLayout(
+    composerTextRowRef,
+    composerInlineControlsInTextRow,
+  );
   const foldSuggestionIntoMenu = showMobileGhostSuggestionAcceptButton;
   const imageUploadDisabled = mutationDisabled || sendingAttachment || onboardingInputLocked;
+  const imageRemoveButtonsRef = useRef(new Map<string, HTMLButtonElement>());
+
+  const handleRemoveImageAttachment = (attachmentId: string) => {
+    // A submitted File is already captured by the upload transaction. Removing
+    // its preview cannot cancel that send, so keep it visible until it settles.
+    if (sendingAttachment) return;
+    const removeButton = imageRemoveButtonsRef.current.get(attachmentId);
+    if (removeButton && document.activeElement === removeButton) {
+      const index = imageAttachments.findIndex((attachment) => attachment.id === attachmentId);
+      const neighbor = imageAttachments[index + 1] ?? imageAttachments[index - 1];
+      const nextButton = neighbor ? imageRemoveButtonsRef.current.get(neighbor.id) : null;
+      if (nextButton) {
+        nextButton.focus({ preventScroll: true });
+        nextButton.scrollIntoView({ block: "nearest", inline: "nearest" });
+      } else {
+        chatInputRef.current?.focus();
+      }
+    }
+    onRemoveImageAttachment(attachmentId);
+  };
 
   useEffect(() => {
     if (typeof window === "undefined") {
@@ -648,6 +685,15 @@ export function ChatComposerSurface({
     [queueSurfaceProps, setExternalQueueExpanded],
   );
 
+  useNativeBackButtonAction(openSavedMessagePanel !== null && !queueEditingItem, () => {
+    // Use the same path as Escape, including cancelling an active keyboard
+    // reorder before dismissing the queue, and restoring its trigger focus.
+    const content = savedMessagePopoverContentRef.current;
+    const focused = document.activeElement;
+    const target = content?.contains(focused) ? focused : content;
+    target?.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", code: "Escape", bubbles: true, cancelable: true }));
+  });
+
   const savedMessagePopoverTriggerRef =
     openSavedMessagePanel === "stash" ? stashTrayTriggerRef : queueTriggerRef;
 
@@ -739,7 +785,7 @@ export function ChatComposerSurface({
 
   const touchSendModePicker = useTouchSendModePicker({
     primaryMode: primaryActionMode,
-    primaryDisabled: mutationDisabled || sendButtonDisabled,
+    primaryDisabled: mutationDisabled || primarySendDisabled,
     queueDisabled:
       mutationDisabled ||
       queueMessageDisabled === true ||
@@ -803,7 +849,7 @@ export function ChatComposerSurface({
         onStashDraftFromComposer?.();
         return;
       }
-      if (sendButtonDisabled) {
+      if (primarySendDisabled) {
         return;
       }
       onSendButtonPress?.({ pointerType: "mouse" } as never);
@@ -813,7 +859,7 @@ export function ChatComposerSurface({
       onSendButtonPress,
       onStashDraftFromComposer,
       resolveAvailableDesktopSendModifierMode,
-      sendButtonDisabled,
+      primarySendDisabled,
       visibleDesktopSendModifierMode,
     ],
   );
@@ -843,6 +889,7 @@ export function ChatComposerSurface({
   const actionMenuNode = (
     <ComposerActionMenu
       {...composerActionMenuProps}
+      touchLikeInput={touchLikeInput}
       mutationDisabled={mutationDisabled}
       onUploadImage={onOpenImagePicker}
       uploadImageDisabled={imageUploadDisabled}
@@ -920,9 +967,10 @@ export function ChatComposerSurface({
           onClick={handleSendClick}
           isDisabled={
             mutationDisabled ||
-            (visibleDesktopSendModifierMode === null && sendButtonDisabled)
+            (visibleDesktopSendModifierMode === null && primarySendDisabled)
           }
           aria-label={primaryActionLabel}
+          aria-describedby={imageOnlyDraft ? imageMessageHintId : undefined}
           title={primaryActionLabel}
           style={{ touchAction: "none" }}
           variant={sendButtonVariant === "primary" ? "primary" : "ghost"}
@@ -1312,6 +1360,8 @@ export function ChatComposerSurface({
               }
               data-testid="chat-composer-surface"
               data-browser-composer-condensed={browserComposerCondensed ? "true" : undefined}
+              onDragOver={onDragOver}
+              onDrop={onDrop}
             >
               <span
                 role="status"
@@ -1326,21 +1376,83 @@ export function ChatComposerSurface({
                     : "Voice input is available. Type a message to send."
                   : primaryActionStatus}
               </span>
-              {/* The editor stays mounted while the primary slot switches from
-                  mic to Send. Controls stay bottom-aligned as the text grows. */}
+              {imageAttachments.length > 0 ? (
+                <div className="mb-1 min-w-0" data-testid="chat-image-upload-preview">
+                  <ul
+                    aria-label="Selected images"
+                    className="flex min-w-0 max-w-full gap-2 overflow-x-auto overscroll-x-contain p-1"
+                    data-testid="chat-image-upload-strip"
+                  >
+                    {imageAttachments.map((attachment, index) => (
+                      <li key={attachment.id} className="relative w-20 flex-none">
+                        <button
+                          type="button"
+                          onClick={() => onOpenImage(attachment.previewUrl, attachment.file.name)}
+                          className={`flex h-20 w-20 items-center justify-center overflow-hidden rounded-xl border border-slate-200 bg-white shadow-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary-500 ${DARK_RAISED_CONTROL_CLASS} ${DARK_PANEL_SHADOW_CLASS}`}
+                          aria-label={`Preview image ${index + 1}: ${attachment.file.name}`}
+                          data-testid={`chat-image-upload-preview-item-${index}`}
+                        >
+                          <img
+                            src={attachment.previewUrl}
+                            alt=""
+                            loading="lazy"
+                            decoding="async"
+                            className="h-full w-full object-cover"
+                          />
+                        </button>
+                        <IconButton
+                          ref={(node) => {
+                            if (node) imageRemoveButtonsRef.current.set(attachment.id, node);
+                            else imageRemoveButtonsRef.current.delete(attachment.id);
+                          }}
+                          type="button"
+                          variant="ghost"
+                          size="sm"
+                          radius="full"
+                          className="absolute right-0 top-0 !bg-transparent !shadow-none"
+                          onPress={() => handleRemoveImageAttachment(attachment.id)}
+                          isDisabled={sendingAttachment}
+                          aria-label={`Remove image ${index + 1}: ${attachment.file.name}`}
+                          data-testid="chat-image-upload-remove"
+                        >
+                          <span className="flex h-7 w-7 items-center justify-center rounded-full border border-slate-300 bg-white/95 text-slate-700 shadow-sm dark:border-slate-600 dark:bg-slate-800/95 dark:text-slate-100" aria-hidden="true">
+                            <Xmark className="h-4 w-4" />
+                          </span>
+                        </IconButton>
+                        <Text as="div" variant="caption" tone="secondary" className="truncate px-1 pt-1 text-xs" title={attachment.file.name}>
+                          {attachment.file.name}
+                        </Text>
+                      </li>
+                    ))}
+                  </ul>
+                  {sendingAttachment ? (
+                    <p role="status" className="px-1 text-xs text-slate-600 dark:text-slate-300" data-testid="chat-image-upload-status">
+                      Uploading images…
+                    </p>
+                  ) : imageOnlyDraft ? (
+                    <p id={imageMessageHintId} className="px-1 text-xs text-slate-600 dark:text-slate-300" data-testid="chat-image-message-required">
+                      Add a message to send with your images.
+                    </p>
+                  ) : null}
+                </div>
+              ) : null}
+              {/* Grid placement gives multiline text the full width without
+                  moving the editor or controls to different React parents. */}
               <div
+                ref={composerTextRowRef}
                 className={
                   browserComposerCondensed
                     ? "relative pb-0"
-                    : "relative flex items-end gap-2"
+                    : composerInlineControlsInTextRow
+                      ? "relative grid grid-cols-[auto_minmax(0,1fr)_auto] items-end gap-x-2"
+                      : "relative flex items-end gap-2"
                 }
                 data-testid="chat-composer-text-row"
-                onDragOver={onDragOver}
-                onDrop={onDrop}
+                data-multiline={composerMultiline ? "true" : undefined}
               >
                 {composerInlineControlsInTextRow ? (
                   <div
-                    className="flex flex-none items-center gap-0.5"
+                    className={`flex flex-none items-center gap-0.5 justify-self-start ${composerMultiline ? "col-start-1 row-start-2" : ""}`}
                     data-testid="chat-composer-leading-controls"
                   >
                     {navigationButtonNode}
@@ -1350,9 +1462,10 @@ export function ChatComposerSurface({
                 <div
                   className={
                     composerInlineControlsInTextRow
-                      ? COMPOSER_EDITOR_WRAPPER_CLASS
+                      ? `${COMPOSER_EDITOR_WRAPPER_CLASS} ${composerMultiline ? "col-span-3 col-start-1 row-start-1 px-2" : ""}`
                       : "min-w-0 flex-1"
                   }
+                  data-testid="chat-composer-editor"
                 >
                   <ChatInput
                     ref={chatInputRef}
@@ -1365,7 +1478,7 @@ export function ChatComposerSurface({
                 </div>
                 {composerInlineControlsInTextRow ? (
                   <div
-                    className="flex flex-none items-center justify-end gap-0.5"
+                    className={`flex flex-none items-center justify-end gap-0.5 justify-self-end ${composerMultiline ? "col-start-3 row-start-2" : ""}`}
                     data-testid="chat-composer-trailing-controls"
                   >
                     {voiceStripNode}
@@ -1382,49 +1495,6 @@ export function ChatComposerSurface({
                 className="hidden"
                 data-testid="chat-image-upload-input"
               />
-              {imageAttachments.length > 0 ? (
-                <div
-                  className={`mb-2 space-y-2 rounded-xl border border-slate-200 bg-slate-50 p-2 ${DARK_PANEL_SOFT_BG_CLASS} dark:border-[color:var(--color-studio-dark-raised-control-border)]`}
-                  data-testid="chat-image-upload-preview"
-                >
-                  {imageAttachments.map((attachment, index) => (
-                    <div key={attachment.id} className="flex items-center gap-3">
-                      <button
-                        type="button"
-                        onClick={() => onOpenImage(attachment.previewUrl, attachment.file.name)}
-                        className={`flex h-12 w-12 flex-none items-center justify-center overflow-hidden rounded-lg border border-slate-200 bg-white shadow-sm ${DARK_RAISED_CONTROL_CLASS} ${DARK_PANEL_SHADOW_CLASS}`}
-                        aria-label={`Preview uploaded image ${index + 1}`}
-                        data-testid={`chat-image-upload-preview-item-${index}`}
-                      >
-                        <img
-                          src={attachment.previewUrl}
-                          alt={attachment.file.name}
-                          className="h-full w-full object-cover"
-                        />
-                      </button>
-                      <div className="min-w-0 flex-1">
-                        <Text as="div" variant="caption" tone="secondary" className="truncate text-xs font-medium">
-                          {attachment.file.name}
-                        </Text>
-                        <Text as="div" variant="caption" tone="muted" className="text-xxs">
-                          {Math.max(1, Math.round(attachment.file.size / 1024))} KB
-                        </Text>
-                      </div>
-                      <IconButton
-                        type="button"
-                        variant="ghost"
-                        size="sm"
-                        radius="full"
-                        onPress={() => onRemoveImageAttachment(attachment.id)}
-                        aria-label="Remove image"
-                        data-testid="chat-image-upload-remove"
-                      >
-                        <Xmark className="h-4 w-4" aria-hidden="true" />
-                      </IconButton>
-                    </div>
-                  ))}
-                </div>
-              ) : null}
               {showVoiceStatus ? (
                 <div
                   data-testid="chat-voice-input-status"

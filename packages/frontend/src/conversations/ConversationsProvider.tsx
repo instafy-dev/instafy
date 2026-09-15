@@ -16,6 +16,7 @@ import { useAuth } from "../providers/AuthProvider";
 import { useStatus } from "../status/useStatus";
 import { controllerClient } from "../sdk/instafy";
 import { isAppInForeground } from "../notifications/assistantMessageNotifications";
+import { subscribeAppForeground } from "../native/appForeground";
 import { isUuid } from "./conversationMessageUtils";
 import {
   DEFAULT_CONVERSATION_ROUTING_PREFERENCES,
@@ -98,6 +99,7 @@ interface ConversationsContextValue {
   closeConversation: (conversationId: string) => void;
   setConversationLifecycleStatus: (conversationId: string, status: ConversationLifecycleStatus) => void;
   setConversationDraft: (conversationId: string, draft: string, editorState?: string | null) => void;
+  clearConversationDraftIfUnchanged: (conversationId: string, draft: string, editorState: string | null) => boolean;
   setConversationAssistantEnabled: (conversationId: string, enabled: boolean) => void;
   addConversationAgentHandle: (conversationId: string, handle: string) => void;
   removeConversationAgentHandle: (conversationId: string, handle: string) => void;
@@ -162,6 +164,11 @@ export const ConversationsProvider = ({ children }: PropsWithChildren) => {
   } = runtimeContext;
   const controllerProjectMissing = runtimeContext.runtime.controllerProjectMissing;
   const currentUserId = user?.id ?? null;
+  const draftSessionRef = useRef({ userId: currentUserId, generation: 0 });
+  if (draftSessionRef.current.userId !== currentUserId) {
+    draftSessionRef.current = { userId: currentUserId, generation: draftSessionRef.current.generation + 1 };
+  }
+  const draftSessionGeneration = draftSessionRef.current.generation;
 
   // Note: notification nudges are rendered inside the Chat panel so they feel like part of the
   // conversation flow (instead of a global toast).
@@ -182,11 +189,11 @@ export const ConversationsProvider = ({ children }: PropsWithChildren) => {
     };
 
     recordBackgroundState();
-    document.addEventListener("visibilitychange", recordBackgroundState);
+    const unsubscribeForeground = subscribeAppForeground(recordBackgroundState);
     window.addEventListener("blur", recordBackgroundState);
 
     return () => {
-      document.removeEventListener("visibilitychange", recordBackgroundState);
+      unsubscribeForeground();
       window.removeEventListener("blur", recordBackgroundState);
     };
   }, []);
@@ -348,6 +355,24 @@ export const ConversationsProvider = ({ children }: PropsWithChildren) => {
   const setConversationDraft = useCallback((conversationId: string, draft: string, editorState: string | null = null) => {
     dispatch({ type: "SET_DRAFT", id: conversationId, draft, editorState });
   }, []);
+
+  const clearConversationDraftIfUnchanged = useCallback((conversationId: string, draft: string, editorState: string | null) => {
+    if (draftSessionRef.current.generation !== draftSessionGeneration) return false;
+    const action = { type: "CLEAR_SUBMITTED_DRAFT" as const, projectKey, id: conversationId, draft, editorState };
+    const current = latestStateRef.current;
+    const source = current.projectKey === projectKey ? current : projectStatesRef.current[projectKey];
+    if (!source) return false;
+    const next = conversationsReducer(source, action);
+    if (next === source) return false;
+    if (current.projectKey === projectKey) {
+      dispatch(action);
+    } else {
+      // A late upload may complete while another space is selected. Update
+      // only its retained source draft, never the current space's editor.
+      projectStatesRef.current[projectKey] = next;
+    }
+    return true;
+  }, [draftSessionGeneration, projectKey]);
 
   const setConversationAssistantEnabled = useCallback((conversationId: string, enabled: boolean) => {
     const conversation =
@@ -544,6 +569,7 @@ export const ConversationsProvider = ({ children }: PropsWithChildren) => {
       closeConversation,
       setConversationLifecycleStatus,
       setConversationDraft,
+      clearConversationDraftIfUnchanged,
       setConversationAssistantEnabled,
       addConversationAgentHandle,
       removeConversationAgentHandle,
@@ -572,6 +598,7 @@ export const ConversationsProvider = ({ children }: PropsWithChildren) => {
       closeConversation,
       setConversationLifecycleStatus,
       setConversationDraft,
+      clearConversationDraftIfUnchanged,
       setConversationAssistantEnabled,
       addConversationAgentHandle,
       removeConversationAgentHandle,

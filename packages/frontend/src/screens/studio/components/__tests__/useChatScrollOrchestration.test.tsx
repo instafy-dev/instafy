@@ -185,6 +185,7 @@ function AnchorHarness({
         ))}
       </div>
     </div>
+    <span data-testid="anchor-latest-indicator">{controller.hasNewMessages ? "new" : controller.showJumpToLatest ? "away" : "bottom"}</span>
     </ChatScrollSnapshotBoundary>
   );
 }
@@ -307,7 +308,7 @@ describe("useChatScrollController", () => {
     ]} />));
     const scroller = container.querySelector('[data-testid="anchor-scroll"]') as HTMLDivElement;
     scroller.scrollTop = 450;
-    scroller.dispatchEvent(new Event("scroll"));
+    await act(async () => { scroller.dispatchEvent(new Event("scroll")); });
     expect(savedAnchor(conversationId)).toBe("reading");
 
     await act(async () => root.render(null));
@@ -325,10 +326,10 @@ describe("useChatScrollController", () => {
     await act(async () => root.render(<AnchorHarness conversationId={conversationId} scrollHeight={1200} rows={rows} />));
     const scroller = container.querySelector('[data-testid="anchor-scroll"]') as HTMLDivElement;
     scroller.scrollTop = 430;
-    scroller.dispatchEvent(new Event("scroll"));
+    await act(async () => { scroller.dispatchEvent(new Event("scroll")); });
     await act(async () => root.render(null));
     await act(async () => root.render(<AnchorHarness conversationId={conversationId} loading scrollHeight={200} rows={[]} />));
-    container.querySelector('[data-testid="anchor-scroll"]')?.dispatchEvent(new Event("scroll"));
+    await act(async () => { container.querySelector('[data-testid="anchor-scroll"]')?.dispatchEvent(new Event("scroll")); });
     expect(savedAnchor(conversationId)).toBe("reading");
     await act(async () => root.render(<AnchorHarness conversationId={conversationId} scrollHeight={1200} rows={rows} />));
     const restored = container.querySelector('[data-testid="anchor-scroll"]') as HTMLDivElement;
@@ -348,7 +349,7 @@ describe("useChatScrollController", () => {
     ]} />));
     const scroller = container.querySelector('[data-testid="anchor-scroll"]') as HTMLDivElement;
     scroller.scrollTop = 300;
-    scroller.dispatchEvent(new Event("scroll"));
+    await act(async () => { scroller.dispatchEvent(new Event("scroll")); });
     await act(async () => root.render(null));
     await act(async () => root.render(<AnchorHarness conversationId={conversationId} scrollHeight={800} rows={[
       { id: "retained", top: 0, height: 400 }, { id: "new", top: 400, height: 400 },
@@ -365,12 +366,12 @@ describe("useChatScrollController", () => {
     ]} />));
     const scroller = container.querySelector('[data-testid="anchor-scroll"]') as HTMLDivElement;
     scroller.scrollTop = 450;
-    scroller.dispatchEvent(new Event("scroll"));
+    await act(async () => { scroller.dispatchEvent(new Event("scroll")); });
     const rows = [{ id: "reading", top: 0, height: 400 }, { id: "newest", top: 400, height: 400 }];
     await act(async () => root.render(<AnchorHarness conversationId={conversationId} scrollHeight={800} rows={rows} />));
     expect(scroller.scrollTop).toBe(50);
     scroller.scrollTop = 100;
-    scroller.dispatchEvent(new Event("scroll"));
+    await act(async () => { scroller.dispatchEvent(new Event("scroll")); });
     rows[0].top = 20;
     await act(async () => resizeCallback?.([], {} as ResizeObserver));
     expect(scroller.scrollTop).toBe(100);
@@ -394,12 +395,12 @@ describe("useChatScrollController", () => {
     await act(async () => root.render(<AnchorHarness conversationId="anchor-switch-a" scrollHeight={1200} rows={rows} />));
     const scroller = container.querySelector('[data-testid="anchor-scroll"]') as HTMLDivElement;
     scroller.scrollTop = 430;
-    scroller.dispatchEvent(new Event("scroll"));
+    await act(async () => { scroller.dispatchEvent(new Event("scroll")); });
 
     await act(async () => root.render(<AnchorHarness conversationId="anchor-switch-b" scrollHeight={1200} rows={rows} />));
     expect(scroller.scrollTop).toBe(1000);
     scroller.scrollTop = 70;
-    scroller.dispatchEvent(new Event("scroll"));
+    await act(async () => { scroller.dispatchEvent(new Event("scroll")); });
     await act(async () => root.render(<AnchorHarness conversationId="anchor-switch-a" scrollHeight={1200} rows={rows} />));
     expect(scroller.scrollTop).toBe(430);
     await act(async () => root.render(<AnchorHarness conversationId="anchor-switch-b" scrollHeight={1200} rows={rows} />));
@@ -456,6 +457,58 @@ describe("useChatScrollController", () => {
     expect(scroller.scrollTop).toBe(1000);
     await render(a, a);
     expect(scroller.scrollTop).toBe(435);
+  });
+
+  it("preserves bottom following through keyboard resize with a scoped history snapshot", async () => {
+    let clientHeight = 648;
+    await act(async () => root.render(<AnchorHarness conversationId="scoped-keyboard-follow"
+      clientHeight={() => clientHeight} scrollHeight={1200} rows={[
+        { id: "keyboard-first", top: 0, height: 400 },
+        { id: "keyboard-reading", top: 400, height: 400 },
+        { id: "keyboard-last", top: 800, height: 400 },
+      ]} />));
+    const scroller = container.querySelector('[data-testid="anchor-scroll"]') as HTMLDivElement;
+    expect(scroller.scrollTop).toBe(552);
+    clientHeight = 306;
+    // Android can deliver a layout-induced scroll before ResizeObserver.
+    await act(async () => scroller.dispatchEvent(new Event("scroll")));
+    expect(scroller.scrollTop).toBe(894);
+    expect(container.querySelector('[data-testid="anchor-latest-indicator"]')?.textContent).toBe("bottom");
+  });
+
+  it("starts a fresh arrival baseline for another visit to the same conversation", async () => {
+    const conversationId = "notice-history-visits";
+    const firstVisit = visit(conversationId, "first-visit");
+    const secondVisit = visit(conversationId, "second-visit");
+    const rows = [
+      { id: "notice-old", top: 0, height: 400 },
+      { id: "notice-reading", top: 400, height: 400 },
+      { id: "notice-latest", top: 800, height: 400 },
+    ];
+    const render = async (historyVisit: ChatScrollHistoryVisit | null, renderedRows = rows) => {
+      await act(async () => root.render(<AnchorHarness conversationId={conversationId}
+        historyVisit={historyVisit} scrollHeight={renderedRows.length * 400} rows={renderedRows} />));
+    };
+    const indicator = () => container.querySelector('[data-testid="anchor-latest-indicator"]')?.textContent;
+    await render(firstVisit);
+    const scroller = container.querySelector('[data-testid="anchor-scroll"]') as HTMLDivElement;
+    scroller.scrollTop = 450;
+    await act(async () => scroller.dispatchEvent(new Event("scroll")));
+    expect(indicator()).toBe("away");
+    const arrived = [...rows, { id: "notice-arrived", top: 1200, height: 400 }];
+    await render(firstVisit, arrived);
+    expect(indicator()).toBe("new");
+    expect(scroller.scrollTop).toBe(450);
+
+    // Route/provider mismatch must not present an outgoing visit's notice.
+    await render(null, arrived);
+    expect(indicator()).toBe("bottom");
+    await render(secondVisit, arrived);
+    expect(indicator()).toBe("bottom");
+    expect(scroller.scrollTop).toBe(1400);
+    await render(firstVisit, arrived);
+    expect(scroller.scrollTop).toBe(450);
+    expect(indicator()).toBe("away");
   });
 
   it("captures the outgoing visit before unmount even without a scroll event", async () => {

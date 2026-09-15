@@ -15,7 +15,7 @@ import {
 
 const POPOVER_BASE =
   [
-    "relative rounded-2xl text-slate-700",
+    "relative flex flex-col rounded-2xl text-slate-700",
     "shadow-[0_18px_42px_-26px_rgba(0,0,0,0.18)] outline-none",
     "dark:text-slate-100",
     DARK_FLOATING_BG_CLASS,
@@ -91,7 +91,12 @@ export function StudioPopover({
               `${DARK_FLOATING_SOLID_BG_CLASS} dark:border-transparent`,
             ].join(" ")}
           />
-          <div className="relative z-10">{resolvedChildren}</div>
+          {/* React Aria constrains the outer popover with an inline max-height.
+              This flex child must shrink inside that height (including outer
+              padding), and own scrolling across any nested dialog wrapper. */}
+          <div className="relative z-10 min-h-0 overflow-y-auto" data-studio-popover-content="">
+            {resolvedChildren}
+          </div>
         </>
       ))}
     >
@@ -105,10 +110,7 @@ export function StudioDialogPopover({
 }: PopoverProps & { children: ReactNode }) {
   return (
     <StudioPopover {...props}>
-      {/* react-aria clamps the popover to the available space via an inline
-          max-height; inheriting it here makes tall content scroll instead of
-          being clipped by the popover's overflow. */}
-      <Dialog className="max-h-[inherit] overflow-y-auto outline-none">{children}</Dialog>
+      <Dialog className="outline-none">{children}</Dialog>
     </StudioPopover>
   );
 }

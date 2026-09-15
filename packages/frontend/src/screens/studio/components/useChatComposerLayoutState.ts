@@ -43,14 +43,11 @@ type UseChatComposerLayoutStateOptions = {
   isChatInputFocused: () => boolean;
   isHistoryLoading: boolean;
   lastComposerScrollTopRef: MutableRefObject<number>;
-  lastScrollHeightRef: MutableRefObject<number>;
   queuedSummaryItemCount: number;
-  recordScrollPosition: () => void;
   requestOlderMessages: () => void;
   rootRef: MutableRefObject<HTMLDivElement | null>;
   scrollContainerRef: MutableRefObject<HTMLDivElement | null>;
   sendingAttachment: boolean;
-  shouldAutoScrollRef: MutableRefObject<boolean>;
   showBrowserSessionPageStrip: boolean;
   totalQueuedCount: number;
   touchLikeInput: boolean;
@@ -74,14 +71,11 @@ export function useChatComposerLayoutState({
   isChatInputFocused,
   isHistoryLoading,
   lastComposerScrollTopRef,
-  lastScrollHeightRef,
   queuedSummaryItemCount,
-  recordScrollPosition,
   requestOlderMessages,
   rootRef,
   scrollContainerRef,
   sendingAttachment,
-  shouldAutoScrollRef,
   showBrowserSessionPageStrip,
   totalQueuedCount,
   touchLikeInput,
@@ -155,11 +149,9 @@ export function useChatComposerLayoutState({
       return;
     }
     const distanceFromBottom = node.scrollHeight - (node.scrollTop + node.clientHeight);
-    shouldAutoScrollRef.current = distanceFromBottom <= AUTO_SCROLL_BOTTOM_THRESHOLD_PX;
-    if (shouldAutoScrollRef.current) {
-      lastScrollHeightRef.current = node.scrollHeight;
-    }
-    recordScrollPosition();
+    // The scroll controller owns following and reading-position snapshots.
+    // This React handler runs first; writing them here would erase the prior
+    // viewport geometry before the controller can distinguish a layout scroll.
     const currentScrollTop = node.scrollTop;
     const scrollDelta = currentScrollTop - lastComposerScrollTopRef.current;
     lastComposerScrollTopRef.current = currentScrollTop;
@@ -193,11 +185,8 @@ export function useChatComposerLayoutState({
     hasMoreHistory,
     isHistoryLoading,
     lastComposerScrollTopRef,
-    lastScrollHeightRef,
-    recordScrollPosition,
     requestOlderMessages,
     scrollContainerRef,
-    shouldAutoScrollRef,
   ]);
 
   useLayoutEffect(() => {

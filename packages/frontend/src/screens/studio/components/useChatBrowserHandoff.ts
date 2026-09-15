@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef } from "react";
-import type { SubmitConversationOptions } from "../../../conversations/useConversation";
+import type { SubmitConversationOptions, SubmitConversationResult } from "../../../conversations/conversationSubmitTypes";
 import { cancelAgentJob } from "../../../services/runtimeController/jobs";
 import type { RunRecord } from "../../../types";
 import { sharedBrowserTakeoverJob } from "./browserHandoffRouting";
@@ -19,7 +19,7 @@ type Options = {
   runs: RunRecord[];
   personal: ReturnType<typeof usePersonalBrowserBridge>;
   agentHandle: string;
-  onSubmit: (id: string | null, message: string, options?: SubmitConversationOptions) => Promise<void>;
+  onSubmit: (id: string | null, message: string, options?: SubmitConversationOptions) => Promise<SubmitConversationResult>;
 };
 
 function identity(value: Options) {

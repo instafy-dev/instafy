@@ -1,7 +1,8 @@
 import { Capacitor } from "@capacitor/core";
-import { useEffect, type ReactNode } from "react";
+import { useEffect, useRef, type ReactNode } from "react";
 import { useMobileSidebarViewport } from "./useMobileSidebarViewport";
 import { Dialog, Modal, ModalOverlay } from "react-aria-components";
+import { useNativeBackButtonAction } from "../../../native/useNativeBackButtonAction";
 
 interface SidebarStatusBarSession {
   users: number;
@@ -102,6 +103,16 @@ export function StudioMobileSidebarOverlay({
 }) {
   useSidebarStatusBarOverlay();
   const { controlsRef, style } = useMobileSidebarViewport();
+  const dialogRef = useRef<HTMLDivElement | null>(null);
+  useNativeBackButtonAction(true, () => {
+    // Let a focused drill-in or React Aria's topmost modal consume Escape before
+    // its existing dismissal callback changes the route. Keep this above route
+    // owners (10), but below explicit native dialog actions (100).
+    const target = document.activeElement instanceof HTMLElement && document.activeElement !== document.body
+      ? document.activeElement
+      : dialogRef.current;
+    target?.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true }));
+  }, 20);
 
   return (
     <ModalOverlay
@@ -121,7 +132,7 @@ export function StudioMobileSidebarOverlay({
           paddingLeft: "var(--instafy-safe-area-inset-left)",
         }}
       >
-        <Dialog aria-label="Navigation and recent chats" className="h-full outline-none">
+        <Dialog ref={dialogRef} aria-label="Navigation and recent chats" className="h-full outline-none">
           <div ref={controlsRef} className="relative h-full min-h-0" style={style} data-testid="mobile-sidebar-controls">
             {children}
           </div>

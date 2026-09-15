@@ -255,7 +255,7 @@ export function useChatSubmitFlow({
     controllerId: string | null;
     at: number;
   } | null>;
-  performSubmit: (payload: ChatSubmitDispatchPayload) => Promise<void>;
+  performSubmit: (payload: ChatSubmitDispatchPayload) => Promise<boolean | void>;
   personalBrowserActive: boolean;
   personalBrowserAgentControlEnabled: boolean;
   personalBrowserAgentError: string | null;
@@ -305,6 +305,7 @@ export function useChatSubmitFlow({
 
     const allowWhileBusy = options?.allowWhileBusy ?? false;
     const requestedIntent = options?.intent ?? "send";
+    const submitImageFiles = override ? override.imageFiles ?? [] : imageFiles;
     const {
       agentSelection,
       browserLaunchMode,
@@ -323,7 +324,7 @@ export function useChatSubmitFlow({
       browserTargetingEnabled: !personalBrowserActive,
       browserSessionOpen,
       hasHiddenBrowserSession,
-      imageAttachmentCount: imageFiles.length,
+      imageAttachmentCount: submitImageFiles.length,
       inputValue,
       override,
       pendingBrowserLaunchMode,
@@ -332,7 +333,7 @@ export function useChatSubmitFlow({
       softPrefillSuggestion,
     });
     if (!messageToSend) {
-      if (imageFiles.length > 0) {
+      if (submitImageFiles.length > 0) {
         showStatus("Add a message to send with your image attachments.", "error", 4000);
       }
       focusInput();
@@ -480,7 +481,7 @@ export function useChatSubmitFlow({
         : requestedIntent;
 
     if (effectiveIntent === "queue" || effectiveIntent === "steer") {
-      if (imageFiles.length > 0) {
+      if (submitImageFiles.length > 0) {
         showStatus(
           effectiveIntent === "steer"
             ? "Steer currently supports text only. Remove image attachments first."
@@ -655,7 +656,7 @@ export function useChatSubmitFlow({
       activeProjectId,
       allowWhileBusy: allowWhileBusy || participationBypassesBusySerialization,
       appendMessages,
-      attachedImageCount: imageFiles.length,
+      attachedImageCount: submitImageFiles.length,
       // Clearing is conditional on the composer still holding the text that was
       // queued — the same match performSubmit and the steer path make. Passing
       // the live composer value instead would always match itself and so wipe
@@ -724,7 +725,6 @@ export function useChatSubmitFlow({
       broadcastTyping(false, controllerId);
     }
 
-    const submitImageFiles = override ? [] : imageFiles;
     const invitePromptRequest = await resolvePrivateConversationInvitePrompt({
       activeConversationId,
       browserLaunchMode: shouldApplyNewBrowserLaunch ? browserLaunchMode : null,
@@ -751,7 +751,7 @@ export function useChatSubmitFlow({
       return false;
     }
 
-    await performSubmit({
+    const submitted = await performSubmit({
       message: dispatchedMessage,
       composerMessage: messageToSend,
       editorState,
@@ -760,6 +760,7 @@ export function useChatSubmitFlow({
       runtimeOverride: submitRuntimeOverride,
       expectedLaneIdle: !allowWhileBusy && !participationBypassesBusySerialization,
     });
+    if (submitted === false) return false;
     consumeBrowserComposerTarget();
     return true;
   }, [

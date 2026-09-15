@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 
-import { act } from "react";
+import { act, StrictMode } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { Capacitor } from "@capacitor/core";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -83,14 +83,14 @@ describe("useNativeBackButtonAction", () => {
     });
     const drawer = vi.fn(), modal = vi.fn();
     await act(async () => root.render(<>
-      <Harness enabled onBack={drawer} priority={10} />
-      <Harness enabled onBack={modal} priority={100} />
+      <Harness key="modal" enabled onBack={modal} priority={100} />
+      <Harness key="drawer" enabled onBack={drawer} priority={10} />
     </>));
     expect(appMock.addListener).toHaveBeenCalledTimes(1);
     act(() => handleBack?.());
     expect(modal).toHaveBeenCalledTimes(1);
     expect(drawer).not.toHaveBeenCalled();
-    await act(async () => root.render(<Harness enabled onBack={drawer} priority={10} />));
+    await act(async () => root.render(<Harness key="drawer" enabled onBack={drawer} priority={10} />));
     act(() => handleBack?.());
     expect(drawer).toHaveBeenCalledTimes(1);
     expect(appMock.addListener).toHaveBeenCalledTimes(1);
@@ -124,5 +124,73 @@ describe("useNativeBackButtonAction", () => {
     expect(remove).not.toHaveBeenCalled();
     await act(async () => root.render(<Harness enabled={false} onBack={vi.fn()} />));
     expect(remove).toHaveBeenCalledTimes(1);
+  });
+
+  it("delivers each Back only to the latest enabled surface and resumes the previous one after dismissal", async () => {
+    const remove = vi.fn().mockResolvedValue(undefined);
+    let handleBack: (() => void) | undefined;
+    appMock.addListener.mockImplementation(async (_eventName: string, listener: () => void) => {
+      handleBack = listener;
+      return { remove };
+    });
+    const outer = vi.fn();
+    const inner = vi.fn();
+    const updatedInner = vi.fn();
+    const render = (innerEnabled: boolean, onInner = inner) => root.render(<>
+      <Harness enabled onBack={outer} />
+      <Harness enabled={innerEnabled} onBack={onInner} />
+    </>);
+
+    await act(async () => render(false));
+    await act(async () => render(true));
+    expect(appMock.addListener).toHaveBeenCalledOnce();
+    act(() => handleBack?.());
+    expect(inner).toHaveBeenCalledOnce();
+    expect(outer).not.toHaveBeenCalled();
+    await act(async () => render(true, updatedInner));
+    act(() => handleBack?.());
+    expect(updatedInner).toHaveBeenCalledOnce();
+    expect(outer).not.toHaveBeenCalled();
+    await act(async () => render(false));
+    expect(remove).not.toHaveBeenCalled();
+    act(() => handleBack?.());
+    expect(outer).toHaveBeenCalledOnce();
+    await act(async () => root.render(null));
+    expect(remove).toHaveBeenCalledOnce();
+  });
+
+  it("ignores a disposed bridge callback after an asynchronous close and reopen", async () => {
+    let finishRemoval!: () => void;
+    const removeOld = vi.fn(() => new Promise<void>((resolve) => { finishRemoval = resolve; }));
+    const removeCurrent = vi.fn().mockResolvedValue(undefined);
+    const callbacks: Array<() => void> = [];
+    appMock.addListener.mockImplementation(async (_eventName: string, listener: () => void) => {
+      callbacks.push(listener);
+      return { remove: callbacks.length === 1 ? removeOld : removeCurrent };
+    });
+    const onBack = vi.fn();
+    await act(async () => root.render(<Harness enabled onBack={onBack} />));
+    await act(async () => root.render(null));
+    await act(async () => root.render(<Harness enabled onBack={onBack} />));
+    expect(appMock.addListener).toHaveBeenCalledOnce();
+    expect(removeOld).toHaveBeenCalledOnce();
+    await act(async () => finishRemoval());
+    expect(appMock.addListener).toHaveBeenCalledTimes(2);
+    act(() => callbacks.forEach((callback) => callback()));
+    expect(onBack).toHaveBeenCalledOnce();
+    expect(removeCurrent).not.toHaveBeenCalled();
+  });
+
+  it("keeps one effective handler through StrictMode remounts", async () => {
+    const callbacks: Array<() => void> = [];
+    const remove = vi.fn().mockResolvedValue(undefined);
+    appMock.addListener.mockImplementation(async (_eventName: string, listener: () => void) => {
+      callbacks.push(listener);
+      return { remove };
+    });
+    const onBack = vi.fn();
+    await act(async () => root.render(<StrictMode><Harness enabled onBack={onBack} /></StrictMode>));
+    act(() => callbacks.forEach((callback) => callback()));
+    expect(onBack).toHaveBeenCalledOnce();
   });
 });

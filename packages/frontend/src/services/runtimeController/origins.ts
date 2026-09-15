@@ -10,6 +10,7 @@ import {
   readControllerError,
   resolveControllerRequestContext,
   runtimeControllerEnabled,
+  type ControllerRequestContext,
 } from "./core";
 import { logControllerRequestError } from "./logging";
 
@@ -121,6 +122,8 @@ export interface FetchOriginParams {
   projectId: string;
   protocol?: "webdav" | "http" | "smb";
   accessToken?: string | null;
+  signal?: AbortSignal;
+  requestContext?: ControllerRequestContext;
 }
 
 export interface RequestOriginAccessTokenParams {
@@ -133,8 +136,14 @@ export interface RequestOriginAccessTokenParams {
   preferRuntime?: string | null;
   browserSessionId?: string | null;
   accessToken?: string | null;
+  signal?: AbortSignal;
+  requestContext?: ControllerRequestContext;
   forceRefresh?: boolean;
   timeoutMs?: number;
+  /** Preserve request failures for callers that need to distinguish retryable errors. */
+  throwOnError?: boolean;
+  /** Let an outer deadline retain a known rejection while its error body is pending. */
+  onErrorResponse?: (status: number) => void;
 }
 
 export interface OriginAccessTokenResponse {
@@ -215,6 +224,7 @@ function buildOriginAccessTokenCacheKey(params: {
   preferRuntime: string | null;
   browserSessionId: string | null;
   controllerAccessToken: string | null;
+  controllerUrl: string;
 }): string {
   const scopeKey = params.scopes.slice().sort().join(",");
   const accessKey = params.controllerAccessToken
@@ -222,6 +232,7 @@ function buildOriginAccessTokenCacheKey(params: {
     : "anon";
   return [
     "v1",
+    params.controllerUrl,
     params.projectId,
     params.protocol,
     scopeKey,
@@ -251,9 +262,11 @@ export async function fetchOriginSummary(
     search.set("protocol", protocol);
   }
 
-  const requestContext = await resolveControllerRequestContext(
+  params.signal?.throwIfAborted();
+  const requestContext = params.requestContext ?? await resolveControllerRequestContext(
     params.accessToken ?? null,
   );
+  params.signal?.throwIfAborted();
   const accessToken = requestContext.accessToken;
   if (!accessToken) {
     return null;
@@ -267,12 +280,15 @@ export async function fetchOriginSummary(
   const url = query.length > 0 ? `${basePath}?${query}` : basePath;
 
   try {
-    const response = await fetch(url, { headers });
+    params.signal?.throwIfAborted();
+    const response = await fetch(url, { headers, signal: params.signal });
+    params.signal?.throwIfAborted();
     if (response.status === 404) {
       return null;
     }
     if (response.status === 401) {
       await readControllerError(response, "fetch origin failed", requestContext);
+      params.signal?.throwIfAborted();
       return null;
     }
     if (response.status === 403) {
@@ -284,6 +300,7 @@ export async function fetchOriginSummary(
     }
 
     const payload = (await response.json()) as Record<string, unknown>;
+    params.signal?.throwIfAborted();
     const originId =
       typeof payload.origin_id === "string"
         ? payload.origin_id
@@ -388,6 +405,7 @@ export async function fetchOriginSummary(
       presence,
     };
   } catch (error) {
+    params.signal?.throwIfAborted();
     logControllerRequestError("[runtime-controller] fetchOriginSummary error:", error, {
       suppressLikelyConnectionNoise: true,
     });
@@ -411,9 +429,11 @@ export async function requestOriginAccessToken(
   }
 
   const protocol = params.protocol ?? "webdav";
-  const requestContext = await resolveControllerRequestContext(
+  params.signal?.throwIfAborted();
+  const requestContext = params.requestContext ?? await resolveControllerRequestContext(
     params.accessToken ?? null,
   );
+  params.signal?.throwIfAborted();
   const accessToken = requestContext.accessToken;
   if (!accessToken) {
     return null;
@@ -429,6 +449,7 @@ export async function requestOriginAccessToken(
         preferRuntime: params.preferRuntime ?? null,
         browserSessionId: params.browserSessionId ?? null,
         controllerAccessToken: accessToken,
+        controllerUrl: requestContext.baseUrl,
       })
     : null;
 
@@ -436,7 +457,9 @@ export async function requestOriginAccessToken(
     typeof params.timeoutMs === "number" && Number.isFinite(params.timeoutMs) && params.timeoutMs > 0
       ? params.timeoutMs
       : ORIGIN_ACCESS_TOKEN_REQUEST_TIMEOUT_MS;
-  const inFlightKey = cacheKey ? `${cacheKey}|timeout:${requestTimeoutMs}` : null;
+  const inFlightKey = cacheKey && !params.signal && !params.onErrorResponse
+    ? `${cacheKey}|timeout:${requestTimeoutMs}|strict:${params.throwOnError === true}`
+    : null;
 
   if (cacheKey && params.forceRefresh !== true) {
     const cached = originAccessTokenCache.get(cacheKey);
@@ -486,41 +509,42 @@ export async function requestOriginAccessToken(
   }
 
   const run = async (): Promise<OriginAccessTokenResponse | null> => {
+    const abortController =
+      typeof AbortController === "function" ? new AbortController() : null;
+    const requestSignal = abortController?.signal ?? params.signal;
+    const abortFromCaller = () => abortController?.abort(params.signal?.reason);
+    params.signal?.addEventListener("abort", abortFromCaller, { once: true });
+    const timeoutHandle = abortController !== null
+      ? setTimeout(() => abortController.abort(), requestTimeoutMs)
+      : null;
+    let responseFailureStatus: number | null = null;
     try {
-      const abortController =
-        typeof AbortController === "function" ? new AbortController() : null;
-      const timeoutHandle =
-        abortController !== null
-          ? setTimeout(() => {
-              abortController.abort();
-            }, requestTimeoutMs)
-          : null;
-
+      params.signal?.throwIfAborted();
       const response = await fetch(`${requestContext.baseUrl}/access_token`, {
         method: "POST",
         headers,
         body: JSON.stringify(body),
-        signal: abortController?.signal,
-      }).finally(() => {
-        if (timeoutHandle !== null) {
-          clearTimeout(timeoutHandle);
-        }
+        signal: requestSignal,
       });
+      if (!response.ok) {
+        responseFailureStatus = response.status;
+        params.onErrorResponse?.(response.status);
+      }
+      requestSignal?.throwIfAborted();
 
-      if (response.status === 404) {
+      if (response.status === 404 && !params.throwOnError) {
         return null;
       }
       if (!response.ok) {
+        const detail = await readControllerError(response, "request origin access token failed", requestContext);
+        requestSignal?.throwIfAborted();
         throw new Error(
-          await readControllerError(
-            response,
-            "request origin access token failed",
-            requestContext,
-          ),
+          `request origin access token failed (${response.status}): ${detail}`,
         );
       }
 
       const payload = (await response.json()) as Record<string, unknown>;
+      requestSignal?.throwIfAborted();
       const originId =
         typeof payload.origin_id === "string"
           ? payload.origin_id
@@ -576,14 +600,26 @@ export async function requestOriginAccessToken(
 
       return value;
     } catch (error) {
-      const message =
+      params.signal?.throwIfAborted();
+      const detail =
         error instanceof Error && error.name === "AbortError"
           ? `request origin access token timed out after ${requestTimeoutMs}ms`
           : error instanceof Error
             ? error.message
             : String(error);
+      // A failed error-body read cannot turn an already received permission
+      // rejection into a retryable network error.
+      const statusPrefix = responseFailureStatus === null
+        ? null : `request origin access token failed (${responseFailureStatus}): `;
+      const message = statusPrefix && !detail.startsWith(statusPrefix) ? statusPrefix + detail : detail;
       console.warn("[runtime-controller] requestOriginAccessToken error:", message);
+      if (params.throwOnError) {
+        throw new Error(message);
+      }
       return null;
+    } finally {
+      if (timeoutHandle !== null) clearTimeout(timeoutHandle);
+      params.signal?.removeEventListener("abort", abortFromCaller);
     }
   };
 

@@ -39,6 +39,10 @@ describe("conversationSubmitHelpers", () => {
     expect(shouldRetryChatImageUploadError("runtime_not_ready")).toBe(true);
     expect(shouldRetryChatImageUploadError("Origin apply failed (400)")).toBe(false);
     expect(shouldRetryChatImageUploadError("unsupported file type")).toBe(false);
+    expect(shouldRetryChatImageUploadError("request origin access token failed (403): origin is not bound to the requested active runtime")).toBe(false);
+    expect(shouldRetryChatImageUploadError("request origin access token failed (403): timeout policy denied")).toBe(false);
+    expect(shouldRetryChatImageUploadError("request origin access token failed (503): runtime is starting")).toBe(true);
+    expect(shouldRetryChatImageUploadError("origin apply failed (429): try later")).toBe(true);
   });
 
   it("patches conversation message metadata without dropping existing fields", () => {

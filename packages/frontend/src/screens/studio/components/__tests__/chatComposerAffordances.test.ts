@@ -27,6 +27,11 @@ function resolveAffordances(overrides: Partial<Parameters<typeof resolveChatComp
 }
 
 describe("resolveChatComposerAffordances", () => {
+  it.each(["", " \n "])("requires a text message alongside images even when AI gates are deferred", (inputValue) => {
+    expect(resolveAffordances({ imageAttachmentCount: 1, inputValue, deferAiGatesForAmbientParticipation: true }).sendButtonDisabled).toBe(true);
+    expect(resolveAffordances({ imageAttachmentCount: 1, inputValue: "Describe the image" }).sendButtonDisabled).toBe(false);
+  });
+
   it("allows queued text to be sent through the durable controller path while runtime is offline", () => {
     expect(
       resolveAffordances({

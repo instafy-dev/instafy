@@ -30,7 +30,7 @@ type UseChatInvitePromptHandlersOptions = {
     role: "member";
     accessToken: null;
   }) => Promise<ControllerConversationParticipant[] | null>;
-  performSubmit: (payload: ChatSubmitDispatchPayload) => Promise<void>;
+  performSubmit: (payload: ChatSubmitDispatchPayload) => Promise<boolean | void>;
   showStatus: ShowStatus;
 };
 

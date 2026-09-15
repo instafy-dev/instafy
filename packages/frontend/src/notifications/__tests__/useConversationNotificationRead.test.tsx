@@ -3,10 +3,18 @@ import { act, useRef, type RefObject } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 const read = vi.hoisted(() => vi.fn());
+const native = vi.hoisted(() => ({ enabled: false, listener: null as ((event: { isActive: boolean }) => void) | null, remove: vi.fn() }));
+vi.mock("@capacitor/core", () => ({ Capacitor: { isNativePlatform: () => native.enabled } }));
+vi.mock("@capacitor/app", () => ({ App: {
+  addListener: async (_event: string, listener: (event: { isActive: boolean }) => void) => { native.listener = listener; return { remove: native.remove }; },
+  getState: async () => ({ isActive: true }),
+} }));
 vi.mock("../../services/runtimeController/productNotifications", () => ({ readConversationProductNotifications: read }));
 vi.mock("../notificationPresentation", () => ({ NOTIFICATION_RECEIVED_EVENT: "notification-read-test" }));
 import { useConversationNotificationRead } from "../useConversationNotificationRead";
 import { setNotificationSession } from "../notificationSession";
+import { installNativeAppForegroundBridge } from "../../native/appForeground";
+import { focusManager } from "@tanstack/react-query";
 
 const ACCOUNT = "11111111-1111-4111-8111-111111111111";
 const OTHER = "22222222-2222-4222-8222-222222222222";
@@ -39,6 +47,7 @@ describe("reading only visible persisted conversation messages", () => {
   let container: HTMLDivElement;
   let visibility: DocumentVisibilityState;
   let covered: boolean;
+  let disposeNative: (() => void) | undefined;
   const acknowledged = vi.fn();
   async function render(props: Parameters<typeof Harness>[0] = {}) {
     await act(async () => root.render(<Harness {...props} />));
@@ -50,6 +59,7 @@ describe("reading only visible persisted conversation messages", () => {
   beforeEach(() => {
     (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
     vi.useFakeTimers(); read.mockReset(); read.mockResolvedValue(undefined); observers.length = 0;
+    native.enabled = false; native.listener = null; native.remove.mockResolvedValue(undefined); disposeNative = undefined;
     visibility = "visible"; covered = false; acknowledged.mockReset();
     vi.spyOn(document, "visibilityState", "get").mockImplementation(() => visibility);
     vi.stubGlobal("IntersectionObserver", FakeIntersectionObserver);
@@ -68,6 +78,7 @@ describe("reading only visible persisted conversation messages", () => {
   });
   afterEach(async () => {
     await act(async () => root.unmount());
+    disposeNative?.(); focusManager.setFocused(undefined);
     window.removeEventListener("notification-read-test", acknowledged);
     setNotificationSession(null); container.remove(); vi.restoreAllMocks(); vi.unstubAllGlobals(); vi.useRealTimers();
     delete (document as unknown as { elementFromPoint?: unknown }).elementFromPoint;
@@ -94,6 +105,43 @@ describe("reading only visible persisted conversation messages", () => {
     await act(async () => document.dispatchEvent(new Event("visibilitychange")));
     await advance(); expect(read).not.toHaveBeenCalled();
     await emit(); await advance(); expect(read).toHaveBeenCalledOnce();
+  });
+
+  it("cancels exposure while native activity is inactive despite visible DOM, and requires a fresh observation on resume", async () => {
+    native.enabled = true;
+    disposeNative = installNativeAppForegroundBridge(); await vi.dynamicImportSettled();
+    await render(); await emit();
+    await act(async () => native.listener?.({ isActive: false }));
+    expect(document.visibilityState).toBe("visible");
+    await advance(1_000); expect(read).not.toHaveBeenCalled();
+    const message = container.querySelector("[data-chat-message-id]")!;
+    await emit([message]); await advance(); expect(read).not.toHaveBeenCalled();
+    await act(async () => native.listener?.({ isActive: true }));
+    await advance(); expect(read).not.toHaveBeenCalled();
+    await emit(); await advance(); expect(read).toHaveBeenCalledOnce();
+  });
+
+  it("reschedules freshly observed exposure after an old request spans native background and resume", async () => {
+    native.enabled = true;
+    disposeNative = installNativeAppForegroundBridge(); await vi.dynamicImportSettled();
+    let complete!: () => void;
+    read.mockImplementationOnce(() => new Promise<void>((resolve) => { complete = resolve; }));
+    await render(); await emit(); await advance();
+    const oldRequest = read.mock.calls[0][0];
+    expect(oldRequest.isCurrent()).toBe(true);
+    await act(async () => native.listener?.({ isActive: false }));
+    expect(oldRequest.isCurrent()).toBe(false);
+    await act(async () => native.listener?.({ isActive: true }));
+    expect(oldRequest.isCurrent()).toBe(false);
+    await emit(); await advance(); expect(read).toHaveBeenCalledOnce();
+    await act(async () => complete());
+    expect(acknowledged).not.toHaveBeenCalled();
+    await advance();
+    expect(read).toHaveBeenCalledTimes(2);
+    expect(read.mock.calls[1][0].messageIds).toEqual([id(1)]);
+    expect(read.mock.calls[1][0].isCurrent()).toBe(true);
+    expect(acknowledged).toHaveBeenCalledOnce();
+    await advance(10_000); expect(read).toHaveBeenCalledTimes(2);
   });
 
   it("does not read a hidden chat pane or messages covered by a modal", async () => {

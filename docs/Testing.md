@@ -1,5 +1,55 @@
 # Testing
 
+### Composer checks on a physical phone
+
+Use disposable local conversations and a named test image. With the native keyboard
+open and closed, check Send, the action menu, image picker cancellation, previews,
+removal, Stash/Restore/Delete, and Android Back. Menus must stay within their surface
+and scroll when the keyboard reduces the available height. Image attachments require
+message text. A rejected upload must retain the draft and attachments without adding
+an unsent message bubble; retrying successfully must create only one message.
+Restore a stash, attach an image, and send: the restored text and new image must arrive
+together, and the stash should disappear only after the send succeeds.
+Select several images together and verify that the thumbnail strip stays one row high
+above the text field, scrolls horizontally without widening the page, and keeps all
+remove controls reachable with a reduced keyboard viewport. Remove a middle image and
+then the remaining images; preserve the draft and keyboard focus. Preview an image with
+the keyboard: Tab stays in the dialog, and Escape returns to the same thumbnail. During
+an upload, previews remain available but removal is disabled until the send settles.
+
+Open a pending attachment and choose **Mark up**. Draw with the pen and arrow tools,
+undo a stroke, clear the current drawing, and cancel without changing the file. Save
+markup and verify that the preview and uploaded PNG contain the same marks while the
+other attachments and text remain unchanged. **Restore original** must recover the
+first selected file, including its exact bytes, after repeated edits. Undo and Clear
+apply to the current editing session; Restore original also removes previously saved
+markup. Switching conversations or removing an image during an asynchronous save
+must not modify another attachment or draft. Uploading images cannot be edited.
+
+Repeat on a phone with a reduced keyboard viewport. Controls must remain reachable,
+finger or stylus strokes must not scroll the page, and Android Back must first cancel
+the editor, then close the preview, before navigating away. Markup uses a frozen image
+frame, exports PNG at up to 2048 pixels on the longest edge, and reduces export size
+further when needed to stay within the 5 MB attachment limit. The original remains
+available in the draft. Verify the shared editor in bug-report screenshots too.
+
+For partial-batch recovery, let the first image upload and reject the second at the
+origin. Verify that both attempted upload paths are absent after cleanup and that an
+unrelated workspace file is unchanged. Retry the retained draft: only the successful
+batch's returned attachment paths should remain. Cleanup uses exact generated paths
+and the original controller, authorization, runtime and origin, even if the user
+switches workspaces during the upload. It retries briefly while an origin transaction
+is busy and reports when cleanup cannot finish. This is best-effort compensation:
+an unavailable origin, revoked access, or process termination can leave files behind;
+browser cancellation cannot stop an already accepted server write.
+
+For an actual upload, use a local controller and runtime-bound filesystem origin;
+mocked picker or queue callbacks do not prove storage or agent dispatch. Verify the
+stored image bytes and message metadata, including when the project's default origin
+differs from the selected runtime. Test Queue, Steer and Send now separately with a
+controlled active turn, and identify callback-only coverage explicitly. Clean up only
+the test user's records, runtime, files and device mappings after verification.
+
 ## Playwright (Studio)
 - Required frontend CI mirror: `pnpm quality:frontend:required`
 - Frontend lint budget gate: `pnpm lint`

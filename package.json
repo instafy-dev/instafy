@@ -55,7 +55,7 @@
     "check:app-icons": "node scripts/check-app-icons.mjs",
     "test:ios:config": "node scripts/check-ios-config.mjs && pnpm check:app-icons",
     "test:ios:build": "pnpm --filter @instafy/frontend test:ios:build",
-    "test:android:config": "node scripts/check-android-config.mjs && pnpm check:app-icons",
+    "test:android:config": "node --test scripts/android-debug-ota-proof.test.mjs && node scripts/check-android-config.mjs && pnpm check:app-icons",
     "test:android:build": "node scripts/test-android-build.mjs",
     "test:ios:automation:probe": "node scripts/ios-automation-probe.mjs",
     "test:chat:voice:speech": "pnpm --filter @instafy/frontend test:e2e:chat:voice:speech",

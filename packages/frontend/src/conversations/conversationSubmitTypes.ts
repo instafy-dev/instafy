@@ -24,6 +24,10 @@ export interface SubmitConversationOptions {
   assertDispatchCurrent?: () => void;
 }
 
+// Existing text/command submissions resolve without a value. Image upload is
+// a precondition: callers must not consume a draft when it fails.
+export type SubmitConversationResult = void | { ok: false; reason: "image_upload_failed" };
+
 export interface UseConversationSubmitFlowArgs {
   conversations: ConversationState[];
   activeConversation: ConversationState | null;
