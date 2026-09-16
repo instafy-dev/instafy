@@ -131,8 +131,10 @@ child publishers and their sealed exact-commit manifests. Fresh manifests must r
 closed rather than attempting to overwrite an immutable release. Mutable tags are not release
 authority. Image publication makes an artifact deployable but does not deploy the hosted product.
 
-Hosted rollout authority lives in the private operations repository. Public CI must not receive
-its credentials, decide production rollout policy or bypass the exact-commit manifest boundary.
+Hosted rollout authority lives in the private operations repository: follow the private runbook's
+plan/apply flow with exact refs and report the receipt. Public CI runs only on GitHub-hosted
+runners; it must not receive private credentials, decide production rollout policy or bypass the
+exact-commit manifest boundary.
 
 ## Code conventions
 

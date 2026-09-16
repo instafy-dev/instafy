@@ -1,4 +1,3 @@
-import { withoutManualCiRouting } from "./lib/manualCiRoutingTestBaseline.mjs";
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import fs from 'node:fs';
@@ -7,7 +6,7 @@ import test from 'node:test';
 import vm from 'node:vm';
 
 const root = path.resolve(import.meta.dirname, '..');
-const source = withoutManualCiRouting('build.yml', fs.readFileSync(path.join(root, '.github/workflows/build.yml'), 'utf8'));
+const source = fs.readFileSync(path.join(root, '.github/workflows/build.yml'), 'utf8');
 const aggregateIf = "    if: ${{ always() && !(github.repository == 'instafy-dev/instafy' && github.event_name == 'push' && github.ref == 'refs/heads/main' && github.ref_protected == true && cancelled()) }}";
 const lanes = [
   { key: 'javascript-contracts', label: 'public-js-contracts', name: 'JavaScript contracts and migrations' },
@@ -35,33 +34,17 @@ function javascript(key, name) {
 function context(event) {
   return { repository: 'instafy-dev/instafy', repository_id: '1309636737', run_id: '1001', run_attempt: '1',
     event_name: event, ref: event === 'pull_request' ? 'refs/pull/2/merge' : 'refs/heads/main', ref_protected: event !== 'pull_request',
-    event: { repository: { private: true }, ...(event === 'pull_request' ? { pull_request: {
+    event: { repository: { private: false }, ...(event === 'pull_request' ? { pull_request: {
       base: { ref: 'main', repo: { full_name: 'instafy-dev/instafy' } },
       head: { repo: { full_name: 'instafy-dev/instafy', fork: false } },
     } } : {}) } };
-}
-function route(key, github, enabled = '') {
-  const expression = job(key).match(/^    runs-on: >-\n((?:      .*\n)+)/mu)?.[1].trim().replace(/^\$\{\{\s*|\s*\}\}$/gu, '');
-  assert.ok(expression);
-  assert.doesNotMatch(expression, /matrix\.|inputs\.|github\.job|CI_EXPANDED_SELF_HOSTED/u);
-  const evaluated = expression.replace(/([a-zA-Z][\w.]*) == ('[^']*'|true|false|[a-zA-Z][\w.]*)/gu, 'equal($1, $2)');
-  const selected = vm.runInNewContext(evaluated, {
-    github, vars: { CI_JAVASCRIPT_SELF_HOSTED: enabled, CI_EXPANDED_SELF_HOSTED: 'true', CI_BOOTSTRAP_SELF_HOSTED: 'true', CI_RUNNER_MODE: 'self-hosted' },
-    equal: (a, b) => typeof a === 'string' && typeof b === 'string' ? a.toLowerCase() === b.toLowerCase() : a === b,
-    fromJSON: JSON.parse,
-    format: (text, ...values) => text.replace(/\{\{|\}\}|\{(\d+)\}/gu,
-      (match, index) => match === '{{' ? '{' : match === '}}' ? '}' : String(values[index])),
-  }, { timeout: 1000 });
-  return JSON.parse(JSON.stringify(selected));
 }
 
 // These are source-only cancellation regressions, not a GitHub scheduler test.
 // Keep them in this existing CI test entrypoint so no workflow command changes.
 const cancellationWorkflows = [
-  { file: 'build.yml', text: source, keys: ['javascript', 'rust', 'rust-tests'],
-    previousHash: '0c0332d3dc8eeebdd9f68e6fc23b31f145cd5f791017e5f3784e1619f38465bc' },
-  { file: 'browser-e2e.yml', text: withoutManualCiRouting('browser-e2e.yml', fs.readFileSync(path.join(root, '.github/workflows/browser-e2e.yml'), 'utf8')),
-    keys: ['shared-profile'], previousHash: '71980384b6c935e2fbe90e48cd7526e8bbded8721611cea427ee0f9bd5da1115' },
+  { file: 'build.yml', text: source, keys: ['javascript', 'rust', 'rust-tests'] },
+  { file: 'browser-e2e.yml', text: fs.readFileSync(path.join(root, '.github/workflows/browser-e2e.yml'), 'utf8'), keys: ['shared-profile'] },
 ];
 const cancellationAggregates = cancellationWorkflows.flatMap(workflow => workflow.keys.map(key => {
   const text = workflow.text.split('\n  ' + key + ':\n')[1]?.split(/\n  [\w-]+:\n/u)[0];
@@ -118,20 +101,6 @@ function aggregateResult(text, github, isCancelled, results) {
     return 'failure';
   }
 }
-
-test('only four job if lines differ from both complete reviewed workflows at 3a6554', () => {
-  for (const workflow of cancellationWorkflows) {
-    assert.equal(workflow.text.split(aggregateIf).length - 1, workflow.keys.length, workflow.file);
-    for (const key of workflow.keys) {
-      const text = workflow.text.split('\n  ' + key + ':\n')[1].split(/\n  [\w-]+:\n/u)[0];
-      assert.ok(text.includes(aggregateIf + '\n'), key);
-    }
-    // The old guard is reconstructed literally; all routes, needs, inline gates,
-    // permissions, concurrency, timeouts and step-level always cleanup stay exact.
-    const original = workflow.text.replaceAll(aggregateIf, '    if: ${{ always() }}');
-    assert.equal(createHash('sha256').update(original).digest('hex'), workflow.previousHash, workflow.file);
-  }
-});
 
 test('only a cancelled canonical protected-main push can skip any of the four aggregates', () => {
   for (const aggregate of cancellationAggregates)
@@ -204,6 +173,7 @@ test('PR and manual cancellation retain exact fail-closed gates; uncancelled mai
 test('the required JavaScript identity is a strict aggregate, not a replacement context', () => {
   const aggregate = job('javascript');
   assert.match(aggregate, /^    name: JavaScript packages$/mu);
+  assert.match(aggregate, /^    runs-on: ubuntu-latest$/mu);
   const needs = aggregate.match(/    needs:\n((?:      - .+\n)+)/u)?.[1].trim().split('\n').map(line => line.trim().slice(2));
   assert.deepEqual(needs, lanes.map(lane => lane.key));
   assert.ok(aggregate.includes(aggregateIf + '\n'));
@@ -230,40 +200,6 @@ test('the actual inline aggregate rejects failure, cancellation, skipped or miss
   for (const malformed of [{}, [], null, { ...success, unexpected: { result: 'success' } }]) assert.throws(() => check(malformed));
 });
 
-test('five selectors are independently default-off and use only exclusive per-job identities', () => {
-  assert.equal((source.match(/vars\.CI_JAVASCRIPT_SELF_HOSTED/g) ?? []).length, 5);
-  const labels = new Set();
-  for (const item of jobs) for (const event of ['pull_request', 'push']) {
-    const github = context(event), trust = event === 'pull_request' ? 'pr' : 'main';
-    for (const toggle of ['', 'false', '0', 'self-hosted', 'unknown', ' true', 'true\n']) assert.equal(route(item.key, github, toggle), 'ubuntu-latest');
-    for (const toggle of ['true', 'TRUE']) assert.deepEqual(route(item.key, github, toggle), {
-      group: `org/instafy-ci-${trust}`,
-      labels: ['self-hosted', 'Linux', 'ARM64', `instafy-ci-bootstrap-1309636737-1001-1-${item.label}`, `instafy-ci-trust-${trust}`],
-    });
-    labels.add(route(item.key, github, 'true').labels[3]);
-    for (const field of ['repository_id', 'run_id', 'run_attempt']) {
-      assert.notEqual(route(item.key, { ...github, [field]: '2002' }, 'true').labels[3], route(item.key, github, 'true').labels[3]);
-    }
-  }
-  assert.equal(labels.size, 5);
-});
-
-test('public visibility, forks, different repositories and unsupported events retain hosted runners', () => {
-  for (const item of jobs) {
-    for (const event of ['workflow_dispatch', 'pull_request_target', 'merge_group', 'schedule', 'workflow_run', 'release']) {
-      assert.equal(route(item.key, context(event), 'true'), 'ubuntu-latest');
-    }
-    for (const event of ['push', 'pull_request']) for (const mutate of [
-      g => { g.repository = 'someone/instafy'; }, g => { g.event.repository.private = false; },
-      ...(event === 'pull_request' ? [g => { g.event.pull_request.base.ref = 'topic'; },
-        g => { g.event.pull_request.head.repo.fork = true; }, g => { g.event.pull_request.head.repo.full_name = 'someone/instafy'; },
-        g => { g.event.pull_request.base.repo.full_name = 'someone/instafy'; }] : [g => { g.ref = 'refs/heads/topic'; }, g => { g.ref_protected = false; }]),
-    ]) {
-      const github = context(event); mutate(github); assert.equal(route(item.key, github, 'true'), 'ubuntu-latest');
-    }
-  }
-});
-
 test('every bounded child independently checks out and installs the same exact Node20 monorepo', () => {
   for (const lane of lanes) {
     const text = job(lane.key);
@@ -279,13 +215,14 @@ test('every bounded child independently checks out and installs the same exact N
     assert.equal((text.match(/run: pnpm install --frozen-lockfile$/gmu) ?? []).length, 1);
     assert.doesNotMatch(step(lane.key, 'Install dependencies'), /--ignore-scripts|--filter/u);
     assert.match(text, /run: node --test scripts\/check-javascript-ci\.test\.mjs/u);
-    assert.ok(text.indexOf('Qualify isolated JavaScript CI runner') < text.indexOf('Checkout repository'));
+    assert.ok(text.startsWith(`  ${lane.key}:\n    name: ${lane.name}\n    runs-on: ubuntu-latest\n`));
+    assert.doesNotMatch(text, /runner\.environment|self-hosted|Qualify isolated/u);
   }
 });
 
 test('all original migration and contract checks remain together including the real empty-database test', () => {
   const text = job('javascript-contracts');
-  for (const filename of ['check-public-boundary-workflow', 'check-production-image-inputs', 'check-production-services-workflow',
+  for (const filename of ['check-public-boundary-workflow', 'check-hosted-only-runners', 'check-production-image-inputs', 'check-production-services-workflow',
     'check-public-release-workflows', 'check-changesets', 'verify-changeset-pack', 'lib/codexMachineAuthExpiry',
     'check-supabase-migrations', 'test-supabase-migrations-empty-db', 'ensure-supabase-postgres-image', 'check-self-host-compose']) {
     assert.equal(text.split(`scripts/${filename}.test.mjs`).length - 1, 1, filename);
@@ -304,7 +241,7 @@ test('the complete pre-split command inventory and working directories are uncha
   const original = {
     'Install dependencies': 'e77ccc60f79964794528b62d01c6c28548ed751c0da9fb1ed7f94c1ed7e8ce17',
     'Validate public migration ordering': '7d8920702565c08045672b91f0a08a35295ef2bf65e7ea9f464fe3bc173a195e',
-    'Test public migration and self-host contracts': '2fc2836399636c2f6038bdfff42c91fa1b133335e9132e2ba6701469733e34cb',
+    'Test public migration and self-host contracts': '992dddcc78218cba519ff0737db1bd2244173e1077fb949366c6d8884576dbb3',
     'Ensure Supabase Postgres image': 'fcb66564f9c4cb18b6612898669e1f23c0c21328f9f69a0771e7b3980dfaf930',
     'Apply public migrations to an empty database': '945388b69cfddc6f588f366844e61ffecaee1106b92b3bb4e88d9f89902a395a',
     'Lint frontend': 'a23bfd0831c63f63e596b3d19225888a844d89f50bf043891c3c005b5b42480b',
@@ -319,7 +256,7 @@ test('the complete pre-split command inventory and working directories are uncha
   const found = [];
   for (const lane of lanes) for (const part of job(lane.key).split('      - name: ').slice(1)) {
     const name = part.split('\n')[0];
-    if (['Qualify isolated JavaScript CI runner', 'Verify JavaScript CI coverage and routing'].includes(name)) continue;
+    if (name === 'Verify JavaScript CI coverage and routing') continue;
     const match = part.match(/^        run: (.*)(?:\n|$)/mu);
     if (!match) continue;
     assert.doesNotMatch(part, /^        (?:if|continue-on-error|timeout-minutes|env):/mu, name);
@@ -344,28 +281,4 @@ test('the full frontend, CLI, provider artifact and Desktop commands are preserv
     assert.equal(lanes.reduce((count, lane) => count + (job(lane.key).split(command).length - 1), 0), 1, command);
   }
   assert.match(step('javascript-cli', 'Validate provider contract package artifact'), /working-directory: packages\/provider-contract/u);
-});
-
-test('inline guest qualification rejects wrong identity and a non-ARM Linux Docker service', () => {
-  for (const item of jobs) {
-    const program = javascript(item.key, 'Qualify isolated JavaScript CI runner');
-    const evaluate = (processOverride = {}, engine = { OSType: 'linux', Architecture: 'aarch64' }) => {
-      const calls = [];
-      vm.runInNewContext(program, { process: { platform: 'linux', arch: 'arm64', getuid: () => 503, versions: { node: '22.23.2' },
-        env: { RUNNER_OS: 'Linux', RUNNER_ARCH: 'ARM64', INSTAFY_CI_JOB_ISOLATION: 'ephemeral' }, ...processOverride },
-        require: name => name === 'node:assert/strict' ? assert : { execFileSync(file, args) {
-          calls.push([file, args]); return file === 'docker' ? JSON.stringify(engine) : '';
-        } },
-      }, { timeout: 1000 });
-      return calls;
-    };
-    assert.doesNotThrow(() => evaluate());
-    for (const override of [{ platform: 'darwin' }, { arch: 'x64' }, { getuid: () => 0 }, { versions: { node: '20.20.2' } }, { env: {} },
-      { env: { RUNNER_OS: 'Linux', RUNNER_ARCH: 'ARM64', INSTAFY_CI_JOB_ISOLATION: 'ephemeral', INSTAFY_ENV_DIR: '/inert' } }]) assert.throws(() => evaluate(override));
-    if (item.key === 'javascript-contracts') {
-      assert.ok(evaluate().some(([file]) => file === 'docker'));
-      assert.throws(() => evaluate({}, { OSType: 'linux', Architecture: 'x86_64' }));
-      assert.throws(() => evaluate({}, { OSType: 'windows', Architecture: 'arm64' }));
-    }
-  }
 });

@@ -28,22 +28,7 @@ permissions:
 jobs:
   boundary:
     name: Public boundary (trusted base)
-    # Temporary, default-off routing for this one trusted boundary job only.
-    # The per-run label cannot accept ordinary control jobs or another attempt.
-    runs-on: >-
-      ${{ vars.CI_BOOTSTRAP_SELF_HOSTED == 'true'
-          && github.repository == 'instafy-dev/instafy'
-          && github.event.repository.private == true
-          && ((github.event_name == 'pull_request_target'
-               && github.event.pull_request.base.ref == 'main'
-               && github.event.pull_request.base.repo.full_name == github.repository
-               && github.event.pull_request.head.repo.full_name == github.repository
-               && github.event.pull_request.head.repo.fork == false)
-              || (github.event_name == 'push'
-                  && github.ref == 'refs/heads/main'
-                  && github.ref_protected == true))
-          && fromJSON(format('{{"group":"org/instafy-ci-{0}","labels":["self-hosted","Linux","ARM64","instafy-ci-bootstrap-{1}-{2}-{3}-boundary","instafy-ci-trust-{0}"]}}', github.event_name == 'pull_request_target' && 'pr' || 'main', github.repository_id, github.run_id, github.run_attempt))
-          || 'ubuntu-latest' }}
+    runs-on: ubuntu-latest
     timeout-minutes: 20
     permissions:
       contents: read

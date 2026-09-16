@@ -23,19 +23,7 @@ concurrency:
 jobs:
   authorize:
     name: Authorize exact release source
-    runs-on: >-
-      ${{ vars.TRUSTED_AMD64_BUILD_RUNNER_MODE == 'self-hosted'
-          && github.repository == 'instafy-dev/instafy'
-          && github.repository_id == '1309636737'
-          && github.event.repository.private == true
-          && github.event_name == 'workflow_dispatch'
-          && github.ref == 'refs/heads/main'
-          && github.ref_protected == true
-          && github.workflow_ref == 'instafy-dev/instafy/.github/workflows/publish-runtime-agent.yml@refs/heads/main'
-          && github.workflow_sha == github.sha
-          && inputs.commit_sha == github.sha
-          && fromJSON('{"group":"org/instafy-trusted-build","labels":["self-hosted","Linux","X64","instafy-build"]}')
-          || 'ubuntu-latest' }}
+    runs-on: ubuntu-latest
     permissions:
       actions: read
       contents: read
@@ -114,19 +102,7 @@ jobs:
   release-approval:
     name: Approve the exact release once
     needs: authorize
-    runs-on: >-
-      ${{ vars.TRUSTED_AMD64_BUILD_RUNNER_MODE == 'self-hosted'
-          && github.repository == 'instafy-dev/instafy'
-          && github.repository_id == '1309636737'
-          && github.event.repository.private == true
-          && github.event_name == 'workflow_dispatch'
-          && github.ref == 'refs/heads/main'
-          && github.ref_protected == true
-          && github.workflow_ref == 'instafy-dev/instafy/.github/workflows/publish-runtime-agent.yml@refs/heads/main'
-          && github.workflow_sha == github.sha
-          && inputs.commit_sha == github.sha
-          && fromJSON('{"group":"org/instafy-trusted-build","labels":["self-hosted","Linux","X64","instafy-build"]}')
-          || 'ubuntu-latest' }}
+    runs-on: ubuntu-latest
     environment: ghcr-release
     permissions: {}
     steps:
@@ -152,19 +128,7 @@ jobs:
     needs:
       - authorize
       - release-approval
-    runs-on: >-
-      ${{ vars.TRUSTED_AMD64_BUILD_RUNNER_MODE == 'self-hosted'
-          && github.repository == 'instafy-dev/instafy'
-          && github.repository_id == '1309636737'
-          && github.event.repository.private == true
-          && github.event_name == 'workflow_dispatch'
-          && github.ref == 'refs/heads/main'
-          && github.ref_protected == true
-          && github.workflow_ref == 'instafy-dev/instafy/.github/workflows/publish-runtime-agent.yml@refs/heads/main'
-          && github.workflow_sha == github.sha
-          && inputs.commit_sha == github.sha
-          && fromJSON('{"group":"org/instafy-trusted-build","labels":["self-hosted","Linux","X64","instafy-build"]}')
-          || matrix.runner }}
+    runs-on: ${{ matrix.runner }}
     # Cache-hit cells normally finish in under 15 minutes, but observed cold
     # Rust rebuilds can approach an hour. Keep a bounded 75-minute path while
     # still preventing a wedged BuildKit worker from consuming six hours.
@@ -222,7 +186,6 @@ jobs:
           submodules: recursive
 
       - name: Reclaim hosted-runner disk for the audited image
-        if: runner.environment == 'github-hosted'
         shell: bash
         run: |
           set -euo pipefail
@@ -252,9 +215,6 @@ jobs:
         uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
         with:
           version: v0.35.0
-          # Only x86 targets need the amd64 BuildKit v0.32.2 image on BUILD.
-          # Keep ARM targets and hosted builders native; never force ARM via QEMU.
-          driver-opts: ${{ runner.environment == 'self-hosted' && matrix.architecture == 'amd64' && 'image=moby/buildkit@sha256:040d34121c27906c4ff9ac152a30d52bf2c5d328d3bb748916bb3d2743c02528' || '' }}
 
       - name: Resolve image references
         id: refs
@@ -285,8 +245,8 @@ jobs:
       - name: Install pinned Trivy
         env:
           TRIVY_VERSION: "0.72.0"
-          TRIVY_ASSET: ${{ runner.environment == 'self-hosted' && 'Linux-64bit' || matrix.trivy_asset }}
-          TRIVY_SHA256: ${{ runner.environment == 'self-hosted' && 'bbb64b9695866ce4a7a8f5c9592002c5961cab378577fa3f8a040df362b9b2ea' || matrix.trivy_sha256 }}
+          TRIVY_ASSET: ${{ matrix.trivy_asset }}
+          TRIVY_SHA256: ${{ matrix.trivy_sha256 }}
         run: |
           set -euo pipefail
           archive="$RUNNER_TEMP/trivy.tar.gz"
@@ -298,8 +258,7 @@ jobs:
           sudo install -m 0755 "$RUNNER_TEMP/trivy" /usr/local/bin/trivy
           test "$(trivy --version | awk 'NR == 1 { print $2 }')" = "$TRIVY_VERSION"
 
-      # Hosted cells build natively; the trusted BUILD daemon must support both
-      # target platforms. Scan each image before any registry login.
+      # Build and scan on the native architecture before any registry login.
       # This exact local image is pushed after the gate; there is no post-scan
       # rebuild that could change bytes.
       - name: Build audit image
@@ -317,7 +276,7 @@ jobs:
             org.opencontainers.image.revision=${{ needs.authorize.outputs.commit_sha }}
             org.opencontainers.image.version=${{ needs.authorize.outputs.commit_sha }}
           cache-from: type=gha,scope=publish-runtime-agent-${{ matrix.flavor }}-${{ matrix.architecture }}
-          cache-to: type=gha,scope=publish-runtime-agent-${{ matrix.flavor }}-${{ matrix.architecture }},mode=max${{ runner.environment == 'self-hosted' && ',timeout=2m,ignore-error=true' || '' }}
+          cache-to: type=gha,scope=publish-runtime-agent-${{ matrix.flavor }}-${{ matrix.architecture }},mode=max
           tags: instafy-runtime-audit:${{ matrix.flavor }}-${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.architecture }}
           load: true
           push: false
@@ -482,19 +441,7 @@ jobs:
     needs:
       - authorize
       - build-scan-push
-    runs-on: >-
-      ${{ vars.TRUSTED_AMD64_BUILD_RUNNER_MODE == 'self-hosted'
-          && github.repository == 'instafy-dev/instafy'
-          && github.repository_id == '1309636737'
-          && github.event.repository.private == true
-          && github.event_name == 'workflow_dispatch'
-          && github.ref == 'refs/heads/main'
-          && github.ref_protected == true
-          && github.workflow_ref == 'instafy-dev/instafy/.github/workflows/publish-runtime-agent.yml@refs/heads/main'
-          && github.workflow_sha == github.sha
-          && inputs.commit_sha == github.sha
-          && fromJSON('{"group":"org/instafy-trusted-build","labels":["self-hosted","Linux","X64","instafy-build"]}')
-          || 'ubuntu-latest' }}
+    runs-on: ubuntu-latest
     permissions:
       contents: read
       packages: write
