@@ -1,11 +1,12 @@
 import { useEffect, useId, useState, type RefObject } from "react";
 import { DialogTrigger, Heading } from "react-aria-components";
-import { Folder } from "iconoir-react";
+import { Check, Folder } from "iconoir-react";
 import { AttentionBadge } from "../../../components/AttentionBadge";
 import { Button } from "../../../components/Button";
 import { ControlChevron } from "../../../components/ControlChevron";
 import { SpaceIdentity } from "../../../components/SpaceIdentity";
 import { StudioDialogPopover } from "../../../components/aria/StudioPopover";
+import { DARK_FLOATING_SELECTION_CLASS } from "../../../theme/darkSurfaces";
 import type { ProjectRecencyMap } from "../../../projects/projectRecency";
 import { unreadUpdatesDescription as unreadDescription } from "../homeUpdateLabels";
 
@@ -118,14 +119,15 @@ export function StudioRecentSpaces({
                     setPopoverOpen(false);
                     onSelectSpace(space.id);
                   }}
-                  className="min-h-[88px] min-w-0 flex-col !justify-start gap-1.5 px-1 pb-1.5 pt-2.5 focus-visible:ring-offset-0 data-[pressed]:!translate-y-0 data-[pressed]:!scale-100 aria-[current=page]:bg-primary-50 dark:aria-[current=page]:bg-primary-500/10"
+                  className={`relative min-h-[88px] min-w-0 flex-col !justify-start gap-1.5 px-1 pb-1.5 pt-2.5 focus-visible:ring-offset-0 data-[pressed]:!translate-y-0 data-[pressed]:!scale-100 aria-[current=page]:bg-slate-100 ${DARK_FLOATING_SELECTION_CLASS}`}
                 >
+                  {selected ? <Check aria-hidden="true" className="pointer-events-none absolute right-1.5 top-1.5 h-3 w-3 text-slate-600 dark:text-slate-300" /> : null}
                   <span className="relative inline-flex shrink-0">
                     <SpaceIdentity name={name} icon={space.icon} color={space.color} avatarUrl={space.avatarUrl} className="!h-8 !w-8" />
                     <AttentionBadge count={attention} aria-hidden testId={`sidebar-recent-space-attention-${space.id}`}
                       title={unreadDescription(attention)} className="absolute -right-1.5 -top-1.5" />
                   </span>
-                  <span className={`line-clamp-2 min-h-8 w-full min-w-0 text-center text-xs leading-4 [overflow-wrap:anywhere] ${selected ? "font-medium text-primary-700 dark:text-primary-300" : "font-normal text-slate-700 dark:text-slate-300"}`}>{name}</span>
+                  <span className={`line-clamp-2 min-h-8 w-full min-w-0 text-center text-xs leading-4 [overflow-wrap:anywhere] ${selected ? "font-medium text-slate-900 dark:text-slate-100" : "font-normal text-slate-700 dark:text-slate-300"}`}>{name}</span>
                 </Button>
               </li>
             );
@@ -160,7 +162,7 @@ export function StudioRecentSpaces({
       variant="ghost"
       size="sm"
       radius="lg"
-      fullWidth
+      fullWidth={!pathPresentation}
       data-testid="sidebar-space-button"
       aria-label={triggerLabel}
       title={triggerLabel}

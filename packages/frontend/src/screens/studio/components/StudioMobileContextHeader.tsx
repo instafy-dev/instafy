@@ -106,7 +106,7 @@ export function StudioMobileContextHeader({
           recency={recency} attentionCounts={attentionCounts}
           collapsed={false} expanded={false} onExpandedChange={() => {}}
           presentation="path"
-          rowClassName="!min-h-12 !px-1 flex-1 [&>[data-testid=sidebar-current-space-attention]]:!static [&>[data-testid=sidebar-current-space-attention]]:order-1 [&>[data-testid=sidebar-current-space-attention]]:shrink-0"
+          rowClassName="!min-h-12 !px-1 [&>[data-testid=sidebar-current-space-attention]]:!static [&>[data-testid=sidebar-current-space-attention]]:order-1 [&>[data-testid=sidebar-current-space-attention]]:shrink-0"
           iconClassName=""
           onSelectSpace={onSpace} onBrowseAll={onBrowseSpaces ?? onSwitchTeam}
         />
