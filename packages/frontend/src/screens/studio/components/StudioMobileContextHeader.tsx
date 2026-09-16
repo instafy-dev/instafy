@@ -11,6 +11,7 @@ import { StudioRecentSpaces } from "./StudioRecentSpaces";
 import { StudioAccountMenu } from "./StudioAccountMenu";
 import { StudioSidebarTeamMenu } from "./StudioSidebarTeamMenu";
 import { unreadUpdatesDescription } from "../homeUpdateLabels";
+import "./StudioMobileContextHeader.css";
 
 export interface StudioMobileContextHeaderProps {
   teamName: string;
@@ -106,7 +107,7 @@ export function StudioMobileContextHeader({
           recency={recency} attentionCounts={attentionCounts}
           collapsed={false} expanded={false} onExpandedChange={() => {}}
           presentation="path"
-          rowClassName="!min-h-12 !px-1 [&>[data-testid=sidebar-current-space-attention]]:!static [&>[data-testid=sidebar-current-space-attention]]:order-1 [&>[data-testid=sidebar-current-space-attention]]:shrink-0"
+          rowClassName="!min-h-12 !px-2 [&>[data-testid=sidebar-current-space-attention]]:!static [&>[data-testid=sidebar-current-space-attention]]:order-1 [&>[data-testid=sidebar-current-space-attention]]:shrink-0"
           iconClassName=""
           onSelectSpace={onSpace} onBrowseAll={onBrowseSpaces ?? onSwitchTeam}
         />

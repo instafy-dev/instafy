@@ -169,7 +169,7 @@ export function StudioRecentSpaces({
       aria-expanded={usePopover ? popoverOpen : expanded}
       aria-controls={!usePopover && expanded ? listId : undefined}
       onPress={usePopover ? undefined : () => onExpandedChange(!expanded)}
-      className={`group/item relative min-w-0 py-1.5 transition focus-visible:ring-offset-0 data-[pressed]:!translate-y-0 data-[pressed]:!scale-100 ${rowClassName}`}
+      className={`${pathPresentation ? "studio-breadcrumb-trigger" : ""} group/item relative min-w-0 py-1.5 transition focus-visible:ring-offset-0 data-[pressed]:!translate-y-0 data-[pressed]:!scale-100 ${rowClassName}`}
     >
       {pathPresentation && currentSpace ? <SpaceIdentity
         name={spaceName(currentSpace)} icon={currentSpace.icon} color={currentSpace.color} avatarUrl={currentSpace.avatarUrl}

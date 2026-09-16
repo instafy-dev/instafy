@@ -55,7 +55,7 @@ export function StudioSidebarTeamMenu({
         data-testid="sidebar-team-menu-trigger"
         aria-label={`Team menu: ${teamName}`} title={`Team menu: ${teamName}`}
         aria-haspopup="menu"
-        className={`${path ? `shrink-0 !px-0 ${mobile || touchTargets ? "!min-w-11 !w-11" : "!min-w-8 !w-8"}` : compact ? rowClassName : "min-w-0 flex-1 justify-between gap-1 py-2 pl-2 pr-3"} ${mobile ? "!min-h-12" : touchTargets ? "!min-h-11" : ""} data-[pressed]:!translate-y-0 data-[pressed]:!scale-100`}
+        className={`${path ? `studio-breadcrumb-trigger studio-breadcrumb-avatar-trigger shrink-0 !px-0 ${mobile || touchTargets ? "!min-w-11 !w-11" : "!min-w-8 !w-8"}` : compact ? rowClassName : "min-w-0 flex-1 justify-between gap-1 py-2 pl-2 pr-3"} ${mobile ? "!min-h-12" : touchTargets ? "!min-h-11" : ""} data-[pressed]:!translate-y-0 data-[pressed]:!scale-100`}
       >
         {path ? (
           <OrgIdentity name={teamName} avatarUrl={teamAvatarUrl} accentColor={accentColor}

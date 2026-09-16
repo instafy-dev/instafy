@@ -154,6 +154,10 @@ the mobile context and navigation rows share one neutral surface, separated from
 by a single divider. Keep workspace surfaces, primary
 actions and notification counts on their existing semantic colors.
 
+Mobile breadcrumb pickers keep a 48px tap target, but hover, open-menu and keyboard-focus
+feedback follows a compact 32px shape around the content. Give text pickers 8px horizontal
+padding so the highlight has breathing room beside the label as well as above and below it.
+
 Color choices have 44px targets, native radio keyboard behavior and a selected border, so
 selection does not depend on hue alone. The selector preview reflects unsaved name and color
 edits. Save profile persists those changes together with the picture.
