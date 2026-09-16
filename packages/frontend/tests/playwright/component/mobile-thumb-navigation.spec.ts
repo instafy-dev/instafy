@@ -143,8 +143,9 @@ for (const layout of [
     await expect(dock).toHaveCount(0);
     await expect(header.getByTestId("mobile-header-back")).toHaveCount(0);
     await expect(header.getByTestId("mobile-header-open-chats")).toBeVisible();
-    await expect(header.getByTestId("mobile-header-picker")).toContainText("Alpha chat");
-    await expect(header.getByTestId("mobile-header-picker")).toContainText("Alpha space");
+    await expect(header.getByTestId("mobile-header-title")).toHaveText("Alpha chat");
+    await expect(header.getByTestId("mobile-header-space")).toHaveText("Alpha space");
+    await expect(header.getByTestId("mobile-header-picker")).toHaveAccessibleName("Open space navigation: Alpha space");
     for (const id of ["mobile-header-open-chats", "mobile-header-picker", "mobile-header-more"]) {
       const box = (await header.getByTestId(id).boundingBox())!;
       expect(box.width).toBeGreaterThanOrEqual(48); expect(box.height).toBeGreaterThanOrEqual(48);

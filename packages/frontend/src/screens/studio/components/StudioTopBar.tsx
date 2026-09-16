@@ -557,9 +557,9 @@ export function StudioTopBar({ mobileNavigation, newChatInSidebar = false, conte
               {...mobileNavigation}
               onOpenPicker={onToggleSidebar ?? mobileNavigation.onOpenPicker}
               title={topbarLocationTitle}
+              titleIcon={topbarLocationOverride ? topbarLocationOverride.icon : activeWorkspaceTab?.icon}
               spaceName={resolvedProjectName}
               showSpaceName={!contextHeaderAbove}
-              onOpenSidebar={onToggleSidebar}
               sidebarOpen={sidebarOpen}
               onOpenSettings={onOpenProjectSettings}
               onNewChat={onNewChat}

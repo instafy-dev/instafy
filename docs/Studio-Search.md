@@ -30,10 +30,13 @@ space around the text, supports forced colors and respects reduced motion.
 **Back to results** restores the query, scope, loaded result pages and reading
 position. Below 900px, this appears as **Results** in the existing workspace
 header, replacing its Back/Chats action. Touch and compact mouse layouts use the
-same rule: Results when there is a saved search, Back when there is a previous
-visit, and Chats for direct entry without history. Forward, tab switching and
-other secondary actions are available in **More**. Drawer dismissal and parent
-conversation navigation remain separate actions.
+same rule: Results when there is a saved search, a Back arrow when there is a previous
+visit, and a Chats icon for direct entry without history. Their accessible names
+describe the destination. The sidebar toggle stays at the far left, separate from
+the current tab's icon and title. Forward, tab switching and other secondary actions
+are available in **More**. Drawer dismissal and parent conversation navigation
+remain separate actions. Org and space transitions preserve the last resolved
+history controls while the route catches up, without accepting stale actions.
 
 Scrolling down near the end of a historical message window automatically loads
 the next page while preserving the reading position. Search-result reveals and

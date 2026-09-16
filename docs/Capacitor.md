@@ -192,7 +192,7 @@ still requires verification on a phone, even when the simulated-event test passe
 
 ## iOS release boundary
 
-Studio's touch layout keeps Back in its header and Forward in the Chats/Spaces picker,
+Studio's touch layout keeps Back in its header and Forward in the More menu,
 backed by the same React Router history as the browser and Electron renderer. A direct entry
 without previous history offers an explicit Chats destination instead of pretending it is Back.
 Do not confuse these controls with navigation
@@ -204,7 +204,9 @@ must separately verify keyboard dismissal, drill-in dismissal and underlying rou
 
 Only Home, Chats history and Spaces overviews have a bottom destination bar; conversations,
 job threads, editors and settings details do not, even with the keyboard closed. The compact
-picker opens from the header title/space. An overview's bar yields to a resized software keyboard.
+navigation drawer opens from the fixed sidebar button at the far left of the header;
+the current tab's icon and title are separate from that control. An overview's bar
+yields to a resized software keyboard.
 The viewport observer does not install a native keyboard listener or alter resize/accessory policy.
 Hardware-keyboard focus alone keeps the overview bar visible; pinch zoom is not classified as a keyboard.
 The transient navigation picker follows the visual viewport, fits short lists and caps long lists
