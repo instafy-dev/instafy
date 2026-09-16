@@ -46,6 +46,7 @@ import {
   DARK_CANVAS_CLASS,
   DARK_CONTROL_HOVER_CLASS,
   DARK_DIVIDER_BORDER_CLASS,
+  DARK_RAIL_BG_CLASS,
   DARK_RAIL_BLUR_BG_CLASS,
   DARK_RAIL_HOVER_CLASS,
   DARK_RAIL_MUTED_BG_CLASS,
@@ -397,7 +398,9 @@ export function StudioTopBar({ mobileNavigation, newChatInSidebar = false, conte
             ? useDesktopTabChrome
               ? `bg-white ${DARK_CANVAS_CLASS}`
               : `bg-white/95 ${DARK_RAIL_MUTED_BG_CLASS}`
-            : `bg-white/70 backdrop-blur-md ${DARK_RAIL_BLUR_BG_CLASS}`,
+            : contextHeaderAbove
+              ? `bg-slate-50 ${DARK_RAIL_BG_CLASS}`
+              : `bg-white/70 backdrop-blur-md ${DARK_RAIL_BLUR_BG_CLASS}`,
           isLargeScreen
             ? useDesktopTabChrome
               // No bottom border in tab-chrome mode: the tab strip draws its own

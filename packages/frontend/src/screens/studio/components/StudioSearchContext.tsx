@@ -1,4 +1,3 @@
-import { normalizeOrgAccent } from "../../../org/orgAccent";
 import type { ReactNode } from "react";
 import { NavArrowDown, Xmark } from "iconoir-react";
 import type { StudioSearchScope } from "./useStudioSearch";
@@ -19,7 +18,7 @@ export function StudioSearchContext({ scope, context, onBroaden }: {
   onBroaden: (scope: StudioSearchScope, focusInput?: boolean) => void;
 }) {
   return <span className="studio-search-context" data-testid="studio-search-context" onClick={event => event.stopPropagation()}>
-    {scope !== "all" ? <span className="studio-scope-picker-chip org-accent-chip" data-org-accent={normalizeOrgAccent(context.accentColor) ?? "slate"}>
+    {scope !== "all" ? <span className="studio-scope-picker-chip">
       {context.team}
       <button type="button" className="studio-scope-remove" aria-label="Search all orgs" title="Search all orgs" onClick={() => onBroaden("all", true)}><Xmark aria-hidden="true" /></button>
     </span> : <button type="button" className="studio-search-all studio-all-scope-picker" aria-label="Choose team or space" onClick={context.onBrowseTeams}>All orgs<NavArrowDown aria-hidden="true" /></button>}

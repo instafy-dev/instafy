@@ -146,8 +146,12 @@ menu remains the visible touch entry point.
 Team profile settings and new-team onboarding offer a shared color alongside the name and
 picture. Use `OrgIdentity` for team avatars and `TeamAccentPicker` for the fixed palette:
 neutral, blue, violet, pink, red, orange, green and teal. A picture takes precedence over
-initials; the accent still identifies the selected team in its rail marker and breadcrumb
-background. These colors adapt to light and dark mode. Keep workspace surfaces, primary
+initials; the accent still identifies the selected team in its rail marker. In the header,
+keep color on the identity itself, without a second tinted tile around the avatar. Search
+scope chips use the same neutral surface for teams and spaces. These colors adapt to light
+and dark mode. Home uses a small selection marker rather than a colored logo background;
+the mobile context and navigation rows share one neutral surface, separated from the page
+by a single divider. Keep workspace surfaces, primary
 actions and notification counts on their existing semantic colors.
 
 Color choices have 44px targets, native radio keyboard behavior and a selected border, so

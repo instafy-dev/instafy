@@ -20,14 +20,14 @@
   --org-marker: hsl(var(--org-hue) var(--org-saturation) 68%);
 }
 .org-accent-avatar { background: var(--org-avatar); color: var(--org-ink); }
-.org-accent-selection[aria-current=page], .org-accent-chip[data-org-accent], .studio-scope-picker-chip.org-accent-chip[data-org-accent] { background: var(--org-tint); }
+.org-accent-selection[aria-current=page] { background: var(--org-tint); }
 .org-accent-marker { background: var(--org-marker); }
 .org-accent-choice { border: 2px solid transparent; border-radius: 10px; }
 .org-accent-choice:has(:checked) { border-color: var(--org-marker); background: var(--org-tint); }
 .org-accent-choice:has(:focus-visible) { outline: 2px solid var(--color-primary-500); outline-offset: 2px; }
 .org-accent-swatch { background: var(--org-marker); }
 @media (forced-colors: active) {
-  .org-accent-selection[aria-current=page], .org-accent-chip[data-org-accent] { outline: 1px solid Highlight; }
+  .org-accent-selection[aria-current=page] { outline: 1px solid Highlight; }
   .org-accent-marker { background: Highlight; forced-color-adjust: none; }
   .org-accent-choice:has(:checked) { border-color: Highlight; }
   .org-accent-choice:has(:focus-visible) { outline-color: Highlight; }

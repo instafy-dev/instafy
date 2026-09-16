@@ -24,6 +24,7 @@ import { Badge } from "../components/Badge";
 import { Heading } from "../components/Heading";
 import { Surface } from "../components/Surface";
 import { Text } from "../components/Text";
+import { DARK_RAIL_SURFACE_CLASS } from "../theme/darkSurfaces";
 import { OctoMark } from "../components/OctoMark";
 import { AttentionBadge } from "../components/AttentionBadge";
 import { ChatsIcon } from "../components/AppIcons";
@@ -2222,7 +2223,7 @@ function StudioLayoutInner() {
             inert={search.open || showMobileLeftDrawerOverlay || undefined}
           >
             {!isLargeScreen ? mobileContextHeader() : null}
-            {isLargeScreen || navigationScope.page === "workspace" ? <StudioTopBar newChatInSidebar={isLargeScreen} contextHeaderAbove mobileNavigation={mobileTopbarNavigation} /> : <div className="flex min-h-14 shrink-0 items-center gap-2 border-b border-slate-200/70 px-1 py-1 dark:border-[color:var(--color-studio-dark-divider)]">
+            {isLargeScreen || navigationScope.page === "workspace" ? <StudioTopBar newChatInSidebar={isLargeScreen} contextHeaderAbove mobileNavigation={mobileTopbarNavigation} /> : <div className={`flex min-h-14 shrink-0 items-center gap-2 border-b border-slate-200/70 bg-slate-50 px-1 py-1 ${DARK_RAIL_SURFACE_CLASS}`}>
               <IconButton variant="ghost" aria-label="Open navigation" data-testid="topbar-sidebar-toggle" onPress={handleToggleSidebar} className="!min-h-12 !min-w-12"><SidebarExpand className="h-[18px] w-[18px]" aria-hidden="true" /></IconButton>
               <span className="min-w-0 flex-1 truncate text-sm text-slate-500 dark:text-slate-400">{navigationScope.page === "account" ? "Your settings" : topbarLocationOverride?.title ?? (contextHomeActive ? "Home" : activeTeamName)}</span>
             </div>}

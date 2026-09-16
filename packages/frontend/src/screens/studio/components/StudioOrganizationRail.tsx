@@ -13,7 +13,7 @@ import { StudioPopover } from "../../../components/aria/StudioPopover";
 import { StudioMenu, StudioMenuItem } from "../../../components/aria/StudioMenu";
 import { MenuItemContent } from "../../../components/MenuItemContent";
 
-const SELECTION_MARKER_CLASS = "pointer-events-none absolute -left-2 top-1/2 h-5 w-[3px] -translate-y-1/2 rounded-r-full bg-primary-600 dark:bg-primary-400";
+const SELECTION_MARKER_CLASS = "pointer-events-none absolute -left-2 top-1/2 h-5 w-[3px] -translate-y-1/2 rounded-r-full bg-current";
 
 export interface StudioOrganizationRailProps {
   organizations: SidebarWorkspaceOrgOption[];
@@ -102,7 +102,7 @@ export function StudioOrganizationRail({
           aria-label="Home — all teams" title="Home — all teams" aria-current={homeActive ? "page" : undefined}
           aria-describedby={homeAttentionCount > 0 ? homeAttentionId : undefined}
           data-testid="sidebar-home-button"
-          className="relative h-11 w-11 aria-[current=page]:bg-primary-50 dark:aria-[current=page]:bg-primary-500/10">
+          className="relative h-11 w-11">
           {homeActive ? <span aria-hidden="true" className={SELECTION_MARKER_CLASS} /> : null}
           <span aria-hidden="true"><OctoMark className="h-6 w-6 text-brand-ink dark:text-brand-paper" /></span>
           <AttentionBadge count={homeAttentionCount} aria-hidden testId="sidebar-home-badge"
