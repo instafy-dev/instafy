@@ -48,6 +48,12 @@ test("version retains the two exact bot-secret uses after a credential-free chec
   assert.equal((version.match(/secrets\.INSTAFY_BOT_TOKEN/gu) ?? []).length, 2);
   const credential = version.indexOf("      - name: Require the dedicated instafy-bot credential\n");
   assert.ok(credential > version.indexOf("run: pnpm install --frozen-lockfile --ignore-scripts"));
+  const freshness = version.indexOf("      - name: Require exact current protected main before bot authorization\n");
+  assert.ok(freshness > 0 && freshness < credential);
+  const freshnessStep = version.slice(freshness, credential);
+  assert.doesNotMatch(freshnessStep, /^        if:/mu);
+  assert.match(freshnessStep, /gh api --method GET "repos\/instafy-dev\/instafy\/branches\/main" --jq 'select\(\.name == "main" and \.protected == true\) \| \.commit\.sha'/u);
+  assert.match(freshnessStep, /test "\$current_sha" = "\$GITHUB_SHA"\n[^\n]*\n\s+test "\$checkout_sha" = "\$GITHUB_SHA"/u);
   assert.doesNotMatch(version.slice(0, credential), /secrets\./u);
   assert.ok(version.indexOf("      - name: Create or update the Changesets version pull request\n") > credential);
 });

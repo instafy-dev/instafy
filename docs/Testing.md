@@ -114,7 +114,7 @@ part of the JavaScript contracts lane.
 Explicit `workflow_dispatch` runs of protected `main` (Public Build, the
 Browser workflows, Auth Email, Controller database tests, the Git conflict
 fixture, npm Select/Version/Pack and the image publishers) run on the same
-GitHub-hosted runners as push and pull-request events, with unchanged commands,
+GitHub-hosted runners as push and pull-request events, with the same commands,
 permissions and timeouts. The publishers' first step still requires
 `inputs.commit_sha` to equal the current protected-main commit;
 npm publish keeps its hosted `npm-release` environment and trusted-publisher

@@ -181,6 +181,7 @@ test("Changesets separates pull-request, version, pack, and npm publish authorit
     version,
     "Checkout the exact protected-main event commit",
     "Install the exact dependency graph without lifecycle scripts",
+    "Require exact current protected main before bot authorization",
     "Require the dedicated instafy-bot credential",
     "Create or update the Changesets version pull request",
   );

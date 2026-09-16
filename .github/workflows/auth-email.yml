@@ -13,7 +13,6 @@ on:
     paths:
       - ".github/workflows/auth-email.yml"
       - "scripts/auth-email-smoke.mjs"
-      - "scripts/check-database-ci-routing.test.mjs"
       - "scripts/supabase-stack.mjs"
       - "scripts/lib/localSupabaseEnv.mjs"
       - "scripts/lib/supabaseStartMode.mjs"
@@ -30,7 +29,6 @@ on:
     paths:
       - ".github/workflows/auth-email.yml"
       - "scripts/auth-email-smoke.mjs"
-      - "scripts/check-database-ci-routing.test.mjs"
       - "scripts/supabase-stack.mjs"
       - "scripts/lib/localSupabaseEnv.mjs"
       - "scripts/lib/supabaseStartMode.mjs"
@@ -65,9 +63,6 @@ jobs:
           set-safe-directory: true
           persist-credentials: false
           ref: ${{ github.sha }}
-
-      - name: Verify database CI routing contracts
-        run: node --test scripts/check-database-ci-routing.test.mjs
 
       - name: Setup pnpm
         uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4

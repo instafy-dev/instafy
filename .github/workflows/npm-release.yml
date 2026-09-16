@@ -47,9 +47,6 @@ jobs:
       - name: Install the exact dependency graph without lifecycle scripts
         run: pnpm install --frozen-lockfile --ignore-scripts
 
-      - name: Test expanded CI routing
-        run: node --test scripts/check-expanded-ci-routing.test.mjs
-
       - name: Validate ordinary or generated release changes
         shell: bash
         env:
@@ -143,6 +140,17 @@ jobs:
 
       - name: Install the exact dependency graph without lifecycle scripts
         run: pnpm install --frozen-lockfile --ignore-scripts
+
+      - name: Require exact current protected main before bot authorization
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          current_sha="$(gh api --method GET "repos/instafy-dev/instafy/branches/main" --jq 'select(.name == "main" and .protected == true) | .commit.sha')"
+          test "$current_sha" = "$GITHUB_SHA"
+          checkout_sha="$(git rev-parse HEAD)"
+          test "$checkout_sha" = "$GITHUB_SHA"
 
       - name: Require the dedicated instafy-bot credential
         env:

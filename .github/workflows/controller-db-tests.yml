@@ -6,7 +6,6 @@ on:
       - "packages/runtime-controller/**"
       - "supabase/**"
       - "scripts/test-controller.mjs"
-      - "scripts/check-database-ci-routing.test.mjs"
       - "scripts/supabase-stack.mjs"
       - "scripts/lib/localSupabaseEnv.mjs"
       - "scripts/lib/supabaseStartMode.mjs"

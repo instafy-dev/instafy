@@ -55,7 +55,10 @@ to an immutable commit.
 pushes and exact-current-main manual runs; see
 [protected-main manual CI](Testing.md#protected-main-manual-ci). Version retains
 Select's version mode and the existing repository-only bot credential in its two
-original steps; it is not credential-free. Publish, approvals and npm OIDC routing
+original steps; it is not credential-free. Before either credential step, Version
+re-reads protected `main` with the read-only workflow token and requires both that
+branch head and its own checkout to equal the event commit, so a stale run cannot
+expose the bot credential. Publish, approvals and npm OIDC routing
 are unchanged. Pack still requires Select's publish mode and exact immutable plan,
 tests the packages and uploads only verified tarballs; it has no npm OIDC or
 repository-write authority.
