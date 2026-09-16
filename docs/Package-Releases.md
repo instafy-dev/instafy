@@ -51,23 +51,14 @@ Pull-request checks run on hosted runners with read-only repository access and n
 Publishing never runs from `pull_request` or `pull_request_target`. Every external Action is pinned
 to an immutable commit.
 
-The independently default-off `CI_PUBLIC_CONTROL_SELF_HOSTED` switch can route
-the protected-main push and exact-current-main manual **Select**, **Version** and **Pack**
-jobs to authenticated disposable Linux ARM64 runners while the canonical repository
-remains private. Other sources and events retain hosted routing. Manual runs require
-the defining workflow SHA to match the event SHA and independent current-main
-admission; see [protected-main manual CI](Testing.md#protected-main-manual-ci).
-Version retains Select's version mode and the existing
-repository-only bot credential in its two original steps; it is not credential-free.
-Its isolated-runner preflight precedes checkout, and a fresh protected-main and
-checkout-SHA check immediately precedes bot authorization. The earlier Select
-check alone cannot authorize a Version job delayed in the queue. Publish, approvals
-and npm OIDC routing are unchanged. Pack still requires Select's publish mode and exact immutable plan,
+**Select**, **Version** and **Pack** run on hosted `ubuntu-24.04` for protected-main
+pushes and exact-current-main manual runs; see
+[protected-main manual CI](Testing.md#protected-main-manual-ci). Version retains
+Select's version mode and the existing repository-only bot credential in its two
+original steps; it is not credential-free. Publish, approvals and npm OIDC routing
+are unchanged. Pack still requires Select's publish mode and exact immutable plan,
 tests the packages and uploads only verified tarballs; it has no npm OIDC or
-repository-write authority. This requires separate exact-job runner admission,
-baseline-tool qualification and cold execution/cleanup proof before enabling the switch; see
-[Testing](Testing.md). It does not grant npm publication authority or make the
-remaining hosted release stages available.
+repository-write authority.
 
 The source repository is currently internal. npm trusted publishing can still replace static npm
 tokens, but npm will not generate public provenance attestations until the source repository is
