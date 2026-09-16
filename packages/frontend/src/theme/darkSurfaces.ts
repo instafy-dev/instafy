@@ -62,6 +62,8 @@ export const DARK_FLOATING_BG_CLASS = "dark:bg-[var(--color-studio-dark-floating
 export const DARK_FLOATING_SOLID_BG_CLASS = "dark:bg-[var(--color-studio-dark-floating-solid)]";
 export const DARK_FLOATING_RAISED_BG_CLASS =
   "dark:bg-[var(--color-studio-dark-floating-raised)]";
+export const DARK_FLOATING_SELECTION_CLASS =
+  "dark:aria-[current=page]:bg-[var(--color-studio-dark-floating-raised)]";
 export const DARK_FLOATING_BORDER_CLASS = "dark:border-[color:var(--color-studio-dark-floating-border)]";
 export const DARK_FLOATING_SURFACE_CLASS = `${DARK_FLOATING_BG_CLASS} ${DARK_FLOATING_BORDER_CLASS}`;
 

@@ -33,12 +33,32 @@ without a photo. Agent/Octo identities and shared-browser cursor colors retain t
 treatments.
 
 Simple forms use `SettingsFormLayout`: a bounded reading width on the page surface, with
-spacing between sections and outlines on individual controls. Profile, personal preferences
-and team profile share this layout. Reserve cards for distinct collections, summaries,
+spacing between sections and outlines on individual controls. Profile, personal preferences,
+team profile and space basics share this layout. Reserve cards for distinct collections, summaries,
 warnings or other content that needs grouping; do not wrap an entire ordinary form in a
-second rounded surface.
+second rounded surface. The space name and appearance editors sit directly on this page
+surface, with no enclosing `SettingsSurface`. Team and personal name/photo rows share
+`SettingsIdentityRow`.
 
-Use `Field` for persistent labels above controls. Default labels are 13px medium-weight
+Explicit-save forms use `SettingsFormActions`: one quiet divider, a secondary Cancel action
+and a primary Save action, with the same radius and touch targets. Save stays disabled for
+unchanged, invalid or pending edits; Cancel restores saved values without writing. Space
+name and space appearance remain separately saved sections. Enter submits the name form;
+Escape resets its draft without dismissing the surrounding settings navigation. Personal
+display names may be empty; team and space names remain required. Permissions remain
+scope-specific: people edit their profile, owners/admins edit team identity, and writable
+members edit space identity.
+
+One-off operations use `SettingsActionRow`: one heading, one explanation and an action on
+the page surface. At smaller widths the action moves below the explanation instead of
+shrinking its label onto multiple lines. Managed defaults and device alert permissions use
+this pattern. Notification categories use plain groups with quiet separators; invitation,
+AI/voice and provider setup forms use the same field spacing as profile settings. Preserve
+list cards and permission warnings where their boundary carries meaning.
+
+Use `Field` for persistent labels above controls. Connect `htmlFor` to the control's `id`;
+text that only looks like a label is insufficient. Do not wrap secondary buttons inside a
+label. Keep visible labels in automation, import and provider setup dialogs as well. Default labels are 13px medium-weight
 secondary text; hints stay 12px muted text. A vertical layout provides an actual 8px gap
 between label, control and helper text. Explicit extra-small fields keep a compact 6px gap.
 The label should identify the field without relying on placeholder text; omit placeholders
@@ -54,7 +74,8 @@ target and uses a compact 36px height on wider fine-pointer screens.
 
 Use a small, consistent radius scale: 6px for compact search scope chips, 8px for navigation
 and menu rows, 12px for form controls and profile actions, and 16px for cards, dialogs and
-popovers. Avatars remain circular. Do not turn every action into a pill.
+popovers. Human avatars remain circular; team identities use rounded squares. Do not turn
+every action into a pill.
 
 Compact category navigation and single-choice settings share the same segmented selector
 styles: a quiet group with 12px corners, 8px options and one filled selected option. Hover
@@ -84,3 +105,90 @@ available height, with a stable background and space for keyboard focus indicato
 Check settings with long labels, both themes, narrow and wide containers, and keyboard
 navigation. In particular, verify nested destination selection, dismissal, and resizing
 without losing focus or creating extra route visits.
+
+## Team identity
+
+The space segment of the organization/space breadcrumb uses `SpaceIdentity`, including
+the saved picture, icon and color, on both desktop and mobile. It follows confirmed appearance saves
+and falls back to the chosen emoji, then initials, when a picture is removed or unavailable. Draft choices remain confined to the editor until
+saved; a missing current space shows the Choose space prompt without a stale identity.
+
+People, bots, teams and spaces share `IdentityPhotoButton`: a labeled photo button with a pencil
+badge opens the native file picker. People and bots stay circular and team/space pictures use rounded
+squares. Removing a space picture preserves its fallback icon and color. Space uploads are
+previewed locally until Save appearance; Cancel discards the draft. Team uploads follow the
+same draft behavior: name, picture and color save together through Save profile. Cancel
+restores the latest saved identity, including updates received while editing. Uploads are
+validated before preview, and a failed metadata save can retry its uploaded URL.
+
+Team and space uploads accept PNG, JPEG and WebP up to 2 MB. They use the public
+`identity-images` Supabase Storage bucket with immutable random filenames; these pictures
+are public display assets, not private workspace files. Only owners/admins upload team
+pictures. Space owners, builders and inherited writable team members can upload space
+pictures. The controller rechecks metadata write access, validates picture URLs and returns
+`projectAvatarUrl` in space summaries; omission preserves it and null removes it. Network
+URLs are persisted, while local preview blobs never enter workspace metadata.
+
+Apply `20260915100000_identity_images.sql` before enabling picture writes. It adds the space
+image field and provisions the bucket's size/MIME limits and upload/delete policies. For a
+controller-only database without Supabase Storage, metadata migration still succeeds with
+an explicit notice; install Storage and rerun that migration to enable uploads. HTTPS
+image URLs remain supported. HTTP image URLs are allowed only under the configured Supabase
+public identity-image storage origin, so local/self-hosted previews work without relaxing
+external image URL validation.
+
+Right-click a team icon in the desktop organization rail for Team overview, Team settings
+and Members. Shift+F10 or the keyboard menu key opens the same anchored menu; Escape
+dismisses it and returns focus to the icon. Actions target the clicked team, including
+teams with no spaces, without first switching the active space. The mobile header's team
+menu remains the visible touch entry point.
+
+Team profile settings and new-team onboarding offer a shared color alongside the name and
+picture. Use `OrgIdentity` for team avatars and `TeamAccentPicker` for the fixed palette:
+neutral, blue, violet, pink, red, orange, green and teal. A picture takes precedence over
+initials; the accent still identifies the selected team in its rail marker. In the header,
+keep color on the identity itself, without a second tinted tile around the avatar. Search
+scope chips use the same neutral surface for teams and spaces. These colors adapt to light
+and dark mode. Home uses a small selection marker rather than a colored logo background;
+the mobile context and navigation rows share one neutral surface, separated from the page
+by a single divider. Keep workspace surfaces, primary
+actions and notification counts on their existing semantic colors.
+
+Mobile breadcrumb pickers keep a 48px tap target, but hover, open-menu and keyboard-focus
+feedback follows a compact 32px shape around the content. Give text pickers 8px horizontal
+padding so the highlight has breathing room beside the label as well as above and below it.
+
+Color choices have 44px targets, native radio keyboard behavior and a selected border, so
+selection does not depend on hue alone. The selector preview reflects unsaved name and color
+edits. Save profile persists those changes together with the picture.
+Only owners and admins can update team identity. Personal and existing teams without a
+chosen accent use neutral styling.
+
+The controller accepts optional `accentColor` on organization creation and profile updates,
+and returns it in organization summaries. Omitted updates preserve the value; explicit
+`null` clears it. Idempotent creation preserves an existing organization's saved color.
+Apply the additive `20260914180000_org_accent.sql` migration before enabling color writes.
+Older clients remain compatible and organization reads tolerate an unmigrated database;
+the database and controller both reject values outside the palette.
+
+## Bot profiles
+
+Bot creation and editing use the same `SettingsIdentityRow`, persistent fields and
+`SettingsFormActions` as personal profiles: picture beside Display name, then Handle and
+About. Keep provider, credential, model and Style guidance in a separate Bot behavior
+section. Changing a public profile must not pin or change inherited runtime defaults.
+
+Bot pictures use the shared PNG/JPEG/WebP validation and 2 MB limit. Native file selection
+creates a local preview; Save profile uploads and then saves the URL. Cancel discards the
+draft, removal restores the bot's fallback identity, and failed metadata saves reuse the
+uploaded picture on retry. Disable editing and dismissal during a save. Reset drafts on
+account changes and do not save a completed upload into a different account's bot.
+`AgentAvatar` renders the same saved or draft identity in the editor and bot list, including
+the themed Octo mark and a fallback for unavailable images.
+
+Apply `20260915110000_agent_identity_images.sql` after the identity-image migration. Bot
+uploads use `agents/<owner-user-id>/<random-uuid>.<extension>` in the public `identity-images`
+bucket, which also permits uploading before a new bot has an ID. Only that user can upload
+or delete objects in their directory; overwrite is not allowed. The existing controller
+checks bot ownership when saving `avatarSeed`. Existing saved image URLs remain readable,
+but the editor uses the native file picker rather than an image-URL field.

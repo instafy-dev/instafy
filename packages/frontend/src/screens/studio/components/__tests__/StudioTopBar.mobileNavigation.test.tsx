@@ -89,15 +89,19 @@ describe("StudioTopBar mobile navigation integration", () => {
   });
 
   it("uses the active chat and space labels, but respects the full-history title override", async () => {
+    mocks.tabs.mockReturnValue({ ...mocks.tabs(), tabs: [{ ...mocks.tabs().tabs[0], icon: <svg data-testid="conversation-icon" /> }] });
     await render();
     expect(query("mobile-header-title")?.textContent).toBe("Active chat");
+    expect(query("mobile-header-location-icon")?.contains(query("conversation-icon"))).toBe(true);
     expect(query("mobile-header-space")?.textContent).toBe("Alpha space");
     await click("mobile-header-picker");
     expect(mocks.controls().onToggleSidebar).toHaveBeenCalledTimes(1);
     expect(props.mobileNavigation!.onOpenPicker).not.toHaveBeenCalled();
     expect(query("mobile-header-picker")?.getAttribute("aria-label")).toBe("Open space navigation: Alpha space");
-    mocks.controls.mockReturnValue({ ...mocks.controls(), topbarLocationOverride: { title: "Chats" } });
+    mocks.controls.mockReturnValue({ ...mocks.controls(), topbarLocationOverride: { title: "Chats", icon: <svg data-testid="chats-icon" /> } });
     await render(); expect(query("mobile-header-title")?.textContent).toBe("Chats");
+    expect(query("mobile-header-location-icon")?.contains(query("chats-icon"))).toBe(true);
+    expect(query("conversation-icon")).toBeNull();
     expect(query("studio-mobile-history-bar")).toBeNull();
   });
 
@@ -107,7 +111,8 @@ describe("StudioTopBar mobile navigation integration", () => {
     mocks.posture.mockReturnValue({ isLargeScreen: false, showTopbarHomeButton: false, showTouchBottomDock: touch });
     await render();
     const pickerId = "mobile-header-picker";
-    expect(query(pickerId)?.textContent).toBe("Active chat");
+    expect(query("mobile-header-title")?.textContent).toBe("Active chat");
+    expect(query("mobile-header-title")?.closest("button")).toBeNull();
     expect(query(pickerId)?.getAttribute("aria-label")).toBe("Open space navigation: Alpha space");
     expect(query("mobile-header-space")).toBeNull();
     await click(pickerId);

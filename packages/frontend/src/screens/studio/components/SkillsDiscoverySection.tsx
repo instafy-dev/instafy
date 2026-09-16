@@ -1,3 +1,4 @@
+import { Field } from "../../../components/Field";
 import { useId, useState } from "react";
 import { ChatLines, Filter, NavArrowDown, NavArrowRight, Plus, Puzzle, Search } from "iconoir-react";
 import { Button, IconButton } from "../../../components/Button";
@@ -101,6 +102,7 @@ export function SkillsDiscoverySection({
 }: SkillsDiscoverySectionProps) {
   const isLargeScreen = useStudioDesktopLayout();
   const [filtersExpanded, setFiltersExpanded] = useState(false);
+  const fieldId = useId();
   const filtersId = useId();
   const changedFilterCount = [
     discoveryLaneFilter !== "all",
@@ -181,11 +183,8 @@ export function SkillsDiscoverySection({
 
         {isLargeScreen || filtersExpanded ? (
           <div id={filtersId} className="grid gap-2 @min-[36rem]/settings-content:grid-cols-3" data-testid="skills-discovery-filters">
-            <label className="min-w-0 space-y-1">
-              <Text as="span" variant="caption" tone="muted">
-                Source
-              </Text>
-              <Select
+            <Field label="Source" htmlFor={`${fieldId}-skills-discovery-source-select`}>
+              <Select id={`${fieldId}-skills-discovery-source-select`}
                 value={discoveryLaneFilter}
                 onChange={(event) => onDiscoveryLaneFilterChange(event.target.value)}
                 disabled={!hasProject || discoveryLoading}
@@ -197,13 +196,10 @@ export function SkillsDiscoverySection({
                 <option value="registry">Registry ({discoveryLaneCounts.registry})</option>
                 <option value="long_tail">Community ({discoveryLaneCounts.longTail})</option>
               </Select>
-            </label>
+            </Field>
 
-            <label className="min-w-0 space-y-1">
-              <Text as="span" variant="caption" tone="muted">
-                Category
-              </Text>
-              <Select
+            <Field label="Category" htmlFor={`${fieldId}-skills-discovery-category-select`}>
+              <Select id={`${fieldId}-skills-discovery-category-select`}
                 value={discoveryCategoryFilter}
                 onChange={(event) => onDiscoveryCategoryFilterChange(event.target.value)}
                 disabled={!hasProject || discoveryLoading || discoveryCategoryOptions.length === 0}
@@ -217,13 +213,10 @@ export function SkillsDiscoverySection({
                   </option>
                 ))}
               </Select>
-            </label>
+            </Field>
 
-            <label className="min-w-0 space-y-1">
-              <Text as="span" variant="caption" tone="muted">
-                Sort
-              </Text>
-              <Select
+            <Field label="Sort" htmlFor={`${fieldId}-skills-discovery-sort-select`}>
+              <Select id={`${fieldId}-skills-discovery-sort-select`}
                 value={discoverySort}
                 onChange={(event) => onDiscoverySortChange(event.target.value)}
                 disabled={!hasProject || discoveryLoading}
@@ -234,7 +227,7 @@ export function SkillsDiscoverySection({
                 <option value="stars_desc">Stars</option>
                 <option value="name_asc">Name (A-Z)</option>
               </Select>
-            </label>
+            </Field>
           </div>
         ) : null}
       </div>

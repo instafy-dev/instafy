@@ -333,11 +333,9 @@ export function ProjectLauncher({
 
           {mode === "github" ? (
             <div className="space-y-3 rounded-2xl border border-slate-200/70 bg-slate-50/50 p-4 dark:border-slate-800 dark:bg-slate-950/20">
-              <div className="space-y-1.5">
-                <Text as="span" variant="bodyStrong" tone="secondary">
-                  GitHub repository
-                </Text>
+              <Field label="GitHub repository" htmlFor="project-launcher-github-repo">
                 <Input
+                  id="project-launcher-github-repo"
                   value={githubRepo}
                   onChange={(event) => {
                     setGithubRepo(event.target.value);
@@ -346,12 +344,10 @@ export function ProjectLauncher({
                   placeholder="https://github.com/owner/repo or owner/repo"
                   data-testid="project-launcher-github-repo-input"
                 />
-              </div>
-              <div className="space-y-1.5">
-                <Text as="span" variant="bodyStrong" tone="secondary">
-                  Ref (optional)
-                </Text>
+              </Field>
+              <Field label="Ref (optional)" htmlFor="project-launcher-github-ref">
                 <Input
+                  id="project-launcher-github-ref"
                   value={githubRef}
                   onChange={(event) => {
                     setGithubRef(event.target.value);
@@ -360,7 +356,7 @@ export function ProjectLauncher({
                   placeholder="main, v1.2.3, or commit SHA (defaults to HEAD)"
                   data-testid="project-launcher-github-ref-input"
                   />
-              </div>
+              </Field>
               <Text as="p" variant="caption" tone="muted">
                 Public repos import without login. For private repos, connect GitHub (device code) and keep this page open.
               </Text>

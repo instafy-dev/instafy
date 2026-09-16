@@ -24,6 +24,7 @@ import { Badge } from "../components/Badge";
 import { Heading } from "../components/Heading";
 import { Surface } from "../components/Surface";
 import { Text } from "../components/Text";
+import { DARK_RAIL_SURFACE_CLASS } from "../theme/darkSurfaces";
 import { OctoMark } from "../components/OctoMark";
 import { AttentionBadge } from "../components/AttentionBadge";
 import { ChatsIcon } from "../components/AppIcons";
@@ -292,9 +293,9 @@ function StudioLayoutInner() {
   const searchHistory = useStudioSearchHistory(currentUserId, getStudioVisitKey(location), searchKey,
     currentUserId ? `${currentUserId}:${activeProjectId ?? "no-project"}` : null);
 
-  const [navigationTeam, setNavigationTeam] = useState<{ userId: string | null; key: string; name: string; avatarUrl: string | null } | null>(null);
-  const handleActiveTeamChange = useCallback((team: { key: string; name: string; avatarUrl: string | null }) => {
-    setNavigationTeam((current) => current?.userId === currentUserId && current.key === team.key && current.name === team.name && current.avatarUrl === team.avatarUrl
+  const [navigationTeam, setNavigationTeam] = useState<{ userId: string | null; key: string; name: string; avatarUrl: string | null; accentColor?: string | null } | null>(null);
+  const handleActiveTeamChange = useCallback((team: { key: string; name: string; avatarUrl: string | null; accentColor?: string | null }) => {
+    setNavigationTeam((current) => current?.userId === currentUserId && current.key === team.key && current.name === team.name && current.avatarUrl === team.avatarUrl && current.accentColor === team.accentColor
       ? current : { userId: currentUserId, ...team });
   }, [currentUserId]);
   const selectedTeamMetadata = navigationTeam?.userId === currentUserId && navigationTeam.key === navigationScope.orgKey
@@ -2039,7 +2040,7 @@ function StudioLayoutInner() {
   useNativeBackButtonAction(search.open, () => search.closeSearch(), 200);
   const contextHomeActive = navigationScope.page === "home";
   const mobileContextHeader = (overlay = false) => <StudioMobileContextHeader
-    teamName={activeTeamName} teamAvatarUrl={activeTeamAvatarUrl} teamId={navigationScope.orgKey}
+    teamName={activeTeamName} teamAvatarUrl={activeTeamAvatarUrl} accentColor={selectedTeamMetadata?.accentColor} teamId={navigationScope.orgKey}
     projects={projectList} activeProjectId={activeProjectId} attentionCounts={homeAttentionByProject}
     homeActive={contextHomeActive} homeAttentionCount={homeAttentionCount} searchRef={overlay ? overlaySearchTriggerRef : mobileSearchTriggerRef}
     onHome={handleOpenHome} onSearch={search.openSearch} onProfile={handleOpenProfileSettings}
@@ -2222,7 +2223,7 @@ function StudioLayoutInner() {
             inert={search.open || showMobileLeftDrawerOverlay || undefined}
           >
             {!isLargeScreen ? mobileContextHeader() : null}
-            {isLargeScreen || navigationScope.page === "workspace" ? <StudioTopBar newChatInSidebar={isLargeScreen} contextHeaderAbove mobileNavigation={mobileTopbarNavigation} /> : <div className="flex min-h-14 shrink-0 items-center gap-2 border-b border-slate-200/70 px-1 py-1 dark:border-[color:var(--color-studio-dark-divider)]">
+            {isLargeScreen || navigationScope.page === "workspace" ? <StudioTopBar newChatInSidebar={isLargeScreen} contextHeaderAbove mobileNavigation={mobileTopbarNavigation} /> : <div className={`flex min-h-14 shrink-0 items-center gap-2 border-b border-slate-200/70 bg-slate-50 px-1 py-1 ${DARK_RAIL_SURFACE_CLASS}`}>
               <IconButton variant="ghost" aria-label="Open navigation" data-testid="topbar-sidebar-toggle" onPress={handleToggleSidebar} className="!min-h-12 !min-w-12"><SidebarExpand className="h-[18px] w-[18px]" aria-hidden="true" /></IconButton>
               <span className="min-w-0 flex-1 truncate text-sm text-slate-500 dark:text-slate-400">{navigationScope.page === "account" ? "Your settings" : topbarLocationOverride?.title ?? (contextHomeActive ? "Home" : activeTeamName)}</span>
             </div>}

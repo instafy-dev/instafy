@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useId, useMemo, useState } from "react";
 import type {
   LocalHardwareBinding,
   LocalHardwareIoActionRunResult,
@@ -10,6 +10,7 @@ import {
 } from "@instafy/sdk/hardware-provider";
 import type { ProviderProjectBinding } from "@instafy/sdk/provider-project-binding";
 import { Button } from "../../../components/Button";
+import { Field } from "../../../components/Field";
 import { Input } from "../../../components/Input";
 import { Text } from "../../../components/Text";
 import { useRuntime } from "../../../runtime/useRuntime";
@@ -316,6 +317,7 @@ export function ProjectProviderBindingsCard({
   projectId,
   canManageAccess = true,
 }: ProjectProviderBindingsCardProps) {
+  const fieldId = useId();
   const { showStatus } = useStatus();
   const { localWorkspace, showDesktopRuntimeHelp } = useRuntime();
   const workspaceSummary = useMemo(
@@ -1070,22 +1072,17 @@ export function ProjectProviderBindingsCard({
                       No local devices found.
                     </Text>
                   ) : null}
-                  <div className="mt-3">
-                    <Text variant="caption" tone="muted">
-                      Device path to grant
-                    </Text>
+                  <Field className="mt-3" label="Device path to grant" htmlFor={`${fieldId}-device-path`}
+                    hint="Save access for a serial device on this host.">
                     <Input
+                      id={`${fieldId}-device-path`}
                       value={devicePath}
                       onChange={(event) => setDevicePath(event.target.value)}
                       placeholder="/dev/cu.usbserial-130"
                       disabled={!projectId || !canManageAccess || hardwareGrantPending}
                       data-testid="project-hardware-serial-device"
-                      className="mt-1"
                     />
-                    <Text variant="caption" tone="muted" className="mt-1">
-                      Save access for a serial device on this host.
-                    </Text>
-                  </div>
+                  </Field>
                 </div>
                 <Button
                   onPress={handleHardwareGrant}

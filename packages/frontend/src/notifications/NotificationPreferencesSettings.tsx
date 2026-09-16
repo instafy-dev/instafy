@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Button } from "../components/Button";
-import { Card } from "../components/Card";
+import { SettingsFormLayout } from "../components/SettingsFormLayout";
+import { SettingsActionRow } from "../components/SettingsActionRow";
 import { Checkbox } from "../components/Checkbox";
 import { Text } from "../components/Text";
 import { controllerClient } from "../sdk/instafy";
@@ -111,57 +112,55 @@ export function NotificationPreferencesSettings({ userId, accessToken }: {
 
   return (
     <section className="@container/notification-settings min-w-0 space-y-4" aria-label="Notification preferences" data-testid="notification-preferences-settings">
-      <Text variant="caption" tone="muted">Choose which alerts reach you. Activity stays available in Home when alerts are off.</Text>
-      {state?.error ? (
-        <div className="flex flex-wrap items-start gap-2">
-          <p role="alert" className="min-w-0 flex-1 text-sm text-rose-600 dark:text-rose-400">{state.error}</p>
-          {!state.value ? <Button variant="ghost" size="sm" onPress={() => void load()}>Retry</Button> : null}
-        </div>
-      ) : null}
-      {!state || state.loading ? <Text role="status" tone="muted">Loading notification preferences…</Text> : preferences ? (
-        <>
-          <div className="grid min-w-0 grid-cols-1 gap-3 @min-[34rem]/notification-settings:grid-cols-2">
-            {NOTIFICATION_CATEGORIES.map((category) => (
-              <Card key={category} radius="2xl" shadow="none" padding="sm" className="min-w-0">
-                <fieldset className="min-w-0" disabled={state.pending}>
-                  <legend className="mb-2 text-sm font-semibold text-slate-700 dark:text-slate-200">{CATEGORY_LABELS[category]}</legend>
-                  {NOTIFICATION_CHANNELS.map((channel) => (
-                    <Checkbox
-                      key={channel}
-                      label={CHANNEL_LABELS[channel]}
-                      aria-label={`${CATEGORY_LABELS[category]} ${CHANNEL_LABELS[channel]}`}
-                      className="min-h-11 py-2.5"
-                      isSelected={preferences.preferences.find((preference) => preference.category === category && preference.channel === channel)?.enabled ?? true}
-                      isDisabled={state.pending}
-                      onChange={(enabled) => void change({ preferences: [{ category, channel, enabled }] })}
-                    />
-                  ))}
-                </fieldset>
-              </Card>
-            ))}
+      <SettingsFormLayout>
+        <Text variant="caption" tone="muted">Choose which alerts reach you. Activity stays available in Home when alerts are off.</Text>
+        {state?.error ? (
+          <div className="flex flex-wrap items-start gap-2">
+            <p role="alert" className="min-w-0 flex-1 text-sm text-rose-600 dark:text-rose-400">{state.error}</p>
+            {!state.value ? <Button variant="ghost" size="sm" onPress={() => void load()}>Retry</Button> : null}
           </div>
-          <Card radius="2xl" shadow="none" padding="sm">
-            <Checkbox
-              label="Hide lock-screen previews"
-              description="Show a generic alert. Turning this off shows the type of activity, never message or report contents."
-              className="min-h-11 py-1"
-              isSelected={preferences.hidePreviews}
-              isDisabled={state.pending}
-              onChange={(hidePreviews) => void change({ hidePreviews })}
-            />
-          </Card>
-          <Card radius="2xl" shadow="none" padding="sm" className="space-y-3">
-            <div>
-              <Text as="h3" variant="bodyStrong" tone="secondary">This device</Text>
-              <Text variant="caption" tone="muted" className="mt-1">Push and desktop alerts also need permission on this device.</Text>
+        ) : null}
+        {!state || state.loading ? <Text role="status" tone="muted">Loading notification preferences…</Text> : preferences ? (
+          <>
+            <div className="grid min-w-0 grid-cols-1 gap-3 @min-[34rem]/notification-settings:grid-cols-2">
+              {NOTIFICATION_CATEGORIES.map((category) => (
+                <div key={category} className="min-w-0 border-b border-slate-200/70 pb-3 dark:border-[color:var(--color-studio-dark-divider)]">
+                  <fieldset className="min-w-0" disabled={state.pending}>
+                    <legend className="mb-2 text-sm font-semibold text-slate-700 dark:text-slate-200">{CATEGORY_LABELS[category]}</legend>
+                    {NOTIFICATION_CHANNELS.map((channel) => (
+                      <Checkbox
+                        key={channel}
+                        label={CHANNEL_LABELS[channel]}
+                        aria-label={`${CATEGORY_LABELS[category]} ${CHANNEL_LABELS[channel]}`}
+                        className="min-h-11 py-2.5"
+                        isSelected={preferences.preferences.find((preference) => preference.category === category && preference.channel === channel)?.enabled ?? true}
+                        isDisabled={state.pending}
+                        onChange={(enabled) => void change({ preferences: [{ category, channel, enabled }] })}
+                      />
+                    ))}
+                  </fieldset>
+                </div>
+              ))}
             </div>
-            <Button variant="outline" className="min-h-11 max-w-full whitespace-normal" isDisabled={state.pending} onPress={() => void change("enable-device")}>
-              Enable alerts on this device
-            </Button>
-          </Card>
-          <p role="status" className="min-h-5 text-xs text-slate-500 dark:text-slate-400">{state.pending ? "Updating notifications…" : state.status}</p>
-        </>
-      ) : null}
+            <div>
+              <Checkbox
+                label="Hide lock-screen previews"
+                description="Show a generic alert. Turning this off shows the type of activity, never message or report contents."
+                className="min-h-11 py-1"
+                isSelected={preferences.hidePreviews}
+                isDisabled={state.pending}
+                onChange={(hidePreviews) => void change({ hidePreviews })}
+              />
+            </div>
+            <SettingsActionRow title="This device"
+              description="Push and desktop alerts also need permission on this device."
+              action={<Button variant="outline" radius="xl" className="min-h-11 max-w-full whitespace-nowrap sm:pointer-fine:min-h-9" isDisabled={state.pending} onPress={() => void change("enable-device")}>
+                Enable device alerts
+              </Button>} />
+            <p role="status" className="min-h-5 text-xs text-slate-500 dark:text-slate-400">{state.pending ? "Updating notifications…" : state.status}</p>
+          </>
+        ) : null}
+      </SettingsFormLayout>
     </section>
   );
 }

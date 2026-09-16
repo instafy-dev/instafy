@@ -1,4 +1,6 @@
-import { useState } from "react";
+import { Field } from "../../../components/Field";
+import { SettingsFormLayout } from "../../../components/SettingsFormLayout";
+import { useId, useState } from "react";
 import { Button } from "../../../components/Button";
 import { Input } from "../../../components/Input";
 import { Select } from "../../../components/Select";
@@ -102,6 +104,7 @@ export function OrgMembersSettingsSections({
   onRoleChange,
   onRemoveMember,
 }: OrgMembersSettingsSectionsProps) {
+  const fieldId = useId();
   const [invitationsExpanded, setInvitationsExpanded] = useState(false);
   const [membersExpanded, setMembersExpanded] = useState(false);
   const hasInvitations = invitations.length > 0;
@@ -117,42 +120,36 @@ export function OrgMembersSettingsSections({
         description="Prepare a secure link and deliver it yourself — Instafy never emails invites. Builders can edit; viewers can read; admins manage members; owners control billing."
       >
         {canManageOrgMembers ? (
-          <SettingsSurface className="space-y-3">
+          <SettingsFormLayout>
             <div className="grid gap-3 @min-[32rem]/settings-content:grid-cols-[minmax(0,1fr)_minmax(180px,220px)]">
-              <div className="min-w-0">
-                <Text variant="caption" tone="muted">
-                  Email
-                </Text>
+              <Field
+                label="Email"
+                htmlFor={`${fieldId}-email`}
+                error={!inviteEmailValid && inviteEmail.trim().length > 0 ? "Enter a valid email address." : null}
+              >
                 <Input
+                  id={`${fieldId}-email`}
                   type="email"
-                  placeholder="teammate@instafy.dev"
+                  placeholder="name@example.com"
                   value={inviteEmail}
                   onChange={(event) => onInviteEmailChange(event.target.value)}
+                  disabled={!canManageOrgMembers || invitePending}
                   data-testid="org-member-invite-email"
-                  className="mt-1"
                 />
-                {!inviteEmailValid && inviteEmail.trim().length > 0 ? (
-                  <Text variant="caption" tone="danger" className="mt-1">
-                    Enter a valid email address.
-                  </Text>
-                ) : null}
-              </div>
-              <div className="min-w-0">
-                <Text variant="caption" tone="muted">
-                  Role
-                </Text>
-                <Select
+              </Field>
+              <Field label="Role" htmlFor={`${fieldId}-role`}>
+                <Select id={`${fieldId}-role`}
                   value={inviteRole}
                   onChange={(event) => onInviteRoleChange(event.target.value)}
                   data-testid="org-member-invite-role"
-                  className="mt-1"
+                  disabled={!canManageOrgMembers || invitePending}
                 >
                   <option value="viewer">Viewer</option>
                   <option value="builder">Builder</option>
                   <option value="admin">Admin</option>
                   {canManageOwners ? <option value="owner">Owner</option> : null}
                 </Select>
-              </div>
+              </Field>
             </div>
             {inviteError ? (
               <Text
@@ -219,7 +216,7 @@ export function OrgMembersSettingsSections({
                 testIdPrefix="org-email-invite"
               />
             ) : null}
-          </SettingsSurface>
+          </SettingsFormLayout>
         ) : (
           <SettingsSurface>
             <Text variant="body" tone="secondary">

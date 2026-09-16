@@ -638,6 +638,8 @@ struct OrgSummary {
     org_name: String,
     #[serde(rename = "avatarUrl", skip_serializing_if = "Option::is_none")]
     avatar_url: Option<String>,
+    #[serde(rename = "accentColor", skip_serializing_if = "Option::is_none")]
+    accent_color: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     role: Option<String>,
 }
@@ -663,6 +665,7 @@ struct CreateOrgBody {
     org_name: Option<String>,
     #[serde(default, rename = "ownerUserId", alias = "owner_user_id")]
     owner_user_id: Option<String>,
+    accent_color: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -671,6 +674,7 @@ struct CreateOrgResponse {
     org_id: Uuid,
     org_slug: String,
     org_name: String,
+    accent_color: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -683,6 +687,7 @@ struct ProjectSummary {
     project_name: Option<String>,
     project_icon: Option<String>,
     project_color: Option<String>,
+    project_avatar_url: Option<String>,
     owner_user_id: Option<Uuid>,
     project_type: Option<String>,
     status: Option<String>,
@@ -1280,7 +1285,8 @@ async fn list_organizations(
         transaction
             .query(
                 "select o.id, o.slug, o.name, null as role,
-                        to_jsonb(o) ->> 'avatar_url' as avatar_url
+                        to_jsonb(o) ->> 'avatar_url' as avatar_url,
+                        to_jsonb(o) ->> 'accent_color' as accent_color
                  from organizations o",
                 &[],
             )
@@ -1290,7 +1296,8 @@ async fn list_organizations(
         transaction
             .query(
                 "select o.id, o.slug, o.name, m.role,
-                        to_jsonb(o) ->> 'avatar_url' as avatar_url
+                        to_jsonb(o) ->> 'avatar_url' as avatar_url,
+                        to_jsonb(o) ->> 'accent_color' as accent_color
                  from organizations o
                  join org_memberships m on m.org_id = o.id
                  where m.user_id = $1",
@@ -1321,6 +1328,7 @@ async fn list_organizations(
                     org_slug: slug,
                     org_name: name,
                     avatar_url: row.get::<_, Option<String>>("avatar_url"),
+                    accent_color: row.get::<_, Option<String>>("accent_color"),
                     role: row.get::<_, Option<String>>("role"),
                 })
             } else {
@@ -1344,6 +1352,7 @@ async fn create_organization(
         ));
     }
 
+    validate_org_accent(body.accent_color.as_deref())?;
     let requested_owner = parse_optional_uuid_param(body.owner_user_id, "ownerUserId")?;
     let owner_user_id = if let Some(owner) = requested_owner {
         if !context.is_service_role && Some(owner) != context.user_id {
@@ -1470,20 +1479,18 @@ async fn create_organization(
     }
 
     let mut final_slug = resolved_slug.clone();
-    let (org_id, org_name) =
+    let (org_id, org_name, created) =
         match upsert_org(&transaction, &resolved_slug, &resolved_name, owner_user_id).await? {
-            OrgUpsertOutcome::Created(id, name) | OrgUpsertOutcome::Existing(id, name) => {
-                (id, name)
-            }
+            OrgUpsertOutcome::Created(id, name) => (id, name, true),
+            OrgUpsertOutcome::Existing(id, name) => (id, name, false),
             OrgUpsertOutcome::SlugTakenByOthers if !slug_is_explicit => {
                 // The display-name-derived slug belongs to somebody else's
                 // org: mint a fresh unique slug instead of joining theirs.
                 let suffix = Uuid::new_v4().simple().to_string();
                 final_slug = format!("{resolved_slug}-{}", &suffix[..8]);
                 match upsert_org(&transaction, &final_slug, &resolved_name, owner_user_id).await? {
-                    OrgUpsertOutcome::Created(id, name) | OrgUpsertOutcome::Existing(id, name) => {
-                        (id, name)
-                    }
+                    OrgUpsertOutcome::Created(id, name) => (id, name, true),
+                    OrgUpsertOutcome::Existing(id, name) => (id, name, false),
                     OrgUpsertOutcome::SlugTakenByOthers => {
                         return Err(internal_error(
                             "failed to allocate a unique organization slug".to_string(),
@@ -1504,6 +1511,23 @@ async fn create_organization(
             }
         };
 
+    // Idempotent creation must not recolor an existing organization.
+    if created {
+        if let Some(color) = body.accent_color.as_deref() {
+            transaction
+                .execute(
+                    "update organizations set accent_color = $2 where id = $1",
+                    &[&org_id, &color],
+                )
+                .await
+                .map_err(|error| {
+                    internal_error(format!("failed to save organization color: {error}"))
+                })?;
+        }
+    }
+    let accent_color = transaction.query_one("select to_jsonb(o) ->> 'accent_color' as accent_color from organizations o where id = $1", &[&org_id])
+        .await.map_err(|error| internal_error(format!("failed to read organization color: {error}")))?.get("accent_color");
+
     if let Err(error) =
         crate::billing::service::ensure_default_org_subscription(&transaction, &org_id).await
     {
@@ -1523,6 +1547,7 @@ async fn create_organization(
         org_id,
         org_slug: final_slug,
         org_name,
+        accent_color,
     }))
 }
 
@@ -1777,7 +1802,7 @@ async fn get_project_summary(
 
     let row = transaction
         .query_opt(
-            "select p.id, p.org_id, p.name, p.icon, p.color, p.owner_user_id, p.project_type, p.status,
+            "select p.id, p.org_id, p.name, p.icon, p.color, to_jsonb(p) ->> 'avatar_url' as avatar_url, p.owner_user_id, p.project_type, p.status,
                     o.slug as org_slug, o.name as org_name
              from projects p
              left join organizations o on o.id = p.org_id
@@ -1807,6 +1832,36 @@ struct ProjectUpdateRequest {
     project_icon: Option<Option<String>>,
     #[serde(default, deserialize_with = "deserialize_identity_patch")]
     project_color: Option<Option<String>>,
+    #[serde(default, deserialize_with = "deserialize_identity_patch")]
+    project_avatar_url: Option<Option<String>>,
+}
+
+// Public uploads on the configured self-hosted storage origin may use HTTP.
+// External images must use HTTPS; credentials and executable URL schemes are rejected.
+fn validate_identity_image_url(
+    value: &str,
+    storage_origin: &str,
+) -> Result<(), (StatusCode, Json<ApiError>)> {
+    let url =
+        reqwest::Url::parse(value).map_err(|_| bad_request("Picture must be a valid image URL"))?;
+    let local_storage = reqwest::Url::parse(storage_origin)
+        .ok()
+        .is_some_and(|storage| {
+            url.origin() == storage.origin()
+                && url
+                    .path()
+                    .starts_with("/storage/v1/object/public/identity-images/")
+        });
+    if value.len() > 2048
+        || !url.username().is_empty()
+        || url.password().is_some()
+        || !(url.scheme() == "https" || (url.scheme() == "http" && local_storage))
+    {
+        return Err(bad_request(
+            "Picture must use HTTPS or the configured image storage",
+        ));
+    }
+    Ok(())
 }
 
 fn deserialize_identity_patch<'de, D>(deserializer: D) -> Result<Option<Option<String>>, D::Error>
@@ -1821,9 +1876,10 @@ impl ProjectUpdateRequest {
         if self.project_name.is_none()
             && self.project_icon.is_none()
             && self.project_color.is_none()
+            && self.project_avatar_url.is_none()
         {
             return Err(bad_request(
-                "Provide a projectName, projectIcon or projectColor",
+                "Provide a projectName, projectIcon, projectColor or projectAvatarUrl",
             ));
         }
         if let Some(name) = &mut self.project_name {
@@ -1870,6 +1926,9 @@ async fn update_project(
     let project_id = parse_uuid_param(project_id_raw, "project_id")?;
 
     body.validate()?;
+    if let Some(Some(url)) = &body.project_avatar_url {
+        validate_identity_image_url(url, &state.config._supabase_project_url)?;
+    }
 
     let mut connection = state
         .pool
@@ -1890,6 +1949,7 @@ async fn update_project(
             "update projects set name = coalesce($2, name),
                  icon = case when $3 then $4 else icon end,
                  color = case when $5 then $6 else color end,
+                 avatar_url = case when $7 then $8 else avatar_url end,
                  updated_at = now() where id = $1",
             &[
                 &project_id,
@@ -1898,6 +1958,8 @@ async fn update_project(
                 &body.project_icon.clone().flatten(),
                 &body.project_color.is_some(),
                 &body.project_color.clone().flatten(),
+                &body.project_avatar_url.is_some(),
+                &body.project_avatar_url.clone().flatten(),
             ],
         )
         .await
@@ -1905,7 +1967,7 @@ async fn update_project(
 
     let row = transaction
         .query_one(
-            "select p.id, p.org_id, p.name, p.icon, p.color, p.owner_user_id, p.project_type, p.status,
+            "select p.id, p.org_id, p.name, p.icon, p.color, to_jsonb(p) ->> 'avatar_url' as avatar_url, p.owner_user_id, p.project_type, p.status,
                     o.slug as org_slug, o.name as org_name
              from projects p
              left join organizations o on o.id = p.org_id
@@ -2254,7 +2316,7 @@ async fn list_org_projects(
     let request_user_id = context.user_id;
     let rows = transaction
         .query(
-            "select p.id, p.org_id, p.name, p.icon, p.color, p.owner_user_id, p.project_type, p.status,
+            "select p.id, p.org_id, p.name, p.icon, p.color, to_jsonb(p) ->> 'avatar_url' as avatar_url, p.owner_user_id, p.project_type, p.status,
                     o.slug as org_slug, o.name as org_name,
                     access_pm.role as project_member_role,
                     access_om.role as org_member_role
@@ -2312,7 +2374,7 @@ async fn list_accessible_projects(
     let rows = if context.is_service_role {
         transaction
             .query(
-                "select p.id, p.org_id, p.name, p.icon, p.color, p.owner_user_id, p.project_type, p.status,
+                "select p.id, p.org_id, p.name, p.icon, p.color, to_jsonb(p) ->> 'avatar_url' as avatar_url, p.owner_user_id, p.project_type, p.status,
                         o.slug as org_slug, o.name as org_name,
                         null::text as project_member_role,
                         null::text as org_member_role
@@ -2344,7 +2406,7 @@ async fn list_accessible_projects(
                    join projects p on p.org_id = om.org_id
                    where om.user_id = $1
                  )
-                 select p.id, p.org_id, p.name, p.icon, p.color, p.owner_user_id, p.project_type, p.status,
+                 select p.id, p.org_id, p.name, p.icon, p.color, to_jsonb(p) ->> 'avatar_url' as avatar_url, p.owner_user_id, p.project_type, p.status,
                         o.slug as org_slug, o.name as org_name,
                         access_pm.role as project_member_role,
                         access_om.role as org_member_role
@@ -4146,9 +4208,25 @@ async fn accept_org_invitation(
 struct UpdateOrgBody {
     name: Option<String>,
     avatar_url: Option<String>,
+    #[serde(default, deserialize_with = "deserialize_identity_patch")]
+    accent_color: Option<Option<String>>,
 }
 
-/// Owner/manager-editable org profile: display name and avatar. The avatar is
+fn validate_org_accent(color: Option<&str>) -> Result<(), (StatusCode, Json<ApiError>)> {
+    if color.is_some_and(|value| {
+        ![
+            "slate", "blue", "violet", "pink", "red", "orange", "green", "teal",
+        ]
+        .contains(&value)
+    }) {
+        return Err(bad_request(
+            "accentColor must be one of the supported team colors",
+        ));
+    }
+    Ok(())
+}
+
+/// Owner/admin-editable org profile: display name, avatar and accent. The avatar is
 /// an https image URL (typically a Supabase storage public URL); an empty
 /// string clears it.
 async fn update_organization(
@@ -4171,17 +4249,17 @@ async fn update_organization(
     let avatar_url = match body.avatar_url.as_deref().map(str::trim) {
         Some("") => Some(None),
         Some(value) => {
-            if value.len() > 2048 {
-                return Err(bad_request("avatarUrl must be 2048 characters or fewer"));
-            }
-            if !value.starts_with("https://") {
-                return Err(bad_request("avatarUrl must be an https URL"));
-            }
+            validate_identity_image_url(value, &state.config._supabase_project_url)?;
             Some(Some(value.to_string()))
         }
         None => None,
     };
-    if name.is_none() && avatar_url.is_none() {
+    validate_org_accent(
+        body.accent_color
+            .as_ref()
+            .and_then(|color| color.as_deref()),
+    )?;
+    if name.is_none() && avatar_url.is_none() && body.accent_color.is_none() {
         return Err(bad_request("nothing to update"));
     }
 
@@ -4227,6 +4305,18 @@ async fn update_organization(
             .await
             .map_err(|error| {
                 internal_error(format!("failed to update organization avatar: {error}"))
+            })?;
+    }
+
+    if let Some(color) = body.accent_color {
+        transaction
+            .execute(
+                "update organizations set accent_color = $2, updated_at = now() where id = $1",
+                &[&org_id, &color],
+            )
+            .await
+            .map_err(|error| {
+                internal_error(format!("failed to update organization color: {error}"))
             })?;
     }
 
@@ -5373,6 +5463,7 @@ fn map_project_summary(row: tokio_postgres::Row) -> ProjectSummary {
         project_name: row.get("name"),
         project_icon: row.get("icon"),
         project_color: row.get("color"),
+        project_avatar_url: row.get("avatar_url"),
         owner_user_id: row.get("owner_user_id"),
         project_type: row.get("project_type"),
         status: row.get("status"),

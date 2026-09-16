@@ -1,4 +1,5 @@
-import { normalizeSpaceColor, normalizeSpaceIcon } from "@instafy/sdk/project-identity";
+import { useState } from "react";
+import { normalizeSpaceAvatarUrl, normalizeSpaceColor, normalizeSpaceIcon } from "@instafy/sdk/project-identity";
 
 const COLOR_CLASSES = {
   slate: "bg-slate-100 text-slate-700 dark:bg-slate-700 dark:text-slate-100",
@@ -12,16 +13,19 @@ const COLOR_CLASSES = {
 } as const;
 
 /** Decorative identity; the adjoining space name provides the accessible label. */
-export function SpaceIdentity({ name, icon, color, className = "" }: {
+export function SpaceIdentity({ name, icon, color, avatarUrl, className = "" }: {
   name?: string | null;
   icon?: string | null;
   color?: string | null;
+  avatarUrl?: string | null;
   className?: string;
 }) {
+  const [failedUrl, setFailedUrl] = useState<string | null>(null);
+  const imageUrl = avatarUrl?.startsWith("blob:") ? avatarUrl : normalizeSpaceAvatarUrl(avatarUrl);
   const symbol = normalizeSpaceIcon(icon) ?? Array.from(name?.trim() || "S")[0].toLocaleUpperCase();
   return <span
     aria-hidden="true"
     data-testid="space-identity"
-    className={`inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-lg text-sm font-semibold ${COLOR_CLASSES[normalizeSpaceColor(color) ?? "slate"]} ${className}`}
-  >{symbol}</span>;
+    className={`inline-flex h-7 w-7 shrink-0 items-center justify-center overflow-hidden rounded-lg text-sm font-semibold ${COLOR_CLASSES[normalizeSpaceColor(color) ?? "slate"]} ${className}`}
+  >{imageUrl && imageUrl !== failedUrl ? <img src={imageUrl} alt="" draggable={false} className="h-full w-full object-cover" onError={() => setFailedUrl(imageUrl)} /> : symbol}</span>;
 }

@@ -32,6 +32,7 @@ export function useProjects() {
       name: state.metadata.projectName ?? "Untitled Space",
       projectIcon: state.metadata.projectIcon,
       projectColor: state.metadata.projectColor,
+      projectAvatarUrl: state.metadata.projectAvatarUrl,
       orgId: state.org?.id ?? null,
       orgName: getOrgDisplayName(state.org?.name),
       state

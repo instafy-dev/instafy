@@ -1,3 +1,5 @@
+import { AgentAvatar } from "../../../components/AgentAvatar";
+import { uploadIdentityImage } from "../../../lib/identityImages";
 import { PROFILE_BIO_MAX_LENGTH } from "@instafy/sdk/human-profiles";
 import { useCallback, useEffect, useMemo, useRef, useState, type ChangeEvent } from "react";
 import { Brain, CheckCircle, Cpu, EditPencil, MoreHoriz, Trash, Upload, WarningTriangle, Xmark } from "iconoir-react";
@@ -23,9 +25,6 @@ import {
 import { useStatus } from "../../../status/useStatus";
 import {
   normalizeCustomAgentAvatarSrc,
-  resolveAgentAvatarGradient,
-  resolveAgentAvatarImageSrc,
-  resolveAgentAvatarText,
 } from "../../../utils/agentAvatar";
 import { normalizeCustomAgentHandle } from "../../../assistants/localBuiltInAssistantCatalog";
 import { formatCredentialKind, resolveCredentialLabel } from "../../../utils/credentialFormatting";
@@ -277,44 +276,20 @@ async function readCredentialJsonFile(file: File): Promise<unknown> {
   return JSON.parse(contents) as unknown;
 }
 
-function AgentAvatar({
-  agent,
-  size = "md",
-}: {
-  agent: Pick<ControllerAgentProfile, "avatarSeed" | "handle" | "displayName">;
-  size?: "sm" | "md";
-}) {
-  const imageSrc = resolveAgentAvatarImageSrc(agent);
-  const dimensions = size === "sm" ? "h-7 w-7 text-xs" : "h-9 w-9 text-sm";
-  if (imageSrc) {
-    return (
-      <span
-        className={[
-          "inline-flex flex-none items-center justify-center overflow-hidden rounded-full border border-slate-200 bg-white shadow-sm dark:border-slate-700 dark:bg-slate-900",
-          dimensions,
-        ].join(" ")}
-        aria-hidden="true"
-      >
-        <img src={imageSrc} alt="" className="h-full w-full object-cover" decoding="async" draggable={false} />
-      </span>
-    );
-  }
-  return (
-    <span
-      className={[
-        "inline-flex flex-none items-center justify-center rounded-full text-white shadow-sm ring-1 ring-black/5 dark:ring-white/10",
-        dimensions,
-      ].join(" ")}
-      style={{ backgroundImage: resolveAgentAvatarGradient(agent.avatarSeed) }}
-      aria-hidden="true"
-    >
-      {resolveAgentAvatarText(agent)}
-    </span>
-  );
-}
-
 export function CredentialsSettingsCard() {
   const { user } = useAuth();
+  return <UserCredentialsSettingsCard key={user?.id ?? "signed-out"} />;
+}
+
+function UserCredentialsSettingsCard() {
+  const { user } = useAuth();
+  const mounted = useRef(true);
+  const agentSaveLock = useRef(false);
+  const uploadedAgentPicture = useRef<{ file: File; ownerId: string; url: string } | null>(null);
+  useEffect(() => {
+    mounted.current = true;
+    return () => { mounted.current = false; };
+  }, []);
   const { showStatus } = useStatus();
 
   const [credentials, setCredentials] = useState<ControllerCredentialListItem[]>([]);
@@ -330,6 +305,7 @@ export function CredentialsSettingsCard() {
   const [agentHandleDraft, setAgentHandleDraft] = useState("");
   const [agentNameDraft, setAgentNameDraft] = useState("");
   const [agentAvatarUrlDraft, setAgentAvatarUrlDraft] = useState("");
+  const [agentAvatarFileDraft, setAgentAvatarFileDraft] = useState<File | null>(null);
   const [agentBioDraft, setAgentBioDraft] = useState("");
   const [agentDescriptionDraft, setAgentDescriptionDraft] = useState("");
   const [agentCredentialDraft, setAgentCredentialDraft] = useState<string | null>(null);
@@ -674,6 +650,8 @@ export function CredentialsSettingsCard() {
 
   const closeAgentProfileModal = useCallback(() => {
     setAgentProfileModal(null);
+    setAgentAvatarFileDraft(null);
+    uploadedAgentPicture.current = null;
     setAgentHandleDraft("");
     setAgentNameDraft("");
     setAgentAvatarUrlDraft("");
@@ -776,6 +754,8 @@ export function CredentialsSettingsCard() {
     const credential = credentialsById.get(credentialId) ?? null;
     const provider = credential ? resolveCredentialProviderId(credential) : "openai";
     setAgentProfileModal({ mode: "create" });
+    setAgentAvatarFileDraft(null);
+    uploadedAgentPicture.current = null;
     setAgentHandleDraft("");
     setAgentNameDraft("");
     setAgentAvatarUrlDraft("");
@@ -818,6 +798,8 @@ export function CredentialsSettingsCard() {
     setAgentCredentialDirty(false);
     setAgentModelDirty(false);
     setAgentProfileModal({ mode: "edit", agentId: agent.id });
+    setAgentAvatarFileDraft(null);
+    uploadedAgentPicture.current = null;
     setAgentHandleDraft(`@${agent.handle}`);
     setAgentNameDraft(agent.displayName ?? "");
     setAgentAvatarUrlDraft(resolveAgentAvatarUrlDraftFromSeed(agent.avatarSeed));
@@ -843,6 +825,8 @@ export function CredentialsSettingsCard() {
     setAgentCredentialDirty(false);
     setAgentModelDirty(false);
     setAgentProfileModal({ mode: "octo", agentId: agent.id });
+    setAgentAvatarFileDraft(null);
+    uploadedAgentPicture.current = null;
     setAgentHandleDraft("@octo");
     setAgentNameDraft(agent.displayName ?? "Octo");
     setAgentAvatarUrlDraft(resolveAgentAvatarUrlDraftFromSeed(agent.avatarSeed));
@@ -894,7 +878,7 @@ export function CredentialsSettingsCard() {
     if (!agentProfileModal) {
       return;
     }
-    if (agentActionPendingId) {
+    if (agentActionPendingId || agentSaveLock.current || !user) {
       return;
     }
 
@@ -908,9 +892,18 @@ export function CredentialsSettingsCard() {
     const rawAvatarUrl = agentAvatarUrlDraft.trim();
     const normalizedAvatarUrl = normalizeCustomAgentAvatarSrc(rawAvatarUrl);
     if (rawAvatarUrl.length > 0 && !normalizedAvatarUrl) {
-      showStatus("Profile picture URL must start with https://, http://, or /.", "error", 4500);
+      showStatus("Unable to use this picture. Choose another image.", "error", 4500);
       return;
     }
+
+    const resolvePicture = async () => {
+      if (!agentAvatarFileDraft) return normalizedAvatarUrl;
+      const cached = uploadedAgentPicture.current;
+      if (cached?.file === agentAvatarFileDraft && cached.ownerId === user.id) return cached.url;
+      const url = await uploadIdentityImage("agents", user.id, agentAvatarFileDraft);
+      uploadedAgentPicture.current = { file: agentAvatarFileDraft, ownerId: user.id, url };
+      return url;
+    };
 
     if (agentProfileModal.mode === "create") {
       const credentialId = (agentCredentialDraft ?? "").trim();
@@ -928,17 +921,21 @@ export function CredentialsSettingsCard() {
       }
       const handleForRequest = handleNormalized ?? undefined;
 
+      agentSaveLock.current = true;
       setAgentActionPendingId(`create:${credentialId}`);
       try {
+        const picture = await resolvePicture();
+        if (!mounted.current) return;
         const result = await createMyAgent({
           credentialId,
           handle: handleForRequest,
           displayName: trimmedName.length > 0 ? trimmedName : undefined,
-          avatarSeed: normalizedAvatarUrl ?? undefined,
+          avatarSeed: picture ?? undefined,
           description: trimmedDescription.length > 0 ? trimmedDescription : undefined,
           bio: trimmedBio || undefined,
           model: agentModelDraft,
         });
+        if (!mounted.current) return;
         if (!result.success || !result.agent) {
           showStatus(result.error ?? "Unable to create bot.", "error", 4500);
           return;
@@ -948,10 +945,12 @@ export function CredentialsSettingsCard() {
         await loadCredentials({ silent: true });
         notifyAiConfigChanged("agent_created");
       } catch (error) {
+        if (!mounted.current) return;
         const message = error instanceof Error ? error.message : String(error);
         showStatus(`Unable to create bot: ${message}`, "error", 4500);
       } finally {
-        setAgentActionPendingId(null);
+        agentSaveLock.current = false;
+        if (mounted.current) setAgentActionPendingId(null);
       }
       return;
     }
@@ -962,9 +961,6 @@ export function CredentialsSettingsCard() {
     }
     const existingAgent = agents.find((candidate) => candidate.id === agentId) ?? null;
     const existingCustomAvatarUrl = normalizeCustomAgentAvatarSrc(existingAgent?.avatarSeed ?? null);
-    const nextAvatarSeed =
-      normalizedAvatarUrl ??
-      (rawAvatarUrl.length === 0 && existingCustomAvatarUrl ? agentId : undefined);
 
     const shouldUpdateHandle = agentProfileModal.mode === "edit";
     const normalizedHandle = shouldUpdateHandle ? normalizeAgentHandle(agentHandleDraft) : null;
@@ -981,8 +977,12 @@ export function CredentialsSettingsCard() {
       return;
     }
 
+    agentSaveLock.current = true;
     setAgentActionPendingId(agentId);
     try {
+      const picture = await resolvePicture();
+      if (!mounted.current) return;
+      const nextAvatarSeed = picture ?? (rawAvatarUrl.length === 0 && existingCustomAvatarUrl ? agentId : undefined);
       const result = await updateMyAgent(agentId, {
         handle: handleForRequest,
         displayName: trimmedName.length > 0 ? trimmedName : null,
@@ -994,6 +994,7 @@ export function CredentialsSettingsCard() {
         ...(agentCredentialDirty ? { credentialId: credentialId || null } : {}),
         ...(agentModelDirty ? { model: agentModelDraft } : {}),
       });
+      if (!mounted.current) return;
       if (!result.success || !result.agent) {
         showStatus(result.error ?? "Unable to update bot.", "error", 4500);
         return;
@@ -1003,14 +1004,18 @@ export function CredentialsSettingsCard() {
       await loadCredentials({ silent: true });
       notifyAiConfigChanged("agent_updated");
     } catch (error) {
+      if (!mounted.current) return;
       const message = error instanceof Error ? error.message : String(error);
       showStatus(`Unable to update bot: ${message}`, "error", 4500);
     } finally {
-      setAgentActionPendingId(null);
+      agentSaveLock.current = false;
+      if (mounted.current) setAgentActionPendingId(null);
     }
   }, [
     agentActionPendingId,
     agentAvatarUrlDraft,
+    agentAvatarFileDraft,
+    user,
     agentCredentialDraft,
     agentCredentialDirty,
     codexCredentials.length,
@@ -1061,6 +1066,15 @@ export function CredentialsSettingsCard() {
     },
     [agentActionPendingId, agentProfileModal, closeAgentProfileModal, loadCredentials, notifyAiConfigChanged, showStatus]
   );
+
+  const editingAgent = agents.find(agent => agent.id === agentProfileModal?.agentId);
+  const agentProfileDirty = agentProfileModal?.mode === "create" || Boolean(agentAvatarFileDraft) ||
+    agentNameDraft.trim() !== (editingAgent?.displayName ?? "") ||
+    agentAvatarUrlDraft.trim() !== resolveAgentAvatarUrlDraftFromSeed(editingAgent?.avatarSeed ?? "") ||
+    agentBioDraft.trim() !== (editingAgent?.bio ?? "") ||
+    agentDescriptionDraft.trim() !== (editingAgent?.description ?? "") ||
+    (agentProfileModal?.mode === "edit" && normalizeAgentHandle(agentHandleDraft) !== editingAgent?.handle) ||
+    agentCredentialDirty || agentModelDirty;
 
   const agentProfileModalMode: AgentProfileModalMode = agentProfileModal?.mode ?? "create";
   const agentProfileModalTitle =
@@ -1176,6 +1190,7 @@ export function CredentialsSettingsCard() {
   return (
     <>
       <AgentProfileModal
+        key={`${user?.id}:${agentProfileModal?.mode}:${agentProfileModal?.agentId ?? "new"}`}
         isOpen={Boolean(agentProfileModal)}
         mode={agentProfileModalMode}
         title={agentProfileModalTitle}
@@ -1203,6 +1218,10 @@ export function CredentialsSettingsCard() {
         displayName={agentNameDraft}
         onDisplayNameChange={setAgentNameDraft}
         avatarImageUrl={agentAvatarUrlDraft}
+        avatarFile={agentAvatarFileDraft}
+        avatarSeed={editingAgent && normalizeCustomAgentAvatarSrc(editingAgent.avatarSeed) ? editingAgent.id : editingAgent?.avatarSeed}
+        onAvatarFileChange={(file) => { setAgentAvatarFileDraft(file); uploadedAgentPicture.current = null; }}
+        dirty={agentProfileDirty}
         onAvatarImageUrlChange={setAgentAvatarUrlDraft}
         bio={agentBioDraft}
         onBioChange={setAgentBioDraft}
@@ -1210,7 +1229,7 @@ export function CredentialsSettingsCard() {
         onDescriptionChange={setAgentDescriptionDraft}
         onClose={closeAgentProfileModal}
         onSave={() => void handleSaveAgentProfile()}
-        saveLabel={agentProfileModalMode === "create" ? "Create bot" : "Save"}
+        saveLabel={agentProfileModalMode === "create" ? "Create bot" : "Save profile"}
       />
 
       <div className="space-y-8" data-testid="credentials-settings-card">

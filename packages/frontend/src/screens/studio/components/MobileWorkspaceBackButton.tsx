@@ -17,13 +17,14 @@ export function MobileWorkspaceBackButton({ history, onOpenChats }: {
       size="icon"
       className="!min-h-12 !min-w-12 shrink-0 gap-1 px-2"
       aria-label={hasResults ? "Back to results" : history.canGoBack ? "Go back" : "Open chats"}
+      title={hasResults ? "Back to results" : history.canGoBack ? "Go back" : "Open chats"}
       data-testid={hasResults ? "mobile-header-results" : history.canGoBack ? "mobile-header-back" : "mobile-header-open-chats"}
       onPress={hasResults ? searchReturn.returnToResults : history.canGoBack ? history.goBack : onOpenChats}
     >
       {hasResults || history.canGoBack
         ? <NavArrowLeft className="h-5 w-5" aria-hidden="true" />
         : <ChatLines className="h-5 w-5" aria-hidden="true" />}
-      <span className="text-sm">{label}</span>
+      <span className={hasResults ? "text-sm" : "sr-only"}>{label}</span>
     </Button>
   );
 }

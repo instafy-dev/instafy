@@ -1,3 +1,4 @@
+import { normalizeOrgAccent } from "../../../org/orgAccent";
 import type { ControllerOrgSummary } from "../../../sdk/instafy";
 
 /**
@@ -25,6 +26,7 @@ export interface CachedSidebarOrg {
   name: string;
   slug: string | null;
   avatarUrl: string | null;
+  accentColor?: string | null;
 }
 
 export interface SidebarOrgSnapshot {
@@ -79,6 +81,7 @@ function toCachedOrg(value: unknown): CachedSidebarOrg | null {
     name,
     slug: typeof record.slug === "string" ? record.slug : null,
     avatarUrl: typeof record.avatarUrl === "string" ? record.avatarUrl : null,
+    ...(normalizeOrgAccent(record.accentColor) ? { accentColor: normalizeOrgAccent(record.accentColor) } : {}),
   };
 }
 
@@ -136,6 +139,7 @@ export function readCachedControllerOrgs(
     slug: org.slug ?? "",
     name: org.name,
     avatarUrl: org.avatarUrl,
+    ...(org.accentColor ? { accentColor: org.accentColor } : {}),
   }));
 }
 
@@ -163,6 +167,7 @@ export function writeSidebarOrgSnapshot(
       name: org.name,
       slug: org.slug ?? null,
       avatarUrl: org.avatarUrl ?? null,
+      ...(normalizeOrgAccent(org.accentColor) ? { accentColor: normalizeOrgAccent(org.accentColor) } : {}),
     })),
     railChipCount:
       Number.isFinite(railChipCount) && railChipCount > 0

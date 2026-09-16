@@ -78,9 +78,13 @@ describe("MobileStudioNavigationHeader", () => {
     expect(query("mobile-header-more")?.getAttribute("aria-expanded")).toBe("false");
   });
 
-  it("keeps chat and space visible in the shared navigation drawer trigger", async () => {
+  it("keeps the sidebar control first and separate from the current location", async () => {
+    props.titleIcon = <svg data-testid="chat-icon" />;
     await render();
     const picker = query("mobile-header-picker")!;
+    expect(container.querySelector("button")).toBe(picker);
+    expect(query("mobile-header-title")?.closest("button")).toBeNull();
+    expect(query("chat-icon")?.closest('[data-testid="mobile-header-location"]')).not.toBeNull();
     expect(picker.getAttribute("aria-label")).toBe("Open space navigation: Alpha space");
     expect(picker.getAttribute("aria-haspopup")).toBe("dialog");
     expect(picker.getAttribute("aria-expanded")).toBe("false");
@@ -98,17 +102,19 @@ describe("MobileStudioNavigationHeader", () => {
     props.sidebarOpen = true;
     await render();
     expect(query("mobile-header-picker")?.getAttribute("aria-expanded")).toBe("true");
+    expect(query("mobile-header-picker")?.getAttribute("aria-label")).toBe("Close space navigation: Alpha space");
+    expect(container.querySelector("button")).toBe(query("mobile-header-picker"));
   });
 
-  it("keeps secondary chat, parent, sidebar and settings actions reachable and closes after each", async () => {
-    const actions = [vi.fn(), vi.fn(), vi.fn(), vi.fn(), vi.fn()];
+  it("keeps secondary chat, parent and settings actions reachable and closes after each", async () => {
+    const actions = [vi.fn(), vi.fn(), vi.fn(), vi.fn()];
     Object.assign(props, {
       onNewChat: actions[0], onNewPrivateChat: actions[1],
       parentConversation: { title: "Parent", onOpen: actions[2] },
-      onOpenSidebar: actions[3], onOpenSettings: actions[4],
+      onOpenSettings: actions[3],
     });
     await render();
-    for (const [index, title] of ["Public chat", "Private chat", "Open parent conversationParent", "Open sidebar", "Space settings"].entries()) {
+    for (const [index, title] of ["Public chat", "Private chat", "Open parent conversationParent", "Space settings"].entries()) {
       await click("mobile-header-more");
       expect(query("mobile-header-actions")).not.toBeNull();
       // Observe the real shared Dialog/React Aria fallback, not just the

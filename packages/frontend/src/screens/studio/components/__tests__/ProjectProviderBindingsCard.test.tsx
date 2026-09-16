@@ -327,6 +327,7 @@ describe("ProjectProviderBindingsCard", () => {
       '[data-testid="project-hardware-serial-device"]',
     );
     expect(input).not.toBeNull();
+    expect(input?.labels?.[0]?.textContent).toBe("Device path to grant");
 
     await act(async () => {
       setInputValue(input!, "/dev/cu.usbserial-130");

@@ -170,10 +170,10 @@ describe("notification preferences in Settings", () => {
     mocks.enableDevice.mockResolvedValueOnce(false);
     await render();
     expect(mocks.enableDevice).not.toHaveBeenCalled();
-    await clickButton("Enable alerts on this device");
+    await clickButton("Enable device alerts");
     expect(container.querySelector('[role="alert"]')?.textContent).toContain("permission was not granted");
     expect(mocks.save).not.toHaveBeenCalled();
-    await clickButton("Enable alerts on this device");
+    await clickButton("Enable device alerts");
     expect(container.querySelector('[role="alert"]')).toBeNull();
     expect(container.querySelector('[role="status"]')?.textContent).toBe("Alerts are enabled on this device.");
     expect(changed).not.toHaveBeenCalled();
@@ -183,7 +183,7 @@ describe("notification preferences in Settings", () => {
     const enabling = deferred<boolean>();
     mocks.enableDevice.mockReturnValueOnce(enabling.promise);
     await render();
-    await clickButton("Enable alerts on this device");
+    await clickButton("Enable device alerts");
     await render(B);
     await act(async () => enabling.resolve(true));
     expect(container.textContent).not.toContain("Alerts are enabled on this device.");

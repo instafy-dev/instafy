@@ -1,3 +1,8 @@
+import { useId } from "react";
+import { Field } from "../../../components/Field";
+import { SettingsFormLayout } from "../../../components/SettingsFormLayout";
+import { SettingsFormActions } from "../../../components/SettingsFormActions";
+import { SettingsActionRow } from "../../../components/SettingsActionRow";
 import { Button } from "../../../components/Button";
 import { HumanAvatar } from "../../../components/HumanAvatar";
 import { Input } from "../../../components/Input";
@@ -144,99 +149,60 @@ export function ProjectSettingsSections({
   projectDefaultsRefreshPending,
   onRefreshProjectDefaults,
 }: ProjectSettingsSectionsProps) {
+  const fieldId = useId();
   const showGuestAccess = projectAccessPanel === "guests";
   const showProviderAccess = projectAccessPanel === "providers";
 
   return (
     <div className="space-y-4">
       {showProjectBasics ? (
-        <>
+        <SettingsFormLayout>
           <SettingsSection
             title="Space name"
             description="Rename this space. Guests will see the updated name in the studio header and invite links."
           >
-            <SettingsSurface>
-              <div className="grid gap-2 @min-[32rem]/settings-content:grid-cols-[minmax(0,1fr)_auto_auto] @min-[32rem]/settings-content:items-end">
-                <div className="min-w-0">
-                  <Text variant="caption" tone="muted">
-                    Name
-                  </Text>
-                  <Input
-                    value={projectNameDraft}
-                    onChange={(event) => onProjectNameChange(event.target.value)}
-                    onKeyDown={(event) => {
-                      if (event.key === "Enter") {
-                        event.preventDefault();
-                        onProjectNameSave();
-                      }
-                      if (event.key === "Escape") {
-                        event.preventDefault();
-                        onProjectNameCancel();
-                      }
-                    }}
-                    disabled={!canWriteProject || projectNameSaving}
-                    data-testid="project-settings-name-input"
-                    className="mt-1"
-                  />
-                </div>
-                <Button
-                  onPress={onProjectNameSave}
-                  isDisabled={!canWriteProject || projectNameSaving || projectNameInvalid || !projectNameDirty}
-                  variant="outline"
-                  size="sm"
-                  radius="xl"
-                  data-testid="project-settings-name-save"
-                  className="w-full @min-[32rem]/settings-content:w-auto"
-                >
-                  {projectNameSaving ? "Saving…" : "Save"}
-                </Button>
-                <Button
-                  onPress={onProjectNameCancel}
-                  isDisabled={!canWriteProject || projectNameSaving || !projectNameDirty}
-                  variant="ghost"
-                  size="sm"
-                  radius="xl"
-                  data-testid="project-settings-name-cancel"
-                  className="w-full @min-[32rem]/settings-content:w-auto"
-                >
-                  Cancel
-                </Button>
-              </div>
-            </SettingsSurface>
+            <form className="space-y-4" onSubmit={event => {
+              event.preventDefault();
+              if (canWriteProject && !projectNameSaving && !projectNameInvalid && projectNameDirty) onProjectNameSave();
+            }}>
+              <Field label="Name" htmlFor="project-settings-name">
+                <Input id="project-settings-name" value={projectNameDraft}
+                  onChange={event => onProjectNameChange(event.target.value)}
+                  onKeyDown={event => {
+                    if (event.key === "Escape" && !projectNameSaving) {
+                      event.preventDefault(); event.stopPropagation(); onProjectNameCancel();
+                    }
+                  }}
+                  disabled={!canWriteProject || projectNameSaving}
+                  aria-invalid={projectNameDirty && projectNameInvalid || undefined}
+                  data-testid="project-settings-name-input" />
+              </Field>
+              <SettingsFormActions saveLabel="Save name" saving={projectNameSaving}
+                disabled={!canWriteProject || projectNameInvalid || !projectNameDirty}
+                onCancel={onProjectNameCancel} cancelDisabled={!canWriteProject || !projectNameDirty}
+                saveTestId="project-settings-name-save" cancelTestId="project-settings-name-cancel" />
+            </form>
           </SettingsSection>
 
           {activeProjectId ? <SpaceIdentityEditor key={activeProjectId} projectId={activeProjectId} name={activeProjectName} canWrite={canWriteProject} enabled={runtimeControllerEnabled} /> : null}
 
-          <SettingsSection
+          <SettingsActionRow
             title="Managed defaults"
-            description="Pull in the latest pinned skills and docs for this project without overwriting local edits."
-            data-testid="project-defaults-section"
-          >
-            <SettingsSurface>
-              <div className="flex flex-col gap-3 @min-[32rem]/settings-content:flex-row @min-[32rem]/settings-content:items-center @min-[32rem]/settings-content:justify-between">
-                <div className="min-w-0">
-                  <Text variant="bodyStrong" tone="secondary">
-                    Refresh defaults
-                  </Text>
-                  <Text variant="caption" tone="muted" className="mt-1">
-                    Adds missing defaults and updates untouched managed files to the latest repo version.
-                  </Text>
-                </div>
-                <Button
+            description="Update pinned skills and docs, and add missing defaults. Your local edits are kept."
+            testId="project-defaults-section"
+            action={<Button
                   onPress={onRefreshProjectDefaults}
                   isDisabled={!canWriteProject || !activeProjectId || !runtimeControllerEnabled || projectDefaultsRefreshPending}
                   variant="outline"
                   size="sm"
                   radius="xl"
                   data-testid="project-defaults-refresh"
-                  className="w-full @min-[32rem]/settings-content:w-auto"
+                  className="min-h-11 shrink-0 whitespace-nowrap sm:pointer-fine:min-h-9"
                 >
                   {projectDefaultsRefreshPending ? "Refreshing…" : "Refresh defaults"}
-                </Button>
-              </div>
-            </SettingsSurface>
-          </SettingsSection>
-        </>
+                </Button>}
+          />
+        </SettingsFormLayout>
       ) : null}
 
       {showGuestAccess ? (
@@ -257,41 +223,34 @@ export function ProjectSettingsSections({
               : "You have read-only access and cannot invite people to this space."}
           </Text>
         ) : null}
-        <SettingsSurface className="space-y-3">
+        <SettingsFormLayout>
           <div className="grid gap-3 @min-[32rem]/settings-content:grid-cols-[minmax(0,1fr)_minmax(180px,220px)]">
-            <div className="min-w-0">
-              <Text variant="caption" tone="muted">
-                Email
-              </Text>
+            <Field
+              label="Email"
+              htmlFor={`${fieldId}-email`}
+              error={!projectInviteEmailValid && projectInviteEmail.trim().length > 0 ? "Enter a valid email address." : null}
+            >
               <Input
+                id={`${fieldId}-email`}
                 type="email"
-                placeholder="guest@instafy.dev"
+                placeholder="name@example.com"
                 value={projectInviteEmail}
                 onChange={(event) => onProjectInviteEmailChange(event.target.value)}
+                disabled={!canShareProject || projectInvitePending}
                 data-testid="project-member-invite-email"
-                className="mt-1"
               />
-              {!projectInviteEmailValid && projectInviteEmail.trim().length > 0 ? (
-                <Text variant="caption" tone="danger" className="mt-1">
-                  Enter a valid email address.
-                </Text>
-              ) : null}
-            </div>
-            <div className="min-w-0">
-              <Text variant="caption" tone="muted">
-                Access
-              </Text>
-              <Select
+            </Field>
+            <Field label="Access" htmlFor={`${fieldId}-role`}>
+              <Select id={`${fieldId}-role`}
                 value={projectInviteRole}
                 onChange={(event) => onProjectInviteRoleChange(event.target.value)}
                 data-testid="project-member-invite-role"
-                className="mt-1"
                 disabled={!canShareProject || projectInvitePending}
               >
                 <option value="viewer">Read-only</option>
                 <option value="builder">Read &amp; write</option>
               </Select>
-            </div>
+            </Field>
           </div>
           {projectInviteError ? (
             <Text
@@ -358,7 +317,7 @@ export function ProjectSettingsSections({
               testIdPrefix="project-email-invite"
             />
           ) : null}
-        </SettingsSurface>
+        </SettingsFormLayout>
           </SettingsSection>
 
           <SettingsSection
@@ -486,23 +445,19 @@ export function ProjectSettingsSections({
               : "You have read-only access and cannot manage invite links."}
           </Text>
         ) : null}
-        <SettingsSurface className="space-y-3">
+        <SettingsFormLayout>
           <div className="grid gap-2 @min-[32rem]/settings-content:grid-cols-[minmax(0,1fr)_auto] @min-[32rem]/settings-content:items-end">
-            <div>
-              <Text variant="caption" tone="muted">
-                {inviteLinkUrl ? "Access for replacement link" : "Access"}
-              </Text>
-              <Select
+            <Field label={inviteLinkUrl ? "Access for replacement link" : "Access"} htmlFor={`${fieldId}-link-role`}>
+              <Select id={`${fieldId}-link-role`}
                 value={inviteLinkRole}
                 onChange={(event) => onInviteLinkRoleChange(event.target.value)}
                 data-testid="org-invite-link-role"
-                className="mt-1"
                 disabled={!canShareProject || inviteLinkPending}
               >
                 <option value="viewer">Read-only</option>
                 <option value="builder">Read &amp; write</option>
               </Select>
-            </div>
+            </Field>
             <Button
               onPress={onCreateInviteLink}
               isDisabled={!canShareProject || inviteLinkPending}
@@ -521,7 +476,7 @@ export function ProjectSettingsSections({
                 Current link · {activeInviteLinkRole === "builder" ? "Read & write" : "Read-only"}
               </Text>
               <div className="grid gap-2 @min-[32rem]/settings-content:grid-cols-[minmax(0,1fr)_auto_auto] @min-[32rem]/settings-content:items-center">
-                <Input value={inviteLinkUrl} readOnly data-testid="org-invite-link-url" className="min-w-0" />
+                <Input aria-label="Current invite link" value={inviteLinkUrl} readOnly data-testid="org-invite-link-url" className="min-w-0" />
                 <Button
                   onPress={onCopyInviteLink}
                   variant="primary"
@@ -553,7 +508,7 @@ export function ProjectSettingsSections({
               Loading invite link…
             </Text>
           ) : null}
-        </SettingsSurface>
+        </SettingsFormLayout>
           </SettingsSection>
 
           <SettingsSection

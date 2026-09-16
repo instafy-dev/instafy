@@ -7,6 +7,7 @@ export interface StudioNavigationContext {
   team: ReactNode;
   space: ReactNode;
   teamName: string;
+  accentColor?: string | null;
   onBrowseTeams: () => void;
 }
 

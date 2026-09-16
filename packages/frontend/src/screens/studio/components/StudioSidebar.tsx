@@ -94,7 +94,7 @@ export interface StudioSidebarProps {
   selectedOrgKey?: string;
   onOpenTeam?: (orgKey: string) => void;
   onReturnToTeam?: (orgKey: string) => void;
-  onActiveTeamChange?: (team: { key: string; name: string; avatarUrl: string | null }) => void;
+  onActiveTeamChange?: (team: { key: string; name: string; avatarUrl: string | null; accentColor?: string | null }) => void;
   onActivateProject?: (projectId: string, orgKey: string) => void;
   hideContext?: boolean;
   mobileNavigation?: MobileSidebarNavigation;
@@ -544,12 +544,13 @@ export function StudioSidebar({
     retryRemoteProjects();
   }, [pendingOrgSwitchKey, retryRemoteProjects]);
   const controllerOrgInfoById = useMemo(() => {
-    const map = new Map<string, { name: string; slug: string | null; avatarUrl: string | null }>();
+    const map = new Map<string, { name: string; slug: string | null; avatarUrl: string | null; accentColor?: string | null }>();
     controllerOrgs.forEach((org) => {
       map.set(org.id, {
         name: getOrgDisplayName(org.name),
         slug: org.slug ?? null,
         avatarUrl: org.avatarUrl ?? null,
+        accentColor: org.accentColor ?? null,
       });
     });
     return map;
@@ -557,7 +558,7 @@ export function StudioSidebar({
   const orgOptions = useMemo(() => {
     const options = new Map<
       string,
-      { key: string; name: string; label: string; slug: string | null; count: number; avatarUrl: string | null }
+      { key: string; name: string; label: string; slug: string | null; count: number; avatarUrl: string | null; accentColor?: string | null }
     >();
 
     controllerOrgs.forEach((org) => {
@@ -568,6 +569,7 @@ export function StudioSidebar({
         slug: org.slug ?? null,
         count: 0,
         avatarUrl: org.avatarUrl ?? null,
+        accentColor: org.accentColor ?? null,
       });
     });
     mergedProjects.forEach((project) => {
@@ -592,6 +594,7 @@ export function StudioSidebar({
           slug,
           count: 1,
           avatarUrl: controllerInfo?.avatarUrl ?? null,
+          accentColor: controllerInfo?.accentColor ?? null,
         });
       }
     });
@@ -633,19 +636,20 @@ export function StudioSidebar({
     return activeOrgKey === activeProjectOrgKey ? getOrgDisplayName(activeProject?.orgName) : "Team";
   }, [activeOrgKey, activeProjectOrgKey, activeProject?.orgName, orgOptions]);
   const activeOrgAvatarUrl = orgOptions.find((org) => org.key === activeOrgKey)?.avatarUrl ?? null;
+  const activeOrgAccentColor = orgOptions.find((org) => org.key === activeOrgKey)?.accentColor ?? null;
   const activeTeamUserKey = normalizeSidebarOrgUser(userEmail);
   const activeTeamMetadataReady = hydratedOrgUserRef.current === activeTeamUserKey;
-  const publishedActiveTeamRef = useRef<{ user: string | null; key: string; name: string; avatarUrl: string | null } | null>(null);
+  const publishedActiveTeamRef = useRef<{ user: string | null; key: string; name: string; avatarUrl: string | null; accentColor?: string | null } | null>(null);
   useEffect(() => {
     // Account changes hydrate their own org snapshot in the effect above. Do
     // not publish this render's previous-account metadata as the new user.
     if (!activeTeamMetadataReady) return;
     const previous = publishedActiveTeamRef.current;
-    if (previous?.user === activeTeamUserKey && previous.key === activeOrgKey && previous.name === activeOrgName && previous.avatarUrl === activeOrgAvatarUrl) return;
-    const team = { key: activeOrgKey, name: activeOrgName, avatarUrl: activeOrgAvatarUrl };
+    if (previous?.user === activeTeamUserKey && previous.key === activeOrgKey && previous.name === activeOrgName && previous.avatarUrl === activeOrgAvatarUrl && previous.accentColor === activeOrgAccentColor) return;
+    const team = { key: activeOrgKey, name: activeOrgName, avatarUrl: activeOrgAvatarUrl, accentColor: activeOrgAccentColor };
     publishedActiveTeamRef.current = { user: activeTeamUserKey, ...team };
     onActiveTeamChange?.(team);
-  }, [activeOrgKey, activeOrgName, activeOrgAvatarUrl, activeTeamMetadataReady, activeTeamUserKey, onActiveTeamChange]);
+  }, [activeOrgKey, activeOrgName, activeOrgAvatarUrl, activeOrgAccentColor, activeTeamMetadataReady, activeTeamUserKey, onActiveTeamChange]);
   const orgDeckTeams = useMemo(
     () => orgOptions.filter((org) => org.key !== "all"),
     [orgOptions],
@@ -674,7 +678,7 @@ export function StudioSidebar({
   // the authenticated project snapshot.
   const recentSpaceCandidates = useMemo(() => activeTeamMetadataReady
     ? mergedProjects.filter((project) => (project.orgId ?? "personal") === activeOrgKey)
-      .map((project) => ({ id: project.id, name: project.name, icon: project.projectIcon, color: project.projectColor }))
+      .map((project) => ({ id: project.id, name: project.name, icon: project.projectIcon, color: project.projectColor, avatarUrl: project.projectAvatarUrl }))
     : [], [activeOrgKey, activeTeamMetadataReady, mergedProjects]);
   const filteredOrgProjects = useMemo(() => {
     const needle = workspaceProjectQuery.trim().toLowerCase();
@@ -998,21 +1002,23 @@ export function StudioSidebar({
     runDestination(() => onOpenOrgSettings?.(created.id));
   }, [onOpenOrgSettings, resetWorkspaceSwitcher, runDestination]);
 
-  const openSelectedTeam = () => {
+  const openTeamOverview = (orgKey: string) => {
     onNavigationHeaderAction?.();
     resetWorkspaceSwitcher();
     closeMoreMenu();
     runDestination(() => {
-      if (onOpenTeam) onOpenTeam(activeOrgKey);
+      if (onOpenTeam) onOpenTeam(orgKey);
       else onSelect("team");
     });
   };
-  const openSelectedTeamSettings = () => {
+  const openSelectedTeam = () => openTeamOverview(activeOrgKey);
+  const openTeamSettings = (orgKey: string, category?: "profile" | "members") => {
     onNavigationHeaderAction?.();
     resetWorkspaceSwitcher();
     closeMoreMenu();
-    runDestination(() => onOpenOrgSettings?.(activeOrgKey));
+    runDestination(() => category ? onOpenOrgSettings?.(orgKey, category) : onOpenOrgSettings?.(orgKey));
   };
+  const openSelectedTeamSettings = () => openTeamSettings(activeOrgKey);
   const canStartHeaderChat = externalHeader && showChatActions && selectedTeamHasActiveSpace &&
     Boolean(onStartNewConversation) && activePanel !== "home" && !hideContext &&
     navigationPage !== "home";
@@ -1036,7 +1042,7 @@ export function StudioSidebar({
   // changes that retain the same loaded project behind a global panel.
   const teamMenu = <StudioSidebarTeamMenu
     key={JSON.stringify([activeTeamUserKey, activeOrgKey, activeProjectId, activePanel, desktopRail, externalHeader || showLabels, navigationPresentation, externalHeader])}
-    teamName={activeOrgName} teamAvatarUrl={activeOrgAvatarUrl}
+    teamName={activeOrgName} teamAvatarUrl={activeOrgAvatarUrl} accentColor={activeOrgAccentColor}
     presentation={pathControls && (!externalHeader || !desktopRail) ? "path" : "standard"} compact={!externalHeader && !showLabels}
     active={activePanel === "team" || activePanel === "settings"}
     rowClassName={`${sidebarRowLayoutClass} ${getSidebarRowToneClass(activePanel === "team" || activePanel === "settings")}`}
@@ -1167,7 +1173,7 @@ export function StudioSidebar({
 
   return (
     <>
-      {navigationHeaderPortalTarget ? createPortal(renderNavigationHeader ? renderNavigationHeader({ team: teamMenu, space: spaceControl, teamName: activeOrgName, onBrowseTeams: () => { onNavigationHeaderAction?.(); openWorkspaceSwitcher(); } }) : navigationPath, navigationHeaderPortalTarget) : null}
+      {navigationHeaderPortalTarget ? createPortal(renderNavigationHeader ? renderNavigationHeader({ team: teamMenu, space: spaceControl, teamName: activeOrgName, accentColor: activeOrgAccentColor, onBrowseTeams: () => { onNavigationHeaderAction?.(); openWorkspaceSwitcher(); } }) : navigationPath, navigationHeaderPortalTarget) : null}
       {desktopRail ? <StudioOrganizationRail
         organizations={orgDeckTeams} selectedOrgKey={activeOrgKey}
         pendingOrgKey={mergedProjectsError ? null : pendingOrgSwitchKey}
@@ -1175,6 +1181,8 @@ export function StudioSidebar({
         orgAttentionCounts={homeAttentionByOrg} titleBarFree={titleBarFree}
         onHome={() => { resetWorkspaceSwitcher(); closeMoreMenu(); runDestination(() => onSelect("home")); }}
         onSelectOrganization={handleWorkspaceOrgChange}
+        onOpenOrganizationOverview={onOpenTeam ? openTeamOverview : undefined}
+        onOpenOrganizationSettings={onOpenOrgSettings ? openTeamSettings : undefined}
         onCreateOrganization={runtimeControllerEnabled ? () => { resetWorkspaceSwitcher(); setNewTeamOpen(true); } : undefined}
         onBrowseOrganizations={() => openWorkspaceSwitcher()}
         browseButtonRef={browseTriggerRef} account={accountSection}

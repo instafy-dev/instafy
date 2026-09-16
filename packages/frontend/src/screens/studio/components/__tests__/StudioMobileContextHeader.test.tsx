@@ -138,6 +138,18 @@ describe("StudioMobileContextHeader", () => {
     expect(props.onHome).not.toHaveBeenCalled();
   });
 
+  it("shows the saved space appearance in the mobile breadcrumb alongside its unread count", async () => {
+    await render({ ...props, projects: props.projects.map(project => project.id === "current"
+      ? { ...project, projectIcon: "📚", projectColor: "pink" } : project) });
+    const identity = button("sidebar-space-button").querySelector('[data-testid="space-identity"]')!;
+    expect(identity.textContent).toBe("📚");
+    expect(identity.className).toContain("bg-pink-100");
+    expect(button("sidebar-space-button").getAttribute("aria-label")).toBe("Choose space: Autofix, 2 unread updates");
+    expect(container.querySelectorAll('[data-testid="sidebar-current-space-attention"]')).toHaveLength(1);
+    await render({ ...props, teamId: "empty" });
+    expect(button("sidebar-space-button").querySelector('[data-testid="space-identity"]')).toBeNull();
+  });
+
   it("does not retain another team's active space or an open menu after switching teams", async () => {
     await render();
     await click("sidebar-space-button");

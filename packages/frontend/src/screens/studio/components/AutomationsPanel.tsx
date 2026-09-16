@@ -1,8 +1,9 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useId, useMemo, useRef, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Clock, EditPencil, MoreHoriz, Pause, Play, Trash } from "iconoir-react";
 import { MenuTrigger } from "react-aria-components";
 import { Button, IconButton } from "../../../components/Button";
+import { Field } from "../../../components/Field";
 import { Input } from "../../../components/Input";
 import { SegmentedControl } from "../../../components/SegmentedControl";
 import { StudioDialogHeader } from "../../../components/aria/StudioDialogLayout";
@@ -193,6 +194,7 @@ export function AutomationsPanel() {
 }
 
 function ProjectAutomationsPanel({ activeProjectId, userId }: { activeProjectId: string | null; userId: string | null }) {
+  const fieldId = useId();
   const { openConversationTab, requestUrlPush } = useWorkspaceTabs();
   const { showStatus } = useStatus();
   const queryClient = useQueryClient();
@@ -581,42 +583,36 @@ function ProjectAutomationsPanel({ activeProjectId, userId }: { activeProjectId:
           <div className="flex-1 overflow-y-auto overscroll-contain px-4 py-4">
             <div className="space-y-4">
               <div className="grid gap-3 md:grid-cols-2">
-                <div className="space-y-1">
-                  <Text variant="caption" tone="muted">
-                    Name
-                  </Text>
+                <Field label="Name" htmlFor={`${fieldId}-name`}>
                   <Input
+                    id={`${fieldId}-name`}
                     value={draft.name}
                     onChange={(e) => setDraft((prev) => ({ ...prev, name: e.target.value }))}
                     placeholder="Daily bug scan"
                     data-testid="automation-name-input"
                   />
-                </div>
-                <div className="space-y-1">
-                  <Text variant="caption" tone="muted">
-                    Timezone
-                  </Text>
+                </Field>
+                <Field label="Timezone" htmlFor={`${fieldId}-timezone`}>
                   <Input
+                    id={`${fieldId}-timezone`}
                     value={draft.timezone}
                     onChange={(e) => setDraft((prev) => ({ ...prev, timezone: e.target.value }))}
                     placeholder="America/New_York"
                     data-testid="automation-timezone-input"
                   />
-                </div>
+                </Field>
               </div>
 
-              <div className="space-y-1">
-                <Text variant="caption" tone="muted">
-                  Prompt
-                </Text>
+              <Field label="Prompt" htmlFor={`${fieldId}-prompt`}>
                 <Textarea
+                  id={`${fieldId}-prompt`}
                   value={draft.promptText}
                   onChange={(e) => setDraft((prev) => ({ ...prev, promptText: e.target.value }))}
                   rows={8}
                   placeholder="What should Instafy do on schedule?"
                   data-testid="automation-prompt-input"
                 />
-              </div>
+              </Field>
 
               <div className="grid gap-4 md:grid-cols-2">
                 <SegmentedControl<ControllerAutomationScheduleKind>
@@ -648,18 +644,16 @@ function ProjectAutomationsPanel({ activeProjectId, userId }: { activeProjectId:
               </div>
 
               {draft.scheduleKind === "once" ? (
-                <div className="space-y-1">
-                  <Text variant="caption" tone="muted">
-                    Run at
-                  </Text>
+                <Field label="Run at" htmlFor={`${fieldId}-run-at`}>
                   <Input
+                    id={`${fieldId}-run-at`}
                     type="datetime-local"
                     value={draft.runAtLocal}
                     step={1}
                     onChange={(e) => setDraft((prev) => ({ ...prev, runAtLocal: e.target.value }))}
                     data-testid="automation-runat-input"
                   />
-                </div>
+                </Field>
               ) : draft.scheduleKind === "weekly" ? (
                 <div className="space-y-3 rounded-2xl border border-slate-200 bg-white p-3 dark:border-slate-800 dark:bg-slate-950">
                   <div className="flex flex-wrap items-center gap-2">
@@ -689,11 +683,9 @@ function ProjectAutomationsPanel({ activeProjectId, userId }: { activeProjectId:
                     })}
                   </div>
                   <div className="grid gap-3 sm:grid-cols-2">
-                    <div className="space-y-1">
-                      <Text variant="caption" tone="muted">
-                        Hour (0-23)
-                      </Text>
+                    <Field label="Hour (0-23)" htmlFor={`${fieldId}-hour`}>
                       <Input
+                        id={`${fieldId}-hour`}
                         type="number"
                         min={0}
                         max={23}
@@ -703,12 +695,10 @@ function ProjectAutomationsPanel({ activeProjectId, userId }: { activeProjectId:
                         }
                         data-testid="automation-byhour-input"
                       />
-                    </div>
-                    <div className="space-y-1">
-                      <Text variant="caption" tone="muted">
-                        Minute (0-59)
-                      </Text>
+                    </Field>
+                    <Field label="Minute (0-59)" htmlFor={`${fieldId}-minute`}>
                       <Input
+                        id={`${fieldId}-minute`}
                         type="number"
                         min={0}
                         max={59}
@@ -718,36 +708,32 @@ function ProjectAutomationsPanel({ activeProjectId, userId }: { activeProjectId:
                         }
                         data-testid="automation-byminute-input"
                       />
-                    </div>
+                    </Field>
                   </div>
                 </div>
               ) : (
-                <div className="space-y-1">
-                  <Text variant="caption" tone="muted">
-                    Interval hours
-                  </Text>
+                <Field label="Interval hours" htmlFor={`${fieldId}-interval`}>
                   <Input
+                    id={`${fieldId}-interval`}
                     type="number"
                     min={1}
                     value={draft.intervalHours}
                     onChange={(e) => setDraft((prev) => ({ ...prev, intervalHours: Number(e.target.value) }))}
                     data-testid="automation-interval-input"
                   />
-                </div>
+                </Field>
               )}
 
               <div className="grid gap-3 md:grid-cols-2">
-                <div className="space-y-1">
-                  <Text variant="caption" tone="muted">
-                    Runtime provider (optional)
-                  </Text>
+                <Field label="Runtime provider (optional)" htmlFor={`${fieldId}-provider`}>
                   <Input
+                    id={`${fieldId}-provider`}
                     value={draft.runtimeProvider}
                     onChange={(e) => setDraft((prev) => ({ ...prev, runtimeProvider: e.target.value }))}
                     placeholder="instafy_cloud"
                     data-testid="automation-runtime-provider-input"
                   />
-                </div>
+                </Field>
                 <div className="flex items-end">
                   <Toggle
                     isSelected={draft.enabled}

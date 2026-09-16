@@ -1,4 +1,5 @@
-import { useCallback, useMemo, useState } from "react";
+import { Field } from "../../../components/Field";
+import { useCallback, useId, useMemo, useState } from "react";
 import { Eye, EyeClosed } from "iconoir-react";
 import { Badge } from "../../../components/Badge";
 import { Button, IconButton } from "../../../components/Button";
@@ -40,6 +41,7 @@ export function InlineSecretsForm({
   agentHandles?: string[];
   onSaved?: (names: string[]) => void;
 }) {
+  const fieldId = useId();
   const { showStatus } = useStatus();
   const normalizedSecrets = useMemo(() => {
     const out: InlineSecretDescriptor[] = [];
@@ -238,34 +240,16 @@ export function InlineSecretsForm({
         Add secrets here. Values are saved to Project Secrets (not chat).
       </Text>
       <div className="space-y-2">
-        {normalizedSecrets.map((secret) => {
+        {normalizedSecrets.map((secret, index) => {
           const draft = drafts[secret.name] ?? createDefaultDraft();
           const savedAt = savedAtByName[secret.name];
           const recentlySaved = typeof savedAt === "number" && Date.now() - savedAt < 60_000;
           const hasValue = Boolean(draft.value.trim());
           return (
-            <label key={secret.name} className="block space-y-1">
-              <div className="flex flex-wrap items-center justify-between gap-2">
-                <Text as="div" variant="caption" tone="muted" className="text-xxs font-mono">
-                  {secret.name}
-                </Text>
-                {recentlySaved ? (
-                  <Badge tone="success" size="xs">
-                    Saved
-                  </Badge>
-                ) : hasValue ? (
-                  <Badge tone="info" size="xs">
-                    Ready to save
-                  </Badge>
-                ) : null}
-              </div>
-              {secret.description ? (
-                <Text as="div" variant="caption" tone="muted" className="text-xxs leading-snug">
-                  {secret.description}
-                </Text>
-              ) : null}
+            <Field key={secret.name} label={secret.name} htmlFor={`${fieldId}-${index}`}
+              size="xs" labelClassName="font-mono" hint={secret.description || undefined}>
               <div className="flex items-stretch gap-2">
-                <Input
+                <Input id={`${fieldId}-${index}`}
                   value={draft.value}
                   onChange={(event) => setDraftValue(secret.name, event.target.value)}
                   placeholder="Paste value…"
@@ -275,7 +259,7 @@ export function InlineSecretsForm({
                   disabled={!projectId || saving}
                   // Keep this as text input + CSS masking so password managers
                   // don't treat tokens like login forms.
-                  className={draft.visible ? "" : "[-webkit-text-security:disc]"}
+                  className={`min-w-0 ${draft.visible ? "" : "[-webkit-text-security:disc]"}`}
                   name={`secret-${secret.name}`}
                   autoComplete="off"
                   data-1p-ignore="true"
@@ -301,7 +285,9 @@ export function InlineSecretsForm({
                   )}
                 </IconButton>
               </div>
-            </label>
+              {recentlySaved ? <Badge tone="success" size="xs" className="self-start">Saved</Badge>
+                : hasValue ? <Badge tone="info" size="xs" className="self-start">Ready to save</Badge> : null}
+            </Field>
           );
         })}
       </div>
@@ -311,7 +297,7 @@ export function InlineSecretsForm({
           onPress={() => void handleSave()}
           variant="primary"
           size="xs"
-          radius="full"
+          radius="xl"
           isDisabled={!canSave}
         >
           {saving ? (
