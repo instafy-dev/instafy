@@ -70,31 +70,47 @@ async function runSkillsCommandAndWait(
   return (await newAssistant.innerText().catch(() => "")).trim();
 }
 
+function buildExpectedSkillImportLine(params: {
+  expectedSource: string;
+  expectedSkillName?: string;
+}): string {
+  return [
+    "/skills import",
+    params.expectedSource,
+    params.expectedSkillName ? `--name ${params.expectedSkillName}` : null,
+    "--start",
+  ]
+    .filter(Boolean)
+    .join(" ");
+}
+
+async function countConversationTabs(page: Page): Promise<number> {
+  return page
+    .getByTestId("workspace-tabs")
+    .locator("[data-tab-kind='conversation']")
+    .count()
+    .catch(() => 0);
+}
+
+// Every skills send lands as the user's own one-line message in the
+// conversation that was already active: no new conversation, no tab switch.
+// Callers run with an existing active conversation, so the tab count is a
+// valid invariant here.
 async function expectSkillImportTaskConversation(
   page: Page,
   params: {
     expectedSource: string;
     expectedSkillName?: string;
-    expectedTitlePattern?: RegExp;
+    tabCountBefore: number;
   },
 ): Promise<void> {
-  await expect(page.getByTestId("chat-input")).toBeVisible({ timeout: 60_000 });
-  const installTaskBubble = page
-    .getByTestId("chat-bubble-user")
-    .filter({ hasText: "Install and adapt a skill for this Instafy workspace." })
-    .last();
-  await expect(installTaskBubble).toBeVisible({ timeout: 90_000 });
-  await expect(installTaskBubble).toContainText(`Source: ${params.expectedSource}`);
-  if (params.expectedSkillName) {
-    await expect(installTaskBubble).toContainText(`Target skill name: ${params.expectedSkillName}`);
-  }
-  if (params.expectedTitlePattern) {
-    await expect(
-      page.getByTestId("workspace-tabs").locator("[data-tab-kind='conversation']").filter({
-        hasText: params.expectedTitlePattern,
-      }).first(),
-    ).toBeVisible({ timeout: 60_000 });
-  }
+  const expectedLine = buildExpectedSkillImportLine(params);
+  await expect
+    .poll(async () => (await page.getByTestId("chat-bubble-user").last().innerText().catch(() => "")).trim(), {
+      timeout: 90_000,
+    })
+    .toContain(expectedLine);
+  expect(await countConversationTabs(page)).toBe(params.tabCountBefore);
 }
 
 function parseSkillCount(summaryText: string): number {
@@ -330,11 +346,15 @@ test.describe("Skills command", () => {
     await page.getByTestId("skills-discovery-search").click();
     const installButton = page.getByTestId("skills-discovery-install-github:community:playwright-skill");
     await expect(installButton).toBeVisible({ timeout: 60_000 });
+    const tabCountBeforeInstall = await countConversationTabs(page);
     await installButton.click();
+    // Settings stays put: the line lands in the active chat; the panel does not switch.
+    await expect(page.getByTestId("skills-panel")).toBeVisible();
+    await page.getByTestId("sidebar-nav-chat").click();
     await expectSkillImportTaskConversation(page, {
       expectedSource: "https://github.com/lackeyjb/playwright-skill/tree/main/skills/playwright-skill",
       expectedSkillName: "playwright-skill",
-      expectedTitlePattern: /Playwright Skill Skill import/i,
+      tabCountBefore: tabCountBeforeInstall,
     });
 
     await expect
@@ -499,11 +519,14 @@ test.describe("Skills command", () => {
 
     const firstInstallButton = firstDiscoveryCard.getByRole("button", { name: "Install" });
     await expect(firstInstallButton).toBeVisible({ timeout: 60_000 });
+    const tabCountBeforeInstall = await countConversationTabs(page);
     await firstInstallButton.click();
+    await expect(page.getByTestId("skills-panel")).toBeVisible();
+    await page.getByTestId("sidebar-nav-chat").click();
     await expectSkillImportTaskConversation(page, {
       expectedSource: "https://github.com/openclaw/skills/tree/main/whatsapp-concierge/SKILL.md",
       expectedSkillName: "whatsapp-concierge",
-      expectedTitlePattern: /Whatsapp Concierge Skill import/i,
+      tabCountBefore: tabCountBeforeInstall,
     });
 
     const installedSkillContent = [
@@ -547,8 +570,232 @@ test.describe("Skills command", () => {
 
     const chatInput = page.getByTestId("chat-input");
     await expect(chatInput).toBeVisible({ timeout: 60_000 });
-    await expect(chatInput).toContainText('I just installed the "WhatsApp Concierge" skill.');
-    await expect(chatInput).toContainText("credentials or secrets");
+    // "Ask" is a prefill the user completes in the composer; nothing is sent.
+    await expect(chatInput).toContainText("/skills start whatsapp-concierge");
+    await expect(chatInput).not.toContainText("I just installed");
+  });
+
+  test("connect a tool from the composer menu through Paste a skill link", async ({ page }) => {
+    page.setDefaultTimeout(60_000);
+
+    const projectId = await prepareStudio(page);
+    if (!projectId) {
+      throw new Error("Project id missing for composer connect test.");
+    }
+    // `--start` continues into a model turn, so the AI lane must be ready.
+    await ensureRealDefaultCodexCredentialWhenRequired(page);
+    await page.getByTestId("sidebar-nav-chat").click();
+    await clearRuntimePreference(page, { projectId, source: "skills-connect" }).catch(() => {});
+    await ensureHostedRuntimeReady(page, projectId);
+    await ensureProjectCreditsReadyInUi(page, projectId);
+    await page.getByTestId("sidebar-nav-chat").click();
+
+    const fixturePath = "playwright/skill-import-fixture/SKILL.md";
+    const fixtureContent = [
+      "---",
+      "name: playwright-imported-skill",
+      "description: skill imported by Playwright e2e",
+      "---",
+      "",
+      "# Playwright imported skill",
+      "",
+      "Use this skill when testing deterministic slash-command behavior.",
+      "",
+    ].join("\n");
+    await writeWorkspaceFile(page, fixturePath, fixtureContent, { projectId });
+
+    const userBubbles = page.getByTestId("chat-bubble-user");
+    const userBubbleCountBefore = await userBubbles.count();
+    const tabCountBefore = await countConversationTabs(page);
+
+    await page.getByTestId("composer-action-menu-trigger").click();
+    await page.getByTestId("composer-action-menu-connect").click();
+
+    // Connect sub-view: the featured rows plus Browse all tools, and nothing sent.
+    for (const id of ["slack", "notion", "discord", "github", "browse"]) {
+      await expect(page.getByTestId(`composer-action-menu-connect-${id}`)).toBeVisible();
+    }
+    await expect(page.getByTestId("composer-action-menu-connect-freefinance")).toHaveCount(0);
+    await expect(page.getByTestId("composer-action-menu-connect-other")).toHaveCount(0);
+    expect(await userBubbles.count()).toBe(userBubbleCountBefore);
+
+    // Skill packs that are not published yet: the row is disabled with a Soon
+    // Badge and opens no confirm sheet. GitHub stays live.
+    for (const id of ["slack", "notion", "discord"]) {
+      const row = page.getByTestId(`composer-action-menu-connect-${id}`);
+      await expect(row).toBeDisabled();
+      await expect(row).toContainText("Soon");
+    }
+    await expect(page.getByTestId("composer-action-menu-connect-github")).toBeEnabled();
+    await page.getByTestId("composer-action-menu-connect-slack").click({ force: true });
+    await expect(page.getByTestId("connect-sheet")).toHaveCount(0);
+    await expect(page.getByTestId("connect-confirm-submit")).toHaveCount(0);
+    await expect(page.getByTestId("composer-action-menu-connect-browse")).toBeVisible();
+    expect(await userBubbles.count()).toBe(userBubbleCountBefore);
+
+    // "Browse all tools" opens the sheet's browse stage; "Paste a skill link" in its
+    // footer opens the import modal; "Add and start" sends the one line.
+    await page.getByTestId("composer-action-menu-connect-browse").click();
+    await expect(page.getByRole("dialog", { name: "Connect a tool" })).toBeVisible();
+    await expect(page.getByTestId("connect-search")).toBeVisible();
+    await expect(page.getByTestId("connect-confirm-submit")).toHaveCount(0);
+    expect(await userBubbles.count()).toBe(userBubbleCountBefore);
+    await page.getByTestId("connect-paste-link").click();
+    await expect(page.getByTestId("connect-sheet")).toHaveCount(0);
+    await expect(page.getByTestId("skills-add-modal")).toBeVisible();
+    await page.getByTestId("skills-import-source").fill("playwright/skill-import-fixture");
+    const assistantBubbles = page.locator('[data-testid="chat-bubble-assistant"]');
+    const baselineAssistantCount = await assistantBubbles.count();
+    await page.getByTestId("skills-import-submit").click();
+
+    await expect(page.getByTestId("skills-add-modal")).toHaveCount(0);
+    await expect
+      .poll(async () => (await userBubbles.last().innerText().catch(() => "")).trim(), {
+        timeout: 90_000,
+      })
+      .toContain("/skills import playwright/skill-import-fixture --start");
+    expect(await userBubbles.count()).toBe(userBubbleCountBefore + 1);
+
+    // Stop at the import card; the model's kickoff reply is not awaited.
+    const importCard = assistantBubbles.nth(baselineAssistantCount);
+    await expect(importCard).toBeVisible({ timeout: 180_000 });
+    await expect
+      .poll(async () => (await importCard.innerText().catch(() => "")).trim(), { timeout: 180_000 })
+      .toMatch(/Imported 1 skill/i);
+
+    await expect
+      .poll(
+        async () =>
+          (
+            await readWorkspaceFileText(page, ".agents/skills/playwright-imported-skill/SKILL.md", {
+              projectId,
+            })
+          )?.trim(),
+        { timeout: 120_000 },
+      )
+      .toContain("# Playwright imported skill");
+
+    expect(await countConversationTabs(page)).toBe(tabCountBefore);
+  });
+
+  test("Browse all tools searches by keyword and Escape sends nothing", async ({ page }) => {
+    page.setDefaultTimeout(60_000);
+
+    const projectId = await prepareStudio(page);
+    if (!projectId) {
+      throw new Error("Project id missing for browse tools test.");
+    }
+    await page.getByTestId("sidebar-nav-chat").click();
+
+    const userBubbles = page.getByTestId("chat-bubble-user");
+    const userBubbleCountBefore = await userBubbles.count();
+
+    await page.getByTestId("composer-action-menu-trigger").click();
+    await page.getByTestId("composer-action-menu-connect").click();
+    await page.getByTestId("composer-action-menu-connect-browse").click();
+
+    // Browse stage: search and the category rows. Popular stays hidden while
+    // GitHub is the only featured tool that can be selected; the unpublished
+    // packs are listed disabled with a Soon Badge.
+    await expect(page.getByRole("dialog", { name: "Connect a tool" })).toBeVisible();
+    await expect(page.getByTestId("connect-popular")).toHaveCount(0);
+    await expect(page.getByTestId("connect-popular-slack")).toHaveCount(0);
+    await expect(page.getByTestId("connect-row-github")).toBeEnabled();
+    for (const id of ["slack", "notion", "discord", "freefinance"]) {
+      await expect(page.getByTestId(`connect-row-${id}`)).toBeDisabled();
+      await expect(page.getByTestId(`connect-row-${id}-meta`)).toHaveText("Soon");
+    }
+
+    // A keyword narrows the list to the niche tool, still greyed.
+    await page.getByTestId("connect-search").fill("buch");
+    await expect(page.getByTestId("connect-row-freefinance")).toBeVisible();
+    await expect(page.getByTestId("connect-row-freefinance")).toBeDisabled();
+    await expect(page.getByTestId("connect-row-slack")).toHaveCount(0);
+    await expect(page.getByTestId("connect-popular-slack")).toHaveCount(0);
+    await expect(page.getByTestId("connect-confirm-submit")).toHaveCount(0);
+
+    await page.keyboard.press("Escape");
+    await expect(page.getByTestId("connect-sheet")).toHaveCount(0);
+    expect(await userBubbles.count()).toBe(userBubbleCountBefore);
+  });
+
+  test("Import a GitHub repo on the getting-started card opens the GitHub flow", async ({ page }) => {
+    page.setDefaultTimeout(60_000);
+
+    const projectId = await prepareStudio(page);
+    if (!projectId) {
+      throw new Error("Project id missing for GitHub import test.");
+    }
+    await page.getByTestId("sidebar-nav-chat").click();
+
+    const userBubbles = page.getByTestId("chat-bubble-user");
+    const userBubbleCountBefore = await userBubbles.count();
+
+    const importAction = page
+      .getByTestId("onboarding-getting-started")
+      .getByTestId("onboarding-action-import-github-repo");
+    await expect(importAction).toBeVisible({ timeout: 60_000 });
+    await importAction.click();
+
+    // The card switches to its GitHub mode: repo import plus device login.
+    await expect(page.getByTestId("onboarding-github-connect-button")).toBeVisible();
+    await expect(page.getByTestId("onboarding-github-repo-input")).toBeVisible();
+    await expect(page.getByTestId("connect-confirm-submit")).toHaveCount(0);
+    expect(await userBubbles.count()).toBe(userBubbleCountBefore);
+  });
+
+  test("a soon card chip opens nothing, More tools browses and Escape sends nothing", async ({ page }) => {
+    page.setDefaultTimeout(60_000);
+
+    const projectId = await prepareStudio(page);
+    if (!projectId) {
+      throw new Error("Project id missing for card chip test.");
+    }
+    await page.getByTestId("sidebar-nav-chat").click();
+
+    const userBubbles = page.getByTestId("chat-bubble-user");
+    const userBubbleCountBefore = await userBubbles.count();
+
+    const card = page.getByTestId("onboarding-getting-started");
+    const slackChip = card.getByTestId("connect-chip-slack");
+    await expect(slackChip).toBeVisible({ timeout: 60_000 });
+    // Featured skills only: no niche chip, no GitHub chip, no paste link on the card.
+    await expect(card.getByTestId("connect-chip-freefinance")).toHaveCount(0);
+    await expect(card.getByTestId("connect-chip-github")).toHaveCount(0);
+    await expect(card.getByTestId("connect-chip-other")).toHaveCount(0);
+    await expect(card.getByTestId("connect-more-tools")).toBeVisible();
+
+    // Every shipped chip is a skill whose pack is not published yet: disabled,
+    // with a Soon Badge, and a press opens no sheet.
+    for (const id of ["slack", "notion", "discord"]) {
+      const chip = card.getByTestId(`connect-chip-${id}`);
+      await expect(chip).toBeDisabled();
+      await expect(chip).toHaveAttribute("aria-label", /, coming soon$/);
+      await expect(card.getByTestId(`connect-chip-${id}-soon`)).toHaveText("Soon");
+    }
+    await slackChip.click({ force: true });
+    await expect(page.getByTestId("connect-sheet")).toHaveCount(0);
+    await expect(page.getByTestId("connect-confirm-submit")).toHaveCount(0);
+    expect(await userBubbles.count()).toBe(userBubbleCountBefore);
+
+    // "More tools" opens the browse stage; the soon rows are disabled there
+    // too and the GitHub row leads to the card's GitHub mode.
+    await card.getByTestId("connect-more-tools").click();
+    await expect(page.getByRole("dialog", { name: "Connect a tool" })).toBeVisible();
+    await expect(page.getByTestId("connect-row-notion")).toBeDisabled();
+    await expect(page.getByTestId("connect-row-notion-meta")).toHaveText("Soon");
+    await expect(page.getByTestId("connect-confirm-submit")).toHaveCount(0);
+    await page.keyboard.press("Escape");
+    await expect(page.getByTestId("connect-sheet")).toHaveCount(0);
+    expect(await userBubbles.count()).toBe(userBubbleCountBefore);
+
+    await card.getByTestId("connect-more-tools").click();
+    await expect(page.getByRole("dialog", { name: "Connect a tool" })).toBeVisible();
+    await page.getByTestId("connect-row-github").click();
+    await expect(page.getByTestId("connect-sheet")).toHaveCount(0);
+    await expect(page.getByTestId("onboarding-github-connect-button")).toBeVisible();
+    await expect(page.getByTestId("onboarding-github-repo-input")).toBeVisible();
+    expect(await userBubbles.count()).toBe(userBubbleCountBefore);
   });
 
   test("live GitHub discovery resolves Nice-Wolf-Studio agent-discord-skills", async ({ page }) => {

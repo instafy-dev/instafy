@@ -5,10 +5,11 @@ import { Input } from "../../../components/Input";
 import { Spinner } from "../../../components/Spinner";
 import { Surface } from "../../../components/Surface";
 import { Text } from "../../../components/Text";
-import { INSTAFY_DESKTOP_INSTALL_URL } from "../../../desktop/install";
 import { controllerClient } from "../../../sdk/instafy";
 import { openExternalUrl } from "../../../utils/openExternalUrl";
 import { CHAT_BUBBLE_MAX_WIDTH } from "./chatBubbleWidth";
+import { ConnectChipStrip } from "./ConnectChipStrip";
+import type { SkillConnector } from "./connectors";
 import type { GettingStartedAiViewState } from "./gettingStartedAiChoices";
 import { ONBOARDING_PATHS, type OnboardingAction } from "./onboardingPlaybook";
 
@@ -30,6 +31,12 @@ interface ChatGettingStartedCardProps {
   mode: ChatGettingStartedMode;
   onSelectMode: (mode: ChatGettingStartedMode) => void;
   onSelectAction: (action: OnboardingAction) => void;
+  // "Connect a tool" chips. A press only reports the skill; ChatPanel opens
+  // the confirm stage of the Connect sheet. "More tools" opens its browse stage.
+  onSelectConnector: (connector: SkillConnector) => void;
+  onBrowseConnectors: () => void;
+  installedSkillNames: ReadonlySet<string>;
+  showConnectTools: boolean;
   managedAiOffer: {
     label: string;
     dailyPromptLimit: number;
@@ -95,6 +102,10 @@ export function ChatGettingStartedCard({
   mode,
   onSelectMode,
   onSelectAction,
+  onSelectConnector,
+  onBrowseConnectors,
+  installedSkillNames,
+  showConnectTools,
   managedAiOffer,
   selectedAi,
   aiViewState,
@@ -160,7 +171,7 @@ export function ChatGettingStartedCard({
       tone="default"
       radius="2xl"
       shadow="sm"
-      className={`@container w-full ${CHAT_BUBBLE_MAX_WIDTH.intro} px-3 py-3 sm:px-4`}
+      className={`@container w-full ${CHAT_BUBBLE_MAX_WIDTH.card} px-3 py-3 sm:px-4`}
       data-testid="onboarding-getting-started"
     >
       {mode === "root" ? (
@@ -273,7 +284,7 @@ export function ChatGettingStartedCard({
               </div>
             </div>
           ) : null}
-          {/* Step 2 appears once the AI choice is settled — one decision at a time. */}
+          {/* Step 2 appears once the AI choice is settled: one decision at a time. */}
           {aiViewState === "workspace" ? (
             <div
               ref={workspaceStepRef}
@@ -295,11 +306,13 @@ export function ChatGettingStartedCard({
                       variant="ghost"
                       size="xs"
                       radius="full"
-                      className="px-1.5 text-slate-500 underline-offset-2 hover:underline dark:text-slate-400"
+                      className="px-1.5 underline-offset-2 hover:underline"
                       onPress={onChangeAiChoice}
                       data-testid="onboarding-change-ai"
                     >
-                      Change AI
+                      {/* Tone on a span: a text colour on the Button loses to the
+                          ghost variant's text-slate-700 (no tailwind-merge). */}
+                      <span className="text-slate-500 dark:text-slate-400">Change AI</span>
                     </Button>
                   ) : null}
                 </div>
@@ -311,21 +324,6 @@ export function ChatGettingStartedCard({
                 tone="primary"
               >
                 What should your agent work on?
-              </Text>
-              <Text as="p" variant="caption" tone="muted" className="mt-0.5">
-                Your agent works in a hosted workspace — a real git repo where every change is a
-                commit you can revert. Prefer a local folder? Use the{" "}
-                <a
-                  href={INSTAFY_DESKTOP_INSTALL_URL}
-                  className="underline underline-offset-2"
-                  onClick={(event) => {
-                    event.preventDefault();
-                    void openExternalUrl(INSTAFY_DESKTOP_INSTALL_URL);
-                  }}
-                >
-                  desktop app
-                </a>
-                .
               </Text>
               <div className="mt-2 grid gap-2 @sm:grid-cols-2">
                 {importGithubAction ? (
@@ -341,6 +339,34 @@ export function ChatGettingStartedCard({
                   />
                 ) : null}
               </div>
+              {showConnectTools ? (
+                <>
+                  <div
+                    className="mt-3 border-t border-slate-200/70 pt-3 dark:border-[color:var(--color-studio-dark-panel-border)]"
+                    data-testid="onboarding-connect-strip"
+                  >
+                    <Text as="p" id="onboarding-connect-label" variant="caption" tone="muted">
+                      Connect a tool
+                    </Text>
+                    <ConnectChipStrip
+                      className="mt-1.5"
+                      aria-labelledby="onboarding-connect-label"
+                      installedSkillNames={installedSkillNames}
+                      onSelect={onSelectConnector}
+                      onMoreTools={onBrowseConnectors}
+                    />
+                  </div>
+                  <Text
+                    as="p"
+                    variant="caption"
+                    tone="subtle"
+                    className="mt-2.5"
+                    data-testid="onboarding-type-hint"
+                  >
+                    Or just type below.
+                  </Text>
+                </>
+              ) : null}
             </div>
           ) : null}
         </>
@@ -352,13 +378,13 @@ export function ChatGettingStartedCard({
             <div className="min-w-0">
               <Button
                 variant="ghost"
-                size="xs"
+                size="sm"
                 radius="full"
                 onPress={() => onSelectMode("root")}
-                className="gap-1 px-2"
+                className="gap-1 px-2 text-slate-600 dark:text-slate-300"
                 data-testid="onboarding-back-button"
               >
-                <NavArrowLeft className="h-3.5 w-3.5" aria-hidden="true" />
+                <NavArrowLeft className="h-4 w-4" aria-hidden="true" />
                 Back
               </Button>
               <Text as="h3" variant="bodyStrong" tone="primary" className="mt-2">
@@ -388,7 +414,7 @@ export function ChatGettingStartedCard({
             <Input
               value={githubRefDraft}
               onChange={(event) => onGithubRefDraftChange(event.target.value)}
-              placeholder="ref (optional) — main, tag, or commit SHA"
+              placeholder="ref (optional): main, a tag, or a commit SHA"
               size="sm"
               radius="xl"
               disabled={githubImportBusy}
@@ -396,8 +422,8 @@ export function ChatGettingStartedCard({
               data-testid="onboarding-github-ref-input"
             />
             <Text as="p" variant="caption" tone="muted" className="text-xs">
-              Public repos import without login. For a private repo, click Connect GitHub — we’ll
-              show a short code to paste on GitHub and approve. No password needed here.
+              Public repos import without login. For a private repo, use Connect GitHub: you
+              approve a short code on GitHub. No password is entered here.
             </Text>
             {githubDeviceAuthError ? (
               <Text as="p" variant="caption" tone="inherit" className="text-xs text-rose-600 dark:text-rose-300">

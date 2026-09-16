@@ -265,6 +265,8 @@ On mobile, installed skill titles open the skill file directly, the enable toggl
 visible, and other actions live in the row menu. Skill discovery keeps search on one row
 and folds source, category and sort controls into **Filters**; closing the controls keeps
 their selections. Wider layouts retain direct row actions and visible discovery filters.
+**Import** and a catalogue **Install** send the same `/skills import ... --start` line as the
+composer, into the current chat, and keep you on the Skills panel.
 
 Automations uses a flat empty state on the shared panel surface, with a labeled
 **New automation** action and a short explanation of scheduling.
@@ -274,6 +276,42 @@ Automations uses a flat empty state on the shared panel surface, with a labeled
 The composer uses one compact, rounded writing row on phones and wider screens. It grows
 with the draft, then scrolls within the editor. Image upload and other message tools live
 in the `+` menu.
+
+**Connect a tool** in the composer `+` menu, next to **Import GitHub repo**, lists the
+featured tools (Slack, Notion, Discord, GitHub) and ends with **Browse all tools**; the
+featured skills also sit as a row of chips under **Connect a tool** on the getting-started
+card of an empty space, followed by a **More tools** link. Both open the Connect sheet: a
+**Search tools** box, a **Popular** row of bare marks (a curated list, not a measurement), and
+every first-party tool grouped by category (Chat and community, Docs and notes, Code, Finance
+and bookkeeping, and so on), with **connected** or a region such as Austria as the row's meta.
+Tools whose skill pack is not published yet show a **Soon** badge and cannot be selected, on
+the card, in the menu and in the sheet, and the Popular row appears only once at least two of
+its tools are available.
+Typing filters the rows by name, keyword, category or region and hides the Popular row; when
+nothing matches, **Search all skills** opens the Skills panel's Discover tab with the same
+query. **Paste a skill link** lives in the sheet's footer. Choosing a skill opens the confirm stage, which says which skill is added
+and from which repo, what its setup will ask for, and where the files land
+(`.agents/skills/<skill>`), with **Back** when it was reached from the list; **Connect** then
+sends one line, `/skills import <source> --name <skill> --start`, into the current chat as a
+new turn (queued behind an active reply when there is one). Nothing is sent by a chip, a menu
+row, a search, a Popular mark or a category row: **Connect** is the only sending control.
+GitHub is reached through **Import GitHub repo** and its device login (the GitHub row in the
+sheet and menu leads there too), and **Paste a skill link** opens a dialog for any GitHub repo
+or skill folder link, a `SKILL.md` link, or a workspace path, whose **Add and start** sends
+`/skills import <source> --start` the same way. The runtime
+copies every folder in the
+source that contains a `SKILL.md` into `.agents/skills/`, reports what it wrote in one
+message, and then continues the same turn by following each skill's `## Getting started`
+section: questions are asked in chat, secrets are requested by name through the secrets card
+and never pasted into the conversation, dependencies are installed inside the skill folder,
+and schedules are created through the normal automation flow. `/skills start <name>` runs
+that section again for one installed skill, and `/skills` is listed in the typed `/` menu
+and in **Commands**. The product list is a fixed, first-party list built into Studio, and
+**Import** and **Install** in Settings > Skills send the same line into the current chat
+without leaving Settings. Skills are files distributed as public repos and URLs; what the
+agent does after install is written by the skill author, and Studio supplies only the
+import, start, secret and automation verbs. There is no marketplace, no plugin registry, and
+no remote code loading beyond files written into the workspace.
 
 On clients with voice input, the trailing action is the microphone for an empty draft and
 Send or Steer for a text or image draft. Recording and transcription keep the microphone

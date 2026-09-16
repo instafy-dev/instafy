@@ -3,7 +3,11 @@ import { Plus, Refresh } from "iconoir-react";
 import { Button, IconButton } from "../../../components/Button";
 import { Spinner } from "../../../components/Spinner";
 import { Text } from "../../../components/Text";
-import { useConversations } from "../../../conversations/ConversationsProvider";
+import {
+  buildSkillStartMessage,
+  humanizeSkillName,
+  normalizeSkillName,
+} from "../../../conversations/skillCommands";
 import { useConversation } from "../../../conversations/useConversation";
 import { useProject } from "../../../projects/useProject";
 import { useRuntime } from "../../../runtime/useRuntime";
@@ -18,6 +22,7 @@ import { InstalledSkillsSection } from "./InstalledSkillsSection";
 import { SkillsDiscoverySection } from "./SkillsDiscoverySection";
 import { SkillsImportModal } from "./SkillsImportModal";
 import { SettingsShell, type SettingsCategory } from "./SettingsShell";
+import { useSkillsDiscoveryRequest } from "./skillsDiscoveryRequest";
 import { useSkillsDiscoveryState } from "./useSkillsDiscoveryState";
 import { useSkillsImportFlow } from "./useSkillsImportFlow";
 
@@ -433,154 +438,8 @@ function parseSkillDocumentDetails(markdown: string): SkillDocumentDetails {
   };
 }
 
-function humanizeSkillName(value: string): string {
-  const normalized = value
-    .trim()
-    .replace(/[_-]+/g, " ")
-    .replace(/\s+/g, " ");
-  if (!normalized) {
-    return "Unnamed skill";
-  }
-  return normalized
-    .split(" ")
-    .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
-    .join(" ");
-}
-
-function normalizeSkillNameForCommand(value: string): string {
-  return value
-    .trim()
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, "-")
-    .replace(/^-+|-+$/g, "");
-}
-
-function buildSkillOnboardingPrompt(skillTitle: string): string {
-  const title = skillTitle.trim() || "this";
-  return `I just installed the "${title}" skill. What can I do with it, and what setup (including credentials or secrets) do I need before it works? Please guide me step by step.`;
-}
-
-function deriveSkillNameHintFromImportSource(source: string): string | null {
-  const trimmed = source.trim();
-  if (!trimmed) {
-    return null;
-  }
-
-  const pickFromSegments = (segments: string[]): string | null => {
-    if (segments.length === 0) {
-      return null;
-    }
-    const last = segments[segments.length - 1]?.trim() ?? "";
-    const candidate =
-      last.toLowerCase() === SKILL_FILE_NAME.toLowerCase() && segments.length >= 2
-        ? segments[segments.length - 2] ?? ""
-        : last;
-    const normalized = normalizeSkillNameForCommand(candidate);
-    return normalized || null;
-  };
-
-  try {
-    const parsed = new URL(trimmed);
-    const segments = parsed.pathname
-      .split("/")
-      .map((segment) => segment.trim())
-      .filter((segment) => segment.length > 0);
-    if (segments.length === 0) {
-      return null;
-    }
-
-    if (
-      parsed.hostname.toLowerCase() === "github.com" &&
-      segments.length >= 5 &&
-      (segments[2] === "blob" || segments[2] === "tree")
-    ) {
-      const githubPathSegments = segments.slice(4);
-      return pickFromSegments(githubPathSegments);
-    }
-
-    return pickFromSegments(segments);
-  } catch {
-    const localSegments = trimmed
-      .replace(/\\+/g, "/")
-      .split("/")
-      .map((segment) => segment.trim())
-      .filter((segment) => segment.length > 0);
-    return pickFromSegments(localSegments);
-  }
-}
-
-function buildSkillImportTaskPrompt(params: {
-  source: string;
-  skillName?: string | null;
-  overwrite: boolean;
-}): string {
-  const normalizedName =
-    normalizeSkillNameForCommand(params.skillName ?? "") ||
-    deriveSkillNameHintFromImportSource(params.source) ||
-    "imported-skill";
-  const overwriteInstruction = params.overwrite
-    ? "The user requested overwrite: it is okay to replace existing files for this skill."
-    : "The user did not request overwrite: avoid destructive replacement if the skill already exists.";
-
-  const skillsImportCommand = [
-    "/skills import",
-    params.source.trim(),
-    "--name",
-    normalizedName,
-    params.overwrite ? "--overwrite" : null,
-  ]
-    .filter(Boolean)
-    .join(" ");
-
-  return [
-    skillsImportCommand,
-    "",
-    "Install and adapt a skill for this Instafy workspace.",
-    "",
-    `Source: ${params.source.trim()}`,
-    `Target skill name: ${normalizedName}`,
-    overwriteInstruction,
-    "",
-    "Preservation requirements (critical):",
-    "- Prefer running `/skills import <source> --name <skill-name> [--overwrite]` to fetch and write the skill bundle.",
-    "- Do NOT rewrite/retitle the upstream SKILL.md. Preserve existing frontmatter and headings (especially the first `# ...` heading).",
-    "- Only apply minimal edits needed for Instafy compatibility (for example `.claude/skills` -> `.agents/skills`).",
-    "- If you add Instafy notes, append them at the end under `## Instafy Compatibility` (do not prepend).",
-    "",
-    "Execution requirements:",
-    "- Use available runtime tools directly (for example `git`, `curl`, `wget`, `tar`, `unzip`) to fetch skill content.",
-    "- You may use slash commands if helpful, but complete the task even when commands are unavailable.",
-    "- Perform concrete setup actions in the runtime when possible; do not stop at analysis-only guidance.",
-    "- If the skill depends on MCP/tooling, attempt to install or configure it with available runtime tools before asking the user for manual steps.",
-    "- If a setup step fails, include the exact command/tool call attempted and the concrete error output.",
-    "- If onboarding actions are shown in UI (for example integration/secrets cards), use position-agnostic wording; do not say above/below/left/right.",
-    "",
-    "Adaptation requirements:",
-    "- Preserve the original capability and intent from upstream.",
-    `- Keep the final skill path as \`.agents/skills/${normalizedName}/SKILL.md\` unless there is a clear naming conflict.`,
-    "- Rewrite Claude/OpenClaw/host-specific assumptions into Instafy-compatible guidance.",
-    "- Convert path references like `~/.claude/skills/*` and `.claude/skills/*` to `.agents/skills/*`.",
-    "- Prefer workspace-relative file operations over host-level assumptions.",
-    "- Remove or rewrite instructions that require unsupported host management (for example `systemd`, `/usr/local/bin`, global shell profile edits) when those steps are not valid in Instafy runtime contexts.",
-    "- Keep companion files working (scripts/assets) with relative paths inside the skill folder.",
-    "- Use the active default connected credential and Instafy proxy flow when network/model access is needed.",
-    "- Do not ask the user to paste API keys or secrets in chat; point to space secrets/connect flows.",
-    "- When auth/integrations are missing, explicitly guide the user to the correct Instafy connect/secrets step, then continue with all non-auth setup automatically.",
-    "- If full runtime compatibility is impossible, keep the useful parts and clearly state practical limits plus what must run outside Instafy.",
-    "- Include an immediate user journey after install: what to run first, what to configure next, and how to verify success.",
-    "- Where appropriate, include Instafy-native operational examples using slash commands like `/skills list`, `/terminal ...`, and `/learn`.",
-    "",
-    "When finished, report:",
-    `1. Installed path (expected skill name: \`${normalizedName}\`)`,
-    "2. What was transformed for Instafy compatibility",
-    "3. A first validation prompt the user can run in chat",
-    "4. Any required secrets/credentials and where they should be configured in Instafy",
-    "5. Commands/tool calls attempted for setup and their outcomes",
-  ].join("\n");
-}
-
 function resolveDiscoveredSkillSlug(discovered: ControllerSkillDiscoveryItem): string | null {
-  const suggested = normalizeSkillNameForCommand(discovered.suggestedName ?? "");
+  const suggested = normalizeSkillName(discovered.suggestedName ?? "");
   if (suggested) {
     return suggested;
   }
@@ -602,7 +461,7 @@ function resolveDiscoveredSkillSlug(discovered: ControllerSkillDiscoveryItem): s
 
     const last = segments[segments.length - 1]?.toLowerCase() ?? "";
     const candidate = last === "skill.md" && segments.length >= 2 ? segments[segments.length - 2] : last;
-    const normalized = normalizeSkillNameForCommand(candidate ?? "");
+    const normalized = normalizeSkillName(candidate ?? "");
     return normalized || null;
   } catch {
     return null;
@@ -692,9 +551,9 @@ export function SkillsPanel() {
   const { activeProjectId } = useProject();
   const { effectiveRuntimeId } = useRuntime();
   const { showStatus } = useStatus();
-  const { conversations, createConversation } = useConversations();
-  const { activeConversationId, onInputChange, onSubmit, isAssistantTyping } = useConversation();
-  const { openConversationTab, openPanelTab, requestUrlPush } = useWorkspaceTabs();
+  const { activeConversationId, assistantEnabled, onInputChange, onSubmit, isAssistantTyping } =
+    useConversation();
+  const { openPanelTab, requestUrlPush } = useWorkspaceTabs();
 
   const [skills, setSkills] = useState<SkillItem[]>([]);
   const [loading, setLoading] = useState(false);
@@ -890,24 +749,17 @@ export function SkillsPanel() {
     importPending,
     addSkillModalOpen,
     setAddSkillModalOpen,
-    lastQueuedTask,
     queueSkillImportTask,
     handleSubmitImport,
     handleOpenAddSkillModal,
-    handleOpenAssistant,
   } = useSkillsImportFlow({
-    conversations,
-    createConversation,
+    activeConversationId,
+    assistantEnabled,
     onSubmit,
-    openConversationTab,
-    requestUrlPush,
-    openPanelTab,
     showStatus,
     loadSkills,
-    buildImportTaskPrompt: buildSkillImportTaskPrompt,
-    normalizeSkillName: normalizeSkillNameForCommand,
-    humanizeSkillName,
-    deriveSkillNameHintFromImportSource,
+    // Only the toast's "Open chat" action leaves Settings; the flow never navigates.
+    onOpenChat: () => openPanelTab("chat"),
   });
   const {
     discoveryQuery,
@@ -939,9 +791,21 @@ export function SkillsPanel() {
     normalizeCategory: normalizeDiscoveryCategory,
     sanitizeCategoryLabel: sanitizeDiscoveryCategoryLabel,
     resolveDiscoveredSkillSlug,
-    normalizeSkillName: normalizeSkillNameForCommand,
+    normalizeSkillName,
     resolveDiscoverySourceMeta,
   });
+
+  // "Search all skills" in the Connect sheet: open Discover with its query,
+  // whether this panel was mounted for it or was already open.
+  const handleSkillsDiscoveryRequest = useCallback(
+    (query: string) => {
+      setActivePrimaryTab("discover");
+      setDiscoveryQuery(query);
+      void runDiscoverySearch({ query });
+    },
+    [runDiscoverySearch, setDiscoveryQuery],
+  );
+  useSkillsDiscoveryRequest(handleSkillsDiscoveryRequest);
 
   const handleBootstrapSkills = useCallback(async () => {
     const projectId = activeProjectId?.trim() ?? "";
@@ -989,12 +853,14 @@ export function SkillsPanel() {
     }
   }, [activeProjectId, loadSkills, showStatus]);
 
+  // The one navigation in the skills flow: a prefill the user must finish in
+  // the composer, so the chat is shown. Nothing is sent.
   const handleDraftSkillPrompt = useCallback(
-    (skillTitle: string) => {
+    (skillSlug: string) => {
       requestUrlPush();
       openPanelTab("chat");
-      onInputChange(activeConversationId, buildSkillOnboardingPrompt(skillTitle));
-      showStatus("Drafted a skill setup prompt in Assistant.", "info", 2500);
+      onInputChange(activeConversationId, `${buildSkillStartMessage(skillSlug)} `);
+      showStatus("Drafted /skills start in the composer.", "info", 2500);
     },
     [activeConversationId, onInputChange, openPanelTab, requestUrlPush, showStatus],
   );
@@ -1166,15 +1032,11 @@ export function SkillsPanel() {
         return;
       }
 
-      const queued = await queueSkillImportTask({
+      await queueSkillImportTask({
         source: installSource,
         skillName: discovered.suggestedName ?? null,
         overwrite: false,
       });
-      if (!queued) {
-        return;
-      }
-      showStatus(`${discovered.title} import task started.`, "info", 3500);
     },
     [
       handleOpenSkillFile,
@@ -1313,19 +1175,13 @@ export function SkillsPanel() {
             void handleToggleSkill(skill, enabled);
           }}
           onAskExistingSkill={(skill) => {
-            handleDraftSkillPrompt(skill.title);
+            handleDraftSkillPrompt(skill.slug);
           }}
           onOpenExistingSkill={handleOpenSkillFile}
           onDiscoveredSkillAction={(discovered, existingSkill) => {
             void handleDiscoveredSkillAction(discovered, existingSkill);
           }}
         />
-      ) : null}
-
-      {lastQueuedTask ? (
-        <Text variant="caption" tone="muted" data-testid="skills-last-task">
-          Last queued task: <code>{lastQueuedTask}</code>
-        </Text>
       ) : null}
 
       <SkillsImportModal
@@ -1339,7 +1195,6 @@ export function SkillsPanel() {
         importOverwrite={importOverwrite}
         onImportOverwriteChange={setImportOverwrite}
         hasProject={hasProject}
-        onOpenAssistant={handleOpenAssistant}
         onSubmitImport={() => {
           void handleSubmitImport({ closeModalOnSuccess: true });
         }}

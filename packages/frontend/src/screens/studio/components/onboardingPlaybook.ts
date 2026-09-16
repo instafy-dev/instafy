@@ -47,14 +47,14 @@ export const ONBOARDING_PATHS: OnboardingPath[] = [
       {
         id: "import-github-repo",
         title: "Import a GitHub repo",
-        description: "Copy its files into your workspace — or just paste a repo link in chat.",
+        description: "Copy its files into your workspace, or paste a repo link in chat.",
         kind: "github_import",
         icon: Github,
       },
       {
         id: "start-from-scratch",
         title: "Start from scratch",
-        description: "A blank workspace — turn an idea into an app, tool, or prototype.",
+        description: "A blank workspace. Turn an idea into an app, tool, or prototype.",
         kind: "prompt",
         prompt:
           "I'm starting from a blank workspace. What I want to build: <describe it here>. Create the smallest useful first version as real files and commit it, then summarize what you built and suggest the next step.",
