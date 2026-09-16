@@ -266,22 +266,26 @@ describe("ConnectSheet", () => {
       // Button's disabled opacity greys it; the name keeps the primary tone,
       // as on the chip and menu row) and its meta is the Soon Badge in place
       // of the region.
-      expect(SOON_IDS).toEqual(["slack", "notion", "discord", "freefinance"]);
-      const freefinance = query<HTMLButtonElement>('[data-testid="connect-row-freefinance"]')!;
-      expect(freefinance.querySelectorAll("svg")).toHaveLength(1);
+      expect(SOON_IDS).toEqual(["slack", "notion", "discord"]);
+      const slack = query<HTMLButtonElement>('[data-testid="connect-row-slack"]')!;
+      expect(slack.querySelectorAll("svg")).toHaveLength(1);
       // The mark is aria-hidden; the row reads as the name plus the meta.
-      expect(freefinance.querySelector("svg")?.getAttribute("aria-hidden")).toBe("true");
-      expect(freefinance.querySelectorAll("span span")[0]?.textContent).toBe("FreeFinance");
-      expect(freefinance.disabled).toBe(true);
-      expect(query('[data-testid="connect-row-freefinance-meta"]')?.textContent).toBe("Soon");
-      expect(document.body.textContent).not.toContain("Austria");
+      expect(slack.querySelector("svg")?.getAttribute("aria-hidden")).toBe("true");
+      expect(slack.querySelectorAll("span span")[0]?.textContent).toBe("Slack");
+      expect(slack.disabled).toBe(true);
+      expect(query('[data-testid="connect-row-slack-meta"]')?.textContent).toBe("Soon");
       // No aria-label: the visible text names the row, meta included.
-      expect(freefinance.getAttribute("aria-label")).toBeNull();
-      expect(accessibleText(freefinance)).toBe("FreeFinance Soon");
+      expect(slack.getAttribute("aria-label")).toBeNull();
+      expect(accessibleText(slack)).toBe("Slack Soon");
       // Meta keeps the muted token (slate-600), not subtle (slate-400): 12 px
       // text needs the contrast; the Badge's neutral tone carries it.
-      expect(query('[data-testid="connect-row-freefinance-meta"]')?.className).toContain("text-slate-600");
-      expect(query('[data-testid="connect-row-freefinance-meta"]')?.className).toContain("rounded-full");
+      expect(query('[data-testid="connect-row-slack-meta"]')?.className).toContain("text-slate-600");
+      expect(query('[data-testid="connect-row-slack-meta"]')?.className).toContain("rounded-full");
+      // A published pack is selectable and shows its region as the meta.
+      const freefinance = query<HTMLButtonElement>('[data-testid="connect-row-freefinance"]')!;
+      expect(freefinance.disabled).toBe(false);
+      expect(query('[data-testid="connect-row-freefinance-meta"]')?.textContent).toBe("Austria");
+      expect(accessibleText(freefinance)).toBe("FreeFinance Austria");
       for (const id of SOON_IDS) {
         const row = query<HTMLButtonElement>(`[data-testid="connect-row-${id}"]`)!;
         expect(row.disabled).toBe(true);
@@ -324,9 +328,8 @@ describe("ConnectSheet", () => {
       const s = spies();
       await render({ initial: "browse", installedSkillNames: new Set(["freefinance", "slack"]), spies: s });
 
-      expect(query('[data-testid="connect-row-freefinance-meta"]')?.textContent).toBe("Soon");
+      expect(query('[data-testid="connect-row-freefinance-meta"]')?.textContent).toBe("connected");
       expect(query('[data-testid="connect-row-slack-meta"]')?.textContent).toBe("Soon");
-      expect(document.body.textContent).not.toContain("connected");
       const slackRow = query<HTMLButtonElement>('[data-testid="connect-row-slack"]');
       expect(slackRow?.disabled).toBe(true);
       expect(slackRow?.getAttribute("aria-label")).toBeNull();
@@ -373,11 +376,10 @@ describe("ConnectSheet", () => {
         (element) => element.getAttribute("role") === "group",
       );
       expect(sections.map((section) => section.dataset.testid)).toEqual(["connect-category-finance"]);
-      // A soon tool still shows up in the results, disabled with its Badge.
       const freefinance = query<HTMLButtonElement>('[data-testid="connect-row-freefinance"]');
       expect(freefinance).not.toBeNull();
-      expect(freefinance?.disabled).toBe(true);
-      expect(query('[data-testid="connect-row-freefinance-meta"]')?.textContent).toBe("Soon");
+      expect(freefinance?.disabled).toBe(false);
+      expect(query('[data-testid="connect-row-freefinance-meta"]')?.textContent).toBe("Austria");
       expect(query('[data-testid="connect-row-slack"]')).toBeNull();
       expect(query('[data-testid="connect-empty"]')).toBeNull();
 

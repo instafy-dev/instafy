@@ -701,7 +701,7 @@ test.describe("Skills command", () => {
     await expect(page.getByTestId("connect-popular")).toHaveCount(0);
     await expect(page.getByTestId("connect-popular-slack")).toHaveCount(0);
     await expect(page.getByTestId("connect-row-github")).toBeEnabled();
-    for (const id of ["slack", "notion", "discord", "freefinance"]) {
+    for (const id of ["slack", "notion", "discord"]) {
       await expect(page.getByTestId(`connect-row-${id}`)).toBeDisabled();
       await expect(page.getByTestId(`connect-row-${id}-meta`)).toHaveText("Soon");
     }
@@ -709,7 +709,8 @@ test.describe("Skills command", () => {
     // A keyword narrows the list to the niche tool, still greyed.
     await page.getByTestId("connect-search").fill("buch");
     await expect(page.getByTestId("connect-row-freefinance")).toBeVisible();
-    await expect(page.getByTestId("connect-row-freefinance")).toBeDisabled();
+    await expect(page.getByTestId("connect-row-freefinance")).toBeEnabled();
+    await expect(page.getByTestId("connect-row-freefinance-meta")).toHaveText("Austria");
     await expect(page.getByTestId("connect-row-slack")).toHaveCount(0);
     await expect(page.getByTestId("connect-popular-slack")).toHaveCount(0);
     await expect(page.getByTestId("connect-confirm-submit")).toHaveCount(0);

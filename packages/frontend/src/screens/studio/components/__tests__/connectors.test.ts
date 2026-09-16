@@ -68,7 +68,7 @@ describe("CONNECTORS", () => {
     expect(ids(FEATURED_CONNECTORS)).not.toContain("freefinance");
   });
 
-  it("marks the unpublished packs soon and only GitHub available today", () => {
+  it("marks the unpublished packs soon and only GitHub and FreeFinance available today", () => {
     // Flip an entry to "available" once its pack repo is published; until
     // then it stays listed everywhere, greyed with a "Soon" Badge.
     const availability = Object.fromEntries(
@@ -78,11 +78,13 @@ describe("CONNECTORS", () => {
       slack: "soon",
       notion: "soon",
       discord: "soon",
-      freefinance: "soon",
+      freefinance: "available",
       github: "available",
     });
     for (const entry of CONNECTORS) {
-      expect(isConnectorAvailable(entry)).toBe(entry.kind === "other" || entry.id === "github");
+      expect(isConnectorAvailable(entry)).toBe(
+        entry.kind === "other" || entry.id === "github" || entry.id === "freefinance",
+      );
     }
     // The paste link is always available: it has no pack to wait for.
     const other = CONNECTORS.find((entry) => entry.id === "other")!;
