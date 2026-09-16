@@ -11,13 +11,14 @@ const cleanupSteps = (source) => steps(source).filter((step) =>
   /\b(?:rm|Remove-Item)\s[^\n]*(?:\/usr\/share\/(?:dotnet|swift)|\/usr\/local\/lib\/android|\/opt\/(?:ghc|swift|hostedtoolcache))/u
     .test(step.replace(/\\\n/gu, " ")));
 
-test("system SDK cleanup is restricted to GitHub-hosted runners in every workflow", () => {
+test("system SDK cleanup runs unconditionally on the hosted-only workflows", () => {
+  // Every job is a GitHub-hosted runner (scripts/check-hosted-only-runners.test.mjs),
+  // so the disposable-image cleanup needs no runner guard and must not gain one.
   const inventory = new Map();
   for (const name of fs.readdirSync(workflowRoot).filter((entry) => /\.ya?ml$/u.test(entry))) {
     const found = cleanupSteps(read(name));
     for (const step of found) {
-      assert.match(step, /^        if: runner\.environment == 'github-hosted'$/mu,
-        `${name}: system tool removal must not run on self-hosted or unknown runners`);
+      assert.doesNotMatch(step, /^        if:/mu, `${name}: system tool removal must not be conditional`);
     }
     if (found.length) inventory.set(name, found.length);
   }

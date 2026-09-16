@@ -27,28 +27,7 @@ permissions:
 jobs:
   controller-db-tests:
     name: Controller database tests
-    runs-on: >-
-      ${{ vars.CI_DATABASE_SELF_HOSTED == 'true'
-          && github.repository == 'instafy-dev/instafy'
-          && github.event.repository.private == true
-          && ((github.event_name == 'pull_request'
-               && github.event.pull_request.base.ref == 'main'
-               && github.event.pull_request.base.repo.full_name == github.repository
-               && github.event.pull_request.head.repo.full_name == github.repository
-               && github.event.pull_request.head.repo.fork == false)
-              || (github.event_name == 'push' && github.ref == 'refs/heads/main' && github.ref_protected == true))
-          && fromJSON(format('{{"group":"org/instafy-ci-{0}","labels":["self-hosted","Linux","ARM64","instafy-ci-bootstrap-{1}-{2}-{3}-public-controller-db","instafy-ci-trust-{0}"]}}', github.event_name == 'pull_request' && 'pr' || 'main', github.repository_id, github.run_id, github.run_attempt))
-          || (vars.CI_DATABASE_SELF_HOSTED == 'true'
-              && github.repository == 'instafy-dev/instafy'
-              && github.repository_id == '1309636737'
-              && github.event.repository.private == true
-              && github.event_name == 'workflow_dispatch'
-              && github.ref == 'refs/heads/main'
-              && github.ref_protected == true
-              && github.workflow_ref == 'instafy-dev/instafy/.github/workflows/controller-db-tests.yml@refs/heads/main'
-              && github.workflow_sha == github.sha
-              && fromJSON(format('{{"group":"org/instafy-ci-main","labels":["self-hosted","Linux","ARM64","instafy-ci-bootstrap-{0}-{1}-{2}-public-controller-db","instafy-ci-trust-main"]}}', github.repository_id, github.run_id, github.run_attempt)))
-          || 'ubuntu-latest' }}
+    runs-on: ubuntu-latest
     timeout-minutes: 30
     env:
       CARGO_BUILD_JOBS: "2"
@@ -60,30 +39,6 @@ jobs:
       TEST_DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:54322/postgres
 
     steps:
-      - name: Qualify isolated database CI runner
-        if: runner.environment == 'self-hosted'
-        shell: bash
-        run: |
-          node <<'NODE'
-          const assert = require('node:assert/strict');
-          const { execFileSync } = require('node:child_process');
-          assert.equal(process.platform, 'linux');
-          assert.equal(process.arch, 'arm64');
-          assert.ok(Number.isSafeInteger(process.getuid()) && process.getuid() > 0);
-          assert.equal(process.versions.node.split('.')[0], '22');
-          assert.equal(process.env.RUNNER_OS, 'Linux');
-          assert.equal(process.env.RUNNER_ARCH, 'ARM64');
-          assert.equal(process.env.INSTAFY_CI_JOB_ISOLATION, 'ephemeral');
-          assert.ok(!process.env.INSTAFY_ENV_DIR);
-          for (const tool of ['bash', 'git', 'curl', 'tar', 'sha256sum', 'unzip', 'docker', 'rustup', 'cc', 'c++', 'make', 'pkg-config']) {
-            execFileSync('/bin/bash', ['-c', 'command -v "$1" >/dev/null', 'database-ci-preflight', tool], { timeout: 1000, stdio: 'ignore' });
-          }
-          execFileSync('pkg-config', ['--exists', 'openssl'], { timeout: 1000, stdio: 'ignore' });
-          const engine = JSON.parse(execFileSync('docker', ['info', '--format', '{{json .}}'], { timeout: 10000, encoding: 'utf8' }));
-          assert.equal(engine.OSType, 'linux');
-          assert.ok(['aarch64', 'arm64'].includes(engine.Architecture));
-          NODE
-
       - name: Checkout repository
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
@@ -91,9 +46,6 @@ jobs:
           submodules: recursive
           persist-credentials: false
           ref: ${{ github.sha }}
-
-      - name: Verify database CI routing contracts
-        run: node --test scripts/check-database-ci-routing.test.mjs
 
       - name: Set up pnpm
         uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4
@@ -111,18 +63,7 @@ jobs:
           rustup toolchain install stable --profile minimal
           rustup default stable
 
-      - name: Restore compiler cache without saving
-        if: runner.environment == 'self-hosted'
-        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            packages/runtime-controller/target
-          key: controller-db-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('packages/runtime-controller/Cargo.lock') }}
-
       - name: Cache controller Cargo dependencies and build
-        if: runner.environment == 'github-hosted'
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |

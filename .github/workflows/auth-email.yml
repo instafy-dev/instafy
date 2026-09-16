@@ -53,55 +53,11 @@ concurrency:
 jobs:
   auth-email:
     name: signup -> email -> activate
-    runs-on: >-
-      ${{ vars.CI_DATABASE_SELF_HOSTED == 'true'
-          && github.repository == 'instafy-dev/instafy'
-          && github.event.repository.private == true
-          && ((github.event_name == 'pull_request'
-               && github.event.pull_request.base.ref == 'main'
-               && github.event.pull_request.base.repo.full_name == github.repository
-               && github.event.pull_request.head.repo.full_name == github.repository
-               && github.event.pull_request.head.repo.fork == false)
-              || (github.event_name == 'push' && github.ref == 'refs/heads/main' && github.ref_protected == true))
-          && fromJSON(format('{{"group":"org/instafy-ci-{0}","labels":["self-hosted","Linux","ARM64","instafy-ci-bootstrap-{1}-{2}-{3}-public-auth-email","instafy-ci-trust-{0}"]}}', github.event_name == 'pull_request' && 'pr' || 'main', github.repository_id, github.run_id, github.run_attempt))
-          || (vars.CI_DATABASE_SELF_HOSTED == 'true'
-              && github.repository == 'instafy-dev/instafy'
-              && github.repository_id == '1309636737'
-              && github.event.repository.private == true
-              && github.event_name == 'workflow_dispatch'
-              && github.ref == 'refs/heads/main'
-              && github.ref_protected == true
-              && github.workflow_ref == 'instafy-dev/instafy/.github/workflows/auth-email.yml@refs/heads/main'
-              && github.workflow_sha == github.sha
-              && fromJSON(format('{{"group":"org/instafy-ci-main","labels":["self-hosted","Linux","ARM64","instafy-ci-bootstrap-{0}-{1}-{2}-public-auth-email","instafy-ci-trust-main"]}}', github.repository_id, github.run_id, github.run_attempt)))
-          || 'ubuntu-latest' }}
+    runs-on: ubuntu-latest
     # `supabase start` pulls several Docker images on a cold runner; cap the job
     # so a hung pull can't burn the 6h default.
     timeout-minutes: 25
     steps:
-      - name: Qualify isolated database CI runner
-        if: runner.environment == 'self-hosted'
-        shell: bash
-        run: |
-          node <<'NODE'
-          const assert = require('node:assert/strict');
-          const { execFileSync } = require('node:child_process');
-          assert.equal(process.platform, 'linux');
-          assert.equal(process.arch, 'arm64');
-          assert.ok(Number.isSafeInteger(process.getuid()) && process.getuid() > 0);
-          assert.equal(process.versions.node.split('.')[0], '22');
-          assert.equal(process.env.RUNNER_OS, 'Linux');
-          assert.equal(process.env.RUNNER_ARCH, 'ARM64');
-          assert.equal(process.env.INSTAFY_CI_JOB_ISOLATION, 'ephemeral');
-          assert.ok(!process.env.INSTAFY_ENV_DIR);
-          for (const tool of ['bash', 'git', 'curl', 'tar', 'sha256sum', 'unzip', 'docker']) {
-            execFileSync('/bin/bash', ['-c', 'command -v "$1" >/dev/null', 'database-ci-preflight', tool], { timeout: 1000, stdio: 'ignore' });
-          }
-          const engine = JSON.parse(execFileSync('docker', ['info', '--format', '{{json .}}'], { timeout: 10000, encoding: 'utf8' }));
-          assert.equal(engine.OSType, 'linux');
-          assert.ok(['aarch64', 'arm64'].includes(engine.Architecture));
-          NODE
-
       - name: Checkout repository
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:

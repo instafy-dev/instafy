@@ -1,4 +1,3 @@
-import { withoutManualCiRouting } from "./lib/manualCiRoutingTestBaseline.mjs";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import { createHash } from "node:crypto";
@@ -7,53 +6,23 @@ import test from "node:test";
 import vm from "node:vm";
 
 const root = path.resolve(import.meta.dirname, "..");
-const workflow = withoutManualCiRouting("browser-e2e.yml", fs.readFileSync(path.join(root, ".github/workflows/browser-e2e.yml"), "utf8"));
+const workflow = fs.readFileSync(path.join(root, ".github/workflows/browser-e2e.yml"), "utf8");
 const aggregateIf = "    if: ${{ always() && !(github.repository == 'instafy-dev/instafy' && github.event_name == 'push' && github.ref == 'refs/heads/main' && github.ref_protected == true && cancelled()) }}";
-// Only historical byte-reconstruction proofs use the former aggregate guard.
-const previousAggregateWorkflow = workflow.replace(aggregateIf, "    if: ${{ always() }}");
 const jobs = [
   { key: "shared-profile", label: "public-shared-browser-aggregate", name: "Shared Browser profile E2E", minutes: 5 },
   { key: "shared-profile-lifecycle", label: "public-shared-browser-profile", name: "Shared Browser profile lifecycle", minutes: 30, script: "browser-profile-e2e.mjs" },
   { key: "shared-studio", label: "public-shared-browser-studio", name: "Shared Browser Studio journey", minutes: 30, script: "shared-browser-studio-e2e.mjs" },
 ];
 const section = key => workflow.split(`\n  ${key}:\n`)[1].split(/\n  [\w-]+:\n/u)[0];
-const compilerSegmentTimeout = '        env:\n          SEGMENT_DOWNLOAD_TIMEOUT_MINS: "2"\n';
-const withoutCompilerSegmentTimeout = text => text.replaceAll(compilerSegmentTimeout, "");
-// Reconstruct only the removed standalone migration-image preparation for
-// the existing whole-workflow scope proofs, excluding the separately proven
-// segment-timeout opt-ins. Do not loosen their baselines.
-function withStandaloneMigrationImagePreparation(text) {
-  text = withoutCompilerSegmentTimeout(text);
-  const cache = [
-    "      - name: Restore Supabase Postgres image cache",
-    "        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0",
-    "        with:",
-    "          path: ~/.instafy-image-cache",
-    "          key: shared-browser-image-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('scripts/test-supabase-migrations-empty-db.mjs') }}",
-    "",
-  ].join("\n");
-  const compilerStep = "      - name: Restore compiler cache without saving\n";
-  const startup = '          SUPABASE_BROWSER_TEST: "1"\n        run: |\n';
-  assert.equal(text.split(compilerStep).length - 1, 2);
-  assert.equal(text.split(startup).length - 1, 2);
-  return text.replaceAll(compilerStep, cache + compilerStep)
-    .replaceAll(startup, startup + "          node scripts/ensure-supabase-postgres-image.mjs\n");
-}
-function cacheStep(key, name) {
-  const text = section(key), marker = `      - name: ${name}\n`, start = text.indexOf(marker);
-  assert.ok(start >= 0);
-  const end = text.indexOf('\n      - name: ', start + marker.length);
-  return text.slice(start, end < 0 ? text.length : end);
-}
-function withoutRestoreOnlyCaches(text) {
-  for (const job of jobs.filter(job => job.script)) {
-    const restore = withoutCompilerSegmentTimeout(cacheStep(job.key, 'Restore compiler cache without saving'));
-    const hosted = cacheStep(job.key, 'Restore architecture-specific compiler cache');
-    text = text.replace(restore + '\n', '').replace(hosted,
-      hosted.replace("        if: runner.environment == 'github-hosted'\n", ''));
+test("the Shared aggregate and both children run on hosted Ubuntu 24.04 with their exact names and budgets", () => {
+  for (const job of jobs) {
+    assert.ok(section(job.key).includes(`    name: ${job.name}\n`));
+    assert.match(section(job.key), /^    runs-on: ubuntu-24\.04$/mu);
+    assert.equal((section(job.key).match(/runs-on:/g) ?? []).length, 1);
+    assert.ok(section(job.key).includes(`    timeout-minutes: ${job.minutes}\n`));
+    assert.doesNotMatch(section(job.key), /runner\.environment|self-hosted|Qualify isolated|SEGMENT_DOWNLOAD_TIMEOUT_MINS/u);
   }
-  return text;
-}
+});
 function withoutCargoLinkerDefault(source) {
   const helper = [
     "// Linux fixture Cargo builds default to LLD through the existing compiler",
@@ -69,63 +38,6 @@ function withoutCargoLinkerDefault(source) {
     .replace("  const cargoEnv = fixtureCargoEnvironment(process.env);\n", "")
     .replaceAll(/(await run\("cargo",[^\n]+\{ env: )cargoEnv/g, "$1compilerEnv");
 }
-function context(event = "pull_request") {
-  const ref = event === "pull_request" ? "refs/pull/11/merge" : "refs/heads/main";
-  return { repository: "instafy-dev/instafy", repository_id: "1001", run_id: "2002", run_attempt: "3",
-    ref, workflow_ref: `instafy-dev/instafy/.github/workflows/build.yml@${ref}`, event_name: event, ref_protected: event === "push",
-    event: { repository: { private: true }, ...(event === "pull_request" ? { pull_request: {
-      number: 11, base: { ref: "main", repo: { full_name: "instafy-dev/instafy" } },
-      head: { repo: { full_name: "instafy-dev/instafy", fork: false } },
-    } } : {}) } };
-}
-function select(job, github, toggle = "true") {
-  const expression = section(job.key).match(/^    runs-on: >-\n((?:      .*\n)+)/mu)[1]
-    .trim().replace(/^\$\{\{\s*|\s*\}\}$/gu, "");
-  assert.doesNotMatch(expression, /github\.job\b|matrix\.|inputs\./u);
-  return JSON.parse(JSON.stringify(vm.runInNewContext(expression, { github,
-    vars: { CI_SHARED_BROWSER_SELF_HOSTED: toggle, CI_BROWSER_SELF_HOSTED: "true", CI_BOOTSTRAP_SELF_HOSTED: "true",
-      CI_EXPANDED_SELF_HOSTED: "true", CI_JAVASCRIPT_SELF_HOSTED: "true", CI_RUST_SELF_HOSTED: "true" },
-    fromJSON: JSON.parse, format: (template, ...values) => template.replace(/\{\{|\}\}|\{(\d+)\}/gu,
-      (match, index) => match === "{{" ? "{" : match === "}}" ? "}" : String(values[index])),
-  }, { timeout: 1000 })));
-}
-test("Shared routing is independently default-off for exactly two30m children and the original5m required aggregate", () => {
-  assert.equal((workflow.match(/vars\.CI_SHARED_BROWSER_SELF_HOSTED/g) ?? []).length, 3);
-  for (const job of jobs) {
-    assert.ok(section(job.key).includes(`    name: ${job.name}\n`));
-    assert.ok(section(job.key).includes(`    timeout-minutes: ${job.minutes}\n`));
-    for (const event of ["pull_request", "push"]) {
-      for (const flag of ["", "false", "0", "unknown"]) assert.equal(select(job, context(event), flag), "ubuntu-24.04");
-      const github = context(event), trust = event === "push" ? "main" : "pr";
-      const selected = select(job, github);
-      assert.deepEqual(selected, { group: `org/instafy-ci-${trust}`,
-        labels: ["self-hosted", "Linux", "ARM64", `instafy-ci-bootstrap-1001-2002-3-${job.label}`, `instafy-ci-trust-${trust}`] });
-      for (const key of ["repository_id", "run_id", "run_attempt"]) {
-        assert.notEqual(select(job, { ...github, [key]: "9009" }).labels[3], selected.labels[3]);
-      }
-    }
-  }
-});
-test("Shared callers, private visibility and exact PR/main event guards fail closed to hosted", () => {
-  for (const job of jobs) {
-    for (const event of ["workflow_dispatch", "workflow_call", "pull_request_target", "schedule", "workflow_run", "merge_group"])
-      assert.equal(select(job, context(event)), "ubuntu-24.04");
-    for (const event of ["pull_request", "push"]) for (const mutate of [
-      g => { g.repository = "someone/instafy"; }, g => { g.event.repository.private = false; },
-      g => { delete g.workflow_ref; }, g => { g.workflow_ref = `instafy-dev/instafy/.github/workflows/browser-e2e.yml@${g.ref}`; },
-      g => { g.workflow_ref = `instafy-dev/instafy/.github/workflows/other.yml@${g.ref}`; },
-      g => { g.workflow_ref = "instafy-dev/instafy/.github/workflows/build.yml@refs/heads/other"; },
-    ]) { const g = context(event); mutate(g); assert.equal(select(job, g), "ubuntu-24.04"); }
-    for (const mutate of [g => { g.event.pull_request.base.ref = "other"; },
-      g => { g.event.pull_request.head.repo.fork = true; }, g => { g.event.pull_request.head.repo.full_name = "someone/instafy"; },
-      g => { g.event.pull_request.base.repo.full_name = "someone/instafy"; }, g => { g.event.pull_request.number = 12; },
-      g => { g.ref = "refs/heads/main"; g.workflow_ref = `instafy-dev/instafy/.github/workflows/build.yml@${g.ref}`; },
-    ]) { const g = context(); mutate(g); assert.equal(select(job, g), "ubuntu-24.04"); }
-    for (const mutate of [g => { g.ref_protected = false; }, g => { g.ref = "refs/heads/other"; }]) {
-      const g = context("push"); mutate(g); assert.equal(select(job, g), "ubuntu-24.04");
-    }
-  }
-});
 test("each Shared child preserves a complete independent dependency, migrated auth and fixture lifecycle", () => {
   for (const job of jobs.filter(job => job.script)) {
     const source = section(job.key);
@@ -139,31 +51,11 @@ test("each Shared child preserves a complete independent dependency, migrated au
     assert.equal((source.match(/run: xvfb-run -a node scripts\/(?:browser-profile-e2e|shared-browser-studio-e2e)\.mjs/g) ?? []).length, 1);
     assert.ok(source.includes(`run: xvfb-run -a node scripts/${job.script}\n`));
     assert.match(source, /Stop the disposable authentication stack\n        if: always\(\)\n        run: pnpm supabase:down/u);
-    assert.match(source, /Free space on the disposable hosted runner\n        if: runner.environment == 'github-hosted'/u);
-    assert.ok(source.includes("INSTAFY_SHARED_BROWSER_COMPILER_PROXY: ${{ runner.environment == 'self-hosted' && '1' || '0' }}"));
+    assert.match(source, /Free space on the disposable hosted runner\n        run: \|/u);
+    assert.ok(source.includes("INSTAFY_SHARED_BROWSER_COMPILER_PROXY: '0'\n"));
     assert.doesNotMatch(source, /SUPABASE_DATABASE_ONLY|--ignore-scripts|--no-sandbox|--allow-unauthenticated|continue-on-error|--grep|--retries=|--pass-with-no-tests/u);
   }
   assert.doesNotMatch(workflow, /secrets:|secrets\.|NODE_OPTIONS|NODE_TLS_REJECT_UNAUTHORIZED|HTTP_PROXY:|HTTPS_PROXY:/u);
-});
-function withoutPersonalElectronPreparation(source) {
-  const step = "      - name: Install the locked Electron binary\n        timeout-minutes: 5\n        env:\n          NODE_USE_ENV_PROXY: \"1\"\n        run: pnpm --filter @instafy/desktop-app exec install-electron\n";
-  assert.equal(source.split(step).length - 1, 1);
-  return source.replace(step, "");
-}
-test("only the two Shared startup steps select the browser-test profile; all previous workflow bytes remain", () => {
-  const originalStartup = "      - name: Start disposable migrated Supabase and local authentication\n";
-  const selectedStartup = `${originalStartup}        env:\n          SUPABASE_BROWSER_TEST: "1"\n`;
-  assert.equal(workflow.split(selectedStartup).length - 1, 2);
-  assert.equal((workflow.match(/SUPABASE_BROWSER_TEST/g) ?? []).length, 2);
-  for (const job of jobs) {
-    if (job.script) assert.ok(section(job.key).includes(`${selectedStartup}        run: |\n          pnpm supabase:up\n`));
-    else assert.doesNotMatch(section(job.key), /SUPABASE_BROWSER_TEST/u);
-  }
-  // Normalize only the explicit profile opt-ins. All commands, permissions,
-  // selectors, timeouts, assertions, cleanup and aggregate bytes stay intact.
-  const original = withoutPersonalElectronPreparation(withoutRestoreOnlyCaches(withStandaloneMigrationImagePreparation(previousAggregateWorkflow))).replaceAll(selectedStartup, originalStartup);
-  assert.equal(createHash("sha256").update(original).digest("hex"),
-    "39492b8b3c32d931444180ac4e7e52d77b6aa8eed9937b55d6d5bad7ee8aa0ec");
 });
 test("the Cargo default changes only four compiler environments and its exact helper, not fixture behavior", () => {
   const reviewed = {
@@ -215,8 +107,6 @@ test("Shared startup omits only standalone migration-image preparation, retainin
   for (const job of jobs.filter(job => job.script)) {
     assert.ok(section(job.key).includes('SUPABASE_BROWSER_TEST: "1"\n        run: |\n          pnpm supabase:up\n'));
   }
-  assert.equal(createHash("sha256").update(withStandaloneMigrationImagePreparation(previousAggregateWorkflow)).digest("hex"),
-    "48e8ed7ce8e931e7679290199102717cc65de943dcdc3eacf63b61eacacef2f1");
   // The standalone migration lane really consumes this cache; keep it there.
   const build = fs.readFileSync(path.join(root, ".github/workflows/build.yml"), "utf8");
   assert.match(build, /path: ~\/\.instafy-image-cache/u);
@@ -228,75 +118,10 @@ test("Shared compiler caches isolate operating system, architecture and child ta
     const source = section(job.key);
     assert.ok(source.includes(`key: shared-browser-cargo-v1-\${{ runner.os }}-\${{ runner.arch }}-${job.label}-\${{ hashFiles('packages/*/Cargo.lock') }}`));
     assert.doesNotMatch(source, /restore-keys:|supabase-postgres-image-\$\{/u);
-  }
-});
-test("only self-hosted Shared compiler restores bound segment waits without changing required work", () => {
-  assert.equal(workflow.split(compilerSegmentTimeout).length - 1, 2);
-  assert.equal((workflow.match(/SEGMENT_DOWNLOAD_TIMEOUT_MINS/g) ?? []).length, 2);
-  for (const job of jobs.filter(job => job.script)) {
-    const restore = cacheStep(job.key, "Restore compiler cache without saving");
-    const hosted = cacheStep(job.key, "Restore architecture-specific compiler cache");
-    assert.match(restore, /^        if: runner\.environment == 'self-hosted'$/mu);
-    assert.ok(restore.includes(compilerSegmentTimeout));
-    assert.doesNotMatch(hosted, /SEGMENT_DOWNLOAD_TIMEOUT_MINS/u);
-    assert.doesNotMatch(restore, /timeout-minutes:|continue-on-error|fail-on-cache-miss|lookup-only/u);
-    assert.doesNotMatch(section(job.key), /cache-hit|continue-on-error/u);
-  }
-  // Exact merged baseline: both complete fixtures, migrations, cleanup, hosted
-  // restores, keys, paths, job budgets and aggregate remain byte-for-byte intact.
-  assert.equal(createHash("sha256").update(withoutCompilerSegmentTimeout(previousAggregateWorkflow)).digest("hex"),
-    "5c97291dd95421be8b8311413589a975c3fdc0c8dc831a3416f82c8b3bb441ff");
-});
-test('Shared self-hosted compiler caches restore only, preserving all other reviewed workflow bytes', () => {
-  for (const job of jobs.filter(job => job.script)) {
-    const restore = cacheStep(job.key, 'Restore compiler cache without saving');
-    const hosted = cacheStep(job.key, 'Restore architecture-specific compiler cache');
-    assert.match(restore, /^        if: runner\.environment == 'self-hosted'$/mu);
-    assert.match(hosted, /^        if: runner\.environment == 'github-hosted'$/mu);
-    assert.match(restore, /^        uses: actions\/cache\/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6\.1\.0$/mu);
-    assert.match(hosted, /^        uses: actions\/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6\.1\.0$/mu);
-    assert.equal(restore.split('        with:\n')[1].trimEnd(), hosted.split('        with:\n')[1].trimEnd());
-    for (const environment of ['self-hosted', 'github-hosted', '', 'unknown']) {
-      for (const [part, selected] of [[restore, 'self-hosted'], [hosted, 'github-hosted']]) {
-        assert.equal(vm.runInNewContext(part.match(/^        if: (.+)$/mu)[1], { runner: { environment } }, { timeout: 1000 }), environment === selected);
-      }
-    }
-    assert.equal((section(job.key).match(/uses: actions\/cache(?:\/\w+)?@/gu) ?? []).length, 2);
-    assert.doesNotMatch(section(job.key), /actions\/cache\/save@|continue-on-error|save-always|lookup-only/u);
-  }
-  assert.equal((workflow.match(/uses: actions\/cache\/restore@/gu) ?? []).length, 2);
-  // Complete browser-e2e.yml at combined source 2ef4dde, including image caches,
-  // every fixture/assertion, strict aggregate and the ordinary browser lanes.
-  assert.equal(createHash('sha256').update(withoutPersonalElectronPreparation(withoutRestoreOnlyCaches(withStandaloneMigrationImagePreparation(previousAggregateWorkflow)))).digest('hex'),
-    '1e3cc8932d4cc78e1eb64ce389bd2b959362bb22bbaa92d155cf6743c5fd19c8');
-});
-function qualify(job, mutate = () => {}, badDaemon) {
-  const source = section(job.key), programs = [...source.matchAll(/          node <<'NODE'\n([\s\S]*?)          NODE\n/gu)];
-  assert.ok(programs.length >= 1);
-  assert.match(source, /steps:\n      - name: Qualify isolated Shared Browser CI runner\n        if: runner.environment == 'self-hosted'/u);
-  if (job.script) assert.ok(source.indexOf(programs[0][0]) < source.indexOf("uses: actions/checkout@"));
-  const state = { platform: "linux", arch: "arm64", getuid: () => 503, versions: { node: "22.23.2" },
-    env: { RUNNER_OS: "Linux", RUNNER_ARCH: "ARM64", INSTAFY_CI_JOB_ISOLATION: "ephemeral" } };
-  mutate(state); const calls = [];
-  vm.runInNewContext(programs[0][1], { process: state, require(name) {
-    if (name === "node:assert/strict") return assert;
-    assert.equal(name, "node:child_process");
-    return { execFileSync(command, args, options) {
-      calls.push(command); assert.ok(options.timeout <= 5000);
-      if (command === "docker") return JSON.stringify(badDaemon ?? { OSType: "linux", Architecture: "aarch64" });
-      assert.equal(command, "/bin/bash"); assert.equal(args[1], 'command -v "$1" >/dev/null');
-    } };
-  } }, { timeout: 1000 });
-  return calls;
-}
-test("Shared prerequisites prove nonroot Linux ARM64 Node22 and real Docker only for the two children", () => {
-  for (const job of jobs) {
-    assert.equal(qualify(job).includes("docker"), Boolean(job.script));
-    for (const mutate of [s => { s.platform = "darwin"; }, s => { s.arch = "x64"; }, s => { s.getuid = () => 0; },
-      s => { s.versions.node = "20.20.2"; }, s => { s.env.RUNNER_OS = "macOS"; }, s => { s.env.RUNNER_ARCH = "X64"; },
-      s => { delete s.env.INSTAFY_CI_JOB_ISOLATION; }, s => { s.env.INSTAFY_ENV_DIR = "/inert-private"; }]) assert.throws(() => qualify(job, mutate));
-    if (job.script) for (const daemon of [{}, { OSType: "windows", Architecture: "aarch64" }, { OSType: "linux", Architecture: "x86_64" }])
-      assert.throws(() => qualify(job, () => {}, daemon));
+    // One unconditional save+restore cache per child; no restore-only mitigation remains.
+    assert.match(source, /      - name: Restore architecture-specific compiler cache\n        uses: actions\/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6\.1\.0\n/u);
+    assert.equal((source.match(/uses: actions\/cache(?:\/\w+)?@/gu) ?? []).length, 1);
+    assert.doesNotMatch(source, /actions\/cache\/(?:restore|save)@|save-always|lookup-only/u);
   }
 });
 test("the required Shared aggregate waits for both exact children and accepts only full success", () => {
