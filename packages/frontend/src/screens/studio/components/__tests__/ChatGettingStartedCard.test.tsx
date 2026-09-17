@@ -224,9 +224,17 @@ describe("ChatGettingStartedCard", () => {
     // No em-dash anywhere on the card.
     expect(container.textContent).not.toContain("—");
 
-    // Every shipped chip is a soon skill (pack not published): disabled, with
+    // Slack and Discord are soon skills (pack not published): disabled, with
     // the Soon Badge after the name and "coming soon" in its accessible name.
+    // Notion's pack is published: enabled, name only, the verb in its name.
     for (const chip of chips) {
+      if (chip.dataset.testid === "connect-chip-notion") {
+        expect(chip.disabled).toBe(false);
+        expect(chip.getAttribute("aria-label")).toBe("Connect Notion");
+        expect(chip.querySelector('[data-testid="connect-chip-notion-soon"]')).toBeNull();
+        expect(chip.textContent).toBe("Notion");
+        continue;
+      }
       expect(chip.disabled).toBe(true);
       expect(chip.getAttribute("aria-label")).toMatch(/, coming soon$/);
       expect(chip.querySelector(`[data-testid="${chip.dataset.testid}-soon"]`)?.textContent).toBe("Soon");
@@ -240,6 +248,20 @@ describe("ChatGettingStartedCard", () => {
     expect(onSelectConnector).not.toHaveBeenCalled();
     expect(onSelectAction).toHaveBeenCalledTimes(2);
 
+    // The available chip reports its connector (the host opens the confirm
+    // stage); no onboarding action, no browse.
+    await act(async () => {
+      container.querySelector<HTMLButtonElement>('[data-testid="connect-chip-notion"]')?.click();
+    });
+    expect(onSelectConnector).toHaveBeenCalledTimes(1);
+    expect(onSelectConnector.mock.calls[0][0]).toMatchObject({
+      id: "notion",
+      kind: "skill",
+      availability: "available",
+      skillName: "notion",
+    });
+    expect(onSelectAction).toHaveBeenCalledTimes(2);
+
     expect(onBrowseConnectors).not.toHaveBeenCalled();
 
     // "More tools" opens the sheet's browse stage; it reports no connector.
@@ -248,14 +270,16 @@ describe("ChatGettingStartedCard", () => {
       moreTools?.click();
     });
     expect(onBrowseConnectors).toHaveBeenCalledTimes(1);
-    expect(onSelectConnector).not.toHaveBeenCalled();
+    expect(onSelectConnector).toHaveBeenCalledTimes(1);
     expect(onSelectAction).toHaveBeenCalledTimes(2);
   });
 
-  it("keeps a soon chip soon when its skill folder is installed", async () => {
+  it("keeps a soon chip soon when its skill folder is installed, and marks the published one connected", async () => {
     await act(async () => {
       root.render(
-        <ChatGettingStartedCard {...baseProps({ installedSkillNames: new Set(["slack"]) })} />,
+        <ChatGettingStartedCard
+          {...baseProps({ installedSkillNames: new Set(["slack", "notion"]) })}
+        />,
       );
     });
 
@@ -265,7 +289,12 @@ describe("ChatGettingStartedCard", () => {
     expect(
       container.querySelector('[data-testid="connect-chip-slack"]')?.getAttribute("aria-label"),
     ).toBe("Slack, coming soon");
-    expect(container.querySelector('[data-testid="connect-chip-notion-connected"]')).toBeNull();
+    // A published pack's installed folder shows the check and stays selectable.
+    expect(container.querySelector('[data-testid="connect-chip-notion-connected"]')).not.toBeNull();
+    expect(container.querySelector('[data-testid="connect-chip-notion-soon"]')).toBeNull();
+    const notionChip = container.querySelector<HTMLButtonElement>('[data-testid="connect-chip-notion"]');
+    expect(notionChip?.disabled).toBe(false);
+    expect(notionChip?.getAttribute("aria-label")).toBe("Notion, connected");
   });
 
   it("keeps the GitHub mode free of em-dashes", async () => {

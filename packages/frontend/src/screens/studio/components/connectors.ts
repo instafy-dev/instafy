@@ -95,7 +95,7 @@ export type Connector = ProductConnector | OtherConnector;
 export const CONNECTORS: readonly Connector[] = [
   {
     id: "slack",
-    // Flip to "available" when the instafy-dev/team-integrations pack repo is published.
+    // Flip to "available" once packs/team/.agents/skills/slack lands in instafy-dev/skills.
     availability: "soon",
     name: "Slack",
     mark: SlackMark,
@@ -103,29 +103,28 @@ export const CONNECTORS: readonly Connector[] = [
     category: "chat",
     featured: true,
     keywords: ["chat", "team", "messages"],
-    source: "https://github.com/instafy-dev/team-integrations/tree/main/.agents/skills/slack",
-    sourceLabel: "instafy-dev/team-integrations",
+    source: "https://github.com/instafy-dev/skills/tree/main/packs/team/.agents/skills/slack",
+    sourceLabel: "instafy-dev/skills",
     skillName: "slack",
     needs: ["a Slack app bot token (SLACK_BOT_TOKEN)"],
   },
   {
     id: "notion",
-    // Flip to "available" when the instafy-dev/team-integrations pack repo is published.
-    availability: "soon",
+    availability: "available",
     name: "Notion",
     mark: NotionMark,
     kind: "skill",
     category: "docs",
     featured: true,
     keywords: ["notes", "docs", "wiki", "database"],
-    source: "https://github.com/instafy-dev/team-integrations/tree/main/.agents/skills/notion",
-    sourceLabel: "instafy-dev/team-integrations",
+    source: "https://github.com/instafy-dev/skills/tree/main/packs/team/.agents/skills/notion",
+    sourceLabel: "instafy-dev/skills",
     skillName: "notion",
     needs: ["a Notion internal integration token (NOTION_API_KEY)"],
   },
   {
     id: "discord",
-    // Flip to "available" when the instafy-dev/team-integrations pack repo is published.
+    // Flip to "available" once packs/team/.agents/skills/discord lands in instafy-dev/skills.
     availability: "soon",
     name: "Discord",
     mark: Discord,
@@ -133,8 +132,8 @@ export const CONNECTORS: readonly Connector[] = [
     category: "chat",
     featured: true,
     keywords: ["chat", "community", "server"],
-    source: "https://github.com/instafy-dev/team-integrations/tree/main/.agents/skills/discord",
-    sourceLabel: "instafy-dev/team-integrations",
+    source: "https://github.com/instafy-dev/skills/tree/main/packs/team/.agents/skills/discord",
+    sourceLabel: "instafy-dev/skills",
     skillName: "discord",
     needs: ["a Discord bot token (DISCORD_BOT_TOKEN)"],
   },

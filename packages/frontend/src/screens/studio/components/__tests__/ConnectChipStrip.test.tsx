@@ -9,12 +9,13 @@ import { CARD_CHIP_CONNECTORS, isConnectorAvailable } from "../connectors";
 const EXPECTED_CHIP_IDS = ["slack", "notion", "discord"];
 const EM_DASH = "—";
 
-// Every shipped chip is a "soon" skill today (its pack is not published), so
-// the pressable path has no static entry to exercise; the disabled path and
-// its precedence over the installed state are what these cover.
+// Notion's pack is published, so its chip is the pressable path; Slack and
+// Discord are still "soon" (packs not published), which covers the disabled
+// path and its precedence over the installed state.
 const SOON_CHIP_IDS = CARD_CHIP_CONNECTORS.filter((entry) => !isConnectorAvailable(entry)).map(
   (entry) => entry.id,
 );
+const notionConnector = CARD_CHIP_CONNECTORS.find((entry) => entry.id === "notion")!;
 
 describe("ConnectChipStrip", () => {
   let container: HTMLDivElement;
@@ -94,7 +95,7 @@ describe("ConnectChipStrip", () => {
 
   it("renders a soon chip disabled with a Soon Badge after the name", async () => {
     await render();
-    expect(SOON_CHIP_IDS).toEqual(["slack", "notion", "discord"]);
+    expect(SOON_CHIP_IDS).toEqual(["slack", "discord"]);
 
     for (const id of SOON_CHIP_IDS) {
       const chip = container.querySelector<HTMLButtonElement>(`[data-testid="connect-chip-${id}"]`)!;
@@ -125,28 +126,50 @@ describe("ConnectChipStrip", () => {
     expect(container.textContent).not.toContain(EM_DASH);
   });
 
-  it("reports nothing from a soon chip and still opens the browse sheet from More tools", async () => {
+  it("renders the available Notion chip enabled, with no Badge and the verb in its name", async () => {
+    await render();
+    const notion = container.querySelector<HTMLButtonElement>('[data-testid="connect-chip-notion"]')!;
+    expect(notion.disabled).toBe(false);
+    expect(notion.getAttribute("data-disabled")).toBeNull();
+    expect(notion.getAttribute("aria-label")).toBe("Connect Notion");
+    expect(notion.textContent).toBe("Notion");
+    expect(notion.querySelectorAll("svg")).toHaveLength(1);
+    expect(container.querySelector('[data-testid="connect-chip-notion-soon"]')).toBeNull();
+    expect(container.querySelector('[data-testid="connect-chip-notion-connected"]')).toBeNull();
+    expect(notion.parentElement?.getAttribute("title")).toBeNull();
+  });
+
+  it("reports the pressed available chip, nothing from a soon chip, and opens the browse sheet from More tools", async () => {
     const onSelect = vi.fn();
     const onMoreTools = vi.fn();
     await render({ onSelect, onMoreTools });
 
+    // The available chip reports its connector once and sends nothing else.
     const notion = container.querySelector<HTMLButtonElement>('[data-testid="connect-chip-notion"]')!;
-    expect(notion.disabled).toBe(true);
+    expect(notion.disabled).toBe(false);
     await act(async () => notion.click());
+    expect(onSelect).toHaveBeenCalledTimes(1);
+    expect(onSelect).toHaveBeenCalledWith(notionConnector);
+    expect(onSelect.mock.calls[0]?.[0]?.availability).toBe("available");
+    expect(onMoreTools).not.toHaveBeenCalled();
+
+    const slack = container.querySelector<HTMLButtonElement>('[data-testid="connect-chip-slack"]')!;
+    expect(slack.disabled).toBe(true);
+    await act(async () => slack.click());
     await act(async () => {
-      notion.dispatchEvent(new MouseEvent("mousedown", { bubbles: true }));
-      notion.dispatchEvent(new MouseEvent("mouseup", { bubbles: true }));
-      notion.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
-      notion.dispatchEvent(new KeyboardEvent("keyup", { key: "Enter", bubbles: true }));
+      slack.dispatchEvent(new MouseEvent("mousedown", { bubbles: true }));
+      slack.dispatchEvent(new MouseEvent("mouseup", { bubbles: true }));
+      slack.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
+      slack.dispatchEvent(new KeyboardEvent("keyup", { key: "Enter", bubbles: true }));
     });
-    expect(onSelect).not.toHaveBeenCalled();
+    expect(onSelect).toHaveBeenCalledTimes(1);
     expect(onMoreTools).not.toHaveBeenCalled();
 
     const more = container.querySelector<HTMLButtonElement>('[data-testid="connect-more-tools"]')!;
     expect(more.disabled).toBe(false);
     await act(async () => more.click());
     expect(onMoreTools).toHaveBeenCalledTimes(1);
-    expect(onSelect).not.toHaveBeenCalled();
+    expect(onSelect).toHaveBeenCalledTimes(1);
   });
 
   it("names a soon chip as coming soon, ahead of the verb and the installed state", async () => {
@@ -155,16 +178,19 @@ describe("ConnectChipStrip", () => {
       container.querySelector<HTMLButtonElement>(`[data-testid="connect-chip-${id}"]`)?.getAttribute("aria-label");
     expect(label("slack")).toBe("Slack, coming soon");
     expect(label("discord")).toBe("Discord, coming soon");
-    expect(label("notion")).toBe("Notion, coming soon");
+    expect(label("notion")).toBe("Connect Notion");
 
     // An installed folder does not make an unpublished pack selectable: the
-    // chip keeps the Soon state and its label.
-    await render({ installedSkillNames: new Set(["slack"]) });
+    // chip keeps the Soon state and its label. A published pack's installed
+    // folder reads as connected.
+    await render({ installedSkillNames: new Set(["slack", "notion"]) });
     expect(label("slack")).toBe("Slack, coming soon");
-    expect(label("notion")).toBe("Notion, coming soon");
+    expect(label("notion")).toBe("Notion, connected");
     for (const chip of chipButtons()) {
       expect(chip.getAttribute("aria-label")).not.toMatch(/^Connect /);
-      expect(chip.getAttribute("aria-label")).not.toContain("connected");
+    }
+    for (const id of SOON_CHIP_IDS) {
+      expect(label(id)).not.toContain("connected");
     }
   });
 
@@ -177,6 +203,19 @@ describe("ConnectChipStrip", () => {
     expect(container.querySelector('[data-testid="connect-chip-notion-connected"]')).toBeNull();
     expect(container.querySelectorAll('[data-testid$="-connected"]')).toHaveLength(0);
     expect(container.querySelectorAll('[data-testid$="-soon"]')).toHaveLength(SOON_CHIP_IDS.length);
+  });
+
+  it("shows the check glyph for the available Notion chip once its skill folder is installed", async () => {
+    await render({ installedSkillNames: new Set(["notion"]) });
+    const notion = container.querySelector<HTMLButtonElement>('[data-testid="connect-chip-notion"]')!;
+    expect(notion.disabled).toBe(false);
+    expect(notion.getAttribute("aria-label")).toBe("Notion, connected");
+    expect(container.querySelector('[data-testid="connect-chip-notion-connected"]')).not.toBeNull();
+    expect(container.querySelector('[data-testid="connect-chip-notion-soon"]')).toBeNull();
+    // Name plus the check: the mark and the glyph are the two svgs.
+    expect(notion.textContent).toBe("Notion");
+    expect(notion.querySelectorAll("svg")).toHaveLength(2);
+    expect(container.querySelectorAll('[data-testid$="-connected"]')).toHaveLength(1);
   });
 
   it("keeps the same DOM shape in the dark theme", async () => {

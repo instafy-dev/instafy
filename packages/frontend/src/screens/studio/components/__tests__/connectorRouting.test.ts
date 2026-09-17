@@ -15,14 +15,28 @@ function connector(id: string): Connector {
   return CONNECTORS.find((entry) => entry.id === id)!;
 }
 
-// Every shipped skill is "soon" today; an available skill is a fixture.
+// Notion is the shipped skill whose pack is published; Slack stays "soon",
+// so its available form is a fixture.
+const notion = connector("notion") as SkillConnector;
 const availableSlack: SkillConnector = {
   ...(connector("slack") as SkillConnector),
   availability: "available",
 };
 
 describe("routeConnectorSelection", () => {
-  it("opens the confirm stage for an available skill and nothing else", () => {
+  it("opens the confirm stage for the shipped available skill and nothing else", () => {
+    expect(notion.availability).toBe("available");
+    const acts = actions();
+    routeConnectorSelection(notion, acts);
+
+    expect(acts.openConfirm).toHaveBeenCalledTimes(1);
+    expect(acts.openConfirm).toHaveBeenCalledWith(notion);
+    expect(acts.leaveSheet).not.toHaveBeenCalled();
+    expect(acts.openImportModal).not.toHaveBeenCalled();
+    expect(acts.beginGithubImport).not.toHaveBeenCalled();
+  });
+
+  it("opens the confirm stage for an available skill fixture and nothing else", () => {
     const acts = actions();
     const slack = availableSlack;
     routeConnectorSelection(slack, acts);
@@ -60,7 +74,7 @@ describe("routeConnectorSelection", () => {
 
   it("does nothing for a soon connector, so the confirm stage stays unreachable", () => {
     const soon = CONNECTORS.filter((item) => !isConnectorAvailable(item));
-    expect(soon.map((item) => item.id)).toEqual(["slack", "notion", "discord"]);
+    expect(soon.map((item) => item.id)).toEqual(["slack", "discord"]);
     for (const entry of soon) {
       const acts = actions();
       routeConnectorSelection(entry, acts);

@@ -266,14 +266,19 @@ describe("ComposerActionMenu", () => {
     expect(container.textContent).not.toContain("\u2014");
 
     // Soon rows (pack not published) are disabled with the Soon Badge in the
-    // end slot; GitHub and Browse all tools stay live.
-    for (const id of ["slack", "notion", "discord"]) {
+    // end slot; Notion, GitHub and Browse all tools stay live.
+    for (const id of ["slack", "discord"]) {
       const row = container.querySelector<HTMLButtonElement>(`[data-testid="composer-action-menu-connect-${id}"]`)!;
       expect(row.disabled).toBe(true);
       expect(row.textContent).toContain("Soon");
       expect(row.querySelector("span.rounded-full")?.textContent).toBe("Soon");
       expect(row.parentElement?.getAttribute("title")).toBe("Coming soon");
     }
+    const notionRow = container.querySelector<HTMLButtonElement>('[data-testid="composer-action-menu-connect-notion"]')!;
+    expect(notionRow.disabled).toBe(false);
+    expect(notionRow.textContent).toBe("Notion");
+    expect(notionRow.querySelector("span.rounded-full")).toBeNull();
+    expect(notionRow.parentElement?.getAttribute("title")).toBeNull();
     const githubRow = container.querySelector<HTMLButtonElement>('[data-testid="composer-action-menu-connect-github"]')!;
     expect(githubRow.disabled).toBe(false);
     expect(githubRow.textContent).toBe("GitHub");
@@ -291,7 +296,15 @@ describe("ComposerActionMenu", () => {
     expect(document.activeElement).toBe(back);
     await pressKey(back, "ArrowDown");
     expect((document.activeElement as HTMLElement | null)?.dataset.testid).toBe(
+      "composer-action-menu-connect-notion",
+    );
+    await pressKey(document.activeElement, "ArrowDown");
+    expect((document.activeElement as HTMLElement | null)?.dataset.testid).toBe(
       "composer-action-menu-connect-github",
+    );
+    await pressKey(document.activeElement, "ArrowUp");
+    expect((document.activeElement as HTMLElement | null)?.dataset.testid).toBe(
+      "composer-action-menu-connect-notion",
     );
     await pressKey(document.activeElement, "ArrowUp");
     expect(document.activeElement).toBe(back);
@@ -352,7 +365,7 @@ describe("ComposerActionMenu", () => {
 
   it("reports the pressed available row and closes the menu, while a soon row does nothing", async () => {
     const onSelectConnector = vi.fn();
-    await renderMenu(true, true, { onSelectConnector, installedSkillNames: new Set(["notion"]) });
+    await renderMenu(true, true, { onSelectConnector, installedSkillNames: new Set(["notion", "slack"]) });
 
     const menuState = container.querySelector<HTMLDivElement>('[data-testid="mock-dialog-trigger"]')!;
     await act(async () =>
@@ -363,13 +376,17 @@ describe("ComposerActionMenu", () => {
     );
 
     // Soon wins over the installed state: an installed folder does not make
-    // an unpublished pack selectable, so the Badge reads Soon, not Connected.
+    // an unpublished pack selectable, so Slack's Badge reads Soon, not
+    // Connected. Notion's pack is published, so its installed folder reads
+    // Connected and the row stays live.
     const notion = container.querySelector<HTMLButtonElement>('[data-testid="composer-action-menu-connect-notion"]')!;
     const slack = container.querySelector<HTMLButtonElement>('[data-testid="composer-action-menu-connect-slack"]')!;
-    expect(notion.textContent).toContain("Soon");
-    expect(notion.textContent).not.toContain("Connected");
-    expect(notion.disabled).toBe(true);
+    expect(notion.textContent).toContain("Connected");
+    expect(notion.textContent).not.toContain("Soon");
+    expect(notion.disabled).toBe(false);
     expect(slack.textContent).toContain("Soon");
+    expect(slack.textContent).not.toContain("Connected");
+    expect(slack.disabled).toBe(true);
     expect(container.querySelector('[data-testid="composer-action-menu-connect-github"]')?.textContent).not.toContain(
       "Connected",
     );
@@ -387,10 +404,25 @@ describe("ComposerActionMenu", () => {
     expect(menuState.dataset.open).toBe("true");
     expect(container.querySelector('[data-testid="composer-action-menu-connect-slack"]')).not.toBeNull();
 
+    // The available Notion row reports its connector and closes the menu.
+    await act(async () => notion.click());
+    expect(onSelectConnector).toHaveBeenCalledTimes(1);
+    expect(onSelectConnector.mock.calls[0][0]).toBe(CONNECTORS.find((entry) => entry.id === "notion"));
+    expect(menuState.dataset.open).toBe("false");
+    expect(container.querySelector('[data-testid="composer-action-menu-import-github"]')).not.toBeNull();
+    expect(container.querySelector('[data-testid="composer-action-menu-connect-notion"]')).toBeNull();
+
+    // Reopen: the GitHub row does the same.
+    await act(async () =>
+      container.querySelector<HTMLButtonElement>('[data-testid="mock-dialog-trigger-open"]')?.click(),
+    );
+    await act(async () =>
+      container.querySelector<HTMLButtonElement>('[data-testid="composer-action-menu-connect"]')?.click(),
+    );
     const github = container.querySelector<HTMLButtonElement>('[data-testid="composer-action-menu-connect-github"]')!;
     await act(async () => github.click());
-    expect(onSelectConnector).toHaveBeenCalledTimes(1);
-    expect(onSelectConnector.mock.calls[0][0]).toBe(CONNECTORS.find((entry) => entry.id === "github"));
+    expect(onSelectConnector).toHaveBeenCalledTimes(2);
+    expect(onSelectConnector.mock.calls[1][0]).toBe(CONNECTORS.find((entry) => entry.id === "github"));
     // closeMenu() flipped the controlled open state to false and reset the view.
     expect(menuState.dataset.open).toBe("false");
     expect(container.querySelector('[data-testid="composer-action-menu-import-github"]')).not.toBeNull();

@@ -264,7 +264,7 @@ describe("useSkillsImportFlow", () => {
     const onSubmit = vi.fn(async () => undefined);
     const showStatus = vi.fn();
     const { resultRef } = await renderHook(baseOptions({ onSubmit, showStatus }));
-    const source = "https://github.com/instafy-dev/team-integrations/tree/main/.agents/skills/slack";
+    const source = "https://github.com/instafy-dev/skills/tree/main/packs/team/.agents/skills/slack";
 
     await act(async () => {
       await resultRef.current!.queueSkillImportTask({

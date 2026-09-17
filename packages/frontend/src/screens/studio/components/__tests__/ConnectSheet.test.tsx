@@ -19,13 +19,17 @@ import { useConnectSheetState, type ConnectSheetState } from "../useConnectSheet
 
 const EM_DASH = "—";
 
-// Every shipped skill is "soon" today (its pack is not published), so the
-// browse rows are all disabled and the confirm stage is reached through the
-// harness with this available fixture, the way a published skill's row would.
+// Notion is the one shipped skill whose pack is published, so its row and
+// Popular mark are the pressable path. Slack and Discord are still "soon"
+// (their packs are not published); the confirm-stage copy tests use this
+// available copy of Slack so a flip of its availability changes no wording.
 const soonSlack = CONNECTORS.find(
   (entry): entry is SkillConnector => entry.kind === "skill" && entry.id === "slack",
 )!;
 const slack: SkillConnector = { ...soonSlack, availability: "available" };
+const notion = CONNECTORS.find(
+  (entry): entry is SkillConnector => entry.kind === "skill" && entry.id === "notion",
+)!;
 const SOON_IDS = PRODUCT_CONNECTORS.filter((entry) => !isConnectorAvailable(entry)).map(
   (entry) => entry.id,
 );
@@ -209,7 +213,7 @@ describe("ConnectSheet", () => {
   }
 
   describe("browse stage", () => {
-    it("renders the search box, no Popular row while only one tool is available, and every category in order", async () => {
+    it("renders the search box, the Popular row of the two available tools, and every category in order", async () => {
       const s = spies();
       await render({ initial: "browse", spies: s });
 
@@ -219,12 +223,17 @@ describe("ConnectSheet", () => {
       expect(search?.value).toBe("");
 
       // Popular shows only tools that can be selected today, and only once
-      // there are at least two of them; GitHub alone is not a choice.
-      expect(AVAILABLE_FEATURED_CONNECTORS.map((entry) => entry.id)).toEqual(["github"]);
-      expect(query('[data-testid="connect-popular"]')).toBeNull();
-      expect(query('[data-testid="connect-popular-row"]')).toBeNull();
-      expect(queryAll('[data-testid^="connect-popular-"]')).toHaveLength(0);
-      expect(document.body.textContent).not.toContain("Popular");
+      // there are at least two of them: Notion and GitHub, in list order.
+      expect(AVAILABLE_FEATURED_CONNECTORS.map((entry) => entry.id)).toEqual(["notion", "github"]);
+      expect(query('[data-testid="connect-popular"]')).not.toBeNull();
+      expect(query("#connect-popular-label")?.textContent).toBe("Popular");
+      expect(
+        queryAll<HTMLButtonElement>('[data-testid="connect-popular-row"] [data-testid^="connect-popular-"]').map(
+          (mark) => mark.dataset.testid,
+        ),
+      ).toEqual(["connect-popular-notion", "connect-popular-github"]);
+      expect(query('[data-testid="connect-popular-slack"]')).toBeNull();
+      expect(query('[data-testid="connect-popular-discord"]')).toBeNull();
 
       // Categories: only the ones with entries, in CONNECTOR_CATEGORIES order,
       // each with one row per connector in list order.
@@ -266,7 +275,7 @@ describe("ConnectSheet", () => {
       // Button's disabled opacity greys it; the name keeps the primary tone,
       // as on the chip and menu row) and its meta is the Soon Badge in place
       // of the region.
-      expect(SOON_IDS).toEqual(["slack", "notion", "discord"]);
+      expect(SOON_IDS).toEqual(["slack", "discord"]);
       const slack = query<HTMLButtonElement>('[data-testid="connect-row-slack"]')!;
       expect(slack.querySelectorAll("svg")).toHaveLength(1);
       // The mark is aria-hidden; the row reads as the name plus the meta.
@@ -304,6 +313,13 @@ describe("ConnectSheet", () => {
       expect(github.querySelectorAll("span span")[0]?.className).not.toContain("text-slate-600");
       expect(query('[data-testid="connect-row-github-meta"]')).toBeNull();
       expect(github.textContent).toBe("GitHub");
+      // A published skill without a region: selectable, name only, no Badge.
+      const notionRow = query<HTMLButtonElement>('[data-testid="connect-row-notion"]')!;
+      expect(notionRow.disabled).toBe(false);
+      expect(notionRow.parentElement?.getAttribute("title")).toBeNull();
+      expect(query('[data-testid="connect-row-notion-meta"]')).toBeNull();
+      expect(notionRow.textContent).toBe("Notion");
+      expect(accessibleText(notionRow)).toBe("Notion");
       expect(query<HTMLButtonElement>('[data-testid="connect-row-slack"]')?.textContent).toBe("SlackSoon");
       expect(document.body.textContent).not.toContain("please");
       // Both stage footers share the header's hairline token.
@@ -326,7 +342,11 @@ describe("ConnectSheet", () => {
       // An installed folder does not make an unpublished pack selectable: the
       // Soon Badge wins over the connected meta and the row stays disabled.
       const s = spies();
-      await render({ initial: "browse", installedSkillNames: new Set(["freefinance", "slack"]), spies: s });
+      await render({
+        initial: "browse",
+        installedSkillNames: new Set(["freefinance", "slack", "notion"]),
+        spies: s,
+      });
 
       expect(query('[data-testid="connect-row-freefinance-meta"]')?.textContent).toBe("connected");
       expect(query('[data-testid="connect-row-slack-meta"]')?.textContent).toBe("Soon");
@@ -334,7 +354,9 @@ describe("ConnectSheet", () => {
       expect(slackRow?.disabled).toBe(true);
       expect(slackRow?.getAttribute("aria-label")).toBeNull();
       expect(accessibleText(slackRow)).toBe("Slack Soon");
-      expect(query('[data-testid="connect-row-notion-meta"]')?.textContent).toBe("Soon");
+      // A published skill's installed folder reads as connected and stays selectable.
+      expect(query('[data-testid="connect-row-notion-meta"]')?.textContent).toBe("connected");
+      expect(query<HTMLButtonElement>('[data-testid="connect-row-notion"]')?.disabled).toBe(false);
       expect(query('[data-testid="connect-row-github-meta"]')).toBeNull();
     });
 
@@ -370,8 +392,10 @@ describe("ConnectSheet", () => {
       await render({ initial: "browse", spies: s });
 
       await typeQuery("buch");
+      // Typing hides the Popular row.
       expect(query('[data-testid="connect-popular"]')).toBeNull();
-      expect(query('[data-testid="connect-popular-slack"]')).toBeNull();
+      expect(query('[data-testid="connect-popular-notion"]')).toBeNull();
+      expect(queryAll('[data-testid^="connect-popular-"]')).toHaveLength(0);
       const sections = queryAll<HTMLElement>('[data-testid^="connect-category-"]').filter(
         (element) => element.getAttribute("role") === "group",
       );
@@ -397,10 +421,10 @@ describe("ConnectSheet", () => {
       ]);
       expect(query<HTMLButtonElement>('[data-testid="connect-row-github"]')?.disabled).toBe(false);
 
-      // Clearing the query brings every category back (Popular stays hidden
-      // while only one featured tool is available).
+      // Clearing the query brings every category and the Popular row back.
       await typeQuery("");
-      expect(query('[data-testid="connect-popular"]')).toBeNull();
+      expect(query('[data-testid="connect-popular-row"]')).not.toBeNull();
+      expect(query('[data-testid="connect-popular-notion"]')).not.toBeNull();
       expect(query('[data-testid="connect-row-slack"]')).not.toBeNull();
       expect(query('[data-testid="connect-row-freefinance"]')).not.toBeNull();
       expect(s.onConnect).not.toHaveBeenCalled();
@@ -431,12 +455,13 @@ describe("ConnectSheet", () => {
       const s = spies();
       await render({ initial: "browse", spies: s });
 
-      await typeQuery("sla");
-      // The routed press of a published skill's row (no shipped row is
-      // pressable today).
-      await act(async () => query<HTMLButtonElement>('[data-testid="harness-route-available"]')?.click());
-      expect(lastState(s)).toEqual({ stage: "confirm", target: slack, openedFromBrowse: true });
-      expect(query('[role="dialog"]')?.getAttribute("aria-label")).toBe("Connect Slack");
+      await typeQuery("not");
+      // The press of a published skill's row: Notion is the shipped one.
+      const notionRow = query<HTMLButtonElement>('[data-testid="connect-row-notion"]')!;
+      expect(notionRow.disabled).toBe(false);
+      await act(async () => notionRow.click());
+      expect(lastState(s)).toEqual({ stage: "confirm", target: notion, openedFromBrowse: true });
+      expect(query('[role="dialog"]')?.getAttribute("aria-label")).toBe("Connect Notion");
       expect(query('[data-testid="connect-confirm-stage"]')).not.toBeNull();
       expect(query('[data-testid="connect-browse-stage"]')).toBeNull();
       expect(query('[data-testid="connect-confirm-submit"]')).not.toBeNull();
@@ -450,9 +475,9 @@ describe("ConnectSheet", () => {
       await act(async () => back?.click());
       expect(lastState(s)).toEqual({ stage: "browse", target: null, openedFromBrowse: false });
       expect(query('[data-testid="connect-browse-stage"]')).not.toBeNull();
-      expect(query<HTMLInputElement>('[data-testid="connect-search"]')?.value).toBe("sla");
-      expect(query('[data-testid="connect-row-slack"]')).not.toBeNull();
-      expect(query('[data-testid="connect-row-notion"]')).toBeNull();
+      expect(query<HTMLInputElement>('[data-testid="connect-search"]')?.value).toBe("not");
+      expect(query('[data-testid="connect-row-notion"]')).not.toBeNull();
+      expect(query('[data-testid="connect-row-slack"]')).toBeNull();
       expect(s.onConnect).not.toHaveBeenCalled();
       expect(s.onClose).not.toHaveBeenCalled();
     });
@@ -576,82 +601,66 @@ describe("ConnectSheet", () => {
       expect(query('[data-testid="connect-row-slack"]')).not.toBeNull();
     });
 
-    it("shows the Popular row of available marks once two featured tools are selectable", async () => {
-      // The show branch of the Popular row (>= 2 available featured tools)
-      // is unreachable with the shipped data, so the sheet is re-evaluated
-      // against a connectors module where Notion's pack counts as published.
-      vi.resetModules();
-      vi.doMock("../connectors", async (importOriginal) => {
-        const mod = await importOriginal<typeof import("../connectors")>();
-        return {
-          ...mod,
-          AVAILABLE_FEATURED_CONNECTORS: mod.FEATURED_CONNECTORS.filter(
-            (entry) => entry.id === "github" || entry.id === "notion",
-          ),
-        };
-      });
-      try {
-        const { ConnectSheet: FreshConnectSheet } = await import("../ConnectSheet");
-        const onSelect = vi.fn();
-        const s = spies();
-        await act(async () => {
-          root.render(
-            <FreshConnectSheet
-              isOpen
-              stage="browse"
-              target={null}
-              showBack={false}
-              installedSkillNames={new Set<string>()}
-              pending={false}
-              onSelect={onSelect}
-              onBack={vi.fn()}
-              onPasteLink={s.openImportModal}
-              onSearchAllSkills={s.openSkillsPanel}
-              onConnect={s.onConnect}
-              onSetUpAgain={s.onSetUpAgain}
-              onClose={s.onClose}
-            />,
-          );
-        });
+    it("shows the Popular row of the available marks, routing Notion to confirm and GitHub to its import", async () => {
+      const s = spies();
+      await render({ initial: "browse", spies: s });
 
-        // Exactly the available featured marks, in featured order; Slack and
-        // Discord stay soon and never reach the row.
-        expect(query('[data-testid="connect-popular"]')).not.toBeNull();
-        expect(query('#connect-popular-label')?.textContent).toBe("Popular");
-        const marks = queryAll<HTMLButtonElement>('[data-testid="connect-popular-row"] [data-testid^="connect-popular-"]');
-        expect(marks.map((mark) => mark.dataset.testid)).toEqual([
-          "connect-popular-notion",
-          "connect-popular-github",
-        ]);
-        expect(query('[data-testid="connect-popular-slack"]')).toBeNull();
-        expect(query('[data-testid="connect-popular-discord"]')).toBeNull();
-        for (const mark of marks) {
-          expect(mark.disabled).toBe(false);
-          // Bare marks at the IconButton md size, with the touch floor.
-          expect(mark.className).toContain("h-9 w-9");
-          expect(mark.className).toContain("pointer-coarse:min-h-11");
-          expect(mark.querySelector("svg")?.getAttribute("aria-hidden")).toBe("true");
-        }
-        expect(query<HTMLButtonElement>('[data-testid="connect-popular-github"]')?.getAttribute("aria-label")).toBe("GitHub");
-        expect(query<HTMLButtonElement>('[data-testid="connect-popular-notion"]')?.getAttribute("title")).toBe("Notion");
-
-        // A mark only reports its connector; nothing sends.
-        await act(async () => query<HTMLButtonElement>('[data-testid="connect-popular-github"]')?.click());
-        expect(onSelect).toHaveBeenCalledTimes(1);
-        expect(onSelect.mock.calls[0]?.[0]?.id).toBe("github");
-        expect(s.onConnect).not.toHaveBeenCalled();
-
-        // Typing hides the row; clearing the query brings it back.
-        await typeQuery("git");
-        expect(query('[data-testid="connect-popular"]')).toBeNull();
-        expect(queryAll('[data-testid^="connect-popular-"]')).toHaveLength(0);
-        await typeQuery("");
-        expect(query('[data-testid="connect-popular-row"]')).not.toBeNull();
-        expect(document.body.textContent).not.toContain(EM_DASH);
-      } finally {
-        vi.doUnmock("../connectors");
-        vi.resetModules();
+      // Exactly the available featured marks, in featured order; Slack and
+      // Discord stay soon and never reach the row.
+      expect(query('[data-testid="connect-popular"]')).not.toBeNull();
+      expect(query("#connect-popular-label")?.textContent).toBe("Popular");
+      const marks = queryAll<HTMLButtonElement>('[data-testid="connect-popular-row"] [data-testid^="connect-popular-"]');
+      expect(marks.map((mark) => mark.dataset.testid)).toEqual([
+        "connect-popular-notion",
+        "connect-popular-github",
+      ]);
+      expect(query('[data-testid="connect-popular-slack"]')).toBeNull();
+      expect(query('[data-testid="connect-popular-discord"]')).toBeNull();
+      expect(query('[data-testid="connect-popular-freefinance"]')).toBeNull();
+      for (const mark of marks) {
+        expect(mark.disabled).toBe(false);
+        // Bare marks at the IconButton md size, with the touch floor.
+        expect(mark.className).toContain("h-9 w-9");
+        expect(mark.className).toContain("pointer-coarse:min-h-11");
+        expect(mark.querySelectorAll("svg")).toHaveLength(1);
+        expect(mark.querySelector("svg")?.getAttribute("aria-hidden")).toBe("true");
+        // The name lives on the label and the hover title; no visible text.
+        expect(mark.textContent).toBe("");
       }
+      expect(query<HTMLButtonElement>('[data-testid="connect-popular-github"]')?.getAttribute("aria-label")).toBe("GitHub");
+      expect(query<HTMLButtonElement>('[data-testid="connect-popular-notion"]')?.getAttribute("aria-label")).toBe("Notion");
+      expect(query<HTMLButtonElement>('[data-testid="connect-popular-notion"]')?.getAttribute("title")).toBe("Notion");
+
+      // Typing hides the row; clearing the query brings it back.
+      await typeQuery("git");
+      expect(query('[data-testid="connect-popular"]')).toBeNull();
+      expect(queryAll('[data-testid^="connect-popular-"]')).toHaveLength(0);
+      await typeQuery("");
+      expect(query('[data-testid="connect-popular-row"]')).not.toBeNull();
+      expect(document.body.textContent).not.toContain(EM_DASH);
+
+      // The Notion mark routes like its row: the confirm stage, with Back,
+      // and nothing sent.
+      await act(async () => query<HTMLButtonElement>('[data-testid="connect-popular-notion"]')?.click());
+      expect(lastState(s)).toEqual({ stage: "confirm", target: notion, openedFromBrowse: true });
+      expect(query('[role="dialog"]')?.getAttribute("aria-label")).toBe("Connect Notion");
+      expect(query('[data-testid="connect-confirm-stage"]')).not.toBeNull();
+      expect(query('[data-testid="connect-confirm-back"]')).not.toBeNull();
+      expect(s.onConnect).not.toHaveBeenCalled();
+      expect(s.beginGithubImport).not.toHaveBeenCalled();
+      expect(s.openImportModal).not.toHaveBeenCalled();
+      await act(async () => query<HTMLButtonElement>('[data-testid="connect-confirm-back"]')?.click());
+      expect(lastState(s)).toEqual({ stage: "browse", target: null, openedFromBrowse: false });
+      expect(query('[data-testid="connect-popular-row"]')).not.toBeNull();
+
+      // The GitHub mark leaves the sheet for the GitHub import flow.
+      await act(async () => query<HTMLButtonElement>('[data-testid="connect-popular-github"]')?.click());
+      expect(s.beginGithubImport).toHaveBeenCalledTimes(1);
+      expect(query('[role="dialog"]')).toBeNull();
+      expect(lastState(s)).toBeNull();
+      expect(s.onConnect).not.toHaveBeenCalled();
+      expect(s.openImportModal).not.toHaveBeenCalled();
+      expect(s.onClose).not.toHaveBeenCalled();
     });
   });
 
@@ -664,7 +673,7 @@ describe("ConnectSheet", () => {
       expect(query('[role="dialog"]')?.getAttribute("aria-label")).toBe("Connect Slack");
       expect(document.body.textContent).toContain("Connect Slack");
       expect(query('[data-testid="connect-confirm-install-line"]')?.textContent).toBe(
-        "Adds the Slack skill from instafy-dev/team-integrations to this space, then starts its setup in this chat.",
+        "Adds the Slack skill from instafy-dev/skills to this space, then starts its setup in this chat.",
       );
       expect(query('[data-testid="connect-confirm-needs-line"]')?.textContent).toBe(
         "Setup will ask for a Slack app bot token (SLACK_BOT_TOKEN) through the secrets card. Never paste it in chat.",
@@ -693,6 +702,30 @@ describe("ConnectSheet", () => {
       expect(s.onClose).toHaveBeenCalledTimes(1);
       expect(query('[role="dialog"]')).toBeNull();
       expect(s.onConnect).toHaveBeenCalledTimes(1);
+    });
+
+    it("confirms the shipped Notion entry with its published pack and token", async () => {
+      // Real data, not a fixture: the copy reads straight from connectors.ts.
+      const s = spies();
+      await render({ initial: notion, spies: s });
+
+      expect(query('[role="dialog"]')?.getAttribute("aria-label")).toBe("Connect Notion");
+      expect(query('[data-testid="connect-confirm-install-line"]')?.textContent).toBe(
+        "Adds the Notion skill from instafy-dev/skills to this space, then starts its setup in this chat.",
+      );
+      expect(query('[data-testid="connect-confirm-needs-line"]')?.textContent).toBe(
+        "Setup will ask for a Notion internal integration token (NOTION_API_KEY) through the secrets card. Never paste it in chat.",
+      );
+      expect(query('[data-testid="connect-confirm-files-line"]')?.textContent).toBe(
+        "Files land in .agents/skills/notion.",
+      );
+      expect(document.body.textContent).not.toContain("https://");
+      expect(document.body.textContent).not.toContain(EM_DASH);
+
+      await act(async () => query<HTMLButtonElement>('[data-testid="connect-confirm-submit"]')?.click());
+      expect(s.onConnect).toHaveBeenCalledTimes(1);
+      expect(s.onConnect).toHaveBeenCalledWith(notion);
+      expect(s.onSetUpAgain).not.toHaveBeenCalled();
     });
 
     it("never prints the source URL, only its label", async () => {
@@ -745,7 +778,7 @@ describe("ConnectSheet", () => {
       await render({ initial: appConnector, spies: s });
 
       expect(query('[data-testid="connect-confirm-install-line"]')?.textContent).toBe(
-        "Adds the Fixture skill from instafy-dev/team-integrations to this space. Setup opens Fixture in the shared display; you sign in there once, and the agent then works in that session.",
+        "Adds the Fixture skill from instafy-dev/skills to this space. Setup opens Fixture in the shared display; you sign in there once, and the agent then works in that session.",
       );
       expect(query('[data-testid="connect-confirm-needs-line"]')).toBeNull();
       expect(query('[data-testid="connect-confirm-files-line"]')?.textContent).toBe(
