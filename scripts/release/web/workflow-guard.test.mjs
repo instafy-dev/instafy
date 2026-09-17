@@ -228,3 +228,26 @@ test("lane files carry no private identity or infrastructure strings", () => {
     assert.equal(match, null, `${file} contains a forbidden identity string: ${match?.[0]}`);
   }
 });
+
+test("the stale guard reads the operator adoption only from the web-release environment", () => {
+  const publish = jobs(read(WEB)).get("publish");
+  assert.match(publish, /^      HOSTED_WEB_ADOPTED_DEPLOYMENT_ID: \$\{\{ vars\.HOSTED_WEB_ADOPTED_DEPLOYMENT_ID \}\}$/mu);
+  assert.equal((read(WEB).match(/HOSTED_WEB_ADOPTED_DEPLOYMENT_ID/gu) ?? []).length, 2);
+});
+
+test("the runbook creates the bot-only immutable web-v* tag rulesets before any secret", () => {
+  const doc = read("docs/Web-Release.md");
+  const setup = doc.slice(doc.indexOf("## One-time setup"));
+  assertOrdered(setup, [
+    "refs/tags/web-v*",
+    "*Restrict creations*",
+    "`instafy-bot` user only",
+    "*Restrict updates* and *Restrict",
+    "empty bypass list",
+    "**Read them back.**",
+    "**Create the `web-release` environment.**",
+    "tag `web-v*` and branch `main`",
+    "**Enter the secrets:**",
+    "HOSTED_WEB_ADOPTED_DEPLOYMENT_ID",
+  ]);
+});

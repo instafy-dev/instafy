@@ -233,6 +233,7 @@ jobs:
       HOSTED_FRONTEND_PUBLISH_ENABLED: ${{ vars.HOSTED_FRONTEND_PUBLISH_ENABLED }}
       PAGES_PROJECT: ${{ vars.CLOUDFLARE_PAGES_PROJECT }}
       PUBLIC_APP_URL: ${{ vars.PUBLIC_APP_URL }}
+      HOSTED_WEB_ADOPTED_DEPLOYMENT_ID: ${{ vars.HOSTED_WEB_ADOPTED_DEPLOYMENT_ID }}
     steps:
       - name: Check out the release commit
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6

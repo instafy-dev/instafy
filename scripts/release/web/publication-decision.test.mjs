@@ -20,9 +20,24 @@ const facts = (overrides = {}) => ({
 test("a newer commit deploys and records the deployment to restore", () => {
   assert.deepEqual(decidePublication(facts()), { action: "deploy", previousDeploymentId: DEPLOYMENT });
   assert.equal(decidePublication(facts({ previousCompare: "identical", previousCommitHash: SOURCE })).action, "deploy");
-  assert.equal(decidePublication(facts({ previousCompare: "not-found" })).action, "deploy");
-  assert.equal(decidePublication(facts({ previousCompare: "none", previousCommitHash: "" })).action, "deploy");
   assert.equal(decidePublication(facts({ servedReleaseId: "" })).action, "deploy");
+});
+
+test("a deployment from outside this repository is replaced only when adopted by id", () => {
+  const OTHER = "99999999-8888-7777-6666-555555555555";
+  for (const outside of [{ previousCompare: "not-found" }, { previousCompare: "none", previousCommitHash: "" }]) {
+    assert.throws(() => decidePublication(facts(outside)), /not published from this repository/u);
+    assert.throws(() => decidePublication(facts({ ...outside, adoptedDeploymentId: OTHER })), /not published from this repository/u);
+    assert.deepEqual(decidePublication(facts({ ...outside, adoptedDeploymentId: DEPLOYMENT })), {
+      action: "deploy",
+      previousDeploymentId: DEPLOYMENT,
+    });
+    // An already served release still needs no adoption.
+    assert.equal(decidePublication(facts({ ...outside, servedReleaseId: RELEASE })).action, "already-serving");
+  }
+  // Once this lane has published, the adoption is inert: a stale tag is still refused.
+  assert.throws(() => decidePublication(facts({ previousCompare: "behind", adoptedDeploymentId: DEPLOYMENT })), /stale publish/u);
+  assert.throws(() => decidePublication(facts({ adoptedDeploymentId: "not-a-deployment" })), /ADOPTED_DEPLOYMENT_ID/u);
 });
 
 test("an already served release is not redeployed", () => {
