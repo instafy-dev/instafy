@@ -35,21 +35,22 @@ jobs:
     timeout-minutes: 15
     environment: downloads-worker
     env:
-      DOWNLOADS_BASE_URL: ${{ vars.DOWNLOADS_BASE_URL || 'https://downloads.instafy.dev' }}
-      DESKTOP_DOWNLOADS_PREFIX: ${{ vars.DESKTOP_DOWNLOADS_PREFIX || 'desktop-app' }}
-      MOBILE_OTA_DOWNLOADS_PREFIX: ${{ vars.MOBILE_OTA_DOWNLOADS_PREFIX || 'mobile' }}
+      DOWNLOADS_BASE_URL: https://downloads.instafy.dev
+      DESKTOP_DOWNLOADS_PREFIX: desktop-app
+      MOBILE_OTA_DOWNLOADS_PREFIX: mobile
       DRY_RUN: ${{ inputs.dry_run }}
     steps:
       - name: Bind the deploy to protected main and the release bot
         env:
           ACTOR: ${{ github.actor }}
+          TRIGGERING_ACTOR: ${{ github.triggering_actor }}
           REQUESTED_COMMIT: ${{ inputs.commit_sha }}
         run: |
           set -euo pipefail
           if [[ "$GITHUB_REPOSITORY" != "instafy-dev/instafy" || "$GITHUB_REF" != "refs/heads/main" ]]; then
             echo "::error::The downloads Worker deploys only from protected main of instafy-dev/instafy."; exit 1
           fi
-          if [[ "$ACTOR" != "instafy-bot" ]]; then
+          if [[ "$ACTOR" != "instafy-bot" || "$TRIGGERING_ACTOR" != "instafy-bot" ]]; then
             echo "::error::The downloads Worker deploy may only be started by instafy-bot."; exit 1
           fi
           if [[ ! "$REQUESTED_COMMIT" =~ ^[0-9a-f]{40}$ || "$REQUESTED_COMMIT" != "$GITHUB_SHA" ]]; then

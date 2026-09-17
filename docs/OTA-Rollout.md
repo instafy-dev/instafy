@@ -193,6 +193,42 @@ This keeps CI stable and makes the OTA system replaceable without changing how b
 Use `pnpm ota:signing:keygen` to generate the RSA keypair. Keep the private key only in the
 deployment's CI secret store and embed the corresponding public key in native builds.
 
+### Public release lane operations
+
+`.github/workflows/mobile-ota-release.yml` runs steps 1-4 when the release bot pushes a tag named
+`ota-v<sha12>`. The workflow_dispatch trigger (`tag`, `dry_run`) is for dry runs and for retrying a
+tag. Steps 5 and 6 stay with the operator-authenticated control plane caller.
+
+Set things up in this order:
+
+1. Add tag rulesets for `refs/tags/ota-v*` before any secret exists: only the release bot may
+   create these tags, and nobody, including the bot, may bypass the update or delete rules. The
+   `ota-release` environment's tag policy is not a security boundary on its own. Without the
+   ruleset, anyone with write access could tag an unmerged commit, and that commit's own copy of
+   the workflow, with its checks removed, would receive the signing key and the R2 token.
+2. Create the `ota-release` environment with tag policy `ota-v*`, then add its secrets and the
+   `CAPACITOR_LIVE_UPDATE_PUBLIC_KEY` variable.
+3. Dispatch `dry_run=true` for the current main head to prove that the signing key matches the
+   shipped trust anchor.
+
+The downloads origin (`https://downloads.instafy.dev`), the bucket and the `mobile`/`desktop-app`
+prefixes are pinned in the workflow and in `browser-safe-config.mjs`. Repository variables cannot
+override them.
+
+Recovery:
+
+- Dry runs share a concurrency group with each other, and each release tag has its own group. A
+  second release run for the same tag can therefore cancel a pending one. To recover, dispatch
+  `tag=<tag>, dry_run=false`; release mode accepts an existing tag.
+- Publication is one-shot. authorize requires the GitHub Release and both R2 objects to be absent.
+  If publish fails after the R2 upload, use **Re-run failed jobs** on the original run while the
+  signed artifact is retained (30 days). This reuses authorize's outputs, and `put-immutable.sh`
+  accepts a byte-identical re-put. **Re-run all jobs** and a new dispatch will both fail at
+  authorize. Past the retention window, release a new commit under a new tag.
+- If `gh release create` was interrupted and left a draft Release, delete the draft by hand and
+  then re-run the failed publish job. A draft does not count as a published Release.
+- A re-run is accepted only when `github.triggering_actor` is the release bot.
+
 ## Initial Channel Model
 
 Keep the first version simple:

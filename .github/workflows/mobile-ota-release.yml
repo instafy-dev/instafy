@@ -23,7 +23,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: mobile-ota-release
+  group: mobile-ota-release-${{ inputs.dry_run == true && 'dry-run' || inputs.tag || github.ref_name }}
   cancel-in-progress: false
 
 defaults:
@@ -32,10 +32,10 @@ defaults:
 
 env:
   OTA_CHANNEL: internal
-  DOWNLOADS_BUCKET: ${{ vars.DOWNLOADS_BUCKET || 'instafy-downloads' }}
-  DOWNLOADS_BASE_URL: ${{ vars.DOWNLOADS_BASE_URL || 'https://downloads.instafy.dev' }}
-  MOBILE_OTA_DOWNLOADS_PREFIX: ${{ vars.MOBILE_OTA_DOWNLOADS_PREFIX || 'mobile' }}
-  DESKTOP_DOWNLOADS_PREFIX: ${{ vars.DESKTOP_DOWNLOADS_PREFIX || 'desktop-app' }}
+  DOWNLOADS_BUCKET: instafy-downloads
+  DOWNLOADS_BASE_URL: https://downloads.instafy.dev
+  MOBILE_OTA_DOWNLOADS_PREFIX: mobile
+  DESKTOP_DOWNLOADS_PREFIX: desktop-app
 
 jobs:
   authorize:
@@ -58,12 +58,13 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           EVENT_NAME: ${{ github.event_name }}
           ACTOR: ${{ github.actor }}
+          TRIGGERING_ACTOR: ${{ github.triggering_actor }}
           PUSHER: ${{ github.event.pusher.name }}
           REF_NAME: ${{ github.ref_name }}
           INPUT_TAG: ${{ inputs.tag }}
         run: |
           set -euo pipefail
-          if [[ "$GITHUB_REPOSITORY" != "instafy-dev/instafy" || "$ACTOR" != "instafy-bot" ]]; then
+          if [[ "$GITHUB_REPOSITORY" != "instafy-dev/instafy" || "$ACTOR" != "instafy-bot" || "$TRIGGERING_ACTOR" != "instafy-bot" ]]; then
             echo "::error::OTA releases run only in instafy-dev/instafy and only for instafy-bot."; exit 1
           fi
           if [[ "$EVENT_NAME" == "push" && "$PUSHER" != "instafy-bot" ]]; then
@@ -103,6 +104,7 @@ jobs:
           EVENT_NAME: ${{ github.event_name }}
           REPOSITORY: ${{ github.repository }}
           ACTOR: ${{ github.actor }}
+          TRIGGERING_ACTOR: ${{ github.triggering_actor }}
           PUSHER: ${{ github.event.pusher.name }}
           REF: ${{ github.ref }}
           RUN_SHA: ${{ github.sha }}
@@ -152,8 +154,8 @@ jobs:
       VITE_CONTROLLER_URL: ${{ vars.VITE_CONTROLLER_URL || 'https://controller.instafy.dev' }}
       VITE_SUPABASE_URL: ${{ vars.VITE_SUPABASE_URL }}
       VITE_SUPABASE_ANON_KEY: ${{ vars.VITE_SUPABASE_ANON_KEY }}
-      VITE_DOWNLOADS_BASE_URL: ${{ vars.DOWNLOADS_BASE_URL || 'https://downloads.instafy.dev' }}
-      VITE_DESKTOP_DOWNLOADS_PREFIX: ${{ vars.DESKTOP_DOWNLOADS_PREFIX || 'desktop-app' }}
+      VITE_DOWNLOADS_BASE_URL: https://downloads.instafy.dev
+      VITE_DESKTOP_DOWNLOADS_PREFIX: desktop-app
       VITE_INSTAFY_SHARED_BROWSER_CDP_SCREENCAST: "1"
       VITE_INSTAFY_SHARED_BROWSER_WEBRTC: "0"
       VITE_REQUIRE_AUTH: ${{ vars.VITE_REQUIRE_AUTH }}
@@ -246,7 +248,7 @@ jobs:
         run: |
           set -euo pipefail
           test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
-          command -v zip >/dev/null && command -v python3 >/dev/null
+          command -v zip >/dev/null || { echo "::error::zip is required."; exit 1; }; command -v python3 >/dev/null || { echo "::error::python3 is required."; exit 1; }
           test "$(bash scripts/release/ota/prove-web-layer.sh packages/frontend/dist "$SOURCE_SHA")" = "$INVENTORY"
 
       - name: Resolve the native trust anchor from the signing key
@@ -277,9 +279,7 @@ jobs:
         run: |
           set -euo pipefail
           node scripts/release/ota/verify-public-bytes.mjs anchor
-          if [[ "$ARCHIVE_FILE_NAME" != "${TAG}.zip" ]]; then
-            echo "::error::The downloads Worker serves only <tag>.zip as immutable."; exit 1
-          fi
+          [[ "$ARCHIVE_FILE_NAME" == "${TAG}.zip" ]] || { echo "::error::The downloads Worker serves only <tag>.zip as immutable."; exit 1; }
           ARCHIVE_PATH="$RUNNER_TEMP/ota/${TAG}.zip" MANIFEST_PATH="$RUNNER_TEMP/ota/${TAG}.manifest.json" \
             node scripts/release/ota/verify-public-bytes.mjs local
           python3 scripts/release/ota/validate-ota-web-archive.py "$RUNNER_TEMP/ota/${TAG}.zip"
