@@ -25,6 +25,7 @@ const PRIVATE_NAME_MARKERS = Object.freeze([
   ["kno", "sh"].join(""),
   ["operator", "console"].join("-"),
 ]);
+const ENV_TEMPLATE_NAME = /^\.env\.(?:example|sample|template|dist)$/u;
 const APP_NAME = "Instafy.app";
 const S_IFMT = 0o170000;
 const S_IFREG = 0o100000;
@@ -61,7 +62,9 @@ export function forbiddenReason(relativePath) {
   const lower = relativePath.toLowerCase();
   if (/\.appimage$/iu.test(name) || name === "latest-linux.yml") return "Linux artifacts are not part of the stable Desktop lane";
   if (PRIVATE_NAME_MARKERS.some((marker) => lower.includes(marker))) return "a private package marker is present";
-  if (name === ".env" || name.startsWith(".env.")) return "an environment file is present";
+  // Committed templates such as .env.example (shipped by some bundled
+  // dependencies) carry no values; the Gitleaks gate still scans their content.
+  if ((name === ".env" || name.startsWith(".env.")) && !ENV_TEMPLATE_NAME.test(name)) return "an environment file is present";
   if (name.toLowerCase() === "auth.json") return "a credential-bearing auth.json is present";
   // Top level only: bundled third-party dependencies inside Instafy.app may
   // legitimately contain directories with this common name.

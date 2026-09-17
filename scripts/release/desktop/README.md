@@ -16,8 +16,11 @@ ledger: there are no deployment ledgers, journals or merge freezes.
 
 Concurrency: runs are grouped per tag, and the publish job has its own global group,
 so stable-pointer writes never race. GitHub keeps only one *pending* run or job per
-group; if a queued tag run or publish job is ever cancelled that way, re-run it
-(or dispatch `dry_run=false` for the tag).
+group: if three publishes queue at once, the older pending one is cancelled. The
+`publish_cancelled` job turns that into a failed run with an error annotation; use
+**Re-run failed jobs** on it. If a newer version became stable meanwhile, the pointer
+guard refuses the older tag and nothing more is needed. A cancelled queued tag run
+(before publish) is recovered the same way, or with `dry_run=false` for the tag.
 
 ## Jobs
 
@@ -27,8 +30,9 @@ group; if a queued tag run or publish job is ever cancelled that way, re-run it
 | preflight | ubuntu-24.04 | desktop-release | picks `personal-browser` when the optional canary credentials exist with 24 h left, else `launch-smoke` |
 | build | macos-15 | desktop-release | credential sanity, isolated keychain, `pnpm --filter @instafy/desktop-app dist` (notarize + staple), signature/staple/DMG checks, release-set and Gitleaks gates, artifact upload |
 | launch_smoke | macos-15 | none | safe ZIP extraction, `spctl`, packaged launch through Playwright's Electron driver |
-| personal_browser_canary | macos-15 | desktop-release | the production Personal Browser agent-turn canary (opt-in); restores recovery journals only from this workflow's own push/dispatch runs on `main` or `desktop-app-v*` in this repository (`recovery-journals.mjs`) |
+| personal_browser_canary | macos-15 | desktop-release | the production Personal Browser agent-turn canary (opt-in); restores recovery journals only from this workflow's own push/dispatch runs on `main` or `desktop-app-v*` in this repository (`recovery-journals.mjs`), enumerated through this workflow's run list of the last 31 days rather than the repository-wide artifact list, so untrusted uploads cannot crowd them out |
 | publish | ubuntu-24.04 | desktop-release | `publish-downloads.sh`, `release-receipt.json`, `gh release create` last |
+| publish_cancelled | ubuntu-24.04 | none | fails the run with recovery instructions when publish was cancelled |
 
 Lane tooling (`scripts/release/desktop/**`) is read from the workflow commit; the product
 bytes are built from the tag commit.
@@ -37,6 +41,11 @@ The GitHub Release carries the dmg, zip, zip.blockmap, dmg.blockmap (when
 electron-builder emits one), latest-mac.yml, latest.json and release-receipt.json. The
 `personal-browser-recovery-journals` artifact holds the journal JSON files plus a
 `marker.txt` export timestamp.
+
+The release-set gate rejects `.env` and `.env.*` files at any depth in the signed
+output, except the value-free templates `.env.example`, `.env.sample`, `.env.template`
+and `.env.dist` that bundled dependencies sometimes ship; the Gitleaks gate still
+scans their content.
 
 The Gitleaks release gate derives its config from `scripts/public-boundary-gitleaks.toml`
 but replaces the frozen bare GitHub-token-prefix rule with the token shape: four bytes
@@ -83,6 +92,25 @@ environment with no branch/tag policy the first time a job references it. With t
 review of every workflow merged to `main`. Repository variables: `DOWNLOADS_BASE_URL`,
 `DOWNLOADS_BUCKET`, `DESKTOP_DOWNLOADS_PREFIX`, and for the optional canary
 `VITE_SUPABASE_URL` and `VITE_SUPABASE_ANON_KEY` (publishable key only).
+
+## Cutover dry run (first real proof)
+
+The offline tests cannot prove these; check them on the first
+`gh workflow run desktop-release.yml --ref main -f tag=<next tag> -f dry_run=true`
+before any `dry_run=false` or tag push:
+
+- build: Gitleaks 8.30.1 parses the derived release config (check the step log
+  shows the scan ran with it) and reports no findings on the signed output.
+- build: the throwaway keychain import yields the Developer ID Application identity,
+  `notarytool history` succeeds, and notarize + staple complete on `macos-15`.
+- launch_smoke: `spctl --assess` accepts the extracted app and Playwright's Electron
+  driver launches and closes it with exit code 0.
+- personal_browser_canary (only when its optional secrets are set): the run-list
+  journal lookup works with the job's `actions: read` token.
+- publish (first `dry_run=false` only): the `gh api --paginate ... --jq` draft filter
+  prints nothing when no draft exists, and the Release and receipt are created.
+
+These are one-time checks by a maintainer watching the run, not settings to change.
 
 ## Tests
 

@@ -1,11 +1,15 @@
 import assert from "node:assert/strict";
+import fs from "node:fs";
+import path from "node:path";
 import test from "node:test";
 
 import {
   JOURNAL_ARTIFACT_NAME,
   RELEASE_WORKFLOW_PATH,
+  findTrustedJournalArtifact,
   isTrustedHeadBranch,
   selectTrustedJournalArtifact,
+  workflowRunsRoute,
 } from "./recovery-journals.mjs";
 
 const REPO_ID = 1000;
@@ -102,5 +106,64 @@ test("malformed input fails closed", () => {
   assert.equal(
     selectTrustedJournalArtifact({ artifacts: [item], repositoryId: String(REPO_ID), fetchRun: () => ({ id: 999 }) }),
     null,
+  );
+});
+
+test("a flood of name-matched uploads cannot push the trusted journals out of view", () => {
+  // Candidates come from this workflow's own runs, so untrusted uploads never
+  // enter the listing, however many there are.
+  const trustedArtifact = artifact(1, { created: "2026-09-01T00:00:00Z" });
+  const trustedRun = run(trustedArtifact, { created_at: "2026-09-01T00:00:00Z", event: "push", head_branch: "main" });
+  const untrustedRuns = Array.from({ length: 150 }, (_, index) =>
+    run(artifact(100 + index, { created: "2026-09-10T00:00:00Z" }), {
+      created_at: `2026-09-10T00:${String(index % 60).padStart(2, "0")}:00Z`,
+      event: "pull_request",
+    }),
+  );
+  const listed = [];
+  const warnings = [];
+  const id = findTrustedJournalArtifact({
+    listRuns: () => [...untrustedRuns, trustedRun],
+    listRunArtifacts: (runId) => {
+      listed.push(runId);
+      return runId === trustedRun.id ? [trustedArtifact] : [];
+    },
+    repositoryId: String(REPO_ID),
+    warn: (message) => warnings.push(message),
+  });
+  assert.equal(id, 1);
+  assert.deepEqual(listed, [trustedRun.id]);
+  assert.equal(warnings.length, 150);
+});
+
+test("the newest trusted run with a journal wins, and runs without one are skipped", () => {
+  const older = artifact(1, { created: "2026-09-01T00:00:00Z" });
+  const newerWithout = artifact(2, { created: "2026-09-05T00:00:00Z", branch: "desktop-app-v0.2.14" });
+  const runs = [
+    run(older, { created_at: "2026-09-01T00:00:00Z" }),
+    run(newerWithout, { created_at: "2026-09-05T00:00:00Z" }),
+  ];
+  const id = findTrustedJournalArtifact({
+    listRuns: () => runs,
+    listRunArtifacts: (runId) => (runId === older.workflow_run.id ? [older] : []),
+    repositoryId: String(REPO_ID),
+  });
+  assert.equal(id, 1);
+  assert.equal(
+    findTrustedJournalArtifact({ listRuns: () => [], listRunArtifacts: () => [], repositoryId: String(REPO_ID) }),
+    null,
+  );
+  assert.throws(
+    () => findTrustedJournalArtifact({ listRuns: () => undefined, listRunArtifacts: () => [], repositoryId: String(REPO_ID) }),
+    /malformed/u,
+  );
+});
+
+test("the CLI lists this workflow's runs, never the repository-wide artifact listing", () => {
+  const source = fs.readFileSync(path.join(import.meta.dirname, "recovery-journals.mjs"), "utf8");
+  assert.doesNotMatch(source, /actions\/artifacts\?name=/u);
+  assert.equal(
+    workflowRunsRoute("owner/repo", "push", 2, new Date("2026-09-17T12:00:00Z")),
+    "repos/owner/repo/actions/workflows/desktop-release.yml/runs?event=push&created=%3E%3D2026-08-17&per_page=100&page=2",
   );
 });

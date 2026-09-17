@@ -602,3 +602,23 @@ jobs:
             printf -- '- Tag: `%s`\n- Source: `%s`\n- latest.json: %s/latest.json\n' "$TAG" "$SOURCE_SHA" "$base"
             printf -- '- Release: %s/%s/releases/tag/%s\n' "$GITHUB_SERVER_URL" "$GITHUB_REPOSITORY" "$TAG"
           } >> "$GITHUB_STEP_SUMMARY"
+
+  publish_cancelled:
+    name: Fail loudly when publish was cancelled
+    # The publish group keeps one pending job; a third queued publish cancels the
+    # older pending one. Turn that grey cancellation into a failed run that
+    # "Re-run failed jobs" recovers (the one-shot guards keep a re-run safe).
+    needs: [authorize, publish]
+    if: ${{ always() && needs.publish.result == 'cancelled' && needs.authorize.outputs.mode == 'release' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      - name: Report the cancelled publish
+        env:
+          TAG: ${{ needs.authorize.outputs.tag }}
+        run: |
+          set -euo pipefail
+          echo "::error::Publish for ${TAG} was cancelled before it finished (a newer queued publish or a manual cancel). It may be partially published. Use Re-run failed jobs on this run; if a newer version already became stable, the pointer guard refuses this older tag and it needs no further action."
+          exit 1

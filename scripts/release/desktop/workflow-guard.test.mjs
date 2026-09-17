@@ -13,7 +13,7 @@ const source = fs.readFileSync(workflowPath, "utf8");
 const publishScript = fs.readFileSync(path.join(laneDir, "publish-downloads.sh"), "utf8");
 const verifyScript = fs.readFileSync(path.join(laneDir, "verify-release-tag.mjs"), "utf8");
 
-const JOBS = ["authorize", "preflight", "build", "launch_smoke", "personal_browser_canary", "publish"];
+const JOBS = ["authorize", "preflight", "build", "launch_smoke", "personal_browser_canary", "publish", "publish_cancelled"];
 const ENVIRONMENT_JOBS = ["preflight", "build", "personal_browser_canary", "publish"];
 const RUNNERS = {
   authorize: "ubuntu-24.04",
@@ -22,6 +22,7 @@ const RUNNERS = {
   launch_smoke: "macos-15",
   personal_browser_canary: "macos-15",
   publish: "ubuntu-24.04",
+  publish_cancelled: "ubuntu-24.04",
 };
 const SECRET_ENV_NAMES = [
   "CSC_LINK",
@@ -295,6 +296,17 @@ test("publish runs only for release mode after green build and canaries, in the 
   );
   assert.doesNotMatch(source, /always\(\) && needs\.authorize/u);
   assert.match(publish, /^ {4}concurrency: \{ group: desktop-release-publish, cancel-in-progress: false \}$/mu);
+  // The publish group keeps only one pending job, so a cancelled publish must
+  // fail the run visibly instead of ending grey.
+  const { publish_cancelled: cancelledReport } = jobs();
+  assert.ok(cancelledReport, "publish_cancelled job is required");
+  assert.match(cancelledReport, /^ {4}needs: \[authorize, publish\]$/mu);
+  assert.match(
+    cancelledReport,
+    /^ {4}if: \$\{\{ always\(\) && needs\.publish\.result == 'cancelled' && needs\.authorize\.outputs\.mode == 'release' \}\}$/mu,
+  );
+  assert.match(cancelledReport, /::error::[^\n]*Re-run failed jobs[^\n]*\n\s*exit 1$/mu);
+  assert.doesNotMatch(cancelledReport, /secrets\.|environment:|contents: write/u);
   assertOrdered(publish, ["--recheck-only", "select(.draft and .tag_name", "gh release create"], "publish drafts");
   assert.equal(source.match(/gh release create/gu).length, 1);
   assert.doesNotMatch(source.replace(publish, ""), /wrangler r2|CLOUDFLARE|gh release/u);
