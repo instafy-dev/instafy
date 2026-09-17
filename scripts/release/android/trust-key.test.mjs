@@ -6,7 +6,7 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 
-import { canonicalTrustKey } from "./trust-key.mjs";
+import { canonicalTrustKey, readGitHubFileCommand, resolverDigestMatches } from "./trust-key.mjs";
 
 const HELPER = path.join(import.meta.dirname, "trust-key.mjs");
 const RESOLVER = path.resolve(import.meta.dirname, "..", "..", "resolve-live-update-public-key.mjs");
@@ -80,4 +80,51 @@ test("CLI digest equals the resolver's public_key_sha256 output for the accepted
     fs.rmSync(dir, { force: true, recursive: true });
   }
   assert.doesNotMatch(rejected.stderr, /-----BEGIN/u);
+});
+
+test("GitHub output parsing does not depend on the resolver's exact heredoc layout", () => {
+  const other = "f".repeat(64);
+  // Heredoc (current resolver), name=value, and later entries overriding earlier ones.
+  assert.equal(readGitHubFileCommand(`public_key_sha256<<EOF_1\n${canonicalSha256}\nEOF_1\n`, "public_key_sha256"), canonicalSha256);
+  assert.equal(readGitHubFileCommand(`public_key_sha256=${canonicalSha256}\n`, "public_key_sha256"), canonicalSha256);
+  assert.equal(
+    readGitHubFileCommand(`public_key_sha256=${other}\nx<<D\npublic_key_sha256=${other}\nD\npublic_key_sha256<<E\n${canonicalSha256}\nE\n`, "public_key_sha256"),
+    canonicalSha256,
+  );
+  assert.equal(readGitHubFileCommand("other=1\n", "public_key_sha256"), undefined);
+  assert.throws(() => readGitHubFileCommand(`public_key_sha256<<EOF\n${canonicalSha256}\n`, "public_key_sha256"), /unterminated/u);
+  assert.equal(resolverDigestMatches(`public_key_sha256=${canonicalSha256}\n`, canonicalSha256), true);
+  assert.throws(() => resolverDigestMatches(`public_key_sha256=${other}\n`, canonicalSha256), /not the canonical SPKI PEM/u);
+  assert.throws(() => resolverDigestMatches("", canonicalSha256), /no public_key_sha256/u);
+});
+
+test("CLI --resolver-output checks the real resolver's GITHUB_OUTPUT exactly as the workflow step does", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "instafy-trust-output-"));
+  try {
+    const output = path.join(dir, "output");
+    const envFile = path.join(dir, "env");
+    fs.writeFileSync(output, "unrelated=1\n");
+    fs.writeFileSync(envFile, "");
+    const env = { PATH: process.env.PATH, CAPACITOR_LIVE_UPDATE_PUBLIC_KEY: canonical, GITHUB_OUTPUT: output, GITHUB_ENV: envFile };
+    const resolved = spawnSync(process.execPath, [RESOLVER], { encoding: "utf8", env });
+    assert.equal(resolved.status, 0, resolved.stderr);
+    const ok = spawnSync(process.execPath, [HELPER, "--resolver-output", output], { encoding: "utf8", env });
+    assert.equal(ok.status, 0, ok.stderr);
+    assert.equal(ok.stdout.trim(), canonicalSha256);
+    // A later output of a different digest (e.g. a different key resolved) is refused.
+    fs.appendFileSync(output, `public_key_sha256=${"0".repeat(64)}\n`);
+    const mismatch = spawnSync(process.execPath, [HELPER, "--resolver-output", output], { encoding: "utf8", env });
+    assert.equal(mismatch.status, 1);
+    assert.equal(mismatch.stdout, "");
+    assert.match(mismatch.stderr, /not the canonical SPKI PEM/u);
+    const missing = path.join(dir, "empty");
+    fs.writeFileSync(missing, "");
+    const none = spawnSync(process.execPath, [HELPER, "--resolver-output", missing], { encoding: "utf8", env });
+    assert.equal(none.status, 1);
+    assert.match(none.stderr, /no public_key_sha256/u);
+    const usage = spawnSync(process.execPath, [HELPER, "--bogus"], { encoding: "utf8", env });
+    assert.equal(usage.status, 1);
+  } finally {
+    fs.rmSync(dir, { force: true, recursive: true });
+  }
 });
