@@ -278,12 +278,16 @@ test("certificate matching uses SHA-256 fingerprints; SHA-1 is only Xcode's iden
   }
   const credentials = fs.readFileSync(path.join(laneDirectory, "signing-credentials.sh"), "utf8");
   assertOrdered(credentials, [
-    'security find-certificate -a -c "$identity_name" -p "$keychain"',
-    "openssl x509 -in \"$identity_pem\" -outform DER",
-    '= "$identity_sha1" ]',
-    'identity_sha256="$(shasum -a 256 "$identity_der"',
+    'identity_sha1="$(printf \'%s\' "$identity_sha1" | tr \'ABCDEF\' \'abcdef\')"',
+    'security find-certificate -a -p "$keychain" > "$identity_pem"',
+    'identity_sha256="$(node scripts/release/ios/identity-certificate.mjs "$identity_pem" "$identity_sha1")" ||',
     'echo "IOS_DIST_CERT_SHA256=$identity_sha256" >> "$GITHUB_ENV"',
   ]);
+  // Selection is by exact SHA-1, never by a (substring) name filter.
+  assert.doesNotMatch(credentials, /find-certificate[^\n]*-c /u);
+  const identityCertificate = fs.readFileSync(path.join(laneDirectory, "identity-certificate.mjs"), "utf8");
+  assert.match(identityCertificate, /hex\(certificate\.fingerprint\) === identitySha1/u);
+  assert.match(identityCertificate, /matches\.size !== 1/u);
   const verifyIpa = fs.readFileSync(path.join(laneDirectory, "verify-ipa.sh"), "utf8");
   assert.match(verifyIpa, /leaf="\$\(shasum -a 256 "\$certs\/cert-0"/u);
   assert.match(source, /asc\.mjs download-profile "\$APP_BUNDLE_ID" "\$IOS_DIST_CERT_SHA256"/u);
