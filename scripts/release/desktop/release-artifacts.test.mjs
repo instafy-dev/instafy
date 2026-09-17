@@ -209,6 +209,13 @@ test("release set rejects missing, foreign and private files", () => {
   assert.equal(forbiddenReason("instafy-0.2.13-mac-arm64.dmg"), null);
   const nestedDependency = `mac-arm64/Instafy.app/Contents/Resources/app.asar.unpacked/node_modules/dep/${["inter", "nal"].join("")}/index.js`;
   assert.equal(forbiddenReason(nestedDependency), null);
+  const dependencyDir = "mac-arm64/Instafy.app/Contents/Resources/app.asar.unpacked/node_modules/dep";
+  for (const template of [".env.example", ".env.sample", ".env.template", ".env.dist"]) {
+    assert.equal(forbiddenReason(`${dependencyDir}/${template}`), null, template);
+  }
+  for (const real of [".env", ".env.local", ".env.production", ".env.example.local", ".env.examples"]) {
+    assert.match(forbiddenReason(`${dependencyDir}/${real}`) ?? "", /environment file/u, real);
+  }
   assert.equal(forbiddenReason(`mac-arm64/Instafy.app/Contents/Resources/${["kno", "sh"].join("")}`) !== null, true);
 });
 
