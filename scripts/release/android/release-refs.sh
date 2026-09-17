@@ -5,7 +5,9 @@
 # usage: release-refs.sh recheck <tag> <source-sha>
 #   * the tag still resolves (peeled) to <source-sha>;
 #   * protected main still contains <source-sha> (compare status identical|ahead);
-#   * no GitHub Release exists for <tag> yet (the release is the one-shot marker).
+#   * no GitHub Release exists for <tag> yet (the release is the one-shot marker),
+#     including a draft left by an interrupted gh release create (drafts are
+#     invisible to releases/tags/<tag>; only a contents: write token lists them).
 # Requires GH_TOKEN. Prints no token and no response bodies.
 set -euo pipefail
 
@@ -57,6 +59,11 @@ recheck() {
     fail "A GitHub Release for ${tag} already exists; this tag was already published."
   fi
   grep -q 'HTTP 404' "$err_file" || fail "Could not prove that no GitHub Release exists for ${tag}."
+  drafts="$(gh api "repos/${repository}/releases?per_page=100" --paginate --jq '.[] | select(.draft) | .tag_name')" ||
+    fail "Could not list draft releases for ${tag}."
+  if grep -Fxq -- "$tag" <<< "$drafts"; then
+    fail "A draft GitHub Release for ${tag} exists (interrupted publication); delete the draft, then re-run."
+  fi
   echo "[android-release] ${tag} -> ${source_sha} on main (${status}); no GitHub Release yet."
 }
 

@@ -102,7 +102,11 @@ test("triggers are exactly push of android-v* tags and workflow_dispatch(tag, dr
 
 test("top-level permissions, concurrency and shell defaults are fixed", () => {
   assert.equal(topLevel("permissions"), "permissions:\n  contents: read");
-  assert.equal(topLevel("concurrency"), "concurrency:\n  group: android-release\n  cancel-in-progress: false");
+  // Dry runs queue separately, so a dry run can never displace a pending bot release.
+  assert.equal(
+    topLevel("concurrency"),
+    "concurrency:\n  group: android-release-${{ github.event_name == 'workflow_dispatch' && inputs.dry_run && 'dry-run' || 'release' }}\n  cancel-in-progress: false",
+  );
   assert.equal(topLevel("defaults"), "defaults:\n  run:\n    shell: bash");
   assert.ok(lines.length <= 450, `workflow has ${lines.length} lines; target is 450`);
 });
@@ -155,8 +159,13 @@ test("run blocks never interpolate untrusted or secret expressions and never ech
       }
     }
   }
-  const keystoreDecode = source.match(/printf '%s' "\$ANDROID_UPLOAD_KEYSTORE_B64" \| base64 -d > "\$keystore"/gu) ?? [];
+  // The keystore is decoded only by the lane helper, never inline in the workflow.
+  assert.doesNotMatch(source, /base64 -d/u);
+  const keystoreHelper = fs.readFileSync(path.join(laneDirectory, "upload-keystore.sh"), "utf8");
+  const keystoreDecode = keystoreHelper.match(/printf '%s' "\$ANDROID_UPLOAD_KEYSTORE_B64" \| base64 -d > "\$keystore"/gu) ?? [];
   assert.equal(keystoreDecode.length, 1);
+  assert.doesNotMatch(keystoreHelper, /\b(?:echo|printf)\b[^\n]*\$\{?ANDROID_UPLOAD_(?:KEYSTORE_PASSWORD|KEYSTORE_B64|KEY_PASSWORD)\b(?![^\n]*base64 -d)/u);
+  assert.doesNotMatch(keystoreHelper, /set -x|set -o xtrace/u);
   assert.match(JOBS.get("build"), /- name: Remove signing material\n {8}if: always\(\)\n {8}run: rm -rf "\$RUNNER_TEMP\/instafy-android-signing"/u);
 });
 
@@ -185,6 +194,7 @@ test("authorize proves actor, pusher, main containment, committed version and on
   assertOrdered(authorize, [
     '[[ "$GITHUB_REPOSITORY" == "$RELEASE_REPOSITORY" ]]',
     '[[ "$GITHUB_ACTOR" == "$RELEASE_ACTOR" ]]',
+    '[[ "$GITHUB_TRIGGERING_ACTOR" == "$RELEASE_ACTOR" ]]',
     '[[ "$PUSHER_NAME" == "$RELEASE_ACTOR" ]]',
     '[[ "$GITHUB_REF" == "refs/heads/main" ]]',
     "^android-v([0-9A-Za-z][0-9A-Za-z._-]{0,63})-([1-9][0-9]{0,9})$",
@@ -210,7 +220,10 @@ test("build observes Play before building, verifies the signed AAB and publishes
   const build = JOBS.get("build");
   assert.match(build, /^ {4}needs: authorize$/mu);
   assert.match(build, /^ {4}timeout-minutes: 90$/mu);
-  assert.match(build, /submodules: recursive/u);
+  assert.match(build, /submodules: false/u);
+  assert.doesNotMatch(source, /submodules: (?:recursive|true)/u);
+  // No dependency cache may be restored into a job that holds release secrets.
+  assert.doesNotMatch(source, /cache:/u);
   for (const constant of [
     "VITE_OTA_CHANNEL: internal",
     "CAPACITOR_LIVE_UPDATE_DEFAULT_CHANNEL: internal",
@@ -220,6 +233,7 @@ test("build observes Play before building, verifies the signed AAB and publishes
     assert.ok(build.includes(constant), constant);
   }
   assertOrdered(build, [
+    '[[ "$GITHUB_TRIGGERING_ACTOR" == "$RELEASE_ACTOR" ]]',
     'test "$(git rev-parse HEAD)" = "$SOURCE_SHA"',
     "Missing android-release secret",
     'test "$(pnpm --version)" = "10.34.5"',
@@ -227,18 +241,29 @@ test("build observes Play before building, verifies the signed AAB and publishes
     "android-preflight",
     "--dry-run",
     "setup-android-toolchain.sh",
-    "keytool -list",
+    "upload-keystore.sh prove",
     "node scripts/resolve-live-update-public-key.mjs",
+    "node scripts/release/android/trust-key.mjs",
+    "grep -A1 '^public_key_sha256<<' \"$GITHUB_OUTPUT\"",
+    "canonical_sha256=$canonical",
     "browser-safe-supabase-key.mjs --write-env-file .env.supabase",
     "pnpm install --frozen-lockfile",
     "pnpm run test:android:config",
     "run cap:sync",
+    "upload-keystore.sh materialize",
     "./gradlew --no-daemon :app:bundleRelease",
+    "rm -rf \"$RUNNER_TEMP/instafy-android-signing\"",
+    "TRUST_KEY_SHA256: ${{ steps.trust.outputs.canonical_sha256 }}",
     "verify-aab.sh",
     "name: android-aab-${{ needs.authorize.outputs.tag }}",
-    "rm -rf \"$RUNNER_TEMP/instafy-android-signing\"",
     "GITHUB_STEP_SUMMARY",
   ], "build");
+  assert.match(
+    build,
+    /run: bash scripts\/release\/android\/upload-keystore\.sh materialize\n\n {6}- name: Build the signed release bundle\n[\s\S]*?run: \.\/gradlew --no-daemon :app:bundleRelease\n\n {6}- name: Remove signing material\n {8}if: always\(\)\n/u,
+  );
+  assert.equal([...source.matchAll(/upload-keystore\.sh (?:prove|materialize)/gu)].length, 2);
+  assert.doesNotMatch(build, /public_key_sha256 \}\}/u);
   assert.doesNotMatch(build, /resolve-live-update-public-key\.mjs --require-private-key/u);
   assert.match(build, /CAPACITOR_LIVE_UPDATE_PUBLIC_KEY: \$\{\{ vars\.CAPACITOR_LIVE_UPDATE_PUBLIC_KEY \}\}/u);
   assert.match(build, /ANDROID_VERSION_CODE: \$\{\{ needs\.authorize\.outputs\.version_code \}\}/u);
@@ -253,6 +278,7 @@ test("publish runs only for release mode and rechecks state immediately before e
   assertOrdered(publish, [
     "uses: actions/download-artifact@",
     "name: android-aab-${{ needs.authorize.outputs.tag }}",
+    '[[ "$GITHUB_TRIGGERING_ACTOR" == "$RELEASE_ACTOR" ]]',
     'test "$(git rev-parse HEAD)" = "$SOURCE_SHA"',
     "nativeArtifactSha256",
     "release-refs.sh recheck \"$TAG\" \"$SOURCE_SHA\"",
@@ -292,6 +318,16 @@ test("helpers keep the Play contract and the recheck invariants", () => {
     "instafy-release.aab.zip",
     "public-boundary-gitleaks.toml",
   ], "verify-aab");
+  // Release binaries scan with the full GitHub token body, never the bare prefix.
+  const gitleaks = fs.readFileSync(path.join(laneDirectory, "gitleaks-release-artifact.mjs"), "utf8");
+  assert.ok(gitleaks.includes("const releaseConfig = strictTokenRule(baseConfig);"));
+  assert.ok(gitleaks.includes("gh[pousr]_[A-Za-z0-9]{36,}"));
+  // One canonical OTA trust-key digest: SPKI PEM export, refused otherwise.
+  const trustKey = fs.readFileSync(path.join(laneDirectory, "trust-key.mjs"), "utf8");
+  assert.ok(trustKey.includes('key.export({ type: "spki", format: "pem" }).toString().trim()'));
+  assert.ok(trustKey.includes("if (configured !== canonical)"));
+  const inspector = fs.readFileSync(path.join(laneDirectory, "inspect-aab.py"), "utf8");
+  assert.ok(inspector.includes('require(CANONICAL_SPKI_PEM.fullmatch(trimmed) is not None, "live-update-public-key")'));
 });
 
 test("identity scrub: no private identities in the workflow or lane scripts", () => {

@@ -12,8 +12,9 @@ Proves, from the final bytes rather than from a sidecar:
     names dev.instafy.studio with exactly the committed versionName/versionCode;
   * base/assets/capacitor.config.json is the only Capacitor config, with appId
     dev.instafy.studio, LiveUpdate defaultChannel internal, autoUpdateStrategy
-    none, and a publicKey whose normalized-PEM sha256 equals the trust key
-    fingerprint computed by scripts/resolve-live-update-public-key.mjs;
+    none, and a canonical SPKI PEM publicKey whose sha256 equals the trust key
+    fingerprint from scripts/release/android/trust-key.mjs (the same digest
+    the OTA authority computes from its canonical SPKI export);
   * the web bundle carries exactly the internal OTA channel marker and the
     exact source commit.
 Prints one JSON object: schemaVersion, applicationId, versionName, versionCode,
@@ -156,9 +157,19 @@ def android_identity(data):
     }
 
 
+# Canonical SPKI PEM as Node's createPublicKey(...).export({type: "spki",
+# format: "pem"}).toString().trim() prints it: LF only, 64-column base64.
+CANONICAL_SPKI_PEM = re.compile(
+    r"-----BEGIN PUBLIC KEY-----\n(?:[A-Za-z0-9+/=]{64}\n)*[A-Za-z0-9+/=]{1,64}\n-----END PUBLIC KEY-----"
+)
+
+
 def normalized_pem_sha256(value):
     trimmed = value.strip().replace("\\n", "\n")
-    require(trimmed.startswith("-----BEGIN PUBLIC KEY-----"), "live-update-public-key")
+    # The trust key fingerprint (scripts/release/android/trust-key.mjs) is the
+    # sha256 of the canonical export; any other byte form of the same key would
+    # attest a digest the OTA authority never compares against.
+    require(CANONICAL_SPKI_PEM.fullmatch(trimmed) is not None, "live-update-public-key")
     return hashlib.sha256(trimmed.encode("utf-8")).hexdigest()
 
 

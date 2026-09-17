@@ -6,6 +6,7 @@ import test from "node:test";
 
 import {
   parseArguments,
+  RELEASE_TOKEN_REGEX,
   releaseArtifactScannerConfig,
   runReleaseArtifactGate,
   scannerEnvironment,
@@ -18,7 +19,7 @@ function fixture({ version = "8.30.1", findings = [], status = 0 }) {
   const release = path.join(root, "release");
   const config = path.join(root, "gitleaks.toml");
   const scanner = path.join(root, "gitleaks");
-  writeFileSync(config, "[extend]\nuseDefault = true\n");
+  writeFileSync(config, "[extend]\nuseDefault = true\n\n[[rules]]\nid = \"instafy-github-token-prefix\"\nregex = '''(?:gh[p]_)'''\n");
   writeFileSync(
     scanner,
     `#!/bin/sh
@@ -121,4 +122,45 @@ test("CLI arguments and scanner environment are allowlisted", () => {
     if (previous === undefined) delete process.env.GOOGLE_PLAY_SERVICE_ACCOUNT_JSON;
     else process.env.GOOGLE_PLAY_SERVICE_ACCOUNT_JSON = previous;
   }
+});
+
+test("release scanner replaces the bare GitHub token prefix with the full-token rule", () => {
+  const base = readFileSync(path.join(repositoryRoot, "scripts", "public-boundary-gitleaks.toml"), "utf8");
+  const config = releaseArtifactScannerConfig(base);
+  const split = (text) => text.split(/(?=^\[\[)/mu);
+  const baseBlocks = split(base);
+  const releaseBlocks = split(config);
+  assert.equal(releaseBlocks.length, baseBlocks.length + 1, "only the allowlist block is appended");
+  let replaced = 0;
+  baseBlocks.forEach((block, index) => {
+    if (/^id = "instafy-github-token-prefix"$/mu.test(block)) {
+      replaced += 1;
+      assert.equal(releaseBlocks[index].match(/^regex = '''(.*)'''$/mu)?.[1], RELEASE_TOKEN_REGEX);
+      assert.equal(releaseBlocks[index].replace(/^regex = .*$/mu, ""), block.replace(/^regex = .*$/mu, ""));
+    } else {
+      assert.equal(releaseBlocks[index].trimEnd(), block.trimEnd(), "every other rule is carried over unchanged");
+    }
+  });
+  assert.equal(replaced, 1);
+
+  const pattern = new RegExp(RELEASE_TOKEN_REGEX, "u");
+  const body = "A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q7r8S9t0";
+  for (const prefix of ["ghp", "gho", "ghu", "ghs", "ghr"]) {
+    assert.equal(pattern.test([prefix, body].join("_")), true, prefix);
+  }
+  assert.equal(pattern.test(["github", "pat", "x".repeat(70)].join("_")), true);
+  // Four chance bytes of compressed noise followed by binary are not a token.
+  const bare = ["gh", "p_"].join("");
+  assert.equal(pattern.test(bare + String.fromCharCode(0, 255, 19) + "binary"), false);
+  assert.equal(pattern.test(bare + "short"), false);
+});
+
+test("release scanner fails closed when the token rule is missing, duplicated or not single-line", () => {
+  const rule = (regex) => "[[rules]]\nid = \"instafy-github-token-prefix\"\n" + regex + "\n";
+  assert.throws(() => releaseArtifactScannerConfig("[extend]\nuseDefault = true\n"), /exactly one instafy-github-token-prefix/u);
+  assert.throws(
+    () => releaseArtifactScannerConfig(rule("regex = '''a'''") + "\n" + rule("regex = '''b'''")),
+    /exactly one instafy-github-token-prefix/u,
+  );
+  assert.throws(() => releaseArtifactScannerConfig(rule("regex = \"a\"")), /single-line regex/u);
 });
