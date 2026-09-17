@@ -30,7 +30,6 @@ const dispatch = (overrides = {}) => ({
   ref: "refs/heads/main",
   githubSha: SHA,
   inputTag: TAG,
-  inputDryRun: "false",
   tagSha: SHA,
   compareStatus: "identical",
   ...overrides,
@@ -64,21 +63,21 @@ test("tag format, sha prefix, moved tags and main containment fail closed", () =
   assert.throws(() => verifyReleaseTag(push({ githubSha: "abc" })), /40-character/u);
 });
 
-test("dispatch must run main's workflow and names the mode explicitly", () => {
-  assert.equal(verifyReleaseTag(dispatch()).mode, "release");
-  assert.equal(verifyReleaseTag(dispatch({ inputDryRun: "true" })).mode, "dry_run");
+test("dispatch must run main's workflow and is always a dry run of github.sha", () => {
+  assert.deepEqual(verifyReleaseTag(dispatch()), { tag: TAG, mode: "dry_run", sourceSha: SHA, sourceSha12: "8ddffed21d44" });
+  // A stale inputs.dry_run=false from an older caller cannot turn a dispatch into a publication.
+  assert.equal(verifyReleaseTag({ ...dispatch(), inputDryRun: "false" }).mode, "dry_run");
   assert.throws(() => verifyReleaseTag(dispatch({ ref: `refs/tags/${TAG}` })), /--ref main/u);
-  assert.throws(() => verifyReleaseTag(dispatch({ inputDryRun: "" })), /dry_run must be/u);
   assert.throws(() => verifyReleaseTag(dispatch({ actor: "octocat" })), /started by instafy-bot/u);
   assert.throws(() => verifyReleaseTag({ ...dispatch(), eventName: "pull_request" }), /Unsupported release trigger/u);
 });
 
-test("only a dry run may name a tag that does not exist yet", () => {
-  const dry = verifyReleaseTag(dispatch({ inputDryRun: "true", tagSha: "" }));
+test("the release commit is always github.sha; an existing tag must peel to it", () => {
+  const dry = verifyReleaseTag(dispatch({ tagSha: "" }));
   assert.equal(dry.sourceSha, SHA);
-  assert.throws(() => verifyReleaseTag(dispatch({ tagSha: "" })), /does not exist/u);
-  assert.throws(
-    () => verifyReleaseTag(dispatch({ inputDryRun: "true", tagSha: "", githubSha: OTHER })),
-    /does not name its commit/u,
-  );
+  assert.throws(() => verifyReleaseTag(dispatch({ tagSha: OTHER })), /not the main head/u);
+  assert.throws(() => verifyReleaseTag(dispatch({ tagSha: "", githubSha: OTHER })), /does not name its commit/u);
+  assert.throws(() => verifyReleaseTag(push({ tagSha: "" })), /does not exist/u);
+  assert.throws(() => verifyReleaseTag(dispatch({ tagSha: "abc" })), /40-character/u);
+  assert.throws(() => verifyReleaseTag(dispatch({ headSha: OTHER })), /checked-out source/u);
 });

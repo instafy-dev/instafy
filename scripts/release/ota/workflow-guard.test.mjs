@@ -55,8 +55,8 @@ function listFiles(relativeDir) {
   );
 }
 
-// Dry runs never cancel a pending release; each release tag queues only behind itself.
-const OTA_CONCURRENCY_GROUP = "mobile-ota-release-${{ inputs.dry_run == true && 'dry-run' || inputs.tag || github.ref_name }}";
+// Dry runs (every dispatch) never cancel a pending release; each release tag queues only behind itself.
+const OTA_CONCURRENCY_GROUP = "mobile-ota-release-${{ github.event_name == 'workflow_dispatch' && 'dry-run' || github.ref_name }}";
 
 function commonWorkflowRules(source, name) {
   assert.match(source, /^permissions:\n  contents: read\n/mu, `${name}: top-level permissions`);
@@ -88,7 +88,7 @@ function commonWorkflowRules(source, name) {
   assert.doesNotMatch(source, /ota\/releases|\/activate\b|CONTROLLER_INTERNAL_TOKEN|SERVICE_ROLE|INSTAFY_BOT_TOKEN/u);
 }
 
-test("OTA release triggers only on bot tags or main dispatch with tag + dry_run", () => {
+test("OTA release triggers only on bot tags or a main dry-run dispatch", () => {
   const source = read(OTA);
   commonWorkflowRules(source, OTA);
   assert.equal(
@@ -99,21 +99,38 @@ test("OTA release triggers only on bot tags or main dispatch with tag + dry_run"
   workflow_dispatch:
     inputs:
       tag:
-        description: "Release tag (existing, or the intended tag name for a dry run)"
+        description: "Dry run only: ota-v<first 12 hex of the main head>; builds, signs and verifies, publishes nothing"
         required: true
         type: string
-      dry_run:
-        description: "Build, sign and verify but publish nothing"
-        required: false
-        type: boolean
-        default: true
 
 `,
   );
+  assert.doesNotMatch(source, /inputs\.dry_run|INPUT_DRY_RUN/u, "a dispatch can never select release mode");
   assert.ok(source.includes(`\nconcurrency:\n  group: ${OTA_CONCURRENCY_GROUP}\n  cancel-in-progress: false\n`));
   assert.match(source, /^  DOWNLOADS_BASE_URL: https:\/\/downloads\.instafy\.dev\n  MOBILE_OTA_DOWNLOADS_PREFIX: mobile$/mu);
   assert.match(source, /^  OTA_CHANNEL: internal$/mu);
   assert.ok(source.split("\n").length <= 455, "workflow should stay within the 455-line target");
+});
+
+test("every OTA job checks out github.sha and nothing writes a cache", () => {
+  // Checking out a ref derived from step outputs or inputs in a main/tag context is a cache-poisoning
+  // shape; the exact-source binding is instead enforced by authorize (tag peels to github.sha) and by
+  // every job's `git rev-parse HEAD` == SOURCE_SHA check.
+  const source = read(OTA);
+  const all = jobs(source);
+  for (const [name, job] of all) {
+    const checkouts = steps(job).filter((step) => /uses: actions\/checkout@/u.test(step.text));
+    assert.equal(checkouts.length, 1, `${name}: exactly one checkout`);
+    const refs = [...checkouts[0].text.matchAll(/^\s+ref: (.*)$/gmu)].map((m) => m[1]);
+    assert.deepEqual(refs, ["${{ github.sha }}"], `${name}: checkout must be github.sha`);
+    if (name !== "authorize") {
+      assert.match(job, /test "\$\(git rev-parse HEAD\)" = "\$SOURCE_SHA"/u, `${name}: re-proves the source`);
+    }
+  }
+  assert.doesNotMatch(source, /^\s+ref: \$\{\{ (?:needs|steps|inputs)\./mu);
+  assert.doesNotMatch(source, /actions\/cache@|^\s+cache(?:-dependency-path)?:/mu, "no cache reads or writes");
+  const worker = read(WORKER);
+  assert.doesNotMatch(worker, /actions\/cache@|^\s+cache(?:-dependency-path)?:/mu, "no cache reads or writes");
 });
 
 test("OTA jobs isolate secrets in the ota-release environment", () => {
@@ -180,7 +197,7 @@ test("authorize binds actor, pusher, main containment, version and one-shot prob
     "^ota-v[0-9a-f]{12}$",
     'gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/${tag}"',
     "git/tags/${tag_sha}",
-    'compare/${candidate}...main" --jq .status',
+    'compare/${GITHUB_SHA}...main" --jq .status',
     "persist-credentials: false",
     "node scripts/release/ota/verify-release-tag.mjs",
     "node scripts/release/ota/read-committed-mobile-versions.mjs .",
@@ -189,7 +206,6 @@ test("authorize binds actor, pusher, main containment, version and one-shot prob
     "curl --silent --head",
     "GITHUB_STEP_SUMMARY",
   ]);
-  assert.match(authorize, /INPUT_DRY_RUN: \$\{\{ inputs\.dry_run \}\}/u);
   assert.match(authorize, /PUSHER: \$\{\{ github\.event\.pusher\.name \}\}/u);
   assert.equal(authorize.match(/TRIGGERING_ACTOR: \$\{\{ github\.triggering_actor \}\}/gu)?.length, 2);
 });

@@ -36,7 +36,6 @@ function requireSha(value, label) {
  * @param {string} input.githubSha github.sha
  * @param {string} [input.refName] github.ref_name (push)
  * @param {string} [input.inputTag] inputs.tag (dispatch)
- * @param {string} [input.inputDryRun] inputs.dry_run (dispatch)
  * @param {string} [input.tagSha] peeled commit of refs/tags/<tag>, empty when absent
  * @param {string} input.compareStatus compare/<source>...main status
  * @param {string} [input.headSha] git rev-parse HEAD of the checked-out source
@@ -65,14 +64,12 @@ export function verifyReleaseTag(input) {
     mode = "release";
   } else if (eventName === "workflow_dispatch") {
     if (input.ref !== "refs/heads/main") {
-      fail("An OTA release dispatch must run main's workflow (--ref main)");
+      fail("An OTA dry run dispatch must run main's workflow (--ref main)");
     }
+    // Publication happens only on the bot's tag push. A dispatch always builds
+    // exactly github.sha, the main head it was started for, and publishes nothing.
     tag = String(input.inputTag ?? "").trim();
-    const dryRun = String(input.inputDryRun ?? "");
-    if (dryRun !== "true" && dryRun !== "false") {
-      fail("dry_run must be true or false");
-    }
-    mode = dryRun === "true" ? "dry_run" : "release";
+    mode = "dry_run";
   } else {
     fail(`Unsupported release trigger: ${eventName || "(none)"}`);
   }
@@ -82,17 +79,20 @@ export function verifyReleaseTag(input) {
     fail("The OTA release tag must match ota-v<first 12 hex of the commit>");
   }
 
+  // Every job checks out github.sha, so the release commit is always the run's own commit.
+  const sourceSha = githubSha;
   const tagSha = String(input.tagSha ?? "");
-  let sourceSha;
   if (tagSha) {
-    sourceSha = requireSha(tagSha, "The peeled tag commit");
-  } else if (mode === "dry_run") {
-    sourceSha = githubSha;
-  } else {
+    requireSha(tagSha, "The peeled tag commit");
+    if (tagSha !== githubSha) {
+      fail(
+        eventName === "push"
+          ? "The pushed tag no longer resolves to the commit this run was triggered for"
+          : `Tag ${tag} names ${tagSha}, not the main head ${githubSha} this dry run builds`,
+      );
+    }
+  } else if (mode === "release") {
     fail(`Tag ${tag} does not exist; only a dry run may name a tag that is not pushed yet`);
-  }
-  if (eventName === "push" && sourceSha !== githubSha) {
-    fail("The pushed tag no longer resolves to the commit this run was triggered for");
   }
   if (!sourceSha.startsWith(match[1])) {
     fail(`Tag ${tag} does not name its commit ${sourceSha}`);
@@ -128,7 +128,6 @@ function main() {
     githubSha: env.RUN_SHA,
     refName: env.REF_NAME,
     inputTag: env.INPUT_TAG,
-    inputDryRun: env.INPUT_DRY_RUN,
     tagSha: env.TAG_SHA,
     compareStatus: env.COMPARE_STATUS,
     headSha: env.HEAD_SHA,
