@@ -228,6 +228,11 @@ Recovery:
   signed artifact is retained (30 days). This reuses authorize's outputs, and `put-immutable.sh`
   accepts a byte-identical re-put. **Re-run all jobs** fails at authorize once any object is
   public, and a dispatch never publishes. Past the retention window, release a new commit under a new tag.
+- If the tag push never started a run (GitHub dropped the event, or a bulk tag push did not
+  trigger), or the run is gone with nothing left to re-run, that tag cannot be published: dispatch
+  is a dry run only and nothing else may start a release. Recovery is the same as past the
+  retention window: land a new commit on main and push a new `ota-v<sha12>` tag for it. Leave the
+  unpublished tag in place; it names no Release and no R2 object.
 - If `gh release create` was interrupted and left a draft Release, delete the draft by hand and
   then re-run the failed publish job. A draft does not count as a published Release.
 - A run or re-run is accepted only when `github.triggering_actor` is the release bot. authorize
