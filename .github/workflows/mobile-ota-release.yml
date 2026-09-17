@@ -2,6 +2,8 @@ name: Mobile OTA Release
 
 # The bot-pushed immutable tag ota-v<sha12> is the ledger: build, sign and publish that protected-main
 # commit's web layer to R2 plus a secret-free receipt. Registration/activation stay with the private train.
+# Every job checks out github.sha only: the tag push builds the tag's commit, and a main dispatch is a dry run
+# of the main head it was started for. Publication happens only on the tag push (or a re-run of that run).
 
 on:
   push:
@@ -10,20 +12,15 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: "Release tag (existing, or the intended tag name for a dry run)"
+        description: "Dry run only: ota-v<first 12 hex of the main head>; builds, signs and verifies, publishes nothing"
         required: true
         type: string
-      dry_run:
-        description: "Build, sign and verify but publish nothing"
-        required: false
-        type: boolean
-        default: true
 
 permissions:
   contents: read
 
 concurrency:
-  group: mobile-ota-release-${{ inputs.dry_run == true && 'dry-run' || inputs.tag || github.ref_name }}
+  group: mobile-ota-release-${{ github.event_name == 'workflow_dispatch' && 'dry-run' || github.ref_name }}
   cancel-in-progress: false
 
 defaults:
@@ -86,14 +83,13 @@ jobs:
           elif ! grep -q 'HTTP 404' "$RUNNER_TEMP/tag-ref.err"; then
             echo "::error::Unable to resolve tag ${tag}."; exit 1
           fi
-          candidate="${tag_sha:-$GITHUB_SHA}"
-          compare_status="$(gh api "repos/${GITHUB_REPOSITORY}/compare/${candidate}...main" --jq .status)"
-          printf 'tag_sha=%s\ncandidate=%s\ncompare_status=%s\n' "$tag_sha" "$candidate" "$compare_status" >> "$GITHUB_OUTPUT"
+          compare_status="$(gh api "repos/${GITHUB_REPOSITORY}/compare/${GITHUB_SHA}...main" --jq .status)"
+          printf 'tag_sha=%s\ncompare_status=%s\n' "$tag_sha" "$compare_status" >> "$GITHUB_OUTPUT"
 
       - name: Check out the release commit
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
-          ref: ${{ steps.facts.outputs.candidate }}
+          ref: ${{ github.sha }}
           persist-credentials: false
           fetch-depth: 1
           submodules: false
@@ -110,7 +106,6 @@ jobs:
           RUN_SHA: ${{ github.sha }}
           REF_NAME: ${{ github.ref_name }}
           INPUT_TAG: ${{ inputs.tag }}
-          INPUT_DRY_RUN: ${{ inputs.dry_run }}
           TAG_SHA: ${{ steps.facts.outputs.tag_sha }}
           COMPARE_STATUS: ${{ steps.facts.outputs.compare_status }}
         run: |
@@ -167,7 +162,7 @@ jobs:
       - name: Check out the release commit
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
-          ref: ${{ needs.authorize.outputs.source_sha }}
+          ref: ${{ github.sha }}
           persist-credentials: false
           fetch-depth: 1
           submodules: recursive
@@ -179,7 +174,6 @@ jobs:
         uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
         with:
           node-version: "22"
-          cache: pnpm
 
       - name: Verify the toolchain and publishable configuration, then build
         run: |
@@ -227,7 +221,7 @@ jobs:
       - name: Check out the release commit
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
-          ref: ${{ needs.authorize.outputs.source_sha }}
+          ref: ${{ github.sha }}
           persist-credentials: false
           fetch-depth: 1
           submodules: false
@@ -359,7 +353,7 @@ jobs:
       - name: Check out the release commit
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
-          ref: ${{ needs.authorize.outputs.source_sha }}
+          ref: ${{ github.sha }}
           persist-credentials: false
           fetch-depth: 1
           submodules: false

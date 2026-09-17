@@ -196,8 +196,10 @@ deployment's CI secret store and embed the corresponding public key in native bu
 ### Public release lane operations
 
 `.github/workflows/mobile-ota-release.yml` runs steps 1-4 when the release bot pushes a tag named
-`ota-v<sha12>`. The workflow_dispatch trigger (`tag`, `dry_run`) is for dry runs and for retrying a
-tag. Steps 5 and 6 stay with the operator-authenticated control plane caller.
+`ota-v<sha12>`. Only that tag push publishes. The workflow_dispatch trigger (`tag`) is always a dry
+run: it builds, signs and verifies the main head it was started for and publishes nothing. Every job
+checks out `github.sha`, so a dispatch can only name a tag that is absent or peels to that main head.
+Steps 5 and 6 stay with the operator-authenticated control plane caller.
 
 Set things up in this order:
 
@@ -209,7 +211,7 @@ Set things up in this order:
 2. Create the `ota-release` environment with deployment policies tag `ota-v*` and branch `main`
    (the dry run in step 3 is a main dispatch and is refused at sign without the branch policy), then
    add its secrets and the `CAPACITOR_LIVE_UPDATE_PUBLIC_KEY` variable.
-3. Dispatch `dry_run=true` for the current main head to prove that the signing key matches the
+3. Dispatch a dry run (`--ref main -f tag=ota-v<sha12 of the main head>`) to prove that the signing key matches the
    shipped trust anchor.
 
 The downloads origin (`https://downloads.instafy.dev`), the bucket and the `mobile`/`desktop-app`
@@ -218,14 +220,14 @@ override them.
 
 Recovery:
 
-- Dry runs share a concurrency group with each other, and each release tag has its own group. A
-  second release run for the same tag can therefore cancel a pending one. To recover, dispatch
-  `tag=<tag>, dry_run=false`; release mode accepts an existing tag.
+- Dry runs share a concurrency group with each other, and each release tag has its own group, so
+  a dry run never cancels a pending release. A release cannot be started by dispatch; recover a tag
+  push run by re-running it (it keeps its tag commit as `github.sha`).
 - Publication is one-shot. authorize requires the GitHub Release and both R2 objects to be absent.
   If publish fails after the R2 upload, use **Re-run failed jobs** on the original run while the
   signed artifact is retained (30 days). This reuses authorize's outputs, and `put-immutable.sh`
-  accepts a byte-identical re-put. **Re-run all jobs** and a new dispatch will both fail at
-  authorize. Past the retention window, release a new commit under a new tag.
+  accepts a byte-identical re-put. **Re-run all jobs** fails at authorize once any object is
+  public, and a dispatch never publishes. Past the retention window, release a new commit under a new tag.
 - If `gh release create` was interrupted and left a draft Release, delete the draft by hand and
   then re-run the failed publish job. A draft does not count as a published Release.
 - A run or re-run is accepted only when `github.triggering_actor` is the release bot. authorize
