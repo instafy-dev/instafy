@@ -6,10 +6,13 @@ name: Desktop release
 # build signs and notarizes on hosted macOS, the launch smoke (or the optional
 # Personal Browser canary) proves the packaged app, and publish writes the
 # downloads R2 layout then the GitHub Release with release-receipt.json.
-# Lane tooling comes from the workflow commit (.release-tooling); the product
-# bytes come from the tag commit. Recover a partial publish with "Re-run failed
-# jobs" on the same run; a fresh dispatch of a partially published tag fails
-# closed at the immutable-object guards by design.
+# Every job checks out github.sha, the commit that triggered the run: authorize
+# refuses any run whose release tag resolves to a different commit, so the
+# product bytes are the tag commit without ever checking out a computed ref, and
+# no job reads or writes an Actions cache. Lane tooling also comes from the
+# workflow commit (.release-tooling). Recover a partial publish with "Re-run
+# failed jobs" on the same run; a fresh dispatch of a partially published tag
+# fails closed at the immutable-object guards by design.
 
 on:
   push:
@@ -96,7 +99,7 @@ jobs:
           node "$TOOLING/verify-release-tag.mjs" resolve >> "$GITHUB_OUTPUT"
       - name: Check out the exact release source
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
-        with: { ref: '${{ steps.resolve.outputs.source_sha }}', path: source, persist-credentials: false, fetch-depth: 1 }
+        with: { ref: '${{ github.sha }}', path: source, persist-credentials: false, fetch-depth: 1 }
       - name: Require the tag version in source
         id: source
         env:
@@ -208,16 +211,14 @@ jobs:
           set -euo pipefail
           [[ "$RUNNER_ARCH" == "ARM64" ]] || { echo "::error::The Desktop release requires RUNNER_ARCH ARM64."; exit 1; }
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
-        with: { ref: '${{ needs.authorize.outputs.source_sha }}', submodules: recursive, persist-credentials: false, fetch-depth: 1 }
+        with: { ref: '${{ github.sha }}', submodules: recursive, persist-credentials: false, fetch-depth: 1 }
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with: { ref: '${{ github.workflow_sha }}', path: .release-tooling, persist-credentials: false, fetch-depth: 1, sparse-checkout: scripts }
       - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4
       - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
-        with: { node-version: '22', cache: pnpm }
+        with: { node-version: '22' }
       - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4
         with: { toolchain: 1.97.0 }
-      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
-        with: { workspaces: packages/runtime-agent, shared-key: desktop-release-runtime-agent-macos }
       - name: Pin toolchains and install exact dependencies
         run: |
           set -euo pipefail
@@ -369,23 +370,25 @@ jobs:
       contents: read
     env:
       VERSION: ${{ needs.authorize.outputs.version }}
+      SOURCE_SHA: ${{ needs.authorize.outputs.source_sha }}
     steps:
       - name: Require the Apple Silicon hosted runner
         run: |
           set -euo pipefail
           [[ "$RUNNER_ARCH" == "ARM64" ]] || { echo "::error::The launch smoke requires RUNNER_ARCH ARM64."; exit 1; }
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
-        with: { ref: '${{ needs.authorize.outputs.source_sha }}', submodules: recursive, persist-credentials: false, fetch-depth: 1 }
+        with: { ref: '${{ github.sha }}', submodules: recursive, persist-credentials: false, fetch-depth: 1 }
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with: { ref: '${{ github.workflow_sha }}', path: .release-tooling, persist-credentials: false, fetch-depth: 1, sparse-checkout: scripts }
       - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4
       - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
-        with: { node-version: '22', cache: pnpm }
+        with: { node-version: '22' }
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with: { name: 'desktop-app-macos-arm64-${{ needs.authorize.outputs.tag }}', path: desktop-artifact }
       - name: Extract and assess the notarized application
         run: |
           set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
           pnpm install --frozen-lockfile --prefer-offline
           archive="$(node "$TOOLING/release-artifacts.mjs" archive --root desktop-artifact --version "$VERSION")"
           mkdir -m 700 "$RUNNER_TEMP/smoke"
@@ -416,6 +419,7 @@ jobs:
       actions: read
     env:
       VERSION: ${{ needs.authorize.outputs.version }}
+      SOURCE_SHA: ${{ needs.authorize.outputs.source_sha }}
       PLAYWRIGHT_ELECTRON_SHARED_BROWSER_BASE_URL: https://prod.instafy.dev
       PLAYWRIGHT_EXTERNAL_BASE_URL: https://prod.instafy.dev
       PLAYWRIGHT_CONTROLLER_URL: https://controller.instafy.dev
@@ -428,17 +432,18 @@ jobs:
           set -euo pipefail
           [[ "$RUNNER_ARCH" == "ARM64" ]] || { echo "::error::The canary requires RUNNER_ARCH ARM64."; exit 1; }
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
-        with: { ref: '${{ needs.authorize.outputs.source_sha }}', submodules: recursive, persist-credentials: false, fetch-depth: 1 }
+        with: { ref: '${{ github.sha }}', submodules: recursive, persist-credentials: false, fetch-depth: 1 }
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with: { ref: '${{ github.workflow_sha }}', path: .release-tooling, persist-credentials: false, fetch-depth: 1, sparse-checkout: scripts }
       - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4
       - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
-        with: { node-version: '22', cache: pnpm }
+        with: { node-version: '22' }
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with: { name: 'desktop-app-macos-arm64-${{ needs.authorize.outputs.tag }}', path: desktop-artifact }
       - name: Extract and assess the notarized application
         run: |
           set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
           archive="$(node "$TOOLING/release-artifacts.mjs" archive --root desktop-artifact --version "$VERSION")"
           mkdir -m 700 "$RUNNER_TEMP/canary"
           ditto -x -k "$archive" "$RUNNER_TEMP/canary"
@@ -447,8 +452,6 @@ jobs:
           codesign --verify --deep --strict --verbose=2 "$RUNNER_TEMP/canary/Instafy.app"
           xcrun stapler validate "$RUNNER_TEMP/canary/Instafy.app"
           spctl --assess --type execute --verbose=4 "$RUNNER_TEMP/canary/Instafy.app"
-      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with: { path: ~/Library/Caches/ms-playwright, key: "playwright-chromium-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('pnpm-lock.yaml') }}" }
       - name: Install dependencies and Chromium without machine credentials
         run: |
           set -euo pipefail
@@ -537,7 +540,7 @@ jobs:
       ARTIFACT_DIR: desktop-artifact
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
-        with: { ref: '${{ needs.authorize.outputs.source_sha }}', submodules: false, persist-credentials: false, fetch-depth: 1 }
+        with: { ref: '${{ github.sha }}', submodules: false, persist-credentials: false, fetch-depth: 1 }
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with: { ref: '${{ github.workflow_sha }}', path: .release-tooling, persist-credentials: false, fetch-depth: 1, sparse-checkout: scripts }
       - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6

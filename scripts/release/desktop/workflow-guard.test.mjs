@@ -175,6 +175,27 @@ test("every lane tooling checkout contains what its tests and scripts read", () 
   assert.match(authorize, /scripts\/release\/desktop\/\*\.test\.mjs/u);
 });
 
+test("jobs check out only the triggering commit or the workflow commit and never use Actions caches", () => {
+  // CodeQL cache-poisoning hardening: no checkout ref is computed from inputs or
+  // job/step outputs; authorize binds the release tag to github.sha instead.
+  const all = jobs();
+  const refs = [...source.matchAll(/uses: actions\/checkout@[0-9a-f]{40} # v6\n(?:\s+#[^\n]*\n)*\s+with: \{ ref: '([^']*)'/gu)].map((match) => match[1]);
+  assert.equal(refs.length, [...source.matchAll(/uses: actions\/checkout@/gu)].length, "every checkout names an explicit ref");
+  for (const ref of refs) {
+    assert.ok(["${{ github.sha }}", "${{ github.workflow_sha }}"].includes(ref), `untrusted checkout ref ${ref}`);
+  }
+  assert.doesNotMatch(source, /ref: '\$\{\{ (?:inputs|needs|steps|github\.event)\./u);
+  for (const name of ["authorize", "build", "launch_smoke", "personal_browser_canary", "publish"]) {
+    assert.match(all[name], /ref: '\$\{\{ github\.sha \}\}'/u, `${name} checks out github.sha`);
+  }
+  for (const name of ["build", "launch_smoke", "personal_browser_canary", "publish"]) {
+    assert.match(all[name], /SOURCE_SHA: \$\{\{ needs\.authorize\.outputs\.source_sha \}\}/u, `${name} binds SOURCE_SHA`);
+    assert.match(all[name], /test "\$\(git rev-parse HEAD\)" = "\$SOURCE_SHA"/u, `${name} re-asserts the checkout`);
+  }
+  assert.doesNotMatch(source, /actions\/cache@|Swatinem\/rust-cache|\bcache: |cache-dependency-path/u);
+  assert.match(verifyScript, /if \(sourceSha !== sha\) \{/u);
+});
+
 test("authorize checks actor, pusher, tag commit, main ancestry, version and one-shot probes in order", () => {
   const { authorize } = jobs();
   assert.doesNotMatch(authorize, /environment:|secrets\./u);
@@ -186,7 +207,7 @@ test("authorize checks actor, pusher, tag commit, main ancestry, version and one
       "git/ref/tags/${TAG}",
       "compare/${COMPARE_BASE}...main",
       'verify-release-tag.mjs" resolve',
-      "ref: '${{ steps.resolve.outputs.source_sha }}'",
+      "ref: '${{ github.sha }}', path: source",
       "HEAD_SHA=\"$(git -C source rev-parse HEAD)\"",
       'verify-release-tag.mjs" source',
       "scripts/create-desktop-release-metadata.test.mjs scripts/verify-desktop-publication.test.mjs",
