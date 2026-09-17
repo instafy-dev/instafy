@@ -788,6 +788,12 @@ test("Gitleaks marker rules decode private values without path-broad secret allo
     source,
     /paths = \['''\(\?:\^\|\/\)packages\/provider-contract/u,
   );
+  // Exactly two product-marker path exceptions: the provider contract and the
+  // vendored hosted-web robot slice. Any further prefix is a new policy change.
+  assert.equal(
+    [...source.matchAll(/^\s+paths = (.*)$/gmu)][0][1],
+    "['''(?:^|/)packages/provider-contract(?:/|$)''', '''(?:^|/)packages/frontend/hosted/robot(?:/|$)''']",
+  );
   assert.match(
     streamSource,
     /^path = "scripts\/public-boundary-gitleaks\.toml"$/mu,

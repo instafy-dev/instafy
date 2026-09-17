@@ -109,6 +109,56 @@ test("accepts neutral public files and provider-contract product references", ()
   );
 });
 
+test("accepts product references only inside the exact hosted-web robot slice prefix", () => {
+  const productMarker = ["kno", "sh"].join("");
+  const packageMarker = [productMarker, "contract"].join("-");
+  withFixture(
+    {
+      [`packages/frontend/hosted/robot/frontend/${productMarker}Runtime.ts`]: `export const family = '${productMarker}';\n`,
+      "packages/frontend/hosted/robot/encoded.txt": Buffer.from(productMarker).toString("base64"),
+      "packages/frontend/hosted/robot-evil/probe.ts": `export const family = '${productMarker}';\n`,
+      "packages/frontend/hosted/manifest.ts": `export const family = '${productMarker}';\n`,
+      "packages/frontend/src/hosted/robot/probe.ts": `export const family = '${productMarker}';\n`,
+      "PACKAGES/FRONTEND/HOSTED/ROBOT/probe.ts": `export const family = '${productMarker}';\n`,
+      "packages/frontend/hosted/robot/package.ts": `export const name = '${packageMarker}';\n`,
+    },
+    (root, paths) => {
+      const violations = findPublicBoundaryViolations({ root, paths });
+      const has = (filePath, rule) =>
+        violations.some((finding) => finding.path === filePath && finding.rule === rule);
+      assert.ok(!has(`packages/frontend/hosted/robot/frontend/${productMarker}Runtime.ts`, "private-product"));
+      assert.ok(!has("packages/frontend/hosted/robot/encoded.txt", "private-product"));
+      for (const filePath of [
+        "packages/frontend/hosted/robot-evil/probe.ts",
+        "packages/frontend/hosted/manifest.ts",
+        "packages/frontend/src/hosted/robot/probe.ts",
+        "PACKAGES/FRONTEND/HOSTED/ROBOT/probe.ts",
+      ]) {
+        assert.ok(has(filePath, "private-product"), `expected private-product finding for ${filePath}`);
+      }
+      assert.ok(
+        has("packages/frontend/hosted/robot/package.ts", "private-package"),
+        "the private package marker keeps no exception inside the slice",
+      );
+    },
+  );
+});
+
+test("a sibling directory whose name extends the slice prefix does not inherit the exception", () => {
+  const productMarker = ["kno", "sh"].join("");
+  withFixture(
+    { "packages/frontend/hosted/robotx/probe.ts": `export const family = '${productMarker}';\n` },
+    (root, paths) => {
+      assert.ok(
+        findPublicBoundaryViolations({ root, paths }).some(
+          ({ path: findingPath, rule }) =>
+            findingPath === "packages/frontend/hosted/robotx/probe.ts" && rule === "private-product",
+        ),
+      );
+    },
+  );
+});
+
 test("rejects private paths, live environments, auth material, and product markers", () => {
   const productMarker = ["kno", "sh"].join("");
   withFixture(
