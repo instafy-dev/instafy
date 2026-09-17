@@ -112,7 +112,7 @@ export function resolveSource(input) {
     if (eventName === "push") {
       deny("The pushed tag no longer resolves to the commit that triggered this run.");
     }
-    deny(`${tag} resolves to ${sourceSha}, not to the main head ${sha} this dispatch runs from; re-run the tag's own push run instead.`);
+    deny(`${tag} resolves to ${sourceSha}, not to the main head ${sha} this dispatch runs from; re-run the tag's own push run instead, or ship a new version and tag if that run cannot be re-run.`);
   }
   if (input.compareBase !== sourceSha) deny("The main comparison was made for a different commit.");
   if (!["identical", "ahead"].includes(input.compareStatus)) {

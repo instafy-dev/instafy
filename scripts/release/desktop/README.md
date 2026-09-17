@@ -15,7 +15,10 @@ ledger: there are no deployment ledgers, journals or merge freezes.
   it runs from (`github.sha`): authorize refuses it unless the named tag, when it
   exists, resolves to that same commit. A tag at an older commit is published only by
   its own tag-push run; recover a cancelled tag-push run with **Re-run all jobs** on
-  that run, not with a dispatch.
+  that run, not with a dispatch. This is a deliberate narrowing: once `main` has moved
+  past a tag whose push run never started, or can no longer be re-run (GitHub allows
+  re-runs for 30 days), that tag cannot be shipped or dry-run; bump the version and
+  push a new tag at the `main` head instead.
 
 Concurrency: runs are grouped per tag, and the publish job has its own global group,
 so stable-pointer writes never race. GitHub keeps only one *pending* run or job per
