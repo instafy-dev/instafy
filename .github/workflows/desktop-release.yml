@@ -1,0 +1,580 @@
+name: Desktop release
+
+# One signed macOS arm64 Desktop release per bot-pushed immutable tag
+# desktop-app-v<MAJOR.MINOR.PATCH>. The tag is the ledger: authorize proves the
+# tag commit is on protected main and matches packages/desktop-app/package.json,
+# build signs and notarizes on hosted macOS, the launch smoke (or the optional
+# Personal Browser canary) proves the packaged app, and publish writes the
+# downloads R2 layout then the GitHub Release with release-receipt.json.
+# Lane tooling comes from the workflow commit (.release-tooling); the product
+# bytes come from the tag commit. Recover a partial publish with "Re-run failed
+# jobs" on the same run; a fresh dispatch of a partially published tag fails
+# closed at the immutable-object guards by design.
+
+on:
+  push:
+    tags: ['desktop-app-v*']
+  workflow_dispatch:
+    inputs:
+      tag: { description: 'Release tag (existing, or the intended tag name for a dry run)', required: true, type: string }
+      dry_run: { description: 'Build, sign and verify but publish nothing', required: false, type: boolean, default: true }
+
+permissions:
+  contents: read
+
+concurrency:
+  group: desktop-release
+  cancel-in-progress: false
+
+defaults:
+  run:
+    shell: bash
+
+env:
+  DOWNLOADS_BASE_URL: ${{ vars.DOWNLOADS_BASE_URL || 'https://downloads.instafy.dev' }}
+  DOWNLOADS_BUCKET: ${{ vars.DOWNLOADS_BUCKET || 'instafy-downloads' }}
+  DESKTOP_DOWNLOADS_PREFIX: ${{ vars.DESKTOP_DOWNLOADS_PREFIX || 'desktop-app' }}
+  TOOLING: .release-tooling/scripts/release/desktop
+
+jobs:
+  authorize:
+    name: Authorize release tag
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    outputs:
+      tag: ${{ steps.request.outputs.tag }}
+      mode: ${{ steps.request.outputs.mode }}
+      version: ${{ steps.source.outputs.version }}
+      source_sha: ${{ steps.resolve.outputs.source_sha }}
+      previous_stable_version: ${{ steps.one_shot.outputs.previous_stable_version }}
+    steps:
+      - name: Check out lane tooling from the workflow commit
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with: { ref: '${{ github.workflow_sha }}', path: .release-tooling, persist-credentials: false, fetch-depth: 1, sparse-checkout: "scripts\npackages/downloads-worker" }
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with: { node-version: '22' }
+      - name: Check event, actor, pusher and tag shape
+        id: request
+        env:
+          PUSHER_NAME: ${{ github.event.pusher.name }}
+          INPUT_TAG: ${{ inputs.tag }}
+          INPUT_DRY_RUN: ${{ inputs.dry_run }}
+        run: |
+          set -euo pipefail
+          test "$GITHUB_WORKFLOW_SHA" = "$GITHUB_SHA"
+          node "$TOOLING/verify-release-tag.mjs" request >> "$GITHUB_OUTPUT"
+      - name: Resolve the tag commit and require it on protected main
+        id: resolve
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.request.outputs.tag }}
+          MODE: ${{ steps.request.outputs.mode }}
+        run: |
+          set -euo pipefail
+          export TAG_REF_PATH="$RUNNER_TEMP/tag-ref.json" PEELED_TYPE="" PEELED_SHA=""
+          if gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/${TAG}" > "$TAG_REF_PATH" 2> "$RUNNER_TEMP/tag-ref.err"; then
+            export TAG_REF_STATUS=200
+            COMPARE_BASE="$(jq -r .object.sha "$TAG_REF_PATH")"
+            if [[ "$(jq -r .object.type "$TAG_REF_PATH")" == "tag" ]]; then
+              peeled="$(gh api "repos/${GITHUB_REPOSITORY}/git/tags/${COMPARE_BASE}" --jq '.object.type + " " + .object.sha')"
+              PEELED_TYPE="${peeled%% *}"; PEELED_SHA="${peeled#* }"; COMPARE_BASE="$PEELED_SHA"
+            fi
+          elif grep -q 'HTTP 404' "$RUNNER_TEMP/tag-ref.err"; then
+            export TAG_REF_STATUS=404 COMPARE_BASE="$GITHUB_SHA"
+          else
+            echo "::error::Could not look up ${TAG}."; exit 1
+          fi
+          [[ "$COMPARE_BASE" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::The tag does not resolve to a commit."; exit 1; }
+          COMPARE_STATUS="$(gh api "repos/${GITHUB_REPOSITORY}/compare/${COMPARE_BASE}...main" --jq .status)"
+          export COMPARE_BASE COMPARE_STATUS
+          node "$TOOLING/verify-release-tag.mjs" resolve >> "$GITHUB_OUTPUT"
+      - name: Check out the exact release source
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with: { ref: '${{ steps.resolve.outputs.source_sha }}', path: source, persist-credentials: false, fetch-depth: 1 }
+      - name: Require the tag version in source
+        id: source
+        env:
+          SOURCE_SHA: ${{ steps.resolve.outputs.source_sha }}
+          VERSION: ${{ steps.request.outputs.version }}
+        run: |
+          set -euo pipefail
+          HEAD_SHA="$(git -C source rev-parse HEAD)" PACKAGE_JSON_PATH=source/packages/desktop-app/package.json \
+            node "$TOOLING/verify-release-tag.mjs" source >> "$GITHUB_OUTPUT"
+      - name: Test the downloads contracts and lane tooling
+        run: |
+          set -euo pipefail
+          cd .release-tooling
+          node --test scripts/create-desktop-release-metadata.test.mjs scripts/verify-desktop-publication.test.mjs scripts/release/desktop/*.test.mjs
+          node --experimental-strip-types --test packages/downloads-worker/test/index.test.mjs
+      - name: Enforce one-shot destination probes
+        id: one_shot
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.request.outputs.tag }}
+          MODE: ${{ steps.request.outputs.mode }}
+          VERSION: ${{ steps.source.outputs.version }}
+        run: |
+          set -euo pipefail
+          base="${DOWNLOADS_BASE_URL%/}/${DESKTOP_DOWNLOADS_PREFIX}"
+          export LATEST_PATH="$RUNNER_TEMP/live-latest.json" CONTRACT_PATH="$RUNNER_TEMP/contract.json"
+          LATEST_STATUS="$(curl --proto '=https' -sS --max-time 20 -o "$LATEST_PATH" -w '%{http_code}' "$base/latest.json?run=${GITHUB_RUN_ID}")"
+          CONTRACT_STATUS="$(curl --proto '=https' -sS --max-time 20 -o "$CONTRACT_PATH" -w '%{http_code}' "$base/stable-pointer-contract.json?run=${GITHUB_RUN_ID}")"
+          if gh api "repos/${GITHUB_REPOSITORY}/releases/tags/${TAG}" > /dev/null 2> "$RUNNER_TEMP/release.err"; then RELEASE_STATUS=200
+          elif grep -q 'HTTP 404' "$RUNNER_TEMP/release.err"; then RELEASE_STATUS=404
+          else RELEASE_STATUS=unknown; fi
+          export LATEST_STATUS CONTRACT_STATUS RELEASE_STATUS
+          node "$TOOLING/verify-release-tag.mjs" one-shot | tee -a "$GITHUB_OUTPUT"
+      - name: Summarize authorization
+        env:
+          TAG: ${{ steps.request.outputs.tag }}
+          MODE: ${{ steps.request.outputs.mode }}
+          SOURCE_SHA: ${{ steps.resolve.outputs.source_sha }}
+          VERSION: ${{ steps.source.outputs.version }}
+        run: |
+          set -euo pipefail
+          printf '### Desktop release authorized\n\n- Tag: `%s`\n- Mode: `%s`\n- Commit: `%s`\n- Version: `%s`\n' "$TAG" "$MODE" "$SOURCE_SHA" "$VERSION" >> "$GITHUB_STEP_SUMMARY"
+
+  preflight:
+    name: Choose the packaged canary
+    needs: authorize
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    environment: desktop-release
+    permissions:
+      contents: read
+    outputs:
+      canary_mode: ${{ steps.canary.outputs.canary_mode }}
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with: { ref: '${{ github.workflow_sha }}', path: .release-tooling, persist-credentials: false, fetch-depth: 1, sparse-checkout: scripts }
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with: { node-version: '22' }
+      - name: Decide canary mode from configured credentials
+        id: canary
+        env:
+          CODEX_MACHINE_AUTH: ${{ secrets.CODEX_MACHINE_AUTH }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          VITE_SUPABASE_URL: ${{ vars.VITE_SUPABASE_URL }}
+          VITE_SUPABASE_ANON_KEY: ${{ vars.VITE_SUPABASE_ANON_KEY }}
+        run: |
+          set -euo pipefail
+          set +x
+          missing=""
+          for name in CODEX_MACHINE_AUTH SUPABASE_SERVICE_ROLE_KEY VITE_SUPABASE_URL VITE_SUPABASE_ANON_KEY; do
+            [[ -n "${!name:-}" ]] || missing="$missing $name"
+          done
+          mode=launch-smoke
+          if [[ -z "$missing" ]]; then
+            umask 077
+            auth_dir="$(mktemp -d "$RUNNER_TEMP/codex-auth.XXXXXX")"
+            printf '%s' "$CODEX_MACHINE_AUTH" > "$auth_dir/auth.json"
+            if AUTH_PATH="$auth_dir/auth.json" EXPIRY_MODULE="$PWD/.release-tooling/scripts/lib/codexMachineAuthExpiry.mjs" node --input-type=module -e '
+              import { pathToFileURL } from "node:url";
+              const { requireFreshCodexMachineAuth } = await import(pathToFileURL(process.env.EXPIRY_MODULE).href);
+              requireFreshCodexMachineAuth({ authPath: process.env.AUTH_PATH, minimumRemainingMs: 24 * 60 * 60 * 1000 });
+            '; then mode=personal-browser
+            else echo "::warning::CODEX_MACHINE_AUTH has less than 24 hours left; running the packaged launch smoke instead."; fi
+            rm -rf "$auth_dir"
+          else
+            echo "::warning::Personal Browser canary not configured (missing:${missing}); running the packaged launch smoke."
+          fi
+          echo "canary_mode=$mode" >> "$GITHUB_OUTPUT"
+          printf '### Desktop canary\n\n- Mode: `%s`\n' "$mode" >> "$GITHUB_STEP_SUMMARY"
+
+  build:
+    name: Build, sign and notarize (macOS arm64)
+    needs: [authorize, preflight]
+    runs-on: macos-15
+    timeout-minutes: 180
+    environment: desktop-release
+    permissions:
+      contents: read
+    env:
+      TAG: ${{ needs.authorize.outputs.tag }}
+      VERSION: ${{ needs.authorize.outputs.version }}
+      SOURCE_SHA: ${{ needs.authorize.outputs.source_sha }}
+    outputs:
+      dmg_name: instafy-${{ needs.authorize.outputs.version }}-mac-arm64.dmg
+      zip_name: instafy-${{ needs.authorize.outputs.version }}-mac-arm64.zip
+    steps:
+      - name: Require the Apple Silicon hosted runner
+        run: |
+          set -euo pipefail
+          [[ "$RUNNER_ARCH" == "ARM64" ]] || { echo "::error::The Desktop release requires RUNNER_ARCH ARM64."; exit 1; }
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with: { ref: '${{ needs.authorize.outputs.source_sha }}', submodules: recursive, persist-credentials: false, fetch-depth: 1 }
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with: { ref: '${{ github.workflow_sha }}', path: .release-tooling, persist-credentials: false, fetch-depth: 1, sparse-checkout: scripts }
+      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with: { node-version: '22', cache: pnpm }
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4
+        with: { toolchain: 1.97.0 }
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with: { workspaces: packages/runtime-agent, shared-key: desktop-release-runtime-agent-macos }
+      - name: Pin toolchains and install exact dependencies
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
+          test "$(pnpm --version)" = "10.34.5"
+          [[ "$(rustc --version)" == "rustc 1.97.0 "* ]]
+          test "$(node -p 'require("./packages/desktop-app/package.json").version')" = "$VERSION"
+          pnpm install --frozen-lockfile
+          pnpm check:app-icons
+      - name: Require and sanity-check signing and notarization credentials
+        env:
+          CSC_LINK: ${{ secrets.CSC_LINK }}
+          CSC_KEY_PASSWORD: ${{ secrets.CSC_KEY_PASSWORD }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          set -euo pipefail
+          set +x
+          missing=""
+          for name in CSC_LINK CSC_KEY_PASSWORD APPLE_ID APPLE_APP_SPECIFIC_PASSWORD APPLE_TEAM_ID; do
+            [[ -n "${!name:-}" ]] || missing="$missing $name"
+          done
+          [[ -z "$missing" ]] || { echo "::error::Missing desktop-release secrets:${missing}"; exit 1; }
+          umask 077
+          work="$(mktemp -d "$RUNNER_TEMP/instafy-signing-check.XXXXXX")"
+          keychain="$work/check.keychain-db"; keychain_password="$(openssl rand -base64 24)"
+          security list-keychains -d user | sed -e 's/^[[:space:]]*"//' -e 's/"[[:space:]]*$//' > "$work/search-list.txt"
+          restore() {
+            original=(); while IFS= read -r line; do [[ -n "$line" ]] && original+=("$line"); done < "$work/search-list.txt"
+            security list-keychains -d user -s ${original[@]+"${original[@]}"} || true
+            security delete-keychain "$keychain" >/dev/null 2>&1 || true; rm -rf "$work"
+          }
+          trap restore EXIT
+          printf '%s' "$CSC_LINK" | base64 -d > "$work/cert.p12" && [[ -s "$work/cert.p12" ]] || { echo "::error::CSC_LINK is not base64 of a .p12."; exit 1; }
+          security create-keychain -p "$keychain_password" "$keychain"
+          security unlock-keychain -p "$keychain_password" "$keychain"
+          security import "$work/cert.p12" -k "$keychain" -P "$CSC_KEY_PASSWORD" -T /usr/bin/codesign >/dev/null 2>&1 || { echo "::error::CSC_KEY_PASSWORD does not open CSC_LINK."; exit 1; }
+          identities="$(security find-identity -v -p codesigning "$keychain")"
+          [[ "$identities" == *"Developer ID Application"* ]] || { echo "::error::CSC_LINK has no Developer ID Application identity."; exit 1; }
+          openssl pkcs12 -in "$work/cert.p12" -passin env:CSC_KEY_PASSWORD -nokeys -clcerts -legacy -out "$work/cert.pem" 2>/dev/null ||
+            openssl pkcs12 -in "$work/cert.p12" -passin env:CSC_KEY_PASSWORD -nokeys -clcerts -out "$work/cert.pem" 2>/dev/null || true
+          [[ -s "$work/cert.pem" ]] || { echo "::error::Could not read the signing certificate."; exit 1; }
+          team="$(openssl x509 -in "$work/cert.pem" -noout -subject -nameopt sep_multiline,utf8 | sed -n 's/^ *OU=//p' | head -n1 | tr -d ' \r')"
+          [[ "$team" == "$APPLE_TEAM_ID" ]] || { echo "::error::APPLE_TEAM_ID does not match the certificate team (OU)."; exit 1; }
+          openssl x509 -in "$work/cert.pem" -noout -checkend 2592000 >/dev/null || { echo "::error::The signing certificate expires within 30 days."; exit 1; }
+          xcrun notarytool history --apple-id "$APPLE_ID" --password "$APPLE_APP_SPECIFIC_PASSWORD" --team-id "$APPLE_TEAM_ID" >/dev/null 2>&1 || { echo "::error::Apple rejected the notarization credentials."; exit 1; }
+          echo "Signing identity, team and notarization credentials accepted."
+      - name: Prepare an isolated signing keychain
+        env:
+          CSC_LINK: ${{ secrets.CSC_LINK }}
+          CSC_KEY_PASSWORD: ${{ secrets.CSC_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          set +x
+          umask 077
+          SIGNING_STATE_DIR="$(mktemp -d "$RUNNER_TEMP/instafy-desktop-signing.XXXXXX")"
+          echo "SIGNING_STATE_DIR=$SIGNING_STATE_DIR" >> "$GITHUB_ENV"
+          keychain="$SIGNING_STATE_DIR/signing.keychain-db"
+          security list-keychains -d user | sed -e 's/^[[:space:]]*"//' -e 's/"[[:space:]]*$//' > "$SIGNING_STATE_DIR/original-search-list.txt"
+          original=()
+          while IFS= read -r line; do [[ -n "$line" ]] && original+=("$line"); done < "$SIGNING_STATE_DIR/original-search-list.txt"
+          keychain_password="$(openssl rand -base64 24)"
+          printf '%s' "$CSC_LINK" | base64 -d > "$SIGNING_STATE_DIR/signing.p12"
+          security create-keychain -p "$keychain_password" "$keychain"
+          security set-keychain-settings -lut 21600 "$keychain"
+          security unlock-keychain -p "$keychain_password" "$keychain"
+          security import "$SIGNING_STATE_DIR/signing.p12" -k "$keychain" -P "$CSC_KEY_PASSWORD" -T /usr/bin/codesign -T /usr/bin/security
+          rm -f "$SIGNING_STATE_DIR/signing.p12"
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$keychain_password" "$keychain" >/dev/null
+          security list-keychains -d user -s "$keychain" ${original[@]+"${original[@]}"}
+          identities="$(security find-identity -v -p codesigning "$keychain")"
+          [[ "$identities" == *"Developer ID Application"* ]] || { echo "::error::No Developer ID Application identity in the signing keychain."; exit 1; }
+          echo "CSC_KEYCHAIN=$keychain" >> "$GITHUB_ENV"
+      - name: Build signed and notarized macOS release
+        run: |
+          set -euo pipefail
+          pnpm --filter @instafy/desktop-app dist
+        env:
+          # The certificate secret is deliberately absent: electron-builder signs from
+          # the prepared keychain; the afterSign hook notarizes and staples (100 min cap).
+          CSC_IDENTITY_AUTO_DISCOVERY: "true"
+          DEBUG: electron-builder,electron-osx-sign,electron-osx-sign:warn
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+      - name: Remove the signing keychain
+        if: always()
+        run: |
+          set -euo pipefail
+          [[ -n "${SIGNING_STATE_DIR:-}" && -d "$SIGNING_STATE_DIR" ]] || exit 0
+          keychain="$SIGNING_STATE_DIR/signing.keychain-db"
+          original=()
+          while IFS= read -r line; do [[ -n "$line" ]] && original+=("$line"); done < "$SIGNING_STATE_DIR/original-search-list.txt"
+          security list-keychains -d user -s ${original[@]+"${original[@]}"}
+          if [[ -e "$keychain" ]]; then security delete-keychain "$keychain"; fi
+          search_list="$(security list-keychains -d user)"
+          if [[ -e "$keychain" || "$search_list" == *"$keychain"* ]]; then
+            echo "::error::The signing keychain was not removed; signing cleanup is incomplete."; exit 1
+          fi
+          rm -rf "$SIGNING_STATE_DIR"
+      - name: Verify signed artifacts and scan them for secrets
+        env:
+          INSTAFY_REQUIRE_SIGNED_DESKTOP_ARTIFACTS: "1"
+        run: |
+          set -euo pipefail
+          pnpm --filter @instafy/desktop-app verify:packaged-runtime-agent
+          pnpm --filter @instafy/desktop-app verify:release-artifacts
+          release=packages/desktop-app/release
+          apps=0
+          while IFS= read -r app; do
+            codesign --verify --deep --strict --verbose=2 "$app"
+            xcrun stapler validate "$app"
+            apps=$((apps + 1))
+          done < <(find "$release" -maxdepth 3 -type d -name Instafy.app)
+          [[ "$apps" -ge 1 ]] || { echo "::error::No packaged Instafy.app was produced."; exit 1; }
+          hdiutil verify "$release/instafy-${VERSION}-mac-arm64.dmg"
+          node "$TOOLING/release-artifacts.mjs" release-set --root "$release" --version "$VERSION"
+          archive="$RUNNER_TEMP/gitleaks_8.30.1_darwin_arm64.tar.gz"
+          curl --proto '=https' --tlsv1.2 --fail --location --silent --show-error --output "$archive" \
+            https://github.com/gitleaks/gitleaks/releases/download/v8.30.1/gitleaks_8.30.1_darwin_arm64.tar.gz
+          test "$(shasum -a 256 "$archive" | awk '{print $1}')" = "b40ab0ae55c505963e365f271a8d3846efbc170aa17f2607f13df610a9aeb6a5"
+          tar -xzf "$archive" -C "$RUNNER_TEMP" gitleaks
+          node "$TOOLING/gitleaks-release-artifact.mjs" --root "$release" \
+            --config .release-tooling/scripts/public-boundary-gitleaks.toml --executable "$RUNNER_TEMP/gitleaks"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: desktop-app-macos-arm64-${{ needs.authorize.outputs.tag }}
+          path: |
+            packages/desktop-app/release/instafy-*
+            packages/desktop-app/release/latest*.yml
+            packages/desktop-app/release/*.blockmap
+          if-no-files-found: error
+          retention-days: 7
+          compression-level: 0
+      - name: Summarize the signed build
+        run: |
+          set -euo pipefail
+          printf '### Signed Desktop build\n\n- Tag: `%s`\n- Commit: `%s`\n- Runner: `%s/%s`\n' "$TAG" "$SOURCE_SHA" "$RUNNER_OS" "$RUNNER_ARCH" >> "$GITHUB_STEP_SUMMARY"
+
+  launch_smoke:
+    name: Packaged launch smoke
+    needs: [authorize, build]
+    runs-on: macos-15
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    env:
+      VERSION: ${{ needs.authorize.outputs.version }}
+    steps:
+      - name: Require the Apple Silicon hosted runner
+        run: |
+          set -euo pipefail
+          [[ "$RUNNER_ARCH" == "ARM64" ]] || { echo "::error::The launch smoke requires RUNNER_ARCH ARM64."; exit 1; }
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with: { ref: '${{ needs.authorize.outputs.source_sha }}', submodules: recursive, persist-credentials: false, fetch-depth: 1 }
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with: { ref: '${{ github.workflow_sha }}', path: .release-tooling, persist-credentials: false, fetch-depth: 1, sparse-checkout: scripts }
+      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with: { node-version: '22', cache: pnpm }
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with: { name: 'desktop-app-macos-arm64-${{ needs.authorize.outputs.tag }}', path: desktop-artifact }
+      - name: Extract and assess the notarized application
+        run: |
+          set -euo pipefail
+          pnpm install --frozen-lockfile --prefer-offline
+          archive="$(node "$TOOLING/release-artifacts.mjs" archive --root desktop-artifact --version "$VERSION")"
+          mkdir -m 700 "$RUNNER_TEMP/smoke"
+          ditto -x -k "$archive" "$RUNNER_TEMP/smoke"
+          node "$TOOLING/release-artifacts.mjs" extracted --root "$RUNNER_TEMP/smoke"
+          codesign --verify --deep --strict --verbose=2 "$RUNNER_TEMP/smoke/Instafy.app"
+          xcrun stapler validate "$RUNNER_TEMP/smoke/Instafy.app"
+          spctl --assess --type execute --verbose=4 "$RUNNER_TEMP/smoke/Instafy.app"
+      - name: Launch the packaged application
+        run: |
+          set -euo pipefail
+          node "$TOOLING/packaged-launch-smoke.mjs" --executable "$RUNNER_TEMP/smoke/Instafy.app/Contents/MacOS/Instafy" --timeout-ms 120000
+          printf '### Packaged launch smoke\n\n- `%s` launched, loaded its first window and exited cleanly.\n' "$VERSION" >> "$GITHUB_STEP_SUMMARY"
+      - if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with: { name: 'desktop-launch-smoke-${{ github.run_id }}', path: '${{ runner.temp }}/smoke-*.png', if-no-files-found: ignore, retention-days: 7 }
+
+  personal_browser_canary:
+    name: Packaged Personal Browser canary
+    needs: [authorize, preflight, build]
+    if: needs.preflight.outputs.canary_mode == 'personal-browser'
+    runs-on: macos-15
+    timeout-minutes: 45
+    environment: desktop-release
+    concurrency: { group: personal-browser-release-canary, cancel-in-progress: false }
+    permissions:
+      contents: read
+      actions: read
+    env:
+      VERSION: ${{ needs.authorize.outputs.version }}
+      PLAYWRIGHT_ELECTRON_SHARED_BROWSER_BASE_URL: https://prod.instafy.dev
+      PLAYWRIGHT_EXTERNAL_BASE_URL: https://prod.instafy.dev
+      PLAYWRIGHT_CONTROLLER_URL: https://controller.instafy.dev
+      PLAYWRIGHT_CLEANUP_RUNTIME: "0"
+      VITE_SUPABASE_URL: ${{ vars.VITE_SUPABASE_URL }}
+      VITE_SUPABASE_ANON_KEY: ${{ vars.VITE_SUPABASE_ANON_KEY }}
+    steps:
+      - name: Require the Apple Silicon hosted runner
+        run: |
+          set -euo pipefail
+          [[ "$RUNNER_ARCH" == "ARM64" ]] || { echo "::error::The canary requires RUNNER_ARCH ARM64."; exit 1; }
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with: { ref: '${{ needs.authorize.outputs.source_sha }}', submodules: recursive, persist-credentials: false, fetch-depth: 1 }
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with: { ref: '${{ github.workflow_sha }}', path: .release-tooling, persist-credentials: false, fetch-depth: 1, sparse-checkout: scripts }
+      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with: { node-version: '22', cache: pnpm }
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with: { name: 'desktop-app-macos-arm64-${{ needs.authorize.outputs.tag }}', path: desktop-artifact }
+      - name: Extract, assess and seed the dedicated Codex login
+        env:
+          CODEX_MACHINE_AUTH: ${{ secrets.CODEX_MACHINE_AUTH }}
+        run: |
+          set -euo pipefail
+          set +x
+          archive="$(node "$TOOLING/release-artifacts.mjs" archive --root desktop-artifact --version "$VERSION")"
+          mkdir -m 700 "$RUNNER_TEMP/canary"
+          ditto -x -k "$archive" "$RUNNER_TEMP/canary"
+          executable="$(node "$TOOLING/release-artifacts.mjs" extracted --root "$RUNNER_TEMP/canary")"
+          echo "PLAYWRIGHT_ELECTRON_PACKAGED_EXECUTABLE_PATH=$executable" >> "$GITHUB_ENV"
+          codesign --verify --deep --strict --verbose=2 "$RUNNER_TEMP/canary/Instafy.app"
+          xcrun stapler validate "$RUNNER_TEMP/canary/Instafy.app"
+          spctl --assess --type execute --verbose=4 "$RUNNER_TEMP/canary/Instafy.app"
+          umask 077
+          mkdir -p "$HOME/.codex"
+          printf '%s' "$CODEX_MACHINE_AUTH" > "$HOME/.codex/auth.json"
+          chmod 600 "$HOME/.codex/auth.json"
+          EXPIRY_MODULE="$PWD/.release-tooling/scripts/lib/codexMachineAuthExpiry.mjs" node --input-type=module -e '
+            import { pathToFileURL } from "node:url";
+            const { requireFreshCodexMachineAuth } = await import(pathToFileURL(process.env.EXPIRY_MODULE).href);
+            requireFreshCodexMachineAuth({ minimumRemainingMs: 24 * 60 * 60 * 1000 });
+          '
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with: { path: ~/Library/Caches/ms-playwright, key: "playwright-chromium-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('pnpm-lock.yaml') }}" }
+      - name: Install dependencies and Chromium without machine credentials
+        run: |
+          set -euo pipefail
+          clean=(env -u OPENAI_API_KEY -u CODEX_API_KEY -u CODEX_AUTH_PATH -u PROXY_CODEX_AUTH_PATH -u PROXY_CODEX_HOME -u RUNTIME_PROXY_STATIC_AUTH)
+          "${clean[@]}" pnpm install --frozen-lockfile --prefer-offline
+          "${clean[@]}" pnpm --filter @instafy/frontend exec playwright install chromium
+      - name: Restore recovery journals from prior runs
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          recovery_dir="$HOME/.instafy/smoke-recovery/electron-shared-browser-production"
+          mkdir -p "$recovery_dir"
+          artifact_id="$(gh api "repos/${GITHUB_REPOSITORY}/actions/artifacts?name=personal-browser-recovery-journals&per_page=10" --jq '[.artifacts[] | select(.expired | not)][0].id // empty')"
+          [[ -n "$artifact_id" ]] || { echo "No prior recovery journals."; exit 0; }
+          gh api "repos/${GITHUB_REPOSITORY}/actions/artifacts/${artifact_id}/zip" > "$RUNNER_TEMP/journals.zip"
+          unzip -o -j "$RUNNER_TEMP/journals.zip" '*.json' -d "$recovery_dir" >/dev/null 2>&1 || true
+      - name: Run the Personal Browser recovery and agent-turn production specs
+        env:
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+        run: |
+          set -euo pipefail
+          clean=(env -u OPENAI_API_KEY -u CODEX_API_KEY -u CODEX_AUTH_PATH -u PROXY_CODEX_AUTH_PATH -u PROXY_CODEX_HOME -u RUNTIME_PROXY_STATIC_AUTH)
+          args=(--project=chromium --workers=1 --retries=0 --no-deps --max-failures=1 --trace=off)
+          "${clean[@]}" PLAYWRIGHT_ELECTRON_SHARED_BROWSER_RECOVERY=1 pnpm --filter @instafy/frontend exec node ./scripts/playwright-test.mjs tests/playwright/smoke/electron-shared-browser-recovery.prod.spec.ts "${args[@]}"
+          rm -rf packages/frontend/test-results
+          "${clean[@]}" PLAYWRIGHT_ELECTRON_PERSONAL_BROWSER_AGENT_TURN=1 pnpm --filter @instafy/frontend exec node ./scripts/playwright-test.mjs tests/playwright/smoke/electron-personal-browser-agent-turn.prod.spec.ts "${args[@]}"
+          printf '### Personal Browser canary\n\n- `%s` passed the packaged agent-turn production canary.\n' "$VERSION" >> "$GITHUB_STEP_SUMMARY"
+      - name: Finalize recovery and export journals
+        if: always()
+        env:
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+        run: |
+          set -euo pipefail
+          clean=(env -u OPENAI_API_KEY -u CODEX_API_KEY -u CODEX_AUTH_PATH -u PROXY_CODEX_AUTH_PATH -u PROXY_CODEX_HOME -u RUNTIME_PROXY_STATIC_AUTH)
+          status=0
+          "${clean[@]}" PLAYWRIGHT_ELECTRON_SHARED_BROWSER_RECOVERY=1 pnpm --filter @instafy/frontend exec node ./scripts/playwright-test.mjs tests/playwright/smoke/electron-shared-browser-recovery.prod.spec.ts --project=chromium --workers=1 --retries=0 --no-deps --max-failures=1 --trace=off || status=$?
+          mkdir -p "$RUNNER_TEMP/journals" "$RUNNER_TEMP/canary-screenshots"
+          find "$HOME/.instafy/smoke-recovery/electron-shared-browser-production" -maxdepth 1 -name '*.json' -exec cp {} "$RUNNER_TEMP/journals/" \; 2>/dev/null || true
+          date -u +"exported %Y-%m-%dT%H:%M:%SZ" > "$RUNNER_TEMP/journals/marker.txt"
+          find packages/frontend/test-results -type f -name 'electron-personal-browser-agent-*.png' -exec cp {} "$RUNNER_TEMP/canary-screenshots/" \; 2>/dev/null || true
+          rm -f "$HOME/.codex/auth.json"
+          exit "$status"
+      - if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with: { name: 'personal-browser-release-canary-${{ github.run_id }}-${{ github.run_attempt }}', path: '${{ runner.temp }}/canary-screenshots', if-no-files-found: ignore, retention-days: 7 }
+      - if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with: { name: personal-browser-recovery-journals, path: '${{ runner.temp }}/journals', if-no-files-found: error, retention-days: 30, overwrite: true }
+
+  publish:
+    name: Publish downloads and GitHub Release
+    needs: [authorize, preflight, build, launch_smoke, personal_browser_canary]
+    if: always() && needs.authorize.outputs.mode == 'release' && needs.build.result == 'success' && needs.launch_smoke.result == 'success' && (needs.personal_browser_canary.result == 'success' || needs.personal_browser_canary.result == 'skipped')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    environment: desktop-release
+    permissions:
+      contents: write
+    env:
+      TAG: ${{ needs.authorize.outputs.tag }}
+      VERSION: ${{ needs.authorize.outputs.version }}
+      SOURCE_SHA: ${{ needs.authorize.outputs.source_sha }}
+      WORK_DIR: .desktop-release-work
+      ARTIFACT_DIR: desktop-artifact
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with: { ref: '${{ needs.authorize.outputs.source_sha }}', submodules: false, persist-credentials: false, fetch-depth: 1 }
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with: { ref: '${{ github.workflow_sha }}', path: .release-tooling, persist-credentials: false, fetch-depth: 1, sparse-checkout: scripts }
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with: { node-version: '22' }
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with: { name: 'desktop-app-macos-arm64-${{ needs.authorize.outputs.tag }}', path: desktop-artifact }
+      - name: Install exact Wrangler without publication credentials
+        id: wrangler
+        run: |
+          set -euo pipefail
+          tool_root="$RUNNER_TEMP/instafy-wrangler"
+          mkdir -m 700 "$tool_root"
+          npm install --prefix "$tool_root" --ignore-scripts --no-audit --no-fund --save-exact wrangler@4.73.0
+          test "$("$tool_root/node_modules/.bin/wrangler" --version)" = "4.73.0"
+          echo "binary=$tool_root/node_modules/.bin/wrangler" >> "$GITHUB_OUTPUT"
+      - name: Publish immutable artifacts and select stable
+        id: publish
+        env:
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_R2_API_TOKEN }}
+          GH_TOKEN: ${{ github.token }}
+          WRANGLER: ${{ steps.wrangler.outputs.binary }}
+          PREVIOUS_STABLE_HINT: ${{ needs.authorize.outputs.previous_stable_version }}
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
+          RELEASE_PUBLISHED_AT="$(git show -s --format=%cI "$SOURCE_SHA")" bash "$TOOLING/publish-downloads.sh"
+      - name: Write the release receipt
+        env:
+          WORKFLOW_REF: ${{ github.workflow_ref }}
+          CANARY_MODE: ${{ needs.preflight.outputs.canary_mode }}
+          PREVIOUS_STABLE_VERSION: ${{ steps.publish.outputs.previous_stable_version }}
+        run: |
+          set -euo pipefail
+          files=()
+          while IFS= read -r name; do files+=("$ARTIFACT_DIR/$name"); done < "$WORK_DIR/release-files.txt"
+          RECEIPT_PATH="$WORK_DIR/release-receipt.json" node "$TOOLING/write-receipt.mjs" "${files[@]}" "$WORK_DIR/latest.json"
+      - name: Create the GitHub Release (one-shot marker, last)
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          bash "$TOOLING/publish-downloads.sh" --recheck-only
+          files=()
+          while IFS= read -r name; do files+=("$ARTIFACT_DIR/$name"); done < "$WORK_DIR/release-files.txt"
+          base="${DOWNLOADS_BASE_URL%/}/${DESKTOP_DOWNLOADS_PREFIX}"
+          gh release create "$TAG" --verify-tag --latest=false --title "Instafy Desktop ${VERSION} (${TAG})" \
+            --notes "Published ${base}/latest.json from ${SOURCE_SHA}." \
+            "${files[@]}" "$WORK_DIR/latest.json" "$WORK_DIR/release-receipt.json"
+          {
+            printf '### Published Desktop %s\n\n' "$VERSION"
+            printf -- '- Tag: `%s`\n- Source: `%s`\n- latest.json: %s/latest.json\n' "$TAG" "$SOURCE_SHA" "$base"
+            printf -- '- Release: %s/%s/releases/tag/%s\n' "$GITHUB_SERVER_URL" "$GITHUB_REPOSITORY" "$TAG"
+          } >> "$GITHUB_STEP_SUMMARY"
