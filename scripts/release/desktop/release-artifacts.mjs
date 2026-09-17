@@ -63,7 +63,9 @@ export function forbiddenReason(relativePath) {
   if (PRIVATE_NAME_MARKERS.some((marker) => lower.includes(marker))) return "a private package marker is present";
   if (name === ".env" || name.startsWith(".env.")) return "an environment file is present";
   if (name.toLowerCase() === "auth.json") return "a credential-bearing auth.json is present";
-  if (relativePath.split("/").includes(["inter", "nal"].join(""))) return "a private path segment is present";
+  // Top level only: bundled third-party dependencies inside Instafy.app may
+  // legitimately contain directories with this common name.
+  if (!relativePath.includes("/") && name === ["inter", "nal"].join("")) return "a private path segment is present";
   return null;
 }
 

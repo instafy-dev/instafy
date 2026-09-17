@@ -22,8 +22,11 @@ on:
 permissions:
   contents: read
 
+# One group per tag: GitHub keeps only one pending run per group, so a shared
+# group would silently cancel queued runs for other tags. Cross-tag publication
+# is serialized by the publish job's own group plus the one-shot guards.
 concurrency:
-  group: desktop-release
+  group: desktop-release-${{ inputs.tag || github.ref_name }}
   cancel-in-progress: false
 
 defaults:
@@ -52,7 +55,8 @@ jobs:
     steps:
       - name: Check out lane tooling from the workflow commit
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
-        with: { ref: '${{ github.workflow_sha }}', path: .release-tooling, persist-credentials: false, fetch-depth: 1, sparse-checkout: "scripts\npackages/downloads-worker" }
+        # .github is required: workflow-guard.test.mjs reads this workflow file.
+        with: { ref: '${{ github.workflow_sha }}', path: .release-tooling, persist-credentials: false, fetch-depth: 1, sparse-checkout: "scripts\npackages/downloads-worker\n.github" }
       - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
         with: { node-version: '22' }
       - name: Check event, actor, pusher and tag shape
@@ -347,7 +351,9 @@ jobs:
             packages/desktop-app/release/latest*.yml
             packages/desktop-app/release/*.blockmap
           if-no-files-found: error
-          retention-days: 7
+          # A partial publish is recovered by re-running this run's failed jobs,
+          # which reuses these exact bytes; after expiry only a new version can ship.
+          retention-days: 30
           compression-level: 0
       - name: Summarize the signed build
         run: |
@@ -430,12 +436,9 @@ jobs:
         with: { node-version: '22', cache: pnpm }
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with: { name: 'desktop-app-macos-arm64-${{ needs.authorize.outputs.tag }}', path: desktop-artifact }
-      - name: Extract, assess and seed the dedicated Codex login
-        env:
-          CODEX_MACHINE_AUTH: ${{ secrets.CODEX_MACHINE_AUTH }}
+      - name: Extract and assess the notarized application
         run: |
           set -euo pipefail
-          set +x
           archive="$(node "$TOOLING/release-artifacts.mjs" archive --root desktop-artifact --version "$VERSION")"
           mkdir -m 700 "$RUNNER_TEMP/canary"
           ditto -x -k "$archive" "$RUNNER_TEMP/canary"
@@ -444,6 +447,20 @@ jobs:
           codesign --verify --deep --strict --verbose=2 "$RUNNER_TEMP/canary/Instafy.app"
           xcrun stapler validate "$RUNNER_TEMP/canary/Instafy.app"
           spctl --assess --type execute --verbose=4 "$RUNNER_TEMP/canary/Instafy.app"
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with: { path: ~/Library/Caches/ms-playwright, key: "playwright-chromium-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('pnpm-lock.yaml') }}" }
+      - name: Install dependencies and Chromium without machine credentials
+        run: |
+          set -euo pipefail
+          clean=(env -u OPENAI_API_KEY -u CODEX_API_KEY -u CODEX_AUTH_PATH -u PROXY_CODEX_AUTH_PATH -u PROXY_CODEX_HOME -u RUNTIME_PROXY_STATIC_AUTH)
+          "${clean[@]}" pnpm install --frozen-lockfile --prefer-offline
+          "${clean[@]}" pnpm --filter @instafy/frontend exec playwright install chromium
+      - name: Seed the dedicated Codex login after dependency installation
+        env:
+          CODEX_MACHINE_AUTH: ${{ secrets.CODEX_MACHINE_AUTH }}
+        run: |
+          set -euo pipefail
+          set +x
           umask 077
           mkdir -p "$HOME/.codex"
           printf '%s' "$CODEX_MACHINE_AUTH" > "$HOME/.codex/auth.json"
@@ -453,23 +470,19 @@ jobs:
             const { requireFreshCodexMachineAuth } = await import(pathToFileURL(process.env.EXPIRY_MODULE).href);
             requireFreshCodexMachineAuth({ minimumRemainingMs: 24 * 60 * 60 * 1000 });
           '
-      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with: { path: ~/Library/Caches/ms-playwright, key: "playwright-chromium-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('pnpm-lock.yaml') }}" }
-      - name: Install dependencies and Chromium without machine credentials
-        run: |
-          set -euo pipefail
-          clean=(env -u OPENAI_API_KEY -u CODEX_API_KEY -u CODEX_AUTH_PATH -u PROXY_CODEX_AUTH_PATH -u PROXY_CODEX_HOME -u RUNTIME_PROXY_STATIC_AUTH)
-          "${clean[@]}" pnpm install --frozen-lockfile --prefer-offline
-          "${clean[@]}" pnpm --filter @instafy/frontend exec playwright install chromium
-      - name: Restore recovery journals from prior runs
+      - name: Restore recovery journals exported by this workflow on main or a release tag
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           recovery_dir="$HOME/.instafy/smoke-recovery/electron-shared-browser-production"
           mkdir -p "$recovery_dir"
-          artifact_id="$(gh api "repos/${GITHUB_REPOSITORY}/actions/artifacts?name=personal-browser-recovery-journals&per_page=10" --jq '[.artifacts[] | select(.expired | not)][0].id // empty')"
-          [[ -n "$artifact_id" ]] || { echo "No prior recovery journals."; exit 0; }
+          # Artifact names are not trusted in a public repository; the selector keeps only
+          # artifacts from this repository's own desktop-release.yml push/dispatch runs on
+          # main or desktop-app-v* and restores nothing otherwise.
+          artifact_id="$(node "$TOOLING/recovery-journals.mjs" select)"
+          [[ -n "$artifact_id" ]] || { echo "No trusted prior recovery journals."; exit 0; }
+          [[ "$artifact_id" =~ ^[1-9][0-9]*$ ]] || { echo "::error::Unexpected journal artifact id."; exit 1; }
           gh api "repos/${GITHUB_REPOSITORY}/actions/artifacts/${artifact_id}/zip" > "$RUNNER_TEMP/journals.zip"
           unzip -o -j "$RUNNER_TEMP/journals.zip" '*.json' -d "$recovery_dir" >/dev/null 2>&1 || true
       - name: Run the Personal Browser recovery and agent-turn production specs
@@ -508,10 +521,12 @@ jobs:
   publish:
     name: Publish downloads and GitHub Release
     needs: [authorize, preflight, build, launch_smoke, personal_browser_canary]
-    if: always() && needs.authorize.outputs.mode == 'release' && needs.build.result == 'success' && needs.launch_smoke.result == 'success' && (needs.personal_browser_canary.result == 'success' || needs.personal_browser_canary.result == 'skipped')
+    if: ${{ !cancelled() && needs.authorize.outputs.mode == 'release' && needs.build.result == 'success' && needs.launch_smoke.result == 'success' && (needs.personal_browser_canary.result == 'success' || needs.personal_browser_canary.result == 'skipped') }}
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     environment: desktop-release
+    # Serializes stable-pointer writes across tags (the run-level group is per tag).
+    concurrency: { group: desktop-release-publish, cancel-in-progress: false }
     permissions:
       contents: write
     env:
@@ -567,6 +582,15 @@ jobs:
         run: |
           set -euo pipefail
           bash "$TOOLING/publish-downloads.sh" --recheck-only
+          # Release creation uploads assets to a draft before publishing it. A draft
+          # left by an interrupted attempt is invisible to releases/tags/<tag>, so
+          # remove this tag's drafts before creating the one Release.
+          draft_ids="$(gh api --paginate "repos/${GITHUB_REPOSITORY}/releases?per_page=100" --jq ".[] | select(.draft and .tag_name == \"${TAG}\") | .id")"
+          for draft_id in $draft_ids; do
+            [[ "$draft_id" =~ ^[1-9][0-9]*$ ]] || { echo "::error::Unexpected draft release id."; exit 1; }
+            echo "::warning::Removing leftover draft Release ${draft_id} for ${TAG}."
+            gh api -X DELETE "repos/${GITHUB_REPOSITORY}/releases/${draft_id}"
+          done
           files=()
           while IFS= read -r name; do files+=("$ARTIFACT_DIR/$name"); done < "$WORK_DIR/release-files.txt"
           base="${DOWNLOADS_BASE_URL%/}/${DESKTOP_DOWNLOADS_PREFIX}"

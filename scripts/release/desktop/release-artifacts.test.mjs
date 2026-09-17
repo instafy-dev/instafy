@@ -191,7 +191,7 @@ test("release set rejects missing, foreign and private files", () => {
     [[...releaseNames, "latest-linux.yml"], /Linux/u],
     [[...releaseNames, "mac-arm64/.env.production"], /environment file/u],
     [[...releaseNames, "mac-arm64/Instafy.app/auth.json"], /auth\.json/u],
-    [[...releaseNames, `mac-arm64/${["inter", "nal"].join("")}/x`], /private path/u],
+    [[...releaseNames, `${["inter", "nal"].join("")}/x`], /private path/u],
     [[...releaseNames, `${["kno", "sh"].join("")}.txt`], /private package/u],
   ];
   for (const [names, pattern] of cases) {
@@ -207,6 +207,9 @@ test("release set rejects missing, foreign and private files", () => {
     assert.throws(() => checkReleaseSet({ root: dir, version: "0.2.13", noSymlinks: true }), /symbolic links/u);
   });
   assert.equal(forbiddenReason("instafy-0.2.13-mac-arm64.dmg"), null);
+  const nestedDependency = `mac-arm64/Instafy.app/Contents/Resources/app.asar.unpacked/node_modules/dep/${["inter", "nal"].join("")}/index.js`;
+  assert.equal(forbiddenReason(nestedDependency), null);
+  assert.equal(forbiddenReason(`mac-arm64/Instafy.app/Contents/Resources/${["kno", "sh"].join("")}`) !== null, true);
 });
 
 test("extracted application must be one regular bundle with an executable", () => {

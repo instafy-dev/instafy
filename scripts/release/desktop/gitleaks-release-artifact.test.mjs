@@ -3,6 +3,7 @@ import {
   chmodSync,
   mkdirSync,
   mkdtempSync,
+  readFileSync,
   rmSync,
   writeFileSync,
 } from "node:fs";
@@ -11,6 +12,7 @@ import path from "node:path";
 import test from "node:test";
 
 import {
+  GITHUB_TOKEN_SHAPE_REGEX,
   parseArguments,
   releaseArtifactScannerConfig,
   runReleaseArtifactGate,
@@ -193,4 +195,86 @@ test("every allowlist target rule exists in the public base scanner config", asy
   assert.deepEqual(targets, ["generic-api-key", "instafy-absolute-personal-path"]);
   assert.match(base, /^id = "instafy-absolute-personal-path"$/mu);
   assert.match(base, /^id = "generic-api-key"$/mu);
+});
+
+function baseScannerConfig() {
+  return readFileSync(
+    path.join(import.meta.dirname, "..", "..", "public-boundary-gitleaks.toml"),
+    "utf8",
+  );
+}
+
+function ruleBlocks(config) {
+  return config.split(/(?=^\[\[)/mu);
+}
+
+function tokenRuleRegex(config) {
+  const blocks = ruleBlocks(config).filter((block) =>
+    /^id = "instafy-github-token-prefix"$/mu.test(block),
+  );
+  assert.equal(blocks.length, 1);
+  const lines = blocks[0].match(/^regex = '''(.*)'''$/gmu) ?? [];
+  assert.equal(lines.length, 1);
+  return lines[0].slice("regex = '''".length, -"'''".length);
+}
+
+// Built at runtime so no credential-looking literal sits in the repository.
+const tokenPrefix = (letter) => ["gh", letter, "_"].join("");
+const ALNUM = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
+
+function seededBytes(length, seed) {
+  const bytes = Buffer.alloc(length);
+  let state = seed >>> 0;
+  for (let index = 0; index < length; index += 1) {
+    state = (Math.imul(state, 1664525) + 1013904223) >>> 0;
+    bytes[index] = state >>> 24;
+  }
+  return bytes;
+}
+
+test("release scan uses the GitHub token shape, not the frozen bare-prefix rule", () => {
+  const base = baseScannerConfig();
+  const derived = releaseArtifactScannerConfig(base);
+  assert.equal(tokenRuleRegex(derived), GITHUB_TOKEN_SHAPE_REGEX);
+  assert.notEqual(tokenRuleRegex(base), GITHUB_TOKEN_SHAPE_REGEX);
+  const ids = (text) => [...text.matchAll(/^id = "([^"]+)"$/gmu)].map((match) => match[1]);
+  assert.deepEqual(ids(derived), ids(base));
+  const untouched = (text) =>
+    ruleBlocks(text).filter((block) => !/instafy-github-token-prefix/u.test(block)).join("");
+  assert.equal(untouched(derived).startsWith(untouched(base)), true);
+});
+
+test("a four-byte token prefix inside binary noise is not a release finding", () => {
+  const shape = new RegExp(GITHUB_TOKEN_SHAPE_REGEX, "u");
+  const bare = new RegExp(tokenRuleRegex(baseScannerConfig()), "u");
+  for (let seed = 1; seed <= 64; seed += 1) {
+    const noise = seededBytes(4096, seed);
+    const offset = 512 + ((seed * 37) % 2048);
+    Buffer.from(tokenPrefix("p"), "latin1").copy(noise, offset);
+    // Four random bytes, then binary: the shape of the observed DMG false positive.
+    seededBytes(4, seed * 7919).copy(noise, offset + 4);
+    noise[offset + 8] = 0;
+    const text = noise.toString("latin1");
+    assert.equal(bare.test(text), true, "the frozen prefix rule would have fired");
+    assert.equal(shape.test(text), false, `seed ${seed} produced a false positive`);
+  }
+});
+
+test("real GitHub token shapes are still release findings", () => {
+  const shape = new RegExp(GITHUB_TOKEN_SHAPE_REGEX, "u");
+  const binary = String.fromCharCode(0, 1);
+  const body = (length) =>
+    Array.from({ length }, (_, index) => ALNUM[(index * 11) % ALNUM.length]).join("");
+  for (const letter of ["p", "o", "u", "s", "r"]) {
+    assert.equal(shape.test(`${binary}${tokenPrefix(letter)}${body(36)}${binary}`), true, letter);
+    assert.equal(shape.test(`${tokenPrefix(letter)}${body(35)}${binary}`), false, letter);
+  }
+  assert.equal(shape.test(["github", "pat", body(70)].join("_")), true);
+});
+
+test("token rule is added when the base lacks it and rejected when duplicated", () => {
+  const minimal = "[extend]\nuseDefault = true\n";
+  assert.equal(tokenRuleRegex(releaseArtifactScannerConfig(minimal)), GITHUB_TOKEN_SHAPE_REGEX);
+  const rule = "[[rules]]\nid = \"instafy-github-token-prefix\"\nregex = '''x'''\n\n";
+  assert.throws(() => releaseArtifactScannerConfig(minimal + rule + rule), /more than once/u);
 });

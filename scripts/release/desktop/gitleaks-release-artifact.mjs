@@ -83,12 +83,53 @@ function run(executable, args, options = {}) {
   });
 }
 
+// The frozen public-boundary config flags the bare GitHub token prefix. In a
+// large compressed artifact (DMG, ZIP, decoded blobs) four bytes of noise match
+// that prefix by chance, at a different offset in every build, which would throw
+// away a correctly signed and notarized build. Release artifacts are scanned for
+// the token shape instead, exactly as the internal release gate does: every
+// real token still matches, and the ghu_/ghs_/ghr_ families are covered too.
+const GITHUB_TOKEN_RULE_ID = "instafy-github-token-prefix";
+const GITHUB_TOKEN_SHAPE_REGEX =
+  "(?:gh[pousr]_[A-Za-z0-9]{36,}|github_[p]at_[A-Za-z0-9_]{60,})";
+const GITHUB_TOKEN_SHAPE_RULE = [
+  "[[rules]]",
+  `id = "${GITHUB_TOKEN_RULE_ID}"`,
+  'description = "GitHub token (release artifact shape)"',
+  `regex = '''${GITHUB_TOKEN_SHAPE_REGEX}'''`,
+  "",
+].join("\n");
+const REGEX_LINE = /^regex = '''.*'''$/gmu;
+
+function withGithubTokenShapeRule(baseConfig) {
+  const blocks = baseConfig.split(/(?=^\[\[)/mu);
+  const idLine = new RegExp(`^id = "${GITHUB_TOKEN_RULE_ID}"$`, "mu");
+  const matches = blocks.filter((block) => idLine.test(block));
+  if (matches.length > 1) {
+    throw new Error("The base Gitleaks config defines the GitHub token rule more than once");
+  }
+  if (matches.length === 0) {
+    const separator = baseConfig.endsWith("\n") ? "\n" : "\n\n";
+    return `${baseConfig}${separator}${GITHUB_TOKEN_SHAPE_RULE}`;
+  }
+  const [block] = matches;
+  if (!block.startsWith("[[rules]]") || (block.match(REGEX_LINE) ?? []).length !== 1) {
+    throw new Error("The base Gitleaks GitHub token rule has an unexpected shape");
+  }
+  const replaced = block.replace(
+    new RegExp(REGEX_LINE.source, "mu"),
+    () => `regex = '''${GITHUB_TOKEN_SHAPE_REGEX}'''`,
+  );
+  return blocks.map((candidate) => (candidate === block ? replaced : candidate)).join("");
+}
+
 function releaseArtifactScannerConfig(baseConfig) {
   if (typeof baseConfig !== "string" || baseConfig.trim().length === 0) {
     throw new Error("The base Gitleaks config must not be empty");
   }
-  const separator = baseConfig.endsWith("\n") ? "\n" : "\n\n";
-  return `${baseConfig}${separator}${RELEASE_ARTIFACT_ALLOWLIST.trimStart()}`;
+  const config = withGithubTokenShapeRule(baseConfig);
+  const separator = config.endsWith("\n") ? "\n" : "\n\n";
+  return `${config}${separator}${RELEASE_ARTIFACT_ALLOWLIST.trimStart()}`;
 }
 
 function runReleaseArtifactGate({
@@ -253,6 +294,7 @@ if (isEntryPoint(process.argv[1])) {
 }
 
 export {
+  GITHUB_TOKEN_SHAPE_REGEX,
   parseArguments,
   releaseArtifactScannerConfig,
   runReleaseArtifactGate,

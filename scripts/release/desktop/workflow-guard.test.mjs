@@ -94,7 +94,10 @@ test("triggers are exactly the tag push and a main dispatch with tag and dry_run
 
 test("top-level permissions, concurrency and shell defaults are minimal and fixed", () => {
   assert.equal(topLevelBlock("permissions"), "  contents: read\n\n");
-  assert.equal(topLevelBlock("concurrency"), "  group: desktop-release\n  cancel-in-progress: false\n\n");
+  assert.equal(
+    topLevelBlock("concurrency"),
+    "  group: desktop-release-${{ inputs.tag || github.ref_name }}\n  cancel-in-progress: false\n\n",
+  );
   assert.equal(topLevelBlock("defaults"), "  run:\n    shell: bash\n\n");
 });
 
@@ -159,6 +162,18 @@ test("every run block is strict bash and every action is pinned", () => {
   }
 });
 
+test("every lane tooling checkout contains what its tests and scripts read", () => {
+  const { authorize } = jobs();
+  const tooling = /path: \.release-tooling, [^\n]*sparse-checkout: "([^"]*)"/u.exec(authorize);
+  assert.ok(tooling, "authorize must sparse-check-out the lane tooling");
+  const paths = tooling[1].split("\\n");
+  // authorize runs workflow-guard.test.mjs, which reads this workflow file.
+  for (const required of ["scripts", "packages/downloads-worker", ".github"]) {
+    assert.ok(paths.includes(required), `authorize tooling checkout must include ${required}`);
+  }
+  assert.match(authorize, /scripts\/release\/desktop\/\*\.test\.mjs/u);
+});
+
 test("authorize checks actor, pusher, tag commit, main ancestry, version and one-shot probes in order", () => {
   const { authorize } = jobs();
   assert.doesNotMatch(authorize, /environment:|secrets\./u);
@@ -217,7 +232,7 @@ test("build signs from an isolated keychain, verifies, scans and uploads only th
       "b40ab0ae55c505963e365f271a8d3846efbc170aa17f2607f13df610a9aeb6a5",
       'gitleaks-release-artifact.mjs" --root',
       "name: desktop-app-macos-arm64-${{ needs.authorize.outputs.tag }}",
-      "retention-days: 7",
+      "retention-days: 30",
       "GITHUB_STEP_SUMMARY",
     ],
     "build",
@@ -234,9 +249,25 @@ test("canaries: launch smoke is secret-free and the Personal Browser canary is o
   assert.match(all.personal_browser_canary, /concurrency: \{ group: personal-browser-release-canary, cancel-in-progress: false \}/u);
   assertOrdered(
     all.personal_browser_canary,
-    ['release-artifacts.mjs" archive', "spctl --assess", "minimumRemainingMs: 24 * 60 * 60 * 1000", "electron-shared-browser-recovery.prod.spec.ts", "electron-personal-browser-agent-turn.prod.spec.ts", "if: always()", "electron-shared-browser-recovery.prod.spec.ts", "name: personal-browser-recovery-journals"],
+    [
+      'release-artifacts.mjs" archive',
+      "spctl --assess",
+      "pnpm install --frozen-lockfile --prefer-offline",
+      "playwright install chromium",
+      "CODEX_MACHINE_AUTH: ${{ secrets.CODEX_MACHINE_AUTH }}",
+      '> "$HOME/.codex/auth.json"',
+      "minimumRemainingMs: 24 * 60 * 60 * 1000",
+      'recovery-journals.mjs" select',
+      "electron-shared-browser-recovery.prod.spec.ts",
+      "electron-personal-browser-agent-turn.prod.spec.ts",
+      "if: always()",
+      "electron-shared-browser-recovery.prod.spec.ts",
+      "name: personal-browser-recovery-journals",
+    ],
     "personal_browser_canary",
   );
+  // Journals are selected by provenance, never by artifact name alone.
+  assert.doesNotMatch(all.personal_browser_canary, /actions\/artifacts\?name=/u);
   assert.match(all.preflight, /minimumRemainingMs: 24 \* 60 \* 60 \* 1000/u);
   assert.match(all.preflight, /mode=launch-smoke/u);
 });
@@ -245,7 +276,7 @@ test("publish runs only for release mode after green build and canaries, in the 
   const { publish } = jobs();
   assert.match(
     publish,
-    /^ {4}if: always\(\) && needs\.authorize\.outputs\.mode == 'release' && needs\.build\.result == 'success' && needs\.launch_smoke\.result == 'success' && \(needs\.personal_browser_canary\.result == 'success' \|\| needs\.personal_browser_canary\.result == 'skipped'\)$/mu,
+    /^ {4}if: \$\{\{ !cancelled\(\) && needs\.authorize\.outputs\.mode == 'release' && needs\.build\.result == 'success' && needs\.launch_smoke\.result == 'success' && \(needs\.personal_browser_canary\.result == 'success' \|\| needs\.personal_browser_canary\.result == 'skipped'\) \}\}$/mu,
   );
   assertOrdered(
     publish,
@@ -262,6 +293,9 @@ test("publish runs only for release mode after green build and canaries, in the 
     ],
     "publish",
   );
+  assert.doesNotMatch(source, /always\(\) && needs\.authorize/u);
+  assert.match(publish, /^ {4}concurrency: \{ group: desktop-release-publish, cancel-in-progress: false \}$/mu);
+  assertOrdered(publish, ["--recheck-only", "select(.draft and .tag_name", "gh release create"], "publish drafts");
   assert.equal(source.match(/gh release create/gu).length, 1);
   assert.doesNotMatch(source.replace(publish, ""), /wrangler r2|CLOUDFLARE|gh release/u);
   assertOrdered(
