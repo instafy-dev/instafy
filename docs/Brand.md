@@ -104,15 +104,21 @@ one composition) behind the headline, with presence cursors pinned to the arms
 in the crew colors: Ada pink, Kim green, Octo orange, and the purple agent
 whose label follows the active scenario. A cursor that would clip the scene
 edge or sit partly behind the workspace example is left out rather than
-clamped or cut. A clearly labeled workspace example
-below the headline may use the same thinking state beside its simulated active
-work. Keep one scenario visible at a time and let the deck rotate gently: one
-scenario every 8 seconds, waiting while the pointer or focus is on the deck,
-holding 20 seconds after a manual choice, and honoring the pause control. Under
+clamped or cut. A workspace example below the headline, named by the
+scenario chips above it and by the group label Choose a workspace example, may
+use the same thinking state beside its simulated active work. Keep one scenario visible at a time and let the deck rotate gently: one
+scenario every 11 seconds, which leaves the finished turn on screen for several
+seconds before the next one starts, waiting while the pointer or focus is on the deck,
+and holding 20 seconds after a manual choice. Under
 reduced motion the deck does not rotate at all, and both rotation and the
 thinking state stop offscreen and in hidden browser tabs. Rotation must never
 move focus or shift layout. The example does not animate the header logo or
-completed output.
+completed output. The example is one scripted turn drawn with the studio's own
+chrome: Ada types into the composer, Octo works through its activity rail, the
+result lands inline in the conversation, in the message that produced it, and a
+teammate replies only once that message is complete; under reduced motion,
+offscreen and in hidden tabs the window shows that finished turn
+with nothing in motion.
 
 ## Scale, clear space, and wordmark
 

@@ -54,13 +54,19 @@ results and closes space-specific editors.
 The hero sits on the tentacle artwork with its crew presence cursors (Ada, Kim, Octo, and the
 purple agent label that follows the active scenario), fading into the page below. Cursors that
 would sit partly behind the example card are left out at that viewport size. The landing
-workspace is an explicitly labeled interactive example that never creates a real session.
-Its three scenarios advance on their own every 8 seconds. Rotation waits while the pointer is
+workspace is an example that never creates a real session and carries no control of its own:
+the chips above it name the three scenarios, the link below it offers to start a session of
+your own, and assistive tech reads the chips as a group called Choose a workspace example.
+Its three scenarios advance on their own every 11 seconds, so each finished turn rests on screen for several seconds first. Rotation waits while the pointer is
 over the example or focus is inside it, holds for 20 seconds after a visitor picks a scenario,
-stops while the pause control is pressed, and never runs under reduced motion, offscreen, or in
-a hidden browser tab. Picking a scenario always works, and rotation never moves focus or shifts
-the layout. Octo's existing thinking animation appears only beside the example's active work and
-follows the same pause rules. Header marks remain static.
+and never runs under reduced motion, offscreen, or in a hidden browser tab. Picking a scenario
+always works, and rotation never moves focus or shifts the layout. Octo's existing thinking
+animation appears only beside the example's active work and stops under reduced motion,
+offscreen, and in hidden browser tabs. Header marks remain static. The conversation reads from the top of the window down, so a scenario starts
+directly under the roster and any unused space rests above the composer. Each scenario plays one
+scripted turn inside the example window (a prompt typed and sent, Octo's run, the files or browser
+page landing inline in Octo's own message, then a teammate's reply) and then rests on the finished frame, which is also what
+visitors see under reduced motion, offscreen and in hidden tabs.
 
 ## Studio Surface
 - **Assistant**: conversational control of the workspace, runs, and file changes.
