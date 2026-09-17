@@ -51,7 +51,7 @@ function laneFiles() {
   return fs.readdirSync(laneDirectory).map((name) => path.join(laneDirectory, name)).filter((file) => fs.statSync(file).isFile());
 }
 
-test("only bot tag pushes and main dispatch (tag, dry_run, reconcile_only) trigger the release", () => {
+test("only bot tag pushes and main or tag dispatch (tag, dry_run, reconcile_only) trigger the release", () => {
   const on = header().slice(header().indexOf("\non:\n"), header().indexOf("\npermissions:"));
   assert.match(on, /^\non:\n {2}push:\n {4}tags: \['ios-v\*'\]\n {2}workflow_dispatch:\n {4}inputs:\n/u);
   const inputs = [...on.matchAll(/^ {6}([a-z_]+): \{/gmu)].map((match) => match[1]);
@@ -121,9 +121,19 @@ test("hosted runners only, pinned actions, exact tooling", () => {
     assert.ok(PINS.has(match[1]), `unexpected action ${match[1]}`);
     assert.equal(match[2], PINS.get(match[1]), `${match[1]} pin`);
   }
-  for (const checkout of source.matchAll(/uses: actions\/checkout@[0-9a-f]{40} # v6\n {8}with:\n((?: {10}.+\n)+)/gu)) {
-    assert.match(checkout[1], /ref: \$\{\{ (?:steps\.resolve|needs\.authorize)\.outputs\.source_sha \}\}/u);
+  const checkouts = [...source.matchAll(/uses: actions\/checkout@[0-9a-f]{40} # v6\n {8}with:\n((?: {10}.+\n)+)/gu)];
+  assert.equal(checkouts.length, (source.match(/uses: actions\/checkout@/gu) ?? []).length);
+  assert.equal(checkouts.length, 4, "one checkout per job");
+  for (const checkout of checkouts) {
+    // Cache poisoning: never check out a computed ref (step/job outputs, inputs).
+    assert.match(checkout[1], /^ {10}ref: \$\{\{ github\.sha \}\}\n/mu);
     assert.match(checkout[1], /persist-credentials: false/u);
+  }
+  assert.doesNotMatch(source, /ref: \$\{\{ (?:steps|needs|inputs)\./u);
+  // No job that runs checked-out code reads or writes an Actions cache.
+  assert.doesNotMatch(source, /actions\/cache|^\s+cache(?:-dependency-path)?:/mu);
+  for (const [name, job] of jobs()) {
+    assert.match(job, /test "\$\(git rev-parse HEAD\)" = "\$SOURCE_SHA"/u, `${name} proves the checkout is the authorized source`);
   }
   assert.match(source, /PNPM_VERSION: 10\.34\.5/u);
   assert.match(source, /test "\$\(pnpm --version\)" = "\$PNPM_VERSION"/u);
@@ -141,8 +151,9 @@ test("authorize proves actor, pusher, exact main, version and one-shot before an
     '[ "$GITHUB_ACTOR" = "instafy-bot" ]',
     '[ "$GITHUB_TRIGGERING_ACTOR" = "instafy-bot" ]',
     '[ "$EVENT_PUSHER" = "instafy-bot" ]',
-    '[ "$GITHUB_REF" = "refs/heads/main" ]',
+    '[ "$GITHUB_REF" = "refs/heads/main" ] || [ "$GITHUB_REF" = "refs/tags/$tag" ]',
     "git/ref/tags/$tag",
+    '[ "$source_sha" = "$GITHUB_SHA" ]',
     "git/ref/heads/main",
     "compare/${source_sha}...${main_sha}",
     "identical|ahead",
@@ -259,6 +270,23 @@ test("every run step is strict and every job ends with a step summary", () => {
     }
   }
   assert.ok(source.split("\n").length <= 560, "workflow stays lean");
+});
+
+test("certificate matching uses SHA-256 fingerprints; SHA-1 is only Xcode's identity selector", () => {
+  for (const file of laneFiles().filter((candidate) => candidate.endsWith(".mjs"))) {
+    assert.doesNotMatch(fs.readFileSync(file, "utf8"), /createHash\(\s*["']sha-?1["']/iu, path.basename(file));
+  }
+  const credentials = fs.readFileSync(path.join(laneDirectory, "signing-credentials.sh"), "utf8");
+  assertOrdered(credentials, [
+    'security find-certificate -a -c "$identity_name" -p "$keychain"',
+    "openssl x509 -in \"$identity_pem\" -outform DER",
+    '= "$identity_sha1" ]',
+    'identity_sha256="$(shasum -a 256 "$identity_der"',
+    'echo "IOS_DIST_CERT_SHA256=$identity_sha256" >> "$GITHUB_ENV"',
+  ]);
+  const verifyIpa = fs.readFileSync(path.join(laneDirectory, "verify-ipa.sh"), "utf8");
+  assert.match(verifyIpa, /leaf="\$\(shasum -a 256 "\$certs\/cert-0"/u);
+  assert.match(source, /asc\.mjs download-profile "\$APP_BUNDLE_ID" "\$IOS_DIST_CERT_SHA256"/u);
 });
 
 test("lane shell stays bash 3.2 safe and syntactically valid", () => {

@@ -1,7 +1,8 @@
 #!/usr/bin/env node
 // Pure authorization of an iOS release run. The tag is the ledger: it must be
-// bot-created, peel to a commit contained in protected main, and encode exactly
-// the MARKETING_VERSION / CURRENT_PROJECT_VERSION committed at that commit.
+// bot-created, peel to the workflow commit (github.sha) contained in protected
+// main, and encode exactly the MARKETING_VERSION / CURRENT_PROJECT_VERSION
+// committed at that commit.
 //
 //   node verify-release-tag.mjs authorize   (authorize job, after checkout)
 //   node verify-release-tag.mjs recheck     (immediately before a mutable write)
@@ -109,10 +110,13 @@ export function authorizeRelease(context) {
     mode = "release";
     expectedSource = tagSha;
   } else if (eventName === "workflow_dispatch") {
-    if (ref !== "refs/heads/main") fail("dispatch must run the workflow from refs/heads/main");
+    if (ref !== "refs/heads/main" && ref !== `refs/tags/${tag}`) {
+      fail("dispatch must run the workflow from refs/heads/main or from the release tag itself");
+    }
     if (dryRun === null) fail("dispatch requires dry_run");
     if (dryRun) {
       if (reconcileOnly) fail("reconcile_only is valid only with dry_run=false");
+      if (tagSha === null && ref !== "refs/heads/main") fail("a dry run before the tag exists must dispatch from refs/heads/main");
       mode = "dry_run";
       expectedSource = tagSha ?? sha;
     } else {
@@ -122,6 +126,11 @@ export function authorizeRelease(context) {
     }
   } else {
     fail("only tag pushes and workflow_dispatch may run a release");
+  }
+  // Every job checks out github.sha, never a computed ref, so the release source
+  // must be the workflow commit itself. An older tag is dispatched with --ref <tag>.
+  if (expectedSource !== sha) {
+    fail("release source must be the workflow commit; dispatch an existing tag with --ref <tag>");
   }
   if (sourceSha !== expectedSource) fail("resolved source commit does not match the tag");
   if (!CONTAINED_STATUSES.has(compareStatus)) {

@@ -5,7 +5,7 @@ import test from "node:test";
 import { validateCmsStatus, validateProfileMetadata, validateSignedProfile } from "./install-profile.mjs";
 
 const CERT = Buffer.from("fixture distribution certificate");
-const CERT_SHA1 = createHash("sha1").update(CERT).digest("hex");
+const CERT_SHA256 = createHash("sha256").update(CERT).digest("hex");
 const UUID = "11111111-2222-3333-4444-555555555555";
 const NOW = new Date("2026-09-17T00:00:00Z");
 const metadata = {
@@ -19,7 +19,7 @@ const metadata = {
   expirationDate: "2027-09-02T12:00:00.000Z",
   profileContent: Buffer.from("signed profile bytes").toString("base64"),
   certificateId: "certificate-1",
-  certificateSha1: CERT_SHA1,
+  certificateSha256: CERT_SHA256,
 };
 const payload = {
   UUID: UUID.toLowerCase(),
@@ -31,12 +31,12 @@ const payload = {
   DeveloperCertificates: [CERT.toString("base64")],
   IsXcodeManaged: false,
 };
-const context = { metadata, team: "ABCDE12345", bundleId: "dev.instafy.studio", certSha1: CERT_SHA1, now: NOW };
+const context = { metadata, team: "ABCDE12345", bundleId: "dev.instafy.studio", certSha256: CERT_SHA256, now: NOW };
 
 test("provider metadata must name the exact bundle, certificate and profile type", () => {
   assert.deepEqual(validateProfileMetadata(metadata, context), Buffer.from("signed profile bytes"));
   assert.throws(() => validateProfileMetadata({ ...metadata, bundleId: "dev.other" }, context), /provider-bundle-binding/u);
-  assert.throws(() => validateProfileMetadata({ ...metadata, certificateSha1: "0".repeat(40) }, context), /provider-certificate-binding/u);
+  assert.throws(() => validateProfileMetadata({ ...metadata, certificateSha256: "0".repeat(64) }, context), /provider-certificate-binding/u);
   assert.throws(() => validateProfileMetadata({ ...metadata, profileType: "IOS_APP_DEVELOPMENT" }, context), /provider-profile-type/u);
   assert.throws(() => validateProfileMetadata({ ...metadata, profileContent: "not base64!" }, context), /provider-profile-content/u);
 });

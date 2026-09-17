@@ -27,7 +27,7 @@ const push = {
   sourceSha: SHA,
   versions: { name: "1.0", code: "81" },
 };
-const dispatch = { ...push, eventName: "workflow_dispatch", pusher: "", ref: "refs/heads/main", sha: MAIN, dryRun: "false" };
+const dispatch = { ...push, eventName: "workflow_dispatch", pusher: "", ref: `refs/tags/${TAG}`, dryRun: "false" };
 
 test("parses only ios-v<marketing>-<build> tags", () => {
   assert.deepEqual(parseIosTag("ios-v1.0-81"), { marketing: "1.0", build: "81" });
@@ -83,8 +83,8 @@ test("rejects foreign actors, repositories, refs, diverged commits and version d
   }
 });
 
-test("dispatch semantics: dry runs may precede the tag, releases need a new existing tag", () => {
-  const dryRunNoTag = authorizeRelease({ ...dispatch, dryRun: "true", tagSha: null, sourceSha: MAIN, releaseState: "absent" });
+test("dispatch semantics: dry runs may precede the tag, releases need a new existing tag at the workflow commit", () => {
+  const dryRunNoTag = authorizeRelease({ ...dispatch, ref: "refs/heads/main", sha: MAIN, dryRun: "true", tagSha: null, sourceSha: MAIN, releaseState: "absent" });
   assert.equal(dryRunNoTag.mode, "dry_run");
   assert.equal(dryRunNoTag.source_sha, MAIN);
   assert.equal(dryRunNoTag.tag_exists, "false");
@@ -92,11 +92,19 @@ test("dispatch semantics: dry runs may precede the tag, releases need a new exis
   assert.equal(authorizeRelease({ ...dispatch, dryRun: "true", releaseState: "present" }).source_sha, SHA);
   assert.equal(authorizeRelease(dispatch).mode, "release");
   assert.equal(authorizeRelease({ ...dispatch, reconcileOnly: "true" }).reconcile_only, "true");
-  assert.throws(() => authorizeRelease({ ...dispatch, tagSha: null, sourceSha: MAIN }), /requires an existing tag/u);
+  // Dispatching from main is fine while the tag still points at the main head.
+  assert.equal(authorizeRelease({ ...dispatch, ref: "refs/heads/main" }).source_sha, SHA);
+  assert.throws(() => authorizeRelease({ ...dispatch, ref: "refs/heads/main", sha: MAIN, tagSha: null, sourceSha: MAIN }), /requires an existing tag/u);
+  assert.throws(() => authorizeRelease({ ...dispatch, tagSha: null, dryRun: "true" }), /must dispatch from refs\/heads\/main/u);
   assert.throws(() => authorizeRelease({ ...dispatch, dryRun: "true", reconcileOnly: "true" }), /reconcile_only is valid only/u);
-  assert.throws(() => authorizeRelease({ ...dispatch, ref: "refs/heads/feature" }), /refs\/heads\/main/u);
+  assert.throws(() => authorizeRelease({ ...dispatch, ref: "refs/heads/feature" }), /refs\/heads\/main or from the release tag/u);
+  assert.throws(() => authorizeRelease({ ...dispatch, ref: "refs/tags/ios-v1.0-80" }), /refs\/heads\/main or from the release tag/u);
   assert.throws(() => authorizeRelease({ ...dispatch, dryRun: "" }), /requires dry_run/u);
   assert.throws(() => authorizeRelease({ ...dispatch, sourceSha: MAIN }), /does not match the tag/u);
+  // The checkout is always github.sha: a tag at an older commit than the dispatched ref fails closed.
+  for (const dryRun of ["true", "false"]) {
+    assert.throws(() => authorizeRelease({ ...dispatch, ref: "refs/heads/main", sha: MAIN, dryRun }), /must be the workflow commit/u, dryRun);
+  }
 });
 
 test("recheck requires the same commit, containment and an absent Release", () => {
