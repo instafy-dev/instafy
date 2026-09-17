@@ -1,0 +1,93 @@
+import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import test from "node:test";
+
+const SCRIPT = path.join(import.meta.dirname, "release-refs.sh");
+const TAG = "android-v1.0-260860839";
+const COMMIT = "a".repeat(40);
+const TAG_OBJECT = "b".repeat(40);
+
+// A fake gh that answers the three read-only API calls the recheck makes.
+const FAKE_GH = `#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\\n' "$*" >> "$FAKE_LOG"
+not_found() { echo "gh: Not Found (HTTP 404)" >&2; exit 1; }
+server_error() { echo "gh: Server Error (HTTP 502)" >&2; exit 1; }
+case "$2" in
+  repos/instafy-dev/instafy/git/ref/tags/*)
+    case "$FAKE_TAG" in 404) not_found ;; 502) server_error ;; *) echo "$FAKE_TAG" ;; esac ;;
+  repos/instafy-dev/instafy/git/tags/*) echo "$FAKE_PEELED" ;;
+  repos/instafy-dev/instafy/compare/*) echo "$FAKE_COMPARE" ;;
+  repos/instafy-dev/instafy/releases/tags/*)
+    case "$FAKE_RELEASE" in 404) not_found ;; 502) server_error ;; *) echo 42 ;; esac ;;
+  *) echo "unexpected gh call" >&2; exit 2 ;;
+esac
+`;
+
+function run(args, fake) {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "android-refs-"));
+  try {
+    fs.writeFileSync(path.join(root, "gh"), FAKE_GH, { mode: 0o755 });
+    const log = path.join(root, "gh.log");
+    const result = spawnSync("bash", [SCRIPT, ...args], {
+      encoding: "utf8",
+      env: {
+        PATH: `${root}:${process.env.PATH}`,
+        FAKE_LOG: log,
+        FAKE_TAG: `commit ${COMMIT}`,
+        FAKE_PEELED: `commit ${COMMIT}`,
+        FAKE_COMPARE: "ahead",
+        FAKE_RELEASE: "404",
+        ...fake,
+      },
+    });
+    const calls = fs.existsSync(log) ? fs.readFileSync(log, "utf8").trim().split("\n") : [];
+    return { ...result, calls };
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+}
+
+test("recheck passes only for the exact tag commit on main with no release yet", () => {
+  const ok = run(["recheck", TAG, COMMIT], {});
+  assert.equal(ok.status, 0, ok.stderr);
+  assert.match(ok.stdout, /android-v1\.0-260860839 -> a{40} on main \(ahead\); no GitHub Release yet/u);
+  assert.deepEqual(ok.calls.map((call) => call.split(" ")[1]), [
+    `repos/instafy-dev/instafy/git/ref/tags/${TAG}`,
+    `repos/instafy-dev/instafy/compare/${COMMIT}...main`,
+    `repos/instafy-dev/instafy/releases/tags/${TAG}`,
+  ]);
+  const annotated = run(["recheck", TAG, COMMIT], { FAKE_TAG: `tag ${TAG_OBJECT}`, FAKE_COMPARE: "identical" });
+  assert.equal(annotated.status, 0, annotated.stderr);
+  assert.ok(annotated.calls.some((call) => call.includes(`git/tags/${TAG_OBJECT}`)));
+});
+
+test("recheck fails closed on moved tags, rewritten main, existing releases and unknown API errors", () => {
+  const cases = [
+    [{ FAKE_TAG: `commit ${"c".repeat(40)}` }, /no longer resolves to/u],
+    [{ FAKE_TAG: "404" }, /no longer resolves to a{40} \(now: absent\)/u],
+    [{ FAKE_TAG: "502" }, /Could not resolve tag/u],
+    [{ FAKE_TAG: `tag ${TAG_OBJECT}`, FAKE_PEELED: `tree ${COMMIT}` }, /does not peel to a commit/u],
+    [{ FAKE_COMPARE: "behind" }, /no longer contains/u],
+    [{ FAKE_COMPARE: "diverged" }, /no longer contains/u],
+    [{ FAKE_RELEASE: "exists" }, /already exists; this tag was already published/u],
+    [{ FAKE_RELEASE: "502" }, /Could not prove that no GitHub Release exists/u],
+  ];
+  for (const [fake, error] of cases) {
+    const result = run(["recheck", TAG, COMMIT], fake);
+    assert.equal(result.status, 1, JSON.stringify(fake));
+    assert.match(result.stderr, error, JSON.stringify(fake));
+    assert.match(result.stderr, /^::error::/mu);
+  }
+});
+
+test("rejects malformed arguments before any API call", () => {
+  for (const args of [["recheck", "ios-v1.0-81", COMMIT], ["recheck", TAG, "short"], ["recheck", TAG], ["delete", TAG]]) {
+    const result = run(args, {});
+    assert.equal(result.status, 1);
+    assert.deepEqual(result.calls, []);
+  }
+});
