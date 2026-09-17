@@ -105,8 +105,14 @@ export function resolveSource(input) {
     deny("The tag ref lookup did not return a definite answer.");
   }
   if (!FULL_SHA.test(sourceSha ?? "")) deny("The release source is not a full commit SHA.");
-  if (eventName === "push" && sourceSha !== sha) {
-    deny("The pushed tag no longer resolves to the commit that triggered this run.");
+  // Every job checks out github.sha, never a computed ref, so the release
+  // source must be exactly the commit this run was triggered for. A dispatch
+  // therefore publishes or dry-runs only a tag at the main head it runs from.
+  if (sourceSha !== sha) {
+    if (eventName === "push") {
+      deny("The pushed tag no longer resolves to the commit that triggered this run.");
+    }
+    deny(`${tag} resolves to ${sourceSha}, not to the main head ${sha} this dispatch runs from; re-run the tag's own push run instead.`);
   }
   if (input.compareBase !== sourceSha) deny("The main comparison was made for a different commit.");
   if (!["identical", "ahead"].includes(input.compareStatus)) {

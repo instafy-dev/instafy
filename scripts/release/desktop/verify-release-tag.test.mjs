@@ -85,6 +85,15 @@ test("resolve peels tags, binds push to github.sha and requires ancestry on main
   assert.throws(() => resolveSource({ ...resolveBase, tagRefJson: lightweight.replace("0.2.13", "0.2.14") }), /different ref/u);
 });
 
+test("a dispatch runs only for a tag at the main head it runs from", () => {
+  const dispatched = { ...resolveBase, eventName: "workflow_dispatch" };
+  assert.equal(resolveSource(dispatched).sourceSha, SHA);
+  assert.equal(resolveSource({ ...dispatched, mode: "dry-run" }).sourceSha, SHA);
+  for (const mode of ["release", "dry-run"]) {
+    assert.throws(() => resolveSource({ ...dispatched, mode, sha: OTHER }), /not to the main head/u);
+  }
+});
+
 test("a missing tag is accepted only for a dispatched dry run", () => {
   const missing = { ...resolveBase, tagRefStatus: "404", tagRefJson: "" };
   assert.throws(() => resolveSource(missing), /only a dry run/u);

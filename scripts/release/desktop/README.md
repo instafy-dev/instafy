@@ -11,8 +11,11 @@ ledger: there are no deployment ledgers, journals or merge freezes.
 - `gh workflow run desktop-release.yml --ref main -f tag=<tag> -f dry_run=true|false`
   as `instafy-bot`. `dry_run=true` (default) builds, signs, notarizes and smoke-tests
   but publishes nothing; the signed artifact is kept for 30 days. `dry_run=false`
-  publishes an existing tag that never ran (for example a tag created before this
-  workflow existed on that commit), or one whose tag-push run was cancelled.
+  publishes an existing tag that never ran. A dispatch builds exactly the `main` head
+  it runs from (`github.sha`): authorize refuses it unless the named tag, when it
+  exists, resolves to that same commit. A tag at an older commit is published only by
+  its own tag-push run; recover a cancelled tag-push run with **Re-run all jobs** on
+  that run, not with a dispatch.
 
 Concurrency: runs are grouped per tag, and the publish job has its own global group,
 so stable-pointer writes never race. GitHub keeps only one *pending* run or job per
@@ -20,7 +23,8 @@ group: if three publishes queue at once, the older pending one is cancelled. The
 `publish_cancelled` job turns that into a failed run with an error annotation; use
 **Re-run failed jobs** on it. If a newer version became stable meanwhile, the pointer
 guard refuses the older tag and nothing more is needed. A cancelled queued tag run
-(before publish) is recovered the same way, or with `dry_run=false` for the tag.
+(before publish) is recovered by re-running that run, or with `dry_run=false` only
+while the tag still points at the `main` head.
 
 ## Jobs
 
@@ -36,6 +40,15 @@ guard refuses the older tag and nothing more is needed. A cancelled queued tag r
 
 Lane tooling (`scripts/release/desktop/**`) is read from the workflow commit; the product
 bytes are built from the tag commit.
+
+Every job checks out `github.sha` (or `github.workflow_sha` for the tooling), never a
+ref computed from inputs or job outputs, and re-asserts it equals the authorized
+`source_sha`. Authorize requires the release tag to resolve to `github.sha` for tag
+pushes and dispatches alike, which keeps the exact-source binding while giving static
+analysis (CodeQL `actions/cache-poisoning`) no untrusted checkout. No job restores or
+saves an Actions cache (no `setup-node` cache, `rust-cache` or `actions/cache`): a
+signed release is built from a cold dependency install, and its runs can neither
+consume nor seed caches shared with other workflows on `main`.
 
 The GitHub Release carries the dmg, zip, zip.blockmap, dmg.blockmap (when
 electron-builder emits one), latest-mac.yml, latest.json and release-receipt.json. The
