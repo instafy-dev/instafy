@@ -1,9 +1,11 @@
 import assert from "node:assert/strict";
+import { randomBytes } from "node:crypto";
 import test from "node:test";
 
 import { assertBrowserSafeConfig, assertBrowserSafeSupabaseKey } from "./browser-safe-config.mjs";
 
-const PUBLISHABLE = "sb_publishable_Q7mX2vK9pR4tN8zL3cW6yH1fJ5dB0sA";
+// Generated per run so the tree never carries a key-shaped literal.
+const PUBLISHABLE = `sb_publishable_${randomBytes(24).toString("base64url").replace(/[-_]/gu, "x")}`;
 
 const env = (overrides = {}) => ({
   VITE_CONTROLLER_URL: "https://controller.instafy.dev",

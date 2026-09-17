@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { randomBytes } from "node:crypto";
 import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -89,8 +90,10 @@ test("gate rejects scanner version drift and inconsistent exit codes", () => {
 test("release config allowlists only publishable Supabase keys and targets the public path rule", () => {
   const config = releaseArtifactScannerConfig("[extend]\nuseDefault = true\n");
   const publishable = new RegExp(config.match(/regexes = \['''(\^sb_publishable_[^']+\$)'''\]/u)[1], "u");
-  assert.equal(publishable.test("sb_publishable_Q7mX2vK9pR4tN8zL3cW6yH1fJ5dB0sA"), true);
-  assert.equal(publishable.test(["sb", "secret", "Q7mX2vK9pR4tN8zL3cW6yH1fJ5dB0sA"].join("_")), false);
+  // Key material is generated per run so the tree never carries a key-shaped literal.
+  const suffix = randomBytes(24).toString("base64url").replace(/[-_]/gu, "x");
+  assert.equal(publishable.test(`sb_publishable_${suffix}`), true);
+  assert.equal(publishable.test(["sb", "secret", suffix].join("_")), false);
   assert.match(config, /targetRules = \["instafy-absolute-personal-path"\]/u);
   assert.doesNotMatch(config, /"instafy-personal-path"/u);
   const line = new RegExp(config.match(/regexes = \['''([^']*runner[^']*)'''\]/u)[1], "u");
