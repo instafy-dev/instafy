@@ -75,5 +75,5 @@ description = "Private product marker outside its public contract"
 regex = '''(?i)k[n]osh'''
 
   [[rules.allowlists]]
-  description = "The public provider contract names the supported private product"
-  paths = ['''(?:^|/)packages/provider-contract(?:/|$)''']
+  description = "The public provider contract and the vendored hosted-web robot slice name the product"
+  paths = ['''(?:^|/)packages/provider-contract(?:/|$)''', '''(?:^|/)packages/frontend/hosted/robot(?:/|$)''']
