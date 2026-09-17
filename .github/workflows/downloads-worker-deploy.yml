@@ -1,0 +1,135 @@
+name: Downloads Worker Deploy
+
+# The Worker has no version in source, so it is not tag-driven: a bot dispatch
+# on protected main deploys exactly main's head. The deploy never touches R2
+# objects; it only changes the code fronting them.
+
+on:
+  workflow_dispatch:
+    inputs:
+      commit_sha:
+        description: "Exact commit to deploy; must equal the current protected main head"
+        required: true
+        type: string
+      dry_run:
+        description: "Test and bundle the Worker but deploy nothing"
+        required: false
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: downloads-worker-deploy
+  cancel-in-progress: false
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  deploy:
+    name: Deploy the downloads Worker
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    environment: downloads-worker
+    env:
+      DOWNLOADS_BASE_URL: ${{ vars.DOWNLOADS_BASE_URL || 'https://downloads.instafy.dev' }}
+      DESKTOP_DOWNLOADS_PREFIX: ${{ vars.DESKTOP_DOWNLOADS_PREFIX || 'desktop-app' }}
+      MOBILE_OTA_DOWNLOADS_PREFIX: ${{ vars.MOBILE_OTA_DOWNLOADS_PREFIX || 'mobile' }}
+      DRY_RUN: ${{ inputs.dry_run }}
+    steps:
+      - name: Bind the deploy to protected main and the release bot
+        env:
+          ACTOR: ${{ github.actor }}
+          REQUESTED_COMMIT: ${{ inputs.commit_sha }}
+        run: |
+          set -euo pipefail
+          if [[ "$GITHUB_REPOSITORY" != "instafy-dev/instafy" || "$GITHUB_REF" != "refs/heads/main" ]]; then
+            echo "::error::The downloads Worker deploys only from protected main of instafy-dev/instafy."; exit 1
+          fi
+          if [[ "$ACTOR" != "instafy-bot" ]]; then
+            echo "::error::The downloads Worker deploy may only be started by instafy-bot."; exit 1
+          fi
+          if [[ ! "$REQUESTED_COMMIT" =~ ^[0-9a-f]{40}$ || "$REQUESTED_COMMIT" != "$GITHUB_SHA" ]]; then
+            echo "::error::commit_sha must be the exact current main head ${GITHUB_SHA}."; exit 1
+          fi
+          if [[ "$DRY_RUN" != "true" && "$DRY_RUN" != "false" ]]; then
+            echo "::error::dry_run must be true or false."; exit 1
+          fi
+
+      - name: Check out the exact commit
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+          fetch-depth: 1
+          submodules: false
+
+      - name: Set up Node.js
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: "22"
+
+      - name: Test the Worker and pin its public contract
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          node --experimental-strip-types --test packages/downloads-worker/test/index.test.mjs
+          node scripts/release/downloads-worker/verify-wrangler-contract.mjs
+
+      - name: Install exact Wrangler without credentials
+        id: wrangler
+        run: |
+          set -euo pipefail
+          tool_root="$RUNNER_TEMP/instafy-wrangler"
+          mkdir -m 700 "$tool_root"
+          npm install --prefix "$tool_root" --ignore-scripts --no-audit --no-fund --save-exact wrangler@4.73.0
+          test "$("$tool_root/node_modules/.bin/wrangler" --version)" = "4.73.0"
+          echo "binary=$tool_root/node_modules/.bin/wrangler" >> "$GITHUB_OUTPUT"
+
+      - name: Deploy the Worker (bundle only on a dry run)
+        id: deploy
+        working-directory: packages/downloads-worker
+        env:
+          WRANGLER: ${{ steps.wrangler.outputs.binary }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_WORKERS_API_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [[ -z "${CLOUDFLARE_ACCOUNT_ID:-}" || -z "${CLOUDFLARE_API_TOKEN:-}" ]]; then
+            echo "::error::CLOUDFLARE_ACCOUNT_ID and CLOUDFLARE_WORKERS_API_TOKEN are required in downloads-worker."; exit 1
+          fi
+          log="$RUNNER_TEMP/wrangler-deploy.log"
+          if [[ "$DRY_RUN" == "true" ]]; then
+            "$WRANGLER" deploy --dry-run --outdir "$RUNNER_TEMP/worker-dry-run" 2>&1 | tee "$log"
+            echo "version_id=dry-run" >> "$GITHUB_OUTPUT"
+          else
+            "$WRANGLER" deploy 2>&1 | tee "$log"
+            version_id="$(grep -Eo 'Current Version ID: [0-9a-f-]{36}' "$log" | head -n 1 | cut -d' ' -f4 || true)"
+            if [[ -z "$version_id" ]]; then
+              echo "::warning::Wrangler did not report a version id."
+            fi
+            echo "version_id=${version_id:-unknown}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Prove the live Worker still serves what is shipping
+        if: ${{ inputs.dry_run == false }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          LATEST_OTA_TAG="$(gh api "repos/${GITHUB_REPOSITORY}/releases?per_page=100" \
+            --jq '[.[] | select(.tag_name | test("^ota-v[0-9a-f]{12}$")) | .tag_name][0] // ""')"
+          export LATEST_OTA_TAG
+          node scripts/release/downloads-worker/verify-live-feed.mjs
+
+      - name: Summarize the deploy
+        if: ${{ always() }}
+        env:
+          VERSION_ID: ${{ steps.deploy.outputs.version_id }}
+        run: |
+          set -euo pipefail
+          printf '### Downloads Worker\n\n- commit: `%s`\n- dry run: `%s`\n- version: `%s`\n' \
+            "$GITHUB_SHA" "$DRY_RUN" "${VERSION_ID:-not deployed}" >> "$GITHUB_STEP_SUMMARY"
