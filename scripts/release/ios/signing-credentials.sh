@@ -5,6 +5,7 @@
 #   signing-credentials.sh require       validate the six Apple secrets (names only are printed)
 #   signing-credentials.sh keychain      create the isolated keychain, import the p12,
 #                                        export IOS_SIGNING_KEYCHAIN / IOS_DIST_CERT_SHA1
+#                                        (Xcode identity) / IOS_DIST_CERT_SHA256 (DER fingerprint)
 #   signing-credentials.sh stage-asc-key write AuthKey_<KEY_ID>.p8 (0600, noclobber)
 #   signing-credentials.sh cleanup       remove profile, p8, keychain; restore search list
 set -euo pipefail
@@ -92,7 +93,22 @@ PY
   printf '%s' "$identity_sha1" | grep -Eq '^[0-9A-Fa-f]{40}$' ||
     fail "The Apple Distribution identity has no exact SHA-1."
   identity_sha1="$(printf '%s' "$identity_sha1" | tr 'ABCDEF' 'abcdef')"
+  # Our own certificate matching (App Store Connect, signed profile, IPA leaf) uses
+  # the SHA-256 of the DER certificate; the SHA-1 is only Xcode's identity selector.
+  identity_pem="$state/identity-certificate.pem"
+  identity_der="$state/identity-certificate.der"
+  security find-certificate -a -c "$identity_name" -p "$keychain" > "$identity_pem"
+  [ "$(grep -c -e '^-----BEGIN CERTIFICATE-----$' "$identity_pem")" = "1" ] ||
+    fail "The keychain must hold exactly one certificate for the Apple Distribution identity."
+  openssl x509 -in "$identity_pem" -outform DER -out "$identity_der"
+  [ "$(shasum -a 1 "$identity_der" | awk '{print $1}')" = "$identity_sha1" ] ||
+    fail "The exported certificate is not the Apple Distribution identity."
+  identity_sha256="$(shasum -a 256 "$identity_der" | awk '{print $1}')"
+  rm -f "$identity_pem" "$identity_der"
+  printf '%s' "$identity_sha256" | grep -Eq '^[0-9a-f]{64}$' ||
+    fail "The Apple Distribution certificate has no exact SHA-256 fingerprint."
   echo "IOS_DIST_CERT_SHA1=$identity_sha1" >> "$GITHUB_ENV"
+  echo "IOS_DIST_CERT_SHA256=$identity_sha256" >> "$GITHUB_ENV"
   echo "Prepared an isolated keychain with one Apple Distribution identity ($identity_sha1)."
 }
 

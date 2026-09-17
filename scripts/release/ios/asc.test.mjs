@@ -24,7 +24,7 @@ const IPA_MD5_BASE64 = Buffer.from(IPA_MD5, "hex").toString("base64");
 const IPA_SHA256 = "5".repeat(64);
 const IPA_SHA256_BASE64 = Buffer.from(IPA_SHA256, "hex").toString("base64");
 const CERTIFICATE_BYTES = Buffer.from("fixture distribution certificate");
-const CERTIFICATE_SHA1 = crypto.createHash("sha1").update(CERTIFICATE_BYTES).digest("hex");
+const CERTIFICATE_SHA256 = crypto.createHash("sha256").update(CERTIFICATE_BYTES).digest("hex");
 const PROFILE_CONTENT = Buffer.from("fixture signed profile").toString("base64");
 const appleKeys = crypto.generateKeyPairSync("ec", { namedCurve: "P-256" });
 const applePrivateKey = appleKeys.privateKey.export({ type: "pkcs8", format: "pem" });
@@ -390,22 +390,22 @@ test("downloads exactly one active App Store profile bound to the imported certi
   };
   const selected = await downloadAppleAppStoreProfile({
     bundleId: BUNDLE_ID,
-    certificateSha1: CERTIFICATE_SHA1.toUpperCase(),
+    certificateSha256: CERTIFICATE_SHA256.toUpperCase(),
     token: ACCESS_TOKEN,
     fetchImpl,
     now: NOW,
   });
   assert.equal(selected.profileId, "exact");
   assert.equal(selected.uuid, "11111111-2222-3333-4444-555555555555");
-  assert.equal(selected.certificateSha1, CERTIFICATE_SHA1);
+  assert.equal(selected.certificateSha256, CERTIFICATE_SHA256);
   assert.equal(selected.certificateId, "certificate-1");
   assert.ok(calls.every((call) => call.method === "GET" && call.url.origin === APPLE_ORIGIN));
   await assert.rejects(
-    downloadAppleAppStoreProfile({ bundleId: BUNDLE_ID, certificateSha1: CERTIFICATE_SHA1, profileId: "other", token: ACCESS_TOKEN, fetchImpl, now: NOW }),
+    downloadAppleAppStoreProfile({ bundleId: BUNDLE_ID, certificateSha256: CERTIFICATE_SHA256, profileId: "other", token: ACCESS_TOKEN, fetchImpl, now: NOW }),
     /exactly one active iOS App Store profile/u,
   );
   await assert.rejects(
-    downloadAppleAppStoreProfile({ bundleId: BUNDLE_ID, certificateSha1: "0".repeat(40), token: ACCESS_TOKEN, fetchImpl, now: NOW }),
+    downloadAppleAppStoreProfile({ bundleId: BUNDLE_ID, certificateSha256: "0".repeat(64), token: ACCESS_TOKEN, fetchImpl, now: NOW }),
     /exactly one active distribution certificate/u,
   );
 });

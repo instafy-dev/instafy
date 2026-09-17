@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
 # Locate the single exported IPA, rename it Instafy.ipa and prove it is the
 # exact signed app: strict codesign on the archived and exported .app, the
-# installed profile embedded byte-for-byte, the leaf certificate SHA-1, the
+# installed profile embedded byte-for-byte, the leaf certificate SHA-256, the
 # committed bundle/version/build, no credential-bearing or private entries.
 # bash 3.2 safe.
 #
 # env: IOS_ARCHIVE_PATH, IOS_EXPORT_DIR, IOS_RELEASE_DIR, IOS_APP_STORE_PROFILE_PATH,
-#      IOS_DIST_CERT_SHA1, APP_BUNDLE_ID, EXPECTED_MARKETING, EXPECTED_BUILD, GITHUB_OUTPUT
+#      IOS_DIST_CERT_SHA256, APP_BUNDLE_ID, EXPECTED_MARKETING, EXPECTED_BUILD, GITHUB_OUTPUT
 set -euo pipefail
 
 fail() {
@@ -15,7 +15,7 @@ fail() {
 }
 
 : "${IOS_ARCHIVE_PATH:?}" "${IOS_EXPORT_DIR:?}" "${IOS_RELEASE_DIR:?}" "${IOS_APP_STORE_PROFILE_PATH:?}"
-: "${IOS_DIST_CERT_SHA1:?}" "${APP_BUNDLE_ID:?}" "${EXPECTED_MARKETING:?}" "${EXPECTED_BUILD:?}" "${GITHUB_OUTPUT:?}"
+: "${IOS_DIST_CERT_SHA256:?}" "${APP_BUNDLE_ID:?}" "${EXPECTED_MARKETING:?}" "${EXPECTED_BUILD:?}" "${GITHUB_OUTPUT:?}"
 
 work="$(mktemp -d "${RUNNER_TEMP:-/tmp}/instafy-ios-verify.XXXXXX")"
 trap 'rm -rf "$work"' EXIT
@@ -40,8 +40,8 @@ verify_app() { # <label> <app-dir>
   mkdir -m 700 "$certs"
   codesign -d --extract-certificates="$certs/cert-" "$app" >/dev/null 2>&1
   [ -f "$certs/cert-0" ] || fail "The $label has no leaf signing certificate."
-  leaf="$(shasum -a 1 "$certs/cert-0" | awk '{print $1}')"
-  [ "$leaf" = "$IOS_DIST_CERT_SHA1" ] || fail "The $label leaf certificate is not the imported Apple Distribution certificate."
+  leaf="$(shasum -a 256 "$certs/cert-0" | awk '{print $1}')"
+  [ "$leaf" = "$IOS_DIST_CERT_SHA256" ] || fail "The $label leaf certificate is not the imported Apple Distribution certificate."
   plist="$app/Info.plist"
   [ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$plist")" = "$APP_BUNDLE_ID" ] ||
     fail "The $label bundle identifier differs."

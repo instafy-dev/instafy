@@ -20,10 +20,24 @@ upload, `ubuntu-24.04` for authorization and reconciliation). The tag is the led
 Receipt: `https://github.com/instafy-dev/instafy/releases/download/<tag>/release-receipt.json`
 (`instafy-client-release-receipt-v1`, lane `ios`, secret-free).
 
+## Source binding
+
+Every job checks out `github.sha` (never a ref computed from job outputs or inputs) and no
+job reads or writes an Actions cache, so a release run cannot build or poison anything but
+the commit that triggered it. `authorize` therefore requires the release tag to peel to
+`github.sha`:
+
+- tag push: the tag commit is `github.sha`;
+- dispatch from `main`: only while the tag is absent (dry run, source = `main` head) or still
+  points at the current `main` head;
+- dispatch of an existing tag at an older commit: run the workflow **on the tag itself**,
+  `gh workflow run ios-release.yml --ref <tag> -f tag=<tag> ...`. Any other combination fails
+  closed in `authorize` before a secret job starts.
+
 ## Dry run and recovery
 
 - Dry run: `gh workflow run ios-release.yml --ref main -f tag=ios-v1.0-82 -f dry_run=true`.
-  The tag may not exist yet (source = `main` head). Archive, export, signing and IPA checks
+  The tag may not exist yet (source = `main` head); for an existing tag use `--ref <tag>`. Archive, export, signing and IPA checks
   run, App Store Connect is only observed, and the IPA is kept as an Actions artifact for
   7 days. Nothing is published.
 - Only `instafy-bot` may start or re-run a release. GitHub keeps `github.actor` on a re-run,
@@ -37,12 +51,12 @@ Receipt: `https://github.com/instafy-dev/instafy/releases/download/<tag>/release
 - Queued runs: runs share a concurrency group per kind (`publish` or `dry-run`). GitHub keeps
   only one *pending* run per group and cancels the older pending one. A tag push run that was
   cancelled while queued never published anything; dispatch it again with
-  `-f tag=<tag> -f dry_run=false`.
+  `--ref <tag> -f tag=<tag> -f dry_run=false`.
 - `altool` can exit 0 on some delivery failures; the lane treats `product-errors` in its XML
   as a failure. In either case check App Store Connect and use `reconcile_only` if the build
   arrived.
 - Upload accepted but the run died before the Release: dispatch
-  `-f tag=<tag> -f dry_run=false -f reconcile_only=true`. This never uploads; it proves the
+  `--ref <tag> -f tag=<tag> -f dry_run=false -f reconcile_only=true`. This never uploads; it proves the
   same App Store Connect state and publishes a receipt whose IPA digests come from App
   Store Connect (`digestSource: app-store-connect`). Such a receipt proves only App Store
   Connect state for that build number: nothing binds the App Store Connect build to the tag's
@@ -90,6 +104,13 @@ This is a public repository. The run artifact `ios-ipa-<tag>` (signed IPA, `pre.
 `post-build.json` with App Store Connect app and beta group ids, `ota.json`, digests) can be
 downloaded by any signed-in user, including from dry runs, and the IPA is also a Release
 asset. None of it is secret, but nothing secret may ever be added to it.
+
+## Signing identity
+
+The keychain step exports the imported certificate's SHA-1 only as Xcode's identity selector
+(`CODE_SIGN_IDENTITY`, `signingCertificate`). Every match the lane performs itself (the App
+Store Connect certificate, the signed profile's `DeveloperCertificates`, the IPA leaf
+certificate) compares the SHA-256 of the DER certificate (`IOS_DIST_CERT_SHA256`).
 
 ## Hosted runner
 

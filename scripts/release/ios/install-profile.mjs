@@ -7,7 +7,7 @@
 // cleanup target is recorded in GITHUB_ENV before any byte is written.
 //
 // usage: install-profile.mjs <profile-metadata.json>
-// env:   IOS_SIGNING_KEYCHAIN, IOS_DEVELOPMENT_TEAM, IOS_DIST_CERT_SHA1,
+// env:   IOS_SIGNING_KEYCHAIN, IOS_DEVELOPMENT_TEAM, IOS_DIST_CERT_SHA256,
 //        APP_BUNDLE_ID, RUNNER_TEMP, HOME, GITHUB_ENV
 
 import { execFileSync } from "node:child_process";
@@ -25,13 +25,13 @@ function fail(code) {
   throw new Error(`[ios-profile] validation failed at ${code}`);
 }
 
-export function validateProfileMetadata(metadata, { bundleId, certSha1 }) {
+export function validateProfileMetadata(metadata, { bundleId, certSha256 }) {
   if (!metadata || typeof metadata !== "object") fail("provider-metadata");
   if (metadata.provider !== "app-store-connect" || metadata.profileType !== "IOS_APP_STORE") {
     fail("provider-profile-type");
   }
   if (metadata.bundleId !== bundleId) fail("provider-bundle-binding");
-  if (metadata.certificateSha1 !== certSha1) fail("provider-certificate-binding");
+  if (metadata.certificateSha256 !== certSha256) fail("provider-certificate-binding");
   if (typeof metadata.uuid !== "string" || !UUID.test(metadata.uuid)) fail("provider-uuid");
   if (typeof metadata.name !== "string" || metadata.name.length === 0) fail("provider-name");
   if (!Number.isFinite(Date.parse(metadata.expirationDate))) fail("provider-expiration");
@@ -63,7 +63,7 @@ export function validateCmsStatus(text) {
 }
 
 // `payload` is the signed plist as JSON (dates as ISO strings, data as base64).
-export function validateSignedProfile(payload, { metadata, team, bundleId, certSha1, now = new Date() }) {
+export function validateSignedProfile(payload, { metadata, team, bundleId, certSha256, now = new Date() }) {
   if (!payload || typeof payload !== "object" || Array.isArray(payload)) fail("signed-profile-shape");
   if (Object.hasOwn(payload, "IsXcodeManaged") && payload.IsXcodeManaged !== false) {
     fail("signed-profile-xcode-managed");
@@ -97,9 +97,10 @@ export function validateSignedProfile(payload, { metadata, team, bundleId, certS
   }
   const certificates = payload.DeveloperCertificates;
   if (!Array.isArray(certificates) || certificates.length === 0) fail("signed-certificate-binding");
+  // DeveloperCertificates are DER certificates; match on their SHA-256 fingerprint.
   const matches = certificates.filter((value) =>
     typeof value === "string" &&
-    createHash("sha1").update(Buffer.from(value, "base64")).digest("hex") === certSha1);
+    createHash("sha256").update(Buffer.from(value, "base64")).digest("hex") === certSha256);
   if (matches.length !== 1) fail("signed-certificate-binding");
   return uuid;
 }
@@ -173,12 +174,12 @@ function main(argv) {
   if (argv.length !== 1) fail("usage");
   const keychain = requireEnv("IOS_SIGNING_KEYCHAIN");
   const team = requireEnv("IOS_DEVELOPMENT_TEAM");
-  const certSha1 = requireEnv("IOS_DIST_CERT_SHA1");
+  const certSha256 = requireEnv("IOS_DIST_CERT_SHA256");
   const bundleId = requireEnv("APP_BUNDLE_ID");
   const githubEnv = requireEnv("GITHUB_ENV");
-  if (!/^[0-9a-f]{40}$/u.test(certSha1) || !/^[A-Z0-9]{10}$/u.test(team)) fail("inputs");
+  if (!/^[0-9a-f]{64}$/u.test(certSha256) || !/^[A-Z0-9]{10}$/u.test(team)) fail("inputs");
   const metadata = JSON.parse(fs.readFileSync(argv[0], "utf8"));
-  const bytes = validateProfileMetadata(metadata, { bundleId, certSha1 });
+  const bytes = validateProfileMetadata(metadata, { bundleId, certSha256 });
   const work = fs.mkdtempSync(path.join(requireEnv("RUNNER_TEMP"), "instafy-ios-profile."));
   try {
     const downloaded = path.join(work, "profile.mobileprovision");
@@ -195,7 +196,7 @@ function main(argv) {
       input: signedPlist,
       encoding: "utf8",
     }));
-    const uuid = validateSignedProfile(payload, { metadata, team, bundleId, certSha1 });
+    const uuid = validateSignedProfile(payload, { metadata, team, bundleId, certSha256 });
     const store = path.join(requireEnv("HOME"), PROFILE_STORE);
     fs.mkdirSync(store, { recursive: true });
     const target = installExclusive({ bytes, directory: store, uuid, githubEnv });

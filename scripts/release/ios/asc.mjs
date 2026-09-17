@@ -13,7 +13,6 @@ const APPLE_API_ORIGIN = "https://api.appstoreconnect.apple.com";
 // Split so repository secret scanners never see a bare PEM header literal.
 const PKCS8_HEADER = ["-----BEGIN", "PRIVATE KEY-----"].join(" ");
 const SHA256 = /^[0-9a-f]{64}$/u;
-const SHA1 = /^[0-9a-f]{40}$/u;
 const MD5 = /^[0-9a-f]{32}$/u;
 const APPLE_JWT = /^(?=.{20,4096}$)[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/u;
 const OPAQUE_ID = /^[A-Za-z0-9._:-]{1,200}$/u;
@@ -557,7 +556,7 @@ function appleDistributionCertificatesUrl() {
 async function readAppleDistributionCertificate({
   fetchImpl,
   token,
-  certificateSha1,
+  certificateSha256,
   nowMilliseconds,
 }) {
   const response = await appleRequest(
@@ -627,14 +626,16 @@ async function readAppleDistributionCertificate({
       nowMilliseconds,
       "App Store Connect distribution certificate expiration",
     );
-    const providerCertificateSha1 = crypto
-      .createHash("sha1")
+    // SHA-256 of the DER certificate: the same fingerprint the keychain step
+    // exports and the signed profile's DeveloperCertificates are matched on.
+    const providerCertificateSha256 = crypto
+      .createHash("sha256")
       .update(certificateBytes)
       .digest("hex");
     if (
       certificateIsNotExplicitlyInactive &&
       certificateUnexpired &&
-      providerCertificateSha1 === certificateSha1
+      providerCertificateSha256 === certificateSha256
     ) {
       matches.push(certificateId);
     }
@@ -642,7 +643,7 @@ async function readAppleDistributionCertificate({
   if (matches.length !== 1) {
     fail(
       "App Store Connect did not expose exactly one active distribution " +
-        "certificate for the imported SHA-1",
+        "certificate for the imported SHA-256 fingerprint",
     );
   }
   return matches[0];
@@ -679,7 +680,7 @@ function validateAppleBundleProfileLinkage(profile, bundleResourceId) {
 
 export async function downloadAppleAppStoreProfile({
   bundleId,
-  certificateSha1,
+  certificateSha256,
   profileId = "",
   token,
   fetchImpl = fetch,
@@ -690,13 +691,13 @@ export async function downloadAppleAppStoreProfile({
   if (profileId !== "") {
     exactString(profileId, OPAQUE_ID, "requested App Store Connect profile ID");
   }
-  if (typeof certificateSha1 !== "string") {
-    fail("Apple Distribution certificate SHA-1 is invalid");
+  if (typeof certificateSha256 !== "string") {
+    fail("Apple Distribution certificate SHA-256 is invalid");
   }
-  certificateSha1 = exactString(
-    certificateSha1.toLowerCase(),
-    SHA1,
-    "Apple Distribution certificate SHA-1",
+  certificateSha256 = exactString(
+    certificateSha256.toLowerCase(),
+    SHA256,
+    "Apple Distribution certificate SHA-256",
   );
   if (typeof token !== "string" || token.length < 20) {
     fail("App Store Connect JWT is missing");
@@ -899,7 +900,7 @@ export async function downloadAppleAppStoreProfile({
   const certificateId = await readAppleDistributionCertificate({
     fetchImpl,
     token,
-    certificateSha1,
+    certificateSha256,
     nowMilliseconds,
   });
   // This API lookup proves the imported certificate is active account state.
@@ -908,7 +909,7 @@ export async function downloadAppleAppStoreProfile({
   return {
     ...selectedProfiles[0],
     certificateId,
-    certificateSha1,
+    certificateSha256,
   };
 }
 
@@ -1726,7 +1727,7 @@ const USAGE =
   "usage: asc.mjs observe <bundleId> <marketing> | " +
   "gate <bundleId> <marketing> <build> <out.json> [--dry-run] | " +
   "assess <observation.json> <build> [--dry-run] | " +
-  "download-profile <bundleId> <certSha1> [profileId] | " +
+  "download-profile <bundleId> <certSha256> [profileId] | " +
   "reconcile <bundleId> <marketing> <build> <ipaSize> <ipaMd5> <ipaSha256> | " +
   "reconcile-existing <bundleId> <marketing> <build>";
 
@@ -1783,7 +1784,7 @@ async function cliStore(argv) {
   if (command === "download-profile" && (argv.length === 3 || argv.length === 4)) {
     return downloadAppleAppStoreProfile({
       bundleId: argv[1],
-      certificateSha1: argv[2],
+      certificateSha256: argv[2],
       profileId: argv[3] ?? "",
       token: createAppStoreConnectJwt(appleCredentials()),
       relationshipDiagnostic: (message) => process.stderr.write(`${message}\n`),
