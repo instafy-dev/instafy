@@ -23,7 +23,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: android-release
+  group: android-release-${{ github.event_name == 'workflow_dispatch' && inputs.dry_run && 'dry-run' || 'release' }}
   cancel-in-progress: false
 
 defaults:
@@ -68,6 +68,7 @@ jobs:
           fail() { echo "::error::$*"; exit 1; }
           [[ "$GITHUB_REPOSITORY" == "$RELEASE_REPOSITORY" ]] || fail "Android releases run only in $RELEASE_REPOSITORY."
           [[ "$GITHUB_ACTOR" == "$RELEASE_ACTOR" ]] || fail "Only $RELEASE_ACTOR may run an Android release."
+          [[ "$GITHUB_TRIGGERING_ACTOR" == "$RELEASE_ACTOR" ]] || fail "Only $RELEASE_ACTOR may start or re-run an Android release."
           case "$GITHUB_EVENT_NAME" in
             push)
               [[ "$PUSHER_NAME" == "$RELEASE_ACTOR" ]] || fail "The tag pusher must be $RELEASE_ACTOR."
@@ -182,12 +183,13 @@ jobs:
           ref: ${{ needs.authorize.outputs.source_sha }}
           fetch-depth: 1
           persist-credentials: false
-          submodules: recursive
+          submodules: false
 
       - name: Verify runner and checkout
         run: |
           set -euo pipefail
           [[ "$RUNNER_OS" == "Linux" && "$RUNNER_ARCH" == "X64" ]] || { echo "::error::Android releases build on ubuntu-24.04 x64."; exit 1; }
+          [[ "$GITHUB_TRIGGERING_ACTOR" == "$RELEASE_ACTOR" ]] || { echo "::error::Only $RELEASE_ACTOR may re-run the build."; exit 1; }
           test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
           mkdir -m 700 "$RUNNER_TEMP/android-release"
 
@@ -219,7 +221,6 @@ jobs:
         uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
         with:
           node-version: '22'
-          cache: pnpm
 
       - name: Verify pinned package manager and Node.js
         run: |
@@ -244,25 +245,13 @@ jobs:
       - name: Select Java 21 and provision the Android SDK
         run: bash scripts/release/android/setup-android-toolchain.sh
 
-      - name: Materialize and prove the upload keystore
-        id: keystore
+      - name: Prove the upload keystore, then remove it until Gradle
         env:
           ANDROID_UPLOAD_KEYSTORE_B64: ${{ secrets.ANDROID_UPLOAD_KEYSTORE_B64 }}
           ANDROID_UPLOAD_KEYSTORE_TYPE: ${{ secrets.ANDROID_UPLOAD_KEYSTORE_TYPE }}
           ANDROID_UPLOAD_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_UPLOAD_KEYSTORE_PASSWORD }}
           ANDROID_UPLOAD_KEY_ALIAS: ${{ secrets.ANDROID_UPLOAD_KEY_ALIAS }}
-        run: |
-          set -euo pipefail
-          signing_dir="$RUNNER_TEMP/instafy-android-signing"
-          mkdir -m 700 "$signing_dir"
-          keystore="$signing_dir/upload.keystore"
-          (umask 077 && printf '%s' "$ANDROID_UPLOAD_KEYSTORE_B64" | base64 -d > "$keystore")
-          chmod 600 "$keystore"
-          test -s "$keystore"
-          keytool -list -keystore "$keystore" -storetype "$ANDROID_UPLOAD_KEYSTORE_TYPE" \
-            -storepass "$ANDROID_UPLOAD_KEYSTORE_PASSWORD" -alias "$ANDROID_UPLOAD_KEY_ALIAS" > /dev/null 2>&1 ||
-            { echo "::error::The keystore has no ANDROID_UPLOAD_KEY_ALIAS entry, or its password/type is wrong."; exit 1; }
-          echo "path=$keystore" >> "$GITHUB_OUTPUT"
+        run: bash scripts/release/android/upload-keystore.sh prove
 
       - name: Resolve the embedded OTA trust key from the public variable
         id: trust
@@ -275,8 +264,12 @@ jobs:
           node scripts/resolve-live-update-public-key.mjs
           grep -q '^CAPACITOR_LIVE_UPDATE_PUBLIC_KEY<<' "$GITHUB_ENV" ||
             { echo "::error::vars.CAPACITOR_LIVE_UPDATE_PUBLIC_KEY is empty; a Play build must embed the OTA trust key."; exit 1; }
-          node -e 'const k=require("node:crypto").createPublicKey(process.env.CAPACITOR_LIVE_UPDATE_PUBLIC_KEY.trim().replace(/\\n/g,"\n")); if (k.asymmetricKeyType!=="rsa"||k.asymmetricKeyDetails.modulusLength<2048) process.exit(1)' ||
-            { echo "::error::CAPACITOR_LIVE_UPDATE_PUBLIC_KEY must be an RSA (>=2048) SPKI public key."; exit 1; }
+          # Refuse any non-canonical byte form of the key, so the resolver's digest,
+          # the embedded config and the receipt all equal the OTA authority's digest.
+          canonical="$(node scripts/release/android/trust-key.mjs)"
+          resolved="$(grep -A1 '^public_key_sha256<<' "$GITHUB_OUTPUT" | tail -n 1)"
+          [[ "$resolved" == "$canonical" ]] || { echo "::error::The resolved OTA trust key is not the canonical SPKI PEM."; exit 1; }
+          echo "canonical_sha256=$canonical" >> "$GITHUB_OUTPUT"
 
       - name: Seed the browser-safe hosted Capacitor environment
         env:
@@ -297,6 +290,15 @@ jobs:
           ANDROID_VERSION_NAME: ${{ needs.authorize.outputs.version_name }}
         run: pnpm --filter @instafy/frontend run cap:sync
 
+      - name: Materialize the upload keystore for Gradle
+        id: keystore
+        env:
+          ANDROID_UPLOAD_KEYSTORE_B64: ${{ secrets.ANDROID_UPLOAD_KEYSTORE_B64 }}
+          ANDROID_UPLOAD_KEYSTORE_TYPE: ${{ secrets.ANDROID_UPLOAD_KEYSTORE_TYPE }}
+          ANDROID_UPLOAD_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_UPLOAD_KEYSTORE_PASSWORD }}
+          ANDROID_UPLOAD_KEY_ALIAS: ${{ secrets.ANDROID_UPLOAD_KEY_ALIAS }}
+        run: bash scripts/release/android/upload-keystore.sh materialize
+
       - name: Build the signed release bundle
         working-directory: packages/frontend/android
         env:
@@ -309,9 +311,13 @@ jobs:
           ANDROID_VERSION_NAME: ${{ needs.authorize.outputs.version_name }}
         run: ./gradlew --no-daemon :app:bundleRelease
 
+      - name: Remove signing material
+        if: always()
+        run: rm -rf "$RUNNER_TEMP/instafy-android-signing" .env.supabase packages/frontend/.env.production.local
+
       - name: Verify identity, signature and contents of the final AAB
         env:
-          TRUST_KEY_SHA256: ${{ steps.trust.outputs.public_key_sha256 }}
+          TRUST_KEY_SHA256: ${{ steps.trust.outputs.canonical_sha256 }}
         run: |
           set -euo pipefail
           bash scripts/release/android/verify-aab.sh \
@@ -325,10 +331,6 @@ jobs:
           if-no-files-found: error
           retention-days: ${{ needs.authorize.outputs.mode == 'release' && 30 || 7 }}
           compression-level: 0
-
-      - name: Remove signing material
-        if: always()
-        run: rm -rf "$RUNNER_TEMP/instafy-android-signing" .env.supabase packages/frontend/.env.production.local
 
       - name: Summarize the build
         if: always()
@@ -381,6 +383,7 @@ jobs:
         run: |
           set -euo pipefail
           out="$RUNNER_TEMP/android-release"
+          [[ "$GITHUB_TRIGGERING_ACTOR" == "$RELEASE_ACTOR" ]] || { echo "::error::Only $RELEASE_ACTOR may re-run the publication."; exit 1; }
           test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
           value() { sed -n "s/^$1=//p" "$out/digests.env"; }
           [[ "$(value TAG)" == "$TAG" && "$(value SOURCE_SHA)" == "$SOURCE_SHA" ]]

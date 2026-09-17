@@ -23,6 +23,8 @@ case "$2" in
   repos/instafy-dev/instafy/compare/*) echo "$FAKE_COMPARE" ;;
   repos/instafy-dev/instafy/releases/tags/*)
     case "$FAKE_RELEASE" in 404) not_found ;; 502) server_error ;; *) echo 42 ;; esac ;;
+  repos/instafy-dev/instafy/releases*)
+    case "$FAKE_DRAFTS" in 502) server_error ;; *) printf '%s' "$FAKE_DRAFTS" ;; esac ;;
   *) echo "unexpected gh call" >&2; exit 2 ;;
 esac
 `;
@@ -41,6 +43,7 @@ function run(args, fake) {
         FAKE_PEELED: `commit ${COMMIT}`,
         FAKE_COMPARE: "ahead",
         FAKE_RELEASE: "404",
+        FAKE_DRAFTS: "android-v1.0-260860838\nandroid-v1.0-2608608390\n",
         ...fake,
       },
     });
@@ -59,6 +62,7 @@ test("recheck passes only for the exact tag commit on main with no release yet",
     `repos/instafy-dev/instafy/git/ref/tags/${TAG}`,
     `repos/instafy-dev/instafy/compare/${COMMIT}...main`,
     `repos/instafy-dev/instafy/releases/tags/${TAG}`,
+    "repos/instafy-dev/instafy/releases?per_page=100",
   ]);
   const annotated = run(["recheck", TAG, COMMIT], { FAKE_TAG: `tag ${TAG_OBJECT}`, FAKE_COMPARE: "identical" });
   assert.equal(annotated.status, 0, annotated.stderr);
@@ -75,6 +79,8 @@ test("recheck fails closed on moved tags, rewritten main, existing releases and 
     [{ FAKE_COMPARE: "diverged" }, /no longer contains/u],
     [{ FAKE_RELEASE: "exists" }, /already exists; this tag was already published/u],
     [{ FAKE_RELEASE: "502" }, /Could not prove that no GitHub Release exists/u],
+    [{ FAKE_DRAFTS: `android-v1.0-1\n${TAG}\n` }, /draft GitHub Release for android-v1\.0-260860839 exists/u],
+    [{ FAKE_DRAFTS: "502" }, /Could not list draft releases/u],
   ];
   for (const [fake, error] of cases) {
     const result = run(["recheck", TAG, COMMIT], fake);

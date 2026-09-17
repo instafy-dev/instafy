@@ -150,6 +150,12 @@ test("fails closed with a fixed label for every contract violation", () => {
     ["live-update-channel", (o) => { o.config.plugins.LiveUpdate.defaultChannel = "stable"; }],
     ["live-update-strategy", (o) => { o.config.plugins.LiveUpdate.autoUpdateStrategy = "background"; }],
     ["live-update-public-key", (o) => { delete o.config.plugins.LiveUpdate.publicKey; }],
+    // The same key in a non-canonical byte form must not attest a different digest.
+    ["live-update-public-key", (o) => { o.config.plugins.LiveUpdate.publicKey = publicKeyPem.replace(/\n/g, "\r\n"); }],
+    ["live-update-public-key", (o) => {
+      o.config.plugins.LiveUpdate.publicKey = crypto.createPublicKey(publicKeyPem)
+        .export({ type: "pkcs1", format: "pem" }).toString();
+    }],
     ["live-update-trust-key", (o) => {
       o.config.plugins.LiveUpdate.publicKey = crypto.generateKeyPairSync("rsa", { modulusLength: 2048 })
         .publicKey.export({ type: "spki", format: "pem" }).toString();
