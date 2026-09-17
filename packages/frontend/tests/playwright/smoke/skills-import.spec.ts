@@ -611,28 +611,27 @@ test.describe("Skills command", () => {
     await page.getByTestId("composer-action-menu-trigger").click();
     await page.getByTestId("composer-action-menu-connect").click();
 
-    // Connect sub-view: the featured rows plus Browse all tools, and nothing sent.
-    for (const id of ["slack", "notion", "discord", "github", "browse"]) {
+    // Connect sub-view: only the featured rows that can be selected today
+    // (Notion, GitHub) plus Browse all tools, and nothing sent. Skill packs
+    // that are not published yet are not rows here; the sheet names them with
+    // a Soon Badge.
+    for (const id of ["notion", "github", "browse"]) {
       await expect(page.getByTestId(`composer-action-menu-connect-${id}`)).toBeVisible();
     }
     await expect(page.getByTestId("composer-action-menu-connect-freefinance")).toHaveCount(0);
     await expect(page.getByTestId("composer-action-menu-connect-other")).toHaveCount(0);
     expect(await userBubbles.count()).toBe(userBubbleCountBefore);
 
-    // Skill packs that are not published yet: the row is disabled with a Soon
-    // Badge and opens no confirm sheet. Notion (published) and GitHub stay live.
+    // Skill packs that are not published yet get no row at all; Notion
+    // (published) and GitHub stay live, and nothing here reads Soon.
     for (const id of ["slack", "discord"]) {
-      const row = page.getByTestId(`composer-action-menu-connect-${id}`);
-      await expect(row).toBeDisabled();
-      await expect(row).toContainText("Soon");
+      await expect(page.getByTestId(`composer-action-menu-connect-${id}`)).toHaveCount(0);
     }
     await expect(page.getByTestId("composer-action-menu-connect-notion")).toBeEnabled();
-    await expect(page.getByTestId("composer-action-menu-connect-notion")).not.toContainText("Soon");
+    await expect(page.getByTestId("composer-action-menu")).not.toContainText("Soon");
     await expect(page.getByTestId("composer-action-menu-connect-github")).toBeEnabled();
-    await page.getByTestId("composer-action-menu-connect-slack").click({ force: true });
     await expect(page.getByTestId("connect-sheet")).toHaveCount(0);
     await expect(page.getByTestId("connect-confirm-submit")).toHaveCount(0);
-    await expect(page.getByTestId("composer-action-menu-connect-browse")).toBeVisible();
     expect(await userBubbles.count()).toBe(userBubbleCountBefore);
 
     // "Browse all tools" opens the sheet's browse stage; "Paste a skill link" in its
@@ -754,7 +753,7 @@ test.describe("Skills command", () => {
     expect(await userBubbles.count()).toBe(userBubbleCountBefore);
   });
 
-  test("a soon card chip opens nothing, the Notion chip confirms, More tools browses and Escape sends nothing", async ({ page }) => {
+  test("the Notion chip confirms, a soon tool gets no chip, More tools browses and Escape sends nothing", async ({ page }) => {
     page.setDefaultTimeout(60_000);
 
     const projectId = await prepareStudio(page);
@@ -767,23 +766,18 @@ test.describe("Skills command", () => {
     const userBubbleCountBefore = await userBubbles.count();
 
     const card = page.getByTestId("onboarding-getting-started");
-    const slackChip = card.getByTestId("connect-chip-slack");
-    await expect(slackChip).toBeVisible({ timeout: 60_000 });
-    // Featured skills only: no niche chip, no GitHub chip, no paste link on the card.
-    await expect(card.getByTestId("connect-chip-freefinance")).toHaveCount(0);
-    await expect(card.getByTestId("connect-chip-github")).toHaveCount(0);
-    await expect(card.getByTestId("connect-chip-other")).toHaveCount(0);
-    await expect(card.getByTestId("connect-more-tools")).toBeVisible();
-
-    // Slack and Discord are skills whose packs are not published yet:
-    // disabled, with a Soon Badge, and a press opens no sheet.
-    for (const id of ["slack", "discord"]) {
-      const chip = card.getByTestId(`connect-chip-${id}`);
-      await expect(chip).toBeDisabled();
-      await expect(chip).toHaveAttribute("aria-label", /, coming soon$/);
-      await expect(card.getByTestId(`connect-chip-${id}-soon`)).toHaveText("Soon");
+    const notionChip = card.getByTestId("connect-chip-notion");
+    await expect(notionChip).toBeVisible({ timeout: 60_000 });
+    // Notion's pack is published, so it is the one chip. Slack and Discord
+    // (unpublished) get no chip and no Soon badge here; the sheet names them.
+    // No niche chip, no GitHub chip, no paste link and no coming-soon line.
+    await expect(card.locator('button[data-testid^="connect-chip-"]')).toHaveCount(1);
+    for (const id of ["slack", "discord", "freefinance", "github", "other"]) {
+      await expect(card.getByTestId(`connect-chip-${id}`)).toHaveCount(0);
     }
-    await slackChip.click({ force: true });
+    await expect(card.getByTestId("connect-coming-soon")).toHaveCount(0);
+    await expect(card).not.toContainText("Soon");
+    await expect(card.getByTestId("connect-more-tools")).toBeVisible();
     await expect(page.getByTestId("connect-sheet")).toHaveCount(0);
     await expect(page.getByTestId("connect-confirm-submit")).toHaveCount(0);
     expect(await userBubbles.count()).toBe(userBubbleCountBefore);
@@ -791,7 +785,6 @@ test.describe("Skills command", () => {
     // Notion's pack is published: the chip is live and opens the confirm
     // stage straight away (no Back, since it did not come from the list);
     // nothing is sent until Connect, and Escape sends nothing.
-    const notionChip = card.getByTestId("connect-chip-notion");
     await expect(notionChip).toBeEnabled();
     await expect(notionChip).toHaveAttribute("aria-label", "Connect Notion");
     await expect(card.getByTestId("connect-chip-notion-soon")).toHaveCount(0);

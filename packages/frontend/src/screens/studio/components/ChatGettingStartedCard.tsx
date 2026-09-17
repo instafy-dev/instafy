@@ -10,7 +10,10 @@ import { openExternalUrl } from "../../../utils/openExternalUrl";
 import { CHAT_BUBBLE_MAX_WIDTH } from "./chatBubbleWidth";
 import { ConnectChipStrip } from "./ConnectChipStrip";
 import type { SkillConnector } from "./connectors";
-import type { GettingStartedAiViewState } from "./gettingStartedAiChoices";
+import type {
+  GettingStartedAiViewState,
+  GettingStartedManagedAiOffer,
+} from "./gettingStartedAiChoices";
 import { ONBOARDING_PATHS, type OnboardingAction } from "./onboardingPlaybook";
 
 const { deriveGithubImportTargetPath } = controllerClient.projects;
@@ -29,6 +32,10 @@ type ChatGettingStartedMode = "root" | "github";
 
 interface ChatGettingStartedCardProps {
   mode: ChatGettingStartedMode;
+  // While a draft is in the composer the card collapses to one row of the
+  // three workspace actions (no heading, no AI line) instead of unmounting,
+  // so the options stay reachable; the full card returns when the draft clears.
+  collapsed?: boolean;
   onSelectMode: (mode: ChatGettingStartedMode) => void;
   onSelectAction: (action: OnboardingAction) => void;
   // "Connect a tool" chips. A press only reports the skill; ChatPanel opens
@@ -37,12 +44,10 @@ interface ChatGettingStartedCardProps {
   onBrowseConnectors: () => void;
   installedSkillNames: ReadonlySet<string>;
   showConnectTools: boolean;
-  managedAiOffer: {
-    label: string;
-    dailyPromptLimit: number;
-    remainingPrompts: number | null;
-  } | null;
+  managedAiOffer: GettingStartedManagedAiOffer | null;
   selectedAi: "managed" | "connected" | null;
+  /** Label of the saved connection in use, once hydrated; null until then. */
+  connectedAiLabel: string | null;
   aiViewState: GettingStartedAiViewState;
   canChangeAiChoice: boolean;
   personalAiConnectionState: "missing" | "needs_default" | null;
@@ -61,6 +66,35 @@ interface ChatGettingStartedCardProps {
   onBeginGithubDeviceAuth: () => void;
   onCancelGithubDeviceAuth: () => void;
   onImportGithub: () => void;
+}
+
+function formatCreditsEach(amount: number): string {
+  return amount === 1 ? "1 credit each" : `${amount} credits each`;
+}
+
+// The collapsed row's buttons: text-only ghost pills at caption size, 44 px on
+// coarse pointers through the Button size.
+function CollapsedActionButton({
+  label,
+  onPress,
+  testId,
+}: {
+  label: string;
+  onPress: () => void;
+  testId: string;
+}) {
+  return (
+    <Button
+      variant="ghost"
+      size="xs"
+      radius="full"
+      className="px-1 underline-offset-2 hover:underline"
+      onPress={onPress}
+      data-testid={testId}
+    >
+      <span className="text-slate-600 dark:text-slate-300">{label}</span>
+    </Button>
+  );
 }
 
 function ActionButton({
@@ -100,6 +134,7 @@ function ActionButton({
 
 export function ChatGettingStartedCard({
   mode,
+  collapsed = false,
   onSelectMode,
   onSelectAction,
   onSelectConnector,
@@ -108,6 +143,7 @@ export function ChatGettingStartedCard({
   showConnectTools,
   managedAiOffer,
   selectedAi,
+  connectedAiLabel,
   aiViewState,
   canChangeAiChoice,
   personalAiConnectionState,
@@ -130,15 +166,47 @@ export function ChatGettingStartedCard({
   const codingActions = ONBOARDING_PATHS.find((entry) => entry.id === "coding")?.actions ?? [];
   const importGithubAction = codingActions.find((entry) => entry.id === "import-github-repo") ?? null;
   const startFromScratchAction = codingActions.find((entry) => entry.id === "start-from-scratch") ?? null;
-  const managedAiAllowance = managedAiOffer
-    ? managedAiOffer.dailyPromptLimit <= 0
+  // A paused tier keeps the choice framing but offers no free button: the one
+  // primary action is Connect AI, and the line says why.
+  const managedAiPaused = managedAiOffer?.paused === true;
+  const managedAiChoice = managedAiOffer && !managedAiPaused ? managedAiOffer : null;
+  const managedAiAllowance = managedAiChoice
+    ? managedAiChoice.dailyPromptLimit <= 0
       ? "No daily prompt cap."
-      : managedAiOffer.remainingPrompts === 0
-      ? `Today's free prompts are used (${managedAiOffer.dailyPromptLimit}/day).`
-      : typeof managedAiOffer.remainingPrompts === "number"
-        ? `${managedAiOffer.remainingPrompts} of ${managedAiOffer.dailyPromptLimit} free prompts left today.`
-        : `${managedAiOffer.dailyPromptLimit} free prompts each day.`
+      : managedAiChoice.remainingPrompts === 0
+      ? `Today's free prompts are used (${managedAiChoice.dailyPromptLimit}/day).`
+      : typeof managedAiChoice.remainingPrompts === "number"
+        ? `${managedAiChoice.remainingPrompts} of ${managedAiChoice.dailyPromptLimit} free prompts left today.`
+        : `${managedAiChoice.dailyPromptLimit} free prompts each day.`
     : null;
+  const managedAiLabel = managedAiOffer?.label ?? "Instafy AI";
+  const aiChoiceHeading =
+    managedAiOffer || personalAiConnectionState === "needs_default" ? "Choose your AI" : "Connect AI";
+  const aiChoiceLine =
+    personalAiConnectionState === "needs_default"
+      ? managedAiChoice
+        ? "Use free AI now, or choose which saved connection Instafy should use."
+        : "Choose which saved connection Instafy should use."
+      : managedAiPaused
+        ? `Free ${managedAiLabel} is paused right now. Connect your own AI to start; you pay your provider directly and Instafy adds nothing.`
+        : managedAiChoice?.remainingPrompts === 0
+          ? "Today's free prompts are used. Connect your own AI to keep going, or come back tomorrow."
+          : managedAiChoice
+            ? "Start free now, or connect your own AI for the best results. Next: pick what to work on."
+            : "Connect the AI account you already use.";
+  // The status line names what will answer, at the point of decision.
+  const aiStatusLine =
+    selectedAi === "managed"
+      ? `Using free ${managedAiLabel}: ${
+          managedAiOffer && managedAiOffer.dailyPromptLimit > 0
+            ? `${managedAiOffer.dailyPromptLimit} prompts a day`
+            : "no daily cap"
+        }, ${formatCreditsEach(managedAiOffer?.creditBurnAmount ?? 1)}`
+      : selectedAi === "connected"
+        ? connectedAiLabel
+          ? `Using ${connectedAiLabel}`
+          : "Using your connected AI"
+        : null;
   const aiResolvingStepRef = useRef<HTMLDivElement | null>(null);
   const aiChoiceStepRef = useRef<HTMLDivElement | null>(null);
   const workspaceStepRef = useRef<HTMLDivElement | null>(null);
@@ -171,10 +239,52 @@ export function ChatGettingStartedCard({
       tone="default"
       radius="2xl"
       shadow="sm"
-      className={`@container w-full ${CHAT_BUBBLE_MAX_WIDTH.card} px-3 py-3 sm:px-4`}
+      className={`@container w-full ${CHAT_BUBBLE_MAX_WIDTH.card} ${
+        mode === "root" && collapsed ? "px-2 py-1.5 sm:px-2.5" : "px-3 py-3 sm:px-4"
+      }`}
       data-testid="onboarding-getting-started"
+      data-collapsed={mode === "root" && collapsed ? "true" : undefined}
     >
-      {mode === "root" ? (
+      {mode === "root" && collapsed ? (
+        <ul
+          className="flex flex-wrap items-center gap-x-1 gap-y-0.5"
+          aria-label="Workspace options"
+          data-testid="onboarding-collapsed-row"
+        >
+          {importGithubAction ? (
+            <li>
+              {/* Shorter than the full card's title so the three buttons
+                  hold one row at phone width. */}
+              <CollapsedActionButton
+                label="Import a repo"
+                onPress={() => onSelectAction(importGithubAction)}
+                testId="onboarding-collapsed-import-github-repo"
+              />
+            </li>
+          ) : null}
+          {startFromScratchAction ? (
+            <li className="flex items-center gap-x-1">
+              <span aria-hidden="true" className="text-slate-400 dark:text-slate-500">·</span>
+              <CollapsedActionButton
+                label={startFromScratchAction.title}
+                onPress={() => onSelectAction(startFromScratchAction)}
+                testId="onboarding-collapsed-start-from-scratch"
+              />
+            </li>
+          ) : null}
+          {showConnectTools ? (
+            <li className="flex items-center gap-x-1">
+              <span aria-hidden="true" className="text-slate-400 dark:text-slate-500">·</span>
+              <CollapsedActionButton
+                label="More tools"
+                onPress={onBrowseConnectors}
+                testId="onboarding-collapsed-more-tools"
+              />
+            </li>
+          ) : null}
+        </ul>
+      ) : null}
+      {mode === "root" && !collapsed ? (
         <>
           {aiViewState === "resolving" ? (
             <div
@@ -214,37 +324,27 @@ export function ChatGettingStartedCard({
                 variant="bodyStrong"
                 tone="primary"
               >
-                {managedAiOffer || personalAiConnectionState === "needs_default"
-                  ? "Choose your AI"
-                  : "Connect your AI"}
+                {aiChoiceHeading}
               </Text>
-              <Text as="p" variant="caption" tone="muted" className="mt-0.5">
-                {personalAiConnectionState === "needs_default"
-                  ? managedAiOffer
-                    ? "Use free AI now, or choose which saved connection Instafy should use."
-                    : "Choose which saved connection Instafy should use."
-                  : managedAiOffer?.remainingPrompts === 0
-                    ? "Today's free prompts are used. Bring your own AI to keep going, or come back tomorrow."
-                    : managedAiOffer
-                      ? "Start free now, or bring your own AI for the best results. Next: pick what to work on."
-                      : "Connect the AI account you already use."}
+              <Text as="p" variant="caption" tone="muted" className="mt-0.5" data-testid="onboarding-ai-choice-line">
+                {aiChoiceLine}
               </Text>
-              <div className={`mt-2 grid gap-2 ${managedAiOffer ? "@sm:grid-cols-2" : ""}`}>
-                {managedAiOffer ? (
+              <div className={`mt-2 grid gap-2 ${managedAiChoice ? "@sm:grid-cols-2" : ""}`}>
+                {managedAiChoice ? (
                   <Button
                     variant="primary"
                     size="sm"
                     radius="xl"
                     className="h-full items-start justify-start px-3 py-2.5 text-left"
                     onPress={onStartWithManagedAi}
-                    isDisabled={managedAiOffer.remainingPrompts === 0}
+                    isDisabled={managedAiChoice.remainingPrompts === 0}
                     data-testid="onboarding-use-managed-ai"
                   >
                     <span className="flex min-w-0 items-start gap-2.5">
                       <Sparks className="mt-0.5 h-4 w-4 shrink-0" aria-hidden="true" />
                       <span className="min-w-0">
                         <Text as="span" variant="caption" tone="inherit" className="block text-left font-medium">
-                          Start free with {managedAiOffer.label}
+                          Start free with {managedAiChoice.label}
                         </Text>
                         <Text as="span" variant="caption" tone="inherit" className="mt-0.5 block text-left opacity-90">
                           {managedAiAllowance}
@@ -254,7 +354,7 @@ export function ChatGettingStartedCard({
                   </Button>
                 ) : null}
                 <Button
-                  variant={managedAiOffer ? "outline" : "primary"}
+                  variant={managedAiChoice ? "outline" : "primary"}
                   size="sm"
                   radius="xl"
                   className="h-full items-start justify-start px-3 py-2.5 text-left"
@@ -271,7 +371,7 @@ export function ChatGettingStartedCard({
                       <Text as="span" variant="caption" tone="inherit" className="block text-left font-medium">
                         {personalAiConnectionState === "needs_default"
                           ? "Choose connected AI"
-                          : "Bring my own AI"}
+                          : "Connect AI"}
                       </Text>
                       <Text as="span" variant="caption" tone="inherit" className="mt-0.5 block text-left opacity-80">
                         {personalAiConnectionState === "needs_default"
@@ -293,29 +393,33 @@ export function ChatGettingStartedCard({
               className="px-0.5 pt-0.5 outline-none"
               data-testid="onboarding-workspace-step"
             >
-              {selectedAi ? (
-                <div className="mb-1.5 flex flex-wrap items-center gap-1.5">
-                  <Text as="span" variant="caption" tone="muted">
-                    Using{" "}
-                    {selectedAi === "managed"
-                      ? `free ${managedAiOffer?.label ?? "Instafy AI"}`
-                      : "your connected AI"}
-                  </Text>
+              {aiStatusLine ? (
+                <Text
+                  as="p"
+                  variant="caption"
+                  tone="muted"
+                  className="mb-1.5 flex flex-wrap items-center gap-x-1"
+                  data-testid="onboarding-ai-status"
+                >
+                  <span>{aiStatusLine}</span>
                   {canChangeAiChoice ? (
-                    <Button
-                      variant="ghost"
-                      size="xs"
-                      radius="full"
-                      className="px-1.5 underline-offset-2 hover:underline"
-                      onPress={onChangeAiChoice}
-                      data-testid="onboarding-change-ai"
-                    >
-                      {/* Tone on a span: a text colour on the Button loses to the
-                          ghost variant's text-slate-700 (no tailwind-merge). */}
-                      <span className="text-slate-500 dark:text-slate-400">Change AI</span>
-                    </Button>
+                    <>
+                      <span aria-hidden="true">·</span>
+                      <Button
+                        variant="ghost"
+                        size="xs"
+                        radius="full"
+                        className="px-1 underline-offset-2 hover:underline"
+                        onPress={onChangeAiChoice}
+                        data-testid="onboarding-change-ai"
+                      >
+                        {/* Tone on a span: a text colour on the Button loses to the
+                            ghost variant's text-slate-700 (no tailwind-merge). */}
+                        <span className="text-slate-500 dark:text-slate-400">Change AI</span>
+                      </Button>
+                    </>
                   ) : null}
-                </div>
+                </Text>
               ) : null}
               <Text
                 id="onboarding-workspace-heading"

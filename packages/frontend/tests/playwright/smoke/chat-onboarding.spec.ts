@@ -77,7 +77,7 @@ test.describe("Chat onboarding", () => {
     await expect(
       onboarding.getByText("What should your agent work on?", { exact: true }),
     ).toBeVisible();
-    // Topic paths are gone from first-run — the workspace step replaced them.
+    // Topic paths are gone from first-run; the workspace step replaced them.
     await expect(onboarding.getByTestId("onboarding-path-finance")).toHaveCount(0);
     await expect(onboarding.getByTestId("onboarding-path-coding")).toHaveCount(0);
 
@@ -88,9 +88,49 @@ test.describe("Chat onboarding", () => {
     await page.getByTestId("onboarding-back-button").click();
     await expect(page.getByTestId("onboarding-action-start-from-scratch")).toBeVisible();
 
+    // Start from scratch inserts nothing: it asks through the composer's
+    // placeholder, focuses the composer and leaves send disabled until the
+    // user types their own line. The card stays until a draft exists, then
+    // folds to its one-line row.
     await page.getByTestId("onboarding-action-start-from-scratch").click();
-    await expect(page.getByTestId("chat-input")).toContainText("I'm starting from a blank workspace");
-    await expect(page.getByTestId("onboarding-getting-started")).toBeHidden();
+    const chatInput = page.getByTestId("chat-input");
+    await expect(chatInput).not.toContainText("I'm starting from a blank workspace");
+    await expect(chatInput).not.toContainText("describe it here");
+    await expect(page.locator("#studio-chat-input")).toBeFocused();
+    await expect(page.getByText("What do you want to build? One sentence is enough.")).toBeVisible();
+    // The question is spoken too, not only painted.
+    await expect(page.locator("#studio-chat-input")).toHaveAttribute(
+      "aria-placeholder",
+      "What do you want to build? One sentence is enough.",
+    );
+    await expect(page.getByTestId("chat-send-button")).toBeDisabled();
+    await expect(page.getByTestId("onboarding-getting-started")).toBeVisible();
+    await expect(page.getByTestId("onboarding-getting-started")).not.toHaveAttribute(
+      "data-collapsed",
+      "true",
+    );
+
+    await chatInput.fill("A habit tracker");
+    const card = page.getByTestId("onboarding-getting-started");
+    await expect(card).toHaveAttribute("data-collapsed", "true");
+    await expect(card.getByTestId("onboarding-collapsed-row").getByRole("button")).toHaveText([
+      "Import a repo",
+      "Start from scratch",
+      "More tools",
+    ]);
+    await expect(page.getByTestId("chat-send-button")).toBeEnabled();
+
+    // Start from scratch in the collapsed row selects the draft, so typing
+    // replaces it instead of appending to it.
+    await card.getByTestId("onboarding-collapsed-start-from-scratch").click();
+    await expect(page.locator("#studio-chat-input")).toBeFocused();
+    await page.keyboard.type("A recipe box");
+    await expect(chatInput).toHaveText("A recipe box");
+    await expect(chatInput).not.toContainText("A habit tracker");
+
+    await chatInput.fill("");
+    await expect(card).not.toHaveAttribute("data-collapsed", "true");
+    await expect(card.getByText("What should your agent work on?", { exact: true })).toBeVisible();
   });
 
   test("github import onboarding shows visible success feedback", async ({ page }) => {

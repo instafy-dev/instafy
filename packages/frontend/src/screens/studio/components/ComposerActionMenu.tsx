@@ -24,7 +24,7 @@ import { Button, IconButton } from "../../../components/Button";
 import { Text } from "../../../components/Text";
 import { StudioDialogPopover } from "../../../components/aria/StudioPopover";
 import { CHAT_SLASH_COMMANDS } from "../../../conversations/slashCommands";
-import { FEATURED_CONNECTORS, isConnectorAvailable, type ProductConnector } from "./connectors";
+import { AVAILABLE_FEATURED_CONNECTORS, type ProductConnector } from "./connectors";
 
 type ComposerActionMenuView = "main" | "commands" | "connect";
 
@@ -153,11 +153,12 @@ export function ComposerActionMenu({
   onOpenNewBrowser: () => void;
   onOpenInvite: () => void;
   onImportGithubRepo: () => void;
-  // "Connect a tool" opens a sub-view of the featured connector rows plus
-  // "Browse all tools"; a row press closes the menu and reports the connector,
-  // the last row closes the menu and opens the Connect sheet's browse stage.
-  // A "soon" connector (pack not published yet) renders disabled with a
-  // "Soon" Badge and reports nothing. Nothing here sends or prefills.
+  // "Connect a tool" opens a sub-view of the featured connector rows that can
+  // be selected today plus "Browse all tools"; a row press closes the menu and
+  // reports the connector, the last row closes the menu and opens the Connect
+  // sheet's browse stage. A "soon" connector (pack not published yet) is not
+  // listed here: the sheet names it with its Badge. Nothing here sends or
+  // prefills.
   onSelectConnector?: (connector: ProductConnector) => void;
   onBrowseConnectors?: () => void;
   installedSkillNames?: ReadonlySet<string>;
@@ -269,35 +270,23 @@ export function ComposerActionMenu({
               <NavArrowLeft className="h-4 w-4" aria-hidden="true" />
               Connect a tool
             </Button>
-            {FEATURED_CONNECTORS.map((connector) => {
+            {AVAILABLE_FEATURED_CONNECTORS.map((connector) => {
               const Mark = connector.mark;
-              const soon = !isConnectorAvailable(connector);
-              // "Soon" wins over the installed state: the pack is not
-              // published, so the row cannot lead anywhere yet.
               const installed =
-                !soon && connector.kind === "skill" && installedSkillNames.has(connector.skillName);
+                connector.kind === "skill" && installedSkillNames.has(connector.skillName);
               return (
                 <ActionRow
                   key={connector.id}
                   icon={<Mark className="h-4 w-4" aria-hidden="true" />}
                   title={connector.name}
                   end={
-                    soon ? (
-                      <Badge tone="neutral" size="xs">
-                        Soon
-                      </Badge>
-                    ) : installed ? (
+                    installed ? (
                       <Badge tone="success" size="xs">
                         Connected
                       </Badge>
                     ) : undefined
                   }
-                  disabled={soon}
-                  hoverTitle={soon ? "Coming soon" : undefined}
                   onPress={() => {
-                    if (soon) {
-                      return;
-                    }
                     closeMenu();
                     onSelectConnector(connector);
                   }}

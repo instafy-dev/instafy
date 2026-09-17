@@ -174,6 +174,8 @@ export function ChatPostTranscriptAuxiliaryRows({
   onSetDefaultCredential,
   onUseManagedAi,
   onChatWithoutAi,
+  onConnectAi,
+  hasTeammates,
   onCloseAiOnboarding,
   onStashDraftForCredentials,
   onConnectDesktop,
@@ -211,6 +213,10 @@ export function ChatPostTranscriptAuxiliaryRows({
   onSetDefaultCredential: (credentialId: string) => void;
   onUseManagedAi: () => void;
   onChatWithoutAi: () => void;
+  // The gate's one button: opens the Add AI connection modal.
+  onConnectAi: () => void;
+  // Gates the gate's "turn the assistant off" caption on a real second member.
+  hasTeammates: boolean;
   onCloseAiOnboarding: () => void;
   onStashDraftForCredentials: () => void;
   onConnectDesktop: () => void;
@@ -307,6 +313,8 @@ export function ChatPostTranscriptAuxiliaryRows({
             onSetDefaultCredential={onSetDefaultCredential}
             onUseManagedAi={onUseManagedAi}
             onChatWithoutAi={onChatWithoutAi}
+            onConnectAi={onConnectAi}
+            hasTeammates={hasTeammates}
             onClose={onCloseAiOnboarding}
             onStashDraft={onStashDraftForCredentials}
             onConnectDesktop={onConnectDesktop}

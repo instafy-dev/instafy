@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   AVAILABLE_FEATURED_CONNECTORS,
   CARD_CHIP_CONNECTORS,
+  COMING_SOON_FEATURED_SKILLS,
   CONNECTOR_CATEGORIES,
   CONNECTORS,
   FEATURED_CONNECTOR_LIMIT,
@@ -10,12 +11,13 @@ import {
   buildConnectorImportMessage,
   connectorCategoryLabel,
   filterConnectors,
+  formatComingSoonLine,
   isConnectorAvailable,
   type SkillConnector,
 } from "../connectors";
 import { ONBOARDING_PATHS } from "../onboardingPlaybook";
 
-const EM_DASH = "—";
+const EM_DASH = "\u2014";
 
 function ids(entries: readonly { id: string }[]): string[] {
   return entries.map((entry) => entry.id);
@@ -70,7 +72,8 @@ describe("CONNECTORS", () => {
 
   it("marks the unpublished packs soon and Notion, GitHub and FreeFinance available today", () => {
     // Flip an entry to "available" once its pack lands in instafy-dev/skills;
-    // until then it stays listed everywhere, greyed with a "Soon" Badge.
+    // until then it is listed in the sheet, greyed with a "Soon" Badge, and
+    // named in the card's coming-soon line while no chip is available.
     const availability = Object.fromEntries(
       PRODUCT_CONNECTORS.map((entry) => [entry.id, entry.availability]),
     );
@@ -95,12 +98,11 @@ describe("CONNECTORS", () => {
     expect("availability" in other).toBe(false);
   });
 
-  it("keeps soon entries in the featured and chip lists but out of the available Popular list", () => {
-    // Soon entries render greyed rather than vanish, so the featured and chip
-    // lists keep them; only the sheet's Popular row is limited to what can be
-    // selected today.
-    expect(ids(FEATURED_CONNECTORS)).toEqual(expect.arrayContaining(["slack", "discord"]));
-    expect(ids(CARD_CHIP_CONNECTORS)).toEqual(["slack", "notion", "discord"]);
+  it("keeps soon entries in the featured list but out of the card chips and the available rows", () => {
+    // The featured list is the curated set; what the card and the composer
+    // rows show is the part of it that can be selected today. The rest is
+    // one coming-soon line while the card has no chip at all.
+    expect(ids(FEATURED_CONNECTORS)).toEqual(expect.arrayContaining(["slack", "notion", "discord"]));
     expect(AVAILABLE_FEATURED_CONNECTORS).toEqual(FEATURED_CONNECTORS.filter(isConnectorAvailable));
     // Notion before GitHub: list order, so the Popular row reads the same way.
     expect(ids(AVAILABLE_FEATURED_CONNECTORS)).toEqual(["notion", "github"]);
@@ -110,6 +112,26 @@ describe("CONNECTORS", () => {
       expect(entry.featured).toBe(true);
       expect(entry.availability).toBe("available");
     }
+    expect(CARD_CHIP_CONNECTORS).toEqual(
+      AVAILABLE_FEATURED_CONNECTORS.filter((entry) => entry.kind === "skill"),
+    );
+    expect(ids(CARD_CHIP_CONNECTORS)).toEqual(["notion"]);
+    expect(ids(COMING_SOON_FEATURED_SKILLS)).toEqual(["slack", "discord"]);
+    for (const entry of COMING_SOON_FEATURED_SKILLS) {
+      expect(entry.featured).toBe(true);
+      expect(entry.kind).toBe("skill");
+      expect(isConnectorAvailable(entry)).toBe(false);
+    }
+  });
+
+  it("phrases the coming-soon line from the pending featured skills", () => {
+    expect(formatComingSoonLine()).toBe("Slack and Discord are coming soon.");
+    expect(formatComingSoonLine([{ name: "Slack" }])).toBe("Slack is coming soon.");
+    expect(formatComingSoonLine([{ name: "Slack" }, { name: "Notion" }])).toBe(
+      "Slack and Notion are coming soon.",
+    );
+    expect(formatComingSoonLine([])).toBeNull();
+    expect(formatComingSoonLine()).not.toContain(EM_DASH);
   });
 
   it("keeps soon entries valid data so flipping them needs no other change", () => {
@@ -129,7 +151,7 @@ describe("CONNECTORS", () => {
   });
 
   it("keeps GitHub and unfeatured tools out of the card chips", () => {
-    expect(ids(CARD_CHIP_CONNECTORS)).toEqual(["slack", "notion", "discord"]);
+    // FreeFinance is available but not featured: "More tools" is its way in.
     expect(ids(CARD_CHIP_CONNECTORS)).not.toContain("github");
     expect(ids(CARD_CHIP_CONNECTORS)).not.toContain("freefinance");
     expect(ids(CARD_CHIP_CONNECTORS)).not.toContain("other");
@@ -217,6 +239,7 @@ describe("CONNECTORS", () => {
         expect(action.title).not.toContain(EM_DASH);
         expect(action.description).not.toContain(EM_DASH);
         expect(action.prompt ?? "").not.toContain(EM_DASH);
+        expect(action.placeholder ?? "").not.toContain(EM_DASH);
       }
     }
   });

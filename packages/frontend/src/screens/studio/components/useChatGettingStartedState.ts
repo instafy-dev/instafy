@@ -26,6 +26,11 @@ type UseChatGettingStartedStateOptions = {
   credentialsReady: boolean;
   currentUserId: string | null;
   displayedMessageCount: number;
+  /**
+   * Focuses the composer; with selectAll the existing draft is selected so
+   * the next keystroke replaces it. Falls back to a plain DOM focus.
+   */
+  focusComposer?: (options?: { selectAll?: boolean }) => void;
   githubImportBusy: boolean;
   gettingStartedContextRelevant: boolean;
   gettingStartedContextResolved: boolean;
@@ -77,6 +82,7 @@ export function useChatGettingStartedState({
   credentialsReady,
   currentUserId,
   displayedMessageCount,
+  focusComposer,
   githubImportBusy,
   gettingStartedContextRelevant,
   gettingStartedContextResolved,
@@ -117,6 +123,9 @@ export function useChatGettingStartedState({
   // the getting-started card open in github mode even after it was dismissed or
   // once the conversation has history, so repo import is never buried or lost.
   const [forceGithubImport, setForceGithubImport] = useState(false);
+  // "Start from scratch" asks its question through the composer placeholder
+  // instead of prefilling text; it lives until the conversation changes.
+  const [composerPlaceholderOverride, setComposerPlaceholderOverride] = useState<string | null>(null);
 
   const gettingStartedDismissed =
     gettingStartedDismissedState.key === gettingStartedKey
@@ -150,6 +159,11 @@ export function useChatGettingStartedState({
     setGettingStartedMode("root");
     clearGithubImportUi();
   }, [activeConversationId, clearGithubImportUi, gettingStartedKey, managedAiSelectedKey, projectHistoryKey]);
+  // Keyed on the conversation alone: a re-render with a fresh callback must
+  // not drop the question mid-draft.
+  useLayoutEffect(() => {
+    setComposerPlaceholderOverride(null);
+  }, [activeConversationId, gettingStartedKey]);
 
   const projectHasObservedHistory = useMemo(() => {
     if (!conversationScopeAligned) {
@@ -216,40 +230,48 @@ export function useChatGettingStartedState({
     runtimeControllerEnabled,
   ]);
 
-  const shouldShowGettingStarted = useMemo(() => {
+  // "full" is the card; "collapsed" is its one-line row of workspace actions,
+  // shown while a draft is in the composer instead of unmounting the card.
+  // Dismissal, history and the credential gate hide both.
+  const gettingStartedPresentation = useMemo((): "full" | "collapsed" | null => {
     if (!activeProjectId) {
-      return false;
+      return null;
     }
     if (!conversationScopeAligned) {
-      return false;
+      return null;
     }
     // An explicit repo-import request overrides dismissal, history, and
     // context-relevance gates so repo import is never buried or lost.
     if (forceGithubImport && gettingStartedMode === "github" && !aiOnboardingOpen) {
-      return true;
+      return "full";
     }
     if (!gettingStartedContextResolved || !gettingStartedContextRelevant) {
-      return false;
+      return null;
     }
     if (gettingStartedDismissed) {
-      return false;
+      return null;
     }
     if (runtimeControllerEnabled && !remoteHistoryPresenceResolved) {
-      return false;
+      return null;
     }
     if ((credentialGateState && credentialGateState !== "checking") || aiOnboardingOpen) {
-      return false;
+      return null;
     }
     if (gettingStartedMode === "github" && githubImportBusy) {
-      return true;
+      return "full";
     }
-    if (inputValue.trim().length > 0 || projectHasConversationHistory || displayedMessageCount > 0) {
-      return false;
+    if (projectHasConversationHistory || displayedMessageCount > 0) {
+      return null;
     }
     if (hasMoreHistory || isHistoryLoading) {
-      return false;
+      return null;
     }
-    return true;
+    if (inputValue.trim().length > 0) {
+      // The GitHub mode was asked for explicitly (from the row or the menu),
+      // so it stays open over a draft; the root card folds to its row.
+      return gettingStartedMode === "github" ? "full" : "collapsed";
+    }
+    return "full";
   }, [
     activeProjectId,
     aiOnboardingOpen,
@@ -269,6 +291,13 @@ export function useChatGettingStartedState({
     remoteHistoryPresenceResolved,
     runtimeControllerEnabled,
   ]);
+  const shouldShowGettingStarted = gettingStartedPresentation !== null;
+  const gettingStartedCollapsed = gettingStartedPresentation === "collapsed";
+  // The question is only meaningful while the card (full or collapsed) is up;
+  // once the message is sent the composer's usual placeholder returns.
+  const gettingStartedComposerPlaceholder = shouldShowGettingStarted
+    ? composerPlaceholderOverride
+    : null;
 
   const handleGettingStartedModeChange = useCallback(
     (mode: "root" | "github") => {
@@ -312,6 +341,19 @@ export function useChatGettingStartedState({
     clearGithubImportUi();
   }, [clearGithubImportUi, managedAiSelectedKey]);
 
+  // Focus synchronously inside the trusted press so native keyboards open;
+  // deferring to an animation frame loses user activation on mobile.
+  const focusComposerNow = useCallback(
+    (options?: { selectAll?: boolean }) => {
+      if (focusComposer) {
+        focusComposer(options);
+        return;
+      }
+      document.getElementById("studio-chat-input")?.focus();
+    },
+    [focusComposer],
+  );
+
   const handleGettingStartedAction = useCallback(
     (action: OnboardingAction) => {
       if (action.kind === "github_import") {
@@ -319,22 +361,32 @@ export function useChatGettingStartedState({
         clearGithubImportUi();
         return;
       }
+      if (action.kind === "compose") {
+        // Nothing is inserted: the composer stays empty (send stays disabled)
+        // and asks the question through its placeholder. From the collapsed
+        // row a draft already exists; it is selected so typing replaces it,
+        // since the placeholder only shows over an empty composer.
+        setComposerPlaceholderOverride(action.placeholder ?? null);
+        setGettingStartedMode("root");
+        focusComposerNow({ selectAll: inputValue.trim().length > 0 });
+        return;
+      }
       if (!activeConversationId || !action.prompt) {
         return;
       }
       onInputChange(activeConversationId, action.prompt, null);
       setGettingStartedMode("root");
-      // Focus synchronously inside the trusted press so native keyboards open;
-      // deferring to an animation frame loses user activation on mobile.
-      document.getElementById("studio-chat-input")?.focus();
+      focusComposerNow();
     },
-    [activeConversationId, clearGithubImportUi, onInputChange],
+    [activeConversationId, clearGithubImportUi, focusComposerNow, inputValue, onInputChange],
   );
 
   return {
     beginGithubImport,
     clearGettingStartedManagedAiSelection,
     dismissGettingStarted,
+    gettingStartedCollapsed,
+    gettingStartedComposerPlaceholder,
     gettingStartedManagedAiSelected,
     gettingStartedMode,
     handleGettingStartedAction,

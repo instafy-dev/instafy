@@ -4,18 +4,29 @@ import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ConnectChipStrip } from "../ConnectChipStrip";
-import { CARD_CHIP_CONNECTORS, isConnectorAvailable } from "../connectors";
+import {
+  CARD_CHIP_CONNECTORS,
+  COMING_SOON_FEATURED_SKILLS,
+  CONNECTORS,
+  isConnectorAvailable,
+  type SkillConnector,
+} from "../connectors";
 
-const EXPECTED_CHIP_IDS = ["slack", "notion", "discord"];
-const EM_DASH = "—";
+const EM_DASH = "\u2014";
 
-// Notion's pack is published, so its chip is the pressable path; Slack and
-// Discord are still "soon" (packs not published), which covers the disabled
-// path and its precedence over the installed state.
-const SOON_CHIP_IDS = CARD_CHIP_CONNECTORS.filter((entry) => !isConnectorAvailable(entry)).map(
-  (entry) => entry.id,
-);
+// Notion's pack is published, so the shipped list renders its one chip and no
+// coming-soon line; Slack and Discord are still "soon" (packs not published)
+// and get no chip at all. The test seam covers the multi-chip path with the
+// niche FreeFinance skill and a soon skill flipped to available, and the
+// coming-soon line with an empty chip list.
 const notionConnector = CARD_CHIP_CONNECTORS.find((entry) => entry.id === "notion")!;
+const freefinance = CONNECTORS.find(
+  (entry): entry is SkillConnector => entry.kind === "skill" && entry.id === "freefinance",
+)!;
+const slackAvailable: SkillConnector = {
+  ...COMING_SOON_FEATURED_SKILLS.find((entry) => entry.id === "slack")!,
+  availability: "available",
+};
 
 describe("ConnectChipStrip", () => {
   let container: HTMLDivElement;
@@ -59,69 +70,53 @@ describe("ConnectChipStrip", () => {
     );
   }
 
-  it("renders exactly the featured skill chips, in order, then the More tools link", async () => {
+  it("renders the one published chip and no coming-soon line from the shipped list", async () => {
     await render();
 
+    expect(CARD_CHIP_CONNECTORS.map((entry) => entry.id)).toEqual(["notion"]);
+    expect(COMING_SOON_FEATURED_SKILLS.map((entry) => entry.id)).toEqual(["slack", "discord"]);
     const strip = container.querySelector('[data-testid="connect-chip-strip"]');
     expect(strip?.tagName).toBe("UL");
-    const chips = chipButtons();
-    expect(chips.map((chip) => chip.dataset.testid)).toEqual(
-      EXPECTED_CHIP_IDS.map((id) => `connect-chip-${id}`),
-    );
-    expect(chips.map((chip) => chip.dataset.testid)).toEqual(
-      CARD_CHIP_CONNECTORS.map((entry) => `connect-chip-${entry.id}`),
-    );
-    expect(container.querySelector('[data-testid="connect-chip-github"]')).toBeNull();
-    expect(container.querySelector('[data-testid="connect-chip-freefinance"]')).toBeNull();
-    expect(container.querySelector('[data-testid="connect-chip-other"]')).toBeNull();
-    for (const [index, chip] of chips.entries()) {
-      const entry = CARD_CHIP_CONNECTORS[index]!;
-      expect(chip.textContent).toBe(
-        isConnectorAvailable(entry) ? entry.name : `${entry.name}Soon`,
-      );
-      expect(chip.querySelector("svg")).not.toBeNull();
-    }
+    expect(chipButtons().map((chip) => chip.dataset.testid)).toEqual(["connect-chip-notion"]);
+    expect(container.querySelector('[data-testid^="connect-chip-"][data-testid$="-soon"]')).toBeNull();
+    expect(container.textContent).not.toContain("Soon");
+    expect(container.querySelector('[data-testid="connect-coming-soon"]')).toBeNull();
+    expect(container.textContent).not.toContain("coming soon");
     expect(container.querySelector("img")).toBeNull();
-    expect(container.querySelector('[data-testid$="-connected"]')).toBeNull();
 
-    // The trailing link is text only, last in the list, and no chip.
+    // The trailing link is text only and last in the list, after the chip.
     const more = container.querySelector<HTMLButtonElement>('[data-testid="connect-more-tools"]');
     expect(more?.textContent).toBe("More tools");
     expect(more?.querySelector("svg")).toBeNull();
     expect(strip?.lastElementChild?.contains(more!)).toBe(true);
+    expect(chipButtons()[0]!.compareDocumentPosition(more!) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
     expect(container.textContent).not.toContain("Paste a skill link");
+    expect(container.textContent).not.toContain("please");
     expect(container.textContent).not.toContain(EM_DASH);
   });
 
-  it("renders a soon chip disabled with a Soon Badge after the name", async () => {
-    await render();
-    expect(SOON_CHIP_IDS).toEqual(["slack", "discord"]);
+  it("shows one coming-soon line and the More tools link while no featured skill is available", async () => {
+    await render({ connectors: [], comingSoon: COMING_SOON_FEATURED_SKILLS });
 
-    for (const id of SOON_CHIP_IDS) {
-      const chip = container.querySelector<HTMLButtonElement>(`[data-testid="connect-chip-${id}"]`)!;
-      expect(chip.disabled).toBe(true);
-      expect(chip.getAttribute("data-disabled")).toBe("true");
-      // The state is a Badge next to the name (no uppercase tracked pill,
-      // no wording beyond the one label), muted by the disabled tokens.
-      const badge = chip.querySelector<HTMLElement>(`[data-testid="connect-chip-${id}-soon"]`);
-      expect(badge?.tagName.toLowerCase()).toBe("span");
-      expect(badge?.textContent).toBe("Soon");
-      expect(badge?.className).toContain("rounded-full");
-      expect(badge?.className).toContain("text-3xs");
-      expect(badge?.className).not.toContain("uppercase");
-      expect(badge?.className).toContain("text-slate-600");
-      expect(chip.className).toContain("data-[disabled]:opacity-60");
-      // Name, then the Badge; the mark stays the one svg.
-      expect(chip.textContent).toBe(`${chip.querySelector("span")?.textContent}Soon`);
-      expect(chip.querySelectorAll("svg")).toHaveLength(1);
-      expect(chip.querySelector('[data-testid$="-connected"]')).toBeNull();
-      // Hover reads "Coming soon" from the list item: the disabled Button has
-      // pointer-events none, so the pointer lands on the item.
-      expect(chip.parentElement?.getAttribute("title")).toBe("Coming soon");
-    }
-    expect(
-      container.querySelector('[data-testid="connect-more-tools"]')?.parentElement?.getAttribute("title"),
-    ).toBeNull();
+    const strip = container.querySelector('[data-testid="connect-chip-strip"]');
+    expect(strip?.tagName).toBe("UL");
+    expect(chipButtons()).toEqual([]);
+    expect(container.querySelector('[data-testid^="connect-chip-"][data-testid$="-soon"]')).toBeNull();
+    expect(container.textContent).not.toContain("Soon");
+    const line = container.querySelector<HTMLElement>('[data-testid="connect-coming-soon"]');
+    expect(line?.textContent).toBe("Slack and Discord are coming soon.");
+    expect(line?.tagName).toBe("SPAN");
+    expect(line?.className).not.toContain("uppercase");
+    expect(container.querySelector("img")).toBeNull();
+    expect(container.querySelector("svg")).toBeNull();
+
+    // The trailing link is text only, last in the list, after the line.
+    const more = container.querySelector<HTMLButtonElement>('[data-testid="connect-more-tools"]');
+    expect(more?.textContent).toBe("More tools");
+    expect(more?.querySelector("svg")).toBeNull();
+    expect(strip?.lastElementChild?.contains(more!)).toBe(true);
+    expect(line!.compareDocumentPosition(more!) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(container.textContent).not.toContain("Paste a skill link");
     expect(container.textContent).not.toContain("please");
     expect(container.textContent).not.toContain(EM_DASH);
   });
@@ -139,7 +134,7 @@ describe("ConnectChipStrip", () => {
     expect(notion.parentElement?.getAttribute("title")).toBeNull();
   });
 
-  it("reports the pressed available chip, nothing from a soon chip, and opens the browse sheet from More tools", async () => {
+  it("reports the pressed Notion chip and opens the browse sheet from More tools", async () => {
     const onSelect = vi.fn();
     const onMoreTools = vi.fn();
     await render({ onSelect, onMoreTools });
@@ -153,17 +148,9 @@ describe("ConnectChipStrip", () => {
     expect(onSelect.mock.calls[0]?.[0]?.availability).toBe("available");
     expect(onMoreTools).not.toHaveBeenCalled();
 
-    const slack = container.querySelector<HTMLButtonElement>('[data-testid="connect-chip-slack"]')!;
-    expect(slack.disabled).toBe(true);
-    await act(async () => slack.click());
-    await act(async () => {
-      slack.dispatchEvent(new MouseEvent("mousedown", { bubbles: true }));
-      slack.dispatchEvent(new MouseEvent("mouseup", { bubbles: true }));
-      slack.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
-      slack.dispatchEvent(new KeyboardEvent("keyup", { key: "Enter", bubbles: true }));
-    });
-    expect(onSelect).toHaveBeenCalledTimes(1);
-    expect(onMoreTools).not.toHaveBeenCalled();
+    // Soon skills have no chip to press.
+    expect(container.querySelector('[data-testid="connect-chip-slack"]')).toBeNull();
+    expect(container.querySelector('[data-testid="connect-chip-discord"]')).toBeNull();
 
     const more = container.querySelector<HTMLButtonElement>('[data-testid="connect-more-tools"]')!;
     expect(more.disabled).toBe(false);
@@ -172,37 +159,30 @@ describe("ConnectChipStrip", () => {
     expect(onSelect).toHaveBeenCalledTimes(1);
   });
 
-  it("names a soon chip as coming soon, ahead of the verb and the installed state", async () => {
+  it("names the Notion chip with the verb, or with its installed state instead", async () => {
     await render();
     const label = (id: string) =>
       container.querySelector<HTMLButtonElement>(`[data-testid="connect-chip-${id}"]`)?.getAttribute("aria-label");
-    expect(label("slack")).toBe("Slack, coming soon");
-    expect(label("discord")).toBe("Discord, coming soon");
     expect(label("notion")).toBe("Connect Notion");
 
-    // An installed folder does not make an unpublished pack selectable: the
-    // chip keeps the Soon state and its label. A published pack's installed
-    // folder reads as connected.
     await render({ installedSkillNames: new Set(["slack", "notion"]) });
-    expect(label("slack")).toBe("Slack, coming soon");
     expect(label("notion")).toBe("Notion, connected");
     for (const chip of chipButtons()) {
       expect(chip.getAttribute("aria-label")).not.toMatch(/^Connect /);
     }
-    for (const id of SOON_CHIP_IDS) {
-      expect(label(id)).not.toContain("connected");
-    }
   });
 
-  it("shows no check glyph for a soon chip, even with its skill folder installed", async () => {
+  it("gives a soon skill no chip and no check glyph, even with its skill folder installed", async () => {
     await render({ installedSkillNames: new Set(["slack", "other", "github"]) });
 
+    expect(chipButtons().map((chip) => chip.dataset.testid)).toEqual(["connect-chip-notion"]);
+    expect(container.querySelector('[data-testid="connect-chip-slack"]')).toBeNull();
     expect(container.querySelector('[data-testid="connect-chip-slack-connected"]')).toBeNull();
-    expect(container.querySelector('[data-testid="connect-chip-slack-soon"]')?.textContent).toBe("Soon");
-    expect(container.querySelector('[data-testid="connect-chip-slack"]')?.textContent).toBe("SlackSoon");
+    expect(container.querySelector('[data-testid="connect-chip-slack-soon"]')).toBeNull();
     expect(container.querySelector('[data-testid="connect-chip-notion-connected"]')).toBeNull();
     expect(container.querySelectorAll('[data-testid$="-connected"]')).toHaveLength(0);
-    expect(container.querySelectorAll('[data-testid$="-soon"]')).toHaveLength(SOON_CHIP_IDS.length);
+    expect(container.querySelectorAll('[data-testid$="-soon"]')).toHaveLength(0);
+    expect(container.textContent).not.toContain("Soon");
   });
 
   it("shows the check glyph for the available Notion chip once its skill folder is installed", async () => {
@@ -218,8 +198,85 @@ describe("ConnectChipStrip", () => {
     expect(container.querySelectorAll('[data-testid$="-connected"]')).toHaveLength(1);
   });
 
+  it("renders an available skill as a pressable chip with its mark, and drops the coming-soon line once nothing is pending", async () => {
+    const onSelect = vi.fn();
+    await render({ connectors: [slackAvailable, freefinance], comingSoon: [], onSelect });
+
+    const chips = chipButtons();
+    expect(chips.map((chip) => chip.dataset.testid)).toEqual([
+      "connect-chip-slack",
+      "connect-chip-freefinance",
+    ]);
+    expect(container.querySelector('[data-testid="connect-coming-soon"]')).toBeNull();
+    for (const chip of chips) {
+      expect(chip.disabled).toBe(false);
+      expect(chip.getAttribute("aria-label")).toMatch(/^Connect /);
+      expect(chip.querySelectorAll("svg")).toHaveLength(1);
+      expect(chip.className).toContain("rounded-full");
+    }
+    expect(chips[0]?.textContent).toBe("Slack");
+    expect(chips[0]?.getAttribute("aria-label")).toBe("Connect Slack");
+
+    await act(async () => chips[0]?.click());
+    expect(onSelect).toHaveBeenCalledTimes(1);
+    expect(onSelect.mock.calls[0][0]).toBe(slackAvailable);
+    expect(container.textContent).not.toContain(EM_DASH);
+  });
+
+  it("shows no coming-soon line once any chip is available, even while other featured skills are pending", async () => {
+    await render({ connectors: [slackAvailable], comingSoon: COMING_SOON_FEATURED_SKILLS.slice(1) });
+
+    // With a chip present the line is not shown: the chips are the strip and
+    // the sheet names what is pending.
+    expect(chipButtons().map((chip) => chip.dataset.testid)).toEqual(["connect-chip-slack"]);
+    expect(container.querySelector('[data-testid="connect-coming-soon"]')).toBeNull();
+  });
+
+  it("marks an installed available skill with a check glyph and says so in its name", async () => {
+    await render({
+      connectors: [slackAvailable, freefinance],
+      comingSoon: [],
+      installedSkillNames: new Set(["freefinance", "other", "github"]),
+    });
+
+    const chip = container.querySelector<HTMLButtonElement>('[data-testid="connect-chip-freefinance"]')!;
+    expect(chip.getAttribute("aria-label")).toBe("FreeFinance, connected");
+    expect(chip.querySelector('[data-testid="connect-chip-freefinance-connected"]')).not.toBeNull();
+    expect(chip.querySelectorAll("svg")).toHaveLength(2);
+    expect(container.querySelector('[data-testid="connect-chip-slack-connected"]')).toBeNull();
+    expect(container.querySelectorAll('[data-testid$="-connected"]')).toHaveLength(1);
+    expect(container.querySelectorAll('[data-testid^="connect-chip-"][data-testid$="-soon"]')).toHaveLength(0);
+  });
+
+  it("phrases the coming-soon line for one, two and three names", async () => {
+    const byId = (id: string) =>
+      CONNECTORS.find((entry): entry is SkillConnector => entry.kind === "skill" && entry.id === id)!;
+    const [slack, notion, discord] = [byId("slack"), byId("notion"), byId("discord")];
+    const line = () => container.querySelector('[data-testid="connect-coming-soon"]')?.textContent;
+    await render({ connectors: [], comingSoon: [slack] });
+    expect(line()).toBe("Slack is coming soon.");
+    await render({ connectors: [], comingSoon: [slack, notion] });
+    expect(line()).toBe("Slack and Notion are coming soon.");
+    await render({ connectors: [], comingSoon: [slack, notion, discord] });
+    expect(line()).toBe("Slack, Notion and Discord are coming soon.");
+    await render({ connectors: [], comingSoon: [] });
+    expect(container.querySelector('[data-testid="connect-coming-soon"]')).toBeNull();
+    expect(container.querySelector('[data-testid="connect-more-tools"]')).not.toBeNull();
+  });
+
+  it("only ever lists skills that can be selected today", () => {
+    for (const entry of CARD_CHIP_CONNECTORS) {
+      expect(isConnectorAvailable(entry)).toBe(true);
+      expect(entry.featured).toBe(true);
+    }
+    for (const entry of COMING_SOON_FEATURED_SKILLS) {
+      expect(isConnectorAvailable(entry)).toBe(false);
+      expect(entry.featured).toBe(true);
+    }
+  });
+
   it("keeps the same DOM shape in the dark theme", async () => {
-    await render({ installedSkillNames: new Set(["discord"]) });
+    await render({ connectors: [freefinance], comingSoon: [], installedSkillNames: new Set(["freefinance"]) });
     const lightShape = chipButtons().map((chip) => ({
       id: chip.dataset.testid,
       svg: chip.querySelectorAll("svg").length,
@@ -227,7 +284,7 @@ describe("ConnectChipStrip", () => {
     }));
 
     document.documentElement.classList.add("dark");
-    await render({ installedSkillNames: new Set(["discord"]) });
+    await render({ connectors: [freefinance], comingSoon: [], installedSkillNames: new Set(["freefinance"]) });
     const darkShape = chipButtons().map((chip) => ({
       id: chip.dataset.testid,
       svg: chip.querySelectorAll("svg").length,
@@ -236,7 +293,6 @@ describe("ConnectChipStrip", () => {
 
     expect(darkShape).toEqual(lightShape);
     expect(container.querySelector("img")).toBeNull();
-    expect(container.querySelector('[data-testid="connect-chip-discord-soon"]')).not.toBeNull();
-    expect(container.querySelector('[data-testid="connect-chip-discord-connected"]')).toBeNull();
+    expect(container.querySelector('[data-testid="connect-chip-freefinance-connected"]')).not.toBeNull();
   });
 });

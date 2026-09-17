@@ -11,10 +11,11 @@ import { FreeFinanceMark, NotionMark, SlackMark } from "./connectorMarks";
 export type ConnectorKind = "skill" | "github" | "other";
 
 /**
- * "available" routes and confirms as usual. "soon" renders greyed with a
- * "Soon" Badge everywhere the connector appears (card chip, sheet row, menu
- * row) and is never pressable: routeConnectorSelection returns without
- * action, so the confirm stage is unreachable for it.
+ * "available" routes and confirms as usual. "soon" is listed only in the
+ * Connect sheet, greyed with a "Soon" Badge and never pressable
+ * (routeConnectorSelection returns without action, so the confirm stage is
+ * unreachable for it); the card chips and the composer rows leave it out and
+ * name it in one "coming soon" line instead.
  */
 export type ConnectorAvailability = "available" | "soon";
 
@@ -183,29 +184,51 @@ export function isConnectorAvailable(connector: Connector): boolean {
   return connector.kind === "other" || connector.availability === "available";
 }
 
-/**
- * The composer's Connect rows, in list order. "soon" entries stay in here so
- * they render greyed with their Badge rather than vanish.
- */
+/** Every curated entry in list order, "soon" ones included. */
 export const FEATURED_CONNECTORS: readonly ProductConnector[] = PRODUCT_CONNECTORS.filter(
   (connector) => connector.featured,
 );
 
 /**
- * The sheet's "Popular" row: featured entries that can be selected today. The
- * row hides itself while fewer than two are available.
+ * Featured entries that can be selected today: the sheet's "Popular" row
+ * (which hides itself while fewer than two are available) and the composer's
+ * Connect rows, which fall back to "Browse all tools" alone when this is empty.
  */
 export const AVAILABLE_FEATURED_CONNECTORS: readonly ProductConnector[] =
   FEATURED_CONNECTORS.filter(isConnectorAvailable);
 
 /**
- * The getting-started card's chips: featured skills only, "soon" ones
- * included (they render disabled). GitHub is not a chip because the card
- * already carries the "Import a GitHub repo" button.
+ * The getting-started card's chips: featured skills that can be selected
+ * today. GitHub is not a chip because the card already carries the "Import a
+ * GitHub repo" button; a "soon" skill is named in the coming-soon line instead.
  */
-export const CARD_CHIP_CONNECTORS: readonly SkillConnector[] = FEATURED_CONNECTORS.filter(
+export const CARD_CHIP_CONNECTORS: readonly SkillConnector[] = AVAILABLE_FEATURED_CONNECTORS.filter(
   (connector): connector is SkillConnector => connector.kind === "skill",
 );
+
+/** Featured skills whose pack is not published yet, in list order. */
+export const COMING_SOON_FEATURED_SKILLS: readonly SkillConnector[] = FEATURED_CONNECTORS.filter(
+  (connector): connector is SkillConnector => connector.kind === "skill" && !isConnectorAvailable(connector),
+);
+
+/**
+ * "Slack and Discord are coming soon." for the card and the composer
+ * rows when no featured skill is available yet; null once there is nothing
+ * to wait for.
+ */
+export function formatComingSoonLine(
+  connectors: readonly { name: string }[] = COMING_SOON_FEATURED_SKILLS,
+): string | null {
+  const names = connectors.map((connector) => connector.name);
+  if (names.length === 0) {
+    return null;
+  }
+  const list =
+    names.length === 1
+      ? names[0]
+      : `${names.slice(0, -1).join(", ")} and ${names[names.length - 1]}`;
+  return `${list} ${names.length === 1 ? "is" : "are"} coming soon.`;
+}
 
 export function connectorCategoryLabel(id: ConnectorCategoryId): string {
   return CONNECTOR_CATEGORIES.find((category) => category.id === id)?.label ?? id;

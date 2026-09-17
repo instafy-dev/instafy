@@ -8,7 +8,13 @@ import {
   Search,
 } from "iconoir-react";
 
-export type OnboardingActionKind = "prompt" | "github_import";
+/**
+ * "prompt" prefills the composer with the action's prompt. "compose" inserts
+ * nothing: it sets the composer's placeholder to the action's question and
+ * focuses it, so the sent line is the user's own words. "github_import"
+ * switches the card to its GitHub mode.
+ */
+export type OnboardingActionKind = "prompt" | "compose" | "github_import";
 
 export type OnboardingPathId = "coding" | "finance" | "science" | "connect";
 
@@ -18,6 +24,8 @@ export type OnboardingAction = {
   description: string;
   kind: OnboardingActionKind;
   prompt?: string;
+  /** "compose" only: the composer placeholder shown until the user types. */
+  placeholder?: string;
   icon: ComponentType<{ className?: string; "aria-hidden"?: boolean }>;
 };
 
@@ -25,6 +33,13 @@ export type PromptOnboardingAction = OnboardingAction & {
   kind: "prompt";
   prompt: string;
 };
+
+export type ComposeOnboardingAction = OnboardingAction & {
+  kind: "compose";
+  placeholder: string;
+};
+
+export const START_FROM_SCRATCH_PLACEHOLDER = "What do you want to build? One sentence is enough.";
 
 export type OnboardingPath = {
   id: OnboardingPathId;
@@ -55,9 +70,8 @@ export const ONBOARDING_PATHS: OnboardingPath[] = [
         id: "start-from-scratch",
         title: "Start from scratch",
         description: "A blank workspace. Turn an idea into an app, tool, or prototype.",
-        kind: "prompt",
-        prompt:
-          "I'm starting from a blank workspace. What I want to build: <describe it here>. Create the smallest useful first version as real files and commit it, then summarize what you built and suggest the next step.",
+        kind: "compose",
+        placeholder: START_FROM_SCRATCH_PLACEHOLDER,
         icon: CodeBrackets,
       },
       {
