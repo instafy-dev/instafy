@@ -728,7 +728,7 @@ test.describe("Skills command", () => {
     expect(await userBubbles.count()).toBe(userBubbleCountBefore);
   });
 
-  test("Import a GitHub repo on the getting-started card opens the GitHub flow", async ({ page }) => {
+  test("the GitHub chip on the getting-started card opens the GitHub flow", async ({ page }) => {
     page.setDefaultTimeout(60_000);
 
     const projectId = await prepareStudio(page);
@@ -740,11 +740,12 @@ test.describe("Skills command", () => {
     const userBubbles = page.getByTestId("chat-bubble-user");
     const userBubbleCountBefore = await userBubbles.count();
 
-    const importAction = page
+    const importChip = page
       .getByTestId("onboarding-getting-started")
-      .getByTestId("onboarding-action-import-github-repo");
-    await expect(importAction).toBeVisible({ timeout: 60_000 });
-    await importAction.click();
+      .getByTestId("connect-chip-github");
+    await expect(importChip).toBeVisible({ timeout: 60_000 });
+    await expect(importChip).toHaveAttribute("aria-label", "Import from GitHub");
+    await importChip.click();
 
     // The card switches to its GitHub mode: repo import plus device login.
     await expect(page.getByTestId("onboarding-github-connect-button")).toBeVisible();
@@ -753,7 +754,7 @@ test.describe("Skills command", () => {
     expect(await userBubbles.count()).toBe(userBubbleCountBefore);
   });
 
-  test("the Notion chip confirms, a soon tool gets no chip, More tools browses and Escape sends nothing", async ({ page }) => {
+  test("the card row confirms a skill, keeps soon tools out, browses and sends nothing", async ({ page }) => {
     page.setDefaultTimeout(60_000);
 
     const projectId = await prepareStudio(page);
@@ -768,11 +769,13 @@ test.describe("Skills command", () => {
     const card = page.getByTestId("onboarding-getting-started");
     const notionChip = card.getByTestId("connect-chip-notion");
     await expect(notionChip).toBeVisible({ timeout: 60_000 });
-    // Notion's pack is published, so it is the one chip. Slack and Discord
-    // (unpublished) get no chip and no Soon badge here; the sheet names them.
-    // No niche chip, no GitHub chip, no paste link and no coming-soon line.
-    await expect(card.locator('button[data-testid^="connect-chip-"]')).toHaveCount(1);
-    for (const id of ["slack", "discord", "freefinance", "github", "other"]) {
+    // The row is every featured tool that can be picked today: GitHub then
+    // Notion. Slack and Discord (unpublished) get no chip and no Soon badge
+    // here; the sheet names them. No niche chip, no paste link, no pending
+    // line: every entry on the card leads somewhere.
+    await expect(card.locator('button[data-testid^="connect-chip-"]')).toHaveCount(2);
+    await expect(card.getByTestId("connect-chip-github")).toBeEnabled();
+    for (const id of ["slack", "discord", "freefinance", "other"]) {
       await expect(card.getByTestId(`connect-chip-${id}`)).toHaveCount(0);
     }
     await expect(card.getByTestId("connect-coming-soon")).toHaveCount(0);

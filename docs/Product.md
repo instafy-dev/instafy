@@ -291,10 +291,11 @@ button) and **Connect AI**; when the free tier is paused the heading stays, the 
 Instafy AI is paused right now. Connect your own AI to start; you pay your provider directly and
 Instafy adds nothing." and **Connect AI** is the one button. The same verb names the act
 everywhere: **Connect AI** on the card and in the gate, **Add AI connection** as the modal's
-title, **AI connections** as the AI panel's heading. Once settled, a status line above **What
-should your agent work on?** names what will answer ("Using OpenAI API key" or "Using
-free Instafy AI: 20 prompts a day, 1 credit each") followed by **Change AI**, which reopens the
-AI step for the free choice and opens the AI panel for a saved connection.
+title, **AI connections** as the AI panel's heading. When a free lane is offered the line ends
+"Next: pick a tool, or just type.", which is what the step below actually asks. Once settled, a
+status line above **Start with a tool you already use** names what will answer ("Using OpenAI
+API key" or "Using free Instafy AI: 20 prompts a day, 1 credit each") followed by **Change AI**,
+which reopens the AI step for the free choice and opens the AI panel for a saved connection.
 
 Typing or sending with no AI connected shows one sentence in the chat, "Connect AI to send this.
 Your message is kept.", with a primary **Connect AI** that opens the Add AI connection modal and,
@@ -304,11 +305,23 @@ more than one member. The draft stays in the composer. Switching the assistant o
 connected, or an expired connection, shows the same hand-off in the chat: no provider list is
 drawn there, **Connect AI** opens the modal.
 
-**Start from scratch** inserts no text: it sets the composer's placeholder to "What do you want
-to build? One sentence is enough." and focuses it, so send stays disabled until the user types
-their own line. While a draft exists the card folds to one row, **Import a repo**, **Start from scratch**
-and **More tools**, and unfolds when the draft is cleared; history and dismissal hide it as
-before. **Start from scratch** from that row selects the draft, so typing replaces it.
+The workspace step is four lines: the AI status line, the heading **Start with a tool you
+already use**, one wrapping row of the tools that can be picked today, and the closing line
+"Or just type what you want below." The row is outline chips of a mark and a name, GitHub
+first because it signs in with a device code and needs no key pasted, then Notion, ending in
+a **More tools** link into the Connect sheet. Every chip leads somewhere: a tool whose pack is
+not published is not on the card at all. The card carries no action cards and no separate
+**Connect a tool** caption, and nothing on it sends a message or writes into the composer.
+
+The blank path is the composer itself, which is already on screen asking "Ask for something…":
+the closing line points at it, the send button enables on the first character, and typing folds
+the card to one row, **Import a repo**, **Notion** and **More tools**, which unfolds when the draft
+is cleared; history and dismissal hide it as before. The collapsed row names the same tools in
+text form, in the same order, keeping the verb for the repo import.
+
+A member without write access keeps the heading, the closing line and the **GitHub** chip,
+whose press opens the import form and sends nothing. The skill chips and **More tools** are
+dropped, because their press ends at **Connect**, which sends.
 
 ## Composer
 
@@ -317,12 +330,13 @@ with the draft, then scrolls within the editor. Image upload and other message t
 in the `+` menu.
 
 **Connect a tool** in the composer `+` menu, next to **Import GitHub repo**, lists the
-featured tools that can be selected today (Notion and GitHub, until the Slack and Discord
-packs are published) and ends with **Browse all tools**; the available featured skills also
-sit as a row of chips under **Connect a tool** on the getting-started card of an empty space
-(Notion today), followed by a **More tools** link. Should no featured skill be available, the
-card shows one muted line in place of the chips, "Slack and Discord are coming soon.", ahead
-of the same link, and the menu shows **Browse all tools** alone under GitHub. Both open the Connect sheet: a
+featured tools that can be selected today (GitHub and Notion, until the Slack and Discord
+packs are published) and ends with **Browse all tools**; the same tools are the chip row on the
+getting-started card of an empty space, followed by a **More tools** link. Curation is list
+order in one build-time file: connections with nothing to paste come first, then the ones that
+ask for a key. The card row is capped at five chips, measured so it holds at most two lines on
+a phone; anything past the cap stays in the sheet. Should no featured tool be available, the
+menu shows **Browse all tools** alone under GitHub. Both open the Connect sheet: a
 **Search tools** box, a **Popular** row of bare marks (a curated list, not a measurement), and
 every first-party tool grouped by category (Chat and community, Docs and notes, Code, Finance
 and bookkeeping, and so on), with **connected** or a region such as Austria as the row's meta.
@@ -337,8 +351,9 @@ and from which repo, what its setup will ask for, and where the files land
 sends one line, `/skills import <source> --name <skill> --start`, into the current chat as a
 new turn (queued behind an active reply when there is one). Nothing is sent by a chip, a menu
 row, a search, a Popular mark or a category row: **Connect** is the only sending control.
-GitHub is reached through **Import GitHub repo** and its device login (the GitHub row in the
-sheet and menu leads there too), and **Paste a skill link** opens a dialog for any GitHub repo
+GitHub is reached through its chip on the card, through **Import GitHub repo** in the menu and
+through the GitHub row in the sheet, all of which lead to the same repo import and device
+login; it installs no skill, so it never shows as connected. **Paste a skill link** opens a dialog for any GitHub repo
 or skill folder link, a `SKILL.md` link, or a workspace path, whose **Add and start** sends
 `/skills import <source> --start` the same way. The runtime
 copies every folder in the

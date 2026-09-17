@@ -108,7 +108,7 @@ test.describe("Runtime & AI menu", () => {
     await onboarding.getByTestId("onboarding-use-managed-ai").click();
     await expect(onboarding.getByTestId("onboarding-ai-choice")).toHaveCount(0);
     await expect(
-      onboarding.getByText("What should your agent work on?", { exact: true }),
+      onboarding.getByText("Start with a tool you already use", { exact: true }),
     ).toBeVisible();
     // Focus hands off to the workspace step, not the composer (which would open
     // the mobile keyboard over the next decision).
@@ -146,7 +146,7 @@ test.describe("Runtime & AI menu", () => {
     await expect(reloadedOnboarding).toBeVisible();
     await expect(reloadedOnboarding.getByTestId("onboarding-ai-choice")).toHaveCount(0);
     await expect(
-      reloadedOnboarding.getByText("What should your agent work on?", { exact: true }),
+      reloadedOnboarding.getByText("Start with a tool you already use", { exact: true }),
     ).toBeVisible();
   });
 

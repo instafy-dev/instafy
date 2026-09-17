@@ -62,7 +62,6 @@ async function mountGettingStartedCard(
             mode: "root",
             collapsed: ${JSON.stringify(collapsed)},
             onSelectMode: (mode) => window.__onboardingActions.push(["mode", mode]),
-            onSelectAction: (action) => window.__onboardingActions.push(["action", action.id]),
             onSelectConnector: (connector) => window.__onboardingActions.push(["connector", connector.id]),
             onBrowseConnectors: () => window.__onboardingActions.push(["browse"]),
             installedSkillNames: new Set(),
@@ -139,7 +138,7 @@ test.describe("chat getting-started card", () => {
     await expect(card).not.toContainText("Bring my own AI");
     // The workspace step is gated behind the AI choice: one decision at a time.
     await expect(card.getByTestId("onboarding-workspace-step")).toHaveCount(0);
-    await expect(card.getByTestId("onboarding-action-import-github-repo")).toHaveCount(0);
+    await expect(card.getByTestId("connect-chip-strip")).toHaveCount(0);
 
     const geometry = await page.evaluate(() => {
       const cardElement = document.querySelector<HTMLElement>(
@@ -207,7 +206,7 @@ test.describe("chat getting-started card", () => {
     expect(cardBox!.width).toBeLessThanOrEqual(560);
   });
 
-  test("asks what the agent should work on when AI is already connected", async ({ page }) => {
+  test("offers one wrapping row of live tools when AI is already connected", async ({ page }) => {
     await page.setViewportSize({ width: 375, height: 667 });
     await mountGettingStartedCard(page, {
       selectedAi: "connected",
@@ -218,22 +217,75 @@ test.describe("chat getting-started card", () => {
     await expect(card.getByTestId("onboarding-ai-choice")).toHaveCount(0);
     await expect(card).toContainText("Using your connected AI");
     await expect(card.getByTestId("onboarding-change-ai")).toHaveCount(0);
-    await expect(card.getByText("What should your agent work on?", { exact: true })).toBeVisible();
-    // Notion is the one published featured skill: one chip, no Soon badge,
-    // no coming-soon line, then the More tools link.
+    await expect(card.getByText("Start with a tool you already use", { exact: true })).toBeVisible();
+    // Every featured tool that can be picked today: GitHub first because it
+    // needs no key pasted, then Notion, then the More tools link. Nothing
+    // pending is named here and nothing is disabled.
     await expect(card.getByTestId("connect-coming-soon")).toHaveCount(0);
-    await expect(card.locator('button[data-testid^="connect-chip-"]')).toHaveCount(1);
+    await expect(card.locator('button[data-testid^="connect-chip-"]')).toHaveCount(2);
+    await expect(card.getByTestId("connect-chip-github")).toBeEnabled();
     await expect(card.getByTestId("connect-chip-notion")).toBeEnabled();
     await expect(card).not.toContainText("Soon");
     await expect(card.getByTestId("connect-more-tools")).toBeVisible();
-    await expect(card.getByTestId("onboarding-action-import-github-repo")).toContainText(
-      "Import a GitHub repo",
+    // The action cards and their vocabulary are gone.
+    await expect(card.getByTestId("onboarding-action-import-github-repo")).toHaveCount(0);
+    await expect(card.getByTestId("onboarding-action-start-from-scratch")).toHaveCount(0);
+    await expect(card).not.toContainText("Start from scratch");
+    await expect(card).not.toContainText("Connect a tool");
+    await expect(card.getByTestId("onboarding-type-hint")).toHaveText(
+      "Or just type what you want below.",
     );
-    await expect(card.getByTestId("onboarding-action-start-from-scratch")).toContainText(
-      "Start from scratch",
-    );
+
+    // One line at 375: the chips and the link share a row, and the card is
+    // far shorter than the two stacked action cards it replaces.
+    const boxes = await Promise.all([
+      card.getByTestId("connect-chip-github").boundingBox(),
+      card.getByTestId("connect-chip-notion").boundingBox(),
+      card.getByTestId("connect-more-tools").boundingBox(),
+    ]);
+    for (const box of boxes) {
+      expect(box).not.toBeNull();
+    }
+    // Centres, not top edges: the bordered chip is two pixels taller than the
+    // borderless link, so equal tops would mean the link hangs low. Sharing a
+    // centre line is what "one row" means for controls of different heights.
+    const centres = boxes.map((box) => box!.y + box!.height / 2);
+    expect(Math.abs(centres[0]! - centres[1]!)).toBeLessThanOrEqual(1);
+    expect(Math.abs(centres[0]! - centres[2]!)).toBeLessThanOrEqual(1);
+    const cardBox = await card.boundingBox();
+    expect(cardBox!.height).toBeLessThanOrEqual(200);
     const documentWidth = await page.evaluate(() => document.documentElement.scrollWidth);
     expect(documentWidth).toBeLessThanOrEqual(375);
+  });
+
+  test("routes the card's GitHub chip to the import mode, never through connector routing", async ({ page }) => {
+    await page.setViewportSize({ width: 375, height: 667 });
+    await mountGettingStartedCard(page, {
+      selectedAi: "connected",
+      aiViewState: "workspace",
+    });
+
+    const card = page.getByTestId("onboarding-getting-started");
+    await expect(card.getByTestId("connect-chip-github")).toHaveAttribute(
+      "aria-label",
+      "Import from GitHub",
+    );
+    await card.getByTestId("connect-chip-github").click();
+    // The host is told to switch mode. Reporting it as a connector instead
+    // would reach beginGithubImport, whose force flag overrides every later
+    // show gate, including dismissal.
+    await expect
+      .poll(() => page.evaluate(() => (window as { __onboardingActions?: unknown[] }).__onboardingActions))
+      .toContainEqual(["mode", "github"]);
+    const reported = await page.evaluate(
+      () => (window as { __onboardingActions?: unknown[][] }).__onboardingActions ?? [],
+    );
+    expect(reported.filter((entry) => entry[0] === "connector")).toEqual([]);
+
+    await card.getByTestId("connect-chip-notion").click();
+    await expect
+      .poll(() => page.evaluate(() => (window as { __onboardingActions?: unknown[] }).__onboardingActions))
+      .toContainEqual(["connector", "notion"]);
   });
 
   test("names the selected free AI and exposes the real change action", async ({ page }) => {
@@ -354,7 +406,7 @@ test.describe("chat getting-started card", () => {
     const row = card.getByTestId("onboarding-collapsed-row");
     await expect(row.getByRole("button")).toHaveText([
       "Import a repo",
-      "Start from scratch",
+      "Notion",
       "More tools",
     ]);
     const boxes = await Promise.all(
@@ -367,10 +419,14 @@ test.describe("chat getting-started card", () => {
     expect(Math.abs(boxes[0]!.y - boxes[2]!.y)).toBeLessThanOrEqual(1);
     const documentWidth = await page.evaluate(() => document.documentElement.scrollWidth);
     expect(documentWidth).toBeLessThanOrEqual(375);
-    await row.getByRole("button", { name: "Start from scratch" }).click();
+    await row.getByRole("button", { name: "Notion" }).click();
     await expect
       .poll(() => page.evaluate(() => (window as { __onboardingActions?: unknown[] }).__onboardingActions))
-      .toContainEqual(["action", "start-from-scratch"]);
+      .toContainEqual(["connector", "notion"]);
+    await row.getByRole("button", { name: "Import a repo" }).click();
+    await expect
+      .poll(() => page.evaluate(() => (window as { __onboardingActions?: unknown[] }).__onboardingActions))
+      .toContainEqual(["mode", "github"]);
   });
 
   test("describes a non-positive daily cap as uncapped", async ({ page }) => {

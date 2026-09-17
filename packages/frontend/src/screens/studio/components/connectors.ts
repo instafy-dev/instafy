@@ -6,7 +6,7 @@ import { FreeFinanceMark, NotionMark, SlackMark } from "./connectorMarks";
 // The static, first-party, build-time connector list: the one place in
 // packages/frontend where product names and the secret names their setup asks
 // for may appear. Never fetched, never merged with server data, never editable
-// from the UI (the same trust model as ONBOARDING_PATHS).
+// from the UI: a name shown here is one a reviewer approved in this file.
 
 export type ConnectorKind = "skill" | "github" | "other";
 
@@ -14,8 +14,10 @@ export type ConnectorKind = "skill" | "github" | "other";
  * "available" routes and confirms as usual. "soon" is listed only in the
  * Connect sheet, greyed with a "Soon" Badge and never pressable
  * (routeConnectorSelection returns without action, so the confirm stage is
- * unreachable for it); the card chips and the composer rows leave it out and
- * name it in one "coming soon" line instead.
+ * unreachable for it); the card chips and the composer rows leave it out
+ * entirely, so every entry a first-run card offers leads somewhere. An entry
+ * may be "soon" when the only missing piece is its pack folder; when the
+ * missing piece is platform machinery, it is not in this file at all.
  */
 export type ConnectorAvailability = "available" | "soon";
 
@@ -33,6 +35,12 @@ export const CONNECTOR_CATEGORIES: readonly ConnectorCategory[] = [
   { id: "docs", label: "Docs and notes" },
   { id: "code", label: "Code" },
   { id: "finance", label: "Finance and bookkeeping" },
+  // Empty today, and invisible because the sheet drops a section with no
+  // rows. "email" is the landing slot for the first mail pack, which needs a
+  // third-party OAuth broker in the controller before it can be written at
+  // all: a project secret is a flat environment string with no refresh or
+  // expiry, so a token that must rotate would look fine at setup and die
+  // later. "files" waits on a pack in the same way.
   { id: "email", label: "Email and calendar" },
   { id: "files", label: "Files" },
 ];
@@ -54,8 +62,8 @@ type ProductConnectorBase = ConnectorBase & {
   availability: ConnectorAvailability;
   /**
    * Curated, not measured: a featured connector sits in the sheet's "Popular"
-   * row, in the composer's Connect rows and (skills only) as a card chip.
-   * Nothing counts installs or usage.
+   * row, in the composer's Connect rows and, once it is available, as a chip
+   * on the getting-started card. Nothing counts installs or usage.
    */
   featured: boolean;
   /** Lowercase search terms matched by filterConnectors, next to the name. */
@@ -83,7 +91,10 @@ export type SkillConnector = ProductConnectorBase & {
   app?: { url: string };
 };
 
-/** Routes to the existing GitHub import and device-login flow; never a card chip. */
+/**
+ * Routes to the existing GitHub import and device-login flow rather than a
+ * skill import: it installs nothing, so it never carries the connected glyph.
+ */
 export type GithubConnector = ProductConnectorBase & { kind: "github" };
 
 export type ProductConnector = SkillConnector | GithubConnector;
@@ -108,6 +119,22 @@ export const CONNECTORS: readonly Connector[] = [
     sourceLabel: "instafy-dev/skills",
     skillName: "slack",
     needs: ["a Slack app bot token (SLACK_BOT_TOKEN)"],
+  },
+  // Ordering rule for the featured entries, which is what the card's chip row
+  // and the sheet's Popular row read: connections with nothing to paste come
+  // first, then the ones that ask for a key, then the rest. GitHub signs in
+  // with a device code, so it leads; Notion asks for a token, so it follows.
+  // A sign-in tool added later enters at the front and the key tools drift
+  // right, with no layout change anywhere.
+  {
+    id: "github",
+    availability: "available",
+    name: "GitHub",
+    mark: Github,
+    kind: "github",
+    category: "code",
+    featured: true,
+    keywords: ["repo", "git", "code", "pull request"],
   },
   {
     id: "notion",
@@ -156,16 +183,6 @@ export const CONNECTORS: readonly Connector[] = [
       "its secret (FREEFINANCE_API_CLIENT_SECRET)",
     ],
   },
-  {
-    id: "github",
-    availability: "available",
-    name: "GitHub",
-    mark: Github,
-    kind: "github",
-    category: "code",
-    featured: true,
-    keywords: ["repo", "git", "code", "pull request"],
-  },
   { id: "other", name: "Paste a skill link", mark: Puzzle, kind: "other" },
 ];
 
@@ -198,37 +215,36 @@ export const AVAILABLE_FEATURED_CONNECTORS: readonly ProductConnector[] =
   FEATURED_CONNECTORS.filter(isConnectorAvailable);
 
 /**
- * The getting-started card's chips: featured skills that can be selected
- * today. GitHub is not a chip because the card already carries the "Import a
- * GitHub repo" button; a "soon" skill is named in the coming-soon line instead.
+ * The card's own cap, measured rather than inherited from the sheet's
+ * FEATURED_CONNECTOR_LIMIT. With the shipped chip (mark, name, gap-1.5,
+ * px-2.5) and the trailing "More tools" link, a 390 px phone gives the step
+ * 340 px and wraps at 27 px a line: five chips plus the link measure 60 px
+ * (two lines) and six measure 92 px (three), while desktop holds five on one
+ * 27 px line. Five is therefore the largest row that stays at two lines on a
+ * phone, which is the height the card can spend on tools. Everything past it
+ * lives behind "More tools" in the categorised, searchable sheet.
  */
-export const CARD_CHIP_CONNECTORS: readonly SkillConnector[] = AVAILABLE_FEATURED_CONNECTORS.filter(
-  (connector): connector is SkillConnector => connector.kind === "skill",
-);
-
-/** Featured skills whose pack is not published yet, in list order. */
-export const COMING_SOON_FEATURED_SKILLS: readonly SkillConnector[] = FEATURED_CONNECTORS.filter(
-  (connector): connector is SkillConnector => connector.kind === "skill" && !isConnectorAvailable(connector),
-);
+export const CARD_CHIP_LIMIT = 5;
 
 /**
- * "Slack and Discord are coming soon." for the card and the composer
- * rows when no featured skill is available yet; null once there is nothing
- * to wait for.
+ * The getting-started card's chip row: every featured tool that can be picked
+ * today, in list order, capped at CARD_CHIP_LIMIT. GitHub is one of them now
+ * that the card no longer carries its own import button; its chip opens the
+ * same repo import and device login as before. A "soon" entry is not here at
+ * all: the sheet lists it with a Soon Badge, which is where a tool that leads
+ * nowhere belongs.
  */
-export function formatComingSoonLine(
-  connectors: readonly { name: string }[] = COMING_SOON_FEATURED_SKILLS,
-): string | null {
-  const names = connectors.map((connector) => connector.name);
-  if (names.length === 0) {
-    return null;
-  }
-  const list =
-    names.length === 1
-      ? names[0]
-      : `${names.slice(0, -1).join(", ")} and ${names[names.length - 1]}`;
-  return `${list} ${names.length === 1 ? "is" : "are"} coming soon.`;
-}
+export const CARD_TOOL_CONNECTORS: readonly ProductConnector[] =
+  AVAILABLE_FEATURED_CONNECTORS.slice(0, CARD_CHIP_LIMIT);
+
+/**
+ * The same row for a member without write access: only the entries whose
+ * press sends nothing into the conversation. A repo import opens a form and
+ * writes files; a skill chip ends at the sheet's Connect button, which sends
+ * the import line, so it is dropped rather than offered and refused.
+ */
+export const CARD_READ_ONLY_TOOL_CONNECTORS: readonly ProductConnector[] =
+  CARD_TOOL_CONNECTORS.filter((connector) => connector.kind === "github");
 
 export function connectorCategoryLabel(id: ConnectorCategoryId): string {
   return CONNECTOR_CATEGORIES.find((category) => category.id === id)?.label ?? id;

@@ -24,7 +24,6 @@ const GATED_FILES = [
   resolve(components, "connectors.ts"),
   resolve(components, "gettingStartedAiChoices.ts"),
   resolve(components, "mentionableMembers.ts"),
-  resolve(components, "onboardingPlaybook.ts"),
   resolve(components, "useChatGettingStartedState.ts"),
   resolve(components, "chat-input/ChatInput.tsx"),
   resolve(components, "__tests__/AiCredentialsStatusBubble.test.tsx"),

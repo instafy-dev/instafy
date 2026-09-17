@@ -4,8 +4,8 @@ import { act, type ComponentProps } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ChatGettingStartedCard } from "../ChatGettingStartedCard";
+import { CARD_TOOL_CONNECTORS } from "../connectors";
 import type { GettingStartedManagedAiOffer } from "../gettingStartedAiChoices";
-import { START_FROM_SCRATCH_PLACEHOLDER } from "../onboardingPlaybook";
 
 vi.mock("../../../../sdk/instafy", () => ({
   controllerClient: {
@@ -32,7 +32,6 @@ function baseProps(overrides: Partial<GettingStartedCardProps> = {}): GettingSta
   return {
     mode: "root" as const,
     onSelectMode: vi.fn(),
-    onSelectAction: vi.fn(),
     onSelectConnector: vi.fn(),
     onBrowseConnectors: vi.fn(),
     installedSkillNames: new Set<string>(),
@@ -118,7 +117,11 @@ describe("ChatGettingStartedCard", () => {
     expect(container.textContent).not.toContain("Bring my own AI");
     expect(container.textContent).not.toContain("Bring your own AI");
     expect(connectButton?.textContent).toContain("API keys for OpenAI");
-    expect(container.textContent).toContain("Start free now, or connect your own AI for the best results.");
+    // The forward reference names what the next step actually offers.
+    expect(container.textContent).toContain(
+      "Start free now, or connect your own AI for the best results. Next: pick a tool, or just type.",
+    );
+    expect(container.textContent).not.toContain("Next: pick what to work on.");
     expect(container.textContent).not.toContain(EM_DASH);
     expect(container.querySelector('[data-testid="onboarding-path-coding"]')).toBeNull();
     // The workspace step is gated behind the AI choice: one decision at a time.
@@ -136,125 +139,98 @@ describe("ChatGettingStartedCard", () => {
     expect(onConnectOwnAi).toHaveBeenCalledTimes(1);
   });
 
-  it("asks what the agent should work on once the AI choice is settled", async () => {
-    const onSelectAction = vi.fn();
+  it("offers one row of live tools once the AI choice is settled", async () => {
+    const onSelectMode = vi.fn();
     const onSelectConnector = vi.fn();
     const onBrowseConnectors = vi.fn();
     await act(async () => {
       root.render(
         <ChatGettingStartedCard
-          {...baseProps({ onSelectAction, onSelectConnector, onBrowseConnectors })}
+          {...baseProps({ onSelectMode, onSelectConnector, onBrowseConnectors })}
         />,
       );
     });
 
     expect(container.querySelector('[data-testid="onboarding-use-managed-ai"]')).toBeNull();
     expect(container.querySelector('[data-testid="onboarding-connect-own-ai"]')).toBeNull();
-    expect(container.textContent).toContain("What should your agent work on?");
-    expect(container.textContent).not.toContain("hosted git repo");
-    expect(container.textContent).not.toContain("desktop app");
+    expect(container.textContent).toContain("Start with a tool you already use");
+    // The two action cards and their vocabulary are gone with them.
+    expect(container.querySelector('[data-testid="onboarding-action-import-github-repo"]')).toBeNull();
+    expect(container.querySelector('[data-testid="onboarding-action-start-from-scratch"]')).toBeNull();
+    expect(container.textContent).not.toContain("Start from scratch");
+    expect(container.textContent).not.toContain("What should your agent work on?");
+    expect(container.textContent).not.toContain("Connect a tool");
     // The card shares the bubble scale: the card tier, not a private width.
     expect(
       container.querySelector('[data-testid="onboarding-getting-started"]')?.className,
     ).toContain("!max-w-[min(100%,38rem)]");
 
-    const importButton = container.querySelector<HTMLButtonElement>(
-      '[data-testid="onboarding-action-import-github-repo"]',
-    );
-    const scratchButton = container.querySelector<HTMLButtonElement>(
-      '[data-testid="onboarding-action-start-from-scratch"]',
-    );
-    expect(importButton?.textContent).toContain("Import a GitHub repo");
-    expect(scratchButton?.textContent).toContain("Start from scratch");
-
-    await act(async () => {
-      scratchButton?.click();
-    });
-    expect(onSelectAction).toHaveBeenCalledTimes(1);
-    expect(onSelectAction.mock.calls[0][0]).toMatchObject({
-      id: "start-from-scratch",
-      kind: "compose",
-    });
-
-    await act(async () => {
-      importButton?.click();
-    });
-    expect(onSelectAction).toHaveBeenCalledTimes(2);
-    expect(onSelectAction.mock.calls[1][0]).toMatchObject({
-      id: "import-github-repo",
-      kind: "github_import",
-    });
-
-    // "Connect a tool" is a quiet block under a hairline after the workspace
-    // grid: a muted caption and the chip strip, no second heading.
-    const connectBlock = container.querySelector<HTMLElement>(
-      '[data-testid="onboarding-connect-strip"]',
-    );
-    expect(connectBlock).not.toBeNull();
-    expect(connectBlock?.textContent).toContain("Connect a tool");
-    expect(container.textContent).not.toContain("Connect your tools");
+    // One heading, one row, one line: no second heading, no caption above the
+    // chips, no hairline inside the step.
     expect(
       Array.from(container.querySelectorAll("h3")).map((heading) => heading.textContent),
-    ).toEqual(["What should your agent work on?"]);
-    const strip = connectBlock?.querySelector('[data-testid="connect-chip-strip"]');
+    ).toEqual(["Start with a tool you already use"]);
+    expect(container.querySelector('[data-testid="onboarding-connect-strip"]')).toBeNull();
+    expect(container.querySelector("#onboarding-connect-label")).toBeNull();
+    const strip = container.querySelector<HTMLElement>('[data-testid="connect-chip-strip"]');
     expect(strip).not.toBeNull();
-    // The visible caption names the list for screen readers.
-    expect(strip?.getAttribute("aria-labelledby")).toBe("onboarding-connect-label");
-    expect(connectBlock?.querySelector("#onboarding-connect-label")?.textContent).toBe(
-      "Connect a tool",
+    // The heading itself names the list for screen readers.
+    expect(strip?.getAttribute("aria-labelledby")).toBe("onboarding-workspace-heading");
+    expect(container.querySelector("#onboarding-workspace-heading")?.textContent).toBe(
+      "Start with a tool you already use",
     );
+
     const chips = Array.from(
-      connectBlock!.querySelectorAll<HTMLButtonElement>('[data-testid^="connect-chip-"]'),
+      strip!.querySelectorAll<HTMLButtonElement>('[data-testid^="connect-chip-"]'),
     ).filter(
       (element) =>
         element instanceof HTMLButtonElement && !element.dataset.testid?.endsWith("-connected"),
     );
-    // Only featured skills whose pack is published get a chip: Notion today.
-    // Slack and Discord are still "soon", so they are simply absent here (the
-    // Connect sheet names them with a Badge); no coming-soon line while at
-    // least one chip can be pressed. Niche tools and GitHub live in the sheet
-    // (GitHub already has its own button above), the paste link in the sheet
-    // footer.
-    expect(chips.map((chip) => chip.dataset.testid)).toEqual(["connect-chip-notion"]);
+    // Every featured tool that can be picked today, GitHub first because it
+    // needs no key pasted. Slack and Discord are still "soon", so they are
+    // simply absent (the Connect sheet names them with a Badge); FreeFinance
+    // is available but unfeatured, and the paste link lives in the sheet.
+    expect(chips.map((chip) => chip.dataset.testid)).toEqual([
+      "connect-chip-github",
+      "connect-chip-notion",
+    ]);
+    expect(chips.map((chip) => chip.dataset.testid)).toEqual(
+      CARD_TOOL_CONNECTORS.map((entry) => `connect-chip-${entry.id}`),
+    );
+    for (const chip of chips) {
+      expect(chip.disabled).toBe(false);
+    }
     expect(container.querySelector('[data-testid="connect-chip-slack"]')).toBeNull();
     expect(container.querySelector('[data-testid="connect-chip-discord"]')).toBeNull();
-    expect(container.querySelector('[data-testid^="connect-chip-"][data-testid$="-soon"]')).toBeNull();
     expect(container.textContent).not.toContain("Soon");
     expect(container.querySelector('[data-testid="connect-coming-soon"]')).toBeNull();
     expect(container.textContent).not.toContain("coming soon");
-    expect(container.querySelector('[data-testid="connect-chip-github"]')).toBeNull();
     expect(container.querySelector('[data-testid="connect-chip-freefinance"]')).toBeNull();
     expect(container.querySelector('[data-testid="connect-chip-other"]')).toBeNull();
     expect(container.textContent).not.toContain("Paste a skill link");
-    const moreTools = connectBlock?.querySelector<HTMLButtonElement>('[data-testid="connect-more-tools"]');
+    const moreTools = strip?.querySelector<HTMLButtonElement>('[data-testid="connect-more-tools"]');
     expect(moreTools?.textContent).toBe("More tools");
     // The chips come first, the link after them.
     expect(
       chips[0]!.compareDocumentPosition(moreTools!) & Node.DOCUMENT_POSITION_FOLLOWING,
     ).toBeTruthy();
-    const workspaceGrid = importButton?.parentElement;
-    expect(workspaceGrid).not.toBeNull();
-    expect(
-      workspaceGrid!.compareDocumentPosition(connectBlock!) & Node.DOCUMENT_POSITION_FOLLOWING,
-    ).toBeTruthy();
 
-    // The closing hint is the card's last line, after the strip.
-    const hint = container.querySelector<HTMLElement>('[data-testid="onboarding-type-hint"]');
-    expect(hint?.textContent).toBe("Or just type below.");
+    // The row sits directly under the heading, and the hint closes the card.
+    const heading = container.querySelector<HTMLElement>("#onboarding-workspace-heading");
     expect(
-      connectBlock!.compareDocumentPosition(hint!) & Node.DOCUMENT_POSITION_FOLLOWING,
+      heading!.compareDocumentPosition(strip!) & Node.DOCUMENT_POSITION_FOLLOWING,
     ).toBeTruthy();
+    const hint = container.querySelector<HTMLElement>('[data-testid="onboarding-type-hint"]');
+    expect(hint?.textContent).toBe("Or just type what you want below.");
+    expect(strip!.compareDocumentPosition(hint!) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
 
     // No em-dash anywhere on the card.
     expect(container.textContent).not.toContain(EM_DASH);
 
-    // The published chip is enabled, name only, the verb in its accessible
-    // name; it reports its connector (the host opens the confirm stage) and
-    // no onboarding action, no browse.
+    // The skill chip reports its connector (the host opens the confirm stage)
+    // and nothing else.
     const notionChip = container.querySelector<HTMLButtonElement>('[data-testid="connect-chip-notion"]');
-    expect(notionChip?.disabled).toBe(false);
     expect(notionChip?.getAttribute("aria-label")).toBe("Connect Notion");
-    expect(notionChip?.querySelector('[data-testid="connect-chip-notion-soon"]')).toBeNull();
     expect(notionChip?.textContent).toBe("Notion");
     await act(async () => {
       notionChip?.click();
@@ -266,9 +242,20 @@ describe("ChatGettingStartedCard", () => {
       availability: "available",
       skillName: "notion",
     });
-    expect(onSelectAction).toHaveBeenCalledTimes(2);
-
+    expect(onSelectMode).not.toHaveBeenCalled();
     expect(onBrowseConnectors).not.toHaveBeenCalled();
+
+    // The GitHub chip opens the card's own import mode. It must never go
+    // through the host's connector routing, which would call beginGithubImport
+    // and set the flag that overrides every later show gate.
+    const githubChip = container.querySelector<HTMLButtonElement>('[data-testid="connect-chip-github"]');
+    expect(githubChip?.getAttribute("aria-label")).toBe("Import from GitHub");
+    await act(async () => {
+      githubChip?.click();
+    });
+    expect(onSelectMode).toHaveBeenCalledTimes(1);
+    expect(onSelectMode).toHaveBeenCalledWith("github");
+    expect(onSelectConnector).toHaveBeenCalledTimes(1);
 
     // "More tools" opens the sheet's browse stage; it reports no connector.
     expect(moreTools?.disabled).toBe(false);
@@ -277,14 +264,14 @@ describe("ChatGettingStartedCard", () => {
     });
     expect(onBrowseConnectors).toHaveBeenCalledTimes(1);
     expect(onSelectConnector).toHaveBeenCalledTimes(1);
-    expect(onSelectAction).toHaveBeenCalledTimes(2);
+    expect(onSelectMode).toHaveBeenCalledTimes(1);
   });
 
   it("shows no chip for a soon skill even when its folder is installed, and marks the published one connected", async () => {
     await act(async () => {
       root.render(
         <ChatGettingStartedCard
-          {...baseProps({ installedSkillNames: new Set(["slack", "notion"]) })}
+          {...baseProps({ installedSkillNames: new Set(["slack", "notion", "github"]) })}
         />,
       );
     });
@@ -293,14 +280,17 @@ describe("ChatGettingStartedCard", () => {
     // skill gets no chip and no check.
     expect(container.querySelector('[data-testid="connect-chip-slack"]')).toBeNull();
     expect(container.querySelector('[data-testid="connect-chip-slack-connected"]')).toBeNull();
-    expect(container.querySelector('[data-testid="connect-chip-slack-soon"]')).toBeNull();
     // A published pack's installed folder shows the check and stays selectable.
     expect(container.querySelector('[data-testid="connect-chip-notion-connected"]')).not.toBeNull();
-    expect(container.querySelector('[data-testid="connect-chip-notion-soon"]')).toBeNull();
     const notionChip = container.querySelector<HTMLButtonElement>('[data-testid="connect-chip-notion"]');
     expect(notionChip?.disabled).toBe(false);
     expect(notionChip?.getAttribute("aria-label")).toBe("Notion, connected");
-    // With a published chip on the card there is no coming-soon line.
+    // GitHub installs nothing, so it never carries the glyph, whatever is in
+    // .agents/skills.
+    expect(container.querySelector('[data-testid="connect-chip-github-connected"]')).toBeNull();
+    expect(
+      container.querySelector('[data-testid="connect-chip-github"]')?.getAttribute("aria-label"),
+    ).toBe("Import from GitHub");
     expect(container.querySelector('[data-testid="connect-coming-soon"]')).toBeNull();
   });
 
@@ -315,28 +305,47 @@ describe("ChatGettingStartedCard", () => {
         .querySelector<HTMLInputElement>('[data-testid="onboarding-github-ref-input"]')
         ?.getAttribute("placeholder"),
     ).toBe("ref (optional): main, a tag, or a commit SHA");
-    expect(container.querySelector('[data-testid="onboarding-connect-strip"]')).toBeNull();
+    expect(container.querySelector('[data-testid="connect-chip-strip"]')).toBeNull();
     expect(container.querySelector('[data-testid="onboarding-type-hint"]')).toBeNull();
   });
 
-  it("hides the chip strip and hint for read-only members while keeping the workspace tiles", async () => {
+  it("leaves a read-only member the repo import, the hint and nothing that sends", async () => {
+    const onSelectMode = vi.fn();
+    const onSelectConnector = vi.fn();
     await act(async () => {
-      root.render(<ChatGettingStartedCard {...baseProps({ showConnectTools: false })} />);
+      root.render(
+        <ChatGettingStartedCard
+          {...baseProps({ showConnectTools: false, onSelectMode, onSelectConnector })}
+        />,
+      );
     });
 
-    expect(container.querySelector('[data-testid="onboarding-connect-strip"]')).toBeNull();
-    expect(container.querySelector('[data-testid^="connect-chip-"]')).toBeNull();
-    expect(container.querySelector('[data-testid="connect-coming-soon"]')).toBeNull();
+    // Read-only removes everything whose press ends in a line being sent into
+    // the conversation: the skill chips and the browse sheet. The repo import
+    // sends nothing, so a viewer keeps it, exactly as they do today.
+    const chips = Array.from(
+      container.querySelectorAll<HTMLButtonElement>('button[data-testid^="connect-chip-"]'),
+    );
+    expect(chips.map((chip) => chip.dataset.testid)).toEqual(["connect-chip-github"]);
+    expect(container.querySelector('[data-testid="connect-chip-notion"]')).toBeNull();
     expect(container.querySelector('[data-testid="connect-more-tools"]')).toBeNull();
-    expect(container.querySelector('[data-testid="onboarding-type-hint"]')).toBeNull();
-    expect(container.textContent).not.toContain("Connect a tool");
-    expect(container.textContent).not.toContain("Or just type below.");
-    expect(
-      container.querySelector('[data-testid="onboarding-action-import-github-repo"]'),
-    ).not.toBeNull();
-    expect(
-      container.querySelector('[data-testid="onboarding-action-start-from-scratch"]'),
-    ).not.toBeNull();
+    expect(container.textContent).not.toContain("More tools");
+    // No note explaining the absence: it would have to be written before
+    // capabilities resolve, when it would be saying something untrue.
+    expect(container.querySelector('[data-testid="onboarding-readonly-note"]')).toBeNull();
+    expect(container.textContent).not.toContain("write access");
+    // The hint is ungated: the member with the least to press is the one who
+    // most needs the sentence telling them to type.
+    expect(container.querySelector('[data-testid="onboarding-type-hint"]')?.textContent).toBe(
+      "Or just type what you want below.",
+    );
+    expect(container.textContent).toContain("Start with a tool you already use");
+
+    await act(async () => {
+      chips[0]?.click();
+    });
+    expect(onSelectMode).toHaveBeenCalledWith("github");
+    expect(onSelectConnector).not.toHaveBeenCalled();
   });
 
   it("keeps workspace actions hidden while the AI state is resolving", async () => {
@@ -636,8 +645,9 @@ describe("ChatGettingStartedCard", () => {
     ).toContain("Connect AI");
   });
 
-  it("collapses to one row of the workspace actions while a draft exists", async () => {
-    const onSelectAction = vi.fn();
+  it("collapses to one row of the same tools while a draft exists", async () => {
+    const onSelectMode = vi.fn();
+    const onSelectConnector = vi.fn();
     const onBrowseConnectors = vi.fn();
     await act(async () => {
       root.render(
@@ -647,7 +657,8 @@ describe("ChatGettingStartedCard", () => {
             selectedAi: "connected",
             connectedAiLabel: "My OpenAI key",
             canChangeAiChoice: true,
-            onSelectAction,
+            onSelectMode,
+            onSelectConnector,
             onBrowseConnectors,
           })}
         />,
@@ -665,26 +676,35 @@ describe("ChatGettingStartedCard", () => {
     const row = container.querySelector<HTMLElement>('[data-testid="onboarding-collapsed-row"]');
     expect(row?.tagName).toBe("UL");
     const buttons = Array.from(row!.querySelectorAll<HTMLButtonElement>("button"));
+    // The same tools as the full row, in the same order, in text form. The
+    // repo import keeps its verb, which is the one place a bare "GitHub"
+    // would lose it; names carry the rest.
     expect(buttons.map((button) => button.textContent)).toEqual([
       "Import a repo",
-      "Start from scratch",
+      "Notion",
       "More tools",
     ]);
-    expect(row?.textContent).toBe("Import a repo·Start from scratch·More tools");
+    expect(row?.textContent).toBe("Import a repo·Notion·More tools");
+    expect(buttons.map((button) => button.dataset.testid)).toEqual([
+      "onboarding-collapsed-import-github-repo",
+      "onboarding-collapsed-notion",
+      "onboarding-collapsed-more-tools",
+    ]);
     for (const button of buttons) {
       expect(button.className).toContain("pointer-coarse:min-h-11");
       expect(button.querySelector("svg")).toBeNull();
     }
+    expect(container.textContent).not.toContain("Start from scratch");
     expect(container.textContent).not.toContain(EM_DASH);
 
     await act(async () => {
       buttons[0]?.click();
     });
-    expect(onSelectAction.mock.calls[0][0]).toMatchObject({ id: "import-github-repo", kind: "github_import" });
+    expect(onSelectMode).toHaveBeenCalledWith("github");
     await act(async () => {
       buttons[1]?.click();
     });
-    expect(onSelectAction.mock.calls[1][0]).toMatchObject({ id: "start-from-scratch", kind: "compose" });
+    expect(onSelectConnector.mock.calls[0][0]).toMatchObject({ id: "notion", kind: "skill" });
     await act(async () => {
       buttons[2]?.click();
     });
@@ -704,13 +724,13 @@ describe("ChatGettingStartedCard", () => {
       );
     });
     expect(container.querySelector('[data-testid="onboarding-collapsed-row"]')).toBeNull();
-    expect(container.querySelector("h3")?.textContent).toBe("What should your agent work on?");
+    expect(container.querySelector("h3")?.textContent).toBe("Start with a tool you already use");
     expect(container.querySelector('[data-testid="onboarding-ai-status"]')?.textContent).toBe(
       "Using My OpenAI key·Change AI",
     );
   });
 
-  it("drops More tools from the collapsed row for read-only members", async () => {
+  it("leaves the read-only collapsed row the repo import alone", async () => {
     await act(async () => {
       root.render(
         <ChatGettingStartedCard {...baseProps({ collapsed: true, showConnectTools: false })} />,
@@ -720,8 +740,8 @@ describe("ChatGettingStartedCard", () => {
     const row = container.querySelector<HTMLElement>('[data-testid="onboarding-collapsed-row"]');
     expect(Array.from(row!.querySelectorAll("button")).map((button) => button.textContent)).toEqual([
       "Import a repo",
-      "Start from scratch",
     ]);
+    expect(row?.textContent).toBe("Import a repo");
   });
 
   it("keeps the GitHub mode full even when collapsed is requested", async () => {
@@ -733,26 +753,28 @@ describe("ChatGettingStartedCard", () => {
     expect(container.querySelector('[data-testid="onboarding-github-repo-input"]')).not.toBeNull();
   });
 
-  it("reports Start from scratch as a compose action carrying the placeholder question, never a template", async () => {
-    const onSelectAction = vi.fn();
+  it("sends nothing and prefills nothing from any control on the card", async () => {
+    const onSelectConnector = vi.fn();
+    const onSelectMode = vi.fn();
+    const onBrowseConnectors = vi.fn();
     await act(async () => {
-      root.render(<ChatGettingStartedCard {...baseProps({ onSelectAction })} />);
+      root.render(
+        <ChatGettingStartedCard {...baseProps({ onSelectConnector, onSelectMode, onBrowseConnectors })} />,
+      );
     });
 
-    await act(async () => {
-      container
-        .querySelector<HTMLButtonElement>('[data-testid="onboarding-action-start-from-scratch"]')
-        ?.click();
-    });
-    const action = onSelectAction.mock.calls[0][0];
-    expect(action).toMatchObject({
-      id: "start-from-scratch",
-      kind: "compose",
-      placeholder: START_FROM_SCRATCH_PLACEHOLDER,
-    });
-    expect(action.prompt).toBeUndefined();
-    expect(START_FROM_SCRATCH_PLACEHOLDER).toBe("What do you want to build? One sentence is enough.");
-    expect(START_FROM_SCRATCH_PLACEHOLDER).not.toContain("describe it here");
+    // The blank path is the composer itself, not a control here: the card
+    // points at it in one line and nothing on the card writes into it.
+    for (const button of Array.from(container.querySelectorAll<HTMLButtonElement>("button"))) {
+      await act(async () => {
+        button.click();
+      });
+    }
+    expect(composer.value).toBe("");
+    expect(document.activeElement).not.toBe(composer);
+    // Every press is a report to the host, and the host opens a surface.
+    expect(onSelectConnector.mock.calls.length + onSelectMode.mock.calls.length +
+      onBrowseConnectors.mock.calls.length).toBeGreaterThan(0);
   });
 
   it("guides an existing connection to choose its default", async () => {

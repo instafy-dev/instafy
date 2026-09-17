@@ -3,7 +3,7 @@
 import { act, useEffect } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { ConnectSheet } from "../ConnectSheet";
+import { ConnectSheet, POPULAR_MIN_AVAILABLE } from "../ConnectSheet";
 import { routeConnectorSelection } from "../connectorRouting";
 import {
   AVAILABLE_FEATURED_CONNECTORS,
@@ -223,15 +223,19 @@ describe("ConnectSheet", () => {
       expect(search?.value).toBe("");
 
       // Popular shows only tools that can be selected today, and only once
-      // there are at least two of them: Notion and GitHub, in list order.
-      expect(AVAILABLE_FEATURED_CONNECTORS.map((entry) => entry.id)).toEqual(["notion", "github"]);
+      // there are at least two of them: GitHub then Notion, in list order,
+      // which is the no-paste-first rule the card row reads too.
+      expect(AVAILABLE_FEATURED_CONNECTORS.map((entry) => entry.id)).toEqual(["github", "notion"]);
+      // The catalogue sits close to the threshold, so assert the row is not
+      // one un-featured entry away from disappearing without a test noticing.
+      expect(AVAILABLE_FEATURED_CONNECTORS.length).toBeGreaterThanOrEqual(POPULAR_MIN_AVAILABLE);
       expect(query('[data-testid="connect-popular"]')).not.toBeNull();
       expect(query("#connect-popular-label")?.textContent).toBe("Popular");
       expect(
         queryAll<HTMLButtonElement>('[data-testid="connect-popular-row"] [data-testid^="connect-popular-"]').map(
           (mark) => mark.dataset.testid,
         ),
-      ).toEqual(["connect-popular-notion", "connect-popular-github"]);
+      ).toEqual(["connect-popular-github", "connect-popular-notion"]);
       expect(query('[data-testid="connect-popular-slack"]')).toBeNull();
       expect(query('[data-testid="connect-popular-discord"]')).toBeNull();
 
@@ -611,8 +615,8 @@ describe("ConnectSheet", () => {
       expect(query("#connect-popular-label")?.textContent).toBe("Popular");
       const marks = queryAll<HTMLButtonElement>('[data-testid="connect-popular-row"] [data-testid^="connect-popular-"]');
       expect(marks.map((mark) => mark.dataset.testid)).toEqual([
-        "connect-popular-notion",
         "connect-popular-github",
+        "connect-popular-notion",
       ]);
       expect(query('[data-testid="connect-popular-slack"]')).toBeNull();
       expect(query('[data-testid="connect-popular-discord"]')).toBeNull();

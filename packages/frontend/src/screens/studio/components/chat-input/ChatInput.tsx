@@ -7,7 +7,7 @@ import { HistoryPlugin } from "@lexical/react/LexicalHistoryPlugin";
 import { OnChangePlugin } from "@lexical/react/LexicalOnChangePlugin";
 import { useLexicalComposerContext } from "@lexical/react/LexicalComposerContext";
 import type { EditorState, LexicalEditor } from "lexical";
-import { $createParagraphNode, $createTextNode, $getRoot, $getSelection, $isRangeSelection, $selectAll } from "lexical";
+import { $createParagraphNode, $createTextNode, $getRoot, $getSelection, $isRangeSelection } from "lexical";
 import { Microphone } from "iconoir-react";
 import { parseAssistantMentions } from "../assistantMentionUI";
 import { AgentMentionNode } from "./AgentMentionNode";
@@ -36,8 +36,6 @@ type ChatInputPlaceholderProps = ContentEditableProps extends infer P
 
 export type ChatInputHandle = {
   focus: () => void;
-  /** Focus with the whole draft selected, so the next keystroke replaces it. */
-  selectAll: () => void;
   focusAfterValueSync: () => void;
   acceptGhostSuggestion: (remainder: string) => void;
   clear: () => void;
@@ -196,21 +194,6 @@ function ChatInputEditor(
         if (rootElement && document.activeElement !== rootElement) {
           rootElement.focus();
         }
-      },
-      selectAll: () => {
-        // DOM focus first, then a discrete update: Lexical only paints a
-        // selection into a root that already holds focus, and the synchronous
-        // commit keeps the select-all inside the user's press.
-        const rootElement = editor.getRootElement();
-        if (rootElement && document.activeElement !== rootElement) {
-          rootElement.focus();
-        }
-        editor.update(
-          () => {
-            $selectAll();
-          },
-          { discrete: true },
-        );
       },
       focusAfterValueSync: () => {
         pendingSelectEndAfterSyncRef.current = true;

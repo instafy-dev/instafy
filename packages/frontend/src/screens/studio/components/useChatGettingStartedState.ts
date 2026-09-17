@@ -1,7 +1,6 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useState } from "react";
 import type { ChatMessage } from "../types";
 import type { AiCredentialsGateState } from "./AiCredentialsStatusBubble";
-import { type OnboardingAction } from "./onboardingPlaybook";
 import { shouldDisplayChatMessage } from "./chatMessagePresentation";
 
 const GETTING_STARTED_DISMISSED_KEY = "instafy.onboarding.gettingStartedDismissed";
@@ -26,18 +25,12 @@ type UseChatGettingStartedStateOptions = {
   credentialsReady: boolean;
   currentUserId: string | null;
   displayedMessageCount: number;
-  /**
-   * Focuses the composer; with selectAll the existing draft is selected so
-   * the next keystroke replaces it. Falls back to a plain DOM focus.
-   */
-  focusComposer?: (options?: { selectAll?: boolean }) => void;
   githubImportBusy: boolean;
   gettingStartedContextRelevant: boolean;
   gettingStartedContextResolved: boolean;
   hasMoreHistory: boolean;
   inputValue: string;
   isHistoryLoading: boolean;
-  onInputChange: (conversationId: string, value: string, editorState: string | null) => void;
   remoteHistoryPresenceResolved: boolean;
   runtimeControllerEnabled: boolean;
 };
@@ -82,14 +75,12 @@ export function useChatGettingStartedState({
   credentialsReady,
   currentUserId,
   displayedMessageCount,
-  focusComposer,
   githubImportBusy,
   gettingStartedContextRelevant,
   gettingStartedContextResolved,
   hasMoreHistory,
   inputValue,
   isHistoryLoading,
-  onInputChange,
   remoteHistoryPresenceResolved,
   runtimeControllerEnabled,
 }: UseChatGettingStartedStateOptions) {
@@ -123,9 +114,6 @@ export function useChatGettingStartedState({
   // the getting-started card open in github mode even after it was dismissed or
   // once the conversation has history, so repo import is never buried or lost.
   const [forceGithubImport, setForceGithubImport] = useState(false);
-  // "Start from scratch" asks its question through the composer placeholder
-  // instead of prefilling text; it lives until the conversation changes.
-  const [composerPlaceholderOverride, setComposerPlaceholderOverride] = useState<string | null>(null);
 
   const gettingStartedDismissed =
     gettingStartedDismissedState.key === gettingStartedKey
@@ -159,11 +147,6 @@ export function useChatGettingStartedState({
     setGettingStartedMode("root");
     clearGithubImportUi();
   }, [activeConversationId, clearGithubImportUi, gettingStartedKey, managedAiSelectedKey, projectHistoryKey]);
-  // Keyed on the conversation alone: a re-render with a fresh callback must
-  // not drop the question mid-draft.
-  useLayoutEffect(() => {
-    setComposerPlaceholderOverride(null);
-  }, [activeConversationId, gettingStartedKey]);
 
   const projectHasObservedHistory = useMemo(() => {
     if (!conversationScopeAligned) {
@@ -293,11 +276,6 @@ export function useChatGettingStartedState({
   ]);
   const shouldShowGettingStarted = gettingStartedPresentation !== null;
   const gettingStartedCollapsed = gettingStartedPresentation === "collapsed";
-  // The question is only meaningful while the card (full or collapsed) is up;
-  // once the message is sent the composer's usual placeholder returns.
-  const gettingStartedComposerPlaceholder = shouldShowGettingStarted
-    ? composerPlaceholderOverride
-    : null;
 
   const handleGettingStartedModeChange = useCallback(
     (mode: "root" | "github") => {
@@ -341,55 +319,16 @@ export function useChatGettingStartedState({
     clearGithubImportUi();
   }, [clearGithubImportUi, managedAiSelectedKey]);
 
-  // Focus synchronously inside the trusted press so native keyboards open;
-  // deferring to an animation frame loses user activation on mobile.
-  const focusComposerNow = useCallback(
-    (options?: { selectAll?: boolean }) => {
-      if (focusComposer) {
-        focusComposer(options);
-        return;
-      }
-      document.getElementById("studio-chat-input")?.focus();
-    },
-    [focusComposer],
-  );
-
-  const handleGettingStartedAction = useCallback(
-    (action: OnboardingAction) => {
-      if (action.kind === "github_import") {
-        setGettingStartedMode("github");
-        clearGithubImportUi();
-        return;
-      }
-      if (action.kind === "compose") {
-        // Nothing is inserted: the composer stays empty (send stays disabled)
-        // and asks the question through its placeholder. From the collapsed
-        // row a draft already exists; it is selected so typing replaces it,
-        // since the placeholder only shows over an empty composer.
-        setComposerPlaceholderOverride(action.placeholder ?? null);
-        setGettingStartedMode("root");
-        focusComposerNow({ selectAll: inputValue.trim().length > 0 });
-        return;
-      }
-      if (!activeConversationId || !action.prompt) {
-        return;
-      }
-      onInputChange(activeConversationId, action.prompt, null);
-      setGettingStartedMode("root");
-      focusComposerNow();
-    },
-    [activeConversationId, clearGithubImportUi, focusComposerNow, inputValue, onInputChange],
-  );
-
+  // Nothing on the card prefills or focuses the composer any more: the card
+  // points at it in one line and the composer's own placeholder does the
+  // asking, so there is no second voice and no placeholder to plumb.
   return {
     beginGithubImport,
     clearGettingStartedManagedAiSelection,
     dismissGettingStarted,
     gettingStartedCollapsed,
-    gettingStartedComposerPlaceholder,
     gettingStartedManagedAiSelected,
     gettingStartedMode,
-    handleGettingStartedAction,
     handleGettingStartedModeChange,
     onboardingInputLocked,
     projectHasConversationHistory,

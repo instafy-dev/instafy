@@ -2,8 +2,7 @@
 
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { ONBOARDING_PATHS } from "../onboardingPlaybook";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { useChatGettingStartedState } from "../useChatGettingStartedState";
 
 type HookOptions = Parameters<typeof useChatGettingStartedState>[0];
@@ -27,7 +26,6 @@ function baseOptions(overrides: Partial<HookOptions> = {}): HookOptions {
     hasMoreHistory: false,
     inputValue: "",
     isHistoryLoading: false,
-    onInputChange: () => undefined,
     remoteHistoryPresenceResolved: true,
     runtimeControllerEnabled: true,
     ...overrides,
@@ -46,7 +44,6 @@ function Harness({ options }: { options: HookOptions }) {
         {String(captured.gettingStartedManagedAiSelected)}
       </span>
       <span data-testid="collapsed">{String(captured.gettingStartedCollapsed)}</span>
-      <span data-testid="placeholder">{captured.gettingStartedComposerPlaceholder ?? ""}</span>
     </div>
   );
 }
@@ -83,9 +80,6 @@ describe("useChatGettingStartedState", () => {
   }
   function collapsed() {
     return container.querySelector('[data-testid="collapsed"]')?.textContent;
-  }
-  function placeholder() {
-    return container.querySelector('[data-testid="placeholder"]')?.textContent;
   }
 
   it("keeps the large discovery card out of a human-only shared conversation", async () => {
@@ -464,37 +458,30 @@ describe("useChatGettingStartedState", () => {
   });
 
   it("collapses the card to its one-line row while a draft exists and restores it when the draft clears", async () => {
-    const onInputChange = vi.fn();
     await act(async () => {
-      root.render(<Harness options={baseOptions({ onInputChange })} />);
+      root.render(<Harness options={baseOptions()} />);
     });
     expect(show()).toBe("true");
     expect(collapsed()).toBe("false");
 
     await act(async () => {
       root.render(
-        <Harness
-          options={baseOptions({
-            inputValue: "Refactor the payments flow",
-            onInputChange,
-          })}
-        />,
+        <Harness options={baseOptions({ inputValue: "Refactor the payments flow" })} />,
       );
     });
     // Still shown, folded: the options stay reachable while typing.
     expect(show()).toBe("true");
     expect(collapsed()).toBe("true");
     expect(captured?.projectHasConversationHistory).toBe(false);
-    expect(onInputChange).not.toHaveBeenCalled();
 
     // Whitespace is not a draft.
     await act(async () => {
-      root.render(<Harness options={baseOptions({ inputValue: "   ", onInputChange })} />);
+      root.render(<Harness options={baseOptions({ inputValue: "   " })} />);
     });
     expect(collapsed()).toBe("false");
 
     await act(async () => {
-      root.render(<Harness options={baseOptions({ onInputChange })} />);
+      root.render(<Harness options={baseOptions()} />);
     });
     expect(show()).toBe("true");
     expect(collapsed()).toBe("false");
@@ -552,118 +539,31 @@ describe("useChatGettingStartedState", () => {
     expect(collapsed()).toBe("true");
   });
 
-  it("turns Start from scratch into a composer question: no template, nothing inserted, composer focused", async () => {
-    const onInputChange = vi.fn();
+  it("never writes into the composer or moves focus: the card has no such control", async () => {
     const composer = document.createElement("textarea");
     composer.id = "studio-chat-input";
     document.body.appendChild(composer);
     try {
       await act(async () => {
-        root.render(<Harness options={baseOptions({ onInputChange })} />);
+        root.render(<Harness options={baseOptions()} />);
       });
-      expect(placeholder()).toBe("");
+      // The compose and prompt kinds are gone with the action layer: the hook
+      // exposes no way to prefill or focus the composer, so the composer's own
+      // placeholder is the only invitation on screen.
+      expect(Object.keys(captured ?? {})).not.toContain("handleGettingStartedAction");
+      expect(Object.keys(captured ?? {})).not.toContain("gettingStartedComposerPlaceholder");
+      expect(composer.value).toBe("");
+      expect(document.activeElement).not.toBe(composer);
 
-      const scratch = ONBOARDING_PATHS.find((path) => path.id === "coding")!.actions.find(
-        (action) => action.id === "start-from-scratch",
-      )!;
-      expect(scratch.kind).toBe("compose");
-      expect(scratch.prompt).toBeUndefined();
+      // Typing folds the card; the composer is untouched by that.
       await act(async () => {
-        captured?.handleGettingStartedAction(scratch);
-      });
-
-      // The composer stays empty (so send stays disabled) and asks instead.
-      expect(onInputChange).not.toHaveBeenCalled();
-      expect(placeholder()).toBe("What do you want to build? One sentence is enough.");
-      expect(placeholder()).not.toContain("describe it here");
-      expect(document.activeElement).toBe(composer);
-      expect(show()).toBe("true");
-      expect(collapsed()).toBe("false");
-      expect(mode()).toBe("root");
-
-      // Typing folds the card; the question stays until the message is sent.
-      await act(async () => {
-        root.render(<Harness options={baseOptions({ inputValue: "A habit tracker", onInputChange })} />);
+        root.render(<Harness options={baseOptions({ inputValue: "A habit tracker" })} />);
       });
       expect(collapsed()).toBe("true");
-      expect(placeholder()).toBe("What do you want to build? One sentence is enough.");
-
-      // Sent: the card is gone and the usual placeholder returns.
-      await act(async () => {
-        root.render(<Harness options={baseOptions({ displayedMessageCount: 1, onInputChange })} />);
-      });
-      expect(show()).toBe("false");
-      expect(placeholder()).toBe("");
+      expect(composer.value).toBe("");
     } finally {
       composer.remove();
     }
-  });
-
-  it("drops the Start from scratch question when the conversation changes", async () => {
-    await act(async () => {
-      root.render(<Harness options={baseOptions()} />);
-    });
-    const scratch = ONBOARDING_PATHS.find((path) => path.id === "coding")!.actions.find(
-      (action) => action.id === "start-from-scratch",
-    )!;
-    await act(async () => {
-      captured?.handleGettingStartedAction(scratch);
-    });
-    expect(placeholder()).not.toBe("");
-
-    await act(async () => {
-      root.render(<Harness options={baseOptions({ activeConversationId: "conv-2" })} />);
-    });
-    expect(placeholder()).toBe("");
-  });
-
-  it("selects an existing draft when Start from scratch is pressed from the collapsed row", async () => {
-    const onInputChange = vi.fn();
-    const focusComposer = vi.fn();
-    const scratch = ONBOARDING_PATHS.find((path) => path.id === "coding")!.actions.find(
-      (action) => action.id === "start-from-scratch",
-    )!;
-
-    await act(async () => {
-      root.render(
-        <Harness options={baseOptions({ inputValue: "A habit tracker", onInputChange, focusComposer })} />,
-      );
-    });
-    expect(collapsed()).toBe("true");
-    await act(async () => {
-      captured?.handleGettingStartedAction(scratch);
-    });
-    // The draft is selected (typing replaces it), never rewritten by the hook.
-    expect(focusComposer).toHaveBeenCalledTimes(1);
-    expect(focusComposer).toHaveBeenCalledWith({ selectAll: true });
-    expect(onInputChange).not.toHaveBeenCalled();
-    expect(placeholder()).toBe("What do you want to build? One sentence is enough.");
-
-    // An empty composer is plainly focused: nothing to select.
-    focusComposer.mockClear();
-    await act(async () => {
-      root.render(<Harness options={baseOptions({ onInputChange, focusComposer })} />);
-    });
-    await act(async () => {
-      captured?.handleGettingStartedAction(scratch);
-    });
-    expect(focusComposer).toHaveBeenCalledWith({ selectAll: false });
-    expect(onInputChange).not.toHaveBeenCalled();
-  });
-
-  it("still prefills the composer for a prompt action", async () => {
-    const onInputChange = vi.fn();
-    await act(async () => {
-      root.render(<Harness options={baseOptions({ onInputChange })} />);
-    });
-    const buildWithCode = ONBOARDING_PATHS.find((path) => path.id === "coding")!.actions.find(
-      (action) => action.id === "build-with-code",
-    )!;
-    await act(async () => {
-      captured?.handleGettingStartedAction(buildWithCode);
-    });
-    expect(onInputChange).toHaveBeenCalledWith("conv-1", buildWithCode.prompt, null);
-    expect(placeholder()).toBe("");
   });
 
   it("treats a visible message as completed project onboarding", async () => {
