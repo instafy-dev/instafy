@@ -18,7 +18,9 @@ on:
 permissions:
   contents: read
 
-concurrency: { group: ios-release, cancel-in-progress: false }
+# A pending run is replaced by a newer pending run in the same group, so dry runs
+# queue separately and can never displace a queued publication.
+concurrency: { group: "ios-release-${{ github.event_name == 'workflow_dispatch' && inputs.dry_run && 'dry-run' || 'publish' }}", cancel-in-progress: false }
 
 defaults:
   run:
@@ -65,6 +67,8 @@ jobs:
           fail() { echo "::error::$1"; exit 1; }
           [ "$GITHUB_REPOSITORY" = "instafy-dev/instafy" ] || fail "Releases run only in instafy-dev/instafy."
           [ "$GITHUB_ACTOR" = "instafy-bot" ] || fail "Only instafy-bot may run an iOS release."
+          # Re-runs keep github.actor; github.triggering_actor names whoever clicked re-run.
+          [ "$GITHUB_TRIGGERING_ACTOR" = "instafy-bot" ] || fail "Only instafy-bot may run or re-run an iOS release."
           case "$GITHUB_EVENT_NAME" in
             push)
               tag="$GITHUB_REF_NAME"
@@ -92,7 +96,9 @@ jobs:
           if [ "$GITHUB_EVENT_NAME" = "push" ] && [ "$source_sha" != "$GITHUB_SHA" ]; then
             fail "Pushed tag does not peel to the workflow commit."
           fi
-          status="$(gh api "repos/$GITHUB_REPOSITORY/compare/${source_sha}...main" --jq .status)"
+          main_sha="$(gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/main" --jq .object.sha)"
+          [[ "$main_sha" =~ ^[0-9a-f]{40}$ ]] || fail "Protected main does not resolve."
+          status="$(gh api "repos/$GITHUB_REPOSITORY/compare/${source_sha}...${main_sha}" --jq .status)"
           case "$status" in
             identical|ahead) ;;
             *) fail "Source commit is not contained in protected main (compare: $status)." ;;
@@ -173,9 +179,10 @@ jobs:
           fetch-depth: 1
           submodules: recursive
 
-      - name: Verify runner and checkout
+      - name: Verify trigger, runner and checkout
         run: |
           set -euo pipefail
+          [ "$GITHUB_TRIGGERING_ACTOR" = "instafy-bot" ] || { echo "::error::Only instafy-bot may run or re-run an iOS release (partial re-runs reuse authorize outputs)."; exit 1; }
           test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
           test "$RUNNER_OS" = macOS
           test "$RUNNER_ARCH" = ARM64
@@ -234,7 +241,10 @@ jobs:
           (umask 077; printf 'VITE_SUPABASE_URL=%s\nVITE_SUPABASE_ANON_KEY=%s\nVITE_CONTROLLER_URL=%s\n' \
             "$VITE_SUPABASE_URL" "$VITE_SUPABASE_ANON_KEY" "$VITE_CONTROLLER_URL" > .env.supabase)
           # Public key variable only (no OTA private key in this lane); fails on empty or non-RSA SPKI.
-          echo "TRUST_KEY_SHA256=$(node scripts/release/ios/verify-trust-anchor.mjs key)" >> "$GITHUB_ENV"
+          # Assign first so a failing verifier stops the step (set -e ignores substitutions inside echo).
+          trust_key_sha256="$(node scripts/release/ios/verify-trust-anchor.mjs key)"
+          [[ "$trust_key_sha256" =~ ^[0-9a-f]{64}$ ]] || { echo "::error::Live Update trust anchor fingerprint is missing."; exit 1; }
+          echo "TRUST_KEY_SHA256=$trust_key_sha256" >> "$GITHUB_ENV"
           node scripts/resolve-live-update-public-key.mjs
 
       - name: Validate iOS config and sync Capacitor
@@ -242,10 +252,12 @@ jobs:
           RESOLVED_KEY_SHA256: ${{ steps.live_key.outputs.public_key_sha256 }}
         run: |
           set -euo pipefail
+          [[ "$TRUST_KEY_SHA256" =~ ^[0-9a-f]{64}$ ]] || { echo "::error::TRUST_KEY_SHA256 is missing."; exit 1; }
           test "$RESOLVED_KEY_SHA256" = "$TRUST_KEY_SHA256"
           pnpm test:ios:config
           pnpm --filter @instafy/frontend cap:sync
-          test "$(node scripts/release/ios/verify-trust-anchor.mjs config packages/frontend/ios/App/App/capacitor.config.json)" = "$TRUST_KEY_SHA256"
+          synced_key_sha256="$(node scripts/release/ios/verify-trust-anchor.mjs config packages/frontend/ios/App/App/capacitor.config.json)"
+          test "$synced_key_sha256" = "$TRUST_KEY_SHA256"
 
       - name: Prepare keychain, App Store profile and the App Release signing binding
         env:
@@ -325,12 +337,13 @@ jobs:
           if-no-files-found: error
           retention-days: ${{ needs.authorize.outputs.mode == 'release' && 30 || 7 }}
           compression-level: 0
+          overwrite: true
 
       - name: Remove signing credentials
         if: always()
         run: |
           set -euo pipefail
-          rm -f .env.supabase
+          rm -f .env.supabase packages/frontend/.env.production.local
           if [ -f scripts/release/ios/signing-credentials.sh ]; then
             bash scripts/release/ios/signing-credentials.sh cleanup
           fi
@@ -380,9 +393,10 @@ jobs:
           name: ios-ipa-${{ needs.authorize.outputs.tag }}
           path: ${{ runner.temp }}/ios-release
 
-      - name: Verify checkout, runner and IPA bytes
+      - name: Verify trigger, checkout, runner and IPA bytes
         run: |
           set -euo pipefail
+          [ "$GITHUB_TRIGGERING_ACTOR" = "instafy-bot" ] || { echo "::error::Only instafy-bot may run or re-run an iOS release (partial re-runs reuse authorize outputs)."; exit 1; }
           test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
           test "$RUNNER_ARCH" = ARM64
           dir="$RUNNER_TEMP/ios-release"
@@ -418,6 +432,8 @@ jobs:
           xcrun altool --output-format xml --upload-app --file "$IOS_RELEASE_DIR/$IPA" --type ios --apiKey "$APP_STORE_CONNECT_KEY_ID" --p8-file-path "$ASC_KEY_PATH" --apiIssuer "$APP_STORE_CONNECT_ISSUER_ID" 2>&1 | tee "$RUNNER_TEMP/altool.log"
           upload_status="${PIPESTATUS[0]}"
           set -e
+          # altool can exit 0 on some delivery failures; its XML then carries product-errors.
+          if [ "$upload_status" -eq 0 ] && grep -q 'product-errors' "$RUNNER_TEMP/altool.log"; then upload_status=1; fi
           if [ "$upload_status" -ne 0 ]; then
             echo "::error::The single upload attempt failed. If App Store Connect accepted it anyway, dispatch with reconcile_only=true; never re-run this job."
             exit 1
@@ -446,6 +462,9 @@ jobs:
 
       - name: Remove the App Store Connect key
         if: always()
+        # Warn-only: the Release already exists, and a failed cleanup on the ephemeral runner
+        # must not turn a published run into a failure the handoff would reject.
+        continue-on-error: true
         run: |
           set -euo pipefail
           if [ -f scripts/release/ios/signing-credentials.sh ]; then
@@ -503,6 +522,7 @@ jobs:
           IOS_ASC_POLL_INTERVAL_SECONDS: '30'
         run: |
           set -euo pipefail
+          [ "$GITHUB_TRIGGERING_ACTOR" = "instafy-bot" ] || { echo "::error::Only instafy-bot may run or re-run an iOS release (partial re-runs reuse authorize outputs)."; exit 1; }
           test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
           IOS_RELEASE_DIR="$RUNNER_TEMP/ios-release"
           mkdir -p "$IOS_RELEASE_DIR"
@@ -511,6 +531,7 @@ jobs:
           bash scripts/release/ios/github-release-state.sh "$RELEASE_TAG" "$SOURCE_SHA" "$RELEASE_STATE_DIR"
           node scripts/release/ios/verify-release-tag.mjs recheck
           TRUST_KEY_SHA256="$(node scripts/release/ios/verify-trust-anchor.mjs key)"
+          [[ "$TRUST_KEY_SHA256" =~ ^[0-9a-f]{64}$ ]] || { echo "::error::Live Update trust anchor fingerprint is missing."; exit 1; }
           node scripts/release/ios/asc.mjs reconcile-existing "$APP_BUNDLE_ID" "$MARKETING" "$BUILD" > "$IOS_RELEASE_DIR/post.json"
           node scripts/release/ios/write-receipt.mjs --tag "$TAG" --source-sha "$SOURCE_SHA" --marketing "$MARKETING" --build "$BUILD" \
             --post "$IOS_RELEASE_DIR/post.json" --digest-source app-store-connect --trust-key-sha256 "$TRUST_KEY_SHA256" \

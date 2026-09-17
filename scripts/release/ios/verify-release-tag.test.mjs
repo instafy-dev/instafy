@@ -14,6 +14,7 @@ const push = {
   repository: "instafy-dev/instafy",
   eventName: "push",
   actor: "instafy-bot",
+  triggeringActor: "instafy-bot",
   pusher: "instafy-bot",
   ref: `refs/tags/${TAG}`,
   sha: SHA,
@@ -61,6 +62,8 @@ test("authorizes a bot-pushed tag on main whose version matches the source", () 
 test("rejects foreign actors, repositories, refs, diverged commits and version drift", () => {
   const cases = [
     [{ actor: "someone" }, /actor must be instafy-bot/u],
+    [{ triggeringActor: "someone" }, /triggering actor \(including re-runs\) must be instafy-bot/u],
+    [{ triggeringActor: undefined }, /triggering actor/u],
     [{ pusher: "someone" }, /pusher must be instafy-bot/u],
     [{ repository: "fork/instafy" }, /releases run only/u],
     [{ ref: "refs/heads/main" }, /push ref must be the release tag/u],
@@ -97,9 +100,10 @@ test("dispatch semantics: dry runs may precede the tag, releases need a new exis
 });
 
 test("recheck requires the same commit, containment and an absent Release", () => {
-  const base = { tag: TAG, sourceSha: SHA, tagSha: SHA, compareStatus: "ahead", releaseState: "absent" };
+  const base = { tag: TAG, triggeringActor: "instafy-bot", sourceSha: SHA, tagSha: SHA, compareStatus: "ahead", releaseState: "absent" };
   assert.equal(recheckRelease(base).recheck, "ok");
   assert.throws(() => recheckRelease({ ...base, tagSha: MAIN }), /no longer resolves/u);
+  assert.throws(() => recheckRelease({ ...base, triggeringActor: "writer" }), /triggering actor/u);
   assert.throws(() => recheckRelease({ ...base, compareStatus: "diverged" }), /no longer contained/u);
   assert.throws(() => recheckRelease({ ...base, releaseState: "present" }), /already exists/u);
 });
@@ -124,6 +128,7 @@ test("CLI writes GITHUB_OUTPUT from recorded GitHub state and the checked-out pb
       GITHUB_REPOSITORY: "instafy-dev/instafy",
       GITHUB_EVENT_NAME: "push",
       GITHUB_ACTOR: "instafy-bot",
+      GITHUB_TRIGGERING_ACTOR: "instafy-bot",
       EVENT_PUSHER: "instafy-bot",
       GITHUB_REF: `refs/tags/${TAG}`,
       GITHUB_SHA: SHA,
@@ -138,6 +143,9 @@ test("CLI writes GITHUB_OUTPUT from recorded GitHub state and the checked-out pb
     const bad = spawnSync(process.execPath, [script, "authorize"], { env: { ...env, GITHUB_ACTOR: "someone" }, encoding: "utf8" });
     assert.equal(bad.status, 1);
     assert.match(bad.stderr, /^::error::\[ios-release-tag\] actor must be instafy-bot/u);
+    const rerun = spawnSync(process.execPath, [script, "authorize"], { env: { ...env, GITHUB_TRIGGERING_ACTOR: "writer" }, encoding: "utf8" });
+    assert.equal(rerun.status, 1);
+    assert.match(rerun.stderr, /^::error::\[ios-release-tag\] triggering actor \(including re-runs\) must be instafy-bot/u);
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }
