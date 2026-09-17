@@ -86,8 +86,38 @@ function releaseArtifactScannerConfig(baseConfig) {
   if (typeof baseConfig !== "string" || baseConfig.trim().length === 0) {
     throw new Error("The base Gitleaks config must not be empty");
   }
-  const separator = baseConfig.endsWith("\n") ? "\n" : "\n\n";
-  return `${baseConfig}${separator}${RELEASE_ARTIFACT_ALLOWLIST.trimStart()}`;
+  const releaseConfig = strictTokenRule(baseConfig);
+  const separator = releaseConfig.endsWith("\n") ? "\n" : "\n\n";
+  return `${releaseConfig}${separator}${RELEASE_ARTIFACT_ALLOWLIST.trimStart()}`;
+}
+
+// The repository gate matches the bare GitHub token prefix. That is right for
+// source text but hits by chance in large binaries: the first hosted iOS dry
+// run matched it inside an Xcode .symbols file in the IPA. Release artifacts
+// therefore scan with the full token body, the same rule the Desktop and
+// Android lanes use. Every real token shape still matches, including
+// ghu_/ghs_/ghr_, which the bare prefix missed.
+const TOKEN_RULE_ID = "instafy-github-token-prefix";
+const RELEASE_TOKEN_REGEX = String.raw`(?:gh[pousr]_[A-Za-z0-9]{36,}|github_[p]at_[A-Za-z0-9_]{60,})`;
+const RULE_BLOCK_SPLIT = /(?=^\[\[)/mu;
+const TOKEN_RULE_ID_LINE = new RegExp(`^id = "${TOKEN_RULE_ID}"$`, "mu");
+const SINGLE_LINE_REGEX = /^regex = '''.*'''$/gmu;
+
+function strictTokenRule(baseConfig) {
+  const blocks = baseConfig.split(RULE_BLOCK_SPLIT);
+  const indexes = blocks
+    .map((block, index) => (block.startsWith("[[rules]]") && TOKEN_RULE_ID_LINE.test(block) ? index : -1))
+    .filter((index) => index >= 0);
+  if (indexes.length !== 1) {
+    throw new Error(`The base Gitleaks config must define exactly one ${TOKEN_RULE_ID} rule`);
+  }
+  const block = blocks[indexes[0]];
+  const regexLines = block.match(SINGLE_LINE_REGEX) ?? [];
+  if (regexLines.length !== 1) {
+    throw new Error(`The ${TOKEN_RULE_ID} rule must have exactly one single-line regex`);
+  }
+  blocks[indexes[0]] = block.replace(regexLines[0], () => `regex = '''${RELEASE_TOKEN_REGEX}'''`);
+  return blocks.join("");
 }
 
 function runReleaseArtifactGate({
@@ -247,6 +277,7 @@ if (
 
 export {
   parseArguments,
+  RELEASE_TOKEN_REGEX,
   releaseArtifactScannerConfig,
   runReleaseArtifactGate,
   scannerEnvironment,
