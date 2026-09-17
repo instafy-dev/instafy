@@ -140,8 +140,7 @@ export const CONNECTORS: readonly Connector[] = [
   },
   {
     id: "freefinance",
-    // Flip to "available" when the instafy-dev/bookkeeping-pack repo is published.
-    availability: "soon",
+    availability: "available",
     name: "FreeFinance",
     mark: FreeFinanceMark,
     kind: "skill",
@@ -149,10 +148,13 @@ export const CONNECTORS: readonly Connector[] = [
     featured: false,
     region: "Austria",
     keywords: ["bookkeeping", "accounting", "buchhaltung", "invoices", "uva"],
-    source: "https://github.com/instafy-dev/bookkeeping-pack/tree/main/.agents/skills/freefinance",
-    sourceLabel: "instafy-dev/bookkeeping-pack",
+    source: "https://github.com/instafy-dev/skills/tree/main/packs/bookkeeping/.agents/skills/freefinance",
+    sourceLabel: "instafy-dev/skills",
     skillName: "freefinance",
-    needs: ["a FreeFinance technical user (FREEFINANCE_TECHNICAL_USER)"],
+    needs: [
+      "a FreeFinance technical user id (FREEFINANCE_API_CLIENT_ID)",
+      "its secret (FREEFINANCE_API_CLIENT_SECRET)",
+    ],
   },
   {
     id: "github",

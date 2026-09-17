@@ -60,7 +60,7 @@ describe("routeConnectorSelection", () => {
 
   it("does nothing for a soon connector, so the confirm stage stays unreachable", () => {
     const soon = CONNECTORS.filter((item) => !isConnectorAvailable(item));
-    expect(soon.map((item) => item.id)).toEqual(["slack", "notion", "discord", "freefinance"]);
+    expect(soon.map((item) => item.id)).toEqual(["slack", "notion", "discord"]);
     for (const entry of soon) {
       const acts = actions();
       routeConnectorSelection(entry, acts);
