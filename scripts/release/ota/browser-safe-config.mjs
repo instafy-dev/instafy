@@ -8,6 +8,10 @@ import process from "node:process";
 import { pathToFileURL } from "node:url";
 
 export const CONTROLLER_ORIGIN = "https://controller.instafy.dev";
+// Pinned to the downloads Worker contract (verify-wrangler-contract.mjs) and to what
+// the private train accepts as artifact_url; a variable must not redirect signed bytes.
+export const DOWNLOADS_ORIGIN = "https://downloads.instafy.dev";
+export const PINNED_PREFIXES = { MOBILE_OTA_DOWNLOADS_PREFIX: "mobile", DESKTOP_DOWNLOADS_PREFIX: "desktop-app" };
 const SEGMENT = /^[A-Za-z0-9][A-Za-z0-9._-]*$/u;
 
 function fail(message) {
@@ -76,7 +80,10 @@ export function assertBrowserSafeConfig(env, options = {}) {
     fail(`VITE_CONTROLLER_URL must be the production control plane ${CONTROLLER_ORIGIN}`);
   }
   httpsUrl(env, "VITE_SUPABASE_URL");
-  httpsUrl(env, "DOWNLOADS_BASE_URL");
+  const downloads = httpsUrl(env, "DOWNLOADS_BASE_URL");
+  if (downloads.origin !== DOWNLOADS_ORIGIN || !["", "/"].includes(downloads.pathname) || downloads.search || downloads.hash) {
+    fail(`DOWNLOADS_BASE_URL must be exactly ${DOWNLOADS_ORIGIN}`);
+  }
 
   for (const name of Object.keys(env)) {
     if (/^VITE_.*SERVICE_ROLE/iu.test(name)) {
@@ -96,6 +103,11 @@ export function assertBrowserSafeConfig(env, options = {}) {
   }
   if (mobile === desktop || mobile.startsWith(`${desktop}/`) || desktop.startsWith(`${mobile}/`)) {
     fail("Desktop and mobile downloads prefixes overlap");
+  }
+  for (const [name, pinned] of Object.entries(PINNED_PREFIXES)) {
+    if (String(env[name]).trim() !== pinned) {
+      fail(`${name} must be ${pinned}`);
+    }
   }
 
   const channel = String(env.VITE_OTA_CHANNEL ?? "");

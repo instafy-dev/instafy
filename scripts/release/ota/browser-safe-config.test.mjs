@@ -35,6 +35,11 @@ test("service-role variables, unsafe or overlapping prefixes and other channels 
   assert.throws(() => assertBrowserSafeConfig(env({ [serviceRoleName]: "x" })), /forbidden in a browser build/u);
   assert.throws(() => assertBrowserSafeConfig(env({ MOBILE_OTA_DOWNLOADS_PREFIX: "../mobile" })), /safe downloads prefix/u);
   assert.throws(() => assertBrowserSafeConfig(env({ MOBILE_OTA_DOWNLOADS_PREFIX: "desktop-app/mobile" })), /overlap/u);
+  assert.throws(() => assertBrowserSafeConfig(env({ MOBILE_OTA_DOWNLOADS_PREFIX: "ota" })), /must be mobile/u);
+  assert.throws(() => assertBrowserSafeConfig(env({ DESKTOP_DOWNLOADS_PREFIX: "desktop" })), /must be desktop-app/u);
+  assert.throws(() => assertBrowserSafeConfig(env({ DOWNLOADS_BASE_URL: "https://downloads.example.com" })), /exactly https:\/\/downloads\.instafy\.dev/u);
+  assert.throws(() => assertBrowserSafeConfig(env({ DOWNLOADS_BASE_URL: "https://downloads.instafy.dev/mirror" })), /exactly/u);
+  assert.doesNotThrow(() => assertBrowserSafeConfig(env({ DOWNLOADS_BASE_URL: "https://downloads.instafy.dev/" })));
   assert.throws(() => assertBrowserSafeConfig(env({ VITE_OTA_CHANNEL: "stable" })), /internal OTA channel/u);
 });
 

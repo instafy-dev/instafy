@@ -11,6 +11,7 @@ const push = (overrides = {}) => ({
   eventName: "push",
   repository: "instafy-dev/instafy",
   actor: "instafy-bot",
+  triggeringActor: "instafy-bot",
   pusher: "instafy-bot",
   ref: `refs/tags/${TAG}`,
   refName: TAG,
@@ -25,6 +26,7 @@ const dispatch = (overrides = {}) => ({
   eventName: "workflow_dispatch",
   repository: "instafy-dev/instafy",
   actor: "instafy-bot",
+  triggeringActor: "instafy-bot",
   ref: "refs/heads/main",
   githubSha: SHA,
   inputTag: TAG,
@@ -43,6 +45,8 @@ test("a bot-pushed tag on protected main is a release of its exact commit", () =
 test("push is refused for another repository, actor, pusher or ref", () => {
   assert.throws(() => verifyReleaseTag(push({ repository: "someone/instafy" })), /publish only from/u);
   assert.throws(() => verifyReleaseTag(push({ actor: "octocat" })), /started by instafy-bot/u);
+  assert.throws(() => verifyReleaseTag(push({ triggeringActor: "octocat" })), /started by instafy-bot/u);
+  assert.throws(() => verifyReleaseTag(dispatch({ triggeringActor: undefined })), /started by instafy-bot/u);
   assert.throws(() => verifyReleaseTag(push({ pusher: "octocat" })), /pushed by instafy-bot/u);
   assert.throws(() => verifyReleaseTag(push({ ref: "refs/heads/main" })), /tag ref itself/u);
 });

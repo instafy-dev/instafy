@@ -55,11 +55,20 @@ function listFiles(relativeDir) {
   );
 }
 
+// Dry runs never cancel a pending release; each release tag queues only behind itself.
+const OTA_CONCURRENCY_GROUP = "mobile-ota-release-${{ inputs.dry_run == true && 'dry-run' || inputs.tag || github.ref_name }}";
+
 function commonWorkflowRules(source, name) {
   assert.match(source, /^permissions:\n  contents: read\n/mu, `${name}: top-level permissions`);
   assert.match(source, /^defaults:\n  run:\n    shell: bash\n/mu, `${name}: bash default`);
   assert.doesNotMatch(source, /^\s*(pull_request|pull_request_target|workflow_run|schedule|workflow_call|repository_dispatch|release):/mu);
-  assert.doesNotMatch(source, /self-hosted|runner\.environment|^\s+group: .*\$\{\{/mu);
+  assert.doesNotMatch(source, /self-hosted|runner\.environment/mu);
+  for (const match of source.matchAll(/^\s+group: (.*)$/gmu)) {
+    assert.ok(!match[1].includes("${{") || match[1] === OTA_CONCURRENCY_GROUP, `${name}: dynamic group ${match[1]}`);
+  }
+  // Signed bytes and the private train's artifact_url are pinned; no variable may redirect them.
+  assert.doesNotMatch(source, /vars\.(DOWNLOADS_BASE_URL|DOWNLOADS_BUCKET|MOBILE_OTA_DOWNLOADS_PREFIX|DESKTOP_DOWNLOADS_PREFIX)/u);
+  assert.doesNotMatch(source, /command -v \S+ >\/dev\/null &&/u, `${name}: && lists do not fail under set -e`);
   for (const match of source.matchAll(/^\s+runs-on:\s*(.*)$/gmu)) {
     assert.equal(match[1], "ubuntu-24.04", `${name}: runs-on must be a hosted literal`);
   }
@@ -101,7 +110,8 @@ test("OTA release triggers only on bot tags or main dispatch with tag + dry_run"
 
 `,
   );
-  assert.match(source, /^concurrency:\n  group: mobile-ota-release\n  cancel-in-progress: false\n/mu);
+  assert.ok(source.includes(`\nconcurrency:\n  group: ${OTA_CONCURRENCY_GROUP}\n  cancel-in-progress: false\n`));
+  assert.match(source, /^  DOWNLOADS_BASE_URL: https:\/\/downloads\.instafy\.dev\n  MOBILE_OTA_DOWNLOADS_PREFIX: mobile$/mu);
   assert.match(source, /^  OTA_CHANNEL: internal$/mu);
   assert.ok(source.split("\n").length <= 451, "workflow should stay within the 450-line target");
 });
@@ -141,7 +151,7 @@ test("OTA jobs isolate secrets in the ota-release environment", () => {
 test("authorize binds actor, pusher, main containment, version and one-shot probes in order", () => {
   const authorize = jobs(read(OTA)).get("authorize");
   assertOrdered(authorize, [
-    '"$GITHUB_REPOSITORY" != "instafy-dev/instafy" || "$ACTOR" != "instafy-bot"',
+    '"$GITHUB_REPOSITORY" != "instafy-dev/instafy" || "$ACTOR" != "instafy-bot" || "$TRIGGERING_ACTOR" != "instafy-bot"',
     '"$EVENT_NAME" == "push" && "$PUSHER" != "instafy-bot"',
     "^ota-v[0-9a-f]{12}$",
     'gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/${tag}"',
@@ -157,6 +167,7 @@ test("authorize binds actor, pusher, main containment, version and one-shot prob
   ]);
   assert.match(authorize, /INPUT_DRY_RUN: \$\{\{ inputs\.dry_run \}\}/u);
   assert.match(authorize, /PUSHER: \$\{\{ github\.event\.pusher\.name \}\}/u);
+  assert.equal(authorize.match(/TRIGGERING_ACTOR: \$\{\{ github\.triggering_actor \}\}/gu)?.length, 2);
 });
 
 test("web, sign and publish keep the exact-source, signing and publication order", () => {
@@ -178,7 +189,7 @@ test("web, sign and publish keep the exact-source, signing and publication order
     'node scripts/build-ota-bundle.mjs --dist packages/frontend/dist --out "$RUNNER_TEMP/ota"',
     '--git-sha "$SOURCE_SHA" --bundle-version "$TAG"',
     "verify-public-bytes.mjs anchor",
-    '"$ARCHIVE_FILE_NAME" != "${TAG}.zip"',
+    '"$ARCHIVE_FILE_NAME" == "${TAG}.zip"',
     "verify-public-bytes.mjs local",
     "validate-ota-web-archive.py",
     "551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb",
@@ -242,7 +253,7 @@ test("downloads worker deploy is a bot dispatch of exact main with a dry run", (
   assert.doesNotMatch(source, /contents: write|r2 object|put-immutable/u);
   assertOrdered(deploy, [
     '"$GITHUB_REPOSITORY" != "instafy-dev/instafy" || "$GITHUB_REF" != "refs/heads/main"',
-    '"$ACTOR" != "instafy-bot"',
+    '"$ACTOR" != "instafy-bot" || "$TRIGGERING_ACTOR" != "instafy-bot"',
     '! "$REQUESTED_COMMIT" =~ ^[0-9a-f]{40}$ || "$REQUESTED_COMMIT" != "$GITHUB_SHA"',
     "ref: ${{ github.sha }}",
     "node --experimental-strip-types --test packages/downloads-worker/test/index.test.mjs",

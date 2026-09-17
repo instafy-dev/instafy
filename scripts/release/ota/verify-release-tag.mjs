@@ -46,7 +46,8 @@ export function verifyReleaseTag(input) {
   if (input.repository !== REPOSITORY) {
     fail(`OTA releases publish only from ${REPOSITORY}`);
   }
-  if (input.actor !== RELEASE_ACTOR) {
+  // github.actor survives a re-run; triggering_actor is who started this attempt.
+  if (input.actor !== RELEASE_ACTOR || input.triggeringActor !== RELEASE_ACTOR) {
     fail(`OTA releases may only be started by ${RELEASE_ACTOR}`);
   }
   const githubSha = requireSha(input.githubSha, "github.sha");
@@ -121,6 +122,7 @@ function main() {
     eventName: env.EVENT_NAME,
     repository: env.REPOSITORY,
     actor: env.ACTOR,
+    triggeringActor: env.TRIGGERING_ACTOR,
     pusher: env.PUSHER,
     ref: env.REF,
     githubSha: env.RUN_SHA,
