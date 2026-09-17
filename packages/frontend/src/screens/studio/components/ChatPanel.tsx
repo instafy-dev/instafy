@@ -93,7 +93,6 @@ import {
   listBuiltInAssistantMentionTokens,
 } from "../../../assistants/localBuiltInAssistantCatalog";
 import {
-  type ControllerProjectMember,
   controllerClient,
 } from "../../../sdk/instafy";
 import { useAuth } from "../../../providers/AuthProvider";
@@ -237,6 +236,7 @@ import { useChatSubmitDispatch } from "./useChatSubmitDispatch";
 import { useChatSubmitFlow, type SubmitMessageFn } from "./useChatSubmitFlow";
 import { useChatVoiceComposerController } from "./useChatVoiceComposerController";
 import { useChatGettingStartedState } from "./useChatGettingStartedState";
+import { mergeMentionableMembers } from "./mentionableMembers";
 import {
   resolveConversationHumanPeerContext,
   resolveGettingStartedConversationContext,
@@ -420,7 +420,7 @@ function formatCredentialConnectionFailure(raw: string | null | undefined): stri
 }
 
 const NARROW_SPEAKER_INLINE_SELECTOR = '[data-chat-speaker-inline="true"]';
-// The scroll container's own top padding (`pt-2`) — where its content
+// The scroll container's own top padding (`pt-2`), where its content
 // actually starts painting. The pill now lives in the roster row above the
 // transcript rather than overlapping it, so this edge (not the pill's own
 // position) is the only stable line left to compare marker positions against.
@@ -644,7 +644,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
   });
   // Which conversation subtab is visible: chat messages or the docked browser.
   // Kept as its own state (not derived from browserSessionOpen) so switching
-  // back to Chat does NOT close/unmount the browser — it keeps the live remote
+  // back to Chat does NOT close/unmount the browser; it keeps the live remote
   // connection mounted, avoiding a reconnect on every switch.
   const [browserSubtab, setBrowserSubtab] = useState<ChatBrowserSubtab>("chat");
   const [sharedBrowserApprovalPending, setSharedBrowserApprovalPending] = useState(false);
@@ -1018,25 +1018,10 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
       : projectCapabilitiesResolved === false
         ? false
         : canShareProject;
-  const mentionableUsers = useMemo(() => {
-    const merged = [...(orgMembers ?? []), ...(projectMembers ?? [])];
-    const result: ControllerProjectMember[] = [];
-    const seen = new Set<string>();
-    for (const member of merged) {
-      const userId = typeof member.userId === "string" ? member.userId.trim() : "";
-      if (!userId || userId === currentUserId || seen.has(userId)) {
-        continue;
-      }
-      seen.add(userId);
-      result.push(member);
-    }
-    result.sort((a, b) => {
-      const labelA = `${a.fullName ?? ""} ${a.email ?? ""}`.trim().toLowerCase();
-      const labelB = `${b.fullName ?? ""} ${b.email ?? ""}`.trim().toLowerCase();
-      return labelA.localeCompare(labelB);
-    });
-    return result;
-  }, [currentUserId, orgMembers, projectMembers]);
+  const mentionableUsers = useMemo(
+    () => mergeMentionableMembers({ orgMembers, projectMembers, currentUserId }),
+    [currentUserId, orgMembers, projectMembers],
+  );
 
   const chatInputRef = useRef<ChatInputHandle | null>(null);
 
@@ -1707,7 +1692,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     chatInputRef.current?.clear();
   }, []);
   // Surfaces outside the chat tree (the agent profile card, panels) hand
-  // keyboard focus to the composer after navigating here — without this the
+  // keyboard focus to the composer after navigating here; without this the
   // popover's focus restore lands on <body> once its trigger unmounts.
   useEffect(() => {
     const handler = () => focusInput({ force: true });
@@ -2143,7 +2128,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
   // window event; this panel owns the composer, so it turns the request into a
   // normal user message (with the target-message reference in metadata) and
   // sends it. The handler serializes rapid requests, and the standard submit
-  // preflight queues the message when the assistant is busy — the intent is
+  // preflight queues the message when the assistant is busy; the intent is
   // never dropped and never double-sent.
   useEffect(() => {
     const handler = createMessageUndoRequestHandler(async ({ message, metadata }) =>
@@ -2225,7 +2210,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     [invokeSubmitMessage, messages, showStatus],
   );
   // Automatic transient-failure re-dispatch mirrors handleRunFailureRetry but
-  // deliberately does NOT touch pendingRunFailureRetryKey — that state is the
+  // deliberately does NOT touch pendingRunFailureRetryKey; that state is the
   // manual "Try again" in-flight signal, and the auto path presents its own calm
   // "trying again automatically" state via autoRetryingKey instead.
   const handleRunFailureAutoRetry = useCallback(
@@ -2235,7 +2220,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     [invokeSubmitMessage],
   );
   // Busy while the assistant is producing output or a manual retry resend is in
-  // flight — do not stack an automatic retry on top of an active run.
+  // flight; do not stack an automatic retry on top of an active run.
   const runFailureAutoRetryBusy = isAssistantTyping || pendingRunFailureRetryKey !== null;
   const { autoRetryingKey: runFailureAutoRetryingKey } = useRunFailureAutoRetry({
     messages,
@@ -3190,7 +3175,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     useState<StickyChatSpeaker | null>(null);
   // Rendered in the roster row above the transcript (never inside the
   // scroller), so the ref stays valid for as long as the chat panel is
-  // mounted — the sticky-speaker effect below no longer reads its rect (see
+  // mounted; the sticky-speaker effect below no longer reads its rect (see
   // CHAT_TRANSCRIPT_VISIBLE_TOP_INSET_PX), but ChatSpeakerStickyOverlay still
   // takes a ref, so this stays the one it's given.
   const stickySpeakerOverlayRef = useRef<HTMLDivElement>(null);
@@ -3205,7 +3190,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     let animationFrameId: number | null = null;
     const readAndApplySpeaker = () => {
       // The pill lives in the roster row now, physically separate from the
-      // transcript, so its own rect can no longer mark the handoff line — a
+      // transcript, so its own rect can no longer mark the handoff line, a
       // marker's inline label only needs to hide once it has actually
       // scrolled past the transcript's own visible top edge.
       const containerRect = scrollContainer.getBoundingClientRect();
@@ -3486,7 +3471,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
       return;
     }
     const contextSummary = selectedMessageTokenUsage.context
-      ? `\nContext — ${formatPromptContextModeLabel(selectedMessageTokenUsage.context)}${
+      ? `\nContext: ${formatPromptContextModeLabel(selectedMessageTokenUsage.context)}${
           selectedMessageTokenUsage.context.estimatedPromptTokens !== null
             ? `, prompt est: ${Math.round(selectedMessageTokenUsage.context.estimatedPromptTokens)}`
             : ""
@@ -3496,7 +3481,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
             : ""
         }`
       : "";
-    const summary = `Message stats — input: ${selectedMessageTokenUsage.inputTokens}, cached: ${selectedMessageTokenUsage.cachedInputTokens}, output: ${selectedMessageTokenUsage.outputTokens}${contextSummary}`;
+    const summary = `Message stats. Input: ${selectedMessageTokenUsage.inputTokens}, cached: ${selectedMessageTokenUsage.cachedInputTokens}, output: ${selectedMessageTokenUsage.outputTokens}${contextSummary}`;
     try {
       await writeClipboardText(summary);
       showStatus("Copied message stats.", "success", 2000, { presentation: "confirmation" });
@@ -3738,10 +3723,22 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     onRecordMessage,
     showStatus,
   });
+  // Getting-started actions focus the composer synchronously inside the press
+  // (native keyboards need the user activation). With a draft present the
+  // draft is selected, so the next keystroke replaces it instead of appending.
+  const focusComposerForGettingStarted = useCallback((options?: { selectAll?: boolean }) => {
+    if (options?.selectAll) {
+      chatInputRef.current?.selectAll();
+      return;
+    }
+    chatInputRef.current?.focus();
+  }, []);
   const {
     beginGithubImport,
     clearGettingStartedManagedAiSelection,
     dismissGettingStarted,
+    gettingStartedCollapsed,
+    gettingStartedComposerPlaceholder,
     gettingStartedManagedAiSelected,
     gettingStartedMode,
     handleGettingStartedAction,
@@ -3761,6 +3758,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     credentialsReady,
     currentUserId,
     displayedMessageCount: displayedMessages.length,
+    focusComposer: focusComposerForGettingStarted,
     githubImportBusy,
     gettingStartedContextRelevant: gettingStartedConversationContext.relevant,
     gettingStartedContextResolved: gettingStartedConversationContext.resolved,
@@ -3873,7 +3871,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     managedAiSelected: gettingStartedManagedAiSelected,
   });
   const handleStartWithManagedAi = useCallback(() => {
-    // Focus moves to the workspace step (the card handles it) — not the composer,
+    // Focus moves to the workspace step (the card handles it), not the composer,
     // which would open the mobile keyboard over the next decision.
     selectGettingStartedManagedAi();
   }, [selectGettingStartedManagedAi]);
@@ -3884,6 +3882,46 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     }
     openGettingStartedConnectModal();
   }, [gettingStartedPersonalAiConnectionState, openAiOnboarding, openGettingStartedConnectModal]);
+  // The gate's "Connect AI": the same Add AI connection modal the card opens.
+  // Nothing is stashed or armed. The modal never clears the composer, so the
+  // draft simply stays where it is ("Your message is kept") and goes out on
+  // the user's own press once AI is connected; arming an auto-submit here
+  // would fire a stale draft later, since closing the modal without connecting
+  // leaves nothing to clear it. The composer is refocused when credentials
+  // become ready, because the gate bubble (the modal's focus-restore target)
+  // unmounts at that moment and focus would otherwise land on <body>.
+  const connectFromGateRef = useRef(false);
+  const handleConnectAiFromGate = useCallback(() => {
+    connectFromGateRef.current = true;
+    openGettingStartedConnectModal();
+  }, [openGettingStartedConnectModal]);
+  useEffect(() => {
+    connectFromGateRef.current = false;
+  }, [activeConversationId]);
+  useEffect(() => {
+    if (!credentialsReady || !connectFromGateRef.current) {
+      return;
+    }
+    connectFromGateRef.current = false;
+    focusInput({ force: true });
+  }, [credentialsReady, focusInput]);
+  // "Change AI" on the card: the managed choice resets to the AI step; a saved
+  // credential is changed in the AI panel, where the connections live.
+  const handleChangeAiChoice = useCallback(() => {
+    if (gettingStartedSelectedAi === "connected") {
+      openAiManager();
+      return;
+    }
+    clearGettingStartedManagedAiSelection();
+  }, [clearGettingStartedManagedAiSelection, gettingStartedSelectedAi, openAiManager]);
+  const gettingStartedConnectedAiLabel = useMemo(
+    () => (defaultAiCredential ? resolveCredentialLabel(defaultAiCredential) : null),
+    [defaultAiCredential],
+  );
+  // Alone in a space, "turn the assistant off" has nobody to chat with. The
+  // mentionable set is the source of truth: org and project members merged,
+  // minus the viewer, so an org-shared space counts its teammates too.
+  const spaceHasTeammates = mentionableUsers.length > 0;
 
   const { clearComposerAfterQueue, clearComposerIfUnchanged, performSubmit } = useChatSubmitDispatch({
     activeConversationId,
@@ -4503,7 +4541,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
   const participantsSnapshotConversationId = activeConversationEntry?.controllerId ?? null;
   // Enrich each roster agent with the model, provider, and credential it draws
   // from, resolving pinned-vs-default and stale credentials the same way the
-  // Runtime & AI panel does — so the drawer can show it without re-deriving.
+  // Runtime & AI panel does, so the drawer can show it without re-deriving.
   const participantAgents = useMemo<ParticipantAgent[]>(() => {
     const credentialsById = new Map(
       availableCredentials.map((credential) => [credential.id, credential]),
@@ -4590,7 +4628,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
       let credentialState: ParticipantCredentialState = "none";
       // The credential whose live usage applies to this agent: the pinned one
       // when it resolves, otherwise the workspace default. Stays null for the
-      // broken states (missing/revoked) — there's no live snapshot to show.
+      // broken states (missing/revoked); there's no live snapshot to show.
       let effectiveCredential: (typeof availableCredentials)[number] | null = null;
       if (profile?.credentialId) {
         const pinned = credentialsById.get(profile.credentialId) ?? null;
@@ -4638,7 +4676,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     runtimeMenu,
   ]);
   // Amber dot on the roster facepile when any agent's credential needs
-  // attention — visible without opening the drawer.
+  // attention, visible without opening the drawer.
   const participantAgentsHaveCredentialWarning = participantAgents.some(
     (agent) =>
       agent.credentialState === "missing" ||
@@ -4669,7 +4707,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     }),
     [availableCredentials, openAiManager, refreshAvailableAgents, refreshCredentials],
   );
-  // The conversation's assistant switch, published for the participants panel —
+  // The conversation's assistant switch, published for the participants panel:
   // same semantics as the composer chip's toggle: enabling with no AI connected
   // routes through onboarding first; disabling also clears invited agents.
   const participantsAssistant = useMemo(() => {
@@ -4780,7 +4818,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
 
   const gettingStartedTopAnchoredRef = useRef(false);
   const gettingStartedTopAnchorActive =
-    shouldShowGettingStarted && (compactBrowserViewport || touchLikeInput);
+    shouldShowGettingStarted && !gettingStartedCollapsed && (compactBrowserViewport || touchLikeInput);
   useLayoutEffect(() => {
     setAutoScrollSuspended(gettingStartedTopAnchorActive);
     const node = scrollContainerRef.current;
@@ -5093,7 +5131,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
   // true), so the connect wizard's "Use free managed AI" button just dismisses
   // the wizard and fires whatever prompt the user already typed. The draft is
   // still in the composer (openAiOnboarding never clears it), so there is no
-  // stashed draft to restore — and the false→true auto-submit effect above
+  // stashed draft to restore, and the false→true auto-submit effect above
   // never runs in this case, so we submit here explicitly.
   const handleUseManagedAi = useCallback(() => {
     closeAiOnboarding();
@@ -5108,7 +5146,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
 
   // The gate bubble's "just chatting with teammates?" escape: turn the assistant
   // off for this conversation so plain p2p messages send with no AI connected.
-  // Mirrors the OctoAgentChip disable path — clear extra agent handles too, or a
+  // Mirrors the OctoAgentChip disable path: clear extra agent handles too, or a
   // lingering AI handle keeps inputRequiresAi true and the gate never clears.
   const handleChatWithoutAi = useCallback(() => {
     if (!activeConversationId) {
@@ -5117,7 +5155,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     for (const handle of extraAgentHandles) {
       onRemoveAgentHandle(activeConversationId, handle);
     }
-    // Also drop any sticky mentioned agent for this conversation — otherwise it
+    // Also drop any sticky mentioned agent for this conversation; otherwise it
     // keeps inputRequiresAi true and the gate would never self-dismiss. This is
     // the submit flow's own map, so clearing it also stops handleSubmit from
     // dispatching follow-ups to the stale sticky agent.
@@ -5559,7 +5597,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
       {/* Presence belongs to the conversation, so it sits at the top of the
           conversation surface: one placement at every width, a flow row (never
           an overlay) so it cannot cover message text, and outside the scroller
-          so it never scrolls away. Always rendered — the roster collapses to a
+          so it never scrolls away. Always rendered; the roster collapses to a
           plain "open participants" icon when no one has joined, so the
           participants/config panel is reachable even on a brand-new chat. */}
       <div
@@ -5628,6 +5666,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
                 <ChatGettingStartedCard
                   key={`${activeProjectId ?? "no-project"}:${activeConversationId ?? "no-conversation"}`}
                   mode={gettingStartedMode}
+                  collapsed={gettingStartedCollapsed}
                   onSelectMode={handleGettingStartedModeChange}
                   onSelectAction={handleGettingStartedAction}
                   onSelectConnector={handleSelectConnector}
@@ -5636,12 +5675,13 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
                   showConnectTools={!projectWriteDisabled}
                   managedAiOffer={gettingStartedManagedAiOffer}
                   selectedAi={gettingStartedSelectedAi}
+                  connectedAiLabel={gettingStartedConnectedAiLabel}
                   aiViewState={gettingStartedAiViewState}
                   canChangeAiChoice={canChangeGettingStartedAiChoice}
                   personalAiConnectionState={gettingStartedPersonalAiConnectionState}
                   onStartWithManagedAi={handleStartWithManagedAi}
                   onConnectOwnAi={handleConnectOwnAi}
-                  onChangeAiChoice={clearGettingStartedManagedAiSelection}
+                  onChangeAiChoice={handleChangeAiChoice}
                   githubRepoDraft={githubRepoDraft}
                   githubRefDraft={githubRefDraft}
                   githubImportBusy={githubImportBusy}
@@ -5755,6 +5795,8 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
               onSetDefaultCredential={(credentialId) => void handleSetDefaultCredentialFromChat(credentialId)}
               onUseManagedAi={handleUseManagedAi}
               onChatWithoutAi={handleChatWithoutAi}
+              onConnectAi={handleConnectAiFromGate}
+              hasTeammates={spaceHasTeammates}
               onCloseAiOnboarding={closeAiOnboarding}
               onStashDraftForCredentials={stashDraftForCredentials}
               onConnectDesktop={connectFromDesktop}
@@ -5830,7 +5872,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
         }
         accessNotice={
           projectReadOnly
-            ? "Read-only access — you can review this space, but you can’t send messages or change files."
+            ? "Read-only access. You can review this space, but you can’t send messages or change files."
             : null
         }
         accessChecking={!projectReadOnly && projectCapabilitiesResolved === false}
@@ -5914,7 +5956,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
           agentHandles: mentionableAgentHandles,
           agentProfiles: availableAgents,
           mentionableUsers,
-          placeholder: chatInputPlaceholder,
+          placeholder: gettingStartedComposerPlaceholder ?? chatInputPlaceholder,
           onChange: handleChatInputChange,
           onKeyDown: handleInputKeyDown,
           onPaste: handleComposerPaste,
@@ -5933,7 +5975,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
         homeAttentionBadge={homeAttentionBadge}
         composerActionMenuProps={{
           // The pre-AI lock gates sending, not the "+" actions (import a repo,
-          // open a browser, invite) — none of which need AI connected. Keeping
+          // open a browser, invite), none of which need AI connected. Keeping
           // it enabled here is what makes repo import reachable before setup.
           disabled: sendingAttachment,
           mutationDisabled: projectWriteDisabled,

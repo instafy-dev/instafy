@@ -1,17 +1,20 @@
 import { Check } from "iconoir-react";
-import { Badge } from "../../../components/Badge";
 import { Button } from "../../../components/Button";
-import { CARD_CHIP_CONNECTORS, isConnectorAvailable, type SkillConnector } from "./connectors";
+import { Text } from "../../../components/Text";
+import {
+  CARD_CHIP_CONNECTORS,
+  COMING_SOON_FEATURED_SKILLS,
+  formatComingSoonLine,
+  type SkillConnector,
+} from "./connectors";
 
 // Presentational: the getting-started card's "Connect a tool" strip. One
-// hairline pill chip per featured skill (bare mark plus name) and a trailing
-// "More tools" text link that opens the browse sheet. A press only reports
-// the connector; nothing is sent. A "soon" skill (pack not published yet)
-// renders as a disabled chip with a "Soon" Badge and reports nothing.
-
-// Shown on hover over a disabled chip. It sits on the list item because the
-// disabled Button has pointer-events none, so the pointer reaches the item.
-const SOON_TITLE = "Coming soon";
+// hairline pill chip per featured skill that can be selected today (bare mark
+// plus name) and a trailing "More tools" text link that opens the browse
+// sheet. A press only reports the connector; nothing is sent. While no
+// featured skill is available, the chips give way to one muted line naming
+// what is coming ("Slack and Discord are coming soon.") ahead of the
+// same link; the Soon badges live in the sheet, where the full list is.
 
 type ConnectChipStripProps = {
   installedSkillNames: ReadonlySet<string>;
@@ -20,6 +23,10 @@ type ConnectChipStripProps = {
   className?: string;
   /** Id of the visible caption that labels the list (e.g. "Connect a tool"). */
   "aria-labelledby"?: string;
+  /** Test seam: the chips to render (defaults to the shipped list). */
+  connectors?: readonly SkillConnector[];
+  /** Test seam: the skills named in the coming-soon line. */
+  comingSoon?: readonly SkillConnector[];
 };
 
 export function ConnectChipStrip({
@@ -28,49 +35,38 @@ export function ConnectChipStrip({
   onMoreTools,
   className,
   "aria-labelledby": ariaLabelledBy,
+  connectors = CARD_CHIP_CONNECTORS,
+  comingSoon = COMING_SOON_FEATURED_SKILLS,
 }: ConnectChipStripProps) {
+  const comingSoonLine = connectors.length === 0 ? formatComingSoonLine(comingSoon) : null;
   return (
     <ul
       className={["flex flex-wrap items-center gap-1.5", className].filter(Boolean).join(" ")}
       aria-labelledby={ariaLabelledBy}
       data-testid="connect-chip-strip"
     >
-      {CARD_CHIP_CONNECTORS.map((connector) => {
+      {connectors.map((connector) => {
         const Mark = connector.mark;
-        const soon = !isConnectorAvailable(connector);
-        // "Soon" wins over the installed state: the pack is not published, so
-        // the chip cannot lead anywhere yet.
-        const connected = !soon && installedSkillNames.has(connector.skillName);
+        const connected = installedSkillNames.has(connector.skillName);
         // The visible chip is mark plus name; the accessible name adds the
         // verb, or the state in place of it.
-        const accessibleName = soon
-          ? `${connector.name}, coming soon`
-          : connected
-            ? `${connector.name}, connected`
-            : `Connect ${connector.name}`;
+        const accessibleName = connected
+          ? `${connector.name}, connected`
+          : `Connect ${connector.name}`;
         return (
-          <li key={connector.id} title={soon ? SOON_TITLE : undefined}>
+          <li key={connector.id}>
             <Button
               variant="outline"
               size="xs"
               radius="full"
               className="gap-1.5 px-2.5 shadow-none"
               aria-label={accessibleName}
-              isDisabled={soon}
-              onPress={() => {
-                if (!soon) {
-                  onSelect(connector);
-                }
-              }}
+              onPress={() => onSelect(connector)}
               data-testid={`connect-chip-${connector.id}`}
             >
               <Mark className="h-4 w-4" aria-hidden="true" />
               <span className="text-xs font-medium">{connector.name}</span>
-              {soon ? (
-                <Badge tone="neutral" size="xs" data-testid={`connect-chip-${connector.id}-soon`}>
-                  Soon
-                </Badge>
-              ) : connected ? (
+              {connected ? (
                 <Check
                   className="h-3 w-3 text-primary-600 dark:text-primary-300"
                   aria-hidden="true"
@@ -81,6 +77,13 @@ export function ConnectChipStrip({
           </li>
         );
       })}
+      {comingSoonLine ? (
+        <li>
+          <Text as="span" variant="caption" tone="muted" data-testid="connect-coming-soon">
+            {comingSoonLine}
+          </Text>
+        </li>
+      ) : null}
       <li>
         <Button
           variant="ghost"

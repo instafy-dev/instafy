@@ -36,7 +36,7 @@ its code, and switching to chat or the personal browser keeps an active shared v
 An optional timing observer measures Studio startup and chat, space, and team switches; the
 public app sends no timing data by default. Its memory buffer holds at most 32 anonymous samples
 containing only the operation, outcome, duration, message-count bucket, narrow/wide viewport, and
-whether a readiness check was still waiting (`loadingShown`)—no identities, URLs, or message content.
+whether a readiness check was still waiting (`loadingShown`): no identities, URLs, or message content.
 That flag includes access checks, discovery, conversation selection, and content loading; it does
 not prove that a spinner was painted or indicate a cache hit or miss. Readiness means the selected main chat or panel
 has committed and had a paint opportunity, including its code download; it does not wait for
@@ -140,8 +140,8 @@ new messages.
 Studio uses the browser/React Router history in every shell. Back and Forward retrace visits;
 **Open parent conversation** opens the parent as a new visit, and **Home** always opens Home.
 Desktop shells expose explicit Back/Forward controls because they do not have a browser toolbar.
-Touch layouts below the desktop breakpoint keep three bottom destinations — Home, Chats and
-Spaces — only on those overview screens, in both mobile web and native apps. Chats opens the
+Touch layouts below the desktop breakpoint keep three bottom destinations (Home, Chats and
+Spaces) only on those overview screens, in both mobile web and native apps. Chats opens the
 full history overview, not the compact picker. Conversations (including empty chats and job
 threads), editors and settings details have no bottom navigation row. The full history overview
 owns its destination bar rather than covering a second one underneath it.
@@ -277,6 +277,33 @@ composer, into the current chat, and keep you on the Skills panel.
 Automations uses a flat empty state on the shared panel surface, with a labeled
 **New automation** action and a short explanation of scheduling.
 
+## First run
+
+An empty space opens with the getting-started card in the chat, at message weight. Its AI step
+is one decision: **Choose your AI** with **Start free with Instafy AI** (the live allowance on the
+button) and **Connect AI**; when the free tier is paused the heading stays, the line reads "Free
+Instafy AI is paused right now. Connect your own AI to start; you pay your provider directly and
+Instafy adds nothing." and **Connect AI** is the one button. The same verb names the act
+everywhere: **Connect AI** on the card and in the gate, **Add AI connection** as the modal's
+title, **AI connections** as the AI panel's heading. Once settled, a status line above **What
+should your agent work on?** names what will answer ("Using OpenAI API key" or "Using
+free Instafy AI: 20 prompts a day, 1 credit each") followed by **Change AI**, which reopens the
+AI step for the free choice and opens the AI panel for a saved connection.
+
+Typing or sending with no AI connected shows one sentence in the chat, "Connect AI to send this.
+Your message is kept.", with a primary **Connect AI** that opens the Add AI connection modal and,
+while the free tier is available, **Use free Instafy AI (20 a day)**. "Just chatting with
+teammates? Turn the assistant off." appears as a quiet caption below only when the space has
+more than one member. The draft stays in the composer. Switching the assistant on with no AI
+connected, or an expired connection, shows the same hand-off in the chat: no provider list is
+drawn there, **Connect AI** opens the modal.
+
+**Start from scratch** inserts no text: it sets the composer's placeholder to "What do you want
+to build? One sentence is enough." and focuses it, so send stays disabled until the user types
+their own line. While a draft exists the card folds to one row, **Import a repo**, **Start from scratch**
+and **More tools**, and unfolds when the draft is cleared; history and dismissal hide it as
+before. **Start from scratch** from that row selects the draft, so typing replaces it.
+
 ## Composer
 
 The composer uses one compact, rounded writing row on phones and wider screens. It grows
@@ -284,15 +311,18 @@ with the draft, then scrolls within the editor. Image upload and other message t
 in the `+` menu.
 
 **Connect a tool** in the composer `+` menu, next to **Import GitHub repo**, lists the
-featured tools (Slack, Notion, Discord, GitHub) and ends with **Browse all tools**; the
-featured skills also sit as a row of chips under **Connect a tool** on the getting-started
-card of an empty space, followed by a **More tools** link. Both open the Connect sheet: a
+featured tools that can be selected today (Notion and GitHub, until the Slack and Discord
+packs are published) and ends with **Browse all tools**; the available featured skills also
+sit as a row of chips under **Connect a tool** on the getting-started card of an empty space
+(Notion today), followed by a **More tools** link. Should no featured skill be available, the
+card shows one muted line in place of the chips, "Slack and Discord are coming soon.", ahead
+of the same link, and the menu shows **Browse all tools** alone under GitHub. Both open the Connect sheet: a
 **Search tools** box, a **Popular** row of bare marks (a curated list, not a measurement), and
 every first-party tool grouped by category (Chat and community, Docs and notes, Code, Finance
 and bookkeeping, and so on), with **connected** or a region such as Austria as the row's meta.
-Tools whose skill pack is not published yet show a **Soon** badge and cannot be selected, on
-the card, in the menu and in the sheet, and the Popular row appears only once at least two of
-its tools are available.
+Tools whose skill pack is not published yet are listed only in the sheet, where they show a
+**Soon** badge and cannot be selected; the Popular row appears only once at least two of its
+tools are available. FreeFinance is available but not featured, so **More tools** is its way in.
 Typing filters the rows by name, keyword, category or region and hides the Popular row; when
 nothing matches, **Search all skills** opens the Skills panel's Discover tab with the same
 query. **Paste a skill link** lives in the sheet's footer. Choosing a skill opens the confirm stage, which says which skill is added

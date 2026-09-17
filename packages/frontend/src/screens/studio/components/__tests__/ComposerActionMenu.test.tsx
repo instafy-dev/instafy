@@ -5,7 +5,13 @@ import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ComposerActionMenu } from "../ComposerActionMenu";
-import { CONNECTORS, FEATURED_CONNECTORS, type ProductConnector } from "../connectors";
+import {
+  AVAILABLE_FEATURED_CONNECTORS,
+  CONNECTORS,
+  FEATURED_CONNECTORS,
+  isConnectorAvailable,
+  type ProductConnector,
+} from "../connectors";
 
 // The trigger is a pass-through so the popover content always renders. It
 // mirrors the menu's controlled open state so a test can observe closeMenu()
@@ -241,39 +247,40 @@ describe("ComposerActionMenu", () => {
     const connectRows = Array.from(
       container.querySelectorAll<HTMLButtonElement>('[data-testid^="composer-action-menu-connect-"]'),
     ).map((row) => row.dataset.testid);
-    // Back, the featured rows in list order, then Browse all tools. Niche
-    // tools and the paste link live in the sheet, not the menu.
+    // Back, the featured rows that can be selected today in list order, then
+    // Browse all tools. Soon rows are not listed (the sheet names them with
+    // their Badge); niche tools and the paste link live in the sheet too.
     expect(connectRows).toEqual([
       "composer-action-menu-connect-back",
-      ...FEATURED_CONNECTORS.map((entry) => `composer-action-menu-connect-${entry.id}`),
+      ...AVAILABLE_FEATURED_CONNECTORS.map((entry) => `composer-action-menu-connect-${entry.id}`),
       "composer-action-menu-connect-browse",
     ]);
     expect(connectRows).toEqual([
       "composer-action-menu-connect-back",
-      "composer-action-menu-connect-slack",
       "composer-action-menu-connect-notion",
-      "composer-action-menu-connect-discord",
       "composer-action-menu-connect-github",
       "composer-action-menu-connect-browse",
     ]);
+    for (const entry of FEATURED_CONNECTORS) {
+      if (!isConnectorAvailable(entry)) {
+        expect(container.querySelector(`[data-testid="composer-action-menu-connect-${entry.id}"]`)).toBeNull();
+      }
+    }
+    expect(container.querySelector('[data-testid="composer-action-menu-connect-slack"]')).toBeNull();
+    expect(container.querySelector('[data-testid="composer-action-menu-connect-discord"]')).toBeNull();
     expect(container.querySelector('[data-testid="composer-action-menu-connect-other"]')).toBeNull();
     expect(container.querySelector('[data-testid="composer-action-menu-connect-freefinance"]')).toBeNull();
     expect(container.textContent).not.toContain("Paste a skill link");
+    expect(container.textContent).not.toContain("Soon");
+    expect(container.textContent).not.toContain("coming soon");
+    expect(container.querySelector("button[disabled]")).toBeNull();
     expect(
       container.querySelector('[data-testid="composer-action-menu-connect-browse"]')?.textContent,
     ).toContain("Browse all tools");
     expect(container.textContent).not.toContain("Connected");
     expect(container.textContent).not.toContain("\u2014");
 
-    // Soon rows (pack not published) are disabled with the Soon Badge in the
-    // end slot; Notion, GitHub and Browse all tools stay live.
-    for (const id of ["slack", "discord"]) {
-      const row = container.querySelector<HTMLButtonElement>(`[data-testid="composer-action-menu-connect-${id}"]`)!;
-      expect(row.disabled).toBe(true);
-      expect(row.textContent).toContain("Soon");
-      expect(row.querySelector("span.rounded-full")?.textContent).toBe("Soon");
-      expect(row.parentElement?.getAttribute("title")).toBe("Coming soon");
-    }
+    // The published Notion row is live with no Badge and no hover title.
     const notionRow = container.querySelector<HTMLButtonElement>('[data-testid="composer-action-menu-connect-notion"]')!;
     expect(notionRow.disabled).toBe(false);
     expect(notionRow.textContent).toBe("Notion");
@@ -286,8 +293,7 @@ describe("ComposerActionMenu", () => {
     expect(container.querySelector<HTMLButtonElement>('[data-testid="composer-action-menu-connect-browse"]')?.disabled).toBe(false);
     expect(container.textContent).not.toContain("please");
 
-    // Arrow keys move between the enabled rows like a menu, wrapping at both
-    // ends and skipping the soon rows.
+    // Arrow keys move between the rows like a menu, wrapping at both ends.
     const pressKey = (element: Element | null | undefined, key: string) =>
       act(async () => {
         element?.dispatchEvent(new KeyboardEvent("keydown", { key, bubbles: true, cancelable: true }));
@@ -359,11 +365,11 @@ describe("ComposerActionMenu", () => {
     await act(async () =>
       container.querySelector<HTMLButtonElement>('[data-testid="composer-action-menu-connect"]')?.click(),
     );
-    expect(container.querySelector('[data-testid="composer-action-menu-connect-slack"]')).not.toBeNull();
+    expect(container.querySelector('[data-testid="composer-action-menu-connect-github"]')).not.toBeNull();
     expect(container.querySelector('[data-testid="composer-action-menu-connect-browse"]')).toBeNull();
   });
 
-  it("reports the pressed available row and closes the menu, while a soon row does nothing", async () => {
+  it("lists no soon row, even with its skill folder installed, and reports the pressed available row", async () => {
     const onSelectConnector = vi.fn();
     await renderMenu(true, true, { onSelectConnector, installedSkillNames: new Set(["notion", "slack"]) });
 
@@ -375,34 +381,19 @@ describe("ComposerActionMenu", () => {
       container.querySelector<HTMLButtonElement>('[data-testid="composer-action-menu-connect"]')?.click(),
     );
 
-    // Soon wins over the installed state: an installed folder does not make
-    // an unpublished pack selectable, so Slack's Badge reads Soon, not
-    // Connected. Notion's pack is published, so its installed folder reads
-    // Connected and the row stays live.
+    // An installed folder does not make an unpublished pack selectable: the
+    // Slack row is absent rather than badged. Notion's pack is published, so
+    // its installed folder reads Connected and the row stays live.
     const notion = container.querySelector<HTMLButtonElement>('[data-testid="composer-action-menu-connect-notion"]')!;
-    const slack = container.querySelector<HTMLButtonElement>('[data-testid="composer-action-menu-connect-slack"]')!;
     expect(notion.textContent).toContain("Connected");
-    expect(notion.textContent).not.toContain("Soon");
     expect(notion.disabled).toBe(false);
-    expect(slack.textContent).toContain("Soon");
-    expect(slack.textContent).not.toContain("Connected");
-    expect(slack.disabled).toBe(true);
+    expect(container.querySelector('[data-testid="composer-action-menu-connect-slack"]')).toBeNull();
+    expect(container.textContent).not.toContain("Soon");
     expect(container.querySelector('[data-testid="composer-action-menu-connect-github"]')?.textContent).not.toContain(
       "Connected",
     );
-
-    // A soon row is disabled: no click reaches it, and even synthetic input
-    // reports nothing and leaves the menu open on the connect view.
-    await act(async () => slack.click());
-    await act(async () => {
-      slack.dispatchEvent(new MouseEvent("mousedown", { bubbles: true }));
-      slack.dispatchEvent(new MouseEvent("mouseup", { bubbles: true }));
-      slack.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
-      slack.dispatchEvent(new KeyboardEvent("keyup", { key: "Enter", bubbles: true }));
-    });
     expect(onSelectConnector).not.toHaveBeenCalled();
     expect(menuState.dataset.open).toBe("true");
-    expect(container.querySelector('[data-testid="composer-action-menu-connect-slack"]')).not.toBeNull();
 
     // The available Notion row reports its connector and closes the menu.
     await act(async () => notion.click());
@@ -426,7 +417,7 @@ describe("ComposerActionMenu", () => {
     // closeMenu() flipped the controlled open state to false and reset the view.
     expect(menuState.dataset.open).toBe("false");
     expect(container.querySelector('[data-testid="composer-action-menu-import-github"]')).not.toBeNull();
-    expect(container.querySelector('[data-testid="composer-action-menu-connect-slack"]')).toBeNull();
+    expect(container.querySelector('[data-testid="composer-action-menu-connect-github"]')).toBeNull();
   });
 
   it("hides Connect a tool without a handler or while mutations are disabled", async () => {

@@ -11,18 +11,27 @@ async function mountGettingStartedCard(
       label: string;
       dailyPromptLimit: number;
       remainingPrompts: number | null;
+      creditBurnAmount?: number;
+      paused?: boolean;
     } | null;
     selectedAi?: "managed" | "connected" | null;
+    connectedAiLabel?: string | null;
+    collapsed?: boolean;
     canChangeAiChoice?: boolean;
     aiViewState?: "resolving" | "choice" | "workspace";
     personalAiConnectionState?: "missing" | "needs_default" | null;
   } = {},
 ): Promise<void> {
   const deps = await resolveViteReactDependencies(page);
-  const managedAiOffer = options.managedAiOffer === undefined
-    ? { label: "Instafy AI", dailyPromptLimit: 20, remainingPrompts: 7 }
-    : options.managedAiOffer;
+  const managedAiOffer =
+    options.managedAiOffer === undefined
+      ? { label: "Instafy AI", dailyPromptLimit: 20, remainingPrompts: 7, creditBurnAmount: 1, paused: false }
+      : options.managedAiOffer === null
+        ? null
+        : { creditBurnAmount: 1, paused: false, ...options.managedAiOffer };
   const selectedAi = options.selectedAi ?? null;
+  const connectedAiLabel = options.connectedAiLabel ?? null;
+  const collapsed = options.collapsed ?? false;
   const canChangeAiChoice = options.canChangeAiChoice ?? false;
   const aiViewState = options.aiViewState ?? "choice";
   const personalAiConnectionState =
@@ -51,10 +60,16 @@ async function mountGettingStartedCard(
         },
           h(ChatGettingStartedCard, {
             mode: "root",
+            collapsed: ${JSON.stringify(collapsed)},
             onSelectMode: (mode) => window.__onboardingActions.push(["mode", mode]),
             onSelectAction: (action) => window.__onboardingActions.push(["action", action.id]),
+            onSelectConnector: (connector) => window.__onboardingActions.push(["connector", connector.id]),
+            onBrowseConnectors: () => window.__onboardingActions.push(["browse"]),
+            installedSkillNames: new Set(),
+            showConnectTools: true,
             managedAiOffer: ${JSON.stringify(managedAiOffer)},
             selectedAi: ${JSON.stringify(selectedAi)},
+            connectedAiLabel: ${JSON.stringify(connectedAiLabel)},
             aiViewState: ${JSON.stringify(aiViewState)},
             canChangeAiChoice: ${JSON.stringify(canChangeAiChoice)},
             personalAiConnectionState: ${JSON.stringify(personalAiConnectionState)},
@@ -120,10 +135,9 @@ test.describe("chat getting-started card", () => {
     await expect(card.getByTestId("onboarding-use-managed-ai")).toContainText(
       "7 of 20 free prompts left today",
     );
-    await expect(card.getByTestId("onboarding-connect-own-ai")).toContainText(
-      "Bring my own AI",
-    );
-    // The workspace step is gated behind the AI choice — one decision at a time.
+    await expect(card.getByTestId("onboarding-connect-own-ai")).toContainText("Connect AI");
+    await expect(card).not.toContainText("Bring my own AI");
+    // The workspace step is gated behind the AI choice: one decision at a time.
     await expect(card.getByTestId("onboarding-workspace-step")).toHaveCount(0);
     await expect(card.getByTestId("onboarding-action-import-github-repo")).toHaveCount(0);
 
@@ -205,6 +219,13 @@ test.describe("chat getting-started card", () => {
     await expect(card).toContainText("Using your connected AI");
     await expect(card.getByTestId("onboarding-change-ai")).toHaveCount(0);
     await expect(card.getByText("What should your agent work on?", { exact: true })).toBeVisible();
+    // Notion is the one published featured skill: one chip, no Soon badge,
+    // no coming-soon line, then the More tools link.
+    await expect(card.getByTestId("connect-coming-soon")).toHaveCount(0);
+    await expect(card.locator('button[data-testid^="connect-chip-"]')).toHaveCount(1);
+    await expect(card.getByTestId("connect-chip-notion")).toBeEnabled();
+    await expect(card).not.toContainText("Soon");
+    await expect(card.getByTestId("connect-more-tools")).toBeVisible();
     await expect(card.getByTestId("onboarding-action-import-github-repo")).toContainText(
       "Import a GitHub repo",
     );
@@ -224,7 +245,9 @@ test.describe("chat getting-started card", () => {
     });
 
     const card = page.getByTestId("onboarding-getting-started");
-    await expect(card).toContainText("Using free Instafy AI");
+    await expect(card.getByTestId("onboarding-ai-status")).toHaveText(
+      "Using free Instafy AI: 20 prompts a day, 1 credit each·Change AI",
+    );
     await expect(card).not.toContainText("Using your connected AI");
     await card.getByTestId("onboarding-change-ai").click();
     await expect
@@ -244,7 +267,7 @@ test.describe("chat getting-started card", () => {
 
     const card = page.getByTestId("onboarding-getting-started");
     await expect(card).toContainText("Today's free prompts are used (20/day).");
-    await expect(card).toContainText("Bring your own AI to keep going");
+    await expect(card).toContainText("Connect your own AI to keep going");
     await expect(card.getByTestId("onboarding-use-managed-ai")).toBeDisabled();
     await expect(card.getByTestId("onboarding-connect-own-ai")).toBeEnabled();
   });
@@ -271,6 +294,83 @@ test.describe("chat getting-started card", () => {
       "Choose connected AI",
     );
     await expect(page.getByTestId("onboarding-connect-own-ai")).toHaveCount(0);
+  });
+
+  test("names the saved connection and routes Change AI for it", async ({ page }) => {
+    await page.setViewportSize({ width: 375, height: 667 });
+    await mountGettingStartedCard(page, {
+      selectedAi: "connected",
+      connectedAiLabel: "Local Codex login (dev)",
+      canChangeAiChoice: true,
+      aiViewState: "workspace",
+    });
+
+    const card = page.getByTestId("onboarding-getting-started");
+    await expect(card.getByTestId("onboarding-ai-status")).toHaveText(
+      "Using Local Codex login (dev)·Change AI",
+    );
+    await expect(card).not.toContainText("\u2014");
+    await card.getByTestId("onboarding-change-ai").click();
+    await expect
+      .poll(() => page.evaluate(() => (window as { __onboardingActions?: unknown[] }).__onboardingActions))
+      .toContainEqual(["change-ai"]);
+  });
+
+  test("keeps the AI step a choice with one Connect AI button while the free tier is paused", async ({ page }) => {
+    await page.setViewportSize({ width: 375, height: 667 });
+    await mountGettingStartedCard(page, {
+      managedAiOffer: { label: "Instafy AI", dailyPromptLimit: 20, remainingPrompts: 7, paused: true },
+    });
+
+    const card = page.getByTestId("onboarding-getting-started");
+    await expect(card.getByText("Choose your AI", { exact: true })).toBeVisible();
+    await expect(card.getByTestId("onboarding-ai-choice-line")).toHaveText(
+      "Free Instafy AI is paused right now. Connect your own AI to start; you pay your provider directly and Instafy adds nothing.",
+    );
+    await expect(card.getByTestId("onboarding-use-managed-ai")).toHaveCount(0);
+    await expect(card.getByTestId("onboarding-ai-choice").getByRole("button")).toHaveCount(1);
+    await expect(card.getByTestId("onboarding-connect-own-ai")).toContainText("Connect AI");
+    const connectBox = await card.getByTestId("onboarding-connect-own-ai").boundingBox();
+    const choiceBox = await card.getByTestId("onboarding-ai-choice").boundingBox();
+    expect(connectBox!.width).toBeGreaterThan(choiceBox!.width * 0.85);
+    const documentWidth = await page.evaluate(() => document.documentElement.scrollWidth);
+    expect(documentWidth).toBeLessThanOrEqual(375);
+  });
+
+  test("collapses to one row of ghost buttons while a draft exists, on the phone too", async ({ page }) => {
+    await page.setViewportSize({ width: 375, height: 667 });
+    await mountGettingStartedCard(page, {
+      collapsed: true,
+      selectedAi: "connected",
+      connectedAiLabel: "Local Codex login (dev)",
+      canChangeAiChoice: true,
+      aiViewState: "workspace",
+    });
+
+    const card = page.getByTestId("onboarding-getting-started");
+    await expect(card).toHaveAttribute("data-collapsed", "true");
+    await expect(card.getByRole("heading")).toHaveCount(0);
+    await expect(card.getByTestId("onboarding-ai-status")).toHaveCount(0);
+    const row = card.getByTestId("onboarding-collapsed-row");
+    await expect(row.getByRole("button")).toHaveText([
+      "Import a repo",
+      "Start from scratch",
+      "More tools",
+    ]);
+    const boxes = await Promise.all(
+      (await row.getByRole("button").all()).map((button) => button.boundingBox()),
+    );
+    for (const box of boxes) {
+      expect(box).not.toBeNull();
+    }
+    // One row: every button sits on the same line.
+    expect(Math.abs(boxes[0]!.y - boxes[2]!.y)).toBeLessThanOrEqual(1);
+    const documentWidth = await page.evaluate(() => document.documentElement.scrollWidth);
+    expect(documentWidth).toBeLessThanOrEqual(375);
+    await row.getByRole("button", { name: "Start from scratch" }).click();
+    await expect
+      .poll(() => page.evaluate(() => (window as { __onboardingActions?: unknown[] }).__onboardingActions))
+      .toContainEqual(["action", "start-from-scratch"]);
   });
 
   test("describes a non-positive daily cap as uncapped", async ({ page }) => {
