@@ -63,11 +63,18 @@ function booleanInput(value, label) {
   fail(`${label} must be a boolean`);
 }
 
+// On a re-run GitHub keeps github.actor (the original bot actor) and names the
+// person who clicked re-run only in github.triggering_actor, so both must be the bot.
+export function requireBotTrigger(triggeringActor) {
+  if (triggeringActor !== BOT_LOGIN) fail(`triggering actor (including re-runs) must be ${BOT_LOGIN}`);
+}
+
 export function authorizeRelease(context) {
   const {
     repository,
     eventName,
     actor,
+    triggeringActor,
     pusher,
     ref,
     sha,
@@ -82,6 +89,7 @@ export function authorizeRelease(context) {
   } = context;
   if (repository !== REPOSITORY) fail(`releases run only in ${REPOSITORY}`);
   if (actor !== BOT_LOGIN) fail(`actor must be ${BOT_LOGIN}`);
+  requireBotTrigger(triggeringActor);
   if (typeof sha !== "string" || !SHA.test(sha)) fail("workflow commit is invalid");
   const { marketing, build } = parseIosTag(tag);
   const dryRun = booleanInput(rawDryRun, "dry_run");
@@ -139,7 +147,8 @@ export function authorizeRelease(context) {
   };
 }
 
-export function recheckRelease({ tag, sourceSha, tagSha, compareStatus, releaseState }) {
+export function recheckRelease({ tag, triggeringActor, sourceSha, tagSha, compareStatus, releaseState }) {
+  requireBotTrigger(triggeringActor);
   parseIosTag(tag);
   if (typeof sourceSha !== "string" || !SHA.test(sourceSha)) fail("source commit is invalid");
   if (tagSha !== sourceSha) fail("tag no longer resolves to the authorized source commit");
@@ -196,6 +205,7 @@ function main(argv) {
       repository: env.GITHUB_REPOSITORY,
       eventName: env.GITHUB_EVENT_NAME,
       actor: env.GITHUB_ACTOR,
+      triggeringActor: env.GITHUB_TRIGGERING_ACTOR,
       pusher: env.EVENT_PUSHER ?? "",
       ref: env.GITHUB_REF,
       sha: env.GITHUB_SHA,
@@ -212,6 +222,7 @@ function main(argv) {
   if (command === "recheck" && argv.length === 1) {
     return recheckRelease({
       tag,
+      triggeringActor: env.GITHUB_TRIGGERING_ACTOR,
       sourceSha: env.SOURCE_SHA,
       tagSha,
       compareStatus: state.compareStatus,

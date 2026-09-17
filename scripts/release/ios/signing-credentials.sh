@@ -31,6 +31,7 @@ require_credentials() {
   printf '%s' "$APP_STORE_CONNECT_ISSUER_ID" | grep -Eq '^[0-9a-fA-F-]{36}$' ||
     fail "APP_STORE_CONNECT_ISSUER_ID must be the App Store Connect issuer UUID."
   case "$APP_STORE_CONNECT_PRIVATE_KEY" in
+    *'\n'*) fail "APP_STORE_CONNECT_PRIVATE_KEY must use real newlines, not literal \\n escapes (altool reads the .p8 as-is)." ;;
     "-----BEGIN PRIVATE"*) ;;
     *) fail "APP_STORE_CONNECT_PRIVATE_KEY must be the full .p8 PEM." ;;
   esac

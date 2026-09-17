@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Snapshot the GitHub state that authorizes (or blocks) an iOS publication:
-# the tag ref (+ annotated tag object), compare <commit>...main, and whether a
+# the tag ref (+ annotated tag object), compare <commit>...<refs/heads/main sha>, and whether a
 # GitHub Release already exists. Read-only; bash 3.2 compatible.
 #
 # usage: github-release-state.sh <tag> <commit-to-compare> <out-dir>
@@ -59,7 +59,13 @@ if [ "$ref_state" = "present" ]; then
   fi
 fi
 
-gh api "repos/$repo/compare/${commit}...main" --jq .status > "$out/compare-status.txt"
+# Compare against the resolved refs/heads/main commit, never the bare name "main" (a tag could shadow it).
+main_sha="$(gh api "repos/$repo/git/ref/heads/main" --jq .object.sha)"
+if ! printf '%s' "$main_sha" | grep -Eq '^[0-9a-f]{40}$'; then
+  echo "::error::Protected main does not resolve." >&2
+  exit 1
+fi
+gh api "repos/$repo/compare/${commit}...${main_sha}" --jq .status > "$out/compare-status.txt"
 api_get "repos/$repo/releases/tags/$tag" "$out/release.json" > "$out/release-state.txt"
 rm -f "$out/release.json"
 echo "tag=$ref_state compare=$(cat "$out/compare-status.txt") release=$(cat "$out/release-state.txt")"

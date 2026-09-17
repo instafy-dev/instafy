@@ -65,7 +65,8 @@ test("only bot tag pushes and main dispatch (tag, dry_run, reconcile_only) trigg
 
 test("least privilege: read-only default, secrets and environments only where needed", () => {
   assert.match(header(), /\npermissions:\n {2}contents: read\n/u);
-  assert.match(header(), /\nconcurrency: \{ group: ios-release, cancel-in-progress: false \}\n/u);
+  // Dry runs queue in their own group so they can never replace a pending publication.
+  assert.match(header(), /\nconcurrency: \{ group: "ios-release-\$\{\{ github\.event_name == 'workflow_dispatch' && inputs\.dry_run && 'dry-run' \|\| 'publish' \}\}", cancel-in-progress: false \}\n/u);
   assert.match(header(), /\ndefaults:\n {2}run:\n {4}shell: bash\n/u);
   assert.doesNotMatch(header(), /secrets\.|environment:/u);
   const all = jobs();
@@ -138,10 +139,12 @@ test("authorize proves actor, pusher, exact main, version and one-shot before an
   assertOrdered(authorize, [
     '[ "$GITHUB_REPOSITORY" = "instafy-dev/instafy" ]',
     '[ "$GITHUB_ACTOR" = "instafy-bot" ]',
+    '[ "$GITHUB_TRIGGERING_ACTOR" = "instafy-bot" ]',
     '[ "$EVENT_PUSHER" = "instafy-bot" ]',
     '[ "$GITHUB_REF" = "refs/heads/main" ]',
     "git/ref/tags/$tag",
-    "compare/${source_sha}...main",
+    "git/ref/heads/main",
+    "compare/${source_sha}...${main_sha}",
     "identical|ahead",
     "uses: actions/checkout@",
     'test "$(git rev-parse HEAD)" = "$SOURCE_SHA"',
@@ -150,7 +153,42 @@ test("authorize proves actor, pusher, exact main, version and one-shot before an
     "verify-release-tag.mjs authorize",
   ]);
   const state = fs.readFileSync(path.join(laneDirectory, "github-release-state.sh"), "utf8");
-  assertOrdered(state, ["git/ref/tags/$tag", "git/tags/$object_sha", "compare/${commit}...main", "releases/tags/$tag"]);
+  assertOrdered(state, ["git/ref/tags/$tag", "git/tags/$object_sha", "git/ref/heads/main", "compare/${commit}...${main_sha}", "releases/tags/$tag"]);
+  assert.doesNotMatch(source + state, /\.\.\.main\b/u, "compare against the resolved refs/heads/main commit only");
+});
+
+test("re-runs cannot bypass the bot gate: every secret job re-checks the triggering actor first", () => {
+  const all = jobs();
+  const verify = fs.readFileSync(path.join(laneDirectory, "verify-release-tag.mjs"), "utf8");
+  assert.match(verify, /actor: env\.GITHUB_ACTOR,\n\s+triggeringActor: env\.GITHUB_TRIGGERING_ACTOR,/u);
+  assert.match(verify, /return recheckRelease\(\{\n\s+tag,\n\s+triggeringActor: env\.GITHUB_TRIGGERING_ACTOR,/u);
+  for (const name of ENVIRONMENT_JOBS) {
+    const jobSteps = steps(all.get(name));
+    const gate = jobSteps.findIndex((step) => step.includes('[ "$GITHUB_TRIGGERING_ACTOR" = "instafy-bot" ] || { echo "::error::Only instafy-bot may run or re-run'));
+    assert.ok(gate >= 0, `${name} re-checks github.triggering_actor`);
+    const firstSecret = jobSteps.findIndex((step) => step.includes("secrets."));
+    const firstRun = jobSteps.findIndex((step) => /^ {8}run: /mu.test(step));
+    assert.equal(gate, firstRun, `${name}: the trigger gate is the first run step`);
+    assert.ok(firstSecret === -1 || gate <= firstSecret, `${name}: the trigger gate precedes every secret`);
+    assert.match(jobSteps[gate], /^ {8}run: \|\n {10}set -euo pipefail\n {10}\[ "\$GITHUB_TRIGGERING_ACTOR" = "instafy-bot" \]/mu, name);
+  }
+});
+
+test("trust anchor capture fails closed before any signing work", () => {
+  const build = jobs().get("build");
+  assert.doesNotMatch(build, /echo "[A-Z_]+=\$\(/u, "no exit-code-swallowing command substitution inside echo");
+  assert.doesNotMatch(build, /test "\$\(node /u, "no command substitution inside test");
+  assertOrdered(build, [
+    'trust_key_sha256="$(node scripts/release/ios/verify-trust-anchor.mjs key)"',
+    '[[ "$trust_key_sha256" =~ ^[0-9a-f]{64}$ ]]',
+    'echo "TRUST_KEY_SHA256=$trust_key_sha256" >> "$GITHUB_ENV"',
+    '[[ "$TRUST_KEY_SHA256" =~ ^[0-9a-f]{64}$ ]]',
+    'test "$RESOLVED_KEY_SHA256" = "$TRUST_KEY_SHA256"',
+    'synced_key_sha256="$(node scripts/release/ios/verify-trust-anchor.mjs config',
+    'test "$synced_key_sha256" = "$TRUST_KEY_SHA256"',
+    "signing-credentials.sh keychain",
+  ]);
+  assert.match(jobs().get("reconcile_only"), /TRUST_KEY_SHA256="\$\(node scripts\/release\/ios\/verify-trust-anchor\.mjs key\)"\n\s+\[\[ "\$TRUST_KEY_SHA256" =~ \^\[0-9a-f\]\{64\}\$ \]\]/u);
 });
 
 test("build signs and verifies but never publishes; publication is one upload then Release last", () => {
@@ -220,7 +258,7 @@ test("every run step is strict and every job ends with a step summary", () => {
       }
     }
   }
-  assert.ok(source.split("\n").length <= 540, "workflow stays lean");
+  assert.ok(source.split("\n").length <= 560, "workflow stays lean");
 });
 
 test("lane shell stays bash 3.2 safe and syntactically valid", () => {
