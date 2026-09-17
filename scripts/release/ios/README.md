@@ -80,6 +80,15 @@ Workflow files are read from the tag's own commit. The environment policy trusts
 ## Environment `ios-release`
 
 Deployment policy: selected branches and tags, exactly `ios-v*` (tag) and `main` (branch).
+The policy matches the run's ref, not its event: a tag push and a recovery or `reconcile_only`
+dispatch with `--ref <tag>` both run on `refs/tags/ios-v*` and pass the same tag entry. If
+either is rejected at the environment gate the job fails closed before any secret step; fix
+the policy (do not widen it beyond these two entries).
+
+The keychain step resolves `IOS_DIST_CERT_SHA256` by exporting every certificate in the
+isolated keychain and selecting the one whose SHA-1 equals the `find-identity` identity
+(`identity-certificate.mjs`), so intermediates or same-named certificates in the p12 do not
+block it. The first dry run should show the step succeeding before App Store Connect is called.
 
 | Secret | Purpose |
 | --- | --- |
