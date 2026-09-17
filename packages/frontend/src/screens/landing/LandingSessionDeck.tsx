@@ -1,6 +1,6 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, type ReactNode, type Ref } from "react";
 import { Link } from "react-router-dom";
-import { OctoMark } from "../../components/OctoMark";
+import { OctoMark, usePrefersReducedMotion } from "../../components/OctoMark";
 
 export interface SessionScenario {
   id: string;
@@ -11,6 +11,9 @@ export interface SessionScenario {
   response: string;
   doneLine: string;
   workingAgent: string;
+  // The scenario's own agent, named on the purple presence cursor in the hero
+  // artwork so the cursor follows the active scenario (Octo keeps its own).
+  presenceAgent: string;
   workingLine: string;
   presenceLine: string;
   artifact: "diff" | "ledger" | "browser";
@@ -26,6 +29,7 @@ export const SESSION_SCENARIOS: SessionScenario[] = [
     response: "The checkout code is in its own package. The existing routes use it, and the changes are ready to review.",
     doneLine: "Checkout package extracted",
     workingAgent: "Octo",
+    presenceAgent: "Canary",
     workingLine: "Checking the payment flow",
     presenceLine: "Ada and Kim",
     artifact: "diff",
@@ -39,6 +43,7 @@ export const SESSION_SCENARIOS: SessionScenario[] = [
     response: "I've matched 214 transactions to the bank statement. Three need your review; I've marked them in the ledger.",
     doneLine: "214 transactions reconciled",
     workingAgent: "Octo",
+    presenceAgent: "Ledger",
     workingLine: "Preparing the month-end summary",
     presenceLine: "Ada and Kim",
     artifact: "ledger",
@@ -52,11 +57,18 @@ export const SESSION_SCENARIOS: SessionScenario[] = [
     response: "The pricing page is ready to look through. The plans share one layout, with a clear next step for each team.",
     doneLine: "Pricing page created",
     workingAgent: "Octo",
+    presenceAgent: "Pixel",
     workingLine: "Checking the mobile layout",
     presenceLine: "Ada and Kim",
     artifact: "browser",
   },
 ];
+
+// Scenarios advance on their own at a reading pace. Rotation waits while a
+// visitor is engaging with the deck (pointer over it or focus inside it) and
+// holds for a while after a manual selection so the choice is not overridden.
+export const ROTATE_INTERVAL_MS = 8_000;
+export const MANUAL_HOLD_MS = 20_000;
 
 const FOCUS_STYLE = "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary-500 focus-visible:ring-offset-2 dark:focus-visible:ring-offset-slate-900";
 
@@ -137,26 +149,100 @@ function SitePreview() {
   );
 }
 
+// Every scenario's copy is laid out in the same grid cell so the deck keeps
+// the height of its tallest scenario: rotation swaps visibility, never layout.
+function StackedCopy({
+  active,
+  className,
+  render,
+}: {
+  active: number;
+  className?: string;
+  render: (scenario: SessionScenario) => ReactNode;
+}) {
+  return (
+    <div className={["grid", className ?? ""].filter(Boolean).join(" ")}>
+      {SESSION_SCENARIOS.map((scenario, index) => (
+        <div
+          key={scenario.id}
+          aria-hidden={index !== active ? true : undefined}
+          data-scenario-copy={index === active ? "active" : "inactive"}
+          className={`[grid-area:1/1] ${index === active ? "" : "invisible"}`}
+        >
+          {render(scenario)}
+        </div>
+      ))}
+    </div>
+  );
+}
+
 interface LandingSessionDeckProps {
   joinToFor: (scenario: SessionScenario) => string;
   className?: string;
   onScenarioChange?: (scenario: SessionScenario) => void;
+  // The deck root, so the hero can keep presence cursors from sitting behind it.
+  ref?: Ref<HTMLDivElement>;
 }
 
-export function LandingSessionDeck({ joinToFor, className, onScenarioChange }: LandingSessionDeckProps) {
+export function LandingSessionDeck({ joinToFor, className, onScenarioChange, ref }: LandingSessionDeckProps) {
   const [active, setActive] = useState(0);
   const [motionEnabled, setMotionEnabled] = useState(true);
   const [isVisible, setIsVisible] = useState(false);
   const [pageVisible, setPageVisible] = useState(() => typeof document === "undefined" || document.visibilityState !== "hidden");
+  const [pointerInside, setPointerInside] = useState(false);
+  const [focusInside, setFocusInside] = useState(false);
+  const [manualHold, setManualHold] = useState(false);
+  const prefersReducedMotion = usePrefersReducedMotion();
   const frameRef = useRef<HTMLDivElement | null>(null);
+  const holdTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // Browsers focus a button on mouse or touch click, so focus alone cannot
+  // tell a keyboard visitor from a pointer one. Only keyboard-originated focus
+  // holds rotation; pointer focus is already covered while the pointer is
+  // inside, and the manual hold covers the choice itself.
+  const pointerFocusRef = useRef(false);
   const onScenarioChangeRef = useRef(onScenarioChange);
   onScenarioChangeRef.current = onScenarioChange;
   const scenario = SESSION_SCENARIOS[active];
   const isWorking = motionEnabled && isVisible && pageVisible;
+  const rotating = isWorking && !prefersReducedMotion && !pointerInside && !focusInside && !manualHold;
 
   useEffect(() => {
     onScenarioChangeRef.current?.(scenario);
   }, [scenario]);
+
+  // Any change to the rotation gate restarts a full countdown, so a scenario
+  // that just became eligible is never swapped moments later.
+  useEffect(() => {
+    if (!rotating) return;
+    const timer = setInterval(() => {
+      setActive((current) => (current + 1) % SESSION_SCENARIOS.length);
+    }, ROTATE_INTERVAL_MS);
+    return () => clearInterval(timer);
+  }, [rotating]);
+
+  useEffect(() => () => {
+    if (holdTimerRef.current) clearTimeout(holdTimerRef.current);
+  }, []);
+
+  // Any key press anywhere (including a Tab from outside the deck) means the
+  // next focus change is keyboard-driven.
+  useEffect(() => {
+    const markKeyboard = () => {
+      pointerFocusRef.current = false;
+    };
+    document.addEventListener("keydown", markKeyboard, true);
+    return () => document.removeEventListener("keydown", markKeyboard, true);
+  }, []);
+
+  const selectScenario = (index: number) => {
+    setActive(index);
+    setManualHold(true);
+    if (holdTimerRef.current) clearTimeout(holdTimerRef.current);
+    holdTimerRef.current = setTimeout(() => {
+      holdTimerRef.current = null;
+      setManualHold(false);
+    }, MANUAL_HOLD_MS);
+  };
 
   useEffect(() => {
     const node = frameRef.current;
@@ -179,14 +265,30 @@ export function LandingSessionDeck({ joinToFor, className, onScenarioChange }: L
   }, []);
 
   return (
-    <div className={["w-full", className ?? ""].filter(Boolean).join(" ")}>
+    <div
+      ref={ref}
+      className={["w-full", className ?? ""].filter(Boolean).join(" ")}
+      data-testid="landing-session-deck-root"
+      data-rotating={rotating ? "true" : "false"}
+      onPointerEnter={() => setPointerInside(true)}
+      onPointerLeave={() => setPointerInside(false)}
+      onPointerDown={() => {
+        pointerFocusRef.current = true;
+      }}
+      onFocus={() => {
+        if (!pointerFocusRef.current) setFocusInside(true);
+      }}
+      onBlur={(event) => {
+        if (!event.currentTarget.contains(event.relatedTarget as Node | null)) setFocusInside(false);
+      }}
+    >
       <div role="group" aria-label="Choose a workspace example" className="mb-5 flex flex-wrap items-center justify-center gap-2">
         {SESSION_SCENARIOS.map((example, index) => (
           <button
             key={example.id}
             type="button"
             aria-pressed={active === index}
-            onClick={() => setActive(index)}
+            onClick={() => selectScenario(index)}
             className={`rounded-full border px-4 py-2.5 text-sm font-medium transition-colors ${FOCUS_STYLE} ${active === index
               ? "border-slate-900 bg-slate-900 text-white dark:border-slate-200 dark:bg-slate-100 dark:text-slate-900"
               : "border-slate-200 bg-transparent text-slate-600 hover:border-slate-400 hover:text-slate-900 dark:border-slate-700 dark:text-slate-300 dark:hover:border-slate-500 dark:hover:text-white"}`}
@@ -219,6 +321,7 @@ export function LandingSessionDeck({ joinToFor, className, onScenarioChange }: L
               <p className="text-xs font-medium text-slate-500 dark:text-slate-400">IN THIS SPACE</p>
               <p className="mt-3 text-sm text-slate-600 dark:text-slate-300">{scenario.presenceLine}</p>
               <p className="mt-1 text-sm text-slate-500 dark:text-slate-400">Octo</p>
+              <p className="mt-1 text-sm text-slate-500 dark:text-slate-400">{scenario.presenceAgent}</p>
             </div>
           </aside>
 
@@ -231,7 +334,11 @@ export function LandingSessionDeck({ joinToFor, className, onScenarioChange }: L
               <span aria-hidden="true" className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-slate-100 text-xs font-semibold text-slate-600 dark:bg-slate-800 dark:text-slate-300">AD</span>
               <div className="min-w-0">
                 <p className="text-sm font-semibold text-slate-800 dark:text-slate-200">Ada</p>
-                <p className="mt-2 text-sm leading-6 text-slate-600 dark:text-slate-300">{scenario.prompt}</p>
+                <StackedCopy
+                  active={active}
+                  className="mt-2"
+                  render={(entry) => <p className="text-sm leading-6 text-slate-600 dark:text-slate-300">{entry.prompt}</p>}
+                />
               </div>
             </div>
             <div className="mt-7 flex items-start gap-3">
@@ -243,8 +350,16 @@ export function LandingSessionDeck({ joinToFor, className, onScenarioChange }: L
                   <p className="text-sm font-semibold text-slate-800 dark:text-slate-200">Octo</p>
                   <span className="rounded-md bg-slate-100 px-1.5 py-0.5 text-xs text-slate-600 dark:bg-slate-800 dark:text-slate-400">Agent</span>
                 </div>
-                <p className="mt-2 text-sm leading-6 text-slate-600 dark:text-slate-300">{scenario.response}</p>
-                <p className="mt-5 border-l-2 border-slate-200 pl-3 text-sm text-slate-500 dark:border-slate-700 dark:text-slate-400">{scenario.workingLine}…</p>
+                <StackedCopy
+                  active={active}
+                  className="mt-2"
+                  render={(entry) => (
+                    <>
+                      <p className="text-sm leading-6 text-slate-600 dark:text-slate-300">{entry.response}</p>
+                      <p className="mt-5 border-l-2 border-slate-200 pl-3 text-sm text-slate-500 dark:border-slate-700 dark:text-slate-400">{entry.workingLine}…</p>
+                    </>
+                  )}
+                />
               </div>
             </div>
             <div className="mt-8 flex items-center justify-between gap-3 border-t border-slate-100 pt-4 dark:border-slate-800">
@@ -267,7 +382,10 @@ export function LandingSessionDeck({ joinToFor, className, onScenarioChange }: L
               <span>WORKSPACE OUTPUT</span>
               <span className="ml-auto rounded-md border border-slate-200 bg-white px-2 py-1 normal-case dark:border-slate-700 dark:bg-slate-900">Saved</span>
             </div>
-            {scenario.artifact === "diff" ? <DiffPreview /> : scenario.artifact === "ledger" ? <LedgerPreview /> : <SitePreview />}
+            <StackedCopy
+              active={active}
+              render={(entry) => (entry.artifact === "diff" ? <DiffPreview /> : entry.artifact === "ledger" ? <LedgerPreview /> : <SitePreview />)}
+            />
             <div className="mt-4 flex items-start gap-2 text-sm text-slate-600 dark:text-slate-300"><Checkmark /><p>{scenario.doneLine}</p></div>
             <p className="mt-2 pl-6 text-xs leading-5 text-slate-500 dark:text-slate-400">Real files, ready for your review.</p>
           </section>
