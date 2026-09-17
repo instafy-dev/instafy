@@ -266,9 +266,7 @@ jobs:
             { echo "::error::vars.CAPACITOR_LIVE_UPDATE_PUBLIC_KEY is empty; a Play build must embed the OTA trust key."; exit 1; }
           # Refuse any non-canonical byte form of the key, so the resolver's digest,
           # the embedded config and the receipt all equal the OTA authority's digest.
-          canonical="$(node scripts/release/android/trust-key.mjs)"
-          resolved="$(grep -A1 '^public_key_sha256<<' "$GITHUB_OUTPUT" | tail -n 1)"
-          [[ "$resolved" == "$canonical" ]] || { echo "::error::The resolved OTA trust key is not the canonical SPKI PEM."; exit 1; }
+          canonical="$(node scripts/release/android/trust-key.mjs --resolver-output "$GITHUB_OUTPUT")"
           echo "canonical_sha256=$canonical" >> "$GITHUB_OUTPUT"
 
       - name: Seed the browser-safe hosted Capacitor environment

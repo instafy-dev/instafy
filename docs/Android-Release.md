@@ -79,9 +79,18 @@ The refused forms include CRLF, other line wrapping and PKCS#1 `RSA PUBLIC KEY` 
 - **Interrupted `gh release create`:** this can leave a draft release, and a draft is invisible
   to `releases/tags/<tag>`. `release-refs.sh recheck` lists drafts and fails closed while one
   exists. Delete the draft, then re-run.
+- **Tag run replaced while pending:** the `release` concurrency group keeps one running and one
+  pending run; a third tag push makes GitHub cancel the pending one without starting it. The
+  tag stays, no Play or GitHub Release write happened, and the recheck still passes, so re-run
+  that cancelled run with the bot token (`gh run rerun <id>`) once the group is idle. This is a
+  GitHub concurrency limit, not something the workflow can queue around.
 - **Anything after a successful publication** needs a new `versionCode` and a new tag.
 
 ## Contract notes for the private train
+
+- The tag-push handoff must push one `android-v*` tag at a time and wait for that run to
+  conclude before pushing the next (see Recovery for a run replaced while pending). The group is
+  deliberately not per tag: releases stay serialized against the one Play internal track.
 
 - Key verification on `destination.aab.sha256` and `version`. `destination.play.stateSha256` is
   the post-publish observation, not the build preflight baseline.

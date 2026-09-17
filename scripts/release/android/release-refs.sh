@@ -42,6 +42,38 @@ peel_tag() {
   echo "$object_sha"
 }
 
+# Fails if a draft release for <tag> exists. GitHub lists releases by
+# created_at, newest first, and a release's created_at is never earlier than
+# the date of the commit it targets (it is that commit's date, or the draft's
+# creation time). So paging stops at the first page that is short or holds no
+# release created at/after the earlier of the source commit's author and
+# committer dates, instead of walking every release on each recheck. A
+# backdated commit only makes the scan longer.
+find_draft() {
+  local tag="$1" source_sha="$2" since page rows row_count recent draft_tags
+  since="$(gh api "repos/${repository}/commits/${source_sha}" --jq '[.commit.author.date, .commit.committer.date] | min')" ||
+    fail "Could not read the commit date of ${source_sha}."
+  [[ "$since" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$ ]] ||
+    fail "Unexpected commit date for ${source_sha}."
+  page=1
+  while :; do
+    rows="$(gh api "repos/${repository}/releases?per_page=100&page=${page}" \
+      --jq "length, ([.[] | select(.created_at >= \"${since}\")] | length), (.[] | select(.draft) | .tag_name)")" ||
+      fail "Could not list draft releases for ${tag}."
+    row_count="$(sed -n 1p <<< "$rows")"
+    recent="$(sed -n 2p <<< "$rows")"
+    draft_tags="$(sed -n '3,$p' <<< "$rows")"
+    [[ "$row_count" =~ ^[0-9]+$ && "$recent" =~ ^[0-9]+$ ]] || fail "Could not list draft releases for ${tag}."
+    if [[ -n "$draft_tags" ]] && grep -Fxq -- "$tag" <<< "$draft_tags"; then
+      fail "A draft GitHub Release for ${tag} exists (interrupted publication); delete the draft, then re-run."
+    fi
+    if ((row_count < 100 || recent == 0)); then
+      return 0
+    fi
+    page=$((page + 1))
+  done
+}
+
 recheck() {
   local tag="$1" source_sha="$2" peeled status err_file
   [[ "$tag" =~ ^android-v([0-9A-Za-z][0-9A-Za-z._-]{0,63})-([1-9][0-9]{0,9})$ ]] || fail "Invalid Android release tag."
@@ -59,11 +91,7 @@ recheck() {
     fail "A GitHub Release for ${tag} already exists; this tag was already published."
   fi
   grep -q 'HTTP 404' "$err_file" || fail "Could not prove that no GitHub Release exists for ${tag}."
-  drafts="$(gh api "repos/${repository}/releases?per_page=100" --paginate --jq '.[] | select(.draft) | .tag_name')" ||
-    fail "Could not list draft releases for ${tag}."
-  if grep -Fxq -- "$tag" <<< "$drafts"; then
-    fail "A draft GitHub Release for ${tag} exists (interrupted publication); delete the draft, then re-run."
-  fi
+  find_draft "$tag" "$source_sha"
   echo "[android-release] ${tag} -> ${source_sha} on main (${status}); no GitHub Release yet."
 }
 
