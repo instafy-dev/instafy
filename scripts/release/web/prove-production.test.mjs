@@ -25,7 +25,7 @@ test("proof converges only on the exact release and a healthy home and install p
   let metadataCalls = 0;
   const fetchImpl = async (url) => {
     calls.push(String(url));
-    if (String(url).includes("instafy-build.json")) {
+    if (new URL(String(url)).pathname === "/instafy-build.json") {
       metadataCalls += 1;
       return response(true, { schemaVersion: 2, releaseId: metadataCalls < 2 ? "d".repeat(64) : RELEASE });
     }
@@ -33,13 +33,13 @@ test("proof converges only on the exact release and a healthy home and install p
   };
   assert.equal(await proveProduction({ base, releaseId: RELEASE, runId: "7", fetchImpl, delayMs: 0, log: () => {} }), true);
   assert.ok(calls.some((url) => url === "https://app.example.invalid/instafy-build.json?release=7"));
-  assert.ok(calls.includes("https://app.example.invalid/install"));
+  assert.ok(calls.some((url) => url === "https://app.example.invalid/install"));
   assert.equal(await servedReleaseId({ base, runId: "7", fetchImpl }), RELEASE);
 });
 
 test("proof fails when production never converges or the smoke fails", async () => {
   const stale = async () => response(true, { schemaVersion: 2, releaseId: "d".repeat(64) });
   await assert.rejects(proveProduction({ base, releaseId: RELEASE, fetchImpl: stale, attempts: 2, delayMs: 0, log: () => {} }), /did not serve/u);
-  const broken = async (url) => (String(url).includes("instafy-build.json") ? response(true, { schemaVersion: 2, releaseId: RELEASE }) : response(false));
+  const broken = async (url) => (new URL(String(url)).pathname === "/instafy-build.json" ? response(true, { schemaVersion: 2, releaseId: RELEASE }) : response(false));
   await assert.rejects(proveProduction({ base, releaseId: RELEASE, fetchImpl: broken, attempts: 1, delayMs: 0, log: () => {} }), /did not serve/u);
 });
