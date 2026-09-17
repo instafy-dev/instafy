@@ -51,10 +51,16 @@ cached rows. Secret and guest directories withhold protected records after a fai
 and show Retry rather than an empty-state claim. Switching account or space isolates loading
 results and closes space-specific editors.
 
-The landing workspace is an explicitly labeled interactive example. Visitors choose a scenario;
-it does not rotate automatically or create a real session. Octo's existing thinking animation
-appears only beside the example's active work. Motion can be paused and stops when the example
-is offscreen, the browser tab is hidden, or reduced motion is enabled. Header marks remain static.
+The hero sits on the tentacle artwork with its crew presence cursors (Ada, Kim, Octo, and the
+purple agent label that follows the active scenario), fading into the page below. Cursors that
+would sit partly behind the example card are left out at that viewport size. The landing
+workspace is an explicitly labeled interactive example that never creates a real session.
+Its three scenarios advance on their own every 8 seconds. Rotation waits while the pointer is
+over the example or focus is inside it, holds for 20 seconds after a visitor picks a scenario,
+stops while the pause control is pressed, and never runs under reduced motion, offscreen, or in
+a hidden browser tab. Picking a scenario always works, and rotation never moves focus or shifts
+the layout. Octo's existing thinking animation appears only beside the example's active work and
+follows the same pause rules. Header marks remain static.
 
 ## Studio Surface
 - **Assistant**: conversational control of the workspace, runs, and file changes.

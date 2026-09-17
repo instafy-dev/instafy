@@ -89,7 +89,7 @@ function readFalse(): boolean {
   return false;
 }
 
-function usePrefersReducedMotion(enabled: boolean): boolean {
+export function usePrefersReducedMotion(enabled = true): boolean {
   return useSyncExternalStore(
     enabled ? subscribeToReducedMotion : subscribeToNothing,
     enabled ? readPrefersReducedMotion : readFalse,

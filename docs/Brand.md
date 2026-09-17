@@ -99,10 +99,20 @@ loading indicators local to their content instead of replacing the full screen. 
 pulsing activity indicators, and status-text shimmer stop under reduced-motion preferences;
 their static label or icon remains visible. Loading text must remain legible in both themes.
 
-A clearly labeled landing-page workspace example may use the same thinking
-state beside its simulated active work. Keep one example visible at a time,
-provide a motion pause control, and suspend motion offscreen and in hidden
-browser tabs. The example does not animate the header logo or completed output.
+The landing hero keeps the tentacle artwork (paired light and dark renders of
+one composition) behind the headline, with presence cursors pinned to the arms
+in the crew colors: Ada pink, Kim green, Octo orange, and the purple agent
+whose label follows the active scenario. A cursor that would clip the scene
+edge or sit partly behind the workspace example is left out rather than
+clamped or cut. A clearly labeled workspace example
+below the headline may use the same thinking state beside its simulated active
+work. Keep one scenario visible at a time and let the deck rotate gently: one
+scenario every 8 seconds, waiting while the pointer or focus is on the deck,
+holding 20 seconds after a manual choice, and honoring the pause control. Under
+reduced motion the deck does not rotate at all, and both rotation and the
+thinking state stop offscreen and in hidden browser tabs. Rotation must never
+move focus or shift layout. The example does not animate the header logo or
+completed output.
 
 ## Scale, clear space, and wordmark
 
