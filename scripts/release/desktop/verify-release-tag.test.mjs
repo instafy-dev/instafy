@@ -90,7 +90,7 @@ test("a dispatch runs only for a tag at the main head it runs from", () => {
   assert.equal(resolveSource(dispatched).sourceSha, SHA);
   assert.equal(resolveSource({ ...dispatched, mode: "dry-run" }).sourceSha, SHA);
   for (const mode of ["release", "dry-run"]) {
-    assert.throws(() => resolveSource({ ...dispatched, mode, sha: OTHER }), /not to the main head/u);
+    assert.throws(() => resolveSource({ ...dispatched, mode, sha: OTHER }), /not to the main head.*re-run the tag's own push run.*new version/u);
   }
 });
 
