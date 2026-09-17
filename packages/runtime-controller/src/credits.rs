@@ -2614,11 +2614,14 @@ mod tests {
             },
         );
 
+        // Luna list-price defaults (USD micros per 1K tokens: 200 / 20 / 1200):
+        // 1,000 input = 200, 500 cached = 10, 250 output = 300, total 510 micros,
+        // which rounds up to one billing unit at 1,000 units per USD.
         assert_eq!(charge.reserve_units, 1);
-        assert_eq!(charge.input_cost_usd_micros, 250);
-        assert_eq!(charge.cached_input_cost_usd_micros, 13);
-        assert_eq!(charge.output_cost_usd_micros, 500);
-        assert_eq!(charge.total_cost_usd_micros, 763);
+        assert_eq!(charge.input_cost_usd_micros, 200);
+        assert_eq!(charge.cached_input_cost_usd_micros, 10);
+        assert_eq!(charge.output_cost_usd_micros, 300);
+        assert_eq!(charge.total_cost_usd_micros, 510);
         assert_eq!(charge.charged_units, 1);
         assert_eq!(charge.adjustment_units, 0);
     }

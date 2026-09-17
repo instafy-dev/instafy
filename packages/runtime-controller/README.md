@@ -235,7 +235,9 @@ Key environment variables (see `AppConfig::from_env` for defaults):
 - `WORKSPACE_ROOT` — runtime/controller root directory containing per-project workspaces. In local-canonical desktop mode, the source-of-truth folder can live outside this hosted layout. In git-canonical hosted mode, this root holds the materialized working copies.
 - `PROXY_BASE_URL`/`PROXY_SIGNING_SECRET` — optional AI proxy envelope support.
 - `MANAGED_AI_ENABLED` — enables the platform-managed AI lane when the proxy is available with static credentials.
-- `MANAGED_AI_MODEL_ID` — upstream model id used for managed AI turns (defaults to `gpt-5.6-sol`).
+- `MANAGED_AI_MODEL_ID` sets the upstream model id used for managed AI turns (defaults to `gpt-5.6-luna`; bring-your-own ChatGPT logins and API keys default to `gpt-5.6-sol` separately).
+- `MANAGED_AI_MODEL_LABEL` sets the managed model name shown in the UI (defaults to `GPT-5.6 Luna`).
+- `MANAGED_AI_INPUT_USD_MICROS_PER_1K`, `MANAGED_AI_CACHED_INPUT_USD_MICROS_PER_1K`, `MANAGED_AI_OUTPUT_USD_MICROS_PER_1K` set the managed AI rates users are charged (defaults `200` / `20` / `1200`, the Luna list prices of `$0.20` / `$0.02` / `$1.20` per 1M tokens).
 - `MANAGED_AI_STARTUP_CHECK` — when `true`, controller boot fails unless `PROXY_BASE_URL/healthz` reports `requiresCredential=false` (that is, the proxy has static credentials such as `OPENAI_API_KEY` or `auth.json`). Defaults to on outside `DEV_MODE`.
 - Shared Browser managed TURN (optional; unset the TURN values to disable):
   - `CONTROLLER_BROWSER_TURN_URLS` — comma-separated `turn:`/`turns:` URLs advertised to WebRTC clients (maximum 4; credentials must not be embedded in a URL).

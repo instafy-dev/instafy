@@ -20,7 +20,11 @@ use tokio_postgres_rustls::MakeRustlsConnect;
 use tracing::{info, warn};
 
 use crate::jwks;
-use crate::model_defaults::{default_managed_ai_model_id, default_managed_ai_model_label};
+use crate::model_defaults::{
+    default_managed_ai_model_id, default_managed_ai_model_label,
+    DEFAULT_MANAGED_AI_CACHED_INPUT_USD_MICROS_PER_1K, DEFAULT_MANAGED_AI_INPUT_USD_MICROS_PER_1K,
+    DEFAULT_MANAGED_AI_OUTPUT_USD_MICROS_PER_1K,
+};
 
 /// Supabase-managed Postgres endpoints (including the shared session pooler)
 /// present certificate chains rooted in Supabase's own authority rather than
@@ -863,6 +867,8 @@ impl AppConfig {
             .ok()
             .and_then(|raw| raw.parse::<i32>().ok())
             .unwrap_or(20);
+        // Managed "Instafy AI" tier (operator-paid): model and list prices default
+        // to Luna. BYO credential defaults live in credentials.rs and stay on Sol.
         let managed_ai_model_id = read_first_env(&["MANAGED_AI_MODEL_ID"])
             .unwrap_or_else(|| default_managed_ai_model_id().to_string());
         let managed_ai_model_label = read_first_env(&["MANAGED_AI_MODEL_LABEL"])
@@ -871,17 +877,17 @@ impl AppConfig {
             std::env::var("MANAGED_AI_INPUT_USD_MICROS_PER_1K")
                 .ok()
                 .and_then(|raw| raw.parse::<i64>().ok())
-                .unwrap_or(250);
+                .unwrap_or(DEFAULT_MANAGED_AI_INPUT_USD_MICROS_PER_1K);
         let managed_ai_cached_input_usd_micros_per_1k =
             std::env::var("MANAGED_AI_CACHED_INPUT_USD_MICROS_PER_1K")
                 .ok()
                 .and_then(|raw| raw.parse::<i64>().ok())
-                .unwrap_or(25);
+                .unwrap_or(DEFAULT_MANAGED_AI_CACHED_INPUT_USD_MICROS_PER_1K);
         let managed_ai_output_usd_micros_per_1k =
             std::env::var("MANAGED_AI_OUTPUT_USD_MICROS_PER_1K")
                 .ok()
                 .and_then(|raw| raw.parse::<i64>().ok())
-                .unwrap_or(2_000);
+                .unwrap_or(DEFAULT_MANAGED_AI_OUTPUT_USD_MICROS_PER_1K);
 
         let tunnel_broker_hook_secret = std::env::var("TUNNEL_BROKER_HOOK_SECRET")
             .ok()

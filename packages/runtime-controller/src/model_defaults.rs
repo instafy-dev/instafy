@@ -1,16 +1,44 @@
 pub const DEFAULT_MANAGED_AI_PROVIDER_ID: &str = "openai";
+
+/// Default model for bring-your-own OpenAI credentials: API keys without a
+/// provider hint and ChatGPT logins (`codex_auth_json`). Those users pay by
+/// subscription or their own key, so the stronger Sol tier is the right default.
+/// This is also the floor that stale ids are raised to (`is_stale_openai_model`).
 pub const DEFAULT_OPENAI_MODEL_ID: &str = "gpt-5.6-sol";
-pub const DEFAULT_OPENAI_MODEL_LABEL: &str = "GPT-5.6 Sol";
+
+/// Default model for the operator-paid managed "Instafy AI" tier (credits).
+/// Luna is priced at $0.20 / $0.02 cached / $1.20 per 1M tokens with a 1.05M
+/// context window (public price pages, 2026-09-17), versus Sol at $5 / $0.50 /
+/// $30. Managed turns are charged to the shared team balance, so the cheaper
+/// model is the default; operators override it with `MANAGED_AI_MODEL_ID`.
+pub const DEFAULT_MANAGED_AI_MODEL_ID: &str = "gpt-5.6-luna";
+pub const DEFAULT_MANAGED_AI_MODEL_LABEL: &str = "GPT-5.6 Luna";
+
+/// Managed-tier list prices in USD micros per 1K tokens, matching
+/// `DEFAULT_MANAGED_AI_MODEL_ID`. 200 micros per 1K tokens is $0.20 per 1M.
+pub const DEFAULT_MANAGED_AI_INPUT_USD_MICROS_PER_1K: i64 = 200;
+pub const DEFAULT_MANAGED_AI_CACHED_INPUT_USD_MICROS_PER_1K: i64 = 20;
+pub const DEFAULT_MANAGED_AI_OUTPUT_USD_MICROS_PER_1K: i64 = 1_200;
+
 pub const DEFAULT_DEEPSEEK_MODEL_ID: &str = "deepseek-chat";
 pub const DEFAULT_ZAI_MODEL_ID: &str = "glm-5";
 pub const DEFAULT_GEMINI_MODEL_ID: &str = "gemini-2.5-pro";
 
+/// Managed "Instafy AI" tier default (operator-paid, credits). Not the default
+/// for user-owned credentials; see `default_chatgpt_model_id`.
 pub fn default_managed_ai_model_id() -> &'static str {
-    DEFAULT_OPENAI_MODEL_ID
+    DEFAULT_MANAGED_AI_MODEL_ID
 }
 
 pub fn default_managed_ai_model_label() -> &'static str {
-    DEFAULT_OPENAI_MODEL_LABEL
+    DEFAULT_MANAGED_AI_MODEL_LABEL
+}
+
+/// Default for a bring-your-own ChatGPT login (`codex_auth_json`). The user pays
+/// by subscription, so this deliberately stays on Sol rather than tracking the
+/// managed tier.
+pub fn default_chatgpt_model_id() -> &'static str {
+    DEFAULT_OPENAI_MODEL_ID
 }
 
 pub fn default_model_for_provider(provider: &str) -> &'static str {
@@ -102,9 +130,33 @@ pub fn resolve_agent_model_for_provider(
 #[cfg(test)]
 mod tests {
     use super::{
-        agent_model_is_compatible_with_provider, is_stale_openai_model,
-        resolve_agent_model_for_provider,
+        agent_model_is_compatible_with_provider, default_chatgpt_model_id,
+        default_managed_ai_model_id, default_managed_ai_model_label, default_model_for_provider,
+        is_stale_openai_model, resolve_agent_model_for_provider,
+        DEFAULT_MANAGED_AI_CACHED_INPUT_USD_MICROS_PER_1K,
+        DEFAULT_MANAGED_AI_INPUT_USD_MICROS_PER_1K, DEFAULT_MANAGED_AI_MODEL_ID,
+        DEFAULT_MANAGED_AI_OUTPUT_USD_MICROS_PER_1K,
     };
+
+    #[test]
+    fn managed_tier_defaults_to_luna_while_byo_credentials_keep_sol() {
+        // Owner decision 2026-09-17: only the operator-paid managed tier moves
+        // to Luna. ChatGPT logins, API keys, and the stale-model floor stay on Sol.
+        assert_eq!(default_managed_ai_model_id(), "gpt-5.6-luna");
+        assert_eq!(default_managed_ai_model_label(), "GPT-5.6 Luna");
+        assert_eq!(default_chatgpt_model_id(), "gpt-5.6-sol");
+        assert_eq!(default_model_for_provider("openai"), "gpt-5.6-sol");
+        assert_eq!(default_model_for_provider(""), "gpt-5.6-sol");
+        assert_ne!(default_managed_ai_model_id(), default_chatgpt_model_id());
+    }
+
+    #[test]
+    fn managed_tier_price_defaults_match_luna_list_prices() {
+        // USD micros per 1K tokens: 200 is $0.20 per 1M, 20 is $0.02, 1200 is $1.20.
+        assert_eq!(DEFAULT_MANAGED_AI_INPUT_USD_MICROS_PER_1K, 200);
+        assert_eq!(DEFAULT_MANAGED_AI_CACHED_INPUT_USD_MICROS_PER_1K, 20);
+        assert_eq!(DEFAULT_MANAGED_AI_OUTPUT_USD_MICROS_PER_1K, 1_200);
+    }
 
     #[test]
     fn stale_openai_models_are_floored_to_current_default() {
@@ -133,6 +185,19 @@ mod tests {
         assert_eq!(
             resolve_agent_model_for_provider("openai", Some("gpt-5.4-mini".to_string())).as_deref(),
             Some("gpt-5.6-sol")
+        );
+
+        // The managed tier default must survive the stale floor untouched: if the
+        // rule ever tightened to "anything but Sol", every managed turn would be
+        // silently floored back to Sol.
+        assert!(!is_stale_openai_model(DEFAULT_MANAGED_AI_MODEL_ID));
+        assert_eq!(
+            resolve_agent_model_for_provider(
+                "openai",
+                Some(DEFAULT_MANAGED_AI_MODEL_ID.to_string())
+            )
+            .as_deref(),
+            Some("gpt-5.6-luna")
         );
     }
 
