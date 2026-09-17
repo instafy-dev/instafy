@@ -41,7 +41,16 @@ test("the same key in any non-canonical byte form is refused", () => {
 
 test("non-RSA, short and empty keys are refused", () => {
   const ec = crypto.generateKeyPairSync("ec", { namedCurve: "P-256" }).publicKey.export({ type: "spki", format: "pem" }).toString();
-  const short = crypto.generateKeyPairSync("rsa", { modulusLength: 1024 }).publicKey.export({ type: "spki", format: "pem" }).toString();
+  // A below-policy RSA public key, assembled from a random odd modulus rather than generated,
+  // so the test never creates (or depends on) a weak key pair.
+  const shortModulus = crypto.randomBytes(128);
+  shortModulus[0] |= 0x80;
+  shortModulus[shortModulus.length - 1] |= 0x01;
+  const short = crypto
+    .createPublicKey({ key: { kty: "RSA", n: shortModulus.toString("base64url"), e: "AQAB" }, format: "jwk" })
+    .export({ type: "spki", format: "pem" })
+    .toString();
+  assert.equal(crypto.createPublicKey(short).asymmetricKeyDetails.modulusLength, 1024);
   assert.throws(() => canonicalTrustKey(ec), /RSA/u);
   assert.throws(() => canonicalTrustKey(short), /RSA/u);
   assert.throws(() => canonicalTrustKey("  "), /empty/u);
