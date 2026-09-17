@@ -206,8 +206,9 @@ Set things up in this order:
    `ota-release` environment's tag policy is not a security boundary on its own. Without the
    ruleset, anyone with write access could tag an unmerged commit, and that commit's own copy of
    the workflow, with its checks removed, would receive the signing key and the R2 token.
-2. Create the `ota-release` environment with tag policy `ota-v*`, then add its secrets and the
-   `CAPACITOR_LIVE_UPDATE_PUBLIC_KEY` variable.
+2. Create the `ota-release` environment with deployment policies tag `ota-v*` and branch `main`
+   (the dry run in step 3 is a main dispatch and is refused at sign without the branch policy), then
+   add its secrets and the `CAPACITOR_LIVE_UPDATE_PUBLIC_KEY` variable.
 3. Dispatch `dry_run=true` for the current main head to prove that the signing key matches the
    shipped trust anchor.
 
@@ -227,7 +228,9 @@ Recovery:
   authorize. Past the retention window, release a new commit under a new tag.
 - If `gh release create` was interrupted and left a draft Release, delete the draft by hand and
   then re-run the failed publish job. A draft does not count as a published Release.
-- A re-run is accepted only when `github.triggering_actor` is the release bot.
+- A run or re-run is accepted only when `github.triggering_actor` is the release bot. authorize
+  checks it, and because **Re-run failed jobs** skips a succeeded authorize, sign and publish check
+  it again as their first shell step, before any step that reads a secret.
 
 ## Initial Channel Model
 

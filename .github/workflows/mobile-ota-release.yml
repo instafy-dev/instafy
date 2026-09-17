@@ -220,6 +220,7 @@ jobs:
     timeout-minutes: 20
     environment: ota-release
     env:
+      TRIGGERING_ACTOR: ${{ github.triggering_actor }}
       TAG: ${{ needs.authorize.outputs.tag }}
       SOURCE_SHA: ${{ needs.authorize.outputs.source_sha }}
     steps:
@@ -247,6 +248,7 @@ jobs:
           INVENTORY: ${{ needs.web.outputs.dist_inventory_sha256 }}
         run: |
           set -euo pipefail
+          [[ "$TRIGGERING_ACTOR" == "instafy-bot" ]] || { echo "::error::Only instafy-bot may run or re-run this job."; exit 1; }
           test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
           command -v zip >/dev/null || { echo "::error::zip is required."; exit 1; }; command -v python3 >/dev/null || { echo "::error::python3 is required."; exit 1; }
           test "$(bash scripts/release/ota/prove-web-layer.sh packages/frontend/dist "$SOURCE_SHA")" = "$INVENTORY"
@@ -349,6 +351,7 @@ jobs:
     permissions:
       contents: write
     env:
+      TRIGGERING_ACTOR: ${{ github.triggering_actor }}
       TAG: ${{ needs.authorize.outputs.tag }}
       SOURCE_SHA: ${{ needs.authorize.outputs.source_sha }}
       CAPACITOR_LIVE_UPDATE_PUBLIC_KEY: ${{ vars.CAPACITOR_LIVE_UPDATE_PUBLIC_KEY }}
@@ -375,6 +378,7 @@ jobs:
       - name: Re-verify the signed set against the trust anchor variable
         run: |
           set -euo pipefail
+          [[ "$TRIGGERING_ACTOR" == "instafy-bot" ]] || { echo "::error::Only instafy-bot may run or re-run this job."; exit 1; }
           test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
           test "$(find "$RUNNER_TEMP/ota" -type f | wc -l)" -eq 5
           EXPECTED_TRUST_KEY_SHA256="$(cat "$RUNNER_TEMP/ota/trust-key.sha256")" \

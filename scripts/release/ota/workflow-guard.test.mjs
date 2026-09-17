@@ -113,7 +113,7 @@ test("OTA release triggers only on bot tags or main dispatch with tag + dry_run"
   assert.ok(source.includes(`\nconcurrency:\n  group: ${OTA_CONCURRENCY_GROUP}\n  cancel-in-progress: false\n`));
   assert.match(source, /^  DOWNLOADS_BASE_URL: https:\/\/downloads\.instafy\.dev\n  MOBILE_OTA_DOWNLOADS_PREFIX: mobile$/mu);
   assert.match(source, /^  OTA_CHANNEL: internal$/mu);
-  assert.ok(source.split("\n").length <= 451, "workflow should stay within the 450-line target");
+  assert.ok(source.split("\n").length <= 455, "workflow should stay within the 455-line target");
 });
 
 test("OTA jobs isolate secrets in the ota-release environment", () => {
@@ -146,6 +146,30 @@ test("OTA jobs isolate secrets in the ota-release environment", () => {
     assert.equal(usesKey, ["Resolve the native trust anchor from the signing key", "Build and sign the OTA bundle"].includes(step.name), step.name);
   }
   assert.match(all.get("publish"), /^    if: \$\{\{ needs\.authorize\.outputs\.mode == 'release' \}\}$/mu);
+});
+
+test("sign and publish re-check the triggering actor before any secret, since re-run failed jobs skips authorize", () => {
+  const all = jobs(read(OTA));
+  const check = '[[ "$TRIGGERING_ACTOR" == "instafy-bot" ]] || {';
+  for (const name of ["sign", "publish"]) {
+    const job = all.get(name);
+    assert.match(job, /^    env:\n(?:      .*\n)*?      TRIGGERING_ACTOR: \$\{\{ github\.triggering_actor \}\}$/mu, `${name}: job-level TRIGGERING_ACTOR`);
+    const jobSteps = steps(job);
+    const firstRun = jobSteps.findIndex((step) => /\n        run: \|/u.test(step.text));
+    const firstSecret = jobSteps.findIndex((step) => /secrets\./u.test(step.text));
+    assert.ok(firstRun >= 0 && firstRun < firstSecret, `${name}: an actor check must run before secrets`);
+    assert.match(jobSteps[firstRun].text, /run: \|\n\s+set -euo pipefail\n\s+\[\[ "\$TRIGGERING_ACTOR" == "instafy-bot" \]\] \|\| \{/u, `${name}: actor check is the first command`);
+    assert.ok(job.includes(check));
+  }
+});
+
+test("OTA runbook matches the workflow's environment and re-run guarantees", () => {
+  const runbook = read("docs/OTA-Rollout.md");
+  // Step 3's dry run is a main dispatch and sign uses ota-release, so the environment needs both policies.
+  assert.match(runbook, /`ota-release` environment with deployment policies tag `ota-v\*` and branch `main`/u);
+  assert.doesNotMatch(runbook, /environment with tag policy `ota-v\*`,/u);
+  // Re-run failed jobs skips authorize; the doc may only promise what sign and publish re-check.
+  assert.match(runbook, /sign and publish check\s+it again/u);
 });
 
 test("authorize binds actor, pusher, main containment, version and one-shot probes in order", () => {
