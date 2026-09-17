@@ -68,22 +68,25 @@ describe("CONNECTORS", () => {
     expect(ids(FEATURED_CONNECTORS)).not.toContain("freefinance");
   });
 
-  it("marks the unpublished packs soon and only GitHub and FreeFinance available today", () => {
-    // Flip an entry to "available" once its pack repo is published; until
-    // then it stays listed everywhere, greyed with a "Soon" Badge.
+  it("marks the unpublished packs soon and Notion, GitHub and FreeFinance available today", () => {
+    // Flip an entry to "available" once its pack lands in instafy-dev/skills;
+    // until then it stays listed everywhere, greyed with a "Soon" Badge.
     const availability = Object.fromEntries(
       PRODUCT_CONNECTORS.map((entry) => [entry.id, entry.availability]),
     );
     expect(availability).toEqual({
       slack: "soon",
-      notion: "soon",
+      notion: "available",
       discord: "soon",
       freefinance: "available",
       github: "available",
     });
     for (const entry of CONNECTORS) {
       expect(isConnectorAvailable(entry)).toBe(
-        entry.kind === "other" || entry.id === "github" || entry.id === "freefinance",
+        entry.kind === "other" ||
+          entry.id === "notion" ||
+          entry.id === "github" ||
+          entry.id === "freefinance",
       );
     }
     // The paste link is always available: it has no pack to wait for.
@@ -96,10 +99,13 @@ describe("CONNECTORS", () => {
     // Soon entries render greyed rather than vanish, so the featured and chip
     // lists keep them; only the sheet's Popular row is limited to what can be
     // selected today.
-    expect(ids(FEATURED_CONNECTORS)).toEqual(expect.arrayContaining(["slack", "notion", "discord"]));
+    expect(ids(FEATURED_CONNECTORS)).toEqual(expect.arrayContaining(["slack", "discord"]));
     expect(ids(CARD_CHIP_CONNECTORS)).toEqual(["slack", "notion", "discord"]);
     expect(AVAILABLE_FEATURED_CONNECTORS).toEqual(FEATURED_CONNECTORS.filter(isConnectorAvailable));
-    expect(ids(AVAILABLE_FEATURED_CONNECTORS)).toEqual(["github"]);
+    // Notion before GitHub: list order, so the Popular row reads the same way.
+    expect(ids(AVAILABLE_FEATURED_CONNECTORS)).toEqual(["notion", "github"]);
+    expect(ids(AVAILABLE_FEATURED_CONNECTORS)).not.toContain("slack");
+    expect(ids(AVAILABLE_FEATURED_CONNECTORS)).not.toContain("discord");
     for (const entry of AVAILABLE_FEATURED_CONNECTORS) {
       expect(entry.featured).toBe(true);
       expect(entry.availability).toBe("available");
@@ -108,7 +114,7 @@ describe("CONNECTORS", () => {
 
   it("keeps soon entries valid data so flipping them needs no other change", () => {
     const soon = PRODUCT_CONNECTORS.filter((entry) => entry.availability === "soon");
-    expect(soon.length).toBeGreaterThan(0);
+    expect(ids(soon)).toEqual(["slack", "discord"]);
     for (const entry of soon) {
       expect(entry.kind).toBe("skill");
       if (entry.kind === "skill") {
@@ -215,13 +221,32 @@ describe("CONNECTORS", () => {
     }
   });
 
-  it("builds the exact one-liner for a product", () => {
-    const slack = CONNECTORS.find(
-      (entry): entry is SkillConnector => entry.kind === "skill" && entry.id === "slack",
+  it("points every team pack at the team pack folder of instafy-dev/skills", () => {
+    // The packs live next to the bookkeeping pack in the one skills repo;
+    // there is no separate team pack repo.
+    for (const id of ["slack", "notion", "discord"]) {
+      const entry = CONNECTORS.find(
+        (item): item is SkillConnector => item.kind === "skill" && item.id === id,
+      );
+      expect(entry).toBeDefined();
+      expect(entry!.source).toBe(
+        `https://github.com/instafy-dev/skills/tree/main/packs/team/.agents/skills/${id}`,
+      );
+      expect(entry!.sourceLabel).toBe("instafy-dev/skills");
+    }
+    const notion = CONNECTORS.find(
+      (entry): entry is SkillConnector => entry.kind === "skill" && entry.id === "notion",
     );
-    expect(slack).toBeDefined();
-    expect(buildConnectorImportMessage(slack!)).toBe(
-      "/skills import https://github.com/instafy-dev/team-integrations/tree/main/.agents/skills/slack --name slack --start",
+    expect(notion?.needs).toEqual(["a Notion internal integration token (NOTION_API_KEY)"]);
+  });
+
+  it("builds the exact one-liner for a product", () => {
+    const notion = CONNECTORS.find(
+      (entry): entry is SkillConnector => entry.kind === "skill" && entry.id === "notion",
+    );
+    expect(notion).toBeDefined();
+    expect(buildConnectorImportMessage(notion!)).toBe(
+      "/skills import https://github.com/instafy-dev/skills/tree/main/packs/team/.agents/skills/notion --name notion --start",
     );
   });
 });

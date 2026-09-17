@@ -620,12 +620,14 @@ test.describe("Skills command", () => {
     expect(await userBubbles.count()).toBe(userBubbleCountBefore);
 
     // Skill packs that are not published yet: the row is disabled with a Soon
-    // Badge and opens no confirm sheet. GitHub stays live.
-    for (const id of ["slack", "notion", "discord"]) {
+    // Badge and opens no confirm sheet. Notion (published) and GitHub stay live.
+    for (const id of ["slack", "discord"]) {
       const row = page.getByTestId(`composer-action-menu-connect-${id}`);
       await expect(row).toBeDisabled();
       await expect(row).toContainText("Soon");
     }
+    await expect(page.getByTestId("composer-action-menu-connect-notion")).toBeEnabled();
+    await expect(page.getByTestId("composer-action-menu-connect-notion")).not.toContainText("Soon");
     await expect(page.getByTestId("composer-action-menu-connect-github")).toBeEnabled();
     await page.getByTestId("composer-action-menu-connect-slack").click({ force: true });
     await expect(page.getByTestId("connect-sheet")).toHaveCount(0);
@@ -694,25 +696,32 @@ test.describe("Skills command", () => {
     await page.getByTestId("composer-action-menu-connect").click();
     await page.getByTestId("composer-action-menu-connect-browse").click();
 
-    // Browse stage: search and the category rows. Popular stays hidden while
-    // GitHub is the only featured tool that can be selected; the unpublished
-    // packs are listed disabled with a Soon Badge.
+    // Browse stage: search, the Popular row of the two selectable featured
+    // tools (Notion and GitHub, as bare marks) and the category rows; the
+    // unpublished packs are listed disabled with a Soon Badge.
     await expect(page.getByRole("dialog", { name: "Connect a tool" })).toBeVisible();
-    await expect(page.getByTestId("connect-popular")).toHaveCount(0);
+    await expect(page.getByTestId("connect-popular")).toBeVisible();
+    await expect(page.getByTestId("connect-popular-notion")).toBeEnabled();
+    await expect(page.getByTestId("connect-popular-github")).toBeEnabled();
     await expect(page.getByTestId("connect-popular-slack")).toHaveCount(0);
+    await expect(page.getByTestId("connect-popular-discord")).toHaveCount(0);
     await expect(page.getByTestId("connect-row-github")).toBeEnabled();
-    for (const id of ["slack", "notion", "discord"]) {
+    await expect(page.getByTestId("connect-row-notion")).toBeEnabled();
+    await expect(page.getByTestId("connect-row-notion-meta")).toHaveCount(0);
+    for (const id of ["slack", "discord"]) {
       await expect(page.getByTestId(`connect-row-${id}`)).toBeDisabled();
       await expect(page.getByTestId(`connect-row-${id}-meta`)).toHaveText("Soon");
     }
 
-    // A keyword narrows the list to the niche tool, still greyed.
+    // A keyword narrows the list to the niche tool and hides Popular.
     await page.getByTestId("connect-search").fill("buch");
     await expect(page.getByTestId("connect-row-freefinance")).toBeVisible();
     await expect(page.getByTestId("connect-row-freefinance")).toBeEnabled();
     await expect(page.getByTestId("connect-row-freefinance-meta")).toHaveText("Austria");
     await expect(page.getByTestId("connect-row-slack")).toHaveCount(0);
-    await expect(page.getByTestId("connect-popular-slack")).toHaveCount(0);
+    await expect(page.getByTestId("connect-row-notion")).toHaveCount(0);
+    await expect(page.getByTestId("connect-popular")).toHaveCount(0);
+    await expect(page.getByTestId("connect-popular-notion")).toHaveCount(0);
     await expect(page.getByTestId("connect-confirm-submit")).toHaveCount(0);
 
     await page.keyboard.press("Escape");
@@ -745,7 +754,7 @@ test.describe("Skills command", () => {
     expect(await userBubbles.count()).toBe(userBubbleCountBefore);
   });
 
-  test("a soon card chip opens nothing, More tools browses and Escape sends nothing", async ({ page }) => {
+  test("a soon card chip opens nothing, the Notion chip confirms, More tools browses and Escape sends nothing", async ({ page }) => {
     page.setDefaultTimeout(60_000);
 
     const projectId = await prepareStudio(page);
@@ -766,9 +775,9 @@ test.describe("Skills command", () => {
     await expect(card.getByTestId("connect-chip-other")).toHaveCount(0);
     await expect(card.getByTestId("connect-more-tools")).toBeVisible();
 
-    // Every shipped chip is a skill whose pack is not published yet: disabled,
-    // with a Soon Badge, and a press opens no sheet.
-    for (const id of ["slack", "notion", "discord"]) {
+    // Slack and Discord are skills whose packs are not published yet:
+    // disabled, with a Soon Badge, and a press opens no sheet.
+    for (const id of ["slack", "discord"]) {
       const chip = card.getByTestId(`connect-chip-${id}`);
       await expect(chip).toBeDisabled();
       await expect(chip).toHaveAttribute("aria-label", /, coming soon$/);
@@ -779,12 +788,31 @@ test.describe("Skills command", () => {
     await expect(page.getByTestId("connect-confirm-submit")).toHaveCount(0);
     expect(await userBubbles.count()).toBe(userBubbleCountBefore);
 
+    // Notion's pack is published: the chip is live and opens the confirm
+    // stage straight away (no Back, since it did not come from the list);
+    // nothing is sent until Connect, and Escape sends nothing.
+    const notionChip = card.getByTestId("connect-chip-notion");
+    await expect(notionChip).toBeEnabled();
+    await expect(notionChip).toHaveAttribute("aria-label", "Connect Notion");
+    await expect(card.getByTestId("connect-chip-notion-soon")).toHaveCount(0);
+    await notionChip.click();
+    await expect(page.getByRole("dialog", { name: "Connect Notion" })).toBeVisible();
+    await expect(page.getByTestId("connect-confirm-submit")).toBeVisible();
+    await expect(page.getByTestId("connect-confirm-back")).toHaveCount(0);
+    await expect(page.getByTestId("connect-confirm-needs-line")).toContainText("NOTION_API_KEY");
+    expect(await userBubbles.count()).toBe(userBubbleCountBefore);
+    await page.keyboard.press("Escape");
+    await expect(page.getByTestId("connect-sheet")).toHaveCount(0);
+    expect(await userBubbles.count()).toBe(userBubbleCountBefore);
+
     // "More tools" opens the browse stage; the soon rows are disabled there
-    // too and the GitHub row leads to the card's GitHub mode.
+    // too, the Notion row is live, and the GitHub row leads to the card's
+    // GitHub mode.
     await card.getByTestId("connect-more-tools").click();
     await expect(page.getByRole("dialog", { name: "Connect a tool" })).toBeVisible();
-    await expect(page.getByTestId("connect-row-notion")).toBeDisabled();
-    await expect(page.getByTestId("connect-row-notion-meta")).toHaveText("Soon");
+    await expect(page.getByTestId("connect-row-slack")).toBeDisabled();
+    await expect(page.getByTestId("connect-row-slack-meta")).toHaveText("Soon");
+    await expect(page.getByTestId("connect-row-notion")).toBeEnabled();
     await expect(page.getByTestId("connect-confirm-submit")).toHaveCount(0);
     await page.keyboard.press("Escape");
     await expect(page.getByTestId("connect-sheet")).toHaveCount(0);

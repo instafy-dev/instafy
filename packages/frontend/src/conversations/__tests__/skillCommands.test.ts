@@ -141,7 +141,7 @@ describe("deriveSkillSourceLabel", () => {
   it("uses the folder name for a single skill folder", () => {
     expect(
       deriveSkillSourceLabel(
-        "https://github.com/instafy-dev/team-integrations/tree/main/.agents/skills/slack",
+        "https://github.com/instafy-dev/skills/tree/main/packs/team/.agents/skills/slack",
       ),
     ).toBe("slack");
   });
