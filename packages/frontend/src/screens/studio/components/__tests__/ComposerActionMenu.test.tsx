@@ -257,8 +257,8 @@ describe("ComposerActionMenu", () => {
     ]);
     expect(connectRows).toEqual([
       "composer-action-menu-connect-back",
-      "composer-action-menu-connect-notion",
       "composer-action-menu-connect-github",
+      "composer-action-menu-connect-notion",
       "composer-action-menu-connect-browse",
     ]);
     for (const entry of FEATURED_CONNECTORS) {
@@ -302,15 +302,15 @@ describe("ComposerActionMenu", () => {
     expect(document.activeElement).toBe(back);
     await pressKey(back, "ArrowDown");
     expect((document.activeElement as HTMLElement | null)?.dataset.testid).toBe(
-      "composer-action-menu-connect-notion",
+      "composer-action-menu-connect-github",
     );
     await pressKey(document.activeElement, "ArrowDown");
     expect((document.activeElement as HTMLElement | null)?.dataset.testid).toBe(
-      "composer-action-menu-connect-github",
+      "composer-action-menu-connect-notion",
     );
     await pressKey(document.activeElement, "ArrowUp");
     expect((document.activeElement as HTMLElement | null)?.dataset.testid).toBe(
-      "composer-action-menu-connect-notion",
+      "composer-action-menu-connect-github",
     );
     await pressKey(document.activeElement, "ArrowUp");
     expect(document.activeElement).toBe(back);

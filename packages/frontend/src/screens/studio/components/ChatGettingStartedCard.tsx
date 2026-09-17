@@ -9,12 +9,33 @@ import { controllerClient } from "../../../sdk/instafy";
 import { openExternalUrl } from "../../../utils/openExternalUrl";
 import { CHAT_BUBBLE_MAX_WIDTH } from "./chatBubbleWidth";
 import { ConnectChipStrip } from "./ConnectChipStrip";
-import type { SkillConnector } from "./connectors";
+import {
+  CARD_READ_ONLY_TOOL_CONNECTORS,
+  CARD_TOOL_CONNECTORS,
+  type ProductConnector,
+  type SkillConnector,
+} from "./connectors";
 import type {
   GettingStartedAiViewState,
   GettingStartedManagedAiOffer,
 } from "./gettingStartedAiChoices";
-import { ONBOARDING_PATHS, type OnboardingAction } from "./onboardingPlaybook";
+
+// The collapsed row names at most this many tools before "More tools", so it
+// holds one line at 390 px: "Import a repo · Notion · More tools" is narrower
+// than the three labels it replaces.
+const COLLAPSED_ROW_TOOL_LIMIT = 2;
+
+// The collapsed row keeps the verb for the repo import, which is the one
+// place a bare "GitHub" would lose it.
+function collapsedToolLabel(connector: ProductConnector): string {
+  return connector.kind === "github" ? "Import a repo" : connector.name;
+}
+
+function collapsedToolTestId(connector: ProductConnector): string {
+  return connector.kind === "github"
+    ? "onboarding-collapsed-import-github-repo"
+    : `onboarding-collapsed-${connector.id}`;
+}
 
 const { deriveGithubImportTargetPath } = controllerClient.projects;
 
@@ -33,16 +54,21 @@ type ChatGettingStartedMode = "root" | "github";
 interface ChatGettingStartedCardProps {
   mode: ChatGettingStartedMode;
   // While a draft is in the composer the card collapses to one row of the
-  // three workspace actions (no heading, no AI line) instead of unmounting,
+  // same tools in text form (no heading, no AI line) instead of unmounting,
   // so the options stay reachable; the full card returns when the draft clears.
   collapsed?: boolean;
   onSelectMode: (mode: ChatGettingStartedMode) => void;
-  onSelectAction: (action: OnboardingAction) => void;
-  // "Connect a tool" chips. A press only reports the skill; ChatPanel opens
-  // the confirm stage of the Connect sheet. "More tools" opens its browse stage.
+  // A skill chip press only reports the skill; ChatPanel opens the confirm
+  // stage of the Connect sheet. "More tools" opens its browse stage. The
+  // GitHub chip never comes through here: see handleSelectTool.
   onSelectConnector: (connector: SkillConnector) => void;
   onBrowseConnectors: () => void;
   installedSkillNames: ReadonlySet<string>;
+  /**
+   * False for a member without write access. It drops every control whose
+   * press ends in a line being sent into the conversation: the skill chips
+   * and "More tools". The repo import sends nothing, so it stays.
+   */
   showConnectTools: boolean;
   managedAiOffer: GettingStartedManagedAiOffer | null;
   selectedAi: "managed" | "connected" | null;
@@ -97,46 +123,10 @@ function CollapsedActionButton({
   );
 }
 
-function ActionButton({
-  action,
-  onPress,
-}: {
-  action: OnboardingAction;
-  onPress: () => void;
-}) {
-  const Icon = action.icon;
-  return (
-    <Button
-      variant="outline"
-      size="sm"
-      radius="2xl"
-      className="h-full items-start justify-start overflow-hidden px-3 py-2.5 text-left shadow-none sm:px-3.5 sm:py-3"
-      onPress={onPress}
-      data-testid={`onboarding-action-${action.id}`}
-    >
-      <span className="flex w-full items-start gap-2.5 sm:gap-3">
-        <Icon
-          className="mt-0.5 h-4.5 w-4.5 shrink-0 text-slate-600 dark:text-slate-300"
-          aria-hidden={true}
-        />
-        <span className="min-w-0">
-          <Text as="span" variant="bodyStrong" className="block text-left">
-            {action.title}
-          </Text>
-          <Text as="span" variant="caption" className="mt-0.5 block text-left text-slate-600 sm:mt-1 dark:text-slate-300">
-            {action.description}
-          </Text>
-        </span>
-      </span>
-    </Button>
-  );
-}
-
 export function ChatGettingStartedCard({
   mode,
   collapsed = false,
   onSelectMode,
-  onSelectAction,
   onSelectConnector,
   onBrowseConnectors,
   installedSkillNames,
@@ -163,9 +153,20 @@ export function ChatGettingStartedCard({
   onCancelGithubDeviceAuth,
   onImportGithub,
 }: ChatGettingStartedCardProps) {
-  const codingActions = ONBOARDING_PATHS.find((entry) => entry.id === "coding")?.actions ?? [];
-  const importGithubAction = codingActions.find((entry) => entry.id === "import-github-repo") ?? null;
-  const startFromScratchAction = codingActions.find((entry) => entry.id === "start-from-scratch") ?? null;
+  // The row a member can actually press: every featured tool that can be
+  // picked today, or just the repo import when they cannot write here.
+  const cardTools = showConnectTools ? CARD_TOOL_CONNECTORS : CARD_READ_ONLY_TOOL_CONNECTORS;
+  // GitHub goes through onSelectMode, never through the host's connector
+  // routing: that path calls beginGithubImport, which un-dismisses the card
+  // and sets a flag overriding every later show gate. From the card the press
+  // only switches to the import form, exactly as its own button always did.
+  const handleSelectTool = (connector: ProductConnector) => {
+    if (connector.kind === "github") {
+      onSelectMode("github");
+      return;
+    }
+    onSelectConnector(connector);
+  };
   // A paused tier keeps the choice framing but offers no free button: the one
   // primary action is Connect AI, and the line says why.
   const managedAiPaused = managedAiOffer?.paused === true;
@@ -192,7 +193,9 @@ export function ChatGettingStartedCard({
         : managedAiChoice?.remainingPrompts === 0
           ? "Today's free prompts are used. Connect your own AI to keep going, or come back tomorrow."
           : managedAiChoice
-            ? "Start free now, or connect your own AI for the best results. Next: pick what to work on."
+            // Names what the next step actually offers, so the forward
+            // reference stays true when that step is a row of tools.
+            ? "Start free now, or connect your own AI for the best results. Next: pick a tool, or just type."
             : "Connect the AI account you already use.";
   // The status line names what will answer, at the point of decision.
   const aiStatusLine =
@@ -251,27 +254,20 @@ export function ChatGettingStartedCard({
           aria-label="Workspace options"
           data-testid="onboarding-collapsed-row"
         >
-          {importGithubAction ? (
-            <li>
-              {/* Shorter than the full card's title so the three buttons
-                  hold one row at phone width. */}
+          {/* The same tools as the full row, in the same order, in text form.
+              The repo import keeps its verb; the rest are named. */}
+          {cardTools.slice(0, COLLAPSED_ROW_TOOL_LIMIT).map((connector, index) => (
+            <li key={connector.id} className={index === 0 ? undefined : "flex items-center gap-x-1"}>
+              {index === 0 ? null : (
+                <span aria-hidden="true" className="text-slate-400 dark:text-slate-500">·</span>
+              )}
               <CollapsedActionButton
-                label="Import a repo"
-                onPress={() => onSelectAction(importGithubAction)}
-                testId="onboarding-collapsed-import-github-repo"
+                label={collapsedToolLabel(connector)}
+                onPress={() => handleSelectTool(connector)}
+                testId={collapsedToolTestId(connector)}
               />
             </li>
-          ) : null}
-          {startFromScratchAction ? (
-            <li className="flex items-center gap-x-1">
-              <span aria-hidden="true" className="text-slate-400 dark:text-slate-500">·</span>
-              <CollapsedActionButton
-                label={startFromScratchAction.title}
-                onPress={() => onSelectAction(startFromScratchAction)}
-                testId="onboarding-collapsed-start-from-scratch"
-              />
-            </li>
-          ) : null}
+          ))}
           {showConnectTools ? (
             <li className="flex items-center gap-x-1">
               <span aria-hidden="true" className="text-slate-400 dark:text-slate-500">·</span>
@@ -421,56 +417,37 @@ export function ChatGettingStartedCard({
                   ) : null}
                 </Text>
               ) : null}
+              {/* One heading, one row, one line. The heading does the work the
+                  separate "Connect a tool" caption used to do, so the card
+                  keeps exactly one heading and no hairline inside the step. */}
               <Text
                 id="onboarding-workspace-heading"
                 as="h3"
                 variant="bodyStrong"
                 tone="primary"
               >
-                What should your agent work on?
+                Start with a tool you already use
               </Text>
-              <div className="mt-2 grid gap-2 @sm:grid-cols-2">
-                {importGithubAction ? (
-                  <ActionButton
-                    action={importGithubAction}
-                    onPress={() => onSelectAction(importGithubAction)}
-                  />
-                ) : null}
-                {startFromScratchAction ? (
-                  <ActionButton
-                    action={startFromScratchAction}
-                    onPress={() => onSelectAction(startFromScratchAction)}
-                  />
-                ) : null}
-              </div>
-              {showConnectTools ? (
-                <>
-                  <div
-                    className="mt-3 border-t border-slate-200/70 pt-3 dark:border-[color:var(--color-studio-dark-panel-border)]"
-                    data-testid="onboarding-connect-strip"
-                  >
-                    <Text as="p" id="onboarding-connect-label" variant="caption" tone="muted">
-                      Connect a tool
-                    </Text>
-                    <ConnectChipStrip
-                      className="mt-1.5"
-                      aria-labelledby="onboarding-connect-label"
-                      installedSkillNames={installedSkillNames}
-                      onSelect={onSelectConnector}
-                      onMoreTools={onBrowseConnectors}
-                    />
-                  </div>
-                  <Text
-                    as="p"
-                    variant="caption"
-                    tone="subtle"
-                    className="mt-2.5"
-                    data-testid="onboarding-type-hint"
-                  >
-                    Or just type below.
-                  </Text>
-                </>
-              ) : null}
+              <ConnectChipStrip
+                className="mt-2"
+                aria-labelledby="onboarding-workspace-heading"
+                connectors={cardTools}
+                showMoreTools={showConnectTools}
+                installedSkillNames={installedSkillNames}
+                onSelect={handleSelectTool}
+                onMoreTools={onBrowseConnectors}
+              />
+              {/* Ungated: the member with the least to press is the one who
+                  most needs the sentence telling them to type. */}
+              <Text
+                as="p"
+                variant="caption"
+                tone="subtle"
+                className="mt-2.5"
+                data-testid="onboarding-type-hint"
+              >
+                Or just type what you want below.
+              </Text>
             </div>
           ) : null}
         </>

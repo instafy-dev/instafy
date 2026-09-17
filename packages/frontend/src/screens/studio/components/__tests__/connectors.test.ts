@@ -1,8 +1,9 @@
 import { describe, expect, it } from "vitest";
 import {
   AVAILABLE_FEATURED_CONNECTORS,
-  CARD_CHIP_CONNECTORS,
-  COMING_SOON_FEATURED_SKILLS,
+  CARD_CHIP_LIMIT,
+  CARD_READ_ONLY_TOOL_CONNECTORS,
+  CARD_TOOL_CONNECTORS,
   CONNECTOR_CATEGORIES,
   CONNECTORS,
   FEATURED_CONNECTOR_LIMIT,
@@ -11,11 +12,9 @@ import {
   buildConnectorImportMessage,
   connectorCategoryLabel,
   filterConnectors,
-  formatComingSoonLine,
   isConnectorAvailable,
   type SkillConnector,
 } from "../connectors";
-import { ONBOARDING_PATHS } from "../onboardingPlaybook";
 
 const EM_DASH = "\u2014";
 
@@ -24,8 +23,11 @@ function ids(entries: readonly { id: string }[]): string[] {
 }
 
 describe("CONNECTORS", () => {
-  it("lists the products in order with GitHub after the skills and the paste link last", () => {
-    expect(ids(CONNECTORS)).toEqual(["slack", "notion", "discord", "freefinance", "github", "other"]);
+  it("leads with the connection that needs no key pasted and keeps the paste link last", () => {
+    // Ordering rule: no-paste connections first, then key-based ones. GitHub
+    // signs in with a device code, so it sits above Notion, which asks for a
+    // token; the card row and the sheet's Popular row both read that order.
+    expect(ids(CONNECTORS)).toEqual(["slack", "github", "notion", "discord", "freefinance", "other"]);
     const last = CONNECTORS[CONNECTORS.length - 1]!;
     expect(last.kind).toBe("other");
     expect(last.name).toBe("Paste a skill link");
@@ -66,14 +68,14 @@ describe("CONNECTORS", () => {
     expect(FEATURED_CONNECTOR_LIMIT).toBe(8);
     expect(FEATURED_CONNECTORS.length).toBeLessThanOrEqual(FEATURED_CONNECTOR_LIMIT);
     expect(FEATURED_CONNECTORS).toEqual(PRODUCT_CONNECTORS.filter((entry) => entry.featured));
-    expect(ids(FEATURED_CONNECTORS)).toEqual(["slack", "notion", "discord", "github"]);
+    expect(ids(FEATURED_CONNECTORS)).toEqual(["slack", "github", "notion", "discord"]);
     expect(ids(FEATURED_CONNECTORS)).not.toContain("freefinance");
   });
 
   it("marks the unpublished packs soon and Notion, GitHub and FreeFinance available today", () => {
     // Flip an entry to "available" once its pack lands in instafy-dev/skills;
-    // until then it is listed in the sheet, greyed with a "Soon" Badge, and
-    // named in the card's coming-soon line while no chip is available.
+    // until then it is listed in the sheet alone, greyed with a "Soon" Badge,
+    // and never a chip on the card.
     const availability = Object.fromEntries(
       PRODUCT_CONNECTORS.map((entry) => [entry.id, entry.availability]),
     );
@@ -98,40 +100,50 @@ describe("CONNECTORS", () => {
     expect("availability" in other).toBe(false);
   });
 
-  it("keeps soon entries in the featured list but out of the card chips and the available rows", () => {
+  it("keeps soon entries in the featured list but out of the card row and the available rows", () => {
     // The featured list is the curated set; what the card and the composer
-    // rows show is the part of it that can be selected today. The rest is
-    // one coming-soon line while the card has no chip at all.
+    // rows show is the part of it that can be selected today. A pending pack
+    // is named nowhere on the card: the sheet's Soon Badge is its only place.
     expect(ids(FEATURED_CONNECTORS)).toEqual(expect.arrayContaining(["slack", "notion", "discord"]));
     expect(AVAILABLE_FEATURED_CONNECTORS).toEqual(FEATURED_CONNECTORS.filter(isConnectorAvailable));
-    // Notion before GitHub: list order, so the Popular row reads the same way.
-    expect(ids(AVAILABLE_FEATURED_CONNECTORS)).toEqual(["notion", "github"]);
+    // GitHub before Notion: list order, so the card row and the Popular row
+    // both lead with the entry that needs no key pasted.
+    expect(ids(AVAILABLE_FEATURED_CONNECTORS)).toEqual(["github", "notion"]);
     expect(ids(AVAILABLE_FEATURED_CONNECTORS)).not.toContain("slack");
     expect(ids(AVAILABLE_FEATURED_CONNECTORS)).not.toContain("discord");
     for (const entry of AVAILABLE_FEATURED_CONNECTORS) {
       expect(entry.featured).toBe(true);
       expect(entry.availability).toBe("available");
     }
-    expect(CARD_CHIP_CONNECTORS).toEqual(
-      AVAILABLE_FEATURED_CONNECTORS.filter((entry) => entry.kind === "skill"),
-    );
-    expect(ids(CARD_CHIP_CONNECTORS)).toEqual(["notion"]);
-    expect(ids(COMING_SOON_FEATURED_SKILLS)).toEqual(["slack", "discord"]);
-    for (const entry of COMING_SOON_FEATURED_SKILLS) {
+  });
+
+  it("builds the card row from the available featured tools and never exceeds its own cap", () => {
+    // The cap is the card's, measured at 390 px, not the sheet's: five chips
+    // plus the link hold two lines there, six take three.
+    expect(CARD_CHIP_LIMIT).toBe(5);
+    expect(CARD_TOOL_CONNECTORS).toEqual(AVAILABLE_FEATURED_CONNECTORS.slice(0, CARD_CHIP_LIMIT));
+    expect(CARD_TOOL_CONNECTORS.length).toBeLessThanOrEqual(CARD_CHIP_LIMIT);
+    expect(ids(CARD_TOOL_CONNECTORS)).toEqual(["github", "notion"]);
+    // However large the catalogue grows, the row cannot: the cap is applied
+    // to the list itself, so everything past it lives behind "More tools".
+    const grown = [...AVAILABLE_FEATURED_CONNECTORS, ...FEATURED_CONNECTORS, ...PRODUCT_CONNECTORS];
+    expect(grown.length).toBeGreaterThan(CARD_CHIP_LIMIT);
+    expect(grown.slice(0, CARD_CHIP_LIMIT).length).toBe(CARD_CHIP_LIMIT);
+    // Every entry on the card leads somewhere: no disabled chip, ever.
+    for (const entry of CARD_TOOL_CONNECTORS) {
       expect(entry.featured).toBe(true);
-      expect(entry.kind).toBe("skill");
-      expect(isConnectorAvailable(entry)).toBe(false);
+      expect(isConnectorAvailable(entry)).toBe(true);
     }
   });
 
-  it("phrases the coming-soon line from the pending featured skills", () => {
-    expect(formatComingSoonLine()).toBe("Slack and Discord are coming soon.");
-    expect(formatComingSoonLine([{ name: "Slack" }])).toBe("Slack is coming soon.");
-    expect(formatComingSoonLine([{ name: "Slack" }, { name: "Notion" }])).toBe(
-      "Slack and Notion are coming soon.",
-    );
-    expect(formatComingSoonLine([])).toBeNull();
-    expect(formatComingSoonLine()).not.toContain(EM_DASH);
+  it("leaves a read-only member only the tools whose press sends nothing", () => {
+    // A repo import opens a form; a skill chip ends at the sheet's Connect
+    // button, which sends the import line, so it is not offered here.
+    expect(ids(CARD_READ_ONLY_TOOL_CONNECTORS)).toEqual(["github"]);
+    for (const entry of CARD_READ_ONLY_TOOL_CONNECTORS) {
+      expect(entry.kind).toBe("github");
+      expect(CARD_TOOL_CONNECTORS).toContain(entry);
+    }
   });
 
   it("keeps soon entries valid data so flipping them needs no other change", () => {
@@ -150,15 +162,14 @@ describe("CONNECTORS", () => {
     }
   });
 
-  it("keeps GitHub and unfeatured tools out of the card chips", () => {
-    // FreeFinance is available but not featured: "More tools" is its way in.
-    expect(ids(CARD_CHIP_CONNECTORS)).not.toContain("github");
-    expect(ids(CARD_CHIP_CONNECTORS)).not.toContain("freefinance");
-    expect(ids(CARD_CHIP_CONNECTORS)).not.toContain("other");
-    for (const entry of CARD_CHIP_CONNECTORS) {
-      expect(entry.kind).toBe("skill");
-      expect(entry.featured).toBe(true);
-    }
+  it("keeps unfeatured and unpublished tools out of the card row", () => {
+    // FreeFinance is available but not featured: Austria-only bookkeeping
+    // behind a monogram placeholder is noise on a worldwide first screen, so
+    // "More tools" is its way in. Slack and Discord have no pack at all.
+    expect(ids(CARD_TOOL_CONNECTORS)).not.toContain("freefinance");
+    expect(ids(CARD_TOOL_CONNECTORS)).not.toContain("slack");
+    expect(ids(CARD_TOOL_CONNECTORS)).not.toContain("discord");
+    expect(ids(CARD_TOOL_CONNECTORS)).not.toContain("other");
   });
 
   it("marks FreeFinance as an Austrian, unfeatured finance tool", () => {
@@ -229,17 +240,6 @@ describe("CONNECTORS", () => {
         for (const need of entry.needs) {
           expect(need).not.toContain(EM_DASH);
         }
-      }
-    }
-    for (const path of ONBOARDING_PATHS) {
-      expect(path.title).not.toContain(EM_DASH);
-      expect(path.description).not.toContain(EM_DASH);
-      expect(path.prompt).not.toContain(EM_DASH);
-      for (const action of path.actions) {
-        expect(action.title).not.toContain(EM_DASH);
-        expect(action.description).not.toContain(EM_DASH);
-        expect(action.prompt ?? "").not.toContain(EM_DASH);
-        expect(action.placeholder ?? "").not.toContain(EM_DASH);
       }
     }
   });

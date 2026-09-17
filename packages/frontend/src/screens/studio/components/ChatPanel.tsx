@@ -3723,25 +3723,13 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     onRecordMessage,
     showStatus,
   });
-  // Getting-started actions focus the composer synchronously inside the press
-  // (native keyboards need the user activation). With a draft present the
-  // draft is selected, so the next keystroke replaces it instead of appending.
-  const focusComposerForGettingStarted = useCallback((options?: { selectAll?: boolean }) => {
-    if (options?.selectAll) {
-      chatInputRef.current?.selectAll();
-      return;
-    }
-    chatInputRef.current?.focus();
-  }, []);
   const {
     beginGithubImport,
     clearGettingStartedManagedAiSelection,
     dismissGettingStarted,
     gettingStartedCollapsed,
-    gettingStartedComposerPlaceholder,
     gettingStartedManagedAiSelected,
     gettingStartedMode,
-    handleGettingStartedAction,
     handleGettingStartedModeChange,
     onboardingInputLocked,
     selectGettingStartedManagedAi,
@@ -3758,7 +3746,6 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     credentialsReady,
     currentUserId,
     displayedMessageCount: displayedMessages.length,
-    focusComposer: focusComposerForGettingStarted,
     githubImportBusy,
     gettingStartedContextRelevant: gettingStartedConversationContext.relevant,
     gettingStartedContextResolved: gettingStartedConversationContext.resolved,
@@ -3767,7 +3754,6 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     isHistoryLoading,
     remoteHistoryPresenceResolved:
       remoteConversationHistoryResolved && !isInitialHistoryLoading && !initialHistoryError,
-    onInputChange,
     runtimeControllerEnabled,
   });
   // Connect: one sheet (browse and confirm stages) shared by the composer
@@ -5668,7 +5654,6 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
                   mode={gettingStartedMode}
                   collapsed={gettingStartedCollapsed}
                   onSelectMode={handleGettingStartedModeChange}
-                  onSelectAction={handleGettingStartedAction}
                   onSelectConnector={handleSelectConnector}
                   onBrowseConnectors={openConnectBrowse}
                   installedSkillNames={installedSkills.names}
@@ -5956,7 +5941,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
           agentHandles: mentionableAgentHandles,
           agentProfiles: availableAgents,
           mentionableUsers,
-          placeholder: gettingStartedComposerPlaceholder ?? chatInputPlaceholder,
+          placeholder: chatInputPlaceholder,
           onChange: handleChatInputChange,
           onKeyDown: handleInputKeyDown,
           onPaste: handleComposerPaste,

@@ -1,32 +1,34 @@
 import { Check } from "iconoir-react";
 import { Button } from "../../../components/Button";
-import { Text } from "../../../components/Text";
-import {
-  CARD_CHIP_CONNECTORS,
-  COMING_SOON_FEATURED_SKILLS,
-  formatComingSoonLine,
-  type SkillConnector,
-} from "./connectors";
+import { CARD_TOOL_CONNECTORS, type ProductConnector } from "./connectors";
 
-// Presentational: the getting-started card's "Connect a tool" strip. One
-// hairline pill chip per featured skill that can be selected today (bare mark
-// plus name) and a trailing "More tools" text link that opens the browse
-// sheet. A press only reports the connector; nothing is sent. While no
-// featured skill is available, the chips give way to one muted line naming
-// what is coming ("Slack and Discord are coming soon.") ahead of the
-// same link; the Soon badges live in the sheet, where the full list is.
+// Presentational: the getting-started card's row of tools. One hairline pill
+// chip per featured tool that can be picked today (bare mark plus name) and a
+// trailing "More tools" text link that opens the browse sheet. A press only
+// reports the tool; nothing is sent. The row cannot be empty on the card,
+// because GitHub is always in it, so there is no "nothing here yet" state to
+// render; a tool whose pack is unpublished is listed in the sheet with a Soon
+// Badge instead, where the full catalogue is.
+//
+// Nothing in the row says how a tool connects. A sign-in tool and a key tool
+// produce the same chip, because that difference belongs to setup, which is
+// the sheet's confirm stage, not to the offer. That is what lets this row
+// absorb dozens of tools without a redesign.
 
 type ConnectChipStripProps = {
   installedSkillNames: ReadonlySet<string>;
-  onSelect: (connector: SkillConnector) => void;
+  onSelect: (connector: ProductConnector) => void;
   onMoreTools: () => void;
   className?: string;
-  /** Id of the visible caption that labels the list (e.g. "Connect a tool"). */
+  /** Id of the visible heading that labels the list. */
   "aria-labelledby"?: string;
   /** Test seam: the chips to render (defaults to the shipped list). */
-  connectors?: readonly SkillConnector[];
-  /** Test seam: the skills named in the coming-soon line. */
-  comingSoon?: readonly SkillConnector[];
+  connectors?: readonly ProductConnector[];
+  /**
+   * False drops the trailing link. Read-only members keep the chips whose
+   * press sends nothing and lose the browse sheet, whose Connect button does.
+   */
+  showMoreTools?: boolean;
 };
 
 export function ConnectChipStrip({
@@ -35,10 +37,9 @@ export function ConnectChipStrip({
   onMoreTools,
   className,
   "aria-labelledby": ariaLabelledBy,
-  connectors = CARD_CHIP_CONNECTORS,
-  comingSoon = COMING_SOON_FEATURED_SKILLS,
+  connectors = CARD_TOOL_CONNECTORS,
+  showMoreTools = true,
 }: ConnectChipStripProps) {
-  const comingSoonLine = connectors.length === 0 ? formatComingSoonLine(comingSoon) : null;
   return (
     <ul
       className={["flex flex-wrap items-center gap-1.5", className].filter(Boolean).join(" ")}
@@ -47,14 +48,28 @@ export function ConnectChipStrip({
     >
       {connectors.map((connector) => {
         const Mark = connector.mark;
-        const connected = installedSkillNames.has(connector.skillName);
+        // Only a skill can be connected: importing a repo installs nothing,
+        // and a finished device session inside one import attempt is not
+        // durable knowledge, so GitHub never carries the glyph.
+        const connected =
+          connector.kind === "skill" && installedSkillNames.has(connector.skillName);
         // The visible chip is mark plus name; the accessible name adds the
-        // verb, or the state in place of it.
-        const accessibleName = connected
-          ? `${connector.name}, connected`
-          : `Connect ${connector.name}`;
+        // verb, or the state in place of it, and always contains the visible
+        // name so a voice-control user can say what they read.
+        const accessibleName =
+          connector.kind === "github"
+            ? `Import from ${connector.name}`
+            : connected
+              ? `${connector.name}, connected`
+              : `Connect ${connector.name}`;
         return (
-          <li key={connector.id}>
+          // flex on the item, not just the list: an inline-flex Button in a
+          // block li sits on a line box whose strut adds descender space, so
+          // the li grows past the control and items-center then centres the
+          // box, not the control. The bordered chip and the borderless link
+          // differ in height, so that strut left the link 1.5 px below the
+          // chips' optical centre. A flex li is exactly its control's height.
+          <li key={connector.id} className="flex">
             <Button
               variant="outline"
               size="xs"
@@ -77,28 +92,23 @@ export function ConnectChipStrip({
           </li>
         );
       })}
-      {comingSoonLine ? (
-        <li>
-          <Text as="span" variant="caption" tone="muted" data-testid="connect-coming-soon">
-            {comingSoonLine}
-          </Text>
+      {showMoreTools ? (
+        <li className="flex">
+          <Button
+            variant="ghost"
+            size="xs"
+            radius="full"
+            className="px-2 underline-offset-2 hover:underline"
+            onPress={onMoreTools}
+            data-testid="connect-more-tools"
+          >
+            {/* The lighter tone sits on a span: Button joins classes without
+                tailwind-merge, so a text colour on the Button itself loses to
+                the ghost variant's text-slate-700 in light mode. */}
+            <span className="text-slate-500 dark:text-slate-400">More tools</span>
+          </Button>
         </li>
       ) : null}
-      <li>
-        <Button
-          variant="ghost"
-          size="xs"
-          radius="full"
-          className="px-2 underline-offset-2 hover:underline"
-          onPress={onMoreTools}
-          data-testid="connect-more-tools"
-        >
-          {/* The lighter tone sits on a span: Button joins classes without
-              tailwind-merge, so a text colour on the Button itself loses to
-              the ghost variant's text-slate-700 in light mode. */}
-          <span className="text-slate-500 dark:text-slate-400">More tools</span>
-        </Button>
-      </li>
     </ul>
   );
 }

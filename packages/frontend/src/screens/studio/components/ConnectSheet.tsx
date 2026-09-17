@@ -60,8 +60,11 @@ const FOOTER_CLASS =
 // drop focus on the first tabbable control, the header Close, so a second
 // Enter would dismiss the sheet.
 const STAGE_ROOT_CLASS = "space-y-3 p-4 outline-none";
-// Popular is worth a row only once it can offer a choice.
-const POPULAR_MIN_AVAILABLE = 2;
+// Popular is worth a row only once it can offer a choice. Exported so a test
+// can assert the catalogue still clears it: AVAILABLE_FEATURED_CONNECTORS
+// sits close to this number, and un-featuring one entry would delete the row
+// silently.
+export const POPULAR_MIN_AVAILABLE = 2;
 // Shown on hover over a disabled row. It sits on the list item because the
 // disabled Button has pointer-events none, so the pointer reaches the item.
 const SOON_TITLE = "Coming soon";
