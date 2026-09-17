@@ -308,10 +308,12 @@ and schedules are created through the normal automation flow. `/skills start <na
 that section again for one installed skill, and `/skills` is listed in the typed `/` menu
 and in **Commands**. The product list is a fixed, first-party list built into Studio, and
 **Import** and **Install** in Settings > Skills send the same line into the current chat
-without leaving Settings. Skills are files distributed as public repos and URLs; what the
-agent does after install is written by the skill author, and Studio supplies only the
-import, start, secret and automation verbs. There is no marketplace, no plugin registry, and
-no remote code loading beyond files written into the workspace.
+without leaving Settings. Skills are files distributed as public repos and URLs; a skill's
+`SKILL.md` is platform-neutral and only declares what it needs (environment variable names
+and whether each is sensitive), the questions to ask, the files to write, a schedule in
+plain words and a validation line, and Studio supplies the import, start, secret and
+automation verbs that carry those declarations out. There is no marketplace, no plugin
+registry, and no remote code loading beyond files written into the workspace.
 
 On clients with voice input, the trailing action is the microphone for an empty draft and
 Send or Steer for a text or image draft. Recording and transcription keep the microphone
