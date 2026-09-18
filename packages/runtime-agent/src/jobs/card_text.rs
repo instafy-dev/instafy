@@ -23,7 +23,8 @@ pub const MAX_VALUE_LABEL_CHARS: usize = 48;
 pub const MAX_VALUE_LABEL_WORDS: usize = 6;
 /// One plain sentence saying what the value lets Instafy do.
 pub const MAX_DESCRIPTION_CHARS: usize = 200;
-/// One plain sentence naming the screen the value is found on.
+/// One plain sentence naming the screen the value is found on. Rejected rather
+/// than cut, for the reason spelled out where the cap is applied.
 pub const MAX_WHERE_TO_GET_CHARS: usize = 160;
 
 /// Which of the three pack-derived strings is being cleaned. The field decides
@@ -43,10 +44,6 @@ impl CardTextField {
             CardTextField::Description => MAX_DESCRIPTION_CHARS,
             CardTextField::WhereToGet => MAX_WHERE_TO_GET_CHARS,
         }
-    }
-
-    fn truncates(self) -> bool {
-        !matches!(self, CardTextField::ValueLabel)
     }
 
     pub fn as_str(self) -> &'static str {
@@ -653,28 +650,43 @@ pub fn sanitize_card_text(
         return None;
     }
 
-    let capped = if field.truncates() {
-        truncate_at_word(&collapsed, field.cap())
-    } else {
-        // The card puts the product name in front of this heading, so the
-        // pack's own copy of it comes off before anything is measured.
-        let collapsed = strip_leading_owner(&collapsed, owner);
-        if collapsed.is_empty() {
-            return None;
+    // Whether an over-length string is cut or refused is a property of what the
+    // string is for. A description is prose that makes its point in its first
+    // clause, so a cut one still reads. The other two are directives whose
+    // point is the last noun: "open the connection's Configuration tab", cut,
+    // becomes "on its Configuration" and an ellipsis, which names no screen at
+    // all and sends the person looking for something that is not there. Those
+    // are refused, and the pack's own table answers in their place.
+    let capped = match field {
+        CardTextField::Description => truncate_at_word(&collapsed, field.cap()),
+        CardTextField::WhereToGet => {
+            if collapsed.chars().count() > field.cap() {
+                return None;
+            }
+            collapsed
         }
-        if collapsed.chars().count() > field.cap() {
-            return None;
+        CardTextField::ValueLabel => {
+            // The card puts the product name in front of this heading, so the
+            // pack's own copy of it comes off before anything is measured.
+            let collapsed = strip_leading_owner(&collapsed, owner);
+            if collapsed.is_empty() {
+                return None;
+            }
+            if collapsed.chars().count() > field.cap() {
+                return None;
+            }
+            // A heading, so a trailing full stop is dropped rather than shown:
+            // the card puts the product name in front of it and never a
+            // sentence after.
+            let trimmed = collapsed
+                .trim_end_matches(['.', '!', '?'])
+                .trim()
+                .to_string();
+            if trimmed.split(' ').filter(|word| !word.is_empty()).count() > MAX_VALUE_LABEL_WORDS {
+                return None;
+            }
+            trimmed
         }
-        // A heading, so a trailing full stop is dropped rather than shown: the
-        // card puts the product name in front of it and never a sentence after.
-        let trimmed = collapsed
-            .trim_end_matches(['.', '!', '?'])
-            .trim()
-            .to_string();
-        if trimmed.split(' ').filter(|word| !word.is_empty()).count() > MAX_VALUE_LABEL_WORDS {
-            return None;
-        }
-        trimmed
     };
 
     if capped.is_empty() {
@@ -1078,7 +1090,7 @@ mod tests {
     }
 
     #[test]
-    fn cuts_a_long_sentence_at_a_word_and_refuses_a_long_heading() {
+    fn cuts_a_description_but_refuses_an_over_length_heading_or_directive() {
         let long = format!("{} end of it", "word ".repeat(60));
         let cut = sanitize_card_text(&long, CardTextField::Description, None, None).expect("kept");
         assert!(cut.chars().count() <= MAX_DESCRIPTION_CHARS);
@@ -1091,6 +1103,12 @@ mod tests {
                 None,
                 None,
             ),
+            None
+        );
+        // The screen this sentence names is the last thing it says, so the
+        // whole sentence goes rather than the one noun the person came for.
+        assert_eq!(
+            sanitize_card_text(&long, CardTextField::WhereToGet, None, None),
             None
         );
     }

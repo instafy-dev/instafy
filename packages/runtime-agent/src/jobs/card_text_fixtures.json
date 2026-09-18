@@ -205,11 +205,18 @@
       "expected": "Lets Instafy keep the books in order and answer the questions you have about them, and it will also do many other genuinely useful things for you on every single day of the working week without ever…"
     },
     {
-      "name": "an over-length where to get sentence is cut at a word",
+      "name": "an over-length where to get sentence is refused rather than cut",
       "field": "whereToGet",
       "owner": null,
       "input": "Open the profile page, then the users and permissions page, then the connected apps page, and read the technical user section that appears at the very bottom of that page.",
-      "expected": "Open the profile page, then the users and permissions page, then the connected apps page, and read the technical user section that appears at the very bottom…"
+      "expected": null
+    },
+    {
+      "name": "a where to get sentence is not cut out of the screen it names",
+      "field": "whereToGet",
+      "owner": "Notion",
+      "input": "Open the connection you just made, and the token is on the Configuration tab that sits between the Basic Information tab and the Capabilities tab.",
+      "expected": "Open the connection you just made, and the token is on the Configuration tab that sits between the Basic Information tab and the Capabilities tab."
     },
     {
       "name": "a claim about what happens to the value refuses the whole string",

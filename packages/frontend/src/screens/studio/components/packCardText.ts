@@ -469,6 +469,15 @@ export function sanitizeCardText(
     }
     return trimmed;
   }
+  if (field === "whereToGet") {
+    // A directive whose point is its last noun. "Open the connection's
+    // Configuration tab", cut, becomes "on its Configuration" and an ellipsis,
+    // which names no screen at all and sends the person looking for something
+    // that is not there. So an over-length one is refused, and the pack's own
+    // table answers in its place. A description is prose that makes its point
+    // in its first clause, so that one is still cut.
+    return [...collapsed].length > cap ? null : collapsed;
+  }
   const capped = truncateAtWord(collapsed, cap);
   return capped.length > 0 ? capped : null;
 }
