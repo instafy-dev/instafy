@@ -142,11 +142,12 @@ fn derive(slug: &str, row: &SecretsRow) -> DeclaredSecret {
         .where_to_get
         .as_deref()
         .and_then(first_usable_sentence)
-        // The sanitizer truncates this field, and truncation here cuts off the
-        // one noun the sentence existed to deliver: the 160-char cap lands
-        // immediately before "Technischer Benutzer" in the FreeFinance row. A
-        // derived sentence that would be cut is refused instead, which is how
-        // `valueLabel` has always behaved.
+        // A sentence that will not fit is refused, not cut: the 160-char cap
+        // lands immediately before "Technischer Benutzer" in the FreeFinance
+        // row and would take with it the one noun the sentence existed to
+        // deliver. The sanitizer refuses an over-length one too, so this is
+        // belt and braces rather than the only guard, and it keeps the
+        // derivation honest about its own output before it reaches that gate.
         .filter(|sentence| sentence.chars().count() <= card_text::MAX_WHERE_TO_GET_CHARS);
     DeclaredSecret {
         skill_slug: slug.to_string(),
