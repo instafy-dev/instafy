@@ -495,7 +495,12 @@ describe("SecretRequestEntry", () => {
     await renderEntry(request, { name: "NOTION_API_KEY" });
 
     expect(text()).toContain("Connect Notion");
-    expect(byTestId("secret-request-where")).toBeNull();
+    // An old message carries no words about where the value lives, and this is
+    // the case the absence line was written for: no handle came with it either,
+    // so it names the chat rather than an agent.
+    expect(byTestId("secret-request-where")?.textContent).toBe(
+      "Not sure where to find it? Ask in the chat and you will be walked through it.",
+    );
     expect(byTestId("secret-request-provenance")).toBeNull();
     expect(text()).toContain("Saved in this space’s Secrets, never in the chat.");
     expect(byTestId<HTMLInputElement>("secret-request-value-NOTION_API_KEY")?.getAttribute(
@@ -644,5 +649,40 @@ describe("SecretRequestEntry", () => {
       "ntn_example",
     );
     expect(mocks.onSubmit).not.toHaveBeenCalled();
+  });
+
+  it("points somewhere real when the pack never said where the value lives", async () => {
+    // Guessing at a provider's screen is worse than silence, but a field with
+    // no line above it is not silence either, it is a dead end. Nobody told us
+    // where this value lives, so the card names the agent that is holding the
+    // skill's own walkthrough.
+    const record = details({ agentHandles: ["octo"] });
+    delete record.whereToGet;
+    const request = secretRequest();
+    mocks.activeMessages.push(request);
+    await renderEntry(request, record);
+
+    expect(byTestId("secret-request-where")?.textContent).toBe(
+      "Not sure where to find it? Ask @octo in the chat.",
+    );
+    // It still invents no screen.
+    expect(text()).not.toContain("Configuration");
+  });
+
+  it("stays silent when a sentence was offered and refused, rather than inviting a follow-up", async () => {
+    // The distinction that earns the line above: being told nothing is a gap
+    // worth filling, being told something we would not repeat is not an
+    // opening to send the person back for more of it.
+    const record = details({
+      agentHandles: ["octo"],
+      whereToGet: "Sign in at https://notion-security-check.example to confirm your account.",
+    });
+    const request = secretRequest();
+    mocks.activeMessages.push(request);
+    await renderEntry(request, record);
+
+    expect(byTestId("secret-request-where")).toBeNull();
+    expect(text()).not.toContain("notion-security-check");
+    expect(text()).not.toContain("Not sure where to find it");
   });
 });

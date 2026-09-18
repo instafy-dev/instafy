@@ -241,6 +241,13 @@ export type ParsedSecretRequestDetails = {
   description: string | null;
   /** One sentence naming the screen inside the provider it is found on. */
   whereToGet: string | null;
+  /**
+   * True when the request said something about where the value lives and the
+   * gate above refused it. It separates "nobody told us" from "we were told
+   * and would not repeat it", which the card answers differently: silence is a
+   * dead end worth filling, a refusal is not an invitation to go asking.
+   */
+  whereToGetRefused: boolean;
   /** The folder under .agents/skills that declared the need. Provenance only. */
   skill: string | null;
   /** Whether the input masks by default. Absent or unreadable means true. */
@@ -345,12 +352,9 @@ export function parseSecretRequestDetails(
     owner,
     skill,
   );
-  const whereToGet = sanitizeCardText(
-    readDetailString(record, ["whereToGet", "where_to_get"]),
-    "whereToGet",
-    owner,
-    skill,
-  );
+  const whereToGetRaw = readDetailString(record, ["whereToGet", "where_to_get"]);
+  const whereToGet = sanitizeCardText(whereToGetRaw, "whereToGet", owner, skill);
+  const whereToGetRefused = Boolean(whereToGetRaw && whereToGetRaw.trim()) && whereToGet === null;
   // Absent or unreadable means sensitive: a value nobody labelled is one
   // worth hiding.
   const sensitive = record["sensitive"] === false ? false : true;
@@ -373,6 +377,7 @@ export function parseSecretRequestDetails(
     valueLabel,
     description,
     whereToGet,
+    whereToGetRefused,
     skill,
     sensitive,
     refusedClass,

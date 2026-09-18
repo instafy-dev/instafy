@@ -620,6 +620,18 @@ export function SecretRequestEntry({
         : "Asked for by a skill in this space."
       : null;
 
+  // The pack said nothing about where the value lives, and the rule everywhere
+  // else here is that a plausible guess at a provider's screen is worse than
+  // silence. Silence on its own line, though, leaves a field and no way
+  // forward. The agent that asked is holding the skill's own walkthrough, so
+  // point at it rather than at a screen we cannot name.
+  const whereToGetFallback =
+    secretName && !refusedClass && !parsed.whereToGetRefused
+      ? parsed.agentHandles.length > 0
+        ? `Not sure where to find it? Ask ${joinHandles(parsed.agentHandles)} in the chat.`
+        : "Not sure where to find it? Ask in the chat and you will be walked through it."
+      : null;
+
   const handlesSentence =
     parsed.agentHandles.length > 0
       ? ` Only ${joinHandles(parsed.agentHandles)} can use it.`
@@ -814,7 +826,11 @@ export function SecretRequestEntry({
   return shell(
     <>
       {purpose ? quietLine(purpose) : null}
-      {whereToGet ? quietLine(whereToGet, "secret-request-where") : null}
+      {whereToGet
+        ? quietLine(whereToGet, "secret-request-where")
+        : whereToGetFallback
+          ? quietLine(whereToGetFallback, "secret-request-where")
+          : null}
       {provenance ? quietLine(provenance, "secret-request-provenance") : null}
       <InlineSecretsForm
         projectId={projectId}
