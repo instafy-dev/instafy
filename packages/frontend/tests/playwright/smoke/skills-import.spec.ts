@@ -612,13 +612,12 @@ test.describe("Skills command", () => {
     await page.getByTestId("composer-action-menu-connect").click();
 
     // Connect sub-view: only the featured rows that can be selected today
-    // (Notion, GitHub) plus Browse all tools, and nothing sent. Skill packs
-    // that are not published yet are not rows here; the sheet names them with
-    // a Soon Badge.
-    for (const id of ["notion", "github", "browse"]) {
+    // (GitHub, Notion, FreeFinance) plus Browse all tools, and nothing sent.
+    // Skill packs that are not published yet are not rows here; the sheet
+    // names them with a Soon Badge.
+    for (const id of ["notion", "github", "freefinance", "browse"]) {
       await expect(page.getByTestId(`composer-action-menu-connect-${id}`)).toBeVisible();
     }
-    await expect(page.getByTestId("composer-action-menu-connect-freefinance")).toHaveCount(0);
     await expect(page.getByTestId("composer-action-menu-connect-other")).toHaveCount(0);
     expect(await userBubbles.count()).toBe(userBubbleCountBefore);
 
@@ -695,13 +694,14 @@ test.describe("Skills command", () => {
     await page.getByTestId("composer-action-menu-connect").click();
     await page.getByTestId("composer-action-menu-connect-browse").click();
 
-    // Browse stage: search, the Popular row of the two selectable featured
-    // tools (Notion and GitHub, as bare marks) and the category rows; the
-    // unpublished packs are listed disabled with a Soon Badge.
+    // Browse stage: search, the Popular row of the three selectable featured
+    // tools (GitHub, Notion and FreeFinance, as bare marks) and the category
+    // rows; the unpublished packs are listed disabled with a Soon Badge.
     await expect(page.getByRole("dialog", { name: "Connect a tool" })).toBeVisible();
     await expect(page.getByTestId("connect-popular")).toBeVisible();
     await expect(page.getByTestId("connect-popular-notion")).toBeEnabled();
     await expect(page.getByTestId("connect-popular-github")).toBeEnabled();
+    await expect(page.getByTestId("connect-popular-freefinance")).toBeEnabled();
     await expect(page.getByTestId("connect-popular-slack")).toHaveCount(0);
     await expect(page.getByTestId("connect-popular-discord")).toHaveCount(0);
     await expect(page.getByTestId("connect-row-github")).toBeEnabled();
@@ -769,13 +769,14 @@ test.describe("Skills command", () => {
     const card = page.getByTestId("onboarding-getting-started");
     const notionChip = card.getByTestId("connect-chip-notion");
     await expect(notionChip).toBeVisible({ timeout: 60_000 });
-    // The row is every featured tool that can be picked today: GitHub then
-    // Notion. Slack and Discord (unpublished) get no chip and no Soon badge
-    // here; the sheet names them. No niche chip, no paste link, no pending
+    // The row is every featured tool that can be picked today: GitHub, then
+    // Notion and FreeFinance. Slack and Discord (unpublished) get no chip and
+    // no Soon badge here; the sheet names them. No paste link, no pending
     // line: every entry on the card leads somewhere.
-    await expect(card.locator('button[data-testid^="connect-chip-"]')).toHaveCount(2);
+    await expect(card.locator('button[data-testid^="connect-chip-"]')).toHaveCount(3);
     await expect(card.getByTestId("connect-chip-github")).toBeEnabled();
-    for (const id of ["slack", "discord", "freefinance", "other"]) {
+    await expect(card.getByTestId("connect-chip-freefinance")).toBeEnabled();
+    for (const id of ["slack", "discord", "other"]) {
       await expect(card.getByTestId(`connect-chip-${id}`)).toHaveCount(0);
     }
     await expect(card.getByTestId("connect-coming-soon")).toHaveCount(0);

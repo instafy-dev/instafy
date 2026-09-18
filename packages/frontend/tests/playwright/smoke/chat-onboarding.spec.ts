@@ -83,9 +83,10 @@ test.describe("Chat onboarding", () => {
     await expect(onboarding.getByTestId("onboarding-action-import-github-repo")).toHaveCount(0);
     await expect(onboarding.getByTestId("onboarding-action-start-from-scratch")).toHaveCount(0);
     await expect(onboarding).not.toContainText("Start from scratch");
-    await expect(onboarding.locator('button[data-testid^="connect-chip-"]')).toHaveCount(2);
+    await expect(onboarding.locator('button[data-testid^="connect-chip-"]')).toHaveCount(3);
     await expect(onboarding.getByTestId("connect-chip-github")).toBeEnabled();
     await expect(onboarding.getByTestId("connect-chip-notion")).toBeEnabled();
+    await expect(onboarding.getByTestId("connect-chip-freefinance")).toBeEnabled();
     await expect(onboarding.getByTestId("onboarding-type-hint")).toHaveText(
       "Or just type what you want below.",
     );
@@ -244,6 +245,7 @@ test.describe("Chat onboarding on phones", () => {
     await expect(workspaceStep).toBeInViewport();
     await expect(onboarding.getByTestId("connect-chip-github")).toBeInViewport();
     await expect(onboarding.getByTestId("connect-chip-notion")).toBeInViewport();
+    await expect(onboarding.getByTestId("connect-chip-freefinance")).toBeInViewport();
     await expect(onboarding.getByTestId("onboarding-type-hint")).toBeInViewport();
     await expect(onboarding.getByTestId("onboarding-path-finance")).toHaveCount(0);
 

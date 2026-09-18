@@ -223,9 +223,13 @@ describe("ConnectSheet", () => {
       expect(search?.value).toBe("");
 
       // Popular shows only tools that can be selected today, and only once
-      // there are at least two of them: GitHub then Notion, in list order,
-      // which is the no-paste-first rule the card row reads too.
-      expect(AVAILABLE_FEATURED_CONNECTORS.map((entry) => entry.id)).toEqual(["github", "notion"]);
+      // there are at least two of them: GitHub, then Notion and FreeFinance,
+      // in list order, which is the no-paste-first rule the card row reads too.
+      expect(AVAILABLE_FEATURED_CONNECTORS.map((entry) => entry.id)).toEqual([
+        "github",
+        "notion",
+        "freefinance",
+      ]);
       // The catalogue sits close to the threshold, so assert the row is not
       // one un-featured entry away from disappearing without a test noticing.
       expect(AVAILABLE_FEATURED_CONNECTORS.length).toBeGreaterThanOrEqual(POPULAR_MIN_AVAILABLE);
@@ -235,7 +239,11 @@ describe("ConnectSheet", () => {
         queryAll<HTMLButtonElement>('[data-testid="connect-popular-row"] [data-testid^="connect-popular-"]').map(
           (mark) => mark.dataset.testid,
         ),
-      ).toEqual(["connect-popular-github", "connect-popular-notion"]);
+      ).toEqual([
+        "connect-popular-github",
+        "connect-popular-notion",
+        "connect-popular-freefinance",
+      ]);
       expect(query('[data-testid="connect-popular-slack"]')).toBeNull();
       expect(query('[data-testid="connect-popular-discord"]')).toBeNull();
 
@@ -617,10 +625,10 @@ describe("ConnectSheet", () => {
       expect(marks.map((mark) => mark.dataset.testid)).toEqual([
         "connect-popular-github",
         "connect-popular-notion",
+        "connect-popular-freefinance",
       ]);
       expect(query('[data-testid="connect-popular-slack"]')).toBeNull();
       expect(query('[data-testid="connect-popular-discord"]')).toBeNull();
-      expect(query('[data-testid="connect-popular-freefinance"]')).toBeNull();
       for (const mark of marks) {
         expect(mark.disabled).toBe(false);
         // Bare marks at the IconButton md size, with the touch floor.
@@ -628,8 +636,11 @@ describe("ConnectSheet", () => {
         expect(mark.className).toContain("pointer-coarse:min-h-11");
         expect(mark.querySelectorAll("svg")).toHaveLength(1);
         expect(mark.querySelector("svg")?.getAttribute("aria-hidden")).toBe("true");
-        // The name lives on the label and the hover title; no visible text.
-        expect(mark.textContent).toBe("");
+        // The name lives on the label and the hover title; the button adds
+        // no text of its own beside the mark. FreeFinance's placeholder
+        // monogram draws "FF" inside its own aria-hidden svg, which is the
+        // mark itself and not a label.
+        expect(mark.textContent).toBe(mark.querySelector("svg")?.textContent ?? "");
       }
       expect(query<HTMLButtonElement>('[data-testid="connect-popular-github"]')?.getAttribute("aria-label")).toBe("GitHub");
       expect(query<HTMLButtonElement>('[data-testid="connect-popular-notion"]')?.getAttribute("aria-label")).toBe("Notion");
@@ -718,7 +729,7 @@ describe("ConnectSheet", () => {
         "Adds the Notion skill from instafy-dev/skills to this space, then starts its setup in this chat.",
       );
       expect(query('[data-testid="connect-confirm-needs-line"]')?.textContent).toBe(
-        "Setup will ask for a Notion internal integration token (NOTION_API_KEY) through the secrets card. Never paste it in chat.",
+        "Setup will ask for a Notion connection Installation access token (NOTION_API_KEY) through the secrets card. Never paste it in chat.",
       );
       expect(query('[data-testid="connect-confirm-files-line"]')?.textContent).toBe(
         "Files land in .agents/skills/notion.",
