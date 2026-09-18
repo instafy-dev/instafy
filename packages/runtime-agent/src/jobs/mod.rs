@@ -42,6 +42,7 @@ mod git_sync;
 mod handoff;
 mod learn;
 mod mcp;
+mod skill_declaration;
 mod skills;
 mod workspace_change_detection;
 mod workspace_commit;
@@ -5421,7 +5422,7 @@ impl JobProcessor {
         let expects_workspace_file_changes_after_actions =
             workspace_file_changes_still_required(expects_workspace_file_changes, &outcome);
         let final_messages = with_runtime_metadata_vec(
-            build_final_messages_from_actions(&outcome.actions),
+            build_final_messages_from_actions(&outcome.actions, Some(&workspace_dir)),
             &registration.runtime_id,
         );
         let reported_file_paths = outcome
@@ -6220,7 +6221,7 @@ impl JobProcessor {
                 }
             }
             let retry_final_messages = with_runtime_metadata_vec(
-                build_final_messages_from_actions(&retry_outcome.actions),
+                build_final_messages_from_actions(&retry_outcome.actions, Some(&workspace_dir)),
                 &registration.runtime_id,
             );
             if retry_generic_mcp_tool_execution_missing {
@@ -7570,9 +7571,12 @@ enum CodexAction {
         /// Provenance and half of the connector resolution key, never a
         /// display name.
         skill: Option<String>,
-        /// Whether the input masks by default. A base URL hidden behind dots
-        /// under a promise that it will never be shown is a lie about both.
-        sensitive: bool,
+        /// Whether the input masks by default, as the model sent it. `None`
+        /// where it said nothing, so the declaration can still speak: a base
+        /// URL hidden behind dots under a promise that it will never be shown
+        /// is a lie about both, and a default applied here would have
+        /// overwritten the pack's own "No, optional" before it was ever read.
+        sensitive: Option<bool>,
         agent_handles: Vec<String>,
         /// Set when the request asked for a human login credential. The card
         /// renders a fixed refusal and no input at all.
@@ -7931,7 +7935,7 @@ fn parse_codex_actions(value: &JsonValue) -> Vec<CodexAction> {
                     value_label: None,
                     where_to_get: None,
                     skill: None,
-                    sensitive: true,
+                    sensitive: Some(true),
                     agent_handles,
                     refused_class: Some(refused_class),
                 });
@@ -7949,12 +7953,11 @@ fn parse_codex_actions(value: &JsonValue) -> Vec<CodexAction> {
             let value_label = read_text(&["valueLabel", "value_label", "label"]);
             let where_to_get = read_text(&["whereToGet", "where_to_get"]);
             let skill = read_text(&["skill", "skillName", "skill_name"]);
-            // Default true: a value nobody labelled is treated as one worth
-            // hiding.
-            let sensitive = map
-                .get("sensitive")
-                .and_then(JsonValue::as_bool)
-                .unwrap_or(true);
+            // No default here. The three-way order lives at the card site,
+            // where the declaration is readable: what the model sent wins, the
+            // skill's own "Sensitive" cell answers when it sent nothing, and
+            // only then does a value nobody labelled fall to being hidden.
+            let sensitive = map.get("sensitive").and_then(JsonValue::as_bool);
 
             out.push(CodexAction::RequestSecret {
                 name,
@@ -9228,7 +9231,17 @@ fn normalize_codex_action_list_item(
     Some(normalized)
 }
 
-fn build_final_messages_from_actions(actions: &[CodexAction]) -> Vec<JobMessage> {
+/// The chat messages an assistant turn's actions become.
+///
+/// `workspace_dir` is where the skills lane installed what it imported, and it
+/// is what lets a secret card read the declaration that asked for the value.
+/// `None` means no derivation: the tests pass it, and so would any caller that
+/// has no workspace, and a card then behaves exactly as it did before, which is
+/// to say it falls back to its own wording.
+fn build_final_messages_from_actions(
+    actions: &[CodexAction],
+    workspace_dir: Option<&Path>,
+) -> Vec<JobMessage> {
     let mut out: Vec<JobMessage> = Vec::new();
     let mut seen_secret_requests: HashSet<String> = HashSet::new();
     let mut seen_integration_requests: HashSet<String> = HashSet::new();
@@ -9309,16 +9322,63 @@ fn build_final_messages_from_actions(actions: &[CodexAction]) -> Vec<JobMessage>
                 // persisted, and every client reads the clean string. The
                 // frontend runs the same rules again on read, because messages
                 // written by an older runtime outlive this deploy.
-                let skill_slug = skill.as_deref().and_then(card_text::sanitize_skill_slug);
+                let model_slug = skill.as_deref().and_then(card_text::sanitize_skill_slug);
+
+                // The pack already declared all of this, in the table the model
+                // was asked to copy from and does not reliably copy from. Read
+                // it here, after the dedupe above, so one card parses one
+                // declaration once. When the model named no skill, the scan
+                // finds the one that declared this variable, which is also the
+                // only way provenance reaches the card at all in that case.
+                let declared = workspace_dir.and_then(|workspace_dir| {
+                    skill_declaration::declared_secret(workspace_dir, &name, model_slug.as_deref())
+                });
+                let skill_slug = model_slug.or_else(|| {
+                    declared
+                        .as_ref()
+                        .map(|declared| declared.skill_slug.clone())
+                });
                 let owner = card_text::resolve_connector_name(&name, skill_slug.as_deref());
-                let clean = |value: &Option<String>, field: card_text::CardTextField| {
-                    value.as_deref().and_then(|raw| {
-                        card_text::sanitize_card_text(raw, field, owner, skill_slug.as_deref())
-                    })
+                let clean = |raw: &str, field: card_text::CardTextField| {
+                    card_text::sanitize_card_text(raw, field, owner, skill_slug.as_deref())
                 };
-                let value_label = clean(&value_label, card_text::CardTextField::ValueLabel);
-                let description = clean(&description, card_text::CardTextField::Description);
-                let where_to_get = clean(&where_to_get, card_text::CardTextField::WhereToGet);
+                // Precedence, in one place: what the model sent wins wherever it
+                // survives the sanitizer, the declaration answers where it did
+                // not, and the card's own fallback ladder has the last word. The
+                // declaration is the floor, never the ceiling. Both halves go
+                // through the same gate, because a SKILL.md is untrusted content
+                // whether the model quoted it to us or we read it ourselves.
+                let derive = |model: &Option<String>,
+                              declared_value: Option<&String>,
+                              field: card_text::CardTextField| {
+                    model
+                        .as_deref()
+                        .and_then(|raw| clean(raw, field))
+                        .or_else(|| declared_value.and_then(|raw| clean(raw, field)))
+                };
+                let declared_fields = declared.as_ref();
+                let value_label = derive(
+                    &value_label,
+                    declared_fields.and_then(|declared| declared.value_label.as_ref()),
+                    card_text::CardTextField::ValueLabel,
+                );
+                let description = derive(
+                    &description,
+                    declared_fields.and_then(|declared| declared.description.as_ref()),
+                    card_text::CardTextField::Description,
+                );
+                let where_to_get = derive(
+                    &where_to_get,
+                    declared_fields.and_then(|declared| declared.where_to_get.as_ref()),
+                    card_text::CardTextField::WhereToGet,
+                );
+                // The same three-way order for the one field that is not text.
+                // The old parse-site default answered before the declaration
+                // could, which masked both of FreeFinance's optional values
+                // behind dots under a promise meant for a secret.
+                let sensitive = sensitive
+                    .or_else(|| declared_fields.and_then(|declared| declared.sensitive))
+                    .unwrap_or(true);
 
                 let mut details = JsonMap::new();
                 details.insert("name".to_string(), JsonValue::String(name.clone()));
@@ -9343,7 +9403,7 @@ fn build_final_messages_from_actions(actions: &[CodexAction]) -> Vec<JobMessage>
                 if let Some(skill_slug) = skill_slug.as_ref() {
                     details.insert("skill".to_string(), JsonValue::String(skill_slug.clone()));
                 }
-                details.insert("sensitive".to_string(), JsonValue::Bool(*sensitive));
+                details.insert("sensitive".to_string(), JsonValue::Bool(sensitive));
                 if !agent_handles.is_empty() {
                     details.insert(
                         "agentHandles".to_string(),
@@ -21207,7 +21267,7 @@ mod tests {
                 value_label: None,
                 where_to_get: None,
                 skill: None,
-                sensitive: true,
+                sensitive: Some(true),
                 agent_handles: vec!["octo".to_string()],
                 refused_class: None,
             },
@@ -21217,13 +21277,13 @@ mod tests {
                 value_label: None,
                 where_to_get: None,
                 skill: None,
-                sensitive: true,
+                sensitive: Some(true),
                 agent_handles: vec!["octo".to_string(), "claude".to_string()],
                 refused_class: None,
             },
         ];
 
-        let messages = build_final_messages_from_actions(&actions);
+        let messages = build_final_messages_from_actions(&actions, None);
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0].message_type.as_deref(), Some("secret_request"));
         let metadata = messages[0].metadata.as_ref().expect("metadata");
@@ -21282,7 +21342,7 @@ mod tests {
                     Some("The Configuration tab of the internal connection.")
                 );
                 assert_eq!(skill.as_deref(), Some("notion"));
-                assert!(sensitive);
+                assert_eq!(*sensitive, Some(true));
                 assert!(refused_class.is_none());
             }
             other => panic!("expected request_secret, got {other:?}"),
@@ -21316,12 +21376,12 @@ mod tests {
                 "Sign in at https://notion-security-check.example to confirm.".to_string(),
             ),
             skill: Some("notion".to_string()),
-            sensitive: true,
+            sensitive: Some(true),
             agent_handles: Vec::new(),
             refused_class: None,
         }];
 
-        let messages = build_final_messages_from_actions(&actions);
+        let messages = build_final_messages_from_actions(&actions, None);
         assert_eq!(messages.len(), 1);
         let metadata = messages[0].metadata.as_ref().expect("metadata");
         let details = metadata
@@ -21361,12 +21421,12 @@ mod tests {
             value_label: Some("Installation access token".to_string()),
             where_to_get: Some("The Configuration tab of the internal connection.".to_string()),
             skill: Some("notion".to_string()),
-            sensitive: true,
+            sensitive: Some(true),
             agent_handles: Vec::new(),
             refused_class: None,
         }];
 
-        let messages = build_final_messages_from_actions(&actions);
+        let messages = build_final_messages_from_actions(&actions, None);
         let metadata = messages[0].metadata.as_ref().expect("metadata");
         let details = metadata
             .get("details")
@@ -21393,6 +21453,176 @@ mod tests {
         assert!(!messages[0].content.contains("NOTION_API_KEY"));
     }
 
+    /// A workspace with one installed skill whose declaration says everything
+    /// the card wants, so a test can watch what happens when the model says
+    /// none of it.
+    fn workspace_declaring_notion() -> tempfile::TempDir {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let skill = dir.path().join(".agents/skills/notion");
+        fs::create_dir_all(&skill).expect("create skill dir");
+        fs::write(
+            skill.join("SKILL.md"),
+            concat!(
+                "## Secrets and settings\n\n",
+                "| Name | Sensitive | What it is | Where the user gets it |\n",
+                "| --- | --- | --- | --- |\n",
+                "| `NOTION_API_KEY` | Yes | The Installation access token of an internal ",
+                "connection, starting with `ntn_`. | In the Notion developer portal, under Build, ",
+                "choose Internal connections, then Create a new connection. |\n",
+                "| `NOTION_PAGE_ID` | No, optional | The id of the page to start from. | Shown in ",
+                "the page address. |\n",
+            ),
+        )
+        .expect("write SKILL.md");
+        dir
+    }
+
+    fn secret_details(messages: &[JobMessage]) -> JsonMap<String, JsonValue> {
+        messages[0]
+            .metadata
+            .as_ref()
+            .and_then(|metadata| metadata.get("details"))
+            .and_then(JsonValue::as_object)
+            .cloned()
+            .expect("details")
+    }
+
+    #[test]
+    fn a_silent_model_still_gets_the_declaration_s_words_on_the_card() {
+        // This is the failure the derivation exists for: the model sent the
+        // name and nothing else, and the card read "Connect Notion / Add the
+        // value in the card on this message.", which is worse than the
+        // hardcoded catalogue entry it replaced.
+        let dir = workspace_declaring_notion();
+        let actions = vec![CodexAction::RequestSecret {
+            name: "NOTION_API_KEY".to_string(),
+            description: None,
+            value_label: None,
+            where_to_get: None,
+            skill: None,
+            sensitive: None,
+            agent_handles: vec!["octo".to_string()],
+            refused_class: None,
+        }];
+
+        let messages = build_final_messages_from_actions(&actions, Some(dir.path()));
+        let details = secret_details(&messages);
+        assert_eq!(
+            details.get("valueLabel").and_then(JsonValue::as_str),
+            Some("Installation access token")
+        );
+        assert_eq!(
+            details.get("description").and_then(JsonValue::as_str),
+            Some("The Installation access token of an internal connection.")
+        );
+        assert_eq!(
+            details.get("whereToGet").and_then(JsonValue::as_str),
+            Some(
+                "In the Notion developer portal, under Build, choose Internal connections, then Create a new connection."
+            )
+        );
+        // The scan found the asker, so provenance reaches the card even though
+        // the model named no skill.
+        assert_eq!(
+            details.get("skill").and_then(JsonValue::as_str),
+            Some("notion")
+        );
+        assert_ne!(
+            messages[0].content,
+            "Add the value in the card on this message."
+        );
+    }
+
+    #[test]
+    fn the_model_outranks_the_declaration_wherever_it_survives_the_gate() {
+        // Derivation is the floor, not the ceiling. Field one is the model's
+        // and stands; field two is the model's, is refused by the gate for
+        // claiming what happens to the value, and the declaration answers in
+        // its place.
+        let dir = workspace_declaring_notion();
+        let actions = vec![CodexAction::RequestSecret {
+            name: "NOTION_API_KEY".to_string(),
+            description: Some(
+                "The Notion setup is blocked until the connection token is saved.".to_string(),
+            ),
+            value_label: Some("Internal integration secret".to_string()),
+            where_to_get: None,
+            skill: Some("notion".to_string()),
+            sensitive: None,
+            agent_handles: Vec::new(),
+            refused_class: None,
+        }];
+
+        let messages = build_final_messages_from_actions(&actions, Some(dir.path()));
+        let details = secret_details(&messages);
+        assert_eq!(
+            details.get("valueLabel").and_then(JsonValue::as_str),
+            Some("Internal integration secret")
+        );
+        assert_eq!(
+            details.get("description").and_then(JsonValue::as_str),
+            Some("The Installation access token of an internal connection.")
+        );
+    }
+
+    #[test]
+    fn a_declaration_that_answers_nothing_leaves_the_fallback_ladder_alone() {
+        let dir = workspace_declaring_notion();
+        let actions = vec![CodexAction::RequestSecret {
+            name: "SOME_OTHER_TOKEN".to_string(),
+            description: None,
+            value_label: None,
+            where_to_get: None,
+            skill: None,
+            sensitive: None,
+            agent_handles: Vec::new(),
+            refused_class: None,
+        }];
+
+        let messages = build_final_messages_from_actions(&actions, Some(dir.path()));
+        let details = secret_details(&messages);
+        assert!(details.get("valueLabel").is_none());
+        assert!(details.get("description").is_none());
+        assert!(details.get("whereToGet").is_none());
+        assert!(details.get("skill").is_none());
+        assert_eq!(
+            messages[0].content,
+            "Add the value in the card on this message."
+        );
+    }
+
+    #[test]
+    fn sensitive_takes_the_same_three_way_order() {
+        let dir = workspace_declaring_notion();
+        let request = |name: &str, sent: Option<bool>| CodexAction::RequestSecret {
+            name: name.to_string(),
+            description: None,
+            value_label: None,
+            where_to_get: None,
+            skill: None,
+            sensitive: sent,
+            agent_handles: Vec::new(),
+            refused_class: None,
+        };
+        let sensitive_of = |action: CodexAction| {
+            secret_details(&build_final_messages_from_actions(
+                &[action],
+                Some(dir.path()),
+            ))
+            .get("sensitive")
+            .and_then(JsonValue::as_bool)
+            .expect("sensitive")
+        };
+
+        // The declaration's "No, optional" is read, where the old parse-site
+        // default answered first and hid an optional value behind dots.
+        assert!(!sensitive_of(request("NOTION_PAGE_ID", None)));
+        // The model still outranks it.
+        assert!(sensitive_of(request("NOTION_PAGE_ID", Some(true))));
+        // And a value nobody labelled at all is still hidden.
+        assert!(sensitive_of(request("SOME_OTHER_TOKEN", None)));
+    }
+
     #[test]
     fn build_final_messages_writes_a_refusal_with_no_destination() {
         let actions = vec![CodexAction::RequestSecret {
@@ -21401,12 +21631,12 @@ mod tests {
             value_label: Some("Account password".to_string()),
             where_to_get: None,
             skill: Some("notion".to_string()),
-            sensitive: true,
+            sensitive: Some(true),
             agent_handles: Vec::new(),
             refused_class: Some("password"),
         }];
 
-        let messages = build_final_messages_from_actions(&actions);
+        let messages = build_final_messages_from_actions(&actions, None);
         assert_eq!(messages.len(), 1);
         assert_eq!(
             messages[0].content,
@@ -21883,7 +22113,7 @@ mod tests {
 
         assert!(outcome_defers_workspace_file_changes(&outcome));
         assert!(!workspace_file_changes_still_required(true, &outcome));
-        assert!(build_final_messages_from_actions(&outcome.actions).is_empty());
+        assert!(build_final_messages_from_actions(&outcome.actions, None).is_empty());
     }
 
     #[test]
@@ -22058,21 +22288,24 @@ mod tests {
 
     #[test]
     fn build_final_messages_from_actions_emits_multi_agent_plan() {
-        let messages = build_final_messages_from_actions(&[CodexAction::MultiAgentPlan {
-            plan: json!({
-                "mode": "read_only",
-                "agents": [
-                    { "handle": "front", "prompt": "Inspect frontend" }
-                ],
-                "lead": {
-                    "leadHandle": "octo",
-                    "continuationPrompt": "Review sibling output and choose the next step.",
-                    "expectedReportFormat": "report"
-                }
-            }),
-            agent_count: 1,
-            rationale: Some("Use one focused sibling for a broad read-only slice.".to_string()),
-        }]);
+        let messages = build_final_messages_from_actions(
+            &[CodexAction::MultiAgentPlan {
+                plan: json!({
+                    "mode": "read_only",
+                    "agents": [
+                        { "handle": "front", "prompt": "Inspect frontend" }
+                    ],
+                    "lead": {
+                        "leadHandle": "octo",
+                        "continuationPrompt": "Review sibling output and choose the next step.",
+                        "expectedReportFormat": "report"
+                    }
+                }),
+                agent_count: 1,
+                rationale: Some("Use one focused sibling for a broad read-only slice.".to_string()),
+            }],
+            None,
+        );
 
         assert_eq!(messages.len(), 1);
         assert_eq!(
@@ -22090,13 +22323,16 @@ mod tests {
 
     #[test]
     fn build_final_messages_from_actions_emits_goal_update() {
-        let messages = build_final_messages_from_actions(&[CodexAction::GoalUpdate {
-            details: json!({
-                "status": "blocked",
-                "progressSummary": "Need a Desktop runtime on the bench machine."
-            }),
-            content: "Goal blocked: Need a Desktop runtime on the bench machine.".to_string(),
-        }]);
+        let messages = build_final_messages_from_actions(
+            &[CodexAction::GoalUpdate {
+                details: json!({
+                    "status": "blocked",
+                    "progressSummary": "Need a Desktop runtime on the bench machine."
+                }),
+                content: "Goal blocked: Need a Desktop runtime on the bench machine.".to_string(),
+            }],
+            None,
+        );
 
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0].message_type.as_deref(), Some("goal_update"));
@@ -22108,13 +22344,16 @@ mod tests {
 
     #[test]
     fn build_final_messages_from_actions_hides_active_goal_plumbing() {
-        let messages = build_final_messages_from_actions(&[CodexAction::GoalUpdate {
-            details: json!({
-                "status": "active",
-                "objective": "Count to 50"
-            }),
-            content: "Goal started: Count to 50.".to_string(),
-        }]);
+        let messages = build_final_messages_from_actions(
+            &[CodexAction::GoalUpdate {
+                details: json!({
+                    "status": "active",
+                    "objective": "Count to 50"
+                }),
+                content: "Goal started: Count to 50.".to_string(),
+            }],
+            None,
+        );
 
         assert_eq!(messages.len(), 1);
         let metadata = messages[0].metadata.as_ref().expect("metadata");
@@ -22143,7 +22382,7 @@ mod tests {
                 value_label: None,
                 where_to_get: None,
                 skill: None,
-                sensitive: true,
+                sensitive: Some(true),
                 agent_handles: vec!["octo".to_string()],
                 refused_class: None,
             },
@@ -22218,7 +22457,7 @@ mod tests {
             },
         ];
 
-        let messages = build_final_messages_from_actions(&actions);
+        let messages = build_final_messages_from_actions(&actions, None);
         assert_eq!(messages.len(), 1);
         assert_eq!(
             messages[0].message_type.as_deref(),
@@ -22237,10 +22476,13 @@ mod tests {
 
     #[test]
     fn build_final_messages_from_actions_emits_location_action_request() {
-        let messages = build_final_messages_from_actions(&[CodexAction::RequestLocation {
-            precision: LocationPrecision::Approximate,
-            description: Some("Need your location to recommend something nearby.".to_string()),
-        }]);
+        let messages = build_final_messages_from_actions(
+            &[CodexAction::RequestLocation {
+                precision: LocationPrecision::Approximate,
+                description: Some("Need your location to recommend something nearby.".to_string()),
+            }],
+            None,
+        );
 
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0].message_type.as_deref(), Some("action_request"));

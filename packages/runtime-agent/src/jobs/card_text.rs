@@ -401,6 +401,26 @@ fn looks_like_host(token: &str) -> bool {
     last.chars().count() >= 2 && last.chars().all(|ch| ch.is_ascii_alphabetic())
 }
 
+/// Markup, a link or a bare host: three of the things `rejects` refuses
+/// outright rather than repairing.
+///
+/// `skill_declaration` reads this to choose a clean clause out of a pack's
+/// sentence *before* anything is sanitized, so "the token, starting with
+/// `ntn_`" can be cut at its comma instead of costing the whole sentence. It is
+/// deliberately a test and not a cleaner: nothing here removes a backtick from
+/// a string and hands the result on as clean, because a stripped string that
+/// passes the gate is the gate not working.
+pub fn carries_markup_or_link(text: &str) -> bool {
+    if text.contains('`') || text.contains("](") || text.contains('<') {
+        return true;
+    }
+    let lower = text.to_lowercase();
+    if lower.contains("http://") || lower.contains("https://") || lower.contains("www.") {
+        return true;
+    }
+    lower.split_whitespace().any(looks_like_host)
+}
+
 /// Box drawing, block elements and geometric shapes. No honest sentence about
 /// a provider's screen needs one, and every one of them is a brick in a banner
 /// the pack is drawing for itself.

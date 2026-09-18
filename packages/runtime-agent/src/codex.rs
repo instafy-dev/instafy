@@ -243,6 +243,15 @@ fn is_retired_runtime_codex_model_id(model: &str) -> bool {
         .is_some_and(|minor| minor < 5)
 }
 
+/// The decoder's grammar for the final assistant message.
+///
+/// The `actions` item is `additionalProperties: false` with a `required` list
+/// naming every key, so a key missing from `properties` cannot be emitted at
+/// all, whatever the prompt asks for. That is how `valueLabel`, `whereToGet`,
+/// `skill` and `sensitive` went missing from every secret card: the model was
+/// obeying a harder constraint than the prompt. They are listed here now, and
+/// because `required` names every key, an action of another type emits them as
+/// explicit nulls, which every parse site already reads as absence.
 fn default_final_output_json_schema() -> JsonValue {
     serde_json::from_str(
         r#"{
@@ -330,6 +339,10 @@ fn default_final_output_json_schema() -> JsonValue {
                   "type",
                   "name",
                   "description",
+                  "valueLabel",
+                  "whereToGet",
+                  "skill",
+                  "sensitive",
                   "provider",
                   "precision",
                   "requiredScopes",
@@ -343,6 +356,10 @@ fn default_final_output_json_schema() -> JsonValue {
                   "type": { "type": "string" },
                   "name": { "type": ["string", "null"] },
                   "description": { "type": ["string", "null"] },
+                  "valueLabel": { "type": ["string", "null"] },
+                  "whereToGet": { "type": ["string", "null"] },
+                  "skill": { "type": ["string", "null"] },
+                  "sensitive": { "type": ["boolean", "null"] },
                   "provider": { "type": ["string", "null"] },
                   "precision": { "type": ["string", "null"] },
                   "requiredScopes": {
