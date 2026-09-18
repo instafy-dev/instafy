@@ -21,12 +21,13 @@ import type {
 } from "./gettingStartedAiChoices";
 
 // The collapsed row names at most this many tools before "More tools", so it
-// holds one line at 390 px: "Import a repo · Notion · More tools" is narrower
+// holds one line at 390 px: "Notion · Import a repo · More tools" is narrower
 // than the three labels it replaces.
 const COLLAPSED_ROW_TOOL_LIMIT = 2;
 
 // The collapsed row keeps the verb for the repo import, which is the one
-// place a bare "GitHub" would lose it.
+// place a bare "GitHub" would lose it. It no longer leads the row: see the
+// ordering rule in connectors.ts.
 function collapsedToolLabel(connector: ProductConnector): string {
   return connector.kind === "github" ? "Import a repo" : connector.name;
 }
@@ -195,7 +196,7 @@ export function ChatGettingStartedCard({
           : managedAiChoice
             // Names what the next step actually offers, so the forward
             // reference stays true when that step is a row of tools.
-            ? "Start free now, or connect your own AI for the best results. Next: pick a tool, or just type."
+            ? "Start free now, or connect an AI account you already pay for. Next: pick a tool, or just type."
             : "Connect the AI account you already use.";
   // The status line names what will answer, at the point of decision.
   const aiStatusLine =
@@ -372,7 +373,7 @@ export function ChatGettingStartedCard({
                       <Text as="span" variant="caption" tone="inherit" className="mt-0.5 block text-left opacity-80">
                         {personalAiConnectionState === "needs_default"
                           ? "Select which saved connection Instafy should use."
-                          : "ChatGPT/Codex login or API keys for OpenAI, DeepSeek, z.ai, and Gemini."}
+                          : "Sign in with ChatGPT, or use a key from another AI provider."}
                       </Text>
                     </span>
                   </span>

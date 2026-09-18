@@ -1,5 +1,3 @@
-const STORAGE_KEY = "instafy.projectSecrets.pendingCreate.v1";
-
 export type PendingProjectSecretPrefill = {
   projectId?: string | null;
   name: string;
@@ -56,33 +54,39 @@ function normalizePrefill(raw: unknown): PendingProjectSecretPrefill | null {
   };
 }
 
+/**
+ * Which value the Secrets panel should open its create form on, held in memory
+ * for the one navigation that is about to happen.
+ *
+ * It lived in sessionStorage, which was more than the job needs and worse at
+ * it. The panel switch that consumes this is a render away in the same
+ * document, so nothing has to survive a reload, and a prefill that did survive
+ * one would reopen a create form the person had already walked away from. Held
+ * here it cannot outlive the page, reach another tab, or be read back by
+ * anything but this module.
+ *
+ * It names a value; it never carries one. PendingProjectSecretPrefill has no
+ * field for a value, and normalizePrefill rebuilds the object field by field
+ * from an allow list, so a `value` an untyped caller supplies is dropped at the
+ * boundary. The name itself is not a secret: it is already on screen in the
+ * card that sent the person here.
+ */
+let pendingPrefill: PendingProjectSecretPrefill | null = null;
+
 export function setPendingProjectSecretPrefill(prefill: PendingProjectSecretPrefill) {
-  if (typeof window === "undefined") return;
   const normalized = normalizePrefill(prefill);
+  // A prefill that does not name anything is not a reason to forget the one
+  // already waiting, which is how the storage-backed version behaved too.
   if (!normalized) return;
-  try {
-    window.sessionStorage?.setItem(STORAGE_KEY, JSON.stringify(normalized));
-  } catch {
-    // Ignore storage failures.
-  }
+  pendingPrefill = normalized;
 }
 
 export function readPendingProjectSecretPrefill(): PendingProjectSecretPrefill | null {
-  if (typeof window === "undefined") return null;
-  try {
-    const raw = window.sessionStorage?.getItem(STORAGE_KEY);
-    if (!raw) return null;
-    return normalizePrefill(JSON.parse(raw) as unknown);
-  } catch {
-    return null;
-  }
+  // Rebuilt on the way out as well, so the caller holds its own copy and
+  // cannot reach back into the one this module is keeping.
+  return pendingPrefill ? normalizePrefill(pendingPrefill) : null;
 }
 
 export function clearPendingProjectSecretPrefill() {
-  if (typeof window === "undefined") return;
-  try {
-    window.sessionStorage?.removeItem(STORAGE_KEY);
-  } catch {
-    // Ignore storage failures.
-  }
+  pendingPrefill = null;
 }

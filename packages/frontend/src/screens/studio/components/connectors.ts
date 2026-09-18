@@ -80,8 +80,15 @@ export type SkillConnector = ProductConnectorBase & {
   sourceLabel: string;
   /** Folder under .agents/skills. */
   skillName: string;
-  /** "Setup will ask for" phrases, each naming its secret. Display text only. */
-  needs: string[];
+  /**
+   * The environment variable names this skill's setup asks for. Not copy: no
+   * customer reads one, and nothing here is shown on any surface. It is the
+   * trusted half of the key `findConnectorForSecret` resolves on, which is why
+   * it survived the move of the card's words into the pack: a request arrives
+   * untrusted, so the name it asks for has to be matched against a list a
+   * reviewer approved in this file.
+   */
+  secretNames: readonly string[];
   /**
    * Display-only. Set when the tool is used through its web app inside the
    * shared display: the human signs in there once and the project's browser
@@ -118,24 +125,16 @@ export const CONNECTORS: readonly Connector[] = [
     source: "https://github.com/instafy-dev/skills/tree/main/packs/team/.agents/skills/slack",
     sourceLabel: "instafy-dev/skills",
     skillName: "slack",
-    needs: ["a Slack app bot token (SLACK_BOT_TOKEN)"],
+    secretNames: ["SLACK_BOT_TOKEN"],
   },
   // Ordering rule for the featured entries, which is what the card's chip row
-  // and the sheet's Popular row read: connections with nothing to paste come
-  // first, then the ones that ask for a key, then the rest. GitHub signs in
-  // with a device code, so it leads; Notion asks for a token, so it follows.
-  // A sign-in tool added later enters at the front and the key tools drift
-  // right, with no layout change anywhere.
-  {
-    id: "github",
-    availability: "available",
-    name: "GitHub",
-    mark: Github,
-    kind: "github",
-    category: "code",
-    featured: true,
-    keywords: ["repo", "git", "code", "pull request"],
-  },
+  // and the sheet's Popular row read: a named product the customer already
+  // uses comes first, and the developer entry follows it. The first-run chip
+  // row is the first offer someone sees in an empty chat, and leading it with
+  // a repo import says "this is for programmers" before any copy can say
+  // otherwise. Notion therefore leads and GitHub sits next to it; a product
+  // tool added later enters at the front and GitHub drifts right, with no
+  // layout change anywhere.
   {
     id: "notion",
     availability: "available",
@@ -148,7 +147,20 @@ export const CONNECTORS: readonly Connector[] = [
     source: "https://github.com/instafy-dev/skills/tree/main/packs/team/.agents/skills/notion",
     sourceLabel: "instafy-dev/skills",
     skillName: "notion",
-    needs: ["a Notion connection Installation access token (NOTION_API_KEY)"],
+    // What Notion calls this value on screen is the pack's to say, and it has
+    // said it twice already this year. This list holds the variable name and
+    // nothing else.
+    secretNames: ["NOTION_API_KEY"],
+  },
+  {
+    id: "github",
+    availability: "available",
+    name: "GitHub",
+    mark: Github,
+    kind: "github",
+    category: "code",
+    featured: true,
+    keywords: ["repo", "git", "code", "pull request"],
   },
   {
     id: "discord",
@@ -163,7 +175,7 @@ export const CONNECTORS: readonly Connector[] = [
     source: "https://github.com/instafy-dev/skills/tree/main/packs/team/.agents/skills/discord",
     sourceLabel: "instafy-dev/skills",
     skillName: "discord",
-    needs: ["a Discord bot token (DISCORD_BOT_TOKEN)"],
+    secretNames: ["DISCORD_BOT_TOKEN"],
   },
   {
     id: "freefinance",
@@ -172,18 +184,24 @@ export const CONNECTORS: readonly Connector[] = [
     mark: FreeFinanceMark,
     kind: "skill",
     category: "finance",
-    // Featured, and last of the three that can be picked today, because it
-    // asks for a key and GitHub does not. It sits behind Notion by the
-    // ordering rule above and still leaves two of the five card slots free.
+    // Featured, and last of the three that can be picked today: Notion leads
+    // the row and GitHub follows it by the ordering rule above. This still
+    // leaves two of the five card slots free.
     featured: true,
     region: "Austria",
     keywords: ["bookkeeping", "accounting", "buchhaltung", "invoices", "uva"],
     source: "https://github.com/instafy-dev/skills/tree/main/packs/bookkeeping/.agents/skills/freefinance",
     sourceLabel: "instafy-dev/skills",
     skillName: "freefinance",
-    needs: [
-      "a FreeFinance technical user id (FREEFINANCE_API_CLIENT_ID)",
-      "its secret (FREEFINANCE_API_CLIENT_SECRET)",
+    // All four names the pack declares, not only the two sensitive ones: a
+    // name missing here resolves to no connector, so that value's card loses
+    // FreeFinance's mark and the pack's own sentence naming FreeFinance with
+    // it. The pack's optional needs are cards too.
+    secretNames: [
+      "FREEFINANCE_API_CLIENT_ID",
+      "FREEFINANCE_API_CLIENT_SECRET",
+      "FREEFINANCE_CLIENT_ID",
+      "FREEFINANCE_API_BASE_URL",
     ],
   },
   { id: "other", name: "Paste a skill link", mark: Puzzle, kind: "other" },
@@ -271,6 +289,45 @@ export function filterConnectors(query: string): ProductConnector[] {
     ];
     return haystack.some((term) => term.toLowerCase().includes(needle));
   });
+}
+
+/**
+ * The connector a secret request wears the name and mark of. Identity only: it
+ * returns the catalogue entry and nothing else, because every word on the card
+ * now comes from the pack that asked.
+ *
+ * The request is untrusted, so resolution needs a key we curate. The variable
+ * name must be one this entry declares in `secretNames`, and when the request
+ * also names a skill folder, that slug must be this entry's own `skillName`.
+ * Both must agree or the card goes generic. Keying on the slug alone would let
+ * any pack claim `skill: "notion"` and wear Notion's mark; keying on the name
+ * alone is the status quo, and requiring both costs nothing.
+ *
+ * Returns null for a name no first-party connector declares, which is how the
+ * card falls back to its own generic chrome and the Key glyph.
+ */
+export function findConnectorForSecret(
+  secretName: string | null | undefined,
+  skillSlug?: string | null,
+): ProductConnector | null {
+  const needle = (secretName ?? "").trim().toUpperCase();
+  if (!needle) {
+    return null;
+  }
+  const slug = (skillSlug ?? "").trim().toLowerCase();
+  for (const connector of PRODUCT_CONNECTORS) {
+    if (connector.kind !== "skill") {
+      continue;
+    }
+    if (!connector.secretNames.some((name) => name.trim().toUpperCase() === needle)) {
+      continue;
+    }
+    if (slug && slug !== connector.skillName) {
+      return null;
+    }
+    return connector;
+  }
+  return null;
 }
 
 export function buildConnectorImportMessage(connector: SkillConnector): string {

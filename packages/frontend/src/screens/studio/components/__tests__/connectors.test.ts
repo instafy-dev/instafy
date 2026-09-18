@@ -12,6 +12,7 @@ import {
   buildConnectorImportMessage,
   connectorCategoryLabel,
   filterConnectors,
+  findConnectorForSecret,
   isConnectorAvailable,
   type SkillConnector,
 } from "../connectors";
@@ -23,11 +24,12 @@ function ids(entries: readonly { id: string }[]): string[] {
 }
 
 describe("CONNECTORS", () => {
-  it("leads with the connection that needs no key pasted and keeps the paste link last", () => {
-    // Ordering rule: no-paste connections first, then key-based ones. GitHub
-    // signs in with a device code, so it sits above Notion, which asks for a
-    // token; the card row and the sheet's Popular row both read that order.
-    expect(ids(CONNECTORS)).toEqual(["slack", "github", "notion", "discord", "freefinance", "other"]);
+  it("leads with a named product rather than the repo import and keeps the paste link last", () => {
+    // Ordering rule: a product the customer already uses comes first and the
+    // developer entry follows. The first-run chip row is the first offer in an
+    // empty chat, and leading it with a repo import says "this is for
+    // programmers" before any copy can say otherwise.
+    expect(ids(CONNECTORS)).toEqual(["slack", "notion", "github", "discord", "freefinance", "other"]);
     const last = CONNECTORS[CONNECTORS.length - 1]!;
     expect(last.kind).toBe("other");
     expect(last.name).toBe("Paste a skill link");
@@ -52,6 +54,49 @@ describe("CONNECTORS", () => {
     expect(PRODUCT_CONNECTORS.some((entry) => (entry.id as string) === "other")).toBe(false);
   });
 
+  it("carries no customer-facing copy at all any more", () => {
+    // The words on the secret card and in the setup conversation come from the
+    // pack that asked, which is the copy that gets updated when a provider
+    // renames something. What survives here is identity and routing: a name, a
+    // mark, the search terms, and where the skill is installed from.
+    for (const entry of PRODUCT_CONNECTORS) {
+      expect("purpose" in entry).toBe(false);
+      expect("needs" in entry).toBe(false);
+      expect("credentials" in entry).toBe(false);
+      expect("sharingNote" in entry).toBe(false);
+    }
+  });
+
+  it("declares the secret names as variable names and never as copy", () => {
+    // Not a word any customer reads: it is the trusted half of the key
+    // findConnectorForSecret resolves on, so it has to be curated here.
+    const seen = new Set<string>();
+    for (const entry of PRODUCT_CONNECTORS) {
+      if (entry.kind !== "skill") {
+        continue;
+      }
+      expect(entry.secretNames.length).toBeGreaterThan(0);
+      for (const name of entry.secretNames) {
+        expect(name).toMatch(/^[A-Z][A-Z0-9_]*$/);
+        expect(seen.has(name), `${name} is declared twice`).toBe(false);
+        seen.add(name);
+      }
+    }
+  });
+
+  it("resolves identity only when the secret name and the skill slug agree", () => {
+    // Keying on the slug alone would let any pack claim skill "notion" and
+    // wear Notion's mark; keying on the name alone is the status quo.
+    expect(findConnectorForSecret("notion_api_key")?.id).toBe("notion");
+    expect(findConnectorForSecret("NOTION_API_KEY", "notion")?.id).toBe("notion");
+    expect(findConnectorForSecret("NOTION_API_KEY", "attacker")).toBeNull();
+    expect(findConnectorForSecret("FREEFINANCE_API_CLIENT_SECRET")?.id).toBe("freefinance");
+    expect(findConnectorForSecret("CLOUDFLARE_API_TOKEN")).toBeNull();
+    expect(findConnectorForSecret("CLOUDFLARE_API_TOKEN", "notion")).toBeNull();
+    expect(findConnectorForSecret("")).toBeNull();
+    expect(findConnectorForSecret(null)).toBeNull();
+  });
+
   it("keeps the category labels exact and in order", () => {
     expect(CONNECTOR_CATEGORIES.map((category) => [category.id, category.label])).toEqual([
       ["chat", "Chat and community"],
@@ -70,8 +115,8 @@ describe("CONNECTORS", () => {
     expect(FEATURED_CONNECTORS).toEqual(PRODUCT_CONNECTORS.filter((entry) => entry.featured));
     expect(ids(FEATURED_CONNECTORS)).toEqual([
       "slack",
-      "github",
       "notion",
+      "github",
       "discord",
       "freefinance",
     ]);
@@ -111,9 +156,9 @@ describe("CONNECTORS", () => {
     // is named nowhere on the card: the sheet's Soon Badge is its only place.
     expect(ids(FEATURED_CONNECTORS)).toEqual(expect.arrayContaining(["slack", "notion", "discord"]));
     expect(AVAILABLE_FEATURED_CONNECTORS).toEqual(FEATURED_CONNECTORS.filter(isConnectorAvailable));
-    // GitHub before Notion: list order, so the card row and the Popular row
-    // both lead with the entry that needs no key pasted.
-    expect(ids(AVAILABLE_FEATURED_CONNECTORS)).toEqual(["github", "notion", "freefinance"]);
+    // Notion before GitHub: list order, so the card row and the Popular row
+    // both lead with a named product rather than "Import a repo".
+    expect(ids(AVAILABLE_FEATURED_CONNECTORS)).toEqual(["notion", "github", "freefinance"]);
     expect(ids(AVAILABLE_FEATURED_CONNECTORS)).not.toContain("slack");
     expect(ids(AVAILABLE_FEATURED_CONNECTORS)).not.toContain("discord");
     for (const entry of AVAILABLE_FEATURED_CONNECTORS) {
@@ -128,7 +173,7 @@ describe("CONNECTORS", () => {
     expect(CARD_CHIP_LIMIT).toBe(5);
     expect(CARD_TOOL_CONNECTORS).toEqual(AVAILABLE_FEATURED_CONNECTORS.slice(0, CARD_CHIP_LIMIT));
     expect(CARD_TOOL_CONNECTORS.length).toBeLessThanOrEqual(CARD_CHIP_LIMIT);
-    expect(ids(CARD_TOOL_CONNECTORS)).toEqual(["github", "notion", "freefinance"]);
+    expect(ids(CARD_TOOL_CONNECTORS)).toEqual(["notion", "github", "freefinance"]);
     // However large the catalogue grows, the row cannot: the cap is applied
     // to the list itself, so everything past it lives behind "More tools".
     const grown = [...AVAILABLE_FEATURED_CONNECTORS, ...FEATURED_CONNECTORS, ...PRODUCT_CONNECTORS];
@@ -159,7 +204,7 @@ describe("CONNECTORS", () => {
       if (entry.kind === "skill") {
         expect(entry.source).toMatch(/^https:\/\/github\.com\//);
         expect(entry.source.split("/").pop()).toBe(entry.skillName);
-        expect(entry.needs.length).toBeGreaterThan(0);
+        expect(entry.secretNames.length).toBeGreaterThan(0);
         expect(buildConnectorImportMessage(entry)).toContain(`--name ${entry.skillName} --start`);
       }
       // Search still lists them, greyed.
@@ -204,7 +249,7 @@ describe("CONNECTORS", () => {
       expect(entry.source.split("/").pop()).toBe(entry.skillName);
       expect(entry.sourceLabel.trim().length).toBeGreaterThan(0);
       expect(entry.name.trim().length).toBeGreaterThan(0);
-      expect(entry.needs.length).toBeGreaterThan(0);
+      expect(entry.secretNames.length).toBeGreaterThan(0);
     }
   });
 
@@ -244,9 +289,7 @@ describe("CONNECTORS", () => {
       }
       if (entry.kind === "skill") {
         expect(entry.sourceLabel).not.toContain(EM_DASH);
-        for (const need of entry.needs) {
-          expect(need).not.toContain(EM_DASH);
-        }
+        expect(entry.skillName).not.toContain(EM_DASH);
       }
     }
   });
@@ -267,7 +310,7 @@ describe("CONNECTORS", () => {
     const notion = CONNECTORS.find(
       (entry): entry is SkillConnector => entry.kind === "skill" && entry.id === "notion",
     );
-    expect(notion?.needs).toEqual(["a Notion connection Installation access token (NOTION_API_KEY)"]);
+    expect(notion?.secretNames).toEqual(["NOTION_API_KEY"]);
   });
 
   it("builds the exact one-liner for a product", () => {

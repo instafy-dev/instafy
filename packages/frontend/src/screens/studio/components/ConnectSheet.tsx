@@ -11,6 +11,7 @@ import {
   AVAILABLE_FEATURED_CONNECTORS,
   CONNECTOR_CATEGORIES,
   FEATURED_CONNECTOR_LIMIT,
+  connectorCategoryLabel,
   filterConnectors,
   isConnectorAvailable,
   type ProductConnector,
@@ -69,27 +70,53 @@ export const POPULAR_MIN_AVAILABLE = 2;
 // disabled Button has pointer-events none, so the pointer reaches the item.
 const SOON_TITLE = "Coming soon";
 
-function joinNeeds(needs: readonly string[]): string {
-  if (needs.length <= 1) {
-    return needs[0] ?? "";
-  }
-  return `${needs.slice(0, -1).join(", ")} and ${needs[needs.length - 1]}`;
-}
+// The confirm stage answers three questions and no others: what is installed
+// and from where, what setup will ask of the person, and whether anything in
+// their account changes without them.
+//
+// It is deliberately generic about the values. This sheet renders BEFORE the
+// pack is installed, so there is no SKILL.md here to read: any list of values
+// printed here would be a claim about a file we have not fetched, and it was
+// right about Notion's "Installation access token" only until Notion renamed
+// it. Fetching one at sheet time would put untrusted remote prose into the
+// exact surface where the person is deciding whether to trust the tool at all,
+// which inverts the order of trust. Caching the declaration beside the
+// catalogue entry is the thing this change exists to undo, wearing a different
+// name. So the sheet says what we know without the pack, and the specifics
+// arrive seconds later in the setup conversation, from the pack itself.
 
+// The person pressing Connect is deciding whether they want the tool, so the
+// first line answers what they get and where it happens, and the source follows
+// it. Leading with a GitHub org handle and the word "skill" describes the shape
+// of the thing rather than the point of it, and it is the only line the sheet
+// has left for the point.
 function installLine(connector: SkillConnector): ReactNode {
+  const category = connectorCategoryLabel(connector.category).toLowerCase();
   if (connector.app) {
     return (
       <>
-        Adds the {connector.name} skill from {connector.sourceLabel} to this space. Setup opens{" "}
-        {connector.name} in the shared display; you sign in there once, and the agent then
-        works in that session.
+        Setup runs here, in this chat, and Instafy then works with your {category} in{" "}
+        {connector.name}. It installs the {connector.name} skill from {connector.sourceLabel}{" "}
+        into this space and opens {connector.name} in the shared display; you sign in there
+        once, and Instafy then works in that session.
       </>
     );
   }
   return (
     <>
-      Adds the {connector.name} skill from {connector.sourceLabel} to this space, then starts
-      its setup in this chat.
+      Setup runs here, in this chat, and Instafy then works with your {category} in{" "}
+      {connector.name} once it is set up. It installs the {connector.name} skill from{" "}
+      {connector.sourceLabel} into this space.
+    </>
+  );
+}
+
+function needsLine(connector: SkillConnector): ReactNode {
+  return (
+    <>
+      Setup will ask you for whatever {connector.name} needs, one value at a time, in a card
+      you paste into. A value you paste there is saved in this space{"\u2019"}s Secrets and
+      never goes into a chat message.
     </>
   );
 }
@@ -365,14 +392,12 @@ function ConfirmStage({
           <Text as="p" variant="body" tone="secondary" data-testid="connect-confirm-install-line">
             {installLine(connector)}
           </Text>
-          {connector.needs.length > 0 ? (
-            <Text as="p" variant="caption" tone="muted" data-testid="connect-confirm-needs-line">
-              Setup will ask for {joinNeeds(connector.needs)} through the secrets card. Never
-              paste {connector.needs.length > 1 ? "them" : "it"} in chat.
-            </Text>
-          ) : null}
-          <Text as="p" variant="caption" tone="muted" data-testid="connect-confirm-files-line">
-            Files land in <code className={CODE_CLASS}>{skillPath}</code>.
+          <Text as="p" variant="caption" tone="muted" data-testid="connect-confirm-needs-line">
+            {needsLine(connector)}
+          </Text>
+          <Text as="p" variant="caption" tone="muted" data-testid="connect-confirm-safety-line">
+            Instafy never changes anything in {connector.name} without asking you first,
+            every time.
           </Text>
         </>
       )}

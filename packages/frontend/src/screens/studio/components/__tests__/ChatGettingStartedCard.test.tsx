@@ -116,10 +116,14 @@ describe("ChatGettingStartedCard", () => {
     expect(connectButton?.textContent).toContain("Connect AI");
     expect(container.textContent).not.toContain("Bring my own AI");
     expect(container.textContent).not.toContain("Bring your own AI");
-    expect(connectButton?.textContent).toContain("API keys for OpenAI");
+    // Four unexplained product names plus "API keys" is not first-run copy.
+    expect(connectButton?.textContent).toContain(
+      "Sign in with ChatGPT, or use a key from another AI provider.",
+    );
+    expect(container.textContent).not.toContain("DeepSeek");
     // The forward reference names what the next step actually offers.
     expect(container.textContent).toContain(
-      "Start free now, or connect your own AI for the best results. Next: pick a tool, or just type.",
+      "Start free now, or connect an AI account you already pay for. Next: pick a tool, or just type.",
     );
     expect(container.textContent).not.toContain("Next: pick what to work on.");
     expect(container.textContent).not.toContain(EM_DASH);
@@ -186,13 +190,13 @@ describe("ChatGettingStartedCard", () => {
       (element) =>
         element instanceof HTMLButtonElement && !element.dataset.testid?.endsWith("-connected"),
     );
-    // Every featured tool that can be picked today, GitHub first because it
-    // needs no key pasted, then the two that ask for one. Slack and Discord
-    // are still "soon", so they are simply absent (the Connect sheet names
-    // them with a Badge), and the paste link lives in the sheet.
+    // Every featured tool that can be picked today, a named product first so
+    // the first offer in an empty chat is not "Import a repo". Slack and
+    // Discord are still "soon", so they are simply absent (the Connect sheet
+    // names them with a Badge), and the paste link lives in the sheet.
     expect(chips.map((chip) => chip.dataset.testid)).toEqual([
-      "connect-chip-github",
       "connect-chip-notion",
+      "connect-chip-github",
       "connect-chip-freefinance",
     ]);
     expect(chips.map((chip) => chip.dataset.testid)).toEqual(
@@ -681,14 +685,14 @@ describe("ChatGettingStartedCard", () => {
     // repo import keeps its verb, which is the one place a bare "GitHub"
     // would lose it; names carry the rest.
     expect(buttons.map((button) => button.textContent)).toEqual([
-      "Import a repo",
       "Notion",
+      "Import a repo",
       "More tools",
     ]);
-    expect(row?.textContent).toBe("Import a repo·Notion·More tools");
+    expect(row?.textContent).toBe("Notion·Import a repo·More tools");
     expect(buttons.map((button) => button.dataset.testid)).toEqual([
-      "onboarding-collapsed-import-github-repo",
       "onboarding-collapsed-notion",
+      "onboarding-collapsed-import-github-repo",
       "onboarding-collapsed-more-tools",
     ]);
     for (const button of buttons) {
@@ -701,11 +705,11 @@ describe("ChatGettingStartedCard", () => {
     await act(async () => {
       buttons[0]?.click();
     });
-    expect(onSelectMode).toHaveBeenCalledWith("github");
+    expect(onSelectConnector.mock.calls[0][0]).toMatchObject({ id: "notion", kind: "skill" });
     await act(async () => {
       buttons[1]?.click();
     });
-    expect(onSelectConnector.mock.calls[0][0]).toMatchObject({ id: "notion", kind: "skill" });
+    expect(onSelectMode).toHaveBeenCalledWith("github");
     await act(async () => {
       buttons[2]?.click();
     });

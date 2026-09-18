@@ -74,19 +74,19 @@ describe("ConnectChipStrip", () => {
     );
   }
 
-  it("renders the shipped row of live tools, GitHub first, then the More tools link", async () => {
+  it("renders the shipped row of live tools, Notion first, then the More tools link", async () => {
     await render();
 
     expect(CARD_TOOL_CONNECTORS.map((entry) => entry.id)).toEqual([
-      "github",
       "notion",
+      "github",
       "freefinance",
     ]);
     const strip = container.querySelector('[data-testid="connect-chip-strip"]');
     expect(strip?.tagName).toBe("UL");
     expect(chipButtons().map((chip) => chip.dataset.testid)).toEqual([
-      "connect-chip-github",
       "connect-chip-notion",
+      "connect-chip-github",
       "connect-chip-freefinance",
     ]);
     // Nothing pending is named here, and nothing is disabled.
@@ -202,8 +202,8 @@ describe("ConnectChipStrip", () => {
     await render({ installedSkillNames: new Set(["slack", "other"]) });
 
     expect(chipButtons().map((chip) => chip.dataset.testid)).toEqual([
-      "connect-chip-github",
       "connect-chip-notion",
+      "connect-chip-github",
       "connect-chip-freefinance",
     ]);
     expect(container.querySelector('[data-testid="connect-chip-slack"]')).toBeNull();
@@ -222,8 +222,8 @@ describe("ConnectChipStrip", () => {
     expect(notion.getAttribute("aria-label")).toBe("Notion, connected");
     expect(container.querySelector('[data-testid="connect-chip-notion-connected"]')).not.toBeNull();
     expect(chipButtons().map((chip) => chip.dataset.testid)).toEqual([
-      "connect-chip-github",
       "connect-chip-notion",
+      "connect-chip-github",
       "connect-chip-freefinance",
     ]);
     // Name plus the check: the mark and the glyph are the two svgs.

@@ -172,7 +172,7 @@ test.describe("Skills command", () => {
     await runSkillsCommandAndWait(
       page,
       "/skills import playwright/skill-import-fixture",
-      /Imported skill\s+`?playwright-imported-skill`?/i,
+      /Playwright imported skill is ready\./i,
       180_000
     );
 
@@ -661,7 +661,7 @@ test.describe("Skills command", () => {
     await expect(importCard).toBeVisible({ timeout: 180_000 });
     await expect
       .poll(async () => (await importCard.innerText().catch(() => "")).trim(), { timeout: 180_000 })
-      .toMatch(/Imported 1 skill/i);
+      .toMatch(/ is ready\./i);
 
     await expect
       .poll(
@@ -796,7 +796,15 @@ test.describe("Skills command", () => {
     await expect(page.getByRole("dialog", { name: "Connect Notion" })).toBeVisible();
     await expect(page.getByTestId("connect-confirm-submit")).toBeVisible();
     await expect(page.getByTestId("connect-confirm-back")).toHaveCount(0);
-    await expect(page.getByTestId("connect-confirm-needs-line")).toContainText("NOTION_API_KEY");
+    // The sheet renders before the pack is installed, so it names no value:
+    // what Notion calls this one is the pack's to say, on the secret card in
+    // the setup conversation this Connect button starts.
+    await expect(page.getByTestId("connect-confirm-needs-line")).toContainText(
+      "Setup will ask you for whatever Notion needs, one value at a time",
+    );
+    await expect(page.getByTestId("connect-confirm-needs-line")).not.toContainText(
+      "Installation access token",
+    );
     expect(await userBubbles.count()).toBe(userBubbleCountBefore);
     await page.keyboard.press("Escape");
     await expect(page.getByTestId("connect-sheet")).toHaveCount(0);

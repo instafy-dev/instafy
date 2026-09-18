@@ -99,7 +99,9 @@ describe("LandingPage entry", () => {
     expect(crew.get("Ada")).toBe("rgb(233, 61, 130)");
     expect(crew.get("Kim")).toBe("rgb(140, 185, 59)");
     expect(crew.get("Octo · agent")).toBe("rgb(245, 150, 10)");
-    expect(crew.get("Canary · agent")).toBe("rgb(124, 77, 216)");
+    // The purple cursor follows the active scenario's agent, and the deck now
+    // leads with Close the books.
+    expect(crew.get("Quill · agent")).toBe("rgb(124, 77, 216)");
     expect(pills).toHaveLength(4);
   });
 

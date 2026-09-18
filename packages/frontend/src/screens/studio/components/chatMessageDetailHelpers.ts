@@ -1,4 +1,12 @@
 import { toUserPromptSuggestion } from "../../../conversations/suggestedReplyVoice";
+import { findConnectorForSecret, type ProductConnector } from "./connectors";
+import {
+  isValidSecretName,
+  normalizeRefusedSecretClass,
+  refusedSecretClass,
+  sanitizeCardText,
+  sanitizeSkillSlug,
+} from "./packCardText";
 import type { ChatMessage } from "../types";
 import { extractMessageDetails, getMessageType } from "./chatMessageMetadata";
 import { parseCommandExecutionOutput } from "./chatContentHelpers";
@@ -218,9 +226,37 @@ export type TokenUsageSummary = {
   context: PromptContextUsage | null;
 };
 
+/**
+ * One secret request, with every pack-authored string already through the
+ * sanitizer. The runtime cleans these before it persists them; this runs the
+ * same rules again because a message written by an older runtime outlives any
+ * deploy, and the card is the last line before a DOM node.
+ */
 export type ParsedSecretRequestDetails = {
+  /** The destination. Validated, never cleaned; null when we cannot read it. */
   name: string | null;
+  /** The pack's own word for the value, the second half of the card title. */
+  valueLabel: string | null;
+  /** One sentence saying what the value lets Instafy do for the person. */
   description: string | null;
+  /** One sentence naming the screen inside the provider it is found on. */
+  whereToGet: string | null;
+  /** The folder under .agents/skills that declared the need. Provenance only. */
+  skill: string | null;
+  /** Whether the input masks by default. Absent or unreadable means true. */
+  sensitive: boolean;
+  /**
+   * Set when the runtime refused the request because it asked for a human
+   * login credential. Named from our own fixed table, never from the pack.
+   */
+  refusedClass: string | null;
+  /**
+   * The catalogue entry this request resolves to, by variable name and, when
+   * the request declares one, by skill slug as well. Identity only: the name
+   * and the mark the card wears, and the one product name the pack's own text
+   * is allowed to contain.
+   */
+  connector: ProductConnector | null;
   agentHandles: string[];
 };
 
@@ -255,21 +291,69 @@ export type TemplateToolCallInfo = {
   total: number;
 };
 
+function readDetailString(record: Record<string, unknown>, keys: string[]): string {
+  for (const key of keys) {
+    const value = record[key];
+    if (typeof value === "string" && value.trim().length > 0) {
+      return value.trim();
+    }
+  }
+  return "";
+}
+
 export function parseSecretRequestDetails(
   details: Record<string, unknown> | null | undefined,
 ): ParsedSecretRequestDetails {
   const record: Record<string, unknown> = details ?? {};
-  const nameCandidate =
-    (typeof record["name"] === "string" && record["name"]) ||
-    (typeof record["secretName"] === "string" && record["secretName"]) ||
-    (typeof record["secret_name"] === "string" && record["secret_name"]) ||
-    (typeof record["envVar"] === "string" && record["envVar"]) ||
-    (typeof record["env_var"] === "string" && record["env_var"]) ||
-    "";
-  const name = typeof nameCandidate === "string" ? nameCandidate.trim() : "";
+  const nameCandidate = readDetailString(record, [
+    "name",
+    "secretName",
+    "secret_name",
+    "envVar",
+    "env_var",
+  ]);
+  // The destination is validated and never repaired: a name that needs
+  // cleaning is a name we do not understand, and the card drops to its
+  // no-name state rather than writing somewhere it guessed at.
+  const validName = isValidSecretName(nameCandidate) ? nameCandidate : "";
 
-  const descriptionCandidate = typeof record["description"] === "string" ? record["description"] : "";
-  const description = descriptionCandidate.trim().length > 0 ? descriptionCandidate.trim() : null;
+  // The runtime refuses a human login credential before it writes the message,
+  // and this gate derives the same refusal from the same table: a message a
+  // runtime older than that rule persisted lives forever, and without this the
+  // card would render a live input asking for the password.
+  const refusedClass =
+    normalizeRefusedSecretClass(
+      record["refusedClass"] ?? record["refused_class"] ?? record["refused"],
+    ) ?? refusedSecretClass(nameCandidate);
+  // A refused request has no destination: the card shows the refusal and no
+  // input, and no other card in the run counts this one as outstanding.
+  const name = refusedClass ? "" : validName;
+
+  const skill = sanitizeSkillSlug(readDetailString(record, ["skill", "skillName", "skill_name"]));
+  // Identity, and the one product name the pack's own words may contain.
+  const connector = findConnectorForSecret(name, skill);
+  const owner = connector?.name ?? null;
+  const valueLabel = sanitizeCardText(
+    readDetailString(record, ["valueLabel", "value_label", "label"]),
+    "valueLabel",
+    owner,
+    skill,
+  );
+  const description = sanitizeCardText(
+    readDetailString(record, ["description"]),
+    "description",
+    owner,
+    skill,
+  );
+  const whereToGet = sanitizeCardText(
+    readDetailString(record, ["whereToGet", "where_to_get"]),
+    "whereToGet",
+    owner,
+    skill,
+  );
+  // Absent or unreadable means sensitive: a value nobody labelled is one
+  // worth hiding.
+  const sensitive = record["sensitive"] === false ? false : true;
 
   const handlesRaw = Array.isArray(record["agentHandles"])
     ? record["agentHandles"]
@@ -286,7 +370,13 @@ export function parseSecretRequestDetails(
 
   return {
     name: name.length > 0 ? name : null,
+    valueLabel,
     description,
+    whereToGet,
+    skill,
+    sensitive,
+    refusedClass,
+    connector,
     agentHandles,
   };
 }
@@ -485,6 +575,11 @@ export function resolveUiSuggestedReplies(metadata: Record<string, unknown> | nu
  * GitHub import requests carry a deterministic resume action; submitting their
  * historical prose suggestion would dispatch an unrelated AI run instead of
  * retrying the import API.
+ *
+ * A secret request is the same argument one step on: the card takes the value,
+ * saves it and continues the run from its own button. A chip under the composer
+ * offering "I added NOTION_API_KEY" is a fourth way to answer one question, and
+ * the only one that can be pressed before the value exists.
  */
 export function resolveComposerUiSuggestedReplies(message: ChatMessage | null | undefined): string[] {
   if (!message) {
@@ -492,6 +587,9 @@ export function resolveComposerUiSuggestedReplies(message: ChatMessage | null | 
   }
 
   const messageType = (getMessageType(message) ?? "").trim().toLowerCase();
+  if (messageType === "secret_request") {
+    return [];
+  }
   if (messageType === "integration_request") {
     const details = extractMessageDetails(message.metadata);
     const resumeActionCandidate = details?.["resumeAction"] ?? details?.["resume_action"];

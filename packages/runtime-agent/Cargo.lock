@@ -9704,6 +9704,7 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-subscriber",
+ "unicode-normalization",
  "uuid",
  "windows-sys 0.61.2",
  "zip 1.1.4",
