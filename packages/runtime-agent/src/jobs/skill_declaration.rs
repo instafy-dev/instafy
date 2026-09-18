@@ -142,13 +142,13 @@ fn derive(slug: &str, row: &SecretsRow) -> DeclaredSecret {
         .where_to_get
         .as_deref()
         .and_then(first_usable_sentence)
-        // A sentence that will not fit is refused, not cut: the 160-char cap
-        // lands immediately before "Technischer Benutzer" in the FreeFinance
-        // row and would take with it the one noun the sentence existed to
-        // deliver. The sanitizer refuses an over-length one too, so this is
-        // belt and braces rather than the only guard, and it keeps the
-        // derivation honest about its own output before it reaches that gate.
-        .filter(|sentence| sentence.chars().count() <= card_text::MAX_WHERE_TO_GET_CHARS);
+        // The sanitizer refuses an over-length sentence rather than cutting it,
+        // because a directive cut mid-phrase loses the noun it existed to
+        // deliver. Here we can do better than refuse: the pack wrote clause
+        // boundaries, so trailing clauses come off until the sentence fits and
+        // only a first clause that is itself too long leaves the card without
+        // the line.
+        .and_then(|sentence| clauses_that_fit(&sentence, card_text::MAX_WHERE_TO_GET_CHARS));
     DeclaredSecret {
         skill_slug: slug.to_string(),
         value_label,
@@ -480,6 +480,11 @@ fn first_usable_sentence(cell: &str) -> Option<String> {
     {
         clauses.pop();
     }
+    finish_clauses(&clauses)
+}
+
+/// The kept clauses rejoined, with the punctuation a card sentence ends on.
+fn finish_clauses(clauses: &[String]) -> Option<String> {
     if clauses.is_empty() {
         return None;
     }
@@ -500,6 +505,31 @@ fn first_usable_sentence(cell: &str) -> Option<String> {
     } else {
         Some(format!("{kept}."))
     }
+}
+
+/// The same sentence with trailing clauses dropped until it fits `cap`, or
+/// nothing when its opening clause alone is already too long.
+///
+/// Refusing a whole sentence is the right rule for text we cannot cut safely.
+/// A pack's cell is not that: it arrives with the separators the pack itself
+/// wrote, so "open Settings, then Developers, then read the third panel" can
+/// lose its tail and still name a screen, where refusing it leaves the card
+/// with no line at all. Clauses come off whole, never words, so the sentence
+/// that survives is one the pack wrote rather than one we cut into shape.
+fn clauses_that_fit(sentence: &str, cap: usize) -> Option<String> {
+    if sentence.chars().count() <= cap {
+        return Some(sentence.to_string());
+    }
+    let mut clauses = split_clauses(sentence);
+    while !clauses.is_empty() {
+        if let Some(candidate) = finish_clauses(&clauses) {
+            if candidate.chars().count() <= cap {
+                return Some(candidate);
+            }
+        }
+        clauses.pop();
+    }
+    None
 }
 
 /// A sentence split at its top-level commas and semicolons, each piece keeping
@@ -743,12 +773,74 @@ mod tests {
     }
 
     #[test]
-    fn where_to_get_is_refused_rather_than_truncated() {
+    fn the_live_notion_row_yields_a_floor_that_names_the_screen() {
+        // A copy of the row in instafy-dev/skills, packs/team/.agents/skills/
+        // notion/SKILL.md. The floor only earns its name if it answers the
+        // question the card asks, and only the FIRST sentence of a cell is ever
+        // a candidate: a cell that opens by explaining how to create the
+        // connection would leave the card pointing at the wrong screen the
+        // moment the model's own sentence is refused. That happened, which is
+        // why this is pinned here.
+        let table = concat!(
+            "| Name | Sensitive | What it is | Where the user gets it |\n",
+            "| --- | --- | --- | --- |\n",
+            "| `NOTION_API_KEY` | Yes | The Installation access token of an internal connection. ",
+            "It starts with `ntn_`. | ",
+            "Open your connection's Configuration tab in the Notion developer portal, under Build, ",
+            "then Internal connections: the Installation access token is there. ",
+            "The portal is at `app.notion.com/developers/connections`, and a connection is made ",
+            "under Build, Internal connections, Create a new connection. |\n",
+        );
+        let derived = derive("notion", &row(table, "NOTION_API_KEY"));
+        let where_to_get = derived.where_to_get.expect("a floor sentence");
+        assert!(
+            where_to_get.contains("Configuration tab"),
+            "the floor must name the screen the token is on, got: {where_to_get}"
+        );
+        assert!(where_to_get.chars().count() <= card_text::MAX_WHERE_TO_GET_CHARS);
+        // And it survives the gate it is about to be put through.
+        assert_eq!(
+            card_text::sanitize_card_text(
+                &where_to_get,
+                card_text::CardTextField::WhereToGet,
+                Some("Notion"),
+                Some("notion"),
+            )
+            .as_deref(),
+            Some(where_to_get.as_str()),
+        );
+    }
+
+    #[test]
+    fn where_to_get_with_no_clause_boundary_to_cut_at_is_refused() {
+        // One unbroken run: there is no separator the pack wrote, so there is
+        // nothing to drop, and a cut would land mid-word.
         let long = "x".repeat(card_text::MAX_WHERE_TO_GET_CHARS + 1);
         let table =
             format!("| Name | Where the user gets it |\n| --- | --- |\n| `X_TOKEN` | {long} |\n");
         let derived = derive("x", &row(&table, "X_TOKEN"));
         assert_eq!(derived.where_to_get, None);
+    }
+
+    #[test]
+    fn where_to_get_drops_trailing_clauses_until_it_fits() {
+        // A walk too long for the card. The screen it names survives; the steps
+        // trailing behind it come off whole, at the separators the pack wrote.
+        let cell = "Open the Configuration tab of your connection, then scroll \
+past the capabilities block, then past the user block, then past the content \
+block, then past the very last block on that whole long page, and read it there.";
+        assert!(cell.chars().count() > card_text::MAX_WHERE_TO_GET_CHARS);
+        let table =
+            format!("| Name | Where the user gets it |\n| --- | --- |\n| `X_TOKEN` | {cell} |\n");
+        let derived = derive("x", &row(&table, "X_TOKEN"))
+            .where_to_get
+            .expect("kept");
+        assert!(derived.chars().count() <= card_text::MAX_WHERE_TO_GET_CHARS);
+        assert!(derived.starts_with("Open the Configuration tab of your connection"));
+        // Whole clauses, so no half phrase is left stranded, and it still ends
+        // like a sentence.
+        assert!(derived.ends_with('.'));
+        assert!(!derived.contains("and read it there"));
     }
 
     #[test]
