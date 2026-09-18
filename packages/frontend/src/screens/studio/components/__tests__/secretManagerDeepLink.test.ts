@@ -1,47 +1,52 @@
-// @vitest-environment jsdom
-
 import { describe, expect, it, beforeEach } from "vitest";
 import {
+  clearPendingProjectSecretPrefill,
   readPendingProjectSecretPrefill,
   setPendingProjectSecretPrefill,
 } from "../secretManagerDeepLink";
 
 describe("secret manager deep link", () => {
   beforeEach(() => {
-    window.sessionStorage.clear();
+    clearPendingProjectSecretPrefill();
   });
 
   it("carries which value to open on, and never the value itself", () => {
-    // The guarantee the CodeQL suppression at the storage site rests on: this
-    // prefill names a secret, it does not carry one. A caller that smuggles a
-    // value in loses it at the boundary rather than putting it in storage.
+    // The guarantee the whole deep link rests on: this prefill names a secret,
+    // it does not carry one. A caller that smuggles a value in loses it at the
+    // boundary rather than having it kept.
     setPendingProjectSecretPrefill({
       projectId: "project-1",
       name: "NOTION_API_KEY",
       description: "Notion installation access token",
       agentHandles: ["octo"],
-      // A field that does not exist on the type, as an untyped caller or a
-      // stale stored payload could supply.
+      // A field that does not exist on the type, as an untyped caller could
+      // supply.
       ...({ value: "ntn_not-a-real-token" } as Record<string, unknown>),
     });
 
-    const raw = window.sessionStorage.getItem("instafy.projectSecrets.pendingCreate.v1") ?? "";
-    expect(raw).not.toBe("");
-    expect(raw).not.toContain("ntn_not-a-real-token");
-    expect(raw).not.toContain("value");
-
     const restored = readPendingProjectSecretPrefill();
     expect(restored?.name).toBe("NOTION_API_KEY");
     expect(restored && "value" in restored).toBe(false);
+    expect(JSON.stringify(restored)).not.toContain("ntn_not-a-real-token");
   });
 
-  it("drops a value smuggled into the stored payload", () => {
-    window.sessionStorage.setItem(
-      "instafy.projectSecrets.pendingCreate.v1",
-      JSON.stringify({ name: "NOTION_API_KEY", value: "ntn_not-a-real-token" }),
-    );
-    const restored = readPendingProjectSecretPrefill();
-    expect(restored?.name).toBe("NOTION_API_KEY");
-    expect(restored && "value" in restored).toBe(false);
+  it("hands out a copy the caller cannot reach back through", () => {
+    setPendingProjectSecretPrefill({ projectId: "project-1", name: "NOTION_API_KEY" });
+    const first = readPendingProjectSecretPrefill();
+    expect(first).not.toBeNull();
+    first!.name = "SOMETHING_ELSE";
+    expect(readPendingProjectSecretPrefill()?.name).toBe("NOTION_API_KEY");
+  });
+
+  it("keeps nothing once the panel has taken it", () => {
+    setPendingProjectSecretPrefill({ projectId: "project-1", name: "NOTION_API_KEY" });
+    clearPendingProjectSecretPrefill();
+    expect(readPendingProjectSecretPrefill()).toBeNull();
+  });
+
+  it("does not forget a waiting prefill when handed one that names nothing", () => {
+    setPendingProjectSecretPrefill({ projectId: "project-1", name: "NOTION_API_KEY" });
+    setPendingProjectSecretPrefill({ projectId: "project-1", name: "   " });
+    expect(readPendingProjectSecretPrefill()?.name).toBe("NOTION_API_KEY");
   });
 });

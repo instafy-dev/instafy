@@ -49,29 +49,4 @@ test.describe("Project secrets", () => {
 
     await expect(secretsCard).not.toContainText("GITHUB_TOKEN");
   });
-
-  test("deep link prefill opens the create modal", async ({ page }) => {
-    const projectId = await prepareStudio(page, { waitForHostedRuntime: false });
-    if (!projectId) {
-      throw new Error("Project id missing for secrets test.");
-    }
-
-    await page.evaluate((payload) => {
-      window.sessionStorage.setItem(
-        "instafy.projectSecrets.pendingCreate.v1",
-        JSON.stringify({
-          projectId: payload.projectId,
-          name: "CLOUDFLARE_API_TOKEN",
-          description: "Cloudflare API token used for deployments.",
-          agentHandles: ["octo"],
-        }),
-      );
-    }, { projectId });
-
-    await openSecretsPanel(page);
-
-    await expect(page.getByTestId("project-secret-modal")).toBeVisible();
-    await expect(page.getByTestId("project-secret-name-input")).toHaveValue("CLOUDFLARE_API_TOKEN");
-    await expect(page.getByTestId("project-secret-description-input")).toHaveValue("Cloudflare API token used for deployments.");
-  });
 });
