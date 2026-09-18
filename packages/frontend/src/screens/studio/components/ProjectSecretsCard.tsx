@@ -1,10 +1,11 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { Plus } from "iconoir-react";
+import { Eye, EyeClosed, Plus } from "iconoir-react";
 import { Badge } from "../../../components/Badge";
 import { Heading } from "../../../components/Heading";
 import { Button } from "../../../components/Button";
 import { Checkbox } from "../../../components/Checkbox";
+import { ToggleIconButton } from "../../../components/ToggleIconButton";
 import { Field } from "../../../components/Field";
 import { Input } from "../../../components/Input";
 import { Text } from "../../../components/Text";
@@ -204,7 +205,11 @@ function SecretModal({
         </Field>
 
         <Field label="Value" htmlFor="project-secret-value">
-          <div className="flex items-stretch gap-2">
+          {/* Same geometry as the card in the chat: the reveal belongs inside
+              the field, which is where the login password eye and every other
+              trailing control in the product sits. The two secrets surfaces
+              asked for the same value in two different shapes before this. */}
+          <div className="relative">
             <Input
               id="project-secret-value"
               ref={valueInputRef}
@@ -215,6 +220,7 @@ function SecretModal({
               style={valueInputStyle}
               size="sm"
               radius="xl"
+              className="pr-12"
               disabled={pending}
               name="project-secret-value"
               autoComplete="off"
@@ -226,16 +232,22 @@ function SecretModal({
               data-1p-ignore="true"
               data-testid="project-secret-value-input"
             />
-            <Button
-              variant="outline"
-              size="xs"
+            <ToggleIconButton
+              isSelected={valueVisible}
+              size="sm"
               radius="full"
+              aria-label={valueVisible ? "Hide value" : "Show value"}
               onPress={onToggleValueVisible}
               isDisabled={pending}
+              className="absolute right-2 top-1/2 -translate-y-1/2"
               data-testid="project-secret-toggle-value"
             >
-              {valueVisible ? "Hide" : "Show"}
-            </Button>
+              {valueVisible ? (
+                <EyeClosed className="h-4 w-4" aria-hidden="true" />
+              ) : (
+                <Eye className="h-4 w-4" aria-hidden="true" />
+              )}
+            </ToggleIconButton>
           </div>
           <Text variant="caption" tone="muted" className="mt-1 font-normal">
             Never paste secret values into chat.
