@@ -58,6 +58,7 @@ mod provider_identifiers;
 mod provider_requests;
 mod providers;
 mod rate_limit;
+mod redaction;
 mod redis_bus;
 mod runs;
 mod runtime;

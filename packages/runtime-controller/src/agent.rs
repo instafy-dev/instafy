@@ -33,6 +33,7 @@ use crate::credits::{
     reconcile_managed_ai_usage_charge, ManagedAiTokenUsage,
 };
 use crate::dispatch::DispatchPromptNormalized;
+use crate::redaction::RedactedHeaders;
 use crate::runs::{load_run_snapshot, run_snapshot_to_json};
 use crate::state::RuntimeResourceUsagePayload;
 use crate::tokens::{
@@ -554,7 +555,7 @@ fn sanitize_json_for_postgres(value: JsonValue) -> JsonValue {
 #[instrument(skip(state, payload))]
 pub(crate) async fn agent_login(
     axum::extract::State(state): axum::extract::State<AppState>,
-    headers: HeaderMap,
+    headers: RedactedHeaders,
     axum::Json(payload): axum::Json<AgentLoginRequest>,
 ) -> Result<Json<runtime::RuntimeRegisterResponse>, (StatusCode, Json<ApiError>)> {
     let auth_context = authenticate_request(&state.config, &headers).await?;
@@ -736,7 +737,7 @@ pub(crate) async fn agent_login(
 #[instrument(skip(state, payload))]
 pub(crate) async fn agent_lease(
     axum::extract::State(state): axum::extract::State<AppState>,
-    headers: HeaderMap,
+    headers: RedactedHeaders,
     axum::Json(payload): axum::Json<AgentLeasePayload>,
 ) -> Result<Json<AgentLeaseResponse>, (StatusCode, Json<ApiError>)> {
     let AgentLeasePayload {
