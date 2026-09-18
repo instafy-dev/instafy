@@ -12,6 +12,7 @@ import {
   buildConnectorImportMessage,
   connectorCategoryLabel,
   filterConnectors,
+  findConnectorCredential,
   isConnectorAvailable,
   type SkillConnector,
 } from "../connectors";
@@ -23,11 +24,12 @@ function ids(entries: readonly { id: string }[]): string[] {
 }
 
 describe("CONNECTORS", () => {
-  it("leads with the connection that needs no key pasted and keeps the paste link last", () => {
-    // Ordering rule: no-paste connections first, then key-based ones. GitHub
-    // signs in with a device code, so it sits above Notion, which asks for a
-    // token; the card row and the sheet's Popular row both read that order.
-    expect(ids(CONNECTORS)).toEqual(["slack", "github", "notion", "discord", "freefinance", "other"]);
+  it("leads with a named product rather than the repo import and keeps the paste link last", () => {
+    // Ordering rule: a product the customer already uses comes first and the
+    // developer entry follows. The first-run chip row is the first offer in an
+    // empty chat, and leading it with a repo import says "this is for
+    // programmers" before any copy can say otherwise.
+    expect(ids(CONNECTORS)).toEqual(["slack", "notion", "github", "discord", "freefinance", "other"]);
     const last = CONNECTORS[CONNECTORS.length - 1]!;
     expect(last.kind).toBe("other");
     expect(last.name).toBe("Paste a skill link");
@@ -52,6 +54,57 @@ describe("CONNECTORS", () => {
     expect(PRODUCT_CONNECTORS.some((entry) => (entry.id as string) === "other")).toBe(false);
   });
 
+  it("gives every product connector a customer-language purpose", () => {
+    for (const entry of PRODUCT_CONNECTORS) {
+      expect(entry.purpose.trim().length).toBeGreaterThan(0);
+      expect(entry.purpose.trim().endsWith(".")).toBe(true);
+      expect(entry.purpose).not.toMatch(/[A-Z][A-Z0-9]*_[A-Z0-9_]+/);
+      expect(entry.purpose).not.toContain(EM_DASH);
+      expect(entry.purpose.toLowerCase()).not.toContain("please");
+    }
+  });
+
+  it("keeps the needs phrases and the declared credentials naming the same secrets", () => {
+    // The card's good copy is keyed on the secret name. A renamed variable that
+    // is changed in one list and not the other would silently drop the card
+    // back to model prose, and nothing on screen would say so.
+    for (const entry of PRODUCT_CONNECTORS) {
+      if (entry.kind !== "skill") {
+        continue;
+      }
+      const inNeeds = new Set(
+        entry.needs.flatMap((need) => Array.from(need.matchAll(/\(([A-Z0-9_]+)\)/g), (m) => m[1])),
+      );
+      const inCredentials = new Set((entry.credentials ?? []).map((c) => c.name));
+      expect([...inNeeds].sort()).toEqual([...inCredentials].sort());
+      for (const credential of entry.credentials ?? []) {
+        expect(credential.name).toBe(credential.name.toUpperCase());
+        expect(credential.valueLabel.trim().length).toBeGreaterThan(0);
+        // The provider's own on-screen name, never the variable shouted back.
+        expect(credential.valueLabel).not.toBe(credential.name);
+        // The bug this review opened with: the sheet's needs phrase and the
+        // card's title calling one value two different things in the same
+        // message. The phrase that names the variable must also use the
+        // provider's word for it.
+        const phrase = entry.needs.find((need) => need.includes(`(${credential.name})`));
+        expect(phrase, `no needs phrase names ${credential.name}`).toBeDefined();
+        expect(phrase!.toLowerCase()).toContain(credential.valueLabel.toLowerCase());
+      }
+    }
+  });
+
+  it("finds a connector by the secret name its setup asks for, case-insensitively", () => {
+    const notionMatch = findConnectorCredential("notion_api_key");
+    expect(notionMatch?.connector.id).toBe("notion");
+    expect(notionMatch?.credential.valueLabel).toBe("Installation access token");
+    expect(findConnectorCredential("FREEFINANCE_API_CLIENT_SECRET")?.credential.valueLabel).toBe(
+      "Technical user secret",
+    );
+    expect(findConnectorCredential("CLOUDFLARE_API_TOKEN")).toBeNull();
+    expect(findConnectorCredential("")).toBeNull();
+    expect(findConnectorCredential(null)).toBeNull();
+  });
+
   it("keeps the category labels exact and in order", () => {
     expect(CONNECTOR_CATEGORIES.map((category) => [category.id, category.label])).toEqual([
       ["chat", "Chat and community"],
@@ -70,8 +123,8 @@ describe("CONNECTORS", () => {
     expect(FEATURED_CONNECTORS).toEqual(PRODUCT_CONNECTORS.filter((entry) => entry.featured));
     expect(ids(FEATURED_CONNECTORS)).toEqual([
       "slack",
-      "github",
       "notion",
+      "github",
       "discord",
       "freefinance",
     ]);
@@ -111,9 +164,9 @@ describe("CONNECTORS", () => {
     // is named nowhere on the card: the sheet's Soon Badge is its only place.
     expect(ids(FEATURED_CONNECTORS)).toEqual(expect.arrayContaining(["slack", "notion", "discord"]));
     expect(AVAILABLE_FEATURED_CONNECTORS).toEqual(FEATURED_CONNECTORS.filter(isConnectorAvailable));
-    // GitHub before Notion: list order, so the card row and the Popular row
-    // both lead with the entry that needs no key pasted.
-    expect(ids(AVAILABLE_FEATURED_CONNECTORS)).toEqual(["github", "notion", "freefinance"]);
+    // Notion before GitHub: list order, so the card row and the Popular row
+    // both lead with a named product rather than "Import a repo".
+    expect(ids(AVAILABLE_FEATURED_CONNECTORS)).toEqual(["notion", "github", "freefinance"]);
     expect(ids(AVAILABLE_FEATURED_CONNECTORS)).not.toContain("slack");
     expect(ids(AVAILABLE_FEATURED_CONNECTORS)).not.toContain("discord");
     for (const entry of AVAILABLE_FEATURED_CONNECTORS) {
@@ -128,7 +181,7 @@ describe("CONNECTORS", () => {
     expect(CARD_CHIP_LIMIT).toBe(5);
     expect(CARD_TOOL_CONNECTORS).toEqual(AVAILABLE_FEATURED_CONNECTORS.slice(0, CARD_CHIP_LIMIT));
     expect(CARD_TOOL_CONNECTORS.length).toBeLessThanOrEqual(CARD_CHIP_LIMIT);
-    expect(ids(CARD_TOOL_CONNECTORS)).toEqual(["github", "notion", "freefinance"]);
+    expect(ids(CARD_TOOL_CONNECTORS)).toEqual(["notion", "github", "freefinance"]);
     // However large the catalogue grows, the row cannot: the cap is applied
     // to the list itself, so everything past it lives behind "More tools".
     const grown = [...AVAILABLE_FEATURED_CONNECTORS, ...FEATURED_CONNECTORS, ...PRODUCT_CONNECTORS];
@@ -267,7 +320,7 @@ describe("CONNECTORS", () => {
     const notion = CONNECTORS.find(
       (entry): entry is SkillConnector => entry.kind === "skill" && entry.id === "notion",
     );
-    expect(notion?.needs).toEqual(["a Notion connection Installation access token (NOTION_API_KEY)"]);
+    expect(notion?.needs).toEqual(["a Notion Installation access token (NOTION_API_KEY)"]);
   });
 
   it("builds the exact one-liner for a product", () => {

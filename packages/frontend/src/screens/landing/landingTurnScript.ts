@@ -125,6 +125,45 @@ export interface SessionScenario {
 }
 
 export const SESSION_SCENARIOS: SessionScenario[] = [
+  // Order is what the deck plays first, and the first eleven seconds decide
+  // whether a visitor who is not a developer reads on. Closing the books
+  // leads because it is the least technical of the three: it shows the same
+  // mechanics (a run, its steps, a file, a reply from a colleague) without
+  // asking anyone to know what an API package or a router is. Building a
+  // feature follows one rotation later, which is where the visitor who came
+  // for that finds it.
+  {
+    id: "books",
+    label: "Close the books",
+    title: "February close",
+    prompt: "Reconcile February against the bank export and set aside anything that needs a second look.",
+    // Named like the other two crew members (Canary, Pixel) so the colleague
+    // is never mistaken for the ledger the scenario is about.
+    presenceAgent: "Quill",
+    presenceHandle: "quill",
+    opener: "February's bank export is in the ledger folder. Two card payments look doubled.",
+    steps: [
+      { kind: "tool", caption: "Calling tool…" },
+      { kind: "command", caption: "Matching February against the bank export" },
+      { kind: "plan", caption: "Updating plan…" },
+      { kind: "tool", caption: "Calling tool…", ownerHandle: "quill" },
+      { kind: "command", caption: "Pulling the rows that need a second look" },
+    ],
+    summary:
+      "February is reconciled: 214 of 217 bank rows match the ledger. Quill checked the VAT lines, and the three rows that need a second look are in review.csv with a note on each.",
+    // Short enough that the ledger columns still line up at phone width, where
+    // the block wraps instead of scrolling. The escaped no-break space keeps
+    // the thousands group whole (a literal one would be invisible in source).
+    codeLines: [
+      "February: 214 of 217 rows matched",
+      "02-04  Acme AB     2\u00a0140.00  duplicate?",
+      "02-11  Linear seat    89.90  receipt?",
+      "02-19  Bank charge    12.00  category?",
+    ],
+    files: [{ path: "ledger/2026-02-review.csv", added: 4, removed: 0 }],
+    railLabel: null,
+    reply: "The Acme one is a duplicate, I'll void it. Thanks both.",
+  },
   {
     id: "code",
     label: "Build a feature",
@@ -159,36 +198,6 @@ export const SESSION_SCENARIOS: SessionScenario[] = [
       { kind: "add", text: '+router.use("/checkout", checkout.api);' },
     ],
     reply: "Nice. I'll review the router change after lunch.",
-  },
-  {
-    id: "books",
-    label: "Close the books",
-    title: "February close",
-    prompt: "Reconcile February against the bank export and set aside anything that needs a second look.",
-    presenceAgent: "Ledger",
-    presenceHandle: "ledger",
-    opener: "February's bank export is in ledger/. Two card payments look doubled.",
-    steps: [
-      { kind: "tool", caption: "Calling tool…" },
-      { kind: "command", caption: "python tools/reconcile.py --month 2026-02" },
-      { kind: "plan", caption: "Updating plan…" },
-      { kind: "tool", caption: "Calling tool…", ownerHandle: "ledger" },
-      { kind: "command", caption: "python tools/reconcile.py --month 2026-02 --review" },
-    ],
-    summary:
-      "February is reconciled: 214 of 217 bank rows match the ledger. Ledger checked the VAT lines, and the three rows that need a second look are in review.csv with a note on each.",
-    // Short enough that the ledger columns still line up at phone width, where
-    // the block wraps instead of scrolling. The escaped no-break space keeps
-    // the thousands group whole (a literal one would be invisible in source).
-    codeLines: [
-      "February: 214 of 217 rows matched",
-      "02-04  Acme AB     2\u00a0140.00  dup?",
-      "02-11  Linear seat    89.90  rcpt?",
-      "02-19  Bank charge    12.00  cat?",
-    ],
-    files: [{ path: "ledger/2026-02-review.csv", added: 4, removed: 0 }],
-    railLabel: null,
-    reply: "The Acme one is a duplicate, I'll void it. Thanks both.",
   },
   {
     id: "site",

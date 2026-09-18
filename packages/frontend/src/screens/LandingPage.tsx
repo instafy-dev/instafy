@@ -83,7 +83,7 @@ export function LandingPage() {
               <div className="max-w-md lg:pb-1">
                 <p className="text-base leading-relaxed text-slate-600 dark:text-slate-300 sm:text-lg">
                   Bring your people, your AI, and your work into one place.
-                  Build a feature, work through the numbers, or launch something together.
+                  Work through the numbers, build a feature, or launch something together.
                 </p>
                 <div className="mt-6 flex flex-wrap items-center gap-x-6 gap-y-3">
                   <Link to="/studio" className={PRIMARY_LINK} data-testid="landing-get-started-button">

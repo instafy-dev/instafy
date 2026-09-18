@@ -69,27 +69,59 @@ export const POPULAR_MIN_AVAILABLE = 2;
 // disabled Button has pointer-events none, so the pointer reaches the item.
 const SOON_TITLE = "Coming soon";
 
-function joinNeeds(needs: readonly string[]): string {
-  if (needs.length <= 1) {
-    return needs[0] ?? "";
+// The confirm stage answers three questions and no others: what connecting
+// this lets Instafy do, what the person will have to go and fetch, and whether
+// anything in their account changes without them. It used to spend three of
+// its four lines on the repo it installs from, the environment variable the
+// setup will ask for and the folder the files land in, which is the shape of
+// the thing rather than the point of it.
+
+const COUNT_WORDS = ["no", "one", "two", "three", "four", "five"];
+
+function countWord(count: number): string {
+  return COUNT_WORDS[count] ?? String(count);
+}
+
+function joinPhrases(phrases: readonly string[]): string {
+  if (phrases.length <= 1) {
+    return phrases[0] ?? "";
   }
-  return `${needs.slice(0, -1).join(", ")} and ${needs[needs.length - 1]}`;
+  return `${phrases.slice(0, -1).join(", ")} and ${phrases[phrases.length - 1]}`;
+}
+
+/**
+ * What the person fetches, in the provider's own words when the connector
+ * declares them. Falls back to the `needs` phrases as written for a connector
+ * that has not declared its credentials yet.
+ */
+function neededValuePhrases(connector: SkillConnector): string[] {
+  if (connector.credentials && connector.credentials.length > 0) {
+    return connector.credentials.map((credential) => `the ${credential.valueLabel}`);
+  }
+  return [...connector.needs];
 }
 
 function installLine(connector: SkillConnector): ReactNode {
   if (connector.app) {
     return (
       <>
-        Adds the {connector.name} skill from {connector.sourceLabel} to this space. Setup opens{" "}
-        {connector.name} in the shared display; you sign in there once, and the agent then
-        works in that session.
+        {connector.purpose} Setup opens {connector.name} in the shared display; you sign in
+        there once, and Instafy then works in that session.
       </>
     );
   }
+  return <>{connector.purpose} Setup runs here, in this chat.</>;
+}
+
+function needsLine(connector: SkillConnector): ReactNode {
+  const phrases = neededValuePhrases(connector);
+  const plural = phrases.length > 1;
   return (
     <>
-      Adds the {connector.name} skill from {connector.sourceLabel} to this space, then starts
-      its setup in this chat.
+      You will need {countWord(phrases.length)} {plural ? "things" : "thing"} from{" "}
+      {connector.name}: {joinPhrases(phrases)}. Instafy shows a card to paste{" "}
+      {plural ? "them" : "it"} into, so {plural ? "they never go" : "it never goes"} into a
+      chat message.{connector.sharingNote ? ` ${connector.sharingNote}` : ""}
     </>
   );
 }
@@ -367,12 +399,12 @@ function ConfirmStage({
           </Text>
           {connector.needs.length > 0 ? (
             <Text as="p" variant="caption" tone="muted" data-testid="connect-confirm-needs-line">
-              Setup will ask for {joinNeeds(connector.needs)} through the secrets card. Never
-              paste {connector.needs.length > 1 ? "them" : "it"} in chat.
+              {needsLine(connector)}
             </Text>
           ) : null}
-          <Text as="p" variant="caption" tone="muted" data-testid="connect-confirm-files-line">
-            Files land in <code className={CODE_CLASS}>{skillPath}</code>.
+          <Text as="p" variant="caption" tone="muted" data-testid="connect-confirm-safety-line">
+            Instafy never changes anything in {connector.name} without asking you first,
+            every time.
           </Text>
         </>
       )}

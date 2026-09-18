@@ -1,5 +1,13 @@
-import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
-import { GitBranch, Key } from "iconoir-react";
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  useSyncExternalStore,
+  type ReactNode,
+} from "react";
+import { CheckCircle, GitBranch, Key } from "iconoir-react";
 import { Badge } from "../../../components/Badge";
 import { Button } from "../../../components/Button";
 import { GitHubIcon } from "../../../components/IntegrationIcons";
@@ -37,6 +45,9 @@ import {
   subscribeGithubImportRetry,
 } from "./githubImportRetryRegistry";
 import { InlineSecretsForm } from "./InlineSecretsForm";
+import { findConnectorCredential } from "./connectors";
+import { extractMessageDetails, getMessageType } from "./chatMessageMetadata";
+import { useOptionalProjectAccess } from "../../../projects/ProjectAccessProvider";
 import {
   parseIntegrationRequestDetails,
   parseSecretRequestDetails,
@@ -188,19 +199,83 @@ function findGithubImportReceipt(params: {
   return null;
 }
 
+/**
+ * Secret names saved from a card in this tab, per project, shared by every
+ * card on screen. Names only, never values. A card reads the project's stored
+ * names once at mount; this is how the OTHER cards learn about a save without
+ * refetching, so the last of several cards sees nothing outstanding and can
+ * offer to continue the run.
+ */
+const savedSecretNameRegistry = new Map<string, Set<string>>();
+const savedSecretNameListeners = new Set<() => void>();
+
+function publishSavedSecretNames(projectId: string, names: readonly string[]): void {
+  const upper = names.map((name) => name.trim().toUpperCase()).filter((name) => name.length > 0);
+  if (upper.length === 0) {
+    return;
+  }
+  const current = savedSecretNameRegistry.get(projectId) ?? new Set<string>();
+  for (const name of upper) {
+    current.add(name);
+  }
+  savedSecretNameRegistry.set(projectId, current);
+  for (const listener of [...savedSecretNameListeners]) {
+    listener();
+  }
+}
+
+function subscribeSavedSecretNames(listener: () => void): () => void {
+  savedSecretNameListeners.add(listener);
+  return () => {
+    savedSecretNameListeners.delete(listener);
+  };
+}
+
+function savedSecretNamesSnapshot(projectId: string | null): ReadonlySet<string> | null {
+  return projectId ? (savedSecretNameRegistry.get(projectId) ?? null) : null;
+}
+
+/**
+ * Conversations whose blocked run has already been continued from a card in
+ * this tab. A run resumes once: without this, the sibling card of a two-secret
+ * flow would go on offering "Continue setup" after the other card continued.
+ */
+const continuedConversations = new Set<string>();
+
+function publishContinuedConversation(conversationId: string): void {
+  if (continuedConversations.has(conversationId)) {
+    return;
+  }
+  continuedConversations.add(conversationId);
+  for (const listener of [...savedSecretNameListeners]) {
+    listener();
+  }
+}
+
+/** Exported for tests: a fresh page load starts with nothing broadcast. */
+export function __resetSavedSecretNameRegistry(): void {
+  savedSecretNameRegistry.clear();
+  continuedConversations.clear();
+}
+
+/**
+ * `phrases` is every wording this card may have sent: the one it sends today
+ * and the runtime's own, which an older transcript will carry. Matching both
+ * is what keeps a scrolled-back card quiet after the copy changed.
+ */
 function hasSubmittedSuggestedRetry(
   messages: ChatMessage[],
   request: ChatMessage,
-  suggestedRetry: string | null,
+  phrases: readonly string[],
 ): boolean {
-  const expected = suggestedRetry?.trim() ?? "";
-  if (!expected) {
+  const expected = phrases.map((phrase) => phrase.trim()).filter((phrase) => phrase.length > 0);
+  if (expected.length === 0) {
     return false;
   }
   return messages.some(
     (candidate, index) =>
       candidate.role === "user" &&
-      candidate.content.trim() === expected &&
+      expected.includes(candidate.content.trim()) &&
       isMessageAfterRequest(messages, request, candidate, index),
   );
 }
@@ -240,6 +315,45 @@ function normalizeRetryError(error: unknown, fallback: string): string {
   return fallback;
 }
 
+const SECRET_TITLE_MAX_CHARS = 80;
+
+/** The first sentence of model prose, capped, for use as a heading. */
+function firstSentence(value: string, maxChars: number): string {
+  const collapsed = value.replace(/\s+/g, " ").trim();
+  const stop = collapsed.search(/[.!?](\s|$)/);
+  const sentence = stop >= 0 ? collapsed.slice(0, stop + 1) : collapsed;
+  return sentence.length > maxChars ? `${sentence.slice(0, maxChars - 1).trimEnd()}…` : sentence;
+}
+
+function joinHandles(handles: string[]): string {
+  const marked = handles.map((handle) => `@${handle}`);
+  if (marked.length <= 1) {
+    return marked[0] ?? "";
+  }
+  return `${marked.slice(0, -1).join(", ")} and ${marked[marked.length - 1]}`;
+}
+
+/**
+ * One value the assistant cannot continue without.
+ *
+ * The card is the only path: the value is typed here, saved straight to this
+ * space's secrets, and the same card resumes the blocked run. It used to be two
+ * designs stacked (a notice pointing at the Secrets panel, plus an inline form
+ * added later), which printed the variable name twice, the description twice
+ * and two instructions that contradicted each other. `Manage secrets` survives
+ * as the way to the place secrets are kept (rotating, revoking, seeing what is
+ * stored), not as a second way to do this task.
+ *
+ * The product name and the provider's own word for the value come from
+ * connectors.ts, never from model-authored prose, so one token has one name
+ * across the card, the Connect sheet and the pack. An unknown secret name falls
+ * back to the model's description, which is what the card always showed.
+ *
+ * Safety is unchanged: the value is entered only here, goes only to
+ * controllerClient.secrets, is never prefilled, echoed or logged, and the
+ * continue message names the variable and nothing else. The read-only and
+ * no-space states disable the field rather than offering a way round it.
+ */
 export function SecretRequestEntry({
   message,
   projectId,
@@ -250,19 +364,179 @@ export function SecretRequestEntry({
   details: Record<string, unknown> | null;
 }) {
   const { openPanelTab, requestUrlPush } = useWorkspaceTabs();
-
   const parsed = useMemo(() => parseSecretRequestDetails(details), [details]);
+  const { conversations = [] } = useConversations();
+  const {
+    activeConversationId,
+    messages: activeConversationMessages = [],
+    onSubmit,
+  } = useConversation();
+  // Optional so the existing unit-test mocks do not have to mount a provider;
+  // absent context means "no opinion", which is the writable default.
+  const projectAccess = useOptionalProjectAccess();
+  const canWriteProject = projectAccess?.canWriteProject ?? true;
+
+  const secretName = parsed.name?.trim() ? parsed.name.trim() : null;
+  const registry = useMemo(() => findConnectorCredential(secretName), [secretName]);
+  const content = message.content.trim();
+  const description = parsed.description ?? (content.length > 0 ? content : null);
+
+  const [savedHere, setSavedHere] = useState(false);
+  const [storedNames, setStoredNames] = useState<ReadonlySet<string> | null>(null);
+  const [broadcastNames, setBroadcastNames] = useState<ReadonlySet<string> | null>(() =>
+    savedSecretNamesSnapshot(projectId),
+  );
+  const [broadcastVersion, setBroadcastVersion] = useState(0);
+  const [replacingValue, setReplacingValue] = useState(false);
+  const [continueBusy, setContinueBusy] = useState(false);
+  const [continueSentHere, setContinueSentHere] = useState(false);
+  const [continueError, setContinueError] = useState<string | null>(null);
+
+  // Names only, never values. A value that arrived some other way (a teammate,
+  // the panel, an earlier run) must not render as a demand for something the
+  // person already did. The read fails open to the unsaved state.
+  useEffect(() => {
+    if (!projectId) {
+      setStoredNames(null);
+      return;
+    }
+    let cancelled = false;
+    void controllerClient.secrets
+      .listForProject(projectId)
+      .then((result) => {
+        if (cancelled) {
+          return;
+        }
+        setStoredNames(
+          result.success
+            ? new Set(result.secrets.map((secret) => secret.name.trim().toUpperCase()))
+            : null,
+        );
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setStoredNames(null);
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [projectId]);
+
+  // Saves made by any card in this tab, so two cards in one conversation are
+  // not each left waiting on the other.
+  useEffect(() => {
+    setBroadcastNames(savedSecretNamesSnapshot(projectId));
+    return subscribeSavedSecretNames(() => {
+      setBroadcastNames(savedSecretNamesSnapshot(projectId));
+      setBroadcastVersion((current) => current + 1);
+    });
+  }, [projectId]);
+
+  // The project's stored names, whether read at mount or broadcast by another
+  // card's save. Null only while nothing is known at all.
+  const knownNames = useMemo<ReadonlySet<string> | null>(() => {
+    if (!storedNames && !broadcastNames) {
+      return null;
+    }
+    return new Set([...(storedNames ?? []), ...(broadcastNames ?? [])]);
+  }, [broadcastNames, storedNames]);
+
+  // The runtime cannot know what the provider calls this value on screen, so
+  // its own phrase says "the value". Where the connector declares a label, the
+  // card sends that instead: the person is made to say a sentence they can
+  // read, not an environment variable.
+  const runtimeRetry = useMemo(
+    () => resolveUiSuggestedReplies(message.metadata)[0] ?? null,
+    [message.metadata],
+  );
+  const suggestedRetry = useMemo(() => {
+    const label = registry?.credential.valueLabel;
+    return label ? `I saved the ${label}. Ready to continue.` : runtimeRetry;
+  }, [registry, runtimeRetry]);
+  const retryPhrases = useMemo(
+    () => [...new Set([suggestedRetry, runtimeRetry].filter((phrase): phrase is string => Boolean(phrase)))],
+    [runtimeRetry, suggestedRetry],
+  );
+  // This card also renders inside AgentJobThreadPreviewLayout, where the active
+  // conversation is not the one holding the request. Resolving the containing
+  // conversation is what stops a historical card posting into whatever chat
+  // happens to be open.
+  const containingConversation = useMemo(
+    () =>
+      conversations.find((conversation) =>
+        conversation.messages.some(
+          (entry) =>
+            entry.id === message.id || metadataContainsMessageId(entry.metadata, message.id),
+        ),
+      ) ?? null,
+    [conversations, message.id],
+  );
+  const requestConversationId = containingConversation?.localId ?? activeConversationId;
+  const requestConversationMessages = useMemo(
+    () =>
+      containingConversation && containingConversation.localId !== activeConversationId
+        ? containingConversation.messages
+        : activeConversationMessages,
+    [activeConversationId, activeConversationMessages, containingConversation],
+  );
+  // Any card in this conversation having continued the run answers this one
+  // too: the value is saved and the setup is moving again.
+  const continuedElsewhere = useMemo(
+    () => Boolean(requestConversationId && continuedConversations.has(requestConversationId)),
+    // broadcastVersion is the subscription: the Set itself is not reactive.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [broadcastVersion, requestConversationId],
+  );
+  const continueSubmitted =
+    continueSentHere ||
+    continuedElsewhere ||
+    hasSubmittedSuggestedRetry(requestConversationMessages, message, retryPhrases);
+
+  const alreadyStored = Boolean(secretName && knownNames?.has(secretName.toUpperCase()));
+
+  // Other secrets this conversation asked for that are still missing. While any
+  // of them is outstanding this card only saves: the first of two cards must
+  // not fire a retry that will block again on the second.
+  const outstandingOtherSecrets = useMemo(() => {
+    const names = new Set<string>();
+    const own = secretName?.toUpperCase() ?? null;
+    for (const candidate of requestConversationMessages) {
+      if ((getMessageType(candidate) ?? "").trim().toLowerCase() !== "secret_request") {
+        continue;
+      }
+      const other = parseSecretRequestDetails(
+        extractMessageDetails(candidate.metadata),
+      ).name?.trim().toUpperCase();
+      if (!other || other === own || knownNames?.has(other)) {
+        continue;
+      }
+      names.add(other);
+    }
+    return [...names];
+  }, [knownNames, requestConversationMessages, secretName]);
+
+  // Pressing continue dispatches an agent run and spends a managed prompt, so
+  // it is always a press and never an effect of saving. A secret request has no
+  // deterministic resume API (unlike a repo import), so chat is the only way to
+  // unblock it.
+  const canContinueRun =
+    Boolean(suggestedRetry) &&
+    Boolean(requestConversationId) &&
+    canWriteProject &&
+    outstandingOtherSecrets.length === 0;
 
   const canOpen = Boolean(projectId);
-
   const handleOpen = useCallback(() => {
     if (!projectId) {
       return;
     }
-    if (parsed.name) {
+    // A read-only member cannot save from the create modal, so they are taken
+    // to the list rather than to a form that will refuse them.
+    if (secretName && canWriteProject) {
       setPendingProjectSecretPrefill({
         projectId,
-        name: parsed.name,
+        name: secretName,
         description: parsed.description ?? null,
         agentHandles: parsed.agentHandles.length > 0 ? parsed.agentHandles : undefined,
         returnPanelTab: "chat",
@@ -270,80 +544,251 @@ export function SecretRequestEntry({
     }
     requestUrlPush();
     openPanelTab("secrets", { activate: true });
-  }, [openPanelTab, parsed.agentHandles, parsed.description, parsed.name, projectId, requestUrlPush]);
+  }, [
+    canWriteProject,
+    openPanelTab,
+    parsed.agentHandles,
+    parsed.description,
+    projectId,
+    requestUrlPush,
+    secretName,
+  ]);
 
-  const title = parsed.name ? "Secret required" : "Secret required (name missing)";
-  const content = message.content.trim();
-  const description = parsed.description ?? (content.length > 0 ? content : null);
-  const inlineSecretName = parsed.name?.trim() ? parsed.name.trim() : null;
+  const handleContinue = useCallback(async () => {
+    if (!requestConversationId || !suggestedRetry || continueBusy || continueSubmitted) {
+      return;
+    }
+    setContinueBusy(true);
+    setContinueError(null);
+    try {
+      await onSubmit(requestConversationId, suggestedRetry);
+      setContinueSentHere(true);
+      publishContinuedConversation(requestConversationId);
+    } catch (error) {
+      setContinueError(normalizeRetryError(error, "Unable to continue the setup."));
+    } finally {
+      setContinueBusy(false);
+    }
+  }, [continueBusy, continueSubmitted, onSubmit, requestConversationId, suggestedRetry]);
 
-  return (
+  const valueLabel = registry?.credential.valueLabel ?? null;
+  const title = registry
+    ? `${registry.connector.name} ${registry.credential.valueLabel}`
+    : !secretName
+      ? "Something is missing from this request"
+      : description
+        ? firstSentence(description, SECRET_TITLE_MAX_CHARS)
+        : "One value is needed to continue";
+  const purpose = !secretName
+    ? "The assistant asked for a value but did not say which one. Ask it to try again, or add the value yourself in Secrets."
+    : registry
+      ? registry.connector.purpose
+      : // The model's own words, unchanged, unless the title is already made of
+        // them.
+        description && description !== title
+        ? description
+        : null;
+  const Mark = registry?.connector.mark ?? Key;
+
+  const handlesSentence =
+    parsed.agentHandles.length > 0
+      ? ` Only ${joinHandles(parsed.agentHandles)} can use it.`
+      : "";
+  const caption = secretName
+    ? `Saved in this space’s Secrets, never in the chat.${handlesSentence}`
+    : null;
+  // With no space open the field is disabled, and that is the state where a
+  // person is most likely to be improvising: the safety sentence stays and
+  // the missing step is added to it rather than replacing it.
+  const formCaption = projectId
+    ? caption
+    : caption
+      ? `${caption} Open a space to save this value.`
+      : "Open a space to save this value.";
+
+  const stateBadge = !canWriteProject
+    ? { tone: "neutral" as const, label: "Read-only" }
+    : null;
+
+  const header = (
+    <div className="flex items-center gap-2">
+      <Mark className="h-5 w-5 shrink-0 text-slate-700 dark:text-slate-200" aria-hidden="true" />
+      <Text as="span" variant="bodyStrong" tone="primary" className="min-w-0 text-sm">
+        {title}
+      </Text>
+      {stateBadge ? (
+        <Badge tone={stateBadge.tone} size="xs" className="ml-auto shrink-0">
+          {stateBadge.label}
+        </Badge>
+      ) : null}
+    </div>
+  );
+
+  const manageSecretsButton = (
+    <Button
+      onPress={handleOpen}
+      variant="ghost"
+      size="sm"
+      radius="full"
+      isDisabled={!canOpen}
+      data-testid="secret-request-open"
+      className="px-2.5 text-sm text-primary-700 hover:bg-primary-50 data-[hovered]:bg-primary-50 dark:text-primary-300 dark:hover:bg-primary-400/10 dark:data-[hovered]:bg-primary-400/10"
+    >
+      Manage secrets
+    </Button>
+  );
+
+  const continueButton = canContinueRun ? (
+    <Button
+      onPress={() => void handleContinue()}
+      variant="primary"
+      size="sm"
+      radius="full"
+      isDisabled={continueBusy}
+      data-testid="secret-request-continue"
+    >
+      {continueBusy ? "Continuing…" : "Continue setup"}
+    </Button>
+  ) : null;
+
+  const shell = (children: ReactNode) => (
     <Surface
       tone="default"
       radius="2xl"
       shadow="sm"
       data-testid="secret-request-card"
       data-message-type="secret_request"
-      className={`${CHAT_BUBBLE_MAX_WIDTH.alert} px-3 py-2.5 text-sm text-slate-700`}
+      className={`${CHAT_BUBBLE_MAX_WIDTH.alert} space-y-2 px-3 py-2.5 text-sm text-slate-700 dark:text-slate-200`}
     >
-      <div className="flex flex-wrap items-start justify-between gap-3">
-        <div className="min-w-0">
-          <div className="flex items-center gap-2">
-            <Key className="h-4 w-4 text-slate-500" aria-hidden="true" />
-            <Text variant="overline" tone="subtle">
-              {title}
-            </Text>
-          </div>
-          {parsed.name ? (
-            <Text as="div" variant="bodyStrong" tone="primary" className="mt-1 font-mono text-sm">
-              {parsed.name}
-            </Text>
-          ) : null}
-          {description ? (
-            <Text as="div" variant="caption" tone="muted" className="mt-1">
-              {description}
-            </Text>
-          ) : null}
-          {parsed.agentHandles.length > 0 ? (
-            <div className="mt-2 flex flex-wrap gap-1">
-              {parsed.agentHandles.map((handle) => (
-                <Badge key={handle} size="xs" className="text-slate-600">
-                  @{handle}
-                </Badge>
-              ))}
-            </div>
-          ) : null}
-          {inlineSecretName ? (
-            <InlineSecretsForm
-              projectId={projectId}
-              secrets={[
-                {
-                  name: inlineSecretName,
-                  description: parsed.description ?? null,
-                },
-              ]}
-              agentHandles={parsed.agentHandles.length > 0 ? parsed.agentHandles : undefined}
-              description={parsed.description ?? null}
-            />
-          ) : null}
-          <Text as="div" variant="caption" tone="muted" className="mt-2 text-xxs">
-            Add the secret in Secrets, then reply here and I’ll retry.
+      {header}
+      {children}
+    </Surface>
+  );
+
+  const quietLine = (text: string, testId?: string) => (
+    <Text
+      as="div"
+      variant="caption"
+      tone="muted"
+      className="leading-snug"
+      {...(testId ? { "data-testid": testId } : {})}
+    >
+      {text}
+    </Text>
+  );
+
+  // The request has been answered already: a historical card scrolled back to
+  // must not go on demanding a value.
+  if (continueSubmitted) {
+    return shell(
+      quietLine(
+        parsed.agentHandles.length > 0
+          ? `Sent. ${joinHandles(parsed.agentHandles)} is picking the setup back up below.`
+          : "Sent. The setup continues below.",
+        "secret-request-sent",
+      ),
+    );
+  }
+
+  if (!secretName) {
+    return shell(
+      <>
+        {quietLine(purpose ?? "")}
+        <div className="flex flex-wrap items-center gap-2">{manageSecretsButton}</div>
+      </>,
+    );
+  }
+
+  if ((savedHere || alreadyStored) && !replacingValue) {
+    return shell(
+      <>
+        <div className="flex items-start gap-2" data-testid="secret-request-saved">
+          <CheckCircle
+            className="mt-0.5 h-4 w-4 shrink-0 text-primary-600 dark:text-primary-300"
+            aria-hidden="true"
+          />
+          <Text as="div" variant="caption" tone="secondary" className="min-w-0 leading-snug">
+            Saved in this space’s Secrets.
           </Text>
         </div>
+        <div className="flex flex-wrap items-center gap-2">
+          {continueButton}
+          <Button
+            onPress={() => setReplacingValue(true)}
+            variant="ghost"
+            size="sm"
+            radius="full"
+            data-testid="secret-request-replace"
+            className="px-2.5 text-sm text-primary-700 hover:bg-primary-50 data-[hovered]:bg-primary-50 dark:text-primary-300 dark:hover:bg-primary-400/10 dark:data-[hovered]:bg-primary-400/10"
+          >
+            Enter a different value
+          </Button>
+          {manageSecretsButton}
+        </div>
+        {continueError ? (
+          <Text
+            as="div"
+            variant="caption"
+            tone="inherit"
+            className="text-xxs leading-snug text-rose-600 dark:text-rose-300"
+            data-testid="secret-request-error"
+          >
+            {continueError}
+          </Text>
+        ) : null}
+      </>,
+    );
+  }
 
-        <Button
-          onPress={handleOpen}
-          variant="outline"
-          size="xs"
-          radius="full"
-          isDisabled={!canOpen}
-          data-testid="secret-request-open"
-          className="shrink-0"
-        >
-          Manage secrets
-        </Button>
-      </div>
-    </Surface>
+  if (!canWriteProject) {
+    return shell(
+      <>
+        {quietLine(
+          "This space is read-only for you. An admin can add this value.",
+          "secret-request-readonly",
+        )}
+        <div className="flex flex-wrap items-center gap-2">{manageSecretsButton}</div>
+      </>,
+    );
+  }
+
+  return shell(
+    <>
+      {purpose ? quietLine(purpose) : null}
+      <InlineSecretsForm
+        projectId={projectId}
+        secrets={[{ name: secretName, valueLabel }]}
+        agentHandles={parsed.agentHandles.length > 0 ? parsed.agentHandles : undefined}
+        description={parsed.description ?? null}
+        namesShownByHost
+        caption={formCaption}
+        saveLabel={canContinueRun ? "Save and continue" : "Save"}
+        actionAlign="start"
+        saveTestId="secret-request-save"
+        valueTestIdPrefix="secret-request-value"
+        errorTestId="secret-request-error"
+        secondaryAction={manageSecretsButton}
+        onSaved={(names) => {
+          setSavedHere(true);
+          setReplacingValue(false);
+          setStoredNames((current) => {
+            const next = new Set(current ?? []);
+            for (const name of names) {
+              next.add(name.trim().toUpperCase());
+            }
+            return next;
+          });
+          // Tell the other cards in this conversation, so the last of several
+          // secrets sees nothing outstanding and can offer to continue.
+          if (projectId) {
+            publishSavedSecretNames(projectId, names);
+          }
+          if (canContinueRun) {
+            void handleContinue();
+          }
+        }}
+      />
+    </>,
   );
 }
 
@@ -453,7 +898,11 @@ export function IntegrationRequestEntry({
   const durableSuggestedRetrySubmitted = useMemo(
     () =>
       resumeAction?.kind !== "github_import" &&
-      hasSubmittedSuggestedRetry(requestConversationMessages, message, suggestedRetry),
+      hasSubmittedSuggestedRetry(
+        requestConversationMessages,
+        message,
+        suggestedRetry ? [suggestedRetry] : [],
+      ),
     [message, requestConversationMessages, resumeAction, suggestedRetry],
   );
   const githubImportRetryIdentity = useMemo(
@@ -743,7 +1192,8 @@ export function IntegrationRequestEntry({
     !githubConnected;
   // A completed device-auth session in this card means the user connected just
   // now to unblock the request; a persisted connection means the request failed
-  // even though GitHub was already connected — a very different situation.
+  // even though GitHub was already connected, which is a very different
+  // situation.
   const justConnectedHere = githubDeviceAuthSession?.status === "completed";
   const connectedDescription = useMemo(() => {
     if (!githubConnected) {
@@ -752,7 +1202,7 @@ export function IntegrationRequestEntry({
     if (resumeAction?.kind === "github_import") {
       return justConnectedHere
         ? `Retry the import of ${resumeAction.repo} to continue.`
-        : `Importing ${resumeAction.repo} failed even though GitHub is connected — the connected account may lack access, or the URL may be wrong.`;
+        : `Importing ${resumeAction.repo} failed even though GitHub is connected. The connected account may lack access, or the URL may be wrong.`;
     }
     if (suggestedRetry) {
       return "Retry the blocked request from here.";
@@ -863,7 +1313,7 @@ export function IntegrationRequestEntry({
     if (!requestConversationId || retryFlightRef.current || disconnectBusy) {
       return;
     }
-    // Imports retry through the deterministic import API — never via a chat
+    // Imports retry through the deterministic import API, never via a chat
     // message, which would dispatch an agent run (and burn a managed prompt)
     // for something the controller can do directly.
     if (resumeAction?.kind === "github_import") {
@@ -1004,7 +1454,7 @@ export function IntegrationRequestEntry({
                 tone="muted"
                 data-testid="integration-request-retry-sent"
               >
-                Retry sent — the result appears below.
+                Retry sent. The result appears below.
               </Text>
             ) : (
               <>
@@ -1108,6 +1558,15 @@ export function IntegrationRequestEntry({
             secrets={inlineSecrets}
             agentHandles={parsed.agentHandles.length > 0 ? parsed.agentHandles : undefined}
             description={parsed.description ?? null}
+            // The form no longer labels itself, so the host carries the one
+            // sentence that says where a value goes and that it stays out of
+            // the chat. Here the names are on the fields, so the caption does
+            // not repeat them.
+            caption={
+              inlineSecrets.length > 1
+                ? "Saved in this space’s Secrets. Values never appear in the chat."
+                : `Saved as ${inlineSecrets[0]?.name ?? ""} in this space’s Secrets. It never appears in the chat.`
+            }
             onSaved={(names) => {
               const savedGithubToken = names.some((name) =>
                 GITHUB_TOKEN_SECRET_NAMES.has(name.trim().toUpperCase()),

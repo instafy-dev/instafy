@@ -16,7 +16,10 @@ const repo = resolve(frontend, "../..");
 
 const GATED_FILES = [
   resolve(components, "AiCredentialsStatusBubble.tsx"),
+  resolve(components, "ChatCredentialRequestEntries.tsx"),
   resolve(components, "ChatGettingStartedCard.tsx"),
+  resolve(components, "ConnectSheet.tsx"),
+  resolve(components, "InlineSecretsForm.tsx"),
   resolve(components, "ChatPanel.tsx"),
   resolve(components, "ChatSystemRows.tsx"),
   resolve(components, "ComposerActionMenu.tsx"),
@@ -30,6 +33,8 @@ const GATED_FILES = [
   resolve(components, "__tests__/ChatGettingStartedCard.test.tsx"),
   resolve(components, "__tests__/ComposerActionMenu.test.tsx"),
   resolve(components, "__tests__/ConnectChipStrip.test.tsx"),
+  resolve(components, "__tests__/ConnectSheet.test.tsx"),
+  resolve(components, "__tests__/SecretRequestEntry.test.tsx"),
   resolve(components, "__tests__/connectors.test.ts"),
   resolve(components, "__tests__/gettingStartedAiChoices.test.ts"),
   resolve(components, "__tests__/mentionableMembers.test.ts"),

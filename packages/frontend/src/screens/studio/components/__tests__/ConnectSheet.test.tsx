@@ -17,7 +17,9 @@ import {
 } from "../connectors";
 import { useConnectSheetState, type ConnectSheetState } from "../useConnectSheetState";
 
-const EM_DASH = "—";
+// Escaped so the first-run copy gate, which reads this file, does not find
+// the character it is here to forbid.
+const EM_DASH = "\u2014";
 
 // Notion is the one shipped skill whose pack is published, so its row and
 // Popular mark are the pressable path. Slack and Discord are still "soon"
@@ -223,11 +225,12 @@ describe("ConnectSheet", () => {
       expect(search?.value).toBe("");
 
       // Popular shows only tools that can be selected today, and only once
-      // there are at least two of them: GitHub, then Notion and FreeFinance,
-      // in list order, which is the no-paste-first rule the card row reads too.
+      // there are at least two of them: Notion, then GitHub and FreeFinance,
+      // in list order, which is the named-product-first rule the card row
+      // reads too.
       expect(AVAILABLE_FEATURED_CONNECTORS.map((entry) => entry.id)).toEqual([
-        "github",
         "notion",
+        "github",
         "freefinance",
       ]);
       // The catalogue sits close to the threshold, so assert the row is not
@@ -240,8 +243,8 @@ describe("ConnectSheet", () => {
           (mark) => mark.dataset.testid,
         ),
       ).toEqual([
-        "connect-popular-github",
         "connect-popular-notion",
+        "connect-popular-github",
         "connect-popular-freefinance",
       ]);
       expect(query('[data-testid="connect-popular-slack"]')).toBeNull();
@@ -623,8 +626,8 @@ describe("ConnectSheet", () => {
       expect(query("#connect-popular-label")?.textContent).toBe("Popular");
       const marks = queryAll<HTMLButtonElement>('[data-testid="connect-popular-row"] [data-testid^="connect-popular-"]');
       expect(marks.map((mark) => mark.dataset.testid)).toEqual([
-        "connect-popular-github",
         "connect-popular-notion",
+        "connect-popular-github",
         "connect-popular-freefinance",
       ]);
       expect(query('[data-testid="connect-popular-slack"]')).toBeNull();
@@ -687,18 +690,22 @@ describe("ConnectSheet", () => {
       expect(lastState(s)).toEqual({ stage: "confirm", target: slack, openedFromBrowse: false });
       expect(query('[role="dialog"]')?.getAttribute("aria-label")).toBe("Connect Slack");
       expect(document.body.textContent).toContain("Connect Slack");
+      // Three lines and no fourth: what it lets Instafy do, what the person has
+      // to go and fetch, and whether anything changes without them.
       expect(query('[data-testid="connect-confirm-install-line"]')?.textContent).toBe(
-        "Adds the Slack skill from instafy-dev/skills to this space, then starts its setup in this chat.",
+        "Instafy can read and post in the Slack channels you add it to. Setup runs here, in this chat.",
       );
       expect(query('[data-testid="connect-confirm-needs-line"]')?.textContent).toBe(
-        "Setup will ask for a Slack app bot token (SLACK_BOT_TOKEN) through the secrets card. Never paste it in chat.",
+        "You will need one thing from Slack: the Bot User OAuth Token. Instafy shows a card to paste it into, so it never goes into a chat message.",
       );
-      expect(query('[data-testid="connect-confirm-files-line"]')?.textContent).toBe(
-        "Files land in .agents/skills/slack.",
+      expect(query('[data-testid="connect-confirm-safety-line"]')?.textContent).toBe(
+        "Instafy never changes anything in Slack without asking you first, every time.",
       );
-      expect(query('[data-testid="connect-confirm-files-line"] code')?.textContent).toBe(
-        ".agents/skills/slack",
-      );
+      expect(query('[data-testid="connect-confirm-files-line"]')).toBeNull();
+      // No variable name, no repo, no folder: none of them mean anything to
+      // someone who has never seen an API key.
+      expect(document.body.textContent).not.toContain("SLACK_BOT_TOKEN");
+      expect(document.body.textContent).not.toContain(".agents/skills/slack");
       // No list, no search, no Back: this confirm did not come from the browse stage.
       expect(query('[data-testid="connect-browse-stage"]')).toBeNull();
       expect(query('[data-testid="connect-search"]')).toBeNull();
@@ -726,13 +733,15 @@ describe("ConnectSheet", () => {
 
       expect(query('[role="dialog"]')?.getAttribute("aria-label")).toBe("Connect Notion");
       expect(query('[data-testid="connect-confirm-install-line"]')?.textContent).toBe(
-        "Adds the Notion skill from instafy-dev/skills to this space, then starts its setup in this chat.",
+        "Instafy can search and read the Notion pages you share with it, and add notes to them after you confirm each one. Setup runs here, in this chat.",
       );
+      // Notion's own on-screen name for the value, the same one the pack and
+      // the secret card use.
       expect(query('[data-testid="connect-confirm-needs-line"]')?.textContent).toBe(
-        "Setup will ask for a Notion connection Installation access token (NOTION_API_KEY) through the secrets card. Never paste it in chat.",
+        "You will need one thing from Notion: the Installation access token. Instafy shows a card to paste it into, so it never goes into a chat message. You will also pick which pages to share with it; Instafy walks you through that here.",
       );
-      expect(query('[data-testid="connect-confirm-files-line"]')?.textContent).toBe(
-        "Files land in .agents/skills/notion.",
+      expect(query('[data-testid="connect-confirm-safety-line"]')?.textContent).toBe(
+        "Instafy never changes anything in Notion without asking you first, every time.",
       );
       expect(document.body.textContent).not.toContain("https://");
       expect(document.body.textContent).not.toContain(EM_DASH);
@@ -743,10 +752,12 @@ describe("ConnectSheet", () => {
       expect(s.onSetUpAgain).not.toHaveBeenCalled();
     });
 
-    it("never prints the source URL, only its label", async () => {
+    it("never prints a URL or a link", async () => {
+      // The repo the pack comes from left the confirm copy with the rest of the
+      // machinery; the import line the Connect button sends still carries it,
+      // which is where provenance is actually checkable.
       const s = spies();
       await render({ initial: slack, spies: s });
-      expect(document.body.textContent).toContain(slack.sourceLabel);
       expect(document.body.textContent).not.toContain("https://");
       expect(document.body.textContent).not.toContain(slack.source);
       expect(query("a[href]")).toBeNull();
@@ -754,29 +765,37 @@ describe("ConnectSheet", () => {
 
     it("joins two or more needs and switches to the plural wording", async () => {
       const s = spies();
-      const twoNeeds: SkillConnector = {
+      // Two declared values read in the provider's own words, and in the plural.
+      const twoValues: SkillConnector = {
         ...slack,
         needs: ["a bot token (BOT_TOKEN)", "a signing secret (SIGNING_SECRET)"],
+        credentials: [
+          { name: "BOT_TOKEN", valueLabel: "Bot token" },
+          { name: "SIGNING_SECRET", valueLabel: "Signing secret" },
+        ],
       };
-      await render({ initial: twoNeeds, spies: s });
+      await render({ initial: twoValues, spies: s });
       expect(query('[data-testid="connect-confirm-needs-line"]')?.textContent).toBe(
-        "Setup will ask for a bot token (BOT_TOKEN) and a signing secret (SIGNING_SECRET) through the secrets card. Never paste them in chat.",
+        "You will need two things from Slack: the Bot token and the Signing secret. Instafy shows a card to paste them into, so they never go into a chat message.",
       );
       await act(async () => query<HTMLButtonElement>('[data-testid="connect-confirm-cancel"]')?.click());
 
+      // A connector that has not declared its credentials yet falls back to the
+      // needs phrases as written, rather than saying nothing.
       const threeNeeds: SkillConnector = {
         ...slack,
         needs: ["A (A_KEY)", "B (B_KEY)", "C (C_KEY)"],
+        credentials: undefined,
       };
       await render({ initial: threeNeeds, spies: s });
       expect(query('[data-testid="connect-confirm-needs-line"]')?.textContent).toBe(
-        "Setup will ask for A (A_KEY), B (B_KEY) and C (C_KEY) through the secrets card. Never paste them in chat.",
+        "You will need three things from Slack: A (A_KEY), B (B_KEY) and C (C_KEY). Instafy shows a card to paste them into, so they never go into a chat message.",
       );
       await act(async () => query<HTMLButtonElement>('[data-testid="connect-confirm-cancel"]')?.click());
 
-      await render({ initial: { ...slack, needs: [] }, spies: s });
+      await render({ initial: { ...slack, needs: [], credentials: undefined }, spies: s });
       expect(query('[data-testid="connect-confirm-needs-line"]')).toBeNull();
-      expect(query('[data-testid="connect-confirm-files-line"]')).not.toBeNull();
+      expect(query('[data-testid="connect-confirm-safety-line"]')).not.toBeNull();
     });
 
     it("swaps the first line for the shared-display wording when a connector carries an app", async () => {
@@ -787,17 +806,19 @@ describe("ConnectSheet", () => {
         id: "fixture-app",
         name: "Fixture",
         skillName: "fixture",
+        purpose: "Instafy can work in Fixture with you.",
         needs: [],
+        credentials: undefined,
         app: { url: "https://fixture.example/app" },
       };
       await render({ initial: appConnector, spies: s });
 
       expect(query('[data-testid="connect-confirm-install-line"]')?.textContent).toBe(
-        "Adds the Fixture skill from instafy-dev/skills to this space. Setup opens Fixture in the shared display; you sign in there once, and the agent then works in that session.",
+        "Instafy can work in Fixture with you. Setup opens Fixture in the shared display; you sign in there once, and Instafy then works in that session.",
       );
       expect(query('[data-testid="connect-confirm-needs-line"]')).toBeNull();
-      expect(query('[data-testid="connect-confirm-files-line"]')?.textContent).toBe(
-        "Files land in .agents/skills/fixture.",
+      expect(query('[data-testid="connect-confirm-safety-line"]')?.textContent).toBe(
+        "Instafy never changes anything in Fixture without asking you first, every time.",
       );
       expect(document.body.textContent).not.toContain("https://fixture.example/app");
       expect(query('[data-testid="connect-confirm-submit"]')).not.toBeNull();
@@ -812,7 +833,7 @@ describe("ConnectSheet", () => {
         "The Slack skill is in this space at .agents/skills/slack.",
       );
       expect(query('[data-testid="connect-confirm-needs-line"]')).toBeNull();
-      expect(query('[data-testid="connect-confirm-files-line"]')).toBeNull();
+      expect(query('[data-testid="connect-confirm-safety-line"]')).toBeNull();
       expect(query('[data-testid="connect-confirm-submit"]')).toBeNull();
       const setUpAgain = query<HTMLButtonElement>('[data-testid="connect-confirm-set-up-again"]');
       expect(setUpAgain?.textContent).toContain("Set up again");

@@ -45,6 +45,25 @@ describe("resolveComposerUiSuggestedReplies", () => {
     expect(resolveComposerUiSuggestedReplies(message)).toEqual([]);
   });
 
+  it("suppresses a secret request, which the card answers from its own button", () => {
+    const message = createAssistantMessage({
+      messageType: "secret_request",
+      ui: { suggestedReply: "I saved NOTION_API_KEY. Try again." },
+      details: { name: "NOTION_API_KEY" },
+    });
+
+    expect(resolveComposerUiSuggestedReplies(message)).toEqual([]);
+  });
+
+  it("suppresses a historical snake-case secret request too", () => {
+    const message = createAssistantMessage({
+      message_type: "SECRET_REQUEST",
+      ui: { suggested_reply: "I added CLOUDFLARE_API_TOKEN. Try again." },
+    });
+
+    expect(resolveComposerUiSuggestedReplies(message)).toEqual([]);
+  });
+
   it("keeps ordinary assistant suggestions available", () => {
     const message = createAssistantMessage({
       ui: { suggestedReplies: ["Summarize the architecture."] },

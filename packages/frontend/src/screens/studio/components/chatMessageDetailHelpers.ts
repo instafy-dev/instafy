@@ -485,6 +485,11 @@ export function resolveUiSuggestedReplies(metadata: Record<string, unknown> | nu
  * GitHub import requests carry a deterministic resume action; submitting their
  * historical prose suggestion would dispatch an unrelated AI run instead of
  * retrying the import API.
+ *
+ * A secret request is the same argument one step on: the card takes the value,
+ * saves it and continues the run from its own button. A chip under the composer
+ * offering "I added NOTION_API_KEY" is a fourth way to answer one question, and
+ * the only one that can be pressed before the value exists.
  */
 export function resolveComposerUiSuggestedReplies(message: ChatMessage | null | undefined): string[] {
   if (!message) {
@@ -492,6 +497,9 @@ export function resolveComposerUiSuggestedReplies(message: ChatMessage | null | 
   }
 
   const messageType = (getMessageType(message) ?? "").trim().toLowerCase();
+  if (messageType === "secret_request") {
+    return [];
+  }
   if (messageType === "integration_request") {
     const details = extractMessageDetails(message.metadata);
     const resumeActionCandidate = details?.["resumeAction"] ?? details?.["resume_action"];

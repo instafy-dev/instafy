@@ -96,14 +96,15 @@ describe("landing workspace example", () => {
   it("shows one manually selected example with native keyboard-focusable controls", async () => {
     vi.useFakeTimers();
     await mount();
-    const books = button("Close the books");
-    expect(books.type).toBe("button");
-    await act(async () => books.focus());
-    expect(document.activeElement).toBe(books);
-    await act(async () => books.click());
+    // Not the leading scenario, so the selection is visibly a choice.
+    const code = button("Build a feature");
+    expect(code.type).toBe("button");
+    await act(async () => code.focus());
+    expect(document.activeElement).toBe(code);
+    await act(async () => code.click());
 
-    expect(books.getAttribute("aria-pressed")).toBe("true");
-    expect(button("Build a feature").getAttribute("aria-pressed")).toBe("false");
+    expect(code.getAttribute("aria-pressed")).toBe("true");
+    expect(button("Close the books").getAttribute("aria-pressed")).toBe("false");
     expect(container.querySelectorAll('[aria-label$=" conversation"]')).toHaveLength(1);
     expect(shownText()).toContain(SESSION_SCENARIOS[1].prompt);
     expect(shownText()).not.toContain(SESSION_SCENARIOS[0].prompt);
@@ -111,14 +112,14 @@ describe("landing workspace example", () => {
     // the space so the name has a referent on the page.
     expect(shownText()).toContain(SESSION_SCENARIOS[1].presenceAgent);
     expect(shownText()).not.toContain(SESSION_SCENARIOS[0].presenceAgent);
-    expect(container.querySelector('[data-testid="landing-join-session-button"]')?.getAttribute("href")).toBe("/login?example=books");
+    expect(container.querySelector('[data-testid="landing-join-session-button"]')?.getAttribute("href")).toBe("/login?example=code");
     expect(scenarioChanged).toHaveBeenLastCalledWith(SESSION_SCENARIOS[1]);
 
     await advance(20_000);
-    expect(activeExample()).toBe("books");
+    expect(activeExample()).toBe("code");
     await act(async () => button("Launch a site").click());
     expect(shownText()).toContain("The pricing page is up at forma.site/pricing");
-    expect(shownText()).not.toContain("214 of 217 rows matched");
+    expect(shownText()).not.toContain("Checkout is its own package now.");
     // The docked browser stands in for a screencast, so the page it draws is
     // decorative: none of its copy is exposed as conversation content.
     expect(shownText()).not.toContain("Room for your next idea.");
@@ -140,22 +141,22 @@ describe("landing workspace example", () => {
     vi.useFakeTimers();
     await mount();
     await setVisible(true);
-    expect(activeExample()).toBe("code");
+    expect(activeExample()).toBe("books");
     expect(deck().parentElement?.getAttribute("data-rotating")).toBe("true");
 
     await advance(ROTATE_INTERVAL_MS - 1);
-    expect(activeExample()).toBe("code");
-    await advance(1);
     expect(activeExample()).toBe("books");
+    await advance(1);
+    expect(activeExample()).toBe("code");
     expect(scenarioChanged).toHaveBeenLastCalledWith(SESSION_SCENARIOS[1]);
-    expect(button("Close the books").getAttribute("aria-pressed")).toBe("true");
+    expect(button("Build a feature").getAttribute("aria-pressed")).toBe("true");
     expect(document.activeElement).toBe(document.body);
 
     await advance(ROTATE_INTERVAL_MS);
     expect(activeExample()).toBe("site");
     await advance(ROTATE_INTERVAL_MS);
-    expect(activeExample()).toBe("code");
-    expect(container.querySelector('[data-testid="landing-join-session-button"]')?.getAttribute("href")).toBe("/login?example=code");
+    expect(activeExample()).toBe("books");
+    expect(container.querySelector('[data-testid="landing-join-session-button"]')?.getAttribute("href")).toBe("/login?example=books");
   });
 
   it("waits while the pointer is over the deck or focus is inside it, then restarts a full countdown", async () => {
@@ -170,23 +171,23 @@ describe("landing workspace example", () => {
     });
     expect(rootNode.getAttribute("data-rotating")).toBe("false");
     await advance(ROTATE_INTERVAL_MS * 3);
-    expect(activeExample()).toBe("code");
+    expect(activeExample()).toBe("books");
 
     await act(async () => {
       rootNode.dispatchEvent(new Event("pointerout", { bubbles: true }));
     });
     expect(rootNode.getAttribute("data-rotating")).toBe("true");
     await advance(ROTATE_INTERVAL_MS - 1);
-    expect(activeExample()).toBe("code");
-    await advance(1);
     expect(activeExample()).toBe("books");
+    await advance(1);
+    expect(activeExample()).toBe("code");
 
     const join = container.querySelector('[data-testid="landing-join-session-button"]') as HTMLAnchorElement;
     await act(async () => join.focus());
     expect(document.activeElement).toBe(join);
     expect(rootNode.getAttribute("data-rotating")).toBe("false");
     await advance(ROTATE_INTERVAL_MS * 3);
-    expect(activeExample()).toBe("books");
+    expect(activeExample()).toBe("code");
 
     await act(async () => join.blur());
     expect(rootNode.getAttribute("data-rotating")).toBe("true");
@@ -214,7 +215,7 @@ describe("landing workspace example", () => {
     expect(rootNode.getAttribute("data-rotating")).toBe("true");
     expect(activeExample()).toBe("code");
     await advance(ROTATE_INTERVAL_MS);
-    expect(activeExample()).toBe("books");
+    expect(activeExample()).toBe("site");
   });
 
   it("resumes after a mouse click leaves focus on the chosen chip once the pointer moves away", async () => {
@@ -246,7 +247,7 @@ describe("landing workspace example", () => {
     expect(rootNode.getAttribute("data-rotating")).toBe("true");
     expect(document.activeElement).toBe(chip);
     await advance(ROTATE_INTERVAL_MS);
-    expect(activeExample()).toBe("code");
+    expect(activeExample()).toBe("books");
 
     // The same for the join link, which has no manual hold behind it: pointer
     // focus must not leave rotation stopped once the pointer moves away.
@@ -263,7 +264,7 @@ describe("landing workspace example", () => {
     expect(document.activeElement).toBe(join);
     expect(rootNode.getAttribute("data-rotating")).toBe("true");
     await advance(ROTATE_INTERVAL_MS);
-    expect(activeExample()).toBe("books");
+    expect(activeExample()).toBe("code");
   });
 
   it("holds while keyboard focus is inside the deck", async () => {
@@ -271,7 +272,7 @@ describe("landing workspace example", () => {
     await mount();
     await setVisible(true);
     const rootNode = container.querySelector('[data-testid="landing-session-deck-root"]') as HTMLElement;
-    const chip = button("Close the books");
+    const chip = button("Build a feature");
 
     // A Tab press happens on whatever was focused before, outside the deck.
     await act(async () => {
@@ -281,7 +282,7 @@ describe("landing workspace example", () => {
     expect(document.activeElement).toBe(chip);
     expect(rootNode.getAttribute("data-rotating")).toBe("false");
     await advance(ROTATE_INTERVAL_MS * 3);
-    expect(activeExample()).toBe("code");
+    expect(activeExample()).toBe("books");
     expect(document.activeElement).toBe(chip);
 
     await act(async () => chip.blur());
@@ -292,18 +293,18 @@ describe("landing workspace example", () => {
     vi.useFakeTimers();
     await mount();
     await advance(ROTATE_INTERVAL_MS * 2);
-    expect(activeExample()).toBe("code");
+    expect(activeExample()).toBe("books");
 
     await setVisible(true);
     vi.spyOn(document, "visibilityState", "get").mockReturnValue("hidden");
     await act(async () => document.dispatchEvent(new Event("visibilitychange")));
     await advance(ROTATE_INTERVAL_MS * 2);
-    expect(activeExample()).toBe("code");
+    expect(activeExample()).toBe("books");
 
     vi.spyOn(document, "visibilityState", "get").mockReturnValue("visible");
     await act(async () => document.dispatchEvent(new Event("visibilitychange")));
     await advance(ROTATE_INTERVAL_MS);
-    expect(activeExample()).toBe("books");
+    expect(activeExample()).toBe("code");
   });
 
   it("animates only the visible working Octo and stays static across selections while suspended", async () => {
@@ -362,7 +363,7 @@ describe("landing workspace example", () => {
     expect(container.querySelectorAll("animate, animateTransform")).toHaveLength(0);
     expect(container.querySelector('[data-testid="landing-session-deck-root"]')?.getAttribute("data-rotating")).toBe("false");
     await advance(ROTATE_INTERVAL_MS * 3);
-    expect(activeExample()).toBe("code");
+    expect(activeExample()).toBe("books");
     await act(async () => button("Launch a site").click());
     expect(shownText()).toContain(SESSION_SCENARIOS[2].prompt);
     expect(activeMarks()).toHaveLength(0);
@@ -435,16 +436,19 @@ describe("landing workspace example", () => {
     expect(deck().querySelectorAll(".instafy-compact-event-pill-live")).toHaveLength(0);
     expect(deck().querySelector('[data-testid="landing-summary"]')?.getAttribute("data-beat-visible")).toBe("true");
 
-    const diffCard = () => deck().querySelector('[data-testid="landing-diff-card"]')?.closest("[data-beat-visible]");
+    // This scenario's artifact is the ledger block inside the summary; the diff
+    // card belongs to the code scenario and is covered in LandingStudioWindow.
+    expect(deck().querySelector('[data-testid="landing-code-block"]')?.textContent).toContain(
+      "214 of 217 rows matched",
+    );
     await advance(600);
     expect(deck().dataset.beat).toBe("counts");
     // Octo's message is still assembling, so Kim has not started typing.
     expect(deck().querySelector('[data-testid="landing-kim-typing"]')).toBeNull();
-    expect(diffCard()?.getAttribute("data-beat-visible")).toBe("false");
+    expect(deck().querySelector('[data-testid="landing-file-chip"]')).not.toBeNull();
 
     await advance(400);
     expect(deck().dataset.beat).toBe("artifact");
-    expect(diffCard()?.getAttribute("data-beat-visible")).toBe("true");
     expect(deck().querySelector('[data-testid="landing-kim-typing"]')).toBeNull();
 
     await advance(800);
@@ -461,10 +465,10 @@ describe("landing workspace example", () => {
     // The finished frame is what the card is for, so it holds the longest.
     await advance(3000);
     expect(deck().dataset.beat).toBe("reply");
-    expect(activeExample()).toBe("code");
+    expect(activeExample()).toBe("books");
 
     await advance(600);
-    expect(activeExample()).toBe("books");
+    expect(activeExample()).toBe("code");
     expect(deck().dataset.beat).toBe("rest");
     expect(typedPrompt()).toBe("");
     expect(ownBubble()?.getAttribute("data-beat-visible")).toBe("false");
@@ -520,7 +524,7 @@ describe("landing workspace example", () => {
     ).toHaveLength(0);
     const rootNode = container.querySelector('[data-testid="landing-session-deck-root"]') as HTMLElement;
     const controls = Array.from(rootNode.querySelectorAll("button, a[href]")).map((node) => node.textContent?.trim());
-    expect(controls).toEqual(["Build a feature", "Close the books", "Launch a site", "Start your own session ↗"]);
+    expect(controls).toEqual(["Close the books", "Build a feature", "Launch a site", "Start your own session ↗"]);
   });
 
   it("names the chats and the person in the rail and the agent in the run", async () => {
@@ -538,20 +542,20 @@ describe("landing workspace example", () => {
     expect(running()).toBe(1);
     expect(deck().querySelector('[data-testid="landing-run-caption"]')).toBeNull();
     await advance(1800);
-    expect(deck().querySelector('[data-testid="landing-owner-badge"]')?.textContent).toBe("canary");
+    expect(deck().querySelector('[data-testid="landing-owner-badge"]')?.textContent).toBe("quill");
     await advance(850);
     expect(deck().dataset.beat).toBe("done");
     expect(running()).toBe(0);
 
-    await act(async () => button("Close the books").click());
+    await act(async () => button("Build a feature").click());
     const selected = Array.from(rail.querySelectorAll('[data-testid="landing-rail-chat"]')).filter(
       (node) => node.getAttribute("data-selected") === "true",
     );
     expect(selected).toHaveLength(1);
-    expect(selected[0].textContent).toContain("February close");
+    expect(selected[0].textContent).toContain("Checkout flow");
     expect(selected[0].classList.contains("bg-white")).toBe(true);
-    expect(shownText()).toContain("Ledger");
-    expect(shownText()).not.toContain("Canary");
+    expect(shownText()).toContain("Canary");
+    expect(shownText()).not.toContain("Ledger");
   });
 
   it("has no em dashes in any scenario copy or rendered text", async () => {

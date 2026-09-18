@@ -7300,18 +7300,19 @@ Avoid creating dependency caches or stores in the canonical workspace root when 
               - For current-conversation evidence-only follow-ups, do not search workspace files, source trees, `.instafy`, `.codex-runtime*`, `.codex-runtime-fallback`, or runtime logs. If restored provider context is insufficient, inspect only the active conversation with `instafy conversation show <conversation-id> --include-threads --json`.\n\
               - Broad or cross-chat coordination should search compact context cards and prior conversations first. Save/update compact cards for durable work focus and open questions; do not invent a separate first-class topic-focus object.\n\
               - Same agent handle does not imply global memory in a new chat. Recover cross-chat context explicitly with context cards and `instafy conversation search/show --include-threads` before relying on old thread knowledge.\n\
-              - If you emit `request_integration` and/or `request_secret`, your `summary` must actively close the gap with: (1) what is blocked, (2) the exact next UI step using the action card in this message, and (3) the exact retry phrase the user should send.\n\
+              - If you emit `request_integration`, your `summary` must actively close the gap with: (1) what is blocked, (2) the exact next UI step using the action card in this message, and (3) the exact retry phrase the user should send.\n\
+              - If you emit `request_secret`, say in `summary` what is blocked and that the value goes in the card on this message, then stop. Do not write a retry phrase, a \"where to get it\" checklist, or any instruction to reply: the card saves the value and continues the run itself. Do not name the environment variable in `summary`; call the value what the provider calls it on screen.\n\
               - If you emit `request_location`, keep `summary` focused on why location is needed and whether approximate or precise location is enough. Do not mention action cards, UI steps, or retry phrases for location; the app handles that.\n\
             - Use `request_location` when the user wants nearby/current-location recommendations or routes and they have not already provided a place/city. Prefer `approximate` unless exact turn-by-turn or meter-level precision is clearly necessary.\n\
-              - Provide exactly one retry phrase. Do not include any other retry/confirmation phrase anywhere in `summary` (avoid extra lines like \"Then reply …\").\n\
-              - If you include `suggestions` alongside onboarding actions, it must contain exactly one string and it must equal the retry phrase; otherwise omit `suggestions`.\n\
+              - When a retry phrase applies (`request_integration`), provide exactly one. Do not include any other retry/confirmation phrase anywhere in `summary` (avoid extra lines like \"Then reply …\").\n\
+              - If you include `suggestions` alongside onboarding actions, it must contain exactly one string and it must equal the retry phrase; otherwise omit `suggestions`. Omit `suggestions` entirely for `request_secret`.\n\
             - For integration onboarding, state what you will do immediately after the retry phrase (for example: verify connection status, then continue the requested task).\n\
             - When requesting secrets, always include concrete env var names. Prefer names grounded in tool output, a skill, upstream docs, or an explicit error.\n\
             - Keep action-card copy terse. Treat action `description` fields as one-line labels/hints, not documentation.\n\
                 - For `request_integration.description`: aim for <= 1 short sentence (ideally <= ~12 words).\n\
                 - For `request_secret.description` and `suggestedSecrets[].description`: prefer omitting the description entirely. If you include it, keep it extremely short (<= 6 words) and NEVER include \"where to get it\" instructions.\n\
                 - Put detailed setup steps (where to click, where to find tokens, how to generate them) in `summary` instead.\n\
-              - In `summary`, include a short, step-by-step \"where to get it\" checklist (numbered, one action per step). If you don’t know the exact provider UI path, include a precise search phrase the user can copy (for example: \"<provider> create API token\") and ask exactly one clarifying question.\n\
+              - For `request_integration`, include in `summary` a short, step-by-step \"where to get it\" checklist (numbered, one action per step). If you don’t know the exact provider UI path, include a precise search phrase the user can copy (for example: \"<provider> create API token\") and ask exactly one clarifying question. For `request_secret`, the skill's own walkthrough carries those steps; keep `summary` to what is blocked.\n\
               - If you include `requiredScopes` / `capabilities`, keep the lists short and only include items you are confident are required.\n\
               - If upstream guidance does not define a canonical env var name, choose a clear UPPER_SNAKE_CASE name and keep it consistent (do not leave `suggestedSecretNames` empty).\n\
               - If multiple secret inputs are required, include all names in `suggestedSecretNames` (ordered by setup priority).\n\
@@ -8943,17 +8944,11 @@ fn ensure_onboarding_suggestions(suggested_replies: &mut Vec<String>, actions: &
                     format!("I connected {label}. Retry now."),
                 );
             }
-            CodexAction::RequestSecret { name, .. } => {
-                let trimmed = name.trim();
-                if trimmed.is_empty() {
-                    continue;
-                }
-                push_onboarding_suggestion(
-                    suggested_replies,
-                    &mut seen,
-                    format!("I added {trimmed}. Retry now."),
-                );
-            }
+            // No suggestion for a secret: the card in the message saves the
+            // value and continues the run from its own button. A chip here
+            // would be a second path, worded differently from the card's,
+            // which is what made the card read as two competing routes.
+            CodexAction::RequestSecret { .. } => {}
             CodexAction::RequestLocation { .. } => {}
         }
     }
@@ -8991,14 +8986,17 @@ fn augment_summary_for_onboarding_actions(summary: &mut String, actions: &[Codex
     }
 
     if !secret_names.is_empty() {
-        let secrets = secret_names
-            .iter()
-            .map(|name| format!("`{name}`"))
-            .collect::<Vec<_>>()
-            .join(", ");
-        guidance_lines.push(format!(
-            "If credentials are requested during setup, use the secret action card in this message to add {secrets} (never paste secrets in chat)."
-        ));
+        // The card names the value in the provider's own words and carries the
+        // variable itself. Repeating the variable here only shouts it at
+        // someone who has never seen one.
+        guidance_lines.push(
+            if secret_names.len() > 1 {
+                "Add the values in the card on this message; they are saved to this space's secrets and never appear in the chat."
+            } else {
+                "Add the value in the card on this message; it is saved to this space's secrets and never appears in the chat."
+            }
+            .to_string(),
+        );
     }
 
     if guidance_lines.is_empty() {
@@ -9241,17 +9239,22 @@ fn build_final_messages_from_actions(actions: &[CodexAction]) -> Vec<JobMessage>
                     "messageType": "secret_request",
                     "details": JsonValue::Object(details),
                     "ui": {
-                        "suggestedReply": format!("I added {}. Please try again.", name.trim()),
+                        // Posted under the customer's own name, so it must not
+                        // make them say an environment variable, and nothing
+                        // failed, so nothing is being retried. The frontend
+                        // card substitutes the provider's on-screen name for
+                        // the value when the connector declares one.
+                        "suggestedReply": "I saved the value. Ready to continue.",
                     },
                 });
 
-                let content = description.clone().unwrap_or_else(|| {
-                    format!(
-                        "Add secret `{}` using the secret action card in this message, then reply `I added {}. Retry now.`",
-                        name.trim(),
-                        name.trim()
-                    )
-                });
+                // The card in this message takes the value, saves it and
+                // continues the run from its own button. Prose that sends the
+                // user somewhere else, or asks them to type a reply, competes
+                // with it and is what made the card read as two paths.
+                let content = description
+                    .clone()
+                    .unwrap_or_else(|| "Add the value in the card on this message.".to_string());
 
                 out.push(JobMessage {
                     content,
@@ -21820,10 +21823,13 @@ mod tests {
                 .iter()
                 .any(|item| item == "I connected Example. Retry now.")
         );
+        // A secret gets no chip: its card saves the value and continues the
+        // run itself, and a second phrasing of the same step is what made the
+        // card read as two competing paths.
         assert!(
-            suggestions
+            !suggestions
                 .iter()
-                .any(|item| item == "I added EXAMPLE_TOKEN. Retry now.")
+                .any(|item| item.contains("EXAMPLE_TOKEN"))
         );
         assert!(suggestions.len() <= MAX_UI_SUGGESTED_REPLIES);
     }
