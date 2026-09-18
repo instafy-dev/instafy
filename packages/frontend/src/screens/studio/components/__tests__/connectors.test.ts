@@ -12,7 +12,7 @@ import {
   buildConnectorImportMessage,
   connectorCategoryLabel,
   filterConnectors,
-  findConnectorCredential,
+  findConnectorForSecret,
   isConnectorAvailable,
   type SkillConnector,
 } from "../connectors";
@@ -54,55 +54,47 @@ describe("CONNECTORS", () => {
     expect(PRODUCT_CONNECTORS.some((entry) => (entry.id as string) === "other")).toBe(false);
   });
 
-  it("gives every product connector a customer-language purpose", () => {
+  it("carries no customer-facing copy at all any more", () => {
+    // The words on the secret card and in the setup conversation come from the
+    // pack that asked, which is the copy that gets updated when a provider
+    // renames something. What survives here is identity and routing: a name, a
+    // mark, the search terms, and where the skill is installed from.
     for (const entry of PRODUCT_CONNECTORS) {
-      expect(entry.purpose.trim().length).toBeGreaterThan(0);
-      expect(entry.purpose.trim().endsWith(".")).toBe(true);
-      expect(entry.purpose).not.toMatch(/[A-Z][A-Z0-9]*_[A-Z0-9_]+/);
-      expect(entry.purpose).not.toContain(EM_DASH);
-      expect(entry.purpose.toLowerCase()).not.toContain("please");
+      expect("purpose" in entry).toBe(false);
+      expect("needs" in entry).toBe(false);
+      expect("credentials" in entry).toBe(false);
+      expect("sharingNote" in entry).toBe(false);
     }
   });
 
-  it("keeps the needs phrases and the declared credentials naming the same secrets", () => {
-    // The card's good copy is keyed on the secret name. A renamed variable that
-    // is changed in one list and not the other would silently drop the card
-    // back to model prose, and nothing on screen would say so.
+  it("declares the secret names as variable names and never as copy", () => {
+    // Not a word any customer reads: it is the trusted half of the key
+    // findConnectorForSecret resolves on, so it has to be curated here.
+    const seen = new Set<string>();
     for (const entry of PRODUCT_CONNECTORS) {
       if (entry.kind !== "skill") {
         continue;
       }
-      const inNeeds = new Set(
-        entry.needs.flatMap((need) => Array.from(need.matchAll(/\(([A-Z0-9_]+)\)/g), (m) => m[1])),
-      );
-      const inCredentials = new Set((entry.credentials ?? []).map((c) => c.name));
-      expect([...inNeeds].sort()).toEqual([...inCredentials].sort());
-      for (const credential of entry.credentials ?? []) {
-        expect(credential.name).toBe(credential.name.toUpperCase());
-        expect(credential.valueLabel.trim().length).toBeGreaterThan(0);
-        // The provider's own on-screen name, never the variable shouted back.
-        expect(credential.valueLabel).not.toBe(credential.name);
-        // The bug this review opened with: the sheet's needs phrase and the
-        // card's title calling one value two different things in the same
-        // message. The phrase that names the variable must also use the
-        // provider's word for it.
-        const phrase = entry.needs.find((need) => need.includes(`(${credential.name})`));
-        expect(phrase, `no needs phrase names ${credential.name}`).toBeDefined();
-        expect(phrase!.toLowerCase()).toContain(credential.valueLabel.toLowerCase());
+      expect(entry.secretNames.length).toBeGreaterThan(0);
+      for (const name of entry.secretNames) {
+        expect(name).toMatch(/^[A-Z][A-Z0-9_]*$/);
+        expect(seen.has(name), `${name} is declared twice`).toBe(false);
+        seen.add(name);
       }
     }
   });
 
-  it("finds a connector by the secret name its setup asks for, case-insensitively", () => {
-    const notionMatch = findConnectorCredential("notion_api_key");
-    expect(notionMatch?.connector.id).toBe("notion");
-    expect(notionMatch?.credential.valueLabel).toBe("Installation access token");
-    expect(findConnectorCredential("FREEFINANCE_API_CLIENT_SECRET")?.credential.valueLabel).toBe(
-      "Technical user secret",
-    );
-    expect(findConnectorCredential("CLOUDFLARE_API_TOKEN")).toBeNull();
-    expect(findConnectorCredential("")).toBeNull();
-    expect(findConnectorCredential(null)).toBeNull();
+  it("resolves identity only when the secret name and the skill slug agree", () => {
+    // Keying on the slug alone would let any pack claim skill "notion" and
+    // wear Notion's mark; keying on the name alone is the status quo.
+    expect(findConnectorForSecret("notion_api_key")?.id).toBe("notion");
+    expect(findConnectorForSecret("NOTION_API_KEY", "notion")?.id).toBe("notion");
+    expect(findConnectorForSecret("NOTION_API_KEY", "attacker")).toBeNull();
+    expect(findConnectorForSecret("FREEFINANCE_API_CLIENT_SECRET")?.id).toBe("freefinance");
+    expect(findConnectorForSecret("CLOUDFLARE_API_TOKEN")).toBeNull();
+    expect(findConnectorForSecret("CLOUDFLARE_API_TOKEN", "notion")).toBeNull();
+    expect(findConnectorForSecret("")).toBeNull();
+    expect(findConnectorForSecret(null)).toBeNull();
   });
 
   it("keeps the category labels exact and in order", () => {
@@ -212,7 +204,7 @@ describe("CONNECTORS", () => {
       if (entry.kind === "skill") {
         expect(entry.source).toMatch(/^https:\/\/github\.com\//);
         expect(entry.source.split("/").pop()).toBe(entry.skillName);
-        expect(entry.needs.length).toBeGreaterThan(0);
+        expect(entry.secretNames.length).toBeGreaterThan(0);
         expect(buildConnectorImportMessage(entry)).toContain(`--name ${entry.skillName} --start`);
       }
       // Search still lists them, greyed.
@@ -257,7 +249,7 @@ describe("CONNECTORS", () => {
       expect(entry.source.split("/").pop()).toBe(entry.skillName);
       expect(entry.sourceLabel.trim().length).toBeGreaterThan(0);
       expect(entry.name.trim().length).toBeGreaterThan(0);
-      expect(entry.needs.length).toBeGreaterThan(0);
+      expect(entry.secretNames.length).toBeGreaterThan(0);
     }
   });
 
@@ -297,9 +289,7 @@ describe("CONNECTORS", () => {
       }
       if (entry.kind === "skill") {
         expect(entry.sourceLabel).not.toContain(EM_DASH);
-        for (const need of entry.needs) {
-          expect(need).not.toContain(EM_DASH);
-        }
+        expect(entry.skillName).not.toContain(EM_DASH);
       }
     }
   });
@@ -320,7 +310,7 @@ describe("CONNECTORS", () => {
     const notion = CONNECTORS.find(
       (entry): entry is SkillConnector => entry.kind === "skill" && entry.id === "notion",
     );
-    expect(notion?.needs).toEqual(["a Notion Installation access token (NOTION_API_KEY)"]);
+    expect(notion?.secretNames).toEqual(["NOTION_API_KEY"]);
   });
 
   it("builds the exact one-liner for a product", () => {

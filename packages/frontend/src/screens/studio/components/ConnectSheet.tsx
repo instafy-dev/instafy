@@ -11,6 +11,7 @@ import {
   AVAILABLE_FEATURED_CONNECTORS,
   CONNECTOR_CATEGORIES,
   FEATURED_CONNECTOR_LIMIT,
+  connectorCategoryLabel,
   filterConnectors,
   isConnectorAvailable,
   type ProductConnector,
@@ -69,59 +70,53 @@ export const POPULAR_MIN_AVAILABLE = 2;
 // disabled Button has pointer-events none, so the pointer reaches the item.
 const SOON_TITLE = "Coming soon";
 
-// The confirm stage answers three questions and no others: what connecting
-// this lets Instafy do, what the person will have to go and fetch, and whether
-// anything in their account changes without them. It used to spend three of
-// its four lines on the repo it installs from, the environment variable the
-// setup will ask for and the folder the files land in, which is the shape of
-// the thing rather than the point of it.
+// The confirm stage answers three questions and no others: what is installed
+// and from where, what setup will ask of the person, and whether anything in
+// their account changes without them.
+//
+// It is deliberately generic about the values. This sheet renders BEFORE the
+// pack is installed, so there is no SKILL.md here to read: any list of values
+// printed here would be a claim about a file we have not fetched, and it was
+// right about Notion's "Installation access token" only until Notion renamed
+// it. Fetching one at sheet time would put untrusted remote prose into the
+// exact surface where the person is deciding whether to trust the tool at all,
+// which inverts the order of trust. Caching the declaration beside the
+// catalogue entry is the thing this change exists to undo, wearing a different
+// name. So the sheet says what we know without the pack, and the specifics
+// arrive seconds later in the setup conversation, from the pack itself.
 
-const COUNT_WORDS = ["no", "one", "two", "three", "four", "five"];
-
-function countWord(count: number): string {
-  return COUNT_WORDS[count] ?? String(count);
-}
-
-function joinPhrases(phrases: readonly string[]): string {
-  if (phrases.length <= 1) {
-    return phrases[0] ?? "";
-  }
-  return `${phrases.slice(0, -1).join(", ")} and ${phrases[phrases.length - 1]}`;
-}
-
-/**
- * What the person fetches, in the provider's own words when the connector
- * declares them. Falls back to the `needs` phrases as written for a connector
- * that has not declared its credentials yet.
- */
-function neededValuePhrases(connector: SkillConnector): string[] {
-  if (connector.credentials && connector.credentials.length > 0) {
-    return connector.credentials.map((credential) => `the ${credential.valueLabel}`);
-  }
-  return [...connector.needs];
-}
-
+// The person pressing Connect is deciding whether they want the tool, so the
+// first line answers what they get and where it happens, and the source follows
+// it. Leading with a GitHub org handle and the word "skill" describes the shape
+// of the thing rather than the point of it, and it is the only line the sheet
+// has left for the point.
 function installLine(connector: SkillConnector): ReactNode {
+  const category = connectorCategoryLabel(connector.category).toLowerCase();
   if (connector.app) {
     return (
       <>
-        {connector.purpose} Setup opens {connector.name} in the shared display; you sign in
-        there once, and Instafy then works in that session.
+        Setup runs here, in this chat, and Instafy then works with your {category} in{" "}
+        {connector.name}. It installs the {connector.name} skill from {connector.sourceLabel}{" "}
+        into this space and opens {connector.name} in the shared display; you sign in there
+        once, and Instafy then works in that session.
       </>
     );
   }
-  return <>{connector.purpose} Setup runs here, in this chat.</>;
+  return (
+    <>
+      Setup runs here, in this chat, and Instafy then works with your {category} in{" "}
+      {connector.name} once it is set up. It installs the {connector.name} skill from{" "}
+      {connector.sourceLabel} into this space.
+    </>
+  );
 }
 
 function needsLine(connector: SkillConnector): ReactNode {
-  const phrases = neededValuePhrases(connector);
-  const plural = phrases.length > 1;
   return (
     <>
-      You will need {countWord(phrases.length)} {plural ? "things" : "thing"} from{" "}
-      {connector.name}: {joinPhrases(phrases)}. Instafy shows a card to paste{" "}
-      {plural ? "them" : "it"} into, so {plural ? "they never go" : "it never goes"} into a
-      chat message.{connector.sharingNote ? ` ${connector.sharingNote}` : ""}
+      Setup will ask you for whatever {connector.name} needs, one value at a time, in a card
+      you paste into. A value you paste there is saved in this space{"\u2019"}s Secrets and
+      never goes into a chat message.
     </>
   );
 }
@@ -397,11 +392,9 @@ function ConfirmStage({
           <Text as="p" variant="body" tone="secondary" data-testid="connect-confirm-install-line">
             {installLine(connector)}
           </Text>
-          {connector.needs.length > 0 ? (
-            <Text as="p" variant="caption" tone="muted" data-testid="connect-confirm-needs-line">
-              {needsLine(connector)}
-            </Text>
-          ) : null}
+          <Text as="p" variant="caption" tone="muted" data-testid="connect-confirm-needs-line">
+            {needsLine(connector)}
+          </Text>
           <Text as="p" variant="caption" tone="muted" data-testid="connect-confirm-safety-line">
             Instafy never changes anything in {connector.name} without asking you first,
             every time.

@@ -690,13 +690,17 @@ describe("ConnectSheet", () => {
       expect(lastState(s)).toEqual({ stage: "confirm", target: slack, openedFromBrowse: false });
       expect(query('[role="dialog"]')?.getAttribute("aria-label")).toBe("Connect Slack");
       expect(document.body.textContent).toContain("Connect Slack");
-      // Three lines and no fourth: what it lets Instafy do, what the person has
-      // to go and fetch, and whether anything changes without them.
+      // Three lines and no fourth: what the person gets and where setup
+      // happens (with the source after it, not in front of it), what setup
+      // will ask of them, and whether anything changes without them. All three
+      // are fixed chrome with the product name and category substituted:
+      // this sheet renders before the pack is installed, so any list of values
+      // on it would be a claim about a file nothing has fetched.
       expect(query('[data-testid="connect-confirm-install-line"]')?.textContent).toBe(
-        "Instafy can read and post in the Slack channels you add it to. Setup runs here, in this chat.",
+        "Setup runs here, in this chat, and Instafy then works with your chat and community in Slack once it is set up. It installs the Slack skill from instafy-dev/skills into this space.",
       );
       expect(query('[data-testid="connect-confirm-needs-line"]')?.textContent).toBe(
-        "You will need one thing from Slack: the Bot User OAuth Token. Instafy shows a card to paste it into, so it never goes into a chat message.",
+        "Setup will ask you for whatever Slack needs, one value at a time, in a card you paste into. A value you paste there is saved in this space\u2019s Secrets and never goes into a chat message.",
       );
       expect(query('[data-testid="connect-confirm-safety-line"]')?.textContent).toBe(
         "Instafy never changes anything in Slack without asking you first, every time.",
@@ -733,13 +737,15 @@ describe("ConnectSheet", () => {
 
       expect(query('[role="dialog"]')?.getAttribute("aria-label")).toBe("Connect Notion");
       expect(query('[data-testid="connect-confirm-install-line"]')?.textContent).toBe(
-        "Instafy can search and read the Notion pages you share with it, and add notes to them after you confirm each one. Setup runs here, in this chat.",
+        "Setup runs here, in this chat, and Instafy then works with your docs and notes in Notion once it is set up. It installs the Notion skill from instafy-dev/skills into this space.",
       );
-      // Notion's own on-screen name for the value, the same one the pack and
-      // the secret card use.
+      // What Notion calls the value is the pack's to say, and the pack is not
+      // here yet: it says it on the secret card, seconds later, in the setup
+      // conversation this sheet starts.
       expect(query('[data-testid="connect-confirm-needs-line"]')?.textContent).toBe(
-        "You will need one thing from Notion: the Installation access token. Instafy shows a card to paste it into, so it never goes into a chat message. You will also pick which pages to share with it; Instafy walks you through that here.",
+        "Setup will ask you for whatever Notion needs, one value at a time, in a card you paste into. A value you paste there is saved in this space\u2019s Secrets and never goes into a chat message.",
       );
+      expect(document.body.textContent).not.toContain("Installation access token");
       expect(query('[data-testid="connect-confirm-safety-line"]')?.textContent).toBe(
         "Instafy never changes anything in Notion without asking you first, every time.",
       );
@@ -763,38 +769,27 @@ describe("ConnectSheet", () => {
       expect(query("a[href]")).toBeNull();
     });
 
-    it("joins two or more needs and switches to the plural wording", async () => {
+    it("says the same needs line however many values the pack turns out to want", async () => {
+      // One sentence for every connector, because the number of values is in
+      // the pack and the pack is not installed yet. Whether a tool asks for one
+      // value or three, this sheet has exactly one decision on it: install this
+      // skill, from this source, yes or no.
       const s = spies();
-      // Two declared values read in the provider's own words, and in the plural.
+      const line = (name: string) =>
+        `Setup will ask you for whatever ${name} needs, one value at a time, in a card you paste into. A value you paste there is saved in this space\u2019s Secrets and never goes into a chat message.`;
+
+      await render({ initial: slack, spies: s });
+      expect(query('[data-testid="connect-confirm-needs-line"]')?.textContent).toBe(line("Slack"));
+      // No variable name and no value name reaches this surface.
+      expect(query('[data-testid="connect-confirm-needs-line"]')?.textContent).not.toContain("_");
+      await act(async () => query<HTMLButtonElement>('[data-testid="connect-confirm-cancel"]')?.click());
+
       const twoValues: SkillConnector = {
         ...slack,
-        needs: ["a bot token (BOT_TOKEN)", "a signing secret (SIGNING_SECRET)"],
-        credentials: [
-          { name: "BOT_TOKEN", valueLabel: "Bot token" },
-          { name: "SIGNING_SECRET", valueLabel: "Signing secret" },
-        ],
+        secretNames: ["BOT_TOKEN", "SIGNING_SECRET"],
       };
       await render({ initial: twoValues, spies: s });
-      expect(query('[data-testid="connect-confirm-needs-line"]')?.textContent).toBe(
-        "You will need two things from Slack: the Bot token and the Signing secret. Instafy shows a card to paste them into, so they never go into a chat message.",
-      );
-      await act(async () => query<HTMLButtonElement>('[data-testid="connect-confirm-cancel"]')?.click());
-
-      // A connector that has not declared its credentials yet falls back to the
-      // needs phrases as written, rather than saying nothing.
-      const threeNeeds: SkillConnector = {
-        ...slack,
-        needs: ["A (A_KEY)", "B (B_KEY)", "C (C_KEY)"],
-        credentials: undefined,
-      };
-      await render({ initial: threeNeeds, spies: s });
-      expect(query('[data-testid="connect-confirm-needs-line"]')?.textContent).toBe(
-        "You will need three things from Slack: A (A_KEY), B (B_KEY) and C (C_KEY). Instafy shows a card to paste them into, so they never go into a chat message.",
-      );
-      await act(async () => query<HTMLButtonElement>('[data-testid="connect-confirm-cancel"]')?.click());
-
-      await render({ initial: { ...slack, needs: [], credentials: undefined }, spies: s });
-      expect(query('[data-testid="connect-confirm-needs-line"]')).toBeNull();
+      expect(query('[data-testid="connect-confirm-needs-line"]')?.textContent).toBe(line("Slack"));
       expect(query('[data-testid="connect-confirm-safety-line"]')).not.toBeNull();
     });
 
@@ -806,17 +801,15 @@ describe("ConnectSheet", () => {
         id: "fixture-app",
         name: "Fixture",
         skillName: "fixture",
-        purpose: "Instafy can work in Fixture with you.",
-        needs: [],
-        credentials: undefined,
+        secretNames: ["FIXTURE_TOKEN"],
         app: { url: "https://fixture.example/app" },
       };
       await render({ initial: appConnector, spies: s });
 
       expect(query('[data-testid="connect-confirm-install-line"]')?.textContent).toBe(
-        "Instafy can work in Fixture with you. Setup opens Fixture in the shared display; you sign in there once, and Instafy then works in that session.",
+        "Setup runs here, in this chat, and Instafy then works with your chat and community in Fixture. It installs the Fixture skill from instafy-dev/skills into this space and opens Fixture in the shared display; you sign in there once, and Instafy then works in that session.",
       );
-      expect(query('[data-testid="connect-confirm-needs-line"]')).toBeNull();
+      expect(query('[data-testid="connect-confirm-needs-line"]')).not.toBeNull();
       expect(query('[data-testid="connect-confirm-safety-line"]')?.textContent).toBe(
         "Instafy never changes anything in Fixture without asking you first, every time.",
       );

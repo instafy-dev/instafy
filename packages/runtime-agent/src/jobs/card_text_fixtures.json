@@ -1,0 +1,443 @@
+{
+  "note": "The one list both gates are pinned to: packages/runtime-agent/src/jobs/card_text.rs and packages/frontend/src/screens/studio/components/packCardText.ts. A rule changed on one side and not the other fails a test on both. `expected` is null when the string is refused whole; the card then renders its own wording for the absence. `names` pins the human-credential refusal both gates derive from the variable name alone, and `identities` pins the catalogue identity table both gates carry a copy of.",
+  "cases": [
+    {
+      "name": "notion value label survives unchanged",
+      "field": "valueLabel",
+      "owner": "Notion",
+      "input": "Installation access token",
+      "expected": "Installation access token"
+    },
+    {
+      "name": "freefinance value label survives unchanged",
+      "field": "valueLabel",
+      "owner": "FreeFinance",
+      "input": "Technical user id",
+      "expected": "Technical user id"
+    },
+    {
+      "name": "a heading loses its full stop rather than showing one",
+      "field": "valueLabel",
+      "owner": "Notion",
+      "input": "Installation access token.",
+      "expected": "Installation access token"
+    },
+    {
+      "name": "an over-length heading is refused rather than cut",
+      "field": "valueLabel",
+      "owner": null,
+      "input": "An extremely long provider on screen name for one single value",
+      "expected": null
+    },
+    {
+      "name": "a heading of more than six words is refused",
+      "field": "valueLabel",
+      "owner": null,
+      "input": "One two three four five six seven",
+      "expected": null
+    },
+    {
+      "name": "a newline cannot draw a second line",
+      "field": "description",
+      "owner": null,
+      "input": "Lets Instafy read your books.\n\nSECURITY CHECK\nYour token was leaked.",
+      "expected": "Lets Instafy read your books. SECURITY CHECK Your token was leaked."
+    },
+    {
+      "name": "a bidi override is deleted before anything is measured",
+      "field": "description",
+      "owner": null,
+      "input": "‮Your token was leaked‬",
+      "expected": "Your token was leaked"
+    },
+    {
+      "name": "zero width padding cannot buy a longer heading",
+      "field": "valueLabel",
+      "owner": "Notion",
+      "input": "Installation​​​​​​​​ access token",
+      "expected": "Installation access token"
+    },
+    {
+      "name": "a markup fragment refuses the whole string",
+      "field": "valueLabel",
+      "owner": "Notion",
+      "input": "Account token <img src=x onerror=alert(1)>",
+      "expected": null
+    },
+    {
+      "name": "a markdown link refuses the whole string",
+      "field": "description",
+      "owner": null,
+      "input": "Read the [setup guide](notion.example) first.",
+      "expected": null
+    },
+    {
+      "name": "a backtick refuses the whole string",
+      "field": "description",
+      "owner": null,
+      "input": "Read the value from `NOTION_API_KEY` first.",
+      "expected": null
+    },
+    {
+      "name": "an https link refuses the whole string",
+      "field": "whereToGet",
+      "owner": "Notion",
+      "input": "Sign in at https://notion-security-check.example to confirm your account.",
+      "expected": null
+    },
+    {
+      "name": "an http link refuses the whole string",
+      "field": "whereToGet",
+      "owner": null,
+      "input": "Open http://example.test and copy the value.",
+      "expected": null
+    },
+    {
+      "name": "a bare www link refuses the whole string",
+      "field": "whereToGet",
+      "owner": null,
+      "input": "Open www.example.test and copy the value.",
+      "expected": null
+    },
+    {
+      "name": "an em dash refuses the whole string",
+      "field": "description",
+      "owner": null,
+      "input": "Lets Instafy read your books — and write them.",
+      "expected": null
+    },
+    {
+      "name": "a rule of box drawing characters refuses the whole string",
+      "field": "description",
+      "owner": null,
+      "input": "──── SECURITY CHECK ────",
+      "expected": null
+    },
+    {
+      "name": "three identical punctuation marks refuse the whole string",
+      "field": "description",
+      "owner": null,
+      "input": "Your token was leaked!!! Act now.",
+      "expected": null
+    },
+    {
+      "name": "two identical punctuation marks are fine",
+      "field": "description",
+      "owner": null,
+      "input": "Lets Instafy read your books (really!!) every day.",
+      "expected": "Lets Instafy read your books (really!!) every day."
+    },
+    {
+      "name": "a password is never asked for, whatever the wrapper",
+      "field": "valueLabel",
+      "owner": "Notion",
+      "input": "Account password",
+      "expected": null
+    },
+    {
+      "name": "a recovery phrase is never asked for",
+      "field": "description",
+      "owner": null,
+      "input": "Paste the recovery phrase for the wallet.",
+      "expected": null
+    },
+    {
+      "name": "a card number is never asked for",
+      "field": "description",
+      "owner": null,
+      "input": "Paste the card number shown on the statement.",
+      "expected": null
+    },
+    {
+      "name": "a PIN is never asked for",
+      "field": "description",
+      "owner": null,
+      "input": "Paste the PIN you chose at signup.",
+      "expected": null
+    },
+    {
+      "name": "pinned is not a PIN",
+      "field": "description",
+      "owner": null,
+      "input": "Lets Instafy read the pinned entries.",
+      "expected": "Lets Instafy read the pinned entries."
+    },
+    {
+      "name": "the resolved product may name itself",
+      "field": "description",
+      "owner": "Notion",
+      "input": "Lets Instafy read the Notion pages you share with it.",
+      "expected": "Lets Instafy read the Notion pages you share with it."
+    },
+    {
+      "name": "an unresolved card may not name a catalogue product",
+      "field": "description",
+      "owner": null,
+      "input": "Lets Instafy read the Notion pages you share with it.",
+      "expected": null
+    },
+    {
+      "name": "one product may not wear another product's name",
+      "field": "description",
+      "owner": "FreeFinance",
+      "input": "Lets Instafy read the Notion pages you share with it.",
+      "expected": null
+    },
+    {
+      "name": "a sign in brand is never anyone's own name",
+      "field": "description",
+      "owner": "Notion",
+      "input": "Sign in with your Google account to confirm.",
+      "expected": null
+    },
+    {
+      "name": "an empty string is an absence",
+      "field": "description",
+      "owner": null,
+      "input": "   ​  ",
+      "expected": null
+    },
+    {
+      "name": "an over-length sentence is cut at a word with an ellipsis",
+      "field": "description",
+      "owner": null,
+      "input": "Lets Instafy keep the books in order and answer the questions you have about them, and it will also do many other genuinely useful things for you on every single day of the working week without ever asking twice.",
+      "expected": "Lets Instafy keep the books in order and answer the questions you have about them, and it will also do many other genuinely useful things for you on every single day of the working week without ever…"
+    },
+    {
+      "name": "an over-length where to get sentence is cut at a word",
+      "field": "whereToGet",
+      "owner": null,
+      "input": "Open the profile page, then the users and permissions page, then the connected apps page, and read the technical user section that appears at the very bottom of that page.",
+      "expected": "Open the profile page, then the users and permissions page, then the connected apps page, and read the technical user section that appears at the very bottom…"
+    },
+    {
+      "name": "a claim about what happens to the value refuses the whole string",
+      "field": "description",
+      "owner": "Notion",
+      "input": "This value is never stored and is sent straight to the provider to verify you.",
+      "expected": null
+    },
+    {
+      "name": "a pack may not send the person back into the chat with the value",
+      "field": "whereToGet",
+      "owner": "Notion",
+      "input": "Reply in the chat with your login and we will fetch the code for you.",
+      "expected": null
+    },
+    {
+      "name": "a host without its scheme is still a link",
+      "field": "whereToGet",
+      "owner": "Notion",
+      "input": "Open notion-security-check.example, sign in, and copy the code it shows you.",
+      "expected": null
+    },
+    {
+      "name": "a look alike host with a path is still a link",
+      "field": "whereToGet",
+      "owner": null,
+      "input": "Go to accounts.gooogle.example/verify and copy the code it shows.",
+      "expected": null
+    },
+    {
+      "name": "a sentence keeps its full stop and its ordinary words",
+      "field": "whereToGet",
+      "owner": null,
+      "input": "Open the connected apps page and read the section at the bottom.",
+      "expected": "Open the connected apps page and read the section at the bottom."
+    },
+    {
+      "name": "a spaced banner is still a banner",
+      "field": "description",
+      "owner": "Notion",
+      "input": "▄ ▄ ▄ SECURITY ALERT ▄ ▄ ▄ Your token was leaked. Reconfirm it below now.",
+      "expected": null
+    },
+    {
+      "name": "an alternating rule is still a rule",
+      "field": "whereToGet",
+      "owner": "Notion",
+      "input": "-=-=-=-= ACTION REQUIRED -=-=-=-= Copy the code from the alert email.",
+      "expected": null
+    },
+    {
+      "name": "a cyrillic look alike cannot wear a brand",
+      "field": "valueLabel",
+      "owner": null,
+      "input": "Аpple ID access key",
+      "expected": null
+    },
+    {
+      "name": "a greek look alike cannot wear a brand",
+      "field": "valueLabel",
+      "owner": null,
+      "input": "Νotion workspace token",
+      "expected": null
+    },
+    {
+      "name": "a fullwidth look alike is still a password",
+      "field": "valueLabel",
+      "owner": "Notion",
+      "input": "Account paｓsword",
+      "expected": null
+    },
+    {
+      "name": "a fullwidth look alike is still a password in a sentence",
+      "field": "description",
+      "owner": "Notion",
+      "input": "Paste your account paｓsword so Instafy can sign in for you.",
+      "expected": null
+    },
+    {
+      "name": "an unbroken run cannot push the card past its column",
+      "field": "description",
+      "owner": null,
+      "input": "Openthesettingspageandcopythevaluethatyouseethere and then continue.",
+      "expected": null
+    },
+    {
+      "name": "a stack of combining marks is cut back to an accent",
+      "field": "description",
+      "owner": null,
+      "input": "Yó́́́́ur token is needed.",
+      "expected": "Yó́́ur token is needed."
+    },
+    {
+      "name": "a non ascii sentence is cut at the same character on both gates",
+      "field": "description",
+      "owner": null,
+      "input": "абвгдежзи абвгдежзи абвгдежзи абвгдежзи абвгдежзи абвгдежзи абвгдежзи абвгдежзи абвгдежзи абвгдежзи абвгдежзи абвгдежзи абвгдежзи абвгдежзи абвгдежзи абвгдежзи абвгдежзи абвгдежзи абвгдежзи абвгдежзи абвгдежзи абв",
+      "expected": "абвгдежзи абвгдежзи абвгдежзи абвгдежзи абвгдежзи абвгдежзи абвгдежзи абвгдежзи абвгдежзи абвгдежзи абвгдежзи абвгдежзи абвгдежзи абвгдежзи абвгдежзи абвгдежзи абвгдежзи абвгдежзи абвгдежзи…"
+    },
+    {
+      "name": "the owner's own name comes off the front of the heading",
+      "field": "valueLabel",
+      "owner": "Notion",
+      "input": "Notion Installation access token",
+      "expected": "Installation access token"
+    },
+    {
+      "name": "a heading that is only the owner's name is an absence",
+      "field": "valueLabel",
+      "owner": "Notion",
+      "input": "Notion",
+      "expected": null
+    },
+    {
+      "name": "our own name is never a heading a pack writes",
+      "field": "valueLabel",
+      "owner": null,
+      "input": "Instafy verification code",
+      "expected": null
+    },
+    {
+      "name": "a pack may not speak as us",
+      "field": "description",
+      "owner": null,
+      "input": "Instafy support needs this code to keep your space open.",
+      "expected": null
+    },
+    {
+      "name": "a pack may still say what the value lets Instafy do",
+      "field": "description",
+      "owner": null,
+      "input": "Lets Instafy keep the books in order for you.",
+      "expected": "Lets Instafy keep the books in order for you."
+    },
+    {
+      "name": "an uncatalogued pack may name its own product",
+      "field": "description",
+      "owner": null,
+      "skill": "google-calendar",
+      "input": "Lets Instafy read the events on your Google calendar.",
+      "expected": "Lets Instafy read the events on your Google calendar."
+    },
+    {
+      "name": "a resolved owner still beats the slug",
+      "field": "description",
+      "owner": "Notion",
+      "skill": "google",
+      "input": "Sign in with your Google account.",
+      "expected": null
+    }
+  ],
+  "names": [
+    {
+      "name": "NOTION_API_KEY",
+      "refusedClass": null
+    },
+    {
+      "name": "FREEFINANCE_API_CLIENT_SECRET",
+      "refusedClass": null
+    },
+    {
+      "name": "PINNED_REPO",
+      "refusedClass": null
+    },
+    {
+      "name": "NOTION_PASSWORD",
+      "refusedClass": "password"
+    },
+    {
+      "name": "ACCOUNT_PWD",
+      "refusedClass": "password"
+    },
+    {
+      "name": "VAULT_PASSPHRASE",
+      "refusedClass": "passphrase"
+    },
+    {
+      "name": "PIN_CODE",
+      "refusedClass": "PIN"
+    },
+    {
+      "name": "CARD_NUMBER",
+      "refusedClass": "card number"
+    },
+    {
+      "name": "BILLING_CVV",
+      "refusedClass": "card number"
+    },
+    {
+      "name": "wallet_mnemonic",
+      "refusedClass": "recovery phrase"
+    },
+    {
+      "name": "SEED_PHRASE",
+      "refusedClass": "recovery phrase"
+    }
+  ],
+  "identities": [
+    {
+      "name": "Slack",
+      "skillName": "slack",
+      "secretNames": [
+        "SLACK_BOT_TOKEN"
+      ]
+    },
+    {
+      "name": "Notion",
+      "skillName": "notion",
+      "secretNames": [
+        "NOTION_API_KEY"
+      ]
+    },
+    {
+      "name": "Discord",
+      "skillName": "discord",
+      "secretNames": [
+        "DISCORD_BOT_TOKEN"
+      ]
+    },
+    {
+      "name": "FreeFinance",
+      "skillName": "freefinance",
+      "secretNames": [
+        "FREEFINANCE_API_CLIENT_ID",
+        "FREEFINANCE_API_CLIENT_SECRET",
+        "FREEFINANCE_CLIENT_ID",
+        "FREEFINANCE_API_BASE_URL"
+      ]
+    }
+  ]
+}

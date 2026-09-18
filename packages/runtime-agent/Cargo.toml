@@ -40,6 +40,7 @@ jsonwebtoken = { version = "9", default-features = false, features = ["use_pem"]
 chrono = { version = "0.4", default-features = false, features = ["clock", "serde"] }
 sysinfo = "0.30"
 zip = { version = "1", default-features = false, features = ["deflate"] }
+unicode-normalization = "0.1"
 rmcp = { version = "1.7.0", default-features = false, features = ["server", "transport-async-rw"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]

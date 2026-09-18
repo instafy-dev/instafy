@@ -45,7 +45,6 @@ import {
   subscribeGithubImportRetry,
 } from "./githubImportRetryRegistry";
 import { InlineSecretsForm } from "./InlineSecretsForm";
-import { findConnectorCredential } from "./connectors";
 import { extractMessageDetails, getMessageType } from "./chatMessageMetadata";
 import { useOptionalProjectAccess } from "../../../projects/ProjectAccessProvider";
 import {
@@ -53,6 +52,7 @@ import {
   parseSecretRequestDetails,
   resolveUiSuggestedReplies,
 } from "./chatMessageDetailHelpers";
+import { sanitizeCardText } from "./packCardText";
 import { setPendingProjectSecretPrefill } from "./secretManagerDeepLink";
 
 const { listForProject: listProjectIntegrations, upsert: upsertProjectIntegration } = controllerClient.integrations;
@@ -344,10 +344,18 @@ function joinHandles(handles: string[]): string {
  * as the way to the place secrets are kept (rotating, revoking, seeing what is
  * stored), not as a second way to do this task.
  *
- * The product name and the provider's own word for the value come from
- * connectors.ts, never from model-authored prose, so one token has one name
- * across the card, the Connect sheet and the pack. An unknown secret name falls
- * back to the model's description, which is what the card always showed.
+ * Content generated, chrome fixed. The words come from the skill that asked:
+ * a SKILL.md declares, for each need, what the value is, where the person gets
+ * it and whether it is sensitive, and the agent carries those into the action.
+ * Rename a token at the provider, change the pack, and this card follows with
+ * no frontend release. connectors.ts keeps identity only, which is the one
+ * thing a pack must never be able to write: the product name and the mark.
+ *
+ * Pack text is hostile by default. It arrives sanitized (the runtime cleans it
+ * before it persists it, `parseSecretRequestDetails` cleans it again on read),
+ * it can only ever be the muted lines, and it feeds no expression that decides
+ * where the value goes, what the affordances are, or what the safety caption
+ * says. Every one of those is a literal in this file.
  *
  * Safety is unchanged: the value is entered only here, goes only to
  * controllerClient.secrets, is never prefilled, echoed or logged, and the
@@ -377,9 +385,18 @@ export function SecretRequestEntry({
   const canWriteProject = projectAccess?.canWriteProject ?? true;
 
   const secretName = parsed.name?.trim() ? parsed.name.trim() : null;
-  const registry = useMemo(() => findConnectorCredential(secretName), [secretName]);
+  // Identity only: the name and the mark. Resolved from the variable name and,
+  // when the request declares one, the skill slug as well.
+  const connector = parsed.connector;
+  const valueLabel = parsed.valueLabel;
+  // Message content is model-authored too, so the fallback runs the same rules
+  // as the field it stands in for.
   const content = message.content.trim();
-  const description = parsed.description ?? (content.length > 0 ? content : null);
+  const description =
+    parsed.description ??
+    (content.length > 0
+      ? sanitizeCardText(content, "description", connector?.name ?? null, parsed.skill)
+      : null);
 
   const [savedHere, setSavedHere] = useState(false);
   const [storedNames, setStoredNames] = useState<ReadonlySet<string> | null>(null);
@@ -442,21 +459,17 @@ export function SecretRequestEntry({
     return new Set([...(storedNames ?? []), ...(broadcastNames ?? [])]);
   }, [broadcastNames, storedNames]);
 
-  // The runtime cannot know what the provider calls this value on screen, so
-  // its own phrase says "the value". Where the connector declares a label, the
-  // card sends that instead: the person is made to say a sentence they can
-  // read, not an environment variable.
-  const runtimeRetry = useMemo(
+  // Posted under the customer's own name, so it is a surface too, and it is
+  // built where the pack's words are cleaned: the runtime names the value in
+  // the provider's own word when the pack gave one, and says "the value"
+  // otherwise. The card only sends what it was handed.
+  const suggestedRetry = useMemo(
     () => resolveUiSuggestedReplies(message.metadata)[0] ?? null,
     [message.metadata],
   );
-  const suggestedRetry = useMemo(() => {
-    const label = registry?.credential.valueLabel;
-    return label ? `I saved the ${label}. Ready to continue.` : runtimeRetry;
-  }, [registry, runtimeRetry]);
   const retryPhrases = useMemo(
-    () => [...new Set([suggestedRetry, runtimeRetry].filter((phrase): phrase is string => Boolean(phrase)))],
-    [runtimeRetry, suggestedRetry],
+    () => (suggestedRetry ? [suggestedRetry] : []),
+    [suggestedRetry],
   );
   // This card also renders inside AgentJobThreadPreviewLayout, where the active
   // conversation is not the one holding the request. Resolving the containing
@@ -571,24 +584,41 @@ export function SecretRequestEntry({
     }
   }, [continueBusy, continueSubmitted, onSubmit, requestConversationId, suggestedRetry]);
 
-  const valueLabel = registry?.credential.valueLabel ?? null;
-  const title = registry
-    ? `${registry.connector.name} ${registry.credential.valueLabel}`
-    : !secretName
-      ? "Something is missing from this request"
-      : description
-        ? firstSentence(description, SECRET_TITLE_MAX_CHARS)
-        : "One value is needed to continue";
-  const purpose = !secretName
-    ? "The assistant asked for a value but did not say which one. Ask it to try again, or add the value yourself in Secrets."
-    : registry
-      ? registry.connector.purpose
-      : // The model's own words, unchanged, unless the title is already made of
-        // them.
-        description && description !== title
-        ? description
-        : null;
-  const Mark = registry?.connector.mark ?? Key;
+  const refusedClass = parsed.refusedClass;
+  // The title is composed, never owned. Slot one is the product name, which
+  // this file supplies from the catalogue, so no pack string can land where a
+  // product name is read. Slot two is the pack's own word for the value.
+  const title = refusedClass
+    ? "Instafy does not collect this kind of value"
+    : connector
+      ? valueLabel
+        ? `${connector.name} ${valueLabel}`
+        : // An older runtime sends only the name; "Connect Notion" still reads.
+          `Connect ${connector.name}`
+      : !secretName
+        ? "Something is missing from this request"
+        : valueLabel
+          ? valueLabel
+          : description
+            ? firstSentence(description, SECRET_TITLE_MAX_CHARS)
+            : "One value is needed to continue";
+  // A pack cannot select a mark. Resolved entries wear their own; everything
+  // else wears the generic key.
+  const Mark = refusedClass ? Key : (connector?.mark ?? Key);
+  // The one sentence a pack writes about why the value is wanted. Absent when
+  // it was missing or refused, which is a thinner card and not a broken one.
+  const purpose = secretName && !refusedClass && description !== title ? description : null;
+  // Where the value is found, which the pack has always declared and the card
+  // has never carried. The agent used to narrate it in chat instead.
+  const whereToGet = secretName && !refusedClass ? parsed.whereToGet : null;
+  // Fixed provenance for a request no curated entry claims: the person can see
+  // which skill in their own space is doing the asking.
+  const provenance =
+    secretName && !refusedClass && !connector
+      ? parsed.skill
+        ? `Asked for by the skill at .agents/skills/${parsed.skill}.`
+        : "Asked for by a skill in this space."
+      : null;
 
   const handlesSentence =
     parsed.agentHandles.length > 0
@@ -613,7 +643,15 @@ export function SecretRequestEntry({
   const header = (
     <div className="flex items-center gap-2">
       <Mark className="h-5 w-5 shrink-0 text-slate-700 dark:text-slate-200" aria-hidden="true" />
-      <Text as="span" variant="bodyStrong" tone="primary" className="min-w-0 text-sm">
+      {/* break-words because the title's second slot is a pack's word for the
+          value: the sanitizer refuses an unbroken run, and this is the belt
+          under that brace. */}
+      <Text
+        as="span"
+        variant="bodyStrong"
+        tone="primary"
+        className="min-w-0 break-words text-sm"
+      >
         {title}
       </Text>
       {stateBadge ? (
@@ -670,12 +708,28 @@ export function SecretRequestEntry({
       as="div"
       variant="caption"
       tone="muted"
-      className="leading-snug"
+      className="break-words leading-snug"
       {...(testId ? { "data-testid": testId } : {})}
     >
       {text}
     </Text>
   );
+
+  // The runtime refused the request outright: a skill asked for a human login
+  // credential. The class is named from our own fixed table rather than from
+  // whatever the pack called it, there is no field, and no pack sentence
+  // renders beside it.
+  if (refusedClass) {
+    return shell(
+      <>
+        {quietLine(
+          `A skill asked for a ${refusedClass}. Instafy never takes one, and nothing has been saved.`,
+          "secret-request-refused",
+        )}
+        <div className="flex flex-wrap items-center gap-2">{manageSecretsButton}</div>
+      </>,
+    );
+  }
 
   // The request has been answered already: a historical card scrolled back to
   // must not go on demanding a value.
@@ -690,10 +744,15 @@ export function SecretRequestEntry({
     );
   }
 
+  // No destination, so there is no request to describe. Pack text is not
+  // rendered here even when the message carries some: a free-text line above
+  // no input is injection surface for nothing in return.
   if (!secretName) {
     return shell(
       <>
-        {quietLine(purpose ?? "")}
+        {quietLine(
+          "The assistant asked for a value but did not say which one. Ask it to try again, or add the value yourself in Secrets.",
+        )}
         <div className="flex flex-wrap items-center gap-2">{manageSecretsButton}</div>
       </>,
     );
@@ -755,9 +814,11 @@ export function SecretRequestEntry({
   return shell(
     <>
       {purpose ? quietLine(purpose) : null}
+      {whereToGet ? quietLine(whereToGet, "secret-request-where") : null}
+      {provenance ? quietLine(provenance, "secret-request-provenance") : null}
       <InlineSecretsForm
         projectId={projectId}
-        secrets={[{ name: secretName, valueLabel }]}
+        secrets={[{ name: secretName, valueLabel, sensitive: parsed.sensitive }]}
         agentHandles={parsed.agentHandles.length > 0 ? parsed.agentHandles : undefined}
         description={parsed.description ?? null}
         namesShownByHost

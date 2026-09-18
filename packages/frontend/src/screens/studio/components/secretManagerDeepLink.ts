@@ -56,11 +56,20 @@ function normalizePrefill(raw: unknown): PendingProjectSecretPrefill | null {
   };
 }
 
+/**
+ * Carries which value the Secrets panel should open on, never the value itself.
+ * PendingProjectSecretPrefill has no field for one, and normalizePrefill rebuilds
+ * the object field by field from an allow list, so a `value` key present in the
+ * stored JSON is dropped rather than round-tripped. The name of a secret is not
+ * a secret: it is already on screen in the card that sent the person here.
+ */
 export function setPendingProjectSecretPrefill(prefill: PendingProjectSecretPrefill) {
   if (typeof window === "undefined") return;
   const normalized = normalizePrefill(prefill);
   if (!normalized) return;
   try {
+    // codeql[js/clear-text-storage-of-sensitive-data] Only the variable name,
+    // its description and the asking agent's handle are stored. See above.
     window.sessionStorage?.setItem(STORAGE_KEY, JSON.stringify(normalized));
   } catch {
     // Ignore storage failures.

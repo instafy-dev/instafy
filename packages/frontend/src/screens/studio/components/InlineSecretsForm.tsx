@@ -25,11 +25,18 @@ type InlineSecretDescriptor = {
   description?: string | null;
   /**
    * The provider's own on-screen name for this value ("Installation access
-   * token"). Used for the input's accessible name so a screen reader hears
-   * what the person will read in the provider's UI rather than a shouted
-   * environment variable. Falls back to the name.
+   * token"), as the skill that asked declared it. Used for the input's
+   * accessible name so a screen reader hears what the person will read in the
+   * provider's UI rather than a shouted environment variable. Falls back to
+   * the name.
    */
   valueLabel?: string | null;
+  /**
+   * False for a value that is not a credential, such as a base URL. It starts
+   * unmasked, because hiding one behind dots promises a secrecy it does not
+   * have and makes a typo in a URL impossible to see. Default true.
+   */
+  sensitive?: boolean;
 };
 
 type SecretValueDraft = {
@@ -42,8 +49,8 @@ function normalizeSecretName(value: string): string | null {
   return trimmed.length > 0 ? trimmed : null;
 }
 
-function createDefaultDraft(): SecretValueDraft {
-  return { value: "", visible: false };
+function createDefaultDraft(sensitive = true): SecretValueDraft {
+  return { value: "", visible: !sensitive };
 }
 
 export function InlineSecretsForm({
@@ -109,6 +116,7 @@ export function InlineSecretsForm({
           typeof secret.valueLabel === "string" && secret.valueLabel.trim().length > 0
             ? secret.valueLabel.trim()
             : null,
+        sensitive: secret.sensitive !== false,
       });
     }
     return out;
@@ -117,7 +125,7 @@ export function InlineSecretsForm({
   const [drafts, setDrafts] = useState<Record<string, SecretValueDraft>>(() => {
     const initial: Record<string, SecretValueDraft> = {};
     for (const secret of normalizedSecrets) {
-      initial[secret.name] = createDefaultDraft();
+      initial[secret.name] = createDefaultDraft(secret.sensitive !== false);
     }
     return initial;
   });
@@ -304,7 +312,7 @@ export function InlineSecretsForm({
     <div className="mt-2 space-y-2">
       <div className="space-y-2">
         {normalizedSecrets.map((secret) => {
-          const draft = drafts[secret.name] ?? createDefaultDraft();
+          const draft = drafts[secret.name] ?? createDefaultDraft(secret.sensitive !== false);
           // The badge stays for as long as the card is on screen: a state that
           // erased itself after a minute left the person with no answer to
           // "did that save?".

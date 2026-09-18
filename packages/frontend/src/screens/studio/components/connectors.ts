@@ -56,45 +56,10 @@ type ConnectorBase = {
   mark: ComponentType<{ className?: string; "aria-hidden"?: boolean | "true" }>;
 };
 
-/**
- * One value a connector's setup asks a person to fetch. Display only: nothing
- * here is sent anywhere, and the value itself never passes through this file.
- * `valueLabel` is the provider's own on-screen name for it, so the card, the
- * Connect sheet and the pack all call it what the person will read in the
- * provider's UI.
- */
-export type ConnectorCredential = {
-  /** The environment variable name the runtime asks for, uppercase. */
-  name: string;
-  /** What the provider calls this value on screen, e.g. "Installation access token". */
-  valueLabel: string;
-};
-
 type ProductConnectorBase = ConnectorBase & {
   category: ConnectorCategoryId;
   /** See ConnectorAvailability. A skill is "soon" until its pack repo is published. */
   availability: ConnectorAvailability;
-  /**
-   * One customer-language sentence saying what connecting this tool lets
-   * Instafy do. It is the purpose line on the secret card and the first line
-   * of the Connect sheet's confirm stage, so it must read to someone who has
-   * never seen an API key: no variable names, no file paths, no repo names.
-   */
-  purpose: string;
-  /**
-   * The values this connector's setup asks for, in the order the setup asks.
-   * Omitted when nothing is pasted (GitHub signs in with a device code). Kept
-   * in step with `needs` by the drift test in __tests__/connectors.test.ts.
-   */
-  credentials?: readonly ConnectorCredential[];
-  /**
-   * A second errand inside the provider that setup cannot do for the person,
-   * written as one customer-language sentence. Notion is the case this exists
-   * for: a brand new connection can see nothing until each page is shared with
-   * it, so a perfectly good token still finds nothing. The Connect sheet adds
-   * it to the needs line; a connector with no such errand leaves it unset.
-   */
-  sharingNote?: string;
   /**
    * Curated, not measured: a featured connector sits in the sheet's "Popular"
    * row, in the composer's Connect rows and, once it is available, as a chip
@@ -115,8 +80,15 @@ export type SkillConnector = ProductConnectorBase & {
   sourceLabel: string;
   /** Folder under .agents/skills. */
   skillName: string;
-  /** "Setup will ask for" phrases, each naming its secret. Display text only. */
-  needs: string[];
+  /**
+   * The environment variable names this skill's setup asks for. Not copy: no
+   * customer reads one, and nothing here is shown on any surface. It is the
+   * trusted half of the key `findConnectorForSecret` resolves on, which is why
+   * it survived the move of the card's words into the pack: a request arrives
+   * untrusted, so the name it asks for has to be matched against a list a
+   * reviewer approved in this file.
+   */
+  secretNames: readonly string[];
   /**
    * Display-only. Set when the tool is used through its web app inside the
    * shared display: the human signs in there once and the project's browser
@@ -149,13 +121,11 @@ export const CONNECTORS: readonly Connector[] = [
     kind: "skill",
     category: "chat",
     featured: true,
-    purpose: "Instafy can read and post in the Slack channels you add it to.",
     keywords: ["chat", "team", "messages"],
     source: "https://github.com/instafy-dev/skills/tree/main/packs/team/.agents/skills/slack",
     sourceLabel: "instafy-dev/skills",
     skillName: "slack",
-    needs: ["a Slack Bot User OAuth Token (SLACK_BOT_TOKEN)"],
-    credentials: [{ name: "SLACK_BOT_TOKEN", valueLabel: "Bot User OAuth Token" }],
+    secretNames: ["SLACK_BOT_TOKEN"],
   },
   // Ordering rule for the featured entries, which is what the card's chip row
   // and the sheet's Popular row read: a named product the customer already
@@ -173,19 +143,14 @@ export const CONNECTORS: readonly Connector[] = [
     kind: "skill",
     category: "docs",
     featured: true,
-    purpose:
-      "Instafy can search and read the Notion pages you share with it, and add notes to them after you confirm each one.",
     keywords: ["notes", "docs", "wiki", "database"],
     source: "https://github.com/instafy-dev/skills/tree/main/packs/team/.agents/skills/notion",
     sourceLabel: "instafy-dev/skills",
     skillName: "notion",
-    // Notion's own on-screen name since the 2026 rename: Installation access
-    // token, on an internal connection's Configuration tab. The pack, this
-    // list and the secret card all use that name and no other.
-    needs: ["a Notion Installation access token (NOTION_API_KEY)"],
-    credentials: [{ name: "NOTION_API_KEY", valueLabel: "Installation access token" }],
-    sharingNote:
-      "You will also pick which pages to share with it; Instafy walks you through that here.",
+    // What Notion calls this value on screen is the pack's to say, and it has
+    // said it twice already this year. This list holds the variable name and
+    // nothing else.
+    secretNames: ["NOTION_API_KEY"],
   },
   {
     id: "github",
@@ -195,7 +160,6 @@ export const CONNECTORS: readonly Connector[] = [
     kind: "github",
     category: "code",
     featured: true,
-    purpose: "Instafy can work with your GitHub repositories.",
     keywords: ["repo", "git", "code", "pull request"],
   },
   {
@@ -207,13 +171,11 @@ export const CONNECTORS: readonly Connector[] = [
     kind: "skill",
     category: "chat",
     featured: true,
-    purpose: "Instafy can read and post in the Discord channels you add it to.",
     keywords: ["chat", "community", "server"],
     source: "https://github.com/instafy-dev/skills/tree/main/packs/team/.agents/skills/discord",
     sourceLabel: "instafy-dev/skills",
     skillName: "discord",
-    needs: ["a Discord Bot token (DISCORD_BOT_TOKEN)"],
-    credentials: [{ name: "DISCORD_BOT_TOKEN", valueLabel: "Bot token" }],
+    secretNames: ["DISCORD_BOT_TOKEN"],
   },
   {
     id: "freefinance",
@@ -226,19 +188,20 @@ export const CONNECTORS: readonly Connector[] = [
     // the row and GitHub follows it by the ordering rule above. This still
     // leaves two of the five card slots free.
     featured: true,
-    purpose: "Instafy can read your FreeFinance bookkeeping data.",
     region: "Austria",
     keywords: ["bookkeeping", "accounting", "buchhaltung", "invoices", "uva"],
     source: "https://github.com/instafy-dev/skills/tree/main/packs/bookkeeping/.agents/skills/freefinance",
     sourceLabel: "instafy-dev/skills",
     skillName: "freefinance",
-    needs: [
-      "a FreeFinance Technical user id (FREEFINANCE_API_CLIENT_ID)",
-      "its Technical user secret (FREEFINANCE_API_CLIENT_SECRET)",
-    ],
-    credentials: [
-      { name: "FREEFINANCE_API_CLIENT_ID", valueLabel: "Technical user id" },
-      { name: "FREEFINANCE_API_CLIENT_SECRET", valueLabel: "Technical user secret" },
+    // All four names the pack declares, not only the two sensitive ones: a
+    // name missing here resolves to no connector, so that value's card loses
+    // FreeFinance's mark and the pack's own sentence naming FreeFinance with
+    // it. The pack's optional needs are cards too.
+    secretNames: [
+      "FREEFINANCE_API_CLIENT_ID",
+      "FREEFINANCE_API_CLIENT_SECRET",
+      "FREEFINANCE_CLIENT_ID",
+      "FREEFINANCE_API_BASE_URL",
     ],
   },
   { id: "other", name: "Paste a skill link", mark: Puzzle, kind: "other" },
@@ -329,28 +292,40 @@ export function filterConnectors(query: string): ProductConnector[] {
 }
 
 /**
- * The connector that asks for this secret name, with the credential entry that
- * names it. Case-insensitive, first match in list order wins; two connectors
- * claiming one name would need a real key rather than this lookup, and the
- * drift test keeps the names honest until that happens.
+ * The connector a secret request wears the name and mark of. Identity only: it
+ * returns the catalogue entry and nothing else, because every word on the card
+ * now comes from the pack that asked.
  *
- * Returns null for a name no first-party connector declares, which is how a
- * card falls back to the model's own description: the status quo, not a
- * regression.
+ * The request is untrusted, so resolution needs a key we curate. The variable
+ * name must be one this entry declares in `secretNames`, and when the request
+ * also names a skill folder, that slug must be this entry's own `skillName`.
+ * Both must agree or the card goes generic. Keying on the slug alone would let
+ * any pack claim `skill: "notion"` and wear Notion's mark; keying on the name
+ * alone is the status quo, and requiring both costs nothing.
+ *
+ * Returns null for a name no first-party connector declares, which is how the
+ * card falls back to its own generic chrome and the Key glyph.
  */
-export function findConnectorCredential(
+export function findConnectorForSecret(
   secretName: string | null | undefined,
-): { connector: ProductConnector; credential: ConnectorCredential } | null {
+  skillSlug?: string | null,
+): ProductConnector | null {
   const needle = (secretName ?? "").trim().toUpperCase();
   if (!needle) {
     return null;
   }
+  const slug = (skillSlug ?? "").trim().toLowerCase();
   for (const connector of PRODUCT_CONNECTORS) {
-    for (const credential of connector.credentials ?? []) {
-      if (credential.name.trim().toUpperCase() === needle) {
-        return { connector, credential };
-      }
+    if (connector.kind !== "skill") {
+      continue;
     }
+    if (!connector.secretNames.some((name) => name.trim().toUpperCase() === needle)) {
+      continue;
+    }
+    if (slug && slug !== connector.skillName) {
+      return null;
+    }
+    return connector;
   }
   return null;
 }
