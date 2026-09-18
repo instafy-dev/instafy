@@ -1,7 +1,8 @@
 import { useCallback, useMemo, useState, type ReactNode } from "react";
 import { Eye, EyeClosed } from "iconoir-react";
 import { Badge } from "../../../components/Badge";
-import { Button, IconButton } from "../../../components/Button";
+import { Button } from "../../../components/Button";
+import { ToggleIconButton } from "../../../components/ToggleIconButton";
 import { Input } from "../../../components/Input";
 import { Text } from "../../../components/Text";
 import { Spinner } from "../../../components/Spinner";
@@ -318,7 +319,12 @@ export function InlineSecretsForm({
           // "did that save?".
           const saved = typeof savedAtByName[secret.name] === "number";
           return (
-            <label key={secret.name} className="block space-y-1">
+            // Not a <label>: the reveal control now sits inside the field box,
+            // and an interactive control inside a label gets the label's click
+            // forwarded to the input behind it. The input carries its own
+            // aria-label, which already outranked this element as the
+            // accessible name, so nothing is lost by making it a plain box.
+            <div key={secret.name} className="block space-y-1">
               {namesShownByHost ? (
                 saved ? (
                   <div className="flex flex-wrap items-center gap-2">
@@ -346,7 +352,12 @@ export function InlineSecretsForm({
                   ) : null}
                 </>
               )}
-              <div className="flex items-stretch gap-2">
+              {/* The reveal sits inside the field, which is where every other
+                  trailing control in the product sits: the login password eye,
+                  the history search filter, both browser address bars. Beside
+                  it, it was a bordered white box next to a bordered white box,
+                  and it ate typing room the phone width does not have. */}
+              <div className="relative">
                 <Input
                   value={draft.value}
                   onChange={(event) => setDraftValue(secret.name, event.target.value)}
@@ -361,7 +372,7 @@ export function InlineSecretsForm({
                     : {})}
                   // Keep this as text input + CSS masking so password managers
                   // don't treat tokens like login forms.
-                  className={draft.visible ? "" : "[-webkit-text-security:disc]"}
+                  className={`pr-12 ${draft.visible ? "" : "[-webkit-text-security:disc]"}`}
                   name={`secret-${secret.name}`}
                   autoComplete="off"
                   data-1p-ignore="true"
@@ -371,23 +382,23 @@ export function InlineSecretsForm({
                   autoCorrect="off"
                   spellCheck={false}
                 />
-                <IconButton
-                  variant="outline"
+                <ToggleIconButton
+                  isSelected={draft.visible}
                   size="sm"
                   radius="full"
                   aria-label={draft.visible ? "Hide value" : "Show value"}
                   onPress={() => toggleDraftVisible(secret.name)}
                   isDisabled={!projectId || saving}
-                  className="shrink-0"
+                  className="absolute right-2 top-1/2 -translate-y-1/2"
                 >
                   {draft.visible ? (
                     <EyeClosed className="h-4 w-4" aria-hidden="true" />
                   ) : (
                     <Eye className="h-4 w-4" aria-hidden="true" />
                   )}
-                </IconButton>
+                </ToggleIconButton>
               </div>
-            </label>
+            </div>
           );
         })}
       </div>

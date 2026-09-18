@@ -708,7 +708,13 @@ export function SecretRequestEntry({
       shadow="sm"
       data-testid="secret-request-card"
       data-message-type="secret_request"
-      className={`${CHAT_BUBBLE_MAX_WIDTH.alert} space-y-2 px-3 py-2.5 text-sm text-slate-700 dark:text-slate-200`}
+      // The card tier, not the alert tier. This is a contained credential card,
+      // which is what that tier is for, and the two integration cards further
+      // down this same file already use it. On the alert tier the card was 80%
+      // of the column, which at phone width left 267px of content for a 279px
+      // action row, so Save and Manage secrets wrapped onto two lines and the
+      // field was squeezed. Converging on the existing tier fixes both.
+      className={`${CHAT_BUBBLE_MAX_WIDTH.card} space-y-2 px-3 py-2.5 text-sm text-slate-700 dark:text-slate-200`}
     >
       {header}
       {children}

@@ -591,6 +591,39 @@ describe("SecretRequestEntry", () => {
     expect(text()).not.toContain("Needed.");
   });
 
+  it("keeps the reveal inside the field, as a toggle that says which state it is in", async () => {
+    // It used to be a bordered white circle sitting beside a bordered white
+    // field, which is a box next to a box, and it took typing room the phone
+    // width has none of. Every other trailing control in the product sits
+    // inside its field: the login password eye, the history search filter,
+    // both browser address bars.
+    const request = secretRequest();
+    mocks.activeMessages.push(request);
+    await renderEntry(request, details());
+
+    const input = byTestId<HTMLInputElement>("secret-request-value-NOTION_API_KEY");
+    const reveal = query<HTMLButtonElement>('button[aria-label="Show value"]');
+    expect(reveal).not.toBeNull();
+    // Inside the field box, not a sibling of it, and the field leaves room.
+    expect(reveal?.className).toContain("absolute");
+    expect(input?.className).toContain("pr-12");
+    expect(input?.closest("div")).toBe(reveal?.closest("div"));
+    // A toggle now says which way it is set; the old icon button said nothing.
+    expect(reveal?.getAttribute("aria-pressed")).toBe("false");
+
+    await act(async () => {
+      reveal?.click();
+      await Promise.resolve();
+    });
+
+    expect(byTestId<HTMLInputElement>("secret-request-value-NOTION_API_KEY")?.className).not.toContain(
+      "[-webkit-text-security:disc]",
+    );
+    expect(query<HTMLButtonElement>('button[aria-label="Hide value"]')?.getAttribute("aria-pressed")).toBe(
+      "true",
+    );
+  });
+
   it("leaves a value the pack marked not sensitive unmasked", async () => {
     const setting = {
       name: "FREEFINANCE_API_BASE_URL",
