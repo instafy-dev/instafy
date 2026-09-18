@@ -16,10 +16,10 @@ import {
 const EM_DASH = "\u2014";
 
 // The shipped row is every featured tool that can be picked today: GitHub
-// first (a device sign-in, nothing to paste) then Notion. Slack and Discord
-// are still "soon" (packs not published) and get no chip at all. The test
-// seam covers the longer row with the niche FreeFinance skill and a soon
-// skill flipped to available.
+// first (a device sign-in, nothing to paste), then Notion and FreeFinance,
+// which both ask for a key. Slack and Discord are still "soon" (packs not
+// published) and get no chip at all. The test seam covers a longer row with a
+// soon skill flipped to available.
 const githubConnector = CARD_TOOL_CONNECTORS.find((entry) => entry.id === "github")!;
 const notionConnector = CARD_TOOL_CONNECTORS.find((entry) => entry.id === "notion")!;
 const freefinance = CONNECTORS.find(
@@ -77,12 +77,17 @@ describe("ConnectChipStrip", () => {
   it("renders the shipped row of live tools, GitHub first, then the More tools link", async () => {
     await render();
 
-    expect(CARD_TOOL_CONNECTORS.map((entry) => entry.id)).toEqual(["github", "notion"]);
+    expect(CARD_TOOL_CONNECTORS.map((entry) => entry.id)).toEqual([
+      "github",
+      "notion",
+      "freefinance",
+    ]);
     const strip = container.querySelector('[data-testid="connect-chip-strip"]');
     expect(strip?.tagName).toBe("UL");
     expect(chipButtons().map((chip) => chip.dataset.testid)).toEqual([
       "connect-chip-github",
       "connect-chip-notion",
+      "connect-chip-freefinance",
     ]);
     // Nothing pending is named here, and nothing is disabled.
     expect(container.querySelector('[data-testid="connect-chip-slack"]')).toBeNull();
@@ -199,6 +204,7 @@ describe("ConnectChipStrip", () => {
     expect(chipButtons().map((chip) => chip.dataset.testid)).toEqual([
       "connect-chip-github",
       "connect-chip-notion",
+      "connect-chip-freefinance",
     ]);
     expect(container.querySelector('[data-testid="connect-chip-slack"]')).toBeNull();
     expect(container.querySelector('[data-testid="connect-chip-slack-connected"]')).toBeNull();
@@ -218,6 +224,7 @@ describe("ConnectChipStrip", () => {
     expect(chipButtons().map((chip) => chip.dataset.testid)).toEqual([
       "connect-chip-github",
       "connect-chip-notion",
+      "connect-chip-freefinance",
     ]);
     // Name plus the check: the mark and the glyph are the two svgs.
     expect(notion.textContent).toBe("Notion");

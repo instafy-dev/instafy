@@ -187,12 +187,13 @@ describe("ChatGettingStartedCard", () => {
         element instanceof HTMLButtonElement && !element.dataset.testid?.endsWith("-connected"),
     );
     // Every featured tool that can be picked today, GitHub first because it
-    // needs no key pasted. Slack and Discord are still "soon", so they are
-    // simply absent (the Connect sheet names them with a Badge); FreeFinance
-    // is available but unfeatured, and the paste link lives in the sheet.
+    // needs no key pasted, then the two that ask for one. Slack and Discord
+    // are still "soon", so they are simply absent (the Connect sheet names
+    // them with a Badge), and the paste link lives in the sheet.
     expect(chips.map((chip) => chip.dataset.testid)).toEqual([
       "connect-chip-github",
       "connect-chip-notion",
+      "connect-chip-freefinance",
     ]);
     expect(chips.map((chip) => chip.dataset.testid)).toEqual(
       CARD_TOOL_CONNECTORS.map((entry) => `connect-chip-${entry.id}`),
@@ -205,7 +206,7 @@ describe("ChatGettingStartedCard", () => {
     expect(container.textContent).not.toContain("Soon");
     expect(container.querySelector('[data-testid="connect-coming-soon"]')).toBeNull();
     expect(container.textContent).not.toContain("coming soon");
-    expect(container.querySelector('[data-testid="connect-chip-freefinance"]')).toBeNull();
+    expect(container.querySelector('[data-testid="connect-chip-freefinance"]')).not.toBeNull();
     expect(container.querySelector('[data-testid="connect-chip-other"]')).toBeNull();
     expect(container.textContent).not.toContain("Paste a skill link");
     const moreTools = strip?.querySelector<HTMLButtonElement>('[data-testid="connect-more-tools"]');

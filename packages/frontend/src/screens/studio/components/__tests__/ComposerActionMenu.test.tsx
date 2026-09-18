@@ -249,7 +249,7 @@ describe("ComposerActionMenu", () => {
     ).map((row) => row.dataset.testid);
     // Back, the featured rows that can be selected today in list order, then
     // Browse all tools. Soon rows are not listed (the sheet names them with
-    // their Badge); niche tools and the paste link live in the sheet too.
+    // their Badge), and the paste link lives in the sheet too.
     expect(connectRows).toEqual([
       "composer-action-menu-connect-back",
       ...AVAILABLE_FEATURED_CONNECTORS.map((entry) => `composer-action-menu-connect-${entry.id}`),
@@ -259,6 +259,7 @@ describe("ComposerActionMenu", () => {
       "composer-action-menu-connect-back",
       "composer-action-menu-connect-github",
       "composer-action-menu-connect-notion",
+      "composer-action-menu-connect-freefinance",
       "composer-action-menu-connect-browse",
     ]);
     for (const entry of FEATURED_CONNECTORS) {
@@ -269,7 +270,6 @@ describe("ComposerActionMenu", () => {
     expect(container.querySelector('[data-testid="composer-action-menu-connect-slack"]')).toBeNull();
     expect(container.querySelector('[data-testid="composer-action-menu-connect-discord"]')).toBeNull();
     expect(container.querySelector('[data-testid="composer-action-menu-connect-other"]')).toBeNull();
-    expect(container.querySelector('[data-testid="composer-action-menu-connect-freefinance"]')).toBeNull();
     expect(container.textContent).not.toContain("Paste a skill link");
     expect(container.textContent).not.toContain("Soon");
     expect(container.textContent).not.toContain("coming soon");

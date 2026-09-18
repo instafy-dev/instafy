@@ -68,8 +68,13 @@ describe("CONNECTORS", () => {
     expect(FEATURED_CONNECTOR_LIMIT).toBe(8);
     expect(FEATURED_CONNECTORS.length).toBeLessThanOrEqual(FEATURED_CONNECTOR_LIMIT);
     expect(FEATURED_CONNECTORS).toEqual(PRODUCT_CONNECTORS.filter((entry) => entry.featured));
-    expect(ids(FEATURED_CONNECTORS)).toEqual(["slack", "github", "notion", "discord"]);
-    expect(ids(FEATURED_CONNECTORS)).not.toContain("freefinance");
+    expect(ids(FEATURED_CONNECTORS)).toEqual([
+      "slack",
+      "github",
+      "notion",
+      "discord",
+      "freefinance",
+    ]);
   });
 
   it("marks the unpublished packs soon and Notion, GitHub and FreeFinance available today", () => {
@@ -108,7 +113,7 @@ describe("CONNECTORS", () => {
     expect(AVAILABLE_FEATURED_CONNECTORS).toEqual(FEATURED_CONNECTORS.filter(isConnectorAvailable));
     // GitHub before Notion: list order, so the card row and the Popular row
     // both lead with the entry that needs no key pasted.
-    expect(ids(AVAILABLE_FEATURED_CONNECTORS)).toEqual(["github", "notion"]);
+    expect(ids(AVAILABLE_FEATURED_CONNECTORS)).toEqual(["github", "notion", "freefinance"]);
     expect(ids(AVAILABLE_FEATURED_CONNECTORS)).not.toContain("slack");
     expect(ids(AVAILABLE_FEATURED_CONNECTORS)).not.toContain("discord");
     for (const entry of AVAILABLE_FEATURED_CONNECTORS) {
@@ -123,7 +128,7 @@ describe("CONNECTORS", () => {
     expect(CARD_CHIP_LIMIT).toBe(5);
     expect(CARD_TOOL_CONNECTORS).toEqual(AVAILABLE_FEATURED_CONNECTORS.slice(0, CARD_CHIP_LIMIT));
     expect(CARD_TOOL_CONNECTORS.length).toBeLessThanOrEqual(CARD_CHIP_LIMIT);
-    expect(ids(CARD_TOOL_CONNECTORS)).toEqual(["github", "notion"]);
+    expect(ids(CARD_TOOL_CONNECTORS)).toEqual(["github", "notion", "freefinance"]);
     // However large the catalogue grows, the row cannot: the cap is applied
     // to the list itself, so everything past it lives behind "More tools".
     const grown = [...AVAILABLE_FEATURED_CONNECTORS, ...FEATURED_CONNECTORS, ...PRODUCT_CONNECTORS];
@@ -162,24 +167,26 @@ describe("CONNECTORS", () => {
     }
   });
 
-  it("keeps unfeatured and unpublished tools out of the card row", () => {
-    // FreeFinance is available but not featured: Austria-only bookkeeping
-    // behind a monogram placeholder is noise on a worldwide first screen, so
-    // "More tools" is its way in. Slack and Discord have no pack at all.
-    expect(ids(CARD_TOOL_CONNECTORS)).not.toContain("freefinance");
+  it("keeps unpublished tools out of the card row", () => {
+    // Slack and Discord have no pack at all, so they stay in the sheet with a
+    // Soon Badge. The paste link is never a chip.
     expect(ids(CARD_TOOL_CONNECTORS)).not.toContain("slack");
     expect(ids(CARD_TOOL_CONNECTORS)).not.toContain("discord");
     expect(ids(CARD_TOOL_CONNECTORS)).not.toContain("other");
   });
 
-  it("marks FreeFinance as an Austrian, unfeatured finance tool", () => {
+  it("marks FreeFinance as an Austrian, featured finance tool", () => {
+    // Austria-only, but it is one of only three tools that can be connected
+    // today and the card row caps at five, so the owner of a bookkeeping
+    // workspace reaches it without opening "More tools".
     const freefinance = CONNECTORS.find(
       (entry): entry is SkillConnector => entry.kind === "skill" && entry.id === "freefinance",
     );
     expect(freefinance).toBeDefined();
     expect(freefinance?.region).toBe("Austria");
     expect(freefinance?.category).toBe("finance");
-    expect(freefinance?.featured).toBe(false);
+    expect(freefinance?.featured).toBe(true);
+    expect(freefinance?.availability).toBe("available");
     for (const entry of PRODUCT_CONNECTORS) {
       if (entry.id !== "freefinance") {
         expect(entry.region).toBeUndefined();
@@ -260,7 +267,7 @@ describe("CONNECTORS", () => {
     const notion = CONNECTORS.find(
       (entry): entry is SkillConnector => entry.kind === "skill" && entry.id === "notion",
     );
-    expect(notion?.needs).toEqual(["a Notion internal integration token (NOTION_API_KEY)"]);
+    expect(notion?.needs).toEqual(["a Notion connection Installation access token (NOTION_API_KEY)"]);
   });
 
   it("builds the exact one-liner for a product", () => {

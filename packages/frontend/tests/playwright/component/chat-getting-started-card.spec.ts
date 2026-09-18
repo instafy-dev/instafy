@@ -219,12 +219,13 @@ test.describe("chat getting-started card", () => {
     await expect(card.getByTestId("onboarding-change-ai")).toHaveCount(0);
     await expect(card.getByText("Start with a tool you already use", { exact: true })).toBeVisible();
     // Every featured tool that can be picked today: GitHub first because it
-    // needs no key pasted, then Notion, then the More tools link. Nothing
-    // pending is named here and nothing is disabled.
+    // needs no key pasted, then Notion and FreeFinance, then the More tools
+    // link. Nothing pending is named here and nothing is disabled.
     await expect(card.getByTestId("connect-coming-soon")).toHaveCount(0);
-    await expect(card.locator('button[data-testid^="connect-chip-"]')).toHaveCount(2);
+    await expect(card.locator('button[data-testid^="connect-chip-"]')).toHaveCount(3);
     await expect(card.getByTestId("connect-chip-github")).toBeEnabled();
     await expect(card.getByTestId("connect-chip-notion")).toBeEnabled();
+    await expect(card.getByTestId("connect-chip-freefinance")).toBeEnabled();
     await expect(card).not.toContainText("Soon");
     await expect(card.getByTestId("connect-more-tools")).toBeVisible();
     // The action cards and their vocabulary are gone.
@@ -241,6 +242,7 @@ test.describe("chat getting-started card", () => {
     const boxes = await Promise.all([
       card.getByTestId("connect-chip-github").boundingBox(),
       card.getByTestId("connect-chip-notion").boundingBox(),
+      card.getByTestId("connect-chip-freefinance").boundingBox(),
       card.getByTestId("connect-more-tools").boundingBox(),
     ]);
     for (const box of boxes) {

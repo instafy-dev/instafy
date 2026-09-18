@@ -148,7 +148,7 @@ export const CONNECTORS: readonly Connector[] = [
     source: "https://github.com/instafy-dev/skills/tree/main/packs/team/.agents/skills/notion",
     sourceLabel: "instafy-dev/skills",
     skillName: "notion",
-    needs: ["a Notion internal integration token (NOTION_API_KEY)"],
+    needs: ["a Notion connection Installation access token (NOTION_API_KEY)"],
   },
   {
     id: "discord",
@@ -172,7 +172,10 @@ export const CONNECTORS: readonly Connector[] = [
     mark: FreeFinanceMark,
     kind: "skill",
     category: "finance",
-    featured: false,
+    // Featured, and last of the three that can be picked today, because it
+    // asks for a key and GitHub does not. It sits behind Notion by the
+    // ordering rule above and still leaves two of the five card slots free.
+    featured: true,
     region: "Austria",
     keywords: ["bookkeeping", "accounting", "buchhaltung", "invoices", "uva"],
     source: "https://github.com/instafy-dev/skills/tree/main/packs/bookkeeping/.agents/skills/freefinance",
