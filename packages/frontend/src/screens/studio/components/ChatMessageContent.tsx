@@ -36,6 +36,11 @@ import {
   type MessageListItem,
   type WorkspaceFileReferenceDescriptor,
 } from "./chatMessageDialect";
+import {
+  describeKnownLinkHost,
+  labelAlreadyNamesHost,
+  readLinkHost,
+} from "./chatLinkHosts";
 import { resolveProxyUpstreamErrorGuidance } from "./proxyError";
 
 type WorkspaceFileReferencePresentation = {
@@ -148,7 +153,7 @@ function inlineCodeNeedsBlock(value: string): boolean {
 // shell stops overflowing, its own max-width still lets a line run to ~96
 // characters. 70ch keeps paragraphs and list items in the 45–75ch range
 // `leading-relaxed` was tuned for. Deliberately not applied to code blocks,
-// command/output blocks, diff or file-change lists, tables, or image rows —
+// command/output blocks, diff or file-change lists, tables, or image rows:
 // those want the full bubble width.
 const PROSE_MEASURE_CLASS = "max-w-[70ch]";
 const GITHUB_REFERENCE_TOKEN_CLASS = [
@@ -906,7 +911,7 @@ function WorkspaceFileReferenceChip({
       }
       setPreviewOpen(false);
     };
-    // Escape mirrors the action-menu sibling below — every dismissible
+    // Escape mirrors the action-menu sibling below: every dismissible
     // floating surface answers the keyboard.
     const handleKeyDown = (event: globalThis.KeyboardEvent) => {
       if (event.key === "Escape") {
@@ -1606,6 +1611,20 @@ const MessageContentBody = memo(function MessageContentBody({
       }
       if (token.type === "link") {
         const reference = token.value;
+        const host = readLinkHost(reference.url);
+        // A URL we cannot parse is not made pressable. There is nothing
+        // trustworthy to show the person about where it would take them.
+        if (!host) {
+          return <span key={`${keyPrefix}-link-${tokenIndex}`}>{reference.label}</span>;
+        }
+        const known = describeKnownLinkHost(reference.url);
+        const KnownMark = known?.mark;
+        // Chat text arrives near-verbatim from a model that reads SKILL.md
+        // files fetched from arbitrary repositories, and a markdown link shows
+        // only its label. An approved host wears its own mark, so the person
+        // reads the product. Any other host is written out beside the label,
+        // so a pack cannot put a familiar word over an address nobody vetted.
+        const showHost = !known && !labelAlreadyNamesHost(reference.label, host);
         return (
           <a
             key={`${keyPrefix}-${reference.url}-${tokenIndex}`}
@@ -1615,13 +1634,26 @@ const MessageContentBody = memo(function MessageContentBody({
             className="break-all text-primary-600 underline underline-offset-2 hover:text-primary-700 dark:text-primary-300 dark:hover:text-primary-200"
             title={reference.url}
             data-testid="chat-message-link"
+            data-link-host={host}
+            data-link-known={known ? "true" : "false"}
           >
+            {KnownMark ? (
+              <KnownMark
+                className="mr-1 inline h-[0.92em] w-[0.92em] flex-none align-[-0.08em]"
+                aria-hidden
+              />
+            ) : null}
             {reference.label}
+            {showHost ? (
+              <span className="ml-1 font-normal opacity-80" data-testid="chat-message-link-host">
+                ({host})
+              </span>
+            ) : null}
           </a>
         );
       }
       if (token.type === "assistant-mention" || token.type === "agent-mention") {
-        // A mention is the agent's name — clicking it opens the agent's
+        // A mention is the agent's name, and clicking it opens the agent's
         // profile (ChatPanel hosts the card for these anchor-less opens).
         const mentionClass =
           token.type === "assistant-mention"

@@ -28,6 +28,14 @@ const GATED_FILES = [
   resolve(components, "gettingStartedAiChoices.ts"),
   resolve(components, "mentionableMembers.ts"),
   resolve(components, "packCardText.ts"),
+  // The walkthrough now lives in the chat beside the card, so the renderer and
+  // its link gate carry first-run copy too. These hold no pack text at
+  // runtime, so the gate covers their own literals only: a sentence a pack
+  // wrote and the model relayed still arrives ungated, which is why the link
+  // gate writes out an unapproved host rather than trusting its label.
+  resolve(components, "ChatMessageContent.tsx"),
+  resolve(components, "chatMessageDialect.ts"),
+  resolve(components, "chatLinkHosts.ts"),
   resolve(components, "useChatGettingStartedState.ts"),
   resolve(components, "chat-input/ChatInput.tsx"),
   resolve(components, "__tests__/AiCredentialsStatusBubble.test.tsx"),
@@ -40,6 +48,7 @@ const GATED_FILES = [
   resolve(components, "__tests__/gettingStartedAiChoices.test.ts"),
   resolve(components, "__tests__/mentionableMembers.test.ts"),
   resolve(components, "__tests__/packCardText.test.ts"),
+  resolve(components, "__tests__/chatLinkHosts.test.ts"),
   resolve(components, "__tests__/useChatGettingStartedState.test.tsx"),
   resolve(frontend, "tests/playwright/component/chat-getting-started-card.spec.ts"),
   resolve(frontend, "tests/playwright/smoke/chat-onboarding.spec.ts"),
