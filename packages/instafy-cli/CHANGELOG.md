@@ -1,5 +1,11 @@
 # @instafy/cli
 
+## 0.2.3
+
+### Patch Changes
+
+- 7e3b932: Add customer commands for reading paginated support case timelines and posting idempotent follow-up replies.
+
 ## 0.2.2
 
 ### Patch Changes
