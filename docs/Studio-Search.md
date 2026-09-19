@@ -33,8 +33,9 @@ header, replacing its Back/Chats action. Touch and compact mouse layouts use the
 same rule: Results when there is a saved search, a Back arrow when there is a previous
 visit, and a Chats icon for direct entry without history. Their accessible names
 describe the destination. The sidebar toggle stays at the far left, separate from
-the current tab's icon and title. Forward, tab switching and other secondary actions
-are available in **More**. Drawer dismissal and parent conversation navigation
+the current tab's icon and title. A Forward chevron appears beside Back when a later
+visit exists, including on Home, account settings and the search results screen.
+Tab switching and other secondary actions are available in **More**. Drawer dismissal and parent conversation navigation
 remain separate actions. Org and space transitions preserve the last resolved
 history controls while the route catches up, without accepting stale actions.
 

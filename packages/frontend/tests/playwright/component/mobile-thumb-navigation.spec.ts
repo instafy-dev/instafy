@@ -48,14 +48,6 @@ async function mountNavigation(page: Page, height: number, bottom: number) {
     ["projects/useMergedControllerProjects.ts", "useMergedControllerProjects"],
     ["conversations/ConversationsProvider.tsx", "useConversations"],
   ]) await page.route(`**/src/${path}*`, route => route.fulfill({ contentType: "application/javascript", body: `export {${name}} from '/__thumb_state__.js';` }));
-  // Real notification-center state/lifetime; only its transport and external
-  // alert boundaries are inert. No synthetic replacement for the bell's press.
-  for (const [path, body] of [
-    ["sdk/instafy/index.ts", `const unexpected=()=>{throw Error('Unexpected notification mutation');};export const controllerClient={notifications:{list:async()=>({items:[],nextCursor:null,unreadCount:0,asOf:'2026-01-01T00:00:00Z'}),getPreferences:async()=>({hidePreviews:true,preferences:[]}),updateState:unexpected,readAll:unexpected,savePreferences:unexpected}};`],
-    ["status/useStatus.ts", `const noop=()=>{};export const useStatus=()=>({showStatus:noop,hideStatus:noop});`],
-    ["notifications/notificationPresentation.ts", `export const NOTIFICATION_RECEIVED_EVENT='fixture:notification';export const claimNotificationPresentation=async()=>false;`],
-    ["notifications/assistantMessageNotifications.ts", `export const areMessageNotificationsEnabled=()=>false,isAppInForeground=()=>false,enableMessageNotifications=async()=>false,notifyAssistantMessage=async()=>false;`],
-  ]) await page.route(`**/src/${path}*`, route => route.fulfill({ contentType: "application/javascript", body }));
   const main = `
     import '/src/styles/tailwind.css';
     import {React,h,State,projects,chats} from '/__thumb_state__.js';
@@ -64,7 +56,6 @@ async function mountNavigation(page: Page, height: number, bottom: number) {
     import {useStudioHistory} from '/src/navigation/useStudioHistory.ts';
     import {useStudioNavigation} from '/src/navigation/useStudioNavigation.ts';
     import {useStudioViewportState} from '/src/screens/useStudioViewportState.ts';
-    import {useNotificationCenter} from '/src/notifications/useNotificationCenter.tsx';
     import {resolveMobileOverviewSection,useStudioNavigationPosture} from '/src/screens/studio/useStudioNavigationPosture.ts';
     import {MobileBottomDock} from '/src/screens/studio/components/MobileBottomDock.tsx';
     import {MobileStudioNavigationHeader} from '/src/screens/studio/components/MobileStudioNavigationHeader.tsx';
@@ -73,8 +64,6 @@ async function mountNavigation(page: Page, height: number, bottom: number) {
     function Fixture(){
       const location=useLocation(),go=useStudioNavigation();
       const history=useStudioHistory(),viewport=useStudioViewportState({trackKeyboard:true}),posture=useStudioNavigationPosture();
-      const notificationNavigate=React.useCallback(()=>{throw Error('No notification navigation in fixture');},[]);
-      const notifications=useNotificationCenter({userId:'fixture-user',accessToken:'inert-fixture-token',navigate:notificationNavigate});
       const [section,setSection]=React.useState(null),[draft,setDraft]=React.useState(''),[longList,setLongList]=React.useState(false);
       const params=new URLSearchParams(location.search),project=params.get('projectId')??'${PROJECT_A}',chat=params.get('conversationId'),panel=params.get('panel')??'chat';
       const drawer=params.get('workspaceTab'),job=params.get('jobId');
@@ -88,7 +77,7 @@ async function mountNavigation(page: Page, height: number, bottom: number) {
           style:{height:viewport.viewportHeightPx??'100dvh',display:'flex',flexDirection:'column',overflow:'hidden'}},
           h(MobileStudioNavigationHeader,{key:location.key+'|'+project,history,title:overview==='home'?'Home':overview==='chat'?'Chats':overview==='projects'?'Spaces':chat==='B'?'Beta chat':'Alpha chat',
             spaceName:projects.find(p=>p.id===project).name,onOpenPicker:()=>setSection('chats'),onOpenChats:openChats,
-            onOpenSettings:()=>go({kind:'panel',panel:'settings'}),notificationBell:notifications.bell}),
+            onOpenSettings:()=>go({kind:'panel',panel:'settings'})}),
           h('div',{style:{flex:1,minHeight:0,overflow:'auto',padding:16}},
             h('h1',{style:{fontSize:18}},'Inert thumb-navigation fixture'),
             h('output',{'data-testid':'thumb-destination'},overview==='home'?'Home':overview==='chat'?'Chats overview':overview==='projects'?'Spaces overview':(chat??'No selected chat')+' / '+project),
@@ -103,8 +92,7 @@ async function mountNavigation(page: Page, height: number, bottom: number) {
             onHomePress:()=>go({kind:'panel',panel:'home'}),onChatPress:openChats,onProjectsPress:()=>go({kind:'panel',panel:'projects'})}):null),
         section?h(MobileNavigationSheet,{section,onSectionChange:setSection,onClose:close,history,keyboardOpen:viewport.keyboardOpen,
           onNewChat:()=>{throw Error('No chat allocation in fixture');},onOpenFiles:()=>go({kind:'panel',panel:'code'}),
-          onOpenAllChats:openChats,onOpenAllSpaces:()=>go({kind:'panel',panel:'projects'})}):null,
-        notifications.dialog);
+          onOpenAllChats:openChats,onOpenAllSpaces:()=>go({kind:'panel',panel:'projects'})}):null);
     }
     createRoot(document.getElementById('root')).render(h(RouterProvider,{router:createBrowserRouter([{path:'*',element:h(Fixture)}])}));`;
   await page.route(`**${FIXTURE}/main.js`, route => route.fulfill({ contentType: "application/javascript", body: main }));
@@ -134,7 +122,6 @@ for (const layout of [
     const goForward = async () => {
       // Forward must remain available without opening navigation: a real
       // sidebar entry would truncate the branch that Forward needs.
-      await header.getByTestId("mobile-header-more").tap();
       await page.getByTestId("mobile-header-forward").tap();
       await expect(sheet).toHaveCount(0);
       await expect(page.getByTestId("mobile-header-actions")).toHaveCount(0);
@@ -153,25 +140,15 @@ for (const layout of [
     }
     const headerScreenshot = testInfo.outputPath(`thumb-header-${layout.width}.png`);
     await page.screenshot({ path: headerScreenshot }); await testInfo.attach("Production detail header without bottom navigation", { path: headerScreenshot, contentType: "image/png" });
-    const notificationUrl = page.url();
+    const menuUrl = page.url();
     await header.getByTestId("mobile-header-more").tap();
-    await page.getByTestId("notification-center-bell").tap();
-    const notificationCenter = page.getByRole("dialog", { name: "Notifications", exact: true });
-    await expect(notificationCenter).toBeVisible();
+    await expect(page.getByTestId("mobile-header-actions")).toBeVisible();
+    // Activity lives on Home; compact navigation no longer has a duplicate bell.
+    await expect(page.getByTestId("notification-center-bell")).toHaveCount(0);
+    await expect(page.getByRole("button", { name: "Space settings", exact: true })).toBeVisible();
+    await page.keyboard.press("Escape");
     await expect(page.getByTestId("mobile-header-actions")).toHaveCount(0);
-    await expect(notificationCenter.getByText("No notifications yet.", { exact: true })).toBeVisible();
-    // The center survives unmounting the originating More/bell subtree and
-    // remains interactive; this must use real touch press, not element.click.
-    await notificationCenter.getByRole("button", { name: "Unread", exact: true }).tap();
-    await expect(notificationCenter.getByText("You're all caught up.", { exact: true })).toBeVisible();
-    const notificationScreenshot = testInfo.outputPath(`thumb-notifications-${layout.width}.png`);
-    await page.screenshot({ path: notificationScreenshot }); await testInfo.attach("Real notification center after More closes", { path: notificationScreenshot, contentType: "image/png" });
-    await notificationCenter.getByRole("button", { name: "Close dialog", exact: true }).tap();
-    await expect(notificationCenter).toHaveCount(0); expect(page.url()).toBe(notificationUrl);
-    await header.getByTestId("mobile-header-more").tap(); await page.getByTestId("notification-center-bell").tap();
-    await expect(notificationCenter).toBeVisible(); await page.keyboard.press("Escape");
-    await expect(notificationCenter).toHaveCount(0); await expect(page.getByTestId("mobile-header-actions")).toHaveCount(0);
-    expect(page.url()).toBe(notificationUrl);
+    expect(page.url()).toBe(menuUrl);
     const checkDock = async () => {
       await expect(dock).toBeVisible();
       await expect(dock.getByRole("button")).toHaveCount(3);

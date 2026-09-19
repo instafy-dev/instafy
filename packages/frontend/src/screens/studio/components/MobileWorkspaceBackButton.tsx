@@ -4,12 +4,14 @@ import type { StudioHistory } from "../../../navigation/useStudioHistory";
 import { useStudioSearchReturn } from "./StudioSearchReturnContext";
 
 /** Compact mouse and touch layouts share the same destination contract. */
-export function MobileWorkspaceBackButton({ history, onOpenChats }: {
+export function MobileWorkspaceBackButton({ history, onOpenChats, returnToSearch = true }: {
   history: StudioHistory;
-  onOpenChats: () => void;
+  onOpenChats?: () => void;
+  returnToSearch?: boolean;
 }) {
   const searchReturn = useStudioSearchReturn();
-  const hasResults = Boolean(searchReturn.originToken);
+  const hasResults = returnToSearch && Boolean(searchReturn.originToken);
+  if (!hasResults && !history.canGoBack && !onOpenChats) return null;
   const label = hasResults ? "Results" : history.canGoBack ? "Back" : "Chats";
   return (
     <Button

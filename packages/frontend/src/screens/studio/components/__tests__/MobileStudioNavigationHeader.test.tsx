@@ -63,19 +63,21 @@ describe("MobileStudioNavigationHeader", () => {
     expect(query("mobile-header-open-chats")).not.toBeNull();
   });
 
-  it("goes Forward from More through the existing history without opening navigation", async () => {
-    await render(); await click("mobile-header-more");
-    expect(query("mobile-header-forward")?.disabled).toBe(true);
-    await click("mobile-header-forward");
-    expect(props.history.goForward).not.toHaveBeenCalled();
+  it("shows Forward beside Back only when a later visit exists, without opening More", async () => {
+    await render();
+    expect(query("mobile-header-forward")).toBeNull();
     props.history = { ...props.history, canGoForward: true };
     await render();
     expect(query("mobile-header-forward")?.disabled).toBe(false);
+    expect(query("mobile-header-open-chats")?.nextElementSibling).toBe(query("mobile-header-forward"));
     await click("mobile-header-forward");
     expect(props.history.goForward).toHaveBeenCalledTimes(1);
     expect(props.onOpenPicker).not.toHaveBeenCalled();
     expect(props.onOpenChats).not.toHaveBeenCalled();
     expect(query("mobile-header-more")?.getAttribute("aria-expanded")).toBe("false");
+    props.history = { ...props.history, canGoForward: false };
+    await render();
+    expect(query("mobile-header-forward")).toBeNull();
   });
 
   it("keeps the sidebar control first and separate from the current location", async () => {

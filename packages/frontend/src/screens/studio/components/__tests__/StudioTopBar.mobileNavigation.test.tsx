@@ -344,7 +344,7 @@ describe("StudioTopBar mobile navigation integration", () => {
     expect(query("mobile-studio-navigation-header")).toBeNull();
   });
 
-  it("keeps Forward in the shared compact menu without an extra native history row", async () => {
+  it("exposes Forward directly in the compact header without an extra native history row", async () => {
     mocks.posture.mockReturnValue({ isLargeScreen: false, showTopbarHomeButton: false, showTouchBottomDock: false });
     await render();
     expect(query("mobile-studio-navigation-header")).not.toBeNull();
@@ -352,7 +352,6 @@ describe("StudioTopBar mobile navigation integration", () => {
     expect(query("topbar-home-button")).toBeNull();
     props.mobileNavigation!.history.canGoForward = true;
     await render();
-    await click("mobile-header-more");
     await click("mobile-header-forward");
     expect(props.mobileNavigation!.history.goForward).toHaveBeenCalledOnce();
     expect(props.mobileNavigation!.history.goBack).not.toHaveBeenCalled();

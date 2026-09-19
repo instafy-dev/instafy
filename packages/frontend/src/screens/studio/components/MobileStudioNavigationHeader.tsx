@@ -1,12 +1,12 @@
 import { useState, type ReactNode } from "react";
 import { DialogTrigger } from "react-aria-components";
-import { ChatLines, Lock, MoreHoriz, NavArrowRight, NavArrowUp, Settings, SidebarCollapse, SidebarExpand } from "iconoir-react";
+import { ChatLines, Lock, MoreHoriz, NavArrowUp, Settings, SidebarCollapse, SidebarExpand } from "iconoir-react";
 import { Button, IconButton } from "../../../components/Button";
 import { EntityRow } from "../../../components/EntityRow";
 import { StudioDialogPopover } from "../../../components/aria/StudioPopover";
 import type { StudioHistory } from "../../../navigation/useStudioHistory";
 import { useNativeBackButtonAction } from "../../../native/useNativeBackButtonAction";
-import { MobileWorkspaceBackButton } from "./MobileWorkspaceBackButton";
+import { MobileStudioHistoryControls } from "./MobileStudioHistoryControls";
 
 export interface MobileStudioNavigationHeaderProps {
   history: StudioHistory;
@@ -61,7 +61,7 @@ export function MobileStudioNavigationHeader({
           ? <SidebarCollapse className="h-[18px] w-[18px]" aria-hidden="true" />
           : <SidebarExpand className="h-[18px] w-[18px]" aria-hidden="true" />}
       </Button>
-      <MobileWorkspaceBackButton history={history} onOpenChats={onOpenChats} />
+      <MobileStudioHistoryControls history={history} onOpenChats={onOpenChats} />
       <div className="flex min-w-0 flex-1 items-center gap-2 px-1" data-testid="mobile-header-location">
         {titleIcon ? <span className="shrink-0 text-slate-500 dark:text-slate-400 [&_svg]:h-[18px] [&_svg]:w-[18px]" aria-hidden="true" data-testid="mobile-header-location-icon">{titleIcon}</span> : null}
         <span className="min-w-0 flex-1">
@@ -81,9 +81,6 @@ export function MobileStudioNavigationHeader({
         </IconButton>
         <StudioDialogPopover placement="bottom end" offset={4} className="w-72 max-w-[calc(100vw-1.5rem)] p-2" data-testid="mobile-header-actions">
           <div className="flex flex-col gap-1">
-            <EntityRow title="Forward" aria-label="Go forward" surface="interactive" pressable className={TOUCH_TARGET}
-              isDisabled={!history.canGoForward} start={<NavArrowRight className="h-5 w-5" aria-hidden="true" />}
-              onPress={() => actAndClose(history.goForward)} data-testid="mobile-header-forward" />
             {onNewChat ? <EntityRow title="Public chat" surface="interactive" pressable className={TOUCH_TARGET}
               start={<ChatLines className="h-5 w-5" aria-hidden="true" />} onPress={() => actAndClose(onNewChat)} data-testid="chat-new-chat-public" /> : null}
             {onNewPrivateChat ? <EntityRow title="Private chat" surface="interactive" pressable className={TOUCH_TARGET}

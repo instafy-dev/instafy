@@ -192,9 +192,11 @@ still requires verification on a phone, even when the simulated-event test passe
 
 ## iOS release boundary
 
-Studio's touch layout keeps Back in its header and Forward in the More menu,
-backed by the same React Router history as the browser and Electron renderer. A direct entry
-without previous history offers an explicit Chats destination instead of pretending it is Back.
+Studio's compact layouts keep Back in the header and show a Forward chevron beside it
+when a later visit exists, including Home, account settings and search results.
+Both use the same React Router history as the browser and Electron renderer. A direct entry
+into workspace details offers a Chats destination; global pages without history omit Back.
+Choosing a new destination after Back clears the forward branch, as in browser history.
 Do not confuse these controls with navigation
 inside the separate Shared/Personal browser. No native WKWebView swipe-navigation setting is
 changed by this frontend implementation. Android uses a single prioritized native Back listener

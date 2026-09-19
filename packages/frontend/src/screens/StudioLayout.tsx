@@ -44,6 +44,7 @@ import { useStudioSearch, type StudioSearchRequest } from "./studio/components/u
 import { StudioSearchContext } from "./studio/components/StudioSearchContext";
 import { StudioSearchReturnProvider } from "./studio/components/StudioSearchReturnContext";
 import { StudioMobileContextHeader } from "./studio/components/StudioMobileContextHeader";
+import { MobileStudioHistoryControls } from "./studio/components/MobileStudioHistoryControls";
 import { useStudioSearchRecords } from "./studio/useStudioSearchRecords";
 import { getStudioWorkspaceOwnerKey, useStudioKnownFiles } from "./studio/useStudioKnownFiles";
 import { useStudioSearchNavigation } from "./studio/useStudioSearchNavigation";
@@ -2213,7 +2214,8 @@ function StudioLayoutInner() {
 
           {search.open ? <div className="studio-context-search-screen">
             {!isLargeScreen ? <header className="studio-context-search-mobile" aria-label="Search">{search.renderControl()}</header> : null}
-            <StudioHistoryControls history={mobileHistory} className="self-start px-1" />
+            {isLargeScreen ? <StudioHistoryControls history={mobileHistory} className="self-start px-1" />
+              : <div className="px-1"><MobileStudioHistoryControls history={mobileHistory} returnToSearch={false} /></div>}
             <main className="flex min-h-0 min-w-0 flex-1" aria-label="Search results" data-testid="studio-search-screen">{search.results}</main>
           </div> : null}
           <div
@@ -2225,6 +2227,7 @@ function StudioLayoutInner() {
             {!isLargeScreen ? mobileContextHeader() : null}
             {isLargeScreen || navigationScope.page === "workspace" ? <StudioTopBar newChatInSidebar={isLargeScreen} contextHeaderAbove mobileNavigation={mobileTopbarNavigation} /> : <div className={`flex min-h-14 shrink-0 items-center gap-2 border-b border-slate-200/70 bg-slate-50 px-1 py-1 ${DARK_RAIL_SURFACE_CLASS}`}>
               <IconButton variant="ghost" aria-label="Open navigation" data-testid="topbar-sidebar-toggle" onPress={handleToggleSidebar} className="!min-h-12 !min-w-12"><SidebarExpand className="h-[18px] w-[18px]" aria-hidden="true" /></IconButton>
+              <MobileStudioHistoryControls history={mobileHistory} />
               <span className="min-w-0 flex-1 truncate text-sm text-slate-500 dark:text-slate-400">{navigationScope.page === "account" ? "Your settings" : topbarLocationOverride?.title ?? (contextHomeActive ? "Home" : activeTeamName)}</span>
             </div>}
             <ProjectAccessRecoveryBanner />

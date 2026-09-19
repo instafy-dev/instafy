@@ -411,6 +411,23 @@ describe("useChatScrollController", () => {
     }
   });
 
+  it("restores a previously revealed message visit after mobile onboarding releases its loading placeholder", async () => {
+    const conversationId = "mobile-return-target";
+    const historyVisit = { ...visit(conversationId), messageId: "matched" };
+    const rows = [{ id: "older", top: 0, height: 400 }, { id: "matched", top: 400, height: 400 }, { id: "later", top: 800, height: 400 }];
+    await act(async () => root.render(<AnchorHarness conversationId={conversationId} historyVisit={historyVisit} rows={rows} scrollHeight={1200} />));
+    const scroller = container.querySelector<HTMLDivElement>('[data-testid="anchor-scroll"]')!;
+    scroller.scrollTop = 520;
+    await act(async () => scroller.dispatchEvent(new Event("scroll")));
+    await act(async () => root.render(null));
+
+    await act(async () => root.render(<AnchorHarness conversationId={conversationId} historyVisit={historyVisit} mobileAnchor loading rows={[]} scrollHeight={200} />));
+    await act(async () => root.render(<AnchorHarness conversationId={conversationId} historyVisit={historyVisit} rows={rows} scrollHeight={1200} />));
+    const restored = container.querySelector<HTMLDivElement>('[data-testid="anchor-scroll"]')!;
+    expect(restored.scrollTop).toBe(520);
+    expect(restored.dataset.highlightedMessage).toBeUndefined();
+  });
+
   it("does not let mobile onboarding release capture placeholder bottom geometry before a cross-space target loads", async () => {
     const historyVisit = { ...visit("mobile-target", "mobile-target-visit", "user", "next-space"), messageId: "matched" };
     await act(async () => root.render(<AnchorHarness conversationId="previous-chat" historyVisit={null} mobileAnchor loading rows={[]} scrollHeight={200} />));
