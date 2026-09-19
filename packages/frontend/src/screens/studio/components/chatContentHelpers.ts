@@ -190,6 +190,11 @@ export function summarizeActiveCommandForPreview(value: string, maxLength = 120)
   if (normalized.startsWith("instafy conversation show")) {
     return "Opening prior conversation…";
   }
+  if (normalized.startsWith("instafy secrets")) {
+    // Never the raw invocation: it carries the space id, and a shell line at
+    // message weight during a first run is the thing setup promised not to do.
+    return "Checking which values this space already has…";
+  }
   if (normalized.startsWith("instafy agents context ")) {
     return topic ? `Checking saved agent context for "${topic}"…` : "Checking saved agent context…";
   }
