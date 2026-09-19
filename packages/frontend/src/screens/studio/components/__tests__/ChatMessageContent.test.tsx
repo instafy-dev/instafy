@@ -576,7 +576,7 @@ describe("ChatMessageContent", () => {
     expect(codeRefs.map((entry) => entry.textContent?.trim())).toEqual(["**literal**"]);
   });
 
-  it("renders markdown links as clean labeled web links", async () => {
+  it("writes out the host of an unapproved link, so a label cannot stand in for it", async () => {
     await act(async () => {
       root.render(
         <MessageContent content={"Read [the docs](https://example.com/docs) and keep `[literal](https://example.com/raw)` as code."} />,
@@ -585,7 +585,11 @@ describe("ChatMessageContent", () => {
 
     const links = Array.from(container.querySelectorAll('[data-testid="chat-message-link"]'));
     expect(links).toHaveLength(1);
-    expect(links[0]?.textContent?.trim()).toBe("the docs");
+    // A "clean labeled link" is the phishing shape: chat text arrives from a
+    // model that reads packs fetched from arbitrary repositories, and a label
+    // is whatever the pack felt like writing. The host goes beside it.
+    expect(links[0]?.textContent?.trim()).toBe("the docs(example.com)");
+    expect(links[0]?.getAttribute("data-link-known")).toBe("false");
     expect(links[0]?.getAttribute("href")).toBe("https://example.com/docs");
     expect(links[0]?.getAttribute("target")).toBe("_blank");
     expect(links[0]?.getAttribute("title")).toBe("https://example.com/docs");
@@ -594,6 +598,47 @@ describe("ChatMessageContent", () => {
 
     const codeRefs = Array.from(container.querySelectorAll('[data-testid="chat-message-inline-code"]'));
     expect(codeRefs.map((entry) => entry.textContent?.trim())).toEqual(["[literal](https://example.com/raw)"]);
+  });
+
+  it("lets an approved host wear its mark instead of its address", async () => {
+    await act(async () => {
+      root.render(
+        <MessageContent content={"Open [your connections](https://www.notion.so/developers/connections)."} />,
+      );
+    });
+
+    const link = container.querySelector('[data-testid="chat-message-link"]');
+    expect(link?.getAttribute("data-link-known")).toBe("true");
+    expect(link?.getAttribute("data-link-host")).toBe("notion.so");
+    // The mark says Notion, so the address does not have to.
+    expect(link?.textContent?.trim()).toBe("your connections");
+    expect(container.querySelector('[data-testid="chat-message-link-host"]')).toBeNull();
+  });
+
+  it("treats a look-alike host as the stranger it is", async () => {
+    await act(async () => {
+      root.render(
+        <MessageContent
+          content={"Open [Notion](https://notion.so.evil.test/verify) and [Notion](https://evilnotion.so/verify)."}
+        />,
+      );
+    });
+
+    const links = Array.from(container.querySelectorAll('[data-testid="chat-message-link"]'));
+    expect(links).toHaveLength(2);
+    // Ending with the same letters is not the same host. Both wear no mark and
+    // both say where they actually go.
+    expect(links.map((entry) => entry.getAttribute("data-link-known"))).toEqual(["false", "false"]);
+    expect(container.textContent).toContain("(notion.so.evil.test)");
+    expect(container.textContent).toContain("(evilnotion.so)");
+  });
+
+  it("does not make an unparseable or non-web link pressable", async () => {
+    await act(async () => {
+      root.render(<MessageContent content={"Try [this](javascript:alert(1)) instead."} />);
+    });
+
+    expect(container.querySelector('[data-testid="chat-message-link"]')).toBeNull();
   });
 
   it("renders GitHub PR and issue URLs as compact chips while other URLs stay plain links", async () => {
