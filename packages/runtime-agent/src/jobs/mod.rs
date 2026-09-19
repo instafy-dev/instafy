@@ -7272,7 +7272,7 @@ Avoid creating dependency caches or stores in the canonical workspace root when 
             - For integration requests (for example \"connect <provider>\"), if runtime/tool capability is unclear, do a skills preflight: check installed skills first, and if no clear match exists, use skill discovery/import before concluding unsupported.\n\
             - If a command/API fails with auth or permission errors (401/403/not authorized/missing token), include `actions` in the same response so the UI can guide onboarding.\n\
             - Missing secret/env UX: emit the relevant `request_secret`/`request_integration` action immediately, then ask one short follow-up question: whether the user already has the credential and whether they want help finding/creating it.\n\
-            - For auth/integration tasks, inspect existing secret metadata on demand before requesting a new secret by running `instafy secrets list --space <space-id> --json`.\n\
+            - For auth/integration tasks, check which values the space already has before requesting a new secret. The inventory is already in your environment as `INSTAFY_PROJECT_SECRET_INVENTORY`; read that rather than shelling out for it, and never run a command to list secrets during first-run skill setup.\n\
               - Use `actions` to request interactive UI help when needed (e.g. secrets/integrations). Supported actions:\n\
               - { type: 'request_secret', name: string, optional valueLabel: string, optional description: string, optional whereToGet: string, optional skill: string, optional sensitive: boolean, optional agentHandles: string[] }\n\
               - { type: 'request_integration', provider: string, optional description: string, optional requiredScopes: string[], optional capabilities: string[], optional authMethods: string[], optional suggestedSecretNames: string[], optional suggestedSecrets: { name: string, optional description: string }[], optional agentHandles: string[] }\n\
@@ -9047,19 +9047,15 @@ fn augment_summary_for_onboarding_actions(summary: &mut String, actions: &[Codex
         ));
     }
 
-    if !secret_names.is_empty() {
-        // The card names the value in the provider's own words and carries the
-        // variable itself. Repeating the variable here only shouts it at
-        // someone who has never seen one.
-        guidance_lines.push(
-            if secret_names.len() > 1 {
-                "Add the values in the card on this message; they are saved to this space's secrets and never appear in the chat."
-            } else {
-                "Add the value in the card on this message; it is saved to this space's secrets and never appears in the chat."
-            }
-            .to_string(),
-        );
-    }
+    // No guidance line for a secret. The card is a few pixels away, it names the
+    // value in the provider's own words, and its caption already says the value
+    // is saved to this space's secrets and never appears in the chat. A line
+    // here repeated that caption almost word for word, under a sentence the
+    // model had usually written to the same effect, so one ask arrived three
+    // times and read as three separate demands. This is the reasoning the
+    // function already applies to chips above: a second path for one decision
+    // is a second voice, whether it is pressable or not. The integration branch
+    // stays, because a retry phrase is something no card carries.
 
     if guidance_lines.is_empty() {
         return;
@@ -22404,6 +22400,33 @@ mod tests {
                 .any(|item| item.contains("EXAMPLE_TOKEN"))
         );
         assert!(suggestions.len() <= MAX_UI_SUGGESTED_REPLIES);
+    }
+
+    #[test]
+    fn augment_summary_for_onboarding_actions_says_nothing_extra_about_a_secret() {
+        // The card is a few pixels below this sentence and its caption already
+        // says where the value is kept. A line here made one ask arrive three
+        // times: the model's sentence, this line, and the caption itself.
+        let mut summary = "Notion setup is blocked until the token is added.".to_string();
+        let actions = vec![CodexAction::RequestSecret {
+            name: "NOTION_API_KEY".to_string(),
+            value_label: Some("Installation access token".to_string()),
+            description: None,
+            where_to_get: None,
+            skill: Some("notion".to_string()),
+            sensitive: Some(true),
+            agent_handles: vec!["octo".to_string()],
+            refused_class: None,
+        }];
+
+        let before = summary.clone();
+        augment_summary_for_onboarding_actions(&mut summary, &actions);
+
+        assert_eq!(
+            summary, before,
+            "a secret card should add no guidance line of its own: {summary}"
+        );
+        assert!(!summary.contains("never appear"));
     }
 
     #[test]
