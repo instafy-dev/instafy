@@ -246,7 +246,7 @@ test("the runbook creates the bot-only immutable web-v* tag rulesets before any 
     "empty bypass list",
     "**Read them back.**",
     "**Create the `web-release` environment.**",
-    "tag `web-v*` and branch `main`",
+    "tag `web-v*`. Nothing else, and no branch.",
     "**Enter the secrets:**",
     "HOSTED_WEB_ADOPTED_DEPLOYMENT_ID",
   ]);

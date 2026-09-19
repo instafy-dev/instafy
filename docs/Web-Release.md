@@ -54,8 +54,10 @@ The boundary is three repository settings:
 
 1. **Tag rulesets on `refs/tags/web-v*`.** Only instafy-bot may create these
    tags, and nobody, including the bot, may update or delete them.
-2. **The environment deployment policy.** It accepts only tag `web-v*` and
-   branch `main`.
+2. **The environment deployment policy.** It accepts only tag `web-v*`. A dry
+   run never reaches the environment, so it needs no branch there, and every
+   branch the policy would accept is one more ref that could carry a copy of
+   this workflow to the token.
 3. **Protected `main`.** Workflow changes need a reviewed pull request.
 
 ## One-time setup (in this order)
@@ -75,7 +77,7 @@ Do not enter any secret until steps 1 and 2 are done and read back.
    are `active`, include `refs/tags/web-v*`, and that only the creation ruleset
    has a bypass actor (instafy-bot).
 3. **Create the `web-release` environment.** Deployment branches and tags:
-   *Selected branches and tags*, tag `web-v*` and branch `main`. Nothing else.
+   *Selected branches and tags*, tag `web-v*`. Nothing else, and no branch.
 4. **Enter the secrets:** `CLOUDFLARE_ACCOUNT_ID`, `CLOUDFLARE_PAGES_API_TOKEN`.
 5. **Set the environment variables:** `CLOUDFLARE_PAGES_PROJECT`,
    `PUBLIC_APP_URL`, `HOSTED_FRONTEND_PUBLISH_ENABLED` (must be exactly `true`
