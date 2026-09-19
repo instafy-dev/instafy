@@ -35,7 +35,7 @@ const GATED_FILES = [
   // gate writes out an unapproved host rather than trusting its label.
   resolve(components, "ChatMessageContent.tsx"),
   resolve(components, "chatMessageDialect.ts"),
-  resolve(components, "chatLinkHosts.ts"),
+  resolve(frontend, "src/components/chatLinkHosts.ts"),
   resolve(components, "useChatGettingStartedState.ts"),
   resolve(components, "chat-input/ChatInput.tsx"),
   resolve(components, "__tests__/AiCredentialsStatusBubble.test.tsx"),
@@ -48,7 +48,7 @@ const GATED_FILES = [
   resolve(components, "__tests__/gettingStartedAiChoices.test.ts"),
   resolve(components, "__tests__/mentionableMembers.test.ts"),
   resolve(components, "__tests__/packCardText.test.ts"),
-  resolve(components, "__tests__/chatLinkHosts.test.ts"),
+  resolve(frontend, "src/components/__tests__/chatLinkHosts.test.ts"),
   resolve(components, "__tests__/useChatGettingStartedState.test.tsx"),
   resolve(frontend, "tests/playwright/component/chat-getting-started-card.spec.ts"),
   resolve(frontend, "tests/playwright/smoke/chat-onboarding.spec.ts"),

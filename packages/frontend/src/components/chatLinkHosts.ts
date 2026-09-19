@@ -1,6 +1,6 @@
 import type { ComponentType } from "react";
 import { Discord, Github } from "iconoir-react";
-import { FreeFinanceMark, NotionMark, SlackMark } from "./connectorMarks";
+import { FreeFinanceMark, NotionMark, SlackMark } from "../screens/studio/components/connectorMarks";
 
 /**
  * The static, first-party list of hosts a chat link may wear a mark for.

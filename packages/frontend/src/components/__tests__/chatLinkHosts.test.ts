@@ -42,3 +42,28 @@ describe("chat link hosts", () => {
     }
   });
 });
+
+// The file preview is the second renderer on this list, and the more direct of
+// the two: it draws workspace files, and a workspace holds SKILL.md imported
+// from whatever repository the person pointed at. The chat at least shows a
+// model's paraphrase; this shows the pack.
+describe("the surfaces that must use this list", () => {
+  it("is used by both markdown renderers, not just the chat one", async () => {
+    const { readFile } = await import("node:fs/promises");
+    const { fileURLToPath } = await import("node:url");
+    const { dirname, resolve } = await import("node:path");
+    const here = dirname(fileURLToPath(import.meta.url));
+    const src = resolve(here, "../..");
+
+    for (const file of [
+      resolve(src, "components/MarkdownPreview.tsx"),
+      resolve(src, "screens/studio/components/ChatMessageContent.tsx"),
+    ]) {
+      const text = await readFile(file, "utf8");
+      expect(text).toContain("describeKnownLinkHost");
+      expect(text).toContain("readLinkHost");
+      // Neither may render an anchor without first resolving a host.
+      expect(text).toContain("data-link-known");
+    }
+  });
+});

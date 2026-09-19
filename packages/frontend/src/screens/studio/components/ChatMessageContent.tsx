@@ -40,7 +40,7 @@ import {
   describeKnownLinkHost,
   labelAlreadyNamesHost,
   readLinkHost,
-} from "./chatLinkHosts";
+} from "../../../components/chatLinkHosts";
 import { resolveProxyUpstreamErrorGuidance } from "./proxyError";
 
 type WorkspaceFileReferencePresentation = {
