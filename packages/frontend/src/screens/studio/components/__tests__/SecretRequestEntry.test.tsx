@@ -149,6 +149,27 @@ describe("SecretRequestEntry", () => {
     });
   };
 
+  const typeValue = async (value: string, name = "NOTION_API_KEY") => {
+    const input = byTestId<HTMLInputElement>(`secret-request-value-${name}`)!;
+    await act(async () => {
+      const setter = Object.getOwnPropertyDescriptor(
+        window.HTMLInputElement.prototype,
+        "value",
+      )?.set;
+      setter?.call(input, value);
+      input.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+  };
+
+  const pressSave = async () => {
+    await act(async () => {
+      byTestId<HTMLButtonElement>("secret-request-save")?.click();
+      for (let index = 0; index < 12; index += 1) {
+        await Promise.resolve();
+      }
+    });
+  };
+
   beforeEach(() => {
     (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
     container = document.createElement("div");
@@ -425,6 +446,64 @@ describe("SecretRequestEntry", () => {
     expect(byTestId("secret-request-value-NOTION_API_KEY")).toBeNull();
     expect(byTestId("secret-request-save")).toBeNull();
     expect(byTestId("secret-request-continue")).toBeNull();
+  });
+
+  it("asks again, live, when the setup continued and the value then failed its check", async () => {
+    // The first real run: words were pasted in place of the token, the card
+    // saved and continued, Notion answered 401, and the agent asked again.
+    // That second card rendered as "Sent" with no field, which left no way to
+    // give the right value from the chat.
+    const first = secretRequest();
+    mocks.activeMessages.push(first);
+    await renderEntry(first, details());
+    await typeValue("ntn_example");
+    await pressSave();
+    expect(mocks.onSubmit).toHaveBeenCalledTimes(1);
+
+    mocks.activeMessages.push({
+      id: "user-reply",
+      role: "user",
+      content: RUNTIME_REPLY,
+      timestamp: first.timestamp + 1_000,
+    } as ChatMessage);
+    const again = secretRequest({
+      id: "secret-request-again",
+      timestamp: first.timestamp + 40_000,
+    });
+    mocks.activeMessages.push(again);
+    mocks.listSecrets.mockResolvedValue({
+      success: true,
+      secrets: [{ id: "secret-1", name: "NOTION_API_KEY" }],
+    });
+    // A new message is a new card, not the old one re-rendered with new props.
+    await act(async () => root.unmount());
+    root = createRoot(container);
+    await renderEntry(again, details());
+
+    expect(byTestId("secret-request-sent")).toBeNull();
+    expect(byTestId("secret-request-saved")).not.toBeNull();
+    await act(async () => {
+      byTestId<HTMLElement>("secret-request-replace")!.click();
+    });
+    expect(byTestId("secret-request-value-NOTION_API_KEY")).not.toBeNull();
+  });
+
+  it("refuses words pasted in place of the value before anything is sent", async () => {
+    const request = secretRequest();
+    mocks.activeMessages.push(request);
+    await renderEntry(request, details());
+    await typeValue("Installation access token ntn example");
+    await pressSave();
+
+    expect(byTestId("secret-request-error")?.textContent).toBe(
+      "That has spaces in it, and a token never does. Copy only the value itself, not the words around it.",
+    );
+    expect(mocks.createSecret).not.toHaveBeenCalled();
+    expect(mocks.onSubmit).not.toHaveBeenCalled();
+    // The field keeps what was pasted so the mistake can be seen and fixed.
+    expect(byTestId<HTMLInputElement>("secret-request-value-NOTION_API_KEY")?.value).toBe(
+      "Installation access token ntn example",
+    );
   });
 
   it("says what is missing when the request carries no name, and renders no pack text", async () => {
