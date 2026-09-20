@@ -55,8 +55,6 @@ overrides:
   '@electron/get>undici': '^7.29.1'
   # ws DoS (1 alert) — realtime-js in the frontend; not loaded at run time.
   '@supabase/realtime-js>ws': '^8.21.3'
-  # yaml advisory (1 alert, postcss build config).
-  'postcss-load-config>yaml': '^2.8.3'
   # diff ReDoS (1 alert, ts-node in build tooling).
   'ts-node>diff': '^4.0.4'
   # @babel/core advisory (1 alert, frontend build plugin).
@@ -64,3 +62,9 @@ overrides:
   # dompurify advisories (20 alerts). Alert hygiene only: monaco-editor vendors
   # its own copy of DOMPurify and never imports this one.
   'monaco-editor>dompurify': '^3.4.15'
+  # uuid buffer bounds check in v3/v5/v6 (#302) — xcode 3.0.1 pins uuid 7 and is
+  # the only thing in the tree that pulls uuid at all (via @capacitor/cli). It
+  # calls uuid.v4() and nothing else, so the advisory never applied; the bump is
+  # a free way to close the alert rather than dismiss it. Proven drop-in against
+  # the real ios/App/App.xcodeproj: same id shape, same writeSync output.
+  'xcode>uuid': '^11.1.1'

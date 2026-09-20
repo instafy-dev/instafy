@@ -2,7 +2,7 @@
 
 import { act, useState } from "react";
 import { createRoot, type Root } from "react-dom/client";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi, type Mock } from "vitest";
 import { SettingsShell, type SettingsCategory } from "../SettingsShell";
 
 const categories: SettingsCategory[] = [
@@ -32,7 +32,7 @@ describe("SettingsShell available-pane navigation", () => {
   const observers: Array<{
     targets: Set<Element>;
     notify: () => void;
-    disconnect: ReturnType<typeof vi.fn>;
+    disconnect: Mock;
   }> = [];
 
   function Harness({ initialCategory = "people" }: { initialCategory?: string }) {

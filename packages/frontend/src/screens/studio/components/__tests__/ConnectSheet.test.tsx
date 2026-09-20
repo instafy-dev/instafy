@@ -2,7 +2,7 @@
 
 import { act, useEffect } from "react";
 import { createRoot, type Root } from "react-dom/client";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi, type Mock } from "vitest";
 import { ConnectSheet, POPULAR_MIN_AVAILABLE } from "../ConnectSheet";
 import { routeConnectorSelection } from "../connectorRouting";
 import {
@@ -37,13 +37,13 @@ const SOON_IDS = PRODUCT_CONNECTORS.filter((entry) => !isConnectorAvailable(entr
 );
 
 type HarnessSpies = {
-  onConnect: ReturnType<typeof vi.fn>;
-  onSetUpAgain: ReturnType<typeof vi.fn>;
-  onClose: ReturnType<typeof vi.fn>;
-  openImportModal: ReturnType<typeof vi.fn>;
-  beginGithubImport: ReturnType<typeof vi.fn>;
-  openSkillsPanel: ReturnType<typeof vi.fn>;
-  onStateChange: ReturnType<typeof vi.fn>;
+  onConnect: Mock;
+  onSetUpAgain: Mock;
+  onClose: Mock;
+  openImportModal: Mock;
+  beginGithubImport: Mock;
+  openSkillsPanel: Mock;
+  onStateChange: Mock;
 };
 
 function spies(): HarnessSpies {

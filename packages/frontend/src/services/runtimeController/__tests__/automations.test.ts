@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi, type Mock } from "vitest";
 
 const resolveControllerRequestContextMock = vi.hoisted(() => vi.fn());
 const readControllerErrorMock = vi.hoisted(() => vi.fn());
@@ -67,7 +67,7 @@ function okAutomationResponse(): Response {
   });
 }
 
-function requestBody(fetchMock: ReturnType<typeof vi.fn>, index: number) {
+function requestBody(fetchMock: Mock, index: number) {
   const init = fetchMock.mock.calls[index]?.[1] as RequestInit | undefined;
   return JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>;
 }
