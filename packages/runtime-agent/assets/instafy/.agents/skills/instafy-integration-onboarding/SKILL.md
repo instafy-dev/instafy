@@ -1,6 +1,7 @@
 ---
 name: instafy-integration-onboarding
 description: Action-card policy for integration setup and consent-first onboarding.
+routing_keywords: token, api key, secret, connection, portal, dashboard, developer, walk me through, set up, integration, connect
 ---
 
 # Integration onboarding (action-card contract)
