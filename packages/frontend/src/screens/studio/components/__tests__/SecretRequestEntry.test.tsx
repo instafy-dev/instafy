@@ -488,22 +488,33 @@ describe("SecretRequestEntry", () => {
     expect(byTestId("secret-request-value-NOTION_API_KEY")).not.toBeNull();
   });
 
-  it("refuses words pasted in place of the value before anything is sent", async () => {
+  it("names words pasted in place of the value as they land, unmasks them, and holds Save", async () => {
     const request = secretRequest();
     mocks.activeMessages.push(request);
     await renderEntry(request, details());
-    await typeValue("Installation access token ntn example");
-    await pressSave();
+    expect(container.querySelector('[aria-label="Show value"]')).not.toBeNull();
 
-    expect(byTestId("secret-request-error")?.textContent).toBe(
+    await typeValue("Installation access token ntn example");
+
+    // Said under the field, before Save, and the field unmasks: a masked
+    // sentence looks like a token.
+    expect(byTestId("secret-request-value-NOTION_API_KEY-problem")?.textContent).toBe(
       "That has spaces in it, and a token never does. Copy only the value itself, not the words around it.",
     );
+    expect(container.querySelector('[aria-label="Hide value"]')).not.toBeNull();
+    expect(byTestId("secret-request-save")?.getAttribute("data-disabled")).not.toBeNull();
+    await pressSave();
     expect(mocks.createSecret).not.toHaveBeenCalled();
     expect(mocks.onSubmit).not.toHaveBeenCalled();
     // The field keeps what was pasted so the mistake can be seen and fixed.
     expect(byTestId<HTMLInputElement>("secret-request-value-NOTION_API_KEY")?.value).toBe(
       "Installation access token ntn example",
     );
+
+    // The right value clears it and Save opens again.
+    await typeValue("ntn_example");
+    expect(byTestId("secret-request-value-NOTION_API_KEY-problem")).toBeNull();
+    expect(byTestId("secret-request-save")?.getAttribute("data-disabled")).toBeNull();
   });
 
   it("says what is missing when the request carries no name, and renders no pack text", async () => {
