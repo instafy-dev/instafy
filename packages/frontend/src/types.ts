@@ -1,3 +1,4 @@
+import type { ProjectIdentity } from "@instafy/sdk/project-identity";
 export type ProjectType = string;
 
 export type AIModelChoice = string;
@@ -117,7 +118,7 @@ export interface BillingState {
   subscription: BillingSubscriptionSummary | null;
 }
 
-export interface ProjectMetadata {
+export interface ProjectMetadata extends ProjectIdentity {
   projectType: ProjectType;
   projectName: string;
   prompt: string;

@@ -46,4 +46,15 @@ describe("project metadata refreshes", () => {
     expect(current.state.metadata.projectName).toBe("Renamed space");
     expect(write).toHaveBeenCalledTimes(2);
   });
+
+  it("persists appearance, preserves missing fields, and clears explicit nulls", () => {
+    const store = useWorkspaceStore.getState();
+    store.setProjectIdentity(projectId, { projectIcon: "🚀", projectColor: "blue" });
+    store.setProjectIdentity(projectId, { projectIcon: null });
+    const current = useWorkspaceStore.getState();
+    expect(current.projects[projectId].metadata).toMatchObject({ projectIcon: null, projectColor: "blue" });
+    expect(current.state.metadata).toMatchObject({ projectIcon: null, projectColor: "blue" });
+    current.setProjectIdentity(projectId, { projectColor: "blue" });
+    expect(useWorkspaceStore.getState()).toBe(current);
+  });
 });

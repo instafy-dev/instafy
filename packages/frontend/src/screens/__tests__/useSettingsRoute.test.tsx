@@ -3,7 +3,7 @@ import { act, useState } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { MemoryRouter, useLocation, useNavigate, useNavigationType, type NavigateFunction } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { useSettingsRoute } from "../studio/settingsRoute";
+import { buildOrganizationSettingsCategorySearch, useSettingsRoute } from "../studio/settingsRoute";
 
 describe("URL-driven settings selection", () => {
   let root: Root;
@@ -60,6 +60,49 @@ describe("URL-driven settings selection", () => {
     await act(async () => navigate(-1)); expect(state().itemId).toBe("speech");
     await act(async () => navigate(-1)); expect(state().category).toBe("members");
     await act(async () => navigate(-1)); expect(state().category).toBe("billing");
+  });
+
+  it("restores Notifications through Back and Forward in account settings", async () => {
+    await act(async () => root.render(<MemoryRouter initialEntries={["/studio?panel=settings&settingsTab=profile&settingsCategory=notifications"]}><Harness /></MemoryRouter>));
+    expect(state().category).toBe("notifications");
+    await act(async () => select("preferences"));
+    await act(async () => navigate(-1));
+    expect(state().category).toBe("notifications");
+    await act(async () => navigate(1));
+    expect(state().category).toBe("preferences");
+  });
+
+  it("restores Profile and Members for each selected team without changing the active space", async () => {
+    const originalSearch = "?panel=settings&settingsTab=org&settingsOrgId=empty-team&projectId=other-space";
+    await act(async () => root.render(<MemoryRouter initialEntries={[`/studio${originalSearch}`]}><Harness /></MemoryRouter>));
+    const initialKey = state().key;
+    expect(state().category).toBe("profile");
+    await act(async () => select("members"));
+    const membersKey = state().key;
+    expect(state().category).toBe("members");
+    expect(new URLSearchParams(state().search).get("settingsOrgId")).toBe("empty-team");
+    await act(async () => navigate({
+      pathname: "/studio",
+      search: `?${buildOrganizationSettingsCategorySearch(state().search, "profile", "another-team")}`,
+    }));
+    expect(state().category).toBe("profile");
+    expect(new URLSearchParams(state().search).get("settingsOrgId")).toBe("another-team");
+    await act(async () => navigate(-1));
+    expect(state().key).toBe(membersKey);
+    expect(state().category).toBe("members");
+    expect(new URLSearchParams(state().search).get("settingsOrgId")).toBe("empty-team");
+    await act(async () => select("profile"));
+    expect(state().category).toBe("profile");
+    expect(new URLSearchParams(state().search).has("settingsCategory")).toBe(false);
+    await act(async () => select("profile"));
+    await act(async () => navigate(-1));
+    expect(state().key).toBe(membersKey);
+    await act(async () => navigate(-1));
+    expect(state().key).toBe(initialKey);
+    expect(state().category).toBe("profile");
+    await act(async () => navigate(1));
+    expect(state().category).toBe("members");
+    expect(new URLSearchParams(state().search).get("projectId")).toBe("other-space");
   });
 
   it("deduplicates consecutive identical presses and chains distinct presses before React renders", async () => {

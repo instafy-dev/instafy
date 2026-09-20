@@ -27,6 +27,8 @@ import { useProjects } from "../../../projects/useProjects";
 import { useAuth } from "../../../providers/AuthProvider";
 import { ControllerApiError } from "../../../services/runtimeController/core";
 import { useWorkspaceTabs } from "../../../workspace/WorkspaceTabsProvider";
+import { AutomationRunHistoryProvider, AutomationRunStatus } from "./AutomationRunStatus";
+import { getAutomationScheduleLabel } from "./automationRunPresentation";
 import {
   LIST_ROW_FOCUS_WITHIN_RING,
   LIST_ROW_SURFACE_BASE,
@@ -191,7 +193,7 @@ export function AutomationsPanel() {
 }
 
 function ProjectAutomationsPanel({ activeProjectId, userId }: { activeProjectId: string | null; userId: string | null }) {
-  const { openConversationTab } = useWorkspaceTabs();
+  const { openConversationTab, requestUrlPush } = useWorkspaceTabs();
   const { showStatus } = useStatus();
   const queryClient = useQueryClient();
   const queryKey = useMemo(() => ["project-automations", userId, activeProjectId] as const, [userId, activeProjectId]);
@@ -255,6 +257,13 @@ function ProjectAutomationsPanel({ activeProjectId, userId }: { activeProjectId:
   const openEdit = (automation: ControllerAutomation) => {
     setDraft(draftFromAutomation(automation));
     setEditorOpen(true);
+  };
+
+  const openThread = (automation: ControllerAutomation) => {
+    if (!automation.conversationId) return;
+    // Explicit user navigation must supersede the currently routed panel.
+    requestUrlPush();
+    openConversationTab(automation.conversationId);
   };
 
   const persistDraft = async () => {
@@ -415,6 +424,7 @@ function ProjectAutomationsPanel({ activeProjectId, userId }: { activeProjectId:
             </Text>
           </div>
         ) : (
+          <AutomationRunHistoryProvider projectId={activeProjectId} userId={userId} automations={sortedAutomations}>
           <div className="space-y-2">
             {sortedAutomations.map((automation) => {
               const nextRun = formatWhen(automation.nextRunAt);
@@ -424,23 +434,7 @@ function ProjectAutomationsPanel({ activeProjectId, userId }: { activeProjectId:
                 schedule,
                 automation.runtimeMode === "hosted" ? "Cloud" : automation.runtimeMode === "existing" ? "Existing" : "Auto",
                 automation.silentWhenNothingToReport ? "Findings only" : null,
-                nextRun ? `Next ${nextRun}` : null,
               ].filter(Boolean);
-
-              const isDoneOnce =
-                automation.scheduleKind === "once" &&
-                automation.status === "paused" &&
-                !automation.nextRunAt &&
-                Boolean(automation.lastRunAt);
-              const statusLabel = isDoneOnce
-                ? "Done"
-                : automation.status === "paused"
-                  ? "Paused"
-                  : automation.lastError
-                    ? "Error"
-                    : "Active";
-              const statusTone =
-                automation.lastError ? "text-rose-600 dark:text-rose-400" : automation.status === "paused" ? "text-slate-500 dark:text-slate-400" : "";
 
               return (
                 <div
@@ -460,23 +454,34 @@ function ProjectAutomationsPanel({ activeProjectId, userId }: { activeProjectId:
                     <div className="min-w-0 flex-1">
                       <div className="flex items-start justify-between gap-2">
                         <div className="min-w-0">
-                          <div className="flex items-baseline gap-2">
+                          <div className="flex flex-wrap items-baseline gap-x-2 gap-y-1">
                             <Text className={`${DRAWER_LIST_ROW_TEXT_CLASS} font-medium truncate`}>{automation.name}</Text>
-                            <Text variant="caption" className={["text-xs", statusTone].filter(Boolean).join(" ")}>
-                              {statusLabel}
+                            <Text variant="caption" tone="muted" data-testid={`automation-schedule-status-${automation.id}`}>
+                              {getAutomationScheduleLabel(automation)}
                             </Text>
                           </div>
                           <Text className={DRAWER_LIST_ROW_META_CLASS} tone="muted">
                             {mutedMetaParts.join(" · ")}
                           </Text>
+                          <Text variant="caption" tone="muted" className="mt-1" data-testid={`automation-next-run-${automation.id}`}>
+                            Next run: {automation.status === "paused" ? "None scheduled" : nextRun ?? "Not scheduled"}
+                          </Text>
+                          {lastRun ? (
+                            <Text variant="caption" tone="muted">Last launch attempt: {lastRun}</Text>
+                          ) : null}
                           {automation.lastError ? (
-                            <Text variant="caption" className="mt-1 text-rose-600 dark:text-rose-400 line-clamp-2">
-                              {automation.lastError}
+                            <Text variant="caption" tone="danger" className="mt-1 line-clamp-2 break-words [overflow-wrap:anywhere]" data-testid={`automation-launch-error-${automation.id}`}>
+                              Launch failed: {automation.lastError}
                             </Text>
-                          ) : lastRun ? (
-                            <Text variant="caption" tone="muted" className="mt-1">
-                              Last {lastRun}
-                            </Text>
+                          ) : automation.conversationId && automation.lastRunAt ? (
+                            <AutomationRunStatus automation={automation} />
+                          ) : !automation.lastRunAt ? (
+                            <Text variant="caption" tone="muted">No launch recorded yet.</Text>
+                          ) : null}
+                          {automation.conversationId ? (
+                            <Button variant="outline" size="xs" className="mt-2" onPress={() => openThread(automation)} data-testid={`automation-open-thread-${automation.id}`}>
+                              View thread
+                            </Button>
                           ) : null}
                         </div>
                         <MenuTrigger>
@@ -501,9 +506,7 @@ function ProjectAutomationsPanel({ activeProjectId, userId }: { activeProjectId:
                                 } else if (action === "toggle") {
                                   void handleTogglePause(automation);
                                 } else if (action === "thread") {
-                                  if (automation.conversationId) {
-                                    openConversationTab(automation.conversationId);
-                                  }
+                                  openThread(automation);
                                 } else if (action === "delete") {
                                   void handleDelete(automation);
                                 }
@@ -553,6 +556,7 @@ function ProjectAutomationsPanel({ activeProjectId, userId }: { activeProjectId:
               );
             })}
           </div>
+          </AutomationRunHistoryProvider>
         )}
       </div>
 

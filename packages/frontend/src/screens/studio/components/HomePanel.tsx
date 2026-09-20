@@ -1,6 +1,9 @@
-import { Fragment, useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
+import { Fragment, useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { useNavigate } from "react-router-dom";
+import type { HomeNotifications } from "../../../notifications/useNotificationCenter";
 import { useStudioNavigation } from "../../../navigation/useStudioNavigation";
-import { ChatLines, Check, Clock, Group, Plus, User, WarningTriangle } from "iconoir-react";
+import { ChatLines, Check, Clock, Group, Plus, WarningTriangle } from "iconoir-react";
+import { HumanAvatar } from "../../../components/HumanAvatar";
 import { AttentionBadge } from "../../../components/AttentionBadge";
 import { Button, IconButton } from "../../../components/Button";
 import { FeedRow } from "../../../components/FeedRow";
@@ -26,6 +29,8 @@ import {
   type HomeFeedEvent,
   type HomeFeedOrganizationRef,
 } from "../homeFeed";
+import { getHomeNotificationTarget } from "../homeNotifications";
+import type { HomeSupportReport } from "../homeSupportReports";
 import { useHomeActivity } from "../useHomeActivity";
 import { useWorkspaceControls } from "../workspaceControls";
 import { CHAT_COLUMN_CLASS_NAME } from "./ChatColumn";
@@ -59,12 +64,6 @@ function usablePreview(value: string | null | undefined): string | null {
     return null;
   }
   return /^\d{1,3}$/.test(trimmed) ? null : trimmed;
-}
-
-function initialsFor(name: string | null | undefined): string {
-  const parts = (name ?? "").trim().split(/\s+/).filter(Boolean).slice(0, 2);
-  const initials = parts.map((part) => part[0]?.toUpperCase() ?? "").join("");
-  return initials || "?";
 }
 
 function TeamChip({
@@ -149,7 +148,7 @@ function LaneMore({ label, onPress, testId, disabled = false, className }: {
 }
 
 function EventIcon({ event }: { event: HomeFeedEvent }) {
-  if (event.kind === "run_failed") {
+  if (event.kind === "run_failed" || event.kind === "automation_failed") {
     return <WarningTriangle className="h-4 w-4 text-rose-600 dark:text-rose-300" aria-hidden="true" />;
   }
   // Identity when it is real (a named agent or a person); state only when
@@ -165,15 +164,10 @@ function EventIcon({ event }: { event: HomeFeedEvent }) {
     );
   }
   if (event.actor?.kind === "user") {
-    // A person: their initials, or a plain figure when no name is on file.
-    const initials = initialsFor(event.actor.displayName);
+    const actor = event.source.type === "activity" ? event.source.item.actor : null;
     return (
-      <span
-        className="inline-flex h-7 w-7 items-center justify-center rounded-full bg-slate-200 text-xxs font-medium text-slate-700 dark:bg-slate-700 dark:text-slate-200"
-        aria-hidden="true"
-      >
-        {initials === "?" ? <User className="h-4 w-4" aria-hidden="true" /> : initials}
-      </span>
+      <HumanAvatar userId={actor?.kind === "user" ? actor.userId : null}
+        displayName={event.actor.displayName} className="h-7 w-7 text-xxs" />
     );
   }
   if (event.kind === "running") {
@@ -182,7 +176,7 @@ function EventIcon({ event }: { event: HomeFeedEvent }) {
   if (event.kind === "queued") {
     return <Clock className="h-4 w-4 text-amber-600 dark:text-amber-300" aria-hidden="true" />;
   }
-  if (event.kind === "run_finished") {
+  if (event.kind === "run_finished" || event.kind === "automation_completed" || event.kind === "support_resolved") {
     return <Check className="h-4 w-4 text-emerald-600 dark:text-emerald-300" aria-hidden="true" />;
   }
   return <ChatLines className="h-4 w-4 text-slate-400 dark:text-slate-500" aria-hidden="true" />;
@@ -196,6 +190,13 @@ function statusSubtitle(event: HomeFeedEvent, viewerUserId: string | null): stri
       return "Waiting for a runtime";
     case "run_finished":
       return "Run finished";
+    case "support_reply":
+    case "support_resolved":
+      return null;
+    case "automation_completed":
+      return event.source.type === "notification" ? null : "Automation finished";
+    case "automation_failed":
+      return event.source.type === "notification" ? null : "Automation failed";
     case "run_failed":
       return event.statusLabel ?? "Run failed";
     case "conversation": {
@@ -214,11 +215,17 @@ function statusSubtitle(event: HomeFeedEvent, viewerUserId: string | null): stri
 }
 
 interface HomePanelProps {
+  notifications?: HomeNotifications;
+  supportReports?: HomeSupportReport[];
+  supportLoading?: boolean;
+  supportError?: string | null;
+  refreshSupport?: () => Promise<void>;
+  onOpenSupport?: (reportId: string) => void;
   inboxItems?: NotificationInboxItem[];
   refreshInbox?: (options?: { force?: boolean }) => Promise<NotificationInboxItem[]>;
 }
 
-export function HomePanel({ inboxItems: sharedInboxItems = [], refreshInbox }: HomePanelProps = {}) {
+export function HomePanel({ inboxItems: sharedInboxItems = [], refreshInbox, notifications, supportReports, supportLoading = false, supportError, refreshSupport, onOpenSupport }: HomePanelProps = {}) {
   const { projectList, activeProjectId } = useProjects();
   const {
     conversations,
@@ -229,10 +236,15 @@ export function HomePanel({ inboxItems: sharedInboxItems = [], refreshInbox }: H
   const { showStatus } = useStatus();
   const { openConversationTab } = useWorkspaceTabs();
   const { userEmail, onStartNewProject, onStartNewConversation, onOpenOrgSettings } = useWorkspaceControls();
-  const { user: authUser } = useAuth();
+  const { user: authUser, session: authSession } = useAuth();
+  const authIdentity = useRef({ userId: authUser?.id, token: authSession?.access_token });
+  if (authIdentity.current.userId !== authUser?.id || authIdentity.current.token !== authSession?.access_token) authIdentity.current = { userId: authUser?.id, token: authSession?.access_token };
+  const authVisit = authIdentity.current;
   const viewerUserId = authUser?.id ?? null;
   const navigateTo = useStudioNavigation();
-  const [locallyDismissedKeys, setLocallyDismissedKeys] = useState<string[]>([]);
+  const navigate = useNavigate();
+  const conversationsRef = useRef(conversations);
+  conversationsRef.current = conversations;
   const [teamFilter, setTeamFilter] = useState(HOME_TEAM_FILTER_ALL);
   const [needsExpanded, setNeedsExpanded] = useState(false);
   const [recentLimit, setRecentLimit] = useState(RECENT_LIMIT);
@@ -303,18 +315,7 @@ export function HomePanel({ inboxItems: sharedInboxItems = [], refreshInbox }: H
     () => buildHomeAttentionEntries({ conversations, inboxItems: sharedInboxItems, currentSpaceName }),
     [conversations, currentSpaceName, sharedInboxItems],
   );
-  useEffect(() => {
-    setLocallyDismissedKeys((current) => {
-      if (current.length === 0) return current;
-      const live = new Set(attentionEntries.map((entry) => entry.key));
-      const next = current.filter((key) => live.has(key));
-      return next.length === current.length ? current : next;
-    });
-  }, [attentionEntries]);
-  const visibleAttentionEntries = useMemo(
-    () => attentionEntries.filter((entry) => !locallyDismissedKeys.includes(entry.key)),
-    [attentionEntries, locallyDismissedKeys],
-  );
+  const visibleAttentionEntries = attentionEntries;
 
   const feed = useMemo(
     () =>
@@ -322,6 +323,8 @@ export function HomePanel({ inboxItems: sharedInboxItems = [], refreshInbox }: H
         attentionEntries: visibleAttentionEntries,
         recentConversations: [],
         activity: activityItems,
+        notifications: notifications?.page.items,
+        supportReports,
         serverLastSeenEventId,
         organizations,
         projects: projectList,
@@ -330,7 +333,7 @@ export function HomePanel({ inboxItems: sharedInboxItems = [], refreshInbox }: H
         teamFilter,
         lastSeenAt: null,
       }),
-    [activityItems, conversations, currentProject, organizations, projectList, serverLastSeenEventId, teamFilter, visibleAttentionEntries],
+    [activityItems, conversations, currentProject, notifications?.page.items, organizations, projectList, serverLastSeenEventId, teamFilter, visibleAttentionEntries, supportReports],
   );
   const activityTotal = useMemo(() => feed.activity.reduce((count, day) => count + day.events.length, 0), [feed.activity]);
   const activityEvents = useMemo(
@@ -339,15 +342,43 @@ export function HomePanel({ inboxItems: sharedInboxItems = [], refreshInbox }: H
   );
 
   const acknowledgeInbox = useCallback(
-    async (conversationId: string): Promise<boolean> => {
-      const result = await controllerClient.notifications.acknowledgeInboxItem({ conversationId });
-      if (!result.success) {
-        showStatus(result.error ?? "Unable to mark this as read.", "error", 4000);
-        return false;
+    async (event: HomeFeedEvent): Promise<boolean> => {
+      if (authIdentity.current !== authVisit) return false;
+      const localId = event.source.type === "conversation" ? event.source.localConversationId : null;
+      const local = conversations.find(item => item.localId === localId);
+      const targetConversationId = local?.controllerId ?? event.notifications?.map(getHomeNotificationTarget).find(target => target?.conversationId)?.conversationId;
+      const persistedLast = local?.messages.findLast(message => isUUID(message.id));
+      const item = event.source.type === "inbox" && event.source.entry.source === "inbox"
+        ? event.source.entry.inboxItem
+        : sharedInboxItems.find(item => item.conversationId === targetConversationId) ??
+          (local?.controllerId && isUUID(local.controllerId) && persistedLast ? { conversationId: local.controllerId, lastMessageId: persistedLast.id } : null);
+      if (!item) return event.notifications?.length ? (await notifications?.markRead(event.notifications)) === true : true;
+      const ids = [...new Set((event.notifications ?? []).filter(item => !item.readAt && !item.archivedAt).map(item => item.id))];
+      let inboxAcknowledged = false;
+      // Keep requests bounded while acknowledging exactly this row's snapshot.
+      for (let offset = 0; offset < Math.max(1, ids.length); offset += 100) {
+        if (authIdentity.current !== authVisit) return false;
+        const chunk = ids.slice(offset, offset + 100);
+        const result = await controllerClient.notifications.acknowledgeInboxItem({
+          conversationId: item.conversationId,
+          expectedLastMessageId: offset === 0 ? item.lastMessageId : undefined,
+          notificationIds: chunk, accessToken: authVisit.token,
+          expectedUserId: authVisit.userId,
+          isCurrent: () => authIdentity.current === authVisit,
+        });
+        if (authIdentity.current !== authVisit) return false;
+        if (!result.success || result.inboxAcknowledged === undefined ||
+          !chunk.every(id => result.acknowledgedNotificationIds?.includes(id))) {
+          showStatus(result.error ?? "Unable to mark this update as read. Please refresh and try again.", "error", 4000);
+          return false;
+        }
+        if (offset === 0) inboxAcknowledged = result.inboxAcknowledged;
       }
-      return true;
+      await Promise.all([refreshInbox?.({ force: true }), notifications?.refresh({ force: true })]);
+      // A concurrent reply leaves the server inbox unread; never hide its row.
+      return inboxAcknowledged;
     },
-    [showStatus],
+    [authVisit, conversations, notifications, refreshInbox, sharedInboxItems, showStatus],
   );
 
   const openConversationById = useCallback(
@@ -367,7 +398,20 @@ export function HomePanel({ inboxItems: sharedInboxItems = [], refreshInbox }: H
 
   const openEvent = useCallback(
     (event: HomeFeedEvent) => {
+      if (event.source.type === "support") {
+        if (onOpenSupport) onOpenSupport(event.source.report.id);
+        else navigate(`/studio?supportReportId=${event.source.report.id}`);
+        return;
+      }
+      if (event.source.type === "notification") {
+        void notifications?.markRead(event.notifications ?? [event.source.item]);
+        const supportId = getHomeNotificationTarget(event.source.item)?.supportReportId;
+        if (supportId && onOpenSupport) onOpenSupport(supportId);
+        else navigate(event.source.item.url);
+        return;
+      }
       if (event.source.type === "conversation") {
+        void acknowledgeInbox(event);
         openLocalConversation(event.source.localConversationId);
         return;
       }
@@ -376,13 +420,14 @@ export function HomePanel({ inboxItems: sharedInboxItems = [], refreshInbox }: H
         const projectId = item.projectId.trim();
         const conversationId = item.conversationId.trim();
         if (!projectId || !conversationId) return;
-        void acknowledgeInbox(conversationId).then((ok) => {
-          if (ok) void refreshInbox?.({ force: true });
-        });
+        void acknowledgeInbox(event);
         openConversationById(projectId, conversationId);
         return;
       }
       if (event.source.type === "activity") {
+        if (event.notifications?.length) void notifications?.markRead(event.notifications);
+        const destination = event.notifications?.map(getHomeNotificationTarget).find(target => target?.kind === "automation");
+        if (destination) { navigate(destination.url); return; }
         const item = event.source.item;
         const projectId = item.project?.id;
         if (!projectId) return;
@@ -402,27 +447,27 @@ export function HomePanel({ inboxItems: sharedInboxItems = [], refreshInbox }: H
         openConversationById(target.projectId, target.conversationControllerId);
       }
     },
-    [acknowledgeInbox, activeProjectId, conversations, openConversationById, openLocalConversation, refreshInbox],
+    [acknowledgeInbox, activeProjectId, conversations, navigate, notifications, onOpenSupport, openConversationById, openLocalConversation],
   );
 
   const dismissEvent = useCallback(
     async (event: HomeFeedEvent): Promise<boolean> => {
-      if (event.source.type === "recent" || event.source.type === "activity") return false;
+      if (event.source.type === "support") return false;
+      if (event.source.type === "notification" || event.source.type === "activity" || event.source.type === "recent") {
+        return event.notifications?.length ? acknowledgeInbox(event) : false;
+      }
       const entry: HomeAttentionEntry = event.source.entry;
-      setLocallyDismissedKeys((current) => (current.includes(entry.key) ? current : [...current, entry.key]));
-      if (entry.source === "conversation") {
-        markConversationRead(entry.localConversationId);
-        return true;
-      }
-      const conversationId = entry.inboxItem.conversationId.trim();
-      if (!conversationId) return true;
-      const ok = await acknowledgeInbox(conversationId);
-      if (!ok) {
-        setLocallyDismissedKeys((current) => current.filter((key) => key !== entry.key));
-      }
-      return ok;
+      if (entry.source === "inbox") return acknowledgeInbox(event);
+      const before = conversationsRef.current.find(item => item.localId === entry.localConversationId);
+      if (!before || !(await acknowledgeInbox(event)) || authIdentity.current !== authVisit) return false;
+      const after = conversationsRef.current.find(item => item.localId === entry.localConversationId);
+      // Reducer MARK_READ clears current state. Only invoke it if the displayed
+      // conversation has not changed while its server acknowledgement was pending.
+      if (after !== before) return false;
+      markConversationRead(entry.localConversationId);
+      return true;
     },
-    [acknowledgeInbox, markConversationRead],
+    [acknowledgeInbox, authVisit, markConversationRead],
   );
 
   const dismissibleNeeds = useMemo(() => feed.needs.filter((event) => event.dismissible), [feed.needs]);
@@ -476,19 +521,24 @@ export function HomePanel({ inboxItems: sharedInboxItems = [], refreshInbox }: H
   const visibleNeeds = needsExpanded ? feed.needs : feed.needs.slice(0, UNREAD_PREVIEW_LIMIT);
   const canExpandUnread = !needsExpanded && feed.needs.length > COMPACT_UNREAD_PREVIEW_LIMIT;
   const filteredTeam = feed.teams.find((team) => team.key === feed.teamFilter) ?? null;
-  const lanesEmpty = feed.needs.length === 0 && activityEvents.length === 0 && !activityLoading;
+  const feedLoading = activityLoading || notifications?.loading === true || supportLoading;
+  const feedError = activityError || notifications?.error || supportError;
+  const moreHistory = activityHasMore || Boolean(notifications?.page.nextCursor);
+  const lanesEmpty = feed.needs.length === 0 && activityEvents.length === 0 && !feedLoading;
   const filteredTeamHasSpaces =
     filteredTeam !== null && projectList.some((project) => teamKeyForOrgId(project.orgId) === filteredTeam.key);
-  const canShowMoreRecent = activityTotal > recentLimit || activityHasMore;
+  const canShowMoreRecent = activityTotal > recentLimit || moreHistory;
   const handleShowMoreRecent = useCallback(() => {
     if (activityTotal > recentLimit) {
       setRecentLimit((limit) => limit + RECENT_LIMIT);
       return;
     }
-    void loadMoreActivity().then((loaded) => {
-      if (loaded) setRecentLimit((limit) => limit + RECENT_LIMIT);
-    });
-  }, [activityTotal, loadMoreActivity, recentLimit]);
+    if (activityLoadingMore || notifications?.loading) return;
+    void Promise.all([
+      activityHasMore ? loadMoreActivity() : Promise.resolve(false),
+      notifications?.page.nextCursor ? notifications.loadMore().then(() => true) : Promise.resolve(false),
+    ]).then(results => { if (results.some(Boolean)) setRecentLimit(limit => limit + RECENT_LIMIT); });
+  }, [activityHasMore, activityLoadingMore, activityTotal, loadMoreActivity, notifications, recentLimit]);
 
   const renderRow = (event: HomeFeedEvent, options: { divider: boolean }) => {
     const when = formatRelativeTimestamp(event.at);
@@ -508,7 +558,7 @@ export function HomePanel({ inboxItems: sharedInboxItems = [], refreshInbox }: H
         ? "Scheduled"
         : null;
     const rest =
-      [scheduled, updates, statusSubtitle(event, viewerUserId), event.kind === "run_failed" ? null : usablePreview(event.preview)].filter(Boolean).join(" · ") ||
+      [scheduled, updates, statusSubtitle(event, viewerUserId), event.kind === "run_failed" || event.source.type === "notification" ? null : usablePreview(event.preview)].filter(Boolean).join(" · ") ||
       null;
     return (
       <div key={event.key} className={[ROW_HOVER_CLASS, options.divider ? ROW_DIVIDER_CLASS : ""].filter(Boolean).join(" ")}>
@@ -566,6 +616,13 @@ export function HomePanel({ inboxItems: sharedInboxItems = [], refreshInbox }: H
   return (
     <SettingsShell title="Home" hideTitle testId="home-panel">
       <div className={`${CHAT_COLUMN_CLASS_NAME} @container/home min-w-0 space-y-4`}>
+        {supportError ? <div role="alert" className="flex flex-wrap items-center gap-2 px-3 text-sm text-rose-600 dark:text-rose-300">
+          <span>{supportError}</span><Button variant="ghost" size="sm" onPress={() => void refreshSupport?.()} isDisabled={supportLoading}>Retry support updates</Button>
+        </div> : null}
+        {notifications?.error ? <div role="alert" className="flex flex-wrap items-center gap-2 px-3 text-sm text-rose-600 dark:text-rose-300">
+          <span>{notifications.error}</span>
+          <Button variant="ghost" size="sm" onPress={() => void notifications.refresh()} isDisabled={notifications.loading}>Retry notifications</Button>
+        </div> : null}
         <header className="flex items-center justify-between gap-2">
           {showTeamChips ? (
             <div
@@ -613,7 +670,7 @@ export function HomePanel({ inboxItems: sharedInboxItems = [], refreshInbox }: H
           </div>
         ) : null}
 
-        {feed.isEmpty && !activityLoading && !activityHasMore && !activityError ? (
+        {feed.isEmpty && !feedLoading && !moreHistory && !feedError ? (
           <section className="space-y-3" data-testid="home-empty">
             <Heading level={2} variant="subtitle">
               Nothing here yet
@@ -633,23 +690,23 @@ export function HomePanel({ inboxItems: sharedInboxItems = [], refreshInbox }: H
                 </Button>
               ) : null}
               {onOpenOrgSettings ? (
-                <Button variant="outline" size="sm" radius="xl" className="gap-2" onPress={onOpenOrgSettings}>
+                <Button variant="outline" size="sm" radius="xl" className="gap-2" data-testid="home-invite-people" onPress={() => onOpenOrgSettings(newSpaceOrgId, "members")}>
                   <Group className="h-4 w-4" aria-hidden="true" />
                   Invite people
                 </Button>
               ) : null}
             </div>
           </section>
-        ) : filteredTeam && lanesEmpty && !activityError ? (
+        ) : filteredTeam && lanesEmpty && !feedError ? (
           // A team with nothing in it yet is an invitation, not two empty lanes.
           <section className={`space-y-2 py-4 ${LANE_INSET_CLASS}`} data-testid="home-filter-empty">
             <Text as="p" variant="body" tone="muted">
-              {activityHasMore ? `No activity from ${filteredTeam.name} in the loaded history.` : filteredTeamHasSpaces ? `Quiet in ${filteredTeam.name} so far.` : `No spaces in ${filteredTeam.name} yet.`}
+              {moreHistory ? `No activity from ${filteredTeam.name} in the loaded history.` : filteredTeamHasSpaces ? `Quiet in ${filteredTeam.name} so far.` : `No spaces in ${filteredTeam.name} yet.`}
             </Text>
-            {activityHasMore ? (
-              <LaneMore label={activityLoadingMore ? "Loading…" : "Load older activity"} onPress={handleShowMoreRecent} disabled={activityLoadingMore} testId="home-recent-load-older" className="-mx-3" />
+            {moreHistory ? (
+              <LaneMore label={activityLoadingMore || notifications?.loading ? "Loading…" : "Load older activity"} onPress={handleShowMoreRecent} disabled={activityLoadingMore || notifications?.loading} testId="home-recent-load-older" className="-mx-3" />
             ) : null}
-            {!activityHasMore && !filteredTeamHasSpaces && onStartNewProject ? (
+            {!moreHistory && !filteredTeamHasSpaces && onStartNewProject ? (
               <Button
                 variant="outline"
                 size="sm"
@@ -696,10 +753,10 @@ export function HomePanel({ inboxItems: sharedInboxItems = [], refreshInbox }: H
             ) : null}
 
             <section data-testid="home-recent-section">
-              <LaneHeader label="Recent activity" action={activityLoading ? <Spinner size="xs" /> : null} />
-              {activityEvents.length === 0 && !activityLoading && !activityError ? (
+              <LaneHeader label="Recent activity" action={feedLoading ? <span role="status" aria-label="Loading activity"><Spinner size="xs" /></span> : null} />
+              {activityEvents.length === 0 && !feedLoading && !feedError ? (
                 <Text as="p" variant="body" tone="muted" className={`py-2 ${LANE_INSET_CLASS}`} data-testid="home-recent-empty">
-                  {activityHasMore ? "No recent activity in the loaded history." : "Quiet so far."}
+                  {moreHistory ? "No recent activity in the loaded history." : "Quiet so far."}
                 </Text>
               ) : null}
               {(() => {
@@ -745,7 +802,7 @@ export function HomePanel({ inboxItems: sharedInboxItems = [], refreshInbox }: H
                 });
               })()}
               {canShowMoreRecent ? (
-                <LaneMore label={activityLoadingMore ? "Loading…" : activityEvents.length === 0 ? "Load older activity" : "Show more"} onPress={handleShowMoreRecent} disabled={activityLoadingMore} testId={activityEvents.length === 0 ? "home-recent-load-older" : "home-recent-show-more"} />
+                <LaneMore label={activityLoadingMore || notifications?.loading ? "Loading…" : activityEvents.length === 0 ? "Load older activity" : "Show more"} onPress={handleShowMoreRecent} disabled={activityLoadingMore || notifications?.loading} testId={activityEvents.length === 0 ? "home-recent-load-older" : "home-recent-show-more"} />
               ) : null}
             </section>
           </div>

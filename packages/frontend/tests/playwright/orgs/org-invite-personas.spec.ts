@@ -1,4 +1,5 @@
 import { test, expect, type Page, type Browser } from "@playwright/test";
+import { openTeamDirectory } from "../utils/sidebar.js";
 import {
 import { chooseOption } from "../utils/select.js";
   createControllerOrgAndProject,
@@ -191,7 +192,7 @@ async function activateProject(
 }
 
 async function openOrgSettings(page: Page) {
-  await page.getByTestId("sidebar-project-button").click();
+  await openTeamDirectory(page);
   await expect(page.getByTestId("sidebar-project-switcher-menu")).toBeVisible();
   await page.getByTestId("sidebar-org-settings-button").click();
   await expect(page.getByTestId("settings-panel")).toBeVisible();

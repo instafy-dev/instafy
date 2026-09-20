@@ -3,6 +3,8 @@
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import type { ControllerBugReportSummary } from "../../../../services/runtimeController/bugReports";
+import { NOTIFICATION_RECEIVED_EVENT } from "../../../../notifications/notificationPresentation";
 
 const mocks = vi.hoisted(() => ({
   claimResolutionAlerts: vi.fn(),
@@ -58,7 +60,7 @@ const REPORT_ID = "11111111-1111-4111-8111-111111111111";
 
 function page(unreadCount: number, unnotifiedResolutionCount: number) {
   return {
-    reports: [],
+    reports: [] as ControllerBugReportSummary[],
     hasMore: false,
     nextCursor: null,
     unreadCount,
@@ -67,7 +69,7 @@ function page(unreadCount: number, unnotifiedResolutionCount: number) {
   };
 }
 
-function Harness({ userId }: { userId: string | null }) {
+function Harness({ userId, legacyResolutionToasts }: { userId: string | null; legacyResolutionToasts?: boolean }) {
   const support = useStudioBugReportController({
     currentUserId: userId,
     activeProjectId: null,
@@ -76,13 +78,27 @@ function Harness({ userId }: { userId: string | null }) {
     activeRuntimeId: null,
     controllerProjectMissing: false,
     buildLogs: [],
+    legacyResolutionToasts,
   });
   return (
     <>
       <output data-testid="support-unread-count">{support.supportUnreadCount}</output>
+      <output data-testid="support-unread-reports">{JSON.stringify(support.supportUnreadReports)}</output>
+      <output data-testid="support-loading">{String(support.supportNotificationsLoading)}</output>
+      <output data-testid="support-error">{support.supportNotificationsError}</output>
+      <button onClick={() => void support.refreshSupportNotifications(false)}>Retry support</button>
       {support.dialogs}
     </>
   );
+}
+
+function unreadReport(overrides: Partial<ControllerBugReportSummary> = {}): ControllerBugReportSummary {
+  return {
+    id: REPORT_ID, message: "My tab cannot be dragged", createdAt: "2026-09-01T12:00:00Z", activityAt: "2026-09-06T12:00:00Z", updatedAt: null,
+    projectId: null, status: "resolved", screenshotCount: 0, customerLastMessageAt: null,
+    supportLastMessageAt: "2026-09-05T12:00:00Z", resolvedAt: "2026-09-06T12:00:00Z", hasUnreadResolution: true, hasUnreadSupportActivity: true,
+    ...overrides,
+  };
 }
 
 async function flushAsyncEffects() {
@@ -233,5 +249,93 @@ describe("useStudioBugReportController support notifications", () => {
     });
     await flushAsyncEffects();
     expect(container.querySelector('[data-testid="support-unread-count"]')?.textContent).toBe("1");
+  });
+
+  it("publishes customer-safe unread summaries even when legacy resolution toasts are disabled", async () => {
+    mocks.listReports.mockResolvedValue({ ...page(1, 1), reports: [unreadReport(), unreadReport({ id: "22222222-2222-4222-8222-222222222222", hasUnreadSupportActivity: false })] });
+    await act(async () => root.render(<Harness userId="user-a" legacyResolutionToasts={false} />));
+    await flushAsyncEffects();
+    const reports = JSON.parse(container.querySelector('[data-testid="support-unread-reports"]')!.textContent!);
+    expect(reports).toEqual([{
+      id: REPORT_ID, title: "My tab cannot be dragged", projectId: null, activityAt: "2026-09-06T12:00:00Z",
+      supportLastMessageAt: "2026-09-05T12:00:00Z", resolvedAt: "2026-09-06T12:00:00Z", hasUnreadResolution: true,
+    }]);
+    expect(mocks.claimResolutionAlerts).not.toHaveBeenCalled();
+    expect(container.querySelector('[data-testid="support-loading"]')?.textContent).toBe("false");
+  });
+
+  it("loads past the first page until all counted unread reports have a Home destination", async () => {
+    const firstCursor = { activityAt: "2026-09-04T12:00:00Z", id: REPORT_ID };
+    const secondId = "22222222-2222-4222-8222-222222222222";
+    const secondCursor = { activityAt: "2026-09-02T12:00:00Z", id: secondId };
+    mocks.listReports
+      .mockResolvedValueOnce({ ...page(2, 0), reports: [unreadReport({ hasUnreadSupportActivity: false })], hasMore: true, nextCursor: firstCursor })
+      .mockResolvedValueOnce({ ...page(2, 0), reports: [unreadReport()], hasMore: true, nextCursor: secondCursor })
+      .mockResolvedValueOnce({ ...page(2, 0), reports: [unreadReport({ id: secondId })], hasMore: true, nextCursor: { activityAt: "2026-09-01T12:00:00Z", id: secondId } });
+    await act(async () => root.render(<Harness userId="user-a" />));
+    await flushAsyncEffects();
+    expect(mocks.listReports).toHaveBeenNthCalledWith(2, 100, firstCursor, "user-a");
+    expect(mocks.listReports).toHaveBeenNthCalledWith(3, 100, secondCursor, "user-a");
+    expect(mocks.listReports).toHaveBeenCalledTimes(3);
+    const reports = JSON.parse(container.querySelector('[data-testid="support-unread-reports"]')!.textContent!);
+    expect(reports.map((report: { id: string }) => report.id)).toEqual([REPORT_ID, secondId]);
+    expect(container.querySelector('[data-testid="support-unread-count"]')?.textContent).toBe("2");
+  });
+
+  it("abandons old-account pagination without exposing its summaries to the next account", async () => {
+    let resolveOldPage!: (value: ReturnType<typeof page>) => void;
+    const pending = new Promise<ReturnType<typeof page>>(resolve => { resolveOldPage = resolve; });
+    mocks.listReports
+      .mockResolvedValueOnce({ ...page(1, 0), hasMore: true, nextCursor: { activityAt: "2026-09-04T12:00:00Z", id: REPORT_ID } })
+      .mockReturnValueOnce(pending)
+      .mockResolvedValue(page(0, 0));
+    await act(async () => root.render(<Harness userId="user-a" />));
+    await flushAsyncEffects();
+    expect(container.querySelector('[data-testid="support-loading"]')?.textContent).toBe("true");
+    await act(async () => root.render(<Harness userId="user-b" />));
+    await act(async () => resolveOldPage({ ...page(1, 0), reports: [unreadReport()] }));
+    await flushAsyncEffects();
+    expect(container.querySelector('[data-testid="support-unread-reports"]')?.textContent).toBe("[]");
+    expect(container.querySelector('[data-testid="support-unread-count"]')?.textContent).toBe("0");
+    expect(container.querySelector('[data-testid="support-loading"]')?.textContent).toBe("false");
+    expect(mocks.listReports).toHaveBeenCalledTimes(3);
+  });
+
+  it("retains previous support rows on refresh failure and allows a quiet retry", async () => {
+    mocks.listReports.mockResolvedValueOnce({ ...page(1, 0), reports: [unreadReport()] }).mockRejectedValueOnce(new Error("offline")).mockResolvedValue(page(0, 0));
+    await act(async () => root.render(<Harness userId="user-a" />));
+    await flushAsyncEffects();
+    await act(async () => window.dispatchEvent(new Event("focus")));
+    await flushAsyncEffects();
+    expect(container.querySelector('[data-testid="support-unread-reports"]')?.textContent).toContain(REPORT_ID);
+    expect(container.querySelector('[data-testid="support-error"]')?.textContent).toContain("couldn’t be loaded");
+    expect(container.querySelector('[data-testid="support-loading"]')?.textContent).toBe("false");
+    await act(async () => (container.querySelector("button") as HTMLButtonElement).click());
+    await flushAsyncEffects();
+    expect(container.querySelector('[data-testid="support-unread-reports"]')?.textContent).toBe("[]");
+    expect(container.querySelector('[data-testid="support-error"]')?.textContent).toBe("");
+    expect(mocks.showStatus).not.toHaveBeenCalled();
+  });
+
+  it("refreshes source support read state immediately after Home or the report acknowledges durable activity", async () => {
+    mocks.listReports.mockResolvedValueOnce({ ...page(1, 0), reports: [unreadReport()] }).mockResolvedValue(page(0, 1));
+    await act(async () => root.render(<Harness userId="user-a" />));
+    await flushAsyncEffects();
+    expect(container.querySelector('[data-testid="support-unread-count"]')?.textContent).toBe("1");
+    await act(async () => window.dispatchEvent(new Event(NOTIFICATION_RECEIVED_EVENT)));
+    await flushAsyncEffects();
+    expect(container.querySelector('[data-testid="support-unread-count"]')?.textContent).toBe("0");
+    expect(container.querySelector('[data-testid="support-unread-reports"]')?.textContent).toBe("[]");
+    expect(mocks.claimResolutionAlerts).not.toHaveBeenCalled();
+  });
+
+  it("stops a repeated paging cursor and exposes a retry instead of looping forever", async () => {
+    const repeating = { ...page(2, 0), reports: [], hasMore: true, nextCursor: { activityAt: "2026-09-04T12:00:00Z", id: REPORT_ID } };
+    mocks.listReports.mockResolvedValue(repeating);
+    await act(async () => root.render(<Harness userId="user-a" />));
+    await flushAsyncEffects();
+    expect(mocks.listReports).toHaveBeenCalledTimes(2);
+    expect(container.querySelector('[data-testid="support-error"]')?.textContent).toContain("couldn’t be loaded");
+    expect(container.querySelector('[data-testid="support-loading"]')?.textContent).toBe("false");
   });
 });

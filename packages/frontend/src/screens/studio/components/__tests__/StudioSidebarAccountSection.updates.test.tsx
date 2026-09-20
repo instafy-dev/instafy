@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 
-import { act, createRef, type ComponentProps } from "react";
+import { act, createRef, useState, type ComponentProps } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { AppUpdatePresentation } from "../../../../updates/releaseMetadata";
@@ -30,6 +30,9 @@ describe("StudioSidebarAccountSection update indicator", () => {
 
   afterEach(async () => {
     await act(async () => root.unmount());
+    // React Aria restores overlay focus on the next frame. Finish it before
+    // another test creates a new focus scope.
+    await act(async () => new Promise<void>(resolve => requestAnimationFrame(() => resolve())));
     container.remove();
     delete (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT;
   });
@@ -39,24 +42,27 @@ describe("StudioSidebarAccountSection update indicator", () => {
     updatePresentation: AppUpdatePresentation;
     profileMenuOpen?: boolean;
     onOpenSupport?: () => void;
-    supportUnreadCount?: number;
+    presentation?: "sidebar" | "header";
+    onOpenProfileSettings?: () => void;
+    onSignOut?: () => void;
     installEntry?: ComponentProps<typeof StudioSidebarAccountSection>["installEntry"];
     isLargeScreen?: boolean;
   }) {
-    await act(async () => {
-      root.render(
-        <StudioSidebarAccountSection
+    function Account() {
+      const [open, setOpen] = useState(input.profileMenuOpen ?? false);
+      return <StudioSidebarAccountSection
           footerRef={createRef<HTMLDivElement>()}
+          presentation={input.presentation}
+          onOpenProfileSettings={input.onOpenProfileSettings ?? vi.fn()}
+          onSignOut={input.onSignOut ?? vi.fn()}
           showLabels={input.showLabels}
           collapsedSidebarDensity="comfortable"
-          profileMenuOpen={input.profileMenuOpen ?? false}
-          onProfileMenuOpenChange={vi.fn()}
+          profileMenuOpen={open}
+          onProfileMenuOpenChange={setOpen}
           avatarUrl={null}
-          initials="EU"
+          userId="taylor-user"
           displayName="Example User"
           accountSubtitle="user@example.com"
-          resolvedTheme="light"
-          onThemeModeChange={vi.fn()}
           installEntry={input.installEntry === undefined ? { kind: "desktop", version: "0.2.0" } : input.installEntry}
           isLargeScreen={input.isLargeScreen ?? true}
           shouldRenderUpdateEntry
@@ -65,11 +71,7 @@ describe("StudioSidebarAccountSection update indicator", () => {
           onUpdateEntryContextMenu={vi.fn()}
           onUpdateEntryPointerDown={vi.fn()}
           clearUpdateLongPress={vi.fn()}
-          notificationsPending={false}
-          notificationsEnabled={false}
-          onToggleNotifications={vi.fn()}
           onOpenSupport={input.onOpenSupport ?? vi.fn()}
-          supportUnreadCount={input.supportUnreadCount}
           onOpenDiagnostics={vi.fn()}
           hasAppLogErrors={false}
           updateDialogOpen={false}
@@ -79,9 +81,9 @@ describe("StudioSidebarAccountSection update indicator", () => {
           onUpdateDialogShowDetailsChange={vi.fn()}
           onUpdatePrimaryAction={vi.fn()}
           updateActionPending={false}
-        />,
-      );
-    });
+        />;
+    }
+    await act(async () => root.render(<Account />));
   }
 
   it("keeps an attention dot on the expanded avatar while the menu is closed", async () => {
@@ -211,41 +213,57 @@ describe("StudioSidebarAccountSection update indicator", () => {
     expect(onOpenSupport).toHaveBeenCalledTimes(1);
   });
 
-  it("badges unread support activity on the profile avatar and Support menu item", async () => {
-    await renderAccount({
-      showLabels: true,
-      updatePresentation: presentation("neutral"),
-      profileMenuOpen: true,
-      supportUnreadCount: 3,
-    });
-
-    expect(container.querySelector('[data-testid="profile-support-indicator"]')).not.toBeNull();
-    expect(
-      document.body.querySelector('[data-testid="profile-support-unread-count"]')?.textContent,
-    ).toBe("3");
-    const profileButton = container.querySelector('[data-testid="sidebar-profile-menu"]');
-    const descriptionId = profileButton?.getAttribute("aria-describedby");
-    expect(descriptionId).toBeTruthy();
-    expect(document.getElementById(descriptionId ?? "")?.textContent).toBe(
-      "3 unread support updates.",
-    );
+  it("keeps Support available without a second unread indicator", async () => {
+    await renderAccount({ showLabels: true, updatePresentation: presentation("neutral"), profileMenuOpen: true });
+    expect(container.querySelector('[data-testid="profile-support-indicator"]')).toBeNull();
+    expect(document.body.querySelector('[data-testid="profile-support-unread-count"]')).toBeNull();
+    expect(container.querySelector('[data-testid="sidebar-profile-menu"]')?.hasAttribute("aria-describedby")).toBe(false);
+    expect(document.body.querySelector('[data-testid="profile-support-button"]')?.textContent).toBe("Support");
   });
 
-  it.each([true, false])("keeps both support and update announcements beside desktop acquisition (labels: %s)", async (showLabels) => {
-    await renderAccount({
-      showLabels,
-      updatePresentation: presentation("attention"),
-      supportUnreadCount: 1,
-      profileMenuOpen: true,
-    });
-
-    const profileButton = container.querySelector('[data-testid="sidebar-profile-menu"]');
-    const descriptions = profileButton?.getAttribute("aria-describedby")?.split(" ").map((id) => document.getElementById(id)?.textContent);
-    expect(descriptions).toEqual(["Update available. New.", "1 unread support update."]);
-    expect(container.querySelector('[data-testid="profile-support-indicator"]')).not.toBeNull();
-    expect(container.querySelector('[data-testid="profile-update-indicator"]')).not.toBeNull();
-    expect(container.querySelector('[data-testid="sidebar-get-desktop"]')).not.toBeNull();
-    expect(document.body.querySelector('[data-testid="profile-support-button"]')?.textContent).toContain("Support");
-    expect(document.body.querySelector('[data-testid="profile-install-button"]')).toBeNull();
+  it.each([true, false])("offers account actions in desktop and compact surfaces (wide: %s)", async (isLargeScreen) => {
+    const onOpenProfileSettings = vi.fn();
+    await renderAccount({ showLabels: false, presentation: isLargeScreen ? "sidebar" : "header", isLargeScreen,
+      updatePresentation: presentation("attention"), profileMenuOpen: true, onOpenProfileSettings });
+    expect(document.body.querySelector('[data-testid="profile-account-sheet"]') !== null).toBe(!isLargeScreen);
+    expect(document.body.querySelector('[data-testid="notifications-toggle-button"]')).toBeNull();
+    expect(document.body.querySelector('[aria-label="Theme: Light"]')).toBeNull();
+    expect(document.body.querySelector('[data-testid="profile-updates-button"]')).not.toBeNull();
+    const settings = document.body.querySelector<HTMLElement>('[data-testid="profile-settings-button"]');
+    expect(settings?.textContent).toBe("Your settings");
+    await act(async () => settings?.click());
+    expect(onOpenProfileSettings).toHaveBeenCalledOnce();
   });
+
+  it("keeps diagnostics in a closed secondary disclosure", async () => {
+    await renderAccount({ showLabels: true, updatePresentation: presentation("neutral"), profileMenuOpen: true });
+    const details = document.body.querySelector("details");
+    expect(details?.open).toBe(false);
+    expect(details?.querySelector("summary")?.textContent).toBe("Advanced");
+    expect(details?.querySelector('[data-testid="profile-diagnostics-button"]')).not.toBeNull();
+  });
+
+  it("opens the compact avatar sheet without navigating, and restores focus when closed", async () => {
+    const onOpenProfileSettings = vi.fn();
+    await renderAccount({ showLabels: false, presentation: "header", isLargeScreen: false,
+      updatePresentation: presentation("neutral"), onOpenProfileSettings });
+    const trigger = container.querySelector<HTMLButtonElement>('[data-testid="topbar-profile-button"]')!;
+    await act(async () => { trigger.focus(); trigger.click(); });
+    expect(document.body.querySelector('[data-testid="profile-account-sheet"]')).not.toBeNull();
+    expect(onOpenProfileSettings).not.toHaveBeenCalled();
+    const close = document.body.querySelector<HTMLButtonElement>('[aria-label="Close account menu"]')!;
+    await act(async () => { close.focus(); close.click(); });
+    expect(document.body.querySelector('[data-testid="profile-account-sheet"]')).toBeNull();
+    await act(async () => { await vi.waitFor(() => expect(document.activeElement).toBe(trigger)); });
+  });
+
+  it("dismisses the compact account sheet with Escape", async () => {
+    await renderAccount({ showLabels: false, presentation: "header", isLargeScreen: false,
+      updatePresentation: presentation("neutral"), profileMenuOpen: true });
+    await act(async () => {
+      document.querySelector('[role="dialog"]')!.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+    });
+    expect(document.body.querySelector('[data-testid="profile-account-sheet"]')).toBeNull();
+  });
+
 });

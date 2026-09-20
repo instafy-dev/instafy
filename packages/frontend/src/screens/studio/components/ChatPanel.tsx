@@ -12,6 +12,7 @@ import {
   type JSX,
 } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
+import { useQueryClient } from "@tanstack/react-query";
 import type { RealtimeChannel } from "@supabase/supabase-js";
 import { Capacitor } from "@capacitor/core";
 import { Button } from "../../../components/Button";
@@ -127,6 +128,9 @@ import {
   type StickyChatSpeaker,
 } from "./chatSpeakerMarker";
 import { ChatColumn } from "./ChatColumn";
+import { ChatMessageContextToolbar } from "./ChatMessageContextToolbar";
+import { ChatMessageHistoryControls } from "./ChatMessageHistoryControls";
+import { useStudioSearchReturn } from "./StudioSearchReturnContext";
 import { useOctoSilenceHint } from "./useOctoSilenceHint";
 import { ChatTypingRows } from "./ChatTypingRows";
 import {
@@ -266,6 +270,12 @@ import {
 } from "../../../utils/aiProviderModels";
 import { useChatComposerLayoutState } from "./useChatComposerLayoutState";
 import { useChatAutoScrollSync, useChatScrollController } from "./useChatScrollOrchestration";
+import { useChatNewerHistoryPaging } from "./useChatNewerHistoryPaging";
+import { useChatNewMessages } from "./useChatNewMessages";
+import { ChatNewMessagesButton } from "./ChatNewMessagesButton";
+import { useMessageContext } from "../../../conversations/useMessageContext";
+import { useStudioNavigation } from "../../../navigation/useStudioNavigation";
+import { revealCanonicalMessageTarget } from "./messageContextPresentation";
 import { ChatScrollSnapshotBoundary } from "./ChatScrollSnapshotBoundary";
 import { resolveChatScrollHistoryVisit } from "./chatScrollHistory";
 import {
@@ -338,7 +348,7 @@ import {
   readBrowserTransportPreference,
   writeBrowserTransportPreference,
 } from "./browserTransportPreference";
-import { ChatSpeakerStickyOverlay, ChatTranscriptViewport } from "./ChatTranscriptViewport";
+import { CHAT_TRANSCRIPT_HEADER_INSET_PX, ChatSpeakerStickyOverlay, ChatTranscriptViewport } from "./ChatTranscriptViewport";
 import { resolveSharedBrowserControlOwner } from "./sharedBrowserControlOwner";
 import { useSharedBrowserApprovalTransport } from "./useSharedBrowserApprovalTransport";
 import { useChatBrowserHandoff } from "./useChatBrowserHandoff";
@@ -420,12 +430,6 @@ function formatCredentialConnectionFailure(raw: string | null | undefined): stri
 }
 
 const NARROW_SPEAKER_INLINE_SELECTOR = '[data-chat-speaker-inline="true"]';
-// The scroll container's own top padding (`pt-2`), where its content
-// actually starts painting. The pill now lives in the roster row above the
-// transcript rather than overlapping it, so this edge (not the pill's own
-// position) is the only stable line left to compare marker positions against.
-const CHAT_TRANSCRIPT_VISIBLE_TOP_INSET_PX = 8;
-
 function speakersEqual(left: StickyChatSpeaker | null, right: StickyChatSpeaker | null): boolean {
   if (left === null || right === null) {
     return left === right;
@@ -490,12 +494,13 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     retryRemoteConversationHistory,
     conversations,
     appendMessages,
+    replaceMessages,
     createConversation,
     setConversationDraft,
   } = useConversations();
   const {
     activeConversationId,
-    messages,
+    messages: recentMessages,
     inputValue,
     inputEditorState,
     assistantEnabled,
@@ -504,12 +509,14 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     onAssistantEnabledChange,
     onRemoveAgentHandle,
     isAssistantTyping,
-    hasMoreHistory,
-    isHistoryLoading,
-    isInitialHistoryLoading,
-    initialHistoryError,
-    retryInitialHistory,
-    loadOlderMessages,
+    hasMoreHistory: hasMoreRecentHistory,
+    isHistoryLoading: isRecentHistoryLoading,
+    isInitialHistoryLoading: isInitialRecentHistoryLoading,
+    hasResolvedHistory: hasResolvedRecentHistory,
+    latestArrivalMessages,
+    initialHistoryError: recentHistoryError,
+    retryInitialHistory: retryRecentHistory,
+    loadOlderMessages: loadOlderRecentMessages,
     onInputChange,
     onRecordMessage,
     onMaybeAutoTitleConversation,
@@ -617,6 +624,41 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     }
     return conversations.find((conversation) => conversation.localId === activeConversationId)?.controllerId ?? null;
   }, [activeConversationId, conversations]);
+  const goToStudio = useStudioNavigation();
+  const searchReturn = useStudioSearchReturn();
+  const messageQueryClient = useQueryClient();
+  const requestedMessageId = new URLSearchParams(location.search).get("messageId")?.trim() || null;
+  const messageTargetActive = Boolean(requestedMessageId && !jobThread);
+  const chatScrollHistoryVisit = resolveChatScrollHistoryVisit({
+    location, userId: currentUserId, projectId: activeProjectId ?? null,
+    conversationsProjectKey, conversationId: activeConversationId,
+    conversationControllerId: activeConversationControllerId, jobThread,
+  });
+  const messageContext = useMessageContext(messageTargetActive && chatScrollHistoryVisit && activeConversationControllerId
+    ? { userId: chatScrollHistoryVisit.userId, projectId: chatScrollHistoryVisit.projectId,
+      conversationId: activeConversationControllerId, messageId: requestedMessageId!, visitKey: chatScrollHistoryVisit.key }
+    : null);
+  const messages = messageTargetActive ? messageContext.messages : recentMessages;
+  const hasMoreHistory = messageTargetActive ? messageContext.hasOlder : hasMoreRecentHistory;
+  const isHistoryLoading = messageTargetActive ? messageContext.loading : isRecentHistoryLoading;
+  const isInitialHistoryLoading = messageTargetActive
+    ? !chatScrollHistoryVisit || (messageContext.loading && !messages.length)
+    : isInitialRecentHistoryLoading;
+  const initialHistoryError = messageTargetActive ? messageContext.error : recentHistoryError;
+  const displayedHistoryError = messageTargetActive && messageContext.newerError ? null : initialHistoryError;
+  const retryInitialHistory = messageTargetActive ? messageContext.retry : retryRecentHistory;
+  const loadOlderMessages = messageTargetActive ? messageContext.loadOlder : loadOlderRecentMessages;
+  useEffect(() => {
+    if (!messageContext.accessDenied || !currentUserId || !activeConversationId || !activeConversationControllerId) return;
+    messageQueryClient.removeQueries({ queryKey: ["conversation-messages", currentUserId, activeConversationControllerId], exact: true });
+    messageQueryClient.removeQueries({ queryKey: ["conversation-messages-latest", currentUserId, activeConversationControllerId], exact: true });
+    replaceMessages(activeConversationId, []);
+  }, [messageContext.accessDenied, currentUserId, activeConversationId, activeConversationControllerId, messageQueryClient, replaceMessages]);
+  const returnToLatestMessages = useCallback(() => {
+    if (!activeProjectId || !activeConversationId) return;
+    goToStudio({ kind: "conversation", projectId: activeProjectId, conversationId: activeConversationId,
+      conversationControllerId: activeConversationControllerId }, { replace: true, searchOriginToken: searchReturn.originToken ?? undefined });
+  }, [activeProjectId, activeConversationId, activeConversationControllerId, goToStudio, searchReturn.originToken]);
   const {
     browserSessionOpen,
     browserSessionStateHydrated,
@@ -647,6 +689,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
   // back to Chat does NOT close/unmount the browser; it keeps the live remote
   // connection mounted, avoiding a reconnect on every switch.
   const [browserSubtab, setBrowserSubtab] = useState<ChatBrowserSubtab>("chat");
+  useEffect(() => { if (messageTargetActive) setBrowserSubtab("chat"); }, [messageTargetActive, location.key]);
   const [sharedBrowserApprovalPending, setSharedBrowserApprovalPending] = useState(false);
   const [browserTransport, setBrowserTransport] = useState<BrowserTransport>("shared");
   const [browserTransportPreferenceResolved, setBrowserTransportPreferenceResolved] =
@@ -737,7 +780,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
       ? browserPanelSize.width < ADAPTIVE_SHARED_BROWSER_WIDTH_PX
       : compactBrowserViewport;
   const homeAttentionBadge = homeAttentionCount > 9 ? "9+" : homeAttentionCount.toString();
-  const pinChatMessagesToBottom = shouldPinChatMessagesToBottom({
+  const pinChatMessagesToBottom = !messageTargetActive && shouldPinChatMessagesToBottom({
     hasMoreHistory,
     smallViewport: compactBrowserViewport,
   });
@@ -1699,19 +1742,25 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     window.addEventListener("instafy:focus-composer", handler);
     return () => window.removeEventListener("instafy:focus-composer", handler);
   }, [focusInput]);
-  // Anchor-less profile opens: inline mention chips and narrow speaker labels
-  // dispatch a handle; this panel owns agent resolution, so it hosts the card.
-  const [agentProfileModalHandle, setAgentProfileModalHandle] = useState<string | null>(null);
+  // Carry the observed ID across the mobile/mention entrypoint; handles alone
+  // cannot identify another user's bot. An open card belongs to this account/space.
+  const [agentProfileTarget, setAgentProfileTarget] = useState<{
+    identity: OpenAgentProfileDetail; projectId: string | null; userId: string | null;
+  } | null>(null);
+  const agentProfileModal = agentProfileTarget && agentProfileTarget.projectId === activeProjectId &&
+    agentProfileTarget.userId === currentUserId ? agentProfileTarget.identity : null;
   useEffect(() => {
+    setAgentProfileTarget(null);
     const handler = (event: Event) => {
-      const handle = (event as CustomEvent<OpenAgentProfileDetail>).detail?.handle;
+      const detail = (event as CustomEvent<OpenAgentProfileDetail>).detail;
+      const handle = detail?.handle;
       if (typeof handle === "string" && handle) {
-        setAgentProfileModalHandle(handle);
+        setAgentProfileTarget({ identity: detail, projectId: activeProjectId, userId: currentUserId });
       }
     };
     window.addEventListener(OPEN_AGENT_PROFILE_EVENT, handler);
     return () => window.removeEventListener(OPEN_AGENT_PROFILE_EVENT, handler);
-  }, []);
+  }, [activeProjectId, currentUserId]);
   // This identity belongs to one mounted Shared Browser surface. Keeping it in
   // memory avoids duplicate tabs or side-by-side surfaces replacing each other,
   // while remaining stable across transport and network reconnects.
@@ -1876,15 +1925,6 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
   const openImageLightbox = useCallback((src: string, alt: string) => {
     setImageLightbox({ src, alt });
   }, []);
-  const chatScrollHistoryVisit = resolveChatScrollHistoryVisit({
-    location,
-    userId: currentUserId,
-    projectId: activeProjectId ?? null,
-    conversationsProjectKey,
-    conversationId: activeConversationId,
-    conversationControllerId: activeConversationEntry?.controllerId ?? null,
-    jobThread,
-  });
   const chatScrollMutationIdentity = JSON.stringify([
     location.key, currentUserId, activeProjectId, conversationsProjectKey,
     activeConversationId, jobThread?.jobId ?? null, browserSubtab,
@@ -1893,6 +1933,8 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     autoScrollSuspendedRef,
     autoScrollPendingRef,
     handleScrollContentRef,
+    highlightedMessageId,
+    isHistoryReadingReady,
     lastComposerScrollTopRef,
     lastScrollHeightRef,
     recordScrollPosition,
@@ -1911,6 +1953,39 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     isInitialHistoryLoading,
     loadOlderMessages,
     messages,
+  });
+
+  useChatNewerHistoryPaging({
+    visitKey: scrollSnapshotKey,
+    routeKey: location.key,
+    enabled: messageTargetActive && browserSubtab === "chat",
+    hasNewer: messageContext.hasNewer,
+    loading: messageContext.loading,
+    error: messageContext.error,
+    scrollContainerRef,
+    isReadingReady: isHistoryReadingReady,
+    loadNewer: messageContext.loadNewer,
+    onReachLatest: returnToLatestMessages,
+  });
+
+  const { hasNewMessages, jumpToLatest: jumpToNewMessages } = useChatNewMessages({
+    visitKey: scrollSnapshotKey,
+    routeKey: location.key,
+    currentUserId,
+    enabled: Boolean(chatScrollHistoryVisit) && browserSubtab === "chat" && !jobThread,
+    hasResolvedHistory: hasResolvedRecentHistory,
+    arrivalMessages: latestArrivalMessages,
+    messageTargetActive,
+    scrollContainerRef,
+    shouldAutoScrollRef,
+    isReadingReady: isHistoryReadingReady,
+    onJumpToLatest: () => {
+      if (messageTargetActive) returnToLatestMessages();
+      else {
+        shouldAutoScrollRef.current = true;
+        scrollToBottom({ behavior: "auto" });
+      }
+    },
   });
 
   useConversationNotificationRead({
@@ -2585,7 +2660,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
       const displayName =
         getBuiltInAssistantDisplayName(handle) ??
         (profile?.displayName?.trim() ? profile.displayName.trim() : `@${handle}`);
-      rosterAgents.push({ handle, displayName, avatarSeed });
+      rosterAgents.push({ handle, displayName, avatarSeed, agentId: profile?.id ?? null });
     }
     return rosterAgents;
   }, [agentByHandle, agentHandles]);
@@ -2623,7 +2698,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
   const collapsedConversationMessages = useMemo(() => collapseLifecycleMessages(messages), [messages]);
   const previewThreads = useConversationPreviewThreads(conversations, activeConversation?.controllerId ?? null);
 
-  const displayedMessages = useMemo(() => {
+  const groupedMessages = useMemo(() => {
     const collapsedVisible = collapsedConversationMessages.filter((message) => shouldDisplayChatMessage(message));
     const jobThreads = synthesizeAgentJobThreadMessages(collapsedConversationMessages, collapsedVisible);
 
@@ -2660,6 +2735,9 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
 
     return [...jobThreads, ...threadMessages];
   }, [activeConversation?.controllerId, collapsedConversationMessages, previewThreads, messages]);
+  const displayedMessages = useMemo(() => revealCanonicalMessageTarget(
+    groupedMessages, messages, messageTargetActive ? requestedMessageId : null,
+  ), [groupedMessages, messages, messageTargetActive, requestedMessageId]);
 
   useEffect(() => {
     if (autoRevealHistoryConversationRef.current !== activeConversationId) {
@@ -3173,11 +3251,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
 
   const [stickyChatSpeaker, setStickyChatSpeaker] =
     useState<StickyChatSpeaker | null>(null);
-  // Rendered in the roster row above the transcript (never inside the
-  // scroller), so the ref stays valid for as long as the chat panel is
-  // mounted; the sticky-speaker effect below no longer reads its rect (see
-  // CHAT_TRANSCRIPT_VISIBLE_TOP_INSET_PX), but ChatSpeakerStickyOverlay still
-  // takes a ref, so this stays the one it's given.
+  // Presence stays outside the scroller while the message ink fades beneath it.
   const stickySpeakerOverlayRef = useRef<HTMLDivElement>(null);
 
   useLayoutEffect(() => {
@@ -3189,12 +3263,9 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
 
     let animationFrameId: number | null = null;
     const readAndApplySpeaker = () => {
-      // The pill lives in the roster row now, physically separate from the
-      // transcript, so its own rect can no longer mark the handoff line, a
-      // marker's inline label only needs to hide once it has actually
-      // scrolled past the transcript's own visible top edge.
+      // Hand off the inline identity at the fully readable edge of the fade.
       const containerRect = scrollContainer.getBoundingClientRect();
-      const thresholdTop = containerRect.top + CHAT_TRANSCRIPT_VISIBLE_TOP_INSET_PX;
+      const thresholdTop = containerRect.top + CHAT_TRANSCRIPT_HEADER_INSET_PX;
       const markers = Array.from(
         scrollContainer.querySelectorAll(CHAT_SPEAKER_MARKER_SELECTOR),
       );
@@ -4598,7 +4669,9 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
       };
     };
     return conversationRosterAgents.map((rosterAgent) => {
-      const profile = agentByHandle.get(rosterAgent.handle) ?? null;
+      const profile = rosterAgent.agentId
+        ? availableAgents.find((candidate) => candidate.id === rosterAgent.agentId) ?? null
+        : null;
       const providerRaw = (profile?.provider ?? "").trim().toLowerCase();
       const providerId: AiProviderId =
         !providerRaw || providerRaw === "assistant"
@@ -4606,10 +4679,10 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
           : normalizeAiProviderId(providerRaw);
       // Explicit model, or the provider's default (the first option in
       // modelOptionsForProvider) when the agent pins none.
-      const model =
-        normalizeAiModelId(providerId, profile?.model) ??
+      const model = profile ?
+        normalizeAiModelId(providerId, profile.model) ??
         modelOptionsForProvider(providerId)[0]?.id ??
-        null;
+        null : null;
       let credentialLabel: string | null = null;
       let credentialState: ParticipantCredentialState = "none";
       // The credential whose live usage applies to this agent: the pinned one
@@ -4628,7 +4701,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
           credentialLabel = resolveCredentialLabel(pinned);
           effectiveCredential = pinned;
         }
-      } else if (defaultAiCredential) {
+      } else if (profile && defaultAiCredential) {
         credentialState = "default";
         credentialLabel = resolveCredentialLabel(defaultAiCredential);
         effectiveCredential = defaultAiCredential;
@@ -4641,12 +4714,13 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
       );
       return {
         ...rosterAgent,
-        agentId: profile?.id ?? null,
+        agentId: rosterAgent.agentId ?? null,
+        canEditProfile: Boolean(profile),
         providerId,
         model,
         reasoningEffort: profile?.reasoningEffort ?? null,
-        runtime: resolveRuntime(profile?.runtimeId ?? null),
-        providerLabel: formatProviderLabel(providerId),
+        runtime: profile ? resolveRuntime(profile.runtimeId ?? null) : null,
+        providerLabel: profile ? formatProviderLabel(providerId) : null,
         credentialId: effectiveCredential?.id ?? null,
         credentialLabel,
         credentialKind: effectiveCredential?.kind ?? null,
@@ -4655,7 +4729,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
       };
     });
   }, [
-    agentByHandle,
+    availableAgents,
     availableCredentials,
     conversationRosterAgents,
     defaultAiCredential,
@@ -4840,6 +4914,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
   ]);
 
   useChatAutoScrollSync({
+    followLatest: !messageTargetActive,
     aiOnboardingOpen,
     autoScrollSuspendedRef,
     autoScrollPendingRef,
@@ -5420,6 +5495,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
               const humanSpeakerIdentity =
                 message.role === "user" && !isOwnUserMessage && isGroupHead && humanIdentity ? (
                   <HumanSpeakerIdentityLabel
+                    projectId={activeProjectId}
                     avatarSeed={humanIdentity.avatarSeed}
                     label={humanIdentity.label}
                     timestamp={message.timestamp}
@@ -5580,14 +5656,17 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
         hidden={browserSubtab !== "chat"}
         className={browserSubtab === "chat" ? "flex min-h-0 flex-1 flex-col" : "hidden"}
       >
-      {/* Presence belongs to the conversation, so it sits at the top of the
-          conversation surface: one placement at every width, a flow row (never
-          an overlay) so it cannot cover message text, and outside the scroller
-          so it never scrolls away. Always rendered; the roster collapses to a
-          plain "open participants" icon when no one has joined, so the
-          participants/config panel is reachable even on a brand-new chat. */}
+      <ChatMessageContextToolbar />
+      <ChatScrollSnapshotBoundary identity={chatScrollMutationIdentity} messages={messages} capture={recordScrollPosition}>
+      <ChatTranscriptViewport
+        ariaLabel={conversationLabel}
+        onScroll={handleScroll}
+        onContextMenu={handleConversationContextMenu}
+        scrollContainerRef={scrollContainerRef}
+        scrollPaddingBottom={chatScrollPaddingBottom}
+        header={
       <div
-        className="flex-none px-3 pt-2 sm:px-4"
+        className="px-3 pt-2 sm:px-4"
         data-testid="chat-conversation-roster-row"
       >
         {/* Constrain to the shared 56rem chat column so the roster's right
@@ -5596,7 +5675,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
             transcript scrolls) and the roster stays right-aligned; both are
             always rendered, so the roster never shifts when the pill appears
             or disappears. */}
-        <ChatColumn className="flex items-center justify-between gap-2">
+        <ChatColumn className="pointer-events-none flex items-center justify-between gap-2 [&>:last-child]:pointer-events-auto">
           <ChatSpeakerStickyOverlay ref={stickySpeakerOverlayRef} speaker={stickyChatSpeaker} />
           <ConversationRoster
             agents={conversationRosterAgents}
@@ -5605,13 +5684,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
           />
         </ChatColumn>
       </div>
-      <ChatScrollSnapshotBoundary identity={chatScrollMutationIdentity} messages={messages} capture={recordScrollPosition}>
-      <ChatTranscriptViewport
-        ariaLabel={conversationLabel}
-        onScroll={handleScroll}
-        onContextMenu={handleConversationContextMenu}
-        scrollContainerRef={scrollContainerRef}
-        scrollPaddingBottom={chatScrollPaddingBottom}
+        }
       >
         <OctoScrollMotionScope
           sourceRef={scrollContainerRef}
@@ -5638,10 +5711,10 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
                 {isHistoryLoading ? (
                   <>
                     <Spinner aria-hidden="true" data-testid="chat-history-loading" tone="slate" size="sm" />
-                    Loading earlier messages…
+                    Loading messages…
                   </>
                 ) : (
-                  "View earlier messages"
+                  "Load older messages"
                 )}
               </Button>
             </div>
@@ -5682,22 +5755,22 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
                 />
               </ChatBubbleRow>
             ) : null}
-            {!shouldShowGettingStarted && isInitialHistoryLoading && !initialHistoryError && !remoteConversationHistoryError ? (
-              <div className="flex justify-center px-2 py-1">
+            {(messageTargetActive || !shouldShowGettingStarted) && isInitialHistoryLoading && !initialHistoryError && !remoteConversationHistoryError ? (
+              <div className="flex justify-center px-2 py-1" role="status">
                 <div className="inline-flex items-center gap-3 rounded-2xl border border-slate-200/70 bg-white/85 px-4 py-3 text-sm font-medium text-slate-600 shadow-sm dark:border-[color:var(--color-studio-dark-panel-border)] dark:bg-[var(--color-studio-dark-panel-soft)] dark:text-slate-300">
                   <Spinner aria-hidden="true" tone="slate" size="sm" />
                   <span>Loading messages…</span>
                 </div>
               </div>
             ) : null}
-            {initialHistoryError || remoteConversationHistoryError ? (
-              <div className="flex justify-center px-2 py-1" data-testid="chat-history-error">
+            {displayedHistoryError || remoteConversationHistoryError ? (
+              <div className="flex justify-center px-2 py-1" role="alert" data-testid="chat-history-error">
                 <div className="flex flex-wrap items-center justify-center gap-3 text-sm text-slate-600 dark:text-slate-300">
-                  <span>{initialHistoryError ?? remoteConversationHistoryError}</span>
+                  <span>{displayedHistoryError ?? remoteConversationHistoryError}</span>
                   <Button
                     onPress={() => {
                       beginHistoryRetry();
-                      if (initialHistoryError) void retryInitialHistory();
+                      if (displayedHistoryError) void retryInitialHistory();
                       else retryRemoteConversationHistory();
                     }}
                     variant="outline"
@@ -5730,6 +5803,8 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
               rows.push(
                 <ConversationMessageRows
                   scrollSnapshotKey={scrollSnapshotKey}
+                  targetedMessageId={messageTargetActive ? requestedMessageId : null}
+                  highlightedMessageId={highlightedMessageId}
                   key="conversation-message-rows"
                   messages={displayedMessages}
                   allConversationMessages={collapsedConversationMessages}
@@ -5758,6 +5833,15 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
 
               return rows;
             })()}
+            <ChatMessageHistoryControls
+              messageTargetActive={messageTargetActive}
+              loadingNewer={messageContext.loadingNewer}
+              newerError={messageContext.newerError}
+              canReturnToLatest={Boolean(chatScrollHistoryVisit)}
+              onLoadNewer={() => void messageContext.loadNewer()}
+              onReturnToLatest={returnToLatestMessages}
+              hideLatest={hasNewMessages}
+            />
             <ChatPostTranscriptAuxiliaryRows
               jobThreadPresent={Boolean(jobThread)}
               workspaceFileStaleNotice={workspaceFileStaleNotice}
@@ -5851,6 +5935,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
       <CredentialsConnectModal {...gettingStartedConnectModalProps} />
 
       <ChatComposerSurface
+        aboveComposer={hasNewMessages ? <ChatNewMessagesButton onPress={jumpToNewMessages} /> : null}
         mutationDisabled={projectWriteDisabled}
         silenceHintProps={
           octoSilenceHint.visible ? { onDismiss: octoSilenceHint.dismiss } : null
@@ -6088,22 +6173,26 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
           void skillsImport.handleSubmitImport({ closeModalOnSuccess: true });
         }}
       />
-      {agentProfileModalHandle ? (
-        // By-handle profile opens (mention chips, narrow speaker labels) have
+      {agentProfileModal ? (
+        // Event-driven profile opens (mention chips, narrow speaker labels) have
         // no anchor, so the card presents as a centered modal at every width.
         <StudioDialogModal
           isOpen
           isDismissable
           onOpenChange={(open) => {
-            if (!open) setAgentProfileModalHandle(null);
+            if (!open) setAgentProfileTarget(null);
           }}
           className="h-[100dvh] min-h-0 overflow-hidden"
           modalClassName="min-h-0 max-h-full w-full max-w-sm overflow-y-auto overscroll-contain"
-          dialogAriaLabel={`Agent profile: @${agentProfileModalHandle}`}
+          dialogAriaLabel={`Agent profile: @${agentProfileModal.handle}`}
         >
           <AgentProfileCardContent
-            {...resolveAgentProfileCardProps(agentProfileModalHandle)}
-            onRequestClose={() => setAgentProfileModalHandle(null)}
+            {...resolveAgentProfileCardProps(agentProfileModal.handle, {
+              handle: agentProfileModal.handle,
+              id: agentProfileModal.agentId,
+              avatarSeed: agentProfileModal.avatarSeed || agentProfileModal.handle,
+            })}
+            onRequestClose={() => setAgentProfileTarget(null)}
           />
         </StudioDialogModal>
       ) : null}

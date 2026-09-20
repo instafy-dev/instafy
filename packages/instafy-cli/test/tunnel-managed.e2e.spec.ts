@@ -79,7 +79,7 @@ async function waitForLogLine(
 }
 
 async function execCli(args: string[], env?: NodeJS.ProcessEnv, homeDir?: string) {
-  const entry = "dist/index.js";
+  const entry = "bin/instafy.js";
   const tmpHome = homeDir ?? fs.mkdtempSync(path.join(os.tmpdir(), "instafy-cli-home-"));
   const child = spawn("node", [entry, ...args], {
     env: { ...process.env, HOME: tmpHome, USERPROFILE: tmpHome, ...env },

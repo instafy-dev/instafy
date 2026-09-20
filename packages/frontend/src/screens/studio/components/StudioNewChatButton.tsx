@@ -46,6 +46,10 @@ type StudioNewChatButtonProps = {
   size?: ComponentProps<typeof IconButton>["size"];
   radius?: ComponentProps<typeof IconButton>["radius"];
   onStarted?: () => void;
+  /** Run creation after a navigation owner dismisses its drawer. */
+  runAction?: (action: () => void) => void;
+  label?: string;
+  isDisabled?: boolean;
   dismissalKey?: string;
   renderTrigger?: (actions: {
     onNewChat?: () => void;
@@ -60,6 +64,9 @@ export function StudioNewChatButton({
   size = "md",
   radius = "full",
   onStarted,
+  runAction,
+  label,
+  isDisabled = false,
   dismissalKey,
   renderTrigger,
 }: StudioNewChatButtonProps) {
@@ -84,6 +91,11 @@ export function StudioNewChatButton({
   const privateChatTargetsEpochRef = useRef(0);
   const newChatTriggerRef = useRef<HTMLButtonElement | null>(null);
   const newChatInteractionModalityRef = useRef<"pointer" | "keyboard" | null>(null);
+  const startConversation = (action: () => void) => {
+    const start = () => { action(); onStarted?.(); };
+    if (runAction) runAction(start);
+    else start();
+  };
 
   useNativeBackButtonAction(privateChatPickerOpen || newChatMenuOpen, () => {
     setPrivateChatPickerOpen(false);
@@ -231,7 +243,7 @@ export function StudioNewChatButton({
   );
 
   const newChatMenu = shouldShowNewChat ? (
-    <StudioDialogPopover placement="bottom start" offset={8} className="w-80 p-3" data-testid="chat-new-chat-menu-popover">
+    <StudioDialogPopover placement="bottom start" offset={8} className="w-80 max-w-[calc(100vw-1.5rem)] p-3" data-testid="chat-new-chat-menu-popover">
       <div className="flex flex-col gap-1.5">
         <EntityRow
           title="Public chat"
@@ -240,8 +252,7 @@ export function StudioNewChatButton({
           start={<ChatLines className="h-4 w-4 text-slate-400 dark:text-slate-400" aria-hidden="true" />}
           onPress={() => {
             setNewChatMenuOpen(false);
-            onStartNewConversation?.();
-            onStarted?.();
+            startConversation(() => onStartNewConversation?.());
           }}
           data-testid="chat-new-chat-public"
         />
@@ -275,8 +286,7 @@ export function StudioNewChatButton({
       {renderTrigger ? renderTrigger({
         onNewChat: shouldShowNewChat ? () => {
           setNewChatMenuOpen(false);
-          onStartNewConversation?.();
-          onStarted?.();
+          startConversation(() => onStartNewConversation?.());
         } : undefined,
         onNewPrivateChat: shouldShowNewChat && onStartPrivateConversation ? () => {
           setNewChatMenuOpen(false);
@@ -291,6 +301,7 @@ export function StudioNewChatButton({
           variant="ghost"
           size={size}
           radius={radius}
+          isDisabled={isDisabled}
           aria-label="New chat"
           title="New chat"
           data-testid={testId}
@@ -303,6 +314,7 @@ export function StudioNewChatButton({
           }}
         >
           <Plus className="h-[18px] w-[18px]" aria-hidden="true" />
+          {label ? <span className="truncate">{label}</span> : null}
         </IconButton>
         {newChatMenu}
       </DialogTrigger>}
@@ -401,8 +413,7 @@ export function StudioNewChatButton({
                       onPress={() => {
                         setPrivateChatPickerOpen(false);
                         setPrivateChatQuery("");
-                        onStartPrivateConversation?.({ userId, displayName });
-                        onStarted?.();
+                        startConversation(() => onStartPrivateConversation?.({ userId, displayName }));
                       }}
                       data-testid={`chat-private-chat-target-${userId}`}
                     />

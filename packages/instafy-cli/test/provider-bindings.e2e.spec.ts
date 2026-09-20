@@ -6,7 +6,7 @@ import { spawn } from "node:child_process";
 import { describe, expect, it } from "vitest";
 
 async function execCli(args: string[], opts?: { cwd?: string; env?: NodeJS.ProcessEnv }) {
-  const entry = "dist/index.js";
+  const entry = "bin/instafy.js";
   const tmpHome = fs.mkdtempSync(path.join(os.tmpdir(), "instafy-cli-home-"));
   try {
     const child = spawn("node", [entry, ...args], {

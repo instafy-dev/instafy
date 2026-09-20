@@ -37,6 +37,7 @@ interface UseConversationResult {
   conversations: ReturnType<typeof useConversations>["conversations"];
   activeConversationId: string | null;
   messages: ChatMessage[];
+  latestArrivalMessages: readonly ChatMessage[];
   inputValue: string;
   inputEditorState: string | null;
   assistantEnabled: boolean;
@@ -48,6 +49,7 @@ interface UseConversationResult {
   isAssistantTyping: boolean;
   isWorkspaceSettingUp: boolean;
   hasMoreHistory: boolean;
+  hasResolvedHistory: boolean;
   isHistoryLoading: boolean;
   isInitialHistoryLoading: boolean;
   initialHistoryError: string | null;
@@ -107,7 +109,9 @@ export function useConversation(): UseConversationResult {
 
   const {
     messages,
+    latestArrivalMessages,
     hasMoreHistory,
+    hasResolvedHistory,
     isHistoryLoading,
     isInitialHistoryLoading,
     initialHistoryError,
@@ -404,6 +408,7 @@ export function useConversation(): UseConversationResult {
     conversations,
     activeConversationId,
     messages,
+    latestArrivalMessages,
     inputValue,
     inputEditorState,
     assistantEnabled,
@@ -415,6 +420,7 @@ export function useConversation(): UseConversationResult {
     isAssistantTyping,
     isWorkspaceSettingUp,
     hasMoreHistory,
+    hasResolvedHistory,
     isHistoryLoading,
     isInitialHistoryLoading,
     initialHistoryError,

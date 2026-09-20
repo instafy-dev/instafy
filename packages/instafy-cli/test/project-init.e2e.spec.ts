@@ -39,7 +39,7 @@ function startMockController(spaceId: string, orgId: string, orgName: string) {
 }
 
 async function execCli(args: string[], env?: NodeJS.ProcessEnv) {
-  const entry = "dist/index.js";
+  const entry = "bin/instafy.js";
   const tmpHome = fs.mkdtempSync(path.join(os.tmpdir(), "instafy-cli-home-"));
   try {
     const child = spawn("node", [entry, ...args], {

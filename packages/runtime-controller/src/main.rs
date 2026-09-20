@@ -42,6 +42,7 @@ mod group_participation;
 mod imports;
 mod integrations;
 mod jwks;
+mod message_search;
 mod message_stashes;
 mod model_defaults;
 mod multi_agent_plan;
@@ -454,6 +455,7 @@ async fn main() -> anyhow::Result<()> {
         .merge(skills_discovery::router())
         .merge(device_auth::router())
         .merge(conversations::router())
+        .merge(message_search::router())
         .merge(message_stashes::router())
         .merge(send_intents::router())
         .merge(send_queue::router())

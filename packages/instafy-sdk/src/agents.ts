@@ -11,6 +11,86 @@ import {
 
 export const AGENT_HANDLE_REGEX = /^[a-z0-9][a-z0-9_-]{0,19}$/;
 
+/** Public profile text, counted in Unicode code points rather than UTF-16 units. */
+export const AGENT_BIO_MAX_LENGTH = 500;
+
+export interface ControllerAgentProfile {
+  id: string;
+  handle: string;
+  displayName: string | null;
+  /** Runtime style guidance; separate from the public bio. */
+  description: string | null;
+  bio: string | null;
+  avatarSeed: string;
+  provider: string;
+  model: string | null;
+  reasoningEffort: string | null;
+  credentialId: string | null;
+  runtimeId: string | null;
+  deletedAt?: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface CreateMyAgentInput {
+  credentialId?: string | null;
+  handle?: string;
+  displayName?: string | null;
+  description?: string | null;
+  bio?: string | null;
+  avatarSeed?: string | null;
+  provider?: string;
+  model?: string | null;
+  reasoningEffort?: string | null;
+}
+
+export interface UpdateMyAgentInput {
+  handle?: string;
+  displayName?: string | null;
+  description?: string | null;
+  /** Omit to preserve the saved bio; send null to clear it. */
+  bio?: string | null;
+  avatarSeed?: string | null;
+  credentialId?: string | null;
+  model?: string | null;
+  reasoningEffort?: string | null;
+  projectId?: string;
+  runtimeId?: string | null;
+}
+
+/** Safe to show to another current member of the same project. */
+export type ControllerPublicAgentProfile = Pick<ControllerAgentProfile,
+  "id" | "handle" | "displayName" | "avatarSeed" | "bio"
+>;
+
+export interface ProjectAgentProfileParams {
+  projectId: string;
+  agentId: string;
+  signal?: AbortSignal;
+}
+
+export function projectAgentProfilePath(params: Pick<ProjectAgentProfileParams, "projectId" | "agentId">): string {
+  return `/projects/${encodeURIComponent(params.projectId)}/agents/${encodeURIComponent(params.agentId)}/profile`;
+}
+
+export type AgentProfileRequest = (
+  path: string,
+  init: { method: "GET"; signal?: AbortSignal },
+) => Promise<ControllerPublicAgentProfile>;
+
+/** Uses the host's authenticated transport; does not acquire credentials. */
+export function getProjectAgentProfile(request: AgentProfileRequest, params: ProjectAgentProfileParams): Promise<ControllerPublicAgentProfile> {
+  return request(projectAgentProfilePath(params), { method: "GET", signal: params.signal });
+}
+
+export function normalizeAgentBio(value: string | null): string | null {
+  const normalized = value?.trim() || null;
+  if (normalized && Array.from(normalized).length > AGENT_BIO_MAX_LENGTH) {
+    throw new RangeError("Bio must be 500 characters or fewer.");
+  }
+  return normalized;
+}
+
 export type BuiltInAssistantDefinitionInput = {
   handle: string;
   mentionToken?: string;

@@ -323,8 +323,55 @@ describe("BugReportInboxDialog", () => {
     expect(mocks.acknowledgeActivity).toHaveBeenCalledWith(
       REPORT_ID,
       "2026-09-05T11:00:00Z",
+      expect.objectContaining({ messageIds: [], expectedUserId: "user-a", isCurrent: expect.any(Function) }),
     );
     expect(onAcknowledged).toHaveBeenCalledTimes(1);
+  });
+
+  it("acknowledges only loaded support rows and the resolution from the detail snapshot", async () => {
+    const resolutionNotificationId = "99999999-9999-4999-8999-999999999999";
+    mocks.getReport.mockResolvedValueOnce({
+      id: REPORT_ID, message: "A resolved issue", status: "resolved", screenshots: [],
+      supportLastMessageAt: "2026-09-05T11:00:00Z", resolvedAt: "2026-09-05T11:00:00Z",
+      hasUnreadSupportActivity: true, hasUnreadResolution: true, resolutionNotificationId,
+    });
+    mocks.listMessages.mockResolvedValueOnce({ messages: [
+      { id: "loaded-support", authorType: "support", body: "The fix is ready.", createdAt: "2026-09-05T10:59:00Z" },
+      { id: "loaded-customer", authorType: "customer", body: "Thank you", createdAt: "2026-09-05T10:59:30Z" },
+    ], hasMore: true, nextCursor: { createdAt: "2026-09-05T10:59:00Z", id: "loaded-support" } });
+    await act(async () => root.render(<BugReportInboxDialog isOpen onOpenChange={vi.fn()} />));
+    await flushAsyncEffects();
+    expect(mocks.acknowledgeActivity).toHaveBeenCalledWith(REPORT_ID, "2026-09-05T11:00:00Z", expect.objectContaining({
+      messageIds: ["loaded-support"], resolutionNotificationId, expectedUserId: "user-a", isCurrent: expect.any(Function),
+    }));
+  });
+
+  it("retries an incomplete multi-page acknowledgement after returning to the foreground", async () => {
+    let visibilityState: DocumentVisibilityState = "visible";
+    vi.spyOn(document, "visibilityState", "get").mockImplementation(() => visibilityState);
+    const firstChunk = createDeferred<{ acknowledgedThrough: string; hasUnreadSupportActivity: boolean; hasUnreadResolution: boolean }>();
+    mocks.acknowledgeActivity.mockReturnValueOnce(firstChunk.promise);
+    const loaded = Array.from({ length: 101 }, (_, index) => ({
+      id: `loaded-support-${index}`, authorType: "support", body: `Reply ${index}`, createdAt: "2026-09-05T11:00:00Z",
+    }));
+    mocks.listMessages.mockResolvedValueOnce({ messages: loaded, hasMore: false, nextCursor: null });
+    await act(async () => root.render(<BugReportInboxDialog isOpen onOpenChange={vi.fn()} />));
+    await flushAsyncEffects();
+    expect(mocks.acknowledgeActivity).toHaveBeenCalledTimes(1);
+    expect(mocks.acknowledgeActivity.mock.calls[0][2].messageIds).toHaveLength(100);
+    visibilityState = "hidden";
+    await act(async () => {
+      document.dispatchEvent(new Event("visibilitychange"));
+      firstChunk.resolve({ acknowledgedThrough: "2026-09-05T11:00:00Z", hasUnreadSupportActivity: false, hasUnreadResolution: false });
+      await firstChunk.promise;
+    });
+    await flushAsyncEffects();
+    expect(mocks.acknowledgeActivity).toHaveBeenCalledTimes(1);
+    visibilityState = "visible";
+    await act(async () => document.dispatchEvent(new Event("visibilitychange")));
+    await flushAsyncEffects();
+    expect(mocks.acknowledgeActivity).toHaveBeenCalledTimes(3);
+    expect(mocks.acknowledgeActivity.mock.calls[2][2].messageIds).toEqual(["loaded-support-100"]);
   });
 
   it("keeps an off-page alert target selected and can retarget the same report", async () => {

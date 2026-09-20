@@ -194,9 +194,9 @@ async function startRuntime(options: {
   logFile: string;
 }) {
   await ensureCleanRuntimeState();
-  const entry = path.join(repoRoot(), "packages", "instafy-cli", "dist", "index.js");
+  const entry = path.join(repoRoot(), "packages", "instafy-cli", "bin", "instafy.js");
   if (!fs.existsSync(entry)) {
-    throw new Error("CLI entry dist/index.js not found. Run pnpm --filter @instafy/cli build first.");
+    throw new Error("CLI entry bin/instafy.js not found. Run pnpm --filter @instafy/cli build first.");
   }
   const agentKey = readAgentLoginKey() ?? "dev-agent-key";
   console.info("[runtime-tunnel] using agent key prefix:", agentKey.slice(0, 6), "…");
@@ -261,7 +261,7 @@ async function startRuntime(options: {
 }
 
 async function stopRuntime() {
-  const entry = path.join(repoRoot(), "packages", "instafy-cli", "dist", "index.js");
+  const entry = path.join(repoRoot(), "packages", "instafy-cli", "bin", "instafy.js");
   const args = [entry, "runtime", "stop", "--json"];
   const child = spawn("node", args, { cwd: repoRoot(), env: { ...process.env, NODE_ENV: "test" }, stdio: "pipe" });
   const [code] = (await once(child, "exit")) as [number | null];

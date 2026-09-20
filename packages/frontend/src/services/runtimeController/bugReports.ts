@@ -71,6 +71,8 @@ export interface ControllerBugReportDetail {
   customerLastMessageAt: string | null;
   supportLastMessageAt: string | null;
   resolvedAt: string | null;
+  /** Exact resolution event represented by this detail snapshot. */
+  resolutionNotificationId?: string | null;
   hasUnreadSupportActivity: boolean;
   hasUnreadResolution: boolean;
 }
@@ -191,6 +193,7 @@ function parseBugReportDetail(
     customerLastMessageAt: parseNullableString(value.customerLastMessageAt),
     supportLastMessageAt: parseNullableString(value.supportLastMessageAt),
     resolvedAt: parseNullableString(value.resolvedAt),
+    resolutionNotificationId: parseNullableString(value.resolutionNotificationId),
     hasUnreadSupportActivity: value.hasUnreadSupportActivity === true,
     hasUnreadResolution: value.hasUnreadResolution === true,
   };
@@ -380,14 +383,24 @@ export async function getControllerBugReport(
 export async function acknowledgeControllerBugReportActivity(
   bugReportId: string,
   seenThrough: string,
+  snapshot?: {
+    messageIds: string[];
+    resolutionNotificationId?: string | null;
+    expectedUserId: string;
+    isCurrent: () => boolean;
+  },
 ): Promise<AcknowledgeControllerBugReportActivityResult> {
   const normalizedSeenThrough = seenThrough.trim();
   if (!normalizedSeenThrough || Number.isNaN(Date.parse(normalizedSeenThrough))) {
     throw new Error("Support activity timestamp is invalid.");
   }
+  if (snapshot && (!snapshot.expectedUserId || !snapshot.isCurrent() || snapshot.messageIds.length > 100)) {
+    throw new Error("The support notification session changed or its snapshot is too large.");
+  }
   const { requestContext, accessToken } = await resolveSupportRequestContext(
     "Login required to acknowledge support activity.",
   );
+  if (snapshot && !snapshot.isCurrent()) throw new Error("The support notification session changed.");
   const response = await fetch(
     `${requestContext.baseUrl}/support/reports/${encodeURIComponent(bugReportId)}/acknowledge`,
     {
@@ -396,7 +409,11 @@ export async function acknowledgeControllerBugReportActivity(
         authorization: `Bearer ${accessToken}`,
         "content-type": "application/json",
       },
-      body: JSON.stringify({ seenThrough: normalizedSeenThrough }),
+      body: JSON.stringify({ seenThrough: normalizedSeenThrough, ...(snapshot ? {
+        messageIds: snapshot.messageIds,
+        resolutionNotificationId: snapshot.resolutionNotificationId ?? undefined,
+        expectedUserId: snapshot.expectedUserId,
+      } : {}) }),
     },
   );
   if (!response.ok) {

@@ -5,80 +5,53 @@ import {
   useMemo,
   useRef,
   useState,
-  type MouseEvent,
-  type PointerEvent as ReactPointerEvent,
+  type ReactNode,
 } from "react";
-import { Capacitor } from "@capacitor/core";
+import { createPortal } from "react-dom";
 import { DESKTOP_TITLE_BAR_HEIGHT_PX, desktopTitleBarFree } from "../../../lib/desktopShell";
 import {
   SidebarCollapse,
   SidebarExpand,
-  Xmark,
+  Plus,
 } from "iconoir-react";
-import { ChatsIcon, HomeIcon } from "../../../components/AppIcons";
+import { ChatsIcon } from "../../../components/AppIcons";
+import { OctoMark } from "../../../components/OctoMark";
 import { AttentionBadge } from "../../../components/AttentionBadge";
-import { Button } from "../../../components/Button";
-import { ControlChevron } from "../../../components/ControlChevron";
+import { Button, IconButton } from "../../../components/Button";
 import { Text } from "../../../components/Text";
-import { StudioDialogModal } from "../../../components/aria/StudioModal";
-import { StudioDialogBody, StudioDialogHeader } from "../../../components/aria/StudioDialogLayout";
-import { Input } from "../../../components/Input";
+
+import { NewTeamDialog } from "./NewTeamDialog";
+import { StudioNewChatButton } from "./StudioNewChatButton";
 import { useStatus } from "../../../status/useStatus";
 import { useStudioNavigation } from "../../../navigation/useStudioNavigation";
 import { studioPerformance } from "../../../telemetry/studioPerformance";
-import { useProfile } from "../../../profile/ProfileProvider";
 import { useProjects } from "../../../projects/useProjects";
 import { useMergedControllerProjects } from "../../../projects/useMergedControllerProjects";
-import { mostRecentProjectId, readProjectRecency } from "../../../projects/projectRecency";
-import { useRuntimeMenuOptions } from "../../../runtime/useRuntimeMenu";
-import { useTheme } from "../../../theme/ThemeProvider";
-import {
-  areMessageNotificationsEnabled,
-  disableMessageNotifications,
-  enableMessageNotifications,
-} from "../../../notifications/assistantMessageNotifications";
-import { DevDiagnosticsMenu } from "./DevDiagnosticsMenu";
-import { BuildLogOverlay } from "./BuildLogOverlay";
-import type { TunnelCopyMode } from "../../../runtime/components/RuntimeTunnelDetails";
+import { mostRecentProjectId } from "../../../projects/projectRecency";
+import { useProjectRecency } from "../../../projects/useProjectRecency";
+import { DARK_RAIL_SURFACE_CLASS } from "../../../theme/darkSurfaces";
 import { useWorkspaceControls } from "../workspaceControls";
 import type { StudioNavItem, StudioPanel } from "../types";
 import { useStudioDesktopLayout } from "../useStudioDesktopLayout";
+import { useTouchLikeInput } from "../../../hooks/useTouchLikeInput";
 import { getOrgDisambiguator, getOrgDisplayName } from "../../../org/orgNaming";
-import { SidebarOrgDeck } from "./SidebarOrgDeck";
-import { useAppLogs } from "../../../debug/useAppLogs";
 import type { MobileSidebarNavigation } from "../../useMobileSidebarHistory";
 import {
   controllerClient,
   runtimeControllerEnabled,
   type ControllerOrgSummary,
 } from "../../../sdk/instafy";
-import {
-  checkDesktopUpdaterNow,
-  desktopUpdaterBridgeAvailable,
-  downloadDesktopUpdaterNow,
-  installDesktopUpdaterNow,
-} from "../../../desktop/updates/client";
-import {
-  applyStagedNativeOtaUpdate,
-  triggerNativeOtaCheck,
-} from "../../../mobile/ota/bootstrap";
-
 const { list: listControllerOrganizations } = controllerClient.organizations;
-import { otaIsSupportedOnThisClient } from "../../../mobile/ota/shared";
-import {
-  resolveDesktopDownloadFeedback,
-  summarizeAppUpdateState,
-} from "../../../updates/releaseMetadata";
-import { getAppAcquisitionTarget } from "../../../updates/desktopAcquisition";
-import { DESKTOP_APP_PUBLIC_LATEST_URL } from "../../../updates/desktopReleaseManifest";
-import { useAppUpdateMetadata } from "../../../updates/useAppUpdateMetadata";
-import { useDesktopReleaseLookup } from "../../../updates/useDesktopReleaseLookup";
-import { StudioSidebarAccountSection } from "./StudioSidebarAccountSection";
+import { StudioAccountMenu } from "./StudioAccountMenu";
 import { StudioSidebarMobileDrillIn } from "./StudioSidebarMobileDrillIn";
 import { StudioSidebarMorePanels } from "./StudioSidebarMorePanels";
+import type { StudioNavigationContext } from "./StudioSearchContext";
+import { StudioSidebarTeamMenu } from "./StudioSidebarTeamMenu";
 import { StudioSidebarWorkspaceSwitcher } from "./StudioSidebarWorkspaceSwitcher";
 import { StudioSidebarWorkspacePanel } from "./StudioSidebarWorkspacePanel";
+import { StudioOrganizationRail } from "./StudioOrganizationRail";
 import { SIDEBAR_RECENT_CHAT_LIMIT, StudioRecentChats } from "./StudioRecentChats";
+import { SIDEBAR_RECENT_SPACE_LIMIT, StudioRecentSpaces } from "./StudioRecentSpaces";
 import type { ConversationState } from "../../../conversations/conversationState";
 import {
   normalizeSidebarOrgUser,
@@ -112,12 +85,27 @@ export interface StudioSidebarProps {
   onSelectConversation?: (id: string) => void;
   isConversationHistoryActive?: boolean;
   workspaceSwitcherOpen: boolean;
+  /** Scope for directory entry points owned by the surrounding mobile header. */
+  workspaceSwitcherInitialMode?: "teams-and-spaces" | "spaces";
   onWorkspaceSwitcherOpenChange: (open: boolean) => void;
   workspaceSwitcherPortalTarget: HTMLDivElement | null;
   onRequestClose?: () => void;
   mobileOverlay?: boolean;
+  selectedOrgKey?: string;
+  onOpenTeam?: (orgKey: string) => void;
+  onReturnToTeam?: (orgKey: string) => void;
+  onActiveTeamChange?: (team: { key: string; name: string; avatarUrl: string | null }) => void;
+  onActivateProject?: (projectId: string, orgKey: string) => void;
+  hideContext?: boolean;
   mobileNavigation?: MobileSidebarNavigation;
   runSidebarAction?: (action: () => void) => void;
+  /** Compact context pickers can live above the independent navigation rail. */
+  navigationPresentation?: "tiles" | "path";
+  navigationHeaderPortalTarget?: HTMLElement | null;
+  /** The surrounding shell provides the team and space context header. */
+  navigationHeaderExternal?: boolean;
+  renderNavigationHeader?: (context: StudioNavigationContext) => ReactNode;
+  onNavigationHeaderAction?: () => void;
 }
 
 export function StudioSidebar({
@@ -134,54 +122,51 @@ export function StudioSidebar({
   onSelectConversation,
   isConversationHistoryActive = false,
   workspaceSwitcherOpen: desktopWorkspaceSwitcherOpen,
+  workspaceSwitcherInitialMode = "teams-and-spaces",
   onWorkspaceSwitcherOpenChange,
   workspaceSwitcherPortalTarget,
   onRequestClose,
   mobileOverlay = false,
+  selectedOrgKey,
+  onOpenTeam,
+  onReturnToTeam,
+  onActiveTeamChange,
+  onActivateProject,
+  hideContext = false,
   mobileNavigation,
   runSidebarAction,
+  navigationPresentation = "tiles",
+  navigationHeaderPortalTarget = null,
+  navigationHeaderExternal = false,
+  renderNavigationHeader,
+  onNavigationHeaderAction,
 }: StudioSidebarProps) {
   const {
-    onShowLogs,
-    hasLogs,
     userEmail,
     homeAttentionCount = 0,
     homeAttentionByProject = {},
     homeAttentionByOrg = {},
-    onSignOut,
     onToggleSidebar,
     sidebarOpen,
     onStartNewProject,
+    onStartNewConversation,
+    showChatActions = false,
+    navigationPage = "workspace",
     onOpenProjectSettings,
     onOpenProfileSettings,
     onOpenOrgSettings,
-    onOpenBugReport,
     onOpenBugReportInbox,
-    supportUnreadCount = 0,
-    shakeToReportEnabled = false,
-    onToggleShakeToReport,
-    onSimulateShakeToReport,
-    onTestShakeToReport,
-    shakeToReportStatus,
-    shakeToReportDetail,
   } = useWorkspaceControls();
   const { projectList, activeProjectId } = useProjects();
   const navigateToDestination = useStudioNavigation();
-  const {
-    runtime: runtimeContext,
-    runtimeOptions,
-  } = useRuntimeMenuOptions();
   const { showStatus } = useStatus();
-  const { profile } = useProfile();
-  const { resolvedTheme, setThemeMode } = useTheme();
-  const [profileMenuOpen, setProfileMenuOpen] = useState(false);
-  const [notificationsEnabled, setNotificationsEnabled] = useState(() => areMessageNotificationsEnabled());
-  const [notificationsPending, setNotificationsPending] = useState(false);
-  const [devMenuOpen, setDevMenuOpen] = useState(false);
-  const [updateDialogOpen, setUpdateDialogOpen] = useState(false);
-  const [updateDialogShowDetails, setUpdateDialogShowDetails] = useState(false);
-  const [updateActionPending, setUpdateActionPending] = useState(false);
   const workspaceTriggerRef = useRef<HTMLButtonElement | null>(null);
+  const workspaceSwitcherSourceRef = useRef<"rail" | "team">("rail");
+  const browseTriggerRef = useRef<HTMLButtonElement | null>(null);
+  const spaceTriggerRef = useRef<HTMLButtonElement | null>(null);
+  const moreTriggerRef = useRef<HTMLButtonElement | null>(null);
+  const [workspaceSwitcherMode, setWorkspaceSwitcherMode] = useState(workspaceSwitcherInitialMode);
+  const requestedSwitcherModeRef = useRef<"teams-and-spaces" | "spaces" | null>(null);
   const [localWorkspaceMobileViewOpen, setWorkspaceMobileViewOpen] = useState(false);
   const [workspaceOrgKey, setWorkspaceOrgKey] = useState("personal");
   const [workspaceProjectQuery, setWorkspaceProjectQuery] = useState("");
@@ -196,6 +181,7 @@ export function StudioSidebar({
   );
   const hydratedOrgUserRef = useRef<string | null>(normalizeSidebarOrgUser(userEmail));
   const [pendingOrgSwitchKey, setPendingOrgSwitchKey] = useState<string | null>(null);
+  const revealedOrgFailureRef = useRef<string | null>(null);
   const [orgsRefreshEpoch, setOrgsRefreshEpoch] = useState(0);
   const [moreMenuOpen, setMoreMenuOpen] = useState(false);
   const [localMoreMobileViewOpen, setMoreMobileViewOpen] = useState(false);
@@ -204,36 +190,36 @@ export function StudioSidebar({
     if (runSidebarAction) {
       runSidebarAction(action);
     } else {
-      action();
       onRequestClose?.();
+      action();
     }
   }, [onRequestClose, runSidebarAction]);
   const [recentChatsExpanded, setRecentChatsExpanded] = useState(true);
-  const [appLogsOverlayOpen, setAppLogsOverlayOpen] = useState(false);
+  const [recentSpacesExpanded, setRecentSpacesExpanded] = useState(true);
+  const projectRecency = useProjectRecency(userEmail);
   const navRef = useRef<HTMLElement | null>(null);
   const footerRef = useRef<HTMLDivElement | null>(null);
-  const updateLongPressTimerRef = useRef<number | null>(null);
-  const suppressUpdateRowClickRef = useRef(false);
   const [navHeight, setNavHeight] = useState(0);
   const [footerHeight, setFooterHeight] = useState(0);
-  const { logs: appLogs, hasLogs: hasAppLogs, hasErrors: hasAppLogErrors, clearLogs: clearAppLogs } =
-    useAppLogs();
   const isLargeScreen = useStudioDesktopLayout();
+  const touchLikeInput = useTouchLikeInput();
+  const desktopRail = isLargeScreen && !mobileOverlay;
+  const externalHeader = navigationHeaderExternal || Boolean(navigationHeaderPortalTarget);
+  const showContext = !desktopRail || (activePanel !== "home" && !hideContext);
   const workspaceSwitcherOpen = isLargeScreen
     ? desktopWorkspaceSwitcherOpen
     : mobileNavigation ? mobileNavigation.view === "workspace" : desktopWorkspaceSwitcherOpen || localWorkspaceMobileViewOpen;
-  const acquisitionTarget = getAppAcquisitionTarget();
-  const { lookup: desktopReleaseLookup } = useDesktopReleaseLookup({
-    enabled: acquisitionTarget === "desktop",
-    manifestUrl: DESKTOP_APP_PUBLIC_LATEST_URL,
-  });
-  const installEntry = acquisitionTarget === "mobile"
-    ? { kind: "mobile-soon" as const }
-    : acquisitionTarget === "desktop" && desktopReleaseLookup.status === "available"
-      ? { kind: "desktop" as const, version: desktopReleaseLookup.manifest.version }
-      : null;
+  const mobileDrillInOpen = !isLargeScreen && (workspaceSwitcherOpen || moreMobileViewOpen);
+  useEffect(() => {
+    if (!workspaceSwitcherOpen) return;
+    // Internal picker actions override the scope supplied by an external header.
+    setWorkspaceSwitcherMode(requestedSwitcherModeRef.current ?? workspaceSwitcherInitialMode);
+    requestedSwitcherModeRef.current = null;
+  }, [workspaceSwitcherOpen, workspaceSwitcherInitialMode]);
   const isExpanded = !collapsed;
   const showLabels = isExpanded;
+  const pathHeader = !externalHeader && navigationPresentation === "path" && showLabels;
+  const pathControls = externalHeader || pathHeader;
   const collapsedSidebarDensity =
     showLabels || navHeight <= 0 ? "comfortable" : navHeight < 640 ? "dense" : navHeight < 760 ? "compact" : "comfortable";
   const collapsedSidebarRowLayoutClass =
@@ -268,76 +254,61 @@ export function StudioSidebar({
     () => moreItems?.filter((item): item is StudioNavItem => Boolean(item)) ?? [],
     [moreItems],
   );
-  const alwaysCollapsedMoreItemIds = useMemo(() => new Set<StudioPanel>(["secrets"]), []);
   const hasRecentChats = Boolean(onSelectConversation);
-  const fixedEntryCount = 3 + items.length + (onOpenConversationHistory && !hasRecentChats ? 1 : 0);
+  // External context already contains the space selector. Only compact
+  // desktop navigation needs a second row for New chat below its toggle.
+  const desktopHeaderRows = externalHeader ? showLabels ? 1 : 2 : pathHeader ? 1 : showLabels ? 2 : 3;
+  const mobileHeaderRows = showLabels ? pathControls ? 1 : 2 : 4;
+  const fixedEntryCount = (desktopRail ? desktopHeaderRows : mobileHeaderRows) + items.length + (onOpenConversationHistory && !hasRecentChats ? 1 : 0);
   const recentChatsReservePx = hasRecentChats && showLabels && recentChatsExpanded
     ? Math.max(1, Math.min(recentConversations.length, SIDEBAR_RECENT_CHAT_LIMIT)) * 40 + 56
     : 0;
+  // Reserve the bounded two-row space grid before placing secondary tools.
+  const recentSpacesReservePx = showLabels && !pathControls && recentSpacesExpanded
+    ? Math.ceil(SIDEBAR_RECENT_SPACE_LIMIT / 3) * 96 + 48
+    : 0;
   const estimatedChromeReservePx = 24;
-  const effectiveFooterReservePx = Math.max(estimatedFooterReservePx, footerHeight);
-  const desktopSecondaryRowCapacity =
-    isLargeScreen
+  const effectiveFooterReservePx = desktopRail ? 0 : footerHeight || estimatedFooterReservePx;
+  const secondaryRowCapacity =
+    isLargeScreen || isExpanded
       ? Math.max(
           0,
           Math.floor(
-            (navHeight - effectiveFooterReservePx - estimatedChromeReservePx - recentChatsReservePx - fixedEntryCount * estimatedRowHeightPx) /
+            (navHeight - effectiveFooterReservePx - estimatedChromeReservePx - recentChatsReservePx - recentSpacesReservePx - fixedEntryCount * estimatedRowHeightPx) /
               estimatedRowHeightPx,
           ),
         )
       : 0;
-  const spillableDesktopMoreItems = useMemo(
-    () => resolvedMoreItems.filter((item) => !alwaysCollapsedMoreItemIds.has(item.id)),
-    [alwaysCollapsedMoreItemIds, resolvedMoreItems],
-  );
-  const desktopNeedsMoreButton =
-    isLargeScreen &&
-    resolvedMoreItems.length > 0 &&
-    (resolvedMoreItems.length !== spillableDesktopMoreItems.length ||
-      spillableDesktopMoreItems.length > desktopSecondaryRowCapacity);
-  const desktopInlineMoreCapacity = isLargeScreen
-    ? Math.max(0, desktopSecondaryRowCapacity - (desktopNeedsMoreButton ? 1 : 0))
-    : 0;
+  const needsMoreButton = resolvedMoreItems.length > secondaryRowCapacity;
+  const measuredInlineMoreCapacity = Math.max(0, secondaryRowCapacity - (needsMoreButton ? 1 : 0));
+  const moreViewOpen = isLargeScreen ? moreMenuOpen : moreMobileViewOpen;
+  const moreAllocationRef = useRef({ capacity: 0, open: false, overflowIds: [] as StudioPanel[] });
+  // Keep an open menu/drill-in stable until dismissal, even if every tool now fits.
+  const inlineMoreCapacity = moreViewOpen
+    ? moreAllocationRef.current.capacity
+    : measuredInlineMoreCapacity;
   const inlineMoreItems = useMemo(
-    () =>
-      !isLargeScreen
-        ? isExpanded && !hasRecentChats
-          ? resolvedMoreItems
-          : []
-        : spillableDesktopMoreItems.slice(
-            0,
-            Math.min(spillableDesktopMoreItems.length, desktopInlineMoreCapacity),
-          ),
-    [
-      desktopInlineMoreCapacity,
-      hasRecentChats,
-      isExpanded,
-      isLargeScreen,
-      resolvedMoreItems,
-      spillableDesktopMoreItems,
-    ],
+    () => resolvedMoreItems.slice(0, inlineMoreCapacity),
+    [inlineMoreCapacity, resolvedMoreItems],
   );
   const inlineMoreItemIds = useMemo(() => new Set(inlineMoreItems.map((item) => item.id)), [inlineMoreItems]);
   const collapsedMoreItems = useMemo(
-    () =>
-      !isLargeScreen
-        ? isExpanded && !hasRecentChats
-          ? []
-          : resolvedMoreItems
-        : resolvedMoreItems.filter((item) => !inlineMoreItemIds.has(item.id)),
-    [hasRecentChats, inlineMoreItemIds, isExpanded, isLargeScreen, resolvedMoreItems],
+    () => resolvedMoreItems.filter((item) => !inlineMoreItemIds.has(item.id)),
+    [inlineMoreItemIds, resolvedMoreItems],
   );
   const showInlineMoreItems = inlineMoreItems.length > 0;
   const sidebarMobileDrillInOpen = workspaceSwitcherOpen || moreMobileViewOpen;
-  const mobileExpandedWidthClass = sidebarMobileDrillInOpen
+  const mobileExpandedWidthClass = externalHeader
+    ? "w-[min(22rem,calc(100vw-2rem))]"
+    : sidebarMobileDrillInOpen
     ? "w-[clamp(18rem,65vw,24rem)]"
-    : "w-[clamp(16rem,60vw,22rem)]";
+    : pathControls ? "w-[min(22rem,calc(100vw-2rem))]" : "w-[clamp(16rem,60vw,22rem)]";
   // Only true in the macOS shell that vacated its title bar; everywhere
   // else the rail keeps its stock full-height surface.
   const titleBarFree = !mobileOverlay && desktopTitleBarFree();
   const widthClass = isExpanded
     ? isLargeScreen
-      ? "w-56"
+      ? pathHeader && touchLikeInput ? "w-60" : "w-56"
       : mobileExpandedWidthClass
     : "w-[4rem]";
   const getSidebarNavIconClass = useCallback(
@@ -348,7 +319,7 @@ export function StudioSidebar({
           ? showLabels
             ? `border-transparent bg-transparent ${accentClass}`
             : `border-primary-200 bg-primary-50 ${accentClass} dark:border-primary-500/40 dark:bg-primary-500/10`
-          : "border-transparent text-slate-400 group-hover/item:text-primary-600 dark:text-slate-500 dark:group-hover/item:text-primary-500",
+          : "border-transparent text-slate-600 group-hover/item:text-primary-600 dark:text-slate-500 dark:group-hover/item:text-primary-500",
       ].join(" "),
     [showLabels, sidebarIconShellSizeClass],
   );
@@ -387,11 +358,35 @@ export function StudioSidebar({
   }, [isLargeScreen, sidebarOpen]);
 
   useEffect(() => {
-    if (!showInlineMoreItems) {
-      return;
-    }
-    setMoreMobileViewOpen(false);
-  }, [showInlineMoreItems]);
+    // Resizing the rail can move secondary tools between inline rows and
+    // More. An old popover must not reappear on the next width change.
+    setMoreMenuOpen(false);
+  }, [isExpanded, isLargeScreen]);
+
+  useEffect(() => {
+    const previous = moreAllocationRef.current;
+    moreAllocationRef.current = {
+      capacity: inlineMoreCapacity,
+      open: moreViewOpen,
+      overflowIds: collapsedMoreItems.map((item) => item.id),
+    };
+    if (!previous.open || moreViewOpen || collapsedMoreItems.length > 0) return;
+    // After dismissal on a taller screen, More may have become inline tools.
+    // Restore focus to the first of those tools instead of a removed trigger.
+    const frame = requestAnimationFrame(() => {
+      const nav = navRef.current;
+      const focused = document.activeElement;
+      if (!nav || nav.closest("[inert]") || (focused !== document.body && !nav.contains(focused))) return;
+      for (const id of previous.overflowIds) {
+        const target = nav.querySelector<HTMLButtonElement>(`[data-testid="sidebar-more-item-${id}"]`);
+        if (target) {
+          target.focus();
+          break;
+        }
+      }
+    });
+    return () => cancelAnimationFrame(frame);
+  }, [collapsedMoreItems, inlineMoreCapacity, moreViewOpen]);
   useEffect(() => {
     if (collapsedMoreItems.length > 0) {
       return;
@@ -399,44 +394,6 @@ export function StudioSidebar({
     setMoreMenuOpen(false);
     setMoreMobileViewOpen(false);
   }, [collapsedMoreItems.length]);
-  const fullName = profile?.fullName?.trim() || null;
-  const displayName = fullName || userEmail || "Guest";
-  const accountSubtitle = (() => {
-    const email = userEmail?.trim() || null;
-    if (!email) {
-      return null;
-    }
-    if (!fullName) {
-      return null;
-    }
-    if (fullName.toLowerCase() === email.toLowerCase()) {
-      return null;
-    }
-    return email;
-  })();
-  const avatarUrl = profile?.avatarUrl?.trim() || null;
-  const initials = (() => {
-    const base = displayName.trim();
-    if (!base) {
-      return "U";
-    }
-    const parts = base.split(/\s+/).filter(Boolean);
-    if (parts.length >= 2) {
-      return `${parts[0][0]}${parts[1][0]}`.toUpperCase();
-    }
-    return parts[0].slice(0, 2).toUpperCase();
-  })();
-  const updateEntrySupported = desktopUpdaterBridgeAvailable() || otaIsSupportedOnThisClient();
-  const {
-    metadata: updateMetadata,
-    refresh: refreshUpdateMetadata,
-  } = useAppUpdateMetadata(updateEntrySupported);
-  const updatePresentation = useMemo(
-    () => (updateMetadata ? summarizeAppUpdateState(updateMetadata) : null),
-    [updateMetadata],
-  );
-  const shouldRenderUpdateEntry =
-    updateEntrySupported && (updateMetadata ? Boolean(updatePresentation?.show) : true);
 
   useEffect(() => {
     const element = navRef.current;
@@ -467,7 +424,7 @@ export function StudioSidebar({
       observer.disconnect();
       window.removeEventListener("resize", updateHeight);
     };
-  }, [isExpanded, isLargeScreen, items.length, onOpenConversationHistory, resolvedMoreItems.length]);
+  }, [isExpanded, isLargeScreen, items.length, onOpenConversationHistory, resolvedMoreItems.length, showContext]);
 
   useEffect(() => {
     const element = footerRef.current;
@@ -500,148 +457,7 @@ export function StudioSidebar({
     };
   }, [isExpanded, isLargeScreen, showInlineMoreItems]);
 
-  const handleCopyTunnel = useCallback(
-    (mode: TunnelCopyMode, runtimeId: string | null) => {
-      void runtimeContext.copyTunnelDetails(mode, runtimeId);
-    },
-    [runtimeContext],
-  );
 
-  useEffect(() => {
-    if (!profileMenuOpen) {
-      return;
-    }
-    setNotificationsEnabled(areMessageNotificationsEnabled());
-  }, [profileMenuOpen]);
-
-  useEffect(() => {
-    if (!profileMenuOpen && !updateDialogOpen) {
-      return;
-    }
-    void refreshUpdateMetadata();
-  }, [profileMenuOpen, refreshUpdateMetadata, updateDialogOpen]);
-
-  const clearUpdateLongPress = useCallback(() => {
-    if (updateLongPressTimerRef.current === null) {
-      return;
-    }
-    window.clearTimeout(updateLongPressTimerRef.current);
-    updateLongPressTimerRef.current = null;
-  }, []);
-
-  useEffect(() => () => clearUpdateLongPress(), [clearUpdateLongPress]);
-
-  const openUpdateDialog = useCallback(
-    async (showDetails: boolean) => {
-      setProfileMenuOpen(false);
-      setUpdateDialogShowDetails(showDetails);
-      setUpdateDialogOpen(true);
-      await refreshUpdateMetadata();
-    },
-    [refreshUpdateMetadata],
-  );
-
-  const handleUpdateEntryClick = useCallback(() => {
-    clearUpdateLongPress();
-    if (suppressUpdateRowClickRef.current) {
-      suppressUpdateRowClickRef.current = false;
-      return;
-    }
-    void openUpdateDialog(false);
-  }, [clearUpdateLongPress, openUpdateDialog]);
-
-  const handleUpdateEntryContextMenu = useCallback(
-    (event: MouseEvent<HTMLButtonElement>) => {
-      event.preventDefault();
-      clearUpdateLongPress();
-      suppressUpdateRowClickRef.current = true;
-      void openUpdateDialog(true);
-    },
-    [clearUpdateLongPress, openUpdateDialog],
-  );
-
-  const handleUpdateEntryPointerDown = useCallback(
-    (event: ReactPointerEvent<HTMLButtonElement>) => {
-      if (event.pointerType === "mouse" && event.button !== 0) {
-        return;
-      }
-      suppressUpdateRowClickRef.current = false;
-      clearUpdateLongPress();
-      updateLongPressTimerRef.current = window.setTimeout(() => {
-        suppressUpdateRowClickRef.current = true;
-        void openUpdateDialog(true);
-      }, 550);
-    },
-    [clearUpdateLongPress, openUpdateDialog],
-  );
-
-  const handleUpdatePrimaryAction = useCallback(async () => {
-    const current = updateMetadata ?? (await refreshUpdateMetadata());
-    if (!current) {
-      return;
-    }
-
-    setUpdateActionPending(true);
-    try {
-      if (current.runtime_surface === "desktop") {
-        if (current.updates.primary_action === "download") {
-          const result = await downloadDesktopUpdaterNow();
-          const nextMeta = await refreshUpdateMetadata();
-          const feedback = resolveDesktopDownloadFeedback(result, nextMeta);
-          showStatus(feedback.message, feedback.intent, feedback.intent === "error" ? 3500 : 3000);
-          return;
-        } else if (current.updates.primary_action === "install") {
-          const result = await installDesktopUpdaterNow();
-          if (result?.lastInstallRequestAccepted === false) {
-            showStatus("Update kept for later.", "info", 2500);
-            return;
-          }
-          showStatus("Restarting to install update.", "success", 2500);
-        } else if (current.updates.primary_action === "check") {
-          const next = await checkDesktopUpdaterNow();
-          const nextMeta = await refreshUpdateMetadata();
-          if (next?.phase === "up_to_date" || nextMeta?.updates.phase === "up_to_date") {
-            showStatus("Instafy is up to date.", "success", 2500);
-          } else if (next?.phase === "error" || nextMeta?.updates.phase === "error") {
-            showStatus(nextMeta?.updates.last_error ?? "Update check failed.", "error", 3500);
-          }
-          return;
-        }
-      } else if (current.runtime_surface === "native-ota") {
-        if (current.updates.primary_action === "install") {
-          const applied = await applyStagedNativeOtaUpdate();
-          await refreshUpdateMetadata();
-          if (applied) {
-            showStatus("Restarting to apply the staged update.", "success", 3000);
-          } else {
-            showStatus("No staged update was found.", "info", 2500);
-          }
-          return;
-        }
-        if (
-          current.updates.primary_action === "download" ||
-          current.updates.primary_action === "check"
-        ) {
-          const result = await triggerNativeOtaCheck();
-          const nextMeta = await refreshUpdateMetadata();
-          if (nextMeta?.updates.phase === "downloaded") {
-            showStatus("Update is ready. Restart to apply it.", "success", 3000);
-          } else if (result?.update_available) {
-            showStatus("Update detected. Instafy is staging it now.", "success", 3000);
-          } else {
-            showStatus("Instafy is up to date.", "success", 2500);
-          }
-          return;
-        }
-      }
-      await refreshUpdateMetadata();
-    } catch (error) {
-      const message = error instanceof Error ? error.message : "Unable to complete update action.";
-      showStatus(message, "error", 4000);
-    } finally {
-      setUpdateActionPending(false);
-    }
-  }, [refreshUpdateMetadata, showStatus, updateMetadata]);
 
   useEffect(() => {
     let cancelled = false;
@@ -696,36 +512,13 @@ export function StudioSidebar({
     return () => window.removeEventListener("instafy:orgs-updated", bump);
   }, []);
 
-  const handleToggleNotifications = useCallback(async () => {
-    if (notificationsPending) {
-      return;
-    }
-    setNotificationsPending(true);
-    try {
-      if (notificationsEnabled) {
-        setNotificationsEnabled(false);
-        const ok = await disableMessageNotifications();
-        if (!ok) {
-          showStatus("Notifications disabled (cleanup may be incomplete).", "info", 4000);
-        }
-        return;
-      }
-
-      const ok = await enableMessageNotifications();
-      setNotificationsEnabled(ok);
-      if (!ok) {
-        showStatus("Unable to enable notifications.", "error", 4000);
-      }
-    } finally {
-      setNotificationsPending(false);
-    }
-  }, [notificationsEnabled, notificationsPending, showStatus]);
-
   const activeProject = useMemo(
     () => projectList.find((project) => project.id === activeProjectId),
     [activeProjectId, projectList],
   );
-  const activeOrgKey = activeProject?.orgId ?? "personal";
+  const activeProjectOrgKey = activeProject?.orgId ?? "personal";
+  const activeOrgKey = selectedOrgKey ?? activeProjectOrgKey;
+  const selectedTeamHasActiveSpace = activeOrgKey === activeProjectOrgKey && Boolean(activeProject);
   const canBrowseAllWorkspaceOrgs = activeProject?.orgId == null && controllerOrgs.length > 0;
   const workspaceOrgFilterId =
     workspaceOrgKey === "all" || workspaceOrgKey === "personal" ? null : workspaceOrgKey;
@@ -761,18 +554,6 @@ export function StudioSidebar({
     });
     return map;
   }, [controllerOrgs]);
-  const appLogExport = useMemo(() => {
-    const payload = {
-      createdAt: new Date().toISOString(),
-      location: typeof window !== "undefined" ? window.location.href : null,
-      userAgent: typeof navigator !== "undefined" ? navigator.userAgent : null,
-      mode: import.meta.env.MODE,
-      userEmail,
-      activeProjectId,
-      logs: appLogs,
-    };
-    return JSON.stringify(payload, null, 2);
-  }, [activeProjectId, appLogs, userEmail]);
   const orgOptions = useMemo(() => {
     const options = new Map<
       string,
@@ -849,29 +630,25 @@ export function StudioSidebar({
     if (match?.name) {
       return match.name;
     }
-    return getOrgDisplayName(activeProject?.orgName);
-  }, [activeOrgKey, activeProject?.orgName, orgOptions]);
-  // The org deck (the team & spaces row's icon) shows the selected team on top
-  // and reads as a stack when there is more than one; switching happens in the
-  // panel it opens. Selection follows the user's CHOICE instantly; the active
-  // project catches up once that team's spaces load.
+    return activeOrgKey === activeProjectOrgKey ? getOrgDisplayName(activeProject?.orgName) : "Team";
+  }, [activeOrgKey, activeProjectOrgKey, activeProject?.orgName, orgOptions]);
+  const activeOrgAvatarUrl = orgOptions.find((org) => org.key === activeOrgKey)?.avatarUrl ?? null;
+  const activeTeamUserKey = normalizeSidebarOrgUser(userEmail);
+  const activeTeamMetadataReady = hydratedOrgUserRef.current === activeTeamUserKey;
+  const publishedActiveTeamRef = useRef<{ user: string | null; key: string; name: string; avatarUrl: string | null } | null>(null);
+  useEffect(() => {
+    // Account changes hydrate their own org snapshot in the effect above. Do
+    // not publish this render's previous-account metadata as the new user.
+    if (!activeTeamMetadataReady) return;
+    const previous = publishedActiveTeamRef.current;
+    if (previous?.user === activeTeamUserKey && previous.key === activeOrgKey && previous.name === activeOrgName && previous.avatarUrl === activeOrgAvatarUrl) return;
+    const team = { key: activeOrgKey, name: activeOrgName, avatarUrl: activeOrgAvatarUrl };
+    publishedActiveTeamRef.current = { user: activeTeamUserKey, ...team };
+    onActiveTeamChange?.(team);
+  }, [activeOrgKey, activeOrgName, activeOrgAvatarUrl, activeTeamMetadataReady, activeTeamUserKey, onActiveTeamChange]);
   const orgDeckTeams = useMemo(
     () => orgOptions.filter((org) => org.key !== "all"),
     [orgOptions],
-  );
-  const orgDeckSelectedKey = activeOrgKey;
-  const orgDeckTeam = useMemo(
-    () => orgDeckTeams.find((team) => team.key === orgDeckSelectedKey) ?? orgDeckTeams[0] ?? null,
-    [orgDeckSelectedKey, orgDeckTeams],
-  );
-  const orgDeckOtherAttention = useMemo(
-    () =>
-      orgDeckTeams.reduce(
-        (total, team) =>
-          team.key === orgDeckSelectedKey ? total : total + (homeAttentionByOrg[team.key] ?? 0),
-        0,
-      ),
-    [homeAttentionByOrg, orgDeckSelectedKey, orgDeckTeams],
   );
   // Refresh the snapshot after every successful load (never after a failure —
   // a flaky request must not erase teams the user really has).
@@ -881,7 +658,6 @@ export function StudioSidebar({
     }
     writeSidebarOrgSnapshot(userEmail, controllerOrgs, orgDeckTeams.length);
   }, [controllerOrgs, orgDeckTeams.length, orgsFetchState, userEmail]);
-  const activeProjectName = activeProject?.name?.trim() || "Untitled space";
   const selectedWorkspaceOrg = useMemo(
     () => orgOptions.find((org) => org.key === workspaceOrgKey) ?? null,
     [orgOptions, workspaceOrgKey],
@@ -893,13 +669,13 @@ export function StudioSidebar({
         : mergedProjects.filter((project) => (project.orgId ?? "personal") === workspaceOrgKey),
     [mergedProjects, workspaceOrgKey],
   );
-  // Re-read recency whenever the switcher opens so the ordering reflects this
-  // session's switches without subscribing to storage events.
-  const projectRecency = useMemo(
-    () => readProjectRecency(),
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-    [workspaceSwitcherOpen],
-  );
+  // Quick switching follows the selected team, independent of directory search
+  // or a temporarily browsed team. Recency contains IDs only; access comes from
+  // the authenticated project snapshot.
+  const recentSpaceCandidates = useMemo(() => activeTeamMetadataReady
+    ? mergedProjects.filter((project) => (project.orgId ?? "personal") === activeOrgKey)
+      .map((project) => ({ id: project.id, name: project.name, icon: project.projectIcon, color: project.projectColor }))
+    : [], [activeOrgKey, activeTeamMetadataReady, mergedProjects]);
   const filteredOrgProjects = useMemo(() => {
     const needle = workspaceProjectQuery.trim().toLowerCase();
     const filtered =
@@ -937,6 +713,7 @@ export function StudioSidebar({
 
   const resetWorkspaceSwitcher = useCallback(() => {
     // A local reset is not Back. Destination actions own their history write.
+    requestedSwitcherModeRef.current = null;
     setWorkspaceMobileViewOpen(false);
     setWorkspaceProjectQuery("");
     setWorkspaceProjectSearchOpen(false);
@@ -948,10 +725,13 @@ export function StudioSidebar({
     else onWorkspaceSwitcherOpenChange(false);
   }, [isLargeScreen, mobileNavigation, onWorkspaceSwitcherOpenChange, resetWorkspaceSwitcher]);
 
-  const openWorkspaceSwitcher = useCallback(() => {
+  const openWorkspaceSwitcher = useCallback((mode: "teams-and-spaces" | "spaces" = "teams-and-spaces", source: "rail" | "team" = "rail") => {
+    workspaceSwitcherSourceRef.current = source;
+    requestedSwitcherModeRef.current = mode;
+    setWorkspaceSwitcherMode(mode);
     setMoreMenuOpen(false);
     setMoreMobileViewOpen(false);
-    setWorkspaceOrgKey(canBrowseAllWorkspaceOrgs ? "all" : activeOrgKey);
+    setWorkspaceOrgKey(mode === "spaces" ? activeOrgKey : canBrowseAllWorkspaceOrgs ? "all" : activeOrgKey);
     // A programmatic reset abandons any in-flight team switch — clear the
     // pending markers or the clicked chip pulses forever and the sync effect
     // stays short-circuited by the stale ref.
@@ -976,23 +756,49 @@ export function StudioSidebar({
 
   const performProjectSwitch = useCallback(
     (projectId: string) => {
-      if (!projectId || projectId === activeProjectId) {
-        return;
-      }
+      if (!projectId) return;
       const destination = mergedProjects.find((entry) => entry.id === projectId);
-      studioPerformance.beginProject(projectId, destination?.orgId ?? null, activeProject?.orgId ?? null);
+      const destinationOrgKey = destination?.orgId ?? (projectId === activeProjectId ? activeProject?.orgId : null) ?? "personal";
+      if (projectId !== activeProjectId) {
+        studioPerformance.beginProject(projectId, destination?.orgId ?? null, activeProject?.orgId ?? null);
+      }
       // Resolve previously unseen spaces through the authenticated route owner;
       // createProject followed by a stale switchProject closure can return early.
-      navigateToDestination({ kind: "conversation", projectId });
+      if (onActivateProject) onActivateProject(projectId, destinationOrgKey);
+      else if (projectId !== activeProjectId || activeOrgKey !== activeProjectOrgKey || activePanel === "home" || hideContext) {
+        navigateToDestination({ kind: "conversation", projectId });
+      }
     },
-    [activeProject?.orgId, activeProjectId, mergedProjects, navigateToDestination],
+    [activeOrgKey, activePanel, activeProject?.orgId, activeProjectId, activeProjectOrgKey, hideContext, mergedProjects, navigateToDestination, onActivateProject],
   );
 
   const handleWorkspaceOrgChange = useCallback(
     (orgKey: string) => {
+      revealedOrgFailureRef.current = null;
       setWorkspaceOrgKey(orgKey);
       setWorkspaceProjectQuery("");
       setWorkspaceProjectSearchOpen(false);
+      if (pendingOrgContextSwitchRef.current) {
+        studioPerformance.cancelOrganizationDiscovery(
+          pendingOrgContextSwitchRef.current === "personal" ? null : pendingOrgContextSwitchRef.current,
+        );
+      }
+      pendingOrgContextSwitchRef.current = null;
+      setPendingOrgSwitchKey(null);
+      if (orgKey === activeOrgKey && (activePanel === "home" || hideContext)) {
+        resetWorkspaceSwitcher();
+        runDestination(() => {
+          if (onReturnToTeam) onReturnToTeam(orgKey);
+          else if (onOpenTeam) onOpenTeam(orgKey);
+          else onSelect("team");
+        });
+        return;
+      }
+      if (orgKey === activeProjectOrgKey && orgKey !== activeOrgKey && activeProjectId) {
+        resetWorkspaceSwitcher();
+        runDestination(() => performProjectSwitch(activeProjectId));
+        return;
+      }
       // Keep the requested team separate from the active space until a
       // successful discovery snapshot can resolve its destination.
       const pending =
@@ -1002,8 +808,24 @@ export function StudioSidebar({
       pendingOrgContextSwitchRef.current = pending;
       setPendingOrgSwitchKey(pending);
     },
-    [activeProject?.orgId],
+    [activeOrgKey, activePanel, activeProject?.orgId, activeProjectId, activeProjectOrgKey, resetWorkspaceSwitcher, hideContext, onOpenTeam, runDestination, onReturnToTeam, onSelect, performProjectSwitch],
   );
+
+  useEffect(() => {
+    if (!desktopRail || !pendingOrgSwitchKey || pendingOrgSwitchKey !== workspaceOrgKey
+      || !mergedProjectsError || mergedProjectsRefreshing) return;
+    if (workspaceSwitcherOpen) {
+      revealedOrgFailureRef.current = pendingOrgSwitchKey;
+      return;
+    }
+    if (revealedOrgFailureRef.current === pendingOrgSwitchKey) return;
+    revealedOrgFailureRef.current = pendingOrgSwitchKey;
+    // Reveal the existing error and Retry without resetting the requested team
+    // or cancelling its pending switch. Dismissing it stays dismissed.
+    requestedSwitcherModeRef.current = "teams-and-spaces";
+    setWorkspaceSwitcherMode("teams-and-spaces");
+    onWorkspaceSwitcherOpenChange(true);
+  }, [desktopRail, mergedProjectsError, mergedProjectsRefreshing, onWorkspaceSwitcherOpenChange, pendingOrgSwitchKey, workspaceOrgKey, workspaceSwitcherOpen]);
 
   useEffect(() => {
     const pendingOrgKey = pendingOrgContextSwitchRef.current;
@@ -1025,27 +847,32 @@ export function StudioSidebar({
       return;
     }
     // Move to the team's most recently opened space; never-opened teams fall
-    // back to name order. A team with no spaces leaves the active space alone
-    // (the switcher shows its create-space state instead).
+    // back to name order. Empty teams open their explicitly scoped overview.
     const orgProjects = mergedProjects.filter(
       (project) => (project.orgId ?? "personal") === pendingOrgKey,
     );
     if (orgProjects.length === 0) {
       studioPerformance.cancel();
-      showStatus("No spaces in this team yet — create one to get started.", "info", 3500);
+      if (onOpenTeam) {
+        resetWorkspaceSwitcher();
+        runDestination(() => onOpenTeam(pendingOrgKey));
+      } else {
+        showStatus("No spaces in this team yet — create one to get started.", "info", 3500);
+      }
       return;
     }
     const targetId =
-      mostRecentProjectId(orgProjects.map((project) => project.id)) ??
+      mostRecentProjectId(orgProjects.map((project) => project.id), projectRecency) ??
       [...orgProjects].sort((a, b) =>
         (a.name || "Untitled space").localeCompare(b.name || "Untitled space"),
       )[0].id;
+    resetWorkspaceSwitcher();
     runDestination(() => performProjectSwitch(targetId));
-  }, [activeProject?.orgId, mergedProjects, mergedProjectsLoading, performProjectSwitch, remoteDiscoveryResolved, remoteLoadedScope, runDestination, showStatus, workspaceOrgKey]);
+  }, [activeProject?.orgId, mergedProjects, mergedProjectsLoading, onOpenTeam, performProjectSwitch, projectRecency, remoteDiscoveryResolved, remoteLoadedScope, resetWorkspaceSwitcher, runDestination, showStatus, workspaceOrgKey]);
 
   const handleProjectSwitch = useCallback(
     (projectId: string) => {
-      if (projectId === activeProjectId && !mobileNavigation) {
+      if (projectId === activeProjectId && !mobileNavigation && activeOrgKey === activeProjectOrgKey && activePanel !== "home" && !hideContext) {
         // Choosing Current is dismissal, not a new destination. A route-owned
         // drawer has no sidebar branch for runDestination to collapse.
         dismissWorkspaceSwitcher();
@@ -1054,7 +881,7 @@ export function StudioSidebar({
       resetWorkspaceSwitcher();
       runDestination(() => performProjectSwitch(projectId));
     },
-    [activeProjectId, dismissWorkspaceSwitcher, mobileNavigation, resetWorkspaceSwitcher, performProjectSwitch, runDestination],
+    [activeOrgKey, activePanel, activeProjectId, activeProjectOrgKey, dismissWorkspaceSwitcher, hideContext, mobileNavigation, resetWorkspaceSwitcher, performProjectSwitch, runDestination],
   );
 
   const handleProjectMenuAction = useCallback(
@@ -1122,13 +949,13 @@ export function StudioSidebar({
   }, [activeProjectId, resetWorkspaceSwitcher]);
 
   useEffect(() => {
-    setWorkspaceOrgKey(canBrowseAllWorkspaceOrgs ? "all" : activeOrgKey);
+    setWorkspaceOrgKey(workspaceSwitcherMode === "spaces" ? activeOrgKey : canBrowseAllWorkspaceOrgs ? "all" : activeOrgKey);
     // A programmatic reset abandons any in-flight team switch — clear the
     // pending markers or the clicked chip pulses forever and the sync effect
     // stays short-circuited by the stale ref.
     pendingOrgContextSwitchRef.current = null;
     setPendingOrgSwitchKey(null);
-  }, [activeOrgKey, canBrowseAllWorkspaceOrgs]);
+  }, [activeOrgKey, canBrowseAllWorkspaceOrgs, workspaceSwitcherMode]);
 
   useEffect(() => {
     if (!sidebarOpen) {
@@ -1163,57 +990,101 @@ export function StudioSidebar({
   }, [showProjectSearch]);
 
   const moreSwitcherOpen = moreMenuOpen || moreMobileViewOpen;
-  // "New team" lives with the sidebar because the sidebar already owns the
-  // org list and the switch: create, refresh that list, then select the new
-  // team so the panel lands on its (empty) spaces with the New-space action
-  // right there.
   const [newTeamOpen, setNewTeamOpen] = useState(false);
-  const [newTeamName, setNewTeamName] = useState("");
-  const [newTeamPending, setNewTeamPending] = useState(false);
-  const closeNewTeam = useCallback(() => {
-    setNewTeamOpen(false);
-    setNewTeamName("");
-  }, []);
-  const handleCreateTeam = useCallback(async () => {
-    const orgName = newTeamName.trim();
-    if (!orgName || newTeamPending) {
-      return;
-    }
-    setNewTeamPending(true);
-    try {
-      const created = await controllerClient.organizations.create({ orgName });
-      if (!created) {
-        showStatus("Couldn't create the team. Nothing was changed — try again in a moment.", "error", 4500);
-        return;
-      }
-      if (typeof window !== "undefined") {
-        window.dispatchEvent(new CustomEvent("instafy:orgs-updated"));
-      }
-      closeNewTeam();
-      showStatus(`Team ${created.name} created.`, "success", 2500, { presentation: "confirmation" });
-      // A new team has no spaces, so selecting it would only bounce back with
-      // a "no spaces yet" notice. Go straight to making its first space; fall
-      // back to plain selection where the new-space flow isn't available.
-      if (onStartNewProject) {
-        runDestination(() => onStartNewProject(created.id));
-      } else {
-        handleWorkspaceOrgChange(created.id);
-      }
-    } finally {
-      setNewTeamPending(false);
-    }
-  }, [
-    closeNewTeam,
-    handleWorkspaceOrgChange,
-    newTeamName,
-    newTeamPending,
-    runDestination,
-    onStartNewProject,
-    showStatus,
-  ]);
+  const handleTeamCreated = useCallback((created: ControllerOrgSummary) => {
+    setControllerOrgs((current) => [...current.filter((org) => org.id !== created.id), created]);
+    setWorkspaceOrgKey(created.id);
+    resetWorkspaceSwitcher();
+    runDestination(() => onOpenOrgSettings?.(created.id));
+  }, [onOpenOrgSettings, resetWorkspaceSwitcher, runDestination]);
+
+  const openSelectedTeam = () => {
+    onNavigationHeaderAction?.();
+    resetWorkspaceSwitcher();
+    closeMoreMenu();
+    runDestination(() => {
+      if (onOpenTeam) onOpenTeam(activeOrgKey);
+      else onSelect("team");
+    });
+  };
+  const openSelectedTeamSettings = () => {
+    onNavigationHeaderAction?.();
+    resetWorkspaceSwitcher();
+    closeMoreMenu();
+    runDestination(() => onOpenOrgSettings?.(activeOrgKey));
+  };
+  const canStartHeaderChat = externalHeader && showChatActions && selectedTeamHasActiveSpace &&
+    Boolean(onStartNewConversation) && activePanel !== "home" && !hideContext &&
+    navigationPage !== "home";
+  const runHeaderChatAction = (action: () => void) => {
+    if (!canStartHeaderChat || !onStartNewConversation) return;
+    resetWorkspaceSwitcher();
+    closeMoreMenu();
+    runDestination(action);
+  };
+  const headerNewChat = canStartHeaderChat ? <StudioNewChatButton
+    testId="sidebar-new-chat" size="sm" radius="lg"
+    label={desktopRail && !showLabels ? undefined : "New chat"}
+    isDisabled={mobileDrillInOpen}
+    dismissalKey={JSON.stringify([activeOrgKey, activeProjectId, activePanel, navigationPage, mobileDrillInOpen])}
+    runAction={runHeaderChatAction}
+    className={desktopRail && !showLabels
+      ? "!h-11 !w-11 !min-h-11 !min-w-11 shrink-0"
+      : "!h-11 !w-auto !min-h-11 min-w-0 flex-1 justify-start gap-2 px-3"}
+  /> : null;
+  // A selected-team/account/page change discards any open menu, including
+  // changes that retain the same loaded project behind a global panel.
+  const teamMenu = <StudioSidebarTeamMenu
+    key={JSON.stringify([activeTeamUserKey, activeOrgKey, activeProjectId, activePanel, desktopRail, externalHeader || showLabels, navigationPresentation, externalHeader])}
+    teamName={activeOrgName} teamAvatarUrl={activeOrgAvatarUrl}
+    presentation={pathControls && (!externalHeader || !desktopRail) ? "path" : "standard"} compact={!externalHeader && !showLabels}
+    active={activePanel === "team" || activePanel === "settings"}
+    rowClassName={`${sidebarRowLayoutClass} ${getSidebarRowToneClass(activePanel === "team" || activePanel === "settings")}`}
+    iconClassName={getSidebarNavIconClass(activePanel === "team" || activePanel === "settings")}
+    mobile={!desktopRail}
+    touchTargets={pathControls && touchLikeInput}
+    triggerRef={externalHeader || !desktopRail || navigationPresentation === "path" ? workspaceTriggerRef : undefined}
+    onSwitchTeam={externalHeader || !desktopRail || pathHeader ? () => { onNavigationHeaderAction?.(); openWorkspaceSwitcher("teams-and-spaces", "team"); } : undefined}
+    onOpenOverview={openSelectedTeam}
+    onOpenSettings={activeOrgKey !== "personal" && onOpenOrgSettings ? openSelectedTeamSettings : undefined}
+  />;
+  const spaceControl = (
+    <StudioRecentSpaces
+      key={JSON.stringify([activeTeamUserKey, activeOrgKey, activePanel, navigationPresentation, externalHeader])}
+      spaces={recentSpaceCandidates}
+      recency={projectRecency}
+      attentionCounts={homeAttentionByProject}
+      activeProjectId={selectedTeamHasActiveSpace ? activeProjectId : null}
+      onSelectSpace={(id) => {
+        if (!recentSpaceCandidates.some((space) => space.id === id)) return;
+        onNavigationHeaderAction?.();
+        resetWorkspaceSwitcher();
+        runDestination(() => performProjectSwitch(id));
+      }}
+      onBrowseAll={() => { onNavigationHeaderAction?.(); openWorkspaceSwitcher("spaces"); }}
+      presentation={pathControls ? "path" : "inline"}
+      collapsed={!externalHeader && !showLabels}
+      expanded={recentSpacesExpanded}
+      onExpandedChange={setRecentSpacesExpanded}
+      rowClassName={pathControls ? `gap-1 !px-1 ${desktopRail ? "min-h-9" : "!min-h-12"}` : `${sidebarRowLayoutClass} ${getSidebarRowToneClass(workspaceSwitcherOpen && workspaceSwitcherMode === "spaces")}`}
+      iconClassName={pathControls ? "flex h-5 w-5 shrink-0 items-center justify-center" : getSidebarNavIconClass(workspaceSwitcherOpen && workspaceSwitcherMode === "spaces")}
+      triggerRef={spaceTriggerRef}
+    />
+  );
+  const navigationPath = <div
+    className="sidebar-navigation-path flex min-w-0 flex-1 items-center gap-0.5"
+    role="group" aria-label="Team and space" data-testid="sidebar-navigation-path"
+    inert={externalHeader && mobileDrillInOpen || undefined} aria-hidden={externalHeader && mobileDrillInOpen || undefined}>
+    <div className={`sidebar-path-team flex ${externalHeader && desktopRail ? "min-w-0 max-w-64" : "shrink-0"}`}>{teamMenu}</div>
+    <span aria-hidden="true" className="pointer-events-none shrink-0 text-sm text-slate-400 dark:text-slate-500">/</span>
+    <div className="sidebar-path-space flex min-w-0 flex-1">{spaceControl}</div>
+  </div>;
+  const selectedTeamRole = controllerOrgs.find((org) => org.id === activeOrgKey)?.role;
+  const canCreateSelectedTeamSpace = activeOrgKey === "personal" || ["owner", "admin", "builder"].includes(selectedTeamRole ?? "");
 
   const workspaceSwitcherSections = (
     <StudioSidebarWorkspaceSwitcher
+      mode={workspaceSwitcherMode}
       orgOptions={orgOptions}
       workspaceOrgKey={workspaceOrgKey}
       activeOrgKey={activeOrgKey}
@@ -1233,10 +1104,10 @@ export function StudioSidebar({
       projectAttentionCounts={homeAttentionByProject}
       orgAttentionCounts={homeAttentionByOrg}
       onOpenOrgSettings={
-        onOpenOrgSettings
+        onOpenOrgSettings && workspaceOrgFilterId
           ? () => {
               resetWorkspaceSwitcher();
-              runDestination(onOpenOrgSettings);
+              runDestination(() => onOpenOrgSettings(workspaceOrgFilterId));
             }
           : undefined
       }
@@ -1251,7 +1122,7 @@ export function StudioSidebar({
           ? () => {
               resetWorkspaceSwitcher();
               runDestination(() => onStartNewProject(
-                selectedWorkspaceOrg?.key && selectedWorkspaceOrg.key !== "personal"
+                selectedWorkspaceOrg?.key && !["personal", "all"].includes(selectedWorkspaceOrg.key)
                   ? selectedWorkspaceOrg.key
                   : null,
               ));
@@ -1272,9 +1143,45 @@ export function StudioSidebar({
     />
   );
 
+  const accountSection = (
+    <StudioAccountMenu
+      footerRef={footerRef}
+      showLabels={!desktopRail && showLabels}
+      collapsedSidebarDensity={desktopRail ? "compact" : collapsedSidebarDensity}
+      onProfile={onOpenProfileSettings ? () => runDestination(onOpenProfileSettings) : undefined}
+      onSupport={onOpenBugReportInbox ? () => runDestination(onOpenBugReportInbox) : undefined}
+    />
+  );
+  const workspacePanel = (
+    <StudioSidebarWorkspacePanel
+        open={workspaceSwitcherOpen}
+        mode={workspaceSwitcherMode}
+        desktop={isLargeScreen}
+        portalTarget={workspaceSwitcherPortalTarget}
+        triggerRef={workspaceSwitcherMode === "spaces" ? spaceTriggerRef : !desktopRail || workspaceSwitcherSourceRef.current === "team" ? workspaceTriggerRef : browseTriggerRef}
+        onClose={dismissWorkspaceSwitcher}
+      >
+        {workspaceSwitcherSections}
+      </StudioSidebarWorkspacePanel>
+  );
+
   return (
     <>
-      <nav
+      {navigationHeaderPortalTarget ? createPortal(renderNavigationHeader ? renderNavigationHeader({ team: teamMenu, space: spaceControl, teamName: activeOrgName, onBrowseTeams: () => { onNavigationHeaderAction?.(); openWorkspaceSwitcher(); } }) : navigationPath, navigationHeaderPortalTarget) : null}
+      {desktopRail ? <StudioOrganizationRail
+        organizations={orgDeckTeams} selectedOrgKey={activeOrgKey}
+        pendingOrgKey={mergedProjectsError ? null : pendingOrgSwitchKey}
+        homeActive={activePanel === "home"} homeAttentionCount={homeAttentionCount}
+        orgAttentionCounts={homeAttentionByOrg} titleBarFree={titleBarFree}
+        onHome={() => { resetWorkspaceSwitcher(); closeMoreMenu(); runDestination(() => onSelect("home")); }}
+        onSelectOrganization={handleWorkspaceOrgChange}
+        onCreateOrganization={runtimeControllerEnabled ? () => { resetWorkspaceSwitcher(); setNewTeamOpen(true); } : undefined}
+        onBrowseOrganizations={() => openWorkspaceSwitcher()}
+        browseButtonRef={browseTriggerRef} account={accountSection}
+      /> : null}
+      {showContext ? <nav
+        aria-label={desktopRail ? `${activeOrgName} navigation` : "Navigation"}
+        data-testid="sidebar-context-navigation"
         ref={navRef}
         // The rail is the full-height column at the very left edge, so on
         // macOS it -- not the workspace header -- is what sits under the
@@ -1299,154 +1206,79 @@ export function StudioSidebar({
               // tagging each one: a control added to the rail later would
               // otherwise render behind the background and simply vanish.
               ? "overflow-visible [&>*:not([data-rail-surface])]:relative [&>*:not([data-rail-surface])]:z-[1]"
-              : "overflow-hidden border-r border-slate-200/70 bg-slate-50/80 pt-[var(--instafy-safe-area-inset-top)] dark:border-[color:var(--color-studio-dark-divider)] dark:bg-[var(--color-studio-dark-rail)]",
+              : `overflow-hidden border-r border-slate-200/70 bg-slate-50 pt-[var(--instafy-safe-area-inset-top)] ${DARK_RAIL_SURFACE_CLASS}`,
         ]
           .filter(Boolean)
           .join(" ")}
-        style={titleBarFree ? { paddingTop: `${DESKTOP_TITLE_BAR_HEIGHT_PX}px` } : undefined}
+        style={titleBarFree && !externalHeader ? { paddingTop: `${DESKTOP_TITLE_BAR_HEIGHT_PX}px` } : undefined}
       >
         {titleBarFree ? (
           <div
             aria-hidden="true"
             data-rail-surface=""
-            className="absolute inset-x-0 bottom-0 z-0 border-r border-slate-200/70 bg-slate-50/80 dark:border-[color:var(--color-studio-dark-divider)] dark:bg-[var(--color-studio-dark-rail)]"
+            className={`absolute inset-x-0 bottom-0 z-0 border-r border-slate-200/70 bg-slate-50 ${DARK_RAIL_SURFACE_CLASS}`}
             style={{ top: `${DESKTOP_TITLE_BAR_HEIGHT_PX}px` }}
           />
         ) : null}
-        <ul className="min-h-0 flex-1 space-y-1 overflow-y-auto overflow-x-hidden pb-2">
-          <li className={showLabels ? "" : "flex justify-center"}>
-            <Button
-              variant="ghost"
-              size="sm"
-              radius="lg"
-              fullWidth
-              onPress={onRequestClose ?? onToggleSidebar}
-              aria-label={onRequestClose ? "Close navigation" : sidebarOpen ? "Collapse sidebar" : "Expand sidebar"}
-              data-testid="sidebar-drawer-toggle"
-              className={[
-                "group/item relative py-1.5 transition focus-visible:ring-offset-0",
-                sidebarRowLayoutClass,
-                getSidebarRowToneClass(false),
-              ].join(" ")}
-              isDisabled={!onRequestClose && !onToggleSidebar}
-            >
-              <span
-                className={
-                  `relative flex ${sidebarIconShellSizeClass} items-center justify-center rounded-lg border border-transparent text-slate-400 transition-colors group-hover/item:text-primary-600 dark:text-slate-500 dark:group-hover/item:text-primary-500`
-                }
-              >
-                {onRequestClose ? (
-                  <Xmark className="text-base" aria-hidden="true" />
-                ) : sidebarOpen ? (
-                  <SidebarCollapse className="text-base" aria-hidden="true" />
-                ) : (
-                  <SidebarExpand className="text-base" aria-hidden="true" />
-                )}
-              </span>
-              {showLabels ? (
-                <span className="flex flex-1 items-center justify-between gap-2 text-sm font-medium text-slate-700 dark:text-slate-200">
-                  <span>{onRequestClose ? "Close" : sidebarOpen ? "Collapse" : "Expand"}</span>
-                </span>
-              ) : null}
-            </Button>
-          </li>
-
-          <li>
-            <Button
-              onPress={() => {
-                resetWorkspaceSwitcher();
-                closeMoreMenu();
-                runDestination(() => onSelect("home"));
-              }}
-              variant="ghost"
-              size="sm"
-              radius="lg"
-              fullWidth
-              data-testid="sidebar-home-button"
-              className={[
-                "group/item relative py-1.5 transition focus-visible:ring-offset-0",
-                sidebarRowLayoutClass,
-                getSidebarRowToneClass(activePanel === "home"),
-              ].join(" ")}
-              aria-current={activePanel === "home" ? "page" : undefined}
-              aria-label="Open home"
-            >
-              <span className={getSidebarNavIconClass(activePanel === "home")}>
-                <HomeIcon className="h-6 w-6" />
-                <AttentionBadge
-                  count={homeAttentionCount}
-                  testId="sidebar-home-badge"
-                  aria-hidden
-                  className="absolute right-[1px] top-[1px] ring-2 ring-slate-50 dark:ring-[color:var(--color-studio-dark-rail)]"
-                />
-              </span>
-              {showLabels ? (
-                <span className="flex flex-1 items-center gap-2 text-sm font-medium text-slate-700 dark:text-slate-200">
-                  <span>Home</span>
-                </span>
-              ) : null}
-            </Button>
-          </li>
-
-          <li>
-            <Button
-              ref={workspaceTriggerRef}
-              variant="ghost"
-              size="sm"
-              radius="lg"
-              fullWidth
-              data-testid="sidebar-project-button"
-              aria-expanded={workspaceSwitcherOpen}
-              onPress={() => {
-                if (workspaceSwitcherOpen) {
-                  dismissWorkspaceSwitcher();
-                  return;
-                }
-                openWorkspaceSwitcher();
-              }}
-              className={[
-                "group/item relative py-1.5 transition focus-visible:ring-offset-0 data-[pressed]:translate-y-0 data-[pressed]:scale-100",
-                sidebarRowLayoutClass,
-                getSidebarRowToneClass(workspaceSwitcherOpen),
-              ].join(" ")}
-              aria-label="Team and spaces"
-            >
-              <span
-                className={[
-                  `relative flex ${sidebarIconShellSizeClass} shrink-0 items-center justify-center rounded-lg transition-transform active:scale-95`,
-                  workspaceSwitcherOpen ? "ring-2 ring-primary-400/60 ring-offset-1 ring-offset-slate-50 dark:ring-offset-[color:var(--color-studio-dark-rail)]" : "",
-                ]
-                  .filter(Boolean)
-                  .join(" ")}
-              >
-                <SidebarOrgDeck
-                  team={orgDeckTeam}
-                  teamCount={orgDeckTeams.length}
-                  otherAttentionCount={orgDeckOtherAttention}
-                  pending={pendingOrgSwitchKey !== null && !mergedProjectsError}
-                />
-              </span>
-              {showLabels ? (
-                <span className="flex min-w-0 flex-1 items-center justify-between gap-2 text-left">
-                  <span className="min-w-0 flex-1">
-                    <Text as="span" variant="bodyStrong" tone="primary" className="block truncate text-sm">
-                      {activeProjectName}
-                    </Text>
-                    <Text as="span" variant="caption" tone="muted" className="block truncate">
-                      {activeOrgName}
-                    </Text>
-                  </span>
-                  <ControlChevron direction={workspaceSwitcherOpen ? "left" : "right"} />
-                </span>
-              ) : null}
-            </Button>
-          </li>
-
+        {desktopRail ? <div
+          className={`${externalHeader ? "h-12 min-h-12 border-b border-transparent" : "min-h-11"} shrink-0 ${pathHeader ? "gap-x-0 flex items-center border-b border-slate-200/70 dark:border-[color:var(--color-studio-dark-divider)]" : "gap-x-1 flex items-center"} ${showLabels ? pathHeader ? "pr-px" : "pr-[7px]" : ""}`}
+          data-testid="sidebar-team-header">
+          <div className={`flex w-[calc(4rem-1px)] shrink-0 items-center justify-center ${pathHeader ? "h-11" : ""}`}>
+            <IconButton variant="ghost" size="sm"
+              aria-label={showLabels ? "Collapse sidebar" : "Expand sidebar"}
+              title={showLabels ? "Collapse sidebar" : "Expand sidebar"}
+              aria-expanded={showLabels}
+              data-testid="sidebar-drawer-toggle" onPress={onToggleSidebar}
+              isDisabled={!onToggleSidebar} className="shrink-0">
+              {showLabels ? <SidebarCollapse className={externalHeader ? "h-[18px] w-[18px]" : "h-4 w-4"} /> : <SidebarExpand className={externalHeader ? "h-[18px] w-[18px]" : "h-4 w-4"} />}
+            </IconButton>
+          </div>
+          {externalHeader && showLabels ? headerNewChat : null}
+          {!externalHeader && showLabels ? pathHeader ? navigationPath : teamMenu : null}
+        </div> : null}
+        {desktopRail && !showLabels && headerNewChat ? <div className="flex shrink-0 justify-center">{headerNewChat}</div> : null}
+        {!desktopRail ? <div
+          className={`shrink-0 gap-x-1 px-1 py-1 ${pathHeader ? "flex items-center border-b border-slate-200/70 dark:border-[color:var(--color-studio-dark-divider)]" : "flex items-center gap-y-1"} ${showLabels ? "min-h-14" : "flex-col"} ${externalHeader ? "flex-row-reverse" : ""}`}
+          inert={mobileDrillInOpen || undefined} aria-hidden={mobileDrillInOpen || undefined}
+          data-testid="sidebar-team-header">
+          {externalHeader ? headerNewChat ?? <span className="min-w-0 flex-1" aria-hidden="true" /> : <>
+          <IconButton variant="ghost" size="sm" radius="lg"
+            onPress={() => {
+              resetWorkspaceSwitcher();
+              closeMoreMenu();
+              runDestination(() => onSelect("home"));
+            }}
+            data-testid="sidebar-home-button"
+            aria-current={activePanel === "home" ? "page" : undefined}
+            aria-label="Home — all teams" title="Home — all teams"
+            className="relative !min-h-12 !min-w-12 shrink-0 aria-[current=page]:bg-primary-50 dark:aria-[current=page]:bg-primary-500/10">
+            <span aria-hidden="true"><OctoMark className="h-6 w-6 text-brand-ink dark:text-brand-paper" /></span>
+            <AttentionBadge count={homeAttentionCount} testId="sidebar-home-badge" aria-hidden
+              className="absolute right-0 top-0 ring-2 ring-slate-50 dark:ring-[color:var(--color-studio-dark-rail)]" />
+          </IconButton>
+          {pathHeader ? navigationPath : teamMenu}
+          </>}
+          <IconButton variant="ghost" size="sm"
+            aria-label={onRequestClose ? "Close navigation" : showLabels ? "Collapse sidebar" : "Expand sidebar"}
+            title={onRequestClose ? "Close navigation" : showLabels ? "Collapse sidebar" : "Expand sidebar"}
+            data-testid="sidebar-drawer-toggle" onPress={onRequestClose ?? onToggleSidebar}
+            isDisabled={!onRequestClose && !onToggleSidebar} className="!min-h-12 !min-w-12 shrink-0">
+            {onRequestClose || showLabels ? <SidebarCollapse className="h-[18px] w-[18px]" aria-hidden="true" /> : <SidebarExpand className="h-[18px] w-[18px]" aria-hidden="true" />}
+          </IconButton>
+        </div> : null}
+        <ul className="min-h-0 flex-1 space-y-1 overflow-y-auto overflow-x-hidden pb-2" data-testid="sidebar-context-scroll"
+          inert={mobileDrillInOpen || undefined} aria-hidden={mobileDrillInOpen || undefined}>
+          {desktopRail && !showLabels && !externalHeader ? <li>{teamMenu}</li> : null}
+          {!pathControls ? <li className="border-t border-slate-200/70 pt-1 dark:border-[color:var(--color-studio-dark-divider)]">
+            {spaceControl}
+          </li> : null}
+          {selectedTeamHasActiveSpace ? <>
           {items.map((item) => {
           if (item.id === "chat" && onSelectConversation) {
             return (
               <li key={item.id}>
                 <StudioRecentChats
+                  key={JSON.stringify([activeTeamUserKey, activeProjectId])}
                   conversations={recentConversations}
                   activeConversationId={activeConversationId}
                   openConversationIds={openConversationIds}
@@ -1487,6 +1319,7 @@ export function StudioSidebar({
                   ].join(" ")}
                   aria-current={isActive ? "page" : undefined}
                   aria-label={item.label}
+                  title={showLabels ? undefined : item.label}
                 >
                   <span className={getSidebarNavIconClass(isActive, item.accent)}>
                     <IconComponent className="text-base" aria-hidden="true" />
@@ -1546,6 +1379,7 @@ export function StudioSidebar({
                     ].join(" ")}
                     aria-current={isConversationHistoryActive ? "page" : undefined}
                     aria-label="Open chats"
+                    title={showLabels ? undefined : "Open chats"}
                   >
                     <span className={getSidebarNavIconClass(isConversationHistoryActive)}>
                       <ChatsIcon className="text-base" aria-hidden="true" />
@@ -1563,6 +1397,7 @@ export function StudioSidebar({
         })}
 
           <StudioSidebarMorePanels
+            triggerRef={moreTriggerRef}
             resolvedMoreItems={resolvedMoreItems}
             showInlineMoreItems={showInlineMoreItems}
             inlineMoreItems={inlineMoreItems}
@@ -1595,58 +1430,25 @@ export function StudioSidebar({
             moreIndicator={moreIndicator}
             selectedMoreKeys={selectedMoreKeys}
           />
+          </> : <li className={`${showLabels ? "mx-3" : ""} ${desktopRail ? "pt-2" : "mt-3 pt-3"} border-t ${externalHeader ? "border-transparent" : "border-slate-200/70 dark:border-[color:var(--color-studio-dark-divider)]"}`} data-testid="sidebar-no-selected-space">
+            {showLabels ? <Text as="p" variant="caption" tone="muted">Choose a space in this team to open its tools.</Text> : null}
+            {onStartNewProject && canCreateSelectedTeamSpace ? <Button variant="ghost" size="sm" fullWidth={!showLabels}
+              className={showLabels ? "mt-1" : `mt-1 ${sidebarRowLayoutClass}`}
+              aria-label="New space" title={showLabels ? undefined : "New space"} data-testid="sidebar-new-space"
+              onPress={() => runDestination(() => onStartNewProject(activeOrgKey === "personal" ? null : activeOrgKey))}>
+              {showLabels ? "New space" : <span className={getSidebarNavIconClass(false)}><Plus className="h-5 w-5" aria-hidden="true" /></span>}
+            </Button> : null}
+          </li>}
       </ul>
 
-      <StudioSidebarAccountSection
-        footerRef={footerRef}
-        showLabels={showLabels}
-        collapsedSidebarDensity={collapsedSidebarDensity}
-        profileMenuOpen={profileMenuOpen}
-        onProfileMenuOpenChange={(open) =>
-          setProfileMenuOpen((current) => (open && current ? false : open))
-        }
-        avatarUrl={avatarUrl}
-        initials={initials}
-        displayName={displayName}
-        accountSubtitle={accountSubtitle}
-        resolvedTheme={resolvedTheme}
-        onThemeModeChange={setThemeMode}
-        installEntry={installEntry}
-        isLargeScreen={isLargeScreen}
-        shouldRenderUpdateEntry={shouldRenderUpdateEntry}
-        updatePresentation={updatePresentation}
-        onUpdateEntryClick={handleUpdateEntryClick}
-        onUpdateEntryContextMenu={handleUpdateEntryContextMenu}
-        onUpdateEntryPointerDown={handleUpdateEntryPointerDown}
-        clearUpdateLongPress={clearUpdateLongPress}
-        onOpenProfileSettings={onOpenProfileSettings ? () => runDestination(onOpenProfileSettings) : undefined}
-        onOpenSupport={onOpenBugReportInbox ? () => runDestination(onOpenBugReportInbox) : undefined}
-        supportUnreadCount={supportUnreadCount}
-        notificationsPending={notificationsPending}
-        notificationsEnabled={notificationsEnabled}
-        onToggleNotifications={handleToggleNotifications}
-        onOpenDiagnostics={() => setDevMenuOpen(true)}
-        hasAppLogErrors={hasAppLogErrors}
-        onSignOut={onSignOut}
-        updateDialogOpen={updateDialogOpen}
-        onUpdateDialogOpenChange={setUpdateDialogOpen}
-        updateMetadata={updateMetadata}
-        updateDialogShowDetails={updateDialogShowDetails}
-        onUpdateDialogShowDetailsChange={setUpdateDialogShowDetails}
-        onUpdatePrimaryAction={handleUpdatePrimaryAction}
-        updateActionPending={updateActionPending}
-      />
-      <StudioSidebarWorkspacePanel
-        open={workspaceSwitcherOpen}
-        desktop={isLargeScreen}
-        portalTarget={workspaceSwitcherPortalTarget}
-        triggerRef={workspaceTriggerRef}
-        onClose={dismissWorkspaceSwitcher}
-      >
-        {workspaceSwitcherSections}
-      </StudioSidebarWorkspacePanel>
+      {!desktopRail ? <div className="shrink-0" data-testid="sidebar-account-navigation"
+        inert={mobileDrillInOpen || undefined} aria-hidden={mobileDrillInOpen || undefined}>
+        {accountSection}
+      </div> : null}
+      {!desktopRail ? workspacePanel : null}
       <StudioSidebarMobileDrillIn
         open={!isLargeScreen && moreMobileViewOpen}
+        triggerRef={moreTriggerRef}
         testId="sidebar-more-menu"
         title="More"
         backLabel="Back"
@@ -1712,114 +1514,9 @@ export function StudioSidebar({
           })}
         </ul>
       </StudioSidebarMobileDrillIn>
-      </nav>
-      <StudioDialogModal
-        isOpen={devMenuOpen}
-        onOpenChange={(open) => setDevMenuOpen(open)}
-        isDismissable
-        dialogAriaLabel="Diagnostics"
-        data-testid="sidebar-dev-diagnostics-modal"
-        modalClassName="max-h-[min(90dvh,42rem)] max-w-xl overflow-hidden p-0"
-      >
-        <DevDiagnosticsMenu
-            onClose={() => setDevMenuOpen(false)}
-            onShowLogs={onShowLogs}
-            hasLogs={hasLogs}
-            onShowAppLogs={() => setAppLogsOverlayOpen(true)}
-            hasAppLogs={hasAppLogs}
-            onShowBugReports={onOpenBugReportInbox}
-            onReportBug={onOpenBugReport}
-            shakeToReportEnabled={shakeToReportEnabled}
-            onToggleShakeToReport={Capacitor.isNativePlatform() ? onToggleShakeToReport : undefined}
-            onSimulateShakeToReport={
-              Capacitor.isNativePlatform() && onSimulateShakeToReport
-                ? () => {
-                    setDevMenuOpen(false);
-                    onSimulateShakeToReport();
-                  }
-                : undefined
-            }
-            onTestShakeToReport={
-              Capacitor.isNativePlatform() && onTestShakeToReport
-                ? () => {
-                    setDevMenuOpen(false);
-                    onTestShakeToReport();
-                  }
-                : undefined
-            }
-            shakeToReportStatus={shakeToReportStatus}
-            shakeToReportDetail={shakeToReportDetail}
-            runtimeOptions={runtimeOptions}
-            onCopyTunnel={handleCopyTunnel}
-          />
-      </StudioDialogModal>
-      <StudioDialogModal
-        isOpen={newTeamOpen}
-        onOpenChange={(open) => {
-          if (!open) {
-            closeNewTeam();
-          }
-        }}
-        isDismissable
-        dialogAriaLabel="New team"
-        data-testid="sidebar-new-team-modal"
-        modalClassName="max-w-sm p-0"
-      >
-        <StudioDialogHeader
-          title="New team"
-          description="A team has its own spaces, members and credits."
-          onClose={closeNewTeam}
-          closeLabel="Close new team"
-        />
-        <StudioDialogBody>
-          <form
-            className="space-y-4"
-            onSubmit={(event) => {
-              event.preventDefault();
-              void handleCreateTeam();
-            }}
-          >
-            <Input
-              id="sidebar-new-team-name"
-              aria-label="Team name"
-              placeholder="Team name"
-              value={newTeamName}
-              onChange={(event) => setNewTeamName(event.target.value)}
-              autoFocus
-              autoComplete="off"
-              maxLength={80}
-              data-testid="sidebar-new-team-name"
-            />
-            <div className="flex items-center justify-end gap-2">
-              <Button variant="ghost" size="sm" radius="full" onPress={closeNewTeam}>
-                Cancel
-              </Button>
-              <Button
-                type="submit"
-                variant="primary"
-                size="sm"
-                radius="full"
-                isDisabled={newTeamName.trim().length === 0 || newTeamPending}
-                data-testid="sidebar-new-team-create"
-              >
-                {newTeamPending ? "Creating…" : "Create team"}
-              </Button>
-            </div>
-          </form>
-        </StudioDialogBody>
-      </StudioDialogModal>
-      {appLogsOverlayOpen ? (
-        <BuildLogOverlay
-          logs={appLogs}
-          onClear={clearAppLogs}
-          onClose={() => setAppLogsOverlayOpen(false)}
-          title="App logs"
-          ariaLabel="App logs"
-          emptySummary=""
-          emptyBody="Warnings, errors, and unhandled exceptions will appear here."
-          copyText={appLogExport}
-        />
-      ) : null}
+      </nav> : null}
+      {desktopRail ? workspacePanel : null}
+      <NewTeamDialog open={newTeamOpen} onClose={() => setNewTeamOpen(false)} onCreated={handleTeamCreated} />
     </>
   );
 }

@@ -1,4 +1,5 @@
 import { test, expect } from "@playwright/test";
+import { openTeamDirectory } from "../utils/sidebar.js";
 import {
   loginAsGuest,
   prepareStudio,
@@ -9,7 +10,7 @@ import { createPublicChatFromTopBar } from "../utils/chatUi.js";
 import { chooseOption } from "../utils/select.js";
 
 async function openProjectSettings(page: import("@playwright/test").Page) {
-  await page.getByTestId("sidebar-project-button").click();
+  await openTeamDirectory(page);
   await page.getByTestId("sidebar-project-settings").click();
   await expect(page.getByTestId("settings-panel")).toBeVisible();
   await page.getByTestId("settings-category-project-access").click();

@@ -1,4 +1,5 @@
 import { test, expect, type Page } from "@playwright/test";
+import { openTeamDirectory } from "../utils/sidebar.js";
 import { randomUUID } from "node:crypto";
 import {
   gotoStudio,
@@ -12,12 +13,11 @@ import { switchToProject } from "../utils/projects.js";
 import { disableAssistantIfPossible } from "../utils/runtimeAi.js";
 
 async function openProjectSettingsFromSidebar(page: Page, timeout = 30_000) {
-  const projectButton = page.getByTestId("sidebar-project-button");
   const settingsButton = page.getByTestId("sidebar-project-settings");
   const settingsPanel = page.getByTestId("settings-panel");
 
   for (let attempt = 0; attempt < 2; attempt += 1) {
-    await projectButton.click({ noWaitAfter: true });
+    await openTeamDirectory(page);
     await expect(settingsButton).toBeVisible({ timeout: 15_000 });
 
     try {
@@ -502,15 +502,14 @@ test.describe.serial("Projects - multi workspace flow", () => {
     // Refresh and confirm the renamed project persists in the list.
     await page.reload({ waitUntil: "domcontentloaded" });
     await expect(page.getByTestId("topbar-project-name")).toHaveText(newName, { timeout: 60_000 });
-    await page.getByTestId("sidebar-project-button").click({ noWaitAfter: true });
+    await openTeamDirectory(page);
     const refreshedMenu = page.getByTestId("sidebar-project-switcher-menu");
     await expect(refreshedMenu).toBeVisible({ timeout: 15_000 });
     await expect(refreshedMenu.getByText(newName)).toBeVisible();
   });
 
   test("new projects persist across refresh", async ({ page }) => {
-    const projectButton = page.getByTestId("sidebar-project-button");
-    await expect(projectButton).toBeVisible({ timeout: 30_000 });
+    await expect(page.getByTestId("sidebar-browse-teams")).toBeVisible({ timeout: 30_000 });
 
     const projectNameA = `Persist A ${Date.now()}`;
     const projectNameB = `Persist B ${Date.now()}`;
@@ -519,7 +518,7 @@ test.describe.serial("Projects - multi workspace flow", () => {
 
     // Refresh and confirm both projects show up.
     await page.reload({ waitUntil: "domcontentloaded" });
-    await projectButton.click({ noWaitAfter: true });
+    await openTeamDirectory(page);
     const projectMenu = page.getByTestId("sidebar-project-switcher-menu");
     await expect(projectMenu).toBeVisible({ timeout: 15_000 });
     await expect(projectMenu.getByText(projectNameA)).toBeVisible();

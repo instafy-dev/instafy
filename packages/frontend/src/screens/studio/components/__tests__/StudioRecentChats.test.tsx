@@ -55,18 +55,28 @@ describe("StudioRecentChats", () => {
     await act(async () => button?.click());
   }
 
-  it("shows up to six chats in caller order and keeps Browse all available", async () => {
+  it("shows up to three chats in caller order and keeps Browse all available", async () => {
     const conversations = Array.from({ length: 8 }, (_, i) => makeConversation(`${i}`));
     const onSelectConversation = vi.fn();
     const onBrowseAll = vi.fn();
     await render({ conversations, onSelectConversation, onBrowseAll });
 
-    expect(container.querySelectorAll('[data-testid^="sidebar-recent-chat-"]')).toHaveLength(6);
-    expect(container.querySelector('[data-testid="sidebar-recent-chat-6"]')).toBeNull();
-    await click("sidebar-recent-chat-4");
-    expect(onSelectConversation).toHaveBeenCalledWith("4");
+    expect(container.querySelectorAll('[data-testid^="sidebar-recent-chat-"]')).toHaveLength(3);
+    expect(container.querySelector('[data-testid="sidebar-recent-chat-3"]')).toBeNull();
+    await click("sidebar-recent-chat-2");
+    expect(onSelectConversation).toHaveBeenCalledWith("2");
     await click("sidebar-browse-all-chats");
     expect(onBrowseAll).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps running and selected work within the bounded list", async () => {
+    const conversations = Array.from({ length: 8 }, (_, i) => makeConversation(`${i}`));
+    conversations[7].pendingRunIds = ["running-job"];
+    await render({ conversations, activeConversationId: "6" });
+    const rows = [...container.querySelectorAll('[data-testid^="sidebar-recent-chat-"]')];
+    expect(rows.map((row) => row.getAttribute("data-testid"))).toEqual([
+      "sidebar-recent-chat-7", "sidebar-recent-chat-6", "sidebar-recent-chat-0",
+    ]);
   });
 
   it("lets the Chats label collapse and expand the list without navigating", async () => {
@@ -103,6 +113,19 @@ describe("StudioRecentChats", () => {
     expect(document.querySelector('[data-testid="sidebar-recent-chats-popover"]')).toBeNull();
   });
 
+  it("keeps the chats popover closed after expanding and collapsing the inner rail", async () => {
+    await render({ collapsed: true });
+    expect(container.querySelector('[data-testid="sidebar-nav-history"]')?.getAttribute("title")).toBe("Open chats");
+    await click("sidebar-nav-history");
+    expect(document.querySelector('[data-testid="sidebar-recent-chats-popover"]')).not.toBeNull();
+    await render({ collapsed: false });
+    expect(document.querySelector('[data-testid="sidebar-recent-chats-popover"]')).toBeNull();
+    expect(container.querySelector('[data-testid="sidebar-recent-chats-list"]')).not.toBeNull();
+    await render({ collapsed: true });
+    expect(document.querySelector('[data-testid="sidebar-recent-chats-popover"]')).toBeNull();
+    expect(container.querySelector('[data-testid="sidebar-nav-history"]')?.getAttribute("aria-expanded")).toBe("false");
+  });
+
   it("marks Browse all as the current destination and dismisses the rail panel after opening it", async () => {
     const onBrowseAll = vi.fn();
     await render({ collapsed: true, isHistoryActive: true, onBrowseAll });
@@ -131,9 +154,10 @@ describe("StudioRecentChats", () => {
     expect(active?.textContent).not.toContain("Draft");
     expect(active?.querySelector('[title="Draft"] svg')).not.toBeNull();
     expect(active?.getAttribute("title")).toContain("Draft");
-    expect(container.querySelector('[data-testid="sidebar-recent-chat-unread"]')?.getAttribute("aria-label")).toContain("3 unread");
     expect(container.querySelector('[data-testid="sidebar-recent-chat-running"]')?.textContent).toContain("Running");
     expect(container.querySelector('[data-testid="sidebar-recent-chat-queued"]')?.textContent).toContain("Queued");
+    await render({ conversations: [makeConversation("unread", { unreadCount: 3 }), makeConversation("open")], openConversationIds: new Set(["open"]) });
+    expect(container.querySelector('[data-testid="sidebar-recent-chat-unread"]')?.getAttribute("aria-label")).toContain("3 unread");
     expect(container.querySelector('[data-testid="sidebar-recent-chat-open"]')?.getAttribute("aria-label")).toContain("Open in tab");
     expect(container.querySelector('[data-testid="sidebar-recent-chat-open"] [title="Open in tab"]')).toBeNull();
     expect(container.querySelector('[data-testid="sidebar-recent-chat-open"]')?.textContent).toBe("Chat open");

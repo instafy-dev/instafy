@@ -1,15 +1,17 @@
-import { BellNotification, BellOff, ChatBubble, Download, HalfMoon, LogOut, Refresh, Settings, SmartphoneDevice, SunLight, User } from "iconoir-react";
+import { ChatBubble, Download, LogOut, Refresh, Settings, SmartphoneDevice, User, Xmark } from "iconoir-react";
 import { DialogTrigger } from "react-aria-components";
 import { useId, type MouseEvent, type PointerEvent as ReactPointerEvent, type RefObject } from "react";
 import { Button, IconButton } from "../../../components/Button";
+import { HumanAvatar } from "../../../components/HumanAvatar";
+import { ControlChevron } from "../../../components/ControlChevron";
 import { MenuItemContent } from "../../../components/MenuItemContent";
-import { SegmentedControl } from "../../../components/SegmentedControl";
 import { Text } from "../../../components/Text";
 import { StudioDialogPopover } from "../../../components/aria/StudioPopover";
 import { StudioMenu, StudioMenuItem } from "../../../components/aria/StudioMenu";
 import { DRAWER_SECTION_LABEL_CLASS } from "../../../components/listRowStyles";
 import { DARK_RAIL_HOVER_CLASS } from "../../../theme/darkSurfaces";
-import type { ResolvedTheme } from "../../../theme/ThemeProvider";
+import { StudioDialogModal } from "../../../components/aria/StudioModal";
+import { useNativeBackButtonAction } from "../../../native/useNativeBackButtonAction";
 import type { AppReleaseMetadata, AppUpdatePresentation } from "../../../updates/releaseMetadata";
 import { UpdateStatusDialog } from "./UpdateStatusDialog";
 
@@ -17,16 +19,15 @@ type CollapsedSidebarDensity = "comfortable" | "compact" | "dense";
 
 type StudioSidebarAccountSectionProps = {
   footerRef: RefObject<HTMLDivElement | null>;
+  presentation?: "sidebar" | "header";
   showLabels: boolean;
   collapsedSidebarDensity: CollapsedSidebarDensity;
   profileMenuOpen: boolean;
   onProfileMenuOpenChange: (open: boolean) => void;
   avatarUrl: string | null;
-  initials: string;
+  userId?: string | null;
   displayName: string;
   accountSubtitle: string | null;
-  resolvedTheme: ResolvedTheme;
-  onThemeModeChange: (value: ResolvedTheme) => void;
   installEntry: { kind: "desktop"; version: string } | { kind: "mobile-soon" } | null;
   isLargeScreen: boolean;
   shouldRenderUpdateEntry: boolean;
@@ -37,10 +38,6 @@ type StudioSidebarAccountSectionProps = {
   clearUpdateLongPress: () => void;
   onOpenProfileSettings?: () => void;
   onOpenSupport?: () => void;
-  supportUnreadCount?: number;
-  notificationsPending: boolean;
-  notificationsEnabled: boolean;
-  onToggleNotifications: () => void;
   onOpenDiagnostics: () => void;
   hasAppLogErrors: boolean;
   onSignOut?: () => void;
@@ -54,7 +51,7 @@ type StudioSidebarAccountSectionProps = {
 };
 
 function avatarShellClassName(sizeClass: string) {
-  return `relative flex ${sizeClass} items-center justify-center overflow-hidden rounded-full border border-slate-200 bg-slate-50 text-sm font-medium text-slate-700 dark:border-[color:var(--color-studio-dark-raised-control-border)] dark:bg-[var(--color-studio-dark-raised-control)] dark:text-slate-200`;
+  return `relative flex ${sizeClass} items-center justify-center rounded-full`;
 }
 
 function ProfileUpdateIndicator({
@@ -85,29 +82,17 @@ function ProfileUpdateIndicator({
   );
 }
 
-function ProfileSupportIndicator({ unreadCount }: { unreadCount: number }) {
-  if (unreadCount <= 0) return null;
-  return (
-    <span
-      className="absolute bottom-0.5 right-0.5 z-10 inline-flex h-2.5 w-2.5 rounded-full bg-sky-500 ring-2 ring-white dark:ring-[var(--color-studio-dark-rail)]"
-      data-testid="profile-support-indicator"
-      aria-hidden="true"
-    />
-  );
-}
-
 export function StudioSidebarAccountSection({
   footerRef,
+  presentation = "sidebar",
   showLabels,
   collapsedSidebarDensity,
   profileMenuOpen,
   onProfileMenuOpenChange,
   avatarUrl,
-  initials,
+  userId,
   displayName,
   accountSubtitle,
-  resolvedTheme,
-  onThemeModeChange,
   installEntry,
   isLargeScreen,
   shouldRenderUpdateEntry,
@@ -118,10 +103,6 @@ export function StudioSidebarAccountSection({
   clearUpdateLongPress,
   onOpenProfileSettings,
   onOpenSupport,
-  supportUnreadCount = 0,
-  notificationsPending,
-  notificationsEnabled,
-  onToggleNotifications,
   onOpenDiagnostics,
   hasAppLogErrors,
   onSignOut,
@@ -134,31 +115,153 @@ export function StudioSidebarAccountSection({
   updateActionPending,
 }: StudioSidebarAccountSectionProps) {
   const updateStatusDescriptionId = useId();
-  const supportStatusDescriptionId = useId();
-  const showFooterInstall = installEntry?.kind === "desktop" && isLargeScreen;
+  const header = presentation === "header";
+  const sheet = !isLargeScreen;
+  const showFooterInstall = !header && installEntry?.kind === "desktop" && isLargeScreen;
+  useNativeBackButtonAction(profileMenuOpen, () => onProfileMenuOpenChange(false), 250);
   const accessibleUpdateStatus =
     shouldRenderUpdateEntry &&
     (updatePresentation?.emphasis === "attention" || updatePresentation?.emphasis === "danger")
       ? `${updatePresentation.title}. ${updatePresentation.detail}.`
       : null;
-  const normalizedSupportUnreadCount = Math.max(0, Math.floor(supportUnreadCount));
-  const accessibleSupportStatus =
-    normalizedSupportUnreadCount > 0
-      ? `${normalizedSupportUnreadCount} unread support ${
-          normalizedSupportUnreadCount === 1 ? "update" : "updates"
-        }.`
-      : null;
-  const profileStatusDescriptionIds = [
-    accessibleUpdateStatus ? updateStatusDescriptionId : null,
-    accessibleSupportStatus ? supportStatusDescriptionId : null,
-  ]
-    .filter(Boolean)
-    .join(" ") || undefined;
+  const profileStatusDescriptionIds = accessibleUpdateStatus ? updateStatusDescriptionId : undefined;
+
+  const menuContent = (
+    <>
+      <div className="flex items-center gap-3 pr-1">
+        <div className={`${avatarShellClassName("h-10 w-10")} shrink-0`}>
+          <HumanAvatar userId={userId} displayName={displayName} avatarUrl={avatarUrl} className="h-full w-full text-sm" />
+        </div>
+        <div className="min-w-0">
+          <Text
+            as="p"
+            variant="label"
+            tone="subtle"
+            className={["truncate", DRAWER_SECTION_LABEL_CLASS].join(" ")}
+          >
+            Signed in
+          </Text>
+          <Text as="p" variant="bodyStrong" tone="primary" className="truncate">
+            {displayName}
+          </Text>
+          {accountSubtitle ? (
+            <Text as="p" variant="caption" tone="muted" className="truncate">
+              {accountSubtitle}
+            </Text>
+          ) : null}
+        </div>
+        {sheet ? <IconButton variant="ghost" aria-label="Close account menu" onPress={() => onProfileMenuOpenChange(false)} className="ml-auto !min-h-11 !min-w-11 shrink-0"><Xmark className="h-5 w-5" aria-hidden="true" /></IconButton> : null}
+      </div>
+
+      <div className="mt-3 space-y-2">
+
+        {shouldRenderUpdateEntry ? (
+          <div className="px-1">
+            <button
+              type="button"
+              onClick={onUpdateEntryClick}
+              onContextMenu={onUpdateEntryContextMenu}
+              onPointerDown={onUpdateEntryPointerDown}
+              onPointerUp={clearUpdateLongPress}
+              onPointerCancel={clearUpdateLongPress}
+              onPointerLeave={clearUpdateLongPress}
+              className="flex min-h-11 w-full items-center justify-between rounded-lg px-2.5 py-1.5 text-left text-sm text-slate-600 transition hover:bg-slate-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary-500 dark:text-slate-300 dark:hover:bg-[var(--color-studio-dark-rail-hover)]"
+              data-testid="profile-updates-button"
+            >
+              <span className="flex min-w-0 flex-1 items-center gap-2">
+                <span className="shrink-0 text-slate-400 dark:text-slate-300">
+                  <Refresh className="h-4 w-4" aria-hidden="true" />
+                </span>
+                <span className="min-w-0 flex-1 truncate">
+                  {updatePresentation?.title ?? "Updates"}
+                </span>
+              </span>
+              <span className="flex shrink-0 items-center gap-2">
+                {updatePresentation?.emphasis === "attention" ? (
+                  <span className="inline-flex h-2 w-2 rounded-full bg-amber-500" aria-hidden="true" />
+                ) : updatePresentation?.emphasis === "danger" ? (
+                  <span className="inline-flex h-2 w-2 rounded-full bg-rose-500" aria-hidden="true" />
+                ) : null}
+                <span className="text-xs text-slate-400 dark:text-slate-500">
+                  {updatePresentation?.detail ?? "Check now"}
+                </span>
+              </span>
+            </button>
+          </div>
+        ) : null}
+
+        <StudioMenu
+          aria-label="Account menu"
+          onAction={(key) => {
+            const action = String(key);
+            if (action === "profile:settings") {
+              onProfileMenuOpenChange(false);
+              onOpenProfileSettings?.();
+              return;
+            }
+            if (action === "profile:support") {
+              onProfileMenuOpenChange(false);
+              onOpenSupport?.();
+              return;
+            }
+            if (action === "profile:signout") {
+              onProfileMenuOpenChange(false);
+              onSignOut?.();
+            }
+          }}
+          className={sheet ? "space-y-1 [&>[role=menuitem]]:min-h-12" : "space-y-1"}
+        >
+          {onOpenProfileSettings ? (
+            <StudioMenuItem id="profile:settings" data-testid="profile-settings-button">
+              <MenuItemContent start={<User aria-hidden="true" />}>
+                Your settings
+              </MenuItemContent>
+            </StudioMenuItem>
+          ) : null}
+          {installEntry && !showFooterInstall ? (
+            <StudioMenuItem
+              id="profile:install"
+              href={installEntry.kind === "mobile-soon" ? "/install#mobile" : "/install#desktop"}
+              target="_blank"
+              rel="noreferrer"
+              data-testid="profile-install-button"
+            >
+              <MenuItemContent
+                start={installEntry.kind === "mobile-soon" ? <SmartphoneDevice aria-hidden="true" /> : <Download aria-hidden="true" />}
+                end={installEntry.kind === "mobile-soon" ? <Text as="span" variant="caption" tone="muted">Soon</Text> : undefined}
+              >
+                {installEntry.kind === "mobile-soon" ? "Get the app" : "Get desktop app"}
+              </MenuItemContent>
+            </StudioMenuItem>
+          ) : null}
+          {onOpenSupport ? (
+            <StudioMenuItem id="profile:support" data-testid="profile-support-button">
+              <MenuItemContent start={<ChatBubble aria-hidden="true" />}>
+                Support
+              </MenuItemContent>
+            </StudioMenuItem>
+          ) : null}
+          <StudioMenuItem id="profile:signout" isDisabled={!onSignOut}>
+            <MenuItemContent start={<LogOut aria-hidden="true" />}>
+              Sign out
+            </MenuItemContent>
+          </StudioMenuItem>
+        </StudioMenu>
+      </div>
+      <details className="group/profile-advanced mt-2 border-t border-slate-200/70 pt-2 dark:border-[color:var(--color-studio-dark-divider)]">
+        <summary className="flex min-h-11 cursor-pointer items-center rounded-lg px-2.5 py-2 text-xs text-slate-500 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary-500/40 pointer-coarse:min-h-11 dark:text-slate-400">Advanced<span className="ml-auto transition-transform group-open/profile-advanced:rotate-180 motion-reduce:transition-none"><ControlChevron /></span></summary>
+        <Button variant="ghost" fullWidth className="!justify-start px-2.5 pointer-coarse:min-h-11" data-testid="profile-diagnostics-button" onPress={() => { onProfileMenuOpenChange(false); onOpenDiagnostics(); }}>
+          <Settings className="h-4 w-4" aria-hidden="true" />Diagnostics
+          {hasAppLogErrors ? <span className="ml-auto text-xs text-slate-500 dark:text-slate-400">Errors recorded</span> : null}
+        </Button>
+      </details>
+    </>
+  );
 
   return (
     <div
       ref={footerRef}
-      className={[
+      className={header ? "shrink-0" : [
         "shrink-0 flex flex-col",
         showLabels
           ? "gap-3 pt-6"
@@ -177,14 +280,6 @@ export function StudioSidebarAccountSection({
         aria-live="polite"
       >
         {accessibleUpdateStatus}
-      </span>
-      <span
-        id={supportStatusDescriptionId}
-        className="sr-only"
-        role="status"
-        aria-live="polite"
-      >
-        {accessibleSupportStatus}
       </span>
       {showFooterInstall ? (
         <a
@@ -210,7 +305,16 @@ export function StudioSidebarAccountSection({
         isOpen={profileMenuOpen}
         onOpenChange={(open) => onProfileMenuOpenChange(open)}
       >
-        {showLabels ? (
+        {header ? (
+          <IconButton variant="ghost" radius="full" aria-label="Open profile menu" title="Open profile menu"
+            data-testid="topbar-profile-button" aria-describedby={profileStatusDescriptionIds}
+            className="!min-h-12 !min-w-11 shrink-0 p-1">
+            <span className={avatarShellClassName("h-8 w-8")} aria-hidden="true">
+              <HumanAvatar userId={userId} displayName={displayName} avatarUrl={avatarUrl} className="h-full w-full text-xs" />
+              {shouldRenderUpdateEntry ? <ProfileUpdateIndicator presentation={updatePresentation} /> : null}
+            </span>
+          </IconButton>
+        ) : showLabels ? (
           <Button
             variant="ghost"
             size="sm"
@@ -218,18 +322,14 @@ export function StudioSidebarAccountSection({
             className="w-full justify-start gap-3 text-left"
             data-testid="sidebar-profile-menu"
             aria-haspopup="dialog"
+            aria-label="Open profile menu"
             aria-describedby={profileStatusDescriptionIds}
           >
             <span className={avatarShellClassName("h-9 w-9")}>
-              {avatarUrl ? (
-                <img src={avatarUrl} alt="" className="h-full w-full object-cover" />
-              ) : (
-                initials
-              )}
+              <HumanAvatar userId={userId} displayName={displayName} avatarUrl={avatarUrl} className="h-full w-full text-xs" />
               {shouldRenderUpdateEntry ? (
                 <ProfileUpdateIndicator presentation={updatePresentation} />
               ) : null}
-              <ProfileSupportIndicator unreadCount={normalizedSupportUnreadCount} />
             </span>
             <span className="min-w-0 flex-1">
               <Text as="span" variant="bodyStrong" tone="primary" className="block truncate">
@@ -253,218 +353,23 @@ export function StudioSidebarAccountSection({
             aria-label="Open profile menu"
             aria-describedby={profileStatusDescriptionIds}
           >
-            {avatarUrl ? (
-              <img src={avatarUrl} alt="" className="h-full w-full object-cover" />
-            ) : (
-              initials
-            )}
+            <HumanAvatar userId={userId} displayName={displayName} avatarUrl={avatarUrl} className="h-full w-full text-xs" />
             {shouldRenderUpdateEntry ? (
               <ProfileUpdateIndicator presentation={updatePresentation} />
             ) : null}
-            <ProfileSupportIndicator unreadCount={normalizedSupportUnreadCount} />
           </IconButton>
         )}
-        <StudioDialogPopover placement="top start" offset={10} className="w-64 p-3 text-sm">
-          <div className="flex items-center gap-3">
-            <div className={avatarShellClassName("h-10 w-10")}>
-              {avatarUrl ? (
-                <img src={avatarUrl} alt="" className="h-full w-full object-cover" />
-              ) : (
-                initials
-              )}
-            </div>
-            <div className="min-w-0">
-              <Text
-                as="p"
-                variant="label"
-                tone="subtle"
-                className={["truncate", DRAWER_SECTION_LABEL_CLASS].join(" ")}
-              >
-                Signed in
-              </Text>
-              <Text as="p" variant="bodyStrong" tone="primary" className="truncate">
-                {displayName}
-              </Text>
-              {accountSubtitle ? (
-                <Text as="p" variant="caption" tone="muted" className="truncate">
-                  {accountSubtitle}
-                </Text>
-              ) : null}
-            </div>
-          </div>
-
-          <div className="mt-3 space-y-2">
-            <div className="px-1">
-              <SegmentedControl<ResolvedTheme>
-                value={resolvedTheme}
-                onChange={onThemeModeChange}
-                options={[
-                  {
-                    value: "light",
-                    ariaLabel: "Theme: Light",
-                    label: <SunLight className="h-4 w-4" aria-hidden="true" />,
-                  },
-                  {
-                    value: "dark",
-                    ariaLabel: "Theme: Dark",
-                    label: <HalfMoon className="h-4 w-4" aria-hidden="true" />,
-                  },
-                ]}
-                size="sm"
-              />
-            </div>
-
-            {shouldRenderUpdateEntry ? (
-              <div className="px-1">
-                <button
-                  type="button"
-                  onClick={onUpdateEntryClick}
-                  onContextMenu={onUpdateEntryContextMenu}
-                  onPointerDown={onUpdateEntryPointerDown}
-                  onPointerUp={clearUpdateLongPress}
-                  onPointerCancel={clearUpdateLongPress}
-                  onPointerLeave={clearUpdateLongPress}
-                  className="flex w-full items-center justify-between rounded-lg px-2.5 py-1.5 text-left text-sm text-slate-600 transition hover:bg-slate-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary-500 dark:text-slate-300 dark:hover:bg-[var(--color-studio-dark-rail-hover)]"
-                  data-testid="profile-updates-button"
-                >
-                  <span className="flex min-w-0 flex-1 items-center gap-2">
-                    <span className="shrink-0 text-slate-400 dark:text-slate-300">
-                      <Refresh className="h-4 w-4" aria-hidden="true" />
-                    </span>
-                    <span className="min-w-0 flex-1 truncate">
-                      {updatePresentation?.title ?? "Updates"}
-                    </span>
-                  </span>
-                  <span className="flex shrink-0 items-center gap-2">
-                    {updatePresentation?.emphasis === "attention" ? (
-                      <span className="inline-flex h-2 w-2 rounded-full bg-amber-500" aria-hidden="true" />
-                    ) : updatePresentation?.emphasis === "danger" ? (
-                      <span className="inline-flex h-2 w-2 rounded-full bg-rose-500" aria-hidden="true" />
-                    ) : null}
-                    <span className="text-xs text-slate-400 dark:text-slate-500">
-                      {updatePresentation?.detail ?? "Check now"}
-                    </span>
-                  </span>
-                </button>
-              </div>
-            ) : null}
-
-            <StudioMenu
-              aria-label="Account menu"
-              onAction={(key) => {
-                const action = String(key);
-                if (action === "profile:settings") {
-                  onProfileMenuOpenChange(false);
-                  onOpenProfileSettings?.();
-                  return;
-                }
-                if (action === "profile:notifications") {
-                  void onToggleNotifications();
-                  return;
-                }
-                if (action === "profile:support") {
-                  onProfileMenuOpenChange(false);
-                  onOpenSupport?.();
-                  return;
-                }
-                if (action === "profile:diagnostics") {
-                  onProfileMenuOpenChange(false);
-                  onOpenDiagnostics();
-                  return;
-                }
-                if (action === "profile:signout") {
-                  onProfileMenuOpenChange(false);
-                  onSignOut?.();
-                }
-              }}
-              className="space-y-1"
-            >
-              {onOpenProfileSettings ? (
-                <StudioMenuItem id="profile:settings" data-testid="profile-settings-button">
-                  <MenuItemContent start={<User aria-hidden="true" />}>
-                    Profile settings
-                  </MenuItemContent>
-                </StudioMenuItem>
-              ) : null}
-              {installEntry && !showFooterInstall ? (
-                <StudioMenuItem
-                  id="profile:install"
-                  href={installEntry.kind === "mobile-soon" ? "/install#mobile" : "/install#desktop"}
-                  target="_blank"
-                  rel="noreferrer"
-                  data-testid="profile-install-button"
-                >
-                  <MenuItemContent
-                    start={installEntry.kind === "mobile-soon" ? <SmartphoneDevice aria-hidden="true" /> : <Download aria-hidden="true" />}
-                    end={installEntry.kind === "mobile-soon" ? <Text as="span" variant="caption" tone="muted">Soon</Text> : undefined}
-                  >
-                    {installEntry.kind === "mobile-soon" ? "Get the app" : "Get desktop app"}
-                  </MenuItemContent>
-                </StudioMenuItem>
-              ) : null}
-              {onOpenSupport ? (
-                <StudioMenuItem id="profile:support" data-testid="profile-support-button">
-                  <MenuItemContent
-                    start={<ChatBubble aria-hidden="true" />}
-                    end={
-                      normalizedSupportUnreadCount > 0 ? (
-                        <span
-                          className="inline-flex min-w-5 items-center justify-center rounded-full bg-sky-100 px-1.5 py-0.5 text-[11px] font-semibold text-sky-700 dark:bg-sky-950 dark:text-sky-200"
-                          data-testid="profile-support-unread-count"
-                          aria-label={`${normalizedSupportUnreadCount} unread support ${
-                            normalizedSupportUnreadCount === 1 ? "update" : "updates"
-                          }`}
-                        >
-                          {normalizedSupportUnreadCount > 99
-                            ? "99+"
-                            : normalizedSupportUnreadCount}
-                        </span>
-                      ) : null
-                    }
-                    endClassName="shrink-0"
-                  >
-                    Support
-                  </MenuItemContent>
-                </StudioMenuItem>
-              ) : null}
-              <StudioMenuItem
-                id="profile:notifications"
-                isDisabled={notificationsPending}
-                data-testid="notifications-toggle-button"
-              >
-                <MenuItemContent
-                  start={
-                    notificationsEnabled ? (
-                      <BellOff aria-hidden="true" />
-                    ) : (
-                      <BellNotification aria-hidden="true" />
-                    )
-                  }
-                >
-                  {notificationsEnabled ? "Disable notifications" : "Enable notifications"}
-                </MenuItemContent>
-              </StudioMenuItem>
-              <StudioMenuItem id="profile:diagnostics" data-testid="profile-diagnostics-button">
-                <MenuItemContent
-                  start={<Settings aria-hidden="true" />}
-                  end={
-                    hasAppLogErrors ? (
-                      <span className="inline-flex h-2 w-2 rounded-full bg-rose-500" aria-hidden="true" />
-                    ) : undefined
-                  }
-                  endClassName="shrink-0"
-                >
-                  Diagnostics
-                </MenuItemContent>
-              </StudioMenuItem>
-              <StudioMenuItem id="profile:signout" isDisabled={!onSignOut}>
-                <MenuItemContent start={<LogOut aria-hidden="true" />}>
-                  Sign out
-                </MenuItemContent>
-              </StudioMenuItem>
-            </StudioMenu>
-          </div>
-        </StudioDialogPopover>
+        {sheet ? (
+          <StudioDialogModal isDismissable dialogAriaLabel="Your account" data-testid="profile-account-sheet"
+            className="!items-end !p-0" modalClassName="!max-w-lg !rounded-b-none max-h-[90dvh] overflow-y-auto"
+            dialogClassName="p-4 pb-[max(1rem,var(--instafy-safe-area-inset-bottom,0px))]">
+            {menuContent}
+          </StudioDialogModal>
+        ) : (
+          <StudioDialogPopover placement="top start" offset={10} className="w-72 max-w-[calc(100vw-1rem)] p-3 text-sm">
+            {menuContent}
+          </StudioDialogPopover>
+        )}
       </DialogTrigger>
       <UpdateStatusDialog
         isOpen={updateDialogOpen}

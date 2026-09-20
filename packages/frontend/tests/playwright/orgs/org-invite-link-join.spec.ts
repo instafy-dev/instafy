@@ -1,4 +1,5 @@
 import { test, expect } from "@playwright/test";
+import { openTeamDirectory } from "../utils/sidebar.js";
 import { getActiveOrgName, getControllerUrl, loginAsGuest, prepareStudio, resetRuntimeUserState } from "../utils/harness.js";
 
 type BrowserSupabaseClient = {
@@ -21,7 +22,7 @@ type InstafyBrowserWindow = Window & {
 };
 
 async function openProjectSettings(page: import("@playwright/test").Page) {
-  await page.getByTestId("sidebar-project-button").click();
+  await openTeamDirectory(page);
   await page.getByTestId("sidebar-project-settings").click();
   await expect(page.getByTestId("settings-panel")).toBeVisible();
   await page.getByTestId("settings-category-project-access").click();
@@ -161,7 +162,7 @@ test.describe("Org invite link join", () => {
       })
       .toBe(orgName);
 
-    await memberPage.getByTestId("sidebar-project-button").click();
+    await openTeamDirectory(memberPage);
     await expect(memberPage.getByTestId("sidebar-project-switcher-menu")).toBeVisible();
     await expect(memberPage.getByTestId("sidebar-org-selector")).toContainText(orgName, { timeout: 60_000 });
 

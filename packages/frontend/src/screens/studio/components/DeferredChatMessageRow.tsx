@@ -10,6 +10,7 @@ import {
   type ReactNode,
 } from "react";
 import type { ChatMessage } from "../types";
+import "./DeferredChatMessageRow.css";
 
 const OVERSCAN_PX = 1_000;
 const MIN_DEFERRED_TRANSCRIPT_ROWS = 100;
@@ -169,11 +170,13 @@ export function DeferredChatRows({ children, messageCount }: {
   );
 }
 
-export function DeferredChatMessageRow({ message, layoutKey, eager, eligible, children }: {
+export function DeferredChatMessageRow({ message, layoutKey, eager, eligible, targeted = false, highlighted = false, children }: {
   message: ChatMessage;
   layoutKey: string;
   eager: boolean;
   eligible: boolean;
+  targeted?: boolean;
+  highlighted?: boolean;
   children: ReactNode;
 }) {
   const context = useContext(DeferredRowsContext);
@@ -182,7 +185,7 @@ export function DeferredChatMessageRow({ message, layoutKey, eager, eligible, ch
   const validMeasurement = cached?.layoutKey === layoutKey && cached.viewportWidth === window.innerWidth
     ? cached : null;
   const [visible, setVisible] = useState(() => eager || !validMeasurement);
-  const deferred = Boolean(context?.enabled && eligible && !visible && validMeasurement);
+  const deferred = Boolean(context?.enabled && eligible && !eager && !visible && validMeasurement);
   const measure = useCallback(() => {
     const node = nodeRef.current;
     if (!node) return;
@@ -208,13 +211,15 @@ export function DeferredChatMessageRow({ message, layoutKey, eager, eligible, ch
   return (
     <div
       ref={nodeRef}
-      className="relative w-full"
+      className="chat-message-row relative w-full rounded-lg transition-colors"
       data-testid="chat-message-row"
       data-chat-scroll-message-id={message.id}
+      data-chat-message-target={highlighted ? "true" : undefined}
       data-chat-row-deferred={deferred ? "true" : undefined}
       style={deferred ? { height: validMeasurement?.height } : undefined}
-      role={deferred ? "article" : undefined}
-      aria-label={deferred ? `${message.role === "user" ? "User" : "Assistant"}: ${message.content}` : undefined}
+      tabIndex={targeted ? -1 : undefined}
+      role={targeted || deferred ? "article" : undefined}
+      aria-label={targeted ? "Search result" : deferred ? `${message.role === "user" ? "User" : "Assistant"}: ${message.content}` : undefined}
     >
       {deferred ? <span ref={hideUntilFound} className="block">{message.content}</span> : children}
     </div>

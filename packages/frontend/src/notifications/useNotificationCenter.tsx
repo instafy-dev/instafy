@@ -1,95 +1,138 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { Bell } from "iconoir-react";
 import { controllerClient } from "../sdk/instafy";
-import { Button, IconButton } from "../components/Button";
-import { StudioDialogModal } from "../components/aria/StudioModal";
-import { StudioDialogHeader } from "../components/aria/StudioDialogLayout";
 import { useStatus } from "../status/useStatus";
-import { NOTIFICATION_CATEGORIES, NOTIFICATION_CHANNELS, type NotificationPage, type NotificationPreferences, type ProductNotification, type NotificationPreference } from "./notificationContract";
+import type { NotificationPage, NotificationPreferences, ProductNotification } from "./notificationContract";
 import { claimNotificationPresentation, NOTIFICATION_RECEIVED_EVENT } from "./notificationPresentation";
-import { areMessageNotificationsEnabled, enableMessageNotifications, isAppInForeground, notifyAssistantMessage } from "./assistantMessageNotifications";
-import { useNativeBackButtonAction } from "../native/useNativeBackButtonAction";
+import { NOTIFICATION_PREFERENCES_CHANGED_EVENT } from "./notificationPreferencesEvents";
+import { areMessageNotificationsEnabled, isAppInForeground, notifyAssistantMessage } from "./assistantMessageNotifications";
 
-const CATEGORY_LABELS = { support: "Support", conversations: "Conversations", runs: "Runs", automations: "Automations" };
-const CHANNEL_LABELS = { web_push: "Browser push", apns: "iPhone push", local: "In-app and desktop alerts" };
 const EMPTY_PAGE: NotificationPage = { items: [], nextCursor: null, unreadCount: 0, asOf: "" };
 
-export function useNotificationCenter({ userId, accessToken, navigate }: { userId: string | null; accessToken: string | null; navigate: (url: string) => void }) {
-  const [open, setOpen] = useState(false);
-  useNativeBackButtonAction(open && Boolean(userId), () => setOpen(false));
-  const [view, setView] = useState<"all" | "unread">("all");
-  const [pageSnapshot, setPageSnapshot] = useState<{ userId: string | null; page: NotificationPage }>({ userId: null, page: EMPTY_PAGE });
-  const page = pageSnapshot.userId === userId ? pageSnapshot.page : EMPTY_PAGE;
-  const setPage = useCallback((update: NotificationPage | ((old: NotificationPage) => NotificationPage)) => {
-    setPageSnapshot((old) => ({ userId, page: typeof update === "function" ? update(old.userId === userId ? old.page : EMPTY_PAGE) : update }));
-  }, [userId]);
-  const [preferenceSnapshot, setPreferenceSnapshot] = useState<{ userId: string | null; value: NotificationPreferences | null }>({ userId: null, value: null });
-  const preferences = preferenceSnapshot.userId === userId ? preferenceSnapshot.value : null;
-  const setPreferences = useCallback((value: NotificationPreferences | null) => setPreferenceSnapshot({ userId, value }), [userId]);
-  const [settings, setSettings] = useState(false);
-  const [pending, setPending] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const { showStatus, hideStatus } = useStatus();
-  const identity = useRef({ userId, accessToken, generation: 0 });
-  if (identity.current.userId !== userId || identity.current.accessToken !== accessToken) {
-    identity.current = { userId, accessToken, generation: identity.current.generation + 1 };
-  }
-  const identityGeneration = identity.current.generation;
-  const requests = useRef(0);
-  const toastIds = useRef(new Set<string>());
-  const openRef = useRef(open);
-  openRef.current = open;
-  const paginatedRef = useRef(false);
-  const preferencesRef = useRef(preferences);
-  preferencesRef.current = preferences;
-  useEffect(() => { paginatedRef.current = false; }, [userId, view]);
-  const current = useCallback((id: string, token: string) => identity.current.userId === id && identity.current.accessToken === token && identity.current.generation === identityGeneration, [identityGeneration]);
+export interface HomeNotifications {
+  page: NotificationPage;
+  loading: boolean;
+  error: string | null;
+  refresh: (options?: { force?: boolean }) => Promise<void>;
+  loadMore: () => Promise<void>;
+  markRead: (items: ProductNotification[]) => Promise<boolean>;
+}
 
-  const refresh = useCallback(async (before?: string) => {
-    if (!userId || !accessToken) return;
+/** Account-owned data and delivery. Home owns the inbox UI; Settings owns preferences. */
+export function useNotificationCenter({ userId, accessToken, navigate }: { userId: string | null; accessToken: string | null; navigate: (url: string) => void }): HomeNotifications {
+  const identity = useRef({ userId, accessToken });
+  if (identity.current.userId !== userId || identity.current.accessToken !== accessToken) identity.current = { userId, accessToken };
+  const session = identity.current;
+  const mounted = useRef(true);
+  const current = useCallback(() => mounted.current && identity.current === session, [session]);
+  const [snapshot, setSnapshot] = useState<{ session: typeof session; page: NotificationPage; error: string | null; loading: boolean }>({ session, page: EMPTY_PAGE, error: null, loading: Boolean(userId) });
+  const state = snapshot.session === session ? snapshot : { page: EMPTY_PAGE, error: null, loading: Boolean(userId) };
+  const patch = useCallback((update: Partial<Omit<typeof snapshot, "session">>) => {
+    if (current()) setSnapshot(old => ({ ...(old.session === session ? old : { page: EMPTY_PAGE, error: null, loading: false }), ...update, session }));
+  }, [current, session]);
+  const requests = useRef(0);
+  const depth = useRef({ session, value: 1 });
+  if (depth.current.session !== session) depth.current = { session, value: 1 };
+  const oldest = useRef<{ session: typeof session; at: string; id: string } | null>(null);
+  const inFlight = useRef<{ session: typeof session; promise: Promise<void> } | null>(null);
+  const preferencesRef = useRef<{ session: typeof session; value: NotificationPreferences } | null>(null);
+  const toastIds = useRef(new Set<string>());
+  const { showStatus, hideStatus } = useStatus();
+
+  const refresh = useCallback((options?: { force?: boolean }): Promise<void> => {
+    if (!userId || !accessToken || !current()) return Promise.resolve();
+    if (options?.force) { requests.current += 1; inFlight.current = null; }
+    if (inFlight.current?.session === session) return inFlight.current.promise;
     const generation = ++requests.current;
-    try {
-      const next = await controllerClient.notifications.list({ view, before, accessToken });
-      if (!current(userId, accessToken) || generation !== requests.current) return;
-      paginatedRef.current = Boolean(before);
-      setPage((old) => ({ ...next, items: before ? [...old.items, ...next.items.filter((item) => !old.items.some((entry) => entry.id === item.id))] : next.items }));
-      setError(null);
-    } catch (caught) {
-      if (current(userId, accessToken) && generation === requests.current) setError(caught instanceof Error ? caught.message : "Unable to load notifications.");
-    }
-  }, [accessToken, current, setPage, userId, view]);
+    const valid = () => current() && generation === requests.current;
+    patch({ loading: true });
+    const promise = (async () => {
+      try {
+        // Refresh the loaded range, including read state, rather than discarding
+        // older pages while somebody is reading Home.
+        let before: string | undefined;
+        let next = EMPTY_PAGE;
+        const items = new Map<string, ProductNotification>();
+        const boundary = oldest.current?.session === session ? oldest.current : null;
+        let pages = 0;
+        while (valid()) {
+          next = await controllerClient.notifications.list({ view: "all", before, accessToken });
+          if (!valid()) return;
+          pages += 1;
+          next.items.forEach(item => items.set(item.id, item));
+          const last = next.items.at(-1);
+          const covered = !boundary || items.has(boundary.id) || (last && last.occurredAt < boundary.at);
+          if (!next.nextCursor || next.nextCursor === before || (pages >= depth.current.value && covered)) break;
+          before = next.nextCursor;
+        }
+        if (valid()) {
+          depth.current.value = pages;
+          const last = next.items.at(-1);
+          if (last) oldest.current = { session, id: last.id, at: last.occurredAt };
+        }
+        // Unread destinations may be older than Recent's first page. Include
+        // all unread pages so Home's single badge counts destinations, not just
+        // whichever notification page happens to be open.
+        let unreadCursor: string | undefined;
+        let unread: NotificationPage;
+        do {
+          unread = await controllerClient.notifications.list({ view: "unread", before: unreadCursor, accessToken });
+          if (!valid()) return;
+          unread.items.forEach(item => items.set(item.id, item));
+          if (!unread.nextCursor || unread.nextCursor === unreadCursor) break;
+          unreadCursor = unread.nextCursor;
+        } while (valid());
+        if (valid()) patch({ page: { ...next, items: [...items.values()].sort((a, b) => b.occurredAt.localeCompare(a.occurredAt)), unreadCount: unread!.unreadCount }, error: null });
+      } catch (caught) {
+        const message = caught instanceof Error ? caught.message : "Unable to load notifications.";
+        if (valid()) patch({ error: message === "Unable to load notifications (404)" ? "Notifications are unavailable on this server." : message });
+      } finally {
+        if (valid()) patch({ loading: false });
+        if (valid()) inFlight.current = null;
+      }
+    })();
+    inFlight.current = { session, promise };
+    return promise;
+  }, [accessToken, current, patch, session, userId]);
 
   useEffect(() => {
-    setPage(EMPTY_PAGE); setPreferences(null); setOpen(false); setSettings(false); setError(null); setPending(false);
-    requests.current += 1;
+    mounted.current = true;
     const ids = toastIds.current;
-    return () => { requests.current += 1; for (const id of ids) hideStatus(id); ids.clear(); };
-  }, [userId, hideStatus, setPage, setPreferences]);
+    return () => { mounted.current = false; requests.current += 1; if (inFlight.current?.session === session) inFlight.current = null; for (const id of ids) hideStatus(id); ids.clear(); };
+  }, [session, hideStatus]);
 
   useEffect(() => {
     if (!userId || !accessToken) return;
     let active = true;
-    void controllerClient.notifications.getPreferences(accessToken).then((result) => {
-      if (active && current(userId, accessToken)) setPreferences(result);
-    }).catch(() => { if (active && current(userId, accessToken)) setError("Unable to load notification preferences."); });
-    return () => { active = false; };
-  }, [userId, accessToken, current, setPreferences]);
+    const refreshPreferences = () => {
+      void controllerClient.notifications.getPreferences(accessToken).then(value => {
+        if (active && current()) preferencesRef.current = { session, value };
+      }).catch(() => { /* Preferences errors are shown in Settings; never guess delivery consent. */ });
+    };
+    refreshPreferences();
+    const changed = (event: Event) => {
+      if ((event as CustomEvent<{ userId: string }>).detail?.userId === userId) refreshPreferences();
+    };
+    window.addEventListener(NOTIFICATION_PREFERENCES_CHANGED_EVENT, changed);
+    return () => { active = false; window.removeEventListener(NOTIFICATION_PREFERENCES_CHANGED_EVENT, changed); };
+  }, [userId, accessToken, current, session]);
 
   useEffect(() => {
     if (!userId || !accessToken) return;
     let stopped = false;
+    let presenting = false;
     const poll = async () => {
-      if (stopped) return;
-      if (!(openRef.current && paginatedRef.current)) await refresh();
-      if (!current(userId, accessToken) || stopped) return;
-      // Poll independently of the selected filter; pagination never drives presentation.
+      if (stopped || presenting) return;
+      presenting = true;
+      try {
+      await refresh();
+      if (!current() || stopped) return;
+      // Presentation is independent of Home's paging and never marks a row read.
       let unread: NotificationPage;
       try { unread = await controllerClient.notifications.list({ view: "unread", accessToken }); } catch { return; }
-      if (!current(userId, accessToken) || stopped) return;
-      setPage((old) => ({ ...old, unreadCount: unread.unreadCount }));
+      if (!current() || stopped) return;
       for (const item of [...unread.items].reverse()) {
         if (item.seenAt || item.archivedAt || item.readAt) continue;
-        const prefs = preferencesRef.current;
+        const prefs = preferencesRef.current?.session === session ? preferencesRef.current.value : null;
         if (!prefs || prefs.preferences.some((pref) => pref.category === item.category && pref.channel === "local" && !pref.enabled)) continue;
         const foreground = isAppInForeground();
         if (!foreground && !areMessageNotificationsEnabled()) continue;
@@ -103,19 +146,19 @@ export function useNotificationCenter({ userId, accessToken, navigate }: { userI
           // Let the worker own presentation whenever this channel is active.
           if (webPushEnabled && await hasActiveWebPushSubscription()) continue;
         }
-        if (!current(userId, accessToken) || stopped || !(await claimNotificationPresentation(userId, item.id))) continue;
-        if (!current(userId, accessToken) || stopped) return;
+        if (!current() || stopped || !(await claimNotificationPresentation(userId, item.id))) continue;
+        if (!current() || stopped) return;
         let presented = false;
         if (foreground) {
           const id = `notification:${userId}:${item.id}`;
           toastIds.current.add(id);
           showStatus(item.body, "info", 10_000, { id, nonPreemptive: true, actionLabel: "View", onShow: () => {
-            if (current(userId, accessToken) && isAppInForeground()) {
-              void controllerClient.notifications.updateState({ id: item.id, action: "seen", accessToken }).catch(() => {});
+            if (current() && isAppInForeground()) {
+              void controllerClient.notifications.updateState({ id: item.id, action: "seen", accessToken, expectedUserId: userId, isCurrent: current }).catch(() => {});
             }
           }, onClose: () => toastIds.current.delete(id), onAction: () => {
-            if (!current(userId, accessToken)) return;
-            void controllerClient.notifications.updateState({ id: item.id, action: "read", accessToken }).then(() => refresh()).catch(() => {});
+            if (!current()) return;
+            void controllerClient.notifications.updateState({ id: item.id, action: "read", accessToken, expectedUserId: userId, isCurrent: current }).then(() => refresh()).catch(() => {});
             navigate(item.url);
           } });
         } else {
@@ -123,8 +166,9 @@ export function useNotificationCenter({ userId, accessToken, navigate }: { userI
         }
         // A queued toast is not proof of visibility; its local claim suppresses
         // duplicates without advancing server seen/read state.
-        if (!foreground && presented) void controllerClient.notifications.updateState({ id: item.id, action: "seen", accessToken }).catch(() => {});
+        if (!foreground && presented) void controllerClient.notifications.updateState({ id: item.id, action: "seen", accessToken, expectedUserId: userId, isCurrent: current }).catch(() => {});
       }
+      } finally { presenting = false; }
     };
     void poll();
     const timer = window.setInterval(() => void poll(), 20_000);
@@ -132,44 +176,34 @@ export function useNotificationCenter({ userId, accessToken, navigate }: { userI
     window.addEventListener("focus", receive);
     window.addEventListener(NOTIFICATION_RECEIVED_EVENT, receive);
     return () => { stopped = true; window.clearInterval(timer); window.removeEventListener("focus", receive); window.removeEventListener(NOTIFICATION_RECEIVED_EVENT, receive); };
-  }, [accessToken, current, navigate, refresh, setPage, showStatus, userId]);
+  }, [accessToken, current, navigate, refresh, session, showStatus, userId]);
 
-  const mutate = async (operation: () => Promise<unknown>) => {
-    if (!userId || !accessToken || pending) return;
-    setPending(true); setError(null); requests.current += 1;
-    try { await operation(); if (current(userId, accessToken)) await refresh(); }
-    catch (caught) { if (current(userId, accessToken)) setError(caught instanceof Error ? caught.message : "Unable to save notification changes."); }
-    finally { if (current(userId, accessToken)) setPending(false); }
-  };
-  const changePreferences = (patch: Partial<NotificationPreferences>) => mutate(async () => {
-    const result = await controllerClient.notifications.savePreferences({ ...patch, accessToken: accessToken ?? undefined });
-    if (userId && accessToken && current(userId, accessToken)) setPreferences(result);
-  });
-  const changeChannel = (preference: NotificationPreference) => changePreferences({ preferences: [preference] });
-  const read = (item: ProductNotification) => mutate(() => controllerClient.notifications.updateState({ id: item.id, action: "read", accessToken: accessToken ?? undefined }));
-  const openItem = (item: ProductNotification) => { void read(item); setOpen(false); navigate(item.url); };
-  const bell = userId ? <IconButton variant="ghost" radius="full" className="relative h-10 w-10 shrink-0" aria-label={page.unreadCount ? `Notifications, ${page.unreadCount} unread` : "Notifications"} data-testid="notification-center-bell" onPress={() => { setOpen(true); void refresh(); }}>
-    <Bell className="h-5 w-5" aria-hidden="true" />
-    {page.unreadCount > 0 ? <span className="absolute right-0 top-0 rounded-full bg-primary-600 px-1 text-[10px] font-semibold text-white" data-testid="notification-center-unread">{page.unreadCount > 99 ? "99+" : page.unreadCount}</span> : null}
-  </IconButton> : null;
-  const dialog = <StudioDialogModal isOpen={open && Boolean(userId)} onOpenChange={setOpen} isDismissable dialogAriaLabel="Notifications" modalClassName="max-w-xl overflow-hidden" data-testid="notification-center">
-    <StudioDialogHeader title="Notifications" onClose={() => setOpen(false)} trailing={<Button variant="ghost" onPress={() => setSettings((value) => !value)}>{settings ? "Inbox" : "Preferences"}</Button>} />
-    <div className="max-h-[70dvh] overflow-y-auto p-4 text-sm text-slate-700 dark:text-slate-200">
-      {error ? <p role="alert" className="mb-3 text-rose-600">{error}</p> : null}
-      {settings ? preferences ? <div className="space-y-5">
-        <label className="flex items-center gap-2"><input type="checkbox" checked={preferences.hidePreviews} disabled={pending} onChange={(event) => void changePreferences({ hidePreviews: event.target.checked })} />Hide lock-screen previews</label>
-        <p className="text-xs text-slate-500">Your notification center remains available when external alerts are off.</p>
-        <div className="overflow-x-auto"><table className="w-full text-left"><thead><tr><th scope="col">Category</th>{NOTIFICATION_CHANNELS.map((channel) => <th className="p-2 text-xs" scope="col" key={channel}>{CHANNEL_LABELS[channel]}</th>)}</tr></thead><tbody>{NOTIFICATION_CATEGORIES.map((category) => <tr key={category}><th scope="row" className="py-3 font-medium">{CATEGORY_LABELS[category]}</th>{NOTIFICATION_CHANNELS.map((channel) => <td className="p-2" key={channel}><input type="checkbox" aria-label={`${CATEGORY_LABELS[category]} ${CHANNEL_LABELS[channel]}`} disabled={pending} checked={preferences.preferences.find((pref) => pref.category === category && pref.channel === channel)?.enabled ?? true} onChange={(event) => void changeChannel({ category, channel, enabled: event.target.checked })} /></td>)}</tr>)}</tbody></table></div>
-        <Button isDisabled={pending} onPress={() => void mutate(async () => { if (!(await enableMessageNotifications())) throw new Error("Notifications are unavailable or permission was not granted on this device."); })}>Enable alerts on this device</Button>
-      </div> : <p>Loading preferences…</p> : <>
-        <div className="mb-3 flex items-center gap-2"><Button variant={view === "all" ? "primary" : "ghost"} onPress={() => setView("all")}>All</Button><Button variant={view === "unread" ? "primary" : "ghost"} onPress={() => setView("unread")}>Unread</Button><Button className="ml-auto" variant="ghost" isDisabled={pending || !page.unreadCount || !page.asOf} onPress={() => void mutate(() => controllerClient.notifications.readAll({ before: page.asOf, accessToken: accessToken ?? undefined }))}>Mark all read</Button></div>
-        {page.items.length === 0 ? <p className="py-8 text-center text-slate-500">{view === "unread" ? "You're all caught up." : "No notifications yet."}</p> : <ul className="space-y-2">{page.items.map((item) => <li key={item.id} className={`rounded-xl border border-slate-200 p-3 dark:border-slate-700 ${item.readAt ? "" : "bg-primary-50 dark:bg-primary-950/20"}`} data-testid={`notification-${item.id}`}>
-          <button type="button" className="w-full text-left" onClick={() => openItem(item)}><span className="block font-medium">{item.body}</span><time className="mt-1 block text-xs text-slate-500" dateTime={item.occurredAt}>{new Date(item.occurredAt).toLocaleString()}</time></button>
-          <div className="mt-2 flex gap-2">{!item.readAt ? <Button variant="ghost" size="xs" isDisabled={pending} onPress={() => void read(item)}>Mark read</Button> : null}<Button variant="ghost" size="xs" isDisabled={pending} onPress={() => void mutate(() => controllerClient.notifications.updateState({ id: item.id, action: "archive", accessToken: accessToken ?? undefined }))}>Archive</Button></div>
-        </li>)}</ul>}
-        {page.nextCursor ? <Button className="mt-4" isDisabled={pending} onPress={() => void refresh(page.nextCursor ?? undefined)}>Load more</Button> : null}
-      </>}
-    </div>
-  </StudioDialogModal>;
-  return { bell, dialog };
+  const markRead = useCallback(async (items: ProductNotification[]): Promise<boolean> => {
+    if (!userId || !accessToken || !current()) return false;
+    const ids = [...new Set(items.filter(item => !item.readAt && !item.archivedAt).map(item => item.id))];
+    try {
+      // Only the displayed snapshot is acknowledged. Concurrent arrivals stay unread.
+      await Promise.all(ids.map(id => controllerClient.notifications.updateState({ id, action: "read", accessToken, expectedUserId: userId, isCurrent: current })));
+      if (!current()) return false;
+      // Supersede a pre-acknowledgement poll; it must not restore old unread rows.
+      requests.current += 1;
+      inFlight.current = null;
+      await refresh();
+      if (current()) window.dispatchEvent(new Event(NOTIFICATION_RECEIVED_EVENT));
+      return current();
+    } catch (caught) {
+      if (current()) patch({ error: caught instanceof Error ? caught.message : "Unable to mark this as read." });
+      return false;
+    }
+  }, [accessToken, current, patch, refresh, userId]);
+
+  const loadMore = useCallback(async () => {
+    if (!current()) return;
+    await refresh();
+    if (!current()) return;
+    depth.current.value += 1;
+    await refresh();
+  }, [current, refresh]);
+
+  return { ...state, refresh, loadMore, markRead };
 }

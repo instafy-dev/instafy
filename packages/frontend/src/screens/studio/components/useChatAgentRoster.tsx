@@ -2,6 +2,7 @@ import {
   useCallback,
   useEffect,
   useMemo,
+  useRef,
   useState,
   type Dispatch,
   type JSX,
@@ -29,6 +30,7 @@ import {
   type AssistantAvatarRenderOptions,
   extractAgentIdentityFromMetadata,
   extractRunIdFromMetadata,
+  resolveObservedAgentIdentity,
 } from "./chatAssistantIdentity";
 import type { QueuedChatSendItem } from "./chatSendQueueStorage";
 import { formatRuntimeResourcesSummary } from "./chatRuntimeResources";
@@ -77,8 +79,16 @@ export function useChatAgentRoster({
   showStatus: ShowStatus;
   stickyMentionedAgentByConversationRef: MutableRefObject<Map<string, string>>;
 }) {
-  const [availableAgents, setAvailableAgents] = useState<ControllerAgentProfile[]>([]);
-  const [availableAgentsLoaded, setAvailableAgentsLoaded] = useState(false);
+  const scopeKey = currentUserId && activeProjectId ? `${currentUserId}:${activeProjectId}` : null;
+  const [agentResult, setAgentResult] = useState<{ scopeKey: string; agents: ControllerAgentProfile[] } | null>(null);
+  const availableAgents = useMemo(() => agentResult?.scopeKey === scopeKey ? agentResult.agents : [], [agentResult, scopeKey]);
+  const availableAgentsLoaded = Boolean(scopeKey && agentResult?.scopeKey === scopeKey);
+  const activeScopeRef = useRef(scopeKey);
+  const requestVersionRef = useRef(0);
+  if (activeScopeRef.current !== scopeKey) {
+    activeScopeRef.current = scopeKey;
+    requestVersionRef.current += 1;
+  }
 
   const preferredRuntimeLabel = useMemo(() => {
     if (!preferredRuntimeId) {
@@ -165,9 +175,10 @@ export function useChatAgentRoster({
 
   const refreshAvailableAgents = useCallback(
     async (options?: { silent?: boolean }) => {
-      if (!runtimeControllerEnabled || !currentUserId || !activeProjectId) {
-        setAvailableAgents([]);
-        setAvailableAgentsLoaded(false);
+      if (activeScopeRef.current !== scopeKey) return;
+      const version = ++requestVersionRef.current;
+      if (!runtimeControllerEnabled || !scopeKey || !activeProjectId) {
+        setAgentResult(null);
         return;
       }
 
@@ -175,10 +186,10 @@ export function useChatAgentRoster({
         const message = error instanceof Error ? error.message : String(error);
         return { success: false as const, agents: [], error: message };
       });
+      if (activeScopeRef.current !== scopeKey || requestVersionRef.current !== version) return;
 
       if (result.success) {
-        setAvailableAgents(result.agents);
-        setAvailableAgentsLoaded(true);
+        setAgentResult({ scopeKey, agents: result.agents });
         return;
       }
 
@@ -186,11 +197,12 @@ export function useChatAgentRoster({
         showStatus(result.error ?? "Unable to load agents.", "error", 4500);
       }
     },
-    [activeProjectId, currentUserId, showStatus],
+    [activeProjectId, scopeKey, showStatus],
   );
 
   useEffect(() => {
     void refreshAvailableAgents({ silent: true });
+    return () => { requestVersionRef.current += 1; };
   }, [refreshAvailableAgents]);
 
   useEffect(() => {
@@ -248,37 +260,42 @@ export function useChatAgentRoster({
     stickyMentionedAgentByConversationRef,
   ]);
 
-  // One resolution for the profile card wherever it opens — the transcript
-  // popover and the by-handle modal (mention chips, narrow speaker labels)
-  // must describe the agent identically.
+  // Handles belong to an owner, so only an exact observed ID can match an
+  // editable profile in the current user's roster.
   const resolveAgentProfileCardProps = useCallback(
-    (agentHandle: string): AgentProfileCardProps => {
-      const agent = agentByHandle.get(agentHandle) ?? null;
+    (agentHandle: string, identity?: AssistantAgentIdentity | null): AgentProfileCardProps => {
+      const agent = identity?.id
+        ? availableAgents.find((candidate) => candidate.id === identity.id) ?? null
+        : null;
       const agentAvatarSeed =
         typeof agent?.avatarSeed === "string" && agent.avatarSeed.trim().length > 0
           ? agent.avatarSeed.trim()
-          : agentHandle;
+          : identity?.avatarSeed || agentHandle;
       const displayName =
         getBuiltInAssistantDisplayName(agentHandle) ??
         (agent?.displayName?.trim() ? agent.displayName.trim() : `@${agentHandle}`);
       const pinnedRuntimeId = agent?.runtimeId ?? null;
       const runtimeOption = pinnedRuntimeId ? runtimeOptionsById.get(pinnedRuntimeId) ?? null : null;
       return {
+        projectId: activeProjectId,
         agentHandle,
-        agentId: agent?.id ?? null,
+        agentId: identity?.id ?? null,
+        canEditProfile: Boolean(agent),
         agentAvatarSeed,
         displayName,
         pinnedRuntimeId,
-        runtimeLabel: runtimeOption?.label ?? preferredRuntimeLabel ?? currentRuntime.label,
-        runtimeState: runtimeOption?.state ?? currentRuntime.state,
-        resourcesSummary:
-          formatRuntimeResourcesSummary(runtimeOption?.resources ?? null) ??
-          formatRuntimeResourcesSummary(currentRuntime.resources ?? null),
-        onOpenSettings: onOpenAgentProfileSettings,
+        runtimeLabel: agent ? runtimeOption?.label ?? preferredRuntimeLabel ?? currentRuntime.label : "Unknown",
+        runtimeState: agent ? runtimeOption?.state ?? currentRuntime.state : "unknown",
+        resourcesSummary: agent
+          ? formatRuntimeResourcesSummary(runtimeOption?.resources ?? null) ??
+            formatRuntimeResourcesSummary(currentRuntime.resources ?? null)
+          : null,
+        onOpenSettings: agent ? onOpenAgentProfileSettings : undefined,
       };
     },
     [
-      agentByHandle,
+      activeProjectId,
+      availableAgents,
       currentRuntime.label,
       currentRuntime.resources,
       currentRuntime.state,
@@ -297,26 +314,21 @@ export function useChatAgentRoster({
       const metadataAgentIdentity = extractAgentIdentityFromMetadata(metadata ?? null);
       const messageRunId = extractRunIdFromMetadata(metadata ?? null);
       const runAgentIdentity = messageRunId ? runAgentIdentityByRunId.get(messageRunId) ?? null : null;
-      const resolvedAgentIdentity = messageAgentIdentity ?? metadataAgentIdentity ?? runAgentIdentity;
+      const resolvedAgentIdentity = resolveObservedAgentIdentity(messageAgentIdentity, metadataAgentIdentity, runAgentIdentity);
       const agentHandle =
         resolvedAgentIdentity?.handle ?? primaryAgentHandleForPopover ?? getDefaultAssistantHandle();
-      const cardProps = resolveAgentProfileCardProps(agentHandle);
-      const agentAvatarSeed =
-        agentByHandle.get(agentHandle)?.avatarSeed?.trim() ||
-        (resolvedAgentIdentity?.avatarSeed ?? agentHandle);
+      const cardProps = resolveAgentProfileCardProps(agentHandle, resolvedAgentIdentity);
 
       return (
         <AssistantAvatarPopover
           {...cardProps}
           metadata={metadata ?? null}
-          agentAvatarSeed={agentAvatarSeed}
           motion={options?.motion}
           scrollReactive={options?.scrollReactive}
         />
       );
     },
     [
-      agentByHandle,
       primaryAgentHandleForPopover,
       resolveAgentProfileCardProps,
       runAgentIdentityByRunId,

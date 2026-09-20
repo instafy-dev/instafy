@@ -1,4 +1,5 @@
-import { Plus } from "iconoir-react";
+import { MoreHoriz } from "iconoir-react";
+import type { RefObject } from "react";
 import { DialogTrigger } from "react-aria-components";
 import { Button } from "../../../components/Button";
 import { MenuItemContent } from "../../../components/MenuItemContent";
@@ -7,6 +8,7 @@ import { StudioMenu, StudioMenuItem } from "../../../components/aria/StudioMenu"
 import type { StudioNavItem, StudioPanel } from "../types";
 
 type StudioSidebarMorePanelsProps = {
+  triggerRef?: RefObject<HTMLButtonElement | null>;
   resolvedMoreItems: StudioNavItem[];
   showInlineMoreItems: boolean;
   inlineMoreItems: StudioNavItem[];
@@ -54,6 +56,7 @@ function renderIndicator(indicator: StudioNavItem["indicator"] | null, testId?: 
 }
 
 export function StudioSidebarMorePanels({
+  triggerRef,
   resolvedMoreItems,
   showInlineMoreItems,
   inlineMoreItems,
@@ -134,6 +137,8 @@ export function StudioSidebarMorePanels({
                 radius="lg"
                 fullWidth
                 data-testid="sidebar-nav-more"
+                aria-label="More"
+                title={showLabels ? undefined : "More"}
                 className={[
                   "group/item relative py-1.5 transition focus-visible:ring-offset-0",
                   sidebarRowLayoutClass,
@@ -143,7 +148,7 @@ export function StudioSidebarMorePanels({
                 aria-haspopup="dialog"
               >
                 <span className={getSidebarNavIconClass(moreSwitcherOpen || isMorePanelActive)}>
-                  <Plus className="text-base" aria-hidden="true" />
+                  <MoreHoriz className="text-base" aria-hidden="true" />
                   {renderIndicator(moreIndicator, "sidebar-nav-more-indicator")}
                 </span>
                 {showLabels ? (
@@ -188,11 +193,14 @@ export function StudioSidebarMorePanels({
             </DialogTrigger>
           ) : (
             <Button
+              ref={triggerRef}
               variant="ghost"
               size="sm"
               radius="lg"
               fullWidth
               data-testid="sidebar-nav-more"
+              aria-label="More"
+              title={showLabels ? undefined : "More"}
               onPress={onMobileMoreToggle}
               className={[
                 "group/item relative py-1.5 transition focus-visible:ring-offset-0",
@@ -203,7 +211,7 @@ export function StudioSidebarMorePanels({
               aria-haspopup="dialog"
             >
               <span className={getSidebarNavIconClass(moreSwitcherOpen || isMorePanelActive)}>
-                <Plus className="text-base" aria-hidden="true" />
+                <MoreHoriz className="text-base" aria-hidden="true" />
                 {renderIndicator(moreIndicator, "sidebar-nav-more-indicator")}
               </span>
               {showLabels ? (

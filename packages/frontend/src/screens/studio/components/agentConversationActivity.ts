@@ -1,7 +1,7 @@
 import type { ConversationState } from "../../../conversations/conversationState";
 import { isRunActivelyProgressing } from "../../../conversations/runLiveness";
 import type { RunRecord } from "../../../types";
-import { extractAgentHandleFromMetadata } from "./chatAssistantIdentity";
+import { extractAgentIdentityFromMetadata } from "./chatAssistantIdentity";
 
 /**
  * Where one agent interacts, derived ONLY from data the viewer already holds:
@@ -12,7 +12,9 @@ import { extractAgentHandleFromMetadata } from "./chatAssistantIdentity";
  *
  * Participation signals, in the order they were persisted: a live or recent
  * run attributed to the agent (`run.metadata.agent`), a thread it owns, an
- * explicit invitation from the current user, or a thread it delegated. The
+ * explicit invitation from the current user, or a thread it delegated. Exact
+ * profile IDs only match exact persisted IDs; handle-only invitation and
+ * legacy metadata matching is used when the profile ID is unknown. The
  * default assistant's `assistantEnabled` toggle is deliberately NOT a signal:
  * it defaults to true on every conversation, so it asserts availability, not
  * interaction — the runs feed already lists everywhere the assistant actually
@@ -63,7 +65,8 @@ export function deriveAgentConversationActivity({
   now?: number;
 }): AgentConversationActivity {
   const handle = normalizeHandle(agentHandle);
-  if (!handle) {
+  const id = agentId?.trim() || null;
+  if (!handle && !id) {
     return { entries: [], overflowCount: 0 };
   }
 
@@ -73,7 +76,8 @@ export function deriveAgentConversationActivity({
   >();
   for (const run of Object.values(runs)) {
     if (!run.conversationId) continue;
-    if (extractAgentHandleFromMetadata(run.metadata) !== handle) continue;
+    const identity = extractAgentIdentityFromMetadata(run.metadata);
+    if (id ? identity?.id !== id : identity?.handle !== handle) continue;
     const lastAt =
       parseTimestamp(run.updatedAt) || parseTimestamp(run.createdAt);
     const active = isRunActivelyProgressing(run, now);
@@ -95,11 +99,10 @@ export function deriveAgentConversationActivity({
       : null;
     const participates =
       runActivity !== null ||
-      normalizeHandle(conversation.ownerAgent?.handle) === handle ||
-      conversation.extraAgentHandles.some(
-        (entry) => normalizeHandle(entry) === handle,
-      ) ||
-      (agentId != null && conversation.delegatedByAgentId === agentId);
+      (id
+        ? conversation.ownerAgent?.id === id || conversation.delegatedByAgentId === id
+        : normalizeHandle(conversation.ownerAgent?.handle) === handle ||
+          conversation.extraAgentHandles.some((entry) => normalizeHandle(entry) === handle));
     if (!participates) continue;
     candidates.push({
       localId: conversation.localId,

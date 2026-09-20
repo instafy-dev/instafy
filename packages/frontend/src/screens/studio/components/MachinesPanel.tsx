@@ -304,6 +304,8 @@ export function MachinesPanel() {
                       placement="bottom start"
                       agentHandle={agent.handle}
                       agentId={agent.id}
+                      projectId={activeProjectId}
+                      canEditProfile
                       agentAvatarSeed={agent.avatarSeed || agent.handle}
                       displayName={
                         getBuiltInAssistantDisplayName(agent.handle) ??

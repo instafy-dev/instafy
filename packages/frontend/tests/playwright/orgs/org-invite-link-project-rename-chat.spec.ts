@@ -1,4 +1,5 @@
 import { test, expect } from "@playwright/test";
+import { openTeamDirectory } from "../utils/sidebar.js";
 import { loginAsGuest, prepareStudio, resetRuntimeUserState } from "../utils/harness.js";
 import { disableAssistantIfPossible } from "../utils/runtimeAi.js";
 import { chooseOption } from "../utils/select.js";
@@ -18,7 +19,7 @@ async function renameProject(
     return response.url().includes(`/projects/${projectId}`);
   });
 
-  await page.getByTestId("sidebar-project-button").click();
+  await openTeamDirectory(page);
   await page.getByTestId("sidebar-project-settings").click();
   await expect(page.getByTestId("settings-panel")).toBeVisible();
   await page.getByTestId("project-settings-name-input").fill(nextName);
@@ -28,7 +29,7 @@ async function renameProject(
 }
 
 async function openProjectSettings(page: import("@playwright/test").Page) {
-  await page.getByTestId("sidebar-project-button").click();
+  await openTeamDirectory(page);
   await page.getByTestId("sidebar-project-settings").click();
   await expect(page.getByTestId("settings-panel")).toBeVisible();
   await page.getByTestId("settings-category-project-access").click();

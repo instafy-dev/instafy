@@ -34,6 +34,8 @@ const IDLE_VIEWER_STATE: ViewerState = {
 };
 
 export interface OpenWorkspaceFileEventDetail {
+  /** In-process callers may cancel an accepted open after navigation changes. */
+  signal?: AbortSignal;
   handoffId?: string | null;
   path: string;
   projectId?: string | null;
@@ -77,12 +79,19 @@ export type EditorRevealRange = {
 type PendingEditorRevealRequest = {
   path: string;
   range: EditorRevealRange;
+  isCurrent: () => boolean;
 };
+
+interface FileOpenRequest {
+  signal: AbortSignal;
+  isCurrent: () => boolean;
+}
 
 interface UseFilesPanelViewerStateParams {
   acceptExternalOpenEvents: boolean;
   activeFile: CodeFile | null;
   activeProjectId: string | null;
+  workspaceOwnerKey?: string | null;
   directoryEntriesRef: RefObject<DirectoryEntries>;
   editorContainerRef: RefObject<HTMLElement | null>;
   effectiveRuntimeId: string | null;
@@ -94,7 +103,7 @@ interface UseFilesPanelViewerStateParams {
   lastExplorerSelectionRef: RefObject<ControllerWorkspaceEntry | null>;
   loadDirectory: (
     path: string,
-    options?: { force?: boolean; syncMode?: "background" | "blocking" },
+    options?: { force?: boolean; syncMode?: "background" | "blocking"; signal?: AbortSignal },
   ) => Promise<ControllerWorkspaceEntry[] | null>;
   normalizePath: (path: string) => string;
   normalizedRootPath: string;
@@ -147,6 +156,7 @@ export function useFilesPanelViewerState({
   acceptExternalOpenEvents,
   activeFile,
   activeProjectId,
+  workspaceOwnerKey,
   directoryEntriesRef,
   editorContainerRef,
   effectiveRuntimeId,
@@ -176,23 +186,70 @@ export function useFilesPanelViewerState({
   activeFilePathRef,
 }: UseFilesPanelViewerStateParams) {
   const previewScopeKey = buildBinaryPreviewScopeKey(previewOwnerId, activeProjectId);
+  // Identity changes invalidate old closures immediately, including A -> B -> A.
+  // Runtime selection is part of workspace ownership even within the same space.
+  const lifetimeKey = JSON.stringify([previewOwnerId, activeProjectId, effectiveRuntimeId, workspaceOwnerKey, acceptExternalOpenEvents]);
+  const lifetimeRef = useRef({ key: lifetimeKey });
+  if (lifetimeRef.current.key !== lifetimeKey) lifetimeRef.current = { key: lifetimeKey };
+  const lifetime = lifetimeRef.current;
   const [viewerStateSnapshot, setViewerStateSnapshot] = useState<{
-    scopeKey: string | null;
+    lifetime: typeof lifetime;
     state: ViewerState;
-  }>(() => ({ scopeKey: previewScopeKey, state: IDLE_VIEWER_STATE }));
+  }>(() => ({ lifetime, state: IDLE_VIEWER_STATE }));
   const viewerStateState =
-    viewerStateSnapshot.scopeKey === previewScopeKey
+    viewerStateSnapshot.lifetime === lifetime
       ? viewerStateSnapshot.state
       : IDLE_VIEWER_STATE;
   const viewerStateRef = useRef<ViewerState>(viewerStateState);
-  const activePreviewScopeRef = useRef(previewScopeKey);
-  activePreviewScopeRef.current = previewScopeKey;
   viewerStateRef.current = viewerStateState;
   const pendingEditorRevealRef = useRef<PendingEditorRevealRequest | null>(null);
   const [pendingEditorRevealEpoch, setPendingEditorRevealEpoch] = useState(0);
 
+  const mountedRef = useRef(true);
+  const openRequestRef = useRef<{
+    lifetime: typeof lifetime;
+    controller: AbortController;
+    detach: () => void;
+  } | null>(null);
+  const cancelOpenRequest = useCallback(() => {
+    const previous = openRequestRef.current;
+    openRequestRef.current = null;
+    previous?.detach();
+    previous?.controller.abort();
+    pendingEditorRevealRef.current = null;
+  }, []);
+
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+      cancelOpenRequest();
+    };
+  }, [cancelOpenRequest]);
+  useEffect(() => {
+    if (openRequestRef.current?.lifetime !== lifetime) cancelOpenRequest();
+  }, [cancelOpenRequest, lifetime]);
+
+  const beginOpenRequest = useCallback((signal?: AbortSignal): FileOpenRequest => {
+    const controller = new AbortController();
+    if (!mountedRef.current || lifetimeRef.current !== lifetime || signal?.aborted) {
+      controller.abort();
+      return { signal: controller.signal, isCurrent: () => false };
+    }
+    cancelOpenRequest();
+    const abort = () => controller.abort();
+    signal?.addEventListener("abort", abort, { once: true });
+    const request = { lifetime, controller, detach: () => signal?.removeEventListener("abort", abort) };
+    openRequestRef.current = request;
+    return {
+      signal: controller.signal,
+      isCurrent: () => mountedRef.current && lifetimeRef.current === lifetime
+        && openRequestRef.current === request && !controller.signal.aborted,
+    };
+  }, [cancelOpenRequest, lifetime]);
+
   const setViewerState = useCallback((nextState: SetStateAction<ViewerState>) => {
-    if (activePreviewScopeRef.current !== previewScopeKey) {
+    if (!mountedRef.current || lifetimeRef.current !== lifetime) {
       return;
     }
     const resolvedState =
@@ -200,18 +257,19 @@ export function useFilesPanelViewerState({
         ? (nextState as (current: ViewerState) => ViewerState)(viewerStateRef.current)
         : nextState;
     viewerStateRef.current = resolvedState;
-    setViewerStateSnapshot({ scopeKey: previewScopeKey, state: resolvedState });
-  }, [previewScopeKey]);
+    setViewerStateSnapshot({ lifetime, state: resolvedState });
+  }, [lifetime]);
 
   useEffect(() => {
     pendingEditorRevealRef.current = null;
     setPendingEditorRevealEpoch(0);
     viewerStateRef.current = IDLE_VIEWER_STATE;
-    setViewerStateSnapshot({ scopeKey: previewScopeKey, state: IDLE_VIEWER_STATE });
-  }, [previewScopeKey]);
+    setViewerStateSnapshot({ lifetime, state: IDLE_VIEWER_STATE });
+  }, [lifetime]);
 
   const tryRevealEditorRange = useCallback(
     (request: PendingEditorRevealRequest): boolean => {
+      if (!request.isCurrent()) return false;
       const container = editorContainerRef.current;
       if (!container) {
         return false;
@@ -264,6 +322,7 @@ export function useFilesPanelViewerState({
         }
         revealInCenter();
         window.requestAnimationFrame(() => {
+          if (!request.isCurrent()) return;
           try {
             revealInCenter();
           } catch (error) {
@@ -280,12 +339,12 @@ export function useFilesPanelViewerState({
   );
 
   const ensureEntryVisible = useCallback(
-    async (entry: ControllerWorkspaceEntry): Promise<void> => {
+    async (entry: ControllerWorkspaceEntry, request = beginOpenRequest()): Promise<boolean> => {
       if (entry.kind !== "file" && entry.kind !== "directory") {
-        return;
+        return false;
       }
-      if (!activeProjectId) {
-        return;
+      if (!activeProjectId || !request.isCurrent()) {
+        return false;
       }
       const targetPath = normalizePath(entry.path);
       let workingRoot = normalizedRootPath;
@@ -293,14 +352,15 @@ export function useFilesPanelViewerState({
       if (workingRoot && !targetPath.startsWith(workingRoot)) {
         workingRoot = "";
         setRootPath("");
-        await loadDirectory("", { force: true });
+        await loadDirectory("", { force: true, signal: request.signal });
+        if (!request.isCurrent()) return false;
       }
 
       const relative = workingRoot
         ? targetPath.slice(workingRoot.length).replace(/^\/+/, "")
         : targetPath;
       if (!relative) {
-        return;
+        return true;
       }
       const segments = relative.split("/");
       const depthLimit = entry.kind === "directory" ? segments.length : segments.length - 1;
@@ -308,16 +368,20 @@ export function useFilesPanelViewerState({
       for (let index = 0; index < depthLimit; index += 1) {
         const segment = segments[index];
         cursor = cursor ? `${cursor}/${segment}` : segment;
-        await loadDirectory(cursor);
+        await loadDirectory(cursor, { signal: request.signal });
+        if (!request.isCurrent()) return false;
         setExpandedDirectories((prev) => {
+          if (!request.isCurrent()) return prev;
           const next = new Set(prev);
           next.add(cursor);
           return next;
         });
       }
+      return request.isCurrent();
     },
     [
       activeProjectId,
+      beginOpenRequest,
       loadDirectory,
       normalizedRootPath,
       normalizePath,
@@ -327,7 +391,8 @@ export function useFilesPanelViewerState({
   );
 
   const focusDirectory = useCallback(
-    async (path: string) => {
+    async (path: string, request = beginOpenRequest()) => {
+      if (!request.isCurrent()) return;
       forgetBinaryPreviewRequest(previewScopeKey);
       const normalized = normalizePath(path);
       const previousRoot = normalizedRootPath;
@@ -349,7 +414,8 @@ export function useFilesPanelViewerState({
         error: null,
       }));
       lastExplorerSelectionRef.current = nextEntry;
-      const fetched = await loadDirectory(normalized, { force: true });
+      const fetched = await loadDirectory(normalized, { force: true, signal: request.signal });
+      if (!request.isCurrent()) return;
       if (!fetched) {
         if (normalized !== previousRoot) {
           setRootPath(previousRoot);
@@ -366,6 +432,7 @@ export function useFilesPanelViewerState({
       setMobileView("tree");
     },
     [
+      beginOpenRequest,
       directoryEntriesRef,
       getParentPath,
       lastExplorerSelectionRef,
@@ -384,8 +451,9 @@ export function useFilesPanelViewerState({
   );
 
   const openTextFile = useCallback(
-    async (entry: ControllerWorkspaceEntry, options?: { forceFetch?: boolean }) => {
-      if (!activeProjectId) {
+    async (entry: ControllerWorkspaceEntry, options?: { forceFetch?: boolean; request?: FileOpenRequest }) => {
+      const request = options?.request ?? beginOpenRequest();
+      if (!activeProjectId || !request.isCurrent()) {
         return;
       }
       forgetBinaryPreviewRequest(previewScopeKey);
@@ -414,6 +482,7 @@ export function useFilesPanelViewerState({
           path: entry.path,
           runtimeId: effectiveRuntimeId ?? null,
         });
+        if (!request.isCurrent()) return;
         if (!result) {
           setViewerState({ mode: "error", entry, error: "Unable to load file content." });
           showStatus("Unable to load file content.", "error");
@@ -425,6 +494,7 @@ export function useFilesPanelViewerState({
             path: entry.path,
             runtimeId: effectiveRuntimeId ?? null,
           });
+          if (!request.isCurrent()) return;
           setViewerState({
             mode: "unsupported",
             entry,
@@ -440,6 +510,7 @@ export function useFilesPanelViewerState({
 
         updateWorkspace(
           (current) => {
+            if (!request.isCurrent()) return current;
             const filtered = current.files.filter((file) => file.id !== entry.path);
             const directory = getParentPath(entry.path);
             const nextFile: CodeFile = {
@@ -464,7 +535,7 @@ export function useFilesPanelViewerState({
         );
       } else {
         updateWorkspace(
-          (current) => ({
+          (current) => !request.isCurrent() ? current : ({
             ...current,
             activeFileId: entry.path,
             files: current.files.map((file) =>
@@ -498,6 +569,7 @@ export function useFilesPanelViewerState({
     },
     [
       activeProjectId,
+      beginOpenRequest,
       effectiveRuntimeId,
       getParentPath,
       isLargeScreen,
@@ -514,8 +586,8 @@ export function useFilesPanelViewerState({
   );
 
   const openImageFile = useCallback(
-    async (entry: ControllerWorkspaceEntry) => {
-      if (!activeProjectId) {
+    async (entry: ControllerWorkspaceEntry, request = beginOpenRequest()) => {
+      if (!activeProjectId || !request.isCurrent()) {
         return;
       }
       setActiveFile(null);
@@ -526,6 +598,7 @@ export function useFilesPanelViewerState({
           path: entry.path,
           runtimeId: effectiveRuntimeId ?? null,
         });
+        if (!request.isCurrent()) return;
         if (!rawUrl) {
           throw new Error("Missing file URL");
         }
@@ -535,6 +608,7 @@ export function useFilesPanelViewerState({
           setMobileView("viewer");
         }
       } catch (error) {
+        if (!request.isCurrent()) return;
         forgetBinaryPreviewRequest(previewScopeKey);
         const message = error instanceof Error ? error.message : "Unable to load image preview.";
         setViewerState({ mode: "error", entry, error: message });
@@ -543,6 +617,7 @@ export function useFilesPanelViewerState({
     },
     [
       activeProjectId,
+      beginOpenRequest,
       effectiveRuntimeId,
       isLargeScreen,
       previewScopeKey,
@@ -554,8 +629,8 @@ export function useFilesPanelViewerState({
   );
 
   const openUnsupportedFile = useCallback(
-    async (entry: ControllerWorkspaceEntry) => {
-      if (!activeProjectId) {
+    async (entry: ControllerWorkspaceEntry, request = beginOpenRequest()) => {
+      if (!activeProjectId || !request.isCurrent()) {
         return;
       }
       setActiveFile(null);
@@ -567,9 +642,11 @@ export function useFilesPanelViewerState({
           runtimeId: effectiveRuntimeId ?? null,
         });
       } catch (error) {
+        if (!request.isCurrent()) return;
         forgetBinaryPreviewRequest(previewScopeKey);
         throw error;
       }
+      if (!request.isCurrent()) return;
       setViewerState({
         mode: "unsupported",
         entry,
@@ -583,6 +660,7 @@ export function useFilesPanelViewerState({
     },
     [
       activeProjectId,
+      beginOpenRequest,
       effectiveRuntimeId,
       isLargeScreen,
       previewScopeKey,
@@ -597,6 +675,8 @@ export function useFilesPanelViewerState({
     if (!remembered || !activeProjectId) {
       return;
     }
+    const request = beginOpenRequest();
+    if (!request.isCurrent()) return;
 
     let cancelled = false;
     setActiveFile(null);
@@ -609,7 +689,7 @@ export function useFilesPanelViewerState({
         runtimeId: effectiveRuntimeId ?? null,
       })
       .then((rawUrl) => {
-        if (cancelled) {
+        if (cancelled || !request.isCurrent()) {
           return;
         }
         if (!rawUrl) {
@@ -627,7 +707,7 @@ export function useFilesPanelViewerState({
         );
       })
       .catch((error) => {
-        if (cancelled) {
+        if (cancelled || !request.isCurrent()) {
           return;
         }
         forgetBinaryPreviewRequest(previewScopeKey);
@@ -641,6 +721,7 @@ export function useFilesPanelViewerState({
     };
   }, [
     activeProjectId,
+    beginOpenRequest,
     effectiveRuntimeId,
     previewScopeKey,
     setActiveFile,
@@ -648,12 +729,14 @@ export function useFilesPanelViewerState({
   ]);
 
   const revealEditorRange = useCallback(
-    (range: EditorRevealRange, path?: string | null) => {
+    (range: EditorRevealRange, path?: string | null, request = beginOpenRequest()) => {
+      if (!request.isCurrent()) return;
       const normalizedPath = normalizePath(path ?? activeFilePathRef.current ?? "");
       if (!normalizedPath) {
         return;
       }
       pendingEditorRevealRef.current = {
+        isCurrent: request.isCurrent,
         path: normalizedPath,
         range: {
           startLine: Math.max(1, Math.floor(range.startLine)),
@@ -662,7 +745,7 @@ export function useFilesPanelViewerState({
       };
       setPendingEditorRevealEpoch((current) => current + 1);
     },
-    [activeFilePathRef, normalizePath],
+    [activeFilePathRef, beginOpenRequest, normalizePath],
   );
 
   useEffect(() => {
@@ -685,7 +768,7 @@ export function useFilesPanelViewerState({
         return;
       }
       const currentPendingReveal = pendingEditorRevealRef.current;
-      if (!currentPendingReveal || currentPendingReveal.path !== pendingReveal.path) {
+      if (!currentPendingReveal || currentPendingReveal.path !== pendingReveal.path || !currentPendingReveal.isCurrent()) {
         return;
       }
       if (tryRevealEditorRange(currentPendingReveal)) {
@@ -730,6 +813,8 @@ export function useFilesPanelViewerState({
       if (!normalizedPath) {
         return;
       }
+      const request = beginOpenRequest(detail.signal);
+      if (!request.isCurrent()) return;
       const wantsMarkdownPreview =
         detail.markdownView === "preview" || detail.preferPreview === true;
       const headingSlug =
@@ -739,12 +824,13 @@ export function useFilesPanelViewerState({
 
       const parentPath = getParentPath(normalizedPath) ?? "";
       try {
-        await loadDirectory(parentPath, { force: true });
+        await loadDirectory(parentPath, { force: true, signal: request.signal });
       } catch (error) {
-        if (import.meta.env.DEV) {
+        if (request.isCurrent() && import.meta.env.DEV) {
           console.warn("[files-panel] unable to preload directory for path", parentPath, error);
         }
       }
+      if (!request.isCurrent()) return;
 
       const entry =
         findEntryByPath(directoryEntriesRef.current, normalizedPath, getParentPath, normalizePath) ??
@@ -761,28 +847,30 @@ export function useFilesPanelViewerState({
         } satisfies ControllerWorkspaceEntry);
 
       if (entry.kind === "directory") {
-        await focusDirectory(entry.path);
+        await focusDirectory(entry.path, request);
         return;
       }
 
       onOpenWorkspaceFileEvent?.(detail);
-      await ensureEntryVisible(entry);
+      if (!await ensureEntryVisible(entry, request)) return;
 
       try {
         if (isImageEntry(entry)) {
-          await openImageFile(entry);
+          await openImageFile(entry, request);
         } else if (isLikelyTextEntry(entry)) {
-          await openTextFile(entry, { forceFetch: true });
+          await openTextFile(entry, { forceFetch: true, request });
+          if (!request.isCurrent()) return;
           if (wantsMarkdownPreview && isMarkdownWorkspacePath(normalizedPath)) {
             setMarkdownView("preview");
           }
         } else {
-          await openUnsupportedFile(entry);
+          await openUnsupportedFile(entry, request);
         }
       } catch (error) {
-        console.warn("[files-panel] failed to open file from event", normalizedPath, error);
+        if (request.isCurrent()) console.warn("[files-panel] failed to open file from event", normalizedPath, error);
         return;
       }
+      if (!request.isCurrent()) return;
 
       const startLineCandidate =
         typeof detail.line === "number" && !Number.isNaN(detail.line)
@@ -804,7 +892,7 @@ export function useFilesPanelViewerState({
         if (wantsMarkdownPreview && headingSlug) {
           queueMarkdownHeadingJump(headingSlug);
         } else {
-          revealEditorRange(nextRange, normalizedPath);
+          revealEditorRange(nextRange, normalizedPath, request);
         }
       } else if (wantsMarkdownPreview && headingSlug) {
         queueMarkdownHeadingJump(headingSlug);
@@ -812,6 +900,7 @@ export function useFilesPanelViewerState({
     },
     [
       activeProjectId,
+      beginOpenRequest,
       directoryEntriesRef,
       ensureEntryVisible,
       focusDirectory,
@@ -831,76 +920,59 @@ export function useFilesPanelViewerState({
     ],
   );
 
+  // Keep the listener stable while loaded files and callbacks change. A handoff
+  // is acknowledged on acceptance, so retries cannot restart an in-flight read.
+  const externalOpenRef = useRef({ activeProjectId, openFileFromEvent, normalizePath, lifetime });
+  externalOpenRef.current = { activeProjectId, openFileFromEvent, normalizePath, lifetime };
+  const acceptedHandoffsRef = useRef({ lifetime, ids: new Set<string>() });
+  if (acceptedHandoffsRef.current.lifetime !== lifetime) {
+    acceptedHandoffsRef.current = { lifetime, ids: new Set<string>() };
+  }
   useEffect(() => {
-    if (typeof window === "undefined" || !acceptExternalOpenEvents) {
-      return;
-    }
+    if (typeof window === "undefined" || !acceptExternalOpenEvents) return;
+    let disposed = false;
     const runtimeWindow = window as typeof window & {
       __INSTAFY_OPEN_WORKSPACE_FILE_ACK__?: string | null;
       __INSTAFY_PENDING_OPEN_WORKSPACE_FILE__?: OpenWorkspaceFileEventDetail | null;
     };
-    let disposed = false;
-    const inFlightKeys = new Set<string>();
-    const acknowledge = (detail: OpenWorkspaceFileEventDetail) => {
-      if (typeof detail.handoffId === "string" && detail.handoffId) {
-        runtimeWindow.__INSTAFY_OPEN_WORKSPACE_FILE_ACK__ = detail.handoffId;
+    const accept = (detail: OpenWorkspaceFileEventDetail) => {
+      const current = externalOpenRef.current;
+      if (!detail || typeof detail.path !== "string" || detail.signal?.aborted
+        || !current.activeProjectId || (detail.projectId && detail.projectId !== current.activeProjectId)
+        || !current.normalizePath(detail.path)) return;
+      const handoffId = typeof detail.handoffId === "string" && detail.handoffId ? detail.handoffId : null;
+      const accepted = acceptedHandoffsRef.current.ids;
+      if (handoffId && accepted.has(handoffId)) return;
+      if (handoffId) {
+        accepted.add(handoffId);
+        if (accepted.size > 64) accepted.delete(accepted.values().next().value!);
+        runtimeWindow.__INSTAFY_OPEN_WORKSPACE_FILE_ACK__ = handoffId;
       }
-    };
-    const clearPendingOpen = (detail: OpenWorkspaceFileEventDetail) => {
-      const pending = runtimeWindow.__INSTAFY_PENDING_OPEN_WORKSPACE_FILE__ ?? null;
-      if (!pending) {
-        return;
-      }
-      const isSameHandoff =
-        typeof detail.handoffId === "string" &&
-        detail.handoffId.length > 0 &&
-        pending.handoffId === detail.handoffId;
-      const isSameLegacyRequest =
-        !detail.handoffId &&
-        !pending.handoffId &&
-        pending.path === detail.path &&
-        (pending.projectId ?? null) === (detail.projectId ?? null);
-      if (pending === detail || isSameHandoff || isSameLegacyRequest) {
+      const pending = runtimeWindow.__INSTAFY_PENDING_OPEN_WORKSPACE_FILE__;
+      if (pending === detail || (handoffId && pending?.handoffId === handoffId)
+        || (!handoffId && !pending?.handoffId && pending?.path === detail.path
+          && (pending.projectId ?? null) === (detail.projectId ?? null))) {
         runtimeWindow.__INSTAFY_PENDING_OPEN_WORKSPACE_FILE__ = null;
       }
-    };
-    const openAndAcknowledge = async (detail: OpenWorkspaceFileEventDetail) => {
-      const requestKey =
-        typeof detail.handoffId === "string" && detail.handoffId
-          ? detail.handoffId
-          : `${detail.projectId ?? ""}:${detail.path}`;
-      if (inFlightKeys.has(requestKey)) {
-        return;
-      }
-      inFlightKeys.add(requestKey);
-      try {
-        await openFileFromEvent(detail);
-        if (!disposed) {
-          clearPendingOpen(detail);
-          acknowledge(detail);
+      void current.openFileFromEvent(detail).catch((error) => {
+        if (!detail.signal?.aborted && mountedRef.current && lifetimeRef.current === current.lifetime) {
+          console.warn("[files-panel] failed to open workspace file", error);
         }
-      } finally {
-        inFlightKeys.delete(requestKey);
-      }
+      });
     };
-    const handler = (event: Event) => {
-      const custom = event as CustomEvent<OpenWorkspaceFileEventDetail>;
-      const detail = custom.detail;
-      if (!detail || typeof detail.path !== "string") {
-        return;
-      }
-      void openAndAcknowledge(detail);
-    };
-    window.addEventListener("instafy:open-workspace-file", handler as EventListener);
-    const pending = runtimeWindow.__INSTAFY_PENDING_OPEN_WORKSPACE_FILE__ ?? null;
-    if (pending && typeof pending.path === "string") {
-      void openAndAcknowledge(pending);
-    }
+    const handler = (event: Event) => accept((event as CustomEvent<OpenWorkspaceFileEventDetail>).detail);
+    window.addEventListener("instafy:open-workspace-file", handler);
+    // StrictMode may dispose an initial listener before replaying its setup.
+    // Do not consume the pending handoff in that discarded effect lifetime.
+    queueMicrotask(() => {
+      const pending = runtimeWindow.__INSTAFY_PENDING_OPEN_WORKSPACE_FILE__;
+      if (!disposed && pending) accept(pending);
+    });
     return () => {
       disposed = true;
-      window.removeEventListener("instafy:open-workspace-file", handler as EventListener);
+      window.removeEventListener("instafy:open-workspace-file", handler);
     };
-  }, [acceptExternalOpenEvents, openFileFromEvent]);
+  }, [acceptExternalOpenEvents, lifetime]);
 
   useEffect(() => {
     if (!activeFile) {

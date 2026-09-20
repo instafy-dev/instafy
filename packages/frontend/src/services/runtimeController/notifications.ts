@@ -494,11 +494,20 @@ export async function listMyNotificationInbox(
 
 export interface AcknowledgeMyNotificationInboxItemParams {
   conversationId: string;
+  /** Last source message represented by the displayed Home row. */
+  expectedLastMessageId?: string;
+  /** Exact durable event IDs represented by that same snapshot (at most 100). */
+  notificationIds?: string[];
+  expectedUserId?: string;
+  isCurrent?: () => boolean;
   accessToken?: string | null;
 }
 
 export interface AcknowledgeMyNotificationInboxItemResult {
   success: boolean;
+  /** False when newer activity arrived; absent on controllers without snapshot ACK support. */
+  inboxAcknowledged?: boolean;
+  acknowledgedNotificationIds?: string[];
   error?: string;
 }
 
@@ -509,10 +518,17 @@ export async function acknowledgeMyNotificationInboxItem(
     return { success: false, error: "Runtime controller is not configured." };
   }
 
+  const snapshotAck = params.expectedLastMessageId !== undefined || params.notificationIds !== undefined;
+  if (snapshotAck && (!params.expectedUserId || !params.accessToken?.trim() || !params.isCurrent?.())) {
+    return { success: false, error: "The notification session changed. Refresh and try again." };
+  }
   const requestContext = await resolveControllerRequestContext(
     params.accessToken ?? null,
   );
   const resolvedAccessToken = requestContext.accessToken;
+  if (snapshotAck && (!params.isCurrent?.() || resolvedAccessToken !== params.accessToken)) {
+    return { success: false, error: "The notification session changed. Refresh and try again." };
+  }
   if (!resolvedAccessToken) {
     return { success: false, error: "Missing controller session token." };
   }
@@ -522,15 +538,21 @@ export async function acknowledgeMyNotificationInboxItem(
     return { success: false, error: "conversationId is required." };
   }
 
+  const endpoint = snapshotAck ? "ack-snapshot" : "ack";
   try {
-    const response = await fetch(`${requestContext.baseUrl}/me/notifications/inbox/ack`, {
+    const response = await fetch(`${requestContext.baseUrl}/me/notifications/inbox/${endpoint}`, {
       method: "POST",
       headers: {
         authorization: `Bearer ${resolvedAccessToken}`,
         "content-type": "application/json",
         accept: "application/json",
       },
-      body: JSON.stringify({ conversationId }),
+      body: JSON.stringify({
+        conversationId,
+        expectedLastMessageId: params.expectedLastMessageId,
+        notificationIds: params.notificationIds,
+        expectedUserId: params.expectedUserId,
+      }),
     });
 
     if (!response.ok) {
@@ -542,7 +564,17 @@ export async function acknowledgeMyNotificationInboxItem(
       return { success: false, error: errorMessage };
     }
 
-    return { success: true };
+    const payload = await response.json().catch(() => null) as Record<string, unknown> | null;
+    if (snapshotAck && (typeof payload?.inboxAcknowledged !== "boolean" || !Array.isArray(payload.acknowledgedNotificationIds))) {
+      return { success: false, error: "This server does not support acknowledging this Home snapshot. Refresh and try again after updating the server." };
+    }
+    return {
+      success: true,
+      ...(typeof payload?.inboxAcknowledged === "boolean" ? { inboxAcknowledged: payload.inboxAcknowledged } : {}),
+      ...(Array.isArray(payload?.acknowledgedNotificationIds) ? {
+        acknowledgedNotificationIds: payload.acknowledgedNotificationIds.filter((id): id is string => typeof id === "string"),
+      } : {}),
+    };
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     return { success: false, error: `Unable to acknowledge inbox item: ${message}` };

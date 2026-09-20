@@ -20,7 +20,7 @@ type MockResponse = {
 };
 
 const packageRoot = fileURLToPath(new URL("../", import.meta.url));
-const cliEntry = path.join(packageRoot, "dist", "index.js");
+const cliEntry = path.join(packageRoot, "bin", "instafy.js");
 
 async function readAll(stream: NodeJS.ReadableStream): Promise<string> {
   const chunks: Buffer[] = [];

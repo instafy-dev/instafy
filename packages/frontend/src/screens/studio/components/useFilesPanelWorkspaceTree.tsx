@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState, type ReactNode, type RefObject, type SetStateAction } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode, type RefObject, type SetStateAction } from "react";
 import { Button } from "../../../components/Button";
 import { Spinner } from "../../../components/Spinner";
 import { controllerClient, type ControllerWorkspaceEntry } from "../../../sdk/instafy";
@@ -8,6 +8,7 @@ import {
 } from "../../../utils/floatingSurfacePosition";
 import { writeWorkspaceFileStaleNotice } from "./workspaceFileStaleNoticeStore";
 import type { ViewerState } from "./useFilesPanelViewerState";
+import type { StudioDirectoryListingListener } from "../useStudioKnownFiles";
 
 const runtimeControllerEnabled = controllerClient.core.enabled;
 
@@ -66,12 +67,15 @@ type UseFilesPanelWorkspaceTreeParams = {
   setViewerStateRef: RefObject<(nextState: SetStateAction<ViewerState>) => void>;
   waitingForPreferredRuntime: boolean;
   workspaceBrowseReady: boolean;
+  workspaceOwnerId?: string | null;
+  workspaceOwnerKey?: string;
+  onDirectoryEntriesLoaded?: StudioDirectoryListingListener;
   readOnly?: boolean;
 };
 
 type LoadDirectory = (
   path: string,
-  options?: { force?: boolean; syncMode?: "background" | "blocking" },
+  options?: { force?: boolean; syncMode?: "background" | "blocking"; signal?: AbortSignal },
 ) => Promise<ControllerWorkspaceEntry[] | null>;
 
 type RefreshFromWorkspaceCommit = (
@@ -128,6 +132,9 @@ export function useFilesPanelWorkspaceTree({
   setViewerStateRef,
   waitingForPreferredRuntime,
   workspaceBrowseReady,
+  workspaceOwnerId,
+  workspaceOwnerKey,
+  onDirectoryEntriesLoaded,
   readOnly = false,
 }: UseFilesPanelWorkspaceTreeParams) {
   const [directoryEntries, setDirectoryEntries] = useState<DirectoryEntries>({});
@@ -138,6 +145,7 @@ export function useFilesPanelWorkspaceTree({
   const expandedDirectoriesRef = useRef<Set<string>>(new Set());
   const lastExplorerSelectionRef = useRef<ControllerWorkspaceEntry | null>(null);
   const directoryAttemptsRef = useRef<Record<string, number>>({});
+  const directoryRequestsRef = useRef(new Map<string, object>());
   const previousRuntimeReadyRef = useRef(runtimeReady);
   const previousWorkspaceBrowseReadyRef = useRef(false);
   const pendingWorkspaceRefreshTimerRef = useRef<number | null>(null);
@@ -146,6 +154,12 @@ export function useFilesPanelWorkspaceTree({
   const lastWorkspaceFileStaleNoticeRef = useRef<{ path: string; at: number } | null>(null);
   const [explorerMenu, setExplorerMenu] = useState<ExplorerMenuState>(null);
   const explorerMenuRef = useRef<HTMLDivElement | null>(null);
+  const requestScope = useMemo(() => ({ activeProjectId, effectiveRuntimeId, workspaceOwnerId, workspaceOwnerKey,
+    onDirectoryEntriesLoaded }), [activeProjectId, effectiveRuntimeId,
+    workspaceOwnerId, workspaceOwnerKey, onDirectoryEntriesLoaded]);
+  const requestScopeRef = useRef(requestScope);
+  requestScopeRef.current = requestScope;
+  const lifetimeRef = useRef({ active: true, scope: requestScope });
 
   useEffect(() => {
     directoryEntriesRef.current = directoryEntries;
@@ -154,6 +168,18 @@ export function useFilesPanelWorkspaceTree({
   useEffect(() => {
     directoryStatusRef.current = directoryStatus;
   }, [directoryStatus]);
+
+  useEffect(() => {
+    const lifetime = { active: true, scope: requestScope };
+    lifetimeRef.current = lifetime;
+    directoryEntriesRef.current = {};
+    directoryStatusRef.current = {};
+    directoryAttemptsRef.current = {};
+    directoryRequestsRef.current.clear();
+    setDirectoryEntries({});
+    setDirectoryStatus({});
+    return () => { lifetime.active = false; };
+  }, [requestScope]);
 
   useEffect(() => {
     expandedDirectoriesRef.current = expandedDirectories;
@@ -194,9 +220,12 @@ export function useFilesPanelWorkspaceTree({
   const loadDirectory = useCallback<LoadDirectory>(
     async (
       path: string,
-      options?: { force?: boolean; syncMode?: "background" | "blocking" },
+      options?: { force?: boolean; syncMode?: "background" | "blocking"; signal?: AbortSignal },
     ): Promise<ControllerWorkspaceEntry[] | null> => {
-      if (!activeProjectId || !runtimeControllerEnabled) {
+      const lifetime = lifetimeRef.current;
+      const isOwnerCurrent = () => lifetime.active && lifetimeRef.current === lifetime
+        && lifetime.scope === requestScope && requestScopeRef.current === requestScope;
+      if (!activeProjectId || !runtimeControllerEnabled || !isOwnerCurrent() || options?.signal?.aborted) {
         return null;
       }
 
@@ -212,6 +241,19 @@ export function useFilesPanelWorkspaceTree({
         return existing ?? null;
       }
 
+      const request = {};
+      directoryRequestsRef.current.set(normalizedPath, request);
+      const ownsRequest = () => isOwnerCurrent() && directoryRequestsRef.current.get(normalizedPath) === request;
+      const isCurrent = () => ownsRequest() && !options?.signal?.aborted;
+      const cancelRequest = () => {
+        if (!ownsRequest()) return;
+        directoryRequestsRef.current.delete(normalizedPath);
+        directoryStatusRef.current = { ...directoryStatusRef.current, [normalizedPath]: "idle" };
+        setDirectoryStatus((previous) => isOwnerCurrent() ? { ...previous, [normalizedPath]: "idle" } : previous);
+      };
+      options?.signal?.addEventListener("abort", cancelRequest, { once: true });
+      const removeAbortListener = () => options?.signal?.removeEventListener("abort", cancelRequest);
+
       setDirectoryStatus((prev) => ({
         ...prev,
         [normalizedPath]: "loading",
@@ -226,8 +268,17 @@ export function useFilesPanelWorkspaceTree({
           syncMode: options?.syncMode ?? (options?.force ? "blocking" : undefined),
         });
       } catch (error) {
+        if (!isCurrent()) { removeAbortListener(); return null; }
         console.warn("[files-panel] directory load failed:", error);
         entries = null;
+      }
+
+      if (!isCurrent()) {
+        removeAbortListener();
+        // Another browse of the same directory may publish first. The original
+        // caller can still reveal its file while its workspace/request is valid.
+        return isOwnerCurrent() && !options?.signal?.aborted && entries
+          ? sortEntries(entries.filter((entry) => !(entry.kind === "file" && entry.name === ".instafy.keep"))) : null;
       }
 
       if (!entries) {
@@ -242,7 +293,8 @@ export function useFilesPanelWorkspaceTree({
             [normalizedPath]: "loading",
           }));
           window.setTimeout(() => {
-            void loadDirectory(normalizedPath, { force: true });
+            removeAbortListener();
+            if (isCurrent()) void loadDirectory(normalizedPath, { force: true, signal: options?.signal });
           }, delay);
           return null;
         }
@@ -251,6 +303,7 @@ export function useFilesPanelWorkspaceTree({
           ...prev,
           [normalizedPath]: "error",
         }));
+        removeAbortListener();
         return null;
       }
 
@@ -267,9 +320,11 @@ export function useFilesPanelWorkspaceTree({
         ...prev,
         [normalizedPath]: "idle",
       }));
+      onDirectoryEntriesLoaded?.({ projectId: activeProjectId, directory: normalizedPath, entries: sorted });
+      removeAbortListener();
       return sorted;
     },
-    [activeProjectId, effectiveRuntimeId, normalizePath, sortEntries, workspaceBrowseReady],
+    [activeProjectId, effectiveRuntimeId, normalizePath, onDirectoryEntriesLoaded, requestScope, sortEntries, workspaceBrowseReady],
   );
 
   useEffect(() => {

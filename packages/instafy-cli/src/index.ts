@@ -47,6 +47,7 @@ import {
   agentsList,
 } from "./agents.js";
 import { chatPrompt } from "./chat.js";
+import { grepConversationMessages, showConversationContext } from "./conversation-grep.js";
 import {
   createConversation,
   listConversations,
@@ -2512,7 +2513,7 @@ conversationListCommand.action(async (opts) => {
 
 const conversationSearchCommand = conversationCommand
   .command("search")
-  .description("Search recent conversations by title, preview, and message content")
+  .description("Search recent titles/previews and up to 12 chats' recent messages; use grep for persisted message content")
   .argument("<query...>", "Search text")
   .option("--space <id>", "Space UUID (defaults to SPACE_ID or .instafy/space.json)")
   .option("--include-threads", "Include child threads in addition to root conversations")
@@ -2534,6 +2535,57 @@ conversationSearchCommand.action(async (queryParts, opts) => {
   } catch (error) {
     console.error(kleur.red(String(error)));
     process.exit(1);
+  }
+});
+
+const conversationGrepCommand = conversationCommand
+  .command("grep")
+  .description("Search persisted message text (literal, case-insensitive; user login required)")
+  .argument("<text...>", "Literal text, 2-200 characters; not a regular expression")
+  .option("--space <id>", "Search one space (defaults to SPACE_ID or linked folder)")
+  .option("--org <id>", "Search accessible spaces in one organization")
+  .option("--personal", "Search accessible spaces without an organization")
+  .option("--all", "Search all accessible spaces")
+  .option("--limit <n>", "Results per page (1-50, default: 30)", Number)
+  .option("--cursor <cursor>", "Next cursor from the same query and scope")
+  .option("--json", "Output the result page with snippets, highlight ranges and nextCursor");
+addServerUrlOptions(conversationGrepCommand);
+addAccessTokenOptions(conversationGrepCommand, "Interactive Instafy user access token");
+// Keep invalid invocations distinct from grep's successful no-match exit code.
+conversationGrepCommand.exitOverride((error) => process.exit(error.exitCode === 0 ? 0 : 2));
+conversationGrepCommand.action(async (parts, opts) => {
+  try {
+    const found = await grepConversationMessages({
+      query: Array.isArray(parts) ? parts.join(" ") : String(parts ?? ""),
+      space: opts.space, org: opts.org, personal: opts.personal, all: opts.all,
+      limit: opts.limit, cursor: opts.cursor, json: opts.json,
+      controllerUrl: opts.serverUrl, accessToken: opts.accessToken,
+    });
+    process.exitCode = found ? 0 : 1;
+  } catch (error) {
+    console.error(kleur.red(String(error)));
+    process.exitCode = 2;
+  }
+});
+
+const conversationContextCommand = conversationCommand
+  .command("context")
+  .description("Read exact message context, including old messages outside the latest history page")
+  .argument("<conversationId>", "Conversation UUID from a grep result")
+  .argument("<messageId>", "Canonical message UUID from a grep result")
+  .option("--before <n>", "Older messages (0-50, default: 20)", Number)
+  .option("--after <n>", "Newer messages (0-50, default: 20)", Number)
+  .option("--json", "Output canonical messages, anchor and paging cursors");
+addServerUrlOptions(conversationContextCommand);
+addAccessTokenOptions(conversationContextCommand, "Interactive Instafy user access token");
+conversationContextCommand.exitOverride((error) => process.exit(error.exitCode === 0 ? 0 : 2));
+conversationContextCommand.action(async (conversationId, messageId, opts) => {
+  try {
+    await showConversationContext({ conversationId, messageId, before: opts.before, after: opts.after,
+      json: opts.json, controllerUrl: opts.serverUrl, accessToken: opts.accessToken });
+  } catch (error) {
+    console.error(kleur.red(String(error)));
+    process.exitCode = 2;
   }
 });
 

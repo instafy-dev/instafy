@@ -9,6 +9,12 @@ const input = {
 };
 
 describe("chat history visit identity", () => {
+  it("keeps the exact message in the matched visit and isolates it from the latest transcript", () => {
+    const target = resolveChatScrollHistoryVisit({ ...input, location: { ...input.location, search: `${input.location.search}&messageId=old-message` } });
+    expect(target?.messageId).toBe("old-message");
+    expect(chatScrollSnapshotKey(target)).not.toBe(chatScrollSnapshotKey(resolveChatScrollHistoryVisit(input)));
+    expect(resolveChatScrollHistoryVisit({ ...input, projectId: "other", location: { ...input.location, search: `${input.location.search}&messageId=old-message` } })).toBeNull();
+  });
   it("keeps canonical replacements in one visit without conflating later pushes", () => {
     const original = resolveChatScrollHistoryVisit(input)!;
     const replaced = resolveChatScrollHistoryVisit({ ...input,

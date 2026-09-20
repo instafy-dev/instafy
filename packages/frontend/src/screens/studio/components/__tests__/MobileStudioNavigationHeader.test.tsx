@@ -63,11 +63,27 @@ describe("MobileStudioNavigationHeader", () => {
     expect(query("mobile-header-open-chats")).not.toBeNull();
   });
 
-  it("keeps both chat and space visible in one bounded, accessible picker target", async () => {
+  it("goes Forward from More through the existing history without opening navigation", async () => {
+    await render(); await click("mobile-header-more");
+    expect(query("mobile-header-forward")?.disabled).toBe(true);
+    await click("mobile-header-forward");
+    expect(props.history.goForward).not.toHaveBeenCalled();
+    props.history = { ...props.history, canGoForward: true };
+    await render();
+    expect(query("mobile-header-forward")?.disabled).toBe(false);
+    await click("mobile-header-forward");
+    expect(props.history.goForward).toHaveBeenCalledTimes(1);
+    expect(props.onOpenPicker).not.toHaveBeenCalled();
+    expect(props.onOpenChats).not.toHaveBeenCalled();
+    expect(query("mobile-header-more")?.getAttribute("aria-expanded")).toBe("false");
+  });
+
+  it("keeps chat and space visible in the shared navigation drawer trigger", async () => {
     await render();
     const picker = query("mobile-header-picker")!;
-    expect(picker.getAttribute("aria-label")).toBe("Switch chat or space");
+    expect(picker.getAttribute("aria-label")).toBe("Open space navigation: Alpha space");
     expect(picker.getAttribute("aria-haspopup")).toBe("dialog");
+    expect(picker.getAttribute("aria-expanded")).toBe("false");
     expect(query("mobile-header-title")?.textContent).toBe(props.title);
     expect(query("mobile-header-space")?.textContent).toBe(props.spaceName);
     expect(query("mobile-header-title")?.classList.contains("truncate")).toBe(true);
@@ -79,6 +95,9 @@ describe("MobileStudioNavigationHeader", () => {
     expect(document.activeElement).not.toBe(picker);
     await click("mobile-header-picker");
     expect(props.onOpenPicker).toHaveBeenCalledTimes(1);
+    props.sidebarOpen = true;
+    await render();
+    expect(query("mobile-header-picker")?.getAttribute("aria-expanded")).toBe("true");
   });
 
   it("keeps secondary chat, parent, sidebar and settings actions reachable and closes after each", async () => {
@@ -109,16 +128,13 @@ describe("MobileStudioNavigationHeader", () => {
     }
   });
 
-  it("preserves the existing notification and tabs controls without inventing disabled actions", async () => {
-    const notification = vi.fn(); const tabs = vi.fn();
-    props.notificationBell = <Button onPress={notification} aria-label="Notifications">Bell</Button>;
+  it("preserves tab controls without a duplicate notification entry", async () => {
+    const tabs = vi.fn();
     props.tabsAction = <Button onPress={tabs}>Browse tabs</Button>;
     await render(); await click("mobile-header-more");
     expect(document.body.textContent).not.toContain("Private chat");
     expect(document.body.textContent).not.toContain("Open parent conversation");
-    await clickText("Bell"); expect(notification).toHaveBeenCalledTimes(1);
-    expect(query("mobile-header-more")?.getAttribute("aria-expanded")).toBe("false");
-    await click("mobile-header-more");
+    expect(document.body.textContent).not.toContain("Notifications");
     await clickText("Browse tabs"); expect(tabs).toHaveBeenCalledTimes(1);
   });
 

@@ -201,7 +201,7 @@ async function readAll(stream: NodeJS.ReadableStream): Promise<string> {
 
 async function execCli(args: string[]) {
   const packageRoot = new URL("../", import.meta.url).pathname;
-  const entry = path.join(packageRoot, "dist", "index.js");
+  const entry = path.join(packageRoot, "bin", "instafy.js");
   const tmpHome = fs.mkdtempSync(path.join(os.tmpdir(), "instafy-cli-home-"));
   try {
     const child = spawn(process.execPath, [entry, ...args], {

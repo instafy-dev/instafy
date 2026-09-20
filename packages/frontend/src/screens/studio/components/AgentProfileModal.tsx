@@ -1,3 +1,5 @@
+import { PROFILE_BIO_MAX_LENGTH } from "@instafy/sdk/human-profiles";
+import { ProfileBioField } from "../../../components/ProfileBioField";
 import { Button } from "../../../components/Button";
 import { Field } from "../../../components/Field";
 import { Input } from "../../../components/Input";
@@ -39,6 +41,8 @@ type AgentProfileModalProps = {
   onDisplayNameChange: (value: string) => void;
   avatarImageUrl: string;
   onAvatarImageUrlChange: (value: string) => void;
+  bio?: string;
+  onBioChange?: (value: string) => void;
   description: string;
   onDescriptionChange: (value: string) => void;
   onClose: () => void;
@@ -71,6 +75,8 @@ export function AgentProfileModal({
   onDisplayNameChange,
   avatarImageUrl,
   onAvatarImageUrlChange,
+  bio = "",
+  onBioChange,
   description,
   onDescriptionChange,
   onClose,
@@ -179,7 +185,6 @@ export function AgentProfileModal({
             value={handle}
             onChange={(event) => onHandleChange(event.target.value)}
             placeholder={handlePlaceholder ?? "@bob"}
-            size="sm"
             radius="xl"
             disabled={pending || handleDisabled}
             data-testid="agent-profile-handle-input"
@@ -192,7 +197,6 @@ export function AgentProfileModal({
             value={displayName}
             onChange={(event) => onDisplayNameChange(event.target.value)}
             placeholder="Optional"
-            size="sm"
             radius="xl"
             disabled={pending}
             data-testid="agent-profile-display-name-input"
@@ -205,7 +209,6 @@ export function AgentProfileModal({
             value={avatarImageUrl}
             onChange={(event) => onAvatarImageUrlChange(event.target.value)}
             placeholder="https://example.com/avatar.png"
-            size="sm"
             radius="xl"
             disabled={pending}
             data-testid="agent-profile-avatar-url-input"
@@ -227,12 +230,14 @@ export function AgentProfileModal({
           </div>
         </Field>
 
-        <Field label="Description" htmlFor="agent-profile-description">
+        {onBioChange ? <ProfileBioField id="agent-profile-bio" value={bio} onChange={onBioChange} disabled={pending} isAgent /> : null}
+
+        <Field label="Style guidance" htmlFor="agent-profile-description">
           <Textarea
             id="agent-profile-description"
             value={description}
             onChange={(event) => onDescriptionChange(event.target.value)}
-            placeholder="Short flavor text for this agent."
+            placeholder="For example: keep replies concise and practical."
             rows={4}
             disabled={pending}
             data-testid="agent-profile-description-input"
@@ -248,7 +253,8 @@ export function AgentProfileModal({
           onPress={onClose}
           variant="ghost"
           size="sm"
-          radius="full"
+          radius="xl"
+          className="min-h-11 sm:pointer-fine:min-h-9"
           isDisabled={pending}
         >
           Cancel
@@ -257,8 +263,9 @@ export function AgentProfileModal({
           onPress={onSave}
           variant="primary"
           size="sm"
-          radius="full"
-          isDisabled={pending}
+          radius="xl"
+          className="min-h-11 sm:pointer-fine:min-h-9"
+          isDisabled={pending || Array.from(bio).length > PROFILE_BIO_MAX_LENGTH}
           data-testid="agent-profile-save"
         >
           {pending ? "Working…" : effectiveSaveLabel}

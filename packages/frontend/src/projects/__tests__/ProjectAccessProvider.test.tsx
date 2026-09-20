@@ -14,6 +14,8 @@ const mocks = vi.hoisted(() => ({
   setProjectName: vi.fn(),
   setProjectOrg: vi.fn(),
   switchProject: vi.fn(),
+  recordProjectOpened: vi.fn(),
+  useAuth: vi.fn(),
 }));
 
 vi.mock("../../lib/supabaseClient", () => ({
@@ -47,7 +49,7 @@ vi.mock("../ProjectStateProvider", () => ({
 }));
 
 vi.mock("../../providers/AuthProvider", () => ({
-  useAuth: () => ({ user: { id: "user-1" } }),
+  useAuth: mocks.useAuth,
 }));
 
 vi.mock("react-router-dom", async (importOriginal) => {
@@ -64,7 +66,7 @@ vi.mock("react-router-dom", async (importOriginal) => {
   };
 });
 
-vi.mock("../projectRecency", () => ({ recordProjectOpened: vi.fn() }));
+vi.mock("../projectRecency", () => ({ recordProjectOpened: mocks.recordProjectOpened }));
 vi.mock("../../workspace/projectClear", () => ({ clearProjectState: vi.fn() }));
 
 import {
@@ -128,6 +130,7 @@ describe("ProjectAccessProvider capability refresh", () => {
     document.body.appendChild(container);
     root = createRoot(container);
     Object.values(mocks).forEach((mock) => mock.mockReset());
+    mocks.useAuth.mockReturnValue({ user: { id: "user-1", email: "user@example.test" } });
   });
 
   afterEach(async () => {
@@ -159,14 +162,30 @@ describe("ProjectAccessProvider capability refresh", () => {
     expect(probe?.getAttribute("data-pending")).toBe("true");
     expect(probe?.getAttribute("data-write")).toBe("false");
     expect(mocks.createControllerProject).not.toHaveBeenCalled();
+    expect(mocks.recordProjectOpened).not.toHaveBeenCalled();
 
     await act(async () => lookup.resolve(summaryFor("viewer")));
+    expect(mocks.recordProjectOpened).toHaveBeenCalledWith(PROJECT_ID, undefined, "user@example.test");
     expect(probe?.getAttribute("data-initialized")).toBe("true");
     expect(probe?.getAttribute("data-pending")).toBe("false");
     expect(probe?.getAttribute("data-role")).toBe("viewer");
     expect(probe?.getAttribute("data-write")).toBe("false");
     expect(container.querySelector('[data-testid="entry-loading-screen"]')).toBeNull();
     expect(container.textContent).toContain("Workspace ready");
+  });
+
+  it("does not copy the previous active space into a new account before initialization", async () => {
+    mocks.getSummaryResult.mockResolvedValue(summaryFor("viewer"));
+    await act(async () => root.render(<ProjectAccessProvider><AccessProbe /></ProjectAccessProvider>));
+    expect(mocks.recordProjectOpened).toHaveBeenCalledWith(PROJECT_ID, undefined, "user@example.test");
+    mocks.recordProjectOpened.mockClear();
+    const lookup = deferred<ReturnType<typeof summaryFor>>();
+    mocks.getSummaryResult.mockReturnValue(lookup.promise);
+    mocks.useAuth.mockReturnValue({ user: { id: "user-2", email: "other@example.test" } });
+    await act(async () => root.render(<ProjectAccessProvider><AccessProbe /></ProjectAccessProvider>));
+    expect(mocks.recordProjectOpened).not.toHaveBeenCalled();
+    await act(async () => lookup.resolve(summaryFor("viewer")));
+    expect(mocks.recordProjectOpened).toHaveBeenCalledWith(PROJECT_ID, undefined, "other@example.test");
   });
 
   it("aborts a pending startup access read when its provider unmounts", async () => {

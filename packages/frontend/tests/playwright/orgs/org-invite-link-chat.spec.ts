@@ -1,4 +1,5 @@
 import { test, expect } from "@playwright/test";
+import { openTeamDirectory } from "../utils/sidebar.js";
 import {
   clearRuntimePreference,
   deleteDisposableTestUser,
@@ -25,7 +26,7 @@ const INVITE_CHAT_MODEL =
   (process.env.PLAYWRIGHT_INVITE_CHAT_MODEL ?? "gpt-5.5").trim() || "gpt-5.5";
 
 async function openProjectSettings(page: import("@playwright/test").Page) {
-  await page.getByTestId("sidebar-project-button").click();
+  await openTeamDirectory(page);
   await page.getByTestId("sidebar-project-settings").click();
   await expect(page.getByTestId("settings-panel")).toBeVisible();
   await page.getByTestId("settings-category-project-access").click();
@@ -203,22 +204,10 @@ test.describe("Org invite link chat", () => {
         .getByText("Preparing your studio workspace…", { exact: false })
         .waitFor({ state: "detached", timeout: 60_000 })
         .catch(() => {});
-      const memberProjectButton = memberPage.getByTestId("sidebar-project-button");
-      await memberProjectButton.waitFor({ state: "visible", timeout: 60_000 });
-      let switcherOpened = false;
-      for (let attempt = 0; attempt < 3; attempt += 1) {
-        await memberProjectButton.click().catch(() => {});
-        if (await memberPage.getByTestId("sidebar-project-switcher-menu").isVisible().catch(() => false)) {
-          switcherOpened = true;
-          break;
-        }
-        await memberPage.waitForTimeout(150).catch(() => {});
-      }
-      if (switcherOpened) {
-        await expect(memberPage.getByTestId("sidebar-org-selector")).toContainText(orgName, { timeout: 60_000 });
-        await memberPage.keyboard.press("Escape").catch(() => {});
-        await expect(memberPage.getByTestId("sidebar-project-switcher-menu")).toHaveCount(0);
-      }
+      await openTeamDirectory(memberPage, 60_000);
+      await expect(memberPage.getByTestId("sidebar-org-selector")).toContainText(orgName, { timeout: 60_000 });
+      await memberPage.keyboard.press("Escape");
+      await expect(memberPage.getByTestId("sidebar-project-switcher-menu")).toHaveCount(0);
 
       const memberUserBubble = memberPage
         .locator('[data-testid="chat-bubble-user"]')

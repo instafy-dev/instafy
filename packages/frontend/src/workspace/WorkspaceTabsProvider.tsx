@@ -481,7 +481,6 @@ export function WorkspaceTabsProvider({ children }: { children: ReactNode }) {
     }
     const currentTabs = tabsRef.current;
     const conversationLookup = new Map(conversations.map((conversation) => [conversation.localId, conversation]));
-    const nonConversationTabs = currentTabs.filter((tab) => tab.kind !== "conversation");
     const existingConversationTabs = currentTabs.filter(
       (tab): tab is WorkspaceConversationTabState =>
         tab.kind === "conversation" && conversationLookup.has(tab.conversationId)
@@ -589,7 +588,20 @@ export function WorkspaceTabsProvider({ children }: { children: ReactNode }) {
       }
     }
 
-    const nextTabs: WorkspaceTabState[] = [...nextConversationTabs, ...nonConversationTabs];
+    // Refresh chats in their existing slots so title/unread updates do not undo
+    // a drag across tab kinds. Keep saved chat order when more history arrives,
+    // and append any remaining chats after the existing tabs.
+    const nextTabs: WorkspaceTabState[] = [];
+    let conversationIndex = 0;
+    for (const tab of currentTabs) {
+      if (tab.kind !== "conversation") {
+        nextTabs.push(tab);
+      } else if (conversationLookup.has(tab.conversationId)) {
+        const nextConversationTab = nextConversationTabs[conversationIndex++];
+        if (nextConversationTab) nextTabs.push(nextConversationTab);
+      }
+    }
+    nextTabs.push(...nextConversationTabs.slice(conversationIndex));
     const orderChanged =
       nextTabs.length !== currentTabs.length ||
       nextTabs.some((tab, index) => tab.id !== currentTabs[index]?.id);

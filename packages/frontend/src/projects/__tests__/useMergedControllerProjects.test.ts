@@ -18,6 +18,12 @@ function createLocalProject(overrides: Partial<ProjectListItem>): ProjectListIte
 }
 
 describe("mergeControllerProjects", () => {
+  it("uses saved controller identity including explicit clears for cached spaces", () => {
+    const local = createLocalProject({ projectIcon: "🚀", projectColor: "blue" });
+    expect(mergeControllerProjects([local], [{ projectId: local.id, orgId: local.orgId, projectIcon: null, projectColor: "green" }])[0]).toMatchObject({ projectIcon: null, projectColor: "green" });
+    expect(mergeControllerProjects([local], [{ projectId: local.id, orgId: local.orgId }])[0]).toMatchObject({ projectIcon: "🚀", projectColor: "blue" });
+  });
+
   it("adds remote-only spaces with controller names and orgs", () => {
     const merged = mergeControllerProjects([], [
       {

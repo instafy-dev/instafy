@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import { act, type ComponentProps } from "react";
 import { createRoot, type Root } from "react-dom/client";
-import { BrowserRouter, useLocation } from "react-router-dom";
+import { BrowserRouter, useLocation, useNavigate } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { StudioSidebar } from "../StudioSidebar";
 import type { StudioSidebarWorkspaceSwitcher } from "../StudioSidebarWorkspaceSwitcher";
@@ -18,26 +18,30 @@ const mocks = vi.hoisted(() => ({
 }));
 vi.mock("../../workspaceControls", () => ({ useWorkspaceControls: () => ({ sidebarOpen: true, userEmail: "qa@example.test" }) }));
 vi.mock("../../useStudioDesktopLayout", () => ({ useStudioDesktopLayout: () => false }));
+vi.mock("../../../../hooks/useTouchLikeInput", () => ({ useTouchLikeInput: () => false }));
 vi.mock("../../../../projects/useProjects", () => ({ useProjects: () => ({ projectList: mocks.projects, activeProjectId: mocks.projects[0].id, switchProject: mocks.legacySwitch, createProject: mocks.legacyCreate }) }));
-vi.mock("../../../../projects/useMergedControllerProjects", () => ({ useMergedControllerProjects: () => ({ mergedProjects: [...mocks.projects, mocks.unseen], remoteLoading: false, remoteDiscoveryResolved: true, remoteLoadedScope: null }) }));
+vi.mock("../../../../projects/useMergedControllerProjects", () => ({ useMergedControllerProjects: ({ orgId }: { orgId: string | null }) => ({ mergedProjects: [...mocks.projects, mocks.unseen], remoteLoading: false, remoteDiscoveryResolved: true, remoteLoadedScope: orgId }) }));
 vi.mock("../../../../runtime/useRuntimeMenu", () => ({ useRuntimeMenuOptions: () => ({ runtime: {}, runtimeOptions: [] }) }));
 vi.mock("../../../../status/useStatus", () => ({ useStatus: () => ({ showStatus: vi.fn() }) }));
 vi.mock("../../../../profile/ProfileProvider", () => ({ useProfile: () => ({ profile: null }) }));
+vi.mock("../../../../providers/AuthProvider", () => ({ useAuth: () => ({ user: { id: "qa-user", email: "qa@example.test" } }) }));
 vi.mock("../../../../theme/ThemeProvider", () => ({ useTheme: () => ({ resolvedTheme: "light", setThemeMode: vi.fn() }) }));
 vi.mock("../../../../debug/useAppLogs", () => ({ useAppLogs: () => ({ logs: [], hasLogs: false, hasErrors: false, clearLogs: vi.fn() }) }));
 vi.mock("../../../../updates/useAppUpdateMetadata", () => ({ useAppUpdateMetadata: () => ({ metadata: null, refresh: vi.fn() }) }));
 vi.mock("../../../../updates/useDesktopReleaseLookup", () => ({ useDesktopReleaseLookup: () => ({ lookup: { status: "idle" } }) }));
 vi.mock("../../../../updates/desktopAcquisition", () => ({ getAppAcquisitionTarget: () => null }));
-vi.mock("../../../../telemetry/studioPerformance", () => ({ studioPerformance: { beginProject: mocks.beginProject, cancel: vi.fn(), cancelOrganizationDiscovery: vi.fn() } }));
-vi.mock("../../../../sdk/instafy", () => ({ runtimeControllerEnabled: false, controllerClient: { organizations: { list: vi.fn() } } }));
+vi.mock("../../../../telemetry/studioPerformance", () => ({ studioPerformance: { begin: vi.fn(), beginProject: mocks.beginProject, cancel: vi.fn(), cancelOrganizationDiscovery: vi.fn() } }));
+vi.mock("../../../../sdk/instafy", () => ({ runtimeControllerEnabled: false, controllerClient: { organizations: { list: vi.fn(), listMembers: vi.fn() }, projects: { listMembers: vi.fn() } } }));
 vi.mock("../StudioSidebarAccountSection", () => ({ StudioSidebarAccountSection: () => null }));
 vi.mock("../DevDiagnosticsMenu", () => ({ DevDiagnosticsMenu: () => null }));
 vi.mock("../BuildLogOverlay", () => ({ BuildLogOverlay: () => null }));
 vi.mock("../StudioSidebarWorkspaceSwitcher", () => ({
-  StudioSidebarWorkspaceSwitcher: ({ onProjectMenuAction }: ComponentProps<typeof StudioSidebarWorkspaceSwitcher>) => (
+  StudioSidebarWorkspaceSwitcher: ({ onProjectMenuAction, onWorkspaceOrgChange }: ComponentProps<typeof StudioSidebarWorkspaceSwitcher>) => (
     <>
     <button data-testid="select-unseen-space" onClick={() => onProjectMenuAction(`project:${mocks.unseen.id}`)}>Space B</button>
     <button data-testid="select-current-space" onClick={() => onProjectMenuAction(`project:${mocks.projects[0].id}`)}>Current</button>
+    <button data-testid="select-personal-team" onClick={() => onWorkspaceOrgChange("personal")}>Personal</button>
+    <button data-testid="select-empty-team" onClick={() => onWorkspaceOrgChange("33333333-3333-4333-8333-333333333333")}>Empty team</button>
     </>
   ),
 }));
@@ -51,13 +55,16 @@ const moreItems: ComponentProps<typeof StudioSidebar>["moreItems"] = [{ id: "set
 
 // Actual Sidebar callback composition and Router history; external data and row
 // discovery are synthetic. No controller, native plugin, or model is contacted.
-function Harness() {
+function Harness({ teamNavigation = false }: { teamNavigation?: boolean }) {
   const location = useLocation();
+  const navigate = useNavigate();
   const history = useStudioHistory();
   const navigation = useStudioNavigation();
   const sidebar = useMobileSidebarHistory({ enabled: true, scopeKey: "qa:space-a" });
   const workspaceOpen = new URLSearchParams(location.search).get("workspaceTab") === "workspaces";
   const routeOwned = workspaceOpen && !sidebar.mobileSidebarOpen;
+  const params = new URLSearchParams(location.search);
+  const panel = params.get("panel");
   const { dismiss } = useRouteOwnedWorkspaceDrawer({ enabled: routeOwned, history });
   return <>
     <button data-testid="open-sidebar" onClick={() => sidebar.setMobileSidebarOpen(true)}>Open</button>
@@ -66,7 +73,11 @@ function Harness() {
     <output data-testid="state">{JSON.stringify({ search: location.search, view: sidebar.mobileSidebarNavigation.view, index: window.history.state?.idx })}</output>
     <StudioNavigationProvider value={sidebar.runAfterSidebarClose}>
       {(sidebar.mobileSidebarOpen || routeOwned) && <StudioSidebar
-        items={items} moreItems={moreItems} activePanel="chat" collapsed={false} mobileOverlay
+        items={items} moreItems={moreItems} activePanel={panel === "home" || panel === "team" ? panel : "chat"} collapsed={false} mobileOverlay
+        selectedOrgKey={params.get("teamId") ?? "personal"}
+        onReturnToTeam={teamNavigation ? () => navigation({ kind: "conversation", projectId: mocks.projects[0].id }) : undefined}
+        onActivateProject={teamNavigation ? projectId => navigation({ kind: "conversation", projectId }) : undefined}
+        onOpenTeam={teamNavigation ? orgKey => { void navigate(`/studio?projectId=${mocks.projects[0].id}&panel=team&teamId=${orgKey}`); } : undefined}
         mobileNavigation={sidebar.mobileSidebarOpen ? sidebar.mobileSidebarNavigation : undefined}
         runSidebarAction={sidebar.runAfterSidebarClose}
         onSelect={panel => navigation({ kind: "panel", panel })}
@@ -89,19 +100,27 @@ describe("StudioSidebar navigation ownership", () => {
   beforeEach(() => {
     (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
     vi.clearAllMocks();
+    // JSDOM lacks CSS.escape, which React Aria uses for keyboard menu focus.
+    vi.stubGlobal("CSS", { escape: (value: string) => value.replace(/[^a-zA-Z0-9_-]/g, "\\$&") });
     window.history.replaceState({ idx: 0, key: "base" }, "", `/studio${chatSearch}`);
     container = document.createElement("div"); document.body.appendChild(container); root = createRoot(container);
   });
   afterEach(async () => {
     await act(async () => root.unmount()); container.remove();
     vi.restoreAllMocks();
+    vi.unstubAllGlobals();
     delete (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT;
   });
   const state = () => JSON.parse(container.querySelector('[data-testid="state"]')!.textContent!) as { search: string; view: string | null; index: number };
-  async function render() { await act(async () => root.render(<BrowserRouter><Harness /></BrowserRouter>)); }
+  async function render(teamNavigation = false) { await act(async () => root.render(<BrowserRouter><Harness teamNavigation={teamNavigation} /></BrowserRouter>)); }
   async function click(id: string) {
     const button = document.querySelector<HTMLButtonElement>(`[data-testid="${id}"]`);
     expect(button).not.toBeNull(); await act(async () => button!.click());
+  }
+  async function openTeamPicker() {
+    await click("sidebar-team-menu-trigger");
+    await click("sidebar-team-menu-switch");
+    expect(document.querySelector('[data-testid="sidebar-team-menu"]')).toBeNull();
   }
   async function settle(assertion: () => void) {
     let failure: unknown;
@@ -115,7 +134,7 @@ describe("StudioSidebar navigation ownership", () => {
   }
 
   it("pops exactly one drill-in level and opening More does not first dismiss the drawer", async () => {
-    await render(); await click("open-sidebar"); await click("sidebar-project-button");
+    await render(); await click("open-sidebar"); await openTeamPicker();
     expect(state().view).toBe("workspace"); expect(state().index).toBe(2);
     const go = vi.spyOn(window.history, "go");
     await click("sidebar-project-switcher-back");
@@ -129,7 +148,7 @@ describe("StudioSidebar navigation ownership", () => {
   });
 
   it("collapses owned drawer history once before pushing an unseen space and preserves Back/Forward", async () => {
-    await render(); await click("open-sidebar"); await click("sidebar-project-button");
+    await render(); await click("open-sidebar"); await openTeamPicker();
     const go = vi.spyOn(window.history, "go");
     await click("select-unseen-space");
     await settle(() => expect(new URLSearchParams(state().search).get("projectId")).toBe(mocks.unseen.id));
@@ -164,5 +183,58 @@ describe("StudioSidebar navigation ownership", () => {
     expect(mocks.workspaceChange).toHaveBeenCalledExactlyOnceWith(false);
     await settle(() => expect(state().search).toBe(chatSearch));
     expect(mocks.beginProject).not.toHaveBeenCalled();
+  });
+
+  it("returns from Home to the same team's work after collapsing the drawer branch once", async () => {
+    const homeSearch = `${chatSearch}&panel=home&teamId=personal`;
+    window.history.replaceState({ idx: 0, key: "home" }, "", `/studio${homeSearch}`);
+    await render(true); await click("open-sidebar"); await openTeamPicker();
+    const go = vi.spyOn(window.history, "go");
+    await click("select-personal-team");
+    await settle(() => {
+      expect(state().view).toBeNull();
+      expect(new URLSearchParams(state().search).get("panel")).toBeNull();
+    });
+    expect(go.mock.calls).toEqual([[-2]]);
+    expect(state().index).toBe(1);
+    expect(new URLSearchParams(state().search).get("projectId")).toBe(mocks.projects[0].id);
+    expect(mocks.legacyCreate).not.toHaveBeenCalled(); expect(mocks.legacySwitch).not.toHaveBeenCalled();
+    await click("back"); await settle(() => expect(state().search).toBe(homeSearch));
+    expect(state().view).toBeNull();
+    await click("forward"); await settle(() => expect(new URLSearchParams(state().search).get("panel")).toBeNull());
+  });
+
+  it("reactivates Current from another team's route-owned picker without a dismissal POP", async () => {
+    const otherTeamPicker = `${chatSearch}&panel=team&teamId=33333333-3333-4333-8333-333333333333&workspaceTab=workspaces`;
+    window.history.pushState({ idx: 1, key: "other-team-picker" }, "", `/studio${otherTeamPicker}`);
+    await render(true);
+    const go = vi.spyOn(window.history, "go");
+    await click("select-current-space");
+    expect(new URLSearchParams(state().search).get("panel")).toBeNull();
+    expect(new URLSearchParams(state().search).get("projectId")).toBe(mocks.projects[0].id);
+    expect(state()).toMatchObject({ view: null, index: 2 });
+    expect(go).not.toHaveBeenCalled();
+    expect(mocks.workspaceChange).not.toHaveBeenCalled();
+    await click("back"); await settle(() => expect(state().search).toBe(otherTeamPicker));
+  });
+
+  it("opens an empty team's overview and reactivates the loaded space without dismissing to the wrong scope", async () => {
+    await render(true); await click("open-sidebar"); await openTeamPicker();
+    const go = vi.spyOn(window.history, "go");
+    await click("select-empty-team");
+    await settle(() => expect(new URLSearchParams(state().search).get("panel")).toBe("team"));
+    expect(new URLSearchParams(state().search).get("teamId")).toBe("33333333-3333-4333-8333-333333333333");
+    expect(state()).toMatchObject({ view: null, index: 1 });
+    expect(go.mock.calls).toEqual([[-2]]);
+    const overviewSearch = state().search;
+    await click("open-sidebar"); await openTeamPicker();
+    go.mockClear(); await click("select-current-space");
+    await settle(() => expect(new URLSearchParams(state().search).get("panel")).toBeNull());
+    expect(state()).toMatchObject({ view: null, index: 2 });
+    expect(go.mock.calls).toEqual([[-2]]);
+    expect(new URLSearchParams(state().search).get("projectId")).toBe(mocks.projects[0].id);
+    expect(mocks.legacyCreate).not.toHaveBeenCalled(); expect(mocks.legacySwitch).not.toHaveBeenCalled();
+    await click("back"); await settle(() => expect(state().search).toBe(overviewSearch));
+    await click("back"); await settle(() => expect(state().search).toBe(chatSearch));
   });
 });

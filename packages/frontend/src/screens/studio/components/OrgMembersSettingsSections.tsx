@@ -9,18 +9,7 @@ import type { PreparedEmailInvite } from "../../../sharing/preparedEmailInvite";
 import { PreparedEmailInviteNotice } from "./PreparedEmailInviteNotice";
 import { SettingsSection } from "./SettingsSection";
 import { SettingsSurface } from "./SettingsSurface";
-
-function resolveInitials(value: string) {
-  const base = value.trim();
-  if (!base) {
-    return "U";
-  }
-  const parts = base.split(/\s+/).filter(Boolean);
-  if (parts.length >= 2) {
-    return `${parts[0][0]}${parts[1][0]}`.toUpperCase();
-  }
-  return parts[0].slice(0, 2).toUpperCase();
-}
+import { HumanAvatar } from "../../../components/HumanAvatar";
 
 function truncateIdentifier(value: string, max = 16) {
   const trimmed = value.trim();
@@ -423,13 +412,11 @@ export function OrgMembersSettingsSections({
           ) : (
             <div className="divide-y divide-slate-200/70 dark:divide-slate-800">
               {sortedMembers.map((member) => {
-                const rawLabel = member.fullName || member.email || member.userId;
                 const label =
                   member.fullName?.trim() ||
                   member.email?.trim() ||
                   `Member ${truncateIdentifier(member.userId, 14)}`;
                 const secondary = member.email?.trim() || truncateIdentifier(member.userId, 24);
-                const initials = resolveInitials(rawLabel);
                 const isSelf = member.userId === currentUserId;
                 const isOwner = member.role === "owner";
                 const canEditOwner = canManageOwners || !isOwner;
@@ -452,9 +439,7 @@ export function OrgMembersSettingsSections({
                   >
                     <div className="flex flex-col gap-3 @min-[32rem]/settings-content:flex-row @min-[32rem]/settings-content:items-start @min-[32rem]/settings-content:justify-between">
                       <div className="flex min-w-0 items-start gap-3">
-                        <div className="flex h-9 w-9 flex-shrink-0 items-center justify-center rounded-full border border-slate-200 bg-slate-100 text-xs font-semibold text-slate-700 dark:border-slate-700 dark:bg-slate-900/60 dark:text-slate-100">
-                          {initials}
-                        </div>
+                        <HumanAvatar userId={member.userId} displayName={member.fullName} className="h-9 w-9 text-xs" />
                         <div className="min-w-0">
                           <Text variant="bodyStrong" tone="primary" className="break-words" title={label}>
                             {label}

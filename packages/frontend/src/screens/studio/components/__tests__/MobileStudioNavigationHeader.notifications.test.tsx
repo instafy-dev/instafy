@@ -23,8 +23,8 @@ describe("mobile header with the real notification center owner", () => {
     return <>
       <MobileStudioNavigationHeader key={userId} title="Chat" spaceName="Space"
         history={{ canGoBack: true, canGoForward: false, goBack: vi.fn(), goForward: vi.fn() }}
-        onOpenPicker={vi.fn()} onOpenChats={vi.fn()} notificationBell={center.bell} />
-      {center.dialog}
+        onOpenPicker={vi.fn()} onOpenChats={vi.fn()} />
+      <span data-testid="notification-data-count">{center.page.items.length}</span>
     </>;
   }
   beforeEach(() => {
@@ -44,35 +44,17 @@ describe("mobile header with the real notification center owner", () => {
     expect(node).not.toBeNull(); return node!;
   };
 
-  it.each(["pointer", "virtual"])("opens the actual external notification dialog after a %s press, with More closed", async mode => {
+  it("keeps the notification owner active without a second inbox or bell in More", async () => {
     await act(async () => root.render(<Harness />));
     await act(async () => button("mobile-header-more").click());
-    const bell = button("notification-center-bell");
-    if (mode === "pointer") {
-      // React Aria uses its real pressed-state path after mousedown. A bare
-      // .click() has detail0 and instead takes its virtual activation path.
-      await act(async () => bell.dispatchEvent(new MouseEvent("mousedown", { bubbles: true, button: 0, detail: 1 })));
-      await act(async () => bell.dispatchEvent(new MouseEvent("mouseup", { bubbles: true, button: 0, detail: 1 })));
-      await act(async () => bell.dispatchEvent(new MouseEvent("click", { bubbles: true, button: 0, detail: 1 })));
-    } else {
-      await act(async () => bell.click());
-    }
-    expect(button("mobile-header-more").getAttribute("aria-expanded")).toBe("false");
-    expect(document.querySelector('[data-testid="notification-center"] [role="dialog"][aria-label="Notifications"]')).not.toBeNull();
-    expect(document.body.textContent).toContain("No notifications yet.");
-    await act(async () => root.render(<Harness userId="bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb" />));
+    expect(document.querySelector('[data-testid="notification-center-bell"]')).toBeNull();
     expect(document.querySelector('[data-testid="notification-center"]')).toBeNull();
-  });
-
-  it("dismisses the actual notification dialog with native Back without navigating the workspace", async () => {
-    await act(async () => root.render(<Harness />));
-    await act(async () => button("mobile-header-more").click());
-    await act(async () => button("notification-center-bell").click());
-    expect(document.querySelector('[data-testid="notification-center"]')).not.toBeNull();
+    expect(mocks.list).toHaveBeenCalled();
+    expect(button("mobile-header-more").getAttribute("aria-expanded")).toBe("true");
     const lastEnabled = mocks.nativeBack.mock.calls.filter(([enabled]) => enabled).at(-1);
     expect(lastEnabled).toBeDefined();
     await act(async () => lastEnabled![1]());
-    expect(document.querySelector('[data-testid="notification-center"]')).toBeNull();
+    expect(button("mobile-header-more").getAttribute("aria-expanded")).toBe("false");
     expect(mocks.navigate).not.toHaveBeenCalled();
   });
 });

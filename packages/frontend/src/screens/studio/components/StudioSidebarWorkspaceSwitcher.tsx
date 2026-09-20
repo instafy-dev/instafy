@@ -1,3 +1,4 @@
+import { SpaceIdentity } from "../../../components/SpaceIdentity";
 import { Plus, Search, Settings } from "iconoir-react";
 import { Button, IconButton } from "../../../components/Button";
 import { MenuItemContent } from "../../../components/MenuItemContent";
@@ -48,6 +49,7 @@ export type SidebarWorkspaceOrgOption = {
 };
 
 type StudioSidebarWorkspaceSwitcherProps = {
+  mode?: "teams-and-spaces" | "spaces";
   orgOptions: SidebarWorkspaceOrgOption[];
   workspaceOrgKey: string;
   activeOrgKey?: string;
@@ -81,6 +83,7 @@ type StudioSidebarWorkspaceSwitcherProps = {
  * list with the active space as its first, selected row.
  */
 export function StudioSidebarWorkspaceSwitcher({
+  mode = "teams-and-spaces",
   orgOptions,
   workspaceOrgKey,
   activeOrgKey = workspaceOrgKey,
@@ -189,7 +192,7 @@ export function StudioSidebarWorkspaceSwitcher({
         <span className="min-w-0 flex-1 truncate">{isAll ? "All teams" : org.label}</span>
         <span className="flex shrink-0 items-center gap-1.5">
           {isCurrent || isSelected ? (
-            <span className="text-3xs font-medium uppercase tracking-[0.08em] text-slate-400 dark:text-slate-500">
+            <span className="text-3xs font-medium uppercase tracking-[0.08em] text-slate-600 dark:text-slate-500">
               {isCurrent ? "Current" : isPending ? "Switching…" : "Selected"}
             </span>
           ) : null}
@@ -225,10 +228,10 @@ export function StudioSidebarWorkspaceSwitcher({
     >
       <MenuItemContent>
         <span className="flex w-full items-center justify-between gap-2">
-          <span className="min-w-0 truncate">{project.name || "Untitled space"}</span>
+          <span className="flex min-w-0 items-center gap-2"><SpaceIdentity name={project.name} icon={project.projectIcon} color={project.projectColor} className="h-6 w-6 shrink-0" /><span className="truncate">{project.name || "Untitled space"}</span></span>
           <span className="flex shrink-0 items-center gap-1.5">
             {options.current ? (
-              <span className="text-3xs font-medium uppercase tracking-[0.08em] text-slate-400 dark:text-slate-500">
+              <span className="text-3xs font-medium uppercase tracking-[0.08em] text-slate-600 dark:text-slate-500">
                 Current
               </span>
             ) : null}
@@ -245,7 +248,7 @@ export function StudioSidebarWorkspaceSwitcher({
 
   return (
     <>
-      <SidebarMenuSection
+      {mode === "teams-and-spaces" ? <SidebarMenuSection
         label="Team"
         headerClassName="pr-0"
         actions={
@@ -283,7 +286,7 @@ export function StudioSidebarWorkspaceSwitcher({
         <div className="mt-2 space-y-1" data-testid="sidebar-org-selector">
           {orgOptions.map(renderTeamRow)}
         </div>
-      </SidebarMenuSection>
+      </SidebarMenuSection> : null}
 
       {projectsError ? (
         <div className="mx-3.5 mt-3 flex flex-wrap items-center justify-between gap-2 text-xs text-slate-600 dark:text-slate-300"

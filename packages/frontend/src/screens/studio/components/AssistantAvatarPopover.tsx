@@ -1,4 +1,7 @@
-import { useContext, useMemo } from "react";
+import type { ControllerPublicAgentProfile } from "@instafy/sdk/agents";
+import { useAuth } from "../../../providers/AuthProvider";
+import { getPublicAgentProfile } from "../../../services/runtimeController/agents";
+import { useContext, useEffect, useMemo, useState } from "react";
 import { Lock, Settings } from "iconoir-react";
 import {
   Button as AriaButton,
@@ -32,6 +35,8 @@ export interface AgentProfileCardProps {
   agentAvatarSeed: string;
   agentHandle: string;
   agentId?: string | null;
+  projectId?: string | null;
+  canEditProfile?: boolean;
   displayName: string;
   metadata?: Record<string, unknown> | null;
   /** Falls back to the agent-settings deep link when not provided. */
@@ -101,10 +106,12 @@ function ActivityRow({
 }
 
 export function AgentProfileCardContent({
-  agentAvatarSeed,
-  agentHandle,
+  agentAvatarSeed: initialAvatarSeed,
+  agentHandle: initialAgentHandle,
   agentId = null,
-  displayName,
+  projectId = null,
+  canEditProfile = false,
+  displayName: initialDisplayName,
   metadata,
   onOpenSettings,
   onRequestClose,
@@ -113,6 +120,28 @@ export function AgentProfileCardContent({
   runtimeLabel,
   runtimeState,
 }: AgentProfileCardProps) {
+  const { user, session } = useAuth();
+  const accessToken = session?.access_token ?? null;
+  const [bioResult, setBioResult] = useState<{ key: string; token: string | null; profile?: ControllerPublicAgentProfile; error?: string } | null>(null);
+  const [retryBio, setRetryBio] = useState(0);
+  const profileKey = user?.id && projectId && agentId ? `${user.id}:${projectId}:${agentId}` : null;
+  useEffect(() => {
+    if (!profileKey || !projectId || !agentId) return;
+    const request = new AbortController();
+    setBioResult(null);
+    void getPublicAgentProfile(projectId, agentId, { accessToken, signal: request.signal }).then((result) => {
+      if (request.signal.aborted) return;
+      setBioResult(result.success ? { key: profileKey, token: accessToken, profile: result.value }
+        : { key: profileKey, token: accessToken, error: result.error });
+    }).catch(() => {
+      if (!request.signal.aborted) setBioResult({ key: profileKey, token: accessToken, error: "Unable to load About." });
+    });
+    return () => request.abort();
+  }, [profileKey, projectId, agentId, accessToken, retryBio]);
+  const currentBio = bioResult?.key === profileKey && bioResult.token === accessToken ? bioResult : null;
+  const displayName = currentBio?.profile ? currentBio.profile.displayName || `@${currentBio.profile.handle}` : initialDisplayName;
+  const agentAvatarSeed = currentBio?.profile?.avatarSeed ?? initialAvatarSeed;
+  const agentHandle = currentBio?.profile?.handle ?? initialAgentHandle;
   const { conversations } = useConversations();
   const { runs } = useRuntime();
   const { openConversationTab, openPanelTab, requestUrlPush } =
@@ -195,7 +224,7 @@ export function AgentProfileCardContent({
                   Pinned
                 </Badge>
               ) : null}
-              <Button
+              {canEditProfile ? <Button
                 type="button"
                 variant="ghost"
                 size="xs"
@@ -205,11 +234,22 @@ export function AgentProfileCardContent({
               >
                 <Settings className="h-3.5 w-3.5" aria-hidden="true" />
                 Settings
-              </Button>
+              </Button> : null}
             </div>
           </div>
         </div>
       </div>
+      {currentBio?.profile?.bio ? (
+        <div className="space-y-1" data-testid="agent-profile-about">
+          <Text as="div" variant="label" tone="subtle">About</Text>
+          <Text as="p" variant="body" tone="secondary" className="whitespace-pre-wrap break-words [overflow-wrap:anywhere]">{currentBio.profile.bio}</Text>
+        </div>
+      ) : currentBio?.error ? (
+        <div>
+          <Text as="p" variant="caption" tone="muted" role="status">About is unavailable.</Text>
+          <Button size="sm" radius="xl" variant="ghost" onPress={() => setRetryBio((value) => value + 1)}>Retry profile</Button>
+        </div>
+      ) : profileKey && !currentBio ? <Text as="p" variant="caption" tone="muted" role="status">Loading profile…</Text> : null}
       <div className="space-y-1" data-testid="agent-profile-activity">
         <Text as="div" variant="label" tone="subtle">
           Active in

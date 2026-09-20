@@ -64,6 +64,10 @@ pub(crate) fn router() -> Router<AppState> {
             post(acknowledge_my_notification_inbox_item),
         )
         .route(
+            "/me/notifications/inbox/ack-snapshot",
+            post(acknowledge_my_notification_inbox_snapshot),
+        )
+        .route(
             "/notifications/web-push/vapid-public-key",
             get(get_web_push_vapid_public_key),
         )
@@ -118,12 +122,20 @@ struct NotificationInboxResponse {
 #[serde(rename_all = "camelCase")]
 struct NotificationInboxAckBody {
     conversation_id: Uuid,
+    /// Snapshot observed by Home. Omitted by older clients.
+    expected_last_message_id: Option<Uuid>,
+    /// Exact durable events represented by the displayed Home row.
+    notification_ids: Option<Vec<Uuid>>,
+    expected_user_id: Option<Uuid>,
 }
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct NotificationInboxAckResponse {
     ok: bool,
+    /// False when a newer message arrived, or this was a durable-only row.
+    inbox_acknowledged: bool,
+    acknowledged_notification_ids: Vec<Uuid>,
 }
 
 async fn get_web_push_vapid_public_key(
@@ -362,6 +374,22 @@ async fn list_my_notification_inbox(
     Ok(Json(NotificationInboxResponse { ok: true, items }))
 }
 
+async fn acknowledge_my_notification_inbox_snapshot(
+    state: State<AppState>,
+    headers: HeaderMap,
+    Json(mut body): Json<NotificationInboxAckBody>,
+) -> Result<Json<NotificationInboxAckResponse>, (StatusCode, Json<ApiError>)> {
+    if body.expected_user_id.is_none() {
+        return Err(bad_request(
+            "expectedUserId is required for a Home snapshot",
+        ));
+    }
+    // This distinct route makes older controllers fail closed instead of
+    // silently ignoring snapshot fields and acknowledging their latest row.
+    body.notification_ids.get_or_insert_with(Vec::new);
+    acknowledge_my_notification_inbox_item(state, headers, Json(body)).await
+}
+
 async fn acknowledge_my_notification_inbox_item(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -369,6 +397,25 @@ async fn acknowledge_my_notification_inbox_item(
 ) -> Result<Json<NotificationInboxAckResponse>, (StatusCode, Json<ApiError>)> {
     let context = authenticate_request(&state.config, &headers).await?;
     let user_id = require_user_session(&context)?;
+    if body
+        .expected_user_id
+        .is_some_and(|expected| expected != user_id)
+    {
+        return Err((
+            StatusCode::CONFLICT,
+            Json(ApiError::new(
+                "Notification session changed; refresh and try again",
+            )),
+        ));
+    }
+    if body
+        .notification_ids
+        .as_ref()
+        .is_some_and(|ids| ids.len() > 100)
+    {
+        return Err(bad_request("notificationIds permits at most 100 event IDs"));
+    }
+    let snapshot_ack = body.expected_last_message_id.is_some() || body.notification_ids.is_some();
 
     let mut connection = state
         .pool
@@ -380,6 +427,18 @@ async fn acknowledge_my_notification_inbox_item(
         .await
         .map_err(|error| internal_error(format!("failed to start transaction: {error}")))?;
 
+    // Acquire the conversation lock before reading its visibility or membership.
+    // A shared-to-private change may have committed while this request waited;
+    // authorization based on the pre-lock snapshot must not enroll its caller.
+    let latest = transaction
+        .query_opt(
+            "select last_message_id from conversations where id=$1 for update",
+            &[&body.conversation_id],
+        )
+        .await
+        .map_err(|error| internal_error(format!("failed to lock conversation: {error}")))?
+        .ok_or_else(|| not_found("Conversation not found"))?
+        .get::<_, Option<Uuid>>(0);
     let conversation = load_conversation_record(&transaction, &body.conversation_id).await?;
     let project = load_project_record(&transaction, &conversation.project_id).await?;
     ensure_project_access(&transaction, &project, &context, conversation.session_id).await?;
@@ -391,7 +450,7 @@ async fn acknowledge_my_notification_inbox_item(
                     "select user_id
                      from conversation_participants
                      where conversation_id = $1 and user_id = $2
-                     limit 1",
+                     limit 1 for update",
                     &[&conversation.id, &user_id],
                 )
                 .await
@@ -406,43 +465,46 @@ async fn acknowledge_my_notification_inbox_item(
         }
     }
 
-    let role = if conversation.created_by == Some(user_id) {
-        "owner"
-    } else {
-        "member"
-    };
-
-    transaction
-        .execute(
-            "insert into conversation_participants (conversation_id, user_id, role, added_by)
+    // Only this exact latest source may clear the legacy inbox.
+    if let Some(expected) = body.expected_last_message_id {
+        let belongs = transaction.query_opt(
+            "select id from conversation_messages where id=$1 and conversation_id=$2 and project_id=$3",
+            &[&expected, &conversation.id, &conversation.project_id],
+        ).await.map_err(|error| internal_error(format!("failed to verify inbox snapshot: {error}")))?;
+        if belongs.is_none() {
+            return Err(bad_request(
+                "expectedLastMessageId does not belong to this conversation",
+            ));
+        }
+    }
+    let inbox_acknowledged = !snapshot_ack
+        || (body.expected_last_message_id.is_some() && body.expected_last_message_id == latest);
+    if inbox_acknowledged {
+        let role = if conversation.created_by == Some(user_id) {
+            "owner"
+        } else {
+            "member"
+        };
+        if !snapshot_ack || conversation.created_by == Some(user_id) {
+            transaction
+            .execute(
+                "insert into conversation_participants (conversation_id, user_id, role, added_by)
              values ($1, $2, $3, $4)
              on conflict (conversation_id, user_id) do nothing",
-            &[&conversation.id, &user_id, &role, &user_id],
-        )
-        .await
-        .map_err(|error| internal_error(format!("failed to ensure participant row: {error}")))?;
-
-    if let Some(last_message_id) = conversation.last_message_id {
-        transaction
-            .execute(
-                "update conversation_participants
-                 set last_seen_message_id = $3, last_seen_at = now()
-                 where conversation_id = $1 and user_id = $2",
-                &[&conversation.id, &user_id, &last_message_id],
+                &[&conversation.id, &user_id, &role, &user_id],
             )
             .await
             .map_err(|error| {
-                internal_error(format!(
-                    "failed to acknowledge notification inbox item: {error}"
-                ))
+                internal_error(format!("failed to ensure participant row: {error}"))
             })?;
-    } else {
+        }
+        // Snapshot reads never enroll a non-owner who lost participation.
         transaction
             .execute(
                 "update conversation_participants
-                 set last_seen_at = now()
-                 where conversation_id = $1 and user_id = $2",
-                &[&conversation.id, &user_id],
+                set last_seen_message_id = coalesce($3, last_seen_message_id), last_seen_at = now()
+              where conversation_id = $1 and user_id = $2",
+                &[&conversation.id, &user_id, &latest],
             )
             .await
             .map_err(|error| {
@@ -451,12 +513,39 @@ async fn acknowledge_my_notification_inbox_item(
                 ))
             })?;
     }
+    let acknowledged_notification_ids = if let Some(ids) = body.notification_ids {
+        transaction
+            .query(
+                "update notification_recipients r
+                set seen_at=coalesce(r.seen_at,clock_timestamp()),
+                    read_at=coalesce(r.read_at,clock_timestamp())
+               from notification_events e
+              where r.event_id=e.id and r.user_id=$1 and e.id=any($2::uuid[])
+                and e.conversation_id=$3 and e.project_id=$4
+                and notification_recipient_authorized(e.id,$1)
+              returning r.event_id",
+                &[&user_id, &ids, &conversation.id, &conversation.project_id],
+            )
+            .await
+            .map_err(|error| {
+                internal_error(format!("failed to acknowledge Home notifications: {error}"))
+            })?
+            .iter()
+            .map(|row| row.get::<_, Uuid>(0))
+            .collect()
+    } else {
+        Vec::new()
+    };
 
     transaction.commit().await.map_err(|error| {
         internal_error(format!("failed to finalize inbox acknowledgement: {error}"))
     })?;
 
-    Ok(Json(NotificationInboxAckResponse { ok: true }))
+    Ok(Json(NotificationInboxAckResponse {
+        ok: true,
+        inbox_acknowledged,
+        acknowledged_notification_ids,
+    }))
 }
 
 fn format_notification_body(content: &str) -> Option<String> {

@@ -72,6 +72,12 @@ export function resolveWorkspaceUrlSyncBaseSearch({
   pendingNavigationMode: UrlNavigationMode;
   routedSearch: string;
 }): string | null {
+  // An explicit destination can reach browser history before Router publishes
+  // it. A drawer's local render must not canonicalize the preceding visit over
+  // that newer URL. Only an explicit queued push may chain onto the live URL.
+  if (browserSearch !== routedSearch && pendingNavigationMode !== "push") {
+    return null;
+  }
   if (lastHydratedSearch !== routedSearch && pendingNavigationMode !== "push") {
     return null;
   }
@@ -130,6 +136,7 @@ type WorkspaceTabSummary = {
 function isStudioPanel(value: string | null): value is StudioPanel {
   return (
     value === "home" ||
+    value === "team" ||
     value === "chat" ||
     value === "credits" ||
     value === "code" ||
@@ -263,6 +270,7 @@ export function useStudioLayoutWorkspaceRouting({
   const lastHydratedSearchRef = useRef<string | null>(null);
   const pendingUrlSearchSyncRef = useRef<string | null>(null);
   const [settingsTab, setSettingsTab] = useState<SettingsTab>("org");
+  const [settingsOrgId, setSettingsOrgId] = useState<string | null>(null);
   const [queryApplicationRevision, setQueryApplicationRevision] = useState(0);
   const cancelQueryReleaseRef = useRef<(() => void) | null>(null);
 
@@ -580,6 +588,14 @@ export function useStudioLayoutWorkspaceRouting({
       applied = true;
     }
 
+    const requestedOrgId = params.get("settingsOrgId");
+    const resolvedOrgId = requestedOrgId && isUUID(requestedOrgId) ? requestedOrgId : null;
+    if (resolvedPanelParam === "settings" && resolvedOrgId !== settingsOrgId) {
+      applyingQueryParamsRef.current = true;
+      setSettingsOrgId(resolvedOrgId);
+      applied = true;
+    }
+
     const resolvedLeftDrawer = resolveLeftDrawerFromSearch(locationSearch);
     if (resolvedLeftDrawer !== leftDrawer) {
       applyingQueryParamsRef.current = true;
@@ -679,6 +695,7 @@ export function useStudioLayoutWorkspaceRouting({
     workspaceTabs,
     clearApplyingQueryParamsSoon,
     settingsTab,
+    settingsOrgId,
     setLeftDrawer,
   ]);
 
@@ -903,6 +920,15 @@ export function useStudioLayoutWorkspaceRouting({
       jobId: activeWorkspaceTabJobId,
       reviewTabId: activeWorkspaceReviewTabId,
     });
+    // A message target belongs only to this explicit conversation visit. Keep
+    // it through canonical hydration, but clear it for ordinary tab selection.
+    const preserveMessageTarget = pendingNavigationMode !== "push" && activePanel === "chat" &&
+      params.get("projectId") === resolvedProjectId &&
+      (params.get("conversationControllerId")
+        ? params.get("conversationControllerId") === projectScopedRouteValues.conversationControllerId
+        : params.get("conversationId") === projectScopedRouteValues.conversationId) &&
+      (params.get("jobId") || null) === projectScopedRouteValues.jobId;
+    if (!preserveMessageTarget) changed = syncParam("messageId", null) || changed;
     changed = clearStaleSharedBrowserResumeTarget(params, resolvedProjectId) || changed;
     changed = syncParam("projectId", resolvedProjectId) || changed;
     changed = syncParam("conversationId", projectScopedRouteValues.conversationId) || changed;
@@ -913,6 +939,8 @@ export function useStudioLayoutWorkspaceRouting({
     changed = syncParam("reviewTab", projectScopedRouteValues.reviewTabId) || changed;
     changed = syncParam("panel", activePanel === "chat" ? null : activePanel) || changed;
     changed = syncParam("settingsTab", activePanel === "settings" ? settingsTab : null) || changed;
+    changed = syncParam("settingsOrgId", activePanel === "settings" && settingsTab === "org" ? settingsOrgId : null) || changed;
+    changed = syncParam("teamId", activePanel === "home" || activePanel === "team" || (activePanel === "settings" && settingsTab === "profile") ? params.get("teamId") : null) || changed;
     changed =
       syncParam(
         "settingsCategory",
@@ -971,11 +999,14 @@ export function useStudioLayoutWorkspaceRouting({
     projectReadyForWorkspace,
     queryApplicationRevision,
     settingsTab,
+    settingsOrgId,
   ]);
 
   return {
     settingsTab,
+    settingsOrgId,
     setSettingsTab,
+    setSettingsOrgId,
     handlePanelSelect,
     suppressNextQuerySync,
   };

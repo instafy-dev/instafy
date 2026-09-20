@@ -143,6 +143,21 @@ test("npm artifact installs and runs without workspace dependencies", () => {
       run(process.execPath, [installedCli, "support", "--help"], installDirectory),
       /report/,
     );
+    for (const command of ["grep", "context"]) {
+      assert.match(
+        run(process.execPath, [installedCli, "conversation", command, "--help"], installDirectory),
+        new RegExp(`Usage: instafy conversation ${command}`),
+      );
+      assert.throws(
+        () => run(process.execPath, [installedCli, "conversation", command], installDirectory),
+        (error) => {
+          assert.equal(error.status, 2);
+          assert.equal(String(error.stdout), "");
+          assert.match(String(error.stderr), /missing required argument/);
+          return true;
+        },
+      );
+    }
     for (const removedCommand of ["ops", "api", "ota", "desktop-updates"]) {
       assertCommandRejected(
         process.execPath,

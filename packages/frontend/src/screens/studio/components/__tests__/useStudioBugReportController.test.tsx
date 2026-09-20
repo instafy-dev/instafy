@@ -78,7 +78,7 @@ describe("shake issue report opening", () => {
     vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
     vi.clearAllMocks();
     mocks.capture.mockReset();
-    mocks.listPage.mockResolvedValue({ unreadCount: 0, unnotifiedResolutionCount: 0 });
+    mocks.listPage.mockResolvedValue({ reports: [], unreadCount: 0, unnotifiedResolutionCount: 0, hasMore: false, nextCursor: null });
     window.localStorage.clear();
     window.localStorage.setItem("instafy.shakeReportEnabled", "1");
     mocks.capture.mockResolvedValue(screenshot);

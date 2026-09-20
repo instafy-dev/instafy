@@ -1,6 +1,7 @@
 import { expect, test, type Locator } from "@playwright/test";
 
 import { prepareStudio, resetRuntimeUserState } from "../utils/harness.js";
+import { openTeamDirectory } from "../utils/sidebar.js";
 
 test.use({
   viewport: { width: 360, height: 649 },
@@ -28,7 +29,7 @@ test.describe("Narrow-phone Studio density", () => {
     await expect(page.getByTestId("chat-input")).toBeVisible();
     expect(page.viewportSize()).toEqual({ width: 360, height: 649 });
 
-    const headerPicker = page.getByTestId("mobile-header-picker");
+    const headerPicker = page.getByTestId("mobile-header-picker").last();
     const headerMore = page.getByTestId("mobile-header-more");
     const studioHeader = headerPicker.locator("xpath=ancestor::header[1]");
     await expectHeightBetween(studioHeader, 56, 58);
@@ -110,7 +111,10 @@ test.describe("Narrow-phone Studio density", () => {
     await page.setViewportSize({ width: 360, height: 649 });
 
     await headerPicker.click();
-    await page.getByTestId("mobile-navigation-sheet").getByRole("button", { name: "All chats", exact: true }).click();
+    await expect(page.getByTestId("mobile-sidebar-overlay")).toBeVisible();
+    await expect(page.getByTestId("mobile-navigation-sheet")).toHaveCount(0);
+    await page.getByTestId("sidebar-browse-all-chats").click();
+    await expect(page.getByTestId("mobile-sidebar-overlay")).toHaveCount(0);
     await expect(page.getByTestId("conversation-history-panel")).toBeVisible();
     const dock = page.getByTestId("mobile-bottom-dock");
     await expect(dock).toBeVisible();
@@ -121,8 +125,28 @@ test.describe("Narrow-phone Studio density", () => {
     await page.getByTestId("mobile-bottom-dock-home").click();
     await expect(page.getByTestId("home-panel")).toBeVisible();
 
-    await page.getByTestId("mobile-header-picker").click();
-    await page.getByTestId("mobile-navigation-sheet").getByRole("button", { name: "Files", exact: true }).click();
+    const globalHeader = page.getByTestId("topbar-global-navigation");
+    await expect(globalHeader).toBeVisible();
+    await expect(page.getByTestId("topbar-home-button")).toHaveAttribute("aria-current", "page");
+    for (const id of ["topbar-home-button", "topbar-team-selector", "topbar-profile-button"]) {
+      await expectHeightBetween(page.getByTestId(id), 48, 48);
+    }
+    expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(360);
+    const projectId = new URL(page.url()).searchParams.get("projectId");
+    expect(projectId).toBeTruthy();
+    await page.getByTestId("topbar-team-selector").click();
+    await expect(page.getByTestId("mobile-sidebar-overlay")).toBeVisible();
+    await expect(page.getByTestId("sidebar-team-menu-trigger")).toBeVisible();
+    await expect(page.getByTestId("sidebar-project-switcher-back")).toHaveCount(0);
+    await openTeamDirectory(page);
+    await page.getByTestId(`sidebar-project-current-${projectId}`).click();
+    await expect(page.getByTestId("mobile-sidebar-overlay")).toHaveCount(0);
+    await expect(globalHeader).toHaveCount(0);
+    await headerPicker.click();
+    await expect(page.getByTestId("mobile-sidebar-overlay")).toBeVisible();
+    await page.getByTestId("sidebar-nav-code").click();
+    await expect(page.getByTestId("mobile-sidebar-overlay")).toHaveCount(0);
+    await expect(page.getByTestId("mobile-left-drawer-overlay")).toBeVisible();
     await expect(dock).toHaveCount(0);
     const filesTree = page.getByTestId("files-explorer-tree");
     const searchRow = page.getByTestId("files-explorer-search-row");
@@ -211,7 +235,7 @@ test.describe("Narrow-phone Studio density", () => {
     await expectHeightBetween(toggle, 48, 48);
     await toggle.click();
     const sidebarOverlay = page.getByTestId("mobile-sidebar-overlay");
-    const sidebar = sidebarOverlay.getByTestId("sidebar-project-button").locator("xpath=ancestor::nav[1]");
+    const sidebar = sidebarOverlay.getByTestId("sidebar-team-menu-trigger").locator("xpath=ancestor::nav[1]");
     const sidebarBox = await sidebar.boundingBox();
     expect(sidebarBox).not.toBeNull();
     expect(sidebarBox!.x).toBeGreaterThanOrEqual(27);

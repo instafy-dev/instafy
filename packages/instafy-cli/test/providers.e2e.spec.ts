@@ -32,7 +32,7 @@ function startMockProviderHost(handler: (req: CapturedRequest) => { status: numb
 
 async function execCli(args: string[], opts?: { cwd?: string; env?: NodeJS.ProcessEnv }) {
   const packageRoot = new URL("../", import.meta.url).pathname;
-  const entry = path.join(packageRoot, "dist", "index.js");
+  const entry = path.join(packageRoot, "bin", "instafy.js");
   const tmpHome = fs.mkdtempSync(path.join(os.tmpdir(), "instafy-cli-home-"));
   try {
     const child = spawn("node", [entry, ...args], {

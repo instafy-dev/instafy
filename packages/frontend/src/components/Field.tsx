@@ -9,7 +9,7 @@ type FieldSize = "xs" | "sm" | "md";
 // per-field labels). This is the single standard forms route through.
 const LABEL_VARIANTS: Record<FieldSize, { variant: TextVariant; tone: TextTone; className: string }> = {
   xs: { variant: "caption", tone: "muted", className: "text-xxs font-medium" },
-  sm: { variant: "caption", tone: "muted", className: "font-medium" },
+  sm: { variant: "caption", tone: "secondary", className: "text-[13px] font-medium leading-[18px]" },
   md: { variant: "bodyStrong", tone: "secondary", className: "" },
 };
 
@@ -50,14 +50,14 @@ export function Field({
   const helpVariant = HELP_VARIANTS[size];
 
   return (
-    <div className={["space-y-1.5", className].filter(Boolean).join(" ")}>
+    <div className={["flex min-w-0 flex-col", size === "xs" ? "gap-1.5" : "gap-2", className].filter(Boolean).join(" ")}>
       {label ? (
         <Text
           as="label"
           htmlFor={htmlFor}
           variant={labelVariant.variant}
           tone={labelVariant.tone}
-          className={[labelVariant.className, labelClassName].filter(Boolean).join(" ") || undefined}
+          className={["block", labelVariant.className, labelClassName].filter(Boolean).join(" ")}
         >
           {label}
           {required ? <span className="ml-1 text-rose-500">*</span> : null}

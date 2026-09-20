@@ -36,7 +36,7 @@ export function readMobileSidebarEntry(
       typeof value.baseKey !== "string" || !value.baseKey || value.baseKey.length > 128 ||
       !Number.isSafeInteger(value.baseIndex) || (value.baseIndex as number) < 0 ||
       (value.depth !== 1 && value.depth !== 2) ||
-      (value.depth === 1 ? value.view !== "sidebar" : value.view !== "workspace" && value.view !== "more") ||
+      (value.depth === 1 ? value.view !== "sidebar" && value.view !== "workspace" : value.view !== "workspace" && value.view !== "more") ||
       historyIndex !== (value.baseIndex as number) + value.depth) return null;
   return value as unknown as SidebarEntry;
 }
@@ -155,7 +155,9 @@ export function useMobileSidebarHistory({ enabled, scopeKey }: { enabled: boolea
       setError("Navigation is not ready. Please try again.");
       return;
     }
-    if (view !== "sidebar" && !state.entry) return;
+    // Global team navigation can open the picker directly. It owns one entry;
+    // opening it from the sidebar remains a two-entry drill-in.
+    if (view === "more" && !state.entry) return;
     if (view === "sidebar" && state.entry) {
       navigate(-1);
       return;
@@ -165,7 +167,7 @@ export function useMobileSidebarHistory({ enabled, scopeKey }: { enabled: boolea
       scopeKey: state.scopeKey,
       baseKey: state.entry?.baseKey ?? state.location.key,
       baseIndex: state.entry?.baseIndex ?? index,
-      depth: view === "sidebar" ? 1 : 2,
+      depth: state.entry ? 2 : 1,
       view,
     };
     setError(null);

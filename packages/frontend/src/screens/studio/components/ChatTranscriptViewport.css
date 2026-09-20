@@ -1,0 +1,15 @@
+.chat-transcript-scroll-with-header {
+  /* No background or blur layer: the message ink recedes into the actual
+     conversation surface, including when its theme changes. */
+  mask-image: linear-gradient(to bottom, transparent, rgb(0 0 0 / 35%) 24px, #000 48px);
+}
+
+@media (forced-colors: active) {
+  .chat-transcript-scroll-with-header {
+    mask-image: none;
+  }
+
+  .chat-transcript-header {
+    background: Canvas;
+  }
+}

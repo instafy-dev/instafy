@@ -11,6 +11,7 @@ export type ConversationRosterHuman = {
 };
 
 export type ConversationRosterAgent = {
+  agentId?: string | null;
   handle: string;
   displayName: string;
   avatarSeed: string;
