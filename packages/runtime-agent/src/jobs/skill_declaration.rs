@@ -786,10 +786,10 @@ mod tests {
             "| --- | --- | --- | --- |\n",
             "| `NOTION_API_KEY` | Yes | The Installation access token of an internal connection. ",
             "It starts with `ntn_`. | ",
-            "Open your connection's Configuration tab in the Notion developer portal, under Build, ",
-            "then Internal connections: the Installation access token is there. ",
-            "The portal is at `app.notion.com/developers/connections`, and a connection is made ",
-            "under Build, Internal connections, Create a new connection. |\n",
+            "Open your connection's Configuration tab in the Notion developer portal: ",
+            "the Installation access token is there. ",
+            "The portal is at `app.notion.com/developers/connections`, under Developer tools; ",
+            "a connection is made on its Connections tab with New connection. |\n",
         );
         let derived = derive("notion", &row(table, "NOTION_API_KEY"));
         let where_to_get = derived.where_to_get.expect("a floor sentence");
