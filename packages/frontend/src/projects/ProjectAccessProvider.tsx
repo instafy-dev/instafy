@@ -56,6 +56,37 @@ export interface ProjectAccessContextValue {
 
 const ProjectAccessContext = createContext<ProjectAccessContextValue | null>(null);
 
+/**
+ * A device that remembers nothing is not a new account. Before a space is
+ * minted, the controller is asked which ones this account already has, and
+ * the first live one is opened; minting is for an account with none. Found on
+ * the first sign-in from a second device, which opened a fresh "Untitled
+ * Space" instead of the one with the work in it. A list that fails or is
+ * unsupported reads as "none", which is what happened before.
+ */
+async function findExistingProjectId(
+  listProjects: typeof controllerClient.projects.listResult,
+  signal: AbortSignal,
+  exclude: string | null = null,
+): Promise<string | null> {
+  try {
+    const result = await listProjects({ signal });
+    if (result.status !== "success") {
+      return null;
+    }
+    const live = result.projects.find(
+      (project) =>
+        isUUID(project.projectId) &&
+        project.projectId !== exclude &&
+        project.projectType !== "sandbox" &&
+        project.status !== "archived",
+    );
+    return live?.projectId ?? null;
+  } catch {
+    return null;
+  }
+}
+
 function readStoredProjectId(): string | null {
   try {
     if (typeof window === "undefined" || !window.localStorage) {
@@ -129,6 +160,7 @@ export function ProjectAccessProvider({ children }: { children: ReactNode }) {
   const {
     create: createControllerProject,
     getSummaryResult: getControllerProjectSummaryResult,
+    listResult: listControllerProjectsResult,
   } = controllerClient.projects;
   const {
     projects,
@@ -348,13 +380,24 @@ export function ProjectAccessProvider({ children }: { children: ReactNode }) {
             setProjectInitialized(true);
             return;
           }
-          mintedProject = await createControllerProject({
-            projectType: "customer",
-          });
+          const existingProjectId = await findExistingProjectId(
+            listControllerProjectsResult,
+            abortController.signal,
+          );
           if (cancelled || activeRequestRef.current !== requestId) {
             return;
           }
-          targetProjectId = mintedProject?.projectId ?? null;
+          if (existingProjectId) {
+            targetProjectId = existingProjectId;
+          } else {
+            mintedProject = await createControllerProject({
+              projectType: "customer",
+            });
+            if (cancelled || activeRequestRef.current !== requestId) {
+              return;
+            }
+            targetProjectId = mintedProject?.projectId ?? null;
+          }
         }
 
         targetProjectIdForBackoff = targetProjectId;
@@ -388,18 +431,38 @@ export function ProjectAccessProvider({ children }: { children: ReactNode }) {
             setProjectInitialized(true);
             return;
           }
-          mintedProject = await createControllerProject({
-            projectType: "customer",
-          });
+          // The remembered space is gone or closed to this account; another
+          // of its spaces comes before a new one.
+          const fallbackProjectId = await findExistingProjectId(
+            listControllerProjectsResult,
+            abortController.signal,
+            targetProjectId,
+          );
           if (cancelled || activeRequestRef.current !== requestId) {
             return;
           }
-          targetProjectId = mintedProject?.projectId ?? null;
-          createdBecauseMissing = true;
-          if (!targetProjectId || !isUUID(targetProjectId)) {
-            throw new Error("Unable to resolve active project id");
+          if (fallbackProjectId) {
+            targetProjectId = fallbackProjectId;
+            projectSummaryResult = await getControllerProjectSummaryResult(targetProjectId, {
+              signal: abortController.signal,
+            });
+            if (cancelled || activeRequestRef.current !== requestId) {
+              return;
+            }
+          } else {
+            mintedProject = await createControllerProject({
+              projectType: "customer",
+            });
+            if (cancelled || activeRequestRef.current !== requestId) {
+              return;
+            }
+            targetProjectId = mintedProject?.projectId ?? null;
+            if (!targetProjectId || !isUUID(targetProjectId)) {
+              throw new Error("Unable to resolve active project id");
+            }
+            projectSummaryResult = { summary: null, notFound: false, forbidden: false, unauthorized: false };
           }
-          projectSummaryResult = { summary: null, notFound: false, forbidden: false, unauthorized: false };
+          createdBecauseMissing = true;
         }
 
         const projectSummary = projectSummaryResult.summary;
@@ -561,6 +624,7 @@ export function ProjectAccessProvider({ children }: { children: ReactNode }) {
     createProject,
     createControllerProject,
     getControllerProjectSummaryResult,
+    listControllerProjectsResult,
     location.search,
     projectInitialized,
     removeProject,

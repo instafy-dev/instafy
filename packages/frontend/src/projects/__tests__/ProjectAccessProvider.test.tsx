@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 
-import { act } from "react";
+import { StrictMode, act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -16,6 +16,11 @@ const mocks = vi.hoisted(() => ({
   switchProject: vi.fn(),
   recordProjectOpened: vi.fn(),
   useAuth: vi.fn(),
+  listProjects: vi.fn(),
+  // Mutable per test: the startup path under test is the one with nothing
+  // remembered, so a test can empty the active project and the URL.
+  activeProjectId: "11111111-1111-4111-8111-111111111111",
+  locationSearch: "?projectId=11111111-1111-4111-8111-111111111111",
 }));
 
 vi.mock("../../lib/supabaseClient", () => ({
@@ -27,6 +32,7 @@ vi.mock("../../sdk/instafy", () => ({
     projects: {
       create: mocks.createControllerProject,
       getSummaryResult: mocks.getSummaryResult,
+      listResult: mocks.listProjects,
     },
   },
 }));
@@ -39,7 +45,7 @@ vi.mock("../ProjectStateProvider", () => ({
         org: { id: "org-1", name: "Team" },
       },
     },
-    activeProjectId: PROJECT_ID,
+    activeProjectId: mocks.activeProjectId,
     createProject: mocks.createProject,
     switchProject: mocks.switchProject,
     setProjectOrg: mocks.setProjectOrg,
@@ -58,7 +64,7 @@ vi.mock("react-router-dom", async (importOriginal) => {
     ...actual,
     useLocation: () => ({
       pathname: "/studio",
-      search: `?projectId=${PROJECT_ID}`,
+      search: mocks.locationSearch,
       hash: "",
       state: null,
       key: "test",
@@ -129,7 +135,11 @@ describe("ProjectAccessProvider capability refresh", () => {
     container = document.createElement("div");
     document.body.appendChild(container);
     root = createRoot(container);
-    Object.values(mocks).forEach((mock) => mock.mockReset());
+    Object.values(mocks).forEach((mock) => {
+      if (typeof mock === "function") mock.mockReset();
+    });
+    mocks.activeProjectId = PROJECT_ID;
+    mocks.locationSearch = `?projectId=${PROJECT_ID}`;
     mocks.useAuth.mockReturnValue({ user: { id: "user-1", email: "user@example.test" } });
   });
 
@@ -475,5 +485,126 @@ describe("ProjectAccessProvider capability refresh", () => {
       expect(probe?.getAttribute("data-resolved")).toBe("false");
       expect(mocks.removeProject).toHaveBeenCalledWith(PROJECT_ID);
     });
+  });
+});
+
+// A device that remembers nothing (a second machine, cleared site data) is
+// not a new account. The first real sign-in from one opened a fresh
+// "Untitled Space" instead of the one with the work in it, and the local
+// database showed the minted spaces in pairs, 9ms apart, from the startup
+// effect running twice.
+describe("ProjectAccessProvider startup with nothing remembered", () => {
+  const EXISTING_ID = "22222222-2222-4222-8222-222222222222";
+  const MINTED_ID = "33333333-3333-4333-8333-333333333333";
+  let container: HTMLDivElement;
+  let root: Root;
+
+  const settle = async () => {
+    await act(async () => {
+      for (let index = 0; index < 12; index += 1) {
+        await Promise.resolve();
+      }
+    });
+  };
+
+  beforeEach(() => {
+    (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
+    window.localStorage.clear();
+    window.history.replaceState(null, "", "/studio");
+    container = document.createElement("div");
+    document.body.appendChild(container);
+    root = createRoot(container);
+    Object.values(mocks).forEach((mock) => {
+      if (typeof mock === "function") mock.mockReset();
+    });
+    mocks.activeProjectId = "";
+    mocks.locationSearch = "";
+    mocks.useAuth.mockReturnValue({ user: { id: "user-1", email: "user@example.test" } });
+    mocks.getSummaryResult.mockImplementation(async (projectId: string) => ({
+      summary: {
+        projectId,
+        projectName: "The one with the work in it",
+        orgId: "org-1",
+        orgName: "Team",
+        effectiveRole: "owner",
+        canWrite: true,
+        canShare: true,
+        canManage: true,
+      },
+      notFound: false,
+      forbidden: false,
+      unauthorized: false,
+    }));
+    mocks.createControllerProject.mockResolvedValue({
+      projectId: MINTED_ID,
+      orgId: "org-1",
+      orgName: "Team",
+      projectName: null,
+    });
+  });
+
+  afterEach(async () => {
+    await act(async () => root.unmount());
+    container.remove();
+    window.localStorage.clear();
+    vi.restoreAllMocks();
+    delete (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT;
+  });
+
+  it("opens a space the account already has instead of minting one", async () => {
+    mocks.listProjects.mockResolvedValue({
+      status: "success",
+      projects: [
+        { projectId: EXISTING_ID, projectName: "The one with the work in it", orgId: "org-1", projectType: "customer", status: "active" },
+      ],
+    });
+    await act(async () => root.render(<ProjectAccessProvider><AccessProbe /></ProjectAccessProvider>));
+    await settle();
+
+    expect(mocks.createControllerProject).not.toHaveBeenCalled();
+    expect(mocks.createProject).toHaveBeenCalledWith(expect.objectContaining({ projectId: EXISTING_ID }));
+    expect(mocks.getSummaryResult).toHaveBeenCalledWith(EXISTING_ID, expect.anything());
+    expect(window.localStorage.getItem("instafy.lastProjectId")).toBe(EXISTING_ID);
+    expect(container.querySelector('[data-testid="access-probe"]')?.getAttribute("data-initialized")).toBe("true");
+  });
+
+  it("passes over sandboxes and archived spaces when choosing", async () => {
+    mocks.listProjects.mockResolvedValue({
+      status: "success",
+      projects: [
+        { projectId: MINTED_ID, orgId: "org-1", projectType: "sandbox", status: "active" },
+        { projectId: PROJECT_ID, orgId: "org-1", projectType: "customer", status: "archived" },
+        { projectId: EXISTING_ID, orgId: "org-1", projectType: "customer", status: "active" },
+      ],
+    });
+    await act(async () => root.render(<ProjectAccessProvider><AccessProbe /></ProjectAccessProvider>));
+    await settle();
+
+    expect(mocks.createControllerProject).not.toHaveBeenCalled();
+    expect(mocks.createProject).toHaveBeenCalledWith(expect.objectContaining({ projectId: EXISTING_ID }));
+  });
+
+  it("mints a space only for an account that has none, and once under a doubled startup", async () => {
+    mocks.listProjects.mockResolvedValue({ status: "success", projects: [] });
+    // StrictMode runs the startup effect twice in development, which is how
+    // the pairs in the database came about.
+    await act(async () => root.render(
+      <StrictMode>
+        <ProjectAccessProvider><AccessProbe /></ProjectAccessProvider>
+      </StrictMode>,
+    ));
+    await settle();
+
+    expect(mocks.createControllerProject).toHaveBeenCalledTimes(1);
+    expect(mocks.createControllerProject).toHaveBeenCalledWith({ projectType: "customer" });
+    expect(mocks.createProject).toHaveBeenCalledWith(expect.objectContaining({ projectId: MINTED_ID }));
+  });
+
+  it("still mints when the list cannot be read, as before", async () => {
+    mocks.listProjects.mockResolvedValue({ status: "error" });
+    await act(async () => root.render(<ProjectAccessProvider><AccessProbe /></ProjectAccessProvider>));
+    await settle();
+
+    expect(mocks.createControllerProject).toHaveBeenCalledTimes(1);
   });
 });
