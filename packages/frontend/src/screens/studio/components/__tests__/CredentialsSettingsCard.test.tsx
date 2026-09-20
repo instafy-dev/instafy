@@ -4,10 +4,16 @@ import { act, type ComponentProps } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { CredentialsSettingsCard } from "../CredentialsSettingsCard";
+import { AiPanel } from "../AiPanel";
+import { clearPendingAgentProfileTarget, setPendingAgentProfileTarget } from "../agentProfileDeepLink";
 import type { AgentProfileModal } from "../AgentProfileModal";
 
 const mocks = vi.hoisted(() => ({
   userId: "user-1",
+  users: {
+    "user-1": { id: "user-1", email: "playwright@instafy.dev" },
+    "user-2": { id: "user-2", email: "second@instafy.test" },
+  },
   uploadPicture: vi.fn(),
   clearDefaultCredential: vi.fn(),
   createCodexCredential: vi.fn(),
@@ -26,11 +32,12 @@ const mocks = vi.hoisted(() => ({
 
 vi.mock("../../../../providers/AuthProvider", () => ({
   useAuth: () => ({
-    user: { id: mocks.userId, email: "playwright@instafy.dev" },
+    user: mocks.users[mocks.userId as keyof typeof mocks.users],
   }),
 }));
 
 vi.mock("../../../../lib/identityImages", () => ({ uploadIdentityImage: mocks.uploadPicture }));
+vi.mock("../../useStudioDesktopLayout", () => ({ useStudioDesktopLayout: () => false }));
 
 vi.mock("../../../../status/useStatus", () => ({
   useStatus: () => ({
@@ -92,6 +99,17 @@ const oldCredential = {
   updatedAt: "2026-01-01T00:00:00.000Z",
 };
 
+const managedRequirements = {
+  success: true,
+  requiresUserCredentials: false,
+  proxyBackend: "codex",
+  hasDefaultCredential: false,
+  managedAi: {
+    enabled: true, available: true, label: "Instafy AI", creditBurnAmount: 0,
+    dailyPromptLimit: 20, dailyPromptsUsed: 3, remainingPrompts: 17,
+  },
+};
+
 const TOKEN_EXPIRED_ERROR = `unexpected status 502 Bad Gateway: upstream request failed (credential_source=claim, endpoint=chatgpt.com/backend-api/codex/responses, requested_model=gpt-5.1-codex-max, resolved_model=gpt-5.1-codex-max): backend responded with 401 Unauthorized: {
   "error": {
     "message": "Provided authentication token is expired. Please try signing in again.",
@@ -116,6 +134,7 @@ describe("CredentialsSettingsCard", () => {
     container = document.createElement("div");
     document.body.appendChild(container);
     root = createRoot(container);
+    clearPendingAgentProfileTarget();
 
     mocks.userId = "user-1";
     mocks.uploadPicture.mockReset().mockResolvedValue("https://storage.example/bot.png");
@@ -167,7 +186,7 @@ describe("CredentialsSettingsCard", () => {
   async function renderAgent(agent = inheritedAgent) {
     mocks.listAgents.mockResolvedValue({ success: true, agents: [agent] });
     mocks.updateAgent.mockResolvedValue({ success: true, agent });
-    await act(async () => { root.render(<CredentialsSettingsCard />); await flush(); });
+    await act(async () => { root.render(<CredentialsSettingsCard section="agents" />); await flush(); });
   }
   async function openAgent(handle = "helper") {
     const selector = handle === "octo" ? "bots-octo-edit" : "bots-edit-agent-1";
@@ -177,6 +196,86 @@ describe("CredentialsSettingsCard", () => {
   async function saveProfile() {
     await act(async () => { mocks.agentProfileProps!.onSave(); await flush(); });
   }
+
+  it("shows managed AI as the first connection and keeps agents in their own view", async () => {
+    mocks.getCredentialRequirements.mockResolvedValue(managedRequirements);
+    mocks.listCredentials.mockResolvedValue({ success: true, credentials: [{ ...oldCredential, isDefault: false }] });
+    mocks.listAgents.mockResolvedValue({ success: true, agents: [inheritedAgent] });
+    await act(async () => { root.render(<AiPanel />); await flush(); });
+
+    const row = container.querySelector('[data-testid="credentials-connection-row-managed-ai"]');
+    expect(row?.parentElement?.firstElementChild).toBe(row);
+    expect(row?.textContent).toContain("Instafy AI");
+    expect(row?.textContent).toContain("Default");
+    expect(row?.textContent).toContain("17 of 20 prompts left today");
+    expect(row?.querySelector(".octo-mark")).not.toBeNull();
+    expect(container.querySelector('[data-testid="credentials-ai-mode-summary"]')).toBeNull();
+    expect(container.querySelector('[data-testid="bots-list"]')).toBeNull();
+
+    await act(async () => container.querySelector<HTMLButtonElement>('[data-testid="ai-category-agents"]')!.click());
+    expect(container.querySelector('[data-testid="bots-edit-agent-1"]')).not.toBeNull();
+    expect(container.querySelector('[data-testid="credentials-list-codex"]')).toBeNull();
+    expect(container.querySelector('[data-testid="ai-category-agents"]')?.getAttribute("aria-current")).toBe("page");
+    await act(async () => container.querySelector<HTMLButtonElement>('[data-testid="ai-category-connections"]')!.click());
+    expect(container.querySelector('[data-testid="credentials-connection-row-managed-ai"]')?.textContent).toContain("Default");
+    expect(mocks.listCredentials).toHaveBeenCalledTimes(1);
+  });
+
+  it("switches the default to managed AI without removing saved connections", async () => {
+    mocks.getCredentialRequirements.mockResolvedValue({ ...managedRequirements, hasDefaultCredential: true });
+    mocks.clearDefaultCredential.mockResolvedValue({ success: true });
+    await act(async () => { root.render(<CredentialsSettingsCard />); await flush(); });
+    const button = container.querySelector<HTMLButtonElement>('[data-testid="credentials-use-managed-ai"]');
+    expect(button?.textContent).toBe("Make default");
+    expect(button?.disabled).toBe(false);
+    mocks.listCredentials.mockResolvedValue({ success: true, credentials: [{ ...oldCredential, isDefault: false }] });
+    mocks.getCredentialRequirements.mockResolvedValue(managedRequirements);
+    await act(async () => { button!.click(); await flush(); });
+    expect(mocks.clearDefaultCredential).toHaveBeenCalledOnce();
+    expect(mocks.revokeCredential).not.toHaveBeenCalled();
+    expect(container.querySelector('[data-testid="credentials-connection-row-managed-ai"]')?.textContent).toContain("Default");
+    expect(container.querySelector('[data-testid="credentials-connection-row-cred-old"]')?.textContent).toContain("Make default");
+  });
+
+  it("keeps the saved default when switching to managed AI fails", async () => {
+    mocks.getCredentialRequirements.mockResolvedValue({ ...managedRequirements, hasDefaultCredential: true });
+    mocks.clearDefaultCredential.mockResolvedValue({ success: false, error: "Try again" });
+    await act(async () => { root.render(<CredentialsSettingsCard />); await flush(); });
+    await act(async () => container.querySelector<HTMLButtonElement>('[data-testid="credentials-use-managed-ai"]')!.click());
+    expect(container.querySelector('[data-testid="credentials-connection-row-cred-old"]')?.textContent).toContain("Default");
+    expect(container.querySelector('[data-testid="credentials-use-managed-ai"]')).not.toBeNull();
+    expect(mocks.showStatus).toHaveBeenCalledWith("Try again", "error", 4500);
+  });
+
+  it("does not offer managed AI on controllers where it is disabled", async () => {
+    mocks.getCredentialRequirements.mockResolvedValue({ ...managedRequirements, managedAi: { ...managedRequirements.managedAi, enabled: false, available: false } });
+    await act(async () => { root.render(<CredentialsSettingsCard />); await flush(); });
+    expect(container.querySelector('[data-testid="credentials-connection-row-managed-ai"]')).toBeNull();
+    expect(container.querySelector('[data-testid="credentials-use-managed-ai"]')).toBeNull();
+  });
+
+  it("distinguishes a selected default from an exhausted allowance", async () => {
+    mocks.getCredentialRequirements.mockResolvedValue({ ...managedRequirements, managedAi: { ...managedRequirements.managedAi, available: false, remainingPrompts: 0 } });
+    mocks.listCredentials.mockResolvedValue({ success: true, credentials: [] });
+    await act(async () => { root.render(<CredentialsSettingsCard />); await flush(); });
+    const row = container.querySelector('[data-testid="credentials-connection-row-managed-ai"]');
+    expect(row?.textContent).toContain("Default");
+    expect(row?.textContent).toContain("0 of 20 prompts left today");
+    expect(row?.textContent).toContain("Currently unavailable");
+    expect(container.textContent).not.toContain("No AI connections yet");
+    expect(container.querySelector('[data-testid="credentials-add-connection"]')).not.toBeNull();
+  });
+
+  it("opens agent deep links on the Agents view and returns to that list after editing", async () => {
+    mocks.listAgents.mockResolvedValue({ success: true, agents: [inheritedAgent] });
+    setPendingAgentProfileTarget("helper");
+    await act(async () => { root.render(<AiPanel />); await flush(); });
+    expect(mocks.agentProfileProps?.isOpen).toBe(true);
+    expect(container.querySelector('[data-testid="ai-category-agents"]')?.getAttribute("aria-current")).toBe("page");
+    await act(async () => mocks.agentProfileProps!.onClose());
+    expect(container.querySelector('[data-testid="bots-edit-agent-1"]')).not.toBeNull();
+    expect(container.querySelector('[data-testid="credentials-list-codex"]')).toBeNull();
+  });
 
   it("keeps picture changes local until Save and discards them on Cancel", async () => {
     await renderAgent(); await openAgent();

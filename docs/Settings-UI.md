@@ -106,6 +106,21 @@ Check settings with long labels, both themes, narrow and wide containers, and ke
 navigation. In particular, verify nested destination selection, dismissal, and resizing
 without losing focus or creating extra route visits.
 
+## Your AI
+
+Keep **Connections** and **Agents** as separate categories inside Your AI, using the same
+responsive `SettingsShell` navigation as other settings. Connections choose what powers
+new prompts; agents customize identity and instructions and may choose their own connection.
+Opening an agent profile from a conversation selects Agents, so closing the editor returns
+to its list. Switching categories keeps the connection and agent state mounted.
+
+When the controller enables managed AI, show Instafy AI as the first connection row with
+the canonical Octo mark, its allowance and the same Default badge or Make default action
+as saved providers. Selecting it clears the default credential without deleting any saved
+connection. Keep quota exhaustion or service unavailability distinct from the chosen default.
+Controllers without managed AI do not show the row. Reserve the separate status summary
+for loading, errors or missing configuration rather than repeating the selected row.
+
 ## Team identity
 
 The space segment of the organization/space breadcrumb uses `SpaceIdentity`, including

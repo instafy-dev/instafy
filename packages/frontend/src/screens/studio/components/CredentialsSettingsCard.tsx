@@ -8,6 +8,7 @@ import { Badge } from "../../../components/Badge";
 import { Button, IconButton } from "../../../components/Button";
 import { EntityRow } from "../../../components/EntityRow";
 import { MenuItemContent } from "../../../components/MenuItemContent";
+import { OctoMark } from "../../../components/OctoMark";
 import { DeepSeekIcon, GeminiIcon, OpenAIIcon, ZaiIcon } from "../../../components/ProviderIcons";
 import { Spinner } from "../../../components/Spinner";
 import { Text } from "../../../components/Text";
@@ -276,12 +277,18 @@ async function readCredentialJsonFile(file: File): Promise<unknown> {
   return JSON.parse(contents) as unknown;
 }
 
-export function CredentialsSettingsCard() {
-  const { user } = useAuth();
-  return <UserCredentialsSettingsCard key={user?.id ?? "signed-out"} />;
+export type AiSettingsSection = "connections" | "agents";
+interface CredentialsSettingsCardProps {
+  section?: AiSettingsSection;
+  onOpenAgentProfile?: () => void;
 }
 
-function UserCredentialsSettingsCard() {
+export function CredentialsSettingsCard(props: CredentialsSettingsCardProps) {
+  const { user } = useAuth();
+  return <UserCredentialsSettingsCard key={user?.id ?? "signed-out"} {...props} />;
+}
+
+function UserCredentialsSettingsCard({ section = "connections", onOpenAgentProfile }: CredentialsSettingsCardProps) {
   const { user } = useAuth();
   const mounted = useRef(true);
   const agentSaveLock = useRef(false);
@@ -749,6 +756,17 @@ function UserCredentialsSettingsCard() {
     Boolean(defaultCodexCredential) &&
     credentialRequirements?.managedAi?.enabled === true &&
     !credentialRequirements?.error;
+  const managedAi = credentialRequirements?.managedAi;
+  const showManagedAi = Boolean(runtimeControllerEnabled && user && managedAi?.enabled);
+  const managedAiSelected = showManagedAi && credentialRequirements?.success === true &&
+    !credentialRequirements.hasDefaultCredential && !defaultCodexCredential;
+  const managedAiDetail = managedAi?.dailyPromptLimit && managedAi.dailyPromptLimit > 0
+    ? typeof managedAi.remainingPrompts === "number"
+      ? `${managedAi.remainingPrompts} of ${managedAi.dailyPromptLimit} prompts left today.`
+      : `${managedAi.dailyPromptLimit} prompts available each day.`
+    : "Uses your shared team balance.";
+  const showAiModeSummary = !credentialRequirements || Boolean(credentialRequirements.error) ||
+    (!showManagedAi && !defaultCodexCredential);
 
   const openCreateBotModal = useCallback((credentialId: string) => {
     const credential = credentialsById.get(credentialId) ?? null;
@@ -861,6 +879,7 @@ function UserCredentialsSettingsCard() {
         return;
       }
       openOctoProfileModal(octoAgent);
+      onOpenAgentProfile?.();
       clearPendingAgentProfileTarget();
       return;
     }
@@ -871,8 +890,9 @@ function UserCredentialsSettingsCard() {
       return;
     }
     openEditBotModal(agent);
+    onOpenAgentProfile?.();
     clearPendingAgentProfileTarget();
-  }, [agentProfileModal, botAgents, octoAgent, openEditBotModal, openOctoProfileModal]);
+  }, [agentProfileModal, botAgents, octoAgent, onOpenAgentProfile, openEditBotModal, openOctoProfileModal]);
 
   const handleSaveAgentProfile = useCallback(async () => {
     if (!agentProfileModal) {
@@ -1233,13 +1253,14 @@ function UserCredentialsSettingsCard() {
       />
 
       <div className="space-y-8" data-testid="credentials-settings-card">
+        {section === "connections" ? (
         <StudioListSection
           title="AI connections"
-          description="Connect your providers and choose the default for your new prompts."
+          description="Choose what powers your chats. Agents use this default unless you choose a connection for them."
           tone="activity"
           icon={<Cpu className="h-5 w-5" aria-hidden={true} />}
           actions={
-            codexCredentials.length > 0 ? (
+            codexCredentials.length > 0 || showManagedAi ? (
               <SettingsAddButton
                 onPress={openConnectModal}
                 isDisabled={!canManageAiConnections || loading}
@@ -1251,7 +1272,7 @@ function UserCredentialsSettingsCard() {
           }
         >
           <div className="min-w-0 space-y-3">
-            {runtimeControllerEnabled && user && aiModeSummary ? (
+            {runtimeControllerEnabled && user && showAiModeSummary && aiModeSummary ? (
               <div
                 className="flex min-w-0 flex-wrap items-center gap-x-3 gap-y-1 px-1 text-sm"
                 data-testid="credentials-ai-mode-summary"
@@ -1262,18 +1283,6 @@ function UserCredentialsSettingsCard() {
                 <Text variant="caption" tone="muted" className="min-w-0 max-w-3xl">
                   {aiModeSummary.detail}
                 </Text>
-                {canSwitchToManagedAi ? (
-                  <Button
-                    onPress={() => void handleUseManagedAi()}
-                    isDisabled={actionPendingId === "managed-ai"}
-                    variant="outline"
-                    size="xs"
-                    radius="full"
-                    data-testid="credentials-use-managed-ai"
-                  >
-                    Use Instafy AI
-                  </Button>
-                ) : null}
               </div>
             ) : null}
 
@@ -1297,7 +1306,7 @@ function UserCredentialsSettingsCard() {
               </div>
             ) : null}
 
-            {runtimeControllerEnabled && user && !loading && codexCredentials.length === 0 ? (
+            {runtimeControllerEnabled && user && !loading && !showManagedAi && codexCredentials.length === 0 ? (
               <div className="flex min-w-0 flex-wrap items-center justify-between gap-3 px-1 py-1">
                 <div className="min-w-0">
                   <Text as="div" variant="body" className="font-semibold">
@@ -1320,8 +1329,47 @@ function UserCredentialsSettingsCard() {
               </div>
             ) : null}
 
-            {codexCredentials.length > 0 ? (
+            {showManagedAi || codexCredentials.length > 0 ? (
               <ul className="space-y-2" data-testid="credentials-list-codex">
+                {showManagedAi ? (
+                  <li data-testid="credentials-connection-row-managed-ai">
+                    <EntityRow
+                      surface="outlined"
+                      density="rich"
+                      start={
+                        <span className="flex h-9 w-9 items-center justify-center rounded-full bg-white/90 text-slate-900 ring-1 ring-black/5 dark:bg-slate-950/40 dark:text-slate-50 dark:ring-white/10" aria-hidden="true">
+                          <OctoMark className="h-6 w-6" />
+                        </span>
+                      }
+                      title={managedAi?.label?.trim() || "Instafy AI"}
+                      subtitle={`Built in · ${managedAiDetail}`}
+                      subtitleClassName="!whitespace-normal"
+                      detail={!managedAi?.available ? (
+                        <Text as="div" variant="caption" tone="muted">
+                          Currently unavailable; use your own connection to continue.
+                        </Text>
+                      ) : null}
+                      className="items-start"
+                      startClassName="pt-0.5"
+                      titleEnd={managedAiSelected ? <Badge size="xs" className="md:hidden">Default</Badge> : null}
+                      end={managedAiSelected ? <span className="hidden md:inline-flex"><Badge size="xs">Default</Badge></span> : (
+                        <Button
+                          onPress={() => void handleUseManagedAi()}
+                          isDisabled={!canSwitchToManagedAi || Boolean(actionPendingId) || loading}
+                          variant="ghost"
+                          size="xs"
+                          radius="full"
+                          className="min-h-11 md:min-h-0"
+                          aria-label="Make Instafy AI default"
+                          data-testid="credentials-use-managed-ai"
+                        >
+                          {actionPendingId === "managed-ai" ? "Switching…" : "Make default"}
+                        </Button>
+                      )}
+                      endClassName="self-center"
+                    />
+                  </li>
+                ) : null}
                 {codexCredentials.map((credential) => {
                   const label = resolveCredentialLabel(credential);
                   const kindLabel = formatCredentialKind(credential);
@@ -1696,10 +1744,12 @@ function UserCredentialsSettingsCard() {
           ) : null}
           </div>
         </StudioListSection>
+        ) : null}
 
+        {section === "agents" ? (
         <StudioListSection
           title="Agents"
-          description="Your agent profiles. Customize how your agents work; team activity is shown in Team."
+          description="Choose who you chat with. Customize each agent’s profile and instructions; connections supply the AI."
           tone="suggestion"
           icon={<Brain className="h-5 w-5" aria-hidden={true} />}
           actions={
@@ -1877,6 +1927,7 @@ function UserCredentialsSettingsCard() {
             </StudioListSurface>
           ) : null}
         </StudioListSection>
+        ) : null}
       </div>
 
       <input
