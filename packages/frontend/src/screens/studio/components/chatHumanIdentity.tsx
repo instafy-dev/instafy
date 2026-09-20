@@ -3,6 +3,8 @@ import { extractChatClientIdentity } from "./chatMessageDetailHelpers";
 import { ChatMessageAvatar } from "./ChatMessageAvatar";
 import { formatSpeakerTimestamp } from "./chatSpeakerTimestamp";
 import { HumanProfilePopover } from "../../../profile/HumanProfilePopover";
+import { useBreakpoint } from "../../../hooks/useBreakpoint";
+import { SPEAKER_PILL_CLASS_NAME } from "./AssistantSpeakerIdentityPill";
 
 export type HumanChatIdentity = {
   avatarSeed: string | null;
@@ -34,16 +36,17 @@ export function HumanSpeakerIdentityPill({
   avatarSeed: string | null;
   label: string;
 }) {
+  const wideLayout = useBreakpoint("sm");
   return (
     <div
-      className="inline-flex max-w-full items-center gap-1.5 rounded-full border border-slate-200/70 bg-white/95 py-0 pl-0.5 pr-2 text-xs font-semibold text-slate-700 shadow-sm backdrop-blur dark:border-[color:var(--color-studio-dark-panel-border)] dark:bg-[var(--color-studio-dark-panel)] dark:text-slate-200"
+      className={`${SPEAKER_PILL_CLASS_NAME} dark:border-[color:var(--color-studio-dark-panel-border)] dark:bg-[var(--color-studio-dark-panel)] dark:text-slate-200`}
       data-testid="chat-human-speaker-pill"
     >
       <ChatMessageAvatar
         kind="human"
         seed={avatarSeed}
         label={label}
-        size="xs"
+        size={wideLayout ? "sm" : "xs"}
       />
       <span className="min-w-0 truncate">{label}</span>
     </div>
