@@ -96,9 +96,6 @@ export function LandingPage() {
                     Install Instafy
                   </Link>
                 </div>
-                <p className="mt-3 text-xs text-slate-500 dark:text-slate-400">
-                  Start in your browser. Your files stay yours.
-                </p>
               </div>
             </div>
 
