@@ -124,7 +124,9 @@ import {
   CHAT_SPEAKER_MARKER_SELECTOR,
   isAssistantSpeakerMarker,
   isHumanSpeakerMarker,
+  hasReachedSpeakerHandoffLine,
   readStickyChatSpeakerMarker,
+  resolveSpeakerHandoffLine,
   type StickyChatSpeaker,
 } from "./chatSpeakerMarker";
 import { ChatColumn } from "./ChatColumn";
@@ -3251,7 +3253,8 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
 
   const [stickyChatSpeaker, setStickyChatSpeaker] =
     useState<StickyChatSpeaker | null>(null);
-  // Presence stays outside the scroller while the message ink fades beneath it.
+  // Presence stays outside the scroller while the message ink fades beneath
+  // it. The overlay's box is also the handoff line the effect below measures.
   const stickySpeakerOverlayRef = useRef<HTMLDivElement>(null);
 
   useLayoutEffect(() => {
@@ -3263,25 +3266,38 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
 
     let animationFrameId: number | null = null;
     const readAndApplySpeaker = () => {
-      // Hand off the inline identity at the fully readable edge of the fade.
+      // Hand off the inline identity on the pill's own line, so the pill
+      // appears where the identity was as it fades up the transcript.
       const containerRect = scrollContainer.getBoundingClientRect();
-      const thresholdTop = containerRect.top + CHAT_TRANSCRIPT_HEADER_INSET_PX;
+      const handoffLine = resolveSpeakerHandoffLine(
+        containerRect.top,
+        stickySpeakerOverlayRef.current?.getBoundingClientRect() ?? null,
+        CHAT_TRANSCRIPT_HEADER_INSET_PX,
+      );
       const markers = Array.from(
         scrollContainer.querySelectorAll(CHAT_SPEAKER_MARKER_SELECTOR),
       );
       let nextSpeaker: StickyChatSpeaker | null = null;
       for (const marker of markers) {
         const markerTop = marker.getBoundingClientRect().top;
-        const hasReachedStickyLine = markerTop <= thresholdTop;
         const inlineSpeaker =
           isAssistantSpeakerMarker(marker) || isHumanSpeakerMarker(marker)
             ? marker.nextElementSibling
             : null;
-        if (inlineSpeaker instanceof HTMLElement && inlineSpeaker.matches(NARROW_SPEAKER_INLINE_SELECTOR)) {
+        const visibleInlineSpeaker =
+          inlineSpeaker instanceof HTMLElement && inlineSpeaker.matches(NARROW_SPEAKER_INLINE_SELECTOR)
+            ? inlineSpeaker
+            : null;
+        const hasReachedStickyLine = hasReachedSpeakerHandoffLine(
+          markerTop,
+          visibleInlineSpeaker?.getBoundingClientRect() ?? null,
+          handoffLine,
+        );
+        if (visibleInlineSpeaker) {
           if (hasReachedStickyLine) {
-            inlineSpeaker.dataset.chatSpeakerCovered = "true";
+            visibleInlineSpeaker.dataset.chatSpeakerCovered = "true";
           } else {
-            delete inlineSpeaker.dataset.chatSpeakerCovered;
+            delete visibleInlineSpeaker.dataset.chatSpeakerCovered;
           }
         }
         if (hasReachedStickyLine) {
