@@ -162,7 +162,7 @@ The global rail keeps Home fixed above a scrollable team list, with New team,
 Browse teams and the account controls below it. Browse teams shows the signed-in
 account's accessible teams and spaces; it is not a public team directory.
 Invitation links continue to use the existing invitation acceptance flow.
-Home uses the static Instafy mark with the label and tooltip “Home — all teams”,
+Home uses the static Instafy mark with an account-wide Home label and tooltip,
 in dark ink on light surfaces and white on dark surfaces. The selected Home or
 team has a persistent side marker as well as its background highlight.
 
