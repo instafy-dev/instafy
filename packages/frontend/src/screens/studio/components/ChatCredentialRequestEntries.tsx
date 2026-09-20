@@ -810,17 +810,20 @@ export function SecretRequestEntry({
   if ((savedHere || alreadyStored) && !replacingValue) {
     return shell(
       <>
-        <div className="flex items-start gap-2" data-testid="secret-request-saved">
+        <div className="flex items-center gap-2" data-testid="secret-request-saved">
           <CheckCircle
-            className="mt-0.5 h-4 w-4 shrink-0 text-primary-600 dark:text-primary-300"
+            className="h-4 w-4 shrink-0 text-primary-600 dark:text-primary-300"
             aria-hidden="true"
           />
           <Text as="div" variant="caption" tone="secondary" className="min-w-0 leading-snug">
             Saved in this space’s Secrets.
           </Text>
         </div>
-        <div className="flex flex-wrap items-center gap-2">
-          {continueButton}
+        {/* One decision, then one quiet line for the two escape hatches. In a
+            single wrapping row the three landed one per line at phone width
+            and read as a list of equal choices. */}
+        {continueButton ? <div className="flex flex-wrap items-center gap-2">{continueButton}</div> : null}
+        <div className="-ml-2.5 flex flex-wrap items-center gap-x-1 gap-y-0.5">
           <Button
             onPress={() => setReplacingValue(true)}
             variant="ghost"
