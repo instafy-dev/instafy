@@ -20,7 +20,7 @@ describe("MobileStudioNavigationHeader", () => {
     props = {
       history: { canGoBack: false, canGoForward: false, goBack: vi.fn(), goForward: vi.fn() },
       title: "A long conversation title", spaceName: "Alpha space",
-      onOpenPicker: vi.fn(), onOpenChats: vi.fn(),
+      onOpenPicker: vi.fn(),
     };
   });
   afterEach(async () => {
@@ -39,45 +39,31 @@ describe("MobileStudioNavigationHeader", () => {
     expect(target).toBeDefined(); await act(async () => target!.click());
   }
 
-  it("uses an explicit Chats destination at direct entry, never a fake Back", async () => {
+  it("omits history controls at direct entry and keeps chats accessible through the sidebar", async () => {
     await render();
-    expect(query("mobile-header-back")).toBeNull();
-    expect(query("mobile-header-open-chats")?.getAttribute("aria-label")).toBe("Open chats");
-    expect(query("mobile-header-open-chats")?.textContent).toBe("Chats");
-    await click("mobile-header-open-chats");
-    expect(props.onOpenChats).toHaveBeenCalledTimes(1);
+    expect(query("mobile-history-controls")).toBeNull();
+    expect(query("mobile-header-open-chats")).toBeNull();
+    await click("mobile-header-picker");
+    expect(props.onOpenPicker).toHaveBeenCalledOnce();
     expect(props.history.goBack).not.toHaveBeenCalled();
   });
 
-  it("uses the supplied current history and switches back to the direct-entry fallback", async () => {
-    props.history.canGoBack = true;
+  it.each([[true, false], [false, true], [true, true]])("keeps a stable Back/Forward pair (back=%s, forward=%s)", async (canGoBack, canGoForward) => {
+    props.history = { ...props.history, canGoBack, canGoForward };
     await render();
+    expect(query("mobile-header-back")?.nextElementSibling).toBe(query("mobile-header-forward"));
+    expect(query("mobile-header-back")?.disabled).toBe(!canGoBack);
+    expect(query("mobile-header-forward")?.disabled).toBe(!canGoForward);
     expect(query("mobile-header-open-chats")).toBeNull();
-    expect(query("mobile-header-back")?.textContent).toBe("Back");
     await click("mobile-header-back");
-    expect(props.history.goBack).toHaveBeenCalledTimes(1);
-    expect(props.onOpenChats).not.toHaveBeenCalled();
-    props.history = { ...props.history, canGoBack: false };
-    await render();
-    expect(query("mobile-header-back")).toBeNull();
-    expect(query("mobile-header-open-chats")).not.toBeNull();
-  });
-
-  it("shows Forward beside Back only when a later visit exists, without opening More", async () => {
-    await render();
-    expect(query("mobile-header-forward")).toBeNull();
-    props.history = { ...props.history, canGoForward: true };
-    await render();
-    expect(query("mobile-header-forward")?.disabled).toBe(false);
-    expect(query("mobile-header-open-chats")?.nextElementSibling).toBe(query("mobile-header-forward"));
     await click("mobile-header-forward");
-    expect(props.history.goForward).toHaveBeenCalledTimes(1);
+    expect(props.history.goBack).toHaveBeenCalledTimes(Number(canGoBack));
+    expect(props.history.goForward).toHaveBeenCalledTimes(Number(canGoForward));
     expect(props.onOpenPicker).not.toHaveBeenCalled();
-    expect(props.onOpenChats).not.toHaveBeenCalled();
     expect(query("mobile-header-more")?.getAttribute("aria-expanded")).toBe("false");
-    props.history = { ...props.history, canGoForward: false };
+    props.history = { ...props.history, canGoBack: false, canGoForward: false };
     await render();
-    expect(query("mobile-header-forward")).toBeNull();
+    expect(query("mobile-history-controls")).toBeNull();
   });
 
   it("keeps the sidebar control first and separate from the current location", async () => {

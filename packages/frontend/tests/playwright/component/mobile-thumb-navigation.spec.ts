@@ -76,7 +76,7 @@ async function mountNavigation(page: Page, height: number, bottom: number) {
         h('main',{'data-testid':'thumb-shell','data-keyboard-open':viewport.keyboardOpen,
           style:{height:viewport.viewportHeightPx??'100dvh',display:'flex',flexDirection:'column',overflow:'hidden'}},
           h(MobileStudioNavigationHeader,{key:location.key+'|'+project,history,title:overview==='home'?'Home':overview==='chat'?'Chats':overview==='projects'?'Spaces':chat==='B'?'Beta chat':'Alpha chat',
-            spaceName:projects.find(p=>p.id===project).name,onOpenPicker:()=>setSection('chats'),onOpenChats:openChats,
+            spaceName:projects.find(p=>p.id===project).name,onOpenPicker:()=>setSection('chats'),
             onOpenSettings:()=>go({kind:'panel',panel:'settings'})}),
           h('div',{style:{flex:1,minHeight:0,overflow:'auto',padding:16}},
             h('h1',{style:{fontSize:18}},'Inert thumb-navigation fixture'),
@@ -122,18 +122,24 @@ for (const layout of [
     const goForward = async () => {
       // Forward must remain available without opening navigation: a real
       // sidebar entry would truncate the branch that Forward needs.
+      await expect(header.getByTestId("mobile-header-back")).toBeVisible();
+      await expect(header.getByTestId("mobile-header-forward")).toBeEnabled();
+      const beforeTitle = await header.getByTestId("mobile-header-title").boundingBox();
       await page.getByTestId("mobile-header-forward").tap();
+      const afterTitle = await header.getByTestId("mobile-header-title").boundingBox();
+      expect(afterTitle?.x).toBe(beforeTitle?.x);
       await expect(sheet).toHaveCount(0);
       await expect(page.getByTestId("mobile-header-actions")).toHaveCount(0);
     };
     const initialKey = await page.evaluate(() => history.state.key);
     await expect(dock).toHaveCount(0);
     await expect(header.getByTestId("mobile-header-back")).toHaveCount(0);
-    await expect(header.getByTestId("mobile-header-open-chats")).toBeVisible();
+    await expect(header.getByTestId("mobile-header-open-chats")).toHaveCount(0);
+    await expect(header.getByTestId("mobile-history-controls")).toHaveCount(0);
     await expect(header.getByTestId("mobile-header-title")).toHaveText("Alpha chat");
     await expect(header.getByTestId("mobile-header-space")).toHaveText("Alpha space");
     await expect(header.getByTestId("mobile-header-picker")).toHaveAccessibleName("Open space navigation: Alpha space");
-    for (const id of ["mobile-header-open-chats", "mobile-header-picker", "mobile-header-more"]) {
+    for (const id of ["mobile-header-picker", "mobile-header-more"]) {
       const box = (await header.getByTestId(id).boundingBox())!;
       expect(box.width).toBeGreaterThanOrEqual(48); expect(box.height).toBeGreaterThanOrEqual(48);
       expect(box.x).toBeGreaterThanOrEqual(0); expect(box.x + box.width).toBeLessThanOrEqual(layout.width);
@@ -159,9 +165,10 @@ for (const layout of [
       }));
       for (const size of sizes) { expect(size.width).toBeGreaterThanOrEqual(48); expect(size.height).toBeGreaterThanOrEqual(48); expect(size.bottom).toBeLessThanOrEqual(layout.height - layout.bottom + 1); }
     };
-    // A direct chat entry uses the header's Open chats fallback. The three
-    // overview destinations navigate to pages, never to the transient picker.
-    await header.getByTestId("mobile-header-open-chats").tap();
+    // Direct chat entry uses the sidebar's All chats action. History controls
+    // never change into destination shortcuts.
+    await openPicker();
+    await sheet.getByRole("button", { name: "All chats", exact: true }).tap();
     await expect(destination).toHaveText("Chats overview"); await expect(sheet).toHaveCount(0);
     await checkDock();
     await dock.getByTestId("mobile-bottom-dock-projects").tap();

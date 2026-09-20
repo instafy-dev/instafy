@@ -23,7 +23,7 @@ describe("mobile header with the real notification center owner", () => {
     return <>
       <MobileStudioNavigationHeader key={userId} title="Chat" spaceName="Space"
         history={{ canGoBack: true, canGoForward: false, goBack: vi.fn(), goForward: vi.fn() }}
-        onOpenPicker={vi.fn()} onOpenChats={vi.fn()} />
+        onOpenPicker={vi.fn()} />
       <span data-testid="notification-data-count">{center.page.items.length}</span>
     </>;
   }

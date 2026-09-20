@@ -29,12 +29,13 @@ seconds, while keyboard focus remains visible until it moves. The outline has
 space around the text, supports forced colors and respects reduced motion.
 **Back to results** restores the query, scope, loaded result pages and reading
 position. Below 900px, this appears as **Results** in the existing workspace
-header, replacing its Back/Chats action. Touch and compact mouse layouts use the
-same rule: Results when there is a saved search, a Back arrow when there is a previous
-visit, and a Chats icon for direct entry without history. Their accessible names
-describe the destination. The sidebar toggle stays at the far left, separate from
-the current tab's icon and title. A Forward chevron appears beside Back when a later
-visit exists, including on Home, account settings and the search results screen.
+header, replacing its Back action. Touch and compact mouse layouts keep Back and
+Forward together, dimming and disabling unavailable directions. The pair is hidden
+when neither history direction nor a saved search is available. Direct entries
+reach chats through the sidebar; history buttons never become chat shortcuts.
+Their accessible names describe the destination. The sidebar toggle stays at the
+far left, separate from the current tab's icon and title. The same history pair is
+used on Home, account settings and the search results screen.
 Tab switching and other secondary actions are available in **More**. Drawer dismissal and parent conversation navigation
 remain separate actions. Org and space transitions preserve the last resolved
 history controls while the route catches up, without accepting stale actions.

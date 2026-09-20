@@ -1965,7 +1965,6 @@ function StudioLayoutInner() {
     visitKey: location.key,
     history: mobileHistory,
     onOpenPicker: handleToggleSidebar,
-    onOpenChats: handleMobileDockOpenChat,
   } : undefined;
   if (!isChatSurfaceVisible || projectAccessBlocked) {
     workspaceContent = (

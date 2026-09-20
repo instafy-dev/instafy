@@ -15,7 +15,6 @@ export interface MobileStudioNavigationHeaderProps {
   spaceName: string;
   showSpaceName?: boolean;
   onOpenPicker: () => void;
-  onOpenChats: () => void;
   sidebarOpen?: boolean;
   onOpenSettings?: () => void;
   onNewChat?: () => void;
@@ -30,7 +29,7 @@ const TOUCH_TARGET = "!min-h-12 !min-w-12";
 /** Compact navigation uses the history owner supplied by Studio, never a second
  * history stack. Secondary actions keep the existing shared popover controls. */
 export function MobileStudioNavigationHeader({
-  history, title, titleIcon, spaceName, showSpaceName = true, onOpenPicker, onOpenChats,
+  history, title, titleIcon, spaceName, showSpaceName = true, onOpenPicker,
   sidebarOpen = false, onOpenSettings,
   onNewChat, onNewPrivateChat, parentConversation, tabsAction, onMoreOpenChange,
 }: MobileStudioNavigationHeaderProps) {
@@ -61,7 +60,7 @@ export function MobileStudioNavigationHeader({
           ? <SidebarCollapse className="h-[18px] w-[18px]" aria-hidden="true" />
           : <SidebarExpand className="h-[18px] w-[18px]" aria-hidden="true" />}
       </Button>
-      <MobileStudioHistoryControls history={history} onOpenChats={onOpenChats} />
+      <MobileStudioHistoryControls history={history} />
       <div className="flex min-w-0 flex-1 items-center gap-2 px-1" data-testid="mobile-header-location">
         {titleIcon ? <span className="shrink-0 text-slate-500 dark:text-slate-400 [&_svg]:h-[18px] [&_svg]:w-[18px]" aria-hidden="true" data-testid="mobile-header-location-icon">{titleIcon}</span> : null}
         <span className="min-w-0 flex-1">

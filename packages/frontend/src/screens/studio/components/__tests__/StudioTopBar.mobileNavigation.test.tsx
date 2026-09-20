@@ -43,7 +43,7 @@ describe("StudioTopBar mobile navigation integration", () => {
     mocks.tabs.mockReturnValue({ activeTabId: "tab-a", tabs: [{ id: "tab-a", kind: "conversation", conversationId: "chat-a", title: "Active chat" }], focusTab: vi.fn(), closeTab: vi.fn(), requestUrlPush: vi.fn(), openPanelTab: vi.fn(), openConversationTab: vi.fn() });
     mocks.conversations.mockReturnValue({ conversations: [{ localId: "chat-a", title: "Active chat", parentConversationId: "controller-parent" }, { localId: "parent", controllerId: "controller-parent", title: "Parent chat" }] });
     mocks.orgMembers.mockResolvedValue([]); mocks.projectMembers.mockResolvedValue([]);
-    props = { mobileNavigation: { visitKey: "visit-a", history: { canGoBack: false, canGoForward: false, goBack: vi.fn(), goForward: vi.fn() }, onOpenPicker: vi.fn(), onOpenChats: vi.fn() } };
+    props = { mobileNavigation: { visitKey: "visit-a", history: { canGoBack: false, canGoForward: false, goBack: vi.fn(), goForward: vi.fn() }, onOpenPicker: vi.fn() } };
     container = document.createElement("div"); document.body.appendChild(container); root = createRoot(container);
   });
   afterEach(async () => {
@@ -57,33 +57,31 @@ describe("StudioTopBar mobile navigation integration", () => {
     expect(query(testId)).not.toBeNull(); await act(async () => query(testId)!.click());
   }
 
-  it.each([true, false])("shares Results, Back and Chats destinations without duplicate arrows (touch=%s)", async touch => {
+  it.each([true, false])("shares Results and Back with a consistent history pair (touch=%s)", async touch => {
     mocks.posture.mockReturnValue({ isLargeScreen: false, showTouchBottomDock: touch });
     props.mobileNavigation!.history.canGoBack = true;
     originToken = "owned-search";
     await render();
     expect(query("mobile-header-results")?.textContent).toBe("Results");
+    expect(query("mobile-header-forward")?.disabled).toBe(true);
     expect(query("mobile-header-back")).toBeNull();
     expect(query("topbar-back-button")).toBeNull();
     expect(query("mobile-header-open-chats")).toBeNull();
     await click("mobile-header-results");
     expect(returnToResults).toHaveBeenCalledOnce();
     expect(props.mobileNavigation!.history.goBack).not.toHaveBeenCalled();
-    expect(props.mobileNavigation!.onOpenChats).not.toHaveBeenCalled();
 
     originToken = null;
     await render();
     expect(query("mobile-header-results")).toBeNull();
     await click("mobile-header-back");
     expect(props.mobileNavigation!.history.goBack).toHaveBeenCalledOnce();
-    expect(props.mobileNavigation!.onOpenChats).not.toHaveBeenCalled();
 
     props.mobileNavigation!.history.canGoBack = false;
     await render();
     expect(query("mobile-header-back")).toBeNull();
-    expect(query("mobile-header-open-chats")?.textContent).toBe("Chats");
-    await click("mobile-header-open-chats");
-    expect(props.mobileNavigation!.onOpenChats).toHaveBeenCalledOnce();
+    expect(query("mobile-header-open-chats")).toBeNull();
+    expect(query("mobile-history-controls")).toBeNull();
     expect(props.mobileNavigation!.history.goBack).toHaveBeenCalledOnce();
     expect(returnToResults).toHaveBeenCalledOnce();
   });

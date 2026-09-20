@@ -192,10 +192,11 @@ still requires verification on a phone, even when the simulated-event test passe
 
 ## iOS release boundary
 
-Studio's compact layouts keep Back in the header and show a Forward chevron beside it
-when a later visit exists, including Home, account settings and search results.
-Both use the same React Router history as the browser and Electron renderer. A direct entry
-into workspace details offers a Chats destination; global pages without history omit Back.
+Studio's compact layouts keep Back and Forward together in the header, including
+Home, account settings and search results. Unavailable directions are dimmed and
+disabled; the pair is hidden when neither direction nor a saved search is available.
+Both use the same React Router history as the browser and Electron renderer.
+Direct entries reach chats through the sidebar, without a changing history shortcut.
 Choosing a new destination after Back clears the forward branch, as in browser history.
 Do not confuse these controls with navigation
 inside the separate Shared/Personal browser. No native WKWebView swipe-navigation setting is

@@ -65,7 +65,6 @@ export interface StudioTopBarProps {
     history: StudioHistory;
     visitKey: string;
     onOpenPicker: () => void;
-    onOpenChats: () => void;
   };
 }
 

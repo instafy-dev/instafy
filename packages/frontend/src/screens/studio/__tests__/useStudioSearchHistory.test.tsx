@@ -110,7 +110,7 @@ describe("search result browser history", () => {
     await pressHistory("mobile-header-forward");
     expect(lastSearch.open).toBe(false);
     expect(result()).toBeNull();
-    expect(container.querySelector('[data-testid="mobile-header-forward"]')).toBeNull();
+    expect(container.querySelector<HTMLButtonElement>('[data-testid="mobile-header-forward"]')?.disabled).toBe(true);
     await travel(-1);
     expect(lastSearch.open).toBe(true);
     expect(input().value).toBe("needle");
