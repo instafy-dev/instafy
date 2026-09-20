@@ -528,13 +528,16 @@ export function ConversationMessageRows({
                 handle: assistantHandleForMessage,
                 avatarSeed: messageAgentIdentity?.avatarSeed ?? assistantHandleForMessage,
               }
-            : message.role === "user" && humanIdentity
+            : message.role === "user" && humanIdentity && !isOwnUserMessage
               ? {
                   kind: "human",
                   label: humanIdentity.label,
                   avatarSeed: humanIdentity.avatarSeed,
                 }
-              : { kind: "boundary" };
+              : // One's own messages sit on the right, which already says who
+                // wrote them, so they clear the pill rather than naming the
+                // reader to themselves.
+                { kind: "boundary" };
 
         rows.push(
           <DeferredChatMessageRow
