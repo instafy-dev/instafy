@@ -30,6 +30,13 @@ export interface ProjectLauncherProps {
   ) => Promise<{ success: boolean; error?: string | null }> | { success: boolean; error?: string | null };
 }
 
+function toSlug(value: string): string {
+  return value
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/gi, "-")
+    .replace(/^-+|-+$/g, "");
+}
+
 export function ProjectLauncher({
   open,
   preferredOrgId = null,
@@ -44,12 +51,19 @@ export function ProjectLauncher({
   const [githubRepo, setGithubRepo] = useState("");
   const [githubRef, setGithubRef] = useState("");
   const [githubImportError, setGithubImportError] = useState<string | null>(null);
+  // A failed create leaves this dialog open, so the reason has to live in the
+  // dialog. It used to go to a transient toast and nothing else: a 500 from the
+  // server rendered as a sheet that simply sat there, and the only way to learn
+  // why was to open the network panel.
+  const [createError, setCreateError] = useState<string | null>(null);
   const [orgs, setOrgs] = useState<ControllerOrgSummary[]>([]);
   const [orgLoading, setOrgLoading] = useState(false);
   const [orgError, setOrgError] = useState<string | null>(null);
   const [selectedOrgId, setSelectedOrgId] = useState<string | "new" | null>(null);
   const [newOrgName, setNewOrgName] = useState("");
   const [newOrgSlug, setNewOrgSlug] = useState("");
+  // Once the person touches the slug it is theirs, and the name stops steering it.
+  const slugEditedRef = useRef(false);
   const [isProcessing, setIsProcessing] = useState(false);
   const [processingStartedAt, setProcessingStartedAt] = useState<number | null>(null);
   const [processingElapsedSeconds, setProcessingElapsedSeconds] = useState(0);
@@ -187,8 +201,9 @@ export function ProjectLauncher({
   const handleSubmit = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     const trimmed = projectName.trim();
+    setCreateError(null);
     if (!trimmed) {
-      showStatus("Please enter a space name.", "warning", 3000);
+      setCreateError("Give the space a name first.");
       return;
     }
     let orgPayload: { orgId?: string | null; orgSlug?: string | null; orgName?: string | null } =
@@ -206,7 +221,7 @@ export function ProjectLauncher({
               .replace(/[^a-z0-9]+/gi, "-")
               .replace(/^-+|-+$/g, "");
       if (!orgName || !orgSlug) {
-        showStatus("Please enter a team name and slug.", "warning", 3000);
+        setCreateError("Give the new team a name and a short slug first.");
         return;
       }
       orgPayload = { orgName, orgSlug };
@@ -240,6 +255,7 @@ export function ProjectLauncher({
       if (mode === "github") {
         setGithubImportError(message);
       } else {
+        setCreateError(message);
         showStatus(message, "error", 4000);
       }
     } finally {
@@ -352,7 +368,18 @@ export function ProjectLauncher({
                     <Input
                       id="project-launcher-org-name"
                       value={newOrgName}
-                      onChange={(e) => setNewOrgName(e.target.value)}
+                      onChange={(e) => {
+                        const value = e.target.value;
+                        setNewOrgName(value);
+                        // The slug follows the name until the person edits it
+                        // themselves. Asking someone to invent a URL fragment
+                        // before they can make their first space is a strange
+                        // first question to be asked by a product they have
+                        // not used yet.
+                        if (!slugEditedRef.current) {
+                          setNewOrgSlug(toSlug(value));
+                        }
+                      }}
                       placeholder="e.g. Weekend crew"
                       data-testid="project-launcher-org-name-input"
                     />
@@ -361,6 +388,9 @@ export function ProjectLauncher({
                     <Input
                       id="project-launcher-org-slug"
                       value={newOrgSlug}
+                      onFocus={() => {
+                        slugEditedRef.current = true;
+                      }}
                       onChange={(e) => setNewOrgSlug(e.target.value)}
                       placeholder="my-team"
                       data-testid="project-launcher-org-slug-input"
@@ -529,6 +559,19 @@ export function ProjectLauncher({
                 </Text>
               ) : null}
             </div>
+          ) : null}
+
+          {createError ? (
+            <Text
+              as="p"
+              variant="caption"
+              tone="inherit"
+              role="alert"
+              data-testid="project-launcher-error"
+              className="break-words text-rose-600 dark:text-rose-300"
+            >
+              {createError}
+            </Text>
           ) : null}
 
           <div className="flex flex-col-reverse gap-2 pt-1 sm:flex-row sm:items-center sm:justify-end">
