@@ -1,8 +1,8 @@
-import { describe, expect, it, vi } from "vitest";
+import { describe, expect, it, vi, type Mock } from "vitest";
 import { routeConnectorSelection, type ConnectorRoutingActions } from "../connectorRouting";
 import { CONNECTORS, isConnectorAvailable, type Connector, type SkillConnector } from "../connectors";
 
-function actions(): ConnectorRoutingActions & Record<keyof ConnectorRoutingActions, ReturnType<typeof vi.fn>> {
+function actions(): ConnectorRoutingActions & Record<keyof ConnectorRoutingActions, Mock> {
   return {
     openConfirm: vi.fn(),
     leaveSheet: vi.fn(),

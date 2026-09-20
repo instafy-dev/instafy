@@ -2,7 +2,7 @@
 
 import { act, createElement, type ComponentProps } from "react";
 import { createRoot, type Root } from "react-dom/client";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi, type Mock } from "vitest";
 import {
   fetchFreshWebRtcPeerConfiguration,
   normalizeWebRtcAnswer,
@@ -228,8 +228,8 @@ describe("WebRTC Shared Browser grant rotation", () => {
   const stableIceServers: RTCIceServer[] = [];
   let container: HTMLDivElement;
   let root: Root;
-  let fetchMock: ReturnType<typeof vi.fn>;
-  let drawImage: ReturnType<typeof vi.fn>;
+  let fetchMock: Mock;
+  let drawImage: Mock;
 
   beforeEach(() => {
     (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;

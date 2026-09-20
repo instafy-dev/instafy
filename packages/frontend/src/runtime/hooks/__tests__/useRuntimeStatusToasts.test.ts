@@ -2,7 +2,7 @@
 
 import { act, createElement } from "react";
 import { createRoot, type Root } from "react-dom/client";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi, type Mock } from "vitest";
 import type {
   ControllerRuntimeStatusEntry,
   LocalWorkspacePresence,
@@ -132,7 +132,7 @@ describe("local runtime status toasts", () => {
   let container: HTMLDivElement;
   let root: Root;
   let latestProps: HarnessProps;
-  let showStatus: ReturnType<typeof vi.fn>;
+  let showStatus: Mock;
 
   const renderHarness = async (overrides: Partial<HarnessProps> = {}) => {
     latestProps = {

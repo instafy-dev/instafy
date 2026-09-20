@@ -59,5 +59,13 @@ export default defineConfig({
   sourcemap: true,
   clean: true,
   splitting: false,
+  // Pinned rather than inherited: tsup 8 defaults `removeNodeProtocol` to true
+  // and plans to flip it in tsup 9. tsup 7 stripped the prefix from this CJS
+  // bundle — its node-protocol rewrite applied to cjs output only, which is why
+  // the ESM cli and runtime-agent bundles kept theirs — so true is what keeps
+  // the Electron main and preload output comparable across the upgrade.
+  // Flipping it to false (`require("node:fs")`) is fine on Electron's Node, but
+  // it belongs in its own change, not in a dependency bump.
+  removeNodeProtocol: true,
   dts: false
 });
