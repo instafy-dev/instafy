@@ -264,7 +264,7 @@ describe("IntegrationRequestEntry", () => {
     // newer message, so no live buttons should linger in chat history.
     expect(container.querySelector('[data-testid="integration-request-retry"]')).toBeNull();
     expect(container.querySelector('[data-testid="integration-request-retry-sent"]')).not.toBeNull();
-    expect(container.textContent).toContain("Retry sent — the result appears below.");
+    expect(container.textContent).toContain("Retry sent. The result appears below.");
   });
 
   it("single-flights a direct import retry and renders an inert resolved receipt", async () => {

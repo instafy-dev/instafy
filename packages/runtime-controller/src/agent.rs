@@ -33,6 +33,7 @@ use crate::credits::{
     reconcile_managed_ai_usage_charge, ManagedAiTokenUsage,
 };
 use crate::dispatch::DispatchPromptNormalized;
+use crate::redaction::RedactedHeaders;
 use crate::runs::{load_run_snapshot, run_snapshot_to_json};
 use crate::state::RuntimeResourceUsagePayload;
 use crate::tokens::{
@@ -554,7 +555,7 @@ fn sanitize_json_for_postgres(value: JsonValue) -> JsonValue {
 #[instrument(skip(state, payload))]
 pub(crate) async fn agent_login(
     axum::extract::State(state): axum::extract::State<AppState>,
-    headers: HeaderMap,
+    headers: RedactedHeaders,
     axum::Json(payload): axum::Json<AgentLoginRequest>,
 ) -> Result<Json<runtime::RuntimeRegisterResponse>, (StatusCode, Json<ApiError>)> {
     let auth_context = authenticate_request(&state.config, &headers).await?;
@@ -736,7 +737,7 @@ pub(crate) async fn agent_login(
 #[instrument(skip(state, payload))]
 pub(crate) async fn agent_lease(
     axum::extract::State(state): axum::extract::State<AppState>,
-    headers: HeaderMap,
+    headers: RedactedHeaders,
     axum::Json(payload): axum::Json<AgentLeasePayload>,
 ) -> Result<Json<AgentLeaseResponse>, (StatusCode, Json<ApiError>)> {
     let AgentLeasePayload {
@@ -3712,6 +3713,16 @@ fn should_include_message_in_agent_history(
         return false;
     }
 
+    // A secret card is not a progress update, whatever its metadata says. It is
+    // a standing request, and the next turn has to be able to see that it was
+    // already made. Dropped here, the agent asks for the same value again the
+    // next time anything touches setup, because from where it is standing it
+    // never asked at all: a person who ran skill setup twice got two live cards
+    // for one token, worded differently, and answered neither.
+    if normalized_message_type.as_deref() == Some("secret_request") {
+        return true;
+    }
+
     let metadata = metadata.as_object();
     let kind = metadata
         .and_then(|map| map.get("kind"))
@@ -5151,6 +5162,22 @@ mod tests {
             "assistant",
             &reasoning_update,
             Some("reasoning"),
+        ));
+
+        // The one carve-out: a secret card wears the same in-progress stamp as
+        // everything above, and must survive it anyway, or the agent cannot see
+        // that it has already asked.
+        let secret_card = build_agent_update_metadata(
+            &job_id,
+            Some("secret_request"),
+            Some(json!({ "name": "NOTION_API_KEY" })),
+        );
+        assert_eq!(secret_card["kind"], json!("update"));
+        assert_eq!(secret_card["outcome"], json!("in_progress"));
+        assert!(should_include_message_in_agent_history(
+            "assistant",
+            &secret_card,
+            Some("secret_request"),
         ));
     }
 

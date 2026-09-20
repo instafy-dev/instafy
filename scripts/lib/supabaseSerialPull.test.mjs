@@ -275,7 +275,12 @@ test("Docker failures retain fixed symptom hints without logging raw output", (t
     ["manifest unknown", "manifest-missing"],
     ["no matching manifest for linux/arm64", "platform-missing"],
     ["proxyconnect tcp: Forbidden", "proxy-denied"],
-    ["x509: certificate signed by unknown authority", "tls"],
+    ["x509: certificate signed by unknown authority", "tls,tls-certificate"],
+    ["x509: certificate has expired or is not yet valid", "tls,tls-certificate"],
+    ["certificate verify failed", "tls,tls-certificate"],
+    ["net/http: TLS handshake timeout", "tls,tls-handshake-timeout"],
+    ["remote error: tls: handshake failure", "tls,tls-handshake-rejected"],
+    ["TLS handshake error", "tls"],
     ["lookup registry: no such host", "dns"],
     ["context deadline exceeded", "network-timeout"],
     ["read: connection reset by peer", "network-reset"],
@@ -308,6 +313,27 @@ test("Docker failure metadata is bounded, unknown output stays private, and no f
     assert.throws(() => h.run({ log: (line) => logs.push(line), execute: (binary, args, options) => args[0] === "pull" ? result : h.execute(binary, args, options) }), /^Error: supabase-serial-pull-failed$/);
     assert.equal(logs.at(-1), `[supabase-stack] Docker preparation failed stage=pull image=postgres ${suffix}`);
     assert.equal(h.calls.length, 3);
+    assert.equal(fs.existsSync(h.calls[0].options.env.HOME), false);
+  }
+});
+
+test("TLS details stay fixed and bounded without authorizing a retry or weakening verification", (t) => {
+  for (const oversized of [false, true]) {
+    const h = harness(t); const logs = []; let pulls = 0;
+    const diagnostic = "net/http: TLS handshake timeout; x509: certificate verify failed\n"
+      + "https://user:never-log@registry.invalid/path?token=never-log\n/private/never-log";
+    assert.throws(() => h.run({ log: (line) => logs.push(line), execute: (binary, args, options) => {
+      if (args[0] !== "pull") return h.execute(binary, args, options);
+      pulls += 1;
+      assert.deepEqual(args.slice(0, 2), ["pull", "--quiet"]);
+      assert.equal(options.env.DOCKER_TLS_VERIFY, undefined);
+      return { status: 1, stderr: diagnostic + (oversized ? "x".repeat(32_768) : "") };
+    } }), /^Error: supabase-serial-pull-failed$/);
+    assert.equal(pulls, 1);
+    assert.equal(logs.at(-1), "[supabase-stack] Docker preparation failed stage=pull image=postgres "
+      + "exit=1 signal=none-or-unknown error=none-or-unknown hints="
+      + (oversized ? "unclassified" : "tls,tls-certificate,tls-handshake-timeout"));
+    assert.ok(logs.every((line) => !/never-log|registry\.invalid|\/private\//.test(line)));
     assert.equal(fs.existsSync(h.calls[0].options.env.HOME), false);
   }
 });

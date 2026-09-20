@@ -11,6 +11,7 @@ import {
   waitForStoreProjectId,
 } from "../utils/harness.js";
 import {
+import { chooseOption } from "../utils/select.js";
   authenticatedActorLabel,
   collaborationAction,
   collaborationSocketProbeSnapshot,
@@ -205,7 +206,7 @@ test.describe("Org Shared Browser collaboration", () => {
     captureCollaborationFrames(page, "owner", collaborationFrames);
     try {
       await openProjectSettings(page);
-      await page.getByTestId("org-invite-link-role").selectOption("builder");
+      await chooseOption(page.getByTestId("org-invite-link-role"), "builder");
       await page.getByTestId("org-invite-link-create").click();
       const inviteLinkUrl = await page.getByTestId("org-invite-link-url").inputValue();
       if (!inviteLinkUrl) {
@@ -328,7 +329,7 @@ test.describe("Org Shared Browser collaboration", () => {
     let viewerUserId: string | null = null;
     try {
       await openProjectSettings(page);
-      await page.getByTestId("org-invite-link-role").selectOption("viewer");
+      await chooseOption(page.getByTestId("org-invite-link-role"), "viewer");
       await page.getByTestId("org-invite-link-create").click();
       const inviteUrl = await page.getByTestId("org-invite-link-url").inputValue();
       if (!inviteUrl) throw new Error("Shared Browser read-only invite link is missing.");

@@ -22,6 +22,24 @@ export const CHAT_SLASH_COMMANDS: ChatSlashCommandOption[] = [
     searchTerms: ["objective", "continue", "complete", "blocked"],
   },
   {
+    command: "/skills",
+    description: "List, add, or start skills in this space.",
+    searchTerms: ["skill", "install", "import", "add", "start", "pack"],
+  },
+  {
+    command: "/skills import",
+    description:
+      "Add skills from a GitHub repo, skill folder, SKILL.md link, or path; add --start to run their setup.",
+    searchTerms: ["install", "add", "pack"],
+    hidden: true,
+  },
+  {
+    command: "/skills start",
+    description: "Start an installed skill's Getting started flow.",
+    searchTerms: ["run", "setup", "onboard"],
+    hidden: true,
+  },
+  {
     command: "/learn collect",
     description: "Scan recent runs and collect learning candidates only.",
     searchTerms: ["scan", "collect", "memory"],

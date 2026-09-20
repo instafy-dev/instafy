@@ -45,6 +45,11 @@ export function ProjectLauncher({
   const [githubRepo, setGithubRepo] = useState("");
   const [githubRef, setGithubRef] = useState("");
   const [githubImportError, setGithubImportError] = useState<string | null>(null);
+  // A failed create leaves this dialog open, so the reason has to live in the
+  // dialog. It used to go to a transient toast and nothing else: a 500 from the
+  // server rendered as a sheet that simply sat there, and the only way to learn
+  // why was to open the network panel.
+  const [createError, setCreateError] = useState<string | null>(null);
   const [orgs, setOrgs] = useState<ControllerOrgSummary[]>([]);
   const [orgLoading, setOrgLoading] = useState(false);
   const [orgError, setOrgError] = useState<string | null>(null);
@@ -186,8 +191,9 @@ export function ProjectLauncher({
   const handleSubmit = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     const trimmed = projectName.trim();
+    setCreateError(null);
     if (!trimmed) {
-      showStatus("Please enter a space name.", "warning", 3000);
+      setCreateError("Give the space a name first.");
       return;
     }
     const orgPayload = selectedOrgId ? { orgId: selectedOrgId } : {};
@@ -220,6 +226,7 @@ export function ProjectLauncher({
       if (mode === "github") {
         setGithubImportError(message);
       } else {
+        setCreateError(message);
         showStatus(message, "error", 4000);
       }
     } finally {
@@ -485,6 +492,19 @@ export function ProjectLauncher({
                 </Text>
               ) : null}
             </div>
+          ) : null}
+
+          {createError ? (
+            <Text
+              as="p"
+              variant="caption"
+              tone="inherit"
+              role="alert"
+              data-testid="project-launcher-error"
+              className="break-words text-rose-600 dark:text-rose-300"
+            >
+              {createError}
+            </Text>
           ) : null}
 
           <div className="flex flex-col-reverse gap-2 pt-1 sm:flex-row sm:items-center sm:justify-end">

@@ -46,3 +46,13 @@ describe("chatContentHelpers", () => {
     ).toBe("Cloning source repo…");
   });
 });
+
+describe("command previews in the transcript", () => {
+  it("never shows the raw secrets invocation, which carries the space id", () => {
+    const raw = "instafy secrets list --space d6aaf12d-3d56-45da-90d3-4806e2e47c10 --json";
+    const preview = summarizeActiveCommandForPreview(raw);
+    expect(preview).toBe("Checking which values this space already has…");
+    expect(preview).not.toContain("d6aaf12d");
+    expect(preview).not.toContain("--json");
+  });
+});

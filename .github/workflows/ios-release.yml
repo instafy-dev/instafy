@@ -1,0 +1,550 @@
+name: iOS release
+run-name: iOS release ${{ inputs.tag || github.ref_name }}${{ inputs.dry_run && ' (dry run)' || '' }}
+
+# TestFlight internal release of dev.instafy.studio. The bot-pushed immutable
+# tag ios-v<MARKETING_VERSION>-<CURRENT_PROJECT_VERSION> is the ledger: the
+# authorize job binds it to protected main and the committed pbxproj version,
+# App Store Connect readback proves publication, and the GitHub Release (last
+# step) carries the secret-free release-receipt.json. Every job checks out
+# github.sha, never a computed ref, and no job reads or writes an Actions cache:
+# authorize refuses a run whose tag resolves to any other commit, so an existing
+# tag is dispatched with --ref <tag>.
+on:
+  push:
+    tags: ['ios-v*']
+  workflow_dispatch:
+    inputs:
+      tag: { description: 'Release tag (existing, or the intended tag name for a dry run)', required: true, type: string }
+      dry_run: { description: 'Build, sign and verify but publish nothing', required: false, type: boolean, default: true }
+      reconcile_only: { description: 'Only reconcile an IPA App Store Connect already accepted (requires dry_run=false)', required: false, type: boolean, default: false }
+
+permissions:
+  contents: read
+
+# A pending run is replaced by a newer pending run in the same group, so dry runs
+# queue separately and can never displace a queued publication.
+concurrency: { group: "ios-release-${{ github.event_name == 'workflow_dispatch' && inputs.dry_run && 'dry-run' || 'publish' }}", cancel-in-progress: false }
+
+defaults:
+  run:
+    shell: bash
+
+env:
+  APP_BUNDLE_ID: dev.instafy.studio
+  IOS_SCHEME: App
+  IOS_PROJECT: packages/frontend/ios/App/App.xcodeproj
+  IOS_REQUIRED_XCODE_MAJOR: '26'
+  ARCHIVE: Instafy.xcarchive
+  IPA: Instafy.ipa
+  CI: 'true'
+  VITE_OTA_CHANNEL: internal
+  CAPACITOR_LIVE_UPDATE_DEFAULT_CHANNEL: internal
+  PNPM_VERSION: 10.34.5
+  GITLEAKS_VERSION: 8.30.1
+  GITLEAKS_DARWIN_ARM64_SHA256: b40ab0ae55c505963e365f271a8d3846efbc170aa17f2607f13df610a9aeb6a5
+
+jobs:
+  authorize:
+    name: Authorize tag
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    outputs:
+      tag: ${{ steps.verify.outputs.tag }}
+      mode: ${{ steps.verify.outputs.mode }}
+      source_sha: ${{ steps.verify.outputs.source_sha }}
+      marketing: ${{ steps.verify.outputs.marketing }}
+      build: ${{ steps.verify.outputs.build }}
+      reconcile_only: ${{ steps.verify.outputs.reconcile_only }}
+    steps:
+      - name: Resolve tag, actor and source commit
+        id: resolve
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EVENT_PUSHER: ${{ github.event.pusher.name }}
+          INPUT_TAG: ${{ inputs.tag }}
+          INPUT_DRY_RUN: ${{ inputs.dry_run }}
+        run: |
+          set -euo pipefail
+          fail() { echo "::error::$1"; exit 1; }
+          [ "$GITHUB_REPOSITORY" = "instafy-dev/instafy" ] || fail "Releases run only in instafy-dev/instafy."
+          [ "$GITHUB_ACTOR" = "instafy-bot" ] || fail "Only instafy-bot may run an iOS release."
+          # Re-runs keep github.actor; github.triggering_actor names whoever clicked re-run.
+          [ "$GITHUB_TRIGGERING_ACTOR" = "instafy-bot" ] || fail "Only instafy-bot may run or re-run an iOS release."
+          case "$GITHUB_EVENT_NAME" in
+            push)
+              tag="$GITHUB_REF_NAME"
+              [ "$GITHUB_REF" = "refs/tags/$tag" ] || fail "Push ref is not the release tag."
+              [ "$EVENT_PUSHER" = "instafy-bot" ] || fail "The tag pusher must be instafy-bot."
+              ;;
+            workflow_dispatch)
+              tag="$INPUT_TAG"
+              [ "$GITHUB_REF" = "refs/heads/main" ] || [ "$GITHUB_REF" = "refs/tags/$tag" ] ||
+                fail "Dispatch the release workflow from refs/heads/main or from the release tag (--ref <tag>)."
+              ;;
+            *) fail "Unsupported event." ;;
+          esac
+          [[ "$tag" =~ ^ios-v[0-9]+(\.[0-9]+){1,3}-[1-9][0-9]*$ ]] || fail "Tag must be ios-v<MARKETING_VERSION>-<CURRENT_PROJECT_VERSION>."
+          if gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$tag" > "$RUNNER_TEMP/ref.json" 2> "$RUNNER_TEMP/ref.err"; then
+            source_sha="$(jq -r .object.sha "$RUNNER_TEMP/ref.json")"
+            if [ "$(jq -r .object.type "$RUNNER_TEMP/ref.json")" = "tag" ]; then
+              source_sha="$(gh api "repos/$GITHUB_REPOSITORY/git/tags/$source_sha" --jq .object.sha)"
+            fi
+          elif grep -q 'HTTP 404' "$RUNNER_TEMP/ref.err" && [ "$GITHUB_EVENT_NAME" = "workflow_dispatch" ] && [ "$INPUT_DRY_RUN" = "true" ] && [ "$GITHUB_REF" = "refs/heads/main" ]; then
+            source_sha="$GITHUB_SHA"
+          else
+            fail "Release tag $tag does not resolve."
+          fi
+          [[ "$source_sha" =~ ^[0-9a-f]{40}$ ]] || fail "Source commit is invalid."
+          # Jobs check out github.sha only; the release source must be that commit.
+          [ "$source_sha" = "$GITHUB_SHA" ] || fail "Release tag $tag does not peel to the workflow commit; dispatch an existing tag with --ref $tag."
+          main_sha="$(gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/main" --jq .object.sha)"
+          [[ "$main_sha" =~ ^[0-9a-f]{40}$ ]] || fail "Protected main does not resolve."
+          status="$(gh api "repos/$GITHUB_REPOSITORY/compare/${source_sha}...${main_sha}" --jq .status)"
+          case "$status" in
+            identical|ahead) ;;
+            *) fail "Source commit is not contained in protected main (compare: $status)." ;;
+          esac
+          { echo "tag=$tag"; echo "source_sha=$source_sha"; } >> "$GITHUB_OUTPUT"
+
+      - name: Check out the tagged source
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+          fetch-depth: 1
+          submodules: false
+
+      - name: Set up Node.js
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: '22'
+
+      - name: Verify tag, actor, exact main and committed version
+        id: verify
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EVENT_PUSHER: ${{ github.event.pusher.name }}
+          RELEASE_TAG: ${{ steps.resolve.outputs.tag }}
+          SOURCE_SHA: ${{ steps.resolve.outputs.source_sha }}
+          INPUT_DRY_RUN: ${{ inputs.dry_run }}
+          INPUT_RECONCILE_ONLY: ${{ inputs.reconcile_only }}
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
+          if [ ! -f scripts/release/ios/verify-release-tag.mjs ]; then
+            echo "::error::The tagged commit predates the public iOS release lane; tag a newer commit."
+            exit 1
+          fi
+          export RELEASE_STATE_DIR="$RUNNER_TEMP/release-state"
+          bash scripts/release/ios/github-release-state.sh "$RELEASE_TAG" "$SOURCE_SHA" "$RELEASE_STATE_DIR"
+          # One-shot (release mode): repos/instafy-dev/instafy/releases/tags/<tag> must be HTTP 404.
+          node scripts/release/ios/verify-release-tag.mjs authorize
+
+      - name: Summary
+        if: always()
+        env:
+          SUMMARY: "tag `${{ steps.verify.outputs.tag }}`, mode `${{ steps.verify.outputs.mode }}`, commit `${{ steps.verify.outputs.source_sha }}`, version `${{ steps.verify.outputs.marketing }} (${{ steps.verify.outputs.build }})`"
+        run: |
+          set -euo pipefail
+          printf '### iOS release authorization\n\n%s\n' "$SUMMARY" >> "$GITHUB_STEP_SUMMARY"
+
+  build:
+    name: Build, sign and verify IPA
+    needs: authorize
+    if: needs.authorize.outputs.reconcile_only != 'true'
+    runs-on: macos-15
+    timeout-minutes: 120
+    environment: ios-release
+    permissions:
+      contents: read
+    env:
+      TAG: ${{ needs.authorize.outputs.tag }}
+      MODE: ${{ needs.authorize.outputs.mode }}
+      SOURCE_SHA: ${{ needs.authorize.outputs.source_sha }}
+      MARKETING: ${{ needs.authorize.outputs.marketing }}
+      BUILD: ${{ needs.authorize.outputs.build }}
+      DRY_RUN_FLAG: ${{ needs.authorize.outputs.mode != 'release' && '--dry-run' || '' }}
+      VITE_BUILD_GIT_SHA: ${{ needs.authorize.outputs.source_sha }}
+      VITE_SUPABASE_URL: ${{ vars.VITE_SUPABASE_URL }}
+      VITE_SUPABASE_ANON_KEY: ${{ vars.VITE_SUPABASE_ANON_KEY }}
+      VITE_CONTROLLER_URL: ${{ vars.VITE_CONTROLLER_URL || 'https://controller.instafy.dev' }}
+      APP_STORE_CONNECT_APP_ID: ${{ vars.APP_STORE_CONNECT_APP_ID }}
+      APP_STORE_CONNECT_INTERNAL_BETA_GROUP_ID: ${{ vars.APP_STORE_CONNECT_INTERNAL_BETA_GROUP_ID }}
+      # CAPACITOR_LIVE_UPDATE_PUBLIC_KEY is deliberately not job-level: the resolver writes it to GITHUB_ENV.
+    steps:
+      - name: Check out the tagged source
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+          fetch-depth: 1
+          submodules: recursive
+
+      - name: Verify trigger, runner and checkout
+        run: |
+          set -euo pipefail
+          [ "$GITHUB_TRIGGERING_ACTOR" = "instafy-bot" ] || { echo "::error::Only instafy-bot may run or re-run an iOS release (partial re-runs reuse authorize outputs)."; exit 1; }
+          test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
+          test "$RUNNER_OS" = macOS
+          test "$RUNNER_ARCH" = ARM64
+          umask 077
+          mkdir -p "$RUNNER_TEMP/ios-release" "$RUNNER_TEMP/ios-swiftpm/cache" "$RUNNER_TEMP/ios-swiftpm/checkouts"
+          { echo "IOS_RELEASE_DIR=$RUNNER_TEMP/ios-release"; echo "IOS_SWIFTPM_ROOT=$RUNNER_TEMP/ios-swiftpm"; } >> "$GITHUB_ENV"
+
+      - name: Set up pnpm
+        uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4
+        with:
+          run_install: false
+
+      - name: Set up Node.js
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: '22'
+
+      - name: Select Xcode via DEVELOPER_DIR and install exact dependencies
+        run: |
+          set -euo pipefail
+          # Newest Xcode_26*.app via DEVELOPER_DIR only: no global Xcode switch, no sudo, no runtime downloads.
+          DEVELOPER_DIR="$(node scripts/release/ios/select-xcode.mjs "$IOS_REQUIRED_XCODE_MAJOR")"
+          export DEVELOPER_DIR
+          echo "DEVELOPER_DIR=$DEVELOPER_DIR" >> "$GITHUB_ENV"
+          xcodebuild -version
+          sdk="$(xcrun --sdk iphoneos --show-sdk-version)"
+          [ "${sdk%%.*}" -ge "$IOS_REQUIRED_XCODE_MAJOR" ] || { echo "::error::iphoneos SDK $sdk is too old."; exit 1; }
+          test "$(pnpm --version)" = "$PNPM_VERSION"
+          pnpm install --frozen-lockfile
+
+      - name: Require Apple credentials and the App Store Connect one-shot preflight
+        env:
+          IOS_DEVELOPMENT_TEAM: ${{ secrets.IOS_DEVELOPMENT_TEAM }}
+          IOS_DIST_CERT_P12_BASE64: ${{ secrets.IOS_DIST_CERT_P12_BASE64 }}
+          IOS_DIST_CERT_PASSWORD: ${{ secrets.IOS_DIST_CERT_PASSWORD }}
+          APP_STORE_CONNECT_KEY_ID: ${{ secrets.APP_STORE_CONNECT_KEY_ID }}
+          APP_STORE_CONNECT_ISSUER_ID: ${{ secrets.APP_STORE_CONNECT_ISSUER_ID }}
+          APP_STORE_CONNECT_PRIVATE_KEY: ${{ secrets.APP_STORE_CONNECT_PRIVATE_KEY }}
+        run: |
+          set -euo pipefail
+          bash scripts/release/ios/signing-credentials.sh require
+          # Before any build minute: exact build absent, highest committed build lower (warnings in a dry run).
+          node scripts/release/ios/asc.mjs gate "$APP_BUNDLE_ID" "$MARKETING" "$BUILD" "$IOS_RELEASE_DIR/pre.json" \
+            ${DRY_RUN_FLAG:+"$DRY_RUN_FLAG"} > /dev/null
+
+      - name: Seed .env.supabase and resolve the Live Update trust anchor
+        id: live_key
+        env:
+          CAPACITOR_LIVE_UPDATE_PUBLIC_KEY: ${{ vars.CAPACITOR_LIVE_UPDATE_PUBLIC_KEY }}
+        run: |
+          set -euo pipefail
+          if [ -n "${INSTAFY_ENV_DIR:-}" ]; then echo "::error::INSTAFY_ENV_DIR must not be set."; exit 1; fi
+          [ -n "$VITE_SUPABASE_URL" ] || { echo "::error::Repository variable VITE_SUPABASE_URL is required."; exit 1; }
+          node scripts/release/ios/browser-safe-supabase-key.mjs
+          (umask 077; printf 'VITE_SUPABASE_URL=%s\nVITE_SUPABASE_ANON_KEY=%s\nVITE_CONTROLLER_URL=%s\n' \
+            "$VITE_SUPABASE_URL" "$VITE_SUPABASE_ANON_KEY" "$VITE_CONTROLLER_URL" > .env.supabase)
+          # Public key variable only (no OTA private key in this lane); fails on empty or non-RSA SPKI.
+          # Assign first so a failing verifier stops the step (set -e ignores substitutions inside echo).
+          trust_key_sha256="$(node scripts/release/ios/verify-trust-anchor.mjs key)"
+          [[ "$trust_key_sha256" =~ ^[0-9a-f]{64}$ ]] || { echo "::error::Live Update trust anchor fingerprint is missing."; exit 1; }
+          echo "TRUST_KEY_SHA256=$trust_key_sha256" >> "$GITHUB_ENV"
+          node scripts/resolve-live-update-public-key.mjs
+
+      - name: Validate iOS config and sync Capacitor
+        env:
+          RESOLVED_KEY_SHA256: ${{ steps.live_key.outputs.public_key_sha256 }}
+        run: |
+          set -euo pipefail
+          [[ "$TRUST_KEY_SHA256" =~ ^[0-9a-f]{64}$ ]] || { echo "::error::TRUST_KEY_SHA256 is missing."; exit 1; }
+          test "$RESOLVED_KEY_SHA256" = "$TRUST_KEY_SHA256"
+          pnpm test:ios:config
+          pnpm --filter @instafy/frontend cap:sync
+          synced_key_sha256="$(node scripts/release/ios/verify-trust-anchor.mjs config packages/frontend/ios/App/App/capacitor.config.json)"
+          test "$synced_key_sha256" = "$TRUST_KEY_SHA256"
+
+      - name: Prepare keychain, App Store profile and the App Release signing binding
+        env:
+          IOS_DEVELOPMENT_TEAM: ${{ secrets.IOS_DEVELOPMENT_TEAM }}
+          IOS_DIST_CERT_P12_BASE64: ${{ secrets.IOS_DIST_CERT_P12_BASE64 }}
+          IOS_DIST_CERT_PASSWORD: ${{ secrets.IOS_DIST_CERT_PASSWORD }}
+          APP_STORE_CONNECT_KEY_ID: ${{ secrets.APP_STORE_CONNECT_KEY_ID }}
+          APP_STORE_CONNECT_ISSUER_ID: ${{ secrets.APP_STORE_CONNECT_ISSUER_ID }}
+          APP_STORE_CONNECT_PRIVATE_KEY: ${{ secrets.APP_STORE_CONNECT_PRIVATE_KEY }}
+          IOS_APP_STORE_PROFILE_ID: ${{ vars.IOS_APP_STORE_PROFILE_ID }}
+        run: |
+          set -euo pipefail
+          bash scripts/release/ios/signing-credentials.sh keychain
+          # GITHUB_ENV values from the previous command are not visible in this step yet.
+          IOS_SIGNING_KEYCHAIN="$RUNNER_TEMP/instafy-ios-signing.keychain-db"
+          IOS_DIST_CERT_SHA1="$(sed -n 's/^IOS_DIST_CERT_SHA1=//p' "$GITHUB_ENV" | tail -n 1)"
+          IOS_DIST_CERT_SHA256="$(sed -n 's/^IOS_DIST_CERT_SHA256=//p' "$GITHUB_ENV" | tail -n 1)"
+          export IOS_SIGNING_KEYCHAIN IOS_DIST_CERT_SHA1 IOS_DIST_CERT_SHA256
+          metadata="$(umask 077; mktemp "$RUNNER_TEMP/instafy-ios-profile-metadata.XXXXXX")"
+          node scripts/release/ios/asc.mjs download-profile "$APP_BUNDLE_ID" "$IOS_DIST_CERT_SHA256" \
+            ${IOS_APP_STORE_PROFILE_ID:+"$IOS_APP_STORE_PROFILE_ID"} > "$metadata"
+          node scripts/release/ios/install-profile.mjs "$metadata"
+          rm -f "$metadata"
+          IOS_APP_STORE_PROFILE_UUID="$(sed -n 's/^IOS_APP_STORE_PROFILE_UUID=//p' "$GITHUB_ENV" | tail -n 1)"
+          export IOS_APP_STORE_PROFILE_UUID
+          node scripts/release/ios/bind-signing.mjs
+
+      - name: Archive (Release)
+        run: |
+          set -euo pipefail
+          test -n "${DEVELOPER_DIR:-}"
+          # No signing settings on the command line: SwiftPM resource bundles would inherit them.
+          xcodebuild -project "$IOS_PROJECT" -scheme "$IOS_SCHEME" -configuration Release \
+            -destination 'generic/platform=iOS' -archivePath "$RUNNER_TEMP/$ARCHIVE" \
+            -derivedDataPath "$RUNNER_TEMP/derived-data-ios-release" \
+            -clonedSourcePackagesDirPath "$IOS_SWIFTPM_ROOT/checkouts" -packageCachePath "$IOS_SWIFTPM_ROOT/cache" \
+            -disablePackageRepositoryCache archive
+
+      - name: Export IPA (app-store-connect, manual signing)
+        env:
+          IOS_DEVELOPMENT_TEAM: ${{ secrets.IOS_DEVELOPMENT_TEAM }}
+        run: bash scripts/release/ios/export-ipa.sh
+
+      - name: Verify the signed IPA
+        id: ipa
+        env:
+          IOS_ARCHIVE_PATH: ${{ runner.temp }}/Instafy.xcarchive
+          IOS_EXPORT_DIR: ${{ runner.temp }}/ios-export
+          EXPECTED_MARKETING: ${{ needs.authorize.outputs.marketing }}
+          EXPECTED_BUILD: ${{ needs.authorize.outputs.build }}
+        run: bash scripts/release/ios/verify-ipa.sh
+
+      - name: Gitleaks scan, native OTA inspection and App Store Connect re-observation
+        env:
+          IPA_SHA256: ${{ steps.ipa.outputs.ipa_sha256 }}
+          APP_STORE_CONNECT_KEY_ID: ${{ secrets.APP_STORE_CONNECT_KEY_ID }}
+          APP_STORE_CONNECT_ISSUER_ID: ${{ secrets.APP_STORE_CONNECT_ISSUER_ID }}
+          APP_STORE_CONNECT_PRIVATE_KEY: ${{ secrets.APP_STORE_CONNECT_PRIVATE_KEY }}
+        run: |
+          set -euo pipefail
+          bash scripts/release/ios/scan-ipa.sh
+          python3 scripts/release/ios/inspect-native-ota.py "$IOS_RELEASE_DIR/$IPA" "$SOURCE_SHA" "$TRUST_KEY_SHA256" > "$IOS_RELEASE_DIR/ota.json"
+          test "$(jq -r .nativeArtifactSha256 "$IOS_RELEASE_DIR/ota.json")" = "$IPA_SHA256"
+          # The local export must not have created an App Store Connect candidate.
+          node scripts/release/ios/asc.mjs gate "$APP_BUNDLE_ID" "$MARKETING" "$BUILD" "$IOS_RELEASE_DIR/post-build.json" \
+            ${DRY_RUN_FLAG:+"$DRY_RUN_FLAG"} > /dev/null
+
+      - name: Upload the signed IPA and evidence
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: ios-ipa-${{ needs.authorize.outputs.tag }}
+          path: |
+            ${{ runner.temp }}/ios-release/Instafy.ipa
+            ${{ runner.temp }}/ios-release/pre.json
+            ${{ runner.temp }}/ios-release/post-build.json
+            ${{ runner.temp }}/ios-release/ota.json
+            ${{ runner.temp }}/ios-release/digests.env
+          if-no-files-found: error
+          retention-days: ${{ needs.authorize.outputs.mode == 'release' && 30 || 7 }}
+          compression-level: 0
+          overwrite: true
+
+      - name: Remove signing credentials
+        if: always()
+        run: |
+          set -euo pipefail
+          rm -f .env.supabase packages/frontend/.env.production.local
+          if [ -f scripts/release/ios/signing-credentials.sh ]; then
+            bash scripts/release/ios/signing-credentials.sh cleanup
+          fi
+
+      - name: Summary
+        if: always()
+        env:
+          IPA_SHA256: ${{ steps.ipa.outputs.ipa_sha256 }}
+        run: |
+          set -euo pipefail
+          printf '### iOS build\n\n`%s` (%s) at `%s`, version `%s (%s)`, Xcode `%s`, IPA sha256 `%s`\n' \
+            "$TAG" "$MODE" "$SOURCE_SHA" "$MARKETING" "$BUILD" "${DEVELOPER_DIR:-unselected}" "${IPA_SHA256:-none}" >> "$GITHUB_STEP_SUMMARY"
+
+  publish:
+    name: Upload to TestFlight internal and publish receipt
+    needs: [authorize, build]
+    if: needs.authorize.outputs.mode == 'release' && needs.authorize.outputs.reconcile_only != 'true'
+    runs-on: macos-15
+    timeout-minutes: 150
+    environment: ios-release
+    permissions:
+      contents: write
+    env:
+      TAG: ${{ needs.authorize.outputs.tag }}
+      SOURCE_SHA: ${{ needs.authorize.outputs.source_sha }}
+      MARKETING: ${{ needs.authorize.outputs.marketing }}
+      BUILD: ${{ needs.authorize.outputs.build }}
+      APP_STORE_CONNECT_APP_ID: ${{ vars.APP_STORE_CONNECT_APP_ID }}
+      APP_STORE_CONNECT_INTERNAL_BETA_GROUP_ID: ${{ vars.APP_STORE_CONNECT_INTERNAL_BETA_GROUP_ID }}
+    steps:
+      - name: Check out the tagged source
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+          fetch-depth: 1
+          submodules: false
+
+      - name: Set up Node.js
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: '22'
+
+      - name: Download the built IPA
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: ios-ipa-${{ needs.authorize.outputs.tag }}
+          path: ${{ runner.temp }}/ios-release
+
+      - name: Verify trigger, checkout, runner and IPA bytes
+        run: |
+          set -euo pipefail
+          [ "$GITHUB_TRIGGERING_ACTOR" = "instafy-bot" ] || { echo "::error::Only instafy-bot may run or re-run an iOS release (partial re-runs reuse authorize outputs)."; exit 1; }
+          test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
+          test "$RUNNER_ARCH" = ARM64
+          dir="$RUNNER_TEMP/ios-release"
+          grep -Eq '^ipa_sha256=[0-9a-f]{64}$' "$dir/digests.env"
+          test "ipa_sha256=$(shasum -a 256 "$dir/$IPA" | awk '{print $1}')" = "$(grep '^ipa_sha256=' "$dir/digests.env")"
+          test "ipa_md5=$(md5 -q "$dir/$IPA")" = "$(grep '^ipa_md5=' "$dir/digests.env")"
+          test "ipa_size=$(stat -f '%z' "$dir/$IPA")" = "$(grep '^ipa_size=' "$dir/digests.env")"
+          { echo "IOS_RELEASE_DIR=$dir"; sed 's/^ipa_/IPA_/; s/^IPA_sha256/IPA_SHA256/; s/^IPA_md5/IPA_MD5/; s/^IPA_size/IPA_SIZE/' "$dir/digests.env"; } >> "$GITHUB_ENV"
+
+      - name: Recheck tag, exact main, absent Release and App Store Connect; stage the API key
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ needs.authorize.outputs.tag }}
+          APP_STORE_CONNECT_KEY_ID: ${{ secrets.APP_STORE_CONNECT_KEY_ID }}
+          APP_STORE_CONNECT_ISSUER_ID: ${{ secrets.APP_STORE_CONNECT_ISSUER_ID }}
+          APP_STORE_CONNECT_PRIVATE_KEY: ${{ secrets.APP_STORE_CONNECT_PRIVATE_KEY }}
+        run: |
+          set -euo pipefail
+          export RELEASE_STATE_DIR="$RUNNER_TEMP/release-state-upload"
+          bash scripts/release/ios/github-release-state.sh "$RELEASE_TAG" "$SOURCE_SHA" "$RELEASE_STATE_DIR"
+          node scripts/release/ios/verify-release-tag.mjs recheck
+          node scripts/release/ios/asc.mjs gate "$APP_BUNDLE_ID" "$MARKETING" "$BUILD" "$IOS_RELEASE_DIR/pre-upload.json" > /dev/null
+          bash scripts/release/ios/signing-credentials.sh stage-asc-key
+          echo "DEVELOPER_DIR=$(node scripts/release/ios/select-xcode.mjs "$IOS_REQUIRED_XCODE_MAJOR")" >> "$GITHUB_ENV"
+
+      - name: Upload the IPA once
+        env:
+          APP_STORE_CONNECT_KEY_ID: ${{ secrets.APP_STORE_CONNECT_KEY_ID }}
+          APP_STORE_CONNECT_ISSUER_ID: ${{ secrets.APP_STORE_CONNECT_ISSUER_ID }}
+        run: |
+          set -euo pipefail
+          set +e
+          xcrun altool --output-format xml --upload-app --file "$IOS_RELEASE_DIR/$IPA" --type ios --apiKey "$APP_STORE_CONNECT_KEY_ID" --p8-file-path "$ASC_KEY_PATH" --apiIssuer "$APP_STORE_CONNECT_ISSUER_ID" 2>&1 | tee "$RUNNER_TEMP/altool.log"
+          upload_status="${PIPESTATUS[0]}"
+          set -e
+          # altool can exit 0 on some delivery failures; its XML then carries product-errors.
+          if [ "$upload_status" -eq 0 ] && grep -q 'product-errors' "$RUNNER_TEMP/altool.log"; then upload_status=1; fi
+          if [ "$upload_status" -ne 0 ]; then
+            echo "::error::The single upload attempt failed. If App Store Connect accepted it anyway, dispatch with reconcile_only=true; never re-run this job."
+            exit 1
+          fi
+
+      - name: Reconcile TestFlight internal availability and write the receipt
+        env:
+          APP_STORE_CONNECT_KEY_ID: ${{ secrets.APP_STORE_CONNECT_KEY_ID }}
+          APP_STORE_CONNECT_ISSUER_ID: ${{ secrets.APP_STORE_CONNECT_ISSUER_ID }}
+          APP_STORE_CONNECT_PRIVATE_KEY: ${{ secrets.APP_STORE_CONNECT_PRIVATE_KEY }}
+          IOS_ASC_POLL_TIMEOUT_SECONDS: '6900'
+          IOS_ASC_POLL_INTERVAL_SECONDS: '30'
+        run: |
+          set -euo pipefail
+          # Durable proof is this readback (uploaded digests, VALID, INTERNAL_ONLY, IN_BETA_TESTING, in group).
+          node scripts/release/ios/asc.mjs reconcile "$APP_BUNDLE_ID" "$MARKETING" "$BUILD" \
+            "$IPA_SIZE" "$IPA_MD5" "$IPA_SHA256" > "$IOS_RELEASE_DIR/post.json"
+          node scripts/release/ios/write-receipt.mjs --tag "$TAG" --source-sha "$SOURCE_SHA" --marketing "$MARKETING" --build "$BUILD" \
+            --ipa "$IOS_RELEASE_DIR/$IPA" --pre "$IOS_RELEASE_DIR/pre-upload.json" --post "$IOS_RELEASE_DIR/post.json" \
+            --ota "$IOS_RELEASE_DIR/ota.json" --out "$IOS_RELEASE_DIR/release-receipt.json"
+
+      - name: Create the GitHub Release with release-receipt.json (last publication step)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: bash scripts/release/ios/create-release.sh "$RUNNER_TEMP/release-state-release" "$IOS_RELEASE_DIR" "$IOS_RELEASE_DIR/$IPA"
+
+      - name: Remove the App Store Connect key
+        if: always()
+        # Warn-only: the Release already exists, and a failed cleanup on the ephemeral runner
+        # must not turn a published run into a failure the handoff would reject.
+        continue-on-error: true
+        run: |
+          set -euo pipefail
+          if [ -f scripts/release/ios/signing-credentials.sh ]; then
+            bash scripts/release/ios/signing-credentials.sh cleanup
+          fi
+
+      - name: Summary
+        if: always()
+        run: |
+          set -euo pipefail
+          receipt="${IOS_RELEASE_DIR:-/nonexistent}/release-receipt.json"
+          ids="$( [ -f "$receipt" ] && jq -c .destination.appStoreConnect "$receipt" || echo none)"
+          printf '### TestFlight internal\n\n`%s` version `%s (%s)`, App Store Connect `%s`, receipt https://github.com/instafy-dev/instafy/releases/download/%s/release-receipt.json\n' \
+            "$TAG" "$MARKETING" "$BUILD" "$ids" "$TAG" >> "$GITHUB_STEP_SUMMARY"
+
+  reconcile_only:
+    name: Reconcile an accepted upload and publish receipt
+    needs: authorize
+    if: needs.authorize.outputs.mode == 'release' && needs.authorize.outputs.reconcile_only == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 130
+    environment: ios-release
+    permissions:
+      contents: write
+    env:
+      TAG: ${{ needs.authorize.outputs.tag }}
+      SOURCE_SHA: ${{ needs.authorize.outputs.source_sha }}
+      MARKETING: ${{ needs.authorize.outputs.marketing }}
+      BUILD: ${{ needs.authorize.outputs.build }}
+      APP_STORE_CONNECT_APP_ID: ${{ vars.APP_STORE_CONNECT_APP_ID }}
+      APP_STORE_CONNECT_INTERNAL_BETA_GROUP_ID: ${{ vars.APP_STORE_CONNECT_INTERNAL_BETA_GROUP_ID }}
+    steps:
+      - name: Check out the tagged source
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+          fetch-depth: 1
+          submodules: false
+
+      - name: Set up Node.js
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: '22'
+
+      - name: Recheck, reconcile the existing upload (never uploads), write receipt, create Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ needs.authorize.outputs.tag }}
+          CAPACITOR_LIVE_UPDATE_PUBLIC_KEY: ${{ vars.CAPACITOR_LIVE_UPDATE_PUBLIC_KEY }}
+          APP_STORE_CONNECT_KEY_ID: ${{ secrets.APP_STORE_CONNECT_KEY_ID }}
+          APP_STORE_CONNECT_ISSUER_ID: ${{ secrets.APP_STORE_CONNECT_ISSUER_ID }}
+          APP_STORE_CONNECT_PRIVATE_KEY: ${{ secrets.APP_STORE_CONNECT_PRIVATE_KEY }}
+          IOS_ASC_POLL_TIMEOUT_SECONDS: '6900'
+          IOS_ASC_POLL_INTERVAL_SECONDS: '30'
+        run: |
+          set -euo pipefail
+          [ "$GITHUB_TRIGGERING_ACTOR" = "instafy-bot" ] || { echo "::error::Only instafy-bot may run or re-run an iOS release (partial re-runs reuse authorize outputs)."; exit 1; }
+          test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
+          IOS_RELEASE_DIR="$RUNNER_TEMP/ios-release"
+          mkdir -p "$IOS_RELEASE_DIR"
+          echo "IOS_RELEASE_DIR=$IOS_RELEASE_DIR" >> "$GITHUB_ENV"
+          export RELEASE_STATE_DIR="$RUNNER_TEMP/release-state-reconcile"
+          bash scripts/release/ios/github-release-state.sh "$RELEASE_TAG" "$SOURCE_SHA" "$RELEASE_STATE_DIR"
+          node scripts/release/ios/verify-release-tag.mjs recheck
+          TRUST_KEY_SHA256="$(node scripts/release/ios/verify-trust-anchor.mjs key)"
+          [[ "$TRUST_KEY_SHA256" =~ ^[0-9a-f]{64}$ ]] || { echo "::error::Live Update trust anchor fingerprint is missing."; exit 1; }
+          node scripts/release/ios/asc.mjs reconcile-existing "$APP_BUNDLE_ID" "$MARKETING" "$BUILD" > "$IOS_RELEASE_DIR/post.json"
+          node scripts/release/ios/write-receipt.mjs --tag "$TAG" --source-sha "$SOURCE_SHA" --marketing "$MARKETING" --build "$BUILD" \
+            --post "$IOS_RELEASE_DIR/post.json" --digest-source app-store-connect --trust-key-sha256 "$TRUST_KEY_SHA256" \
+            --out "$IOS_RELEASE_DIR/release-receipt.json"
+          # Last publication step: GitHub Release with release-receipt.json only.
+          bash scripts/release/ios/create-release.sh "$RUNNER_TEMP/release-state-reconcile-release" "$IOS_RELEASE_DIR"
+
+      - name: Summary
+        if: always()
+        run: |
+          set -euo pipefail
+          printf '### TestFlight internal (reconcile only)\n\n`%s` version `%s (%s)`, receipt https://github.com/instafy-dev/instafy/releases/download/%s/release-receipt.json\n' \
+            "$TAG" "$MARKETING" "$BUILD" "$TAG" >> "$GITHUB_STEP_SUMMARY"

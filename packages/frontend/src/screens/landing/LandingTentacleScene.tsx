@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, type RefObject } from "react";
 
 // Presence cursors are pinned to fixed points in the tentacle artwork
 // (public/landing-tentacles.jpg, rendered with cover semantics), so each one
@@ -33,6 +33,18 @@ const PRESENCE_CURSORS: LandingPresenceCursor[] = [
 const CURSOR_MARGIN_Y = 60;
 const CURSOR_LABEL_CHAR_PX = 7.5;
 const CURSOR_MARGIN_BASE_X = 26;
+const CURSOR_FOOTPRINT_HEIGHT = 48;
+
+// A box in scene coordinates that draws over the artwork (the workspace demo
+// card). A cursor whose pill would be partly hidden behind it reads as
+// truncated text, so it is dropped the same way as one that would clip the
+// scene edge.
+interface SceneRect {
+  left: number;
+  top: number;
+  right: number;
+  bottom: number;
+}
 
 function projectImagePoint(
   box: { width: number; height: number },
@@ -54,6 +66,13 @@ function isInsideScene(
 ): boolean {
   const marginX = CURSOR_MARGIN_BASE_X + label.length * CURSOR_LABEL_CHAR_PX;
   return x >= 12 && x <= box.width - marginX && y >= 12 && y <= box.height - CURSOR_MARGIN_Y;
+}
+
+function isBehind(occluder: SceneRect | null, x: number, y: number, label: string): boolean {
+  if (!occluder || occluder.right <= occluder.left || occluder.bottom <= occluder.top) return false;
+  const right = x + CURSOR_MARGIN_BASE_X + label.length * CURSOR_LABEL_CHAR_PX;
+  const bottom = y + CURSOR_FOOTPRINT_HEIGHT;
+  return x < occluder.right && right > occluder.left && y < occluder.bottom && bottom > occluder.top;
 }
 
 // The bare artwork layer, shared with quieter surfaces (login) that want the
@@ -78,19 +97,48 @@ export function TentacleBackdrop({ className, fadeBottom = true }: { className?:
   );
 }
 
-export function LandingTentacleScene({ purpleAgentLabel }: { purpleAgentLabel?: string }) {
+export function LandingTentacleScene({
+  purpleAgentLabel,
+  occluderRef,
+}: {
+  purpleAgentLabel?: string;
+  // An element drawn over the scene (the workspace demo card); cursors that
+  // would sit partly behind it are dropped instead of showing a cut pill.
+  occluderRef?: RefObject<HTMLElement | null>;
+}) {
   const sceneRef = useRef<HTMLDivElement | null>(null);
   const [box, setBox] = useState<{ width: number; height: number } | null>(null);
+  const [occluder, setOccluder] = useState<SceneRect | null>(null);
 
   useEffect(() => {
     const node = sceneRef.current;
     if (!node) return;
-    const update = () => setBox({ width: node.clientWidth, height: node.clientHeight });
+    const update = () => {
+      setBox({ width: node.clientWidth, height: node.clientHeight });
+      const over = occluderRef?.current;
+      if (!over) {
+        setOccluder(null);
+        return;
+      }
+      const origin = node.getBoundingClientRect();
+      const rect = over.getBoundingClientRect();
+      setOccluder({
+        left: rect.left - origin.left,
+        top: rect.top - origin.top,
+        right: rect.right - origin.left,
+        bottom: rect.bottom - origin.top,
+      });
+    };
     update();
+    if (typeof ResizeObserver === "undefined") return;
     const observer = new ResizeObserver(update);
     observer.observe(node);
+    // The scene resizes with the viewport, which also moves the centred card,
+    // so observing the scene covers card position; the card's own size still
+    // changes when a scenario with more copy becomes active.
+    if (occluderRef?.current) observer.observe(occluderRef.current);
     return () => observer.disconnect();
-  }, []);
+  }, [occluderRef]);
 
   return (
     <div
@@ -105,7 +153,7 @@ export function LandingTentacleScene({ purpleAgentLabel }: { purpleAgentLabel?: 
         ? PRESENCE_CURSORS.map((cursor) => {
             const label = cursor.id === "purple-agent" ? (purpleAgentLabel ?? "Agent") : cursor.label;
             const { x, y } = projectImagePoint(box, cursor.imageX, cursor.imageY);
-            if (!isInsideScene(box, x, y, label)) return null;
+            if (!isInsideScene(box, x, y, label) || isBehind(occluder, x, y, label)) return null;
             return (
               <span
                 key={cursor.id}

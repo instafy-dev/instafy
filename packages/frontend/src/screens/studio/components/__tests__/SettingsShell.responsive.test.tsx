@@ -3,7 +3,7 @@
 import { act, useState } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { MemoryRouter, useLocation, useNavigate } from "react-router-dom";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi, type Mock } from "vitest";
 import { SettingsShell, type SettingsCategory } from "../SettingsShell";
 import { useSettingsRoute } from "../../settingsRoute";
 
@@ -37,7 +37,7 @@ describe("SettingsShell available-pane navigation", () => {
   const observers: Array<{
     targets: Set<Element>;
     notify: () => void;
-    disconnect: ReturnType<typeof vi.fn>;
+    disconnect: Mock;
   }> = [];
 
   function Harness({ initialCategory = "people", personal = false }: { initialCategory?: string; personal?: boolean }) {

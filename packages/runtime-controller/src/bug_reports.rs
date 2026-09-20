@@ -23,6 +23,9 @@ use crate::errors::{
 };
 use crate::ota::require_operator_access_for_context;
 use crate::projects::{ensure_project_read_access, load_project_record};
+use crate::redaction::{
+    is_sensitive_diagnostic_key, normalize_diagnostic_key, REDACTED_DIAGNOSTIC_VALUE,
+};
 use crate::state::{publish_controller_event_with_conversation, AppState};
 
 const MAX_SCREENSHOTS: usize = 6;
@@ -49,7 +52,6 @@ const SUPPORT_THREAD_POSTS_PER_MINUTE: usize = 30;
 // enqueue for the support/devbox pipeline.
 const MAX_CUSTOMER_REPORTS_PER_24_HOURS: i64 = 25;
 const MAX_CUSTOMER_MESSAGES_PER_24_HOURS: i64 = 250;
-const REDACTED_DIAGNOSTIC_VALUE: &str = "[REDACTED]";
 const DEFAULT_LIST_LIMIT: i64 = 25;
 const MAX_LIST_LIMIT: i64 = 100;
 const BUG_REPORT_COOLDOWN: Duration = Duration::from_secs(10);
@@ -3674,48 +3676,6 @@ fn redact_bug_report_diagnostics_at_depth(value: JsonValue, depth: usize) -> Jso
         }
         other => other,
     }
-}
-
-fn normalize_diagnostic_key(key: &str) -> String {
-    key.chars()
-        .filter(|character| character.is_ascii_alphanumeric())
-        .flat_map(char::to_lowercase)
-        .collect()
-}
-
-fn is_sensitive_diagnostic_key(key: &str) -> bool {
-    let key = normalize_diagnostic_key(key);
-    matches!(
-        key.as_str(),
-        "authorization"
-            | "proxyauthorization"
-            | "cookie"
-            | "setcookie"
-            | "password"
-            | "passwd"
-            | "secret"
-            | "credentials"
-            | "credential"
-            | "apikey"
-            | "privatekey"
-            | "clientsecret"
-            | "accesstoken"
-            | "refreshtoken"
-            | "idtoken"
-            | "sessiontoken"
-            | "secretaccesskey"
-            | "signingkey"
-            | "signature"
-            | "xamzcredential"
-            | "xamzsignature"
-            | "sas"
-            | "sastoken"
-    ) || key.ends_with("password")
-        || key.ends_with("secret")
-        || key.ends_with("token")
-        || key.ends_with("apikey")
-        || key.ends_with("privatekey")
-        || key.ends_with("signature")
 }
 
 const MAX_STRINGIFIED_DIAGNOSTIC_DEPTH: usize = 8;

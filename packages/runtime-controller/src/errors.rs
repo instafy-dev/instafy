@@ -53,10 +53,33 @@ pub(crate) fn internal_error(message: impl Into<String>) -> (StatusCode, Json<Ap
         tracing::warn!(error = %message, "database temporarily unavailable");
         return service_unavailable("Instafy is temporarily unavailable. Please retry.");
     }
+    // A 500 used to return in silence: only the transient branch above logged.
+    // A create-space failure therefore produced a dead dialog on the client and
+    // not one line on the server, which is a long way to walk to find out that
+    // a statement failed.
+    tracing::error!(error = %message, "request failed");
     (
         StatusCode::INTERNAL_SERVER_ERROR,
         Json(ApiError::new(message)),
     )
+}
+
+/// A database error together with the cause Postgres actually reported.
+///
+/// `tokio_postgres::Error`'s `Display` is the three words "db error" and
+/// nothing else: the SQLSTATE and the message hang off `source()`. Formatting
+/// one with `{error}` flattens every distinct failure into the same string, so
+/// the reason a statement was rejected never reaches either the log or the
+/// client.
+pub(crate) fn describe_db_error(error: &(dyn std::error::Error + 'static)) -> String {
+    let mut described = error.to_string();
+    let mut source = error.source();
+    while let Some(cause) = source {
+        described.push_str(": ");
+        described.push_str(&cause.to_string());
+        source = cause.source();
+    }
+    described
 }
 
 pub(crate) fn service_unavailable(message: impl Into<String>) -> (StatusCode, Json<ApiError>) {

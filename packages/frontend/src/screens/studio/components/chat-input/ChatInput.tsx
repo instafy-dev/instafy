@@ -1,7 +1,7 @@
 import type { ClipboardEvent, KeyboardEvent } from "react";
 import { forwardRef, useCallback, useEffect, useImperativeHandle, useMemo, useRef } from "react";
 import { LexicalComposer } from "@lexical/react/LexicalComposer";
-import { ContentEditable } from "@lexical/react/LexicalContentEditable";
+import { ContentEditable, type ContentEditableProps } from "@lexical/react/LexicalContentEditable";
 import { PlainTextPlugin } from "@lexical/react/LexicalPlainTextPlugin";
 import { HistoryPlugin } from "@lexical/react/LexicalHistoryPlugin";
 import { OnChangePlugin } from "@lexical/react/LexicalOnChangePlugin";
@@ -25,6 +25,14 @@ import {
 import { useCoarsePointer } from "../../../../hooks/useCoarsePointer";
 import type { ControllerProjectMember } from "../../../../sdk/instafy";
 import { installBrowserUseVirtualClipboardForAutomation } from "./browserUseVirtualClipboard";
+
+// Lexical types the placeholder and aria-placeholder as a pair (both or
+// neither); this keeps that pairing per union member when spreading.
+type ChatInputPlaceholderProps = ContentEditableProps extends infer P
+  ? P extends ContentEditableProps
+    ? Pick<P, "placeholder" | "aria-placeholder">
+    : never
+  : never;
 
 export type ChatInputHandle = {
   focus: () => void;
@@ -127,8 +135,8 @@ function ChatInputEditor(
   const coarsePointer = useCoarsePointer();
   // The editor's box in the one-row composer: the row controls' height as
   // its minimum and (control − line) / 2 of padding on each side, so a
-  // single line — and the last line of a wrapped draft, since the row is
-  // items-end — centres on the controls (see chatInputGrowth.ts). The
+  // single line (and the last line of a wrapped draft, since the row is
+  // items-end) centres on the controls (see chatInputGrowth.ts). The
   // Browser-session condensed bar (compact) keeps its own tighter box. The
   // overlays sit on the first line, so they carry the same top offset.
   const editorBoxClass = compact
@@ -151,6 +159,25 @@ function ChatInputEditor(
   useEffect(() => {
     editor.setEditable(!readOnly);
   }, [editor, readOnly]);
+
+  // The placeholder rides on the ContentEditable itself so assistive tech
+  // announces it (aria-placeholder); the visual overlay is unchanged. Lexical
+  // types the pair together: no overlay, no aria-placeholder.
+  const placeholderProps: ChatInputPlaceholderProps =
+    showGhostSuggestion || showRecordingIndicator
+      ? { placeholder: null }
+      : {
+          "aria-placeholder": placeholder,
+          placeholder: (
+            <div
+              className={`pointer-events-none absolute inset-x-0 z-10 block overflow-hidden text-ellipsis whitespace-nowrap pr-2 text-base leading-5 text-slate-400 sm:text-sm dark:text-slate-500 ${overlayTopClass} ${
+                readOnly ? "opacity-60" : ""
+              }`}
+            >
+              {placeholder}
+            </div>
+          ),
+        };
 
   useImperativeHandle(
     ref,
@@ -308,6 +335,7 @@ function ChatInputEditor(
       <PlainTextPlugin
         contentEditable={
           <ContentEditable
+            {...placeholderProps}
             id="studio-chat-input"
             data-testid="chat-input"
             aria-label="Ask Octo"
@@ -336,17 +364,6 @@ function ChatInputEditor(
               readOnly ? "cursor-not-allowed opacity-60" : ""
             }`}
           />
-        }
-        placeholder={
-          showGhostSuggestion || showRecordingIndicator ? null : (
-            <div
-              className={`pointer-events-none absolute inset-x-0 z-10 block overflow-hidden text-ellipsis whitespace-nowrap pr-2 text-base leading-5 text-slate-400 sm:text-sm dark:text-slate-500 ${overlayTopClass} ${
-                readOnly ? "opacity-60" : ""
-              }`}
-            >
-              {placeholder}
-            </div>
-          )
         }
         ErrorBoundary={({ children }) => <>{children}</>}
       />

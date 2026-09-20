@@ -10,7 +10,12 @@ import type {
   ChatMessageCommitRange,
   ChatMessageFileChange,
 } from "../types";
-import { parseCommandExecutionOutput, parseTodoItems, truncate } from "./chatContentHelpers";
+import {
+  parseCommandExecutionOutput,
+  parseTodoItems,
+  summarizeActiveCommandForPreview,
+  truncate,
+} from "./chatContentHelpers";
 import {
   formatPromptContextModeLabel,
   formatTokenCountLabel,
@@ -151,7 +156,21 @@ export function TimelineEntry({
               ) : null}
             </div>
             {messageType !== "todo_list" ? (
-              <MessageContent content={message.content} projectId={projectId ?? null} />
+              <MessageContent
+                // A command that produced no output renders here, at the same
+                // weight as a sentence octo wrote. The raw invocation carries
+                // the space id and reads as leaked plumbing during a first run
+                // whose promise is that setup does not fill the chat with
+                // commands, so it is summarised into what it was for. With
+                // output, the branch above renders it inside CommandOutputBlock
+                // instead, where a command belongs.
+                content={
+                  messageType === "command_execution"
+                    ? summarizeActiveCommandForPreview(message.content)
+                    : message.content
+                }
+                projectId={projectId ?? null}
+              />
             ) : null}
           </div>
           {statusBadge ? (

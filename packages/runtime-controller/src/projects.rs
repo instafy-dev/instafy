@@ -23,7 +23,8 @@ use zip::write::{FileOptions, ZipWriter};
 use crate::auth::{authenticate_request, RequestContext};
 use crate::conversations::{ensure_conversation_access, load_conversation_record};
 use crate::errors::{
-    bad_request, database_unavailable, forbidden, internal_error, not_found, unauthorized, ApiError,
+    bad_request, database_unavailable, describe_db_error, forbidden, internal_error, not_found,
+    unauthorized, ApiError,
 };
 use crate::origins::{
     acquire_fresh_lease, release_lease,
@@ -5365,7 +5366,10 @@ pub(crate) async fn ensure_project_org(
         )
         .await
         .map_err(|error| {
-            internal_error(format!("failed to link project to organization: {error}"))
+            internal_error(format!(
+                "failed to link project to organization: {}",
+                describe_db_error(&error)
+            ))
         })?;
 
     if let Some(owner) = project.owner_user_id {
@@ -5377,7 +5381,12 @@ pub(crate) async fn ensure_project_org(
                 &[&org_id, &owner],
             )
             .await
-            .map_err(|error| internal_error(format!("failed to upsert org membership: {error}")))?;
+            .map_err(|error| {
+                internal_error(format!(
+                    "failed to upsert org membership: {}",
+                    describe_db_error(&error)
+                ))
+            })?;
     }
 
     if let Err(error) =
@@ -6124,7 +6133,12 @@ pub(crate) async fn upsert_org(
             &[&slug, &trimmed_name],
         )
         .await
-        .map_err(|error| internal_error(format!("failed to upsert organization: {error}")))?;
+        .map_err(|error| {
+            internal_error(format!(
+                "failed to upsert organization: {}",
+                describe_db_error(&error)
+            ))
+        })?;
 
     if let Some(row) = inserted {
         let org_id: Uuid = row.get("id");
@@ -6139,7 +6153,10 @@ pub(crate) async fn upsert_org(
                 )
                 .await
                 .map_err(|error| {
-                    internal_error(format!("failed to upsert org membership: {error}"))
+                    internal_error(format!(
+                        "failed to upsert org membership: {}",
+                        describe_db_error(&error)
+                    ))
                 })?;
         }
         return Ok(OrgUpsertOutcome::Created(org_id, org_name));

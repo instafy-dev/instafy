@@ -3,6 +3,7 @@ import { act, type ReactNode } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ProjectLauncher } from "../ProjectLauncher";
+import { chooseSelectValue, readSelectValue } from "../../../../test-utils/select";
 
 const mocks = vi.hoisted(() => ({ list: vi.fn(), create: vi.fn(), upload: vi.fn(), update: vi.fn(), showStatus: vi.fn(), reset: vi.fn() }));
 vi.mock("../../../../sdk/instafy", () => ({ controllerClient: { organizations: { list: mocks.list, create: mocks.create } } }));
@@ -36,11 +37,7 @@ describe("space launcher team creation", () => {
     const onCreateBlank = vi.fn(); const onClose = vi.fn();
     await act(async () => root.render(<ProjectLauncher open onClose={onClose} onCreateBlank={onCreateBlank} onCreateFromGithub={vi.fn()} />));
     await input("project-launcher-name-input", "First space");
-    await act(async () => {
-      const select = container.querySelector<HTMLSelectElement>('[data-testid="project-launcher-org-select"]')!;
-      select.value = "new";
-      select.dispatchEvent(new Event("change", { bubbles: true }));
-    });
+    await chooseSelectValue(container.querySelector('[data-testid="project-launcher-org-select"]'), "new");
     await input("project-launcher-org-name-input", "Photo team");
     await act(async () => {
       const picker = container.querySelector<HTMLInputElement>('[data-testid="new-team-picture-input"]')!;
@@ -50,7 +47,7 @@ describe("space launcher team creation", () => {
     await act(async () => container.querySelectorAll("form")[1].dispatchEvent(new Event("submit", { bubbles: true, cancelable: true })));
     expect(mocks.create).toHaveBeenCalledTimes(1);
     expect(mocks.update).toHaveBeenCalledWith("created-team", { avatarUrl: "https://example.test/photo.png" });
-    expect(container.querySelector<HTMLSelectElement>('[data-testid="project-launcher-org-select"]')?.value).toBe("created-team");
+    expect(readSelectValue(container.querySelector('[data-testid="project-launcher-org-select"]'))).toBe("created-team");
     expect(onCreateBlank).not.toHaveBeenCalled();
     await act(async () => container.querySelector("form")!.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true })));
     expect(onCreateBlank).toHaveBeenCalledExactlyOnceWith("First space", { orgId: "created-team" });

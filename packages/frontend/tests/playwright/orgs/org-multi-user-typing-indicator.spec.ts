@@ -2,6 +2,7 @@ import { test, expect } from "@playwright/test";
 import { openTeamDirectory } from "../utils/sidebar.js";
 import { loginAsGuest, prepareStudio, resetRuntimeUserState, waitForStoreProjectId } from "../utils/harness.js";
 import { createPublicChatFromTopBar } from "../utils/chatUi.js";
+import { chooseOption } from "../utils/select.js";
 
 async function openProjectSettings(page: import("@playwright/test").Page) {
   await openTeamDirectory(page);
@@ -39,7 +40,7 @@ test.describe("Org multi-user typing indicator", () => {
     }
 
     await openProjectSettings(page);
-    await page.getByTestId("org-invite-link-role").selectOption("builder");
+    await chooseOption(page.getByTestId("org-invite-link-role"), "builder");
     await page.getByTestId("org-invite-link-create").click();
     const inviteLinkUrl = await page.getByTestId("org-invite-link-url").inputValue();
     if (!inviteLinkUrl) {

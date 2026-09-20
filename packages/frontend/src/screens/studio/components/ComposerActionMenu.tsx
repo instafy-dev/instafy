@@ -1,4 +1,4 @@
-import { useCallback, useMemo, useState, type ReactNode } from "react";
+import { useCallback, useMemo, useState, type KeyboardEvent, type ReactNode } from "react";
 import {
   Bookmark,
   Github,
@@ -9,20 +9,55 @@ import {
   NavArrowLeft,
   NavArrowRight,
   OpenNewWindow,
+  PlugTypeC,
   Plus,
   Safari,
+  Search,
   Send,
   SoundHigh,
   SoundOff,
   Terminal,
 } from "iconoir-react";
 import { DialogTrigger } from "react-aria-components";
+import { Badge } from "../../../components/Badge";
 import { Button, IconButton } from "../../../components/Button";
 import { Text } from "../../../components/Text";
 import { StudioDialogPopover } from "../../../components/aria/StudioPopover";
 import { CHAT_SLASH_COMMANDS } from "../../../conversations/slashCommands";
+import { AVAILABLE_FEATURED_CONNECTORS, type ProductConnector } from "./connectors";
 
-type ComposerActionMenuView = "main" | "commands";
+type ComposerActionMenuView = "main" | "commands" | "connect";
+
+const NO_INSTALLED_SKILLS: ReadonlySet<string> = new Set();
+
+// The popover is a Dialog of ghost Buttons, so Tab already reaches every row;
+// this adds menu-style ArrowUp/ArrowDown (wrapping) and Home/End between the
+// enabled rows of whichever view is showing.
+function moveRowFocus(event: KeyboardEvent<HTMLDivElement>) {
+  const { key } = event;
+  if (key !== "ArrowDown" && key !== "ArrowUp" && key !== "Home" && key !== "End") {
+    return;
+  }
+  const rows = Array.from(
+    event.currentTarget.querySelectorAll<HTMLButtonElement>("button:not([disabled])"),
+  );
+  if (rows.length === 0) {
+    return;
+  }
+  const index = rows.indexOf(document.activeElement as HTMLButtonElement);
+  let next: number;
+  if (key === "Home") {
+    next = 0;
+  } else if (key === "End") {
+    next = rows.length - 1;
+  } else if (key === "ArrowDown") {
+    next = index < 0 ? 0 : (index + 1) % rows.length;
+  } else {
+    next = index <= 0 ? rows.length - 1 : index - 1;
+  }
+  rows[next]?.focus();
+  event.preventDefault();
+}
 
 function commandTestId(command: string): string {
   const normalized = command.replace(/^\//, "").replace(/[^a-z0-9]+/gi, "-").replace(/^-+|-+$/g, "");
@@ -36,6 +71,7 @@ function ActionRow({
   end,
   testId,
   disabled = false,
+  hoverTitle,
 }: {
   icon: ReactNode;
   title: string;
@@ -43,8 +79,14 @@ function ActionRow({
   end?: ReactNode;
   testId?: string;
   disabled?: boolean;
+  /**
+   * Native tooltip for a disabled row. It sits on a wrapper because the
+   * disabled Button has pointer-events none, so the pointer reaches the
+   * wrapper instead.
+   */
+  hoverTitle?: string;
 }) {
-  return (
+  const row = (
     <Button
       type="button"
       variant="ghost"
@@ -68,6 +110,7 @@ function ActionRow({
       </span>
     </Button>
   );
+  return hoverTitle ? <div title={hoverTitle}>{row}</div> : row;
 }
 
 export function ComposerActionMenu({
@@ -80,6 +123,9 @@ export function ComposerActionMenu({
   onOpenNewBrowser,
   onOpenInvite,
   onImportGithubRepo,
+  onSelectConnector,
+  onBrowseConnectors,
+  installedSkillNames = NO_INSTALLED_SKILLS,
   onInsertCommand,
   onQueueMessage,
   onStashDraft,
@@ -107,6 +153,15 @@ export function ComposerActionMenu({
   onOpenNewBrowser: () => void;
   onOpenInvite: () => void;
   onImportGithubRepo: () => void;
+  // "Connect a tool" opens a sub-view of the featured connector rows that can
+  // be selected today plus "Browse all tools"; a row press closes the menu and
+  // reports the connector, the last row closes the menu and opens the Connect
+  // sheet's browse stage. A "soon" connector (pack not published yet) is not
+  // listed here: the sheet names it with its Badge. Nothing here sends or
+  // prefills.
+  onSelectConnector?: (connector: ProductConnector) => void;
+  onBrowseConnectors?: () => void;
+  installedSkillNames?: ReadonlySet<string>;
   onInsertCommand: (command: string) => void;
   onQueueMessage?: () => void;
   onStashDraft?: () => void;
@@ -176,7 +231,7 @@ export function ComposerActionMenu({
         data-testid="composer-action-menu"
       >
         {view === "commands" ? (
-          <div className="space-y-1">
+          <div className="space-y-1" onKeyDown={moveRowFocus}>
             <Button
               type="button"
               variant="ghost"
@@ -201,8 +256,58 @@ export function ComposerActionMenu({
               />
             ))}
           </div>
+        ) : view === "connect" && onSelectConnector ? (
+          <div className="space-y-1" onKeyDown={moveRowFocus}>
+            <Button
+              type="button"
+              variant="ghost"
+              size="sm"
+              radius="xl"
+              onPress={() => setView("main")}
+              className="mb-1 justify-start px-2.5 text-left"
+              data-testid="composer-action-menu-connect-back"
+            >
+              <NavArrowLeft className="h-4 w-4" aria-hidden="true" />
+              Connect a tool
+            </Button>
+            {AVAILABLE_FEATURED_CONNECTORS.map((connector) => {
+              const Mark = connector.mark;
+              const installed =
+                connector.kind === "skill" && installedSkillNames.has(connector.skillName);
+              return (
+                <ActionRow
+                  key={connector.id}
+                  icon={<Mark className="h-4 w-4" aria-hidden="true" />}
+                  title={connector.name}
+                  end={
+                    installed ? (
+                      <Badge tone="success" size="xs">
+                        Connected
+                      </Badge>
+                    ) : undefined
+                  }
+                  onPress={() => {
+                    closeMenu();
+                    onSelectConnector(connector);
+                  }}
+                  testId={`composer-action-menu-connect-${connector.id}`}
+                />
+              );
+            })}
+            {onBrowseConnectors ? (
+              <ActionRow
+                icon={<Search className="h-4 w-4" aria-hidden="true" />}
+                title="Browse all tools"
+                onPress={() => {
+                  closeMenu();
+                  onBrowseConnectors();
+                }}
+                testId="composer-action-menu-connect-browse"
+              />
+            ) : null}
+          </div>
         ) : (
-          <div className="space-y-1">
+          <div className="space-y-1" onKeyDown={moveRowFocus}>
             {onInsertSuggestion ? (
               <ActionRow
                 icon={<MagicWand className="h-4 w-4" aria-hidden="true" />}
@@ -318,6 +423,15 @@ export function ComposerActionMenu({
                   onImportGithubRepo();
                 }}
                 testId="composer-action-menu-import-github"
+              />
+            ) : null}
+            {!mutationDisabled && onSelectConnector ? (
+              <ActionRow
+                icon={<PlugTypeC className="h-4 w-4" aria-hidden="true" />}
+                title="Connect a tool"
+                onPress={() => setView("connect")}
+                end={<NavArrowRight className="h-4 w-4" aria-hidden="true" />}
+                testId="composer-action-menu-connect"
               />
             ) : null}
             {!mutationDisabled && showBrowserAction ? (

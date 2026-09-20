@@ -70,6 +70,7 @@
     "test:controller": "node scripts/test-controller.mjs",
     "test:rust": "cargo test --manifest-path packages/runtime-contracts/Cargo.toml && pnpm test:controller && cargo test --manifest-path packages/runtime-agent/Cargo.toml --no-run && cargo test --manifest-path packages/runtime-agent/Cargo.toml --lib --test controller_client -- --test-threads=1 && cargo test --manifest-path packages/openai-proxy-server/Cargo.toml && cargo test --manifest-path packages/origin-http-server/Cargo.toml && cargo test --manifest-path packages/git-service/Cargo.toml",
     "dev:controller": "cargo run --manifest-path packages/runtime-controller/Cargo.toml",
+    "dev:session": "node scripts/dev-session.mjs",
     "dev:proxy": "cargo run --manifest-path packages/openai-proxy-server/Cargo.toml --bin proxy",
     "sync:supabase-local": "node scripts/sync-local-supabase-env.mjs",
     "dev:supabase:release": "node scripts/release-supabase.mjs",
@@ -166,7 +167,7 @@
     "@instafy/provider-client": "workspace:*",
     "@instafy/sdk": "workspace:*",
     "@supabase/supabase-js": "^2.39.3",
-    "baseline-browser-mapping": "^2.10.19",
+    "baseline-browser-mapping": "^2.11.25",
     "npm": "11.19.0",
     "supabase": "^2.92.0"
   }

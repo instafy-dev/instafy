@@ -500,6 +500,10 @@ export function ProjectPickerPanel({ onCreateProject, searchTerm, onSearchTermCh
           </div>
           {showAllOrgs ? (
             <Select
+              // The phone-width twin of the filter above. On a touch device the
+              // operating system's own wheel picker is the right control, and
+              // this ships as a Capacitor app, so this one stays native.
+              native
               value={orgFilterKey}
               onChange={(event) => setOrgFilterKey(event.target.value)}
               size="sm"

@@ -2,6 +2,7 @@ import { test, expect } from "@playwright/test";
 import { openTeamDirectory } from "../utils/sidebar.js";
 import { loginAsGuest, prepareStudio, resetRuntimeUserState } from "../utils/harness.js";
 import { disableAssistantIfPossible } from "../utils/runtimeAi.js";
+import { chooseOption } from "../utils/select.js";
 
 async function renameProject(
   page: import("@playwright/test").Page,
@@ -37,7 +38,7 @@ async function openProjectSettings(page: import("@playwright/test").Page) {
 
 async function createProjectInviteLink(page: import("@playwright/test").Page): Promise<string> {
   await openProjectSettings(page);
-  await page.getByTestId("org-invite-link-role").selectOption("builder");
+  await chooseOption(page.getByTestId("org-invite-link-role"), "builder");
   await page.getByTestId("org-invite-link-create").click();
   const inviteLinkInput = page.getByTestId("org-invite-link-url");
   await expect(inviteLinkInput).toBeVisible();

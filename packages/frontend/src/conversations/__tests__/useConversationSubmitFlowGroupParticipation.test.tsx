@@ -2,7 +2,7 @@
 
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi, type Mock } from "vitest";
 import { createInitialConversation, type ConversationState } from "../conversationState";
 
 const resolveParticipationMock = vi.hoisted(() => vi.fn());
@@ -84,8 +84,8 @@ function HookHarness({
   onReady,
 }: {
   conversation: ConversationState;
-  appendMessages: ReturnType<typeof vi.fn>;
-  updateMessage: ReturnType<typeof vi.fn>;
+  appendMessages: Mock;
+  updateMessage: Mock;
   onReady: (flow: SubmitFlow) => void;
 }) {
   const flow = useConversationSubmitFlow({
@@ -118,8 +118,8 @@ describe("useConversationSubmitFlow group participation", () => {
   let root: Root;
   let flow: SubmitFlow | null;
   let conversation: ConversationState;
-  let appendMessages: ReturnType<typeof vi.fn>;
-  let updateMessage: ReturnType<typeof vi.fn>;
+  let appendMessages: Mock;
+  let updateMessage: Mock;
 
   beforeEach(async () => {
     (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;

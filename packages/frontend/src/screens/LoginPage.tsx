@@ -244,7 +244,10 @@ export function LoginPage() {
     if (step === "password") {
       return null;
     }
-    return "Bring the AI you already pay for and open your projects from any device.";
+    // Most people have no AI subscription; the managed tier is free, and that is
+    // the sentence that opens the door for them. "Your projects" named something
+    // they do not have yet.
+    return "Start with the AI that comes with Instafy, or bring the one you already pay for.";
   }, [normalizedEmail, recoveryMode, step]);
 
   useEffect(() => {
@@ -922,41 +925,12 @@ export function LoginPage() {
       );
     }
 
+    // Email leads. A single "Continue with GitHub" at the top of the only sign-in
+    // screen tells a non-developer, louder than any sentence can, that the
+    // product is not for them. The developer path survives below the divider at
+    // lower weight, where it costs one glance to the people who want it.
     return (
       <div className="mt-8 space-y-6">
-        <div className="space-y-3">
-          <Button
-            variant="outline"
-            radius="full"
-            size="lg"
-            fullWidth
-            onPress={handleGithubLogin}
-            isDisabled={submitting || !hasSupabaseConfig || isExtensionEmbed}
-          >
-            <span className="inline-flex items-center gap-2">
-              <GitHubIcon className="h-4 w-4" />
-              <span>Continue with GitHub</span>
-            </span>
-          </Button>
-          {GOOGLE_AUTH_ENABLED ? (
-            <Button
-              variant="outline"
-              radius="full"
-              size="lg"
-              fullWidth
-              onPress={handleGoogleLogin}
-              isDisabled={submitting || !hasSupabaseConfig || isExtensionEmbed}
-            >
-              <span className="inline-flex items-center gap-2">
-                <GoogleIcon className="h-4 w-4" />
-                <span>Continue with Google</span>
-              </span>
-            </Button>
-          ) : null}
-        </div>
-
-        <OrDivider />
-
         <form onSubmit={handleContinueFromEmail} className="space-y-5">
           <div>
             <Text as="label" htmlFor="email" variant="overline" tone="muted" className="sr-only">
@@ -987,6 +961,39 @@ export function LoginPage() {
             Continue
           </Button>
         </form>
+
+        <OrDivider />
+
+        <div className="space-y-2">
+          <Button
+            variant="outline"
+            radius="full"
+            size="sm"
+            fullWidth
+            onPress={handleGithubLogin}
+            isDisabled={submitting || !hasSupabaseConfig || isExtensionEmbed}
+          >
+            <span className="inline-flex items-center gap-2">
+              <GitHubIcon className="h-4 w-4" />
+              <span>Continue with GitHub</span>
+            </span>
+          </Button>
+          {GOOGLE_AUTH_ENABLED ? (
+            <Button
+              variant="outline"
+              radius="full"
+              size="sm"
+              fullWidth
+              onPress={handleGoogleLogin}
+              isDisabled={submitting || !hasSupabaseConfig || isExtensionEmbed}
+            >
+              <span className="inline-flex items-center gap-2">
+                <GoogleIcon className="h-4 w-4" />
+                <span>Continue with Google</span>
+              </span>
+            </Button>
+          ) : null}
+        </div>
       </div>
     );
   };

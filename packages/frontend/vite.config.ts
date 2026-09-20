@@ -377,6 +377,15 @@ export default defineConfig(({ mode, command }) => {
     )),
     "import.meta.env.INSTAFY_DEV_CODEX_SEED_ENABLED": JSON.stringify(DEV_CODEX_SEED_ENABLED),
   },
+  // Keep third-party license banners in the files we publish. dist/ is what
+  // the hosted SPA, the Capacitor OTA bundle and the mobile app assets are all
+  // cut from, and the MIT/BSD notices in React, noVNC, Capacitor and Tailwind
+  // are required to travel with those copies. Vite defaults esbuild's
+  // legalComments to "none" since 7.2, so this has to be stated rather than
+  // inherited — nothing in CI would catch the banners going missing.
+  esbuild: {
+    legalComments: "inline",
+  },
   build: {
     rollupOptions: {
       output: isCapacitorBundleBuild

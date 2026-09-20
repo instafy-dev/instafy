@@ -5,12 +5,35 @@ import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ComposerActionMenu } from "../ComposerActionMenu";
+import {
+  AVAILABLE_FEATURED_CONNECTORS,
+  CONNECTORS,
+  FEATURED_CONNECTORS,
+  isConnectorAvailable,
+  type ProductConnector,
+} from "../connectors";
 
+// The trigger is a pass-through so the popover content always renders. It
+// mirrors the menu's controlled open state so a test can observe closeMenu()
+// (data-open flips to "false") and open the menu the way a trigger press would.
 vi.mock("react-aria-components", async (importOriginal) => {
   const original = await importOriginal<typeof import("react-aria-components")>();
   return {
     ...original,
-    DialogTrigger: ({ children }: { children: ReactNode }) => <>{children}</>,
+    DialogTrigger: ({
+      children,
+      isOpen,
+      onOpenChange,
+    }: {
+      children: ReactNode;
+      isOpen?: boolean;
+      onOpenChange?: (open: boolean) => void;
+    }) => (
+      <div data-testid="mock-dialog-trigger" data-open={isOpen ? "true" : "false"}>
+        <button type="button" data-testid="mock-dialog-trigger-open" onClick={() => onOpenChange?.(true)} />
+        {children}
+      </div>
+    ),
   };
 });
 
@@ -52,6 +75,9 @@ describe("ComposerActionMenu", () => {
       voiceRepliesEnabled?: boolean;
       voiceRepliesDisabled?: boolean;
       mutationDisabled?: boolean;
+      onSelectConnector?: (connector: ProductConnector) => void;
+      onBrowseConnectors?: () => void;
+      installedSkillNames?: ReadonlySet<string>;
     } = {},
   ) {
     await act(async () => {
@@ -185,6 +211,222 @@ describe("ComposerActionMenu", () => {
 
     expect(container.querySelector('[data-testid="composer-action-menu-invite"]')).toBeNull();
     expect(container.textContent).not.toContain("Invite teammates");
+  });
+
+  it("lists Connect a tool right after Import GitHub repo and opens the connect view", async () => {
+    const onSelectConnector = vi.fn();
+    const onBrowseConnectors = vi.fn();
+    await renderMenu(true, true, { onSelectConnector, onBrowseConnectors });
+
+    const rows = Array.from(
+      container.querySelectorAll<HTMLButtonElement>('[data-testid^="composer-action-menu-"]'),
+    ).map((row) => row.dataset.testid);
+    const importIndex = rows.indexOf("composer-action-menu-import-github");
+    expect(importIndex).toBeGreaterThanOrEqual(0);
+    expect(rows[importIndex + 1]).toBe("composer-action-menu-connect");
+    expect(rows[importIndex + 2]).toBe("composer-action-menu-open-browser");
+
+    const menuState = container.querySelector<HTMLDivElement>('[data-testid="mock-dialog-trigger"]')!;
+    await act(async () =>
+      container.querySelector<HTMLButtonElement>('[data-testid="mock-dialog-trigger-open"]')?.click(),
+    );
+    expect(menuState.dataset.open).toBe("true");
+
+    const connect = container.querySelector<HTMLButtonElement>('[data-testid="composer-action-menu-connect"]')!;
+    expect(connect.textContent).toContain("Connect a tool");
+    // The row opens a further list, so it carries a chevron like Commands.
+    expect(connect.querySelectorAll("svg").length).toBe(2);
+    await act(async () => connect.click());
+    // The row switches views: no handler call, the menu stays open, and the
+    // connect view lists a back row plus one row per connector, in order.
+    expect(onSelectConnector).not.toHaveBeenCalled();
+    expect(menuState.dataset.open).toBe("true");
+    expect(container.querySelector('[data-testid="composer-action-menu-import-github"]')).toBeNull();
+    const back = container.querySelector<HTMLButtonElement>('[data-testid="composer-action-menu-connect-back"]');
+    expect(back?.textContent).toContain("Connect a tool");
+    const connectRows = Array.from(
+      container.querySelectorAll<HTMLButtonElement>('[data-testid^="composer-action-menu-connect-"]'),
+    ).map((row) => row.dataset.testid);
+    // Back, the featured rows that can be selected today in list order, then
+    // Browse all tools. Soon rows are not listed (the sheet names them with
+    // their Badge), and the paste link lives in the sheet too.
+    expect(connectRows).toEqual([
+      "composer-action-menu-connect-back",
+      ...AVAILABLE_FEATURED_CONNECTORS.map((entry) => `composer-action-menu-connect-${entry.id}`),
+      "composer-action-menu-connect-browse",
+    ]);
+    expect(connectRows).toEqual([
+      "composer-action-menu-connect-back",
+      "composer-action-menu-connect-notion",
+      "composer-action-menu-connect-github",
+      "composer-action-menu-connect-freefinance",
+      "composer-action-menu-connect-browse",
+    ]);
+    for (const entry of FEATURED_CONNECTORS) {
+      if (!isConnectorAvailable(entry)) {
+        expect(container.querySelector(`[data-testid="composer-action-menu-connect-${entry.id}"]`)).toBeNull();
+      }
+    }
+    expect(container.querySelector('[data-testid="composer-action-menu-connect-slack"]')).toBeNull();
+    expect(container.querySelector('[data-testid="composer-action-menu-connect-discord"]')).toBeNull();
+    expect(container.querySelector('[data-testid="composer-action-menu-connect-other"]')).toBeNull();
+    expect(container.textContent).not.toContain("Paste a skill link");
+    expect(container.textContent).not.toContain("Soon");
+    expect(container.textContent).not.toContain("coming soon");
+    expect(container.querySelector("button[disabled]")).toBeNull();
+    expect(
+      container.querySelector('[data-testid="composer-action-menu-connect-browse"]')?.textContent,
+    ).toContain("Browse all tools");
+    expect(container.textContent).not.toContain("Connected");
+    expect(container.textContent).not.toContain("\u2014");
+
+    // The published Notion row is live with no Badge and no hover title.
+    const notionRow = container.querySelector<HTMLButtonElement>('[data-testid="composer-action-menu-connect-notion"]')!;
+    expect(notionRow.disabled).toBe(false);
+    expect(notionRow.textContent).toBe("Notion");
+    expect(notionRow.querySelector("span.rounded-full")).toBeNull();
+    expect(notionRow.parentElement?.getAttribute("title")).toBeNull();
+    const githubRow = container.querySelector<HTMLButtonElement>('[data-testid="composer-action-menu-connect-github"]')!;
+    expect(githubRow.disabled).toBe(false);
+    expect(githubRow.textContent).toBe("GitHub");
+    expect(githubRow.parentElement?.getAttribute("title")).toBeNull();
+    expect(container.querySelector<HTMLButtonElement>('[data-testid="composer-action-menu-connect-browse"]')?.disabled).toBe(false);
+    expect(container.textContent).not.toContain("please");
+
+    // Arrow keys move between the rows like a menu, wrapping at both ends.
+    const pressKey = (element: Element | null | undefined, key: string) =>
+      act(async () => {
+        element?.dispatchEvent(new KeyboardEvent("keydown", { key, bubbles: true, cancelable: true }));
+      });
+    await act(async () => back?.focus());
+    expect(document.activeElement).toBe(back);
+    await pressKey(back, "ArrowDown");
+    expect((document.activeElement as HTMLElement | null)?.dataset.testid).toBe(
+      "composer-action-menu-connect-notion",
+    );
+    await pressKey(document.activeElement, "ArrowDown");
+    expect((document.activeElement as HTMLElement | null)?.dataset.testid).toBe(
+      "composer-action-menu-connect-github",
+    );
+    await pressKey(document.activeElement, "ArrowUp");
+    expect((document.activeElement as HTMLElement | null)?.dataset.testid).toBe(
+      "composer-action-menu-connect-notion",
+    );
+    await pressKey(document.activeElement, "ArrowUp");
+    expect(document.activeElement).toBe(back);
+    await pressKey(back, "ArrowUp");
+    expect((document.activeElement as HTMLElement | null)?.dataset.testid).toBe(
+      "composer-action-menu-connect-browse",
+    );
+    await pressKey(document.activeElement, "ArrowDown");
+    expect(document.activeElement).toBe(back);
+    await pressKey(back, "End");
+    expect((document.activeElement as HTMLElement | null)?.dataset.testid).toBe(
+      "composer-action-menu-connect-browse",
+    );
+    await pressKey(document.activeElement, "Home");
+    expect(document.activeElement).toBe(back);
+    expect(onSelectConnector).not.toHaveBeenCalled();
+
+    // Back returns to the main view without reporting anything.
+    await act(async () => back?.click());
+    expect(container.querySelector('[data-testid="composer-action-menu-import-github"]')).not.toBeNull();
+    expect(container.querySelector('[data-testid="composer-action-menu-connect-slack"]')).toBeNull();
+    expect(onSelectConnector).not.toHaveBeenCalled();
+    expect(onBrowseConnectors).not.toHaveBeenCalled();
+  });
+
+  it("closes the menu and opens the browse sheet from Browse all tools", async () => {
+    const onSelectConnector = vi.fn();
+    const onBrowseConnectors = vi.fn();
+    await renderMenu(true, true, { onSelectConnector, onBrowseConnectors });
+
+    const menuState = container.querySelector<HTMLDivElement>('[data-testid="mock-dialog-trigger"]')!;
+    await act(async () =>
+      container.querySelector<HTMLButtonElement>('[data-testid="mock-dialog-trigger-open"]')?.click(),
+    );
+    await act(async () =>
+      container.querySelector<HTMLButtonElement>('[data-testid="composer-action-menu-connect"]')?.click(),
+    );
+    const browse = container.querySelector<HTMLButtonElement>('[data-testid="composer-action-menu-connect-browse"]')!;
+    expect(browse.querySelectorAll("svg")).toHaveLength(1);
+    await act(async () => browse.click());
+    expect(onBrowseConnectors).toHaveBeenCalledTimes(1);
+    expect(onSelectConnector).not.toHaveBeenCalled();
+    expect(menuState.dataset.open).toBe("false");
+    expect(container.querySelector('[data-testid="composer-action-menu-connect-browse"]')).toBeNull();
+  });
+
+  it("omits Browse all tools when no browse handler is given", async () => {
+    await renderMenu(true, true, { onSelectConnector: vi.fn() });
+    await act(async () =>
+      container.querySelector<HTMLButtonElement>('[data-testid="mock-dialog-trigger-open"]')?.click(),
+    );
+    await act(async () =>
+      container.querySelector<HTMLButtonElement>('[data-testid="composer-action-menu-connect"]')?.click(),
+    );
+    expect(container.querySelector('[data-testid="composer-action-menu-connect-github"]')).not.toBeNull();
+    expect(container.querySelector('[data-testid="composer-action-menu-connect-browse"]')).toBeNull();
+  });
+
+  it("lists no soon row, even with its skill folder installed, and reports the pressed available row", async () => {
+    const onSelectConnector = vi.fn();
+    await renderMenu(true, true, { onSelectConnector, installedSkillNames: new Set(["notion", "slack"]) });
+
+    const menuState = container.querySelector<HTMLDivElement>('[data-testid="mock-dialog-trigger"]')!;
+    await act(async () =>
+      container.querySelector<HTMLButtonElement>('[data-testid="mock-dialog-trigger-open"]')?.click(),
+    );
+    await act(async () =>
+      container.querySelector<HTMLButtonElement>('[data-testid="composer-action-menu-connect"]')?.click(),
+    );
+
+    // An installed folder does not make an unpublished pack selectable: the
+    // Slack row is absent rather than badged. Notion's pack is published, so
+    // its installed folder reads Connected and the row stays live.
+    const notion = container.querySelector<HTMLButtonElement>('[data-testid="composer-action-menu-connect-notion"]')!;
+    expect(notion.textContent).toContain("Connected");
+    expect(notion.disabled).toBe(false);
+    expect(container.querySelector('[data-testid="composer-action-menu-connect-slack"]')).toBeNull();
+    expect(container.textContent).not.toContain("Soon");
+    expect(container.querySelector('[data-testid="composer-action-menu-connect-github"]')?.textContent).not.toContain(
+      "Connected",
+    );
+    expect(onSelectConnector).not.toHaveBeenCalled();
+    expect(menuState.dataset.open).toBe("true");
+
+    // The available Notion row reports its connector and closes the menu.
+    await act(async () => notion.click());
+    expect(onSelectConnector).toHaveBeenCalledTimes(1);
+    expect(onSelectConnector.mock.calls[0][0]).toBe(CONNECTORS.find((entry) => entry.id === "notion"));
+    expect(menuState.dataset.open).toBe("false");
+    expect(container.querySelector('[data-testid="composer-action-menu-import-github"]')).not.toBeNull();
+    expect(container.querySelector('[data-testid="composer-action-menu-connect-notion"]')).toBeNull();
+
+    // Reopen: the GitHub row does the same.
+    await act(async () =>
+      container.querySelector<HTMLButtonElement>('[data-testid="mock-dialog-trigger-open"]')?.click(),
+    );
+    await act(async () =>
+      container.querySelector<HTMLButtonElement>('[data-testid="composer-action-menu-connect"]')?.click(),
+    );
+    const github = container.querySelector<HTMLButtonElement>('[data-testid="composer-action-menu-connect-github"]')!;
+    await act(async () => github.click());
+    expect(onSelectConnector).toHaveBeenCalledTimes(2);
+    expect(onSelectConnector.mock.calls[1][0]).toBe(CONNECTORS.find((entry) => entry.id === "github"));
+    // closeMenu() flipped the controlled open state to false and reset the view.
+    expect(menuState.dataset.open).toBe("false");
+    expect(container.querySelector('[data-testid="composer-action-menu-import-github"]')).not.toBeNull();
+    expect(container.querySelector('[data-testid="composer-action-menu-connect-github"]')).toBeNull();
+  });
+
+  it("hides Connect a tool without a handler or while mutations are disabled", async () => {
+    await renderMenu(true);
+    expect(container.querySelector('[data-testid="composer-action-menu-connect"]')).toBeNull();
+
+    await renderMenu(true, true, { onSelectConnector: vi.fn(), mutationDisabled: true });
+    expect(container.querySelector('[data-testid="composer-action-menu-connect"]')).toBeNull();
+    expect(container.querySelector('[data-testid="composer-action-menu-import-github"]')).toBeNull();
   });
 
   it("offers accessible one-shot Queue and Stash actions with shortcuts", async () => {

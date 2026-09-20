@@ -204,21 +204,28 @@ describe("ProjectProviderBindingsCard", () => {
       refreshRuntimeStatuses: vi.fn(),
     };
     confirmSpy = vi.spyOn(window, "confirm").mockReturnValue(true);
-    matchMediaMock = vi
-      .spyOn(window, "matchMedia")
-      .mockImplementation(
-        (query) =>
-          ({
-            matches: false,
-            media: query,
-            onchange: null,
-            addListener: vi.fn(),
-            removeListener: vi.fn(),
-            addEventListener: vi.fn(),
-            removeEventListener: vi.fn(),
-            dispatchEvent: vi.fn(),
-          }) as MediaQueryList,
-      );
+    // jsdom does not implement matchMedia: the key is present on window but its
+    // value is undefined, and vitest 4's vi.spyOn refuses a non-function target.
+    // Install the stub instead of spying on something that was never there.
+    const matchMedia = vi.fn(
+      (query: string) =>
+        ({
+          matches: false,
+          media: query,
+          onchange: null,
+          addListener: vi.fn(),
+          removeListener: vi.fn(),
+          addEventListener: vi.fn(),
+          removeEventListener: vi.fn(),
+          dispatchEvent: vi.fn(),
+        }) as MediaQueryList,
+    );
+    Object.defineProperty(window, "matchMedia", {
+      configurable: true,
+      writable: true,
+      value: matchMedia,
+    });
+    matchMediaMock = matchMedia;
   });
 
   afterEach(async () => {

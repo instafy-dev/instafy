@@ -1,5 +1,6 @@
 @import "tailwindcss";
 @config "../../tailwind.config.ts";
+@source not "../../hosted";
 
 @theme {
   /* Canonical Instafy brand colors. See docs/Brand.md. */

@@ -2,7 +2,7 @@
 
 import { act, createElement } from "react";
 import { createRoot, type Root } from "react-dom/client";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi, type Mock } from "vitest";
 import type { ControllerRuntimeStatusEntry } from "../../../sdk/instafy";
 import type { ShowStatusFn } from "../types";
 
@@ -41,7 +41,7 @@ function localRuntime(
 describe("useDesktopRuntimeEnsure", () => {
   let container: HTMLDivElement;
   let root: Root;
-  let showStatus: ShowStatusFn & ReturnType<typeof vi.fn>;
+  let showStatus: ShowStatusFn & Mock;
   let ensure: (() => Promise<boolean>) | null = null;
 
   function Harness(props: {
@@ -66,7 +66,7 @@ describe("useDesktopRuntimeEnsure", () => {
     container = document.createElement("div");
     document.body.appendChild(container);
     root = createRoot(container);
-    showStatus = vi.fn() as ShowStatusFn & ReturnType<typeof vi.fn>;
+    showStatus = vi.fn() as ShowStatusFn & Mock;
     requestDesktop.mockReset();
     requestDesktop.mockResolvedValue({ runtime: {}, tunnel: null });
     ensure = null;

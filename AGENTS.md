@@ -32,6 +32,11 @@ release signing and deployment configuration do not belong here.
   escapes, and preserve the existing permission checks.
 - Treat public pull requests as untrusted. Public CI must use hosted runners and must not
   receive repository, deployment or production secrets.
+- Outside contributions need a trusted code-owner review before merge. A green check,
+  workflow-run approval, issue comment or prior contribution is not merge approval. Never
+  auto-approve or re-author outsider changes as a bot PR to avoid that review. The existing
+  trusted bot's own changes keep their normal protected-check and auto-merge flow; do not
+  impose a blanket approval requirement on every PR.
 - Protected local credentials may intentionally cover both `instafy-dev/instafy` and
   `instafy-dev/instafy-internal` for explicitly authorized cross-repository release or operations
   work. That cross-repository scope is allowed: target authenticated commands at an explicit

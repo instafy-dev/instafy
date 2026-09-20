@@ -70,7 +70,7 @@ export type MessageContentBlock =
 const WORKSPACE_FILE_REFERENCE_REGEX =
   /^((?:\/workspace\/[^/\s<>"'`()]+\/)?[0-9A-Za-z_.-]+(?:\/[0-9A-Za-z_.-]+)*\.(?:markdown|md|json|tsx?|jsx?|ya?ml|toml|py|rs|css|html|txt|sh|sql))(?:#L(\d+)|:(\d+))?/;
 const URL_REFERENCE_REGEX = /^(https?:\/\/[^\s<>"'`]+)/i;
-// Only the exact PR/issue page shape chips — deeper paths (files, comments,
+// Only the exact PR/issue page shape chips. Deeper paths (files, comments,
 // diffs) and other GitHub pages keep their full URL rendering.
 const GITHUB_REFERENCE_URL_REGEX =
   /^https:\/\/github\.com\/([A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?)\/([A-Za-z0-9._-]+)\/(pull|issues)\/(\d+)$/i;
@@ -532,7 +532,7 @@ type PendingCodeFence = {
   indent: number;
 };
 
-// CommonMark: the info string of a backtick fence may not contain backticks —
+// CommonMark: the info string of a backtick fence may not contain backticks,
 // a line like "```echo `hi` done```" is an inline code span, not a fence.
 function parseCodeFenceOpening(line: string): PendingCodeFence | null {
   const match = line.match(/^(\s*)(`{3,}|~{3,})(.*)$/);
@@ -588,7 +588,7 @@ export function parseMessageContentBlocks(content: string): MessageContentBlock[
   //     sublist at depth + 1, whatever the item's trailing punctuation;
   //   - across exactly ONE blank line the same happens only when the ordered
   //     item ends with ":" (it announced a list), or a flat sublist is already
-  //     open (a LOOSE flat sublist — blank lines between its own bullets —
+  //     open (a LOOSE flat sublist, blank lines between its own bullets,
   //     keeps nesting instead of splitting mid-list); without either, or after
   //     two blank lines, the bullets stay a sibling block as CommonMark says;
   //   - an ordered item after a bullet never nests this way, and the indented
@@ -601,7 +601,7 @@ export function parseMessageContentBlocks(content: string): MessageContentBlock[
   let listSurvivesBlankLine = false;
   let pendingQuote: Extract<MessageContentBlock, { kind: "quote" }> | null = null;
   let pendingCode: PendingCodeFence | null = null;
-  // CommonMark: consecutive non-blank paragraph lines are one paragraph — only
+  // CommonMark: consecutive non-blank paragraph lines are one paragraph, and only
   // a blank line (or a line another block type claims) starts a new one.
   // Lines accumulate here and join with "\n" on flush; `whitespace-pre-wrap`
   // in the renderer turns that embedded newline back into a soft line break
@@ -658,8 +658,8 @@ export function parseMessageContentBlocks(content: string): MessageContentBlock[
         // The item announced a list, or a flat sublist is already open: hold
         // the flush for one blank line and let the next line decide (see the
         // leniency rule above). Holding while a flat sublist is open keeps a
-        // LOOSE flat sublist — one with a blank line between its own bullets,
-        // not just before its first one — from splitting into a separate
+        // LOOSE flat sublist, one with a blank line between its own bullets,
+        // not just before its first one, from splitting into a separate
         // sibling list mid-way through.
         listSurvivesBlankLine = true;
       } else {

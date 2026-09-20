@@ -12,7 +12,11 @@ use crate::config::{AppConfig, PgPool, RuntimeProviderConfig, StripeConfig};
 use crate::connection_limit::ConnectionLimiter;
 use crate::dispatch::{self, DispatchPromptRequest};
 use crate::jwks::SupabaseJwks;
-use crate::model_defaults::{default_managed_ai_model_id, default_managed_ai_model_label};
+use crate::model_defaults::{
+    default_managed_ai_model_id, default_managed_ai_model_label,
+    DEFAULT_MANAGED_AI_CACHED_INPUT_USD_MICROS_PER_1K, DEFAULT_MANAGED_AI_INPUT_USD_MICROS_PER_1K,
+    DEFAULT_MANAGED_AI_OUTPUT_USD_MICROS_PER_1K,
+};
 use crate::origins::{
     acquire_fresh_lease, acquire_lease, authorize_workspace_origin_git_write, post_access_token,
     post_commit_receipt, post_origin_register, record_access_grant, record_commit_receipt,
@@ -234,9 +238,10 @@ pub(crate) fn build_app_config(private_key: &str, public_key: &str, key_id: &str
         managed_ai_daily_prompt_limit: 20,
         managed_ai_model_id: default_managed_ai_model_id().to_string(),
         managed_ai_model_label: default_managed_ai_model_label().to_string(),
-        managed_ai_input_usd_micros_per_1k: 250,
-        managed_ai_cached_input_usd_micros_per_1k: 25,
-        managed_ai_output_usd_micros_per_1k: 2_000,
+        managed_ai_input_usd_micros_per_1k: DEFAULT_MANAGED_AI_INPUT_USD_MICROS_PER_1K,
+        managed_ai_cached_input_usd_micros_per_1k:
+            DEFAULT_MANAGED_AI_CACHED_INPUT_USD_MICROS_PER_1K,
+        managed_ai_output_usd_micros_per_1k: DEFAULT_MANAGED_AI_OUTPUT_USD_MICROS_PER_1K,
         managed_ai_startup_check: true,
         tunnel_broker_hook_secret: None,
         git_event_hook_secret: None,
@@ -4248,6 +4253,7 @@ async fn support_report_routes_enforce_customer_privacy_boundary() -> anyhow::Re
         serde_json::from_slice(&to_bytes(show_a.into_body(), usize::MAX).await?)?;
     assert_eq!(show_a_payload["id"], report_a_id.to_string());
     assert_eq!(show_a_payload["details"], "Details submitted by reporter A");
+    assert!(show_a_payload["resolutionNotificationId"].is_null());
     assert_exact_json_keys(
         &show_a_payload,
         &[
@@ -4258,6 +4264,7 @@ async fn support_report_routes_enforce_customer_privacy_boundary() -> anyhow::Re
             "customerLastMessageAt",
             "supportLastMessageAt",
             "resolvedAt",
+            "resolutionNotificationId",
             "hasUnreadSupportActivity",
             "hasUnreadResolution",
             "message",
@@ -4370,6 +4377,7 @@ async fn support_report_routes_enforce_customer_privacy_boundary() -> anyhow::Re
             "customerLastMessageAt",
             "supportLastMessageAt",
             "resolvedAt",
+            "resolutionNotificationId",
             "hasUnreadSupportActivity",
             "hasUnreadResolution",
             "message",

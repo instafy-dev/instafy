@@ -13,3 +13,58 @@ onlyBuiltDependencies:
   - electron
   - esbuild
   - supabase
+
+# Security overrides. Each entry pins a transitive dependency out of an advisory
+# range that its own parent still allows; drop an entry once every parent has
+# released a version that resolves past it on its own. `pnpm why <pkg>` shows
+# who pulls it. Verified with a residual scan: none of the Dependabot alerts
+# these close still match pnpm-lock.yaml.
+overrides:
+  # GHSA node-tar decompression DoS (alert #250, critical) — supabase pins tar 6.
+  'supabase>tar': '^7.5.21'
+  # minimatch ReDoS (#178, #182, #185) — typescript-estree 6.x pins 9.0.3.
+  '@typescript-eslint/typescript-estree>minimatch': '^9.0.7'
+  # js-yaml merge-key DoS (#162, #244, #247, #273, #298) — reaches the desktop
+  # main process through electron-updater, which parses our own latest-mac.yml.
+  'js-yaml@>=4.0.0 <4.3.2': '^4.3.2'
+  # @xmldom/xmldom parsing advisories (15 alerts, build/test tooling only).
+  '@xmldom/xmldom@<0.8.15': '^0.8.15'
+  # fast-uri ReDoS (6 alerts, via ajv in build tooling).
+  'fast-uri@>=3.0.0 <3.1.6': '^3.1.6'
+  # flatted prototype pollution (2 alerts, eslint cache).
+  'flatted@<3.4.2': '^3.4.2'
+  # form-data unsafe random boundary (#1 alert, test tooling).
+  'form-data@>=4.0.0 <4.0.6': '^4.0.6'
+  # lodash prototype pollution (3 alerts, build tooling).
+  'lodash@<4.18.0': '^4.18.0'
+  # ajv ReDoS (1 alert, build tooling).
+  'ajv@<6.14.0': '^6.14.0'
+  # browserslist ReDoS (#277, #278).
+  browserslist: '^4.28.7'
+  # Not an advisory fix: autoprefixer bundles its own caniuse-lite and compares
+  # it against the browser list browserslist returns. Bumping browserslist alone
+  # installs a second, newer caniuse-lite, so autoprefixer stops recognising the
+  # Safari/iOS targets it is handed and silently drops their -webkit- prefixes.
+  # Keep the two on one copy.
+  caniuse-lite: '^1.0.30001810'
+  # rollup DOM clobbering (#180). Held on 4.62.x deliberately: 4.63.x shipped
+  # 2026-09-19 and has not aged. Relax to '^4.59.0' or drop it once it has —
+  # unscoped, so it also caps any future vite/tsup that wants rollup >= 4.63.
+  rollup: '~4.62.5'
+  # undici advisories (5 alerts) — @electron/get pins an old major.
+  '@electron/get>undici': '^7.29.1'
+  # ws DoS (1 alert) — realtime-js in the frontend; not loaded at run time.
+  '@supabase/realtime-js>ws': '^8.21.3'
+  # diff ReDoS (1 alert, ts-node in build tooling).
+  'ts-node>diff': '^4.0.4'
+  # @babel/core advisory (1 alert, frontend build plugin).
+  '@vitejs/plugin-react>@babel/core': '^7.29.6'
+  # dompurify advisories (20 alerts). Alert hygiene only: monaco-editor vendors
+  # its own copy of DOMPurify and never imports this one.
+  'monaco-editor>dompurify': '^3.4.15'
+  # uuid buffer bounds check in v3/v5/v6 (#302) — xcode 3.0.1 pins uuid 7 and is
+  # the only thing in the tree that pulls uuid at all (via @capacitor/cli). It
+  # calls uuid.v4() and nothing else, so the advisory never applied; the bump is
+  # a free way to close the alert rather than dismiss it. Proven drop-in against
+  # the real ios/App/App.xcodeproj: same id shape, same writeSync output.
+  'xcode>uuid': '^11.1.1'
