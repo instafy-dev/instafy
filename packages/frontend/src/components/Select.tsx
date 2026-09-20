@@ -141,11 +141,14 @@ function NativeSelect(
     fullWidth = true,
     className,
     selectClassName,
-    native: _native,
+    native,
     ...props
   }: SelectProps,
   ref: React.ForwardedRef<HTMLSelectElement>,
 ) {
+  // Consumed by Select's branch above; pulled out here only so it never lands
+  // on the element as an unknown attribute.
+  void native;
   return (
     <div className={["relative min-w-0", fullWidth ? "w-full" : "w-fit", className].filter(Boolean).join(" ")}>
       <select
@@ -176,7 +179,7 @@ function StyledSelect({
   fullWidth = true,
   className,
   selectClassName,
-  native: _native,
+  native,
   children,
   value,
   defaultValue,
@@ -190,6 +193,7 @@ function StyledSelect({
   autoFocus,
   ...rest
 }: SelectProps) {
+  void native;
   // children is a fresh array on every render, so memoising on its identity
   // memoises nothing: react-aria would receive a new items array each time,
   // rebuild its collection, and in a live browser that can chase its own tail
