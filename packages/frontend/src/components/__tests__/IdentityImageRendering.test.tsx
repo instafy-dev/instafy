@@ -28,8 +28,9 @@ describe("identity image rendering", () => {
     for (const src of ["/assets/octo.svg", "blob:https://app.example/preview", "data:image/png;base64,cGljdHVyZQ=="])
       expect(normalizeIdentityImageSrc(src)).toBe(src);
   });
-  it.each(["javascript:alert(1)", "data:text/html,<script>alert(1)</script>", "https://example.test/\ud800", null])
-    ("rejects invalid image source %s", src => { expect(normalizeIdentityImageSrc(src)).toBeNull(); });
+  it.each(["javascript:alert(1)", "data:text/html,<script>alert(1)</script>", "https://example.test/\ud800", null])("rejects invalid image source %s", src => {
+    expect(normalizeIdentityImageSrc(src)).toBeNull();
+  });
 
   const avatars = [
     ["bot", (src: string) => <AgentAvatar agent={{ handle: "reviewer", displayName: "<Review>" }} imageSrc={src} />],
