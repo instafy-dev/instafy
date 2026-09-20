@@ -237,16 +237,22 @@ function savedSecretNamesSnapshot(projectId: string | null): ReadonlySet<string>
 
 /**
  * Conversations whose blocked run has already been continued from a card in
- * this tab. A run resumes once: without this, the sibling card of a two-secret
- * flow would go on offering "Continue setup" after the other card continued.
+ * this tab, with the newest agent message the tab knew of at that moment. A
+ * run resumes once: without this, the sibling card of a two-secret flow would
+ * go on offering "Continue setup" after the other card continued. The moment
+ * matters because a continue answers only the cards that were there when it
+ * was pressed. A request that arrives afterwards is a new ask (the saved value
+ * failed the skill's own check, and the agent needs a different one), and it
+ * has to render live rather than as "Sent".
  */
-const continuedConversations = new Set<string>();
+const continuedConversations = new Map<string, number>();
 
-function publishContinuedConversation(conversationId: string): void {
-  if (continuedConversations.has(conversationId)) {
+function publishContinuedConversation(conversationId: string, newestKnownTimestamp: number): void {
+  const previous = continuedConversations.get(conversationId);
+  if (previous !== undefined && previous >= newestKnownTimestamp) {
     return;
   }
-  continuedConversations.add(conversationId);
+  continuedConversations.set(conversationId, newestKnownTimestamp);
   for (const listener of [...savedSecretNameListeners]) {
     listener();
   }
@@ -494,12 +500,20 @@ export function SecretRequestEntry({
     [activeConversationId, activeConversationMessages, containingConversation],
   );
   // Any card in this conversation having continued the run answers this one
-  // too: the value is saved and the setup is moving again.
+  // too, as long as this card was already there: the value is saved and the
+  // setup is moving again. A request posted after that continue is the agent
+  // asking again, and it stays live.
   const continuedElsewhere = useMemo(
-    () => Boolean(requestConversationId && continuedConversations.has(requestConversationId)),
-    // broadcastVersion is the subscription: the Set itself is not reactive.
+    () => {
+      if (!requestConversationId) {
+        return false;
+      }
+      const continuedAt = continuedConversations.get(requestConversationId);
+      return continuedAt !== undefined && message.timestamp <= continuedAt;
+    },
+    // broadcastVersion is the subscription: the Map itself is not reactive.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [broadcastVersion, requestConversationId],
+    [broadcastVersion, message.timestamp, requestConversationId],
   );
   const continueSubmitted =
     continueSentHere ||
@@ -576,13 +590,30 @@ export function SecretRequestEntry({
     try {
       await onSubmit(requestConversationId, suggestedRetry);
       setContinueSentHere(true);
-      publishContinuedConversation(requestConversationId);
+      // Agent messages only: the person's own reply is stamped by this
+      // client, and a clock ahead of the server would push the horizon past
+      // the agent's next request.
+      publishContinuedConversation(
+        requestConversationId,
+        requestConversationMessages.reduce(
+          (newest, entry) => (entry.role === "user" ? newest : Math.max(newest, entry.timestamp)),
+          message.timestamp,
+        ),
+      );
     } catch (error) {
       setContinueError(normalizeRetryError(error, "Unable to continue the setup."));
     } finally {
       setContinueBusy(false);
     }
-  }, [continueBusy, continueSubmitted, onSubmit, requestConversationId, suggestedRetry]);
+  }, [
+    continueBusy,
+    continueSubmitted,
+    message.timestamp,
+    onSubmit,
+    requestConversationId,
+    requestConversationMessages,
+    suggestedRetry,
+  ]);
 
   const refusedClass = parsed.refusedClass;
   // The title is composed, never owned. Slot one is the product name, which

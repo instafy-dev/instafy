@@ -9,6 +9,7 @@ import { Text } from "../../../components/Text";
 import { Spinner } from "../../../components/Spinner";
 import { controllerClient } from "../../../sdk/instafy";
 import { useStatus } from "../../../status/useStatus";
+import { describeSecretValueProblem } from "./secretValueShape";
 
 // The field group for one or more project secrets: an input per value, the
 // masking and password-manager opt-outs that keep a token out of a login vault,
@@ -198,6 +199,19 @@ export function InlineSecretsForm({
     }
     if (saving) {
       return;
+    }
+    // Words pasted in place of the value are caught here, before anything is
+    // sent. Otherwise the agent learns it from the provider's 401 and has to
+    // ask again.
+    for (const secret of normalizedSecrets) {
+      if (!secret.sensitive) {
+        continue;
+      }
+      const problem = describeSecretValueProblem(drafts[secret.name]?.value ?? "");
+      if (problem) {
+        failSave(problem);
+        return;
+      }
     }
 
     setSaveError(null);
