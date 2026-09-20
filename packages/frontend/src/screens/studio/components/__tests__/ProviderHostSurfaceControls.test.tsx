@@ -3,6 +3,7 @@
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { chooseSelectValue, readSelectOptions, readSelectValue } from "../../../../test-utils/select";
 import { createProviderSummary } from "@instafy/provider-contract";
 import {
   ProviderHostSurfaceControls,
@@ -125,17 +126,12 @@ describe("ProviderHostSurfaceControls", () => {
 
     const select = container.querySelector(
       '[data-testid="provider-host-surface-control-demo-speech-route"]',
-    ) as HTMLSelectElement | null;
+    ) as HTMLElement | null;
 
     expect(readLocalProviderResourceMock).toHaveBeenCalledWith("demo", "instafy://demo/status");
-    expect(select?.value).toBe("provider");
+    expect(readSelectValue(select)).toBe("provider");
 
-    await act(async () => {
-      select!.value = "device";
-      select!.dispatchEvent(new Event("change", { bubbles: true }));
-      await Promise.resolve();
-      await Promise.resolve();
-    });
+    await chooseSelectValue(select, "device");
 
     expect(callLocalProviderToolMock).toHaveBeenCalledWith("demo", "instafy.demo.set_route", {
       route: "device",
@@ -185,16 +181,12 @@ describe("ProviderHostSurfaceControls", () => {
 
     const select = container.querySelector(
       '[data-testid="provider-host-surface-control-demo-speech-route"]',
-    ) as HTMLSelectElement | null;
+    ) as HTMLElement | null;
 
-    expect(select?.value).toBe("provider");
+    expect(readSelectValue(select)).toBe("provider");
     expect(readLocalProviderResourceMock).not.toHaveBeenCalled();
 
-    await act(async () => {
-      select!.value = "device";
-      select!.dispatchEvent(new Event("change", { bubbles: true }));
-      await Promise.resolve();
-    });
+    await chooseSelectValue(select, "device");
 
     expect(hostBindingOnChange).toHaveBeenCalledWith("device");
     expect(callLocalProviderToolMock).not.toHaveBeenCalled();
@@ -244,14 +236,10 @@ describe("ProviderHostSurfaceControls", () => {
 
     const select = container.querySelector(
       '[data-testid="provider-host-surface-control-demo-provider-voice"]',
-    ) as HTMLSelectElement | null;
+    ) as HTMLElement | null;
 
     expect(select).toBeTruthy();
-    expect(Array.from(select?.options ?? []).map((option) => option.textContent)).toEqual([
-      "Automatic (nova)",
-      "Alloy",
-      "Nova",
-    ]);
+    expect(await readSelectOptions(select)).toEqual(["Automatic (nova)", "Alloy", "Nova"]);
     expect(container.textContent).toContain("Provider reply voice: Alloy.");
     expect(container.textContent).not.toContain("Static description should be overridden.");
     expect(readLocalProviderResourceMock).not.toHaveBeenCalled();

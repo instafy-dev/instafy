@@ -3,6 +3,7 @@
 import { act, useState, type ComponentProps, type ReactNode } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { chooseSelectValue, isSelectDisabled, readSelectValue } from "../../../../test-utils/select";
 import { InstalledSkillsSection } from "../InstalledSkillsSection";
 import { SkillsDiscoverySection } from "../SkillsDiscoverySection";
 
@@ -151,19 +152,15 @@ describe("Skills responsive controls", () => {
     await render(<Harness />);
     await click("skills-discovery-filters-toggle");
     for (const [id, value] of [["source", "curated"], ["category", "automation"], ["sort", "name_asc"]]) {
-      const select = query<HTMLSelectElement>(`skills-discovery-${id}-select`);
-      await act(async () => {
-        if (select) select.value = value;
-        select?.dispatchEvent(new Event("change", { bubbles: true }));
-      });
+      await chooseSelectValue(query(`skills-discovery-${id}-select`), value);
     }
     expect(query("skills-discovery-filters-toggle")?.textContent).toContain("Filters (3)");
     await click("skills-discovery-filters-toggle");
     expect(query("skills-discovery-filters")).toBeNull();
     await click("skills-discovery-filters-toggle");
-    expect(query<HTMLSelectElement>("skills-discovery-source-select")?.value).toBe("curated");
-    expect(query<HTMLSelectElement>("skills-discovery-category-select")?.value).toBe("automation");
-    expect(query<HTMLSelectElement>("skills-discovery-sort-select")?.value).toBe("name_asc");
+    expect(readSelectValue(query("skills-discovery-source-select"))).toBe("curated");
+    expect(readSelectValue(query("skills-discovery-category-select"))).toBe("automation");
+    expect(readSelectValue(query("skills-discovery-sort-select"))).toBe("name_asc");
   });
 
   it("keeps filters exposed on desktop and preserves disabled loading states", async () => {
@@ -173,7 +170,7 @@ describe("Skills responsive controls", () => {
     expect(query("skills-discovery-filters")).not.toBeNull();
     expect(query<HTMLButtonElement>("skills-discovery-search")?.disabled).toBe(true);
     for (const id of ["source", "category", "sort"]) {
-      expect(query<HTMLSelectElement>(`skills-discovery-${id}-select`)?.disabled).toBe(true);
+      expect(isSelectDisabled(query(`skills-discovery-${id}-select`))).toBe(true);
     }
   });
 });

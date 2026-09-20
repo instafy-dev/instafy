@@ -2,6 +2,7 @@ import { expect, test, type APIResponse, type Page } from "@playwright/test";
 import { randomUUID } from "node:crypto";
 import { deriveGithubImportTargetPath } from "../../../src/services/runtimeController/githubImportPath.js";
 import {
+import { chooseOption } from "../utils/select.js";
   assertGitRemoteFileText,
   getControllerUrl,
   getSupabaseAuthHeaders,
@@ -218,7 +219,7 @@ async function ensureHostedRuntimeReady(page: Page, projectId: string) {
 
 async function createProjectInviteLink(page: Page): Promise<string> {
   await openProjectSettings(page);
-  await page.getByTestId("org-invite-link-role").selectOption("builder");
+  await chooseOption(page.getByTestId("org-invite-link-role"), "builder");
   await page.getByTestId("org-invite-link-create").click();
   const inviteLinkInput = page.getByTestId("org-invite-link-url");
   await expect(inviteLinkInput).toBeVisible();
