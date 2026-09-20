@@ -50,6 +50,25 @@ function resolve() {
   return { url, anonKey, serviceKey };
 }
 
+// The admin API answers a create for an existing email with 422 and no id, so
+// reuse has to look the account up. The stack is loopback only (assertLocal),
+// so listing every account is a handful of rows.
+async function findUserIdByEmail(url, serviceKey, email) {
+  const wanted = email.toLowerCase();
+  for (let page = 1; page <= 50; page += 1) {
+    const listed = await fetch(`${url}/auth/v1/admin/users?page=${page}&per_page=200`, {
+      headers: { apikey: serviceKey, authorization: `Bearer ${serviceKey}` },
+    });
+    if (!listed.ok) throw new Error(`admin user list failed: ${listed.status} ${await listed.text()}`);
+    const body = await listed.json();
+    const users = Array.isArray(body?.users) ? body.users : [];
+    const hit = users.find((user) => String(user?.email ?? "").toLowerCase() === wanted);
+    if (hit?.id) return hit.id;
+    if (users.length < 200) return null;
+  }
+  return null;
+}
+
 function assertLocal(url) {
   let host;
   try {
@@ -87,6 +106,21 @@ async function main() {
   });
   if (!created.ok && created.status !== 422) {
     throw new Error(`admin user create failed: ${created.status} ${await created.text()}`);
+  }
+  // The account that is already there has a password nobody holds any more.
+  // Put the fresh one on it, so a fixed --email is reusable run after run; a
+  // second run used to fail the sign-in below with invalid credentials.
+  if (created.status === 422) {
+    const existingId = await findUserIdByEmail(url, serviceKey, email);
+    if (!existingId) throw new Error(`account exists but was not found in the admin list: ${email}`);
+    const updated = await fetch(`${url}/auth/v1/admin/users/${existingId}`, {
+      method: "PUT",
+      headers: { apikey: serviceKey, authorization: `Bearer ${serviceKey}`, "content-type": "application/json" },
+      body: JSON.stringify({ password }),
+    });
+    if (!updated.ok) {
+      throw new Error(`admin password update failed: ${updated.status} ${await updated.text()}`);
+    }
   }
 
   const signedIn = await fetch(`${url}/auth/v1/token?grant_type=password`, {
