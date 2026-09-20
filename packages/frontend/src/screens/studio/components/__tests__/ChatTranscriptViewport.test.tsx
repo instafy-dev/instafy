@@ -144,6 +144,22 @@ describe("ChatSpeakerStickyOverlay", () => {
     return { overlay, overlayRef };
   }
 
+  it("lands the pill's face and name where the inline identity's were", async () => {
+    // The pill replaces the identity on the same pixel row, so it keeps the
+    // identity's 8px gap and pulls its border and 2px of padding back so the
+    // face sits on the column's left edge. Below sm (jsdom has no matchMedia,
+    // which reads as the narrow layout) the face is the inline 28px one.
+    for (const speaker of [assistantSpeaker, humanSpeaker]) {
+      const { overlay } = await renderOverlay(speaker);
+      const pill = overlay.firstElementChild?.firstElementChild as HTMLElement;
+      expect(pill.className).toContain("gap-2");
+      expect(pill.className).toContain("-ml-[3px]");
+      expect(pill.className).not.toContain("gap-1.5");
+      const face = pill.firstElementChild as HTMLElement;
+      expect(face.className).toContain("h-7");
+    }
+  });
+
   it("paints nothing behind the pill: no backdrop band of any kind", async () => {
     const { overlay } = await renderOverlay(assistantSpeaker);
 
