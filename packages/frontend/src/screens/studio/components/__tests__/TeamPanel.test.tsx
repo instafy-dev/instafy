@@ -8,6 +8,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ActivityItem, ListMyActivityResult } from "../../../../services/runtimeController/activity";
 import type { ControllerOrgMember, ControllerOrgMembersPage, ControllerOrgSummary } from "../../../../services/runtimeController/projects";
 import { TeamPanel } from "../TeamPanel";
+import { chooseSelectValue } from "../../../../test-utils/select";
 
 const mocks = vi.hoisted(() => ({
   userId: "user-a" as string | null,
@@ -75,11 +76,7 @@ describe("TeamPanel authorized work and navigation", () => {
     return Array.from(scope.querySelectorAll<HTMLButtonElement>("button")).find((node) => node.textContent?.includes(text));
   }
   async function selectTeam(id: string) {
-    await act(async () => {
-      const select = container.querySelector<HTMLSelectElement>('select[aria-label="Team"]')!;
-      select.value = id;
-      select.dispatchEvent(new Event("change", { bubbles: true }));
-    });
+    await chooseSelectValue(container.querySelector('button[aria-haspopup="listbox"]'), id);
     await settle();
   }
   const location = () => new URL(container.querySelector('[data-testid="location"]')!.textContent!, "https://example.test");
