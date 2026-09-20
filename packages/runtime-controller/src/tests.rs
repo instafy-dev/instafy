@@ -4251,6 +4251,7 @@ async fn support_report_routes_enforce_customer_privacy_boundary() -> anyhow::Re
         serde_json::from_slice(&to_bytes(show_a.into_body(), usize::MAX).await?)?;
     assert_eq!(show_a_payload["id"], report_a_id.to_string());
     assert_eq!(show_a_payload["details"], "Details submitted by reporter A");
+    assert!(show_a_payload["resolutionNotificationId"].is_null());
     assert_exact_json_keys(
         &show_a_payload,
         &[
@@ -4261,6 +4262,7 @@ async fn support_report_routes_enforce_customer_privacy_boundary() -> anyhow::Re
             "customerLastMessageAt",
             "supportLastMessageAt",
             "resolvedAt",
+            "resolutionNotificationId",
             "hasUnreadSupportActivity",
             "hasUnreadResolution",
             "message",
