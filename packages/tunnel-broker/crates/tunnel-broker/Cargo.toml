@@ -16,10 +16,13 @@ tracing-subscriber = { workspace = true }
 uuid = { workspace = true }
 thiserror = { workspace = true }
 tunnel_broker_types = { path = "../tunnel-broker-types", package = "tunnel-broker-types" }
-sqlx = { version = "0.7", features = ["postgres", "runtime-tokio-rustls", "uuid", "chrono", "json", "macros"] }
+# The patch floor is explicit: GHSA-xmrp-424f-vfpx covers sqlx <= 0.8.0, so a
+# bare "0.8" requirement still admits the vulnerable 0.8.0 and the advisory
+# stays open against this manifest even though the lock resolves to 0.8.6.
+sqlx = { version = "0.8.1", features = ["postgres", "runtime-tokio-rustls", "uuid", "chrono", "json", "macros"] }
 dotenvy = "0.15"
 base64 = "0.21"
 once_cell = "1"
 tower-http = { version = "0.5", features = ["trace"] }
 jsonwebtoken = { workspace = true }
-reqwest = { version = "0.11", features = ["json", "rustls-tls"] }
+reqwest = { version = "0.11", features = ["json"] }
