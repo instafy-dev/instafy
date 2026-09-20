@@ -4,6 +4,7 @@ import {
   useEffect,
   useLayoutEffect,
   useMemo,
+  useRef,
   useState,
   type MutableRefObject,
 } from "react";
@@ -361,13 +362,41 @@ export function useChatComposerLayoutState({
     }
   }, [canAutoHideComposer]);
 
+  // The two nodes this measures arrive at different moments: the composer
+  // with the panel, the transcript once the conversation resolves, and a
+  // conversation switch can hand out a fresh scroller. Attaching once behind
+  // a dependency list left the padding at zero whenever a node was not there
+  // yet, and nothing re-ran it, which is what put the composer over the last
+  // message. So this runs after every render and re-attaches only when the
+  // nodes it watches change; the measurement itself is re-run on the layout
+  // changes that move the composer without resizing it.
+  const observedOverlapNodesRef = useRef<{
+    overlay: HTMLDivElement | null;
+    scroller: HTMLDivElement | null;
+  }>({ overlay: null, scroller: null });
+  const detachOverlapRef = useRef<(() => void) | null>(null);
+  const scheduleOverlapSyncRef = useRef<(() => void) | null>(null);
+
+  // No dependency list on purpose: the nodes are read from refs, which React
+  // cannot list, and the guard above the setter keeps it to once per change.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   useEffect(() => {
     if (typeof window === "undefined") {
       return;
     }
-
     const overlay = composerOverlayRef.current;
     const scrollContainer = scrollContainerRef.current;
+    const observed = observedOverlapNodesRef.current;
+    if (observed.overlay === overlay && observed.scroller === scrollContainer) {
+      // Same nodes: one deduplicated re-measure per render, so a first frame
+      // measured before layout settled cannot stick.
+      scheduleOverlapSyncRef.current?.();
+      return;
+    }
+    detachOverlapRef.current?.();
+    detachOverlapRef.current = null;
+    scheduleOverlapSyncRef.current = null;
+    observedOverlapNodesRef.current = { overlay, scroller: scrollContainer };
     if (!overlay || !scrollContainer) {
       setComposerScrollOverlapPaddingPx(0);
       return;
@@ -391,42 +420,44 @@ export function useChatComposerLayoutState({
       }
       frameId = window.requestAnimationFrame(syncOverlap);
     };
+    scheduleOverlapSyncRef.current = scheduleSync;
 
     scheduleSync();
     window.addEventListener("resize", scheduleSync);
     window.visualViewport?.addEventListener("resize", scheduleSync);
     window.visualViewport?.addEventListener("scroll", scheduleSync);
+    const observer =
+      typeof ResizeObserver === "undefined" ? null : new ResizeObserver(() => scheduleSync());
+    observer?.observe(overlay);
+    observer?.observe(scrollContainer);
 
-    if (typeof ResizeObserver === "undefined") {
-      return () => {
-        window.removeEventListener("resize", scheduleSync);
-        window.visualViewport?.removeEventListener("resize", scheduleSync);
-        window.visualViewport?.removeEventListener("scroll", scheduleSync);
-        if (frameId !== null) {
-          window.cancelAnimationFrame(frameId);
-        }
-      };
-    }
-
-    const observer = new ResizeObserver(() => scheduleSync());
-    observer.observe(overlay);
-    observer.observe(scrollContainer);
-    return () => {
-      observer.disconnect();
+    detachOverlapRef.current = () => {
+      observer?.disconnect();
       window.removeEventListener("resize", scheduleSync);
       window.visualViewport?.removeEventListener("resize", scheduleSync);
       window.visualViewport?.removeEventListener("scroll", scheduleSync);
       if (frameId !== null) {
         window.cancelAnimationFrame(frameId);
+        frameId = null;
       }
     };
-  }, [
-    activeConversationId,
-    browserSessionOpen,
-    composerOverlayRef,
-    scrollContainerRef,
-    showBrowserSessionPageStrip,
-  ]);
+  });
+
+  useEffect(
+    () => () => {
+      detachOverlapRef.current?.();
+      detachOverlapRef.current = null;
+      scheduleOverlapSyncRef.current = null;
+      observedOverlapNodesRef.current = { overlay: null, scroller: null };
+    },
+    [],
+  );
+
+  // A page strip or a browser session moves the composer without resizing
+  // it, which a ResizeObserver does not see.
+  useEffect(() => {
+    scheduleOverlapSyncRef.current?.();
+  }, [activeConversationId, browserSessionOpen, composerOverlayHeight, showBrowserSessionPageStrip]);
 
   return {
     browserModalBottomInset,
