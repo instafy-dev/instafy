@@ -3,6 +3,7 @@
 import { act, type ComponentProps } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { readSelectValue } from "../../../../test-utils/select";
 import { ProjectSettingsSections } from "../ProjectSettingsSections";
 
 function createProps(
@@ -106,9 +107,7 @@ describe("ProjectSettingsSections", () => {
     expect(currentLink?.textContent).toContain("Current link · Read & write");
     expect(currentLink?.textContent).toContain("Copy current link");
     expect(
-      document.querySelector<HTMLSelectElement>(
-        '[data-testid="org-invite-link-role"]',
-      )?.value,
+      readSelectValue(document.querySelector('[data-testid="org-invite-link-role"]')),
     ).toBe("viewer");
   });
 

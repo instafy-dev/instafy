@@ -1,5 +1,6 @@
 import { test, expect } from "@playwright/test";
 import {
+import { chooseOption } from "../utils/select.js";
   createControllerOrgAndProject,
   getControllerUrl,
   getSupabaseUrl,
@@ -432,7 +433,7 @@ test.describe.serial("Org invitations", () => {
       throw new Error(`Supabase member create missing id. body=${JSON.stringify(memberPayload)}`);
     }
 
-    await page.getByTestId("org-member-invite-role").selectOption("viewer");
+    await chooseOption(page.getByTestId("org-member-invite-role"), "viewer");
     const memberInviteEmailInput = page.getByTestId("org-member-invite-email");
     await memberInviteEmailInput.fill(memberEmail);
     await page.getByTestId("org-member-invite-submit").click();
@@ -515,7 +516,7 @@ test.describe.serial("Org invitations", () => {
     const inviteEmail = `project-guest-${Date.now()}@instafy.dev`;
     const projectInviteEmailInput = page.getByTestId("project-member-invite-email");
     await projectInviteEmailInput.fill(inviteEmail);
-    await page.getByTestId("project-member-invite-role").selectOption("viewer");
+    await chooseOption(page.getByTestId("project-member-invite-role"), "viewer");
     await page.getByTestId("project-member-invite-submit").click();
     await expect(projectInviteEmailInput).toHaveValue("", { timeout: 30_000 });
 

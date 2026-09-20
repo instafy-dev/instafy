@@ -41,6 +41,7 @@ import {
   type CollaborationSocketProbeSnapshot,
 } from "../utils/sharedBrowserCollaborationHarness.js";
 import {
+import { chooseOption } from "../utils/select.js";
   expectParticipantPointerAtNormalizedPoint,
   expectResponsiveSharedBrowserLayout,
   expectSharedBrowserContentGeometryConverged,
@@ -336,7 +337,7 @@ test.describe("Org Shared Browser web/Electron collaboration", () => {
     let memberDisposableUserId: string | null = null;
     try {
       await openProjectSettings(webPage);
-      await webPage.getByTestId("org-invite-link-role").selectOption("builder");
+      await chooseOption(webPage.getByTestId("org-invite-link-role"), "builder");
       await webPage.getByTestId("org-invite-link-create").click();
       const inviteLinkUrl = await webPage.getByTestId("org-invite-link-url").inputValue();
       if (!inviteLinkUrl) {
