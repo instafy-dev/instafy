@@ -1,4 +1,4 @@
-import { normalizeSpaceIcon, normalizeSpaceColor, type ProjectIdentity } from "@instafy/sdk/project-identity";
+import { normalizeSpaceAvatarUrl, normalizeSpaceIcon, normalizeSpaceColor, type ProjectIdentity } from "@instafy/sdk/project-identity";
 import { create } from "zustand";
 import { subscribeWithSelector } from "zustand/middleware";
 import { DEFAULT_PROJECT_AI_MODEL } from "./ai/modelDefaults";
@@ -550,8 +550,9 @@ export const useWorkspaceStore = create<SessionStore>()(
     if (!project) return;
     const projectIcon = identity.projectIcon === undefined ? project.metadata.projectIcon : normalizeSpaceIcon(identity.projectIcon);
     const projectColor = identity.projectColor === undefined ? project.metadata.projectColor : normalizeSpaceColor(identity.projectColor);
-    if (project.metadata.projectIcon === projectIcon && project.metadata.projectColor === projectColor) return;
-    const nextProject = { ...project, metadata: { ...project.metadata, projectIcon, projectColor } };
+    const projectAvatarUrl = identity.projectAvatarUrl === undefined ? project.metadata.projectAvatarUrl : normalizeSpaceAvatarUrl(identity.projectAvatarUrl);
+    if (project.metadata.projectIcon === projectIcon && project.metadata.projectColor === projectColor && project.metadata.projectAvatarUrl === projectAvatarUrl) return;
+    const nextProject = { ...project, metadata: { ...project.metadata, projectIcon, projectColor, projectAvatarUrl } };
     set({
       projects: { ...store.projects, [projectId]: clone(nextProject) },
       state: projectId === store.activeProjectId ? clone(nextProject) : store.state,

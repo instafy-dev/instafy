@@ -98,4 +98,33 @@ describe("persistent Studio history owner", () => {
     staleBack(); staleForward();
     expect(go).not.toHaveBeenCalled();
   });
+
+  it("keeps Back and Forward stable while a scope update renders ahead of Router", async () => {
+    await push("B"); await push("C"); await move(history.goBack);
+    expect(history.canGoBack).toBe(true);
+    expect(history.canGoForward).toBe(true);
+    const go = vi.spyOn(window.history, "go").mockImplementation(() => undefined);
+
+    // The org/space context can render the old Router location after the
+    // browser has committed a new entry. This is not a direct-entry visit.
+    window.history.pushState({ idx: 2, key: "next-org" }, "", "/studio?chat=D");
+    await render();
+    expect(history.canGoBack).toBe(true);
+    expect(history.canGoForward).toBe(true);
+    history.goBack(); history.goForward();
+    expect(go).not.toHaveBeenCalled();
+
+    // Once Router publishes the entry, the new push truncates Forward.
+    await act(async () => window.dispatchEvent(new PopStateEvent("popstate", { state: window.history.state })));
+    expect(location.key).toBe("next-org");
+    expect(history.canGoBack).toBe(true);
+    expect(history.canGoForward).toBe(false);
+  });
+
+  it("still recognizes the real first visit when returning to it", async () => {
+    await push("B");
+    await move(history.goBack);
+    expect(history.canGoBack).toBe(false);
+    expect(history.canGoForward).toBe(true);
+  });
 });

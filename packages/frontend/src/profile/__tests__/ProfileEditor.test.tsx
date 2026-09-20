@@ -132,6 +132,19 @@ describe("ProfileEditor", () => {
     expect(mocks.showStatus).toHaveBeenCalledWith("Profile updated.", "success", 2500);
   });
 
+  it("discards name, bio and picture drafts together on Cancel", async () => {
+    await render();
+    await type("profile-display-name", "Another name");
+    await type("profile-bio", "Unsaved bio");
+    await click("Remove photo");
+    await click("Cancel");
+    expect(container.querySelector<HTMLInputElement>("#profile-display-name")?.value).toBe("Alex Teammate");
+    expect(container.querySelector<HTMLTextAreaElement>("#profile-bio")?.value).toBe("");
+    expect(container.querySelector('img[alt="Profile photo preview"]')?.getAttribute("src")).toBe(mocks.profile.avatarUrl);
+    expect(mocks.updateProfile).not.toHaveBeenCalled();
+    expect(button("Save profile").disabled).toBe(true);
+  });
+
   it("removes a photo as an explicit null while preserving the display name", async () => {
     await render();
     await click("Remove photo");

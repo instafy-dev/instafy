@@ -1,0 +1,35 @@
+[data-org-accent] {
+  --org-hue: 220;
+  --org-saturation: 0%;
+  --org-avatar: hsl(var(--org-hue) var(--org-saturation) 90%);
+  --org-ink: hsl(var(--org-hue) var(--org-saturation) 28%);
+  --org-tint: hsl(var(--org-hue) var(--org-saturation) 95%);
+  --org-marker: hsl(var(--org-hue) var(--org-saturation) 40%);
+}
+[data-org-accent=blue] { --org-hue: 215; --org-saturation: 48%; }
+[data-org-accent=violet] { --org-hue: 265; --org-saturation: 38%; }
+[data-org-accent=pink] { --org-hue: 330; --org-saturation: 40%; }
+[data-org-accent=red] { --org-hue: 5; --org-saturation: 42%; }
+[data-org-accent=orange] { --org-hue: 28; --org-saturation: 50%; }
+[data-org-accent=green] { --org-hue: 135; --org-saturation: 30%; }
+[data-org-accent=teal] { --org-hue: 175; --org-saturation: 38%; }
+.dark [data-org-accent] {
+  --org-avatar: hsl(var(--org-hue) var(--org-saturation) 22%);
+  --org-ink: hsl(var(--org-hue) var(--org-saturation) 86%);
+  --org-tint: hsl(var(--org-hue) var(--org-saturation) 15%);
+  --org-marker: hsl(var(--org-hue) var(--org-saturation) 68%);
+}
+.org-accent-avatar { background: var(--org-avatar); color: var(--org-ink); }
+.org-accent-selection[aria-current=page] { background: var(--org-tint); }
+.org-accent-marker { background: var(--org-marker); }
+.org-accent-choice { border: 2px solid transparent; border-radius: 10px; }
+.org-accent-choice:has(:checked) { border-color: var(--org-marker); background: var(--org-tint); }
+.org-accent-choice:has(:focus-visible) { outline: 2px solid var(--color-primary-500); outline-offset: 2px; }
+.org-accent-swatch { background: var(--org-marker); }
+@media (forced-colors: active) {
+  .org-accent-selection[aria-current=page] { outline: 1px solid Highlight; }
+  .org-accent-marker { background: Highlight; forced-color-adjust: none; }
+  .org-accent-choice:has(:checked) { border-color: Highlight; }
+  .org-accent-choice:has(:focus-visible) { outline-color: Highlight; }
+  .org-accent-swatch { forced-color-adjust: none; }
+}

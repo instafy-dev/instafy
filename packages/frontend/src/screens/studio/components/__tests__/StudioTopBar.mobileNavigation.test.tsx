@@ -43,7 +43,7 @@ describe("StudioTopBar mobile navigation integration", () => {
     mocks.tabs.mockReturnValue({ activeTabId: "tab-a", tabs: [{ id: "tab-a", kind: "conversation", conversationId: "chat-a", title: "Active chat" }], focusTab: vi.fn(), closeTab: vi.fn(), requestUrlPush: vi.fn(), openPanelTab: vi.fn(), openConversationTab: vi.fn() });
     mocks.conversations.mockReturnValue({ conversations: [{ localId: "chat-a", title: "Active chat", parentConversationId: "controller-parent" }, { localId: "parent", controllerId: "controller-parent", title: "Parent chat" }] });
     mocks.orgMembers.mockResolvedValue([]); mocks.projectMembers.mockResolvedValue([]);
-    props = { mobileNavigation: { visitKey: "visit-a", history: { canGoBack: false, canGoForward: false, goBack: vi.fn(), goForward: vi.fn() }, onOpenPicker: vi.fn(), onOpenChats: vi.fn() } };
+    props = { mobileNavigation: { visitKey: "visit-a", history: { canGoBack: false, canGoForward: false, goBack: vi.fn(), goForward: vi.fn() }, onOpenPicker: vi.fn() } };
     container = document.createElement("div"); document.body.appendChild(container); root = createRoot(container);
   });
   afterEach(async () => {
@@ -57,47 +57,49 @@ describe("StudioTopBar mobile navigation integration", () => {
     expect(query(testId)).not.toBeNull(); await act(async () => query(testId)!.click());
   }
 
-  it.each([true, false])("shares Results, Back and Chats destinations without duplicate arrows (touch=%s)", async touch => {
+  it.each([true, false])("shares Results and Back with a consistent history pair (touch=%s)", async touch => {
     mocks.posture.mockReturnValue({ isLargeScreen: false, showTouchBottomDock: touch });
     props.mobileNavigation!.history.canGoBack = true;
     originToken = "owned-search";
     await render();
     expect(query("mobile-header-results")?.textContent).toBe("Results");
+    expect(query("mobile-header-forward")?.disabled).toBe(true);
     expect(query("mobile-header-back")).toBeNull();
     expect(query("topbar-back-button")).toBeNull();
     expect(query("mobile-header-open-chats")).toBeNull();
     await click("mobile-header-results");
     expect(returnToResults).toHaveBeenCalledOnce();
     expect(props.mobileNavigation!.history.goBack).not.toHaveBeenCalled();
-    expect(props.mobileNavigation!.onOpenChats).not.toHaveBeenCalled();
 
     originToken = null;
     await render();
     expect(query("mobile-header-results")).toBeNull();
     await click("mobile-header-back");
     expect(props.mobileNavigation!.history.goBack).toHaveBeenCalledOnce();
-    expect(props.mobileNavigation!.onOpenChats).not.toHaveBeenCalled();
 
     props.mobileNavigation!.history.canGoBack = false;
     await render();
     expect(query("mobile-header-back")).toBeNull();
-    expect(query("mobile-header-open-chats")?.textContent).toBe("Chats");
-    await click("mobile-header-open-chats");
-    expect(props.mobileNavigation!.onOpenChats).toHaveBeenCalledOnce();
+    expect(query("mobile-header-open-chats")).toBeNull();
+    expect(query("mobile-history-controls")).toBeNull();
     expect(props.mobileNavigation!.history.goBack).toHaveBeenCalledOnce();
     expect(returnToResults).toHaveBeenCalledOnce();
   });
 
   it("uses the active chat and space labels, but respects the full-history title override", async () => {
+    mocks.tabs.mockReturnValue({ ...mocks.tabs(), tabs: [{ ...mocks.tabs().tabs[0], icon: <svg data-testid="conversation-icon" /> }] });
     await render();
     expect(query("mobile-header-title")?.textContent).toBe("Active chat");
+    expect(query("mobile-header-location-icon")?.contains(query("conversation-icon"))).toBe(true);
     expect(query("mobile-header-space")?.textContent).toBe("Alpha space");
     await click("mobile-header-picker");
     expect(mocks.controls().onToggleSidebar).toHaveBeenCalledTimes(1);
     expect(props.mobileNavigation!.onOpenPicker).not.toHaveBeenCalled();
     expect(query("mobile-header-picker")?.getAttribute("aria-label")).toBe("Open space navigation: Alpha space");
-    mocks.controls.mockReturnValue({ ...mocks.controls(), topbarLocationOverride: { title: "Chats" } });
+    mocks.controls.mockReturnValue({ ...mocks.controls(), topbarLocationOverride: { title: "Chats", icon: <svg data-testid="chats-icon" /> } });
     await render(); expect(query("mobile-header-title")?.textContent).toBe("Chats");
+    expect(query("mobile-header-location-icon")?.contains(query("chats-icon"))).toBe(true);
+    expect(query("conversation-icon")).toBeNull();
     expect(query("studio-mobile-history-bar")).toBeNull();
   });
 
@@ -107,7 +109,8 @@ describe("StudioTopBar mobile navigation integration", () => {
     mocks.posture.mockReturnValue({ isLargeScreen: false, showTopbarHomeButton: false, showTouchBottomDock: touch });
     await render();
     const pickerId = "mobile-header-picker";
-    expect(query(pickerId)?.textContent).toBe("Active chat");
+    expect(query("mobile-header-title")?.textContent).toBe("Active chat");
+    expect(query("mobile-header-title")?.closest("button")).toBeNull();
     expect(query(pickerId)?.getAttribute("aria-label")).toBe("Open space navigation: Alpha space");
     expect(query("mobile-header-space")).toBeNull();
     await click(pickerId);
@@ -339,7 +342,7 @@ describe("StudioTopBar mobile navigation integration", () => {
     expect(query("mobile-studio-navigation-header")).toBeNull();
   });
 
-  it("keeps Forward in the shared compact menu without an extra native history row", async () => {
+  it("exposes Forward directly in the compact header without an extra native history row", async () => {
     mocks.posture.mockReturnValue({ isLargeScreen: false, showTopbarHomeButton: false, showTouchBottomDock: false });
     await render();
     expect(query("mobile-studio-navigation-header")).not.toBeNull();
@@ -347,7 +350,6 @@ describe("StudioTopBar mobile navigation integration", () => {
     expect(query("topbar-home-button")).toBeNull();
     props.mobileNavigation!.history.canGoForward = true;
     await render();
-    await click("mobile-header-more");
     await click("mobile-header-forward");
     expect(props.mobileNavigation!.history.goForward).toHaveBeenCalledOnce();
     expect(props.mobileNavigation!.history.goBack).not.toHaveBeenCalled();

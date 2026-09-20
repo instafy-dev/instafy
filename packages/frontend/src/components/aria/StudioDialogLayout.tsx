@@ -4,7 +4,7 @@ import { IconButton } from "../Button";
 import { Text } from "../Text";
 
 const CLOSE_BUTTON_CLASS =
-  "text-slate-400 hover:text-slate-700 data-[hovered]:text-slate-700 dark:text-slate-500 dark:hover:text-slate-200 dark:data-[hovered]:text-slate-200";
+  "min-h-11 min-w-11 sm:pointer-fine:min-h-8 sm:pointer-fine:min-w-8 text-slate-400 hover:text-slate-700 data-[hovered]:text-slate-700 dark:text-slate-500 dark:hover:text-slate-200 dark:data-[hovered]:text-slate-200";
 
 type StudioDialogHeaderProps = {
   title: ReactNode;

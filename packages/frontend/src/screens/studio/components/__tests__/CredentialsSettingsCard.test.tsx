@@ -7,6 +7,8 @@ import { CredentialsSettingsCard } from "../CredentialsSettingsCard";
 import type { AgentProfileModal } from "../AgentProfileModal";
 
 const mocks = vi.hoisted(() => ({
+  userId: "user-1",
+  uploadPicture: vi.fn(),
   clearDefaultCredential: vi.fn(),
   createCodexCredential: vi.fn(),
   createAgent: vi.fn(),
@@ -24,9 +26,11 @@ const mocks = vi.hoisted(() => ({
 
 vi.mock("../../../../providers/AuthProvider", () => ({
   useAuth: () => ({
-    user: { id: "user-1", email: "playwright@instafy.dev" },
+    user: { id: mocks.userId, email: "playwright@instafy.dev" },
   }),
 }));
+
+vi.mock("../../../../lib/identityImages", () => ({ uploadIdentityImage: mocks.uploadPicture }));
 
 vi.mock("../../../../status/useStatus", () => ({
   useStatus: () => ({
@@ -113,6 +117,8 @@ describe("CredentialsSettingsCard", () => {
     document.body.appendChild(container);
     root = createRoot(container);
 
+    mocks.userId = "user-1";
+    mocks.uploadPicture.mockReset().mockResolvedValue("https://storage.example/bot.png");
     mocks.clearDefaultCredential.mockReset();
     mocks.createCodexCredential.mockReset();
     mocks.createAgent.mockReset();
@@ -171,6 +177,85 @@ describe("CredentialsSettingsCard", () => {
   async function saveProfile() {
     await act(async () => { mocks.agentProfileProps!.onSave(); await flush(); });
   }
+
+  it("keeps picture changes local until Save and discards them on Cancel", async () => {
+    await renderAgent(); await openAgent();
+    expect(mocks.agentProfileProps?.dirty).toBe(false);
+    const file = new File(["picture"], "bot.png", { type: "image/png" });
+    await act(async () => mocks.agentProfileProps!.onAvatarFileChange!(file));
+    expect(mocks.agentProfileProps?.dirty).toBe(true);
+    expect(mocks.uploadPicture).not.toHaveBeenCalled();
+    expect(mocks.updateAgent).not.toHaveBeenCalled();
+    await act(async () => mocks.agentProfileProps!.onClose());
+    await openAgent();
+    expect(mocks.agentProfileProps?.avatarFile).toBeNull();
+    expect(mocks.agentProfileProps?.dirty).toBe(false);
+  });
+
+  it("reuses an uploaded picture after a failed profile save without changing runtime defaults", async () => {
+    await renderAgent(); await openAgent();
+    const file = new File(["picture"], "bot.png", { type: "image/png" });
+    await act(async () => mocks.agentProfileProps!.onAvatarFileChange!(file));
+    mocks.updateAgent.mockResolvedValueOnce({ success: false, error: "Try again" });
+    await saveProfile();
+    expect(mocks.agentProfileProps?.isOpen).toBe(true);
+    await saveProfile();
+    expect(mocks.uploadPicture).toHaveBeenCalledExactlyOnceWith("agents", "user-1", file);
+    expect(mocks.updateAgent).toHaveBeenCalledTimes(2);
+    expect(mocks.updateAgent.mock.lastCall?.[1]).toMatchObject({ avatarSeed: "https://storage.example/bot.png" });
+    expect(mocks.updateAgent.mock.lastCall?.[1]).not.toHaveProperty("credentialId");
+    expect(mocks.updateAgent.mock.lastCall?.[1]).not.toHaveProperty("model");
+  });
+
+  it("does not create a bot when its picture upload fails, and can retry", async () => {
+    await renderAgent();
+    await act(async () => container.querySelector<HTMLButtonElement>('[data-testid="bots-create"]')!.click());
+    await act(async () => mocks.agentProfileProps!.onAvatarFileChange!(new File(["picture"], "bot.png", { type: "image/png" })));
+    mocks.uploadPicture.mockRejectedValueOnce(new Error("Storage unavailable"));
+    await saveProfile();
+    expect(mocks.createAgent).not.toHaveBeenCalled();
+    expect(mocks.agentProfileProps?.isOpen).toBe(true);
+    mocks.createAgent.mockResolvedValue({ success: true, agent: inheritedAgent });
+    await saveProfile();
+    expect(mocks.createAgent).toHaveBeenCalledOnce();
+    expect(mocks.createAgent.mock.lastCall?.[0]).toMatchObject({ avatarSeed: "https://storage.example/bot.png" });
+  });
+
+  it("prevents duplicate uploads and saves while a picture is pending", async () => {
+    await renderAgent(); await openAgent();
+    await act(async () => mocks.agentProfileProps!.onAvatarFileChange!(new File(["picture"], "bot.png", { type: "image/png" })));
+    let resolve!: (url: string) => void;
+    mocks.uploadPicture.mockReturnValue(new Promise<string>(done => { resolve = done; }));
+    const save = mocks.agentProfileProps!.onSave;
+    await act(async () => { save(); save(); });
+    expect(mocks.uploadPicture).toHaveBeenCalledOnce();
+    expect(mocks.agentProfileProps?.pending).toBe(true);
+    expect(mocks.updateAgent).not.toHaveBeenCalled();
+    await act(async () => { resolve("https://storage.example/bot.png"); await flush(); });
+    expect(mocks.updateAgent).toHaveBeenCalledOnce();
+  });
+
+  it("restores the bot fallback when removing an existing picture", async () => {
+    await renderAgent({ ...inheritedAgent, avatarSeed: "https://storage.example/old.png" }); await openAgent();
+    await act(async () => mocks.agentProfileProps!.onAvatarImageUrlChange(""));
+    await saveProfile();
+    expect(mocks.updateAgent.mock.lastCall?.[1]).toMatchObject({ avatarSeed: inheritedAgent.id });
+    expect(mocks.uploadPicture).not.toHaveBeenCalled();
+  });
+
+  it("does not carry a pending photo save into another account", async () => {
+    await renderAgent(); await openAgent();
+    await act(async () => mocks.agentProfileProps!.onAvatarFileChange!(new File(["picture"], "bot.png", { type: "image/png" })));
+    let resolve!: (url: string) => void;
+    mocks.uploadPicture.mockReturnValue(new Promise<string>(done => { resolve = done; }));
+    await saveProfile();
+    mocks.userId = "user-2";
+    await act(async () => { root.render(<CredentialsSettingsCard />); await flush(); });
+    expect(mocks.agentProfileProps?.isOpen).toBe(false);
+    await act(async () => { resolve("https://storage.example/bot.png"); await flush(); });
+    expect(mocks.updateAgent).not.toHaveBeenCalled();
+    expect(mocks.createAgent).not.toHaveBeenCalled();
+  });
 
   it.each([
     ["helper", null], ["octo", null], ["helper", "custom-unlisted-model"], ["octo", "custom-unlisted-model"],

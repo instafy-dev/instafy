@@ -1,0 +1,49 @@
+/* Keep the 48px tap target independent of the compact visible breadcrumb. */
+.studio-mobile-context-header .studio-breadcrumb-trigger {
+  position: relative;
+  isolation: isolate;
+  background: transparent !important;
+}
+
+.studio-mobile-context-header .studio-breadcrumb-trigger::before {
+  content: "";
+  position: absolute;
+  inset-inline: 0;
+  top: 50%;
+  height: 32px;
+  transform: translateY(-50%);
+  border-radius: 8px;
+  z-index: -1;
+  pointer-events: none;
+  transition: background-color 150ms ease-out;
+}
+
+.studio-mobile-context-header .studio-breadcrumb-avatar-trigger::before {
+  inset-inline: 6px;
+}
+
+.studio-mobile-context-header .studio-breadcrumb-trigger:is([data-hovered], [data-pressed], [aria-expanded="true"])::before {
+  background: var(--color-slate-100);
+}
+
+.dark .studio-mobile-context-header .studio-breadcrumb-trigger:is([data-hovered], [data-pressed], [aria-expanded="true"])::before {
+  background: var(--color-studio-dark-rail-hover);
+}
+
+.studio-mobile-context-header .studio-breadcrumb-trigger:focus-visible {
+  box-shadow: none;
+}
+
+.studio-mobile-context-header .studio-breadcrumb-trigger:focus-visible::before {
+  outline: 2px solid var(--color-primary-500);
+  outline-offset: 2px;
+}
+
+@media (forced-colors: active) {
+  .studio-mobile-context-header .studio-breadcrumb-trigger[aria-expanded="true"]::before {
+    outline: 1px solid Highlight;
+  }
+  .studio-mobile-context-header .studio-breadcrumb-trigger:focus-visible::before {
+    outline: 2px solid Highlight;
+  }
+}

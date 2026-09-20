@@ -14,7 +14,7 @@ import {
 } from "../../../voice/speechService";
 import { AudioHostSettingsCard } from "./AudioHostSettingsCard";
 import { ProviderShellSurface } from "./ProviderShellSurface";
-import { SettingsSurface } from "./SettingsSurface";
+import { SettingsFormLayout } from "../../../components/SettingsFormLayout";
 
 type ProjectAiOverridesSettingsProps = {
   selectedItemId: string | null;
@@ -239,7 +239,7 @@ export function ProjectAiOverridesSettings({
 
   if (selectedItemId === "audio") {
     return (
-      <SettingsSurface data-testid="project-ai-overrides-audio-detail">
+      <SettingsFormLayout data-testid="project-ai-overrides-audio-detail">
         <AudioHostSettingsCard
           diagnostics={hostAudioDiagnostics}
           sessionState={hostAudioSessionState}
@@ -250,13 +250,13 @@ export function ProjectAiOverridesSettings({
           onRequestMicrophonePermission={onRequestMicrophonePermission}
           presentation="embedded"
         />
-      </SettingsSurface>
+      </SettingsFormLayout>
     );
   }
 
   if (activeProviderGroup) {
     return (
-      <SettingsSurface data-testid={`project-ai-overrides-provider-detail-${activeProviderGroup.familyId}`}>
+      <SettingsFormLayout data-testid={`project-ai-overrides-provider-detail-${activeProviderGroup.familyId}`}>
         <div className="space-y-4">
           {activeProviderDetailEntries.map((entry) => (
             <ProviderShellSurface
@@ -269,15 +269,15 @@ export function ProjectAiOverridesSettings({
             />
           ))}
         </div>
-      </SettingsSurface>
+      </SettingsFormLayout>
     );
   }
 
   return (
-    <SettingsSurface data-testid="project-ai-overrides-empty">
+    <SettingsFormLayout data-testid="project-ai-overrides-empty">
       <Text variant="caption" tone="muted">
         Select a voice or audio section from the category list.
       </Text>
-    </SettingsSurface>
+    </SettingsFormLayout>
   );
 }

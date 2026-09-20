@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useId, useMemo, useState } from "react";
 import { Badge } from "../../../components/Badge";
 import { Checkbox } from "../../../components/Checkbox";
 import { Field } from "../../../components/Field";
@@ -183,6 +183,7 @@ export function ProviderHostSurfaceControls({
   controls,
   hostBindings,
 }: ProviderHostSurfaceControlsProps) {
+  const fieldId = useId();
   const bindings = useMemo(() => readSurfaceControlBindings(provider, controls), [provider, controls]);
   const [controlState, setControlState] = useState<Record<string, ControlRuntimeState>>({});
 
@@ -337,7 +338,7 @@ export function ProviderHostSurfaceControls({
 
   return (
     <div className="space-y-4">
-      {controls.map((control) => {
+      {controls.map((control, index) => {
         const controlKey = buildControlKey(control);
         const runtimeState = controlState[controlKey];
         const hostBindingId = resolveHostBindingId(control.binding);
@@ -402,8 +403,9 @@ export function ProviderHostSurfaceControls({
               </div>
             ) : control.kind === "select" && canWrite ? (
               <div className="space-y-2">
-                <Field label={control.label} hint={effectiveDescription} error={error}>
+                <Field label={control.label} htmlFor={`${fieldId}-${index}`} hint={effectiveDescription} error={error}>
                   <Select
+                    id={`${fieldId}-${index}`}
                     aria-label={control.label}
                     value={typeof (boundValue ?? control.value) === "string" ? String(boundValue ?? control.value) : ""}
                     disabled={loading}

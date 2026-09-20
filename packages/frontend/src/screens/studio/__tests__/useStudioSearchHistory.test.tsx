@@ -5,6 +5,9 @@ import { BrowserRouter, useLocation, useNavigate, type NavigateFunction } from "
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { getStudioVisitKey } from "../../../navigation/studioVisit";
 import { useStudioNavigation } from "../../../navigation/useStudioNavigation";
+import { useStudioHistory } from "../../../navigation/useStudioHistory";
+import { MobileStudioHistoryControls } from "../components/MobileStudioHistoryControls";
+import { StudioSearchReturnProvider } from "../components/StudioSearchReturnContext";
 import { useStudioSearch, type StudioSearchRequest } from "../components/useStudioSearch";
 import { useStudioSearchHistory } from "../useStudioSearchHistory";
 
@@ -23,6 +26,7 @@ describe("search result browser history", () => {
     const go = useStudioNavigation();
     const scopeKey = `${viewer}:${getStudioVisitKey(location)}:${location.search}`;
     const history = useStudioSearchHistory(viewer, getStudioVisitKey(location), scopeKey);
+    const appHistory = useStudioHistory();
     lastHistory = history;
     lastSearch = useStudioSearch({
       scopeKey, org: null, space: null, persistentControl: true,
@@ -36,7 +40,10 @@ describe("search result browser history", () => {
         { forceNewVisit: true, searchOriginToken: history.getOriginToken() ?? undefined }),
       }],
     });
-    return <>{lastSearch.renderControl()}{lastSearch.results}</>;
+    return <StudioSearchReturnProvider value={history}>
+      <MobileStudioHistoryControls history={appHistory} returnToSearch={!lastSearch.open} />
+      {lastSearch.renderControl()}{lastSearch.results}
+    </StudioSearchReturnProvider>;
   }
   async function render() { await act(async () => root.render(<BrowserRouter><Harness /></BrowserRouter>)); }
   const input = () => container.querySelector<HTMLInputElement>("input")!;
@@ -52,6 +59,14 @@ describe("search result browser history", () => {
     await act(async () => {
       const popped = new Promise<void>((resolve) => window.addEventListener("popstate", () => resolve(), { once: true }));
       await navigate(delta);
+      await popped;
+    });
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 20)); });
+  }
+  async function pressHistory(testId: string) {
+    await act(async () => {
+      const popped = new Promise<void>((resolve) => window.addEventListener("popstate", () => resolve(), { once: true }));
+      container.querySelector<HTMLButtonElement>(`[data-testid="${testId}"]`)!.click();
       await popped;
     });
     await act(async () => { await new Promise((resolve) => setTimeout(resolve, 20)); });
@@ -85,15 +100,17 @@ describe("search result browser history", () => {
     expect(lastSearch.open).toBe(false);
     expect(lastHistory.originToken).not.toBeNull();
     expect(new URLSearchParams(window.location.search).get("projectId")).toBe(same ? "space-a" : "space-b");
-    await travel(-1);
+    await pressHistory("mobile-header-results");
     expect(lastSearch.open).toBe(true);
     expect(input().value).toBe("needle");
     expect(result()).not.toBeNull();
     expect(container.querySelector<HTMLElement>('[data-testid="studio-search-results"]')!.scrollTop).toBe(730);
     expect(queryRequests).toContainEqual({ open: true, query: "needle", scope: "all", restoreMessagePages: 2 });
-    await travel(1);
+    expect(container.querySelector('[data-testid="mobile-header-results"]')).toBeNull();
+    await pressHistory("mobile-header-forward");
     expect(lastSearch.open).toBe(false);
     expect(result()).toBeNull();
+    expect(container.querySelector<HTMLButtonElement>('[data-testid="mobile-header-forward"]')?.disabled).toBe(true);
     await travel(-1);
     expect(lastSearch.open).toBe(true);
     expect(input().value).toBe("needle");

@@ -1,4 +1,5 @@
-import { useCallback, useMemo, useState, type ReactNode } from "react";
+import { Field } from "../../../components/Field";
+import { useCallback, useId, useMemo, useState, type ReactNode } from "react";
 import { Eye, EyeClosed } from "iconoir-react";
 import { Badge } from "../../../components/Badge";
 import { Button } from "../../../components/Button";
@@ -97,6 +98,7 @@ export function InlineSecretsForm({
    */
   errorTestId?: string;
 }) {
+  const fieldId = useId();
   const { showStatus } = useStatus();
   const normalizedSecrets = useMemo(() => {
     const out: InlineSecretDescriptor[] = [];
@@ -357,7 +359,7 @@ export function InlineSecretsForm({
   return (
     <div className="mt-2 space-y-2">
       <div className="space-y-2">
-        {normalizedSecrets.map((secret) => {
+        {normalizedSecrets.map((secret, index) => {
           const draft = drafts[secret.name] ?? createDefaultDraft(secret.sensitive !== false);
           // The badge stays for as long as the card is on screen: a state that
           // erased itself after a minute left the person with no answer to
@@ -365,46 +367,17 @@ export function InlineSecretsForm({
           const saved = typeof savedAtByName[secret.name] === "number";
           const problem = problemsByName[secret.name] ?? null;
           return (
-            // Not a <label>: the reveal control now sits inside the field box,
-            // and an interactive control inside a label gets the label's click
-            // forwarded to the input behind it. The input carries its own
-            // aria-label, which already outranked this element as the
-            // accessible name, so nothing is lost by making it a plain box.
-            <div key={secret.name} className="block space-y-1">
-              {namesShownByHost ? (
-                saved ? (
-                  <div className="flex flex-wrap items-center gap-2">
-                    <Badge tone="success" size="xs">
-                      Saved
-                    </Badge>
-                  </div>
-                ) : null
-              ) : (
-                <>
-                  <div className="flex flex-wrap items-center justify-between gap-2">
-                    <Text as="div" variant="caption" tone="muted" className="text-xxs font-mono">
-                      {secret.name}
-                    </Text>
-                    {saved ? (
-                      <Badge tone="success" size="xs">
-                        Saved
-                      </Badge>
-                    ) : null}
-                  </div>
-                  {secret.description ? (
-                    <Text as="div" variant="caption" tone="muted" className="text-xxs leading-snug">
-                      {secret.description}
-                    </Text>
-                  ) : null}
-                </>
-              )}
+            <Field key={secret.name} label={namesShownByHost ? undefined : secret.name}
+              htmlFor={`${fieldId}-${index}`} size="xs" labelClassName="font-mono"
+              hint={namesShownByHost ? undefined : secret.description || undefined}>
+              {saved ? <Badge tone="success" size="xs" className="self-start">Saved</Badge> : null}
               {/* The reveal sits inside the field, which is where every other
                   trailing control in the product sits: the login password eye,
                   the history search filter, both browser address bars. Beside
                   it, it was a bordered white box next to a bordered white box,
                   and it ate typing room the phone width does not have. */}
               <div className="relative">
-                <Input
+                <Input id={`${fieldId}-${index}`}
                   value={draft.value}
                   onChange={(event) => setDraftValue(secret.name, event.target.value)}
                   placeholder="Paste it here"
@@ -457,7 +430,7 @@ export function InlineSecretsForm({
                   {problem}
                 </Text>
               ) : null}
-            </div>
+            </Field>
           );
         })}
       </div>
@@ -477,7 +450,7 @@ export function InlineSecretsForm({
           onPress={() => void handleSave()}
           variant="primary"
           size={actionAlign === "start" ? "sm" : "xs"}
-          radius="full"
+          radius="xl"
           isDisabled={!canSave}
           {...(saveTestId ? { "data-testid": saveTestId } : {})}
         >

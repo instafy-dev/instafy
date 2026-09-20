@@ -77,11 +77,28 @@ describe("StudioRecentSpaces", () => {
     await render({ presentation: "path", spaces: [], activeProjectId: null, onBrowseAll });
     const trigger = container.querySelector('[data-testid="sidebar-space-button"]')!;
     expect(trigger.textContent).toContain("Choose space");
+    expect(trigger.querySelector('[data-testid="space-identity"]')).toBeNull();
     await click("sidebar-space-button");
     expect(document.querySelector('[data-testid="sidebar-recent-spaces-popover"]')?.textContent).toContain("No recent spaces in this team");
     await click("sidebar-browse-all-spaces");
     expect(onBrowseAll).toHaveBeenCalledOnce();
     expect(document.querySelector('[data-testid="sidebar-recent-spaces-popover"]')).toBeNull();
+  });
+
+  it("keeps the current breadcrumb identity in sync with appearance changes, clearing and space switching", async () => {
+    await render({ presentation: "path", spaces: [{ id: "current", name: "Website", icon: "📚", color: "pink" }] });
+    const identity = () => container.querySelector('[data-testid="sidebar-space-button"] [data-testid="space-identity"]')!;
+    expect(identity().textContent).toBe("📚");
+    expect(identity().className).toContain("bg-pink-100");
+    expect(identity().className).toContain("dark:bg-pink-900");
+    await render({ presentation: "path", spaces: [{ id: "current", name: "Website", icon: "🌱", color: "green" }] });
+    expect(identity().textContent).toBe("🌱");
+    expect(identity().className).toContain("bg-green-100");
+    await render({ presentation: "path", spaces: [{ id: "current", name: "Website", icon: null, color: null }] });
+    expect(identity().textContent).toBe("W");
+    expect(identity().className).toContain("bg-slate-100");
+    await render({ presentation: "path", activeProjectId: "recent" });
+    expect(identity().textContent).toBe("D");
   });
 
   it("selects the current space and five most recent visits, then lays them out A–Z without mutating candidates", async () => {

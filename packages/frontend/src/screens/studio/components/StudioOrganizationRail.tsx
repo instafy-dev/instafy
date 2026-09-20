@@ -1,15 +1,19 @@
-import { useId, useLayoutEffect, useRef, type ReactNode, type RefObject } from "react";
-import { Compass, Plus } from "iconoir-react";
+import { useEffect, useId, useLayoutEffect, useRef, useState, type ReactNode, type RefObject } from "react";
+import { Compass, Group, Plus, Settings } from "iconoir-react";
 import { AttentionBadge } from "../../../components/AttentionBadge";
 import { IconButton } from "../../../components/Button";
 import { OctoMark } from "../../../components/OctoMark";
 import { DESKTOP_TITLE_BAR_HEIGHT_PX } from "../../../lib/desktopShell";
-import { getOrgInitials } from "../../../org/orgNaming";
+import { OrgIdentity } from "../../../components/OrgIdentity";
+import { normalizeOrgAccent } from "../../../org/orgAccent";
 import { DARK_RAIL_SURFACE_CLASS } from "../../../theme/darkSurfaces";
 import type { SidebarWorkspaceOrgOption } from "./StudioSidebarWorkspaceSwitcher";
 import { unreadUpdatesDescription } from "../homeUpdateLabels";
+import { StudioPopover } from "../../../components/aria/StudioPopover";
+import { StudioMenu, StudioMenuItem } from "../../../components/aria/StudioMenu";
+import { MenuItemContent } from "../../../components/MenuItemContent";
 
-const SELECTION_MARKER_CLASS = "pointer-events-none absolute -left-2 top-1/2 h-5 w-[3px] -translate-y-1/2 rounded-r-full bg-primary-600 dark:bg-primary-400";
+const SELECTION_MARKER_CLASS = "pointer-events-none absolute -left-2 top-1/2 h-5 w-[3px] -translate-y-1/2 rounded-r-full bg-current";
 
 export interface StudioOrganizationRailProps {
   organizations: SidebarWorkspaceOrgOption[];
@@ -21,6 +25,8 @@ export interface StudioOrganizationRailProps {
   titleBarFree: boolean;
   onHome: () => void;
   onSelectOrganization: (key: string) => void;
+  onOpenOrganizationOverview?: (key: string) => void;
+  onOpenOrganizationSettings?: (key: string, category: "profile" | "members") => void;
   onCreateOrganization?: () => void;
   onBrowseOrganizations: () => void;
   browseButtonRef: RefObject<HTMLButtonElement | null>;
@@ -38,6 +44,8 @@ export function StudioOrganizationRail({
   titleBarFree,
   onHome,
   onSelectOrganization,
+  onOpenOrganizationOverview,
+  onOpenOrganizationSettings,
   onCreateOrganization,
   onBrowseOrganizations,
   browseButtonRef,
@@ -46,6 +54,20 @@ export function StudioOrganizationRail({
   const homeAttentionId = useId();
   const listRef = useRef<HTMLDivElement | null>(null);
   const selectedRef = useRef<HTMLButtonElement | null>(null);
+  const contextTriggerRef = useRef<HTMLButtonElement | null>(null);
+  const [contextOrgKey, setContextOrgKey] = useState<string | null>(null);
+  const contextOrg = organizations.find(org => org.key === contextOrgKey);
+  const hasContextActions = Boolean(onOpenOrganizationOverview || onOpenOrganizationSettings);
+  useEffect(() => { setContextOrgKey(null); }, [selectedOrgKey, homeActive]);
+  useEffect(() => {
+    if (!contextOrg || !hasContextActions) setContextOrgKey(null);
+  }, [contextOrg, hasContextActions]);
+  const openContextMenu = (key: string, trigger: HTMLButtonElement) => {
+    contextTriggerRef.current = trigger;
+    // Restore keyboard focus to the right-clicked icon when the menu is dismissed.
+    trigger.focus({ preventScroll: true });
+    setContextOrgKey(key);
+  };
   useLayoutEffect(() => {
     const list = listRef.current;
     const selected = selectedRef.current;
@@ -80,7 +102,7 @@ export function StudioOrganizationRail({
           aria-label="Home — all teams" title="Home — all teams" aria-current={homeActive ? "page" : undefined}
           aria-describedby={homeAttentionCount > 0 ? homeAttentionId : undefined}
           data-testid="sidebar-home-button"
-          className="relative h-11 w-11 aria-[current=page]:bg-primary-50 dark:aria-[current=page]:bg-primary-500/10">
+          className="relative h-11 w-11">
           {homeActive ? <span aria-hidden="true" className={SELECTION_MARKER_CLASS} /> : null}
           <span aria-hidden="true"><OctoMark className="h-6 w-6 text-brand-ink dark:text-brand-paper" /></span>
           <AttentionBadge count={homeAttentionCount} aria-hidden testId="sidebar-home-badge"
@@ -90,6 +112,7 @@ export function StudioOrganizationRail({
         {homeAttentionCount > 0 ? <span id={homeAttentionId} className="sr-only">{unreadUpdatesDescription(homeAttentionCount)} across teams</span> : null}
       </div>
       <div ref={listRef} data-testid="sidebar-team-rail-list"
+        onScroll={() => setContextOrgKey(null)}
         className="flex min-h-0 w-full flex-1 flex-col items-center gap-2 overflow-y-auto overflow-x-hidden overscroll-contain px-1 py-1 [scrollbar-width:thin]">
         {organizations.filter((org) => org.key !== "all").map((org) => {
           const selected = org.key === selectedOrgKey;
@@ -97,20 +120,62 @@ export function StudioOrganizationRail({
           const attention = orgAttentionCounts[org.key] ?? 0;
           return <IconButton key={org.key} ref={selected ? selectedRef : undefined}
             variant="ghost" size="sm" radius="lg" onPress={() => onSelectOrganization(org.key)}
+            onContextMenu={event => {
+              if (!hasContextActions) return;
+              event.preventDefault();
+              event.stopPropagation();
+              openContextMenu(org.key, event.currentTarget);
+            }}
+            onKeyDown={event => {
+              if (hasContextActions && (event.key === "ContextMenu" || (event.shiftKey && event.key === "F10"))) {
+                event.preventDefault();
+                openContextMenu(org.key, event.currentTarget);
+              }
+            }}
+            aria-haspopup={hasContextActions ? "menu" : undefined}
+            aria-expanded={hasContextActions ? contextOrgKey === org.key : undefined}
+            aria-keyshortcuts={hasContextActions ? "Shift+F10" : undefined}
             aria-label={`${org.label}${attention > 0 ? `, ${unreadUpdatesDescription(attention)}` : ""}`}
             title={org.label} aria-current={selected && !homeActive ? "page" : undefined}
+            data-org-accent={normalizeOrgAccent(org.accentColor) ?? "slate"}
             aria-busy={pending || undefined} data-testid={`sidebar-team-${org.key}`}
-            className="relative h-11 w-11 shrink-0 aria-[current=page]:bg-primary-50 aria-[current=page]:text-primary-600 dark:aria-[current=page]:bg-primary-500/10 dark:aria-[current=page]:text-primary-400">
-            {selected && !homeActive ? <span aria-hidden="true" className={SELECTION_MARKER_CLASS} /> : null}
-            <span className={`flex h-8 w-8 items-center justify-center overflow-hidden rounded-lg bg-slate-200 text-xs font-medium text-slate-700 dark:bg-slate-700 dark:text-slate-100 ${pending ? "animate-pulse" : ""}`}>
-              {org.avatarUrl ? <img src={org.avatarUrl} alt="" draggable={false} className="h-full w-full object-cover" /> : getOrgInitials(org.name)}
-            </span>
+            className="org-accent-selection relative h-11 w-11 shrink-0">
+            {selected && !homeActive ? <span aria-hidden="true" className="org-accent-marker pointer-events-none absolute -left-2 top-1/2 h-5 w-[3px] -translate-y-1/2 rounded-r-full" /> : null}
+            <OrgIdentity name={org.name} avatarUrl={org.avatarUrl} accentColor={org.accentColor}
+              className={`h-8 w-8 text-xs ${pending ? "animate-pulse" : ""}`} />
             <AttentionBadge count={attention} aria-hidden testId={`sidebar-team-attention-${org.key}`}
               title={unreadUpdatesDescription(attention)}
               className="absolute right-0 top-0 ring-2 ring-slate-50 dark:ring-[color:var(--color-studio-dark-rail)]" />
           </IconButton>;
         })}
       </div>
+      {contextOrg && hasContextActions ? <StudioPopover
+        triggerRef={contextTriggerRef} isOpen onOpenChange={open => { if (!open) setContextOrgKey(null); }}
+        placement="right top" offset={6} className="w-56 max-w-[calc(100vw-1rem)] p-2"
+        data-testid="sidebar-org-context-menu">
+        <div className="mb-1 flex min-w-0 items-center gap-2 px-2 py-2 text-sm font-semibold">
+          <OrgIdentity name={contextOrg.name} avatarUrl={contextOrg.avatarUrl} accentColor={contextOrg.accentColor} className="h-6 w-6 text-[11px]" />
+          <span className="min-w-0 break-words">{contextOrg.name}</span>
+        </div>
+        <StudioMenu aria-label={`Team actions: ${contextOrg.name}`} autoFocus="first"
+          onClose={() => setContextOrgKey(null)} className="space-y-1"
+          onAction={key => {
+            setContextOrgKey(null);
+            if (key === "overview") onOpenOrganizationOverview?.(contextOrg.key);
+            if (key === "settings") onOpenOrganizationSettings?.(contextOrg.key, "profile");
+            if (key === "members") onOpenOrganizationSettings?.(contextOrg.key, "members");
+          }}>
+          {onOpenOrganizationOverview ? <StudioMenuItem id="overview" textValue="Team overview" data-testid="sidebar-org-context-overview">
+            <MenuItemContent start={<Group className="h-4 w-4" aria-hidden="true" />}>Team overview</MenuItemContent>
+          </StudioMenuItem> : null}
+          {onOpenOrganizationSettings ? <StudioMenuItem id="settings" textValue="Team settings" data-testid="sidebar-org-context-settings">
+            <MenuItemContent start={<Settings className="h-4 w-4" aria-hidden="true" />}>Team settings</MenuItemContent>
+          </StudioMenuItem> : null}
+          {onOpenOrganizationSettings ? <StudioMenuItem id="members" textValue="Members" data-testid="sidebar-org-context-members">
+            <MenuItemContent start={<Group className="h-4 w-4" aria-hidden="true" />}>Members</MenuItemContent>
+          </StudioMenuItem> : null}
+        </StudioMenu>
+      </StudioPopover> : null}
       <div data-testid="sidebar-rail-actions" className="flex w-full shrink-0 flex-col items-center gap-1 border-t border-slate-200/70 pt-2 dark:border-[color:var(--color-studio-dark-divider)]">
         {onCreateOrganization ? <IconButton variant="ghost" size="sm" radius="lg" className="h-11 w-11"
           aria-label="New team" title="New team" data-testid="sidebar-org-new" onPress={onCreateOrganization}>

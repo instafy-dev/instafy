@@ -8,12 +8,12 @@ export interface StudioHistory {
   goForward: () => void;
 }
 
-/** Read only the current Router entry, not a parallel list of destinations. */
-function currentRouterIndex(locationKey: string): number | null {
+/** Read only the browser's Router entry, not a parallel list of destinations.
+ * Undefined means a valid entry awaiting Router; null means invalid state. */
+function currentRouterIndex(locationKey: string): number | null | undefined {
   const state = window.history.state as { idx?: unknown; key?: unknown } | null;
-  if (!state || (state.key ?? "default") !== locationKey) return null;
-  return typeof state.idx === "number" && Number.isSafeInteger(state.idx) && state.idx >= 0
-    ? state.idx : null;
+  if (!state || typeof state.idx !== "number" || !Number.isSafeInteger(state.idx) || state.idx < 0) return null;
+  return (state.key ?? "default") === locationKey ? state.idx : undefined;
 }
 
 /** Keep the owner mounted across conditional controls/sheets. A reload or owner
@@ -25,18 +25,25 @@ export function useStudioHistory(): StudioHistory {
   const navigate = useNavigate();
   const navigationType = useNavigationType();
   const index = currentRouterIndex(location.key);
-  const [knownHead, setKnownHead] = useState<number | null>(index);
+  const [knownHistory, setKnownHistory] = useState({ index: index ?? null, head: index ?? null });
   useLayoutEffect(() => {
-    setKnownHead((previous) => index === null ? null : navigationType === "PUSH"
-      ? index : Math.max(previous ?? index, index));
+    // Context updates can render before Router publishes the browser's new
+    // entry. Keep the last resolved presentation during that interval; it is
+    // not a direct entry with no history. Actions still reject stale entries.
+    if (index == null) return;
+    setKnownHistory((previous) => {
+      const head = navigationType === "PUSH" ? index : Math.max(previous.head ?? index, index);
+      return previous.index === index && previous.head === head ? previous : { index, head };
+    });
   }, [index, location.key, navigationType]);
 
-  const canGoBack = index !== null && index > 0;
-  const canGoForward = index !== null && knownHead !== null && index < knownHead;
+  const displayedIndex = index === undefined ? knownHistory.index : index;
+  const canGoBack = displayedIndex !== null && displayedIndex > 0;
+  const canGoForward = displayedIndex !== null && knownHistory.head !== null && displayedIndex < knownHistory.head;
   const move = useCallback((delta: -1 | 1) => {
     // The browser entry can change before Router publishes it. Never apply a
     // stale control's action to another entry during that hydration interval.
-    if (index === null || currentRouterIndex(location.key) !== index) return;
+    if (index == null || currentRouterIndex(location.key) !== index) return;
     if (delta < 0 ? canGoBack : canGoForward) void navigate(delta);
   }, [canGoBack, canGoForward, index, location.key, navigate]);
   const goBack = useCallback(() => move(-1), [move]);

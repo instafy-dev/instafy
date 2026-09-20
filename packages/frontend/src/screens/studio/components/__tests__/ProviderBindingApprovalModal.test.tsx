@@ -112,6 +112,15 @@ describe("ProviderBindingApprovalModal", () => {
       '[data-testid="provider-binding-save"]',
     ) as HTMLButtonElement | null;
 
+    for (const [id, label] of [
+      ["provider-binding-provider-id", "Provider"],
+      ["provider-binding-prefix", "Storage folder"],
+      ["provider-binding-purpose", "Purpose"],
+      ["provider-binding-root-uri", "Workspace root"],
+    ]) {
+      const input = document.querySelector<HTMLInputElement>(`[data-testid="${id}"]`);
+      expect(input?.labels?.[0]?.textContent).toBe(label);
+    }
     expect(providerIdInput?.disabled).toBe(true);
     expect(rootUriInput?.value).toBe("file:///home/example/git/demo");
     expect(writeCheckbox?.checked).toBe(false);

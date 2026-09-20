@@ -1,3 +1,4 @@
+import { uploadIdentityImage } from "./identityImages";
 import { supabase } from "./supabaseClient";
 
 interface UploadSiteAssetOptions {
@@ -27,18 +28,6 @@ interface UploadOrgAvatarOptions {
 }
 
 /** Team avatar upload; returns the public URL to store on the organization. */
-export async function uploadOrgAvatar(options: UploadOrgAvatarOptions): Promise<string> {
-  const { orgId, file } = options;
-  const bucket = "site-assets";
-  const extension = file.name.includes(".") ? file.name.slice(file.name.lastIndexOf(".")) : "";
-  const path = `org-avatars/${orgId}/${Date.now()}${extension}`;
-  const { error } = await supabase.storage.from(bucket).upload(path, file, {
-    cacheControl: "3600",
-    upsert: false
-  });
-  if (error) {
-    throw error;
-  }
-  const { data } = supabase.storage.from(bucket).getPublicUrl(path);
-  return data.publicUrl;
+export async function uploadOrgAvatar({ orgId, file }: UploadOrgAvatarOptions): Promise<string> {
+  return uploadIdentityImage("orgs", orgId, file);
 }

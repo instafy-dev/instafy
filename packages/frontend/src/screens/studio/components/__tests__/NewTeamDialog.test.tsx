@@ -55,6 +55,20 @@ describe("new team picture onboarding", () => {
     expect(onCreated).toHaveBeenCalledExactlyOnceWith(created);
     expect(onClose).toHaveBeenCalledTimes(1);
   });
+  it("opens the native chooser from the team picture and keeps it disabled while creating", async () => {
+    await render();
+    const input = container.querySelector<HTMLInputElement>('[data-testid="new-team-picture-input"]')!;
+    const chooseFile = vi.spyOn(input, "click");
+    const photo = container.querySelector<HTMLButtonElement>('[aria-label="Upload team picture"]')!;
+    await act(async () => photo.click());
+    expect(chooseFile).toHaveBeenCalledOnce();
+    let resolve!: (value: typeof created) => void;
+    mocks.create.mockReturnValue(new Promise((done) => { resolve = done; }));
+    await submit();
+    expect(photo.disabled).toBe(true);
+    expect(input.disabled).toBe(true);
+    await act(async () => resolve(created));
+  });
   it("preserves optional custom slugs for creation from the space launcher", async () => {
     await render(true); await input("project-launcher-org-slug-input", "my-custom-team"); await submit();
     expect(mocks.create).toHaveBeenCalledWith({ orgName: "New team", orgSlug: "my-custom-team" });
@@ -86,7 +100,7 @@ describe("new team picture onboarding", () => {
   it("rejects unsupported and oversized files before any upload", async () => {
     await render();
     await choose(new File(["text"], "team.txt", { type: "text/plain" }));
-    expect(container.querySelector('[role="alert"]')?.textContent).toContain("must be an image");
+    expect(container.querySelector('[role="alert"]')?.textContent).toContain("PNG, JPEG or WebP");
     await choose(new File([new Uint8Array(2 * 1024 * 1024 + 1)], "big.png", { type: "image/png" }));
     expect(container.querySelector('[role="alert"]')?.textContent).toContain("2 MB or smaller");
     expect(mocks.upload).not.toHaveBeenCalled();
@@ -102,4 +116,26 @@ describe("new team picture onboarding", () => {
     expect(mocks.upload).toHaveBeenCalledTimes(1);
     expect(onCreated).toHaveBeenCalledTimes(1);
   });
+  it("includes the chosen accent in creation and previews it before saving", async () => {
+    await render();
+    await act(async () => container.querySelector<HTMLInputElement>('input[value="violet"]')!.click());
+    expect(container.querySelector('[data-testid="new-team-picture"] [data-org-accent]')?.getAttribute("data-org-accent")).toBe("violet");
+    mocks.create.mockResolvedValue({ ...created, accentColor: "violet" });
+    await submit();
+    expect(mocks.create).toHaveBeenCalledExactlyOnceWith({ orgName: "New team", accentColor: "violet" });
+    expect(onCreated).toHaveBeenCalledExactlyOnceWith({ ...created, accentColor: "violet" });
+  });
+  it("shows the saved color during picture retry when idempotent creation returns an existing neutral team", async () => {
+    mocks.create.mockResolvedValue({ ...created, accentColor: null });
+    mocks.upload.mockRejectedValueOnce(new Error("Upload failed"));
+    await render();
+    await act(async () => container.querySelector<HTMLInputElement>('input[value="violet"]')!.click());
+    await choose(); await submit();
+    expect(container.querySelector<HTMLInputElement>('input[value="slate"]')!.checked).toBe(true);
+    expect(container.querySelector<HTMLFieldSetElement>('[data-testid="team-accent-picker"]')!.disabled).toBe(true);
+    await submit();
+    expect(mocks.create).toHaveBeenCalledTimes(1);
+    expect(onCreated).toHaveBeenCalledExactlyOnceWith({ ...created, accentColor: null, avatarUrl: "https://example.test/team.png" });
+  });
+
 });

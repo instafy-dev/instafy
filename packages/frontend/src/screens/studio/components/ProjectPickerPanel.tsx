@@ -1,3 +1,4 @@
+import { Field } from "../../../components/Field";
 import { FormEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
 import { Copy, MoreHoriz, NavArrowRight, Plus, PlusCircle, Search, Settings, WarningTriangle, Xmark } from "iconoir-react";
@@ -759,13 +760,15 @@ export function ProjectPickerPanel({ onCreateProject, searchTerm, onSearchTermCh
               </Button>
             </div>
             <form onSubmit={handleCreateProject} className="mt-4 space-y-3">
-              <Input
+              <Field label="Space name" htmlFor="project-picker-new-space-name">
+              <Input id="project-picker-new-space-name"
                 value={newProjectName}
                 onChange={(event) => setNewProjectName(event.target.value)}
                 aria-label="Space name"
-                placeholder="Space name"
+                disabled={createPending}
                 data-testid="project-picker-new-project-name"
               />
+              </Field>
               <div className="flex justify-end gap-2">
                 <Button
                   onPress={() => setCreateDialogOpen(false)}

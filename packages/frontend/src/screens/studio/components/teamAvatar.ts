@@ -1,10 +1,9 @@
+import { validateIdentityImage } from "../../../lib/identityImages";
 import { uploadOrgAvatar } from "../../../lib/supabaseStorage";
 import { updateControllerOrganization } from "../../../services/runtimeController/projects";
 
 export function validateTeamAvatar(file: File): string | null {
-  if (!file.type.startsWith("image/")) return "Team picture must be an image file.";
-  if (file.size > 2 * 1024 * 1024) return "Team picture must be 2 MB or smaller.";
-  return null;
+  return validateIdentityImage(file);
 }
 
 export function notifyTeamProfileUpdated() {

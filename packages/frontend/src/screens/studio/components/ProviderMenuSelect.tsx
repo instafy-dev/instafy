@@ -71,7 +71,7 @@ export function ProviderMenuSelect({
             setMenuOpen(true);
           }
         }}
-        className="justify-between bg-slate-50 shadow-none hover:bg-slate-100 data-[hovered]:bg-slate-100 dark:bg-[var(--color-studio-dark-raised-control)] dark:hover:bg-[var(--color-studio-dark-control-hover)] dark:data-[hovered]:bg-[var(--color-studio-dark-control-hover)]"
+        className="min-h-11 sm:pointer-fine:min-h-[38px] justify-between bg-slate-50 shadow-none hover:bg-slate-100 data-[hovered]:bg-slate-100 dark:bg-[var(--color-studio-dark-raised-control)] dark:hover:bg-[var(--color-studio-dark-control-hover)] dark:data-[hovered]:bg-[var(--color-studio-dark-control-hover)]"
       >
         <span className="flex min-w-0 flex-1 items-center gap-2 truncate text-left">
           {providerIcon(value)}

@@ -1,5 +1,5 @@
 import { SpaceIdentity } from "../../../components/SpaceIdentity";
-import { Plus, Search, Settings } from "iconoir-react";
+import { Check, Plus, Search, Settings } from "iconoir-react";
 import { Button, IconButton } from "../../../components/Button";
 import { MenuItemContent } from "../../../components/MenuItemContent";
 import { SearchInput } from "../../../components/SearchInput";
@@ -14,7 +14,7 @@ import {
   pickerListRowTextClassName,
 } from "../../../components/listRowStyles";
 import type { MergedProjectListItem } from "../../../projects/useMergedControllerProjects";
-import { getOrgInitials } from "../../../org/orgNaming";
+import { OrgIdentity } from "../../../components/OrgIdentity";
 import { AttentionBadge } from "../../../components/AttentionBadge";
 import { useStudioPerformanceContent } from "../../../telemetry/useStudioPerformanceContent";
 
@@ -46,6 +46,7 @@ export type SidebarWorkspaceOrgOption = {
   slug: string | null;
   count: number;
   avatarUrl?: string | null;
+  accentColor?: string | null;
 };
 
 type StudioSidebarWorkspaceSwitcherProps = {
@@ -166,36 +167,16 @@ export function StudioSidebarWorkspaceSwitcher({
             : "hover:bg-slate-100 dark:hover:bg-[var(--color-studio-dark-active)]",
         ].join(" ")}
       >
-        <span
-          aria-hidden="true"
-          className={[
-            "flex h-7 w-7 shrink-0 items-center justify-center overflow-hidden rounded-lg text-xxs font-semibold",
-            isSelected
-              ? "bg-primary-600 text-white dark:bg-primary-500"
-              : "bg-slate-200/80 text-slate-600 dark:bg-white/[0.08] dark:text-slate-300",
-          ].join(" ")}
-        >
-          {isAll ? (
-            "All"
-          ) : org.avatarUrl ? (
-            <img
-              src={org.avatarUrl}
-              alt=""
-              aria-hidden="true"
-              className="h-full w-full object-cover"
-              draggable={false}
-            />
-          ) : (
-            getOrgInitials(org.name)
-          )}
-        </span>
+        {isAll ? <span aria-hidden="true" className="flex h-7 w-7 items-center justify-center rounded-lg bg-slate-100 text-xxs dark:bg-slate-700">All</span> : <OrgIdentity name={org.name} avatarUrl={org.avatarUrl} accentColor={org.accentColor}
+          className="h-7 w-7 text-xxs" />}
         <span className="min-w-0 flex-1 truncate">{isAll ? "All teams" : org.label}</span>
         <span className="flex shrink-0 items-center gap-1.5">
           {isCurrent || isSelected ? (
-            <span className="text-3xs font-medium uppercase tracking-[0.08em] text-slate-600 dark:text-slate-500">
+            <span className={isCurrent ? "sr-only" : "text-3xs font-medium uppercase tracking-[0.08em] text-slate-600 dark:text-slate-500"}>
               {isCurrent ? "Current" : isPending ? "Switching…" : "Selected"}
             </span>
           ) : null}
+          {isCurrent ? <Check className="h-4 w-4" aria-hidden="true" /> : null}
           <AttentionBadge
             count={attention}
             aria-hidden
@@ -228,7 +209,7 @@ export function StudioSidebarWorkspaceSwitcher({
     >
       <MenuItemContent>
         <span className="flex w-full items-center justify-between gap-2">
-          <span className="flex min-w-0 items-center gap-2"><SpaceIdentity name={project.name} icon={project.projectIcon} color={project.projectColor} className="h-6 w-6 shrink-0" /><span className="truncate">{project.name || "Untitled space"}</span></span>
+          <span className="flex min-w-0 items-center gap-2"><SpaceIdentity name={project.name} icon={project.projectIcon} color={project.projectColor} avatarUrl={project.projectAvatarUrl} className="h-6 w-6 shrink-0" /><span className="truncate">{project.name || "Untitled space"}</span></span>
           <span className="flex shrink-0 items-center gap-1.5">
             {options.current ? (
               <span className="text-3xs font-medium uppercase tracking-[0.08em] text-slate-600 dark:text-slate-500">

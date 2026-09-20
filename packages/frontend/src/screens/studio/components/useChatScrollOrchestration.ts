@@ -191,7 +191,7 @@ export function useChatScrollController({
   const saveCurrentConversationScrollSnapshot = useCallback(() => {
     const snapshotKey = activeSnapshotKeyRef.current;
     const node = scrollContainerRef.current;
-    if (!snapshotKey || !node || node.clientHeight <= 0 || pendingMessageTargetRef.current || autoScrollSuspendedRef.current || autoScrollPendingRef.current) {
+    if (!snapshotKey || !node || node.clientHeight <= 0 || restoringInitialHistoryRef.current || pendingMessageTargetRef.current || autoScrollSuspendedRef.current || autoScrollPendingRef.current) {
       return;
     }
     const distanceFromBottom = node.scrollHeight - (node.scrollTop + node.clientHeight);
@@ -225,7 +225,11 @@ export function useChatScrollController({
       const wasSuspended = autoScrollSuspendedRef.current;
       autoScrollSuspendedRef.current = suspended;
       if (!suspended) {
-        if (wasSuspended && pendingMessageTargetRef.current) setLayoutRevision((revision) => revision + 1);
+        // A revisited target has already been revealed, but its saved reading
+        // position still needs restoring after the mobile placeholder releases.
+        if (wasSuspended && (pendingMessageTargetRef.current || restoringInitialHistoryRef.current)) {
+          setLayoutRevision((revision) => revision + 1);
+        }
         return;
       }
       cancelScrollAnimation();
