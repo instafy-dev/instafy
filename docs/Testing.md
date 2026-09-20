@@ -247,6 +247,34 @@ runner matrix selections and scanner pins are unchanged. The five-minute
 coordinator never waits for child publishers, so it releases a shared BUILD
 runner before those jobs need it.
 
+Debian service final stages explicitly refresh inherited security packages and
+check distribution-specific minimum versions after installation. Installing an
+unrelated package does not refresh every vulnerable base package. Bookworm
+services enforce the PCRE2 floor; Trixie services additionally enforce gzip,
+SQLite and Perl-base floors. `node --test scripts/check-production-image-inputs.test.mjs`
+checks every Debian publisher cell plus the standalone speech-host image.
+These source checks do not replace the unchanged scan-before-publication gate.
+
+Self-hosted amd64 image cells select the digest-pinned **amd64** BuildKit
+v0.32.2 image, even when the Docker daemon itself is ARM64. This lets a
+Rosetta-enabled Docker VM use its registered x86 translator. An ARM BuildKit
+daemon can fail its x86 capability probe and silently inject its bundled QEMU
+instead; a Rust compiler crash mentioning `/dev/.buildkit_qemu_emulator` is
+evidence of that fallback, not proof of an application defect. ARM image cells
+and hosted builders keep their native/default builder. This selection does not
+install Rosetta or make an unsupported host compatible. Qualify each runner
+with an actual target compiler build and execution before enrollment; a builder
+label or `buildx inspect` alone is insufficient. Do not restart the Docker VM or
+change system-wide emulation while image jobs are active.
+
+Self-hosted image jobs give the optional GitHub cache export two minutes and
+ignore cache-export errors only. Compilation, image loading, security scans,
+registry pushes and manifest checks still fail closed. Hosted jobs retain their
+existing cache settings. Builders remain ephemeral: retaining Docker volumes
+would violate the current BUILD runner's clean-daemon admission check. This
+bound limits upload delays; it does not establish a persistent local cache or
+guarantee a warm build after an interrupted export.
+
 Before enabling this route, an operator must deliberately enroll this repository
 and these three exact `@refs/heads/main` workflow refs in the BUILD group's
 protected workflow allowlist and its existing registration policy. Qualify actual
@@ -291,12 +319,37 @@ disables inline allowances, has no target-size skip, redacts findings, and
 fails on timeout. Protected `main` repeats the current-tree and introduced
 history scans as defense in depth.
 
-`.github/CODEOWNERS` assigns every workflow/action and boundary control,
-including itself, `.gitattributes`, `.gitmodules`, and `codex`, to the security
-maintainer. Branch protection must require code-owner review for those paths
-without imposing review on ordinary product changes. Do not use a push-path
-ruleset as the permanent trust anchor: GitHub disables all push rulesets when
-an internal repository becomes public.
+`.github/CODEOWNERS` assigns **all paths** to the existing trusted code owners,
+`@instafy-bot` and `@instafy-bot-2`, and retains the narrower workflow/action and
+boundary-control entries under `@instafy-bot`. Outside contributions, including
+ordinary product changes and edits to CODEOWNERS itself, need an applicable
+owner's review. GitHub uses CODEOWNERS from the
+target branch, so a PR cannot remove its own review requirement. Keep the
+blanket required-approval count at **zero** and code-owner review **enabled**:
+the code owners' own bot-authored PRs retain their existing review behavior and
+must still pass all protected CI checks. Do not introduce an auto-approve Action,
+a bot bypass, or a new release gate to implement this policy. A new trusted bot
+identity requires an explicit ownership-policy review; a name ending in `[bot]`
+does not confer trust.
+
+Before making the repository public, verify the live branch settings (source
+tests do not configure GitHub): code-owner review enabled, blanket approvals
+zero, stale approvals dismissed after code changes, and existing required checks
+unchanged. Confirm an unapproved non-owner PR needs review and an existing
+owner-authored bot PR gains no extra review requirement. Do not bypass a merge
+block merely to test it. Retain the self-hosted runner groups' server-side
+exclusion of public repositories; YAML runner selection alone is not isolation.
+After the visibility change, select **Require approval for all external
+contributors** in this repository's Actions settings before approving any fork
+run. That setting is not exposed while this repository is internal; do not
+silently substitute an organization-wide policy change. Workflow approval only
+permits the secret-free hosted checks; it does not approve a merge or release.
+Issues and comments are untrusted input, never authority for privileged actions.
+
+Do not use a push-path ruleset as the permanent trust anchor: GitHub disables
+all push rulesets when an internal repository becomes public. See GitHub's
+[code-owner rules](https://docs.github.com/en/repositories/managing-your-repositorys-settings-and-features/customizing-your-repository/about-code-owners)
+and [repository Actions settings](https://docs.github.com/en/repositories/managing-your-repositorys-settings-and-features/enabling-features-for-your-repository/managing-github-actions-settings-for-a-repository).
 
 The trusted policy intentionally makes a binary addition/removal, approved
 environment-path addition, or Codex repin fail its own PR. Those rare changes
@@ -506,7 +559,11 @@ the fixed preparation stage/image name, bounded exit/signal/error-code fields,
 and fixed hints derived from at most 32 KiB of stderr. Raw output, image tags,
 URLs, paths and credentials are not logged. Hints are Docker-reported symptoms,
 not proof of the underlying cause; a signal is not proof of an out-of-memory
-failure. Missing/oversized/unrecognized diagnostics remain unclassified. This
+failure. The `tls` hint retains compatible classification, with additional
+`tls-certificate`, `tls-handshake-timeout` or `tls-handshake-rejected` hints
+when Docker reports that specific symptom. Do not treat a certificate failure
+as a network timeout or disable verification to make the pull succeed.
+Missing/oversized/unrecognized diagnostics remain unclassified. This
 does not retry a failed pull, skip an image or change the failure result.
 CLI upgrades require updating and
 testing the pinned ancillary inventory. Run

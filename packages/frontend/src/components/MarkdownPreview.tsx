@@ -9,6 +9,11 @@ import {
 } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
+import {
+  describeKnownLinkHost,
+  labelAlreadyNamesHost,
+  readLinkHost,
+} from "./chatLinkHosts";
 import { createMarkdownHeadingSlug } from "./markdownOutline";
 
 type MarkdownPreviewProps = {
@@ -86,14 +91,39 @@ export function MarkdownPreview({ value, className }: MarkdownPreviewProps) {
       },
       a: ({ node, children, className, ...props }: MarkdownAnchorProps) => {
         void node;
+        // This renders workspace files, and a workspace holds SKILL.md files
+        // imported from whatever repository the person pointed at. So the text
+        // here is untrusted in the most direct way available: not a model's
+        // paraphrase of a pack, the pack itself. A markdown link shows only its
+        // label, so it is gated exactly as the chat renderer is. An approved
+        // host wears its mark, anything else is written out beside the label,
+        // and an address that is not http or https is not pressable at all.
+        const host = typeof props.href === "string" ? readLinkHost(props.href) : null;
+        if (!host) {
+          return <span className={className}>{children}</span>;
+        }
+        const known = describeKnownLinkHost(props.href as string);
+        const KnownMark = known?.mark;
+        const label = typeof children === "string" ? children : "";
+        const showHost = !known && !labelAlreadyNamesHost(label, host);
         return (
           <a
             {...props}
             target={props.target ?? "_blank"}
             rel={props.rel ?? "noreferrer"}
+            title={props.href}
+            data-link-host={host}
+            data-link-known={known ? "true" : "false"}
             className={`font-medium text-primary-600 hover:underline dark:text-primary-400 ${className ?? ""}`}
           >
+            {KnownMark ? (
+              <KnownMark
+                className="mr-1 inline h-[0.92em] w-[0.92em] flex-none align-[-0.08em]"
+                aria-hidden
+              />
+            ) : null}
             {children}
+            {showHost ? <span className="ml-1 font-normal opacity-80">({host})</span> : null}
           </a>
         );
       },

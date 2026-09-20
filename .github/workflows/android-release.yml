@@ -1,0 +1,447 @@
+name: Android release
+
+# Google Play internal track. The bot-pushed immutable tag is the ledger; the
+# GitHub Release carrying release-receipt.json is created last (one-shot marker).
+
+on:
+  push:
+    tags:
+      - 'android-v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Release tag (existing, or the intended tag name for a dry run)'
+        required: true
+        type: string
+      dry_run:
+        description: 'Build, sign and verify but publish nothing'
+        required: false
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: android-release-${{ github.event_name == 'workflow_dispatch' && inputs.dry_run && 'dry-run' || 'release' }}
+  cancel-in-progress: false
+
+defaults:
+  run:
+    shell: bash
+
+env:
+  RELEASE_REPOSITORY: instafy-dev/instafy
+  RELEASE_ACTOR: instafy-bot
+  ANDROID_APPLICATION_ID: dev.instafy.studio
+  ANDROID_COMPILE_SDK: '36'
+  ANDROID_BUILD_TOOLS_VERSION: 36.0.0
+  PLAY_TRACK: internal
+  RELEASE_STATUS: completed
+  BUNDLETOOL_VERSION: 1.18.1
+  BUNDLETOOL_SHA256: 675786493983787ffa11550bdb7c0715679a44e1643f3ff980a529e9c822595c
+  GITLEAKS_VERSION: 8.30.1
+  GITLEAKS_LINUX_X64_SHA256: 551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb
+
+jobs:
+  authorize:
+    name: Authorize the exact Android release tag
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    outputs:
+      tag: ${{ steps.verify.outputs.tag }}
+      mode: ${{ steps.verify.outputs.mode }}
+      source_sha: ${{ steps.verify.outputs.source_sha }}
+      version_name: ${{ steps.verify.outputs.version_name }}
+      version_code: ${{ steps.verify.outputs.version_code }}
+    steps:
+      - name: Resolve tag, actor and the tag commit on protected main
+        id: resolve
+        env:
+          GH_TOKEN: ${{ github.token }}
+          INPUT_TAG: ${{ inputs.tag }}
+          PUSHER_NAME: ${{ github.event.pusher.name }}
+        run: |
+          set -euo pipefail
+          fail() { echo "::error::$*"; exit 1; }
+          [[ "$GITHUB_REPOSITORY" == "$RELEASE_REPOSITORY" ]] || fail "Android releases run only in $RELEASE_REPOSITORY."
+          [[ "$GITHUB_ACTOR" == "$RELEASE_ACTOR" ]] || fail "Only $RELEASE_ACTOR may run an Android release."
+          [[ "$GITHUB_TRIGGERING_ACTOR" == "$RELEASE_ACTOR" ]] || fail "Only $RELEASE_ACTOR may start or re-run an Android release."
+          case "$GITHUB_EVENT_NAME" in
+            push)
+              [[ "$PUSHER_NAME" == "$RELEASE_ACTOR" ]] || fail "The tag pusher must be $RELEASE_ACTOR."
+              tag="$GITHUB_REF_NAME"
+              [[ "$GITHUB_REF" == "refs/tags/$tag" ]] || fail "Push runs must come from a tag ref." ;;
+            workflow_dispatch)
+              [[ "$GITHUB_REF" == "refs/heads/main" ]] || fail "Dispatch the Android release from refs/heads/main."
+              tag="$INPUT_TAG" ;;
+            *) fail "Unsupported event $GITHUB_EVENT_NAME." ;;
+          esac
+          [[ "$tag" =~ ^android-v([0-9A-Za-z][0-9A-Za-z._-]{0,63})-([1-9][0-9]{0,9})$ ]] ||
+            fail "Tag must match android-v<versionName>-<versionCode>."
+          tag_state=absent tag_commit="" source_sha="$GITHUB_SHA"
+          if resolved="$(gh api "repos/$RELEASE_REPOSITORY/git/ref/tags/$tag" --jq '.object.type + " " + .object.sha' 2>"$RUNNER_TEMP/tag.err")"; then
+            if [[ "${resolved%% *}" == "tag" ]]; then
+              resolved="$(gh api "repos/$RELEASE_REPOSITORY/git/tags/${resolved#* }" --jq '.object.type + " " + .object.sha')"
+            fi
+            [[ "${resolved%% *}" == "commit" && "${resolved#* }" =~ ^[0-9a-f]{40}$ ]] || fail "Tag $tag does not peel to a commit."
+            tag_state=present tag_commit="${resolved#* }" source_sha="${resolved#* }"
+          elif ! grep -q 'HTTP 404' "$RUNNER_TEMP/tag.err"; then
+            fail "Could not resolve tag $tag."
+          fi
+          if [[ "$GITHUB_EVENT_NAME" == "push" && "$source_sha" != "$GITHUB_SHA" ]]; then
+            fail "Tag $tag peels to $source_sha, not the pushed commit $GITHUB_SHA."
+          fi
+          compare_status="$(gh api "repos/$RELEASE_REPOSITORY/compare/${source_sha}...main" --jq .status)"
+          case "$compare_status" in
+            identical | ahead) ;;
+            *) fail "Protected main does not contain $source_sha (compare status: $compare_status)." ;;
+          esac
+          {
+            echo "tag_state=$tag_state"
+            echo "tag_commit=$tag_commit"
+            echo "source_sha=$source_sha"
+            echo "compare_status=$compare_status"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Checkout the exact tag commit
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ steps.resolve.outputs.source_sha }}
+          fetch-depth: 1
+          persist-credentials: false
+          submodules: false
+
+      - name: Set up Node.js
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: '22'
+
+      - name: Verify the tag encodes the committed Android version
+        id: verify
+        env:
+          INPUT_TAG: ${{ inputs.tag }}
+          INPUT_DRY_RUN: ${{ inputs.dry_run }}
+          PUSHER_NAME: ${{ github.event.pusher.name }}
+          TAG_STATE: ${{ steps.resolve.outputs.tag_state }}
+          TAG_COMMIT: ${{ steps.resolve.outputs.tag_commit }}
+          SOURCE_SHA: ${{ steps.resolve.outputs.source_sha }}
+          COMPARE_STATUS: ${{ steps.resolve.outputs.compare_status }}
+        run: |
+          set -euo pipefail
+          HEAD_SHA="$(git rev-parse HEAD)"
+          test "$HEAD_SHA" = "$SOURCE_SHA"
+          export HEAD_SHA VERSIONS_JSON="$RUNNER_TEMP/android-versions.json"
+          node scripts/release/android/mobile-versions.mjs . > "$VERSIONS_JSON"
+          node scripts/release/android/verify-release-tag.mjs
+
+      - name: Require that the tag was never published (one-shot)
+        if: steps.verify.outputs.mode == 'release'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.verify.outputs.tag }}
+        run: |
+          set -euo pipefail
+          if gh api "repos/$RELEASE_REPOSITORY/releases/tags/$TAG" --jq .id > /dev/null 2> "$RUNNER_TEMP/release.err"; then
+            echo "::error::A GitHub Release for $TAG already exists; publish a new versionCode with a new tag."
+            exit 1
+          fi
+          grep -q 'HTTP 404' "$RUNNER_TEMP/release.err" || { echo "::error::Could not prove that $TAG is unpublished."; exit 1; }
+
+      - name: Summarize authorization
+        env:
+          OUTPUTS: ${{ toJSON(steps.verify.outputs) }}
+        run: |
+          set -euo pipefail
+          { echo "### Android release authorized"; echo '```json'; echo "$OUTPUTS"; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+
+  build:
+    name: Build, sign and verify the Android App Bundle
+    needs: authorize
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    environment: android-release
+    permissions:
+      contents: read
+    env:
+      CI: 'true'
+      TAG: ${{ needs.authorize.outputs.tag }}
+      MODE: ${{ needs.authorize.outputs.mode }}
+      SOURCE_SHA: ${{ needs.authorize.outputs.source_sha }}
+      VERSION_NAME: ${{ needs.authorize.outputs.version_name }}
+      VERSION_CODE: ${{ needs.authorize.outputs.version_code }}
+      VITE_OTA_CHANNEL: internal
+      CAPACITOR_LIVE_UPDATE_DEFAULT_CHANNEL: internal
+      VITE_BUILD_GIT_SHA: ${{ needs.authorize.outputs.source_sha }}
+      GRADLE_OPTS: -Dorg.gradle.jvmargs=-Xmx4g -Dfile.encoding=UTF-8
+    steps:
+      - name: Checkout the exact tag commit
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ needs.authorize.outputs.source_sha }}
+          fetch-depth: 1
+          persist-credentials: false
+          submodules: false
+
+      - name: Verify runner and checkout
+        run: |
+          set -euo pipefail
+          [[ "$RUNNER_OS" == "Linux" && "$RUNNER_ARCH" == "X64" ]] || { echo "::error::Android releases build on ubuntu-24.04 x64."; exit 1; }
+          [[ "$GITHUB_TRIGGERING_ACTOR" == "$RELEASE_ACTOR" ]] || { echo "::error::Only $RELEASE_ACTOR may re-run the build."; exit 1; }
+          test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
+          mkdir -m 700 "$RUNNER_TEMP/android-release"
+
+      - name: Require Android signing and Google Play credentials
+        env:
+          ANDROID_UPLOAD_KEYSTORE_B64: ${{ secrets.ANDROID_UPLOAD_KEYSTORE_B64 }}
+          ANDROID_UPLOAD_KEYSTORE_TYPE: ${{ secrets.ANDROID_UPLOAD_KEYSTORE_TYPE }}
+          ANDROID_UPLOAD_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_UPLOAD_KEYSTORE_PASSWORD }}
+          ANDROID_UPLOAD_KEY_ALIAS: ${{ secrets.ANDROID_UPLOAD_KEY_ALIAS }}
+          ANDROID_UPLOAD_KEY_PASSWORD: ${{ secrets.ANDROID_UPLOAD_KEY_PASSWORD }}
+          GOOGLE_PLAY_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_PLAY_SERVICE_ACCOUNT_JSON }}
+        run: |
+          set -euo pipefail
+          missing=0
+          # build.gradle silently drops the release signingConfig when any
+          # upload value is empty, so every name is required before building.
+          for name in ANDROID_UPLOAD_KEYSTORE_B64 ANDROID_UPLOAD_KEYSTORE_TYPE ANDROID_UPLOAD_KEYSTORE_PASSWORD \
+            ANDROID_UPLOAD_KEY_ALIAS ANDROID_UPLOAD_KEY_PASSWORD GOOGLE_PLAY_SERVICE_ACCOUNT_JSON; do
+            if [[ -z "${!name:-}" ]]; then echo "::error::Missing android-release secret ${name}."; missing=1; fi
+          done
+          exit "$missing"
+
+      - name: Set up pinned pnpm
+        uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4
+        with:
+          run_install: false
+
+      - name: Set up Node.js
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: '22'
+
+      - name: Verify pinned package manager and Node.js
+        run: |
+          set -euo pipefail
+          test "$(pnpm --version)" = "10.34.5"
+          test "$(node -p 'process.versions.node.split(".")[0]')" = "22"
+
+      - name: Observe Google Play before spending build minutes (one-shot preflight)
+        env:
+          GOOGLE_PLAY_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_PLAY_SERVICE_ACCOUNT_JSON }}
+        run: |
+          set -euo pipefail
+          pre="$RUNNER_TEMP/android-release/pre.json"
+          node scripts/release/android/google-play-internal.mjs android-observe "$ANDROID_APPLICATION_ID" > "$pre"
+          if [[ "$MODE" == "release" ]]; then
+            node scripts/release/android/google-play-internal.mjs android-preflight "$pre" "$VERSION_CODE"
+          else
+            node scripts/release/android/google-play-internal.mjs android-preflight "$pre" "$VERSION_CODE" --dry-run
+          fi
+          echo "[android-release] Play highestCommittedCode=$(jq -r .highestCommittedCode "$pre") publicationGate=$(jq -r .publicationGate "$pre")"
+
+      - name: Select Java 21 and provision the Android SDK
+        run: bash scripts/release/android/setup-android-toolchain.sh
+
+      - name: Prove the upload keystore, then remove it until Gradle
+        env:
+          ANDROID_UPLOAD_KEYSTORE_B64: ${{ secrets.ANDROID_UPLOAD_KEYSTORE_B64 }}
+          ANDROID_UPLOAD_KEYSTORE_TYPE: ${{ secrets.ANDROID_UPLOAD_KEYSTORE_TYPE }}
+          ANDROID_UPLOAD_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_UPLOAD_KEYSTORE_PASSWORD }}
+          ANDROID_UPLOAD_KEY_ALIAS: ${{ secrets.ANDROID_UPLOAD_KEY_ALIAS }}
+        run: bash scripts/release/android/upload-keystore.sh prove
+
+      - name: Resolve the embedded OTA trust key from the public variable
+        id: trust
+        env:
+          CAPACITOR_LIVE_UPDATE_PUBLIC_KEY: ${{ vars.CAPACITOR_LIVE_UPDATE_PUBLIC_KEY }}
+        run: |
+          set -euo pipefail
+          # Only the ota-release environment holds the signing private key.
+          unset OTA_SIGNING_PRIVATE_KEY OTA_SIGNING_PRIVATE_KEY_FILE CAPACITOR_LIVE_UPDATE_PUBLIC_KEY_FILE
+          node scripts/resolve-live-update-public-key.mjs
+          grep -q '^CAPACITOR_LIVE_UPDATE_PUBLIC_KEY<<' "$GITHUB_ENV" ||
+            { echo "::error::vars.CAPACITOR_LIVE_UPDATE_PUBLIC_KEY is empty; a Play build must embed the OTA trust key."; exit 1; }
+          # Refuse any non-canonical byte form of the key, so the resolver's digest,
+          # the embedded config and the receipt all equal the OTA authority's digest.
+          canonical="$(node scripts/release/android/trust-key.mjs --resolver-output "$GITHUB_OUTPUT")"
+          echo "canonical_sha256=$canonical" >> "$GITHUB_OUTPUT"
+
+      - name: Seed the browser-safe hosted Capacitor environment
+        env:
+          VITE_SUPABASE_URL: ${{ vars.VITE_SUPABASE_URL }}
+          VITE_SUPABASE_ANON_KEY: ${{ vars.VITE_SUPABASE_ANON_KEY }}
+          VITE_CONTROLLER_URL: ${{ vars.VITE_CONTROLLER_URL || 'https://controller.instafy.dev' }}
+        run: node scripts/release/android/browser-safe-supabase-key.mjs --write-env-file .env.supabase
+
+      - name: Install exact dependencies and check the Android configuration
+        run: |
+          set -euo pipefail
+          pnpm install --frozen-lockfile
+          pnpm run test:android:config
+
+      - name: Build the web bundle and sync Capacitor Android
+        env:
+          ANDROID_VERSION_CODE: ${{ needs.authorize.outputs.version_code }}
+          ANDROID_VERSION_NAME: ${{ needs.authorize.outputs.version_name }}
+        run: pnpm --filter @instafy/frontend run cap:sync
+
+      - name: Materialize the upload keystore for Gradle
+        id: keystore
+        env:
+          ANDROID_UPLOAD_KEYSTORE_B64: ${{ secrets.ANDROID_UPLOAD_KEYSTORE_B64 }}
+          ANDROID_UPLOAD_KEYSTORE_TYPE: ${{ secrets.ANDROID_UPLOAD_KEYSTORE_TYPE }}
+          ANDROID_UPLOAD_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_UPLOAD_KEYSTORE_PASSWORD }}
+          ANDROID_UPLOAD_KEY_ALIAS: ${{ secrets.ANDROID_UPLOAD_KEY_ALIAS }}
+        run: bash scripts/release/android/upload-keystore.sh materialize
+
+      - name: Build the signed release bundle
+        working-directory: packages/frontend/android
+        env:
+          ANDROID_UPLOAD_STORE_FILE: ${{ steps.keystore.outputs.path }}
+          ANDROID_UPLOAD_STORE_TYPE: ${{ secrets.ANDROID_UPLOAD_KEYSTORE_TYPE }}
+          ANDROID_UPLOAD_STORE_PASSWORD: ${{ secrets.ANDROID_UPLOAD_KEYSTORE_PASSWORD }}
+          ANDROID_UPLOAD_KEY_ALIAS: ${{ secrets.ANDROID_UPLOAD_KEY_ALIAS }}
+          ANDROID_UPLOAD_KEY_PASSWORD: ${{ secrets.ANDROID_UPLOAD_KEY_PASSWORD }}
+          ANDROID_VERSION_CODE: ${{ needs.authorize.outputs.version_code }}
+          ANDROID_VERSION_NAME: ${{ needs.authorize.outputs.version_name }}
+        run: ./gradlew --no-daemon :app:bundleRelease
+
+      - name: Remove signing material
+        if: always()
+        run: rm -rf "$RUNNER_TEMP/instafy-android-signing" .env.supabase packages/frontend/.env.production.local
+
+      - name: Verify identity, signature and contents of the final AAB
+        env:
+          TRUST_KEY_SHA256: ${{ steps.trust.outputs.canonical_sha256 }}
+        run: |
+          set -euo pipefail
+          bash scripts/release/android/verify-aab.sh \
+            packages/frontend/android/app/build/outputs/bundle/release "$RUNNER_TEMP/android-release"
+
+      - name: Upload the signed bundle and its evidence
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: android-aab-${{ needs.authorize.outputs.tag }}
+          path: ${{ runner.temp }}/android-release/
+          if-no-files-found: error
+          retention-days: ${{ needs.authorize.outputs.mode == 'release' && 30 || 7 }}
+          compression-level: 0
+
+      - name: Summarize the build
+        if: always()
+        run: |
+          set -euo pipefail
+          {
+            echo "### Android bundle ${TAG} (${MODE})"
+            echo "- source: \`${SOURCE_SHA}\`"
+            if [[ -f "$RUNNER_TEMP/android-release/digests.env" ]]; then sed 's/^/- /' "$RUNNER_TEMP/android-release/digests.env"; fi
+            if [[ "$MODE" != "release" ]]; then echo "- dry run: nothing was published"; fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  publish:
+    name: Publish to Google Play internal and attach the receipt
+    needs:
+      - authorize
+      - build
+    if: needs.authorize.outputs.mode == 'release'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    environment: android-release
+    permissions:
+      contents: write
+    env:
+      TAG: ${{ needs.authorize.outputs.tag }}
+      SOURCE_SHA: ${{ needs.authorize.outputs.source_sha }}
+      VERSION_NAME: ${{ needs.authorize.outputs.version_name }}
+      VERSION_CODE: ${{ needs.authorize.outputs.version_code }}
+    steps:
+      - name: Checkout the exact tag commit
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ needs.authorize.outputs.source_sha }}
+          fetch-depth: 1
+          persist-credentials: false
+          submodules: false
+
+      - name: Set up Node.js
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: '22'
+
+      - name: Download the signed bundle of this run
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: android-aab-${{ needs.authorize.outputs.tag }}
+          path: ${{ runner.temp }}/android-release
+
+      - name: Verify the downloaded bundle is the one that was built
+        run: |
+          set -euo pipefail
+          out="$RUNNER_TEMP/android-release"
+          [[ "$GITHUB_TRIGGERING_ACTOR" == "$RELEASE_ACTOR" ]] || { echo "::error::Only $RELEASE_ACTOR may re-run the publication."; exit 1; }
+          test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
+          value() { sed -n "s/^$1=//p" "$out/digests.env"; }
+          [[ "$(value TAG)" == "$TAG" && "$(value SOURCE_SHA)" == "$SOURCE_SHA" ]]
+          [[ "$(value VERSION_NAME)" == "$VERSION_NAME" && "$(value VERSION_CODE)" == "$VERSION_CODE" ]]
+          aab_sha256="$(sha256sum "$out/app-release.aab" | cut -d' ' -f1)"
+          [[ "$aab_sha256" == "$(value AAB_SHA256)" && "$aab_sha256" == "$(jq -er .nativeArtifactSha256 "$out/ota.json")" ]] ||
+            { echo "::error::The downloaded AAB differs from the verified build."; exit 1; }
+          echo "AAB_SHA256=$aab_sha256" >> "$GITHUB_ENV"
+
+      - name: Recheck tag, protected main and one-shot marker before the Play write
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: bash scripts/release/android/release-refs.sh recheck "$TAG" "$SOURCE_SHA"
+
+      - name: Publish the exact bundle to the Play internal track
+        env:
+          GOOGLE_PLAY_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_PLAY_SERVICE_ACCOUNT_JSON }}
+        run: |
+          set -euo pipefail
+          out="$RUNNER_TEMP/android-release"
+          play=scripts/release/android/google-play-internal.mjs
+          node "$play" android-observe "$ANDROID_APPLICATION_ID" > "$out/current.json"
+          # stateSha256 must still equal the build preflight (else Play state moved);
+          # the only accepted difference is this exact release already live (re-run).
+          node "$play" android-decide "$out/pre.json" "$out/current.json" "$VERSION_CODE" "$VERSION_NAME" "$AAB_SHA256" > "$out/decision.json"
+          if [[ "$(jq -er .action "$out/decision.json")" == "publish" ]]; then
+            node "$play" android-publish "$ANDROID_APPLICATION_ID" "$VERSION_CODE" "$VERSION_NAME" \
+              "$out/app-release.aab" "$AAB_SHA256" "$(jq -er .stateSha256 "$out/pre.json")" > /dev/null
+          else
+            echo "::notice::${VERSION_NAME} (${VERSION_CODE}) is already live with identical bytes; reconciling only."
+          fi
+          node "$play" android-reconcile "$ANDROID_APPLICATION_ID" "$VERSION_CODE" "$VERSION_NAME" "$AAB_SHA256" > "$out/post.json"
+
+      - name: Write the secret-free release receipt
+        run: |
+          set -euo pipefail
+          out="$RUNNER_TEMP/android-release"
+          node scripts/release/android/write-receipt.mjs --tag "$TAG" --source-sha "$SOURCE_SHA" \
+            --name "$VERSION_NAME" --code "$VERSION_CODE" --aab "$out/app-release.aab" \
+            --ota "$out/ota.json" --post "$out/post.json" > "$out/release-receipt.json"
+
+      - name: Create the GitHub Release last
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          out="$RUNNER_TEMP/android-release"
+          bash scripts/release/android/release-refs.sh recheck "$TAG" "$SOURCE_SHA"
+          gh release create "$TAG" --repo "$RELEASE_REPOSITORY" --verify-tag --latest=false \
+            --title "Instafy Android ${VERSION_NAME} (${VERSION_CODE})" \
+            --notes "Google Play internal track (dev.instafy.studio), source ${SOURCE_SHA}." \
+            "$out/release-receipt.json" "$out/app-release.aab"
+
+      - name: Summarize the publication
+        if: always()
+        run: |
+          set -euo pipefail
+          {
+            echo "### Android ${VERSION_NAME} (${VERSION_CODE})"
+            echo "- source: \`${SOURCE_SHA}\`"
+            echo "- AAB sha256: \`${AAB_SHA256:-unverified}\`"
+            echo "- receipt: https://github.com/${RELEASE_REPOSITORY}/releases/download/${TAG}/release-receipt.json"
+          } >> "$GITHUB_STEP_SUMMARY"

@@ -15,6 +15,7 @@ import {
 } from "../utils/harness.js";
 import { createPublicChatFromTopBar } from "../utils/chatUi.js";
 import { ensureProjectCreditsReadyForChat } from "../utils/projectCredits.js";
+import { chooseOption } from "../utils/select.js";
 
 // The secondary user receives the machine's real Codex credential. Keep all
 // credential/session material out of Playwright trace archives.
@@ -108,7 +109,7 @@ test.describe("Org invite link conversation tabs + AI", () => {
     await ensureHostedRuntimeReady(page, projectId);
 
     await openProjectSettings(page);
-    await page.getByTestId("org-invite-link-role").selectOption("builder");
+    await chooseOption(page.getByTestId("org-invite-link-role"), "builder");
     await page.getByTestId("org-invite-link-create").click();
     const inviteLinkUrl = await page.getByTestId("org-invite-link-url").inputValue();
     if (!inviteLinkUrl) {

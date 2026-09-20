@@ -70,27 +70,68 @@ test.describe("Chat onboarding", () => {
     await resetRuntimeUserState(page, { source: "chat-onboarding:cleanup" }).catch(() => {});
   });
 
-  test("offers the workspace step and branches into import and scratch flows", async ({ page }) => {
+  test("offers one row of live tools, and leaves the blank path to the composer", async ({ page }) => {
     const onboarding = page.getByTestId("onboarding-getting-started");
     await expect(onboarding).toBeVisible();
     await expect(onboarding.getByRole("button", { name: "VS Code extension" })).toHaveCount(0);
     await expect(
-      onboarding.getByText("What should your agent work on?", { exact: true }),
+      onboarding.getByText("Start with a tool you already use", { exact: true }),
     ).toBeVisible();
-    // Topic paths are gone from first-run — the workspace step replaced them.
+    // Topic paths and the two action cards are gone; one chip row replaced them.
     await expect(onboarding.getByTestId("onboarding-path-finance")).toHaveCount(0);
     await expect(onboarding.getByTestId("onboarding-path-coding")).toHaveCount(0);
+    await expect(onboarding.getByTestId("onboarding-action-import-github-repo")).toHaveCount(0);
+    await expect(onboarding.getByTestId("onboarding-action-start-from-scratch")).toHaveCount(0);
+    await expect(onboarding).not.toContainText("Start from scratch");
+    await expect(onboarding.locator('button[data-testid^="connect-chip-"]')).toHaveCount(3);
+    await expect(onboarding.getByTestId("connect-chip-github")).toBeEnabled();
+    await expect(onboarding.getByTestId("connect-chip-notion")).toBeEnabled();
+    await expect(onboarding.getByTestId("connect-chip-freefinance")).toBeEnabled();
+    await expect(onboarding.getByTestId("onboarding-type-hint")).toHaveText(
+      "Or just type what you want below.",
+    );
 
-    await onboarding.getByTestId("onboarding-action-import-github-repo").click();
+    // The GitHub chip is the same door as the old action card: the import
+    // form, with Back returning to the row.
+    await onboarding.getByTestId("connect-chip-github").click();
     await expect(page.getByTestId("onboarding-github-repo-input")).toBeVisible();
     await page.getByTestId("onboarding-github-repo-input").fill("openai/openai-openapi");
 
     await page.getByTestId("onboarding-back-button").click();
-    await expect(page.getByTestId("onboarding-action-start-from-scratch")).toBeVisible();
+    await expect(page.getByTestId("connect-chip-notion")).toBeVisible();
 
-    await page.getByTestId("onboarding-action-start-from-scratch").click();
-    await expect(page.getByTestId("chat-input")).toContainText("I'm starting from a blank workspace");
-    await expect(page.getByTestId("onboarding-getting-started")).toBeHidden();
+    // The blank path is the composer itself: nothing on the card prefills it
+    // or focuses it, the field keeps its own invitation, and send stays
+    // disabled until the person types.
+    const chatInput = page.getByTestId("chat-input");
+    await expect(chatInput).not.toContainText("I'm starting from a blank workspace");
+    await expect(page.locator("#studio-chat-input")).toHaveAttribute(
+      "aria-placeholder",
+      "Ask for something…",
+    );
+    await expect(page.getByText("What do you want to build? One sentence is enough.")).toHaveCount(0);
+    await expect(page.getByTestId("chat-send-button")).toBeDisabled();
+    await expect(page.getByTestId("onboarding-getting-started")).not.toHaveAttribute(
+      "data-collapsed",
+      "true",
+    );
+
+    await chatInput.fill("A habit tracker");
+    const card = page.getByTestId("onboarding-getting-started");
+    await expect(card).toHaveAttribute("data-collapsed", "true");
+    await expect(card.getByTestId("onboarding-collapsed-row").getByRole("button")).toHaveText([
+      "Import a repo",
+      "Notion",
+      "More tools",
+    ]);
+    // First character enables send: empty studio to first message is type, send.
+    await expect(page.getByTestId("chat-send-button")).toBeEnabled();
+
+    await chatInput.fill("");
+    await expect(card).not.toHaveAttribute("data-collapsed", "true");
+    await expect(
+      card.getByText("Start with a tool you already use", { exact: true }),
+    ).toBeVisible();
   });
 
   test("github import onboarding shows visible success feedback", async ({ page }) => {
@@ -107,7 +148,7 @@ test.describe("Chat onboarding", () => {
       });
     });
 
-    await page.getByTestId("onboarding-action-import-github-repo").click();
+    await page.getByTestId("connect-chip-github").click();
     await page.getByTestId("onboarding-github-repo-input").fill("openai/openai-openapi");
     await page.getByTestId("onboarding-github-import-button").click();
 
@@ -202,7 +243,10 @@ test.describe("Chat onboarding on phones", () => {
 
     await expect(onboarding).toBeVisible();
     await expect(workspaceStep).toBeInViewport();
-    await expect(onboarding.getByTestId("onboarding-action-import-github-repo")).toBeInViewport();
+    await expect(onboarding.getByTestId("connect-chip-github")).toBeInViewport();
+    await expect(onboarding.getByTestId("connect-chip-notion")).toBeInViewport();
+    await expect(onboarding.getByTestId("connect-chip-freefinance")).toBeInViewport();
+    await expect(onboarding.getByTestId("onboarding-type-hint")).toBeInViewport();
     await expect(onboarding.getByTestId("onboarding-path-finance")).toHaveCount(0);
 
     await expect
@@ -248,11 +292,11 @@ test.describe("Chat onboarding on phones", () => {
       () => new Promise<void>((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve()))),
     );
     await expect(
-      onboarding.getByText("What should your agent work on?", { exact: true }),
+      onboarding.getByText("Start with a tool you already use", { exact: true }),
     ).toBeInViewport();
     expect(await page.getByTestId("chat-message-scroll").evaluate((element) => element.scrollTop)).toBe(0);
 
-    await page.getByTestId("onboarding-action-import-github-repo").click();
+    await page.getByTestId("connect-chip-github").click();
     await expect(page.getByTestId("onboarding-back-button")).toBeInViewport();
     await expect
       .poll(async () => page.getByTestId("chat-message-scroll").evaluate((element) => element.scrollTop))

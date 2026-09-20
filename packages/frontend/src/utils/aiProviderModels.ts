@@ -21,8 +21,10 @@ export const AI_PROVIDER_OPTIONS: AiProviderOption[] = [
 
 // Anything below gpt-5.5 is no longer served upstream; saved selections
 // migrate to the closest current model instead of failing at run time.
-// Full-size retirements floor to the managed default (mirrors the
-// controller's is_stale_openai_model → DEFAULT_OPENAI_MODEL_ID path); the
+// Full-size retirements floor to the bring-your-own OpenAI default
+// (gpt-5.6-sol; mirrors the controller's is_stale_openai_model →
+// DEFAULT_OPENAI_MODEL_ID path, which is distinct from the credits-funded
+// managed tier default); the
 // mini tier stays on gpt-5.5-mini, which is still served.
 const OPENAI_MODEL_MIGRATIONS: Record<string, string> = {
   "gpt-5.4": "gpt-5.6-sol",

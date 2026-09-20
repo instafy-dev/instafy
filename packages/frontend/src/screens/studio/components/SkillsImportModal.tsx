@@ -17,10 +17,13 @@ type SkillsImportModalProps = {
   importOverwrite: boolean;
   onImportOverwriteChange: (nextSelected: boolean) => void;
   hasProject: boolean;
-  onOpenAssistant: () => void;
+  /** When provided, a ghost "Browse skills" button opens the Skills panel. */
+  onBrowseSkills?: () => void;
   onSubmitImport: () => void;
 };
 
+// Reached from the "Other" tile and from Settings > Skills "Import". Its
+// "Add and start" button is the only control here that sends.
 export function SkillsImportModal({
   isOpen,
   onOpenChange,
@@ -32,7 +35,7 @@ export function SkillsImportModal({
   importOverwrite,
   onImportOverwriteChange,
   hasProject,
-  onOpenAssistant,
+  onBrowseSkills,
   onSubmitImport,
 }: SkillsImportModalProps) {
   return (
@@ -43,8 +46,8 @@ export function SkillsImportModal({
       data-testid="skills-add-modal"
     >
       <StudioDialogHeader
-        title="Import skill"
-        description="Add from GitHub URL, direct SKILL.md URL, or local path."
+        title="Add skills"
+        description="Paste a GitHub repo or skill folder link, a SKILL.md link, or a workspace path. Every skill in it installs and its setup starts in chat."
         onClose={() => onOpenChange(false)}
         closeLabel="Close"
         closeButtonDisabled={importPending}
@@ -56,9 +59,10 @@ export function SkillsImportModal({
             Source
           </Text>
           <Input
+            autoFocus
             value={importSource}
             onChange={(event) => onImportSourceChange(event.target.value)}
-            placeholder="https://github.com/owner/repo/tree/main/path/to/skill"
+            placeholder="https://github.com/owner/repo or a skill folder link"
             data-testid="skills-import-source"
           />
         </label>
@@ -73,6 +77,9 @@ export function SkillsImportModal({
             placeholder="playwright-review"
             data-testid="skills-import-name"
           />
+          <Text as="span" variant="caption" tone="muted" className="block">
+            Single-skill sources only
+          </Text>
         </label>
 
         <Toggle
@@ -86,15 +93,19 @@ export function SkillsImportModal({
         />
 
         <div className="flex flex-wrap items-center justify-between gap-2 border-t border-slate-200 pt-3 dark:border-slate-800">
-          <Button
-            variant="ghost"
-            size="sm"
-            radius="xl"
-            onPress={onOpenAssistant}
-            data-testid="skills-open-assistant"
-          >
-            Open Assistant
-          </Button>
+          {onBrowseSkills ? (
+            <Button
+              variant="ghost"
+              size="sm"
+              radius="xl"
+              onPress={onBrowseSkills}
+              data-testid="skills-browse"
+            >
+              Browse skills
+            </Button>
+          ) : (
+            <span />
+          )}
           <div className="flex flex-wrap items-center gap-2">
             <Button
               variant="outline"
@@ -114,7 +125,7 @@ export function SkillsImportModal({
               data-testid="skills-import-submit"
             >
               {importPending ? <Spinner tone="primary" size="sm" aria-hidden="true" /> : null}
-              Import Skill
+              Add and start
             </Button>
           </div>
         </div>

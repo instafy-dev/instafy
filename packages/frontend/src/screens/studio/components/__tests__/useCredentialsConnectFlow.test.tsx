@@ -2,7 +2,7 @@
 
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi, type Mock } from "vitest";
 import { useCredentialsConnectFlow } from "../useCredentialsConnectFlow";
 
 const controllerMocks = vi.hoisted(() => ({
@@ -61,9 +61,9 @@ function Harness({ options }: { options: HookOptions }) {
 describe("useCredentialsConnectFlow API-key verification", () => {
   let container: HTMLDivElement;
   let root: Root;
-  let loadCredentials: ReturnType<typeof vi.fn>;
-  let notifyAiConfigChanged: ReturnType<typeof vi.fn>;
-  let showStatus: ReturnType<typeof vi.fn>;
+  let loadCredentials: Mock;
+  let notifyAiConfigChanged: Mock;
+  let showStatus: Mock;
 
   beforeEach(async () => {
     (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
@@ -217,8 +217,8 @@ describe("useCredentialsConnectFlow API-key verification", () => {
 describe("useCredentialsConnectFlow replace ordering", () => {
   let container: HTMLDivElement;
   let root: Root;
-  let showStatus: ReturnType<typeof vi.fn>;
-  let isDefault: ReturnType<typeof vi.fn>;
+  let showStatus: Mock;
+  let isDefault: Mock;
   let calls: string[];
 
   async function mount() {

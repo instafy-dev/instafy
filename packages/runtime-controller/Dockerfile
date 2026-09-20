@@ -20,7 +20,14 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
 
 FROM debian:bookworm-slim@sha256:7b140f374b289a7c2befc338f42ebe6441b7ea838a042bbd5acbfca6ec875818 AS runtime
 LABEL org.opencontainers.image.source="https://github.com/instafy-dev/instafy"
-RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates && rm -rf /var/lib/apt/lists/*
+# Explicitly refresh inherited PCRE2; installing another package does not upgrade it.
+ARG PCRE2_MIN_VERSION=10.42-1+deb12u1
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      ca-certificates \
+      libpcre2-8-0 \
+    && test -n "${PCRE2_MIN_VERSION}" \
+    && dpkg --compare-versions "$(dpkg-query -W -f='${Version}' libpcre2-8-0)" ge "${PCRE2_MIN_VERSION}" \
+    && rm -rf /var/lib/apt/lists/*
 WORKDIR /srv
 COPY --from=builder /usr/local/bin/runtime-controller-build /usr/local/bin/runtime-controller
 EXPOSE 8788

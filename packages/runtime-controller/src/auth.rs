@@ -15,7 +15,11 @@ use tracing::{info, warn};
 use uuid::Uuid;
 
 #[cfg(test)]
-use crate::model_defaults::{default_managed_ai_model_id, default_managed_ai_model_label};
+use crate::model_defaults::{
+    default_managed_ai_model_id, default_managed_ai_model_label,
+    DEFAULT_MANAGED_AI_CACHED_INPUT_USD_MICROS_PER_1K, DEFAULT_MANAGED_AI_INPUT_USD_MICROS_PER_1K,
+    DEFAULT_MANAGED_AI_OUTPUT_USD_MICROS_PER_1K,
+};
 use crate::{
     internal_error,
     tokens::{mint_scoped_token_with_runtime_generation, MintedAccessToken, ScopedTokenRequest},
@@ -756,9 +760,10 @@ mod tests {
             managed_ai_daily_prompt_limit: 20,
             managed_ai_model_id: default_managed_ai_model_id().to_string(),
             managed_ai_model_label: default_managed_ai_model_label().to_string(),
-            managed_ai_input_usd_micros_per_1k: 250,
-            managed_ai_cached_input_usd_micros_per_1k: 25,
-            managed_ai_output_usd_micros_per_1k: 2_000,
+            managed_ai_input_usd_micros_per_1k: DEFAULT_MANAGED_AI_INPUT_USD_MICROS_PER_1K,
+            managed_ai_cached_input_usd_micros_per_1k:
+                DEFAULT_MANAGED_AI_CACHED_INPUT_USD_MICROS_PER_1K,
+            managed_ai_output_usd_micros_per_1k: DEFAULT_MANAGED_AI_OUTPUT_USD_MICROS_PER_1K,
             managed_ai_startup_check: true,
             tunnel_broker_hook_secret: None,
             git_event_hook_secret: None,

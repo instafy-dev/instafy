@@ -203,7 +203,7 @@ test.describe("Credential onboarding", () => {
       .toBeGreaterThan(0);
     await expect(credentialModal).toHaveCount(0);
     await expect(
-      gettingStarted.getByText("What should your agent work on?", { exact: true }),
+      gettingStarted.getByText("Start with a tool you already use", { exact: true }),
     ).toBeVisible();
   });
 });

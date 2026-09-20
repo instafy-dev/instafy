@@ -1,7 +1,6 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useState } from "react";
 import type { ChatMessage } from "../types";
 import type { AiCredentialsGateState } from "./AiCredentialsStatusBubble";
-import { type OnboardingAction } from "./onboardingPlaybook";
 import { shouldDisplayChatMessage } from "./chatMessagePresentation";
 
 const GETTING_STARTED_DISMISSED_KEY = "instafy.onboarding.gettingStartedDismissed";
@@ -32,7 +31,6 @@ type UseChatGettingStartedStateOptions = {
   hasMoreHistory: boolean;
   inputValue: string;
   isHistoryLoading: boolean;
-  onInputChange: (conversationId: string, value: string, editorState: string | null) => void;
   remoteHistoryPresenceResolved: boolean;
   runtimeControllerEnabled: boolean;
 };
@@ -83,7 +81,6 @@ export function useChatGettingStartedState({
   hasMoreHistory,
   inputValue,
   isHistoryLoading,
-  onInputChange,
   remoteHistoryPresenceResolved,
   runtimeControllerEnabled,
 }: UseChatGettingStartedStateOptions) {
@@ -216,40 +213,48 @@ export function useChatGettingStartedState({
     runtimeControllerEnabled,
   ]);
 
-  const shouldShowGettingStarted = useMemo(() => {
+  // "full" is the card; "collapsed" is its one-line row of workspace actions,
+  // shown while a draft is in the composer instead of unmounting the card.
+  // Dismissal, history and the credential gate hide both.
+  const gettingStartedPresentation = useMemo((): "full" | "collapsed" | null => {
     if (!activeProjectId) {
-      return false;
+      return null;
     }
     if (!conversationScopeAligned) {
-      return false;
+      return null;
     }
     // An explicit repo-import request overrides dismissal, history, and
     // context-relevance gates so repo import is never buried or lost.
     if (forceGithubImport && gettingStartedMode === "github" && !aiOnboardingOpen) {
-      return true;
+      return "full";
     }
     if (!gettingStartedContextResolved || !gettingStartedContextRelevant) {
-      return false;
+      return null;
     }
     if (gettingStartedDismissed) {
-      return false;
+      return null;
     }
     if (runtimeControllerEnabled && !remoteHistoryPresenceResolved) {
-      return false;
+      return null;
     }
     if ((credentialGateState && credentialGateState !== "checking") || aiOnboardingOpen) {
-      return false;
+      return null;
     }
     if (gettingStartedMode === "github" && githubImportBusy) {
-      return true;
+      return "full";
     }
-    if (inputValue.trim().length > 0 || projectHasConversationHistory || displayedMessageCount > 0) {
-      return false;
+    if (projectHasConversationHistory || displayedMessageCount > 0) {
+      return null;
     }
     if (hasMoreHistory || isHistoryLoading) {
-      return false;
+      return null;
     }
-    return true;
+    if (inputValue.trim().length > 0) {
+      // The GitHub mode was asked for explicitly (from the row or the menu),
+      // so it stays open over a draft; the root card folds to its row.
+      return gettingStartedMode === "github" ? "full" : "collapsed";
+    }
+    return "full";
   }, [
     activeProjectId,
     aiOnboardingOpen,
@@ -269,6 +274,8 @@ export function useChatGettingStartedState({
     remoteHistoryPresenceResolved,
     runtimeControllerEnabled,
   ]);
+  const shouldShowGettingStarted = gettingStartedPresentation !== null;
+  const gettingStartedCollapsed = gettingStartedPresentation === "collapsed";
 
   const handleGettingStartedModeChange = useCallback(
     (mode: "root" | "github") => {
@@ -312,32 +319,16 @@ export function useChatGettingStartedState({
     clearGithubImportUi();
   }, [clearGithubImportUi, managedAiSelectedKey]);
 
-  const handleGettingStartedAction = useCallback(
-    (action: OnboardingAction) => {
-      if (action.kind === "github_import") {
-        setGettingStartedMode("github");
-        clearGithubImportUi();
-        return;
-      }
-      if (!activeConversationId || !action.prompt) {
-        return;
-      }
-      onInputChange(activeConversationId, action.prompt, null);
-      setGettingStartedMode("root");
-      // Focus synchronously inside the trusted press so native keyboards open;
-      // deferring to an animation frame loses user activation on mobile.
-      document.getElementById("studio-chat-input")?.focus();
-    },
-    [activeConversationId, clearGithubImportUi, onInputChange],
-  );
-
+  // Nothing on the card prefills or focuses the composer any more: the card
+  // points at it in one line and the composer's own placeholder does the
+  // asking, so there is no second voice and no placeholder to plumb.
   return {
     beginGithubImport,
     clearGettingStartedManagedAiSelection,
     dismissGettingStarted,
+    gettingStartedCollapsed,
     gettingStartedManagedAiSelected,
     gettingStartedMode,
-    handleGettingStartedAction,
     handleGettingStartedModeChange,
     onboardingInputLocked,
     projectHasConversationHistory,

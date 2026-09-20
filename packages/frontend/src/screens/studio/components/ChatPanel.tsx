@@ -26,6 +26,15 @@ import {
   clampFloatingSurfacePositionToStudioViewport,
 } from "../../../utils/floatingSurfacePosition";
 import { ChatGettingStartedCard } from "./ChatGettingStartedCard";
+import { ConnectSheet } from "./ConnectSheet";
+import { SkillsImportModal } from "./SkillsImportModal";
+import type { Connector, SkillConnector } from "./connectors";
+import { routeConnectorSelection } from "./connectorRouting";
+import { requestSkillsDiscovery } from "./skillsDiscoveryRequest";
+import { useConnectSheetState } from "./useConnectSheetState";
+import { useInstalledSkillNames } from "./useInstalledSkillNames";
+import { useSkillsImportFlow } from "./useSkillsImportFlow";
+import { buildSkillStartMessage } from "../../../conversations/skillCommands";
 import { type ChatInputHandle } from "./chat-input/ChatInput";
 import { formatConversationTranscript, resolveCopyableMessageContent } from "./chatTranscriptCopy";
 import {
@@ -85,7 +94,6 @@ import {
   listBuiltInAssistantMentionTokens,
 } from "../../../assistants/localBuiltInAssistantCatalog";
 import {
-  type ControllerProjectMember,
   controllerClient,
 } from "../../../sdk/instafy";
 import { useAuth } from "../../../providers/AuthProvider";
@@ -232,6 +240,7 @@ import { useChatSubmitDispatch } from "./useChatSubmitDispatch";
 import { useChatSubmitFlow, type SubmitMessageFn } from "./useChatSubmitFlow";
 import { useChatVoiceComposerController } from "./useChatVoiceComposerController";
 import { useChatGettingStartedState } from "./useChatGettingStartedState";
+import { mergeMentionableMembers } from "./mentionableMembers";
 import {
   resolveConversationHumanPeerContext,
   resolveGettingStartedConversationContext,
@@ -339,7 +348,7 @@ import {
   readBrowserTransportPreference,
   writeBrowserTransportPreference,
 } from "./browserTransportPreference";
-import { CHAT_TRANSCRIPT_HEADER_INSET_PX, ChatSpeakerStickyOverlay, ChatTranscriptViewport } from "./ChatTranscriptViewport";
+import { ChatSpeakerStickyOverlay, ChatTranscriptViewport } from "./ChatTranscriptViewport";
 import { resolveSharedBrowserControlOwner } from "./sharedBrowserControlOwner";
 import { useSharedBrowserApprovalTransport } from "./useSharedBrowserApprovalTransport";
 import { useChatBrowserHandoff } from "./useChatBrowserHandoff";
@@ -421,10 +430,12 @@ function formatCredentialConnectionFailure(raw: string | null | undefined): stri
 }
 
 const NARROW_SPEAKER_INLINE_SELECTOR = '[data-chat-speaker-inline="true"]';
-// The scroll container's own top padding (`pt-2`) — where its content
+// The scroll container's own top padding (`pt-2`), where its content
 // actually starts painting. The pill now lives in the roster row above the
 // transcript rather than overlapping it, so this edge (not the pill's own
 // position) is the only stable line left to compare marker positions against.
+
+const CHAT_TRANSCRIPT_VISIBLE_TOP_INSET_PX = 8;
 
 function speakersEqual(left: StickyChatSpeaker | null, right: StickyChatSpeaker | null): boolean {
   if (left === null || right === null) {
@@ -682,7 +693,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
   });
   // Which conversation subtab is visible: chat messages or the docked browser.
   // Kept as its own state (not derived from browserSessionOpen) so switching
-  // back to Chat does NOT close/unmount the browser — it keeps the live remote
+  // back to Chat does NOT close/unmount the browser; it keeps the live remote
   // connection mounted, avoiding a reconnect on every switch.
   const [browserSubtab, setBrowserSubtab] = useState<ChatBrowserSubtab>("chat");
   useEffect(() => { if (messageTargetActive) setBrowserSubtab("chat"); }, [messageTargetActive, location.key]);
@@ -1057,25 +1068,10 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
       : projectCapabilitiesResolved === false
         ? false
         : canShareProject;
-  const mentionableUsers = useMemo(() => {
-    const merged = [...(orgMembers ?? []), ...(projectMembers ?? [])];
-    const result: ControllerProjectMember[] = [];
-    const seen = new Set<string>();
-    for (const member of merged) {
-      const userId = typeof member.userId === "string" ? member.userId.trim() : "";
-      if (!userId || userId === currentUserId || seen.has(userId)) {
-        continue;
-      }
-      seen.add(userId);
-      result.push(member);
-    }
-    result.sort((a, b) => {
-      const labelA = `${a.fullName ?? ""} ${a.email ?? ""}`.trim().toLowerCase();
-      const labelB = `${b.fullName ?? ""} ${b.email ?? ""}`.trim().toLowerCase();
-      return labelA.localeCompare(labelB);
-    });
-    return result;
-  }, [currentUserId, orgMembers, projectMembers]);
+  const mentionableUsers = useMemo(
+    () => mergeMentionableMembers({ orgMembers, projectMembers, currentUserId }),
+    [currentUserId, orgMembers, projectMembers],
+  );
 
   const chatInputRef = useRef<ChatInputHandle | null>(null);
 
@@ -1746,7 +1742,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     chatInputRef.current?.clear();
   }, []);
   // Surfaces outside the chat tree (the agent profile card, panels) hand
-  // keyboard focus to the composer after navigating here — without this the
+  // keyboard focus to the composer after navigating here; without this the
   // popover's focus restore lands on <body> once its trigger unmounts.
   useEffect(() => {
     const handler = () => focusInput({ force: true });
@@ -2214,7 +2210,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
   // window event; this panel owns the composer, so it turns the request into a
   // normal user message (with the target-message reference in metadata) and
   // sends it. The handler serializes rapid requests, and the standard submit
-  // preflight queues the message when the assistant is busy — the intent is
+  // preflight queues the message when the assistant is busy; the intent is
   // never dropped and never double-sent.
   useEffect(() => {
     const handler = createMessageUndoRequestHandler(async ({ message, metadata }) =>
@@ -2296,7 +2292,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     [invokeSubmitMessage, messages, showStatus],
   );
   // Automatic transient-failure re-dispatch mirrors handleRunFailureRetry but
-  // deliberately does NOT touch pendingRunFailureRetryKey — that state is the
+  // deliberately does NOT touch pendingRunFailureRetryKey; that state is the
   // manual "Try again" in-flight signal, and the auto path presents its own calm
   // "trying again automatically" state via autoRetryingKey instead.
   const handleRunFailureAutoRetry = useCallback(
@@ -2306,7 +2302,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     [invokeSubmitMessage],
   );
   // Busy while the assistant is producing output or a manual retry resend is in
-  // flight — do not stack an automatic retry on top of an active run.
+  // flight; do not stack an automatic retry on top of an active run.
   const runFailureAutoRetryBusy = isAssistantTyping || pendingRunFailureRetryKey !== null;
   const { autoRetryingKey: runFailureAutoRetryingKey } = useRunFailureAutoRetry({
     messages,
@@ -3262,7 +3258,11 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
 
   const [stickyChatSpeaker, setStickyChatSpeaker] =
     useState<StickyChatSpeaker | null>(null);
-  // Presence stays outside the scroller while the message ink fades beneath it.
+  // Rendered in the roster row above the transcript (never inside the
+  // scroller), so the ref stays valid for as long as the chat panel is
+  // mounted; the sticky-speaker effect below no longer reads its rect (see
+  // CHAT_TRANSCRIPT_VISIBLE_TOP_INSET_PX), but ChatSpeakerStickyOverlay still
+  // takes a ref, so this stays the one it's given.
   const stickySpeakerOverlayRef = useRef<HTMLDivElement>(null);
 
   useLayoutEffect(() => {
@@ -3274,9 +3274,12 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
 
     let animationFrameId: number | null = null;
     const readAndApplySpeaker = () => {
-      // Hand off the inline identity at the fully readable edge of the fade.
+      // The pill lives in the roster row now, physically separate from the
+      // transcript, so its own rect can no longer mark the handoff line, a
+      // marker's inline label only needs to hide once it has actually
+      // scrolled past the transcript's own visible top edge.
       const containerRect = scrollContainer.getBoundingClientRect();
-      const thresholdTop = containerRect.top + CHAT_TRANSCRIPT_HEADER_INSET_PX;
+      const thresholdTop = containerRect.top + CHAT_TRANSCRIPT_VISIBLE_TOP_INSET_PX;
       const markers = Array.from(
         scrollContainer.querySelectorAll(CHAT_SPEAKER_MARKER_SELECTOR),
       );
@@ -3553,7 +3556,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
       return;
     }
     const contextSummary = selectedMessageTokenUsage.context
-      ? `\nContext — ${formatPromptContextModeLabel(selectedMessageTokenUsage.context)}${
+      ? `\nContext: ${formatPromptContextModeLabel(selectedMessageTokenUsage.context)}${
           selectedMessageTokenUsage.context.estimatedPromptTokens !== null
             ? `, prompt est: ${Math.round(selectedMessageTokenUsage.context.estimatedPromptTokens)}`
             : ""
@@ -3563,7 +3566,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
             : ""
         }`
       : "";
-    const summary = `Message stats — input: ${selectedMessageTokenUsage.inputTokens}, cached: ${selectedMessageTokenUsage.cachedInputTokens}, output: ${selectedMessageTokenUsage.outputTokens}${contextSummary}`;
+    const summary = `Message stats. Input: ${selectedMessageTokenUsage.inputTokens}, cached: ${selectedMessageTokenUsage.cachedInputTokens}, output: ${selectedMessageTokenUsage.outputTokens}${contextSummary}`;
     try {
       await writeClipboardText(summary);
       showStatus("Copied message stats.", "success", 2000, { presentation: "confirmation" });
@@ -3809,9 +3812,9 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     beginGithubImport,
     clearGettingStartedManagedAiSelection,
     dismissGettingStarted,
+    gettingStartedCollapsed,
     gettingStartedManagedAiSelected,
     gettingStartedMode,
-    handleGettingStartedAction,
     handleGettingStartedModeChange,
     onboardingInputLocked,
     selectGettingStartedManagedAi,
@@ -3836,9 +3839,93 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     isHistoryLoading,
     remoteHistoryPresenceResolved:
       remoteConversationHistoryResolved && !isInitialHistoryLoading && !initialHistoryError,
-    onInputChange,
     runtimeControllerEnabled,
   });
+  // Connect: one sheet (browse and confirm stages) shared by the composer
+  // sub-view, the getting-started card and the "Paste a skill link" modal.
+  // Every send lands in the current conversation as a new turn; nothing here
+  // creates a conversation or switches tabs.
+  const installedSkills = useInstalledSkillNames({
+    projectId: activeProjectId,
+    runtimeId: effectiveRuntimeId ?? null,
+  });
+  const skillsImport = useSkillsImportFlow({
+    activeConversationId,
+    assistantEnabled,
+    onSubmit,
+    showStatus,
+    loadSkills: installedSkills.refresh,
+  });
+  const connectSheet = useConnectSheetState();
+  const connectSheetOpen = connectSheet.state !== null;
+  const { handleOpenAddSkillModal: openAddSkillModal, queueSkillImportTask } = skillsImport;
+  const { openBrowse: openConnectBrowse, openConfirm: openConnectConfirm, back: backConnectSheet, close: closeConnectSheet } = connectSheet;
+  const handleSelectConnector = useCallback(
+    (connector: Connector) => {
+      routeConnectorSelection(connector, {
+        openConfirm: openConnectConfirm,
+        leaveSheet: closeConnectSheet,
+        openImportModal: openAddSkillModal,
+        beginGithubImport,
+      });
+    },
+    [beginGithubImport, closeConnectSheet, openAddSkillModal, openConnectConfirm],
+  );
+  const handleConnectPasteLink = useCallback(() => {
+    closeConnectSheet();
+    openAddSkillModal();
+  }, [closeConnectSheet, openAddSkillModal]);
+  // The typed query travels to the Skills panel's Discover tab; the panel
+  // consumes it on mount (openPanelTab mounts it) or at once when already open.
+  const handleConnectSearchAllSkills = useCallback(
+    (query: string) => {
+      closeConnectSheet();
+      requestSkillsDiscovery(query);
+      openPanelTab("skills", { activate: true });
+    },
+    [closeConnectSheet, openPanelTab],
+  );
+  const handleConnectConfirm = useCallback(
+    async (connector: SkillConnector) => {
+      const queued = await queueSkillImportTask({
+        source: connector.source,
+        skillName: connector.skillName,
+        overwrite: false,
+        label: connector.name,
+      });
+      if (queued) {
+        closeConnectSheet();
+      }
+    },
+    [closeConnectSheet, queueSkillImportTask],
+  );
+  // "Set up again" prefills the composer, but focusing it from inside the
+  // sheet's press is undone by the dialog's focus containment and then by its
+  // restore-focus frame once the sheet unmounts. Hand the composer focus only
+  // after the sheet is gone, two frames later so it runs after that restore.
+  const pendingComposerFocusRef = useRef(false);
+  const handleConnectSetUpAgain = useCallback(
+    (connector: SkillConnector) => {
+      onInputChange(activeConversationId, `${buildSkillStartMessage(connector.skillName)} `, null);
+      pendingComposerFocusRef.current = true;
+      closeConnectSheet();
+    },
+    [activeConversationId, closeConnectSheet, onInputChange],
+  );
+  useEffect(() => {
+    if (!pendingComposerFocusRef.current || connectSheetOpen) {
+      return;
+    }
+    pendingComposerFocusRef.current = false;
+    let inner = 0;
+    const outer = requestAnimationFrame(() => {
+      inner = requestAnimationFrame(() => focusInput({ force: true }));
+    });
+    return () => {
+      cancelAnimationFrame(outer);
+      cancelAnimationFrame(inner);
+    };
+  }, [connectSheetOpen, focusInput]);
   const {
     managedAiOffer: gettingStartedManagedAiOffer,
     selectedAi: gettingStartedSelectedAi,
@@ -3855,7 +3942,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     managedAiSelected: gettingStartedManagedAiSelected,
   });
   const handleStartWithManagedAi = useCallback(() => {
-    // Focus moves to the workspace step (the card handles it) — not the composer,
+    // Focus moves to the workspace step (the card handles it), not the composer,
     // which would open the mobile keyboard over the next decision.
     selectGettingStartedManagedAi();
   }, [selectGettingStartedManagedAi]);
@@ -3866,6 +3953,46 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     }
     openGettingStartedConnectModal();
   }, [gettingStartedPersonalAiConnectionState, openAiOnboarding, openGettingStartedConnectModal]);
+  // The gate's "Connect AI": the same Add AI connection modal the card opens.
+  // Nothing is stashed or armed. The modal never clears the composer, so the
+  // draft simply stays where it is ("Your message is kept") and goes out on
+  // the user's own press once AI is connected; arming an auto-submit here
+  // would fire a stale draft later, since closing the modal without connecting
+  // leaves nothing to clear it. The composer is refocused when credentials
+  // become ready, because the gate bubble (the modal's focus-restore target)
+  // unmounts at that moment and focus would otherwise land on <body>.
+  const connectFromGateRef = useRef(false);
+  const handleConnectAiFromGate = useCallback(() => {
+    connectFromGateRef.current = true;
+    openGettingStartedConnectModal();
+  }, [openGettingStartedConnectModal]);
+  useEffect(() => {
+    connectFromGateRef.current = false;
+  }, [activeConversationId]);
+  useEffect(() => {
+    if (!credentialsReady || !connectFromGateRef.current) {
+      return;
+    }
+    connectFromGateRef.current = false;
+    focusInput({ force: true });
+  }, [credentialsReady, focusInput]);
+  // "Change AI" on the card: the managed choice resets to the AI step; a saved
+  // credential is changed in the AI panel, where the connections live.
+  const handleChangeAiChoice = useCallback(() => {
+    if (gettingStartedSelectedAi === "connected") {
+      openAiManager();
+      return;
+    }
+    clearGettingStartedManagedAiSelection();
+  }, [clearGettingStartedManagedAiSelection, gettingStartedSelectedAi, openAiManager]);
+  const gettingStartedConnectedAiLabel = useMemo(
+    () => (defaultAiCredential ? resolveCredentialLabel(defaultAiCredential) : null),
+    [defaultAiCredential],
+  );
+  // Alone in a space, "turn the assistant off" has nobody to chat with. The
+  // mentionable set is the source of truth: org and project members merged,
+  // minus the viewer, so an org-shared space counts its teammates too.
+  const spaceHasTeammates = mentionableUsers.length > 0;
 
   const { clearComposerAfterQueue, clearComposerIfUnchanged, performSubmit } = useChatSubmitDispatch({
     activeConversationId,
@@ -4485,7 +4612,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
   const participantsSnapshotConversationId = activeConversationEntry?.controllerId ?? null;
   // Enrich each roster agent with the model, provider, and credential it draws
   // from, resolving pinned-vs-default and stale credentials the same way the
-  // Runtime & AI panel does — so the drawer can show it without re-deriving.
+  // Runtime & AI panel does, so the drawer can show it without re-deriving.
   const participantAgents = useMemo<ParticipantAgent[]>(() => {
     const credentialsById = new Map(
       availableCredentials.map((credential) => [credential.id, credential]),
@@ -4574,7 +4701,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
       let credentialState: ParticipantCredentialState = "none";
       // The credential whose live usage applies to this agent: the pinned one
       // when it resolves, otherwise the workspace default. Stays null for the
-      // broken states (missing/revoked) — there's no live snapshot to show.
+      // broken states (missing/revoked); there's no live snapshot to show.
       let effectiveCredential: (typeof availableCredentials)[number] | null = null;
       if (profile?.credentialId) {
         const pinned = credentialsById.get(profile.credentialId) ?? null;
@@ -4623,7 +4750,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     runtimeMenu,
   ]);
   // Amber dot on the roster facepile when any agent's credential needs
-  // attention — visible without opening the drawer.
+  // attention, visible without opening the drawer.
   const participantAgentsHaveCredentialWarning = participantAgents.some(
     (agent) =>
       agent.credentialState === "missing" ||
@@ -4654,7 +4781,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     }),
     [availableCredentials, openAiManager, refreshAvailableAgents, refreshCredentials],
   );
-  // The conversation's assistant switch, published for the participants panel —
+  // The conversation's assistant switch, published for the participants panel:
   // same semantics as the composer chip's toggle: enabling with no AI connected
   // routes through onboarding first; disabling also clears invited agents.
   const participantsAssistant = useMemo(() => {
@@ -4765,7 +4892,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
 
   const gettingStartedTopAnchoredRef = useRef(false);
   const gettingStartedTopAnchorActive =
-    shouldShowGettingStarted && (compactBrowserViewport || touchLikeInput);
+    shouldShowGettingStarted && !gettingStartedCollapsed && (compactBrowserViewport || touchLikeInput);
   useLayoutEffect(() => {
     setAutoScrollSuspended(gettingStartedTopAnchorActive);
     const node = scrollContainerRef.current;
@@ -5079,7 +5206,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
   // true), so the connect wizard's "Use free managed AI" button just dismisses
   // the wizard and fires whatever prompt the user already typed. The draft is
   // still in the composer (openAiOnboarding never clears it), so there is no
-  // stashed draft to restore — and the false→true auto-submit effect above
+  // stashed draft to restore, and the false→true auto-submit effect above
   // never runs in this case, so we submit here explicitly.
   const handleUseManagedAi = useCallback(() => {
     closeAiOnboarding();
@@ -5094,7 +5221,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
 
   // The gate bubble's "just chatting with teammates?" escape: turn the assistant
   // off for this conversation so plain p2p messages send with no AI connected.
-  // Mirrors the OctoAgentChip disable path — clear extra agent handles too, or a
+  // Mirrors the OctoAgentChip disable path: clear extra agent handles too, or a
   // lingering AI handle keeps inputRequiresAi true and the gate never clears.
   const handleChatWithoutAi = useCallback(() => {
     if (!activeConversationId) {
@@ -5103,7 +5230,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     for (const handle of extraAgentHandles) {
       onRemoveAgentHandle(activeConversationId, handle);
     }
-    // Also drop any sticky mentioned agent for this conversation — otherwise it
+    // Also drop any sticky mentioned agent for this conversation; otherwise it
     // keeps inputRequiresAi true and the gate would never self-dismiss. This is
     // the submit flow's own map, so clearing it also stops handleSubmit from
     // dispatching follow-ups to the stale sticky agent.
@@ -5544,14 +5671,12 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
         className={browserSubtab === "chat" ? "flex min-h-0 flex-1 flex-col" : "hidden"}
       >
       <ChatMessageContextToolbar />
-      <ChatScrollSnapshotBoundary identity={chatScrollMutationIdentity} messages={messages} capture={recordScrollPosition}>
-      <ChatTranscriptViewport
-        ariaLabel={conversationLabel}
-        onScroll={handleScroll}
-        onContextMenu={handleConversationContextMenu}
-        scrollContainerRef={scrollContainerRef}
-        scrollPaddingBottom={chatScrollPaddingBottom}
-        header={
+      {/* Presence belongs to the conversation, so it sits at the top of the
+          conversation surface: one placement at every width, a flow row (never
+          an overlay) so it cannot cover message text, and outside the scroller
+          so it never scrolls away. Always rendered; the roster collapses to a
+          plain "open participants" icon when no one has joined, so the
+          participants/config panel is reachable even on a brand-new chat. */}
       <div
         className="px-3 pt-2 sm:px-4"
         data-testid="chat-conversation-roster-row"
@@ -5571,7 +5696,13 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
           />
         </ChatColumn>
       </div>
-        }
+      <ChatScrollSnapshotBoundary identity={chatScrollMutationIdentity} messages={messages} capture={recordScrollPosition}>
+      <ChatTranscriptViewport
+        ariaLabel={conversationLabel}
+        onScroll={handleScroll}
+        onContextMenu={handleConversationContextMenu}
+        scrollContainerRef={scrollContainerRef}
+        scrollPaddingBottom={chatScrollPaddingBottom}
       >
         <OctoScrollMotionScope
           sourceRef={scrollContainerRef}
@@ -5612,16 +5743,21 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
                 <ChatGettingStartedCard
                   key={`${activeProjectId ?? "no-project"}:${activeConversationId ?? "no-conversation"}`}
                   mode={gettingStartedMode}
+                  collapsed={gettingStartedCollapsed}
                   onSelectMode={handleGettingStartedModeChange}
-                  onSelectAction={handleGettingStartedAction}
+                  onSelectConnector={handleSelectConnector}
+                  onBrowseConnectors={openConnectBrowse}
+                  installedSkillNames={installedSkills.names}
+                  showConnectTools={!projectWriteDisabled}
                   managedAiOffer={gettingStartedManagedAiOffer}
                   selectedAi={gettingStartedSelectedAi}
+                  connectedAiLabel={gettingStartedConnectedAiLabel}
                   aiViewState={gettingStartedAiViewState}
                   canChangeAiChoice={canChangeGettingStartedAiChoice}
                   personalAiConnectionState={gettingStartedPersonalAiConnectionState}
                   onStartWithManagedAi={handleStartWithManagedAi}
                   onConnectOwnAi={handleConnectOwnAi}
-                  onChangeAiChoice={clearGettingStartedManagedAiSelection}
+                  onChangeAiChoice={handleChangeAiChoice}
                   githubRepoDraft={githubRepoDraft}
                   githubRefDraft={githubRefDraft}
                   githubImportBusy={githubImportBusy}
@@ -5746,6 +5882,8 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
               onSetDefaultCredential={(credentialId) => void handleSetDefaultCredentialFromChat(credentialId)}
               onUseManagedAi={handleUseManagedAi}
               onChatWithoutAi={handleChatWithoutAi}
+              onConnectAi={handleConnectAiFromGate}
+              hasTeammates={spaceHasTeammates}
               onCloseAiOnboarding={closeAiOnboarding}
               onStashDraftForCredentials={stashDraftForCredentials}
               onConnectDesktop={connectFromDesktop}
@@ -5822,7 +5960,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
         }
         accessNotice={
           projectReadOnly
-            ? "Read-only access — you can review this space, but you can’t send messages or change files."
+            ? "Read-only access. You can review this space, but you can’t send messages or change files."
             : null
         }
         accessChecking={!projectReadOnly && projectCapabilitiesResolved === false}
@@ -5925,7 +6063,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
         homeAttentionBadge={homeAttentionBadge}
         composerActionMenuProps={{
           // The pre-AI lock gates sending, not the "+" actions (import a repo,
-          // open a browser, invite) — none of which need AI connected. Keeping
+          // open a browser, invite), none of which need AI connected. Keeping
           // it enabled here is what makes repo import reachable before setup.
           disabled: sendingAttachment,
           mutationDisabled: projectWriteDisabled,
@@ -5939,6 +6077,9 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
           onOpenNewBrowser: handlePrepareNewBrowserSession,
           onOpenInvite: () => setAddMenuOpen(true),
           onImportGithubRepo: beginGithubImport,
+          onSelectConnector: handleSelectConnector,
+          onBrowseConnectors: openConnectBrowse,
+          installedSkillNames: installedSkills.names,
           onInsertCommand: handleInsertSlashCommand,
           onQueueMessage: () => {
             void invokeSubmitMessage(undefined, { intent: "queue" });
@@ -6015,6 +6156,39 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
           sharingPermissionsLoading:
             orgMembersLoading || projectCapabilitiesResolved === false,
           onOpenProjectSettings,
+        }}
+      />
+      <ConnectSheet
+        isOpen={connectSheetOpen}
+        stage={connectSheet.state?.stage ?? "browse"}
+        target={connectSheet.state?.target ?? null}
+        showBack={connectSheet.state?.openedFromBrowse ?? false}
+        installedSkillNames={installedSkills.names}
+        pending={skillsImport.importPending}
+        onSelect={handleSelectConnector}
+        onBack={backConnectSheet}
+        onPasteLink={handleConnectPasteLink}
+        onSearchAllSkills={handleConnectSearchAllSkills}
+        onConnect={(connector) => {
+          void handleConnectConfirm(connector);
+        }}
+        onSetUpAgain={handleConnectSetUpAgain}
+        onClose={closeConnectSheet}
+      />
+      <SkillsImportModal
+        isOpen={skillsImport.addSkillModalOpen}
+        onOpenChange={skillsImport.setAddSkillModalOpen}
+        importPending={skillsImport.importPending}
+        importSource={skillsImport.importSource}
+        onImportSourceChange={skillsImport.setImportSource}
+        importName={skillsImport.importName}
+        onImportNameChange={skillsImport.setImportName}
+        importOverwrite={skillsImport.importOverwrite}
+        onImportOverwriteChange={skillsImport.setImportOverwrite}
+        hasProject={Boolean(activeProjectId)}
+        onBrowseSkills={() => openPanelTab("skills", { activate: true })}
+        onSubmitImport={() => {
+          void skillsImport.handleSubmitImport({ closeModalOnSuccess: true });
         }}
       />
       {agentProfileModal ? (

@@ -146,6 +146,77 @@ test("runtime image inputs reject the vulnerable Chromium and Go crypto baseline
   );
 });
 
+test("base runtime explicitly refreshes inherited gzip, PCRE2 and SQLite and rejects obsolete versions", () => {
+  const source = read("docker/runtime/Dockerfile");
+  const defaults = argumentDefaults(source);
+  const runtime = dockerfileStage(source, "runtime");
+  const packages = [
+    ["gzip", "GZIP_MIN_VERSION", "1.13-1+deb13u1"],
+    ["libpcre2-8-0", "PCRE2_MIN_VERSION", "10.46-1~deb13u2"],
+    ["libsqlite3-0", "SQLITE3_MIN_VERSION", "3.46.1-7+deb13u2"],
+  ];
+  for (const [name, argument, minimum] of packages) {
+    assert.equal(defaults.get(argument), minimum);
+    assert.ok(runtime.includes(`ARG ${argument}\n`));
+    assertOrdered(runtime, name, "apt-get update", "apt-get install -y --no-install-recommends",
+      `      ${name} \\\n`, `test -n "\${${argument}}"`,
+      `dpkg --compare-versions "$(dpkg-query -W -f='\${Version}' ${name})" ge "\${${argument}}"`,
+      "rm -rf /var/lib/apt/lists/*");
+  }
+});
+
+test("every published Debian service refreshes inherited packages at its release's security floors", () => {
+  const bookwormPackages = [
+    ["libpcre2-8-0", "PCRE2_MIN_VERSION", "10.42-1+deb12u1"],
+  ];
+  const trixiePackages = [
+    ["gzip", "GZIP_MIN_VERSION", "1.13-1+deb13u1"],
+    ["libpcre2-8-0", "PCRE2_MIN_VERSION", "10.46-1~deb13u2"],
+    ["libsqlite3-0", "SQLITE3_MIN_VERSION", "3.46.1-7+deb13u2"],
+    ["perl-base", "PERL_BASE_MIN_VERSION", "5.40.1-6+deb13u1"],
+  ];
+  const expected = new Map([
+    ["packages/runtime-controller/Dockerfile", ["bookworm", bookwormPackages]],
+    ["packages/tunnel-broker/Dockerfile", ["bookworm", bookwormPackages]],
+    ["docker/proxy/Dockerfile", ["bookworm", bookwormPackages]],
+    ["docker/git-edge/Dockerfile", ["trixie", trixiePackages]],
+    ["docker/git-shard/Dockerfile", ["trixie", trixiePackages]],
+    ["docker/origin-gateway/Dockerfile", ["trixie", trixiePackages]],
+  ]);
+  const publishedDockerfiles = [...read(".github/workflows/publish-production-services.yml")
+    .matchAll(/^\s+dockerfile: (\S+)$/gmu)].map((match) => match[1]);
+  const debianDockerfiles = publishedDockerfiles.filter((relativePath) => {
+    const source = read(relativePath);
+    const reference = dockerfileFromReferences(source).at(-1);
+    return resolveBuildArguments(reference, argumentDefaults(source), relativePath)
+      .startsWith("debian:");
+  });
+  assert.deepEqual(debianDockerfiles.sort(), [...expected.keys()].sort(),
+    "a new published Debian service needs reviewed security-package coverage");
+
+  // Speech host is a production image, but not a cell in the service publisher.
+  expected.set("docker/speech-host/Dockerfile", ["bookworm", bookwormPackages]);
+  for (const [relativePath, [release, packages]] of expected) {
+    const source = read(relativePath);
+    const runtime = relativePath === "docker/speech-host/Dockerfile"
+      ? source : dockerfileStage(source, "runtime");
+    const defaults = argumentDefaults(source);
+    const reference = resolveBuildArguments(dockerfileFromReferences(runtime)[0], defaults, relativePath);
+    assert.ok(reference.includes(`${release}-slim@sha256:`),
+      `${relativePath} security floors must match its final base distribution`);
+    for (const [name, argument, minimum] of packages) {
+      assert.equal(defaults.get(argument), minimum, `${relativePath}: ${argument}`);
+      assert.ok(runtime.includes(`ARG ${argument}=${minimum}\n`),
+        `${relativePath}: security argument must be in the final stage`);
+      assertOrdered(runtime, `${relativePath}: ${name}`,
+        "apt-get update", "apt-get install -y --no-install-recommends",
+        `      ${name} \\\n`, `test -n "\${${argument}}"`,
+        `dpkg --compare-versions "$(dpkg-query -W -f='\${Version}' ${name})" ge "\${${argument}}"`,
+        "rm -rf /var/lib/apt/lists/*");
+    }
+  }
+});
+
 test("affected runtime images refresh every util-linux security binary", () => {
   const expectedStages = new Map([
     ["docker/git-edge/Dockerfile", ["runtime"]],

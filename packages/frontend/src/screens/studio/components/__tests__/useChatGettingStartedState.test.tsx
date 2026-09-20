@@ -2,7 +2,7 @@
 
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { useChatGettingStartedState } from "../useChatGettingStartedState";
 
 type HookOptions = Parameters<typeof useChatGettingStartedState>[0];
@@ -26,7 +26,6 @@ function baseOptions(overrides: Partial<HookOptions> = {}): HookOptions {
     hasMoreHistory: false,
     inputValue: "",
     isHistoryLoading: false,
-    onInputChange: () => undefined,
     remoteHistoryPresenceResolved: true,
     runtimeControllerEnabled: true,
     ...overrides,
@@ -44,6 +43,7 @@ function Harness({ options }: { options: HookOptions }) {
       <span data-testid="managed-ai-selected">
         {String(captured.gettingStartedManagedAiSelected)}
       </span>
+      <span data-testid="collapsed">{String(captured.gettingStartedCollapsed)}</span>
     </div>
   );
 }
@@ -77,6 +77,9 @@ describe("useChatGettingStartedState", () => {
   }
   function managedAiSelected() {
     return container.querySelector('[data-testid="managed-ai-selected"]')?.textContent;
+  }
+  function collapsed() {
+    return container.querySelector('[data-testid="collapsed"]')?.textContent;
   }
 
   it("keeps the large discovery card out of a human-only shared conversation", async () => {
@@ -454,31 +457,113 @@ describe("useChatGettingStartedState", () => {
     expect(show()).toBe("false");
   });
 
-  it("lets a power-user draft collapse discovery without completing it", async () => {
-    const onInputChange = vi.fn();
+  it("collapses the card to its one-line row while a draft exists and restores it when the draft clears", async () => {
     await act(async () => {
-      root.render(<Harness options={baseOptions({ onInputChange })} />);
+      root.render(<Harness options={baseOptions()} />);
     });
     expect(show()).toBe("true");
+    expect(collapsed()).toBe("false");
 
     await act(async () => {
       root.render(
-        <Harness
-          options={baseOptions({
-            inputValue: "Refactor the payments flow",
-            onInputChange,
-          })}
-        />,
+        <Harness options={baseOptions({ inputValue: "Refactor the payments flow" })} />,
+      );
+    });
+    // Still shown, folded: the options stay reachable while typing.
+    expect(show()).toBe("true");
+    expect(collapsed()).toBe("true");
+    expect(captured?.projectHasConversationHistory).toBe(false);
+
+    // Whitespace is not a draft.
+    await act(async () => {
+      root.render(<Harness options={baseOptions({ inputValue: "   " })} />);
+    });
+    expect(collapsed()).toBe("false");
+
+    await act(async () => {
+      root.render(<Harness options={baseOptions()} />);
+    });
+    expect(show()).toBe("true");
+    expect(collapsed()).toBe("false");
+  });
+
+  it("keeps the credential gate, history loading, dismissal and history ahead of the collapsed row", async () => {
+    await act(async () => {
+      root.render(<Harness options={baseOptions({ inputValue: "hello", credentialGateState: "missing" })} />);
+    });
+    expect(show()).toBe("false");
+    expect(collapsed()).toBe("false");
+
+    await act(async () => {
+      root.render(<Harness options={baseOptions({ inputValue: "hello", isHistoryLoading: true })} />);
+    });
+    expect(show()).toBe("false");
+
+    await act(async () => {
+      root.render(<Harness options={baseOptions({ inputValue: "hello" })} />);
+    });
+    expect(collapsed()).toBe("true");
+    await act(async () => {
+      captured?.dismissGettingStarted();
+    });
+    expect(show()).toBe("false");
+    expect(collapsed()).toBe("false");
+
+    // History (remembered per space) hides the row for good, draft or not.
+    window.localStorage.clear();
+    await act(async () => {
+      root.render(
+        <Harness options={baseOptions({ inputValue: "hello", displayedMessageCount: 2 })} />,
       );
     });
     expect(show()).toBe("false");
-    expect(captured?.projectHasConversationHistory).toBe(false);
-    expect(onInputChange).not.toHaveBeenCalled();
+    expect(collapsed()).toBe("false");
+  });
+
+  it("keeps the GitHub mode open over a draft instead of folding it", async () => {
+    await act(async () => {
+      root.render(<Harness options={baseOptions({ inputValue: "hello" })} />);
+    });
+    expect(collapsed()).toBe("true");
 
     await act(async () => {
-      root.render(<Harness options={baseOptions({ onInputChange })} />);
+      captured?.handleGettingStartedModeChange("github");
     });
     expect(show()).toBe("true");
+    expect(collapsed()).toBe("false");
+    expect(mode()).toBe("github");
+
+    await act(async () => {
+      captured?.handleGettingStartedModeChange("root");
+    });
+    expect(collapsed()).toBe("true");
+  });
+
+  it("never writes into the composer or moves focus: the card has no such control", async () => {
+    const composer = document.createElement("textarea");
+    composer.id = "studio-chat-input";
+    document.body.appendChild(composer);
+    try {
+      await act(async () => {
+        root.render(<Harness options={baseOptions()} />);
+      });
+      // The compose and prompt kinds are gone with the action layer: the hook
+      // exposes no way to prefill or focus the composer, so the composer's own
+      // placeholder is the only invitation on screen.
+      expect(Object.keys(captured ?? {})).not.toContain("handleGettingStartedAction");
+      expect(Object.keys(captured ?? {})).not.toContain("gettingStartedComposerPlaceholder");
+      expect(composer.value).toBe("");
+      expect(document.activeElement).not.toBe(composer);
+
+      // Typing folds the card; the composer is untouched by that.
+      await act(async () => {
+        root.render(<Harness options={baseOptions({ inputValue: "A habit tracker" })} />);
+      });
+      expect(collapsed()).toBe("true");
+      expect(composer.value).toBe("");
+    } finally {
+      composer.remove();
+    }
   });
 
   it("treats a visible message as completed project onboarding", async () => {

@@ -1,0 +1,358 @@
+name: Hosted Web Release
+
+# The bot-pushed immutable tag web-v<sha12> (or web-v<sha12>-r<N>, N 2-99, for a retry) is the ledger: build,
+# seal and publish that protected-main commit's hosted web frontend to Cloudflare Pages, prove that
+# production serves exactly it, and roll back automatically when the proof fails. The release train
+# pushes the tag only after the backend release this frontend depends on. A main dispatch is a dry
+# run of the main head it was started for: it builds, verifies and seals, and publishes nothing.
+
+on:
+  push:
+    tags:
+      - "web-v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Dry run only: web-v<first 12 hex of the main head>; builds, verifies and seals, publishes nothing"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: web-release-${{ github.event_name == 'workflow_dispatch' && 'dry-run' || github.ref_name }}
+  cancel-in-progress: false
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  authorize:
+    name: Authorize the exact web tag
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    outputs:
+      tag: ${{ steps.verify.outputs.tag }}
+      mode: ${{ steps.verify.outputs.mode }}
+      source_sha: ${{ steps.verify.outputs.source_sha }}
+      source_sha12: ${{ steps.verify.outputs.source_sha12 }}
+      release_id: ${{ steps.verify.outputs.release_id }}
+    steps:
+      - name: Resolve the tag commit and its protected-main containment
+        id: facts
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EVENT_NAME: ${{ github.event_name }}
+          ACTOR: ${{ github.actor }}
+          TRIGGERING_ACTOR: ${{ github.triggering_actor }}
+          PUSHER: ${{ github.event.pusher.name }}
+          REF_NAME: ${{ github.ref_name }}
+          INPUT_TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          if [[ "$GITHUB_REPOSITORY" != "instafy-dev/instafy" || "$ACTOR" != "instafy-bot" || "$TRIGGERING_ACTOR" != "instafy-bot" ]]; then
+            echo "::error::Hosted web releases run only in instafy-dev/instafy and only for instafy-bot."; exit 1
+          fi
+          if [[ "$EVENT_NAME" == "push" && "$PUSHER" != "instafy-bot" ]]; then
+            echo "::error::Hosted web release tags may only be pushed by instafy-bot."; exit 1
+          fi
+          tag="$INPUT_TAG"
+          if [[ "$EVENT_NAME" == "push" ]]; then tag="$REF_NAME"; fi
+          if [[ ! "$tag" =~ ^web-v[0-9a-f]{12}(-r([2-9]|[1-9][0-9]))?$ ]]; then
+            echo "::error::The hosted web release tag must match web-v<12 lowercase hex> or web-v<12 lowercase hex>-r<2-99>."; exit 1
+          fi
+          tag_sha=""
+          if gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/${tag}" >"$RUNNER_TEMP/tag-ref.json" 2>"$RUNNER_TEMP/tag-ref.err"; then
+            test "$(jq -r .ref "$RUNNER_TEMP/tag-ref.json")" = "refs/tags/${tag}"
+            tag_sha="$(jq -r .object.sha "$RUNNER_TEMP/tag-ref.json")"
+            if [[ "$(jq -r .object.type "$RUNNER_TEMP/tag-ref.json")" == "tag" ]]; then
+              tag_sha="$(gh api "repos/${GITHUB_REPOSITORY}/git/tags/${tag_sha}" --jq 'select(.object.type == "commit") | .object.sha')"
+            fi
+            [[ "$tag_sha" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::Tag ${tag} does not peel to a commit."; exit 1; }
+          elif ! grep -q 'HTTP 404' "$RUNNER_TEMP/tag-ref.err"; then
+            echo "::error::Unable to resolve tag ${tag}."; exit 1
+          fi
+          compare_status="$(gh api "repos/${GITHUB_REPOSITORY}/compare/${GITHUB_SHA}...main" --jq .status)"
+          printf 'tag_sha=%s\ncompare_status=%s\n' "$tag_sha" "$compare_status" >> "$GITHUB_OUTPUT"
+
+      - name: Check out the release commit
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+          fetch-depth: 1
+          submodules: false
+
+      - name: Run the web lane contract tests
+        run: |
+          set -euo pipefail
+          node --test scripts/release/web/*.test.mjs packages/frontend/hosted/performance/client.test.mjs
+
+      - name: Verify tag, actor, exact main and the release identity
+        id: verify
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          REPOSITORY: ${{ github.repository }}
+          ACTOR: ${{ github.actor }}
+          TRIGGERING_ACTOR: ${{ github.triggering_actor }}
+          PUSHER: ${{ github.event.pusher.name }}
+          REF: ${{ github.ref }}
+          RUN_SHA: ${{ github.sha }}
+          REF_NAME: ${{ github.ref_name }}
+          INPUT_TAG: ${{ inputs.tag }}
+          TAG_SHA: ${{ steps.facts.outputs.tag_sha }}
+          COMPARE_STATUS: ${{ steps.facts.outputs.compare_status }}
+        run: |
+          set -euo pipefail
+          HEAD_SHA="$(git rev-parse HEAD)" node scripts/release/web/verify-release-tag.mjs
+          echo "release_id=$(node scripts/release/web/release-id.mjs "$(git rev-parse HEAD)")" >> "$GITHUB_OUTPUT"
+
+      - name: Summarize the authorization
+        env:
+          SUMMARY: "tag `${{ steps.verify.outputs.tag }}`, mode `${{ steps.verify.outputs.mode }}`, commit `${{ steps.verify.outputs.source_sha }}`, release `${{ steps.verify.outputs.release_id }}`"
+        run: |
+          set -euo pipefail
+          printf '### Hosted web authorization\n\n%s\n' "$SUMMARY" >> "$GITHUB_STEP_SUMMARY"
+
+  build:
+    name: Build and seal the exact hosted web frontend
+    needs: authorize
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    env:
+      TAG: ${{ needs.authorize.outputs.tag }}
+      SOURCE_SHA: ${{ needs.authorize.outputs.source_sha }}
+      RELEASE_ID: ${{ needs.authorize.outputs.release_id }}
+      VITE_BUILD_GIT_BRANCH: main
+      VITE_BUILD_GIT_SHA: ${{ needs.authorize.outputs.source_sha }}
+      VITE_BUILD_GIT_SHA_SHORT: ${{ needs.authorize.outputs.source_sha12 }}
+      VITE_CONTROLLER_URL: ${{ vars.VITE_CONTROLLER_URL || 'https://controller.instafy.dev' }}
+      VITE_SUPABASE_URL: ${{ vars.VITE_SUPABASE_URL }}
+      VITE_SUPABASE_ANON_KEY: ${{ vars.VITE_SUPABASE_ANON_KEY }}
+      VITE_DOWNLOADS_BASE_URL: https://downloads.instafy.dev
+      VITE_DESKTOP_DOWNLOADS_PREFIX: desktop-app
+      VITE_REQUIRE_AUTH: ${{ vars.VITE_REQUIRE_AUTH }}
+      VITE_USE_WEBCONTAINER: ${{ vars.VITE_USE_WEBCONTAINER }}
+      VITE_USE_WEBCONTAINERS: ${{ vars.VITE_USE_WEBCONTAINER }}
+      VITE_INSTAFY_SHARED_BROWSER_CDP_SCREENCAST: "1"
+      VITE_INSTAFY_SHARED_BROWSER_WEBRTC: "0"
+      # Kill switch: set the repository variable to "0" to hide Continue with Google.
+      VITE_INSTAFY_ENABLE_GOOGLE_AUTH: ${{ vars.VITE_INSTAFY_ENABLE_GOOGLE_AUTH || '1' }}
+    outputs:
+      artifact_sha256: ${{ steps.seal.outputs.artifact_sha256 }}
+    steps:
+      - name: Check out the release commit
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+          fetch-depth: 1
+          submodules: recursive
+
+      - name: Set up pinned pnpm
+        uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: "22"
+
+      - name: Verify the toolchain and browser-safe configuration, then build
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
+          test "$(pnpm --version)" = "10.34.5"
+          case "$(node --version)" in v22.*) ;; *) echo "::error::Node 22 is required."; exit 1 ;; esac
+          node scripts/release/web/browser-safe-config.mjs
+          pnpm install --frozen-lockfile
+          node scripts/release/web/build-hosted-web.mjs
+
+      - name: Prove the hosted web artifact is exact, composed and credential-free
+        run: |
+          set -euo pipefail
+          node scripts/release/web/verify-hosted-web-artifact.mjs packages/frontend/dist "$SOURCE_SHA"
+
+      - name: Scan the hosted web artifact with pinned Gitleaks
+        run: |
+          set -euo pipefail
+          archive="$RUNNER_TEMP/gitleaks.tar.gz"
+          curl --proto '=https' --tlsv1.2 --fail --location --silent --show-error --output "$archive" \
+            https://github.com/gitleaks/gitleaks/releases/download/v8.30.1/gitleaks_8.30.1_linux_x64.tar.gz
+          printf '%s  %s\n' 551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb "$archive" | sha256sum --check --status
+          mkdir -m 700 "$RUNNER_TEMP/gitleaks-bin"
+          tar -xzf "$archive" -C "$RUNNER_TEMP/gitleaks-bin" gitleaks
+          node scripts/release/web/gitleaks-release-artifact.mjs --root packages/frontend/dist \
+            --config scripts/public-boundary-gitleaks.toml --executable "$RUNNER_TEMP/gitleaks-bin/gitleaks"
+
+      - name: Seal the exact archive
+        id: seal
+        run: |
+          set -euo pipefail
+          (cd packages/frontend/dist && find . -type f ! -name artifact-files.sha256 -print0 | LC_ALL=C sort -z | xargs -0 sha256sum > artifact-files.sha256)
+          sealed="$RUNNER_TEMP/hosted-web"
+          mkdir -m 700 "$sealed"
+          (cd packages/frontend && tar --sort=name --mtime='UTC 1970-01-01' --owner=0 --group=0 --numeric-owner -cf - dist | gzip -n -9 > "$sealed/hosted-frontend.tar.gz")
+          artifact_sha256="$(sha256sum "$sealed/hosted-frontend.tar.gz" | cut -d' ' -f1)"
+          printf '%s  %s\n' "$artifact_sha256" hosted-frontend.tar.gz > "$sealed/hosted-frontend.tar.gz.sha256"
+          echo "artifact_sha256=${artifact_sha256}" >> "$GITHUB_OUTPUT"
+
+      - name: Upload the sealed hosted web archive
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: hosted-web-${{ needs.authorize.outputs.tag }}
+          path: ${{ runner.temp }}/hosted-web
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: ${{ needs.authorize.outputs.mode == 'release' && 90 || 7 }}
+
+      - name: Summarize the sealed build
+        env:
+          ARTIFACT_SHA256: ${{ steps.seal.outputs.artifact_sha256 }}
+        run: |
+          set -euo pipefail
+          printf '### Hosted web build\n\n- tag `%s`, commit `%s`\n- release `%s`\n- archive sha256 `%s`\n' "$TAG" "$SOURCE_SHA" "$RELEASE_ID" "$ARTIFACT_SHA256" >> "$GITHUB_STEP_SUMMARY"
+
+  publish:
+    name: Publish the exact hosted web frontend
+    needs: [authorize, build]
+    if: ${{ needs.authorize.outputs.mode == 'release' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    environment: web-release
+    concurrency:
+      group: hosted-web-production
+      cancel-in-progress: false
+    env:
+      TRIGGERING_ACTOR: ${{ github.triggering_actor }}
+      TAG: ${{ needs.authorize.outputs.tag }}
+      SOURCE_SHA: ${{ needs.authorize.outputs.source_sha }}
+      RELEASE_ID: ${{ needs.authorize.outputs.release_id }}
+      ARTIFACT_SHA256: ${{ needs.build.outputs.artifact_sha256 }}
+      HOSTED_FRONTEND_PUBLISH_ENABLED: ${{ vars.HOSTED_FRONTEND_PUBLISH_ENABLED }}
+      PAGES_PROJECT: ${{ vars.CLOUDFLARE_PAGES_PROJECT }}
+      PUBLIC_APP_URL: ${{ vars.PUBLIC_APP_URL }}
+      HOSTED_WEB_ADOPTED_DEPLOYMENT_ID: ${{ vars.HOSTED_WEB_ADOPTED_DEPLOYMENT_ID }}
+    steps:
+      - name: Check out the release commit
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+          fetch-depth: 1
+          submodules: false
+
+      - name: Set up Node.js
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: "22"
+
+      - name: Download the sealed hosted web archive
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: hosted-web-${{ needs.authorize.outputs.tag }}
+          path: ${{ runner.temp }}/hosted-web
+
+      - name: Verify the sealed archive and its provenance
+        run: |
+          set -euo pipefail
+          [[ "$TRIGGERING_ACTOR" == "instafy-bot" ]] || { echo "::error::Only instafy-bot may run or re-run this job."; exit 1; }
+          [[ "$HOSTED_FRONTEND_PUBLISH_ENABLED" == "true" ]] || { echo "::error::HOSTED_FRONTEND_PUBLISH_ENABLED must be exactly true in the web-release environment."; exit 1; }
+          test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
+          sealed="$RUNNER_TEMP/hosted-web"
+          test "$(cd "$sealed" && find . -type f | LC_ALL=C sort | tr '\n' ' ')" = "./hosted-frontend.tar.gz ./hosted-frontend.tar.gz.sha256 "
+          (cd "$sealed" && sha256sum --check --strict hosted-frontend.tar.gz.sha256)
+          test "$(sha256sum "$sealed/hosted-frontend.tar.gz" | cut -d' ' -f1)" = "$ARTIFACT_SHA256"
+          python3 scripts/release/web/validate-hosted-web-archive.py "$sealed/hosted-frontend.tar.gz"
+          mkdir -m 700 "$sealed/extracted"
+          tar -xzf "$sealed/hosted-frontend.tar.gz" --directory "$sealed/extracted" --no-same-owner --no-same-permissions
+          (cd "$sealed/extracted/dist" && sha256sum --check --strict --quiet artifact-files.sha256)
+          node scripts/release/web/verify-hosted-web-artifact.mjs "$sealed/extracted/dist" "$SOURCE_SHA"
+          test "$(jq -r .releaseId "$sealed/extracted/dist/instafy-build.json")" = "$RELEASE_ID"
+
+      - name: Install exact Wrangler without publication credentials
+        id: wrangler
+        run: |
+          set -euo pipefail
+          tool_root="$RUNNER_TEMP/instafy-wrangler"
+          mkdir -m 700 "$tool_root"
+          npm install --prefix "$tool_root" --ignore-scripts --no-audit --no-fund --save-exact wrangler@4.73.0
+          test "$("$tool_root/node_modules/.bin/wrangler" --version)" = "4.73.0"
+          echo "binary=$tool_root/node_modules/.bin/wrangler" >> "$GITHUB_OUTPUT"
+
+      - name: Re-check the tag binding and decide the publication
+        id: decide
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_PAGES_API_TOKEN }}
+        run: |
+          set -euo pipefail
+          [[ "$CLOUDFLARE_ACCOUNT_ID" =~ ^[0-9a-f]{32}$ && -n "${CLOUDFLARE_API_TOKEN:-}" ]] || { echo "::error::CLOUDFLARE_ACCOUNT_ID and CLOUDFLARE_PAGES_API_TOKEN are required in web-release."; exit 1; }
+          [[ "$PAGES_PROJECT" =~ ^[a-z0-9][a-z0-9-]{0,57}[a-z0-9]$ ]] || { echo "::error::CLOUDFLARE_PAGES_PROJECT is missing or invalid."; exit 1; }
+          node scripts/release/web/tag-state.mjs
+          deployments="$(curl --proto '=https' --fail --silent --show-error --max-time 30 \
+            -H "Authorization: Bearer ${CLOUDFLARE_API_TOKEN}" \
+            "https://api.cloudflare.com/client/v4/accounts/${CLOUDFLARE_ACCOUNT_ID}/pages/projects/${PAGES_PROJECT}/deployments?env=production&per_page=20")"
+          previous="$(jq -ec '[.result[] | select(.environment == "production" and .latest_stage.status == "success")][0]' <<<"$deployments")"
+          previous_commit="$(jq -r '.deployment_trigger.metadata.commit_hash // ""' <<<"$previous")"
+          compare="none"
+          if [[ "$previous_commit" =~ ^[0-9a-f]{40}$ ]]; then
+            if gh api "repos/${GITHUB_REPOSITORY}/compare/${previous_commit}...${SOURCE_SHA}" --jq .status >"$RUNNER_TEMP/compare.out" 2>"$RUNNER_TEMP/compare.err"; then
+              compare="$(cat "$RUNNER_TEMP/compare.out")"
+            elif grep -Eq 'HTTP (404|422)' "$RUNNER_TEMP/compare.err"; then
+              compare="not-found"
+            else
+              echo "::error::Unable to compare the production deployment commit."; exit 1
+            fi
+          else
+            previous_commit=""
+          fi
+          served="$(node scripts/release/web/prove-production.mjs served || true)"
+          SERVED_RELEASE_ID="$served" PREVIOUS_DEPLOYMENT_ID="$(jq -r .id <<<"$previous")" \
+            PREVIOUS_COMMIT_HASH="$previous_commit" PREVIOUS_COMPARE="$compare" \
+            node scripts/release/web/publication-decision.mjs
+
+      - name: Publish to Cloudflare Pages
+        id: pages
+        if: ${{ steps.decide.outputs.action == 'deploy' }}
+        env:
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_PAGES_API_TOKEN }}
+          WRANGLER: ${{ steps.wrangler.outputs.binary }}
+        run: |
+          set -euo pipefail
+          publish_cwd="$RUNNER_TEMP/web-publish-cwd"
+          mkdir -m 700 "$publish_cwd"
+          echo "mutation_started=true" >> "$GITHUB_OUTPUT"
+          (cd "$publish_cwd" && WRANGLER_SEND_METRICS=false "$WRANGLER" pages deploy "$RUNNER_TEMP/hosted-web/extracted/dist" \
+            --project-name "$PAGES_PROJECT" --branch main --commit-hash "$SOURCE_SHA")
+
+      - name: Prove production serves the exact release
+        run: |
+          set -euo pipefail
+          node scripts/release/web/prove-production.mjs prove
+
+      - name: Roll back a failed production publication
+        if: ${{ failure() && steps.pages.outputs.mutation_started == 'true' }}
+        env:
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_PAGES_API_TOKEN }}
+          PREVIOUS_DEPLOYMENT_ID: ${{ steps.decide.outputs.previous_deployment_id }}
+        run: |
+          set -euo pipefail
+          [[ "$PREVIOUS_DEPLOYMENT_ID" =~ ^[0-9a-f-]{36}$ ]] || { echo "::error::No previous production deployment to restore."; exit 1; }
+          payload="$(curl --proto '=https' --fail --silent --show-error --max-time 30 --request POST \
+            -H "Authorization: Bearer ${CLOUDFLARE_API_TOKEN}" \
+            "https://api.cloudflare.com/client/v4/accounts/${CLOUDFLARE_ACCOUNT_ID}/pages/projects/${PAGES_PROJECT}/deployments/${PREVIOUS_DEPLOYMENT_ID}/rollback")"
+          [[ "$(jq -r .success <<<"$payload")" == "true" ]] || { echo "::error::Cloudflare rejected the production rollback."; exit 1; }
+          echo "::warning::Restored the previous Cloudflare Pages production deployment."
+
+      - name: Summarize the publication
+        env:
+          ACTION: ${{ steps.decide.outputs.action }}
+        run: |
+          set -euo pipefail
+          printf '### Hosted web published\n\n- application: %s\n- tag `%s`, commit `%s`\n- release `%s` (%s)\n- archive sha256 `%s`\n' \
+            "$PUBLIC_APP_URL" "$TAG" "$SOURCE_SHA" "$RELEASE_ID" "$ACTION" "$ARTIFACT_SHA256" >> "$GITHUB_STEP_SUMMARY"

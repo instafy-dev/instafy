@@ -1,6 +1,17 @@
 import assert from "node:assert/strict";
 
-// Test-only inverse of the new routing delta; not an authority or runtime helper.
+// Test-only inverse of the finite routing/builder delta; not runtime authority.
+const amd64Builder = "image=moby/buildkit@sha256:040d34121c27906c4ff9ac152a30d52bf2c5d328d3bb748916bb3d2743c02528";
+const builderDeltas = {
+  "publish-production-services.yml": `          # Match the amd64 build target so an ARM Docker host uses its registered
+          # translator, not BuildKit's QEMU fallback after a failed x86 probe.
+          driver-opts: \${{ runner.environment == 'self-hosted' && '${amd64Builder}' || '' }}
+`,
+  "publish-runtime-agent.yml": `          # Only x86 targets need the amd64 BuildKit v0.32.2 image on BUILD.
+          # Keep ARM targets and hosted builders native; never force ARM via QEMU.
+          driver-opts: \${{ runner.environment == 'self-hosted' && matrix.architecture == 'amd64' && '${amd64Builder}' || '' }}
+`,
+};
 export const imageBuildSelector = (file,fallback)=>`    runs-on: >-\n      \${{ vars.TRUSTED_AMD64_BUILD_RUNNER_MODE == 'self-hosted'\n          && github.repository == 'instafy-dev/instafy'\n          && github.repository_id == '1309636737'\n          && github.event.repository.private == true\n          && github.event_name == 'workflow_dispatch'\n          && github.ref == 'refs/heads/main'\n          && github.ref_protected == true\n          && github.workflow_ref == 'instafy-dev/instafy/.github/workflows/${file}@refs/heads/main'\n          && github.workflow_sha == github.sha\n          && inputs.commit_sha == github.sha\n          && fromJSON('{"group":"org/instafy-trusted-build","labels":["self-hosted","Linux","X64","instafy-build"]}')\n          || ${fallback} }}\n`;
 export const coordinatorBuildBranch = `          || vars.TRUSTED_AMD64_BUILD_RUNNER_MODE == 'self-hosted'
           && github.repository == 'instafy-dev/instafy'
@@ -54,6 +65,21 @@ export function withoutImageBuildRouting(file, source) {
       .replace(narrowed, "        if: runner.environment == 'self-hosted'\n");
   }
   if (!["publish-production-services.yml", "publish-runtime-agent.yml"].includes(file)) return source;
+  assert.equal(source.split(builderDeltas[file]).length, 2);
+  source = source.replace(builderDeltas[file], "");
+  const cacheOptions = "${{ runner.environment == 'self-hosted' && ',timeout=2m,ignore-error=true' || '' }}";
+  const cacheDeltas = file === "publish-production-services.yml" ? [
+    [`          CACHE_EXPORT_OPTIONS: ${cacheOptions}\n`, ""],
+    ['--cache-to "type=gha,scope=production-${CACHE_KEY},mode=max${CACHE_EXPORT_OPTIONS}"',
+      '--cache-to "type=gha,scope=production-${CACHE_KEY},mode=max"'],
+  ] : [
+    [`          cache-to: type=gha,scope=publish-runtime-agent-\${{ matrix.flavor }}-\${{ matrix.architecture }},mode=max${cacheOptions}\n`,
+      "          cache-to: type=gha,scope=publish-runtime-agent-${{ matrix.flavor }}-${{ matrix.architecture }},mode=max\n"],
+  ];
+  for (const [added, original] of cacheDeltas) {
+    assert.equal(source.split(added).length, 2);
+    source = source.replace(added, original);
+  }
   const ordinary = imageBuildSelector(file, "'ubuntu-latest'");
   assert.equal(source.split(ordinary).length, file === "publish-production-services.yml" ? 5 : 4);
   let normalized = source.replaceAll(ordinary, "    runs-on: ubuntu-latest\n");

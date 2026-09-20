@@ -1537,9 +1537,15 @@ mod tests {
 
         apply_managed_ai_env_overrides(&mut env, &config, &payload);
 
+        // Managed turns pin the operator-paid tier default (Luna), which is
+        // deliberately not the ChatGPT-login default (Sol).
         assert_eq!(
             env.get("CODEX_MODEL").and_then(JsonValue::as_str),
             Some(default_managed_ai_model_id())
+        );
+        assert_eq!(
+            env.get("CODEX_MODEL").and_then(JsonValue::as_str),
+            Some("gpt-5.6-luna")
         );
         assert_eq!(
             env.get("CODEX_MODEL_PROVIDER").and_then(JsonValue::as_str),

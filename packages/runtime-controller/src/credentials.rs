@@ -23,7 +23,7 @@ use crate::auth::{
     authenticate_request, bearer_token, issue_proxy_envelope, require_user_session, RequestContext,
 };
 use crate::config::CredentialEncryptionKey;
-use crate::model_defaults::{default_managed_ai_model_id, default_model_for_provider};
+use crate::model_defaults::{default_chatgpt_model_id, default_model_for_provider};
 use crate::{bad_request, internal_error, not_found, unauthorized, ApiError, AppState};
 
 const CREDENTIAL_KIND_CODEX_AUTH_JSON: &str = "codex_auth_json";
@@ -760,11 +760,14 @@ async fn test_my_credential(
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty())
         .unwrap_or_else(|| match kind.trim() {
-            CREDENTIAL_KIND_CODEX_AUTH_JSON => default_managed_ai_model_id().to_string(),
+            // BYO credential probe (ChatGPT login or API key): the user pays, so
+            // stay on the OpenAI BYO default (Sol), not the credits-funded
+            // managed tier default.
+            CREDENTIAL_KIND_CODEX_AUTH_JSON => default_chatgpt_model_id().to_string(),
             _ => provider
                 .as_deref()
                 .map(default_model_for_provider)
-                .unwrap_or(default_managed_ai_model_id())
+                .unwrap_or(default_model_for_provider("openai"))
                 .to_string(),
         });
 
@@ -2531,7 +2534,8 @@ fn materialize_internal_credential(
         openai_api_key: None,
         provider,
         upstream_endpoint,
-        default_model: default_model.or_else(|| Some(default_managed_ai_model_id().to_string())),
+        // ChatGPT login lease: user-paid subscription, keep the Sol default.
+        default_model: default_model.or_else(|| Some(default_chatgpt_model_id().to_string())),
         auth_mode,
         code_assist_project,
         lease_expires_in_seconds: INTERNAL_CREDENTIAL_LEASE_SECONDS,
@@ -2575,7 +2579,8 @@ fn default_endpoint_for_provider(provider: &str) -> &'static str {
 
 fn default_model_for_credential(kind: &str, provider: &str) -> &'static str {
     if kind.trim() == CREDENTIAL_KIND_CODEX_AUTH_JSON {
-        return default_managed_ai_model_id();
+        // ChatGPT login (user-paid): Sol, not the managed-tier default.
+        return default_chatgpt_model_id();
     }
     default_model_for_provider(provider)
 }
@@ -2604,9 +2609,10 @@ fn augment_metadata_with_provider(
             JsonValue::String(default_model_for_provider(&provider).to_string()),
         );
     } else if kind == CREDENTIAL_KIND_CODEX_AUTH_JSON {
+        // ChatGPT login (user-paid): Sol, not the managed-tier default.
         map.insert(
             "default_model".to_string(),
-            JsonValue::String(default_managed_ai_model_id().to_string()),
+            JsonValue::String(default_chatgpt_model_id().to_string()),
         );
     }
 
@@ -2664,7 +2670,9 @@ mod provider_metadata_tests {
         CREDENTIAL_KIND_CODEX_AUTH_JSON, CREDENTIAL_KIND_OPENAI_API_KEY, PROVIDER_GEMINI,
         PROVIDER_OPENAI,
     };
-    use crate::model_defaults::{default_managed_ai_model_id, default_model_for_provider};
+    use crate::model_defaults::{
+        default_chatgpt_model_id, default_managed_ai_model_id, default_model_for_provider,
+    };
     use serde_json::json;
 
     #[test]
@@ -2698,6 +2706,22 @@ mod provider_metadata_tests {
     #[test]
     fn provider_defaults_use_latest_general_openai_model_for_api_keys() {
         assert_eq!(default_model_for_provider(PROVIDER_OPENAI), "gpt-5.6-sol");
+    }
+
+    #[test]
+    fn chatgpt_credential_default_does_not_track_the_managed_tier() {
+        // BYO ChatGPT logins are subscription-paid and keep Sol even though the
+        // credits-funded managed tier defaults to the cheaper Luna.
+        assert_eq!(default_chatgpt_model_id(), "gpt-5.6-sol");
+        assert_eq!(default_managed_ai_model_id(), "gpt-5.6-luna");
+        assert_eq!(
+            default_model_for_credential(CREDENTIAL_KIND_CODEX_AUTH_JSON, PROVIDER_OPENAI),
+            "gpt-5.6-sol"
+        );
+        assert_eq!(
+            default_model_for_credential(CREDENTIAL_KIND_OPENAI_API_KEY, PROVIDER_OPENAI),
+            "gpt-5.6-sol"
+        );
     }
 
     #[test]
@@ -2742,7 +2766,7 @@ mod provider_metadata_tests {
             metadata
                 .get("default_model")
                 .and_then(|value| value.as_str()),
-            Some(default_managed_ai_model_id())
+            Some(default_chatgpt_model_id())
         );
     }
 
@@ -2762,7 +2786,7 @@ mod provider_metadata_tests {
         );
         assert_eq!(
             default_model_for_credential(CREDENTIAL_KIND_CODEX_AUTH_JSON, PROVIDER_OPENAI),
-            default_managed_ai_model_id()
+            default_chatgpt_model_id()
         );
     }
 }

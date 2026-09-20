@@ -1,6 +1,7 @@
 import { test, expect, type Page, type Browser } from "@playwright/test";
 import { openTeamDirectory } from "../utils/sidebar.js";
 import {
+import { chooseOption } from "../utils/select.js";
   createControllerOrgAndProject,
   getControllerUrl,
   getSupabaseUrl,
@@ -234,7 +235,7 @@ async function sendOrgInvite(
   email: string,
   role: "viewer" | "builder" | "admin",
 ): Promise<string> {
-  await page.getByTestId("org-member-invite-role").selectOption(role);
+  await chooseOption(page.getByTestId("org-member-invite-role"), role);
   const input = page.getByTestId("org-member-invite-email");
   await input.fill(email);
   await page.getByTestId("org-member-invite-submit").click();
@@ -477,7 +478,7 @@ test.describe.serial("Org invite personas", () => {
 
     // Same email, different role: the form must surface the conflict card
     // with an in-place update, not a bare error.
-    await page.getByTestId("org-member-invite-role").selectOption("admin");
+    await chooseOption(page.getByTestId("org-member-invite-role"), "admin");
     await page.getByTestId("org-member-invite-email").fill(inviteeEmail);
     await page.getByTestId("org-member-invite-submit").click();
 
@@ -543,7 +544,7 @@ test.describe.serial("Org invite personas", () => {
     const roleSelect = page.getByTestId(`org-invite-role-${invitationId}`);
     await expect(roleSelect).toBeVisible({ timeout: 30_000 });
     await expect(roleSelect).toHaveValue("viewer");
-    await roleSelect.selectOption("admin");
+    await chooseOption(roleSelect, "admin");
     await expect(roleSelect).toHaveValue("admin", { timeout: 30_000 });
     // The row survives a refetch with the new role (server state, not just
     // optimistic cache).

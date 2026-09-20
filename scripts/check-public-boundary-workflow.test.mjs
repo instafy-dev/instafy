@@ -788,6 +788,12 @@ test("Gitleaks marker rules decode private values without path-broad secret allo
     source,
     /paths = \['''\(\?:\^\|\/\)packages\/provider-contract/u,
   );
+  // Exactly two product-marker path exceptions: the provider contract and the
+  // vendored hosted-web robot slice. Any further prefix is a new policy change.
+  assert.equal(
+    [...source.matchAll(/^\s+paths = (.*)$/gmu)][0][1],
+    "['''(?:^|/)packages/provider-contract(?:/|$)''', '''(?:^|/)packages/frontend/hosted/robot(?:/|$)''']",
+  );
   assert.match(
     streamSource,
     /^path = "scripts\/public-boundary-gitleaks\.toml"$/mu,
@@ -796,6 +802,29 @@ test("Gitleaks marker rules decode private values without path-broad secret allo
     streamSource,
     /^disabledRules = \["instafy-private-product"\]$/mu,
   );
+});
+
+test("CODEOWNERS requires existing trusted owners for all outside contributions", () => {
+  const source = fs.readFileSync(
+    path.join(repositoryRoot, ".github", "CODEOWNERS"),
+    "utf8",
+  );
+  const rules = source.split(/\r?\n/u)
+    .map((line) => line.trim())
+    .filter((line) => line && !line.startsWith("#"))
+    .map((line) => line.split(/\s+/u));
+
+  // Native CODEOWNERS supplies the merge gate; no PR-controlled Action may
+  // approve itself. The catch-all covers root files, dotfiles, nested source,
+  // newly added paths and deletions. Later rules must not un-own any path or
+  // silently add another account that changes the bot-only ownership policy.
+  // Both are existing repository collaborators; preserving both prevents the
+  // new default rule from blocking the second bot's ordinary product PRs.
+  assert.deepEqual(rules[0], ["*", "@instafy-bot", "@instafy-bot-2"]);
+  for (const [pattern, ...owners] of rules.slice(1)) {
+    assert.ok(pattern.startsWith("/"));
+    assert.deepEqual(owners, ["@instafy-bot"], `unexpected owners for ${pattern}`);
+  }
 });
 
 test("CODEOWNERS binds every public-boundary control to the security maintainer", () => {

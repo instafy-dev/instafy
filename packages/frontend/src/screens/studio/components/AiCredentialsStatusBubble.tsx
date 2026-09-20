@@ -1,9 +1,8 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type ChangeEvent, type ReactNode } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type ChangeEvent } from "react";
 import { NavArrowLeft, Upload, WarningTriangle, Xmark } from "iconoir-react";
 import { Button, IconButton } from "../../../components/Button";
 import { Input } from "../../../components/Input";
 import { useNativeBackButtonAction } from "../../../native/useNativeBackButtonAction";
-import { DeepSeekIcon, GeminiIcon, OpenAIIcon, ZaiIcon } from "../../../components/ProviderIcons";
 import { Spinner } from "../../../components/Spinner";
 import { Surface } from "../../../components/Surface";
 import { Text } from "../../../components/Text";
@@ -21,11 +20,7 @@ import {
   type AiConnectWizardProvider,
   type AiConnectWizardStep,
 } from "./aiConnectWizardStorage";
-import {
-  AccessDecisionCard,
-  AccessProviderChoiceButton,
-  AccessSectionLabel,
-} from "./AccessDecisionCard";
+import { AccessDecisionCard } from "./AccessDecisionCard";
 import { ChatGptDeviceCodePrerequisite } from "./ChatGptDeviceCodePrerequisite";
 import { CHAT_BUBBLE_MAX_WIDTH } from "./chatBubbleWidth";
 import { ChatActivityBubble } from "./ChatActivityBubble";
@@ -85,34 +80,24 @@ interface AiCredentialsStatusBubbleProps {
   onSetDefaultCredential?: (credentialId: string) => void;
   onUseManagedAi?: () => void | Promise<void>;
   onChatWithoutAi?: () => void;
+  /**
+   * Opens the Add AI connection modal, which carries the provider list. The
+   * bubble itself never picks a provider: the gate is one sentence and one
+   * button, and the proactive connect prompt hands off to the same modal.
+   */
+  onConnectAi?: () => void;
+  /**
+   * Gate only: the space has more than one member, so "turn the assistant
+   * off" is a real option. Alone in a space there is nobody else to chat with.
+   */
+  hasTeammates?: boolean;
   onClose?: () => void;
 }
 
-type AiProviderChoice = "openai" | "deepseek" | "zai" | "gemini";
-
-function AiProviderIconFrame({
-  children,
-  className,
-  featured = false,
-}: {
-  children: ReactNode;
-  className?: string;
-  featured?: boolean;
-}) {
-  return (
-    <span
-      className={[
-        "flex h-9 w-9 shrink-0 items-center justify-center rounded-full ring-1 ring-black/5 dark:ring-white/10",
-        featured ? "bg-white/90 dark:bg-white" : "bg-white/90 dark:bg-slate-950/40",
-        className,
-      ]
-        .filter(Boolean)
-        .join(" ")}
-      aria-hidden="true"
-    >
-      {children}
-    </span>
-  );
+function formatManagedAiOfferLabel(managedAi: { label: string; dailyPromptLimit: number }): string {
+  return managedAi.dailyPromptLimit > 0
+    ? `Use free ${managedAi.label} (${managedAi.dailyPromptLimit} a day)`
+    : `Use free ${managedAi.label}`;
 }
 
 export function AiCredentialsStatusBubble({
@@ -133,6 +118,8 @@ export function AiCredentialsStatusBubble({
   onSetDefaultCredential,
   onUseManagedAi,
   onChatWithoutAi,
+  onConnectAi,
+  hasTeammates = false,
   onClose,
 }: AiCredentialsStatusBubbleProps) {
   const { showStatus } = useStatus();
@@ -150,8 +137,14 @@ export function AiCredentialsStatusBubble({
   const effectiveState: AiCredentialsGateState =
     state === "needs_default" && connectedCredentials.length === 0 ? "missing" : state;
   const showUnavailableState = effectiveState === "unavailable";
-  const showConnectWizard =
-    !showUnavailableState && (effectiveState === "missing" || intent === "connect");
+  // The bubble never hosts a provider list: picking lives in the Add AI
+  // connection modal. The blocking gate is one sentence and one button, and
+  // the proactive connect prompt is the same surface at its provider step.
+  // The connect intent keeps only the inline steps a persisted wizard can
+  // restore (device login, API key entry).
+  const showReducedGate =
+    effectiveState === "missing" && (intent === "gate" || connectStep === "provider");
+  const showConnectWizard = !showUnavailableState && intent === "connect";
   const canGoBack = showConnectWizard && connectStep !== "provider";
   const allowAuthJsonUpload = useMemo(() => isLikelyDesktopDevice(), []);
 
@@ -249,7 +242,7 @@ export function AiCredentialsStatusBubble({
       case "error":
         return "I couldn't load your AI setup.";
       default:
-        return "Connect AI to start.";
+        return "Connect AI to send this. Your message is kept.";
     }
   }, [connectedCredentials.length, effectiveState, intent, managedAi?.available, managedAi?.label]);
 
@@ -266,13 +259,13 @@ export function AiCredentialsStatusBubble({
       case "needs_default":
         // effectiveState normalizes the zero-credential case to "missing", so
         // this branch always has credentials to choose from.
-        return "Choose one below — you can change it anytime.";
+        return "Choose one below. You can change it anytime.";
       case "unavailable":
         return "Retry in a moment. Your AI credentials may still be fine.";
       case "error":
         // The Retry button beside this is real; there is no link to AI Manager
         // from here, so the sentence no longer sends the reader looking for one.
-        return "Try again — your AI connections are unchanged.";
+        return "Try again. Your AI connections are unchanged.";
       default:
         if (intent === "connect" && managedAi?.available && connectedCredentials.length === 0) {
           const burnLabel =
@@ -285,7 +278,7 @@ export function AiCredentialsStatusBubble({
               : "";
           return `${burnLabel}${quotaLabel} Connect your own provider when you want longer runs, provider-specific control, or deeper work.`;
         }
-        return "Pick a provider, then follow the steps. Browser login is the easiest path, and the connection is saved to your Instafy profile.";
+        return "Follow the steps. Browser login is the easiest path, and the connection is saved to your Instafy profile.";
     }
   }, [
     connectedCredentials.length,
@@ -484,34 +477,6 @@ export function AiCredentialsStatusBubble({
 
   const showDeviceAuthPanel = deviceAuthSession !== null;
 
-  const handleSelectProvider = useCallback((provider: AiProviderChoice) => {
-    if (provider === "openai") {
-      setSelectedProvider("openai");
-      setConnectStep("openai-auth");
-      return;
-    }
-    if (provider === "deepseek") {
-      setApiKeyDraft("");
-      setSelectedProvider("deepseek");
-      setConnectStep("deepseek-api-key");
-      return;
-    }
-    if (provider === "zai") {
-      setApiKeyDraft("");
-      setSelectedProvider("zai");
-      setConnectStep("zai-api-key");
-      return;
-    }
-    if (provider === "gemini") {
-      setApiKeyDraft("");
-      setSelectedProvider("gemini");
-      setConnectStep("gemini-auth");
-      return;
-    }
-    setSelectedProvider(null);
-    setConnectStep("provider");
-  }, []);
-
   const handleOpenAiAuthChoice = useCallback((choice: "login" | "apiKey" | "upload") => {
     setSelectedProvider("openai");
     if (choice === "login") {
@@ -593,6 +558,89 @@ export function AiCredentialsStatusBubble({
     );
   }
 
+  if (showReducedGate) {
+    const managedAiOffered = Boolean(
+      managedAi?.enabled && managedAi.available && onUseManagedAi && connectedCredentials.length === 0,
+    );
+    return (
+      <Surface
+        tone="default"
+        radius="2xl"
+        shadow="sm"
+        className={`w-full ${CHAT_BUBBLE_MAX_WIDTH.card} px-3 py-3 leading-snug text-slate-600 sm:px-4 dark:text-slate-200`}
+        aria-live="polite"
+        data-testid="credentials-status-indicator"
+      >
+        <div className="flex items-start justify-between gap-3">
+          <Text as="p" variant="bodyStrong" tone="primary" className="min-w-0">
+            {title}
+          </Text>
+          {intent === "connect" && onClose ? (
+            <IconButton
+              variant="ghost"
+              size="sm"
+              radius="full"
+              aria-label="Close AI connect"
+              onPress={() => void handleClose()}
+              isDisabled={wizardBusy}
+              className="-mt-1 -mr-1 shrink-0 text-slate-400 hover:text-slate-700 data-[hovered]:text-slate-700 dark:text-slate-500 dark:hover:text-slate-200 dark:data-[hovered]:text-slate-200"
+            >
+              <Xmark className="h-4 w-4" aria-hidden="true" />
+            </IconButton>
+          ) : null}
+        </div>
+        {intent === "connect" && defaultCredential ? (
+          <Text as="p" variant="caption" tone="muted" className="mt-1 text-xs">
+            Currently using: {resolveCredentialLabel(defaultCredential)}
+          </Text>
+        ) : null}
+        <div className="mt-2.5 flex flex-wrap items-center gap-2">
+          <Button
+            variant="primary"
+            size="sm"
+            radius="full"
+            onPress={() => onConnectAi?.()}
+            isDisabled={wizardBusy}
+            data-testid="ai-gate-connect-ai"
+          >
+            Connect AI
+          </Button>
+          {managedAiOffered && managedAi ? (
+            <Button
+              variant="outline"
+              size="sm"
+              radius="full"
+              onPress={() => {
+                void onUseManagedAi?.();
+              }}
+              isDisabled={wizardBusy || managedAi.remainingPrompts === 0}
+              data-testid="ai-gate-use-managed-ai"
+            >
+              {formatManagedAiOfferLabel(managedAi)}
+            </Button>
+          ) : null}
+        </div>
+        {intent === "gate" && hasTeammates && onChatWithoutAi ? (
+          <Button
+            onPress={() => {
+              if (!wizardBusy) {
+                onChatWithoutAi();
+              }
+            }}
+            variant="ghost"
+            size="xs"
+            radius="full"
+            isDisabled={wizardBusy}
+            className="mt-2 -ml-1.5 px-1.5 text-left text-xs text-slate-500 underline-offset-2 hover:underline dark:text-slate-400"
+            data-testid="ai-gate-chat-without-ai"
+          >
+            Just chatting with teammates? Turn the assistant off.
+          </Button>
+        ) : null}
+      </Surface>
+    );
+  }
+
   return (
     <AccessDecisionCard
       tone={
@@ -654,25 +702,6 @@ export function AiCredentialsStatusBubble({
           {resolvedDetail}
         </Text>
       ) : null}
-      {intent === "gate" && onChatWithoutAi ? (
-        <Button
-          onPress={() => {
-            if (!wizardBusy) {
-              onChatWithoutAi();
-            }
-          }}
-          variant="ghost"
-          size="xs"
-          radius="xl"
-          fullWidth
-          isDisabled={wizardBusy}
-          className="mt-2 justify-start text-left text-xs text-slate-500 underline underline-offset-2 hover:text-slate-700 dark:text-slate-400 dark:hover:text-slate-200"
-          data-testid="ai-gate-chat-without-ai"
-        >
-          Just chatting with teammates? Turn the assistant off.
-        </Button>
-      ) : null}
-
           {state === "needs_default" && connectedCredentials.length > 0 ? (
             <div className="mt-2 flex flex-col gap-2">
               {connectedCredentials.map((credential) => (
@@ -692,76 +721,18 @@ export function AiCredentialsStatusBubble({
             </div>
           ) : null}
 
-          {showConnectWizard && connectStep === "provider" ? (
-            <div className="mt-5 space-y-3">
-              {defaultCredential ? (
-                <Text as="div" variant="caption" tone="muted" className="text-xs">
-                  Currently using: {resolveCredentialLabel(defaultCredential)}
-                </Text>
-              ) : null}
-              {managedAi?.available && connectedCredentials.length === 0 ? (
-                <Button
-                  onPress={() => {
-                    void onUseManagedAi?.();
-                  }}
-                  variant="primary"
-                  size="xs"
-                  radius="full"
-                  fullWidth
-                  isDisabled={isBusy || !onUseManagedAi || managedAi.remainingPrompts === 0}
-                  className="justify-center"
-                >
-                  {`Use free ${managedAi.label} (${managedAi.dailyPromptLimit}/day)`}
-                </Button>
-              ) : null}
-              <AccessSectionLabel>Choose provider</AccessSectionLabel>
-              <div className="grid gap-2 sm:grid-cols-2">
-                <AccessProviderChoiceButton
-                  onPress={() => handleSelectProvider("openai")}
-                  isDisabled={isBusy}
-                  featured
-                  icon={
-                    <AiProviderIconFrame featured className="text-slate-900 dark:text-slate-50">
-                      <OpenAIIcon className="h-5 w-5 text-slate-950" />
-                    </AiProviderIconFrame>
-                  }
-                  title="OpenAI"
-                  description="Subscription or API key."
-                />
-                <AccessProviderChoiceButton
-                  onPress={() => handleSelectProvider("deepseek")}
-                  isDisabled={isBusy}
-                  icon={
-                    <AiProviderIconFrame className="text-emerald-600">
-                      <DeepSeekIcon className="h-5 w-5" />
-                    </AiProviderIconFrame>
-                  }
-                  title="DeepSeek"
-                  description="Use an API key."
-                />
-                <AccessProviderChoiceButton
-                  onPress={() => handleSelectProvider("zai")}
-                  isDisabled={isBusy}
-                  icon={
-                    <AiProviderIconFrame className="text-[#7C3AED]">
-                      <ZaiIcon className="h-5 w-5" />
-                    </AiProviderIconFrame>
-                  }
-                  title="z.ai"
-                  description="Use a z.ai API key."
-                />
-                <AccessProviderChoiceButton
-                  onPress={() => handleSelectProvider("gemini")}
-                  isDisabled={isBusy}
-                  icon={
-                    <AiProviderIconFrame className="text-[#0EA5E9]">
-                      <GeminiIcon className="h-5 w-5" />
-                    </AiProviderIconFrame>
-                  }
-                  title="Gemini"
-                  description="Use a Gemini API key."
-                />
-              </div>
+          {showConnectWizard && connectStep === "provider" && onConnectAi ? (
+            <div className="mt-3">
+              <Button
+                onPress={onConnectAi}
+                variant="outline"
+                size="xs"
+                radius="full"
+                isDisabled={isBusy}
+                data-testid="ai-connect-add-connection"
+              >
+                Connect AI
+              </Button>
             </div>
           ) : null}
 
@@ -847,7 +818,7 @@ export function AiCredentialsStatusBubble({
           !showDeviceAuthPrerequisite ? (
             <div className="mt-2 space-y-2">
               <Text as="div" variant="caption" tone="muted" className="text-xs">
-                Great — pick a login method:
+                Pick a login method:
               </Text>
               <div className="flex flex-col gap-2">
                 {canUseDesktopConnect ? (
@@ -1011,7 +982,7 @@ export function AiCredentialsStatusBubble({
                     <Spinner aria-hidden="true" tone="slate" size="xs" />
                     <span>
                       {deviceAuthCompleting
-                        ? "Login complete — checking the connection…"
+                        ? "Login complete. Checking the connection…"
                         : "Waiting for you to finish login…"}
                     </span>
                   </>
@@ -1023,7 +994,7 @@ export function AiCredentialsStatusBubble({
                   ) : (
                     <>
                       <Spinner aria-hidden="true" tone="primary" size="xs" />
-                      <span>Connected — syncing credentials…</span>
+                      <span>Connected. Syncing credentials…</span>
                     </>
                   )
                 ) : deviceAuthSession.status === "failed" ? (
@@ -1126,7 +1097,7 @@ export function AiCredentialsStatusBubble({
                         ? "z.ai"
                         : "Google AI Studio"}
                 </a>
-                {" "}— you pay the provider directly for what you use.
+                . You pay the provider directly for what you use.
               </Text>
               <Input
                 value={apiKeyDraft}

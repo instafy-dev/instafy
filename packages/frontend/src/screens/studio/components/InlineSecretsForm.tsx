@@ -1,16 +1,43 @@
-import { useCallback, useMemo, useState } from "react";
+import { useCallback, useMemo, useState, type ReactNode } from "react";
 import { Eye, EyeClosed } from "iconoir-react";
 import { Badge } from "../../../components/Badge";
-import { Button, IconButton } from "../../../components/Button";
+import { Button } from "../../../components/Button";
+import { ToggleIconButton } from "../../../components/ToggleIconButton";
 import { Input } from "../../../components/Input";
 import { Text } from "../../../components/Text";
 import { Spinner } from "../../../components/Spinner";
 import { controllerClient } from "../../../sdk/instafy";
 import { useStatus } from "../../../status/useStatus";
 
+// The field group for one or more project secrets: an input per value, the
+// masking and password-manager opt-outs that keep a token out of a login vault,
+// and one Save for all of them.
+//
+// It used to label itself as well (its own intro sentence, its own per-field
+// name and description), which made sense only on the integration card, where
+// one card asks for several values under a header that names a provider. On a
+// single-value card every one of those labels landed under a header that had
+// just said the same thing. The labelling now belongs to the host: it passes
+// `namesShownByHost` when its own copy already names the value, and a `caption`
+// for the one sentence under the last field.
+
 type InlineSecretDescriptor = {
   name: string;
   description?: string | null;
+  /**
+   * The provider's own on-screen name for this value ("Installation access
+   * token"), as the skill that asked declared it. Used for the input's
+   * accessible name so a screen reader hears what the person will read in the
+   * provider's UI rather than a shouted environment variable. Falls back to
+   * the name.
+   */
+  valueLabel?: string | null;
+  /**
+   * False for a value that is not a credential, such as a base URL. It starts
+   * unmasked, because hiding one behind dots promises a secrecy it does not
+   * have and makes a typo in a URL impossible to see. Default true.
+   */
+  sensitive?: boolean;
 };
 
 type SecretValueDraft = {
@@ -23,8 +50,8 @@ function normalizeSecretName(value: string): string | null {
   return trimmed.length > 0 ? trimmed : null;
 }
 
-function createDefaultDraft(): SecretValueDraft {
-  return { value: "", visible: false };
+function createDefaultDraft(sensitive = true): SecretValueDraft {
+  return { value: "", visible: !sensitive };
 }
 
 export function InlineSecretsForm({
@@ -33,12 +60,41 @@ export function InlineSecretsForm({
   description,
   agentHandles,
   onSaved,
+  namesShownByHost = false,
+  caption,
+  saveLabel = "Save secrets",
+  secondaryAction,
+  actionAlign = "end",
+  saveTestId,
+  valueTestIdPrefix,
+  errorTestId,
 }: {
   projectId: string | null;
   secrets: InlineSecretDescriptor[];
   description?: string | null;
   agentHandles?: string[];
   onSaved?: (names: string[]) => void;
+  /**
+   * True when the host's own copy already names each value, so the per-field
+   * mono name and description would repeat it. Default false keeps the
+   * integration card, where one header covers several values, unchanged.
+   */
+  namesShownByHost?: boolean;
+  /** One sentence under the last field: where the value is stored, and that it stays out of chat. */
+  caption?: ReactNode;
+  saveLabel?: string;
+  /** Rendered next to Save, at lower weight. The host owns what it does. */
+  secondaryAction?: ReactNode;
+  actionAlign?: "start" | "end";
+  saveTestId?: string;
+  /** When set, each input gets `${valueTestIdPrefix}-${NAME}`. */
+  valueTestIdPrefix?: string;
+  /**
+   * When set, a failed save also renders the controller's message inline under
+   * the actions with this test id. The toast alone is easy to miss when the
+   * consequence is an unsaved token.
+   */
+  errorTestId?: string;
 }) {
   const { showStatus } = useStatus();
   const normalizedSecrets = useMemo(() => {
@@ -57,6 +113,11 @@ export function InlineSecretsForm({
       out.push({
         name,
         description: typeof secret.description === "string" ? secret.description.trim() : null,
+        valueLabel:
+          typeof secret.valueLabel === "string" && secret.valueLabel.trim().length > 0
+            ? secret.valueLabel.trim()
+            : null,
+        sensitive: secret.sensitive !== false,
       });
     }
     return out;
@@ -65,12 +126,26 @@ export function InlineSecretsForm({
   const [drafts, setDrafts] = useState<Record<string, SecretValueDraft>>(() => {
     const initial: Record<string, SecretValueDraft> = {};
     for (const secret of normalizedSecrets) {
-      initial[secret.name] = createDefaultDraft();
+      initial[secret.name] = createDefaultDraft(secret.sensitive !== false);
     }
     return initial;
   });
   const [saving, setSaving] = useState(false);
   const [savedAtByName, setSavedAtByName] = useState<Record<string, number>>({});
+  const [saveError, setSaveError] = useState<string | null>(null);
+
+  // Every failure path both toasts (unchanged) and keeps the message, so a
+  // host that asked for an inline error can render it where the press was.
+  const failSave = useCallback(
+    (message: string) => {
+      // A controller that answers with an empty message must still leave the
+      // person something to act on.
+      const resolved = message.trim() || "The value was not saved. Try again.";
+      setSaveError(resolved);
+      showStatus(resolved, "error", 5000);
+    },
+    [showStatus],
+  );
 
   const missingNames = useMemo(() => {
     const missing: string[] = [];
@@ -123,11 +198,12 @@ export function InlineSecretsForm({
       return;
     }
 
+    setSaveError(null);
     setSaving(true);
     try {
       const existing = await controllerClient.secrets.listForProject(projectId);
       if (!existing.success) {
-        showStatus(existing.error ?? "Unable to load current secrets.", "error", 5000);
+        failSave(existing.error ?? "Unable to load current secrets.");
         return;
       }
 
@@ -167,7 +243,7 @@ export function InlineSecretsForm({
             },
           );
           if (!updated.success) {
-            showStatus(updated.error ?? `Unable to update ${secret.name}`, "error", 5000);
+            failSave(updated.error ?? `Unable to update ${secret.name}`);
             return;
           }
           savedNames.push(secret.name);
@@ -181,7 +257,7 @@ export function InlineSecretsForm({
           ...(agentHandlesValue ? { agentHandles: agentHandlesValue } : {}),
         });
         if (!created.success) {
-          showStatus(created.error ?? `Unable to save ${secret.name}`, "error", 5000);
+          failSave(created.error ?? `Unable to save ${secret.name}`);
           return;
         }
         savedNames.push(secret.name);
@@ -220,6 +296,7 @@ export function InlineSecretsForm({
     agentHandles,
     description,
     drafts,
+    failSave,
     missingNames,
     normalizedSecrets,
     onSaved,
@@ -234,48 +311,68 @@ export function InlineSecretsForm({
 
   return (
     <div className="mt-2 space-y-2">
-      <Text as="div" variant="caption" tone="muted" className="text-xxs">
-        Add secrets here. Values are saved to Project Secrets (not chat).
-      </Text>
       <div className="space-y-2">
         {normalizedSecrets.map((secret) => {
-          const draft = drafts[secret.name] ?? createDefaultDraft();
-          const savedAt = savedAtByName[secret.name];
-          const recentlySaved = typeof savedAt === "number" && Date.now() - savedAt < 60_000;
-          const hasValue = Boolean(draft.value.trim());
+          const draft = drafts[secret.name] ?? createDefaultDraft(secret.sensitive !== false);
+          // The badge stays for as long as the card is on screen: a state that
+          // erased itself after a minute left the person with no answer to
+          // "did that save?".
+          const saved = typeof savedAtByName[secret.name] === "number";
           return (
-            <label key={secret.name} className="block space-y-1">
-              <div className="flex flex-wrap items-center justify-between gap-2">
-                <Text as="div" variant="caption" tone="muted" className="text-xxs font-mono">
-                  {secret.name}
-                </Text>
-                {recentlySaved ? (
-                  <Badge tone="success" size="xs">
-                    Saved
-                  </Badge>
-                ) : hasValue ? (
-                  <Badge tone="info" size="xs">
-                    Ready to save
-                  </Badge>
-                ) : null}
-              </div>
-              {secret.description ? (
-                <Text as="div" variant="caption" tone="muted" className="text-xxs leading-snug">
-                  {secret.description}
-                </Text>
-              ) : null}
-              <div className="flex items-stretch gap-2">
+            // Not a <label>: the reveal control now sits inside the field box,
+            // and an interactive control inside a label gets the label's click
+            // forwarded to the input behind it. The input carries its own
+            // aria-label, which already outranked this element as the
+            // accessible name, so nothing is lost by making it a plain box.
+            <div key={secret.name} className="block space-y-1">
+              {namesShownByHost ? (
+                saved ? (
+                  <div className="flex flex-wrap items-center gap-2">
+                    <Badge tone="success" size="xs">
+                      Saved
+                    </Badge>
+                  </div>
+                ) : null
+              ) : (
+                <>
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <Text as="div" variant="caption" tone="muted" className="text-xxs font-mono">
+                      {secret.name}
+                    </Text>
+                    {saved ? (
+                      <Badge tone="success" size="xs">
+                        Saved
+                      </Badge>
+                    ) : null}
+                  </div>
+                  {secret.description ? (
+                    <Text as="div" variant="caption" tone="muted" className="text-xxs leading-snug">
+                      {secret.description}
+                    </Text>
+                  ) : null}
+                </>
+              )}
+              {/* The reveal sits inside the field, which is where every other
+                  trailing control in the product sits: the login password eye,
+                  the history search filter, both browser address bars. Beside
+                  it, it was a bordered white box next to a bordered white box,
+                  and it ate typing room the phone width does not have. */}
+              <div className="relative">
                 <Input
                   value={draft.value}
                   onChange={(event) => setDraftValue(secret.name, event.target.value)}
-                  placeholder="Paste value…"
+                  placeholder="Paste it here"
+                  aria-label={`${secret.valueLabel ?? secret.name} value`}
                   type="text"
                   size="sm"
                   radius="xl"
                   disabled={!projectId || saving}
+                  {...(valueTestIdPrefix
+                    ? { "data-testid": `${valueTestIdPrefix}-${secret.name.toUpperCase()}` }
+                    : {})}
                   // Keep this as text input + CSS masking so password managers
                   // don't treat tokens like login forms.
-                  className={draft.visible ? "" : "[-webkit-text-security:disc]"}
+                  className={`pr-12 ${draft.visible ? "" : "[-webkit-text-security:disc]"}`}
                   name={`secret-${secret.name}`}
                   autoComplete="off"
                   data-1p-ignore="true"
@@ -285,34 +382,45 @@ export function InlineSecretsForm({
                   autoCorrect="off"
                   spellCheck={false}
                 />
-                <IconButton
-                  variant="outline"
+                <ToggleIconButton
+                  isSelected={draft.visible}
                   size="sm"
                   radius="full"
                   aria-label={draft.visible ? "Hide value" : "Show value"}
                   onPress={() => toggleDraftVisible(secret.name)}
                   isDisabled={!projectId || saving}
-                  className="shrink-0"
+                  className="absolute right-2 top-1/2 -translate-y-1/2"
                 >
                   {draft.visible ? (
                     <EyeClosed className="h-4 w-4" aria-hidden="true" />
                   ) : (
                     <Eye className="h-4 w-4" aria-hidden="true" />
                   )}
-                </IconButton>
+                </ToggleIconButton>
               </div>
-            </label>
+            </div>
           );
         })}
       </div>
 
-      <div className="flex items-center justify-end gap-2">
+      {caption ? (
+        <Text as="div" variant="caption" tone="muted" className="text-xxs leading-snug">
+          {caption}
+        </Text>
+      ) : null}
+
+      <div
+        className={`flex flex-wrap items-center gap-2 ${
+          actionAlign === "start" ? "justify-start" : "justify-end"
+        }`}
+      >
         <Button
           onPress={() => void handleSave()}
           variant="primary"
-          size="xs"
+          size={actionAlign === "start" ? "sm" : "xs"}
           radius="full"
           isDisabled={!canSave}
+          {...(saveTestId ? { "data-testid": saveTestId } : {})}
         >
           {saving ? (
             <span className="inline-flex items-center gap-2">
@@ -320,10 +428,23 @@ export function InlineSecretsForm({
               Saving…
             </span>
           ) : (
-            "Save secrets"
+            saveLabel
           )}
         </Button>
+        {secondaryAction}
       </div>
+
+      {errorTestId && saveError ? (
+        <Text
+          as="div"
+          variant="caption"
+          tone="inherit"
+          className="text-xxs leading-snug text-rose-600 dark:text-rose-300"
+          data-testid={errorTestId}
+        >
+          {saveError}
+        </Text>
+      ) : null}
     </div>
   );
 }

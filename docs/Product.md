@@ -36,7 +36,7 @@ its code, and switching to chat or the personal browser keeps an active shared v
 An optional timing observer measures Studio startup and chat, space, and team switches; the
 public app sends no timing data by default. Its memory buffer holds at most 32 anonymous samples
 containing only the operation, outcome, duration, message-count bucket, narrow/wide viewport, and
-whether a readiness check was still waiting (`loadingShown`)—no identities, URLs, or message content.
+whether a readiness check was still waiting (`loadingShown`): no identities, URLs, or message content.
 That flag includes access checks, discovery, conversation selection, and content loading; it does
 not prove that a spinner was painted or indicate a cache hit or miss. Readiness means the selected main chat or panel
 has committed and had a paint opportunity, including its code download; it does not wait for
@@ -51,10 +51,22 @@ cached rows. Secret and guest directories withhold protected records after a fai
 and show Retry rather than an empty-state claim. Switching account or space isolates loading
 results and closes space-specific editors.
 
-The landing workspace is an explicitly labeled interactive example. Visitors choose a scenario;
-it does not rotate automatically or create a real session. Octo's existing thinking animation
-appears only beside the example's active work. Motion can be paused and stops when the example
-is offscreen, the browser tab is hidden, or reduced motion is enabled. Header marks remain static.
+The hero sits on the tentacle artwork with its crew presence cursors (Ada, Kim, Octo, and the
+purple agent label that follows the active scenario), fading into the page below. Cursors that
+would sit partly behind the example card are left out at that viewport size. The landing
+workspace is an example that never creates a real session and carries no control of its own:
+the chips above it name the three scenarios, the link below it offers to start a session of
+your own, and assistive tech reads the chips as a group called Choose a workspace example.
+Its three scenarios advance on their own every 11 seconds, so each finished turn rests on screen for several seconds first. Rotation waits while the pointer is
+over the example or focus is inside it, holds for 20 seconds after a visitor picks a scenario,
+and never runs under reduced motion, offscreen, or in a hidden browser tab. Picking a scenario
+always works, and rotation never moves focus or shifts the layout. Octo's existing thinking
+animation appears only beside the example's active work and stops under reduced motion,
+offscreen, and in hidden browser tabs. Header marks remain static. The conversation reads from the top of the window down, so a scenario starts
+directly under the roster and any unused space rests above the composer. Each scenario plays one
+scripted turn inside the example window (a prompt typed and sent, Octo's run, the files or browser
+page landing inline in Octo's own message, then a teammate's reply) and then rests on the finished frame, which is also what
+visitors see under reduced motion, offscreen and in hidden tabs.
 
 ## Studio Surface
 - **Assistant**: conversational control of the workspace, runs, and file changes.
@@ -246,8 +258,8 @@ new messages.
 Studio uses the browser/React Router history in every shell. Back and Forward retrace visits;
 **Open parent conversation** opens the parent as a new visit, and **Home** always opens Home.
 Desktop shells expose explicit Back/Forward controls because they do not have a browser toolbar.
-Touch layouts below the desktop breakpoint keep three bottom destinations — Home, Chats and
-Spaces — only on those overview screens, in both mobile web and native apps. Chats opens the
+Touch layouts below the desktop breakpoint keep three bottom destinations (Home, Chats and
+Spaces) only on those overview screens, in both mobile web and native apps. Chats opens the
 full history overview, not the compact picker. Conversations (including empty chats and job
 threads), editors and settings details have no bottom navigation row. The full history overview
 owns its destination bar rather than covering a second one underneath it.
@@ -402,15 +414,100 @@ On mobile, installed skill titles open the skill file directly, the enable toggl
 visible, and other actions live in the row menu. Skill discovery keeps search on one row
 and folds source, category and sort controls into **Filters**; closing the controls keeps
 their selections. Wider layouts retain direct row actions and visible discovery filters.
+**Import** and a catalogue **Install** send the same `/skills import ... --start` line as the
+composer, into the current chat, and keep you on the Skills panel.
 
 Automations uses a flat empty state on the shared panel surface, with a labeled
 **New automation** action and a short explanation of scheduling.
+
+## First run
+
+An empty space opens with the getting-started card in the chat, at message weight. Its AI step
+is one decision: **Choose your AI** with **Start free with Instafy AI** (the live allowance on the
+button) and **Connect AI**; when the free tier is paused the heading stays, the line reads "Free
+Instafy AI is paused right now. Connect your own AI to start; you pay your provider directly and
+Instafy adds nothing." and **Connect AI** is the one button. The same verb names the act
+everywhere: **Connect AI** on the card and in the gate, **Add AI connection** as the modal's
+title, **AI connections** as the AI panel's heading. When a free lane is offered the line ends
+"Next: pick a tool, or just type.", which is what the step below actually asks. Once settled, a
+status line above **Start with a tool you already use** names what will answer ("Using OpenAI
+API key" or "Using free Instafy AI: 20 prompts a day, 1 credit each") followed by **Change AI**,
+which reopens the AI step for the free choice and opens the AI panel for a saved connection.
+
+Typing or sending with no AI connected shows one sentence in the chat, "Connect AI to send this.
+Your message is kept.", with a primary **Connect AI** that opens the Add AI connection modal and,
+while the free tier is available, **Use free Instafy AI (20 a day)**. "Just chatting with
+teammates? Turn the assistant off." appears as a quiet caption below only when the space has
+more than one member. The draft stays in the composer. Switching the assistant on with no AI
+connected, or an expired connection, shows the same hand-off in the chat: no provider list is
+drawn there, **Connect AI** opens the modal.
+
+The workspace step is four lines: the AI status line, the heading **Start with a tool you
+already use**, one wrapping row of the tools that can be picked today, and the closing line
+"Or just type what you want below." The row is outline chips of a mark and a name, GitHub
+first because it signs in with a device code and needs no key pasted, then Notion, ending in
+a **More tools** link into the Connect sheet. Every chip leads somewhere: a tool whose pack is
+not published is not on the card at all. The card carries no action cards and no separate
+**Connect a tool** caption, and nothing on it sends a message or writes into the composer.
+
+The blank path is the composer itself, which is already on screen asking "Ask for something…":
+the closing line points at it, the send button enables on the first character, and typing folds
+the card to one row, **Import a repo**, **Notion** and **More tools**, which unfolds when the draft
+is cleared; history and dismissal hide it as before. The collapsed row names the same tools in
+text form, in the same order, keeping the verb for the repo import.
+
+A member without write access keeps the heading, the closing line and the **GitHub** chip,
+whose press opens the import form and sends nothing. The skill chips and **More tools** are
+dropped, because their press ends at **Connect**, which sends.
 
 ## Composer
 
 The composer uses one compact, rounded writing row on phones and wider screens. It grows
 with the draft, then scrolls within the editor. Image upload and other message tools live
 in the `+` menu.
+
+**Connect a tool** in the composer `+` menu, next to **Import GitHub repo**, lists the
+featured tools that can be selected today (GitHub and Notion, until the Slack and Discord
+packs are published) and ends with **Browse all tools**; the same tools are the chip row on the
+getting-started card of an empty space, followed by a **More tools** link. Curation is list
+order in one build-time file: connections with nothing to paste come first, then the ones that
+ask for a key. The card row is capped at five chips, measured so it holds at most two lines on
+a phone; anything past the cap stays in the sheet. Should no featured tool be available, the
+menu shows **Browse all tools** alone under GitHub. Both open the Connect sheet: a
+**Search tools** box, a **Popular** row of bare marks (a curated list, not a measurement), and
+every first-party tool grouped by category (Chat and community, Docs and notes, Code, Finance
+and bookkeeping, and so on), with **connected** or a region such as Austria as the row's meta.
+Tools whose skill pack is not published yet are listed only in the sheet, where they show a
+**Soon** badge and cannot be selected; the Popular row appears only once at least two of its
+tools are available. FreeFinance is available but not featured, so **More tools** is its way in.
+Typing filters the rows by name, keyword, category or region and hides the Popular row; when
+nothing matches, **Search all skills** opens the Skills panel's Discover tab with the same
+query. **Paste a skill link** lives in the sheet's footer. Choosing a skill opens the confirm stage, which says which skill is added
+and from which repo, what its setup will ask for, and where the files land
+(`.agents/skills/<skill>`), with **Back** when it was reached from the list; **Connect** then
+sends one line, `/skills import <source> --name <skill> --start`, into the current chat as a
+new turn (queued behind an active reply when there is one). Nothing is sent by a chip, a menu
+row, a search, a Popular mark or a category row: **Connect** is the only sending control.
+GitHub is reached through its chip on the card, through **Import GitHub repo** in the menu and
+through the GitHub row in the sheet, all of which lead to the same repo import and device
+login; it installs no skill, so it never shows as connected. **Paste a skill link** opens a dialog for any GitHub repo
+or skill folder link, a `SKILL.md` link, or a workspace path, whose **Add and start** sends
+`/skills import <source> --start` the same way. The runtime
+copies every folder in the
+source that contains a `SKILL.md` into `.agents/skills/`, reports what it wrote in one
+message, and then continues the same turn by following each skill's `## Getting started`
+section: questions are asked in chat, secrets are requested by name through the secrets card
+and never pasted into the conversation, dependencies are installed inside the skill folder,
+and schedules are created through the normal automation flow. `/skills start <name>` runs
+that section again for one installed skill, and `/skills` is listed in the typed `/` menu
+and in **Commands**. The product list is a fixed, first-party list built into Studio, and
+**Import** and **Install** in Settings > Skills send the same line into the current chat
+without leaving Settings. Skills are files distributed as public repos and URLs; a skill's
+`SKILL.md` is platform-neutral and only declares what it needs (environment variable names
+and whether each is sensitive), the questions to ask, the files to write, a schedule in
+plain words and a validation line, and Studio supplies the import, start, secret and
+automation verbs that carry those declarations out. There is no marketplace, no plugin
+registry, and no remote code loading beyond files written into the workspace.
 
 On clients with voice input, the trailing action is the microphone for an empty draft and
 Send or Steer for a text or image draft. Recording and transcription keep the microphone

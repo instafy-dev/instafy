@@ -10,12 +10,15 @@ const managedAi = {
   label: "Instafy AI",
   dailyPromptLimit: 20,
   remainingPrompts: 7,
+  creditBurnAmount: 1,
 };
 
 const managedAiOffer = {
   label: "Instafy AI",
   dailyPromptLimit: 20,
   remainingPrompts: 7,
+  creditBurnAmount: 1,
+  paused: false,
 };
 
 function resolve(
@@ -74,7 +77,7 @@ describe("resolveGettingStartedAiChoices", () => {
     ).toEqual({
       managedAiOffer: null,
       selectedAi: "connected",
-      canChangeAiChoice: false,
+      canChangeAiChoice: true,
       personalAiConnectionState: null,
       viewState: "workspace",
     });
@@ -101,6 +104,8 @@ describe("resolveGettingStartedAiChoices", () => {
         label: "Instafy AI",
         dailyPromptLimit: 20,
         remainingPrompts: 0,
+        creditBurnAmount: 1,
+        paused: false,
       },
       selectedAi: null,
       canChangeAiChoice: false,
@@ -139,7 +144,7 @@ describe("resolveGettingStartedAiChoices", () => {
     ).toEqual({
       managedAiOffer: null,
       selectedAi: "connected",
-      canChangeAiChoice: false,
+      canChangeAiChoice: true,
       personalAiConnectionState: null,
       viewState: "workspace",
     });
@@ -153,6 +158,8 @@ describe("resolveGettingStartedAiChoices", () => {
         label: "Instafy AI",
         dailyPromptLimit: 20,
         remainingPrompts: 0,
+        creditBurnAmount: 1,
+        paused: false,
       },
       selectedAi: null,
       canChangeAiChoice: false,
@@ -161,14 +168,52 @@ describe("resolveGettingStartedAiChoices", () => {
     });
   });
 
-  it("shows only the personal connection route when included AI is unavailable for another reason", () => {
+  it("keeps a paused free tier in the offer with the paused flag so the card can explain it", () => {
+    // Enabled but not available, and not merely used up for today: the tier
+    // is paused. The choice stays a choice; the card shows one Connect AI
+    // button and says why.
     expect(resolve({ managedAi: { ...managedAi, available: false } })).toEqual({
-      managedAiOffer: null,
+      managedAiOffer: { ...managedAiOffer, paused: true },
       selectedAi: null,
       canChangeAiChoice: false,
       personalAiConnectionState: "missing",
       viewState: "choice",
     });
+    expect(
+      resolve({ managedAi: { ...managedAi, available: false, remainingPrompts: null } }).managedAiOffer,
+    ).toMatchObject({ paused: true, remainingPrompts: null });
+    // A paused tier cannot be the selected lane, even if it was chosen before.
+    expect(
+      resolve({ managedAi: { ...managedAi, available: false }, managedAiSelected: true }),
+    ).toMatchObject({ selectedAi: null, viewState: "choice", managedAiOffer: { paused: true } });
+  });
+
+  it("offers nothing when the free tier is disabled outright", () => {
+    expect(resolve({ managedAi: { ...managedAi, enabled: false } })).toMatchObject({
+      managedAiOffer: null,
+      viewState: "choice",
+      personalAiConnectionState: "missing",
+    });
+    expect(resolve({ managedAi: null }).managedAiOffer).toBeNull();
+  });
+
+  it("carries the real credit cost and defaults it to one credit", () => {
+    expect(resolve({ managedAi: { ...managedAi, creditBurnAmount: 2 } }).managedAiOffer).toMatchObject({
+      creditBurnAmount: 2,
+    });
+    const withoutCost: Partial<typeof managedAi> = { ...managedAi };
+    delete withoutCost.creditBurnAmount;
+    expect(
+      resolve({ managedAi: withoutCost as Omit<typeof managedAi, "creditBurnAmount"> }).managedAiOffer,
+    ).toMatchObject({ creditBurnAmount: 1 });
+  });
+
+  it("lets every settled AI choice be changed", () => {
+    expect(resolve({ managedAiSelected: true }).canChangeAiChoice).toBe(true);
+    expect(resolve({ credentialInventoryStatus: "ready" }).canChangeAiChoice).toBe(true);
+    expect(resolve({ hasDefaultCredential: true }).canChangeAiChoice).toBe(true);
+    expect(resolve().canChangeAiChoice).toBe(false);
+    expect(resolve({ credentialInventoryStatus: "loading" }).canChangeAiChoice).toBe(false);
   });
 
   it("waits for live requirements and a signed-in controller session", () => {
