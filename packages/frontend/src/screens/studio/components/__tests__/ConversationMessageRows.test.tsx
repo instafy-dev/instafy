@@ -432,10 +432,12 @@ describe("ConversationMessageRows", () => {
       timestamp: 1,
       metadata: { agent: { handle: "octo", avatarSeed: "octo-seed" } },
     });
+    // Another person's message: one's own would clear the pill instead, since
+    // the right side already says who wrote it.
     const humanMessage = createMessage({
       id: "human-response",
       role: "user",
-      authorId: "user-1",
+      authorId: "user-2",
       content: "I will decide what to do next.",
       timestamp: 2,
     });
@@ -456,7 +458,7 @@ describe("ConversationMessageRows", () => {
     expect(resolveReachedStickySpeaker(markers)).toEqual({
       kind: "human",
       label: "Teammate",
-      avatarSeed: "user-1",
+      avatarSeed: "user-2",
     });
   });
 
@@ -509,7 +511,7 @@ describe("ConversationMessageRows", () => {
     });
   });
 
-  it("renders a sticky human speaker marker for the current user's own long message", async () => {
+  it("clears the sticky speaker at the current user's own message: the right side already says who", async () => {
     const ownPrompt = createMessage({
       id: "own-long-prompt",
       role: "user",
@@ -543,13 +545,11 @@ describe("ConversationMessageRows", () => {
       );
     });
 
-    const marker = container.querySelector('[data-testid="chat-speaker-human-marker"]');
+    expect(container.querySelector('[data-testid="chat-speaker-human-marker"]')).toBeNull();
+    const marker = container.querySelector('[data-testid="chat-speaker-boundary"]');
     expect(marker).toBeInstanceOf(HTMLElement);
-    expect(readStickyChatSpeakerMarker(marker)).toEqual({
-      kind: "human",
-      label: "Owner",
-      avatarSeed: "user-1",
-    });
+    expect(marker?.getAttribute("data-chat-speaker-kind")).toBe("boundary");
+    expect(readStickyChatSpeakerMarker(marker)).toBeNull();
   });
 
   it("clears the sticky assistant speaker at an assistant-to-controller boundary", async () => {
