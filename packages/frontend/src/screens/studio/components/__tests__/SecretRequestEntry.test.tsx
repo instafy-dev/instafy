@@ -480,12 +480,31 @@ describe("SecretRequestEntry", () => {
     root = createRoot(container);
     await renderEntry(again, details());
 
+    // Asked again for a value the space already holds: the stored one did
+    // not work, so the card opens on the field. "Continue setup" would only
+    // send the same value back, so it is not offered.
     expect(byTestId("secret-request-sent")).toBeNull();
-    expect(byTestId("secret-request-saved")).not.toBeNull();
-    await act(async () => {
-      byTestId<HTMLElement>("secret-request-replace")!.click();
-    });
+    expect(byTestId("secret-request-saved")).toBeNull();
+    expect(byTestId("secret-request-asked-again")?.textContent).toBe(
+      "The saved value did not pass the check. Paste it again.",
+    );
     expect(byTestId("secret-request-value-NOTION_API_KEY")).not.toBeNull();
+    expect(byTestId("secret-request-continue")).toBeNull();
+    expect(byTestId("secret-request-save")?.textContent).toBe("Save and continue");
+  });
+
+  it("does not treat a first ask for a value stored through Manage secrets as a failed one", async () => {
+    mocks.listSecrets.mockResolvedValue({
+      success: true,
+      secrets: [{ id: "secret-1", name: "NOTION_API_KEY" }],
+    });
+    const request = secretRequest();
+    mocks.activeMessages.push(request);
+    await renderEntry(request, details());
+
+    expect(byTestId("secret-request-asked-again")).toBeNull();
+    expect(byTestId("secret-request-saved")).not.toBeNull();
+    expect(byTestId("secret-request-continue")).not.toBeNull();
   });
 
   it("names words pasted in place of the value as they land, unmasks them, and holds Save", async () => {
