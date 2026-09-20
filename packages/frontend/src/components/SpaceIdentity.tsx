@@ -1,5 +1,6 @@
 import { useState } from "react";
 import { normalizeSpaceAvatarUrl, normalizeSpaceColor, normalizeSpaceIcon } from "@instafy/sdk/project-identity";
+import { normalizeIdentityImageSrc } from "../utils/identityImageSrc";
 
 const COLOR_CLASSES = {
   slate: "bg-slate-100 text-slate-700 dark:bg-slate-700 dark:text-slate-100",
@@ -21,7 +22,7 @@ export function SpaceIdentity({ name, icon, color, avatarUrl, className = "" }: 
   className?: string;
 }) {
   const [failedUrl, setFailedUrl] = useState<string | null>(null);
-  const imageUrl = avatarUrl?.startsWith("blob:") ? avatarUrl : normalizeSpaceAvatarUrl(avatarUrl);
+  const imageUrl = normalizeIdentityImageSrc(avatarUrl?.startsWith("blob:") ? avatarUrl : normalizeSpaceAvatarUrl(avatarUrl));
   const symbol = normalizeSpaceIcon(icon) ?? Array.from(name?.trim() || "S")[0].toLocaleUpperCase();
   return <span
     aria-hidden="true"

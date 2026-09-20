@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { OctoMark } from "./OctoMark";
 import { OCTO_AVATAR_SRC, normalizeCustomAgentAvatarSrc, resolveAgentAvatarGradient, resolveAgentAvatarImageSrc, resolveAgentAvatarText } from "../utils/agentAvatar";
+import { normalizeIdentityImageSrc } from "../utils/identityImageSrc";
 
 /** The same saved or draft identity in bot settings and the agent list. */
 export function AgentAvatar({ agent, size = "md", imageSrc }: {
@@ -9,7 +10,7 @@ export function AgentAvatar({ agent, size = "md", imageSrc }: {
   imageSrc?: string | null;
 }) {
   const [failedSrc, setFailedSrc] = useState<string | null>(null);
-  const src = imageSrc === undefined ? resolveAgentAvatarImageSrc(agent) : imageSrc;
+  const src = normalizeIdentityImageSrc(imageSrc === undefined ? resolveAgentAvatarImageSrc(agent) : imageSrc);
   const customImage = src && src !== OCTO_AVATAR_SRC && src !== failedSrc;
   const builtIn = src === OCTO_AVATAR_SRC;
   const dimensions = size === "lg" ? "h-16 w-16 text-lg" : size === "sm" ? "h-7 w-7 text-xs" : "h-9 w-9 text-sm";
