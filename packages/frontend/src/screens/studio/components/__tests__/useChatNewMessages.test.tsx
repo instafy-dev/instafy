@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import { act, createRef } from "react";
 import { createRoot, type Root } from "react-dom/client";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi, type Mock } from "vitest";
 import type { ChatMessage } from "../../types";
 import { useChatNewMessages } from "../useChatNewMessages";
 import { ChatNewMessagesButton } from "../ChatNewMessagesButton";
@@ -19,7 +19,7 @@ describe("new arrivals above the composer", () => {
   let options: Options;
   let metrics: { scrollTop: number; scrollHeight: number; clientHeight: number };
   let result: ReturnType<typeof useChatNewMessages>;
-  let onJumpToLatest: ReturnType<typeof vi.fn>;
+  let onJumpToLatest: Mock<() => void>;
   const action = () => container.querySelector<HTMLButtonElement>('[data-testid="chat-new-messages"]');
   function Harness() {
     result = useChatNewMessages(options);

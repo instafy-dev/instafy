@@ -2,7 +2,7 @@
 
 import { act, type RefObject } from "react";
 import { createRoot, type Root } from "react-dom/client";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi, type Mock } from "vitest";
 import { useFilesPanelSaveShortcut } from "../useFilesPanelSaveShortcut";
 
 describe("FilesPanel save shortcut ownership", () => {
@@ -14,8 +14,8 @@ describe("FilesPanel save shortcut ownership", () => {
   let editorRef: RefObject<HTMLElement | null>;
   let previewRef: RefObject<HTMLElement | null>;
   let viewerRef: RefObject<{ mode: string }>;
-  let saveDraft: ReturnType<typeof vi.fn>;
-  let saveVersion: ReturnType<typeof vi.fn>;
+  let saveDraft: Mock<() => Promise<void>>;
+  let saveVersion: Mock<() => Promise<void>>;
   let saveVersionRef: RefObject<(() => Promise<void>) | null>;
   function Harness() {
     useFilesPanelSaveShortcut({ editorContainerRef: editorRef, markdownPreviewContainerRef: previewRef,

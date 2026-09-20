@@ -4375,6 +4375,7 @@ async fn support_report_routes_enforce_customer_privacy_boundary() -> anyhow::Re
             "customerLastMessageAt",
             "supportLastMessageAt",
             "resolvedAt",
+            "resolutionNotificationId",
             "hasUnreadSupportActivity",
             "hasUnreadResolution",
             "message",

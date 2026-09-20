@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import { act, createRef } from "react";
 import { createRoot, type Root } from "react-dom/client";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi, type Mock } from "vitest";
 import { useChatNewerHistoryPaging } from "../useChatNewerHistoryPaging";
 
 type PagingOptions = Parameters<typeof useChatNewerHistoryPaging>[0];
@@ -17,8 +17,8 @@ describe("intent-gated newer history paging", () => {
   let container: HTMLDivElement;
   let options: PagingOptions;
   let metrics: { scrollTop: number; scrollHeight: number; clientHeight: number; clientWidth: number; offsetWidth: number };
-  let loadNewer: ReturnType<typeof vi.fn>;
-  let isReadingReady: ReturnType<typeof vi.fn>;
+  let loadNewer: Mock<PagingOptions["loadNewer"]>;
+  let isReadingReady: Mock<PagingOptions["isReadingReady"]>;
   const viewport = () => options.scrollContainerRef.current!;
 
   function Harness() {
@@ -404,7 +404,7 @@ describe("intent-gated newer history paging", () => {
   });
 
   describe("reaching live history", () => {
-    let onReachLatest: ReturnType<typeof vi.fn>;
+    let onReachLatest: Mock<() => void>;
 
     beforeEach(async () => {
       onReachLatest = vi.fn();
