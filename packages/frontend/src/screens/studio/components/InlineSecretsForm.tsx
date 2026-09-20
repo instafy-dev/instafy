@@ -159,17 +159,48 @@ export function InlineSecretsForm({
     return missing;
   }, [drafts, normalizedSecrets]);
 
-  const canSave = Boolean(projectId) && normalizedSecrets.length > 0 && missingNames.length === 0 && !saving;
+  const problemsByName = useMemo(() => {
+    const problems: Record<string, string> = {};
+    for (const secret of normalizedSecrets) {
+      if (!secret.sensitive) {
+        continue;
+      }
+      const problem = describeSecretValueProblem(drafts[secret.name]?.value ?? "");
+      if (problem) {
+        problems[secret.name] = problem;
+      }
+    }
+    return problems;
+  }, [drafts, normalizedSecrets]);
 
-  const setDraftValue = useCallback((name: string, value: string) => {
-    setDrafts((current) => ({
-      ...current,
-      [name]: {
-        ...(current[name] ?? createDefaultDraft()),
-        value,
-      },
-    }));
-  }, []);
+  const canSave =
+    Boolean(projectId) &&
+    normalizedSecrets.length > 0 &&
+    missingNames.length === 0 &&
+    Object.keys(problemsByName).length === 0 &&
+    !saving;
+
+  const sensitiveByName = useMemo(
+    () => new Map(normalizedSecrets.map((secret) => [secret.name, secret.sensitive])),
+    [normalizedSecrets],
+  );
+
+  const setDraftValue = useCallback(
+    (name: string, value: string) => {
+      // Words in place of the value are named as they land, and the field
+      // unmasks so they can be read: a masked sentence looks like a token.
+      const unmask =
+        sensitiveByName.get(name) !== false && describeSecretValueProblem(value) !== null;
+      setDrafts((current) => {
+        const existing = current[name] ?? createDefaultDraft();
+        return {
+          ...current,
+          [name]: { ...existing, value, visible: unmask ? true : existing.visible },
+        };
+      });
+    },
+    [sensitiveByName],
+  );
 
   const toggleDraftVisible = useCallback((name: string) => {
     setDrafts((current) => {
@@ -332,6 +363,7 @@ export function InlineSecretsForm({
           // erased itself after a minute left the person with no answer to
           // "did that save?".
           const saved = typeof savedAtByName[secret.name] === "number";
+          const problem = problemsByName[secret.name] ?? null;
           return (
             // Not a <label>: the reveal control now sits inside the field box,
             // and an interactive control inside a label gets the label's click
@@ -412,6 +444,19 @@ export function InlineSecretsForm({
                   )}
                 </ToggleIconButton>
               </div>
+              {problem ? (
+                <Text
+                  as="div"
+                  variant="caption"
+                  tone="inherit"
+                  className="text-xxs leading-snug text-rose-600 dark:text-rose-300"
+                  {...(valueTestIdPrefix
+                    ? { "data-testid": `${valueTestIdPrefix}-${secret.name.toUpperCase()}-problem` }
+                    : {})}
+                >
+                  {problem}
+                </Text>
+              ) : null}
             </div>
           );
         })}
