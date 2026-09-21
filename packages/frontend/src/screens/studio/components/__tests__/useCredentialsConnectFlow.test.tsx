@@ -109,6 +109,22 @@ describe("useCredentialsConnectFlow API-key verification", () => {
     delete (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT;
   });
 
+  it("returns direct provider setup to its caller and clears cancelled key drafts", async () => {
+    await act(async () => captured?.openConnectModalAtStep("deepseek", { returnOnBack: true }));
+    expect(captured?.connectModalProps.connectModalStep).toBe("deepseek");
+    await act(async () => captured?.connectModalProps.onBack());
+    expect(captured?.connectModalProps.connectModalOpen).toBe(false);
+    expect(captured?.connectModalProps.deepseekApiKeyDraft).toBe("");
+    expect(controllerMocks.createCodex).not.toHaveBeenCalled();
+
+    // Entry points elsewhere in Studio retain their provider chooser on Back.
+    await act(async () => captured?.openConnectModal());
+    await act(async () => captured?.connectModalProps.onStepChange("openai"));
+    await act(async () => captured?.connectModalProps.onBack());
+    expect(captured?.connectModalProps.connectModalOpen).toBe(true);
+    expect(captured?.connectModalProps.connectModalStep).toBe("picker");
+  });
+
   it("keeps the modal and draft open when the verification request fails", async () => {
     controllerMocks.test.mockResolvedValue({
       success: false,

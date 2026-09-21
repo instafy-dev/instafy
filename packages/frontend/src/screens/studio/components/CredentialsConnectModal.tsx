@@ -12,7 +12,6 @@ import { Button, IconButton } from "../../../components/Button";
 import { Field } from "../../../components/Field";
 import { Input } from "../../../components/Input";
 import { useNativeBackButtonAction } from "../../../native/useNativeBackButtonAction";
-import { DeepSeekIcon, GeminiIcon, OpenAIIcon, ZaiIcon } from "../../../components/ProviderIcons";
 import { Spinner } from "../../../components/Spinner";
 import { Text } from "../../../components/Text";
 import {
@@ -22,6 +21,7 @@ import {
 import { StudioDialogModal } from "../../../components/aria/StudioModal";
 import type { DeviceAuthProvider } from "../../../sdk/instafy";
 import { openExternalUrl } from "../../../utils/openExternalUrl";
+import { CredentialsConnectionChoices, getCodexConnectionChoice } from "./CredentialsConnectionChoices";
 import { ChatGptDeviceCodePrerequisite } from "./ChatGptDeviceCodePrerequisite";
 import { CodexAdvancedConnectionOptions } from "./CodexAdvancedConnectionOptions";
 import {
@@ -194,14 +194,10 @@ export function CredentialsConnectModal({
   const allowAuthJsonImport = canUseDesktopConnect || isLikelyDesktopDevice();
   const modalBusy =
     connectPending || deviceAuthBusy || deviceAuthCompleting || apiKeyPendingProvider !== null;
-  const codexChoiceTitle = canUseDesktopConnect ? "Codex on this computer" : "ChatGPT login";
-  const codexChoiceDescription = canUseDesktopConnect
-    ? desktopCodexAuthJsonStatus?.exists
-      ? "Use this computer's existing Codex login."
-      : shouldPromptForAuthJsonUpload
-        ? "Choose a Codex auth.json from this computer."
-        : "Use this computer's Codex login."
-    : "Use your ChatGPT subscription with a one-time device code.";
+  const { title: codexChoiceTitle } = getCodexConnectionChoice({
+    canUseDesktopConnect,
+    desktopCodexAuthJsonStatus,
+  });
 
   useEffect(() => {
     setCopiedDeviceCode(false);
@@ -319,120 +315,12 @@ export function CredentialsConnectModal({
       <StudioDialogBody className="min-h-0 flex-1 touch-pan-y space-y-3 overflow-y-auto overscroll-contain">
         {connectModalStep === "picker" ? (
           <div className="space-y-2">
-            <Button
-              onPress={() => onStepChange("codex")}
-              variant="ghost"
-              size="sm"
-              radius="xl"
-              fullWidth
-              className="items-start justify-start gap-3 border border-slate-200 bg-white p-3 text-left shadow-none hover:bg-slate-50 data-[hovered]:bg-slate-50 dark:border-slate-800 dark:bg-slate-950/40 dark:hover:bg-slate-900/60 dark:data-[hovered]:bg-slate-900/60"
-              data-testid="credentials-connect-choice-codex"
+            <CredentialsConnectionChoices
+              canUseDesktopConnect={canUseDesktopConnect}
+              desktopCodexAuthJsonStatus={desktopCodexAuthJsonStatus}
               isDisabled={!canManageAiConnections}
-            >
-              <span className="mt-0.5 flex h-9 w-9 flex-none items-center justify-center rounded-full bg-white/90 text-slate-900 ring-1 ring-black/5 dark:bg-slate-950/40 dark:text-slate-50 dark:ring-white/10">
-                <OpenAIIcon className="h-5 w-5" />
-              </span>
-              <span className="min-w-0">
-                <Text variant="bodyStrong" tone="primary">
-                  {codexChoiceTitle}
-                </Text>
-                <Text variant="caption" tone="muted" className="mt-0.5">
-                  {codexChoiceDescription}
-                </Text>
-              </span>
-            </Button>
-
-            <Button
-              onPress={() => onStepChange("openai")}
-              variant="ghost"
-              size="sm"
-              radius="xl"
-              fullWidth
-              className="items-start justify-start gap-3 border border-slate-200 bg-white p-3 text-left shadow-none hover:bg-slate-50 data-[hovered]:bg-slate-50 dark:border-slate-800 dark:bg-slate-950/40 dark:hover:bg-slate-900/60 dark:data-[hovered]:bg-slate-900/60"
-              data-testid="credentials-connect-choice-openai"
-              isDisabled={!canManageAiConnections}
-            >
-              <span className="mt-0.5 flex h-9 w-9 flex-none items-center justify-center rounded-full bg-white/90 text-slate-900 ring-1 ring-black/5 dark:bg-slate-950/40 dark:text-slate-50 dark:ring-white/10">
-                <OpenAIIcon className="h-5 w-5" />
-              </span>
-              <span className="min-w-0">
-                <Text variant="bodyStrong" tone="primary">
-                  OpenAI API key
-                </Text>
-                <Text variant="caption" tone="muted" className="mt-0.5">
-                  Connect a key from the OpenAI API platform.
-                </Text>
-              </span>
-            </Button>
-
-            <Button
-              onPress={() => onStepChange("deepseek")}
-              variant="ghost"
-              size="sm"
-              radius="xl"
-              fullWidth
-              className="items-start justify-start gap-3 border border-slate-200 bg-white p-3 text-left shadow-none hover:bg-slate-50 data-[hovered]:bg-slate-50 dark:border-slate-800 dark:bg-slate-950/40 dark:hover:bg-slate-900/60 dark:data-[hovered]:bg-slate-900/60"
-              data-testid="credentials-connect-choice-deepseek"
-              isDisabled={!canManageAiConnections}
-            >
-              <span className="mt-0.5 flex h-9 w-9 flex-none items-center justify-center rounded-full bg-white/90 text-[#2563EB] ring-1 ring-black/5 dark:bg-slate-950/40 dark:text-slate-50 dark:ring-white/10">
-                <DeepSeekIcon className="h-5 w-5" />
-              </span>
-              <span className="min-w-0">
-                <Text variant="bodyStrong" tone="primary">
-                  DeepSeek API key
-                </Text>
-                <Text variant="caption" tone="muted" className="mt-0.5">
-                  Best if you already have a DeepSeek account.
-                </Text>
-              </span>
-            </Button>
-
-            <Button
-              onPress={() => onStepChange("zai")}
-              variant="ghost"
-              size="sm"
-              radius="xl"
-              fullWidth
-              className="items-start justify-start gap-3 border border-slate-200 bg-white p-3 text-left shadow-none hover:bg-slate-50 data-[hovered]:bg-slate-50 dark:border-slate-800 dark:bg-slate-950/40 dark:hover:bg-slate-900/60 dark:data-[hovered]:bg-slate-900/60"
-              data-testid="credentials-connect-choice-zai"
-              isDisabled={!canManageAiConnections}
-            >
-              <span className="mt-0.5 flex h-9 w-9 flex-none items-center justify-center rounded-full bg-white/90 text-[#7C3AED] ring-1 ring-black/5 dark:bg-slate-950/40 dark:text-slate-50 dark:ring-white/10">
-                <ZaiIcon className="h-5 w-5" />
-              </span>
-              <span className="min-w-0">
-                <Text variant="bodyStrong" tone="primary">
-                  z.ai API key
-                </Text>
-                <Text variant="caption" tone="muted" className="mt-0.5">
-                  Connect a z.ai key for hosted runs.
-                </Text>
-              </span>
-            </Button>
-
-            <Button
-              onPress={() => onStepChange("gemini")}
-              variant="ghost"
-              size="sm"
-              radius="xl"
-              fullWidth
-              className="items-start justify-start gap-3 border border-slate-200 bg-white p-3 text-left shadow-none hover:bg-slate-50 data-[hovered]:bg-slate-50 dark:border-slate-800 dark:bg-slate-950/40 dark:hover:bg-slate-900/60 dark:data-[hovered]:bg-slate-900/60"
-              data-testid="credentials-connect-choice-gemini"
-              isDisabled={!canManageAiConnections}
-            >
-              <span className="mt-0.5 flex h-9 w-9 flex-none items-center justify-center rounded-full bg-white/90 text-[#0EA5E9] ring-1 ring-black/5 dark:bg-slate-950/40 dark:text-slate-50 dark:ring-white/10">
-                <GeminiIcon className="h-5 w-5" />
-              </span>
-              <span className="min-w-0">
-                <Text variant="bodyStrong" tone="primary">
-                  Google Gemini
-                </Text>
-                <Text variant="caption" tone="muted" className="mt-0.5">
-                  Connect a Gemini API key.
-                </Text>
-              </span>
-            </Button>
+              onChoose={onStepChange}
+            />
 
             {!canManageAiConnections ? (
               <Text variant="caption" tone="muted" className="mt-2">

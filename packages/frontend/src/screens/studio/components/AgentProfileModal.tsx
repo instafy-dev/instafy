@@ -41,6 +41,8 @@ type AgentProfileModalProps = {
   handle: string;
   onHandleChange: (value: string) => void;
   handleDisabled?: boolean;
+  handleRequired?: boolean;
+  connectionHint?: string;
   handlePlaceholder?: string;
   handleHelpText?: string;
   displayName: string;
@@ -79,6 +81,8 @@ export function AgentProfileModal({
   handle,
   onHandleChange,
   handleDisabled = false,
+  handleRequired = false,
+  connectionHint,
   handlePlaceholder,
   handleHelpText,
   displayName,
@@ -184,6 +188,7 @@ export function AgentProfileModal({
               placeholder={handlePlaceholder ?? "@bob"}
               radius="xl"
               disabled={pending || handleDisabled}
+              required={handleRequired}
               data-testid="agent-profile-handle-input"
             />
           </Field>
@@ -195,6 +200,13 @@ export function AgentProfileModal({
               <Text as="h3" variant="bodyStrong" tone="primary">Bot behavior</Text>
               <Text as="p" variant="caption" tone="muted" className="mt-1">Connection, model and response preferences. These are separate from the public profile.</Text>
             </div>
+            {connectionHint ? (
+              <Field label="Connection">
+                <Text as="p" variant="caption" tone="muted" data-testid="agent-profile-connection-hint">
+                  {connectionHint}
+                </Text>
+              </Field>
+            ) : null}
             {showProviderPicker && providerId ? (
               <Field label="Provider">
                 <ProviderMenuSelect
@@ -270,7 +282,7 @@ export function AgentProfileModal({
 
       <div className="shrink-0 px-5 pb-4">
         <SettingsFormActions saveLabel={effectiveSaveLabel} saving={pending}
-          disabled={!dirty || Array.from(bio).length > PROFILE_BIO_MAX_LENGTH}
+          disabled={!dirty || (handleRequired && !handle.trim()) || Array.from(bio).length > PROFILE_BIO_MAX_LENGTH}
           onSave={onSave} onCancel={onClose} saveTestId="agent-profile-save" />
       </div>
     </StudioDialogModal>

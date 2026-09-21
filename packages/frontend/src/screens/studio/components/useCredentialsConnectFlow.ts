@@ -63,7 +63,10 @@ type UseCredentialsConnectFlowOptions = {
 type UseCredentialsConnectFlowResult = {
   canManageAiConnections: boolean;
   openConnectModal: () => void;
-  openConnectModalAtStep: (step: CredentialsConnectModalStep) => void;
+  openConnectModalAtStep: (
+    step: CredentialsConnectModalStep,
+    options?: { returnOnBack?: boolean },
+  ) => void;
   /** Opens the modal to replace an existing credential rather than add one. */
   openConnectModalToReplace: (
     credential: { id: string; label: string },
@@ -87,6 +90,7 @@ export function useCredentialsConnectFlow({
   const [showAdvanced, setShowAdvanced] = useState(false);
   const [connectModalOpen, setConnectModalOpen] = useState(false);
   const [connectModalStep, setConnectModalStep] = useState<CredentialsConnectModalStep>("picker");
+  const returnOnBackRef = useRef(false);
   // A ref, not state: handleConnectApiKey has a long explicit dependency array,
   // and a state value read inside it would be captured stale — the replace
   // would silently degrade into a plain add, leaving two live credentials with
@@ -189,6 +193,7 @@ export function useCredentialsConnectFlow({
   ]);
 
   const openConnectModal = useCallback(() => {
+    returnOnBackRef.current = false;
     setConnectModalOpen(true);
     setConnectModalStep("picker");
     setShowAdvanced(false);
@@ -197,7 +202,8 @@ export function useCredentialsConnectFlow({
   }, [resetDeviceAuthFlow]);
 
   const openConnectModalAtStep = useCallback(
-    (step: CredentialsConnectModalStep) => {
+    (step: CredentialsConnectModalStep, options?: { returnOnBack?: boolean }) => {
+      returnOnBackRef.current = options?.returnOnBack === true;
       replaceTargetRef.current = null;
       setConnectModalOpen(true);
       setConnectModalStep(step);
@@ -228,6 +234,12 @@ export function useCredentialsConnectFlow({
     if (connectInteractionBusy) {
       return;
     }
+    // The Connections page already shows the provider choices. Return there
+    // without making the user pass through another chooser.
+    if (returnOnBackRef.current) {
+      closeConnectModal();
+      return;
+    }
     setConnectModalStep("picker");
     setShowAdvanced(false);
     if (deviceAuthSession?.status === "pending") {
@@ -236,7 +248,7 @@ export function useCredentialsConnectFlow({
       resetDeviceAuthFlow();
     }
     completedDeviceAuthSessionRef.current = null;
-  }, [cancelDeviceAuthFlow, connectInteractionBusy, deviceAuthSession, resetDeviceAuthFlow]);
+  }, [cancelDeviceAuthFlow, closeConnectModal, connectInteractionBusy, deviceAuthSession, resetDeviceAuthFlow]);
 
   const beginDeviceAuth = useCallback(
     async (provider: "codex") => {
