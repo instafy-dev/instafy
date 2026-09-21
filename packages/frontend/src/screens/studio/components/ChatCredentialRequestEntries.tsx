@@ -543,6 +543,26 @@ export function SecretRequestEntry({
     return [...names];
   }, [knownNames, requestConversationMessages, secretName]);
 
+  // Asked again for a value this space already holds: the agent tried the
+  // stored one and it did not work, or it would not be asking. Such a card
+  // opens on the field, with Save and continue as its one decision, because
+  // "Continue setup" would only send the same value back. A first ask for a
+  // value stored earlier through Manage secrets is not this case.
+  const askedAgain = useMemo(() => {
+    const own = secretName?.toUpperCase() ?? null;
+    if (!own) {
+      return false;
+    }
+    return requestConversationMessages.some(
+      (candidate) =>
+        candidate.id !== message.id &&
+        candidate.timestamp < message.timestamp &&
+        (getMessageType(candidate) ?? "").trim().toLowerCase() === "secret_request" &&
+        parseSecretRequestDetails(extractMessageDetails(candidate.metadata)).name?.trim().toUpperCase() ===
+          own,
+    );
+  }, [message.id, message.timestamp, requestConversationMessages, secretName]);
+
   // Pressing continue dispatches an agent run and spends a managed prompt, so
   // it is always a press and never an effect of saving. A secret request has no
   // deterministic resume API (unlike a repo import), so chat is the only way to
@@ -807,20 +827,25 @@ export function SecretRequestEntry({
     );
   }
 
-  if ((savedHere || alreadyStored) && !replacingValue) {
+  const openOnField = askedAgain && alreadyStored && !savedHere;
+
+  if ((savedHere || alreadyStored) && !replacingValue && !openOnField) {
     return shell(
       <>
-        <div className="flex items-start gap-2" data-testid="secret-request-saved">
+        <div className="flex items-center gap-2" data-testid="secret-request-saved">
           <CheckCircle
-            className="mt-0.5 h-4 w-4 shrink-0 text-primary-600 dark:text-primary-300"
+            className="h-4 w-4 shrink-0 text-primary-600 dark:text-primary-300"
             aria-hidden="true"
           />
           <Text as="div" variant="caption" tone="secondary" className="min-w-0 leading-snug">
             Saved in this space’s Secrets.
           </Text>
         </div>
-        <div className="flex flex-wrap items-center gap-2">
-          {continueButton}
+        {/* One decision, then one quiet line for the two escape hatches. In a
+            single wrapping row the three landed one per line at phone width
+            and read as a list of equal choices. */}
+        {continueButton ? <div className="flex flex-wrap items-center gap-2">{continueButton}</div> : null}
+        <div className="-ml-2.5 flex flex-wrap items-center gap-x-1 gap-y-0.5">
           <Button
             onPress={() => setReplacingValue(true)}
             variant="ghost"
@@ -862,6 +887,9 @@ export function SecretRequestEntry({
 
   return shell(
     <>
+      {openOnField
+        ? quietLine("The saved value did not pass the check. Paste it again.", "secret-request-asked-again")
+        : null}
       {purpose ? quietLine(purpose) : null}
       {whereToGet
         ? quietLine(whereToGet, "secret-request-where")
