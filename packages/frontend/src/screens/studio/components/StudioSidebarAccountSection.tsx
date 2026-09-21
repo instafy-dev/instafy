@@ -1,9 +1,8 @@
-import { ChatBubble, Download, LogOut, Refresh, Settings, SmartphoneDevice, User, Xmark } from "iconoir-react";
+import { ChatBubble, Download, LogOut, Refresh, SmartphoneDevice, User, Xmark } from "iconoir-react";
 import { DialogTrigger } from "react-aria-components";
 import { useId, type MouseEvent, type PointerEvent as ReactPointerEvent, type RefObject } from "react";
 import { Button, IconButton } from "../../../components/Button";
 import { HumanAvatar } from "../../../components/HumanAvatar";
-import { ControlChevron } from "../../../components/ControlChevron";
 import { MenuItemContent } from "../../../components/MenuItemContent";
 import { Text } from "../../../components/Text";
 import { StudioDialogPopover } from "../../../components/aria/StudioPopover";
@@ -38,8 +37,6 @@ type StudioSidebarAccountSectionProps = {
   clearUpdateLongPress: () => void;
   onOpenProfileSettings?: () => void;
   onOpenSupport?: () => void;
-  onOpenDiagnostics: () => void;
-  hasAppLogErrors: boolean;
   onSignOut?: () => void;
   updateDialogOpen: boolean;
   onUpdateDialogOpenChange: (open: boolean) => void;
@@ -103,8 +100,6 @@ export function StudioSidebarAccountSection({
   clearUpdateLongPress,
   onOpenProfileSettings,
   onOpenSupport,
-  onOpenDiagnostics,
-  hasAppLogErrors,
   onSignOut,
   updateDialogOpen,
   onUpdateDialogOpenChange,
@@ -248,13 +243,6 @@ export function StudioSidebarAccountSection({
           </StudioMenuItem>
         </StudioMenu>
       </div>
-      <details className="group/profile-advanced mt-2 border-t border-slate-200/70 pt-2 dark:border-[color:var(--color-studio-dark-divider)]">
-        <summary className="flex min-h-11 cursor-pointer items-center rounded-lg px-2.5 py-2 text-xs text-slate-500 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary-500/40 pointer-coarse:min-h-11 dark:text-slate-400">Advanced<span className="ml-auto transition-transform group-open/profile-advanced:rotate-180 motion-reduce:transition-none"><ControlChevron /></span></summary>
-        <Button variant="ghost" fullWidth className="!justify-start px-2.5 pointer-coarse:min-h-11" data-testid="profile-diagnostics-button" onPress={() => { onProfileMenuOpenChange(false); onOpenDiagnostics(); }}>
-          <Settings className="h-4 w-4" aria-hidden="true" />Diagnostics
-          {hasAppLogErrors ? <span className="ml-auto text-xs text-slate-500 dark:text-slate-400">Errors recorded</span> : null}
-        </Button>
-      </details>
     </>
   );
 

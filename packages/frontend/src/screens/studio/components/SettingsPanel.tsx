@@ -31,6 +31,8 @@ import { useStatus } from "../../../status/useStatus";
 import { ProfileEditor } from "../../../profile/ProfileEditor";
 import { NotificationPreferencesSettings } from "../../../notifications/NotificationPreferencesSettings";
 import { PersonalPreferencesSettings } from "./PersonalPreferencesSettings";
+import { PersonalAppearanceSettings } from "./PersonalAppearanceSettings";
+import { PersonalAdvancedSettings } from "./PersonalAdvancedSettings";
 import { SettingsSection } from "./SettingsSection";
 import { TeamProfileSettings } from "./TeamProfileSettings";
 import { useSettingsOrganization } from "./useSettingsOrganization";
@@ -963,7 +965,11 @@ export function SettingsPanel({ activeTab: fallbackTab, organizationId, onOrgani
               ? "Profile"
               : profileCategory === "notifications"
                 ? "Notifications"
-                : "Preferences";
+                : profileCategory === "appearance"
+                  ? "Appearance"
+                  : profileCategory === "advanced"
+                    ? "Advanced"
+                    : "Preferences";
 
   const settingsScope =
     activeTab === "profile" ? null : activeTab === "org" ? (
@@ -1294,8 +1300,10 @@ export function SettingsPanel({ activeTab: fallbackTab, organizationId, onOrgani
     }
     return [
       { id: "account", label: "Profile", testId: "settings-category-profile-account" },
-      { id: "preferences", label: "Preferences", testId: "settings-category-profile-preferences" },
+      { id: "appearance", label: "Appearance", testId: "settings-category-profile-appearance" },
       { id: "notifications", label: "Notifications", testId: "settings-category-profile-notifications" },
+      { id: "preferences", label: "Preferences", testId: "settings-category-profile-preferences" },
+      { id: "advanced", label: "Advanced", testId: "settings-category-profile-advanced" },
     ];
   }, [activeTab, projectAiItems]);
 
@@ -1610,6 +1618,10 @@ export function SettingsPanel({ activeTab: fallbackTab, organizationId, onOrgani
             <ProfileEditor variant="panel" />
           ) : profileCategory === "notifications" ? (
             <NotificationPreferencesSettings userId={user?.id ?? null} accessToken={session?.access_token ?? null} />
+          ) : profileCategory === "appearance" ? (
+            <PersonalAppearanceSettings />
+          ) : profileCategory === "advanced" ? (
+            <PersonalAdvancedSettings />
           ) : (
             <PersonalPreferencesSettings gitAutoSyncAfterApply={gitAutoSyncAfterApply} onGitAutoSyncChange={handleGitAutoSyncChange} />
           )}

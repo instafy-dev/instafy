@@ -85,6 +85,7 @@ import {
 } from "./studio/StudioLazyPanels";
 import { HomePanel } from "./studio/components/HomePanel";
 import { useStudioBugReportController } from "./studio/components/useStudioBugReportController";
+import { StudioDiagnostics } from "./studio/components/StudioDiagnostics";
 import { Status } from "../status/Status";
 import type { SettingsTab, StudioNavItem, StudioPanel } from "./studio/types";
 import { useAuth } from "../providers/AuthProvider";
@@ -452,7 +453,11 @@ function StudioLayoutInner() {
     handleHideBuildLogs
   } = useBuildLogs();
   const notificationCenter = useNotificationCenter({ userId: currentUserId, accessToken: auth.session?.access_token ?? null, navigate });
+  const [diagnosticsOpen, setDiagnosticsOpen] = useState(false);
+  const openDiagnostics = useCallback(() => setDiagnosticsOpen(true), []);
+  useEffect(() => { setDiagnosticsOpen(false); }, [currentUserId]);
   const bugReportController = useStudioBugReportController({
+    onOpenDiagnostics: openDiagnostics,
     legacyResolutionToasts: false,
     currentUserId,
     activeProjectId,
@@ -2151,6 +2156,7 @@ function StudioLayoutInner() {
             onOpenProfileSettings: handleOpenProfileSettings,
             onOpenBugReport: bugReportController.onOpenBugReport,
             onOpenBugReportInbox: bugReportController.onOpenBugReportInbox,
+            onOpenDiagnostics: openDiagnostics,
             supportUnreadCount: bugReportController.supportUnreadCount,
             topbarLocationOverride,
             shakeToReportEnabled: bugReportController.shakeToReportEnabled,
@@ -2438,6 +2444,7 @@ function StudioLayoutInner() {
             </div>
           ) : null}
           {bugReportController.dialogs}
+          <StudioDiagnostics key={currentUserId} isOpen={diagnosticsOpen} onOpenChange={setDiagnosticsOpen} />
         </WorkspaceControlsProvider>
       </div>
       <ProjectLauncher

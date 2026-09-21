@@ -4,13 +4,23 @@ Settings pages use `SettingsShell` so their navigation follows the available con
 including when Studio has another panel open.
 
 - Wide pages show a category list beside the form.
-- Compact pages with up to three flat categories show visible tabs. Personal settings,
-  Credits and Skills use this pattern.
+- Compact pages with up to three flat categories show visible tabs. Credits and Skills use
+  this pattern.
 - Larger or nested category sets use one anchored picker. A parent with children opens the
   next level inside that same picker. Back returns to the parent list; selecting a destination
   closes the picker and changes the route. Browsing categories does not add history entries.
 - Escape and native Back return one level, then dismiss the picker. Keyboard focus returns
   to its trigger on dismissal and follows the selected category when the layout changes.
+
+Your settings has Profile, Appearance, Notifications, Preferences and Advanced categories.
+Appearance owns the device's System/Light/Dark theme; Preferences owns assistant file-saving
+behavior. Theme changes apply immediately. Team and space colors remain in their scoped
+identity settings. On mobile the five categories use the shared anchored picker.
+
+Advanced keeps Developer tools collapsed until opened. Its diagnostics action and Support's
+diagnostics action open the same Studio-owned dialog for logs, build information, runtime
+connections and layout overrides. No developer-mode preference is required. The account menu
+keeps Your settings, Support, install/update actions when relevant and Sign out.
 
 Utility pages such as Settings, Credits, AI and Machines share one temporary workspace tab.
 Browsing a different utility replaces that preview; settings categories reuse the same Settings

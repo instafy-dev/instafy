@@ -33,6 +33,7 @@ interface UseStudioBugReportControllerOptions {
   controllerProjectMissing: boolean;
   buildLogs: BuildLogEntry[];
   legacyResolutionToasts?: boolean;
+  onOpenDiagnostics?: () => void;
 }
 
 export function useStudioBugReportController({
@@ -44,6 +45,7 @@ export function useStudioBugReportController({
   controllerProjectMissing,
   buildLogs,
   legacyResolutionToasts = true,
+  onOpenDiagnostics,
 }: UseStudioBugReportControllerOptions) {
   const { hideStatus, showStatus } = useStatus();
   const { logs: appLogs } = useAppLogs();
@@ -519,6 +521,7 @@ export function useStudioBugReportController({
         }}
         onSupportActivityAcknowledged={handleSupportActivityAcknowledged}
         onReportIssue={() => void handleOpenManualBugReport()}
+        onOpenDiagnostics={onOpenDiagnostics}
       />
     </>
   );
