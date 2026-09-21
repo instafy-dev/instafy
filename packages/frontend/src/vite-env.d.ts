@@ -339,6 +339,8 @@ type InstafyDesktopPersonalBrowserStatus = {
   approvalModes?: Array<"ask" | "routine">;
   humanInputRequest?: import("./screens/studio/components/useBrowserHumanInput").BrowserHumanInputRequest;
   humanControlReady?: boolean;
+  sharing?: boolean;
+  tabControlActive?: boolean;
   ownerId?: string;
   projectId?: string;
   runtimeId?: string;
@@ -432,6 +434,19 @@ interface Window {
       visible: boolean;
       ownerId: string;
     }) => Promise<InstafyDesktopPersonalBrowserStatus>;
+    browserTabExploreOpen?: (options: { ownerId: string; captureId: string; viewport: { width: number; height: number; dpr: number } }) => Promise<{ viewId: string }>;
+    browserTabExploreRenew?: (options: { ownerId: string; captureId: string; viewId: string }) => Promise<boolean>;
+    browserTabExploreFrame?: (options: { ownerId: string; captureId: string; viewId: string }) => Promise<Uint8Array | null>;
+    browserTabExploreResize?: (options: { ownerId: string; captureId: string; viewId: string; value: { width: number; height: number; dpr: number } }) => Promise<void>;
+    browserTabExploreInput?: (options: { ownerId: string; captureId: string; viewId: string; value: unknown }) => Promise<void>;
+    browserTabExploreNavigate?: (options: { ownerId: string; captureId: string; viewId: string; value: "back" | "forward" | "reload" }) => Promise<void>;
+    browserTabExploreClose?: (options: { ownerId: string; captureId: string; viewId: string }) => Promise<void>;
+    browserTabShareControl?: (options: { ownerId: string; captureId: string; grantId: string | null }) => Promise<void>;
+    browserTabShareRenew?: (options: { ownerId: string; captureId: string; grantId: string }) => Promise<boolean>;
+    browserTabShareInput?: (options: { ownerId: string; captureId: string; grantId: string; input: unknown }) => Promise<void>;
+    browserTabShareStart?: (options: { ownerId: string }) => Promise<{ captureId: string }>;
+    browserTabShareFrame?: (options: { ownerId: string; captureId: string }) => Promise<Uint8Array>;
+    browserTabShareStop?: (options: { ownerId: string; captureId: string }) => Promise<void>;
     personalBrowserNavigate?: (options: {
       url: string;
       ownerId: string;

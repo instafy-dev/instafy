@@ -142,6 +142,7 @@ describe("PersonalBrowserSurface", () => {
           active
           model={model}
           transportSelector={transportSelector}
+          sharingControls={<div data-testid="sharing-controls">Share this tab</div>}
         />,
       );
     });
@@ -153,11 +154,16 @@ describe("PersonalBrowserSurface", () => {
       visible: true,
       ownerId: "owner-1",
     });
-    expect(container.textContent).not.toContain("Personal on this device");
+    expect(container.textContent).toContain("This device");
     expect(
       container.querySelector('[data-testid="browser-transport-personal"]')?.textContent,
-    ).toBe("Personal · you");
+    ).toBe("This device");
     expect(container.textContent).toContain("Ready");
+    const chrome = container.querySelector('[data-testid="personal-browser-chrome"]')!;
+    const sharing = container.querySelector('[data-testid="sharing-controls"]')!;
+    const viewport = container.querySelector('[data-testid="personal-browser-viewport"]')!;
+    expect(chrome.compareDocumentPosition(sharing) & Node.DOCUMENT_POSITION_FOLLOWING).not.toBe(0);
+    expect(sharing.nextElementSibling).toBe(viewport);
     expect(
       container
         .querySelector('[data-testid="personal-browser-agent-status"]')
@@ -198,8 +204,8 @@ describe("PersonalBrowserSurface", () => {
       '[data-testid="browser-transport-shared"]',
     );
     expect(personal?.disabled).toBe(true);
-    expect(personal?.getAttribute("aria-label")).toBe("Personal — you, this device");
-    expect(shared?.getAttribute("aria-label")).toBe("Shared — this project");
+    expect(personal?.getAttribute("aria-label")).toBe("This device");
+    expect(shared?.getAttribute("aria-label")).toBe("Workspace browser");
     expect(
       document.getElementById(personal?.getAttribute("aria-describedby") ?? "")?.textContent,
     ).toContain("stay on this device");
@@ -263,9 +269,9 @@ describe("PersonalBrowserSurface", () => {
     const shared = container.querySelector<HTMLButtonElement>('[data-testid="browser-transport-shared"]')!;
     expect(personal.textContent).toBe("");
     expect(shared.textContent).toBe("");
-    expect(personal.getAttribute("aria-label")).toBe("Personal — you, this device");
+    expect(personal.getAttribute("aria-label")).toBe("This device");
     expect(personal.getAttribute("aria-pressed")).toBe("true");
-    expect(shared.getAttribute("aria-label")).toBe("Shared — this project");
+    expect(shared.getAttribute("aria-label")).toBe("Workspace browser");
     expect(shared.getAttribute("aria-pressed")).toBe("false");
     const personalDescription = document.getElementById(personal.getAttribute("aria-describedby")!)?.textContent;
     expect(personalDescription).toContain("follow you across projects");

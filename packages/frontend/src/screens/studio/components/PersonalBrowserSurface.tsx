@@ -73,7 +73,7 @@ export function BrowserTransportSelector({
     >
       <button
         aria-describedby={personalDescriptionId}
-        aria-label="Personal — you, this device"
+        aria-label="This device"
         aria-pressed={mode === "personal"}
         className={optionClassName("personal")}
         data-testid="browser-transport-personal"
@@ -84,29 +84,29 @@ export function BrowserTransportSelector({
             ? "Checking this device…"
             : !personalAvailable
               ? "Personal Browser is available in the Instafy desktop app."
-              : "Personal — your logins across projects on this device; never shared with project members"
+              : "This device — logins stay here; you choose who can view the tab"
         }
         type="button"
       >
         <Computer className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
-        {compact ? null : <span>Personal · you</span>}
+        {compact ? null : <span>This device</span>}
       </button>
       <button
         aria-describedby={sharedDescriptionId}
-        aria-label="Shared — this project"
+        aria-label="Workspace browser"
         aria-pressed={mode === "shared"}
         className={optionClassName("shared")}
         data-testid="browser-transport-shared"
         onClick={() => onModeChange("shared")}
-        title="Shared — this project's remote browser and logins, visible to project members on their devices"
+        title="Workspace browser — project members can see and reuse logins"
         type="button"
       >
         <Globe className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
-        {compact ? null : <span>Shared · project</span>}
+        {compact ? null : <span>Workspace</span>}
       </button>
       <span className="sr-only" id={personalDescriptionId}>
-        Your logins and site data stay on this device and follow you across projects.
-        They are not copied to Shared Browser or your other devices.
+        Your logins and site data stay on this device and follow you across projects. They are
+        not copied to Shared Browser or your other devices. Share tab lets you choose who can watch.
       </span>
       <span className="sr-only" id={sharedDescriptionId}>
         Project members see the same remote browser and logged-in pages. Members
@@ -166,6 +166,7 @@ export function PersonalBrowserSurface({
   transportSelector,
   humanInputIdentityKey,
   onContinueAfterHumanInput,
+  sharingControls,
 }: {
   active: boolean;
   compactChrome?: boolean;
@@ -173,6 +174,7 @@ export function PersonalBrowserSurface({
   transportSelector: ReactNode;
   humanInputIdentityKey?: string;
   onContinueAfterHumanInput?: (message: string, approvalMode: "ask" | "routine") => Promise<boolean>;
+  sharingControls?: ReactNode;
 }) {
   const viewportRef = useRef<HTMLDivElement | null>(null);
   const lastValidBoundsRef = useRef<InstafyDesktopPersonalBrowserBounds>({
@@ -281,7 +283,7 @@ export function PersonalBrowserSurface({
   const handleNavigate = useCallback(
     (event: FormEvent<HTMLFormElement>) => {
       event.preventDefault();
-      if (model.status?.agentControlEnabled) {
+      if (model.status?.agentControlEnabled || model.status?.tabControlActive) {
         return;
       }
       void model.navigate(address);
@@ -300,7 +302,7 @@ export function PersonalBrowserSurface({
   }, [model]);
 
   const browserStatus = personalBrowserStatus(model);
-  const humanInputLocked = model.status?.agentControlEnabled === true || model.status?.humanControlReady === false;
+  const humanInputLocked = model.status?.agentControlEnabled === true || model.status?.humanControlReady === false || model.status?.tabControlActive === true;
   const personalHumanInputRequest = model.status?.humanInputRequest;
   const ownsNativeStatus = Boolean(ownerId) && model.status?.ownerId === ownerId;
   const humanInputOptions = {
@@ -411,7 +413,9 @@ export function PersonalBrowserSurface({
               model.clearNavigationError();
             }}
             placeholder={
-              humanInputLocked
+              model.status?.tabControlActive
+                ? "Take back control to navigate"
+                : humanInputLocked
                 ? "Pause agent control to navigate"
                 : ready
                 ? "Enter an address"
@@ -462,7 +466,7 @@ export function PersonalBrowserSurface({
           ) : model.status?.agentControlEnabled || (ready && !humanInputState.active) ? (
             <IconButton
               aria-label={model.status?.agentControlEnabled ? "Pause agent control" : "Resume agent control"}
-              isDisabled={!model.status?.agentControlEnabled && model.status?.humanControlReady === false}
+              isDisabled={!model.status?.agentControlEnabled && (model.status?.humanControlReady === false || model.status?.tabControlActive)}
               className="max-[540px]:h-10 max-[540px]:w-10"
               onPress={() => void model.setAgentControlEnabled(
                 !model.status?.agentControlEnabled,
@@ -545,6 +549,7 @@ export function PersonalBrowserSurface({
       {ready && humanInputIdentityKey && onContinueAfterHumanInput ? (
         <BrowserHumanInputStatus {...humanInputOptions} state={humanInputState} />
       ) : null}
+      {sharingControls}
       <div
         ref={viewportRef}
         aria-label="Personal browser content"

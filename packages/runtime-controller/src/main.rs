@@ -21,6 +21,7 @@ mod auth;
 mod automations;
 mod billing;
 mod browser_profile;
+mod browser_shares;
 mod browser_turn;
 mod bug_reports;
 mod config;
@@ -444,6 +445,7 @@ async fn main() -> anyhow::Result<()> {
         .merge(dispatch::router())
         .merge(automations::router())
         .merge(projects::router())
+        .merge(browser_shares::router())
         .merge(imports::router())
         .merge(integrations::router())
         .merge(providers::router())

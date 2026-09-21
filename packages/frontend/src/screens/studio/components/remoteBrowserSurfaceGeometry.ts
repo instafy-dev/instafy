@@ -1,4 +1,4 @@
-export type RemoteBrowserSurface = HTMLCanvasElement | HTMLVideoElement;
+export type RemoteBrowserSurface = HTMLCanvasElement | HTMLVideoElement | HTMLImageElement;
 
 export type RemoteBrowserContentRect = {
   left: number;
@@ -27,9 +27,9 @@ function contentSizeFromAttributes(surface: RemoteBrowserSurface): ContentSize |
 
 function intrinsicContentSize(surface: RemoteBrowserSurface): ContentSize | null {
   const width =
-    surface instanceof HTMLCanvasElement ? surface.width : surface.videoWidth;
+    surface instanceof HTMLCanvasElement ? surface.width : surface instanceof HTMLImageElement ? surface.naturalWidth : surface.videoWidth;
   const height =
-    surface instanceof HTMLCanvasElement ? surface.height : surface.videoHeight;
+    surface instanceof HTMLCanvasElement ? surface.height : surface instanceof HTMLImageElement ? surface.naturalHeight : surface.videoHeight;
   return positiveFinite(width) && positiveFinite(height) ? { width, height } : null;
 }
 

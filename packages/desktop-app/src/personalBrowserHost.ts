@@ -1,3 +1,5 @@
+import { createBrowserTabExplorePage } from "./browserTabExplorePage";
+import { dispatchBrowserTabInput } from "./browserTabInput";
 import {
   BrowserWindow,
   WebContentsView,
@@ -23,6 +25,7 @@ import {
   type PersonalBrowserTargetDescriptor,
 } from "./personalBrowserPageBridge";
 import { PersonalBrowserInputShield } from "./personalBrowserInputShield";
+import { BrowserTabCapture } from "./browserTabCapture";
 import {
   PersonalBrowserControlError,
   PersonalBrowserControlServer,
@@ -70,6 +73,8 @@ export type PersonalBrowserStatus = {
   humanInputRequest?: PersonalBrowserHumanInputRequest;
   approvalMode: PersonalBrowserApprovalMode;
   approvalModes: PersonalBrowserApprovalMode[];
+  sharing?: boolean;
+  tabControlActive?: boolean;
   ownerId?: string;
   projectId?: string;
   runtimeId?: string;
@@ -224,6 +229,37 @@ export class PersonalBrowserHost {
   private latestAgentSnapshot: PersonalBrowserSnapshotState | null = null;
   private lastEmittedStatus = "";
   private releaseCloseTimer: ReturnType<typeof setTimeout> | null = null;
+  private readonly tabCapture = new BrowserTabCapture(() => {
+    const contents = this.getWebContents();
+    return contents && this.currentOwnerId && this.currentProjectId && this.currentVisible
+      ? { contents, ownerId: this.currentOwnerId, projectId: this.currentProjectId,
+          canControl: !this.agentControlEnabled && this.activeControlOperations === 0,
+          createExplore: viewport => createBrowserTabExplorePage(contents.session, contents.getURL(), viewport),
+          dispatchInput: (input, current) => this.inputShield.withInjectedInput(() => dispatchBrowserTabInput(contents,this.fitBoundsToOwner(this.currentBounds),input,current)),
+        } : null;
+  }, () => { this.syncInputShield(); this.emitStatus(); });
+
+  startTabShare(ownerId: string) {
+    const result = this.tabCapture.start(ownerId);
+    this.emitStatus();
+    return result;
+  }
+  controlSharedTab(ownerId: string, captureId: string, grantId: string | null) { this.tabCapture.setControl(ownerId,captureId,grantId); }
+  renewSharedTabControl(ownerId: string, captureId: string, grantId: string) { return this.tabCapture.renewControl(ownerId,captureId,grantId); }
+  inputSharedTab(ownerId: string, captureId: string, grantId: string, input: unknown) { return this.tabCapture.input(ownerId,captureId,grantId,input); }
+  openTabExplore(ownerId: string, captureId: string, viewport: unknown) { return this.tabCapture.openExplore(ownerId, captureId, viewport); }
+  operateTabExplore(ownerId: string, captureId: string, viewId: string, operation: "renew" | "frame" | "input" | "resize" | "navigate" | "close", value?: unknown) { return this.tabCapture.operateExplore(ownerId, captureId, viewId, operation, value); }
+  captureSharedTab(ownerId: string, captureId: string) {
+    return this.tabCapture.frame(ownerId, captureId);
+  }
+  stopTabShare(ownerId: string, captureId: string) {
+    if (this.isOwnedBy(ownerId)) this.tabCapture.stop(captureId);
+    this.emitStatus();
+  }
+  revokeTabShare() {
+    this.tabCapture.stop();
+    this.emitStatus();
+  }
 
   constructor(options: PersonalBrowserHostOptions) {
     this.enabled = options.enabled;
@@ -296,10 +332,12 @@ export class PersonalBrowserHost {
       ...(title ? { title } : {}),
       ...navigation,
       agentControlEnabled: this.agentControlEnabled,
-      humanControlReady: this.currentState === "ready" && contents !== null && !this.agentControlEnabled && this.activeControlOperations === 0,
+      humanControlReady: this.currentState === "ready" && contents !== null && !this.agentControlEnabled && this.activeControlOperations === 0 && !this.tabCapture.controlActive,
       ...(this.humanInputRequest ? { humanInputRequest: this.humanInputRequest } : {}),
       approvalMode: this.approvalMode,
       approvalModes: ["ask", "routine"],
+      sharing: this.tabCapture.active,
+      tabControlActive: this.tabCapture.controlActive,
       ...(this.currentOwnerId ? { ownerId: this.currentOwnerId } : {}),
       ...(this.currentProjectId ? { projectId: this.currentProjectId } : {}),
       ...(this.currentRuntimeId ? { runtimeId: this.currentRuntimeId } : {}),
@@ -485,6 +523,7 @@ export class PersonalBrowserHost {
   }
 
   async prepareAgentControl(requestedApprovalMode?: unknown): Promise<number> {
+    if (this.tabCapture.controlActive) throw new Error("Take back tab control before enabling the agent.");
     if (!this.agentControlEnabled && this.activeControlOperations > 0) {
       throw new Error("The previous Personal Browser operation is still stopping. Wait for control to return before resuming.");
     }
@@ -623,6 +662,7 @@ export class PersonalBrowserHost {
       return this.getStatus();
     }
     this.clearHumanInputGuidance();
+    this.tabCapture.stop();
     this.cancelReleaseExpiry();
     this.controlEpoch += 1;
     this.invalidateAgentSnapshot();
@@ -657,6 +697,7 @@ export class PersonalBrowserHost {
 
   async clearData(): Promise<PersonalBrowserStatus> {
     this.humanInputRequest = null;
+    this.tabCapture.stop();
     const contents = this.requireWebContents();
     this.setAgentControlState(false);
     this.controlEpoch += 1;
@@ -679,6 +720,7 @@ export class PersonalBrowserHost {
       return this.getStatus();
     }
     this.humanInputRequest = null;
+    this.tabCapture.stop();
     this.cancelReleaseExpiry();
     this.controlEpoch += 1;
     this.invalidateAgentSnapshot();
@@ -893,13 +935,14 @@ export class PersonalBrowserHost {
 
   private syncInputShield() {
     this.inputShield.sync(
-      this.agentControlEnabled || this.activeControlOperations > 0,
+      this.agentControlEnabled || this.activeControlOperations > 0 || this.tabCapture.controlActive,
       this.currentVisible,
       this.fitBoundsToOwner(this.currentBounds),
     );
   }
 
   private emergencyPauseAgentControl() {
+    if (this.tabCapture.controlActive) { this.tabCapture.revokeControl(); return; }
     if (!this.agentControlEnabled) {
       return;
     }
@@ -936,6 +979,7 @@ export class PersonalBrowserHost {
   }
 
   private assertHumanInputAvailable() {
+    if (this.tabCapture.controlActive) throw new Error("Take back tab control before navigating.");
     if (this.agentControlEnabled || this.activeControlOperations > 0) {
       throw new Error("Pause Personal Browser agent control and wait for active operations to stop before navigating manually.");
     }

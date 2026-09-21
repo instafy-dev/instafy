@@ -8,8 +8,14 @@ Sharing an Instafy project does not share a contributor's computer. The current 
 | --- | --- | --- |
 | Managed `instafy-cloud` runtime | Project members according to their project role | Yes, through Shared Browser's separate view/control grants |
 | Ordinary self-hosted runtime | Its controller-attested immutable owner, plus narrowly scoped controller service operations | No |
-| Personal Browser runtime | The signed-in owner on the attested Electron device | No, permanently |
+| Personal Browser runtime | The signed-in owner on the attested Electron device | No runtime access; explicit local tab sharing is a separate surface grant |
 | Team runtime | Not implemented | No |
+
+An Electron owner can explicitly [share a local tab](Local-Browser-Sharing.md) with
+selected space members. That separate human-user channel relays tab pixels and
+owner-approved input or Explore pages; it does not grant runtime discovery, agent
+control, job submission, shell access or profile export. Project membership alone
+never starts sharing or grants control.
 
 Shared Browser is accepted only on the exact canonical managed `instafy-cloud` route. Studio does not offer a self-hosted or custom runtime as a Shared Browser candidate, and the controller independently rejects those runtimes for browser grants, dispatch, and profile persistence. Prefixes are not authority: a provider named `instafy-cloud-custom` cannot opt itself into this boundary or receive managed-provider credentials.
 

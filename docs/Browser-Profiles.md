@@ -9,11 +9,12 @@ and Personal Browser uses a runtime-agent that runs locally on your device.
 
 | Profile | Page execution | Who shares its login state? |
 | --- | --- | --- |
-| **Personal — you, this device** | Electron's bundled Chromium on your computer | Your Instafy account across projects on this device. Not other users or devices. |
-| **Shared — this project** | Chromium in the managed project runtime | Project members viewing that same browser, including from web, mobile, and Desktop. Input still requires control permission. |
+| **This device** | Electron's bundled Chromium on your computer | Stored for your Instafy account across projects on this device. Explicitly approved tab control or Explore can use that account; the profile stays local. |
+| **Workspace browser** | Chromium in the managed project runtime | Project members viewing that same browser, including from web, mobile, and Desktop. Input still requires control permission. |
 | **Fresh — no saved logins** | A fresh headless Chromium context on an explicitly enabled self-hosted Linux runtime | Nobody inherits a previous login. The owner-local observation tool starts fresh for each call. |
 
-Studio's selector uses the short labels **Personal · you** and **Shared · project**.
+Studio's selector uses the short labels **This device** and **Workspace**. The
+local tab starts private; **Share tab** chooses its audience separately.
 Compact icon-only controls keep the full ownership description accessible.
 Fresh is a tool capability, not an interactive browser option in that selector.
 
@@ -83,7 +84,9 @@ in place so the clear can be retried safely.
 
 ## Security and verification
 
-Personal remains device-local and permanently non-shareable. Shared grants
+Personal keeps its profile on this device. Explicit [local tab sharing](Local-Browser-Sharing.md)
+can grant selected members viewing, human control, or an independent Explore page
+using that account, without exporting the profile or granting runtime access. Shared grants
 access to authenticated pages to project members; use a project-appropriate
 account there. Even without a cookie import/export feature, page content an
 agent observes may enter the configured AI provider's context.

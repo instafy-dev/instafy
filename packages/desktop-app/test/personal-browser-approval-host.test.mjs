@@ -33,6 +33,9 @@ function fixture(choose = async () => ({ response: 1 })) {
         return choose(options);
       } },
     },
+    "./browserTabCapture": require(path.join(packageRoot, "dist/browserTabCapture.js")),
+    "./browserTabInput": require(path.join(packageRoot, "dist/browserTabInput.js")),
+    "./browserTabExplorePage": { createBrowserTabExplorePage() { throw new Error("Unexpected native Explore page"); } },
     "./personalBrowserSecurity": security,
     "./personalBrowserPageBridge": { clearPersonalBrowserHumanInput: async () => {} },
     "./personalBrowserHumanInput": {},
