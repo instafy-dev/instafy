@@ -209,6 +209,30 @@ describe("RemoteBrowserMobileKeyboard", () => {
     ]);
   });
 
+  it("forwards rapid printable keys without waiting for beforeinput or inserting locally", async () => {
+    const onMessage = vi.fn();
+    await act(async () => root.render(<RemoteBrowserMobileKeyboard enabled onMessage={onMessage} />));
+    await act(async () => host.querySelector<HTMLButtonElement>('[data-testid="shared-browser-mobile-keyboard-open"]')!.click());
+    const input = host.querySelector<HTMLInputElement>("input")!;
+    await act(async () => {
+      for (const key of "iPhone WiFi åäö 123") {
+        const event = new KeyboardEvent("keydown", { key, bubbles: true, cancelable: true });
+        input.dispatchEvent(event);
+        expect(event.defaultPrevented).toBe(true);
+      }
+    });
+    expect(onMessage.mock.calls.map(([message]) => message.text).join("")).toBe("iPhone WiFi åäö 123");
+    expect(input.value).toBe("");
+    onMessage.mockClear();
+    await act(async () => {
+      input.dispatchEvent(new KeyboardEvent("keydown", { key: "v", metaKey: true, bubbles: true, cancelable: true }));
+      input.dispatchEvent(new CompositionEvent("compositionstart", { bubbles: true }));
+      input.dispatchEvent(new KeyboardEvent("keydown", { key: "n", bubbles: true, cancelable: true }));
+      input.dispatchEvent(new CompositionEvent("compositionend", { data: "に", bubbles: true }));
+    });
+    expect(onMessage.mock.calls.map(([message]) => message)).toEqual([{ type: "text", text: "に" }]);
+  });
+
   it("waits for IME composition to finish before forwarding text", async () => {
     const onMessage = vi.fn();
     await act(async () => {

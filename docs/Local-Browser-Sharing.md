@@ -2,9 +2,10 @@
 
 Status: initial Electron implementation. Touch, software keyboard, independent
 scroll/navigation, rotation and control revocation have been exercised in Chrome
-on a physical Samsung SM-S901B running Android 16 alongside Electron. Physical
-iOS, native mobile shells, real-network measurements and multi-controller routing
-remain open.
+on a physical Samsung SM-S901B running Android 16 alongside Electron. The iOS
+Capacitor QA app has also been exercised on an iPhone 13 mini running iOS 26.6
+over Wi-Fi. Native Android, cellular/WAN performance and multi-controller routing
+remain open; these device checks are not a performance sign-off.
 
 The browser's location and its audience are separate choices. The browser location
 selector says **This device** and **Workspace**. This device uses Personal Browser
@@ -129,6 +130,10 @@ Control groups wrap into the available width. On short viewports, such as a
 landscape phone, explanatory text is hidden to leave more room for the page;
 the status and action buttons remain visible.
 
+The streamed image disables native image selection, callouts and dragging so
+iOS image gestures do not cancel repeated shared-page swipes. Follow-mode zoom
+and local panning remain available.
+
 The expanded viewer follows the device's visible viewport when the software
 keyboard opens. It reserves space for the remote input bar and temporarily hides
 zoom controls and explanatory text, keeping navigation and release controls
@@ -175,8 +180,8 @@ layout and independent page scrolling described above.
 
 ## Next increments
 
-1. Extend local-tab touch/keyboard/control qualification to physical iOS and native mobile shells alongside
-   Electron. The earlier server-browser phone results do not cover this path.
+1. Extend local-tab qualification to the native Android shell and additional
+   mobile browsers. The earlier server-browser phone results do not cover this path.
 2. Measure native capture, end-to-end latency, quality, CPU and bandwidth on LAN
    and constrained networks. Evaluate event-driven capture and WebRTC/TURN against
    this baseline; qualify reconnect and multiple controller instances.
@@ -202,3 +207,11 @@ independent CSS and capture resolutions, shared cookies, native click navigation
 during capture, Back, Reload, resizing and teardown. It does not qualify phone interaction or
 end-to-end network latency. Those checks require an owner in Electron and a
 separately authenticated participant on the actual device.
+
+For the iOS regression check, expand Explore and swipe repeatedly in both
+directions, including after opening/closing the keyboard and rotating the phone.
+The participant must keep scrolling while the owner's scroll stays fixed. Test
+both software-keyboard taps and rapid printable key sequences with mixed case,
+spaces and accented characters; the saved text must match exactly. Finally,
+return to Follow, grant control, revoke it, and stop sharing to verify that input
+and pixels disappear at their respective boundaries.

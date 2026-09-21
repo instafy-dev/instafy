@@ -159,7 +159,7 @@ export function SharedLocalTabViewer({ projectId, share, onClose, onEnded }: { p
       className={`relative min-h-0 min-w-0 overflow-auto overscroll-contain ${fullscreen ? "flex-1" : ""}`}
       style={fullscreen ? undefined : { height: exploring ? "min(55vh,480px)" : image ? inlineHeight : 0, maxHeight: "55vh" }}>
       {image ? <div className="grid min-h-full min-w-full place-items-center" style={{ width, height }}>
-        <img ref={setSurface} tabIndex={(selfControls || exploring) && !panOnly ? 0 : -1} alt="Live shared browser tab" src={image} className="block max-w-none" style={{ width, height, touchAction: (selfControls || exploring) && !panOnly ? "none" : "auto" }} draggable={false} data-testid="local-browser-share-image"
+        <img ref={setSurface} tabIndex={(selfControls || exploring) && !panOnly ? 0 : -1} alt="Live shared browser tab" src={image} className="block max-w-none select-none [-webkit-touch-callout:none] [-webkit-user-drag:none]" style={{ width, height, touchAction: (selfControls || exploring) && !panOnly ? "none" : "auto" }} draggable={false} data-testid="local-browser-share-image"
           onLoad={event => { acknowledgeFrame.current?.(); const img = event.currentTarget; setImageSize(current => current.width === img.naturalWidth && current.height === img.naturalHeight ? current : { width: img.naturalWidth, height: img.naturalHeight }); }} />
       </div> : null}
     </div>

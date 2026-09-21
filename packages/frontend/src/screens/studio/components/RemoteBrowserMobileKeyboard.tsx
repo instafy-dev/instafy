@@ -254,11 +254,19 @@ export function RemoteBrowserMobileKeyboard({
   }
 
   const handleKeyDown = (event: ReactKeyboardEvent<HTMLInputElement>) => {
-    if (event.nativeEvent.isComposing || event.key === "Process") {
+    if (composingRef.current || event.nativeEvent.isComposing || event.key === "Process") {
       return;
     }
     const code = MOBILE_CONTROL_KEYS[event.key];
     if (!code) {
+      const text = remoteBrowserKeyDownText(event.key, cdpScreencastModifiers(event), event.getModifierState("AltGraph"));
+      // Handle printable hardware keys in their own event. WebKit can omit
+      // beforeinput during rapid key sequences; cancelling keydown also stops
+      // its native insertion. Software keyboards and IMEs keep the input lane.
+      if (text && event.cancelable) {
+        event.preventDefault();
+        onMessage({ type: "text", text });
+      }
       return;
     }
     event.preventDefault();
