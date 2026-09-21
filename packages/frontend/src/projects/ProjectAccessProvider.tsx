@@ -1,5 +1,6 @@
 import {
   createContext,
+  useCallback,
   useContext,
   useEffect,
   useMemo,
@@ -59,6 +60,14 @@ export interface ProjectAccessContextValue {
   projectAccessPending: boolean;
   projectAccessBlocked: boolean;
   projectAccessUnavailable: boolean;
+  /**
+   * The account has no space and one could not be made: the list came back
+   * empty (or unreadable) and the create failed. The studio then had nothing
+   * to work in and, until this flag, nothing to say about it: the composer
+   * simply stayed shut. `retryProjectBootstrap` runs the whole startup again.
+   */
+  projectProvisionFailed: boolean;
+  retryProjectBootstrap: () => void;
   projectCapabilitiesResolved: boolean;
   effectiveProjectRole: EffectiveProjectRole | null;
   canWriteProject: boolean;
@@ -199,6 +208,15 @@ export function ProjectAccessProvider({ children }: { children: ReactNode }) {
   const [projectAccessPending, setProjectAccessPending] = useState(false);
   const [projectAccessBlocked, setProjectAccessBlocked] = useState(false);
   const [projectAccessUnavailable, setProjectAccessUnavailable] = useState(false);
+  const [projectProvisionFailed, setProjectProvisionFailed] = useState(false);
+  const [bootstrapAttempt, setBootstrapAttempt] = useState(0);
+  const retryProjectBootstrap = useCallback(() => {
+    setProjectProvisionFailed(false);
+    // Initialized is what the bootstrap effect skips on, so a retry clears it
+    // and the gate shows "Getting things ready" again while it runs.
+    setProjectInitialized(false);
+    setBootstrapAttempt((attempt) => attempt + 1);
+  }, []);
   const [projectCapabilities, setProjectCapabilities] = useState<{
     projectId: string;
     value: ProjectCapabilities;
@@ -377,6 +395,7 @@ export function ProjectAccessProvider({ children }: { children: ReactNode }) {
 
     const resolveProject = async () => {
       let targetProjectIdForBackoff: string | null = urlProjectId;
+      setProjectProvisionFailed(false);
       setProjectAccessPending(true);
       setProjectAccessBlocked(false);
       setProjectAccessUnavailable(false);
@@ -625,6 +644,9 @@ export function ProjectAccessProvider({ children }: { children: ReactNode }) {
           setProjectAccessPending(false);
           setProjectAccessBlocked(false);
           setProjectAccessUnavailable(Boolean(targetProjectIdForBackoff));
+          // No remembered space to fall back to: the account has none and
+          // making one failed. Say so rather than opening an empty studio.
+          setProjectProvisionFailed(!targetProjectIdForBackoff);
           if (typeof window !== "undefined") {
             const runtimeWindow = window as typeof window & {
               __INSTAFY_PROJECT_INITIALIZED__?: boolean;
@@ -648,6 +670,7 @@ export function ProjectAccessProvider({ children }: { children: ReactNode }) {
     };
   }, [
     activeProjectId,
+    bootstrapAttempt,
     createProject,
     createControllerProject,
     getControllerProjectSummaryResult,
@@ -983,13 +1006,24 @@ export function ProjectAccessProvider({ children }: { children: ReactNode }) {
       projectAccessPending,
       projectAccessBlocked,
       projectAccessUnavailable,
+      projectProvisionFailed,
+      retryProjectBootstrap,
       projectCapabilitiesResolved: capabilitiesResolved,
       effectiveProjectRole: activeCapabilities?.effectiveRole ?? null,
       canWriteProject: activeCapabilities?.canWrite ?? !hasSupabaseConfig,
       canShareProject: activeCapabilities?.canShare ?? !hasSupabaseConfig,
       canManageProject: activeCapabilities?.canManage ?? !hasSupabaseConfig,
     }),
-    [activeCapabilities, capabilitiesResolved, projectAccessBlocked, projectAccessUnavailable, projectAccessPending, projectInitialized]
+    [
+      activeCapabilities,
+      capabilitiesResolved,
+      projectAccessBlocked,
+      projectAccessUnavailable,
+      projectAccessPending,
+      projectInitialized,
+      projectProvisionFailed,
+      retryProjectBootstrap,
+    ]
   );
 
   return <ProjectAccessContext.Provider value={value}>{children}</ProjectAccessContext.Provider>;

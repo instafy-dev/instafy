@@ -94,6 +94,7 @@ function AccessProbe() {
       data-blocked={String(access.projectAccessBlocked)}
       data-initialized={String(access.projectInitialized)}
       data-pending={String(access.projectAccessPending)}
+      data-provision-failed={String(access.projectProvisionFailed)}
     />
   );
 }
@@ -641,6 +642,42 @@ describe("ProjectAccessProvider startup with nothing remembered", () => {
     expect(mocks.createControllerProject).toHaveBeenCalledTimes(1);
     expect(mocks.createControllerProject).toHaveBeenCalledWith({ projectType: "customer" });
     expect(mocks.createProject).toHaveBeenCalledWith(expect.objectContaining({ projectId: MINTED_ID }));
+  });
+
+  it("says so and offers a retry when no space could be made, then makes one on retry", async () => {
+    // The last first-run dead end: with no space and a failed create the
+    // studio opened with a shut composer and no word about why.
+    mocks.listProjects.mockResolvedValue({ status: "success", projects: [] });
+    mocks.createControllerProject
+      .mockRejectedValueOnce(new Error("controller unavailable"))
+      .mockResolvedValueOnce({ projectId: MINTED_ID, orgId: "org-1", orgName: "Team", projectName: null });
+    await act(async () => root.render(
+      <ProjectAccessProvider>
+        <AccessProbe />
+        <ProjectAccessRecoveryBanner />
+        <StudioStartupGate><p>Workspace ready</p></StudioStartupGate>
+      </ProjectAccessProvider>,
+    ));
+    await settle();
+
+    const probe = () => container.querySelector('[data-testid="access-probe"]');
+    expect(probe()?.getAttribute("data-initialized")).toBe("true");
+    expect(probe()?.getAttribute("data-provision-failed")).toBe("true");
+    const banner = container.querySelector('[data-testid="project-provision-failed"]');
+    expect(banner?.textContent).toContain("Couldn’t set up your space.");
+    expect(mocks.createProject).not.toHaveBeenCalled();
+
+    const retry = [...container.querySelectorAll("button")].find((button) => button.textContent === "Try again");
+    expect(retry).not.toBeUndefined();
+    await act(async () => {
+      retry!.click();
+    });
+    await settle();
+
+    expect(mocks.createControllerProject).toHaveBeenCalledTimes(2);
+    expect(mocks.createProject).toHaveBeenCalledWith(expect.objectContaining({ projectId: MINTED_ID }));
+    expect(probe()?.getAttribute("data-provision-failed")).toBe("false");
+    expect(container.querySelector('[data-testid="project-provision-failed"]')).toBeNull();
   });
 
   it("still mints when the list cannot be read, as before", async () => {
