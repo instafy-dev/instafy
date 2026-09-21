@@ -54,7 +54,7 @@
 [data-testid="mobile-left-drawer-overlay"][hidden] { display: none; }
 .studio-context-search-screen { display: flex; flex-direction: column; flex: 1; min-width: 0; min-height: 0; overflow: hidden; }
 .studio-context-search-mobile { padding: calc(8px + var(--instafy-safe-area-inset-top)) 8px 8px; background: var(--color-slate-50); border-bottom: 1px solid var(--color-slate-200); }
-.studio-context-mobile-picker { display: flex; flex: none; min-width: 0; padding: 4px 12px; border-bottom: 1px solid var(--color-slate-200); }
+.studio-context-mobile-picker { border-bottom: 1px solid var(--color-slate-200); }
 .dark .studio-context-header, .dark .studio-context-search-mobile { background: var(--color-studio-dark-rail); border-color: var(--color-studio-dark-divider); color: var(--color-slate-100); }
 .dark .studio-context-mobile-picker { border-color: var(--color-studio-dark-divider); }
 @media (pointer: coarse) {

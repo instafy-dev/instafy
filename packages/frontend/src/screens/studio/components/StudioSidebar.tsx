@@ -1074,13 +1074,13 @@ export function StudioSidebar({
       collapsed={!externalHeader && !showLabels}
       expanded={recentSpacesExpanded}
       onExpandedChange={setRecentSpacesExpanded}
-      rowClassName={pathControls ? `gap-1 !px-1 ${desktopRail ? "min-h-9" : "!min-h-12"}` : `${sidebarRowLayoutClass} ${getSidebarRowToneClass(workspaceSwitcherOpen && workspaceSwitcherMode === "spaces")}`}
+      rowClassName={pathControls ? desktopRail ? "gap-1 !px-1 min-h-9" : "!px-2 !min-h-12" : `${sidebarRowLayoutClass} ${getSidebarRowToneClass(workspaceSwitcherOpen && workspaceSwitcherMode === "spaces")}`}
       iconClassName={pathControls ? "flex h-5 w-5 shrink-0 items-center justify-center" : getSidebarNavIconClass(workspaceSwitcherOpen && workspaceSwitcherMode === "spaces")}
       triggerRef={spaceTriggerRef}
     />
   );
   const navigationPath = <div
-    className="sidebar-navigation-path flex min-w-0 flex-1 items-center gap-0.5"
+    className={`sidebar-navigation-path flex min-w-0 flex-1 items-center ${desktopRail ? "gap-0.5" : "gap-[3px]"}`}
     role="group" aria-label="Team and space" data-testid="sidebar-navigation-path"
     inert={externalHeader && mobileDrillInOpen || undefined} aria-hidden={externalHeader && mobileDrillInOpen || undefined}>
     <div className={`sidebar-path-team flex ${externalHeader && desktopRail ? "min-w-0 max-w-64" : "shrink-0"}`}>{teamMenu}</div>

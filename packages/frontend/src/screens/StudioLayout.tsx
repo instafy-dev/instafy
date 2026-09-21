@@ -2317,7 +2317,7 @@ function StudioLayoutInner() {
           {!search.open && !isLargeScreen && (mobileSidebarOpen || routeOwnedMobileWorkspaceDrawer) ? (
             <StudioMobileSidebarOverlay onClose={() => handleMobileSidebarOpenChange(false)}>
               <div className="flex h-full min-h-0 flex-col">
-              <div className="studio-context-mobile-picker" inert={mobileSidebarNavigation.view !== "sidebar" || undefined} aria-hidden={mobileSidebarNavigation.view !== "sidebar" || undefined}>
+              <div className="studio-mobile-context-header studio-context-mobile-picker" inert={mobileSidebarNavigation.view !== "sidebar" || undefined} aria-hidden={mobileSidebarNavigation.view !== "sidebar" || undefined}>
                 <IconButton variant="ghost" onPress={handleOpenHome} aria-label="Home — all teams" aria-current={contextHomeActive ? "page" : undefined} className="relative !min-h-12 !min-w-11 shrink-0">
                   <OctoMark className="h-6 w-6 text-brand-ink dark:text-brand-paper" />
                   <AttentionBadge count={homeAttentionCount} aria-hidden className="absolute right-0 top-0" />
