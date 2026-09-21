@@ -104,6 +104,7 @@ export interface StudioSidebarProps {
   navigationHeaderPortalTarget?: HTMLElement | null;
   /** The surrounding shell provides the team and space context header. */
   navigationHeaderExternal?: boolean;
+  compactContextHeader?: boolean;
   renderNavigationHeader?: (context: StudioNavigationContext) => ReactNode;
   onNavigationHeaderAction?: () => void;
 }
@@ -138,6 +139,7 @@ export function StudioSidebar({
   navigationPresentation = "tiles",
   navigationHeaderPortalTarget = null,
   navigationHeaderExternal = false,
+  compactContextHeader = false,
   renderNavigationHeader,
   onNavigationHeaderAction,
 }: StudioSidebarProps) {
@@ -1043,7 +1045,7 @@ export function StudioSidebar({
   const teamMenu = <StudioSidebarTeamMenu
     key={JSON.stringify([activeTeamUserKey, activeOrgKey, activeProjectId, activePanel, desktopRail, externalHeader || showLabels, navigationPresentation, externalHeader])}
     teamName={activeOrgName} teamAvatarUrl={activeOrgAvatarUrl} accentColor={activeOrgAccentColor}
-    presentation={pathControls && (!externalHeader || !desktopRail) ? "path" : "standard"} compact={!externalHeader && !showLabels}
+    presentation={pathControls && (compactContextHeader || !externalHeader || !desktopRail) ? "path" : "standard"} compact={!externalHeader && !showLabels}
     active={activePanel === "team" || activePanel === "settings"}
     rowClassName={`${sidebarRowLayoutClass} ${getSidebarRowToneClass(activePanel === "team" || activePanel === "settings")}`}
     iconClassName={getSidebarNavIconClass(activePanel === "team" || activePanel === "settings")}

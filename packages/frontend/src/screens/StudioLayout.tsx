@@ -43,6 +43,7 @@ import {
   useParticipantsDrawerOpen,
 } from "./studio/components/chatParticipantsStore";
 import { useStudioSearch, type StudioSearchRequest } from "./studio/components/useStudioSearch";
+import { StudioDesktopHeader } from "./studio/components/StudioDesktopHeader";
 import { StudioSearchContext } from "./studio/components/StudioSearchContext";
 import { StudioSearchReturnProvider } from "./studio/components/StudioSearchReturnContext";
 import { StudioMobileContextHeader } from "./studio/components/StudioMobileContextHeader";
@@ -2036,6 +2037,7 @@ function StudioLayoutInner() {
 
   const [desktopContextTarget, setDesktopContextTarget] = useState<HTMLDivElement | null>(null);
   const [mobileContextTarget, setMobileContextTarget] = useState<HTMLDivElement | null>(null);
+  const desktopSearchTriggerRef = useRef<HTMLButtonElement | null>(null);
   const mobileSearchTriggerRef = useRef<HTMLButtonElement | null>(null);
   const overlaySearchTriggerRef = useRef<HTMLButtonElement | null>(null);
   const globalNavigationContext = usesGlobalNavigationContext(navigationScope.page, activeProjectId);
@@ -2066,7 +2068,7 @@ function StudioLayoutInner() {
     hasMoreMessages: searchData.hasMoreMessages, loadingMoreMessages: searchData.loadingMoreMessages,
     onLoadMoreMessages: searchData.loadMoreMessages, messagePageCount: searchData.messagePageCount,
     restoreSession: searchHistory.restoredSession, onBeforeResultActivate: searchHistory.remember, onDismiss: searchHistory.dismiss,
-    fullPage: true, persistentControl: isLargeScreen, returnFocusRef: showMobileLeftDrawerOverlay ? overlaySearchTriggerRef : mobileSearchTriggerRef,
+    fullPage: true, returnFocusRef: isLargeScreen ? desktopSearchTriggerRef : showMobileLeftDrawerOverlay ? overlaySearchTriggerRef : mobileSearchTriggerRef,
     onRequestChange: request => setSearchRequest({ ...request, key: searchKey }),
     onOpen: () => { if (!isLargeScreen) runAfterSidebarClose(() => {}); },
   });
@@ -2159,13 +2161,21 @@ function StudioLayoutInner() {
             shakeToReportDetail: bugReportController.shakeToReportDetail,
           }}
         >
-          {isLargeScreen ? <header className="studio-context-header" aria-label="Working context"><div ref={setDesktopContextTarget} className="studio-context-slot" /></header> : null}
+          {isLargeScreen ? <StudioDesktopHeader contextRef={setDesktopContextTarget} searchTriggerRef={desktopSearchTriggerRef}
+            searchOpen={search.open} onSearch={search.openSearch}>
+            <StudioTopBar newChatInSidebar inlineDesktop />
+          </StudioDesktopHeader> : null}
           {isLargeScreen ? (
               <StudioSidebar
                 navigationPresentation="path"
                 navigationHeaderExternal
+                compactContextHeader={!search.open}
                 navigationHeaderPortalTarget={desktopContextTarget}
-                renderNavigationHeader={context => search.renderControl(false, <StudioSearchContext scope={search.scope} context={context} onBroaden={search.changeScope} />)}
+                renderNavigationHeader={context => search.open
+                  ? search.renderControl(false, <StudioSearchContext scope={search.scope} context={context} onBroaden={search.changeScope} />)
+                  : <div className="studio-desktop-context" role="group" aria-label="Team and space">
+                    {context.team}<span className="studio-desktop-context-separator" aria-hidden="true">/</span>{context.space}
+                  </div>}
                 onNavigationHeaderAction={() => search.closeSearch(false)}
                 items={sidebarItems}
                 moreItems={sidebarMoreItems}
@@ -2258,11 +2268,11 @@ function StudioLayoutInner() {
             inert={search.open || showMobileLeftDrawerOverlay || undefined}
           >
             {!isLargeScreen ? mobileContextHeader() : null}
-            {isLargeScreen || navigationScope.page === "workspace" ? <StudioTopBar newChatInSidebar={isLargeScreen} contextHeaderAbove mobileNavigation={mobileTopbarNavigation} /> : <div className={`flex min-h-14 shrink-0 items-center gap-2 border-b border-slate-200/70 bg-slate-50 px-1 py-1 ${DARK_RAIL_SURFACE_CLASS}`}>
+            {!isLargeScreen ? navigationScope.page === "workspace" ? <StudioTopBar contextHeaderAbove mobileNavigation={mobileTopbarNavigation} /> : <div className={`flex min-h-14 shrink-0 items-center gap-2 border-b border-slate-200/70 bg-slate-50 px-1 py-1 ${DARK_RAIL_SURFACE_CLASS}`}>
               <IconButton variant="ghost" aria-label="Open navigation" data-testid="topbar-sidebar-toggle" onPress={handleToggleSidebar} className="!min-h-12 !min-w-12"><SidebarExpand className="h-[18px] w-[18px]" aria-hidden="true" /></IconButton>
               <MobileStudioHistoryControls history={mobileHistory} />
               <span className="min-w-0 flex-1 truncate text-sm text-slate-500 dark:text-slate-400">{navigationScope.page === "account" ? "Your settings" : topbarLocationOverride?.title ?? (contextHomeActive ? "Home" : activeTeamName)}</span>
-            </div>}
+            </div> : null}
             <ProjectAccessRecoveryBanner />
             {/* relative: the participants drawer overlays the right edge of the
                 workspace content rather than pushing it, so it never competes

@@ -38,6 +38,17 @@ Forward still follow Router history and restore each visit's scroll position; th
 not introduce another history stack. Utility/file previews and retained form drafts are session
 state, while chat-tab restoration continues to use its existing persistence.
 
+On desktop, `StudioDesktopHeader` keeps the team avatar, space picker, workspace tabs and
+Search button on one 52px row (64px for coarse pointers). Tabs overflow horizontally rather
+than wrapping or compressing their titles. New chat stays in the sidebar, and the profile
+menu stays in the organization rail. Mobile retains its context and navigation rows.
+
+Search expands into the same header when activated, temporarily hiding the tabs and revealing
+the existing scope chips and full-page results. Cmd/Ctrl+K opens or refocuses it; Escape returns
+focus to Search. The shortcut yields to modal dialogs and already-handled editor shortcuts.
+The header clears Electron's window controls once; interactive descendants are excluded from
+the window drag region.
+
 The desktop working-context header owns one continuous divider across the navigation,
 open drawers and workspace. Keep it in both themes and across panel and search changes.
 Active tabs meet that edge without adding a second horizontal line underneath it; tab
@@ -258,7 +269,7 @@ but the editor uses the native file picker rather than an image-URL field.
 
 Docked side panels use `DrawerHeader frame="rail"`: a 48px row with 16px horizontal
 insets and a 16px semibold title. Keep path details and filters below that row so the
-heading stays aligned with the workspace tab rail. Loading fallbacks use the same frame.
+heading starts immediately below the shared desktop header. Loading fallbacks use the same frame.
 Files keeps New file visible and groups New folder, Refresh and Collapse all under More;
 the path has its own row. Desktop layout follows Studio's 900px breakpoint; touch targets
 grow independently for coarse pointers. Navigation selection uses a flat fill with a

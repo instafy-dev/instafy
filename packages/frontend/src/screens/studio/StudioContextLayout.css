@@ -1,5 +1,5 @@
 /* Working context is independent of the inner navigation's width. */
-.studio-context-layout { --studio-context-height: 48px; }
+.studio-context-layout { --studio-context-height: 52px; }
 .studio-context-header {
   position: absolute;
   left: calc(64px + var(--instafy-safe-area-inset-left));
@@ -9,13 +9,31 @@
   z-index: 45;
   display: flex;
   align-items: center;
-  padding: 0 14px;
+  gap: 8px;
+  padding: 0 8px;
   border-bottom: 1px solid var(--color-slate-200);
   background: var(--color-slate-50);
   -webkit-app-region: drag;
 }
-.studio-context-header .studio-search-control, .studio-context-header button, .studio-context-header input, .studio-context-header select { -webkit-app-region: no-drag; }
-.studio-context-slot { width: 100%; min-width: 0; max-width: 940px; }
+.studio-context-header .studio-search-control { -webkit-app-region: no-drag; }
+/* The rail clears 64px; a further 24px clears Electron's traffic-light corner.
+   Tabs no longer need their own native inset because context is to their left. */
+.studio-context-layout[data-titlebar-free="true"] .studio-context-header { padding-left: 24px; }
+.studio-context-slot { width: 208px; min-width: 0; flex: none; }
+.studio-desktop-context { display: flex; align-items: center; gap: 4px; min-width: 0; }
+.studio-desktop-context-separator { flex: none; color: var(--color-slate-400); }
+.studio-desktop-context [data-testid="sidebar-space-button"] { flex: 1; }
+.studio-desktop-tabs { flex: 1; min-width: 0; align-self: flex-end; margin-bottom: -1px; }
+.studio-context-header .studio-desktop-tabbar { height: 48px; min-width: 0; background: transparent; }
+.studio-desktop-tabbar [data-testid="workspace-tabs"] { min-width: 0; gap: 0; background: transparent; }
+.studio-desktop-tabbar [data-workspace-tab-trigger] { max-width: 240px; }
+.studio-context-header .studio-desktop-search-trigger { flex: none; height: 36px; min-width: 36px; gap: 6px; padding: 0 10px; }
+.studio-context-header [hidden] { display: none; }
+.studio-context-header[data-search-open="true"] .studio-context-slot { width: 100%; max-width: 940px; }
+@media (min-width: 900px) and (max-width: 1099px) {
+  .studio-context-slot { width: 180px; }
+  .studio-desktop-search-trigger > span { display: none; }
+}
 .studio-context-layout[data-wide="true"] [data-testid="sidebar-context-navigation"],
 .studio-context-layout[data-wide="true"] .studio-context-drawer {
   margin-top: calc(var(--studio-context-height) + var(--studio-context-top));
@@ -33,16 +51,10 @@
 .studio-context-search-mobile { padding: calc(8px + var(--instafy-safe-area-inset-top)) 8px 8px; background: var(--color-slate-50); border-bottom: 1px solid var(--color-slate-200); }
 .studio-context-mobile-picker { display: flex; flex: none; min-width: 0; padding: 4px 12px; border-bottom: 1px solid var(--color-slate-200); }
 .dark .studio-context-header, .dark .studio-context-search-mobile { background: var(--color-studio-dark-rail); border-color: var(--color-studio-dark-divider); color: var(--color-slate-100); }
-/* The shared header owns the divider across navigation, drawers and tabs.
-   Extend the active tab's outline to that edge while keeping the rail's height:
-   50px minus its two 1px margins retains the 48px row. The scroll viewport
-   clips the overlapping top border, leaving just the shared header divider. */
-.studio-context-tab-rail [data-workspace-tab-active="true"] {
-  height: 50px;
-  margin-top: -1px;
-}
 .dark .studio-context-mobile-picker { border-color: var(--color-studio-dark-divider); }
 @media (pointer: coarse) {
   .studio-context-layout { --studio-context-height: 64px; }
   .studio-context-slot .studio-search-field { min-height: 48px; }
+  .studio-context-header .studio-desktop-search-trigger { min-height: 44px; min-width: 44px; }
+  .studio-desktop-context .studio-breadcrumb-trigger { min-height: 44px; }
 }
