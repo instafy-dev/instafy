@@ -46,6 +46,10 @@ width, including at narrow desktop sizes, so tabs never extend over that sidebar
 column when navigation collapses to preserve usable pickers; subtract native window-control
 insets within it rather than shifting the tabs. Mobile retains its context and navigation rows.
 
+The space picker uses the same compact list on desktop, mobile and inline navigation. Each row
+has a small identity icon, a name, an optional unread count and a trailing current-space checkmark.
+Recent spaces stay alphabetically ordered; **Browse all spaces** remains below the list.
+
 Search expands into the same header when activated, temporarily hiding the tabs and revealing
 the existing scope chips and full-page results. Cmd/Ctrl+K opens or refocuses it; Escape returns
 focus to Search. The shortcut yields to modal dialogs and already-handled editor shortcuts.
