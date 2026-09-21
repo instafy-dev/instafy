@@ -576,6 +576,44 @@ fn rejects(text: &str, allowed: Option<&str>, field: CardTextField) -> bool {
     })
 }
 
+/// The declared prefix for a value, as the field shows it. Shape first: a bare
+/// token prefix of two to sixteen ASCII letters, digits, `_` or `-`. Then the
+/// same word gate every card text passes, read through the skeleton, and not
+/// the drawing rules: a prefix is punctuation-dense by nature ("sk-ant-"),
+/// and the shape rule already forbids everything those rules exist for.
+pub fn sanitize_value_hint(
+    hint: &str,
+    owner: Option<&str>,
+    skill_slug: Option<&str>,
+) -> Option<String> {
+    let hint = hint.trim();
+    let shaped = (2..=16).contains(&hint.chars().count())
+        && hint
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || ch == '_' || ch == '-');
+    if !shaped {
+        return None;
+    }
+    let skeleton = skeleton(&hint.to_lowercase());
+    let banned = HUMAN_CREDENTIAL_TERMS
+        .iter()
+        .chain(HANDLING_CLAIM_TERMS.iter())
+        .chain(FIRST_PARTY_AUTHORITY_PHRASES.iter())
+        .any(|term| contains_term(&skeleton, term))
+        || contains_term(&skeleton, OWN_PRODUCT_NAME);
+    if banned {
+        return None;
+    }
+    let own = allowed_identity(owner, skill_slug);
+    if IDENTITY_PRODUCT_NAMES
+        .iter()
+        .any(|product| own.as_deref() != Some(*product) && contains_term(&skeleton, product))
+    {
+        return None;
+    }
+    Some(hint.to_string())
+}
+
 /// The owner's own name, off the front of a heading the card is about to put
 /// that name in front of. "Notion Installation access token" is a heading a
 /// pack derives honestly from a "What it is" cell, and rendering it whole
@@ -1111,5 +1149,34 @@ mod tests {
             sanitize_card_text(&long, CardTextField::WhereToGet, None, None),
             None
         );
+    }
+
+    #[test]
+    fn a_value_hint_passes_the_word_gate_but_not_the_drawing_rules() {
+        assert_eq!(
+            sanitize_value_hint("ntn_", Some("Notion"), Some("notion")).as_deref(),
+            Some("ntn_")
+        );
+        // Punctuation-dense by nature; the density rule must not apply.
+        assert_eq!(
+            sanitize_value_hint("sk-ant-", None, None).as_deref(),
+            Some("sk-ant-")
+        );
+        // A human credential word, our own name, or another product's name
+        // is refused here exactly as in every other card text.
+        assert_eq!(sanitize_value_hint("Gmail-password", None, None), None);
+        assert_eq!(sanitize_value_hint("instafy-", None, None), None);
+        assert_eq!(
+            sanitize_value_hint("github-", Some("Notion"), Some("notion")),
+            None
+        );
+        assert_eq!(
+            sanitize_value_hint("github-", Some("GitHub"), Some("github")).as_deref(),
+            Some("github-")
+        );
+        // Shape rules: length, spaces, markup.
+        assert_eq!(sanitize_value_hint("x", None, None), None);
+        assert_eq!(sanitize_value_hint("ntn_ then", None, None), None);
+        assert_eq!(sanitize_value_hint("<b>ntn_</b>", None, None), None);
     }
 }

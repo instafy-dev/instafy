@@ -431,6 +431,42 @@ function truncateAtWord(text: string, cap: number): string {
  * resolved to Notion may still write only "Notion". Pass both as null and every
  * catalogue name rejects.
  */
+/**
+ * The declared prefix for a value, as the field shows it. Shape first: a bare
+ * token prefix of two to sixteen ASCII letters, digits, `_` or `-`. Then the
+ * same word gate every card text passes, read through the skeleton, and not
+ * the drawing rules: a prefix is punctuation-dense by nature ("sk-ant-"), and
+ * the shape rule already forbids everything those rules exist for. The
+ * runtime applies the same gate; this one also covers messages an older
+ * runtime persisted.
+ */
+export function sanitizeValueHint(
+  value: unknown,
+  owner: string | null = null,
+  skillSlug: string | null = null,
+): string | null {
+  if (typeof value !== "string") {
+    return null;
+  }
+  const hint = value.trim();
+  if (!/^[A-Za-z0-9_-]{2,16}$/.test(hint)) {
+    return null;
+  }
+  const skeletonText = skeleton(hint.toLowerCase());
+  const banned =
+    [...HUMAN_CREDENTIAL_TERMS, ...HANDLING_CLAIM_TERMS, ...FIRST_PARTY_AUTHORITY_PHRASES].some(
+      (term) => containsTerm(skeletonText, term),
+    ) || containsTerm(skeletonText, OWN_PRODUCT_NAME);
+  if (banned) {
+    return null;
+  }
+  const allowed = allowedIdentity(owner, skillSlug);
+  if (IDENTITY_PRODUCT_NAMES.some((product) => product !== allowed && containsTerm(skeletonText, product))) {
+    return null;
+  }
+  return hint;
+}
+
 export function sanitizeCardText(
   value: unknown,
   field: CardTextField,
