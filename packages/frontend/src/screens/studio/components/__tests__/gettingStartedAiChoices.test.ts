@@ -216,6 +216,16 @@ describe("resolveGettingStartedAiChoices", () => {
     expect(resolve({ credentialInventoryStatus: "loading" }).canChangeAiChoice).toBe(false);
   });
 
+  it("skips the resolving state when both answers are already known", () => {
+    // A cache seeded from the same user's other space resolves both checks
+    // before any fetch returns, so a new space opens on the choice directly.
+    expect(resolve({ requirementsResolved: true, credentialInventoryStatus: "missing" })).toMatchObject({
+      viewState: "choice",
+      personalAiConnectionState: "missing",
+      managedAiOffer,
+    });
+  });
+
   it("waits for live requirements and a signed-in controller session", () => {
     expect(resolve({ requirementsResolved: false }).viewState).toBe("resolving");
     expect(resolve({ hasUser: false }).viewState).toBe("resolving");

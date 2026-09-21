@@ -109,7 +109,7 @@ import { isUUID } from "../utils/uuid";
 import { writeClipboardText } from "../runtime/runtimeMenuShared";
 import { INSTAFY_CLI_URL } from "../config/externalLinks";
 import { SidePaneProvider, useSidePane } from "../workspace/SidePaneProvider";
-import { resolveMobileOverviewSection, useStudioNavigationPosture } from "./studio/useStudioNavigationPosture";
+import { resolveMobileOverviewSection, resolveWorkspaceEmptyState, useStudioNavigationPosture } from "./studio/useStudioNavigationPosture";
 import { SidePaneTabs } from "../workspace/SidePaneTabs";
 import { WorkspaceTabsProvider, useWorkspaceTabs } from "../workspace/WorkspaceTabsProvider";
 import type { WorkspaceGitReviewSource } from "../workspace/gitReviewTypes";
@@ -1860,7 +1860,14 @@ function StudioLayoutInner() {
       />
     );
   } else if (!activeWorkspaceTab) {
-    workspaceContent = (
+    const emptyState = resolveWorkspaceEmptyState({
+      hasActiveTab: false,
+      conversationTabsReady,
+      projectAccessBlocked,
+    });
+    workspaceContent = emptyState === "hydrating" ? (
+      <div className="flex h-full" aria-busy="true" data-testid="workspace-tabs-hydrating" />
+    ) : (
       <div className="flex h-full items-center justify-center text-sm text-slate-500">
         Open a panel to get started.
       </div>

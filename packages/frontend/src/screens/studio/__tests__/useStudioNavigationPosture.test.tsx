@@ -3,7 +3,11 @@
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { resolveMobileOverviewSection, useStudioNavigationPosture } from "../useStudioNavigationPosture";
+import {
+  resolveMobileOverviewSection,
+  resolveWorkspaceEmptyState,
+  useStudioNavigationPosture,
+} from "../useStudioNavigationPosture";
 import { createTabForPanel, type WorkspaceTabState } from "../../../workspace/workspaceTabFactories";
 
 function NavigationPosture() {
@@ -109,4 +113,30 @@ describe("Studio overview destination policy", () => {
     expect(resolveMobileOverviewSection(home, "workspaces")).toBeNull();
   });
 
+});
+
+describe("resolveWorkspaceEmptyState", () => {
+  it("paints a quiet frame while a space's conversation tabs are still hydrating", () => {
+    expect(
+      resolveWorkspaceEmptyState({ hasActiveTab: false, conversationTabsReady: false, projectAccessBlocked: false }),
+    ).toBe("hydrating");
+  });
+
+  it("keeps the real empty state once tabs are ready and none is open", () => {
+    expect(
+      resolveWorkspaceEmptyState({ hasActiveTab: false, conversationTabsReady: true, projectAccessBlocked: false }),
+    ).toBe("empty");
+  });
+
+  it("never applies while a tab is active or access is blocked", () => {
+    expect(
+      resolveWorkspaceEmptyState({ hasActiveTab: true, conversationTabsReady: false, projectAccessBlocked: false }),
+    ).toBeNull();
+    expect(
+      resolveWorkspaceEmptyState({ hasActiveTab: true, conversationTabsReady: true, projectAccessBlocked: false }),
+    ).toBeNull();
+    expect(
+      resolveWorkspaceEmptyState({ hasActiveTab: false, conversationTabsReady: false, projectAccessBlocked: true }),
+    ).toBeNull();
+  });
 });

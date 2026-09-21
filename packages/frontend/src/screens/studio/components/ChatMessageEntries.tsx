@@ -37,6 +37,7 @@ import { extractMessageDetails, getMessageType } from "./chatMessageMetadata";
 import { shouldRenderLocalCapabilityStatusAsTimeline } from "./chatMessagePresentation";
 import { resolveProxyUpstreamErrorGuidance } from "./proxyError";
 import { RunFailureMessageBody } from "./RunFailureNotice";
+import { isRuntimeAlertSupersededByStart } from "./runtimeAlertPresentation";
 import {
   resolveControllerNoticeActionHandler,
   useControllerNoticeActions,
@@ -426,9 +427,14 @@ function AgentJobThreadPreviewEntry({
 // Live runtime activity, provided by ChatPanel, so persisted runtime alerts
 // can tell when a newer workspace start supersedes them: a 45-minute-old
 // "startup failed" card above a live "starting its workspace…" row reads as a
-// contradiction, not as history.
-export const ChatRuntimeActivityContext = createContext<{ workspaceStarting: boolean }>({
+// contradiction, not as history. `workspaceStartingSince` is when the live
+// start began; an alert persisted for that same start is not history yet.
+export const ChatRuntimeActivityContext = createContext<{
+  workspaceStarting: boolean;
+  workspaceStartingSince: number | null;
+}>({
   workspaceStarting: false,
+  workspaceStartingSince: null,
 });
 
 function ControllerConversationNoticeEntry({
@@ -457,11 +463,18 @@ function ControllerConversationNoticeEntry({
   onClickCapture?: (event: MouseEvent<HTMLDivElement>) => void;
 }) {
   const isRuntimeAlert = messageType === "runtime_alert";
-  const { workspaceStarting } = useContext(ChatRuntimeActivityContext);
+  const { workspaceStarting, workspaceStartingSince } = useContext(ChatRuntimeActivityContext);
   // While a workspace start is live, the activity row by the composer is the
   // source of truth; older runtime alerts demote to a quiet history line so
   // the transcript never says "failed" and "starting" at full volume at once.
-  const superseded = isRuntimeAlert && workspaceStarting;
+  // The alert this very start just produced stays at full volume.
+  const superseded =
+    isRuntimeAlert &&
+    isRuntimeAlertSupersededByStart({
+      alertTimestamp: message.timestamp,
+      workspaceStarting,
+      workspaceStartingSince,
+    });
   const spineTone: ThreadSpineTone = isRuntimeAlert ? "warning" : "danger";
   const label = resolveControllerConversationNoticeLabel(message);
   const noticeClassName = isRuntimeAlert

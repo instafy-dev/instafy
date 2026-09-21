@@ -16,6 +16,22 @@ export function resolveMobileOverviewSection(
   return activeTab.panel === "home" || activeTab.panel === "projects" ? activeTab.panel : null;
 }
 
+export type WorkspaceEmptyState = "hydrating" | "empty" | null;
+
+/** With no active tab the workspace is either still hydrating the destination
+ * space's conversation tabs (the provider tears every chat tab down on a
+ * project switch and rebuilds them once history resolves) or genuinely empty.
+ * Only the second case earns user-facing copy; the first paints a quiet frame
+ * so a fresh space never flashes "Open a panel to get started." */
+export function resolveWorkspaceEmptyState(input: {
+  hasActiveTab: boolean;
+  conversationTabsReady: boolean;
+  projectAccessBlocked: boolean;
+}): WorkspaceEmptyState {
+  if (input.hasActiveTab || input.projectAccessBlocked) return null;
+  return input.conversationTabsReady ? "empty" : "hydrating";
+}
+
 export function useStudioNavigationPosture() {
   const isLargeScreen = useStudioDesktopLayout();
   const touchLikeInput = useTouchLikeInput();
