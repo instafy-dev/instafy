@@ -114,7 +114,8 @@ new prompts; agents customize identity and instructions and may choose their own
 Opening an agent profile from a conversation selects Agents, so closing the editor returns
 to its list. Switching categories keeps the connection and agent state mounted.
 
-Keep **New agent** visible even when no personal AI connection is saved. Agent profiles can
+Use the shared `SettingsAddButton` for the **New agent** action, matching Connections.
+Keep it visible even when no personal AI connection is saved. Agent profiles can
 be created before connecting AI; the controller already accepts a null credential with an
 explicit handle. Require that handle in the editor, leave the model unset, and explain whether
 the profile will use managed AI or needs an AI connection before chatting. Do not present a

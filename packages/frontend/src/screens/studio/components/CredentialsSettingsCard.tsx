@@ -2,7 +2,7 @@ import { AgentAvatar } from "../../../components/AgentAvatar";
 import { uploadIdentityImage } from "../../../lib/identityImages";
 import { PROFILE_BIO_MAX_LENGTH } from "@instafy/sdk/human-profiles";
 import { useCallback, useEffect, useMemo, useRef, useState, type ChangeEvent } from "react";
-import { Brain, CheckCircle, Cpu, EditPencil, MoreHoriz, Plus, Trash, Upload, WarningTriangle, Xmark } from "iconoir-react";
+import { Brain, CheckCircle, Cpu, EditPencil, MoreHoriz, Trash, Upload, WarningTriangle, Xmark } from "iconoir-react";
 import { MenuTrigger } from "react-aria-components";
 import { Badge } from "../../../components/Badge";
 import { Button, IconButton } from "../../../components/Button";
@@ -1715,19 +1715,13 @@ function UserCredentialsSettingsCard({ section = "connections", onOpenAgentProfi
           tone="suggestion"
           icon={<Brain className="h-5 w-5" aria-hidden={true} />}
           actions={
-            <Button
+            <SettingsAddButton
               onPress={handleCreateBotFromManager}
               isDisabled={!canManageAiConnections || loading || Boolean(agentActionPendingId)}
-              variant="outline"
-              size="sm"
-              radius="xl"
-              className="min-h-11 min-w-11 gap-1.5"
-              aria-label="New agent"
+              ariaLabel="New agent"
+              title="New agent"
               data-testid="bots-create"
-            >
-              <Plus className="h-4 w-4" aria-hidden="true" />
-              <span className="hidden sm:inline">New agent</span>
-            </Button>
+            />
           }
         >
           {octoAgent || botAgents.length > 0 ? (

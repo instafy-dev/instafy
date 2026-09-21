@@ -317,7 +317,7 @@ describe("CredentialsSettingsCard", () => {
     mocks.createAgent.mockResolvedValue({ success: true, agent: inheritedAgent });
     await act(async () => { root.render(<CredentialsSettingsCard section="agents" />); await flush(); });
     const create = container.querySelector<HTMLButtonElement>('[data-testid="bots-create"]')!;
-    expect(create.textContent).toContain("New agent");
+    expect(create.getAttribute("aria-label")).toBe("New agent");
     expect(create.disabled).toBe(false);
     await act(async () => create.click());
     expect(mocks.agentProfileProps?.isOpen).toBe(true);
