@@ -400,12 +400,11 @@ export function ConversationHistoryTab({
 
   return (
     <div className="flex h-full min-h-0 min-w-0 flex-col" data-testid="conversation-history-panel">
-      <div className={`shrink-0 border-b border-slate-200/70 px-4 pb-3 ${DARK_DIVIDER_BORDER_CLASS}`}>
+      <div className={`shrink-0 border-b border-slate-200/70 pb-3 ${DARK_DIVIDER_BORDER_CLASS}`}>
         <DrawerHeader
           title={selectedFilter.title}
           titleAs="h2"
-          className="h-12"
-          titleClassName="!text-base !font-semibold"
+          frame="rail"
           actions={
             <>
               {onStartNewConversation ? (
@@ -446,7 +445,7 @@ export function ConversationHistoryTab({
             </>
           }
         />
-        <div className="relative">
+        <div className="relative mx-4">
           <SearchInput
             id="conversation-history-search"
             label="Filter chats by name"

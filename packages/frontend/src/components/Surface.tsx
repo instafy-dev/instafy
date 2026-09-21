@@ -1,7 +1,7 @@
 import type { HTMLAttributes } from "react";
-import { DARK_FLOATING_RAISED_BG_CLASS } from "../theme/darkSurfaces";
+import { DARK_FLOATING_RAISED_BG_CLASS, DARK_FLOATING_SURFACE_CLASS, DARK_FLOATING_SHADOW_CLASS } from "../theme/darkSurfaces";
 
-type SurfaceTone = "default" | "muted" | "subtle" | "raised" | "success" | "warning" | "danger";
+type SurfaceTone = "default" | "floating" | "muted" | "subtle" | "raised" | "success" | "warning" | "danger";
 type SurfaceRadius = "none" | "lg" | "xl" | "2xl" | "3xl";
 type SurfaceShadow = "none" | "sm" | "md" | "lg";
 
@@ -10,6 +10,7 @@ const BASE = "border text-slate-700 dark:text-slate-200";
 const TONE_CLASSES: Record<SurfaceTone, string> = {
   default:
     "border-slate-200 bg-white dark:border-[color:var(--color-studio-dark-panel-border)] dark:bg-[var(--color-studio-dark-panel)]",
+  floating: `border-slate-200/70 bg-white ${DARK_FLOATING_SURFACE_CLASS} ${DARK_FLOATING_SHADOW_CLASS}`,
   muted:
     "border-slate-200/70 bg-slate-50/70 dark:border-[color:var(--color-studio-dark-panel-border)] dark:bg-[var(--color-studio-dark-panel-soft)]",
   subtle:

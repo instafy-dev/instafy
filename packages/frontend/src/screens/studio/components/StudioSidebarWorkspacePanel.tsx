@@ -84,11 +84,11 @@ export function StudioSidebarWorkspacePanel({
       className="flex h-full min-h-0 min-w-0 flex-col outline-none"
       data-testid="sidebar-project-switcher-menu"
     >
-      <div className={`shrink-0 border-b border-slate-200/70 px-4 pb-3 pt-4 ${DARK_DIVIDER_BORDER_CLASS}`}>
+      <div className={`shrink-0 border-b border-slate-200/70 ${DARK_DIVIDER_BORDER_CLASS}`}>
         <DrawerHeader
-            title={<span id={titleId}>{title}</span>}
+          title={<span id={titleId}>{title}</span>}
           titleAs="h2"
-          titleClassName="!text-base !font-semibold"
+          frame="rail"
           actions={
             <IconButton
               variant="ghost"

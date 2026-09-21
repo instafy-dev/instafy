@@ -1,3 +1,4 @@
+import { fileExplorerAction } from "../utils/filesExplorer.js";
 import { test, expect, type Page } from "@playwright/test";
 import {
   clearRuntimePreference,
@@ -51,7 +52,7 @@ test.describe("Git-canonical file explorer sync", () => {
 
     await page.getByTestId("sidebar-nav-code").click();
     await waitForWorkspaceOriginConnected(page);
-    await expect(page.getByTestId("files-explorer-refresh")).toBeEnabled({ timeout: 90_000 });
+    await expect(await fileExplorerAction(page, "refresh")).toBeEnabled({ timeout: 90_000 });
   });
 
   test.afterEach(async ({ page }) => {

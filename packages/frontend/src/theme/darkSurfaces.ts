@@ -5,9 +5,9 @@
  *
  * 1. Dark borders are NEUTRAL WHITE-ALPHA ONLY. Never `dark:border-slate-*`,
  *    `dark:border-zinc-*` or `dark:border-gray-*`. The dark surfaces are warm
- *    neutrals (canvas #141414 / rail #181818 / panel #1d1d1d) while Tailwind's
- *    slate ramp is a cool blue (#1e293b / #334155), so a slate edge reads
- *    harder and slightly foreign against them. White-alpha borders tint
+ *    neutrals (canvas #141414 / rail #181818 / panel #1d1d1d) and the remapped
+ *    slate ramp serves text and neutral accents. Hard-coded ramp borders can
+ *    read stronger than the intended surface edge. White-alpha borders tint
  *    themselves from whatever surface is underneath and stay in family.
  *
  * 2. Border strength scales INVERSELY with elevation:

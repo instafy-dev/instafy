@@ -1,3 +1,4 @@
+import { DARK_DIVIDER_BORDER_CLASS, DARK_DIVIDER_CLASS, DARK_PANEL_BG_CLASS, DARK_PANEL_BORDER_CLASS, DARK_RAIL_HOVER_CLASS } from "../../../theme/darkSurfaces";
 import { ReactNode, useCallback, useEffect, useMemo, useRef, useState, type JSX, type SetStateAction } from "react";
 import { createPortal } from "react-dom";
 import Editor from "@monaco-editor/react";
@@ -6,6 +7,7 @@ import { HistoryControls } from "../../../components/HistoryControls";
 import { Badge } from "../../../components/Badge";
 import { Button, IconButton } from "../../../components/Button";
 import { Card } from "../../../components/Card";
+import { DRAWER_ICON_BUTTON_TONE_CLASS, LIST_ROW_SURFACE_BASE, LIST_ROW_FOCUS_RING, listRowSurfaceToneClassName } from "../../../components/listRowStyles";
 import { DrawerHeader } from "../../../components/DrawerHeader";
 import { Heading } from "../../../components/Heading";
 import { MarkdownPreview } from "../../../components/MarkdownPreview";
@@ -14,7 +16,6 @@ import { LoadingStatus } from "../../../components/LoadingStatus";
 import { Surface } from "../../../components/Surface";
 import { Text } from "../../../components/Text";
 import { SearchInput } from "../../../components/SearchInput";
-import { LIST_ROW_SURFACE_BASE } from "../../../components/listRowStyles";
 import { useCode } from "../../../code/useCode";
 import { useStatus } from "../../../status/useStatus";
 import { useProject } from "../../../projects/useProject";
@@ -1594,11 +1595,11 @@ export function FilesPanel({
   const handleOpenRootExplorerMenu = useCallback(() => {
     const buttonBounds = rootExplorerMenuButtonRef.current?.getBoundingClientRect();
     openExplorerMenu({
-      targetPath: normalizedRootPath,
+      targetPath: resolveCreateEntryParentPath(),
       clientX: buttonBounds ? buttonBounds.left : window.innerWidth - 24,
       clientY: buttonBounds ? buttonBounds.bottom + 8 : 72,
     });
-  }, [normalizedRootPath, openExplorerMenu]);
+  }, [openExplorerMenu, resolveCreateEntryParentPath]);
 
   const showInlineSearch = isLargeScreen || mobileSearchOpen || touchExplorer;
   const showBreadcrumbs = isLargeScreen || (!mobileSearchOpen && !touchExplorer);
@@ -1607,196 +1608,119 @@ export function FilesPanel({
 
   const treeContent = (
     <div
-      className={[
-        "flex h-full min-h-0 flex-col",
-        touchExplorer ? "p-5 max-[375px]:px-4 max-[375px]:py-3" : "p-3",
-      ].join(" ")}
+      className="flex h-full min-h-0 flex-col px-4 pb-3"
       data-testid="files-explorer-tree"
     >
+      <DrawerHeader
+        title="Files"
+        frame="rail"
+        className="-mx-4"
+        actions={
+          <>
+            {!isLargeScreen && !touchExplorer ? (
+              <IconButton
+                variant={mobileSearchOpen ? "secondary" : "ghost"}
+                size="sm"
+                radius="full"
+                aria-label={mobileSearchOpen ? "Close file search" : "Search files"}
+                title={mobileSearchOpen ? "Close search" : "Search files"}
+                data-testid="files-explorer-search-toggle"
+                onPress={handleToggleMobileSearch}
+                className={[
+                  "h-11 w-11 shadow-none",
+                  mobileSearchOpen
+                    ? "bg-slate-100 text-slate-900 dark:bg-[var(--color-studio-dark-active)] dark:text-slate-100"
+                    : DRAWER_ICON_BUTTON_TONE_CLASS,
+                ].join(" ")}
+              >
+                <Search className="h-4 w-4" aria-hidden="true" />
+              </IconButton>
+            ) : null}
+            <IconButton
+              variant="ghost"
+              size="sm"
+              radius="full"
+              aria-label="New file"
+              title="New file"
+              data-testid="files-explorer-new-file"
+              onPress={() => void handleStartCreateFile(resolveCreateEntryParentPath())}
+              isDisabled={projectWriteDisabled || !runtimeReady || createFileState?.busy === true || createFolderState?.busy === true}
+              className={`max-[899px]:h-11 max-[899px]:w-11 ${DRAWER_ICON_BUTTON_TONE_CLASS}`}
+            >
+              <PagePlus className="h-4 w-4" aria-hidden="true" />
+            </IconButton>
+            <IconButton
+              ref={rootExplorerMenuButtonRef}
+              variant="ghost"
+              size="sm"
+              radius="full"
+              aria-label="More file actions"
+              title="More"
+              data-testid={touchExplorer ? "files-explorer-touch-actions" : "files-explorer-actions"}
+              onPress={handleOpenRootExplorerMenu}
+              className={`max-[899px]:h-11 max-[899px]:w-11 ${DRAWER_ICON_BUTTON_TONE_CLASS}`}
+            >
+              <MoreHoriz className="h-4 w-4" aria-hidden="true" />
+            </IconButton>
+            {onRequestCloseExplorer ? (
+              <IconButton
+                variant="ghost"
+                size="sm"
+                radius="full"
+                aria-label="Close file explorer"
+                title="Close"
+                data-testid="files-explorer-close"
+                onPress={onRequestCloseExplorer}
+                className={`max-[899px]:h-11 max-[899px]:w-11 ${DRAWER_ICON_BUTTON_TONE_CLASS}`}
+              >
+                <Xmark className="h-4 w-4" aria-hidden="true" />
+              </IconButton>
+            ) : null}
+          </>
+        }
+      />
       {touchExplorer ? (
-        <DrawerHeader
-          title="Files"
-          subtitle={fileExplorerSubtitle}
-          density="touch"
-          actions={
-            <>
-              <IconButton
-                variant="ghost"
-                size="lg"
-                radius="full"
-                aria-label="New file"
-                title="New file"
-                data-testid="files-explorer-new-file"
-                onPress={() => void handleStartCreateFile(resolveCreateEntryParentPath())}
-                isDisabled={projectWriteDisabled || !runtimeReady || createFileState?.busy === true || createFolderState?.busy === true}
-                className="bg-white/90 text-slate-600 shadow-sm shadow-slate-900/5 hover:bg-slate-50 data-[hovered]:bg-slate-50 dark:bg-slate-950/80 dark:text-slate-300 dark:shadow-none dark:hover:bg-slate-900 dark:data-[hovered]:bg-slate-900"
-              >
-                <PagePlus className="h-4 w-4" aria-hidden="true" />
-              </IconButton>
-              <IconButton
-                ref={rootExplorerMenuButtonRef}
-                variant="ghost"
-                size="lg"
-                radius="full"
-                aria-label="More file actions"
-                title="More"
-                data-testid="files-explorer-touch-actions"
-                onPress={handleOpenRootExplorerMenu}
-                className="bg-white/90 text-slate-600 shadow-sm shadow-slate-900/5 hover:bg-slate-50 data-[hovered]:bg-slate-50 dark:bg-slate-950/80 dark:text-slate-300 dark:shadow-none dark:hover:bg-slate-900 dark:data-[hovered]:bg-slate-900"
-              >
-                <MoreHoriz className="h-4 w-4" aria-hidden="true" />
-              </IconButton>
-              {onRequestCloseExplorer ? (
-                <IconButton
-                  variant="ghost"
-                  size="lg"
-                  radius="full"
-                  aria-label="Close file explorer"
-                  title="Close"
-                  data-testid="files-explorer-close"
-                  onPress={onRequestCloseExplorer}
-                  className="bg-white/90 text-slate-600 shadow-sm shadow-slate-900/5 hover:bg-slate-50 data-[hovered]:bg-slate-50 dark:bg-slate-950/80 dark:text-slate-300 dark:shadow-none dark:hover:bg-slate-900 dark:data-[hovered]:bg-slate-900"
-                >
-                  <Xmark className="h-4 w-4" aria-hidden="true" />
-                </IconButton>
-              ) : null}
-            </>
-          }
-        />
-      ) : (
-      <div className="flex items-center justify-between gap-3">
-        <div className="flex min-w-0 flex-1 items-center gap-2">
-          <Text as="span" variant="bodyStrong" tone="primary" className="shrink-0">
-            Files
-          </Text>
-          {showBreadcrumbs ? (
-            <nav className="flex min-w-0 items-center gap-1 overflow-hidden text-xs font-medium text-slate-500 dark:text-slate-400">
-              {breadcrumbs.length === 0 ? (
-                <span className="truncate text-slate-700 dark:text-slate-200">/</span>
-              ) : (
-                <Button
-                  onPress={() => focusDirectory("")}
-                  variant="ghost"
-                  size="xs"
-                  radius="full"
-                  className="shrink-0 px-0 text-slate-500 hover:bg-transparent hover:text-slate-800 data-[hovered]:bg-transparent dark:text-slate-400 dark:hover:text-slate-100"
-                  aria-label="Focus root folder"
-                >
-                  /
-                </Button>
-              )}
-              {breadcrumbs.map((crumb, index) => {
-                const isLast = index === breadcrumbs.length - 1;
-                return (
-                  <span key={crumb.path} className="flex min-w-0 items-center gap-1">
-                    {index > 0 ? <span className="shrink-0 text-slate-300 dark:text-slate-700">/</span> : null}
-                    {isLast ? (
-                      <span className="truncate text-slate-700 dark:text-slate-200">{crumb.label}</span>
-                    ) : (
-                      <Button
-                        onPress={() => focusDirectory(crumb.path)}
-                        variant="ghost"
-                        size="xs"
-                        radius="full"
-                        className="max-w-[10rem] truncate px-0 text-slate-500 hover:bg-transparent hover:text-slate-800 data-[hovered]:bg-transparent dark:text-slate-400 dark:hover:text-slate-100"
-                      >
-                        {crumb.label}
-                      </Button>
-                    )}
-                  </span>
-                );
-              })}
-            </nav>
-          ) : null}
-        </div>
-        <div className="flex shrink-0 items-center gap-1">
-        {!isLargeScreen ? (
-          <IconButton
-            variant={mobileSearchOpen ? "secondary" : "ghost"}
-            size="xs"
-            radius="full"
-            aria-label={mobileSearchOpen ? "Close file search" : "Search files"}
-            title={mobileSearchOpen ? "Close search" : "Search files"}
-            data-testid="files-explorer-search-toggle"
-            onPress={handleToggleMobileSearch}
-            className={[
-              "h-10 w-10 shadow-none lg:hidden",
-              mobileSearchOpen
-                ? "bg-slate-100 text-slate-900 dark:bg-slate-900 dark:text-slate-100"
-                : "text-slate-500 hover:bg-slate-200/70 data-[hovered]:bg-slate-200/70 dark:text-slate-400 dark:hover:bg-slate-800/70 dark:data-[hovered]:bg-slate-800/70",
-            ].join(" ")}
-          >
-            <Search className="h-4 w-4" aria-hidden="true" />
-          </IconButton>
-        ) : null}
-        <IconButton
-          variant="ghost"
-          size="xs"
-          radius="full"
-          aria-label="New file"
-          title="New file"
-          data-testid="files-explorer-new-file"
-          onPress={() => void handleStartCreateFile(resolveCreateEntryParentPath())}
-          isDisabled={projectWriteDisabled || !runtimeReady || createFileState?.busy === true || createFolderState?.busy === true}
-          className="h-10 w-10 text-slate-500 hover:bg-slate-200/70 data-[hovered]:bg-slate-200/70 dark:text-slate-400 dark:hover:bg-slate-800/70 dark:data-[hovered]:bg-slate-800/70 lg:h-6 lg:w-6"
-        >
-          <PagePlus className="h-4 w-4" aria-hidden="true" />
-        </IconButton>
-        <IconButton
-          variant="ghost"
-          size="xs"
-          radius="full"
-          aria-label="New folder"
-          title="New folder"
-          data-testid="files-explorer-new-folder"
-          onPress={() => void handleStartCreateFolder(resolveCreateEntryParentPath())}
-          isDisabled={projectWriteDisabled || !runtimeReady || createFileState?.busy === true || createFolderState?.busy === true}
-          className="h-10 w-10 text-slate-500 hover:bg-slate-200/70 data-[hovered]:bg-slate-200/70 dark:text-slate-400 dark:hover:bg-slate-800/70 dark:data-[hovered]:bg-slate-800/70 lg:h-6 lg:w-6"
-        >
-          <FolderPlus className="h-4 w-4" aria-hidden="true" />
-        </IconButton>
-        <IconButton
-          variant="ghost"
-          size="xs"
-          radius="full"
-          aria-label="Refresh file list"
-          title="Refresh"
-          data-testid="files-explorer-refresh"
-          onPress={() => void refreshFromWorkspaceCommit(null)}
-          isDisabled={!workspaceBrowseReady}
-          className="h-10 w-10 text-slate-500 hover:bg-slate-200/70 data-[hovered]:bg-slate-200/70 dark:text-slate-400 dark:hover:bg-slate-800/70 dark:data-[hovered]:bg-slate-800/70 lg:h-6 lg:w-6"
-        >
-          <Refresh className="h-4 w-4" aria-hidden="true" />
-        </IconButton>
-        <IconButton
-          variant="ghost"
-          size="xs"
-          radius="full"
-          aria-label="Collapse all folders"
-          title="Collapse all"
-          data-testid="files-explorer-collapse-all"
-          onPress={() => setExpandedDirectories(new Set())}
-          className="h-10 w-10 text-slate-500 hover:bg-slate-200/70 data-[hovered]:bg-slate-200/70 dark:text-slate-400 dark:hover:bg-slate-800/70 dark:data-[hovered]:bg-slate-800/70 lg:h-6 lg:w-6"
-        >
-          <Collapse className="h-4 w-4" aria-hidden="true" />
-        </IconButton>
-        {onRequestCloseExplorer ? (
-          <IconButton
-            variant="ghost"
-            size="xs"
-            radius="full"
-            aria-label="Close file explorer"
-            title="Close"
-            data-testid="files-explorer-close"
-            onPress={onRequestCloseExplorer}
-            className="h-10 w-10 text-slate-500 hover:bg-slate-200/70 data-[hovered]:bg-slate-200/70 dark:text-slate-400 dark:hover:bg-slate-800/70 dark:data-[hovered]:bg-slate-800/70 lg:h-6 lg:w-6"
-          >
-            <Xmark className="h-4 w-4" aria-hidden="true" />
-          </IconButton>
-        ) : null}
-        </div>
-      </div>
-      )}
+        <Text variant="caption" tone="muted" className="mb-2 truncate">{fileExplorerSubtitle}</Text>
+      ) : null}
+      {showBreadcrumbs ? (
+        <nav aria-label="File location" className="flex min-w-0 items-center gap-1 overflow-hidden mb-2 min-h-6 text-xs font-medium text-slate-500 dark:text-slate-400">
+          {breadcrumbs.length === 0 ? (
+            <span className="truncate text-slate-700 dark:text-slate-200">/</span>
+          ) : (
+            <Button
+              onPress={() => focusDirectory("")}
+              variant="ghost"
+              size="xs"
+              radius="full"
+              className="shrink-0 px-0 text-slate-500 hover:bg-transparent hover:text-slate-800 data-[hovered]:bg-transparent dark:text-slate-400 dark:hover:text-slate-100"
+              aria-label="Focus root folder"
+            >
+              /
+            </Button>
+          )}
+          {breadcrumbs.map((crumb, index) => {
+            const isLast = index === breadcrumbs.length - 1;
+            return (
+              <span key={crumb.path} className="flex min-w-0 items-center gap-1">
+                {index > 0 ? <span className="shrink-0 text-slate-300 dark:text-slate-700">/</span> : null}
+                {isLast ? (
+                  <span className="truncate text-slate-700 dark:text-slate-200">{crumb.label}</span>
+                ) : (
+                  <Button
+                    onPress={() => focusDirectory(crumb.path)}
+                    variant="ghost"
+                    size="xs"
+                    radius="full"
+                    className="max-w-[10rem] truncate px-0 text-slate-500 hover:bg-transparent hover:text-slate-800 data-[hovered]:bg-transparent dark:text-slate-400 dark:hover:text-slate-100"
+                  >
+                    {crumb.label}
+                  </Button>
+                )}
+              </span>
+            );
+          })}
+        </nav>
+      ) : null}
 
       {showRootDirectoryErrorCard ? (
         <Card
@@ -1842,10 +1766,7 @@ export function FilesPanel({
 
       {showInlineSearch ? (
         <div
-          className={[
-            "flex items-center gap-2",
-            touchExplorer ? "mt-5 max-[375px]:mt-3" : "mt-3",
-          ].join(" ")}
+          className="mt-1 flex items-center gap-2"
           data-testid="files-explorer-search-row"
         >
           <div className="min-w-0 flex-1">
@@ -1855,11 +1776,11 @@ export function FilesPanel({
               label="Search files"
               value={searchTerm}
               onChange={(event) => setSearchTerm(event.target.value)}
-              placeholder={touchExplorer ? "Search files" : "Search name or path"}
-              tone={touchExplorer ? "default" : "muted"}
-              radius={touchExplorer ? "full" : "xl"}
-              size={touchExplorer ? "lg" : "sm"}
-              className={touchExplorer ? "bg-white/90 shadow-sm shadow-slate-900/5 dark:bg-slate-950/70 dark:shadow-none" : undefined}
+              placeholder="Search name or path"
+              tone="default"
+              radius="xl"
+              size={isLargeScreen ? "sm" : "md"}
+              className="min-h-10 max-[899px]:min-h-11 pointer-coarse:min-h-11"
               iconTestId="code-search-icon"
               inputTestId="code-search-input"
             />
@@ -1873,7 +1794,7 @@ export function FilesPanel({
               aria-label="Cancel file search"
               title="Cancel search"
               data-testid="files-explorer-search-cancel"
-              className="h-10 w-10 text-slate-500 hover:bg-slate-200/70 data-[hovered]:bg-slate-200/70 dark:text-slate-400 dark:hover:bg-slate-800/70 dark:data-[hovered]:bg-slate-800/70"
+              className={`h-11 w-11 ${DRAWER_ICON_BUTTON_TONE_CLASS}`}
             >
               <Xmark className="h-4 w-4" aria-hidden="true" />
             </IconButton>
@@ -1882,7 +1803,7 @@ export function FilesPanel({
       ) : null}
 
       <div
-        className={["flex-1 overflow-y-auto pr-1", touchExplorer ? "mt-5" : "mt-3"].join(" ")}
+        className="mt-3 min-h-0 flex-1 overflow-y-auto"
         onContextMenu={(event) => {
           event.preventDefault();
           openExplorerMenu({ targetPath: normalizedRootPath, clientX: event.clientX, clientY: event.clientY });
@@ -1915,11 +1836,7 @@ export function FilesPanel({
                       size="sm"
                       radius="2xl"
                       fullWidth
-                      className={`flex-col items-start justify-start gap-1 text-left ${touchExplorer ? "px-3.5 py-3 text-base" : "px-3 py-1.5"} ${
-                        activePath === entry.path
-                          ? "border-slate-200 bg-slate-100/90 text-slate-900 dark:border-slate-700 dark:bg-slate-800/80 dark:text-slate-50"
-                          : "border-transparent text-slate-600 hover:border-slate-200 hover:bg-slate-50 data-[hovered]:border-slate-200 data-[hovered]:bg-slate-50 dark:text-slate-300 dark:hover:border-slate-800 dark:hover:bg-slate-900/40 dark:data-[hovered]:border-slate-800 dark:data-[hovered]:bg-slate-900/40"
-                      } ${LIST_ROW_SURFACE_BASE}`}
+                      className={`flex-col items-start justify-start gap-1 text-left ${touchExplorer ? "px-3.5 py-3 text-base" : "px-3 py-1.5"} ${listRowSurfaceToneClassName(activePath === entry.path)} ${LIST_ROW_SURFACE_BASE} ${LIST_ROW_FOCUS_RING}`}
                       data-testid={`files-entry-${entry.path.replace(/[^a-zA-Z0-9]/g, "-")}`}
                     >
                       <div className="flex w-full items-center justify-between">
@@ -1974,7 +1891,7 @@ export function FilesPanel({
           )}
         </div>
       {rootDirectoryStatusNode ? (
-        <div className="mt-2 border-t border-slate-200/70 px-1 pt-1.5 dark:border-slate-800/80">
+        <div className={`mt-2 border-t border-slate-200/70 px-1 pt-1.5 ${DARK_DIVIDER_BORDER_CLASS}`}>
           <div className="min-h-[1rem]">{rootDirectoryStatusNode}</div>
         </div>
       ) : null}
@@ -1990,7 +1907,7 @@ export function FilesPanel({
             }}
             data-testid="files-explorer-menu"
           >
-              <Surface tone="default" radius="xl" shadow="lg" className="p-1">
+              <Surface tone="floating" radius="2xl" shadow="lg" className="p-1">
                 <Button
                   variant="ghost"
                   size="sm"
@@ -2039,7 +1956,7 @@ export function FilesPanel({
                   <Refresh className="h-4 w-4" aria-hidden="true" />
                   Refresh
                 </Button>
-                <div className="my-1 h-px bg-slate-200 dark:bg-slate-800" />
+                <div className={`my-1 h-px bg-slate-200 ${DARK_DIVIDER_CLASS}`} />
                 <Button
                 variant="ghost"
                 size="sm"
@@ -2057,7 +1974,7 @@ export function FilesPanel({
                 </Button>
                 {explorerMenu.deleteEntry ? (
                   <>
-                    <div className="my-1 h-px bg-slate-200 dark:bg-slate-800" />
+                    <div className={`my-1 h-px bg-slate-200 ${DARK_DIVIDER_CLASS}`} />
                     <Button
                       variant="ghost"
                       size="sm"
@@ -2126,7 +2043,7 @@ export function FilesPanel({
         mobileViewerBackTarget === "assistant" ? "Back to Assistant" : "Back to file list";
 
       return (
-        <header className="flex items-center justify-between gap-2 border-b border-slate-200/70 px-4 py-2.5 dark:border-slate-800">
+        <header className={`flex items-center justify-between gap-2 border-b border-slate-200/70 px-4 py-2.5 ${DARK_DIVIDER_BORDER_CLASS}`}>
           <div className="min-w-0 flex-1">
             <div className="flex items-center gap-2">
               {mobileViewerBackTarget ? (
@@ -2356,11 +2273,11 @@ export function FilesPanel({
         return renderTextViewer();
       case "image":
         return viewerState.imageUrl ? (
-          <div className="flex h-full items-center justify-center bg-slate-50 dark:bg-slate-900/40">
+          <div className={`flex h-full items-center justify-center bg-slate-50 ${DARK_PANEL_BG_CLASS}`}>
             <img
               src={viewerState.imageUrl}
               alt={viewerState.entry?.name ?? "Preview"}
-              className="max-h-full max-w-full rounded-xl border border-slate-200 bg-white shadow-sm dark:border-slate-800 dark:bg-slate-950"
+              className={`max-h-full max-w-full rounded-xl border border-slate-200 bg-white shadow-sm ${DARK_DIVIDER_BORDER_CLASS} ${DARK_PANEL_BG_CLASS}`}
             />
           </div>
         ) : (
@@ -2382,7 +2299,7 @@ export function FilesPanel({
                 href={viewerState.rawUrl ?? "#"}
                 target="_blank"
                 rel="noreferrer"
-                className="rounded-full border border-slate-200 px-3 py-1.5 text-sm font-medium text-slate-600 transition hover:bg-slate-100 dark:border-slate-700 dark:text-slate-200 dark:hover:bg-slate-800"
+                className={`rounded-full border border-slate-200 px-3 py-1.5 text-sm font-medium text-slate-600 transition hover:bg-slate-100 ${DARK_PANEL_BORDER_CLASS} dark:text-slate-200 ${DARK_RAIL_HOVER_CLASS}`}
               >
                 Open in new tab
               </a>
@@ -2436,9 +2353,9 @@ export function FilesPanel({
     () => (
       <div className="flex h-full min-h-0 flex-1 flex-col overflow-hidden">
         {viewerHeader}
-        <div className="flex-1 min-h-0 overflow-hidden bg-white dark:bg-slate-950">{viewerBody}</div>
+        <div className={`flex-1 min-h-0 overflow-hidden bg-white ${DARK_PANEL_BG_CLASS}`}>{viewerBody}</div>
         {viewerState.entry && viewerState.entry.kind === "file" ? (
-          <footer className="border-t border-slate-200/70 px-4 py-2.5 text-xs text-slate-500 dark:border-slate-800 dark:text-slate-400">
+          <footer className={`border-t border-slate-200/70 px-4 py-2.5 text-xs text-slate-500 ${DARK_DIVIDER_BORDER_CLASS} dark:text-slate-400`}>
             <div className="flex flex-wrap items-center gap-4">
               <span>Size · {formatFileSize(viewerState.entry.size ?? activeFile?.size ?? null)}</span>
               <span>Modified · {formatTimestamp(viewerState.entry.modified ?? activeFile?.modifiedAt ?? null)}</span>
@@ -2500,7 +2417,7 @@ export function FilesPanel({
               title="Close"
               data-testid="files-explorer-close"
               onPress={onRequestCloseExplorer}
-              className="h-10 w-10 text-slate-500 hover:bg-slate-200/70 data-[hovered]:bg-slate-200/70 dark:text-slate-400 dark:hover:bg-slate-800/70 dark:data-[hovered]:bg-slate-800/70 lg:h-6 lg:w-6"
+              className={`h-10 w-10 text-slate-500 hover:bg-slate-200/70 data-[hovered]:bg-slate-200/70 dark:text-slate-400 ${DARK_RAIL_HOVER_CLASS}  lg:h-6 lg:w-6`}
             >
               <Xmark className="h-4 w-4" aria-hidden="true" />
             </IconButton>
@@ -2546,7 +2463,7 @@ export function FilesPanel({
               title="Close"
               data-testid="files-explorer-close"
               onPress={onRequestCloseExplorer}
-              className="h-10 w-10 text-slate-500 hover:bg-slate-200/70 data-[hovered]:bg-slate-200/70 dark:text-slate-400 dark:hover:bg-slate-800/70 dark:data-[hovered]:bg-slate-800/70 lg:h-6 lg:w-6"
+              className={`h-10 w-10 text-slate-500 hover:bg-slate-200/70 data-[hovered]:bg-slate-200/70 dark:text-slate-400 ${DARK_RAIL_HOVER_CLASS}  lg:h-6 lg:w-6`}
             >
               <Xmark className="h-4 w-4" aria-hidden="true" />
             </IconButton>
@@ -2612,10 +2529,10 @@ export function FilesPanel({
   } else {
     mainContent = (
       <div className="flex h-full min-h-0 overflow-hidden">
-        <div className="w-[260px] flex-shrink-0 border-r border-slate-200/70 bg-slate-50/40 dark:border-slate-800 dark:bg-slate-900/20 lg:w-[300px] xl:w-[340px]">
+        <div className={`w-[260px] flex-shrink-0 border-r border-slate-200/70 bg-slate-50/40 ${DARK_DIVIDER_BORDER_CLASS} ${DARK_PANEL_BG_CLASS} lg:w-[300px] xl:w-[340px]`}>
           {treeContent}
         </div>
-        <div className="flex-1 min-w-0 flex flex-col bg-white dark:bg-slate-950">
+        <div className={`flex-1 min-w-0 flex flex-col bg-white ${DARK_PANEL_BG_CLASS}`}>
           {tabsSlot}
           <div className="flex-1 min-h-0 flex flex-col">{viewerPanel}</div>
         </div>

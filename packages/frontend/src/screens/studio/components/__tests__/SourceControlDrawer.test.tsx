@@ -29,10 +29,6 @@ vi.mock("../../../../status/useStatus", () => ({
   useStatus: () => ({ showStatus: mocks.showStatus }),
 }));
 
-vi.mock("../../../../hooks/useBreakpoint", () => ({
-  useBreakpoint: () => false,
-}));
-
 vi.mock("../../../../conversations/ConversationsProvider", () => ({
   useConversations: () => ({
     activeConversationId: null,
@@ -87,6 +83,13 @@ describe("SourceControlDrawer project access", () => {
 
   beforeEach(() => {
     (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
+    vi.stubGlobal("matchMedia", vi.fn((query: string) => ({
+      matches: query.includes("min-width: 900px") && window.innerWidth >= 900,
+      media: query,
+      addEventListener: vi.fn(),
+      removeEventListener: vi.fn(),
+    })));
+    Object.defineProperty(window, "innerWidth", { value: 390, configurable: true });
     container = document.createElement("div");
     document.body.appendChild(container);
     root = createRoot(container);
@@ -119,7 +122,28 @@ describe("SourceControlDrawer project access", () => {
   afterEach(async () => {
     await act(async () => root.unmount());
     container.remove();
+    vi.unstubAllGlobals();
     delete (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT;
+  });
+
+  it.each([899, 900, 960, 1024])("uses Studio's responsive review layout at %ipx", async (width) => {
+    Object.defineProperty(window, "innerWidth", { value: width, configurable: true });
+    await act(async () => {
+      root.render(<SourceControlDrawer openRequest={{ key: 1, previewPath: "src/app.ts", reviewMode: "focused" }} />);
+    });
+    await flushAsyncWork();
+
+    const desktop = width >= 900;
+    expect(container.querySelector('[data-testid="source-control-review-layout"]') !== null).toBe(desktop);
+    expect(container.querySelector('[data-testid="source-control-diff-sheet"]') !== null).toBe(!desktop);
+    const focused = container.querySelector<HTMLButtonElement>('[data-testid="source-control-review-mode-focused"]');
+    const all = container.querySelector<HTMLButtonElement>('[data-testid="source-control-review-mode-all"]');
+    expect(focused?.getAttribute("aria-pressed")).toBe("true");
+    await act(async () => all?.click());
+    expect(all?.getAttribute("aria-pressed")).toBe("true");
+    expect(focused?.getAttribute("aria-pressed")).toBe("false");
+    expect(container.querySelector('[data-testid="source-control-rolling-diff-preview"]') !== null).toBe(desktop);
+    expect(container.querySelector('[data-testid="source-control-rolling-diff-sheet"]') !== null).toBe(!desktop);
   });
 
   it("keeps review available but disables every destructive version-control action for a viewer", async () => {

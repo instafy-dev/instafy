@@ -9,6 +9,8 @@ import {
 } from "react-aria-components";
 import { AgentProfilePopoverCard } from "./AssistantAvatarPopover";
 import { Button, IconButton } from "../../../components/Button";
+import { DrawerHeader } from "../../../components/DrawerHeader";
+import { DRAWER_ICON_BUTTON_TONE_CLASS } from "../../../components/listRowStyles";
 import { Text } from "../../../components/Text";
 import { Toggle } from "../../../components/Toggle";
 import {
@@ -169,7 +171,7 @@ function UsageWindowRow({
         as="span"
         variant="caption"
         tone="muted"
-        className="min-w-0 truncate text-xxs"
+        className="min-w-0 truncate text-xxs max-[899px]:text-xs pointer-coarse:text-xs"
       >
         {label}
         {reset ? ` · ${reset}` : ""}
@@ -178,7 +180,7 @@ function UsageWindowRow({
         as="span"
         variant="caption"
         tone={remainingTone}
-        className="shrink-0 text-xxs tabular-nums"
+        className="shrink-0 text-xxs max-[899px]:text-xs pointer-coarse:text-xs tabular-nums"
       >
         {remaining}% left
       </Text>
@@ -244,7 +246,7 @@ function InlineMenuSelect({
         onPress={() => {
           if (!open) setOpen(true);
         }}
-        className="inline-flex h-auto min-h-0 max-w-full items-center border-0 bg-transparent p-0 text-xxs font-medium text-slate-600 underline decoration-slate-400/80 decoration-dotted underline-offset-[3px] shadow-none hover:text-slate-900 hover:decoration-slate-500 data-[hovered]:text-slate-900 dark:text-slate-200 dark:decoration-slate-500 dark:hover:text-white dark:data-[hovered]:text-white"
+        className="inline-flex h-auto min-h-0 max-[899px]:min-h-11 pointer-coarse:min-h-11 max-w-full items-center border-0 bg-transparent p-0 max-[899px]:px-2 pointer-coarse:px-2 text-xxs max-[899px]:text-xs pointer-coarse:text-xs font-medium text-slate-600 underline decoration-slate-400/80 decoration-dotted underline-offset-[3px] shadow-none hover:text-slate-900 hover:decoration-slate-500 data-[hovered]:text-slate-900 dark:text-slate-200 dark:decoration-slate-500 dark:hover:text-white dark:data-[hovered]:text-white"
       >
         <span className="min-w-0 truncate">{displayLabel}</span>
       </Button>
@@ -337,7 +339,7 @@ function AgentInlineControls({
       {modelOptions.length > 0 && showReasoning ? (
         <span
           aria-hidden="true"
-          className="text-xxs text-slate-400 dark:text-slate-500"
+          className="text-xxs max-[899px]:text-xs pointer-coarse:text-xs text-slate-400 dark:text-slate-500"
         >
           ·
         </span>
@@ -423,7 +425,7 @@ function RuntimeGroupHeader({
         : {})}
       className={`flex w-full items-start gap-2 pb-0.5 pt-2.5 text-left ${
         onOpen
-          ? "group cursor-pointer rounded-md hover:bg-slate-100/70 dark:hover:bg-white/[0.05]"
+          ? "group cursor-pointer rounded-md outline-none focus-visible:ring-2 focus-visible:ring-primary-500/40 max-[899px]:min-h-11 pointer-coarse:min-h-11 hover:bg-slate-100/70 dark:hover:bg-white/[0.05]"
           : ""
       }`}
       data-testid="participants-runtime-group"
@@ -438,7 +440,7 @@ function RuntimeGroupHeader({
             as="span"
             variant="caption"
             tone="secondary"
-            className="min-w-0 truncate text-xxs font-medium"
+            className="min-w-0 truncate text-xxs max-[899px]:text-xs pointer-coarse:text-xs font-medium"
           >
             {runtime.label}
           </Text>
@@ -510,7 +512,7 @@ function MachineFooter({
           }
         : {})}
       className={`mt-1.5 flex w-full items-center gap-1.5 border-t border-slate-200/70 pt-2 text-left dark:border-[color:var(--color-studio-dark-divider)] ${
-        onOpen ? "group cursor-pointer" : ""
+        onOpen ? "group cursor-pointer outline-none focus-visible:ring-2 focus-visible:ring-primary-500/40 max-[899px]:min-h-11 pointer-coarse:min-h-11" : ""
       }`}
       data-testid="participants-machine-footer"
     >
@@ -522,7 +524,7 @@ function MachineFooter({
         as="span"
         variant="caption"
         tone="muted"
-        className={`min-w-0 truncate text-xxs ${
+        className={`min-w-0 truncate text-xxs max-[899px]:text-xs pointer-coarse:text-xs ${
           onOpen
             ? "group-hover:text-slate-700 dark:group-hover:text-slate-200"
             : ""
@@ -537,7 +539,7 @@ function MachineFooter({
           as="span"
           variant="caption"
           tone="warning"
-          className="shrink-0 text-xxs"
+          className="shrink-0 text-xxs max-[899px]:text-xs pointer-coarse:text-xs"
         >
           {status}
         </Text>
@@ -663,34 +665,35 @@ export function ParticipantsDrawer({
       data-testid="participants-drawer"
       className="absolute right-0 top-0 bottom-0 z-30 flex w-[300px] max-w-[85vw] flex-col border-l border-slate-200/70 bg-white shadow-[0_0_40px_-12px_rgba(0,0,0,0.25)] dark:border-[color:var(--color-studio-dark-divider)] dark:bg-[var(--color-studio-dark-panel)] dark:shadow-[0_0_40px_-12px_rgba(0,0,0,0.6)]"
     >
-      <div className="flex items-center justify-between px-3.5 pb-0.5 pt-3">
-        <Text as="div" variant="bodyStrong" tone="primary" className="text-sm">
-          In this conversation
-        </Text>
-        <IconButton
-          variant="ghost"
-          size="xs"
-          radius="full"
-          onPress={onClose}
-          aria-label="Close participants"
-          className="text-slate-500 hover:text-slate-700 data-[hovered]:text-slate-700 dark:text-slate-300 dark:hover:text-slate-100 dark:data-[hovered]:text-slate-100"
-        >
-          <Xmark className="h-4 w-4" aria-hidden="true" />
-        </IconButton>
-      </div>
+      <DrawerHeader
+        frame="rail"
+        title="In this conversation"
+        actions={
+          <IconButton
+            variant="ghost"
+            size="sm"
+            radius="full"
+            onPress={onClose}
+            aria-label="Close participants"
+            className={`max-[899px]:h-11 max-[899px]:w-11 ${DRAWER_ICON_BUTTON_TONE_CLASS}`}
+          >
+            <Xmark className="h-4 w-4" aria-hidden="true" />
+          </IconButton>
+        }
+      />
       {summaryParts.length > 0 ? (
         <Text
           as="div"
           variant="caption"
           tone="subtle"
-          className="px-3.5 pb-1 text-xxs"
+          className="px-4 pb-1 text-xxs max-[899px]:text-xs pointer-coarse:text-xs"
           data-testid="participants-drawer-summary"
         >
           {summaryParts.join(" · ")}
         </Text>
       ) : null}
 
-      <div className="min-h-0 flex-1 overflow-y-auto px-3.5 pb-3">
+      <div className="min-h-0 flex-1 overflow-y-auto px-4 pb-3">
         {humans.length === 0 && agents.length === 0 ? (
           <Text
             as="p"
@@ -708,7 +711,7 @@ export function ParticipantsDrawer({
               as="div"
               variant="caption"
               tone="subtle"
-              className="pb-1 pt-2.5 text-xxs font-medium"
+              className="pb-1 pt-2.5 text-xxs max-[899px]:text-xs pointer-coarse:text-xs font-medium"
             >
               People
             </Text>
@@ -720,7 +723,7 @@ export function ParticipantsDrawer({
                 displayName={human.label}
                 className="flex min-h-11 w-full items-center gap-2.5 rounded-lg py-1.5 text-left hover:bg-slate-100 dark:hover:bg-white/[0.06]"
               >
-                <HumanAvatar userId={human.userId} displayName={human.label} className="h-7 w-7 text-xxs" />
+                <HumanAvatar userId={human.userId} displayName={human.label} className="h-7 w-7 text-xxs max-[899px]:text-xs pointer-coarse:text-xs" />
                 <Text
                   as="span"
                   variant="caption"
@@ -745,7 +748,7 @@ export function ParticipantsDrawer({
               as="div"
               variant="caption"
               tone="subtle"
-              className="border-t border-slate-200/70 pb-1 pt-2.5 text-xxs font-medium dark:border-[color:var(--color-studio-dark-divider)]"
+              className="border-t border-slate-200/70 pb-1 pt-2.5 text-xxs max-[899px]:text-xs pointer-coarse:text-xs font-medium dark:border-[color:var(--color-studio-dark-divider)]"
             >
               {showGroupHeaders ? "Runtimes & agents" : "Agents"}
             </Text>
@@ -818,7 +821,7 @@ export function ParticipantsDrawer({
                           <AriaButton
                             aria-label={`View profile for @${agent.handle}`}
                             data-testid={`participants-agent-profile-${agent.handle}`}
-                            className="shrink-0 rounded-full outline-none focus-visible:ring-2 focus-visible:ring-primary-500/40"
+                            className="flex shrink-0 items-center justify-center rounded-full max-[899px]:h-11 max-[899px]:w-11 pointer-coarse:h-11 pointer-coarse:w-11 outline-none focus-visible:ring-2 focus-visible:ring-primary-500/40"
                           >
                             <AgentAvatar agent={agent} />
                           </AriaButton>
@@ -864,7 +867,7 @@ export function ParticipantsDrawer({
                                 as="span"
                                 variant="caption"
                                 tone="muted"
-                                className="min-w-0 truncate text-xxs"
+                                className="min-w-0 truncate text-xxs max-[899px]:text-xs pointer-coarse:text-xs"
                               >
                                 {readOnlyMeta}
                               </Text>
@@ -880,7 +883,7 @@ export function ParticipantsDrawer({
                                       ? "warning"
                                       : "muted"
                                 }
-                                className="shrink-0 text-xxs tabular-nums"
+                                className="shrink-0 text-xxs max-[899px]:text-xs pointer-coarse:text-xs tabular-nums"
                                 data-testid="participants-agent-headroom"
                               >
                                 · {remaining}% left
@@ -892,7 +895,7 @@ export function ParticipantsDrawer({
                               as="div"
                               variant="caption"
                               tone={credential.tone}
-                              className="truncate pt-0.5 text-xxs"
+                              className="truncate pt-0.5 text-xxs max-[899px]:text-xs pointer-coarse:text-xs"
                             >
                               {credential.text}
                             </Text>
@@ -902,7 +905,7 @@ export function ParticipantsDrawer({
                           ) : null}
                         </div>
                         {runningSet.has(agent.handle) ? (
-                          <span className="flex shrink-0 items-center gap-1.5 pt-0.5 text-xxs font-semibold text-primary-600 dark:text-primary-300">
+                          <span className="flex shrink-0 items-center gap-1.5 pt-0.5 text-xxs max-[899px]:text-xs pointer-coarse:text-xs font-semibold text-primary-600 dark:text-primary-300">
                             <span
                               aria-hidden="true"
                               className="h-1.5 w-1.5 rounded-full bg-primary-500 shadow-[0_0_5px_rgba(55,148,255,0.8)]"
@@ -931,7 +934,7 @@ export function ParticipantsDrawer({
         // Conversation-scoped controls absorbed from the composer chip: the
         // assistant switch (does AI reply here at all) and the door to agent
         // management. Anything workspace-scoped stays out of this panel.
-        <div className="border-t border-slate-200/70 px-3.5 py-2.5 dark:border-[color:var(--color-studio-dark-divider)]">
+        <div className="border-t border-slate-200/70 px-4 py-2.5 dark:border-[color:var(--color-studio-dark-divider)]">
           {assistant ? (
             <Toggle
               size="sm"
@@ -947,13 +950,13 @@ export function ParticipantsDrawer({
               type="button"
               onClick={editing.onManageAgents}
               data-testid="participants-manage-agents"
-              className="group mt-1.5 flex w-full items-center gap-1 text-left"
+              className="group mt-1.5 flex w-full items-center gap-1 rounded-lg text-left outline-none focus-visible:ring-2 focus-visible:ring-primary-500/40 max-[899px]:min-h-11 pointer-coarse:min-h-11"
             >
               <Text
                 as="span"
                 variant="caption"
                 tone="muted"
-                className="text-xxs group-hover:text-slate-700 dark:group-hover:text-slate-200"
+                className="text-xxs max-[899px]:text-xs pointer-coarse:text-xs group-hover:text-slate-700 dark:group-hover:text-slate-200"
               >
                 Manage agents
               </Text>
