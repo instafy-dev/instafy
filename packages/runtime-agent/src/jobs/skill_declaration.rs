@@ -54,9 +54,30 @@ pub struct DeclaredSecret {
     pub value_label: Option<String>,
     pub description: Option<String>,
     pub where_to_get: Option<String>,
+    /// The prefix the pack wrote in backticks after "starts with", such as
+    /// `ntn_`, so the card's field can show what a right value looks like.
+    /// A bare token prefix only: letters, digits, `_` and `-`, two to sixteen
+    /// characters. Anything else is `None`, never a cleaned-up guess.
+    pub value_hint: Option<String>,
     /// `None` where the cell says something this rule does not understand. The
     /// caller's default decides then, not a guess made here.
     pub sensitive: Option<bool>,
+}
+
+/// "It starts with `ntn_`." in a what-it-is cell is a shape the card can show
+/// in its field. The first real run saved a sentence in place of the token;
+/// a field that reads `ntn_…` says what belongs there before a paste.
+fn declared_prefix(cell: &str) -> Option<String> {
+    let lower = cell.to_ascii_lowercase();
+    let start = lower.find("starts with `")? + "starts with `".len();
+    let rest = &cell[start..];
+    let end = rest.find('`')?;
+    let prefix = &rest[..end];
+    let clean = (2..=16).contains(&prefix.chars().count())
+        && prefix
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || ch == '_' || ch == '-');
+    clean.then(|| prefix.to_string())
 }
 
 /// The declaration for one variable, or nothing.
@@ -154,6 +175,7 @@ fn derive(slug: &str, row: &SecretsRow) -> DeclaredSecret {
         value_label,
         description,
         where_to_get,
+        value_hint: row.what_it_is.as_deref().and_then(declared_prefix),
         sensitive: row.sensitive.as_deref().and_then(parse_sensitive),
     }
 }
@@ -798,6 +820,8 @@ mod tests {
             "the floor must name the screen the token is on, got: {where_to_get}"
         );
         assert!(where_to_get.chars().count() <= card_text::MAX_WHERE_TO_GET_CHARS);
+        // The same row declares the shape, and the field shows it.
+        assert_eq!(derived.value_hint.as_deref(), Some("ntn_"));
         // And it survives the gate it is about to be put through.
         assert_eq!(
             card_text::sanitize_card_text(
@@ -809,6 +833,24 @@ mod tests {
             .as_deref(),
             Some(where_to_get.as_str()),
         );
+    }
+
+    #[test]
+    fn a_declared_prefix_is_a_hint_only_when_it_is_a_bare_token_prefix() {
+        assert_eq!(
+            declared_prefix("It starts with `ntn_`.").as_deref(),
+            Some("ntn_")
+        );
+        assert_eq!(
+            declared_prefix("Starts With `sk-ant-`, then letters.").as_deref(),
+            Some("sk-ant-")
+        );
+        // Words, spaces, markup or an unclosed backtick are not a shape.
+        assert_eq!(declared_prefix("It starts with `ntn_ then digits`."), None);
+        assert_eq!(declared_prefix("It starts with `<b>ntn_</b>`."), None);
+        assert_eq!(declared_prefix("It starts with `x`."), None);
+        assert_eq!(declared_prefix("It starts with ntn_."), None);
+        assert_eq!(declared_prefix("It starts with `abcdefghijklmnopq`."), None);
     }
 
     #[test]

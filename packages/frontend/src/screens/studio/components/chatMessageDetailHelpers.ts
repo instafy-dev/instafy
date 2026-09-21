@@ -6,6 +6,7 @@ import {
   refusedSecretClass,
   sanitizeCardText,
   sanitizeSkillSlug,
+  sanitizeValueHint,
 } from "./packCardText";
 import type { ChatMessage } from "../types";
 import { extractMessageDetails, getMessageType } from "./chatMessageMetadata";
@@ -248,6 +249,12 @@ export type ParsedSecretRequestDetails = {
    * dead end worth filling, a refusal is not an invitation to go asking.
    */
   whereToGetRefused: boolean;
+  /**
+   * The prefix the pack declared for the value ("ntn_"), read by the runtime
+   * from the declaration and never from the model. Shown in the field as
+   * what belongs there. A bare token prefix only; anything else is null.
+   */
+  valueHint: string | null;
   /** The folder under .agents/skills that declared the need. Provenance only. */
   skill: string | null;
   /** Whether the input masks by default. Absent or unreadable means true. */
@@ -355,6 +362,7 @@ export function parseSecretRequestDetails(
   const whereToGetRaw = readDetailString(record, ["whereToGet", "where_to_get"]);
   const whereToGet = sanitizeCardText(whereToGetRaw, "whereToGet", owner, skill);
   const whereToGetRefused = Boolean(whereToGetRaw && whereToGetRaw.trim()) && whereToGet === null;
+  const valueHint = sanitizeValueHint(readDetailString(record, ["valueHint", "value_hint"]), owner, skill);
   // Absent or unreadable means sensitive: a value nobody labelled is one
   // worth hiding.
   const sensitive = record["sensitive"] === false ? false : true;
@@ -378,6 +386,7 @@ export function parseSecretRequestDetails(
     description,
     whereToGet,
     whereToGetRefused,
+    valueHint,
     skill,
     sensitive,
     refusedClass,
