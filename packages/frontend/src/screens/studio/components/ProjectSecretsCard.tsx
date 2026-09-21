@@ -233,6 +233,7 @@ function SecretModal({
               data-testid="project-secret-value-input"
             />
             <ToggleIconButton
+              appearance="bare"
               isSelected={valueVisible}
               size="sm"
               radius="full"

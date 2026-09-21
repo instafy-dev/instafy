@@ -402,6 +402,7 @@ export function InlineSecretsForm({
                   spellCheck={false}
                 />
                 <ToggleIconButton
+                  appearance="bare"
                   isSelected={draft.visible}
                   size="sm"
                   radius="full"

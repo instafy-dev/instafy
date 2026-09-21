@@ -3,9 +3,50 @@ import { IconButton, type IconButtonProps } from "./Button";
 
 export type ToggleIconButtonProps = Omit<IconButtonProps, "variant"> & {
   isSelected: boolean;
+  /**
+   * "chip" is the toolbar toggle: a ringed, filled control that reads as a
+   * button on its own. "bare" is for a toggle that lives inside a text
+   * field, such as a password or secret reveal: a muted glyph with no ring,
+   * fill or shadow, which is how such reveals look in the field they sit in
+   * (a ringed circle inside a bordered field was a box inside a box). The
+   * set state is the glyph's colour, and `aria-pressed` says it either way.
+   */
+  appearance?: "chip" | "bare";
 };
 
-export function ToggleIconButton({ isSelected, className, ...props }: ToggleIconButtonProps) {
+const BARE_STATE_CLASSES = {
+  selected: [
+    "!bg-transparent shadow-none !text-primary-600",
+    "hover:!bg-primary-50 data-[hovered]:!bg-primary-50 data-[pressed]:!bg-primary-100",
+    "dark:!text-primary-300 dark:hover:!bg-primary-400/10 dark:data-[hovered]:!bg-primary-400/10 dark:data-[pressed]:!bg-primary-400/20",
+  ],
+  unselected: [
+    "!bg-transparent shadow-none !text-slate-500",
+    "hover:!bg-slate-100 data-[hovered]:!bg-slate-100 data-[pressed]:!bg-slate-200",
+    "dark:!text-slate-400 dark:hover:!bg-slate-800/60 dark:data-[hovered]:!bg-slate-800/60 dark:data-[pressed]:!bg-slate-700/60",
+  ],
+};
+
+export function ToggleIconButton({
+  isSelected,
+  className,
+  appearance = "chip",
+  ...props
+}: ToggleIconButtonProps) {
+  if (appearance === "bare") {
+    return (
+      <IconButton
+        {...props}
+        variant="ghost"
+        aria-pressed={isSelected}
+        className={composeRenderProps(className, (value) =>
+          [...(isSelected ? BARE_STATE_CLASSES.selected : BARE_STATE_CLASSES.unselected), value]
+            .filter(Boolean)
+            .join(" "),
+        )}
+      />
+    );
+  }
   const stateClasses = isSelected
     ? [
         "!bg-primary-600 !text-white ring-primary-600/30 shadow-primary-600/20",

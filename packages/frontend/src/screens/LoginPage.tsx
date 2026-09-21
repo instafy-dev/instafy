@@ -726,6 +726,7 @@ export function LoginPage() {
                   autoComplete="current-password"
                 />
                 <ToggleIconButton
+                  appearance="bare"
                   isSelected={passwordVisible}
                   onPress={() => setPasswordVisible((value) => !value)}
                   aria-label={passwordVisible ? "Hide password" : "Show password"}
@@ -874,6 +875,7 @@ export function LoginPage() {
                   autoComplete="new-password"
                 />
                 <ToggleIconButton
+                  appearance="bare"
                   isSelected={passwordVisible}
                   onPress={() => setPasswordVisible((value) => !value)}
                   aria-label={passwordVisible ? "Hide password" : "Show password"}
