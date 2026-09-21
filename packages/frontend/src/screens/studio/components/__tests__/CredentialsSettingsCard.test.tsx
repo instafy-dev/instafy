@@ -308,6 +308,48 @@ describe("CredentialsSettingsCard", () => {
     expect(container.querySelector('[data-testid="credentials-add-connection"]')).not.toBeNull();
   });
 
+  it.each([false, true])("creates an agent without a personal connection (managed AI: %s)", async (managedEnabled) => {
+    mocks.listCredentials.mockResolvedValue({ success: true, credentials: [] });
+    mocks.getCredentialRequirements.mockResolvedValue({ ...managedRequirements, managedAi: {
+      ...managedRequirements.managedAi, enabled: managedEnabled, available: managedEnabled,
+    } });
+    mocks.listAgents.mockResolvedValue({ success: true, agents: [{ ...inheritedAgent, handle: "octo" }] });
+    mocks.createAgent.mockResolvedValue({ success: true, agent: inheritedAgent });
+    await act(async () => { root.render(<CredentialsSettingsCard section="agents" />); await flush(); });
+    const create = container.querySelector<HTMLButtonElement>('[data-testid="bots-create"]')!;
+    expect(create.textContent).toContain("New agent");
+    expect(create.disabled).toBe(false);
+    await act(async () => create.click());
+    expect(mocks.agentProfileProps?.isOpen).toBe(true);
+    expect(mocks.agentProfileProps?.handleRequired).toBe(true);
+    expect(mocks.agentProfileProps?.connectionHint).toContain(managedEnabled ? "Instafy AI" : "connect AI before chatting");
+    expect(mocks.agentProfileProps?.providerOptions).toEqual([]);
+    expect(mocks.agentProfileProps?.modelOptions).toEqual([]);
+    await act(async () => {
+      mocks.agentProfileProps!.onHandleChange("@reviewer");
+      mocks.agentProfileProps!.onDisplayNameChange("Reviewer");
+    });
+    await saveProfile();
+    expect(mocks.createAgent).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({
+      credentialId: null, provider: "openai", model: null, handle: "reviewer", displayName: "Reviewer",
+    }));
+    expect(mocks.agentProfileProps?.isOpen).toBe(false);
+  });
+
+  it("requires a handle for a connection-free profile and discards a cancelled draft", async () => {
+    mocks.listCredentials.mockResolvedValue({ success: true, credentials: [] });
+    await act(async () => { root.render(<CredentialsSettingsCard section="agents" />); await flush(); });
+    await act(async () => container.querySelector<HTMLButtonElement>('[data-testid="bots-create"]')!.click());
+    await saveProfile();
+    expect(mocks.createAgent).not.toHaveBeenCalled();
+    expect(mocks.showStatus).toHaveBeenLastCalledWith("Choose a handle for this agent, such as @reviewer.", "error", 4500);
+    await act(async () => mocks.agentProfileProps!.onDisplayNameChange("Cancelled draft"));
+    await act(async () => mocks.agentProfileProps!.onClose());
+    await act(async () => container.querySelector<HTMLButtonElement>('[data-testid="bots-create"]')!.click());
+    expect(mocks.agentProfileProps?.displayName).toBe("");
+    expect(mocks.createAgent).not.toHaveBeenCalled();
+  });
+
   it("opens agent deep links on the Agents view and returns to that list after editing", async () => {
     mocks.listAgents.mockResolvedValue({ success: true, agents: [inheritedAgent] });
     setPendingAgentProfileTarget("helper");

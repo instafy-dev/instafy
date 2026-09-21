@@ -52,6 +52,20 @@ describe("agent public About", () => {
     expect((document.querySelector('[data-testid="agent-profile-save"]') as HTMLButtonElement).disabled).toBe(true);
   });
 
+  it("explains connection-free creation and requires its handle before saving", async () => {
+    const render = (handle: string) => <AgentProfileModal isOpen mode="create" title="New agent" handle={handle}
+      handleRequired displayName="Reviewer" avatarImageUrl="" onHandleChange={() => {}}
+      onDisplayNameChange={() => {}} onAvatarImageUrlChange={() => {}} description=""
+      onDescriptionChange={() => {}} onClose={() => {}} onSave={mocks.save}
+      connectionHint="No AI connection yet. You can save this profile now and connect AI before chatting." />;
+    await act(async () => root.render(render("")));
+    expect(document.querySelector<HTMLInputElement>('#agent-profile-handle')?.required).toBe(true);
+    expect(document.querySelector('[data-testid="agent-profile-connection-hint"]')?.textContent).toContain("connect AI before chatting");
+    expect(document.querySelector<HTMLButtonElement>('[data-testid="agent-profile-save"]')?.disabled).toBe(true);
+    await act(async () => root.render(render("@reviewer")));
+    expect(document.querySelector<HTMLButtonElement>('[data-testid="agent-profile-save"]')?.disabled).toBe(false);
+  });
+
   it("reads the exact project and agent and displays only plain-text public bio", async () => {
     mocks.read.mockResolvedValue({ success: true, value: { ...publicProfile, bio: "<script>alert(1)</script>\nBuild specialist", description: "PRIVATE STYLE" } });
     await act(async () => root.render(card()));

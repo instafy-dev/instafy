@@ -2,7 +2,7 @@ import { AgentAvatar } from "../../../components/AgentAvatar";
 import { uploadIdentityImage } from "../../../lib/identityImages";
 import { PROFILE_BIO_MAX_LENGTH } from "@instafy/sdk/human-profiles";
 import { useCallback, useEffect, useMemo, useRef, useState, type ChangeEvent } from "react";
-import { Brain, CheckCircle, Cpu, EditPencil, MoreHoriz, Trash, Upload, WarningTriangle, Xmark } from "iconoir-react";
+import { Brain, CheckCircle, Cpu, EditPencil, MoreHoriz, Plus, Trash, Upload, WarningTriangle, Xmark } from "iconoir-react";
 import { MenuTrigger } from "react-aria-components";
 import { Badge } from "../../../components/Badge";
 import { Button, IconButton } from "../../../components/Button";
@@ -724,8 +724,8 @@ function UserCredentialsSettingsCard({ section = "connections", onOpenAgentProfi
         : `${managedAi.dailyPromptLimit} prompts available each day.`
       : "Uses your shared team balance.";
 
-  const openCreateBotModal = useCallback((credentialId: string) => {
-    const credential = credentialsById.get(credentialId) ?? null;
+  const openCreateBotModal = useCallback((credentialId: string | null) => {
+    const credential = credentialId ? credentialsById.get(credentialId) ?? null : null;
     const provider = credential ? resolveCredentialProviderId(credential) : "openai";
     setAgentProfileModal({ mode: "create" });
     setAgentAvatarFileDraft(null);
@@ -737,7 +737,7 @@ function UserCredentialsSettingsCard({ section = "connections", onOpenAgentProfi
     setAgentBioDraft("");
     setAgentCredentialDraft(credentialId);
     setAgentProviderDraft(provider);
-    setAgentModelDraft(modelOptionsForProvider(provider)[0]?.id ?? null);
+    setAgentModelDraft(credential ? modelOptionsForProvider(provider)[0]?.id ?? null : null);
     setAgentCredentialDirty(false);
     setAgentModelDirty(false);
   }, [credentialsById]);
@@ -883,16 +883,15 @@ function UserCredentialsSettingsCard({ section = "connections", onOpenAgentProfi
 
     if (agentProfileModal.mode === "create") {
       const credentialId = (agentCredentialDraft ?? "").trim();
-      if (!credentialId) {
-        showStatus("Select a credential to power this bot.", "error", 4500);
-        return;
-      }
-
       const handleDraftTrimmed = agentHandleDraft.trim();
       const handleNormalized =
         handleDraftTrimmed.length > 0 ? normalizeAgentHandle(handleDraftTrimmed) : null;
       if (handleDraftTrimmed.length > 0 && !handleNormalized) {
         showStatus("Bot handle must look like @bob (letters/numbers, up to 20 chars).", "error", 4500);
+        return;
+      }
+      if (!credentialId && !handleNormalized) {
+        showStatus("Choose a handle for this agent, such as @reviewer.", "error", 4500);
         return;
       }
       const handleForRequest = handleNormalized ?? undefined;
@@ -903,7 +902,8 @@ function UserCredentialsSettingsCard({ section = "connections", onOpenAgentProfi
         const picture = await resolvePicture();
         if (!mounted.current) return;
         const result = await createMyAgent({
-          credentialId,
+          credentialId: credentialId || null,
+          ...(!credentialId ? { provider: agentProviderDraft } : {}),
           handle: handleForRequest,
           displayName: trimmedName.length > 0 ? trimmedName : undefined,
           avatarSeed: picture ?? undefined,
@@ -916,7 +916,7 @@ function UserCredentialsSettingsCard({ section = "connections", onOpenAgentProfi
           showStatus(result.error ?? "Unable to create bot.", "error", 4500);
           return;
         }
-        showStatus(`Bot created: @${result.agent.handle}`, "success", 3000);
+        showStatus(`Agent created: @${result.agent.handle}`, "success", 3000);
         closeAgentProfileModal();
         await loadCredentials({ silent: true });
         notifyAiConfigChanged("agent_created");
@@ -994,6 +994,7 @@ function UserCredentialsSettingsCard({ section = "connections", onOpenAgentProfi
     user,
     agentCredentialDraft,
     agentCredentialDirty,
+    agentProviderDraft,
     codexCredentials.length,
     agents,
     agentDescriptionDraft,
@@ -1053,9 +1054,10 @@ function UserCredentialsSettingsCard({ section = "connections", onOpenAgentProfi
     agentCredentialDirty || agentModelDirty;
 
   const agentProfileModalMode: AgentProfileModalMode = agentProfileModal?.mode ?? "create";
+  const creatingWithoutConnection = agentProfileModalMode === "create" && codexCredentials.length === 0;
   const agentProfileModalTitle =
     agentProfileModalMode === "create"
-      ? "Create bot"
+      ? "New agent"
       : agentProfileModalMode === "octo"
         ? "Edit @octo"
         : `Edit ${agentHandleDraft.trim() || "@bot"}`;
@@ -1065,7 +1067,7 @@ function UserCredentialsSettingsCard({ section = "connections", onOpenAgentProfi
           const credentialId = (agentCredentialDraft ?? "").trim();
           const credential = credentialId ? credentialsById.get(credentialId) ?? null : null;
           const label = credential ? resolveCredentialLabel(credential) : null;
-          return label ? `Powered by ${label}.` : "Powered by the selected credential.";
+          return label ? `Powered by ${label}.` : "Choose a name, handle and instructions. You can connect AI later.";
         })()
       : agentProfileModalMode === "octo"
         ? (() => {
@@ -1143,12 +1145,8 @@ function UserCredentialsSettingsCard({ section = "connections", onOpenAgentProfi
   );
 
   const handleCreateBotFromManager = useCallback(() => {
-    if (!defaultCredentialId) {
-      showStatus("Connect an AI credential first to create bots.", "error", 4500);
-      return;
-    }
     openCreateBotModal(defaultCredentialId);
-  }, [defaultCredentialId, openCreateBotModal, showStatus]);
+  }, [defaultCredentialId, openCreateBotModal]);
 
   const handleConnectCredentialFromModal = useCallback(() => {
     const step =
@@ -1177,18 +1175,30 @@ function UserCredentialsSettingsCard({ section = "connections", onOpenAgentProfi
         onCredentialChange={handleAgentCredentialChange}
         onConnectCredential={handleConnectCredentialFromModal}
         providerId={agentProviderDraft}
-        providerOptions={agentProviderOptions}
+        providerOptions={creatingWithoutConnection ? [] : agentProviderOptions}
         onProviderChange={handleAgentProviderChange}
         modelId={agentModelDraft}
-        modelOptions={agentModelOptions}
+        modelOptions={creatingWithoutConnection ? [] : agentModelOptions}
+        connectionHint={creatingWithoutConnection
+          ? !credentialRequirements?.success
+            ? "Uses your account's default AI when available. You can save this profile now."
+            : managedAiSelected
+            ? managedAi?.available
+              ? `Uses ${managedAi?.label?.trim() || "Instafy AI"} by default.`
+              : `Uses ${managedAi?.label?.trim() || "Instafy AI"} by default. It is currently unavailable.`
+            : "No AI connection yet. You can save this profile now and connect AI before chatting."
+          : undefined}
         onModelChange={(modelId) => { setAgentModelDraft(modelId); setAgentModelDirty(true); }}
         handle={agentHandleDraft}
         onHandleChange={setAgentHandleDraft}
         handleDisabled={agentProfileModalMode === "octo"}
-        handlePlaceholder={agentProfileModalMode === "create" ? "@bot (optional)" : "@bob"}
+        handleRequired={agentProfileModalMode === "create" && !agentCredentialDraft}
+        handlePlaceholder={agentProfileModalMode === "create" && agentCredentialDraft ? "@bot (optional)" : "@reviewer"}
         handleHelpText={
           agentProfileModalMode === "create"
-            ? "Leave empty to auto-generate a handle from the credential label."
+            ? agentCredentialDraft
+              ? "Leave empty to auto-generate a handle from the connection label."
+              : "Required. Use this handle to mention your agent in chats."
             : undefined
         }
         displayName={agentNameDraft}
@@ -1205,7 +1215,7 @@ function UserCredentialsSettingsCard({ section = "connections", onOpenAgentProfi
         onDescriptionChange={setAgentDescriptionDraft}
         onClose={closeAgentProfileModal}
         onSave={() => void handleSaveAgentProfile()}
-        saveLabel={agentProfileModalMode === "create" ? "Create bot" : "Save profile"}
+        saveLabel={agentProfileModalMode === "create" ? "Create agent" : "Save profile"}
       />
 
       <div className="space-y-8" data-testid="credentials-settings-card">
@@ -1701,19 +1711,23 @@ function UserCredentialsSettingsCard({ section = "connections", onOpenAgentProfi
         {section === "agents" ? (
         <StudioListSection
           title="Agents"
-          description="Choose who you chat with. Customize each agent’s profile and instructions; connections supply the AI."
+          description="Customize profiles and instructions."
           tone="suggestion"
           icon={<Brain className="h-5 w-5" aria-hidden={true} />}
           actions={
-            defaultCredentialId ? (
-              <SettingsAddButton
-                onPress={handleCreateBotFromManager}
-                isDisabled={Boolean(agentActionPendingId)}
-                data-testid="bots-create"
-                ariaLabel="Create bot"
-                title="Create bot"
-              />
-            ) : null
+            <Button
+              onPress={handleCreateBotFromManager}
+              isDisabled={!canManageAiConnections || loading || Boolean(agentActionPendingId)}
+              variant="outline"
+              size="sm"
+              radius="xl"
+              className="min-h-11 min-w-11 gap-1.5"
+              aria-label="New agent"
+              data-testid="bots-create"
+            >
+              <Plus className="h-4 w-4" aria-hidden="true" />
+              <span className="hidden sm:inline">New agent</span>
+            </Button>
           }
         >
           {octoAgent || botAgents.length > 0 ? (
@@ -1854,25 +1868,8 @@ function UserCredentialsSettingsCard({ section = "connections", onOpenAgentProfi
                     </span>
                   }
                   startClassName="self-center"
-                  title="No bots yet"
-                  subtitle={
-                    defaultCredentialId
-                      ? "Create a custom handle when you want a different style or model."
-                      : "Connect AI before creating custom bot handles."
-                  }
-                  end={
-                    defaultCredentialId ? (
-                      <Button
-                        onPress={handleCreateBotFromManager}
-                        isDisabled={Boolean(agentActionPendingId)}
-                        variant="outline"
-                        size="xs"
-                        radius="full"
-                      >
-                        Create bot
-                      </Button>
-                    ) : null
-                  }
+                  title="No agents yet"
+                  subtitle="Create an agent with its own profile and instructions."
                   endClassName="self-center"
                 />
               </StudioListRow>

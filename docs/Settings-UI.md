@@ -114,6 +114,12 @@ new prompts; agents customize identity and instructions and may choose their own
 Opening an agent profile from a conversation selects Agents, so closing the editor returns
 to its list. Switching categories keeps the connection and agent state mounted.
 
+Keep **New agent** visible even when no personal AI connection is saved. Agent profiles can
+be created before connecting AI; the controller already accepts a null credential with an
+explicit handle. Require that handle in the editor, leave the model unset, and explain whether
+the profile will use managed AI or needs an AI connection before chatting. Do not present a
+list of disabled providers when no personal connections exist.
+
 After the controller confirms its capabilities, show Instafy AI as the first connection row with
 the canonical Octo mark, its allowance and the same Default badge or Make default action
 as saved providers. Selecting it clears the default credential without deleting any saved
