@@ -1,7 +1,7 @@
 # Sharing a local browser tab
 
 Status: initial Electron implementation. Physical Android/iOS qualification,
-constrained-network measurements and multi-controller routing remain open.
+real-network measurements and multi-controller routing remain open.
 
 The browser's location and its audience are separate choices. The browser location
 selector says **This device** and **Workspace**. This device uses Personal Browser
@@ -89,10 +89,21 @@ Older Desktop bridges remain compatible and do not advertise Explore.
 
 Each Explore view has its own pending capture; a navigating or stalled page cannot
 delay captures for other participants. Follow and Explore suppress byte-identical
-JPEGs between two-second image heartbeats. Changed images are published on the next
-capture, subject to the existing socket backpressure limit. This reduces static-page
+JPEGs between two-second image heartbeats. Changed images enter the publisher's
+latest-frame queue on the next capture. This reduces static-page
 bandwidth without reducing the requested image resolution or raising the capture rate.
 It does not remove the cost of capturing a static page.
+
+Current clients negotiate `frameFlowVersion=1` when opening the socket. The relay
+acknowledges each uploaded image, and viewers acknowledge after image decoding.
+Each connection permits one unacknowledged image. The publisher retains only the
+latest waiting image for each view, serving those views in turn; the relay retains
+only the latest image while a viewer is busy. A slow connection therefore lowers
+the update frequency instead of accumulating a replay of old frames. Input and
+revocation messages do not wait for image acknowledgement. An acknowledgement
+missing for five seconds ends the affected connection. Older clients/controllers
+keep their existing protocol; both ends must support this negotiation for the
+bounded image delivery behavior.
 
 The first native implementation stalled while navigating hidden pages. Explore
 now uses Electron's capture lease, drops up to three transient missing-surface

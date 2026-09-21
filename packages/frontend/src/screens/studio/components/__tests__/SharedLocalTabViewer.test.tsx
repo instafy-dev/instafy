@@ -47,6 +47,19 @@ it("fits the frame, then preserves local zoom/pan across new frames without send
   await zoom("fit"); expect(pan().scrollLeft).toBe(0); expect(image().style.width).toBe("390px");
 });
 
+it("acknowledges each negotiated frame only after decoding, including discarded old-view frames", async () => {
+  Object.assign(socket, { frameFlowVersion: 1, readyState: WebSocket.OPEN });
+  await act(async () => socket.dispatchEvent(new MessageEvent("message", { data: new Uint8Array([255,216,255,217]).buffer })));
+  expect(socket.send).not.toHaveBeenCalled();
+  await act(async () => image().dispatchEvent(new Event("load")));
+  expect(socket.send).toHaveBeenCalledTimes(1);
+  expect(socket.send).toHaveBeenLastCalledWith('{"type":"frameAck"}');
+  await act(async () => image().dispatchEvent(new Event("load")));
+  expect(socket.send).toHaveBeenCalledTimes(1);
+  await act(async () => socket.dispatchEvent(new MessageEvent("message", { data: new Uint8Array([0]).buffer })));
+  expect(socket.send).toHaveBeenCalledTimes(2);
+});
+
 it("expands and minimizes without reconnecting or ending the session", async () => {
   await frame(); await click("Expand shared tab");
   expect(document.querySelector('[role="dialog"][aria-label="Shared browser tab"]')).not.toBeNull();

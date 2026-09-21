@@ -5,6 +5,7 @@ import {
   type LocalExploreViewport,
 } from "./localTabExplore";
 import { localTabFrameFilter } from "./localTabFrameFilter";
+import type { localTabFrameSender } from "./localTabFrameSender";
 type Bridge = NonNullable<Window["instafyDesktop"]>;
 export function supportsLocalExplore(bridge: Bridge) {
   return Boolean(
@@ -22,6 +23,7 @@ export function localTabExplorePublisher(
   ownerId: string,
   captureId: string,
   socket: WebSocket,
+  frameSender: ReturnType<typeof localTabFrameSender>,
 ) {
   type LocalView = {
     viewport: LocalExploreViewport;
@@ -40,6 +42,7 @@ export function localTabExplorePublisher(
   async function close(viewId: string) {
     const view = views.get(viewId);
     views.delete(viewId);
+    frameSender.remove(viewId);
     window.clearTimeout(view?.timer);
     await bridge.browserTabExploreClose!(options(viewId)).catch(
       () => undefined,
@@ -153,7 +156,7 @@ export function localTabExplorePublisher(
             socket.bufferedAmount < 1024 * 1024 &&
             view.shouldPublish(bytes)
           )
-            socket.send(localExploreFrame(viewId, bytes));
+            frameSender.offer(viewId, localExploreFrame(viewId, bytes));
         } catch {
           await close(viewId);
         } finally {

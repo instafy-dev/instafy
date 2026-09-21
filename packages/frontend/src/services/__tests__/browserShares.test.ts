@@ -9,6 +9,7 @@ vi.mock("../runtimeController/client", () => ({ controllerJsonRequest: vi.fn() }
 class Socket extends EventTarget {
   static OPEN = 1;
   static instances: Socket[] = [];
+  static frameFlowVersion: 1 | undefined;
   readyState = 1; bufferedAmount = 0; binaryType = ""; sent: unknown[] = [];
   constructor(readonly url: string) {
     super(); Socket.instances.push(this);
@@ -16,13 +17,13 @@ class Socket extends EventTarget {
   }
   send(value: unknown) {
     this.sent.push(value);
-    if (typeof value === "string") queueMicrotask(() => this.dispatchEvent(new MessageEvent("message", { data: '{"type":"ready"}' })));
+    if (typeof value === "string") queueMicrotask(() => this.dispatchEvent(new MessageEvent("message", { data: JSON.stringify({ type: "ready", frameFlowVersion: Socket.frameFlowVersion }) })));
   }
   close() { if (this.readyState === 3) return; this.readyState = 3; this.dispatchEvent(new Event("close")); }
 }
 const flush = async () => { for (let i = 0; i < 12; i++) await Promise.resolve(); };
 beforeEach(() => {
-  Socket.instances = []; vi.stubGlobal("WebSocket", Socket);
+  Socket.instances = []; Socket.frameFlowVersion = undefined; vi.stubGlobal("WebSocket", Socket);
   vi.mocked(resolveControllerRequestContext).mockResolvedValue({ baseUrl: "https://controller.example", accessToken: "test-session" } as never);
   vi.mocked(controllerJsonRequest).mockImplementation(async () => ({ success: true, value: { id: "share", projectId: "project", ownerUserId: "user", audience: "space", mode: "view" }, response: new Response() }) as never);
 });
@@ -57,9 +58,19 @@ it("sends identity only in the authenticated handshake and abort closes the sock
   const client = await browserShareClient("project"); const abort = new AbortController();
   await client.connect("share", "watch", abort.signal);
   const socket = Socket.instances[0];
-  expect(String(socket.url)).toBe("wss://controller.example/projects/project/browser-shares/share/watch");
+  expect(String(socket.url)).toBe("wss://controller.example/projects/project/browser-shares/share/watch?frameFlowVersion=1");
   expect(socket.sent).toEqual([JSON.stringify({ accessToken: "test-session" })]);
   abort.abort(); expect(socket.readyState).toBe(3);
+});
+
+it("negotiates frame flow without changing the legacy authentication payload", async () => {
+  Socket.frameFlowVersion = 1;
+  const client = await browserShareClient("project");
+  const abort = new AbortController();
+  const socket = await client.connect("share", "publish", abort.signal);
+  expect(socket.frameFlowVersion).toBe(1);
+  expect(Socket.instances[0].sent).toEqual([JSON.stringify({ accessToken: "test-session" })]);
+  abort.abort();
 });
 
 it("Stop while controller identity is resolving never starts native capture", async () => {

@@ -19,6 +19,7 @@ export function SharedLocalTabViewer({ projectId, share, onClose, onEnded }: { p
   const [control,setControl]=useState<LocalTabControlState|null>(null);
   const controlRef=useRef(control); controlRef.current=control;
   const socketRef=useRef<WebSocket|null>(null);
+  const acknowledgeFrame = useRef<(() => void) | null>(null);
   const [surface,setSurface]=useState<HTMLImageElement|null>(null);
   const [panOnly,setPanOnly]=useState(false);
   const panRef=useRef(panOnly); panRef.current=panOnly;
@@ -51,7 +52,7 @@ export function SharedLocalTabViewer({ projectId, share, onClose, onEnded }: { p
     const abort = new AbortController();
     let imageUrl: string | null = null;
     let stalled: number | undefined;
-    function clear() { setExplore(null); exploreRef.current=null; setControl(null); controlRef.current=null; if (imageUrl) URL.revokeObjectURL(imageUrl); imageUrl = null; setImage(null); }
+    function clear() { acknowledgeFrame.current?.(); setExplore(null); exploreRef.current=null; setControl(null); controlRef.current=null; if (imageUrl) URL.revokeObjectURL(imageUrl); imageUrl = null; setImage(null); }
     void browserShareClient(projectId).then(client => client.connect(share.id, "watch", abort.signal)).then(socket => {
       if (abort.signal.aborted) { socket.close(); return; }
       socketRef.current=socket;
@@ -69,6 +70,7 @@ export function SharedLocalTabViewer({ projectId, share, onClose, onEnded }: { p
               const changed=independent.view?.viewId !== exploreRef.current?.view?.viewId;
               exploreRef.current=independent; setExplore(independent);
               if (changed) {
+                acknowledgeFrame.current?.();
                 if(imageUrl)URL.revokeObjectURL(imageUrl);imageUrl=null;setImage(null);setPanOnly(false);setZoom("fit");
                 // A new native page may take up to 15 seconds to load its first image.
                 armStall(independent.view ? 20_000 : 10_000);
@@ -79,8 +81,14 @@ export function SharedLocalTabViewer({ projectId, share, onClose, onEnded }: { p
           return;
         }
         if (!(event.data instanceof ArrayBuffer)) return;
+        const acknowledge = () => {
+          acknowledgeFrame.current = null;
+          if (socket.frameFlowVersion === 1 && socket.readyState === WebSocket.OPEN)
+            socket.send('{"type":"frameAck"}');
+        };
         const bytes=readLocalTabFrame(event.data,exploreRef.current?.view?.viewId ?? null);
-        if (!bytes) return;
+        if (!bytes) { acknowledge(); return; }
+        acknowledgeFrame.current = acknowledge;
         armStall();
         const previous = imageUrl;
         imageUrl = URL.createObjectURL(new Blob([bytes], { type: "image/jpeg" }));
@@ -89,7 +97,7 @@ export function SharedLocalTabViewer({ projectId, share, onClose, onEnded }: { p
       });
       socket.addEventListener("close", () => { window.clearTimeout(stalled); clear(); if (!abort.signal.aborted) { setState("Sharing ended"); onEnded(share.id); } });
     }).catch(() => { if (!abort.signal.aborted) { clear(); setState("This tab share is unavailable or has ended."); onEnded(share.id); } });
-    return () => { socketRef.current=null; controlRef.current=null; exploreRef.current=null; abort.abort(); window.clearTimeout(stalled); if (imageUrl) URL.revokeObjectURL(imageUrl); };
+    return () => { acknowledgeFrame.current=null; socketRef.current=null; controlRef.current=null; exploreRef.current=null; abort.abort(); window.clearTimeout(stalled); if (imageUrl) URL.revokeObjectURL(imageUrl); };
   }, [projectId, share.id, onEnded]);
   const [fullscreen, setFullscreen] = useState(false);
   const expandedViewportStyle = useExpandedBrowserViewport(fullscreen);
@@ -152,7 +160,7 @@ export function SharedLocalTabViewer({ projectId, share, onClose, onEnded }: { p
       style={fullscreen ? undefined : { height: exploring ? "min(55vh,480px)" : image ? inlineHeight : 0, maxHeight: "55vh" }}>
       {image ? <div className="grid min-h-full min-w-full place-items-center" style={{ width, height }}>
         <img ref={setSurface} tabIndex={(selfControls || exploring) && !panOnly ? 0 : -1} alt="Live shared browser tab" src={image} className="block max-w-none" style={{ width, height, touchAction: (selfControls || exploring) && !panOnly ? "none" : "auto" }} draggable={false} data-testid="local-browser-share-image"
-          onLoad={event => { const img = event.currentTarget; setImageSize(current => current.width === img.naturalWidth && current.height === img.naturalHeight ? current : { width: img.naturalWidth, height: img.naturalHeight }); }} />
+          onLoad={event => { acknowledgeFrame.current?.(); const img = event.currentTarget; setImageSize(current => current.width === img.naturalWidth && current.height === img.naturalHeight ? current : { width: img.naturalWidth, height: img.naturalHeight }); }} />
       </div> : null}
     </div>
     <RemoteBrowserMobileKeyboard enabled={(selfControls || exploring) && !panOnly && Boolean(image)} onMessage={sendInput} onOccupiedHeightChange={setKeyboardOccupiedHeight} />

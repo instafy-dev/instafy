@@ -571,10 +571,17 @@ struct SocketAuth {
     explore_version: Option<u32>,
 }
 
+#[derive(Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct FrameFlowQuery {
+    frame_flow_version: Option<u32>,
+}
+
 async fn socket(
     State(state): State<AppState>,
     Extension(reg): Extension<Registry>,
     Path((project, id, role)): Path<(Uuid, Uuid, String)>,
+    Query(flow): Query<FrameFlowQuery>,
     ws: WebSocketUpgrade,
 ) -> Result<Response> {
     let publish = match role.as_str() {
@@ -586,7 +593,17 @@ async fn socket(
     Ok(ws
         .max_message_size(MAX_FRAME + 40)
         .max_frame_size(MAX_FRAME + 40)
-        .on_upgrade(move |ws| serve(ws, state, reg, project, id, publish)))
+        .on_upgrade(move |ws| {
+            serve(
+                ws,
+                state,
+                reg,
+                project,
+                id,
+                publish,
+                flow.frame_flow_version == Some(1),
+            )
+        }))
 }
 
 async fn serve(
@@ -596,6 +613,7 @@ async fn serve(
     project: Uuid,
     id: Uuid,
     publish: bool,
+    frame_flow: bool,
 ) {
     let Ok(Some(Ok(Message::Text(raw)))) =
         tokio::time::timeout(Duration::from_secs(5), socket.recv()).await
@@ -645,8 +663,17 @@ async fn serve(
     let mut membership = tokio::time::interval(Duration::from_secs(10));
     let mut last_frame = Instant::now() - Duration::from_secs(1);
     let mut lifetime = tokio::time::interval(Duration::from_secs(1));
+    let mut pending_frame: Option<Instant> = None;
+    let mut stopped = feed.clone();
     let _ = socket
-        .send(Message::Text("{\"type\":\"ready\"}".into()))
+        .send(Message::Text(
+            if frame_flow {
+                "{\"type\":\"ready\",\"frameFlowVersion\":1}"
+            } else {
+                "{\"type\":\"ready\"}"
+            }
+            .into(),
+        ))
         .await;
     // send_modify causes existing latest pixels to be delivered to this watcher.
     feed.mark_changed();
@@ -656,7 +683,9 @@ async fn serve(
         tokio::select! {
             biased;
             _ = revoked.changed(), if !publish => { break; }
+            _ = async { let _ = stopped.wait_for(|value| matches!(value, Feed::Stopped)).await; } => { break; }
             _ = lifetime.tick() => {
+                if pending_frame.is_some_and(|sent| sent.elapsed() >= Duration::from_secs(5)) { break; }
                 { let mut shares = reg.0.lock().unwrap();
                   Registry::prune(&mut shares, Instant::now());
                   if !shares.contains_key(&id) { break; }
@@ -683,17 +712,25 @@ async fn serve(
             incoming = socket.recv() => {
                 match incoming {
                     Some(Ok(Message::Binary(bytes))) if publish => {
-                        if bytes.starts_with(b"IEX1") { if !reg.explore_frame(id, bytes) { break; } continue; }
-                        if last_frame.elapsed() < Duration::from_millis(100) { continue; }
-                        last_frame = Instant::now();
-                        if !reg.frame(id, bytes) { break; }
+                        if bytes.starts_with(b"IEX1") {
+                            if !reg.explore_frame(id, bytes) { break; }
+                        } else if last_frame.elapsed() >= Duration::from_millis(100) {
+                            last_frame = Instant::now();
+                            if !reg.frame(id, bytes) { break; }
+                        }
+                        if frame_flow && !matches!(tokio::time::timeout(Duration::from_secs(1), socket.send(Message::Text("{\"type\":\"frameAck\"}".into()))).await, Ok(Ok(()))) { break; }
                     }
                     Some(Ok(Message::Pong(_))) => {},
                     Some(Ok(Message::Ping(value))) => { if socket.send(Message::Pong(value)).await.is_err() { break; } },
                     Some(Ok(Message::Text(raw))) => {
                         if message_window.elapsed() >= Duration::from_secs(1) { message_window = Instant::now(); message_count = 0; }
                         message_count += 1;
-                        if message_count > 120 || !reg.explore_message(id, connection_id, user, publish, &raw).unwrap_or_else(|| reg.control_message(id, connection_id, user, publish, &raw)) { break; }
+                        if message_count > 120 { break; }
+                        if frame_flow && !publish && raw == "{\"type\":\"frameAck\"}" {
+                            pending_frame = None;
+                            continue;
+                        }
+                        if !reg.explore_message(id, connection_id, user, publish, &raw).unwrap_or_else(|| reg.control_message(id, connection_id, user, publish, &raw)) { break; }
                     }
                     // All other messages and binary viewer input remain invalid.
                     _ => break,
@@ -712,11 +749,14 @@ async fn serve(
                     if !matches!(tokio::time::timeout(Duration::from_secs(1), socket.send(Message::Text(message))).await, Ok(Ok(()))) { break; }
                 }
             }
-            changed = explore_feed.changed(), if !publish => {
+            changed = explore_feed.changed(), if !publish && pending_frame.is_none() => {
                 if changed.is_err() { break; }
                 let update = explore_feed.borrow_and_update().clone();
                 if let Feed::Live(Some(bytes)) = update {
-                    if reg.exploring(id, connection_id) && !matches!(tokio::time::timeout(Duration::from_secs(1), socket.send(Message::Binary((*bytes).clone()))).await, Ok(Ok(()))) { break; }
+                    if reg.exploring(id, connection_id) {
+                        if !matches!(tokio::time::timeout(Duration::from_secs(1), socket.send(Message::Binary((*bytes).clone()))).await, Ok(Ok(()))) { break; }
+                        if frame_flow { pending_frame = Some(Instant::now()); }
+                    }
                 }
             }
             changed = control.changed() => {
@@ -731,7 +771,7 @@ async fn serve(
                     if !matches!(tokio::time::timeout(Duration::from_secs(1), socket.send(Message::Text(message))).await, Ok(Ok(()))) { break; }
                 }
             }
-            changed = feed.changed() => {
+            changed = feed.changed(), if pending_frame.is_none() => {
                 if changed.is_err() { break; }
                 let update = feed.borrow_and_update().clone();
                 match update {
@@ -743,6 +783,7 @@ async fn serve(
                             result = tokio::time::timeout(Duration::from_secs(1), socket.send(Message::Binary((*bytes).clone()))) => result,
                         };
                         if !matches!(sent, Ok(Ok(()))) { break; }
+                        if frame_flow { pending_frame = Some(Instant::now()); }
                     }
                     _ => {},
                 }

@@ -1,6 +1,7 @@
 import { readLocalExploreState, type LocalExploreState, type LocalExploreControl } from "./localTabExplore";
 import { localTabExplorePublisher, supportsLocalExplore } from "./localTabExplorePublisher";
 import { localTabFrameFilter } from "./localTabFrameFilter";
+import { localTabFrameSender, type LocalTabSocket } from "./localTabFrameSender";
 import { readLocalTabControlState, type LocalTabControlState, type LocalTabPublisherControl } from "./localTabControl";
 import { controllerJsonRequest } from "./client";
 import { resolveControllerRequestContext } from "./core";
@@ -27,11 +28,12 @@ export async function browserShareClient(projectId: string) {
     viewers: (id: string) => request<BrowserShareViewer[]>(`/${encodeURIComponent(id)}/viewers`, "GET"),
     removeViewer: (id: string, userId: string) => request<void>(`/${encodeURIComponent(id)}/viewers/${encodeURIComponent(userId)}`, "DELETE"),
     stop: (id: string) => request<void>(`/${encodeURIComponent(id)}`, "DELETE"),
-    connect: (id: string, role: "publish" | "watch", signal: AbortSignal, controlVersion?: 1, exploreVersion?: 1): Promise<WebSocket> => new Promise((resolve, reject) => {
+    connect: (id: string, role: "publish" | "watch", signal: AbortSignal, controlVersion?: 1, exploreVersion?: 1): Promise<LocalTabSocket> => new Promise((resolve, reject) => {
       if (signal.aborted || !context.accessToken) { reject(new Error("Tab sharing cancelled.")); return; }
       const url = new URL(context.baseUrl + base + `/${encodeURIComponent(id)}/${role}`);
       url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
-      const socket = new WebSocket(url);
+      url.searchParams.set("frameFlowVersion", "1");
+      const socket: LocalTabSocket = new WebSocket(url);
       socket.binaryType = "arraybuffer";
       let ready = false;
       const timeout = window.setTimeout(() => fail(), 12_000);
@@ -42,7 +44,9 @@ export async function browserShareClient(projectId: string) {
         if (!signal.aborted) socket.send(JSON.stringify({ accessToken: context.accessToken, ...(controlVersion ? { controlVersion } : {}), ...(exploreVersion ? { exploreVersion } : {}) }));
       });
       socket.addEventListener("message", function handshake(event) {
-        if (event.data === '{"type":"ready"}') {
+        let message; try { message = JSON.parse(event.data); } catch { return; }
+        if (message?.type === "ready") {
+          socket.frameFlowVersion = message.frameFlowVersion === 1 ? 1 : undefined;
           ready = true; window.clearTimeout(timeout);
           socket.removeEventListener("message", handshake); resolve(socket);
         }
@@ -63,6 +67,7 @@ export async function publishLocalBrowserTab(projectId: string, ownerId: string,
   let captureId: string | undefined;
   let share: BrowserShare | undefined;
   let socket: WebSocket | undefined;
+  let frames: ReturnType<typeof localTabFrameSender> | undefined;
   let explore: ReturnType<typeof localTabExplorePublisher> | undefined;
   let stopped = false;
   let timer: number | undefined;
@@ -95,6 +100,7 @@ export async function publishLocalBrowserTab(projectId: string, ownerId: string,
     deny: connectionId => send({type:"denyControl",connectionId}),
   };
   async function cleanup() {
+    frames?.dispose();
     explore?.dispose();
     operation++; localGrant=null; window.clearTimeout(timer); window.clearTimeout(grantTimer); socket?.close();
     if (captureId) await bridge!.browserTabShareStop!({ ownerId, captureId }).catch(() => undefined);
@@ -116,7 +122,8 @@ export async function publishLocalBrowserTab(projectId: string, ownerId: string,
     if (stopped || signal.aborted) { await cleanup(); return; }
     socket = await client.connect(share.id, "publish", signal, controlSupported ? 1 : undefined, supportsLocalExplore(bridge) ? 1 : undefined);
     if (stopped || signal.aborted) { await cleanup(); return; }
-    if (supportsLocalExplore(bridge)) explore = localTabExplorePublisher(bridge, ownerId, captureId!, socket);
+    frames = localTabFrameSender(socket);
+    if (supportsLocalExplore(bridge)) explore = localTabExplorePublisher(bridge, ownerId, captureId!, socket, frames);
     socket.addEventListener("close", () => stop("Tab sharing ended."));
     socket.addEventListener("message", event => {
       if (stopped || typeof event.data !== "string") return;
@@ -150,7 +157,7 @@ export async function publishLocalBrowserTab(projectId: string, ownerId: string,
         if (socket.bufferedAmount < 1024 * 1024) {
           const bytes = await bridge!.browserTabShareFrame!({ ownerId, captureId: captureId! });
           if (stopped || signal.aborted) return;
-          if (socket.readyState === WebSocket.OPEN && socket.bufferedAmount < 1024 * 1024 && shouldPublish(bytes)) socket.send(bytes);
+          if (socket.readyState === WebSocket.OPEN && socket.bufferedAmount < 1024 * 1024 && shouldPublish(bytes)) frames!.offer("follow", bytes);
         }
         timer = window.setTimeout(() => void frame(), 200);
       } catch (error) { stop(error instanceof Error ? error.message : "Tab sharing ended."); }

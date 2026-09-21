@@ -57,6 +57,7 @@ function fixture() {
     "owner",
     "capture",
     socket as unknown as WebSocket,
+    { offer: (_view, bytes) => socket.send(bytes), remove: vi.fn(), dispose: vi.fn() },
   );
   return { bridge, socket, publisher };
 }
