@@ -493,6 +493,28 @@ describe("SecretRequestEntry", () => {
     expect(byTestId("secret-request-save")?.textContent).toBe("Save and continue");
   });
 
+  it("hands the field to the newest of two open asks for the same value", async () => {
+    // Seen on the from-scratch run: the walkthrough turn carried the request
+    // along, so two live fields for one value sat in the chat. The earlier
+    // card points down; the newest keeps the field.
+    const first = secretRequest();
+    const again = secretRequest({ id: "secret-request-again", timestamp: first.timestamp + 40_000 });
+    mocks.activeMessages.push(first, again);
+    await renderEntry(first, details());
+
+    expect(byTestId("secret-request-superseded")?.textContent).toBe(
+      "Asked for again below, where the field is.",
+    );
+    expect(byTestId("secret-request-value-NOTION_API_KEY")).toBeNull();
+    expect(byTestId("secret-request-save")).toBeNull();
+
+    await act(async () => root.unmount());
+    root = createRoot(container);
+    await renderEntry(again, details());
+    expect(byTestId("secret-request-superseded")).toBeNull();
+    expect(byTestId("secret-request-value-NOTION_API_KEY")).not.toBeNull();
+  });
+
   it("does not treat a first ask for a value stored through Manage secrets as a failed one", async () => {
     mocks.listSecrets.mockResolvedValue({
       success: true,

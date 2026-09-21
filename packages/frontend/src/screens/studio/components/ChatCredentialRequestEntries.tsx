@@ -548,20 +548,31 @@ export function SecretRequestEntry({
   // opens on the field, with Save and continue as its one decision, because
   // "Continue setup" would only send the same value back. A first ask for a
   // value stored earlier through Manage secrets is not this case.
-  const askedAgain = useMemo(() => {
-    const own = secretName?.toUpperCase() ?? null;
-    if (!own) {
-      return false;
-    }
-    return requestConversationMessages.some(
-      (candidate) =>
-        candidate.id !== message.id &&
-        candidate.timestamp < message.timestamp &&
-        (getMessageType(candidate) ?? "").trim().toLowerCase() === "secret_request" &&
-        parseSecretRequestDetails(extractMessageDetails(candidate.metadata)).name?.trim().toUpperCase() ===
-          own,
-    );
-  }, [message.id, message.timestamp, requestConversationMessages, secretName]);
+  const sameNameRequestExists = useCallback(
+    (where: "before" | "after") => {
+      const own = secretName?.toUpperCase() ?? null;
+      if (!own) {
+        return false;
+      }
+      return requestConversationMessages.some(
+        (candidate) =>
+          candidate.id !== message.id &&
+          (where === "before"
+            ? candidate.timestamp < message.timestamp
+            : candidate.timestamp > message.timestamp) &&
+          (getMessageType(candidate) ?? "").trim().toLowerCase() === "secret_request" &&
+          parseSecretRequestDetails(extractMessageDetails(candidate.metadata)).name?.trim().toUpperCase() ===
+            own,
+      );
+    },
+    [message.id, message.timestamp, requestConversationMessages, secretName],
+  );
+  const askedAgain = useMemo(() => sameNameRequestExists("before"), [sameNameRequestExists]);
+  // The agent asked for this same value again further down while this card
+  // was still waiting (a walkthrough turn tends to carry the request along).
+  // Two open fields for one value is a question with no right answer, so the
+  // field lives in the newest card and this one points there.
+  const askedAgainBelow = useMemo(() => sameNameRequestExists("after"), [sameNameRequestExists]);
 
   // Pressing continue dispatches an agent run and spends a managed prompt, so
   // it is always a press and never an effect of saving. A secret request has no
@@ -828,6 +839,10 @@ export function SecretRequestEntry({
   }
 
   const openOnField = askedAgain && alreadyStored && !savedHere;
+
+  if (askedAgainBelow && !alreadyStored && !savedHere) {
+    return shell(quietLine("Asked for again below, where the field is.", "secret-request-superseded"));
+  }
 
   if ((savedHere || alreadyStored) && !replacingValue && !openOnField) {
     return shell(
