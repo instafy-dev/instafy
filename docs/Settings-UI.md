@@ -12,6 +12,11 @@ including when Studio has another panel open.
 - Escape and native Back return one level, then dismiss the picker. Keyboard focus returns
   to its trigger on dismissal and follows the selected category when the layout changes.
 
+The desktop working-context header owns one continuous divider across the navigation,
+open drawers and workspace. Keep it in both themes and across panel and search changes.
+Active tabs meet that edge without adding a second horizontal line underneath it; tab
+overflow fades affect only scrolling content, leaving the shared divider visible.
+
 Keep account identity in the avatar menu. Personal settings should not repeat an email above
 their categories. Team and space settings retain their scope because it identifies whose
 configuration is being changed.

@@ -33,18 +33,13 @@
 .studio-context-search-mobile { padding: calc(8px + var(--instafy-safe-area-inset-top)) 8px 8px; background: var(--color-slate-50); border-bottom: 1px solid var(--color-slate-200); }
 .studio-context-mobile-picker { display: flex; flex: none; min-width: 0; padding: 4px 12px; border-bottom: 1px solid var(--color-slate-200); }
 .dark .studio-context-header, .dark .studio-context-search-mobile { background: var(--color-studio-dark-rail); border-color: var(--color-studio-dark-divider); color: var(--color-slate-100); }
-/* Draw the dark seam at the tab's top edge instead of a second line above it. */
-.dark .studio-context-header { border-bottom-color: transparent; }
-.dark .studio-context-tab-rail::before {
-  content: "";
-  position: absolute;
-  inset-inline: 0;
-  /* Active tabs sit 1px lower to cover the tab-to-panel baseline. */
-  top: 1px;
-  height: 1px;
-  z-index: 0;
-  pointer-events: none;
-  background: var(--color-studio-dark-divider);
+/* The shared header owns the divider across navigation, drawers and tabs.
+   Extend the active tab's outline to that edge while keeping the rail's height:
+   50px minus its two 1px margins retains the 48px row. The scroll viewport
+   clips the overlapping top border, leaving just the shared header divider. */
+.studio-context-tab-rail [data-workspace-tab-active="true"] {
+  height: 50px;
+  margin-top: -1px;
 }
 .dark .studio-context-mobile-picker { border-color: var(--color-studio-dark-divider); }
 @media (pointer: coarse) {
