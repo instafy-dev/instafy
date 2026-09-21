@@ -5760,6 +5760,9 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
                   aiViewState={gettingStartedAiViewState}
                   canChangeAiChoice={canChangeGettingStartedAiChoice}
                   personalAiConnectionState={gettingStartedPersonalAiConnectionState}
+                  desktopCodexLoginFound={
+                    gettingStartedConnectModalProps.desktopCodexAuthJsonStatus?.exists === true
+                  }
                   onStartWithManagedAi={handleStartWithManagedAi}
                   onConnectOwnAi={handleConnectOwnAi}
                   onChangeAiChoice={handleChangeAiChoice}

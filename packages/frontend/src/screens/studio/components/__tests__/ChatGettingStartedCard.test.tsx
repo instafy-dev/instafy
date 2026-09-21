@@ -86,6 +86,32 @@ describe("ChatGettingStartedCard", () => {
     vi.clearAllMocks();
   });
 
+  it("names the Codex login the desktop found, ahead of the sign-in and key routes", async () => {
+    // The modal behind Connect AI already offers "Use local Codex login" on
+    // the desktop app; the card's line said nothing about it, so a person
+    // with Codex on this computer read a sign-in they did not need.
+    await act(async () => {
+      root.render(
+        <ChatGettingStartedCard
+          {...baseProps({
+            managedAiOffer: null,
+            aiViewState: "choice",
+            personalAiConnectionState: "missing",
+            desktopCodexLoginFound: true,
+          })}
+        />,
+      );
+    });
+
+    const connectButton = container.querySelector<HTMLButtonElement>(
+      '[data-testid="onboarding-connect-own-ai"]',
+    );
+    expect(connectButton?.textContent).toContain("Connect AI");
+    expect(connectButton?.textContent).toContain(
+      "Use the Codex login on this computer, sign in with ChatGPT, or use a key from another AI provider.",
+    );
+  });
+
   it("offers included and personal AI paths with the live allowance", async () => {
     const onStartWithManagedAi = vi.fn();
     const onConnectOwnAi = vi.fn();
