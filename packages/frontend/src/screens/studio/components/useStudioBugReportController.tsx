@@ -20,8 +20,11 @@ import { buildHomeSupportReports, type HomeSupportReport } from "../homeSupportR
 import { NOTIFICATION_RECEIVED_EVENT } from "../../../notifications/notificationPresentation";
 import { getStoredShakeReportEnabled, setStoredShakeReportEnabled } from "./shakeReportPreference";
 import { NATIVE_SHAKE_REPORT_EVENT, useShakeToReport } from "./useShakeToReport";
+import { useGatedInterval } from "../../../runtime/pollingGate";
 
 const SHAKE_SCREENSHOT_TIMEOUT_MS = 3_000;
+const SUPPORT_POLL_ACTIVE_MS = 20_000;
+const SUPPORT_POLL_IDLE_MS = 120_000;
 const EMPTY_SUPPORT_REPORTS: HomeSupportReport[] = [];
 
 interface UseStudioBugReportControllerOptions {
@@ -57,6 +60,7 @@ export function useStudioBugReportController({
     requestKey: number;
   } | null>(null);
   const bugReportInboxTargetKeyRef = useRef(0);
+  const supportPollRef = useRef<(() => void) | null>(null);
   const [supportUnreadSnapshot, setSupportUnreadSnapshot] = useState<{
     userId: string | null;
     count: number;
@@ -210,19 +214,21 @@ export function useStudioBugReportController({
       }
     };
     refreshWhenVisible();
-    const intervalId = window.setInterval(refreshWhenVisible, 20_000);
+    supportPollRef.current = refreshWhenVisible;
     const refreshReadState = () => { void refreshSupportNotifications(false); };
     window.addEventListener("focus", refreshWhenVisible);
     window.addEventListener(NOTIFICATION_RECEIVED_EVENT, refreshReadState);
-    document.addEventListener("visibilitychange", refreshWhenVisible);
     return () => {
-      window.clearInterval(intervalId);
+      supportPollRef.current = null;
       window.removeEventListener("focus", refreshWhenVisible);
       window.removeEventListener(NOTIFICATION_RECEIVED_EVENT, refreshReadState);
-      document.removeEventListener("visibilitychange", refreshWhenVisible);
       supportPollGenerationRef.current += 1;
     };
   }, [currentUserId, refreshSupportNotifications]);
+  // Every 20 s while active, every 2 min once idle, off while hidden. The gate
+  // also runs one refresh when the tab becomes visible again, which replaces
+  // the old visibilitychange listener.
+  useGatedInterval(() => supportPollRef.current?.(), SUPPORT_POLL_ACTIVE_MS, { idleMs: SUPPORT_POLL_IDLE_MS });
 
   useEffect(() => {
     const resolutionToastUsers = resolutionToastUsersRef.current;

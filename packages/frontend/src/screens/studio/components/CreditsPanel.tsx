@@ -18,7 +18,7 @@ import {
   LIVE_ACCESS_SINGULAR,
   LIVE_CONNECTIONS_PLURAL,
 } from "../../../credits/usageLabels";
-import { useCredits } from "../../../credits/useCredits";
+import { CREDITS_UPDATED_EVENT, useCredits } from "../../../credits/useCredits";
 import { useProjects } from "../../../projects/useProjects";
 import { useStatus } from "../../../status/useStatus";
 import { CreditActivityChart, type CreditActivityRange } from "./CreditActivityChart";
@@ -620,6 +620,8 @@ export function CreditsPanel() {
   }, [location.hash, location.pathname, location.search, navigate, showStatus]);
 
   // While a checkout/plan change is activating, poll until the webhook lands.
+  // Ticks are skipped while the tab is hidden, and a credits.updated event
+  // refreshes right away instead of waiting for the next tick.
   useEffect(() => {
     if (!activation) {
       return;
@@ -638,9 +640,20 @@ export function CreditsPanel() {
         );
         return;
       }
+      if (document.visibilityState === "hidden") {
+        return;
+      }
       void refreshCredits({ force: true, notifyOnError: false });
     }, 2_500);
-    return () => window.clearInterval(intervalId);
+    const handleCreditsUpdated = () => {
+      void refreshCredits({ force: true, notifyOnError: false });
+      void refreshPolicy({ force: true });
+    };
+    window.addEventListener(CREDITS_UPDATED_EVENT, handleCreditsUpdated);
+    return () => {
+      window.clearInterval(intervalId);
+      window.removeEventListener(CREDITS_UPDATED_EVENT, handleCreditsUpdated);
+    };
   }, [activation, refreshCredits, refreshPolicy, showStatus]);
 
   // Activation completes when the snapshot reflects the expected plan.

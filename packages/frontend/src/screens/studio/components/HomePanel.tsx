@@ -300,15 +300,12 @@ export function HomePanel({ inboxItems: sharedInboxItems = [], refreshInbox, not
   );
   const currentSpaceName = currentProject ? getSpaceLabel(currentProject.name) : "Choose a Space";
 
+  // One read on mount; the studio layout owns the inbox timer.
   useEffect(() => {
-    if (!refreshInbox || typeof window === "undefined") {
+    if (!refreshInbox) {
       return;
     }
     void refreshInbox();
-    const timer = window.setInterval(() => {
-      void refreshInbox();
-    }, 20_000);
-    return () => window.clearInterval(timer);
   }, [refreshInbox]);
 
   const attentionEntries = useMemo(

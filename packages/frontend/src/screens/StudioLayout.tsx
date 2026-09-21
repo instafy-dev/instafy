@@ -4,6 +4,7 @@ import { buildHomeFeed } from "./studio/homeFeed";
 import { getHomeNotificationTarget } from "./studio/homeNotifications";
 import { processNotificationClickDestination } from "../notifications/notificationClickDestination";
 import { useNotificationCenter } from "../notifications/useNotificationCenter";
+import { NOTIFICATION_RECEIVED_EVENT } from "../notifications/notificationPresentation";
 import { UUID_PATTERN, parseNotificationClickUrl } from "../notifications/notificationContract";
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
@@ -18,6 +19,7 @@ import { ChatLines, Clock, Coins, Cpu, Cube, GitBranch, Globe, Group, Lock, Page
 import { ResizablePanels } from "../components/ResizablePanels";
 import { fetchCreditPolicy } from "../credits/creditService";
 import { clearIdlePaused, markIdlePaused } from "../runtime/idlePauseRegistry";
+import { useGatedInterval } from "../runtime/pollingGate";
 import { setRuntimeSizePreference } from "../runtime/runtimeSizePreference";
 import { isHostedRuntime, runtimeEntryIsReady } from "../runtime/utils/runtimeEntry";
 import { Button, IconButton } from "../components/Button";
@@ -136,6 +138,7 @@ import { controllerBaseUrl } from "../services/runtimeController/core";
 import { useAutoDesktopSpeechTunnel } from "../desktop/voiceTunnel/useAutoDesktopSpeechTunnel";
 import { useStudioLayoutChromeState } from "./useStudioLayoutChromeState";
 import { useStudioLayoutWorkspaceRouting } from "./useStudioLayoutWorkspaceRouting";
+import { useStudioGitStatusBadge } from "./useStudioGitStatusBadge";
 import { canRememberTeamWorkspace, resolveTeamNavigationScope, usesGlobalNavigationContext } from "./studio/teamNavigation";
 import { readCachedControllerOrgs } from "./studio/components/sidebarOrgSnapshot";
 import { StudioPanelPerformance } from "../telemetry/StudioPanelPerformance";
@@ -159,8 +162,8 @@ const navMoreItems: StudioNavItem[] = [
   { id: "credits", label: "Credits", icon: Coins, accent: sidebarPrimaryAccentClass }
 ];
 
-const GIT_STATUS_POLL_INTERVAL_MS = 15_000;
-const GIT_STATUS_POLL_BACKOFF_MS = 60_000;
+const HOME_ATTENTION_POLL_ACTIVE_MS = 20_000;
+const HOME_ATTENTION_POLL_IDLE_MS = 120_000;
 type SourceControlOpenDetail = {
   projectId?: string | null;
   previewPath?: string | null;
@@ -626,13 +629,30 @@ function StudioLayoutInner() {
     // Conversation switches must not wait for the periodic poll: the reply in
     // the chat we just left may have landed since the previous refresh.
     void refreshHomeAttentionCount({ force: true });
-    const timer = window.setInterval(() => {
-      void refreshHomeAttentionCount();
-    }, 20_000);
-    return () => {
-      window.clearInterval(timer);
-    };
   }, [currentUserId, refreshHomeAttentionCount, visibleConversationControllerId]);
+
+  useEffect(() => {
+    if (typeof window === "undefined" || !currentUserId) {
+      return;
+    }
+    // A pushed notification or a local acknowledgement changes the inbox
+    // now, so refresh past any request that was already in flight.
+    const receive = () => {
+      void refreshHomeAttentionCount({ force: true });
+    };
+    window.addEventListener(NOTIFICATION_RECEIVED_EVENT, receive);
+    return () => {
+      window.removeEventListener(NOTIFICATION_RECEIVED_EVENT, receive);
+    };
+  }, [currentUserId, refreshHomeAttentionCount]);
+
+  // Every 20 s while the user is active, every 2 min once idle, never while
+  // hidden; the gate runs it once more when the user comes back.
+  useGatedInterval(() => {
+    if (currentUserId) {
+      void refreshHomeAttentionCount();
+    }
+  }, HOME_ATTENTION_POLL_ACTIVE_MS, { idleMs: HOME_ATTENTION_POLL_IDLE_MS });
 
   useEffect(() => {
     const projectName = (activeProjectName ?? "").trim();
@@ -1101,112 +1121,13 @@ function StudioLayoutInner() {
     showStatus,
   ]);
 
-  const [gitDirtyCount, setGitDirtyCount] = useState(0);
-  const [gitSupported, setGitSupported] = useState(false);
-  const gitStatusEpochRef = useRef(0);
-
-    useEffect(() => {
-      gitStatusEpochRef.current += 1;
-    }, [
-      activeProjectId,
-      controllerProjectMissing,
-      effectiveRuntimeId,
-      projectReadyForWorkspace,
-      runtimeReady,
-    ]);
-
-    const refreshGitStatus = useCallback(
-      async (options?: { silent?: boolean }) => {
-        const epoch = gitStatusEpochRef.current;
-        if (!activeProjectId || controllerProjectMissing || !projectReadyForWorkspace) {
-          if (!options?.silent) {
-            setGitDirtyCount(0);
-            setGitSupported(false);
-          }
-        return false;
-      }
-      const result = await controllerClient.workspace.git.fetchStatus({
-        projectId: activeProjectId,
-        runtimeId: effectiveRuntimeId ?? null,
-        limit: 1,
-      }).catch(() => null);
-
-      if (gitStatusEpochRef.current !== epoch) {
-        return false;
-      }
-
-      if (!result) {
-        if (!options?.silent) {
-          setGitDirtyCount(0);
-          setGitSupported(false);
-        }
-        return false;
-      }
-      setGitSupported(result.supported);
-      const count = result.supported
-        ? Math.max(0, typeof result.dirtyCount === "number" ? result.dirtyCount : result.dirtyPaths.length)
-        : 0;
-      setGitDirtyCount(count);
-      return true;
-      },
-      [activeProjectId, controllerProjectMissing, effectiveRuntimeId, projectReadyForWorkspace],
-    );
-
-  useEffect(() => {
-    setGitDirtyCount(0);
-    setGitSupported(false);
-  }, [activeProjectId]);
-
-    useEffect(() => {
-      if (!activeProjectId || controllerProjectMissing || !projectReadyForWorkspace) {
-        return;
-      }
-      let cancelled = false;
-      let timeoutId: number | null = null;
-    const tick = async () => {
-      if (cancelled) {
-        return;
-      }
-      const succeeded = await refreshGitStatus({ silent: true });
-      if (cancelled) {
-        return;
-      }
-      timeoutId = window.setTimeout(
-        () => void tick(),
-        succeeded ? GIT_STATUS_POLL_INTERVAL_MS : GIT_STATUS_POLL_BACKOFF_MS,
-      );
-    };
-
-    void tick();
-      return () => {
-        cancelled = true;
-        if (timeoutId !== null) {
-          window.clearTimeout(timeoutId);
-        }
-      };
-    }, [activeProjectId, controllerProjectMissing, projectReadyForWorkspace, refreshGitStatus]);
-
-    useEffect(() => {
-      if (!activeProjectId || controllerProjectMissing || !projectReadyForWorkspace) {
-        return;
-      }
-      if (typeof window === "undefined") {
-        return;
-      }
-    const handler = (event: Event) => {
-      const custom = event as CustomEvent<{ projectId?: string | null }>;
-      const projectIdFromEvent =
-        custom.detail && typeof custom.detail.projectId === "string" ? custom.detail.projectId : null;
-      if (projectIdFromEvent && projectIdFromEvent !== activeProjectId) {
-        return;
-      }
-      void refreshGitStatus({ silent: false });
-    };
-    window.addEventListener("instafy:workspace-commit", handler as EventListener);
-      return () => {
-        window.removeEventListener("instafy:workspace-commit", handler as EventListener);
-      };
-    }, [activeProjectId, controllerProjectMissing, projectReadyForWorkspace, refreshGitStatus]);
+  const { gitDirtyCount, gitSupported } = useStudioGitStatusBadge({
+    activeProjectId,
+    controllerProjectMissing,
+    projectReadyForWorkspace,
+    effectiveRuntimeId,
+    runtimeReady,
+  });
 
     useEffect(() => {
       if (typeof window === "undefined") {

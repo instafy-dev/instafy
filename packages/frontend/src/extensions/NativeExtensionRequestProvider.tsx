@@ -31,7 +31,10 @@ import {
   getProjectIntegrationByProvider,
   getProjectProviderSelectedDevice,
 } from "../capabilities/projectProviderAccess";
-import { dispatchNativeExtensionStateUpdated } from "./nativeExtensionStateChannel";
+import {
+  dispatchNativeExtensionStateUpdated,
+  NATIVE_EXTENSION_STATE_UPDATED_EVENT,
+} from "./nativeExtensionStateChannel";
 import {
   integrationIsAttached,
   providerRequestTargetsCurrentDevice,
@@ -39,6 +42,7 @@ import {
 import { APPLICATION_FRONTEND_FEATURES } from "../features/applicationFrontendFeatureComposition";
 import type { FrontendStudioRuntimeBridgeContribution } from "../features/frontendFeatureModule";
 import { useProject } from "../projects/useProject";
+import { isPollingActive, subscribePollingGate } from "../runtime/pollingGate";
 import { controllerClient } from "../sdk/instafy";
 import type {
   ControllerProjectIntegration,
@@ -402,6 +406,14 @@ async function handleCameraProviderRequest(params: {
   });
 }
 
+/**
+ * Retry delay while no camera integration is attached (or the attached device
+ * is not this one). Nothing changes on its own in that state, so the retry
+ * only runs while the user is active; otherwise the bridge waits for the
+ * polling gate, window focus or an integration update before looking again.
+ */
+const NO_INTEGRATION_RETRY_MS = 10_000;
+
 function NativeExtensionRequestBridge() {
   const { activeProjectId } = useProject();
   const busyRef = useRef(false);
@@ -422,9 +434,35 @@ function NativeExtensionRequestBridge() {
 
     let cancelled = false;
     let timerId: number | null = null;
+    let stopWaiting: (() => void) | null = null;
+
+    const waitForWake = () => {
+      const wake = () => {
+        stopWaiting?.();
+        void tick();
+      };
+      const onGateChange = () => {
+        if (isPollingActive()) {
+          wake();
+        }
+      };
+      const unsubscribeGate = subscribePollingGate(onGateChange);
+      window.addEventListener("focus", wake);
+      window.addEventListener(NATIVE_EXTENSION_STATE_UPDATED_EVENT, wake);
+      stopWaiting = () => {
+        stopWaiting = null;
+        unsubscribeGate();
+        window.removeEventListener("focus", wake);
+        window.removeEventListener(NATIVE_EXTENSION_STATE_UPDATED_EVENT, wake);
+      };
+    };
 
     const schedule = (delayMs: number) => {
       if (cancelled) {
+        return;
+      }
+      if (delayMs === NO_INTEGRATION_RETRY_MS && !isPollingActive()) {
+        waitForWake();
         return;
       }
       timerId = window.setTimeout(() => {
@@ -451,7 +489,7 @@ function NativeExtensionRequestBridge() {
           !deviceId ||
           (nativeProviderId.length > 0 && !isCameraProviderId(nativeProviderId))
         ) {
-          nextDelayMs = 10_000;
+          nextDelayMs = NO_INTEGRATION_RETRY_MS;
           return;
         }
 
@@ -461,7 +499,7 @@ function NativeExtensionRequestBridge() {
             ? await loadAttachedCameraIntegration(projectId, CAMERA_PROVIDER_ID)
             : null);
         if (!integration) {
-          nextDelayMs = 10_000;
+          nextDelayMs = NO_INTEGRATION_RETRY_MS;
           return;
         }
 
@@ -503,7 +541,7 @@ function NativeExtensionRequestBridge() {
 
         const savedDevice = getProjectProviderSelectedDevice(integration);
         if (!selectedDeviceMatchesCurrentCameraProvider(savedDevice, status, nativeProviderId)) {
-          nextDelayMs = 10_000;
+          nextDelayMs = NO_INTEGRATION_RETRY_MS;
           return;
         }
 
@@ -543,6 +581,7 @@ function NativeExtensionRequestBridge() {
 
     return () => {
       cancelled = true;
+      stopWaiting?.();
       if (timerId !== null) {
         window.clearTimeout(timerId);
       }
