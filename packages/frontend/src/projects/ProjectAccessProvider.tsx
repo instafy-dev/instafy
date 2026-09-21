@@ -192,6 +192,7 @@ export function ProjectAccessProvider({ children }: { children: ReactNode }) {
     value: ProjectCapabilities;
   } | null>(null);
   const projectsRef = useRef(projects);
+  const projectCapabilitiesRef = useRef(projectCapabilities);
   const projectAccessPendingRef = useRef(projectAccessPending);
   const lastUrlProjectIdRef = useRef<string | null>(null);
   const lastResolvedProjectIdRef = useRef<string | null>(null);
@@ -205,6 +206,10 @@ export function ProjectAccessProvider({ children }: { children: ReactNode }) {
   useEffect(() => {
     projectsRef.current = projects;
   }, [projects]);
+
+  useEffect(() => {
+    projectCapabilitiesRef.current = projectCapabilities;
+  }, [projectCapabilities]);
 
   useEffect(() => {
     // The account-reset effect below clears old workspace state. Do not copy
@@ -914,6 +919,16 @@ export function ProjectAccessProvider({ children }: { children: ReactNode }) {
     const initialRetry = projectSummaryRetryBackoffRef.current;
     if (initialRetry?.projectId === targetProjectId) {
       scheduleRetry(Math.max(0, initialRetry.until - Date.now()));
+    } else if (
+      projectCapabilitiesRef.current?.projectId !== targetProjectId &&
+      blockedProjectIdRef.current !== targetProjectId &&
+      !projectAccessPendingRef.current
+    ) {
+      // A space the studio switched to itself (New space, picker) arrives
+      // with no capabilities and no URL change to trigger the bootstrap
+      // lookup. Resolve access now; the composer stays locked until then and
+      // the periodic refresh alone would hold it for a minute.
+      void refreshCapabilities();
     }
 
     window.addEventListener("focus", handleFocus);

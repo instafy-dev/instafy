@@ -313,8 +313,9 @@ export function ProjectPickerPanel({ onCreateProject, searchTerm, onSearchTermCh
           orgId: result.summary.orgId ?? null,
           orgName: getOrgDisplayName(result.summary.orgName),
         });
-        switchProject(requestedProjectId);
-        openPanelTab("chat");
+        // Same contract as selecting a row: the URL owns project identity, so
+        // access hydration and the routing sync follow this switch too.
+        handleSelectProject(requestedProjectId);
         return;
       }
       if (result.forbidden) {
@@ -337,11 +338,9 @@ export function ProjectPickerPanel({ onCreateProject, searchTerm, onSearchTermCh
     createProject,
     handleSelectProject,
     mergedProjects,
-    openPanelTab,
     openRequestedProjectPending,
     requestedProjectId,
     showStatus,
-    switchProject,
   ]);
 
   const handleProjectMenuAction = useCallback(

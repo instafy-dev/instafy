@@ -336,6 +336,34 @@ describe("ProjectAccessProvider capability refresh", () => {
     expect(mocks.createControllerProject).not.toHaveBeenCalled();
   });
 
+  it("resolves access immediately for a space the studio switched to without a URL change", async () => {
+    const OTHER = "22222222-2222-4222-8222-222222222222";
+    mocks.getSummaryResult.mockResolvedValue(summaryFor("admin"));
+    await act(async () => root.render(<ProjectAccessProvider><AccessProbe /></ProjectAccessProvider>));
+    const probe = container.querySelector('[data-testid="access-probe"]');
+    expect(probe?.getAttribute("data-resolved")).toBe("true");
+    mocks.getSummaryResult.mockClear();
+
+    // New space / picker: the store switches, the URL still names the old space.
+    const lookup = deferred<ReturnType<typeof summaryFor>>();
+    mocks.getSummaryResult.mockReturnValue(lookup.promise);
+    mocks.activeProjectId = OTHER;
+    await act(async () => root.render(<ProjectAccessProvider><AccessProbe /></ProjectAccessProvider>));
+    expect(mocks.getSummaryResult).toHaveBeenCalledTimes(1);
+    expect(mocks.getSummaryResult.mock.calls[0]?.[0]).toBe(OTHER);
+    expect(probe?.getAttribute("data-resolved")).toBe("false");
+
+    await act(async () =>
+      lookup.resolve({
+        ...summaryFor("admin"),
+        summary: { ...summaryFor("admin").summary, projectId: OTHER, projectName: "Fresh space" },
+      }),
+    );
+    expect(probe?.getAttribute("data-resolved")).toBe("true");
+    expect(probe?.getAttribute("data-write")).toBe("true");
+    expect(mocks.setProjectName).not.toHaveBeenCalledWith(PROJECT_ID, "Fresh space");
+  });
+
   it("demotes a live project after a targeted controller invalidation", async () => {
     mocks.getSummaryResult
       .mockResolvedValueOnce(summaryFor("admin"))

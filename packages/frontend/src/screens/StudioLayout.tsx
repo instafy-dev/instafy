@@ -1549,9 +1549,13 @@ function StudioLayoutInner() {
         orgName: projectInfo.orgName ?? null
       });
       prepareWorkspaceForNewSession();
+      // The URL is the source of truth for project identity: access
+      // hydration and the routing sync both follow ?projectId, so a store-only
+      // switch would leave the composer locked behind a stale access check.
+      navigateToDestination({ kind: "conversation", projectId: projectInfo.projectId });
       showStatus("Created a new space.", "success", 2500);
     },
-    [createProject, prepareWorkspaceForNewSession, showStatus]
+    [createProject, navigateToDestination, prepareWorkspaceForNewSession, showStatus]
   );
 
   const handleCreateGithubProject = useCallback(
@@ -1584,6 +1588,7 @@ function StudioLayoutInner() {
         orgName: projectInfo.orgName ?? null
       });
       prepareWorkspaceForNewSession({ closeProjectLauncher: false });
+      navigateToDestination({ kind: "conversation", projectId: projectInfo.projectId });
 
       const targetPath = controllerClient.projects.deriveGithubImportTargetPath(github.repo);
       const importIdentity = buildGithubImportRetryIdentity({
@@ -1621,7 +1626,7 @@ function StudioLayoutInner() {
       }
       return { success: true };
     },
-    [createProject, prepareWorkspaceForNewSession, showStatus]
+    [createProject, navigateToDestination, prepareWorkspaceForNewSession, showStatus]
   );
 
   const handleOpenSettingsTab = useCallback(
