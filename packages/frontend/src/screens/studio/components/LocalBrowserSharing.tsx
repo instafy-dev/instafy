@@ -53,11 +53,22 @@ function ShareAudiencePicker({ projectId, onShare, onCancel }: { projectId: stri
   </section>;
 }
 
-function ShareViewers({ projectId, share }: { projectId: string; share: BrowserShare }) {
+function ShareParticipants({ projectId, share, controlState, exploreState, peopleId, showPeople }: {
+  projectId: string;
+  share: LocalTabPublication;
+  controlState: LocalTabControlState | null;
+  exploreState: LocalExploreState | null;
+  peopleId: string;
+  showPeople: boolean;
+}) {
   const [viewers, setViewers] = useState<BrowserShareViewer[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
   const removed = useRef(new Set<string>());
+  // One audience snapshot supplies both the People panel and approval labels.
+  const requestIds = [...(controlState?.requests ?? []), ...(exploreState?.requests ?? []), ...(exploreState?.views ?? [])]
+    .map(request => request.connectionId).join(",");
+  const controlUserId = controlState?.grant?.userId;
   useEffect(() => {
     let disposed = false; let timer: number;
     async function refresh() {
@@ -69,7 +80,7 @@ function ShareViewers({ projectId, share }: { projectId: string; share: BrowserS
     }
     void refresh();
     return () => { disposed = true; window.clearTimeout(timer); };
-  }, [projectId, share.id]);
+  }, [projectId, share.id, requestIds, controlUserId]);
   async function remove(userId: string) {
     setBusy(userId); setError(null);
     try {
@@ -79,15 +90,20 @@ function ShareViewers({ projectId, share }: { projectId: string; share: BrowserS
     } catch { setError("Could not remove this person. Try again or stop sharing."); }
     finally { setBusy(null); }
   }
-  return <section aria-label="Tab audience" className="space-y-1 text-xs" data-testid="local-browser-share-audience">
-    {!viewers.length ? <p>{share.audience === "space" ? "No other viewers connected." : "Loading audience…"}</p> : null}
-    <div className="max-h-40 space-y-1 overflow-y-auto">{viewers.map(viewer => <div key={viewer.userId} className="flex items-center justify-between gap-2" data-testid="local-browser-share-person">
-      <span className="min-w-0 break-words">{personLabel(viewer)} · {viewer.removed ? "Removed from this share" : viewer.active ? "Viewing" : "Can view"}{viewer.fullName && viewer.email ? <span className="block text-slate-500">{viewer.email}</span> : null}</span>
-      {!viewer.removed ? <Button size="sm" variant="ghost" isDisabled={busy !== null} aria-label={`Remove ${personLabel(viewer)}`} onPress={() => void remove(viewer.userId)}>Remove</Button> : null}
-    </div>)}</div>
-    <p className="text-slate-500">Removed people cannot rejoin this share. Their space membership stays unchanged.</p>
-    {error ? <p role="alert" className="text-rose-600">{error}</p> : null}
-  </section>;
+  return <>
+    {share.control ? <LocalTabControlRequests people={viewers} state={controlState} control={share.control} explore={share.explore} exploreState={exploreState} /> : null}
+    <div id={peopleId} hidden={!showPeople}>
+      <section aria-label="Tab audience" className="space-y-1 text-xs" data-testid="local-browser-share-audience">
+      {!viewers.length ? <p>{share.audience === "space" ? "No other viewers connected." : "Loading audience…"}</p> : null}
+      <div className="max-h-40 space-y-1 overflow-y-auto">{viewers.map(viewer => <div key={viewer.userId} className="flex items-center justify-between gap-2" data-testid="local-browser-share-person">
+        <span className="min-w-0 break-words">{personLabel(viewer)} · {viewer.removed ? "Removed from this share" : viewer.active ? "Viewing" : "Can view"}{viewer.fullName && viewer.email ? <span className="block text-slate-500">{viewer.email}</span> : null}</span>
+        {!viewer.removed ? <Button size="sm" variant="ghost" isDisabled={busy !== null} aria-label={`Remove ${personLabel(viewer)}`} onPress={() => void remove(viewer.userId)}>Remove</Button> : null}
+      </div>)}</div>
+      <p className="text-slate-500">Removed people cannot rejoin this share. Their space membership stays unchanged.</p>
+      {error ? <p role="alert" className="text-rose-600">{error}</p> : null}
+      </section>
+    </div>
+  </>;
 }
 
 export function LocalBrowserTabPublisher({ projectId, userId, ownerId, canShare }: { projectId: string; userId: string; ownerId: string | null; canShare: boolean }) {
@@ -121,8 +137,7 @@ export function LocalBrowserTabPublisher({ projectId, userId, ownerId, canShare 
         <><span className="text-slate-500">Only you can see this tab</span><Button data-testid="local-browser-share-start" size="sm" variant="ghost" onPress={() => setChoosing(true)}>Share tab…</Button></> : null}
     </div>
     {choosing && canShare && !sharing ? <ShareAudiencePicker projectId={projectId} onShare={start} onCancel={() => setChoosing(false)} /> : null}
-    {sharing && activeShare?.control ? <LocalTabControlRequests projectId={projectId} shareId={activeShare.id} state={controlState} control={activeShare.control} explore={activeShare.explore} exploreState={exploreState} /> : null}
-    {sharing && activeShare ? <div id={peopleId} hidden={!showPeople}><ShareViewers key={activeShare.id} projectId={projectId} share={activeShare} /></div> : null}
+    {sharing && activeShare ? <ShareParticipants key={activeShare.id} projectId={projectId} share={activeShare} controlState={controlState} exploreState={exploreState} peopleId={peopleId} showPeople={showPeople} /> : null}
     {error ? <p role="alert" className="text-xs text-rose-600">{error}</p> : null}
   </div>;
 }

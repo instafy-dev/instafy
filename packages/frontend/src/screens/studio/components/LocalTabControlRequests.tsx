@@ -2,56 +2,29 @@ import type {
   LocalExploreState,
   LocalExploreControl,
 } from "../../../services/runtimeController/localTabExplore";
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import { Button } from "../../../components/Button";
-import {
-  browserShareClient,
-  type BrowserShareViewer,
-} from "../../../services/runtimeController/browserShares";
+import type { BrowserSharePerson } from "../../../services/runtimeController/browserShares";
 import type {
   LocalTabControlState,
   LocalTabPublisherControl,
 } from "../../../services/runtimeController/localTabControl";
 
 export function LocalTabControlRequests({
-  projectId,
-  shareId,
+  people,
   state,
   control,
   explore,
   exploreState,
 }: {
-  projectId: string;
-  shareId: string;
+  people: readonly BrowserSharePerson[];
   state: LocalTabControlState | null;
   control: LocalTabPublisherControl;
   explore?: LocalExploreControl;
   exploreState?: LocalExploreState | null;
 }) {
-  const [people, setPeople] = useState<BrowserShareViewer[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
-  const requestIds = [
-    ...(state?.requests ?? []),
-    ...(exploreState?.requests ?? []),
-    ...(exploreState?.views ?? []),
-  ]
-    .map((r) => r.connectionId)
-    .join(",");
-  const ownerId = state?.grant?.userId;
-  useEffect(() => {
-    let disposed = false;
-    if (requestIds || ownerId)
-      void browserShareClient(projectId)
-        .then((c) => c.viewers(shareId))
-        .then((p) => {
-          if (!disposed) setPeople(p);
-        })
-        .catch(() => {});
-    return () => {
-      disposed = true;
-    };
-  }, [projectId, shareId, requestIds, ownerId]);
   const label = (id: string) => {
     const p = people.find((p) => p.userId === id);
     return p?.fullName || p?.email || "A participant";

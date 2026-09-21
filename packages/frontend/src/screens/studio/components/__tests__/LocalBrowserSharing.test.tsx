@@ -11,13 +11,15 @@ const share = { id: "share", projectId: "project", ownerUserId: "owner", audienc
 let socket: EventTarget;
 const people = [{ userId: "alice", fullName: "Alice", email: "alice@example.test" }, { userId: "bob", fullName: "Bob", email: "bob@example.test" }];
 let removeViewer: ReturnType<typeof vi.fn>;
+let viewers: ReturnType<typeof vi.fn>;
 beforeEach(() => {
   (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
   container = document.createElement("div"); document.body.append(container); root = createRoot(container);
   vi.useFakeTimers();
   socket = new EventTarget();
   removeViewer = vi.fn().mockResolvedValue(undefined);
-  vi.mocked(browserShareClient).mockResolvedValue({ list: vi.fn().mockResolvedValue([share]), connect: vi.fn().mockResolvedValue(socket), people: vi.fn().mockResolvedValue({ people, hasMore: false }), viewers: vi.fn().mockResolvedValue(people.map(person => ({ ...person, active: true, removed: false }))), removeViewer } as never);
+  viewers = vi.fn().mockResolvedValue(people.map(person => ({ ...person, active: true, removed: false })));
+  vi.mocked(browserShareClient).mockResolvedValue({ list: vi.fn().mockResolvedValue([share]), connect: vi.fn().mockResolvedValue(socket), people: vi.fn().mockResolvedValue({ people, hasMore: false }), viewers, removeViewer } as never);
   vi.mocked(publishLocalBrowserTab).mockImplementation(async (_p, _o, signal, ended, audience) => { signal.addEventListener("abort", () => ended()); return { ...share, audience: audience!.audience, mode: "view" }; });
   vi.stubGlobal("URL", Object.assign(URL, { createObjectURL: vi.fn(() => "blob:frame"), revokeObjectURL: vi.fn() }));
 });
@@ -89,4 +91,46 @@ it("lets the owner watch from another device and removes pixels immediately on s
   expect(container.textContent).toContain("Sharing ended");
   expect(container.querySelector('[data-testid="local-browser-share-join"]')).toBeNull();
   expect(URL.revokeObjectURL).toHaveBeenCalledWith("blob:frame");
+});
+
+
+it("uses one audience fetch for People and control/Explore labels, and stops polling with the share", async () => {
+  vi.mocked(publishLocalBrowserTab).mockImplementation(async (_p, _o, signal, ended, audience) => {
+    signal.addEventListener("abort", () => ended());
+    return {
+      ...share, audience: audience.audience, mode: "view",
+      control: { grant: vi.fn().mockResolvedValue(undefined), revoke: vi.fn().mockResolvedValue(undefined), deny: vi.fn() },
+      explore: { approve: vi.fn().mockResolvedValue(undefined), close: vi.fn().mockResolvedValue(undefined), deny: vi.fn() },
+    };
+  });
+  await render(true, "owner");
+  await click("local-browser-share-start");
+  await act(async () => vi.advanceTimersByTimeAsync(200));
+  await act(async () => container.querySelector<HTMLInputElement>('input[type="checkbox"]')!.click());
+  await click("local-browser-share-confirm");
+  expect(viewers).toHaveBeenCalledTimes(1);
+
+  const publication = vi.mocked(publishLocalBrowserTab).mock.calls[0];
+  await act(async () => publication[5]!({
+    type: "controlState", available: true, connectionId: "owner", requested: false, grant: null,
+    requests: [{ connectionId: "alice-tab", userId: "alice" }],
+  }));
+  expect(container.textContent).toContain("Alice requests control");
+  expect(viewers).toHaveBeenCalledTimes(2);
+  await click("local-browser-share-people");
+  expect(container.textContent).toContain("Alice · Viewing");
+  expect(viewers).toHaveBeenCalledTimes(2);
+
+  await act(async () => publication[6]!({
+    type: "exploreState", available: true, requested: false, view: null,
+    requests: [{ connectionId: "bob-tab", userId: "bob", viewport: { width: 390, height: 650, dpr: 2 } }],
+    views: [],
+  }));
+  expect(container.textContent).toContain("Bob wants to explore independently");
+  expect(viewers).toHaveBeenCalledTimes(3);
+  await act(async () => vi.advanceTimersByTimeAsync(3000));
+  expect(viewers).toHaveBeenCalledTimes(4);
+  await click("local-browser-share-stop");
+  await act(async () => vi.advanceTimersByTimeAsync(3000));
+  expect(viewers).toHaveBeenCalledTimes(4);
 });
