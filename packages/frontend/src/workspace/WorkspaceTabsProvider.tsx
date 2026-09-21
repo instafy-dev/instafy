@@ -1,3 +1,7 @@
+import type { StudioNavigationOptions } from "../navigation/studioNavigation";
+import { readWorkspacePanelDestination, type WorkspacePanelDestination } from "./workspacePanelDestination";
+import { useStudioDraftSnapshot } from "./StudioDrafts";
+import { useStudioGuardedNavigation } from "../navigation/StudioDraftNavigationGuard";
 import {
   createContext,
   useCallback,
@@ -63,7 +67,7 @@ interface WorkspaceTabsContextValue {
     panel: StudioPanel,
     meta: { title?: string; icon?: ReactNode }
   ) => void;
-  openFileTab: (file: Pick<CodeFile, "id" | "path" | "label">) => void;
+  openFileTab: (file: Pick<CodeFile, "id" | "path" | "label">, options?: { preview?: boolean }) => void;
   openGitDiffTab: (options: {
     path: string;
     title?: string;
@@ -101,8 +105,14 @@ declare global {
   }
 }
 
-export function WorkspaceTabsProvider({ children }: { children: ReactNode }) {
+export function WorkspaceTabsProvider({ children, locationSearch, onRestorePanelDestination }: {
+  children: ReactNode;
+  locationSearch?: string;
+  onRestorePanelDestination?: (destination: WorkspacePanelDestination, options?: StudioNavigationOptions) => void;
+}) {
   const { activePanel, setActivePanel } = useWorkspaceUi();
+  const draftSnapshot = useStudioDraftSnapshot();
+  const guardNavigation = useStudioGuardedNavigation();
   const { workspace, setActiveFile } = useCode();
   const {
     conversations,
@@ -238,6 +248,15 @@ export function WorkspaceTabsProvider({ children }: { children: ReactNode }) {
   useEffect(() => {
     activeConversationIdRef.current = activeConversationId;
   }, [activeConversationId]);
+  const panelDestinations = useRef(new Map<string, WorkspacePanelDestination>());
+  const restorePanelLocation = useCallback((panel: StudioPanel) => {
+    const destination = panelDestinations.current.get(`${workspaceProjectId}:${panel}`);
+    if (!destination || !onRestorePanelDestination) return;
+    const replace = urlNavigationModeRef.current === "replace";
+    urlNavigationModeRef.current = null;
+    onRestorePanelDestination(destination, { replace });
+  }, [onRestorePanelDestination, workspaceProjectId]);
+
   const {
     setActiveTabInternal,
     ensureTabForPanel,
@@ -269,6 +288,7 @@ export function WorkspaceTabsProvider({ children }: { children: ReactNode }) {
     markConversationRead,
     setActiveFile,
     setActivePanel,
+    onActivatePanel: restorePanelLocation,
     workspaceProjectId,
     canPersistTabs: conversationsMatchProject && canRestoreSavedTabs
       && appliedProjectRef.current === workspaceProjectId,
@@ -282,6 +302,34 @@ export function WorkspaceTabsProvider({ children }: { children: ReactNode }) {
     setTabs,
     setActiveTabId,
   });
+
+  const previousProtectedPanels = useRef(new Set<StudioPanel>());
+  useEffect(() => {
+    const protectedPanels = new Set([...draftSnapshot.drafts, ...draftSnapshot.protections].map(item => item.panel));
+    tabsRef.current.forEach(tab => {
+      if (tab.kind === "panel" && (protectedPanels.has(tab.panel) || previousProtectedPanels.current.has(tab.panel))) {
+        setTabDirty(tab.id, protectedPanels.has(tab.panel));
+      }
+    });
+    previousProtectedPanels.current = protectedPanels;
+  }, [draftSnapshot, setTabDirty, tabs]);
+
+  const guardedActions = useMemo(() => {
+    const guarded = <Args extends unknown[]>(action: (...args: Args) => void) =>
+      (...args: Args) => guardNavigation(() => action(...args));
+    return {
+      openPanelTab: guarded(openPanelTab),
+      openConversationTab: guarded(openConversationTab),
+      openJobThreadTab: guarded(openJobThreadTab),
+      openFileTab: guarded(openFileTab),
+      openGitDiffTab: guarded(openGitDiffTab),
+      openGitReviewTab: guarded(openGitReviewTab),
+      openExplorerTab: guarded(openExplorerTab),
+      focusTab: (id: string) => id === activeTabIdRef.current ? focusTab(id) : guardNavigation(() => focusTab(id)),
+      closeTab: (id: string) => id === activeTabIdRef.current ? guardNavigation(() => closeTab(id)) : closeTab(id),
+    };
+  }, [guardNavigation, openPanelTab, openConversationTab, openJobThreadTab, openFileTab,
+    openGitDiffTab, openGitReviewTab, openExplorerTab, focusTab, closeTab]);
 
   useEffect(() => {
     if (tabsProjectRef.current === workspaceProjectId) return;
@@ -695,6 +743,7 @@ export function WorkspaceTabsProvider({ children }: { children: ReactNode }) {
         return {
           ...tab,
           dirty: nextDirty,
+          preview: nextDirty ? false : tab.preview,
           title: nextTitle
         };
       }
@@ -704,7 +753,7 @@ export function WorkspaceTabsProvider({ children }: { children: ReactNode }) {
       tabsRef.current = nextTabs;
       setTabs(nextTabs);
     }
-  }, [workspace.files]);
+  }, [workspace.files, tabs]);
 
   useEffect(() => {
     if (!workspaceProjectId) {
@@ -796,6 +845,12 @@ export function WorkspaceTabsProvider({ children }: { children: ReactNode }) {
   );
 
   useEffect(() => {
+    if (locationSearch === undefined || activeTab?.kind !== "panel") return;
+    const destination = readWorkspacePanelDestination(locationSearch, activeTab.panel);
+    if (destination) panelDestinations.current.set(`${workspaceProjectId}:${activeTab.panel}`, destination);
+  }, [locationSearch, activeTab, workspaceProjectId]);
+
+  useEffect(() => {
     if (typeof window === "undefined") {
       return;
     }
@@ -821,46 +876,30 @@ export function WorkspaceTabsProvider({ children }: { children: ReactNode }) {
       activeTab,
       activeTabId,
       conversationTabsReady,
-      openPanelTab,
-      openConversationTab,
-      openJobThreadTab,
       requestUrlNavigation,
       peekUrlNavigation,
       consumeUrlNavigation,
       requestUrlPush,
       consumeUrlPush,
       setPanelTabMeta,
-      openFileTab,
-      openGitDiffTab,
-      openGitReviewTab,
       restoreGitReviewTab,
-      openExplorerTab,
-      focusTab,
       keepTabOpen,
-      closeTab,
       moveTab,
       setTabDirty,
-      resetTabs
+      resetTabs,
+      ...guardedActions
     }),
     [
       activeTab,
       activeTabId,
       conversationTabsReady,
-      closeTab,
+      guardedActions,
       peekUrlNavigation,
       consumeUrlNavigation,
       consumeUrlPush,
-      focusTab,
       keepTabOpen,
       moveTab,
-      openConversationTab,
-      openJobThreadTab,
-      openExplorerTab,
-      openFileTab,
-      openGitDiffTab,
-      openGitReviewTab,
       restoreGitReviewTab,
-      openPanelTab,
       requestUrlNavigation,
       requestUrlPush,
       setPanelTabMeta,

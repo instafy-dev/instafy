@@ -1,3 +1,4 @@
+import { useStudioNavigationProtection } from "../../../workspace/StudioDrafts";
 import { AgentAvatar } from "../../../components/AgentAvatar";
 import { uploadIdentityImage } from "../../../lib/identityImages";
 import { PROFILE_BIO_MAX_LENGTH } from "@instafy/sdk/human-profiles";
@@ -442,6 +443,10 @@ function UserCredentialsSettingsCard({ section = "connections", onOpenAgentProfi
       Boolean(credentialsById.get(credentialId)?.isDefault),
   });
 
+  useStudioNavigationProtection(connectModalProps.connectModalOpen, "AI connection setup",
+    connectModalProps.connectPending || connectModalProps.deviceAuthCompleting || connectModalProps.apiKeyPendingProvider
+      ? undefined : connectModalProps.onClose);
+
   const handleTestCredential = useCallback(
     async (credentialId: string) => {
       if (credentialTestPendingId) {
@@ -671,6 +676,9 @@ function UserCredentialsSettingsCard({ section = "connections", onOpenAgentProfi
     setAgentCredentialDirty(false);
     setAgentModelDirty(false);
   }, []);
+
+  useStudioNavigationProtection(Boolean(agentProfileModal) || Boolean(agentActionPendingId), "agent editor",
+    agentActionPendingId ? undefined : closeAgentProfileModal);
 
   const defaultCodexCredential = useMemo(() => {
     return codexCredentials.find((credential) => credential.isDefault) ?? null;

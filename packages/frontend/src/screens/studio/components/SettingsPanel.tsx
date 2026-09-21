@@ -1,3 +1,4 @@
+import { useStudioDraftState, useStudioNavigationProtection } from "../../../workspace/StudioDrafts";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
 import { useStudioNavigation } from "../../../navigation/useStudioNavigation";
@@ -139,8 +140,8 @@ export function SettingsPanel({ activeTab: fallbackTab, organizationId, onOrgani
   const [projectMemberRemovePendingId, setProjectMemberRemovePendingId] = useState<string | null>(null);
   const [projectDeletePending, setProjectDeletePending] = useState(false);
   const [orgDeletePending, setOrgDeletePending] = useState(false);
-  const [projectNameDraft, setProjectNameDraft] = useState("");
   const [projectNameSaving, setProjectNameSaving] = useState(false);
+  useStudioNavigationProtection(projectNameSaving, "space name save");
   const [projectDefaultsRefreshPending, setProjectDefaultsRefreshPending] = useState(false);
   const [settingsProviders, setSettingsProviders] = useState<LocalProviderSummary[]>([]);
   // All scopes are URL-driven, including Back/Forward and direct links. There
@@ -257,10 +258,6 @@ export function SettingsPanel({ activeTab: fallbackTab, organizationId, onOrgani
   const orgRole = orgScope.role;
   const orgRoleChecked = orgScope.checked;
 
-  useEffect(() => {
-    setProjectNameDraft(activeProject?.name ?? "");
-  }, [activeProject?.name, activeProjectId]);
-
   const handleRequestMicrophonePermission = useCallback(async () => {
     const permission = await requestMicrophonePermission();
     if (permission === "granted") {
@@ -336,6 +333,7 @@ export function SettingsPanel({ activeTab: fallbackTab, organizationId, onOrgani
     canManageProject &&
     (!activeOrgId || isOrgMember);
   const canAttemptOrgDelete = runtimeControllerEnabled && Boolean(activeOrgId) && orgRole === "owner";
+  const [projectNameDraft, setProjectNameDraft] = useStudioDraftState(`space:${activeProjectId}:name`, activeProject?.name ?? "", Boolean(activeProject));
   const projectNameDirty =
     Boolean(activeProjectId) &&
     projectNameDraft.trim() !== (activeProject?.name ?? "").trim();
@@ -500,7 +498,7 @@ export function SettingsPanel({ activeTab: fallbackTab, organizationId, onOrgani
 
   const handleCancelProjectName = useCallback(() => {
     setProjectNameDraft(activeProject?.name ?? "");
-  }, [activeProject?.name]);
+  }, [activeProject?.name, setProjectNameDraft]);
 
   const handleSaveProjectName = useCallback(async () => {
     if (!activeProjectId) {
@@ -529,11 +527,12 @@ export function SettingsPanel({ activeTab: fallbackTab, organizationId, onOrgani
         showStatus(result.error ?? "Unable to rename space.", "error", 4000);
         return;
       }
+      setProjectNameDraft(trimmed);
       showStatus("Space renamed.", "success", 2500);
     } finally {
       setProjectNameSaving(false);
     }
-  }, [activeProject?.name, activeProjectId, canWriteProject, projectNameDraft, projectNameSaving, renameProject, showStatus]);
+  }, [activeProject?.name, activeProjectId, canWriteProject, projectNameDraft, projectNameSaving, renameProject, setProjectNameDraft, showStatus]);
 
   const sortedInvitations = useMemo(() => {
     return [...invitations].sort((a, b) => {

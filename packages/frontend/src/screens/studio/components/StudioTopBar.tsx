@@ -1,3 +1,4 @@
+import { isWorkspacePreviewTab } from "../../../workspace/workspacePreviewTabs";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { desktopTitleBarFree } from "../../../lib/desktopShell";
 import { DialogTrigger } from "react-aria-components";
@@ -243,7 +244,7 @@ export function StudioTopBar({ mobileNavigation, newChatInSidebar = false, conte
                 <span aria-hidden="true" className="shrink-0 text-slate-600 dark:text-slate-400">
                   {tab.icon}
                 </span>
-                <span className={`min-w-0 flex-1 truncate text-left ${isLargeScreen && tab.kind === "conversation" && tab.preview ? "italic" : ""}`}>{tab.title}</span>
+                <span className={`min-w-0 flex-1 truncate text-left ${isLargeScreen && isWorkspacePreviewTab(tab) ? "italic" : ""}`}>{tab.title}</span>
                 {tab.badge ? (
                   <span
                     className="inline-flex h-4 min-w-[1rem] shrink-0 items-center justify-center rounded-full bg-primary-500/90 px-1 text-3xs font-semibold leading-none text-white dark:bg-primary-500/85"
@@ -253,7 +254,7 @@ export function StudioTopBar({ mobileNavigation, newChatInSidebar = false, conte
                   </span>
                 ) : null}
               </Button>
-              {tab.kind === "conversation" && tab.preview ? (
+              {isWorkspacePreviewTab(tab) ? (
                 <IconButton
                   onPress={() => keepTabOpen(tab.id)}
                   variant="ghost"

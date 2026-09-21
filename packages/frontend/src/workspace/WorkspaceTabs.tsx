@@ -1,3 +1,4 @@
+import { isWorkspacePreviewTab } from "./workspacePreviewTabs";
 import {
   DndContext,
   type DragEndEvent,
@@ -112,7 +113,7 @@ export function WorkspaceTabs({
   const { activeProjectId } = useProject();
   const [conversationMenu, setConversationMenu] = useState<{
     tabId: string;
-    conversationId: string;
+    conversationId?: string;
     x: number;
     y: number;
     maxHeight: number;
@@ -372,7 +373,7 @@ export function WorkspaceTabs({
   }, [commitConversationRename]);
 
   const handleConversationMenuRename = useCallback(() => {
-    if (!conversationMenu) {
+    if (!conversationMenu?.conversationId) {
       return;
     }
     beginConversationRename(conversationMenu.tabId, conversationMenu.conversationId);
@@ -470,7 +471,7 @@ export function WorkspaceTabs({
   }, [conversationMenu, keepTabOpen]);
 
   const handleConversationMenuInvite = useCallback(() => {
-    if (!conversationMenu) {
+    if (!conversationMenu?.conversationId) {
       return;
     }
     const tabId = conversationMenu.tabId;
@@ -566,8 +567,8 @@ export function WorkspaceTabs({
               shadow="lg"
               className={`p-1 ${DARK_FLOATING_SURFACE_CLASS} ${DARK_PANEL_SHADOW_CLASS}`}
             >
-              <StudioMenu aria-label="Conversation tab actions" autoFocus="first">
-                {menuTab?.kind === "conversation" && menuTab.preview ? (
+              <StudioMenu aria-label={menuTab?.kind === "conversation" ? "Conversation tab actions" : "Tab actions"} autoFocus="first">
+                {isWorkspacePreviewTab(menuTab) ? (
                   <StudioMenuItem
                     className="justify-start gap-2 pointer-coarse:min-h-11"
                     onAction={handleConversationMenuKeepOpen}
@@ -579,6 +580,7 @@ export function WorkspaceTabs({
                     <span>Keep open</span>
                   </StudioMenuItem>
                 ) : null}
+                {menuTab?.kind === "conversation" ? <>
                 <StudioMenuItem
                   className="justify-start gap-2 pointer-coarse:min-h-11"
                   onAction={handleConversationMenuNewThread}
@@ -595,6 +597,7 @@ export function WorkspaceTabs({
                 >
                   Rename
                 </StudioMenuItem>
+                </> : null}
                 {menuConversation?.visibility === "private" ? (
                   <StudioMenuItem
                     className="justify-start gap-2 pointer-coarse:min-h-11"
@@ -613,6 +616,7 @@ export function WorkspaceTabs({
                 >
                   Close tab
                 </StudioMenuItem>
+                {menuTab?.kind === "conversation" ? <>
                 <StudioMenuSeparator />
                 <StudioMenuItem
                   className="justify-start gap-2 pointer-coarse:min-h-11 text-rose-600 hover:text-rose-700 dark:text-rose-300 dark:hover:text-rose-200"
@@ -624,6 +628,7 @@ export function WorkspaceTabs({
                   <Trash className="h-4 w-4" aria-hidden="true" />
                   <span>Delete…</span>
                 </StudioMenuItem>
+                </> : null}
               </StudioMenu>
             </Surface>
           </div>,
@@ -700,7 +705,7 @@ export function WorkspaceTabs({
                       title={tab.title}
                       icon={tab.icon}
                       dirty={tab.dirty}
-                      preview={tab.kind === "conversation" && tab.preview}
+                      preview={isWorkspacePreviewTab(tab)}
                       closable={tab.closable}
                       isActive={tab.id === activeTabId}
                       isFirstTab={index === 0}
@@ -744,7 +749,7 @@ export function WorkspaceTabs({
 
 interface ConversationMenuTrigger {
   tabId: string;
-  conversationId: string;
+  conversationId?: string;
   clientX: number;
   clientY: number;
   trigger: HTMLElement;
@@ -837,9 +842,10 @@ function WorkspaceSortableTab({
     onSelect(tabId);
   }, [onSelect, tabId]);
 
+  const hasContextMenu = kind === "conversation" || kind === "panel" || kind === "file";
   const handleContextMenu = useCallback(
     (event: MouseEvent) => {
-      if (kind !== "conversation" || !conversationId) {
+      if (!hasContextMenu) {
         return;
       }
       event.preventDefault();
@@ -852,7 +858,7 @@ function WorkspaceSortableTab({
         trigger: event.currentTarget.querySelector<HTMLElement>("[data-workspace-tab-trigger]") ?? event.currentTarget as HTMLElement,
       });
     },
-    [conversationId, kind, onOpenConversationMenu, tabId],
+    [conversationId, hasContextMenu, onOpenConversationMenu, tabId],
   );
 
   const handleClose = useCallback(() => {
@@ -863,7 +869,7 @@ function WorkspaceSortableTab({
   }, [closable, onClose, tabId]);
   const handleShellKeyDown = useCallback(
     (event: KeyboardEvent<HTMLDivElement>) => {
-      if ((event.key === "ContextMenu" || (event.shiftKey && event.key === "F10")) && kind === "conversation" && conversationId) {
+      if ((event.key === "ContextMenu" || (event.shiftKey && event.key === "F10")) && hasContextMenu) {
         event.preventDefault();
         const bounds = event.currentTarget.getBoundingClientRect();
         onOpenConversationMenu?.({ tabId, conversationId, clientX: bounds.left, clientY: bounds.bottom, trigger: event.currentTarget });
@@ -874,7 +880,7 @@ function WorkspaceSortableTab({
         handleSelect();
       }
     },
-    [conversationId, handleSelect, kind, onOpenConversationMenu, tabId],
+    [conversationId, handleSelect, hasContextMenu, onOpenConversationMenu, tabId],
   );
   const handleShellPointerDown = useCallback(
     (event: PointerEvent<HTMLDivElement>) => {
@@ -978,7 +984,7 @@ function WorkspaceSortableTab({
         data-workspace-tab-active={isActive || undefined}
         title={preview ? `${title} · Preview — double-click to keep open` : title}
         aria-label={preview ? `${title}, preview tab${badge ? `, ${badge} unread messages` : ""}` : undefined}
-        aria-haspopup={kind === "conversation" ? "menu" : undefined}
+        aria-haspopup={hasContextMenu ? "menu" : undefined}
         onPointerDown={handleShellPointerDown}
         onClick={handleSelect}
         onDoubleClick={(event) => {

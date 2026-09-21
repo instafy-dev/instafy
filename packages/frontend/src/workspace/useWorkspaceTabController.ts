@@ -18,6 +18,7 @@ interface UseWorkspaceTabControllerArgs {
   markConversationRead: (conversationId: string) => void;
   setActiveFile: (fileId: string | null) => void;
   setActivePanel: (panel: StudioPanel) => void;
+  onActivatePanel?: (panel: StudioPanel) => void;
   workspaceProjectId: string | null;
   canPersistTabs: boolean;
   tabsRef: MutableRefObject<WorkspaceTabState[]>;
@@ -39,6 +40,7 @@ export function useWorkspaceTabController({
   markConversationRead,
   setActiveFile,
   setActivePanel,
+  onActivatePanel,
   workspaceProjectId,
   canPersistTabs,
   tabsRef,
@@ -98,6 +100,7 @@ export function useWorkspaceTabController({
     markConversationRead,
     setActiveFile,
     setActivePanel,
+    onActivatePanel,
     workspaceProjectId,
     canPersistTabs,
     tabsRef,

@@ -1,6 +1,8 @@
+import { useStudioDraftStore } from "./StudioDrafts";
 import { useCallback, type MutableRefObject, type ReactNode } from "react";
 import type { StudioPanel } from "../screens/studio/types";
 import { studioPerformance } from "../telemetry/studioPerformance";
+import { insertPreviewTab, isUtilityPreviewPanel, isWorkspacePreviewTab } from "./workspacePreviewTabs";
 import {
   createTabForPanel,
   getTabIdForConversation,
@@ -18,6 +20,7 @@ interface UseWorkspaceTabMutationControllerArgs {
   markConversationRead: (conversationId: string) => void;
   setActiveFile: (fileId: string | null) => void;
   setActivePanel: (panel: StudioPanel) => void;
+  onActivatePanel?: (panel: StudioPanel) => void;
   workspaceProjectId: string | null;
   canPersistTabs: boolean;
   tabsRef: MutableRefObject<WorkspaceTabState[]>;
@@ -37,6 +40,7 @@ export function useWorkspaceTabMutationController({
   markConversationRead,
   setActiveFile,
   setActivePanel,
+  onActivatePanel,
   workspaceProjectId,
   canPersistTabs,
   tabsRef,
@@ -49,10 +53,11 @@ export function useWorkspaceTabMutationController({
   commitTabs,
   setActiveTabId,
 }: UseWorkspaceTabMutationControllerArgs) {
+  const draftStore = useStudioDraftStore();
   const setActiveTabInternal = useCallback(
     (
       nextTab: WorkspaceTabState,
-      options?: { syncPanel?: boolean; syncConversation?: boolean },
+      options?: { syncPanel?: boolean; syncConversation?: boolean; restorePanel?: boolean },
     ) => {
       if (nextTab.id !== activeTabIdRef.current &&
           (nextTab.kind === "conversation" || nextTab.kind === "jobThread") && workspaceProjectId) {
@@ -101,6 +106,7 @@ export function useWorkspaceTabMutationController({
       if (panelToSync && options?.syncPanel !== false) {
         suppressPanelSyncRef.current = panelToSync;
         setActivePanel(panelToSync);
+        if (nextTab.kind === "panel" && options?.restorePanel) onActivatePanel?.(nextTab.panel);
       }
     },
     [
@@ -111,6 +117,7 @@ export function useWorkspaceTabMutationController({
       selectConversation,
       setActiveFile,
       setActivePanel,
+      onActivatePanel,
       setActiveTabId,
       suppressPanelSyncRef,
       workspaceProjectId,
@@ -125,11 +132,19 @@ export function useWorkspaceTabMutationController({
       if (existing) {
         return existing;
       }
+      // A draft can be entered and navigation requested in the same React batch.
+      // Read the store synchronously so effect timing cannot replace its tab.
+      const snapshot = draftStore?.getSnapshot();
+      const protectedPanels = new Set([...(snapshot?.drafts ?? []), ...(snapshot?.protections ?? [])].map(item => item.panel));
+      const currentTabs = tabsRef.current.map(tab => tab.kind === "panel" && protectedPanels.has(tab.panel)
+        ? { ...tab, dirty: true, preview: false } : tab);
       const nextTab = createTabForPanel(panel);
-      commitTabs([...tabsRef.current, nextTab]);
+      nextTab.dirty = protectedPanels.has(panel);
+      nextTab.preview = isUtilityPreviewPanel(panel) && !nextTab.dirty;
+      commitTabs(insertPreviewTab(currentTabs, nextTab));
       return nextTab;
     },
-    [commitTabs, tabsRef],
+    [commitTabs, draftStore, tabsRef],
   );
 
   const focusTab = useCallback(
@@ -138,7 +153,7 @@ export function useWorkspaceTabMutationController({
       if (!tab) {
         return;
       }
-      setActiveTabInternal(tab);
+      setActiveTabInternal(tab, { restorePanel: true });
     },
     [setActiveTabInternal, tabsRef],
   );
@@ -198,7 +213,7 @@ export function useWorkspaceTabMutationController({
         commitTabs(nextTabsWithCloseability);
         if (isClosingActiveTab) {
           if (fallbackTab) {
-            setActiveTabInternal(fallbackTab);
+            setActiveTabInternal(fallbackTab, { restorePanel: true });
             return;
           }
           setActiveTabId(null);
@@ -210,7 +225,7 @@ export function useWorkspaceTabMutationController({
       if (isClosingActiveTab) {
         const fallback = nextTabs[nextTabs.length - 1] ?? nextTabs[0] ?? null;
         if (fallback) {
-          setActiveTabInternal(fallback);
+          setActiveTabInternal(fallback, { restorePanel: true });
         } else {
           setActiveTabId(null);
         }
@@ -233,7 +248,7 @@ export function useWorkspaceTabMutationController({
   const keepTabOpen = useCallback((tabId: string) => {
     const currentTabs = tabsRef.current;
     const target = currentTabs.find((tab) => tab.id === tabId);
-    if (target?.kind !== "conversation" || !target.preview) return;
+    if (!isWorkspacePreviewTab(target)) return;
     commitTabs(currentTabs.map((tab) => tab.id === tabId ? { ...target, preview: false } : tab));
   }, [commitTabs, tabsRef]);
 
@@ -251,7 +266,7 @@ export function useWorkspaceTabMutationController({
       }
       const nextTabs = [...currentTabs];
       const [moved] = nextTabs.splice(currentIndex, 1);
-      nextTabs.splice(clampedIndex, 0, moved.kind === "conversation" ? { ...moved, preview: false } : moved);
+      nextTabs.splice(clampedIndex, 0, isWorkspacePreviewTab(moved) ? { ...moved, preview: false } : moved);
       commitTabs(nextTabs);
     },
     [commitTabs, keepTabOpen, tabsRef],
@@ -269,7 +284,7 @@ export function useWorkspaceTabMutationController({
         return;
       }
       const nextTabs = [...currentTabs];
-      nextTabs[index] = target.kind === "conversation" && dirty
+      nextTabs[index] = isWorkspacePreviewTab(target) && dirty
         ? { ...target, dirty, preview: false }
         : { ...target, dirty };
       commitTabs(nextTabs);
