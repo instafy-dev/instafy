@@ -5688,9 +5688,9 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
         {/* Constrain to the shared 56rem chat column so the roster's right
             edge lands on the message column, not the panel edge. The sticky
             speaker pill takes the column's left side (fading in/out as the
-            transcript scrolls) and the roster stays right-aligned; both are
-            always rendered, so the roster never shifts when the pill appears
-            or disappears. */}
+            transcript scrolls) and the roster stays right-aligned; the pill's
+            box keeps the pill's height with or without one, so the roster
+            never shifts when the pill appears or disappears. */}
         <ChatColumn className="pointer-events-none flex items-center justify-between gap-2 [&>:last-child]:pointer-events-auto">
           <ChatSpeakerStickyOverlay ref={stickySpeakerOverlayRef} speaker={stickyChatSpeaker} />
           <ConversationRoster

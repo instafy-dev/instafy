@@ -1,9 +1,10 @@
-import type {
-  CSSProperties,
-  MouseEventHandler,
-  ReactNode,
-  RefObject,
-  UIEventHandler,
+import {
+  useRef,
+  type CSSProperties,
+  type MouseEventHandler,
+  type ReactNode,
+  type RefObject,
+  type UIEventHandler,
 } from "react";
 import { AssistantSpeakerIdentityPill } from "./AssistantSpeakerIdentityPill";
 import { HumanSpeakerIdentityPill } from "./chatHumanIdentity";
@@ -21,28 +22,42 @@ export function ChatSpeakerStickyOverlay({
   ref?: RefObject<HTMLDivElement | null>;
   speaker: StickyChatSpeaker | null;
 }) {
+  // The pill fades rather than pops, and the roster beside it must not move
+  // when it does. Two things keep the box the same height with and without
+  // a speaker: the last speaker stays rendered while hidden, so the fade-out
+  // has a pill to fade and the box keeps its height, and before any speaker
+  // has shown the box reserves the pill's height, which is its face plus a
+  // 1px border each side: 28px inline below sm, 32px beside the avatar
+  // gutter at sm+ (see SPEAKER_PILL_CLASS_NAME). Measured before this, the
+  // roster row grew from 40px to 44px when a pill appeared and the roster
+  // avatars dropped 2px with it.
+  const lastSpeakerRef = useRef<StickyChatSpeaker | null>(null);
+  if (speaker) {
+    lastSpeakerRef.current = speaker;
+  }
+  const shown = speaker ?? lastSpeakerRef.current;
   return (
     <div
       ref={ref}
       aria-hidden={speaker ? undefined : "true"}
       data-chat-speaker-overlay="true"
       data-testid="chat-speaker-sticky-overlay"
-      className="relative"
+      className="relative min-h-[30px] sm:min-h-[34px]"
     >
       <div
         className={[
-          "relative w-fit max-w-full transition-[opacity,transform] duration-150 ease-out",
+          "relative flex w-fit max-w-full transition-[opacity,transform] duration-150 ease-out",
           speaker ? "translate-y-0 opacity-100" : "-translate-y-1 opacity-0",
         ].join(" ")}
       >
-        {speaker ? (
-          speaker.kind === "assistant" ? (
+        {shown ? (
+          shown.kind === "assistant" ? (
             <AssistantSpeakerIdentityPill
-              handle={speaker.handle}
-              agentIdentity={{ handle: speaker.handle, avatarSeed: speaker.avatarSeed }}
+              handle={shown.handle}
+              agentIdentity={{ handle: shown.handle, avatarSeed: shown.avatarSeed }}
             />
           ) : (
-            <HumanSpeakerIdentityPill avatarSeed={speaker.avatarSeed} label={speaker.label} />
+            <HumanSpeakerIdentityPill avatarSeed={shown.avatarSeed} label={shown.label} />
           )
         ) : null}
       </div>
