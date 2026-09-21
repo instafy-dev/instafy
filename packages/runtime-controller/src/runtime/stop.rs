@@ -2040,10 +2040,14 @@ fn provider_runtime_missing_release_generation(state: &AppState, runtime: &Runti
         // A strict explicit stop separately admits `removed` solely so it can
         // verify the ordered provider acknowledgement before succeeding.
         && runtime.status != "stopped"
-        && !(runtime.status == "requested"
-            && runtime.endpoint_url.is_none()
-            && runtime.task_ref.is_none()
-            && runtime.last_seen_at.is_none())
+        // A `requested` row without an active lease has nothing to release:
+        // ensure creates and commits the lease generation before it ever calls
+        // the provider, and provider release is keyed by that lease id. Once
+        // the lease is detached the row no longer counts toward the org cap,
+        // so refusing to stop it would leave a runtime that can neither be
+        // released nor cleaned up. `perform_runtime_stop` records the local
+        // transition to `stopped` for it.
+        && runtime.status != "requested"
 }
 
 fn runtime_requires_provider_release(state: &AppState, runtime: &RuntimeDetails) -> bool {
@@ -2139,6 +2143,47 @@ mod tests {
         ));
         assert!(!provider_runtime_missing_release_generation(
             &state, &stopped
+        ));
+    }
+
+    #[tokio::test]
+    async fn managed_runtime_without_generation_stays_fenced_outside_requested_and_stopped() {
+        let state = test_state_with_provider(None);
+        for status in ["offline", "ready", "removed"] {
+            let runtime = runtime_details(status, None);
+            assert!(
+                provider_runtime_missing_release_generation(&state, &runtime),
+                "{status} without an active lease must stay fenced"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn requested_managed_runtime_without_generation_is_not_fenced() {
+        let state = test_state_with_provider(None);
+
+        // A pristine row that never reached the provider.
+        let pristine = runtime_details("requested", None);
+        assert!(!provider_runtime_missing_release_generation(
+            &state, &pristine
+        ));
+
+        // A row whose lease was detached after registration data was written.
+        // Ensure commits the lease before any provider call, so there is no
+        // allocation left to release once the lease is gone.
+        let mut detached = runtime_details("requested", None);
+        detached.last_seen_at = Some(chrono::Utc::now());
+        detached.endpoint_url = Some("http://runtime".to_string());
+        detached.task_ref = Some("provider-task".to_string());
+        assert!(!provider_runtime_missing_release_generation(
+            &state, &detached
+        ));
+
+        // A `requested` row that still holds its lease is not affected by the
+        // fence at all; the lease is released through the provider as usual.
+        let leased = runtime_details("requested", Some(Uuid::new_v4()));
+        assert!(!provider_runtime_missing_release_generation(
+            &state, &leased
         ));
     }
 

@@ -72,6 +72,8 @@ mod state;
 mod telemetry;
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod tests_runtime_stop_fence;
 mod tokens;
 mod tunnels;
 mod utils;
