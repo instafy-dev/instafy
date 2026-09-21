@@ -14,6 +14,7 @@ const mocks = vi.hoisted(() => ({
     "user-1": { id: "user-1", email: "playwright@instafy.dev" },
     "user-2": { id: "user-2", email: "second@instafy.test" },
   },
+  openConnectModalAtStep: vi.fn(),
   uploadPicture: vi.fn(),
   clearDefaultCredential: vi.fn(),
   createCodexCredential: vi.fn(),
@@ -82,7 +83,7 @@ vi.mock("../useCredentialsConnectFlow", () => ({
   useCredentialsConnectFlow: () => ({
     canManageAiConnections: true,
     openConnectModal: vi.fn(),
-    openConnectModalAtStep: vi.fn(),
+    openConnectModalAtStep: mocks.openConnectModalAtStep,
     connectModalProps: {},
   }),
 }));
@@ -137,6 +138,7 @@ describe("CredentialsSettingsCard", () => {
     clearPendingAgentProfileTarget();
 
     mocks.userId = "user-1";
+    mocks.openConnectModalAtStep.mockReset();
     mocks.uploadPicture.mockReset().mockResolvedValue("https://storage.example/bot.png");
     mocks.clearDefaultCredential.mockReset();
     mocks.createCodexCredential.mockReset();
@@ -247,10 +249,50 @@ describe("CredentialsSettingsCard", () => {
     expect(mocks.showStatus).toHaveBeenCalledWith("Try again", "error", 4500);
   });
 
-  it("does not offer managed AI on controllers where it is disabled", async () => {
+  it("explains when managed AI is disabled without offering a default action", async () => {
     mocks.getCredentialRequirements.mockResolvedValue({ ...managedRequirements, managedAi: { ...managedRequirements.managedAi, enabled: false, available: false } });
     await act(async () => { root.render(<CredentialsSettingsCard />); await flush(); });
+    const row = container.querySelector('[data-testid="credentials-connection-row-managed-ai"]');
+    expect(row?.textContent).toContain("Unavailable on this server");
+    expect(row?.textContent).not.toContain("Default");
+    expect(row?.textContent).not.toContain("prompts left");
+    expect(container.querySelector('[data-testid="credentials-use-managed-ai"]')).toBeNull();
+  });
+
+  it("shows provider setup directly in the empty state, including when managed AI is absent", async () => {
+    mocks.getCredentialRequirements.mockResolvedValue({ ...managedRequirements, managedAi: null });
+    mocks.listCredentials.mockResolvedValue({ success: true, credentials: [] });
+    await act(async () => { root.render(<CredentialsSettingsCard />); await flush(); });
+    expect(container.textContent).toContain("Unavailable on this server");
+    expect(container.textContent).not.toContain("No active AI mode");
+    expect(container.textContent).not.toContain("No AI connections yet");
+    expect(container.querySelector('[data-testid="credentials-ai-mode-summary"]')).toBeNull();
+    for (const step of ["codex", "openai", "deepseek", "zai", "gemini"]) {
+      const choice = container.querySelector<HTMLButtonElement>(`[data-testid="credentials-provider-choice-${step}"]`);
+      expect(choice).not.toBeNull();
+      await act(async () => choice!.click());
+      expect(mocks.openConnectModalAtStep).toHaveBeenLastCalledWith(step, { returnOnBack: true });
+    }
+    expect(mocks.setDefaultCredential).not.toHaveBeenCalled();
+    expect(mocks.createCodexCredential).not.toHaveBeenCalled();
+  });
+
+  it("keeps available providers after saved accounts and does not confuse a requirements error with disabled AI", async () => {
+    mocks.getCredentialRequirements.mockResolvedValue({ ...managedRequirements, success: false, managedAi: null, error: "Server unavailable" });
+    await act(async () => { root.render(<CredentialsSettingsCard />); await flush(); });
+    expect(container.querySelector('[data-testid="credentials-ai-mode-summary"]')?.textContent).toContain("Could not check");
     expect(container.querySelector('[data-testid="credentials-connection-row-managed-ai"]')).toBeNull();
+    expect(container.textContent).not.toContain("Unavailable on this server");
+    const saved = container.querySelector('[data-testid="credentials-connection-row-cred-old"]')!;
+    const choice = container.querySelector('[data-testid="credentials-provider-choice-openai"]')!;
+    expect(saved.compareDocumentPosition(choice) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  });
+
+  it("does not label managed AI unavailable while requirements are still loading", async () => {
+    mocks.getCredentialRequirements.mockReturnValue(new Promise(() => {}));
+    await act(async () => { root.render(<CredentialsSettingsCard />); await flush(); });
+    expect(container.textContent).toContain("Loading AI connections");
+    expect(container.textContent).not.toContain("Unavailable on this server");
     expect(container.querySelector('[data-testid="credentials-use-managed-ai"]')).toBeNull();
   });
 

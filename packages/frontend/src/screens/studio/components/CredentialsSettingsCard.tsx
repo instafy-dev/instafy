@@ -52,6 +52,7 @@ import {
   StudioListSection,
   StudioListSurface,
 } from "./StudioListSection";
+import { CredentialsConnectionChoices } from "./CredentialsConnectionChoices";
 import { useCredentialsConnectFlow } from "./useCredentialsConnectFlow";
 import { isExpiredCredentialProxyError } from "./proxyError";
 
@@ -685,88 +686,43 @@ function UserCredentialsSettingsCard({ section = "connections", onOpenAgentProfi
       return null;
     }
 
-    if (loading && !credentialRequirements) {
+    if (!credentialRequirements) {
       return {
-        title: "Checking which AI mode is active.",
-        detail: "Instafy compares your default credential with the managed Instafy AI lane before deciding what new prompts use.",
+        title: "Loading AI connections…",
+        detail: "",
       };
     }
 
     if (credentialRequirements?.error) {
       return {
-        title: "Current AI mode is unavailable right now.",
+        title: "Could not check the default connection.",
         detail: formatAiModeErrorDetail(credentialRequirements.error),
       };
     }
 
-    const managedAi = credentialRequirements?.managedAi ?? null;
-    const managedAiEnabled = managedAi?.enabled === true;
-    const managedAiAvailable = managedAi?.available === true;
-    const managedAiLabel = managedAi?.label?.trim() || "Instafy AI";
-    const defaultCredentialLabel = defaultCodexCredential
-      ? resolveCredentialLabel(defaultCodexCredential)
-      : null;
-
-    if (credentialRequirements?.hasDefaultCredential && defaultCredentialLabel) {
+    if (!credentialRequirements?.managedAi?.enabled && !defaultCodexCredential && codexCredentials.length > 0) {
       return {
-        title: `Using your AI: ${defaultCredentialLabel}.`,
-        detail: managedAiEnabled
-          ? `${managedAiLabel} is ready when no default credential is selected, but new prompts currently use your default connection.`
-          : "New prompts use your default credential until you switch it below.",
+        title: "Choose a default connection.",
+        detail: "Set one of your saved accounts as default for new chats.",
       };
     }
 
-    if (managedAiAvailable) {
-      const quotaDetail =
-        typeof managedAi?.remainingPrompts === "number" && managedAi?.dailyPromptLimit > 0
-          ? `${managedAi.remainingPrompts} of ${managedAi.dailyPromptLimit} managed prompts remain today.`
-          : managedAi?.dailyPromptLimit && managedAi.dailyPromptLimit > 0
-            ? `${managedAi.dailyPromptLimit} managed prompts are available each day.`
-            : "Managed prompts burn from your shared team balance.";
-      return {
-        title: `Using ${managedAiLabel}.`,
-        detail:
-          codexCredentials.length > 0
-            ? `No default credential is selected, so new prompts use ${managedAiLabel}. ${quotaDetail} Set one of your saved connections as default below to switch to your own AI.`
-            : `No personal credential is connected, so new prompts use ${managedAiLabel}. ${quotaDetail}`,
-      };
-    }
-
-    if (codexCredentials.length > 0) {
-      return {
-        title: "Choose which saved AI connection should be active.",
-        detail: "You already have AI credentials saved, but none is set as default. Set one below to use your own AI for new prompts.",
-      };
-    }
-
-    return {
-      title: "No active AI mode is configured yet.",
-      detail: managedAiEnabled
-        ? `${managedAiLabel} is not currently available, so connect your own AI below to start using prompts.`
-        : "Connect your own AI below to start using prompts.",
-    };
-  }, [
-    codexCredentials.length,
-    credentialRequirements,
-    defaultCodexCredential,
-    loading,
-    user,
-  ]);
-  const canSwitchToManagedAi =
-    Boolean(defaultCodexCredential) &&
-    credentialRequirements?.managedAi?.enabled === true &&
-    !credentialRequirements?.error;
+    return null;
+  }, [codexCredentials.length, credentialRequirements, defaultCodexCredential, user]);
   const managedAi = credentialRequirements?.managedAi;
-  const showManagedAi = Boolean(runtimeControllerEnabled && user && managedAi?.enabled);
-  const managedAiSelected = showManagedAi && credentialRequirements?.success === true &&
-    !credentialRequirements.hasDefaultCredential && !defaultCodexCredential;
-  const managedAiDetail = managedAi?.dailyPromptLimit && managedAi.dailyPromptLimit > 0
-    ? typeof managedAi.remainingPrompts === "number"
-      ? `${managedAi.remainingPrompts} of ${managedAi.dailyPromptLimit} prompts left today.`
-      : `${managedAi.dailyPromptLimit} prompts available each day.`
-    : "Uses your shared team balance.";
-  const showAiModeSummary = !credentialRequirements || Boolean(credentialRequirements.error) ||
-    (!showManagedAi && !defaultCodexCredential);
+  const managedAiEnabled = managedAi?.enabled === true;
+  const showManagedAi = Boolean(runtimeControllerEnabled && user &&
+    credentialRequirements?.success && !credentialRequirements.error);
+  const managedAiSelected = showManagedAi && managedAiEnabled &&
+    !credentialRequirements?.hasDefaultCredential && !defaultCodexCredential;
+  const canSwitchToManagedAi = showManagedAi && managedAiEnabled && Boolean(defaultCodexCredential);
+  const managedAiDetail = !managedAiEnabled
+    ? "Unavailable on this server."
+    : managedAi?.dailyPromptLimit && managedAi.dailyPromptLimit > 0
+      ? typeof managedAi.remainingPrompts === "number"
+        ? `${managedAi.remainingPrompts} of ${managedAi.dailyPromptLimit} prompts left today.`
+        : `${managedAi.dailyPromptLimit} prompts available each day.`
+      : "Uses your shared team balance.";
 
   const openCreateBotModal = useCallback((credentialId: string) => {
     const credential = credentialsById.get(credentialId) ?? null;
@@ -1272,7 +1228,7 @@ function UserCredentialsSettingsCard({ section = "connections", onOpenAgentProfi
           }
         >
           <div className="min-w-0 space-y-3">
-            {runtimeControllerEnabled && user && showAiModeSummary && aiModeSummary ? (
+            {runtimeControllerEnabled && user && aiModeSummary ? (
               <div
                 className="flex min-w-0 flex-wrap items-center gap-x-3 gap-y-1 px-1 text-sm"
                 data-testid="credentials-ai-mode-summary"
@@ -1306,29 +1262,6 @@ function UserCredentialsSettingsCard({ section = "connections", onOpenAgentProfi
               </div>
             ) : null}
 
-            {runtimeControllerEnabled && user && !loading && !showManagedAi && codexCredentials.length === 0 ? (
-              <div className="flex min-w-0 flex-wrap items-center justify-between gap-3 px-1 py-1">
-                <div className="min-w-0">
-                  <Text as="div" variant="body" className="font-semibold">
-                    No AI connections yet
-                  </Text>
-                  <Text as="div" variant="caption" tone="muted">
-                    Connect a provider to use your own account.
-                  </Text>
-                </div>
-                <Button
-                  onPress={openConnectModal}
-                  isDisabled={!canManageAiConnections || loading}
-                  variant="outline"
-                  size="xs"
-                  radius="full"
-                  data-testid="credentials-add-connection"
-                >
-                  Connect AI
-                </Button>
-              </div>
-            ) : null}
-
             {showManagedAi || codexCredentials.length > 0 ? (
               <ul className="space-y-2" data-testid="credentials-list-codex">
                 {showManagedAi ? (
@@ -1342,9 +1275,9 @@ function UserCredentialsSettingsCard({ section = "connections", onOpenAgentProfi
                         </span>
                       }
                       title={managedAi?.label?.trim() || "Instafy AI"}
-                      subtitle={`Built in · ${managedAiDetail}`}
+                      subtitle={managedAiEnabled ? `Built in · ${managedAiDetail}` : managedAiDetail}
                       subtitleClassName="!whitespace-normal"
-                      detail={!managedAi?.available ? (
+                      detail={managedAiEnabled && !managedAi?.available ? (
                         <Text as="div" variant="caption" tone="muted">
                           Currently unavailable; use your own connection to continue.
                         </Text>
@@ -1352,7 +1285,7 @@ function UserCredentialsSettingsCard({ section = "connections", onOpenAgentProfi
                       className="items-start"
                       startClassName="pt-0.5"
                       titleEnd={managedAiSelected ? <Badge size="xs" className="md:hidden">Default</Badge> : null}
-                      end={managedAiSelected ? <span className="hidden md:inline-flex"><Badge size="xs">Default</Badge></span> : (
+                      end={!managedAiEnabled ? null : managedAiSelected ? <span className="hidden md:inline-flex"><Badge size="xs">Default</Badge></span> : (
                         <Button
                           onPress={() => void handleUseManagedAi()}
                           isDisabled={!canSwitchToManagedAi || Boolean(actionPendingId) || loading}
@@ -1742,6 +1675,25 @@ function UserCredentialsSettingsCard({ section = "connections", onOpenAgentProfi
                 })}
               </ul>
           ) : null}
+            {runtimeControllerEnabled && user ? (
+              <section className="pt-4 space-y-3" aria-labelledby="credentials-connect-account-title">
+                <div className="px-1">
+                  <Text as="h3" variant="bodyStrong" id="credentials-connect-account-title">
+                    Connect an account
+                  </Text>
+                  <Text as="div" variant="caption" tone="muted">
+                    Choose a provider to connect your own account.
+                  </Text>
+                </div>
+                <CredentialsConnectionChoices
+                  canUseDesktopConnect={connectModalProps.canUseDesktopConnect}
+                  desktopCodexAuthJsonStatus={connectModalProps.desktopCodexAuthJsonStatus}
+                  isDisabled={!canManageAiConnections || loading}
+                  onChoose={(step) => openConnectModalAtStep(step, { returnOnBack: true })}
+                  testIdPrefix="credentials-provider-choice"
+                />
+              </section>
+            ) : null}
           </div>
         </StudioListSection>
         ) : null}

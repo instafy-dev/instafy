@@ -114,12 +114,21 @@ new prompts; agents customize identity and instructions and may choose their own
 Opening an agent profile from a conversation selects Agents, so closing the editor returns
 to its list. Switching categories keeps the connection and agent state mounted.
 
-When the controller enables managed AI, show Instafy AI as the first connection row with
+After the controller confirms its capabilities, show Instafy AI as the first connection row with
 the canonical Octo mark, its allowance and the same Default badge or Make default action
 as saved providers. Selecting it clears the default credential without deleting any saved
 connection. Keep quota exhaustion or service unavailability distinct from the chosen default.
-Controllers without managed AI do not show the row. Reserve the separate status summary
-for loading, errors or missing configuration rather than repeating the selected row.
+Controllers without managed AI show "Unavailable on this server" without a Default badge,
+quota or switch action. An unresolved or failed capability check must not be presented as
+confirmed unavailability. Reserve the separate status summary for loading, errors or a saved
+account that needs to be selected as default.
+
+Show supported connection methods directly under **Connect an account**, after saved connections,
+even when the account has no connections yet. The page and existing connection chooser share
+`CredentialsConnectionChoices`, including Desktop's local Codex option. Selecting a row opens
+that provider's setup directly; Back or Close returns to the same page without another chooser.
+Provider selection alone never creates a credential or changes the default. Existing connection
+verification, default selection and replacement behavior remain owned by `useCredentialsConnectFlow`.
 
 ## Team identity
 
