@@ -3,6 +3,8 @@
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { StudioDraftsProvider, useStudioDraftStore } from "../../../../workspace/StudioDrafts";
+import { controllerClient } from "../../../../sdk/instafy";
 import { ProjectSecretsCard } from "../ProjectSecretsCard";
 import {
   clearPendingProjectSecretPrefill,
@@ -54,6 +56,8 @@ vi.mock("../../../../sdk/instafy", () => ({
   },
 }));
 
+let draftStore: ReturnType<typeof useStudioDraftStore>;
+function DraftProbe() { draftStore = useStudioDraftStore(); return null; }
 let container: HTMLDivElement | null = null;
 let root: Root | null = null;
 
@@ -62,7 +66,7 @@ function render(projectId: string | null) {
   document.body.appendChild(container);
   root = createRoot(container);
   act(() => {
-    root!.render(<ProjectSecretsCard projectId={projectId} />);
+    root!.render(<StudioDraftsProvider><DraftProbe /><ProjectSecretsCard projectId={projectId} /></StudioDraftsProvider>);
   });
 }
 
@@ -91,6 +95,21 @@ afterEach(() => {
 });
 
 describe("project secrets panel", () => {
+  it("returns to the requesting chat only after a successful save releases the editor guard", async () => {
+    setPendingProjectSecretPrefill({ projectId: "project-1", name: "EXAMPLE_KEY", agentHandles: ["octo"], returnPanelTab: "chat" });
+    vi.mocked(controllerClient.secrets.createForProject).mockResolvedValue({ success: true });
+    render("project-1");
+    expect(draftStore!.getSnapshot().protections).toHaveLength(1);
+    const input = field("project-secret-value-input")!;
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!.call(input, "inert-test-value");
+      input.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    mocks.openPanelTab.mockImplementation(() => expect(draftStore!.getSnapshot().protections).toHaveLength(0));
+    await act(async () => document.querySelector<HTMLButtonElement>('[data-testid="project-secret-save"]')!.click());
+    expect(mocks.openPanelTab).toHaveBeenCalledExactlyOnceWith("chat", { activate: true });
+  });
+
   it("opens on the value the chat card named, with the words that came with it", () => {
     setPendingProjectSecretPrefill({
       projectId: "project-1",

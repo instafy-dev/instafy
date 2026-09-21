@@ -1,6 +1,8 @@
 // @vitest-environment jsdom
 
-import { act } from "react";
+import { act, type ComponentProps } from "react";
+import { StudioDraftsProvider, useStudioDraftStore } from "../StudioDrafts";
+import type { CodeFile } from "../../types";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createInitialConversation, type ConversationState } from "../../conversations/conversationState";
@@ -19,7 +21,7 @@ const fixture = vi.hoisted(() => ({
   activeConversationId: null as string | null,
   activePanel: "chat" as StudioPanel,
   historyResolved: true,
-  workspace: { files: [] },
+  workspace: { files: [] as CodeFile[] },
   selectConversation: vi.fn((id: string) => { fixture.activeConversationId = id; }),
   setActivePanel: vi.fn((panel: StudioPanel) => { fixture.activePanel = panel; }),
   markConversationRead: vi.fn(),
@@ -54,13 +56,15 @@ describe("conversation preview tabs", () => {
   let root: Root;
   let container: HTMLDivElement;
   let api: ReturnType<typeof useWorkspaceTabs>;
+  let draftStore: ReturnType<typeof useStudioDraftStore>;
 
   function Probe() {
     api = useWorkspaceTabs();
+    draftStore = useStudioDraftStore();
     return null;
   }
-  async function render() {
-    await act(async () => root.render(<WorkspaceTabsProvider><Probe /></WorkspaceTabsProvider>));
+  async function render(props: Omit<ComponentProps<typeof WorkspaceTabsProvider>, "children"> = {}) {
+    await act(async () => root.render(<StudioDraftsProvider><WorkspaceTabsProvider {...props}><Probe /></WorkspaceTabsProvider></StudioDraftsProvider>));
   }
   const ids = () => api.tabs.filter((tab) => tab.kind === "conversation").map((tab) => tab.conversationId);
   const previews = () => api.tabs.flatMap((tab) => tab.kind === "conversation" && tab.preview ? [tab.conversationId] : []);
@@ -79,6 +83,7 @@ describe("conversation preview tabs", () => {
     fixture.activeConversationId = "a";
     fixture.activePanel = "chat";
     fixture.historyResolved = true;
+    fixture.workspace.files = [];
     vi.clearAllMocks();
     studioPerformance.clear();
     container = document.createElement("div");
@@ -91,6 +96,102 @@ describe("conversation preview tabs", () => {
     container.remove();
     studioPerformance.clear();
     delete (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT;
+  });
+
+  it("reuses a utility preview independently of chat browsing and route replay", async () => {
+    save(["a"]);
+    await render();
+    await openPreview("b");
+    for (const panel of ["ai", "machines", "credits"] as const) {
+      await act(async () => api.openPanelTab(panel));
+    }
+    expect(api.tabs.filter(tab => tab.kind === "panel")).toMatchObject([{ panel: "credits", preview: true }]);
+    expect(ids()).toEqual(["a", "b"]);
+    fixture.activePanel = "machines";
+    await render();
+    expect(api.tabs.filter(tab => tab.kind === "panel")).toMatchObject([{ panel: "machines", preview: true }]);
+    expect(api.activeTab).toMatchObject({ kind: "panel", panel: "machines" });
+  });
+
+  it("keeps utility tabs explicitly without duplicating them or displacing another preview", async () => {
+    await render();
+    await act(async () => api.openPanelTab("settings"));
+    await act(async () => api.keepTabOpen(getTabIdForPanel("settings")));
+    await act(async () => api.openPanelTab("credits"));
+    await act(async () => api.openPanelTab("settings"));
+    expect(api.tabs.filter(tab => tab.kind === "panel")).toMatchObject([
+      { panel: "settings", preview: false }, { panel: "credits", preview: true },
+    ]);
+    await act(async () => api.moveTab(getTabIdForPanel("credits"), 0));
+    await act(async () => api.openPanelTab("machines"));
+    expect(api.tabs.filter(tab => tab.kind === "panel")).toHaveLength(3);
+  });
+
+  it("reuses file previews, then keeps an edited file after saving", async () => {
+    await render();
+    const file = (id: string) => ({ id, path: id, label: id });
+    await act(async () => api.openFileTab(file("a.ts")));
+    await act(async () => api.openFileTab(file("b.ts")));
+    expect(api.tabs.filter(tab => tab.kind === "file")).toMatchObject([{ fileId: "b.ts", preview: true }]);
+    fixture.workspace.files = [{ ...file("b.ts"), generated: "old", modified: "edit" } as CodeFile];
+    await render();
+    expect(api.tabs.find(tab => tab.kind === "file")).toMatchObject({ preview: false, dirty: true });
+    fixture.workspace.files = [{ ...file("b.ts"), generated: "edit", modified: "edit" } as CodeFile];
+    await render();
+    await act(async () => api.openFileTab(file("c.ts")));
+    await act(async () => api.openPanelTab("credits"));
+    expect(api.tabs.filter(tab => tab.kind === "file")).toMatchObject([
+      { fileId: "b.ts", preview: false, dirty: false }, { fileId: "c.ts", preview: true },
+    ]);
+    await act(async () => api.openFileTab(file("c.ts"), { preview: false }));
+    expect(api.tabs.filter(tab => tab.kind === "file")).toHaveLength(2);
+    expect(api.activeTab).toMatchObject({ fileId: "c.ts", preview: false });
+  });
+
+  it("protects a draft entered in the same batch as navigation and keeps its tab after saving", async () => {
+    await render();
+    await act(async () => api.openPanelTab("settings"));
+    await act(async () => {
+      draftStore!.set({ key: "profile:name", panel: "settings", base: "Alex", value: "Alex edited" });
+      api.openPanelTab("credits");
+    });
+    expect(api.tabs.filter(tab => tab.kind === "panel")).toMatchObject([
+      { panel: "settings", preview: false, dirty: true }, { panel: "credits", preview: true },
+    ]);
+    await act(async () => draftStore!.remove("profile:name"));
+    expect(api.tabs.find(tab => tab.kind === "panel" && tab.panel === "settings")).toMatchObject({ preview: false, dirty: false });
+  });
+
+  it("restores a kept utility's section on focus, respects route replay, and isolates spaces", async () => {
+    const restore = vi.fn();
+    const props = { onRestorePanelDestination: restore, locationSearch: "?panel=settings&settingsTab=profile&settingsCategory=preferences&messageId=stale" };
+    fixture.activePanel = "settings";
+    await render(props);
+    await act(async () => api.keepTabOpen(getTabIdForPanel("settings")));
+    await act(async () => api.openPanelTab("credits"));
+    await render({ ...props, locationSearch: "?panel=credits" });
+    await act(async () => api.focusTab(getTabIdForPanel("settings")));
+    expect(restore).toHaveBeenLastCalledWith({ kind: "panel", panel: "settings", settingsTab: "profile",
+      settingsCategory: "preferences", settingsItem: null, settingsOrgId: null, teamId: null }, { replace: false });
+    await act(async () => api.openPanelTab("credits"));
+    await act(async () => api.closeTab(getTabIdForPanel("credits")));
+    expect(restore.mock.lastCall).toEqual([expect.objectContaining({ settingsCategory: "preferences" }), { replace: true }]);
+    restore.mockClear();
+    // Route hydration calls openPanelTab with the URL's destination. It must
+    // not restore cached sections, or an old render can bounce the route back.
+    await act(async () => api.openPanelTab("settings"));
+    expect(restore).not.toHaveBeenCalled();
+    // Back/Forward hydrates its exact route rather than the last tab destination.
+    await render({ ...props, locationSearch: "?panel=settings&settingsTab=project&settingsCategory=ai&settingsItem=audio" });
+    await act(async () => api.openPanelTab("credits"));
+    await act(async () => api.focusTab(getTabIdForPanel("settings")));
+    expect(restore.mock.lastCall?.[0]).toMatchObject({ settingsTab: "project", settingsCategory: "ai", settingsItem: "audio" });
+    await act(async () => api.openPanelTab("credits"));
+    fixture.projectId = projectB; fixture.projectKey = projectB;
+    await render({ ...props, locationSearch: "?panel=credits" });
+    restore.mockClear();
+    await act(async () => api.focusTab(getTabIdForPanel("settings")));
+    expect(restore).not.toHaveBeenCalled();
   });
 
   it("preserves legacy kept tabs and reuses just the new preview slot", async () => {

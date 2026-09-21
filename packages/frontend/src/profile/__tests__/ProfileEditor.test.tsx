@@ -2,6 +2,7 @@
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { StudioDraftsProvider } from "../../workspace/StudioDrafts";
 import { ProfileEditor } from "../ProfileEditor";
 
 const mocks = vi.hoisted(() => ({
@@ -78,6 +79,28 @@ describe("ProfileEditor", () => {
       input.dispatchEvent(new Event("change", { bubbles: true }));
     });
   }
+
+  it("retains an unsaved profile through utility and settings-category navigation", async () => {
+    const show = (visible: boolean, account = "a") => act(async () => root.render(
+      <StudioDraftsProvider key={account}>{visible ? <ProfileEditor /> : <div>Credits</div>}</StudioDraftsProvider>,
+    ));
+    await show(true);
+    await type("profile-display-name", "Draft name");
+    await type("profile-bio", "Draft bio");
+    await show(false);
+    mocks.profile = { ...mocks.profile, avatarUrl: "https://example.test/new-photo.png" };
+    await show(true);
+    expect(container.querySelector<HTMLInputElement>("#profile-display-name")!.value).toBe("Draft name");
+    expect(container.querySelector<HTMLTextAreaElement>("#profile-bio")!.value).toBe("Draft bio");
+    expect(mocks.updateProfile).not.toHaveBeenCalled();
+    await click("Cancel");
+    await show(false);
+    await show(true);
+    expect(container.querySelector<HTMLInputElement>("#profile-display-name")!.value).toBe("Alex Teammate");
+    await type("profile-display-name", "Another draft");
+    await show(true, "b");
+    expect(container.querySelector<HTMLInputElement>("#profile-display-name")!.value).toBe("Alex Teammate");
+  });
 
   it("saves and clears the optional About text without changing the name or photo", async () => {
     await render();

@@ -71,6 +71,12 @@ function DataProvider({ children }: { children: ReactNode }) {
   return <DataContext.Provider value={value}>{children}</DataContext.Provider>;
 }
 
+function RoutedTabs() {
+  const location = useLocation();
+  const restore = useStudioNavigation();
+  return <WorkspaceTabsProvider locationSearch={location.search} onRestorePanelDestination={restore}><RoutedWorkspace /></WorkspaceTabsProvider>;
+}
+
 function RoutedWorkspace() {
   const tabs = useWorkspaceTabs();
   const data = useContext(DataContext)!;
@@ -134,6 +140,10 @@ function RoutedWorkspace() {
   });
   const navigationScope = resolveTeamNavigationScope(location.search, fixture.projectTeamId);
   return <StudioNavigationProvider value={runNavigation}>
+    <button data-testid="open-preferences" onClick={() => go({ kind: "panel", panel: "settings", settingsTab: "profile", settingsCategory: "preferences" })}>Preferences</button>
+    <button data-testid="keep-active-tab" onClick={() => tabs.activeTabId && tabs.keepTabOpen(tabs.activeTabId)}>Keep open</button>
+    <button data-testid="focus-settings-tab" onClick={() => { tabs.requestUrlPush(); tabs.focusTab("workspace-tab-settings"); }}>Settings tab</button>
+    <button data-testid="close-active-tab" onClick={() => tabs.activeTabId && tabs.closeTab(tabs.activeTabId)}>Close tab</button>
     <button data-testid="use-mobile" onClick={() => setIsLargeScreen(false)}>Mobile layout</button>
     <button data-testid="open-drawer" onClick={() => sidebar.setMobileSidebarOpen(true)}>Open drawer</button>
     <button data-testid="drill-workspaces" onClick={() => sidebar.mobileSidebarNavigation.openView("workspace")}>Spaces</button>
@@ -161,6 +171,7 @@ function RoutedWorkspace() {
       runNavigation(() => go({ kind: "panel", panel: "settings", settingsTab: "org",
         settingsOrgId: fixture.emptyTeamId, settingsCategory: "profile" }));
     }}>Open empty team profile</button>
+    <output data-testid="workspace-tab-ids">{tabs.tabs.map(tab => tab.id).join(",")}</output>
     <output data-testid="selected-workspace-tab">{tab?.kind}:{tab?.id}</output>
     <output data-testid="active-panel">{data.workspace.activePanel}</output>
     <output data-testid="navigation-scope" data-page={navigationScope.page}>{navigationScope.orgKey}</output>
@@ -210,7 +221,7 @@ describe("automation workspace navigation", () => {
     for (let pass = 0; pass < 4; pass += 1) await act(async () => { await new Promise((resolve) => setTimeout(resolve, 25)); });
   }
   async function render() {
-    await act(async () => root.render(<BrowserRouter><QueryClientProvider client={queryClient}><DataProvider><WorkspaceTabsProvider><RoutedWorkspace /></WorkspaceTabsProvider></DataProvider></QueryClientProvider></BrowserRouter>));
+    await act(async () => root.render(<BrowserRouter><QueryClientProvider client={queryClient}><DataProvider><RoutedTabs /></DataProvider></QueryClientProvider></BrowserRouter>));
     await settle();
   }
   async function back() {
@@ -239,6 +250,26 @@ describe("automation workspace navigation", () => {
     expect(container.querySelector('[data-testid="selected-workspace-tab"]')?.textContent).toBe(`panel:workspace-tab-${panel}`);
     expect(container.querySelector('[data-testid="navigation-scope"]')?.textContent).toBe(scope);
   }
+  it("reuses utility previews and restores a kept section on focus or close without URL hydration bouncing back", async () => {
+    await render();
+    await click("open-preferences"); await click("keep-active-tab");
+    await click("open-home"); await click("focus-settings-tab");
+    expect(new URLSearchParams(window.location.search).get("settingsCategory")).toBe("preferences");
+    expect(container.querySelector('[data-testid="selected-workspace-tab"]')?.textContent).toBe("panel:workspace-tab-settings");
+    await click("open-home");
+    const indexBeforeClose = window.history.state.idx;
+    await click("close-active-tab");
+    expect(new URLSearchParams(window.location.search).get("settingsCategory")).toBe("preferences");
+    expect(new URLSearchParams(window.location.search).get("settingsTab")).toBe("profile");
+    expect(container.querySelector('[data-testid="selected-workspace-tab"]')?.textContent).toBe("panel:workspace-tab-settings");
+    expect(window.history.state.idx).toBe(indexBeforeClose);
+    expect(container.querySelector('[data-testid="workspace-tab-ids"]')?.textContent).not.toContain("workspace-tab-home");
+    await back();
+    expect(new URLSearchParams(window.location.search).get("settingsCategory")).toBe("preferences");
+    await forward();
+    expect(new URLSearchParams(window.location.search).get("settingsCategory")).toBe("preferences");
+  });
+
   it("opens View thread as a visible selected chat and Back restores Automations", async () => {
     await render();
     expect(container.querySelector('[data-testid="automations-panel"]')).not.toBeNull();

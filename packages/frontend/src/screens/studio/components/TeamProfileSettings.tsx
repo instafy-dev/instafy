@@ -1,4 +1,5 @@
-import { useEffect, useRef, useState } from "react";
+import { useStudioDraftState, useStudioNavigationProtection } from "../../../workspace/StudioDrafts";
+import { useEffect, useState } from "react";
 import { Button } from "../../../components/Button";
 import { Field } from "../../../components/Field";
 import { Input } from "../../../components/Input";
@@ -26,47 +27,28 @@ export function TeamProfileSettings(props: TeamProfileSettingsProps) {
 }
 
 function TeamProfileForm({ organization, role, onCreateSpace }: TeamProfileSettingsProps) {
-  const [name, setName] = useState(organization.name);
   const [savedName, setSavedName] = useState(organization.name);
-  const [color, setColor] = useState<OrgAccent | null>(normalizeOrgAccent(organization.accentColor));
-  const [savedColor, setSavedColor] = useState(color);
-  const previousServerColor = useRef(color);
+  const [savedColor, setSavedColor] = useState<OrgAccent | null>(normalizeOrgAccent(organization.accentColor));
+  const [name, setName] = useStudioDraftState(`team:${organization.id}:name`, savedName);
+  const [color, setColor] = useStudioDraftState(`team:${organization.id}:color`, savedColor);
   const [pending, setPending] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [saved, setSaved] = useState(false);
-  const previousServerName = useRef(organization.name);
-  const [avatarUrl, setAvatarUrl] = useState(organization.avatarUrl ?? null);
-  const [savedAvatar, setSavedAvatar] = useState(avatarUrl);
-  const previousServerAvatar = useRef(avatarUrl);
-  const [imageFile, setImageFile] = useState<File | null>(null);
+  const [savedAvatar, setSavedAvatar] = useState(organization.avatarUrl ?? null);
+  const [avatarUrl, setAvatarUrl] = useStudioDraftState(`team:${organization.id}:avatar`, savedAvatar);
+  const [imageFile, setImageFile] = useStudioDraftState<File | null>(`team:${organization.id}:file`, null);
+  useStudioNavigationProtection(pending, "team profile save");
   const [previewUrl, setPreviewUrl] = useState<string | null>(null);
   useEffect(() => {
     const url = imageFile ? URL.createObjectURL(imageFile) : null;
     setPreviewUrl(url);
     return () => { if (url) URL.revokeObjectURL(url); };
   }, [imageFile]);
-  useEffect(() => {
-    const incoming = organization.avatarUrl ?? null;
-    const previous = previousServerAvatar.current;
-    setAvatarUrl(current => current === previous ? incoming : current);
-    setSavedAvatar(incoming);
-    previousServerAvatar.current = incoming;
-  }, [organization.avatarUrl]);
+  // The draft store follows these baselines only for unedited fields.
+  useEffect(() => setSavedAvatar(organization.avatarUrl ?? null), [organization.avatarUrl]);
+  useEffect(() => setSavedName(organization.name), [organization.name]);
+  useEffect(() => setSavedColor(normalizeOrgAccent(organization.accentColor)), [organization.accentColor]);
   const canEdit = role === "owner" || role === "admin";
-  useEffect(() => {
-    // Refreshes after a picture change must not discard an unfinished name edit.
-    const previous = previousServerName.current;
-    setName((current) => current === previous ? organization.name : current);
-    setSavedName(organization.name);
-    previousServerName.current = organization.name;
-  }, [organization.name]);
-  useEffect(() => {
-    const incoming = normalizeOrgAccent(organization.accentColor);
-    const previous = previousServerColor.current;
-    setColor(current => current === previous ? incoming : current);
-    setSavedColor(incoming);
-    previousServerColor.current = incoming;
-  }, [organization.accentColor]);
   const changed = name.trim() !== savedName || color !== savedColor || imageFile !== null || avatarUrl !== savedAvatar;
   const saveProfile = async () => {
     if (!canEdit || pending || !name.trim() || !changed) return;

@@ -7,6 +7,7 @@ import { WorkspaceTabs } from "../WorkspaceTabs";
 
 const mocks = vi.hoisted(() => ({
   preview: true,
+  kind: "conversation",
   keepTabOpen: vi.fn(),
   focusTab: vi.fn(),
   closeTab: vi.fn(),
@@ -15,7 +16,7 @@ const mocks = vi.hoisted(() => ({
 vi.mock("../WorkspaceTabsProvider", () => ({
   useWorkspaceTabs: () => ({
     tabs: [
-      { id: "chat-a", kind: "conversation", conversationId: "a", title: "Design review", preview: mocks.preview, dirty: false, closable: true },
+      { id: "chat-a", kind: mocks.kind, panel: "settings", fileId: "file-a", conversationId: "a", title: "Design review", preview: mocks.preview, dirty: false, closable: true },
       { id: "home", kind: "panel", panel: "home", title: "Home", dirty: false, closable: true },
     ],
     activeTabId: "chat-a",
@@ -67,6 +68,7 @@ describe("Workspace conversation preview tab", () => {
     (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
     vi.stubGlobal("CSS", { escape: (value: string) => value.replace(/[^a-zA-Z0-9_-]/g, "\\$&") });
     mocks.preview = true;
+    mocks.kind = "conversation";
     container = document.createElement("div");
     document.body.appendChild(container);
     root = createRoot(container);
@@ -119,6 +121,23 @@ describe("Workspace conversation preview tab", () => {
     });
     expect(mocks.keepTabOpen).toHaveBeenCalledWith("chat-a");
     expect(document.querySelector('[data-testid="conversation-tab-menu"]')).toBeNull();
+    expect(document.activeElement).toBe(tabTrigger());
+  });
+
+  it.each(["panel", "file"])("exposes Keep open with the same keyboard and double-click controls for %s previews", async kind => {
+    mocks.kind = kind;
+    await act(async () => root.render(<WorkspaceTabs />));
+    expect(tabTrigger().getAttribute("aria-label")).toContain("preview tab");
+    await act(async () => tabTrigger().dispatchEvent(new MouseEvent("dblclick", { bubbles: true })));
+    expect(mocks.keepTabOpen).toHaveBeenCalledWith("chat-a");
+    mocks.keepTabOpen.mockClear();
+    const menu = await openKeyboardMenu();
+    const keep = menu.querySelector<HTMLButtonElement>('[data-testid="conversation-tab-menu-keep-open"]')!;
+    expect(document.activeElement).toBe(keep);
+    expect(menu.querySelector('[data-testid="conversation-tab-menu-new-thread"]')).toBeNull();
+    expect(menu.querySelector('[data-testid="conversation-tab-menu-delete"]')).toBeNull();
+    await act(async () => keep.click());
+    expect(mocks.keepTabOpen).toHaveBeenCalledWith("chat-a");
     expect(document.activeElement).toBe(tabTrigger());
   });
 

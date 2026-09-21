@@ -1,4 +1,5 @@
-import { useCallback, useEffect, useState } from "react";
+import { useStudioDraftState, useStudioNavigationProtection } from "../workspace/StudioDrafts";
+import { useCallback, useState } from "react";
 import { IdentityPhotoButton } from "../components/IdentityPhotoButton";
 import { Button } from "../components/Button";
 import { SettingsFormLayout, SettingsIdentityRow } from "../components/SettingsFormLayout";
@@ -22,17 +23,13 @@ export function ProfileEditor({ variant = "panel", onDone }: ProfileEditorProps)
   const { user } = useAuth();
   const { profile, updateProfile, loading, error, refresh } = useProfile();
   const { showStatus } = useStatus();
-  const [displayName, setDisplayName] = useState("");
-  const [bio, setBio] = useState("");
-  const [avatarUrl, setAvatarUrl] = useState("");
+  const [displayName, setDisplayName] = useStudioDraftState(`profile:${user?.id}:name`, profile?.fullName ?? "", !loading && Boolean(profile));
+  const [bio, setBio] = useStudioDraftState(`profile:${user?.id}:bio`, profile?.bio ?? "", !loading && Boolean(profile));
+  const [avatarUrl, setAvatarUrl] = useStudioDraftState(`profile:${user?.id}:avatar`, profile?.avatarUrl ?? "", !loading && Boolean(profile));
   const [saving, setSaving] = useState(false);
   const [uploadError, setUploadError] = useState<string | null>(null);
 
-  useEffect(() => {
-    setDisplayName(profile?.fullName ?? "");
-    setAvatarUrl(profile?.avatarUrl ?? "");
-    setBio(profile?.bio ?? "");
-  }, [profile?.avatarUrl, profile?.fullName, profile?.bio]);
+  useStudioNavigationProtection(saving, "profile save");
 
   const avatarPreview = avatarUrl.trim() || null;
   const hasChanges =
@@ -62,7 +59,7 @@ export function ProfileEditor({ variant = "panel", onDone }: ProfileEditorProps)
       setUploadError("Unable to read image.");
     };
     reader.readAsDataURL(file);
-  }, []);
+  }, [setAvatarUrl]);
 
   const handleSave = useCallback(async () => {
     if (!user) {
@@ -81,11 +78,14 @@ export function ProfileEditor({ variant = "panel", onDone }: ProfileEditorProps)
     if (!result.success) {
       showStatus(result.error ?? "Unable to update profile.", "error", 4000);
     } else {
+      setDisplayName(trimmedName);
+      setBio(bio.trim());
+      setAvatarUrl(trimmedAvatar);
       showStatus("Profile updated.", "success", 2500);
       onDone?.();
     }
     setSaving(false);
-  }, [avatarUrl, bio, bioTooLong, displayName, hasChanges, onDone, profileUnavailable, saving, showStatus, updateProfile, user]);
+  }, [avatarUrl, bio, bioTooLong, displayName, hasChanges, onDone, profileUnavailable, saving, setAvatarUrl, setBio, setDisplayName, showStatus, updateProfile, user]);
 
   return (
     <SettingsFormLayout className="@container/profile-editor" data-testid="profile-editor">

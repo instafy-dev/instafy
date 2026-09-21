@@ -1,3 +1,4 @@
+import { useStudioDraftState, useStudioNavigationProtection } from "../../../workspace/StudioDrafts";
 import { IdentityPhotoButton } from "../../../components/IdentityPhotoButton";
 import { IDENTITY_IMAGE_ACCEPT, uploadIdentityImage, validateIdentityImage } from "../../../lib/identityImages";
 import { useEffect, useRef, useState } from "react";
@@ -23,20 +24,21 @@ export function SpaceIdentityEditor(props: SpaceIdentityEditorProps) {
 }
 function SpaceIdentityForm({ projectId, name, canWrite, enabled }: SpaceIdentityEditorProps) {
   const [saved, setSaved] = useState<ProjectIdentity>(() => useWorkspaceStore.getState().projects[projectId]?.metadata ?? {});
-  const [icon, setIcon] = useState<SpaceIcon | null>(normalizeSpaceIcon(saved.projectIcon));
-  const [color, setColor] = useState<SpaceColor | null>(normalizeSpaceColor(saved.projectColor));
-  const [avatarUrl, setAvatarUrl] = useState<string | null>(normalizeSpaceAvatarUrl(saved.projectAvatarUrl));
-  const [imageFile, setImageFile] = useState<File | null>(null);
+  const [loading, setLoading] = useState(enabled);
+  const [icon, setIcon] = useStudioDraftState<SpaceIcon | null>(`space:${projectId}:icon`, normalizeSpaceIcon(saved.projectIcon), !loading);
+  const [color, setColor] = useStudioDraftState<SpaceColor | null>(`space:${projectId}:color`, normalizeSpaceColor(saved.projectColor), !loading);
+  const [avatarUrl, setAvatarUrl] = useStudioDraftState<string | null>(`space:${projectId}:avatar`, normalizeSpaceAvatarUrl(saved.projectAvatarUrl), !loading);
+  const [imageFile, setImageFile] = useStudioDraftState<File | null>(`space:${projectId}:file`, null);
   const [previewUrl, setPreviewUrl] = useState<string | null>(null);
   useEffect(() => {
     const url = imageFile ? URL.createObjectURL(imageFile) : null;
     setPreviewUrl(url);
     return () => { if (url) URL.revokeObjectURL(url); };
   }, [imageFile]);
-  const [loading, setLoading] = useState(enabled);
   const [loadFailed, setLoadFailed] = useState(false);
   const [loadAttempt, setLoadAttempt] = useState(0);
   const [saving, setSaving] = useState(false);
+  useStudioNavigationProtection(saving, "space appearance save");
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const mounted = useRef(true);
@@ -53,10 +55,6 @@ function SpaceIdentityForm({ projectId, name, canWrite, enabled }: SpaceIdentity
         if (!summary) throw new Error("Unable to load space appearance.");
         const identity = { projectIcon: normalizeSpaceIcon(summary.projectIcon), projectColor: normalizeSpaceColor(summary.projectColor), projectAvatarUrl: normalizeSpaceAvatarUrl(summary.projectAvatarUrl) };
         setSaved(identity);
-        setIcon(identity.projectIcon);
-        setColor(identity.projectColor);
-        setAvatarUrl(identity.projectAvatarUrl);
-        setImageFile(null);
         useWorkspaceStore.getState().setProjectIdentity(projectId, identity);
       }).catch(() => {
         if (active) {
