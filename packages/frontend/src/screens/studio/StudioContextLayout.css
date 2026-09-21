@@ -28,7 +28,8 @@
 .studio-context-slot { width: calc(var(--studio-context-column-width) - var(--studio-context-inset) - 8px); min-width: 0; flex: none; }
 .studio-desktop-context { display: flex; align-items: center; gap: 4px; min-width: 0; }
 .studio-desktop-context-separator { flex: none; color: var(--color-slate-400); }
-.studio-desktop-context [data-testid="sidebar-space-button"] { flex: 1; }
+/* Keep spare column width outside the control; long names can still shrink. */
+.studio-desktop-context [data-testid="sidebar-space-button"] { flex: 0 1 auto; }
 .studio-desktop-tabs { flex: 1; min-width: 0; align-self: flex-end; margin-bottom: -1px; }
 .studio-context-header .studio-desktop-tabbar { height: 48px; min-width: 0; background: transparent; }
 .studio-desktop-tabbar [data-testid="workspace-tabs"] { min-width: 0; gap: 0; background: transparent; }

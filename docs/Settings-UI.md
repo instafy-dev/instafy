@@ -58,6 +58,8 @@ menu stays in the organization rail. The header's left column shares the expande
 width, including at narrow desktop sizes, so tabs never extend over that sidebar. Keep the
 column when navigation collapses to preserve usable pickers; subtract native window-control
 insets within it rather than shifting the tabs. Mobile retains its context and navigation rows.
+The desktop space selector fits its icon, name and chevron with 8px horizontal padding.
+Unused column width stays outside its hover surface; long names truncate within the column.
 The mobile workspace and navigation drawer share header padding and breadcrumb spacing, so
 opening navigation keeps Home, team and space identities at the same leading positions.
 

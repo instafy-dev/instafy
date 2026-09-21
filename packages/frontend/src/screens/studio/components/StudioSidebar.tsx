@@ -1074,7 +1074,7 @@ export function StudioSidebar({
       collapsed={!externalHeader && !showLabels}
       expanded={recentSpacesExpanded}
       onExpandedChange={setRecentSpacesExpanded}
-      rowClassName={pathControls ? desktopRail ? "gap-1 !px-1 min-h-9" : "!px-2 !min-h-12" : `${sidebarRowLayoutClass} ${getSidebarRowToneClass(workspaceSwitcherOpen && workspaceSwitcherMode === "spaces")}`}
+      rowClassName={pathControls ? desktopRail ? `gap-1 ${compactContextHeader ? "!px-2" : "!px-1"} min-h-9` : "!px-2 !min-h-12" : `${sidebarRowLayoutClass} ${getSidebarRowToneClass(workspaceSwitcherOpen && workspaceSwitcherMode === "spaces")}`}
       iconClassName={pathControls ? "flex h-5 w-5 shrink-0 items-center justify-center" : getSidebarNavIconClass(workspaceSwitcherOpen && workspaceSwitcherMode === "spaces")}
       triggerRef={spaceTriggerRef}
     />
