@@ -9,7 +9,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map as JsonMap, Value as JsonValue};
 use tokio_postgres::types::Json as PgJson;
-use tracing::{info, instrument, warn};
+use tracing::{debug, info, instrument, warn};
 use uuid::Uuid;
 
 use super::{
@@ -30,7 +30,7 @@ use crate::conversations::{
 };
 use crate::credits::{
     extract_credit_snapshot, extract_provider_conversation_state, extract_provider_from_metadata,
-    reconcile_managed_ai_usage_charge, ManagedAiTokenUsage,
+    reconcile_managed_ai_usage_charge, ManagedAiRefundOutcome, ManagedAiTokenUsage,
 };
 use crate::dispatch::DispatchPromptNormalized;
 use crate::redaction::RedactedHeaders;
@@ -473,7 +473,7 @@ fn cap_artifacts_payload(artifacts: &JsonValue) -> std::borrow::Cow<'_, JsonValu
     }]))
 }
 
-async fn count_job_tool_update_messages(
+pub(crate) async fn count_job_tool_update_messages(
     transaction: &tokio_postgres::Transaction<'_>,
     project_id: &Uuid,
     job_id: &Uuid,
@@ -1992,7 +1992,7 @@ fn select_completion_message_content<'a>(
     }
 }
 
-async fn run_has_visible_assistant_message(
+pub(crate) async fn run_has_visible_assistant_message(
     transaction: &tokio_postgres::Transaction<'_>,
     project_id: &Uuid,
     run_id: Option<Uuid>,
@@ -2223,6 +2223,171 @@ async fn apply_deferred_managed_ai_billing_on_first_visible_message(
     Ok(())
 }
 
+/// Whether a failed completion's error text shows the request died at the
+/// proxy before any model was called. Kept to auth and configuration
+/// rejections on purpose: a 429, a 5xx or a timeout may already have consumed
+/// tokens upstream, and those settle through usage reconciliation instead.
+fn managed_ai_failure_never_reached_upstream(error_message: Option<&str>) -> bool {
+    const MARKERS: &[&str] = &[
+        "proxy token missing credential_id",
+        "unexpected status 401",
+        "401 unauthorized",
+        "proxy controller integration is not configured",
+    ];
+    let Some(message) = error_message else {
+        return false;
+    };
+    let normalized = message.trim().to_lowercase();
+    if normalized.is_empty() {
+        return false;
+    }
+    MARKERS.iter().any(|marker| normalized.contains(marker))
+}
+
+/// A managed-AI run that failed before reaching a model still holds the
+/// prompt reserve burned at dispatch and the daily prompt slot that goes with
+/// it. Give both back, once, when nothing shows the model was ever called:
+/// no usage in the artifacts, no visible assistant message, no tool updates,
+/// and an error that the proxy rejected the request outright.
+#[allow(clippy::too_many_arguments)]
+async fn refund_managed_ai_reserve_on_failed_completion(
+    transaction: &mut tokio_postgres::Transaction<'_>,
+    project_id: &Uuid,
+    job_id: &Uuid,
+    job_payload: &JsonValue,
+    run_id: Option<Uuid>,
+    prompt_id: Option<Uuid>,
+    leased_runtime_id: Option<Uuid>,
+    error_message: Option<&str>,
+    artifacts_value: &JsonValue,
+) -> Result<(), (StatusCode, Json<ApiError>)> {
+    const REFUND_REASON: &str = "proxy_auth_rejected";
+
+    let managed_ai_used = job_payload
+        .get("metadata")
+        .and_then(JsonValue::as_object)
+        .and_then(|metadata| metadata.get("managedAiUsed"))
+        .and_then(JsonValue::as_bool)
+        .unwrap_or(false);
+    if !managed_ai_used || !managed_ai_failure_never_reached_upstream(error_message) {
+        return Ok(());
+    }
+    let Some(prompt_uuid) = prompt_id else {
+        return Ok(());
+    };
+    if extract_turn_usage_from_artifacts(artifacts_value).is_some()
+        || run_has_visible_assistant_message(transaction, project_id, run_id).await?
+        || count_job_tool_update_messages(transaction, project_id, job_id).await? > 0
+    {
+        return Ok(());
+    }
+    let project = load_project_record(transaction, project_id).await?;
+    let Some(org_id) = project.org_id else {
+        return Ok(());
+    };
+
+    // The refund runs inside a savepoint: a ledger failure must never block
+    // the completion that persists the run's terminal state.
+    let outcome = {
+        let savepoint = transaction
+            .savepoint("managed_ai_refund")
+            .await
+            .map_err(|error| {
+                internal_error(format!(
+                    "failed to open managed AI refund savepoint: {error}"
+                ))
+            })?;
+        match crate::credits::refund_unused_managed_ai_prompt(
+            &savepoint,
+            project_id,
+            &org_id,
+            leased_runtime_id,
+            &prompt_uuid,
+            REFUND_REASON,
+        )
+        .await
+        {
+            Ok(outcome) => savepoint.commit().await.map(|_| outcome),
+            Err((status, Json(api_error))) => {
+                warn!(
+                    project_id = %project_id,
+                    job_id = %job_id,
+                    prompt_id = %prompt_uuid,
+                    status = status.as_u16(),
+                    error = %api_error.message,
+                    "managed AI refund failed; completing run with the reserve charged"
+                );
+                savepoint
+                    .rollback()
+                    .await
+                    .map(|_| ManagedAiRefundOutcome::NotRefundable)
+            }
+        }
+        .map_err(|error| {
+            internal_error(format!(
+                "failed to finalize managed AI refund savepoint: {error}"
+            ))
+        })?
+    };
+    let refund = match outcome {
+        ManagedAiRefundOutcome::NotRefundable => return Ok(()),
+        ManagedAiRefundOutcome::AlreadyRefunded(existing) => {
+            // The sink that wrote the refund also released the prompt slot
+            // and left the trace on the run; a dedupe changes nothing.
+            debug!(
+                project_id = %project_id,
+                job_id = %job_id,
+                prompt_id = %prompt_uuid,
+                ledger_id = %existing.ledger_id,
+                "managed AI prompt reserve was already refunded; nothing to apply"
+            );
+            return Ok(());
+        }
+        ManagedAiRefundOutcome::Applied(refund) => refund,
+    };
+    info!(
+        project_id = %project_id,
+        job_id = %job_id,
+        prompt_id = %prompt_uuid,
+        ledger_id = %refund.ledger_id,
+        delta = refund.delta,
+        "refunded managed AI prompt reserve for a run that never reached a model"
+    );
+
+    // The daily prompt counter is derived from prompts.metadata.managedAiUsed,
+    // so flipping it is what gives the slot back.
+    crate::dispatch::persist_prompt_ai_access_metadata(transaction, &prompt_uuid, true, false)
+        .await?;
+    if let Some(run_uuid) = run_id {
+        crate::dispatch::persist_run_ai_access_metadata(transaction, &[run_uuid], true, false)
+            .await?;
+        let mut refund_trace = json!(refund);
+        if let Some(map) = refund_trace.as_object_mut() {
+            map.insert(
+                "refundReason".to_string(),
+                JsonValue::String(REFUND_REASON.to_string()),
+            );
+        }
+        if let Err((status, Json(api_error))) =
+            crate::dispatch::persist_run_managed_ai_credit_metadata(
+                transaction,
+                &[run_uuid],
+                &json!({ "promptId": prompt_uuid, "refund": refund_trace }),
+            )
+            .await
+        {
+            warn!(
+                project_id = %project_id,
+                prompt_id = %prompt_uuid,
+                status = status.as_u16(),
+                error = %api_error.message,
+                "failed to persist managed AI refund trace onto run"
+            );
+        }
+    }
+    Ok(())
+}
+
 #[instrument(skip(state, headers, payload))]
 pub(crate) async fn agent_complete(
     axum::extract::State(state): axum::extract::State<AppState>,
@@ -2280,7 +2445,7 @@ pub(crate) async fn agent_complete(
         .get()
         .await
         .map_err(|error| internal_error(format!("failed to get connection: {error}")))?;
-    let transaction = connection
+    let mut transaction = connection
         .transaction()
         .await
         .map_err(|error| internal_error(format!("failed to start transaction: {error}")))?;
@@ -2477,6 +2642,21 @@ pub(crate) async fn agent_complete(
                 run_prompt_id = prompt;
             }
         }
+    }
+
+    if outcome_lower == "failed" {
+        refund_managed_ai_reserve_on_failed_completion(
+            &mut transaction,
+            &project_id,
+            &job_uuid,
+            &job_payload,
+            run_id,
+            run_prompt_id,
+            leased_runtime_id,
+            error_message.as_deref(),
+            &artifacts_value,
+        )
+        .await?;
     }
 
     // A run that ended with "nothing to report" (the explicit decline an
@@ -4614,6 +4794,37 @@ fn extract_multi_agent_plan_details(value: &JsonValue) -> Option<&JsonValue> {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn managed_ai_failure_classifier_matches_only_proxy_rejections() {
+        assert!(managed_ai_failure_never_reached_upstream(Some(
+            "unexpected status 401 Unauthorized: proxy token missing credential_id for BYOC request, url: http://proxy:8789/v1/responses"
+        )));
+        assert!(managed_ai_failure_never_reached_upstream(Some(
+            "Unexpected status 401 Unauthorized"
+        )));
+        assert!(managed_ai_failure_never_reached_upstream(Some(
+            "proxy token missing credential_id for BYOC request"
+        )));
+        assert!(managed_ai_failure_never_reached_upstream(Some(
+            "proxy controller integration is not configured"
+        )));
+
+        assert!(!managed_ai_failure_never_reached_upstream(Some(
+            "unexpected status 429 Too Many Requests"
+        )));
+        assert!(!managed_ai_failure_never_reached_upstream(Some(
+            "unexpected status 500 Internal Server Error"
+        )));
+        assert!(!managed_ai_failure_never_reached_upstream(Some(
+            "unexpected status 502 Bad Gateway: upstream request failed"
+        )));
+        assert!(!managed_ai_failure_never_reached_upstream(Some(
+            "request timed out after 120s"
+        )));
+        assert!(!managed_ai_failure_never_reached_upstream(Some("   ")));
+        assert!(!managed_ai_failure_never_reached_upstream(None));
+    }
 
     #[test]
     fn completion_silences_only_successful_explicit_declines() {

@@ -42,6 +42,7 @@ function rawReasonCategory(reason: string): Exclude<ActivityCategory, "neutral">
   switch (reason.trim()) {
     case "managed_ai_prompt":
     case "managed_ai_adjustment":
+    case "managed_ai_refund":
       return "ai";
     case "hosted_runtime":
       return "runtime";
