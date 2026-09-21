@@ -741,6 +741,10 @@ describe("SecretRequestEntry", () => {
     expect(input?.closest("div")).toBe(reveal?.closest("div"));
     // A toggle now says which way it is set; the old icon button said nothing.
     expect(reveal?.getAttribute("aria-pressed")).toBe("false");
+    // A muted glyph, not a ringed chip: a ringed circle inside a bordered
+    // field was a box inside a box.
+    expect(reveal?.className).not.toContain("ring-1");
+    expect(reveal?.className).toContain("!bg-transparent");
 
     await act(async () => {
       reveal?.click();
