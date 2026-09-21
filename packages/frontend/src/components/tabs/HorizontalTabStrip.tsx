@@ -206,6 +206,11 @@ export function HorizontalTabStrip({
   const showOverflowOverflowActions = hasOverflowActions && hasOverflow;
   const showLeftFade = hasOverflow && canScrollLeft;
   const showRightFade = hasOverflow && canScrollRight;
+  // Fade only scrolling content. Painted overlays also cover the rail's
+  // dividers and assume a background color that may not match their host.
+  const scrollMask = showLeftFade || showRightFade
+    ? `linear-gradient(to right, ${showLeftFade ? "transparent, black 32px" : "black"}, ${showRightFade ? "black calc(100% - 40px), transparent" : "black"})`
+    : undefined;
 
   const leftControl = useMemo(() => {
     if (!hasOverflow || !renderScrollControl) {
@@ -243,7 +248,11 @@ export function HorizontalTabStrip({
     >
       {leftControl}
       <div className="relative min-w-0 flex-1">
-        <div ref={viewportRef} className={viewportClassName}>
+        <div
+          ref={viewportRef}
+          className={viewportClassName}
+          style={{ maskImage: scrollMask, WebkitMaskImage: scrollMask }}
+        >
           <div className={contentClassName}>
             {children}
             {showInlineOverflowActions ? (
@@ -256,18 +265,6 @@ export function HorizontalTabStrip({
             ) : null}
           </div>
         </div>
-        {showLeftFade ? (
-          <div
-            aria-hidden="true"
-            className="pointer-events-none absolute inset-y-0 left-0 z-10 w-8 bg-gradient-to-r from-white via-white/92 to-transparent dark:from-[var(--color-studio-dark-canvas)] dark:via-[var(--color-studio-dark-canvas)]/92 dark:to-transparent"
-          />
-        ) : null}
-        {showRightFade ? (
-          <div
-            aria-hidden="true"
-            className="pointer-events-none absolute inset-y-0 right-0 z-10 w-10 bg-gradient-to-l from-white via-white/92 to-transparent dark:from-[var(--color-studio-dark-canvas)] dark:via-[var(--color-studio-dark-canvas)]/92 dark:to-transparent"
-          />
-        ) : null}
       </div>
       {showOverflowOverflowActions ? (
         <div
