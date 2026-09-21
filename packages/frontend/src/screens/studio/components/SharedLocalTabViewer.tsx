@@ -2,6 +2,7 @@ import { readLocalExploreState, readLocalTabFrame, type LocalExploreState } from
 import { attachRemoteBrowserInput, type RemoteBrowserInputMessage } from "./remoteBrowserInput";
 import { localTabInput } from "./localTabInput";
 import { RemoteBrowserMobileKeyboard } from "./RemoteBrowserMobileKeyboard";
+import { useExpandedBrowserViewport } from "./useExpandedBrowserViewport";
 import { readLocalTabControlState, type LocalTabControlState } from "../../../services/runtimeController/localTabControl";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Button } from "../../../components/Button";
@@ -91,6 +92,8 @@ export function SharedLocalTabViewer({ projectId, share, onClose, onEnded }: { p
     return () => { socketRef.current=null; controlRef.current=null; exploreRef.current=null; abort.abort(); window.clearTimeout(stalled); if (imageUrl) URL.revokeObjectURL(imageUrl); };
   }, [projectId, share.id, onEnded]);
   const [fullscreen, setFullscreen] = useState(false);
+  const expandedViewportStyle = useExpandedBrowserViewport(fullscreen);
+  const [keyboardOccupiedHeight, setKeyboardOccupiedHeight] = useState(0);
   const [zoom, setZoom] = useState("fit");
   const [viewport, setViewport] = useState<HTMLDivElement | null>(null);
   const [bounds, setBounds] = useState({ width: 0, height: 0 });
@@ -120,12 +123,12 @@ export function SharedLocalTabViewer({ projectId, share, onClose, onEnded }: { p
   const width = imageSize.width ? imageSize.width * scale : undefined;
   const height = imageSize.height ? imageSize.height * scale : undefined;
   const inlineHeight = Math.max(160, bounds.width && imageSize.width ? bounds.width * imageSize.height / imageSize.width : 240);
-  const panel = <section aria-label="Shared local browser tab" className={`relative flex min-h-0 min-w-0 flex-col overflow-hidden border border-slate-300 bg-slate-950 ${fullscreen ? "h-full border-0" : "rounded-lg"}`} data-testid="local-browser-share-viewer">
+  const panel = <section aria-label="Shared local browser tab" className={`relative flex min-h-0 min-w-0 flex-col overflow-hidden border border-slate-300 bg-slate-950 ${fullscreen ? "h-full border-0" : "rounded-lg"}`} style={{ paddingBottom: keyboardOccupiedHeight }} data-testid="local-browser-share-viewer">
     <div className="shrink-0 space-y-1 bg-slate-100 p-2 text-xs text-slate-800 dark:bg-slate-900 dark:text-slate-100">
       <div className="flex items-center justify-between gap-2">
         <span role="status">{exploring ? "Explore · Your own view" : image && selfControls ? "Live tab · You control" : image && control?.grant ? "Live tab · Another participant controls" : state}</span><Button size="sm" variant="ghost" onPress={onClose}>Leave</Button>
       </div>
-      <div className="flex flex-wrap items-center gap-2">
+      <div className={keyboardOccupiedHeight > 0 ? "hidden" : "flex flex-wrap items-center gap-2"}>
         <Select aria-label="Shared tab zoom" value={zoom} disabled={!image} fullWidth={false} size="xs" onChange={event => {
           setZoom(event.target.value);
           if (viewport) { viewport.scrollLeft = 0; viewport.scrollTop = 0; }
@@ -142,7 +145,7 @@ export function SharedLocalTabViewer({ projectId, share, onClose, onEnded }: { p
         <Button size="sm" variant="secondary" data-testid="local-tab-explore-action" isDisabled={!exploring && selfControls} onPress={() => command(exploring || explore.requested ? "exploreReturn" : "exploreRequest", exploring || explore.requested ? {} : {viewport:viewerViewport()})}>{exploring ? "Return to follow" : explore.requested ? "Cancel Explore request" : "Explore independently"}</Button>
         {exploring ? <><Button size="sm" variant="ghost" aria-label="Back in your Explore view" onPress={() => command("exploreNavigate",{viewId:explore.view!.viewId,action:"back"})}>Back</Button><Button size="sm" variant="ghost" aria-label="Reload your Explore view" onPress={() => command("exploreNavigate",{viewId:explore.view!.viewId,action:"reload"})}>Reload</Button></> : null}
       </div> : null}
-      {exploring ? <p className="text-slate-500 dark:text-slate-400">Your layout and scroll are separate. Saved changes use the owner’s account.</p> : selfControls && !panOnly ? <p className="text-slate-500 dark:text-slate-400">Click the page to type. Scroll moves the shared page.</p> : zoom !== "fit" && image ? <p className="text-slate-500 dark:text-slate-400">Scroll to pan your view.</p> : null}
+      {keyboardOccupiedHeight > 0 ? null : exploring ? <p className="text-slate-500 dark:text-slate-400">Your layout and scroll are separate. Saved changes use the owner’s account.</p> : selfControls && !panOnly ? <p className="text-slate-500 dark:text-slate-400">Click the page to type. Scroll moves the shared page.</p> : zoom !== "fit" && image ? <p className="text-slate-500 dark:text-slate-400">Scroll to pan your view.</p> : null}
     </div>
     <div ref={setViewport} tabIndex={image ? 0 : undefined} role="region" aria-label="Shared tab image viewport" data-testid="local-browser-share-pan"
       className={`relative min-h-0 min-w-0 overflow-auto overscroll-contain ${fullscreen ? "flex-1" : ""}`}
@@ -152,12 +155,13 @@ export function SharedLocalTabViewer({ projectId, share, onClose, onEnded }: { p
           onLoad={event => { const img = event.currentTarget; setImageSize(current => current.width === img.naturalWidth && current.height === img.naturalHeight ? current : { width: img.naturalWidth, height: img.naturalHeight }); }} />
       </div> : null}
     </div>
-    <RemoteBrowserMobileKeyboard enabled={(selfControls || exploring) && !panOnly && Boolean(image)} onMessage={sendInput} />
+    <RemoteBrowserMobileKeyboard enabled={(selfControls || exploring) && !panOnly && Boolean(image)} onMessage={sendInput} onOccupiedHeightChange={setKeyboardOccupiedHeight} />
   </section>;
   // Moving the presentation into a dialog keeps this component's socket alive.
   // Zoom and native overflow change only the local image, never the host page.
   return fullscreen ? <StudioDialogModal isOpen onOpenChange={setFullscreen} isDismissable dialogAriaLabel="Shared browser tab"
-    className="!items-stretch !justify-stretch !p-0" modalClassName="!h-[100dvh] !w-screen !max-w-none !rounded-none !border-0 !shadow-none !overflow-hidden"
+    data-testid="local-browser-share-expanded" style={expandedViewportStyle}
+    className="!items-stretch !justify-stretch !p-0" modalClassName="!h-full !w-screen !max-w-none !rounded-none !border-0 !shadow-none !overflow-hidden"
     dialogClassName="h-full min-h-0 pt-[var(--instafy-safe-area-inset-top)] pb-[var(--instafy-safe-area-inset-bottom)] pl-[var(--instafy-safe-area-inset-left)] pr-[var(--instafy-safe-area-inset-right)]">
     {panel}
   </StudioDialogModal> : panel;

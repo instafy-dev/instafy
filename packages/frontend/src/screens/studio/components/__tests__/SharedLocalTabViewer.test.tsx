@@ -65,6 +65,59 @@ it("clears an expanded, zoomed frame immediately when access is revoked", async 
   expect(URL.revokeObjectURL).toHaveBeenCalledWith("blob:frame-1");
 });
 
+it("keeps the expanded viewer inside the phone's visible area when the keyboard opens", async () => {
+  const viewport = Object.assign(new EventTarget(), { height: 700, offsetTop: 0 });
+  vi.stubGlobal("visualViewport", viewport);
+  const frames: FrameRequestCallback[] = [];
+  vi.stubGlobal("requestAnimationFrame", (callback: FrameRequestCallback) => frames.push(callback));
+  vi.stubGlobal("cancelAnimationFrame", vi.fn());
+  await frame(); await click("Expand shared tab");
+  const expanded = document.querySelector<HTMLElement>('[data-testid="local-browser-share-expanded"]')!;
+  expect(expanded.style.height).toBe("700px");
+  viewport.height = 360; viewport.offsetTop = 20;
+  await act(async () => {
+    viewport.dispatchEvent(new Event("resize"));
+    frames.splice(0).forEach(callback => callback(0));
+  });
+  expect(expanded.style.height).toBe("360px");
+  expect(expanded.style.top).toBe("20px");
+  await frame();
+  expect(image()).not.toBeNull();
+  expect(connect).toHaveBeenCalledTimes(1);
+  expect(socket.close).not.toHaveBeenCalled();
+  viewport.height = 700; viewport.offsetTop = 0;
+  await act(async () => {
+    viewport.dispatchEvent(new Event("resize"));
+    frames.splice(0).forEach(callback => callback(0));
+  });
+  expect(expanded.style.height).toBe("700px");
+});
+
+it("reserves the mobile input bar without losing typing focus or the release action", async () => {
+  await frame();
+  await act(async () => socket.dispatchEvent(new MessageEvent("message", { data: JSON.stringify({
+    type: "controlState", available: true, connectionId: "own", requested: false,
+    grant: { id: "grant", connectionId: "own", userId: "viewer" },
+  }) })));
+  await click("Expand shared tab");
+  vi.mocked(HTMLElement.prototype.getBoundingClientRect).mockImplementation(function (this: HTMLElement) {
+    const keyboard = this.dataset.testid === "shared-browser-mobile-keyboard";
+    return { x: 0, y: keyboard ? 635 : 0, left: 0, top: keyboard ? 635 : 0,
+      right: 390, bottom: 700, width: 390, height: keyboard ? 65 : 700, toJSON: () => ({}) };
+  });
+  await click("Open remote keyboard");
+  const input = document.querySelector('[aria-label="Type into the focused page field"]');
+  const panel = document.querySelector<HTMLElement>('[data-testid="local-browser-share-viewer"]')!;
+  expect(panel.style.paddingBottom).toBe("65px");
+  expect(document.querySelector('[aria-label="Shared tab zoom"]')?.closest(".hidden")).not.toBeNull();
+  expect(document.querySelector('[data-testid="local-tab-control-action"]')?.textContent).toBe("Release control");
+  await frame();
+  expect(document.activeElement).toBe(input);
+  await click("Close remote keyboard");
+  expect(panel.style.paddingBottom).toBe("0px");
+  expect(document.querySelector('[aria-label="Shared tab zoom"]')?.closest(".hidden")).toBeNull();
+});
+
 it("requests control and forwards keys only for this connection's grant, then becomes a spectator immediately",async()=>{
   Object.assign(socket,{readyState:WebSocket.OPEN,bufferedAmount:0});await frame();
   const state={type:"controlState",available:true,connectionId:"self",requested:false,grant:null as null|{id:string;connectionId:string;userId:string}};

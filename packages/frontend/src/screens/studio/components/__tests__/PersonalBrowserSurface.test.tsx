@@ -534,6 +534,16 @@ describe("PersonalBrowserSurface", () => {
     expect(onContinue).not.toHaveBeenCalled();
   });
 
+  it("describes participant control without claiming an agent operation is still stopping", async () => {
+    const model = createModel();
+    model.status = { ...model.status!, agentControlEnabled: false, humanControlReady: false, tabControlActive: true };
+    await act(async () => root.render(<PersonalBrowserSurface active model={model} transportSelector={null} />));
+    const status = container.querySelector('[data-testid="personal-browser-agent-status"]');
+    expect(status?.getAttribute("title")).toContain("participant controls this tab");
+    expect(status?.textContent).toBe("Paused");
+    expect(container.querySelector<HTMLButtonElement>('[aria-label="Resume agent control"]')?.disabled).toBe(true);
+  });
+
   it("makes Done the only resume route after user-initiated takeover", async () => {
     const model = createModel();
     model.status = { ...model.status!, humanControlReady: false, approvalModes: ["ask", "routine"], approvalMode: "ask" };

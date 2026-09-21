@@ -141,6 +141,9 @@ function personalBrowserStatus(model: PersonalBrowserModel): {
       detail: model.agentError,
     };
   }
+  if (model.status.tabControlActive) {
+    return { state: "paused", detail: "Agent control is paused while a participant controls this tab." };
+  }
   if (!model.status.agentControlEnabled && model.status.humanControlReady === false) {
     return { state: "starting", detail: "Waiting for agent operations to stop…" };
   }

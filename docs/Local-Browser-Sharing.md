@@ -111,6 +111,12 @@ back to local inspection. Neither Follow nor canonical control changes the sourc
 a different page layout. Approved Explore uses its own responsive page. New frames retain the viewer's pan.
 Stop and removal clear both docked and fullscreen pixels.
 
+The expanded viewer follows the device's visible viewport when the software
+keyboard opens. It reserves space for the remote input bar and temporarily hides
+zoom controls and explanatory text, keeping navigation and release controls
+available. An Explore page resizes with that available area; Follow continues to
+fit the owner's original layout.
+
 Fitting a desktop article into a phone-width view makes text very small. Zoom
 makes details readable but requires sideways panning through desktop lines. This
 is useful for watching/inspecting. Approved Explore provides the separate responsive
