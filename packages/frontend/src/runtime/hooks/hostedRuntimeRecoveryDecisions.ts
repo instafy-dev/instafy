@@ -38,6 +38,8 @@ export function resolveHostedStatusPollInterval(args: {
 
 export function shouldAutoEnsureHostedForFallback(args: {
   disableAutoRuntimeEnsure: boolean;
+  /** The user stopped this project's machine on purpose; do not relaunch it. */
+  manualStopHeld: boolean;
   projectReadyForRuntime: boolean;
   runtimeControllerEnabled: boolean;
   activeProjectId: string | null;
@@ -50,6 +52,7 @@ export function shouldAutoEnsureHostedForFallback(args: {
 }) {
   const {
     disableAutoRuntimeEnsure,
+    manualStopHeld,
     projectReadyForRuntime,
     runtimeControllerEnabled,
     activeProjectId,
@@ -60,7 +63,7 @@ export function shouldAutoEnsureHostedForFallback(args: {
     readyRuntimeCount,
     runtimeStatusesResolved,
   } = args;
-  if (disableAutoRuntimeEnsure) {
+  if (disableAutoRuntimeEnsure || manualStopHeld) {
     return false;
   }
   const canEnsure =
@@ -85,6 +88,7 @@ export function shouldAutoEnsureHostedForFallback(args: {
 // read-only members and unauthorized visitors still never trigger a launch.
 export function shouldAutoEnsureHostedForEmptyState(args: {
   disableAutoRuntimeEnsure: boolean;
+  manualStopHeld: boolean;
   projectAccessResolved: boolean;
   runtimeControllerEnabled: boolean;
   activeProjectId: string | null;
@@ -97,6 +101,7 @@ export function shouldAutoEnsureHostedForEmptyState(args: {
 }) {
   const {
     disableAutoRuntimeEnsure,
+    manualStopHeld,
     projectAccessResolved,
     runtimeControllerEnabled,
     activeProjectId,
@@ -107,7 +112,7 @@ export function shouldAutoEnsureHostedForEmptyState(args: {
     hasLocalRuntime,
     runtimeStatusCount,
   } = args;
-  if (disableAutoRuntimeEnsure) {
+  if (disableAutoRuntimeEnsure || manualStopHeld) {
     return false;
   }
   if (
@@ -127,6 +132,7 @@ export function shouldAutoEnsureHostedForEmptyState(args: {
 
 export function shouldAutoEnsurePreferredHostedRuntime(args: {
   disableAutoRuntimeEnsure: boolean;
+  manualStopHeld: boolean;
   runtimeControllerEnabled: boolean;
   projectReadyForRuntime: boolean;
   activeProjectId: string | null;
@@ -137,6 +143,7 @@ export function shouldAutoEnsurePreferredHostedRuntime(args: {
 }) {
   const {
     disableAutoRuntimeEnsure,
+    manualStopHeld,
     runtimeControllerEnabled,
     projectReadyForRuntime,
     activeProjectId,
@@ -150,6 +157,7 @@ export function shouldAutoEnsurePreferredHostedRuntime(args: {
   }
   if (
     disableAutoRuntimeEnsure ||
+    manualStopHeld ||
     !runtimeControllerEnabled ||
     !projectReadyForRuntime ||
     !activeProjectId ||

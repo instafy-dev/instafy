@@ -152,3 +152,48 @@ export function parseHostedRuntimeLimitError(
     blockerProjectLabel: projectLabel,
   };
 }
+
+export const HOSTED_RUNTIME_BLOCKER_SPACE_ERROR_CODE =
+  "hosted_runtime_blocker_space_unavailable";
+
+/**
+ * Copy for the follow-up after "Stop blocker and retry" could not stop the
+ * blocking machine from this space (the controller refused the stop) and the
+ * limit still holds. Names the blocking space so the user knows where to go.
+ */
+export function describeHostedRuntimeBlockerSpace(
+  details: Pick<HostedRuntimeLimitErrorDetails, "blockerProjectId" | "blockerProjectLabel">,
+): string {
+  const space = details.blockerProjectLabel ?? details.blockerProjectId;
+  if (!space) {
+    return "The blocking machine can't be stopped from here. Open its space and stop it there.";
+  }
+  return `The blocking machine in "${space}" can't be stopped from here. Open that space and stop it there.`;
+}
+
+/** Thrown by the takeover flow when the blocker must be stopped from its own space. */
+export class HostedRuntimeBlockerSpaceError extends Error {
+  readonly code = HOSTED_RUNTIME_BLOCKER_SPACE_ERROR_CODE;
+  readonly blockerProjectId: string | null;
+  readonly blockerProjectLabel: string | null;
+
+  constructor(
+    details: Pick<HostedRuntimeLimitErrorDetails, "blockerProjectId" | "blockerProjectLabel">,
+  ) {
+    super(describeHostedRuntimeBlockerSpace(details));
+    this.name = "HostedRuntimeBlockerSpaceError";
+    this.blockerProjectId = details.blockerProjectId;
+    this.blockerProjectLabel = details.blockerProjectLabel;
+  }
+}
+
+export function isHostedRuntimeBlockerSpaceError(
+  error: unknown,
+): error is HostedRuntimeBlockerSpaceError {
+  return (
+    error instanceof HostedRuntimeBlockerSpaceError ||
+    (Boolean(error) &&
+      typeof error === "object" &&
+      (error as { code?: unknown }).code === HOSTED_RUNTIME_BLOCKER_SPACE_ERROR_CODE)
+  );
+}

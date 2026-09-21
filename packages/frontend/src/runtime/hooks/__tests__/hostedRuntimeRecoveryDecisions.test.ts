@@ -62,6 +62,7 @@ describe("hostedRuntimeRecoveryDecisions", () => {
     expect(
       shouldAutoEnsureHostedForFallback({
         disableAutoRuntimeEnsure: false,
+        manualStopHeld: false,
         projectReadyForRuntime: true,
         runtimeControllerEnabled: true,
         activeProjectId: "project-1",
@@ -77,6 +78,7 @@ describe("hostedRuntimeRecoveryDecisions", () => {
     expect(
       shouldAutoEnsureHostedForEmptyState({
         disableAutoRuntimeEnsure: false,
+        manualStopHeld: false,
         projectAccessResolved: true,
         runtimeControllerEnabled: true,
         activeProjectId: "project-1",
@@ -95,6 +97,7 @@ describe("hostedRuntimeRecoveryDecisions", () => {
     expect(
       shouldAutoEnsureHostedForEmptyState({
         disableAutoRuntimeEnsure: false,
+        manualStopHeld: false,
         projectAccessResolved: true,
         runtimeControllerEnabled: true,
         activeProjectId: "project-just-created",
@@ -111,6 +114,7 @@ describe("hostedRuntimeRecoveryDecisions", () => {
     expect(
       shouldAutoEnsureHostedForEmptyState({
         disableAutoRuntimeEnsure: false,
+        manualStopHeld: false,
         projectAccessResolved: false,
         runtimeControllerEnabled: true,
         activeProjectId: "project-1",
@@ -126,6 +130,7 @@ describe("hostedRuntimeRecoveryDecisions", () => {
     expect(
       shouldAutoEnsureHostedForFallback({
         disableAutoRuntimeEnsure: false,
+        manualStopHeld: false,
         projectReadyForRuntime: true,
         runtimeControllerEnabled: true,
         activeProjectId: "project-1",
@@ -143,6 +148,7 @@ describe("hostedRuntimeRecoveryDecisions", () => {
     expect(
       shouldAutoEnsurePreferredHostedRuntime({
         disableAutoRuntimeEnsure: false,
+        manualStopHeld: false,
         runtimeControllerEnabled: true,
         projectReadyForRuntime: true,
         activeProjectId: "project-1",
@@ -159,12 +165,68 @@ describe("hostedRuntimeRecoveryDecisions", () => {
     expect(
       shouldAutoEnsurePreferredHostedRuntime({
         disableAutoRuntimeEnsure: false,
+        manualStopHeld: false,
         runtimeControllerEnabled: true,
         projectReadyForRuntime: true,
         activeProjectId: "project-1",
         preferredRuntimeEntry: createRuntimeEntry({
           status: "running",
           health: "online",
+        }),
+        waitingForPreferredRuntime: true,
+        hostedRuntimeEnsuring: false,
+        hasHostedRuntimeInProgress: false,
+      }),
+    ).toBe(false);
+  });
+
+  it("does not relaunch a machine the user stopped on purpose", () => {
+    // A user Stop produces exactly the state auto-ensure exists to repair:
+    // no ready machine, nothing booting, no local runtime. The hold is the
+    // only thing that says the absence is intentional.
+    expect(
+      shouldAutoEnsureHostedForFallback({
+        disableAutoRuntimeEnsure: false,
+        manualStopHeld: true,
+        projectReadyForRuntime: true,
+        runtimeControllerEnabled: true,
+        activeProjectId: "project-1",
+        runtimeReady: false,
+        hasHostedRuntimeInProgress: false,
+        hasLocalRuntime: false,
+        preferredRuntimeId: null,
+        readyRuntimeCount: 0,
+        runtimeStatusesResolved: true,
+      }),
+    ).toBe(false);
+
+    expect(
+      shouldAutoEnsureHostedForEmptyState({
+        disableAutoRuntimeEnsure: false,
+        manualStopHeld: true,
+        projectAccessResolved: true,
+        runtimeControllerEnabled: true,
+        activeProjectId: "project-1",
+        runtimeReady: false,
+        runtimeStatusesResolved: true,
+        hostedRuntimeEnsuring: false,
+        hasHostedRuntimeInProgress: false,
+        hasLocalRuntime: false,
+        runtimeStatusCount: 0,
+      }),
+    ).toBe(false);
+
+    // A stopped preferred machine is normally restartable; not after a Stop.
+    expect(
+      shouldAutoEnsurePreferredHostedRuntime({
+        disableAutoRuntimeEnsure: false,
+        manualStopHeld: true,
+        runtimeControllerEnabled: true,
+        projectReadyForRuntime: true,
+        activeProjectId: "project-1",
+        preferredRuntimeEntry: createRuntimeEntry({
+          status: "stopped",
+          health: "offline",
         }),
         waitingForPreferredRuntime: true,
         hostedRuntimeEnsuring: false,

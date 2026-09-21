@@ -1,9 +1,10 @@
-import { useCallback, useMemo, useState } from "react";
+import { useCallback, useMemo, useRef, useState } from "react";
 import {
   controllerClient,
   type ControllerRuntimeStatusEntry,
 } from "../../sdk/instafy";
 import { isBrowserRuntimeClaimActive } from "../browserRuntimeClaimRegistry";
+import { clearManualStop } from "../idlePauseRegistry";
 import {
   hostedRuntimeLimitDetailsFromError,
   type HostedRuntimeLimitErrorDetails,
@@ -41,6 +42,11 @@ export function useHostedRuntimeEnsure({
   showDesktopRuntimeHelp,
 }: UseHostedRuntimeEnsureOptions) {
   const [hostedRuntimeEnsuring, setHostedRuntimeEnsuring] = useState(false);
+  // Limit details of the most recent ensure failure, or null when the last
+  // attempt succeeded or failed for another reason. Written synchronously so
+  // a caller awaiting `ensureHostedRuntime` can read it before React commits
+  // the matching `setRuntimeEnsureLimit` update.
+  const lastHostedEnsureLimitRef = useRef<HostedRuntimeLimitErrorDetails | null>(null);
   const debugLog = useCallback((message: string, data?: unknown) => {
     if (typeof window === "undefined") {
       return;
@@ -119,6 +125,7 @@ export function useHostedRuntimeEnsure({
     });
     setRuntimeEnsureError(null);
     setRuntimeEnsureLimit(null);
+    lastHostedEnsureLimitRef.current = null;
     setHostedRuntimeEnsuring(true);
     try {
       const latestStatuses = getLatestRuntimeStatuses();
@@ -200,6 +207,7 @@ export function useHostedRuntimeEnsure({
       });
       setRuntimeEnsureError(message);
       setRuntimeEnsureLimit(limitDetails);
+      lastHostedEnsureLimitRef.current = limitDetails;
       // Capacity and credit refusals carry their own plain-language message —
       // surface it directly instead of leaving it behind "View details".
       const errorCode =
@@ -253,6 +261,9 @@ export function useHostedRuntimeEnsure({
 
   const ensureHostedRuntime = useCallback(async () => {
     const effectiveProjectId = resolveEffectiveProjectId();
+    // A new request starts with no recorded limit; only a launch that fails
+    // with the limit below writes one.
+    lastHostedEnsureLimitRef.current = null;
     if (!enabled || !effectiveProjectId) {
       showStatus("Instafy Cloud runtime is unavailable right now.", "warning", 4000);
       debugLog("hosted-runtime:ensure-skip", {
@@ -261,6 +272,10 @@ export function useHostedRuntimeEnsure({
       });
       return false;
     }
+    // Every explicit request for a machine (Reconnect, Start, sending a
+    // prompt) funnels through here; the auto-ensure effects are gated before
+    // they call it. So reaching this point lifts a deliberate Stop.
+    clearManualStop(effectiveProjectId);
     if (isBrowserRuntimeClaimActive(effectiveProjectId)) {
       debugLog("hosted-runtime:ensure-skip-browser-claim", {
         projectId: effectiveProjectId,
@@ -365,5 +380,6 @@ export function useHostedRuntimeEnsure({
     hostedRuntimeEnsuring,
     ensureHostedRuntime,
     hasHostedRuntimeInProgress,
+    lastHostedEnsureLimitRef,
   } as const;
 }

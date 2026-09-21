@@ -1,6 +1,10 @@
 import { describe, expect, it } from "vitest";
 import {
+  HOSTED_RUNTIME_BLOCKER_SPACE_ERROR_CODE,
+  HostedRuntimeBlockerSpaceError,
+  describeHostedRuntimeBlockerSpace,
   hostedRuntimeLimitDetailsFromError,
+  isHostedRuntimeBlockerSpaceError,
   parseHostedRuntimeLimitDetails,
   parseHostedRuntimeLimitError,
 } from "../hostedRuntimeLimitError";
@@ -100,5 +104,48 @@ describe("parseHostedRuntimeLimitError", () => {
       blockerProjectLabel: "Other Project",
       blockerRuntimeLabel: null,
     });
+  });
+});
+
+describe("describeHostedRuntimeBlockerSpace", () => {
+  it("names the blocking space by label", () => {
+    expect(
+      describeHostedRuntimeBlockerSpace({
+        blockerProjectId: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+        blockerProjectLabel: "Acme",
+      }),
+    ).toBe(
+      'The blocking machine in "Acme" can\'t be stopped from here. Open that space and stop it there.',
+    );
+  });
+
+  it("falls back to the project id when the label is missing", () => {
+    expect(
+      describeHostedRuntimeBlockerSpace({
+        blockerProjectId: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+        blockerProjectLabel: null,
+      }),
+    ).toBe(
+      'The blocking machine in "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb" can\'t be stopped from here. Open that space and stop it there.',
+    );
+  });
+
+  it("still reads when neither label nor id is known", () => {
+    expect(
+      describeHostedRuntimeBlockerSpace({ blockerProjectId: null, blockerProjectLabel: null }),
+    ).toBe("The blocking machine can't be stopped from here. Open its space and stop it there.");
+  });
+
+  it("builds a typed error the panel can recognise", () => {
+    const error = new HostedRuntimeBlockerSpaceError({
+      blockerProjectId: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+      blockerProjectLabel: "Acme",
+    });
+    expect(error.code).toBe(HOSTED_RUNTIME_BLOCKER_SPACE_ERROR_CODE);
+    expect(error.blockerProjectId).toBe("bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb");
+    expect(error.message).toContain('"Acme"');
+    expect(isHostedRuntimeBlockerSpaceError(error)).toBe(true);
+    expect(isHostedRuntimeBlockerSpaceError(new Error("stop runtime failed (409)"))).toBe(false);
+    expect(isHostedRuntimeBlockerSpaceError(null)).toBe(false);
   });
 });
