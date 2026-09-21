@@ -1659,6 +1659,142 @@ pub(crate) async fn reconcile_managed_ai_usage_charge(
     })
 }
 
+pub(crate) const MANAGED_AI_REFUND_REASON: &str = "managed_ai_refund";
+
+/// What `refund_unused_managed_ai_prompt` did for a prompt reserve.
+#[derive(Debug, Clone)]
+pub(crate) enum ManagedAiRefundOutcome {
+    /// No reserve was burned, the reserve is empty, or usage reconciliation
+    /// already settled it against real tokens: nothing to give back.
+    NotRefundable,
+    /// This call wrote the refund row and released the reserve.
+    Applied(CreditLedgerReference),
+    /// An earlier call (this sink retried, or the other terminal sink) already
+    /// wrote the refund row; the ledger was not touched.
+    AlreadyRefunded(CreditLedgerReference),
+}
+
+impl ManagedAiRefundOutcome {
+    /// The refund ledger row, whether this call or an earlier one wrote it.
+    pub(crate) fn ledger(&self) -> Option<&CreditLedgerReference> {
+        match self {
+            Self::NotRefundable => None,
+            Self::Applied(reference) | Self::AlreadyRefunded(reference) => Some(reference),
+        }
+    }
+}
+
+/// Give a managed-AI prompt reserve back when the run never reached a model.
+///
+/// The reserve is burned at dispatch under `managed-ai-prompt:{prompt_id}`
+/// and normally settled by completion-time usage reconciliation. A run that
+/// dies before any model turn (proxy auth rejected, runtime never ready) has
+/// no usage to reconcile, so the reserve would stay charged. This refill is
+/// idempotent on `managed-ai-refund:{prompt_id}` (distinct from the burn key:
+/// refills dedupe on the key alone, so reusing the burn key would no-op) and
+/// is skipped when no reserve exists or a usage adjustment already settled it.
+///
+/// A repeated call reports `AlreadyRefunded` with the existing refund row so
+/// callers can tell a fresh refund from a dedupe and skip their side effects.
+pub(crate) async fn refund_unused_managed_ai_prompt(
+    transaction: &Transaction<'_>,
+    project_id: &Uuid,
+    org_id: &Uuid,
+    runtime_id: Option<Uuid>,
+    prompt_id: &Uuid,
+    refund_reason: &str,
+) -> Result<ManagedAiRefundOutcome, (StatusCode, Json<ApiError>)> {
+    let reserve_key = format!("managed-ai-prompt:{prompt_id}");
+    let Some(reserve) = load_credit_ledger_reference_by_idempotency_key(
+        transaction,
+        org_id,
+        project_id,
+        &reserve_key,
+    )
+    .await?
+    else {
+        return Ok(ManagedAiRefundOutcome::NotRefundable);
+    };
+    let refund_units = reserve.delta.abs();
+    if refund_units == 0 {
+        return Ok(ManagedAiRefundOutcome::NotRefundable);
+    }
+
+    // An adjustment row means usage reconciliation ran: a model turn happened
+    // and the reserve was settled against real tokens. Nothing to give back.
+    let adjustment_key = format!("managed-ai-adjustment:{prompt_id}");
+    if load_credit_ledger_reference_by_idempotency_key(
+        transaction,
+        org_id,
+        project_id,
+        &adjustment_key,
+    )
+    .await?
+    .is_some()
+    {
+        return Ok(ManagedAiRefundOutcome::NotRefundable);
+    }
+
+    let refund_key = format!("managed-ai-refund:{prompt_id}");
+    let mut metadata = json!({
+        "source": "managed_ai_refund",
+        "category": "ai_usage",
+        "promptId": prompt_id,
+        "reserveLedgerId": reserve.ledger_id,
+        "reserveIdempotencyKey": reserve_key,
+        "refundReason": refund_reason,
+        "managedAiProvider": DEFAULT_MANAGED_AI_PROVIDER_ID,
+    });
+    process_credit_refill(
+        transaction,
+        project_id,
+        org_id,
+        runtime_id,
+        refund_units,
+        None,
+        MANAGED_AI_REFUND_REASON,
+        Some(&refund_key),
+        &mut metadata,
+    )
+    .await?;
+    let deduped = metadata
+        .get("deduped")
+        .and_then(JsonValue::as_bool)
+        .unwrap_or(false);
+    if !deduped {
+        merge_credit_ledger_metadata_by_idempotency_key(
+            transaction,
+            org_id,
+            project_id,
+            &reserve_key,
+            &json!({
+                "refunded": true,
+                "refundIdempotencyKey": refund_key,
+                "refundReason": refund_reason,
+            }),
+        )
+        .await?;
+    }
+
+    let Some(refund) = load_credit_ledger_reference_by_idempotency_key(
+        transaction,
+        org_id,
+        project_id,
+        &refund_key,
+    )
+    .await?
+    else {
+        return Err(internal_error(format!(
+            "managed AI refund row {refund_key} is missing after the refill"
+        )));
+    };
+    Ok(if deduped {
+        ManagedAiRefundOutcome::AlreadyRefunded(refund)
+    } else {
+        ManagedAiRefundOutcome::Applied(refund)
+    })
+}
+
 pub(crate) async fn process_credit_refill(
     transaction: &Transaction<'_>,
     project_id: &Uuid,
@@ -2478,6 +2614,272 @@ mod tests {
             .and_then(|row| row.try_get::<_, i32>("count").ok())
             .unwrap_or(0);
         assert_eq!(count, 1);
+
+        connection_handle.abort();
+        Ok(())
+    }
+
+    /// Seed the dispatch-time reserve as the ledger row it leaves behind
+    /// (balance 10 -> 9). Written directly rather than through
+    /// `process_credit_burn`, which would first auto-refill the balance to the
+    /// credit limit and make the arithmetic below depend on that window.
+    async fn seed_managed_ai_reserve(
+        client: &tokio_postgres::Client,
+        project_id: &Uuid,
+        org_id: &Uuid,
+        prompt_id: &Uuid,
+    ) -> anyhow::Result<()> {
+        client
+            .execute(
+                "INSERT INTO org_credit_balances (org_id, credit_limit, balance) VALUES ($1, $2, $3)",
+                &[org_id, &25, &10],
+            )
+            .await?;
+        let metadata = json!({ "source": "managed_ai", "promptId": prompt_id });
+        client
+            .execute(
+                "INSERT INTO org_credit_ledger (org_id, project_id, delta, reason, metadata, idempotency_key)
+                 VALUES ($1, $2, -1, 'managed_ai_prompt', $3::jsonb, $4)",
+                &[
+                    org_id,
+                    project_id,
+                    &PgJson(&metadata),
+                    &format!("managed-ai-prompt:{prompt_id}"),
+                ],
+            )
+            .await?;
+        let balance: i32 = client
+            .query_one(
+                "SELECT balance FROM org_credit_balances WHERE org_id = $1",
+                &[org_id],
+            )
+            .await?
+            .get("balance");
+        assert_eq!(balance, 9, "the seeded reserve leaves 9 of 10");
+        Ok(())
+    }
+
+    async fn ledger_rows_for_reason(
+        client: &tokio_postgres::Client,
+        org_id: &Uuid,
+        reason: &str,
+    ) -> anyhow::Result<Vec<(i32, Option<String>)>> {
+        let rows = client
+            .query(
+                "SELECT delta, idempotency_key FROM org_credit_ledger WHERE org_id = $1 AND reason = $2",
+                &[org_id, &reason],
+            )
+            .await?;
+        Ok(rows
+            .iter()
+            .map(|row| (row.get("delta"), row.get("idempotency_key")))
+            .collect())
+    }
+
+    #[tokio::test]
+    async fn refund_unused_managed_ai_prompt_restores_reserve_once() -> anyhow::Result<()> {
+        let Some((mut client, connection_handle)) = connect_test_db().await? else {
+            eprintln!("skipping managed AI refund test: TEST_DATABASE_URL not set");
+            return Ok(());
+        };
+
+        create_credit_tables(&client).await?;
+        let project_id = Uuid::new_v4();
+        let org_id = Uuid::new_v4();
+        let prompt_id = Uuid::new_v4();
+        seed_managed_ai_reserve(&client, &project_id, &org_id, &prompt_id).await?;
+
+        let tx = client.transaction().await?;
+        let ManagedAiRefundOutcome::Applied(refund) = refund_unused_managed_ai_prompt(
+            &tx,
+            &project_id,
+            &org_id,
+            None,
+            &prompt_id,
+            "proxy_auth_rejected",
+        )
+        .await
+        .map_err(|error| credit_error("first managed AI refund", error))?
+        else {
+            panic!("a reserve without usage must be refunded");
+        };
+        assert_eq!(refund.delta, 1);
+        assert_eq!(refund.reason, MANAGED_AI_REFUND_REASON);
+        assert_eq!(
+            refund.idempotency_key,
+            format!("managed-ai-refund:{prompt_id}")
+        );
+        assert_eq!(
+            get_credit_snapshot(&tx, &org_id)
+                .await
+                .map_err(|error| credit_error("snapshot", error))?
+                .balance,
+            10
+        );
+        tx.commit().await?;
+
+        // A second terminal sink (or a retried request) must not pay twice,
+        // and must be told it did not so it skips its own side effects.
+        let tx = client.transaction().await?;
+        let ManagedAiRefundOutcome::AlreadyRefunded(second) = refund_unused_managed_ai_prompt(
+            &tx,
+            &project_id,
+            &org_id,
+            None,
+            &prompt_id,
+            "runtime_not_ready",
+        )
+        .await
+        .map_err(|error| credit_error("second managed AI refund", error))?
+        else {
+            panic!("an already refunded reserve must report the existing refund row");
+        };
+        assert_eq!(second.ledger_id, refund.ledger_id);
+        assert_eq!(
+            get_credit_snapshot(&tx, &org_id)
+                .await
+                .map_err(|error| credit_error("snapshot", error))?
+                .balance,
+            10
+        );
+        tx.commit().await?;
+
+        let refunds = ledger_rows_for_reason(&client, &org_id, MANAGED_AI_REFUND_REASON).await?;
+        assert_eq!(
+            refunds,
+            vec![(1, Some(format!("managed-ai-refund:{prompt_id}")))]
+        );
+        let reserve_metadata: Option<JsonValue> = client
+            .query_one(
+                "SELECT metadata FROM org_credit_ledger WHERE org_id = $1 AND idempotency_key = $2",
+                &[&org_id, &format!("managed-ai-prompt:{prompt_id}")],
+            )
+            .await?
+            .get("metadata");
+        let reserve_metadata = reserve_metadata.unwrap_or(JsonValue::Null);
+        assert_eq!(reserve_metadata["refunded"], json!(true));
+        assert_eq!(
+            reserve_metadata["refundReason"],
+            json!("proxy_auth_rejected")
+        );
+        assert_eq!(
+            reserve_metadata["refundIdempotencyKey"],
+            json!(format!("managed-ai-refund:{prompt_id}"))
+        );
+        let refund_metadata: Option<JsonValue> = client
+            .query_one(
+                "SELECT metadata FROM org_credit_ledger WHERE org_id = $1 AND idempotency_key = $2",
+                &[&org_id, &format!("managed-ai-refund:{prompt_id}")],
+            )
+            .await?
+            .get("metadata");
+        let refund_metadata = refund_metadata.unwrap_or(JsonValue::Null);
+        assert_eq!(refund_metadata["category"], json!("ai_usage"));
+        assert_eq!(refund_metadata["promptId"], json!(prompt_id));
+        assert_eq!(
+            refund_metadata["refundReason"],
+            json!("proxy_auth_rejected")
+        );
+
+        connection_handle.abort();
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn refund_unused_managed_ai_prompt_skips_when_adjustment_exists() -> anyhow::Result<()> {
+        let Some((mut client, connection_handle)) = connect_test_db().await? else {
+            eprintln!("skipping managed AI refund adjustment test: TEST_DATABASE_URL not set");
+            return Ok(());
+        };
+
+        create_credit_tables(&client).await?;
+        let project_id = Uuid::new_v4();
+        let org_id = Uuid::new_v4();
+        let prompt_id = Uuid::new_v4();
+        seed_managed_ai_reserve(&client, &project_id, &org_id, &prompt_id).await?;
+        // Usage reconciliation settled the reserve: a model turn happened.
+        client
+            .execute(
+                "INSERT INTO org_credit_ledger (org_id, project_id, delta, reason, metadata, idempotency_key)
+                 VALUES ($1, $2, -2, 'managed_ai_adjustment', '{}'::jsonb, $3)",
+                &[&org_id, &project_id, &format!("managed-ai-adjustment:{prompt_id}")],
+            )
+            .await?;
+
+        let tx = client.transaction().await?;
+        let refund = refund_unused_managed_ai_prompt(
+            &tx,
+            &project_id,
+            &org_id,
+            None,
+            &prompt_id,
+            "proxy_auth_rejected",
+        )
+        .await
+        .map_err(|error| credit_error("managed AI refund with adjustment", error))?;
+        assert!(
+            matches!(refund, ManagedAiRefundOutcome::NotRefundable),
+            "a reconciled reserve is never refunded, got {refund:?}"
+        );
+        assert_eq!(
+            get_credit_snapshot(&tx, &org_id)
+                .await
+                .map_err(|error| credit_error("snapshot", error))?
+                .balance,
+            7
+        );
+        tx.commit().await?;
+
+        let refunds = ledger_rows_for_reason(&client, &org_id, MANAGED_AI_REFUND_REASON).await?;
+        assert!(refunds.is_empty());
+
+        connection_handle.abort();
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn refund_unused_managed_ai_prompt_skips_without_reserve() -> anyhow::Result<()> {
+        let Some((mut client, connection_handle)) = connect_test_db().await? else {
+            eprintln!("skipping managed AI refund reserve test: TEST_DATABASE_URL not set");
+            return Ok(());
+        };
+
+        create_credit_tables(&client).await?;
+        let project_id = Uuid::new_v4();
+        let org_id = Uuid::new_v4();
+        client
+            .execute(
+                "INSERT INTO org_credit_balances (org_id, credit_limit, balance) VALUES ($1, $2, $3)",
+                &[&org_id, &25, &10],
+            )
+            .await?;
+
+        let tx = client.transaction().await?;
+        let refund = refund_unused_managed_ai_prompt(
+            &tx,
+            &project_id,
+            &org_id,
+            None,
+            &Uuid::new_v4(),
+            "runtime_not_ready",
+        )
+        .await
+        .map_err(|error| credit_error("managed AI refund without reserve", error))?;
+        assert!(
+            matches!(refund, ManagedAiRefundOutcome::NotRefundable),
+            "nothing was reserved, so nothing is refunded, got {refund:?}"
+        );
+        assert_eq!(
+            get_credit_snapshot(&tx, &org_id)
+                .await
+                .map_err(|error| credit_error("snapshot", error))?
+                .balance,
+            10
+        );
+        tx.commit().await?;
+
+        let refunds = ledger_rows_for_reason(&client, &org_id, MANAGED_AI_REFUND_REASON).await?;
+        assert!(refunds.is_empty());
 
         connection_handle.abort();
         Ok(())

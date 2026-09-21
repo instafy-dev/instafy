@@ -39,6 +39,18 @@ import {
 export { PROJECT_ACCESS_REFRESH_EVENT } from "./projectAccessEvents";
 
 const LAST_PROJECT_STORAGE_KEY = "instafy.lastProjectId";
+function readUrlProjectId(): string | null {
+  if (typeof window === "undefined") {
+    return null;
+  }
+  try {
+    const raw = new URLSearchParams(window.location.search).get("projectId")?.trim() ?? "";
+    return raw && isUUID(raw) ? raw : null;
+  } catch {
+    return null;
+  }
+}
+
 const PROJECT_SUMMARY_RETRY_BACKOFF_MS = 5_000;
 const PROJECT_CAPABILITY_REFRESH_INTERVAL_MS = 60_000;
 
@@ -192,6 +204,7 @@ export function ProjectAccessProvider({ children }: { children: ReactNode }) {
     value: ProjectCapabilities;
   } | null>(null);
   const projectsRef = useRef(projects);
+  const projectCapabilitiesRef = useRef(projectCapabilities);
   const projectAccessPendingRef = useRef(projectAccessPending);
   const lastUrlProjectIdRef = useRef<string | null>(null);
   const lastResolvedProjectIdRef = useRef<string | null>(null);
@@ -205,6 +218,10 @@ export function ProjectAccessProvider({ children }: { children: ReactNode }) {
   useEffect(() => {
     projectsRef.current = projects;
   }, [projects]);
+
+  useEffect(() => {
+    projectCapabilitiesRef.current = projectCapabilities;
+  }, [projectCapabilities]);
 
   useEffect(() => {
     // The account-reset effect below clears old workspace state. Do not copy
@@ -914,6 +931,18 @@ export function ProjectAccessProvider({ children }: { children: ReactNode }) {
     const initialRetry = projectSummaryRetryBackoffRef.current;
     if (initialRetry?.projectId === targetProjectId) {
       scheduleRetry(Math.max(0, initialRetry.until - Date.now()));
+    } else if (
+      projectCapabilitiesRef.current?.projectId !== targetProjectId &&
+      blockedProjectIdRef.current !== targetProjectId &&
+      !projectAccessPendingRef.current &&
+      readUrlProjectId() !== targetProjectId
+    ) {
+      // A store-only switch (no URL change) arrives with no capabilities and
+      // nothing to trigger the URL bootstrap lookup. Resolve access now; the
+      // composer stays locked until then and the periodic refresh alone would
+      // hold it for a minute. When the URL already names the space, the
+      // bootstrap effect owns the lookup.
+      void refreshCapabilities();
     }
 
     window.addEventListener("focus", handleFocus);

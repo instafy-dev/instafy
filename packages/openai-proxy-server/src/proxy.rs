@@ -32,6 +32,13 @@ const MAX_PROXY_REQUEST_BYTES: usize = 25 * 1024 * 1024;
 const PUBLIC_PROXY_LANE_HEADER: &str = "x-instafy-proxy-lane";
 const PUBLIC_PERSONAL_BROWSER_LANE: &str = "public-personal-browser";
 
+/// Fixed credential id a `RemoteDynamic` proxy leases for a managed-lane
+/// turn (a controller-signed token with no `credential_id`). The controller
+/// answers it from its own `MANAGED_AI_OPENAI_API_KEY` without a user lookup
+/// (`runtime-controller::config::MANAGED_AI_CREDENTIAL_ID`); keep the two
+/// constants equal.
+pub const MANAGED_AI_CREDENTIAL_ID: &str = "4d414e41-4745-4441-8949-4e5354414659";
+
 #[derive(Clone)]
 enum ProxyBackend {
     RemoteStatic(Credentials),
@@ -356,21 +363,69 @@ fn detect_provider_name(endpoint_host: Option<&str>, creds: Option<&Credentials>
     "openai-compatible".to_string()
 }
 
-fn proxy_auth_mode(backend: &ProxyBackend, claims: Option<&ProxyClaims>) -> &'static str {
-    match backend {
-        ProxyBackend::RemoteDynamic => "byoc",
-        ProxyBackend::RemoteStatic(_) => {
-            if claims
-                .and_then(|ctx| ctx.credential_id.as_deref())
-                .map(str::trim)
-                .filter(|value| !value.is_empty())
-                .is_some()
-            {
-                "byoc"
-            } else {
-                "managed"
-            }
-        }
+fn credential_id_from_claims(claims: Option<&ProxyClaims>) -> Option<&str> {
+    claims
+        .and_then(|ctx| ctx.credential_id.as_deref())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+}
+
+fn run_id_from_claims(claims: Option<&ProxyClaims>) -> Option<&str> {
+    claims
+        .and_then(|ctx| ctx.run_id.as_deref())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+}
+
+/// A token naming a credential is a BYOC turn. A credential-less token is the
+/// managed lane on either backend: static material on `RemoteStatic`, the
+/// controller-served managed lease on `RemoteDynamic`.
+fn proxy_auth_mode(claims: Option<&ProxyClaims>) -> &'static str {
+    if credential_id_from_claims(claims).is_some() {
+        "byoc"
+    } else {
+        "managed"
+    }
+}
+
+/// Which controller credential a `RemoteDynamic` proxy leases for a request,
+/// with the `credential_source` label used in error context.
+///
+/// The controller mints a credential-less token when the user has no
+/// credential of their own (the managed lane) and serves the platform key
+/// under [`MANAGED_AI_CREDENTIAL_ID`]. Leasing that id lets a per-runtime
+/// sidecar with no static credentials complete managed turns.
+///
+/// Only a dispatch job token is a managed turn, and every dispatch job token
+/// carries a `run_id` (`runtime-controller::agent::enqueue_agent_job_record`
+/// requires one; `auth::issue_proxy_envelope` copies it into the claims).
+/// The controller also mints credential-less tokens with no `run_id` at agent
+/// login and runtime register; those are session envelopes, not turns, and
+/// keep the pre-existing rejection so they never spend the platform key.
+/// `PROXY_REQUIRE_CREDENTIAL_CLAIM` rejects credential-less tokens during
+/// authentication, so the public lane never reaches this fallback.
+fn dynamic_lease_target(claims: Option<&ProxyClaims>) -> Result<(&str, &'static str), AppError> {
+    if let Some(credential_id) = credential_id_from_claims(claims) {
+        return Ok((credential_id, "claim"));
+    }
+    if run_id_from_claims(claims).is_some() {
+        return Ok((MANAGED_AI_CREDENTIAL_ID, "managed"));
+    }
+    Err(AppError::unauthorized(anyhow!(
+        "proxy token missing credential_id for BYOC request"
+    )))
+}
+
+/// A failed managed lease keeps today's rejection text as its prefix (a
+/// controller without `MANAGED_AI_OPENAI_API_KEY` answers 404) and appends the
+/// cause so an operator can tell the two apart.
+fn dynamic_lease_error(credential_source: &str, error: anyhow::Error) -> AppError {
+    if credential_source == "managed" {
+        AppError::unauthorized(anyhow!(
+            "proxy token missing credential_id for BYOC request; managed AI credential lease failed: {error:#}"
+        ))
+    } else {
+        AppError::unauthorized(error)
     }
 }
 
@@ -936,7 +991,7 @@ async fn create_response(
 
     let input_items = extract_input_items(&payload).map_err(AppError::bad_request)?;
 
-    let auth_mode = proxy_auth_mode(&state.backend, claims.as_ref());
+    let auth_mode = proxy_auth_mode(claims.as_ref());
     let mut credit_guard = if let Some(ref claims) = claims {
         // Credit burn is keyed before credential resolution, so an absent
         // model uses the crate default as its ledger dimension.
@@ -1046,16 +1101,7 @@ async fn create_response(
             }
         }
         ProxyBackend::RemoteDynamic => {
-            let credential_id = claims
-                .as_ref()
-                .and_then(|claim| claim.credential_id.as_deref())
-                .map(str::trim)
-                .filter(|value| !value.is_empty())
-                .ok_or_else(|| {
-                    AppError::unauthorized(anyhow!(
-                        "proxy token missing credential_id for BYOC request"
-                    ))
-                })?;
+            let (credential_id, credential_source) = dynamic_lease_target(claims.as_ref())?;
 
             let Some(controller) = state.controller.as_ref() else {
                 return Err(AppError::unauthorized(anyhow!(
@@ -1067,7 +1113,7 @@ async fn create_response(
                 .acquire_credential_lease(credential_id)
                 .await
                 .and_then(|lease| lease.into_material())
-                .map_err(AppError::unauthorized)?;
+                .map_err(|error| dynamic_lease_error(credential_source, error))?;
 
             match complete_with_optional_controller_refresh(
                 creds,
@@ -1089,8 +1135,8 @@ async fn create_response(
                         }
                     }
                     let error = error.context(format!(
-                        "upstream request failed (credential_source=claim, requested_model={})",
-                        model,
+                        "upstream request failed (credential_source={}, requested_model={})",
+                        credential_source, model,
                     ));
                     return Err(AppError::upstream(error));
                 }
@@ -1138,7 +1184,7 @@ async fn create_chat_completion(
 
     let input_items = parse_chat_completion_inputs(&payload).map_err(AppError::bad_request)?;
 
-    let auth_mode = proxy_auth_mode(&state.backend, claims.as_ref());
+    let auth_mode = proxy_auth_mode(claims.as_ref());
     let mut credit_guard = if let Some(ref claims) = claims {
         // Credit burn is keyed before credential resolution, so an absent
         // model uses the crate default as its ledger dimension.
@@ -1228,16 +1274,7 @@ async fn create_chat_completion(
             build_remote_chat_response(&payload, completion, upstream_model, credit_guard).await
         }
         ProxyBackend::RemoteDynamic => {
-            let credential_id = claims
-                .as_ref()
-                .and_then(|claim| claim.credential_id.as_deref())
-                .map(str::trim)
-                .filter(|value| !value.is_empty())
-                .ok_or_else(|| {
-                    AppError::unauthorized(anyhow!(
-                        "proxy token missing credential_id for BYOC request"
-                    ))
-                })?;
+            let (credential_id, credential_source) = dynamic_lease_target(claims.as_ref())?;
 
             let Some(controller) = state.controller.as_ref() else {
                 return Err(AppError::unauthorized(anyhow!(
@@ -1249,7 +1286,7 @@ async fn create_chat_completion(
                 .acquire_credential_lease(credential_id)
                 .await
                 .and_then(|lease| lease.into_material())
-                .map_err(AppError::unauthorized)?;
+                .map_err(|error| dynamic_lease_error(credential_source, error))?;
 
             let (completion, upstream_model) = match complete_with_optional_controller_refresh(
                 creds,
@@ -1268,8 +1305,8 @@ async fn create_chat_completion(
                         }
                     }
                     let error = error.context(format!(
-                        "upstream request failed (credential_source=claim, requested_model={})",
-                        requested_model,
+                        "upstream request failed (credential_source={}, requested_model={})",
+                        credential_source, requested_model,
                     ));
                     return Err(AppError::upstream(error));
                 }
@@ -1537,11 +1574,7 @@ async fn create_speech(
             }
         }
         ProxyBackend::RemoteDynamic => {
-            let credential_id = claim_credential_id.ok_or_else(|| {
-                AppError::unauthorized(anyhow!(
-                    "proxy token missing credential_id for BYOC request"
-                ))
-            })?;
+            let (credential_id, credential_source) = dynamic_lease_target(claims.as_ref())?;
 
             let Some(controller) = state.controller.as_ref() else {
                 return Err(AppError::unauthorized(anyhow!(
@@ -1554,7 +1587,7 @@ async fn create_speech(
                     .acquire_credential_lease(credential_id)
                     .await
                     .and_then(|lease| lease.into_material())
-                    .map_err(AppError::unauthorized)?,
+                    .map_err(|error| dynamic_lease_error(credential_source, error))?,
                 Some(credential_id),
             )
         }
@@ -1631,11 +1664,7 @@ async fn create_transcription(
             }
         }
         ProxyBackend::RemoteDynamic => {
-            let credential_id = claim_credential_id.ok_or_else(|| {
-                AppError::unauthorized(anyhow!(
-                    "proxy token missing credential_id for BYOC request"
-                ))
-            })?;
+            let (credential_id, credential_source) = dynamic_lease_target(claims.as_ref())?;
 
             let Some(controller) = state.controller.as_ref() else {
                 return Err(AppError::unauthorized(anyhow!(
@@ -1648,7 +1677,7 @@ async fn create_transcription(
                     .acquire_credential_lease(credential_id)
                     .await
                     .and_then(|lease| lease.into_material())
-                    .map_err(AppError::unauthorized)?,
+                    .map_err(|error| dynamic_lease_error(credential_source, error))?,
                 Some(credential_id),
             )
         }
@@ -2826,6 +2855,122 @@ mod tests {
                 .message
                 .contains("controller credential lease renewal failed")
         );
+    }
+
+    /// A controller-signed token with the given `run_id` and `credential_id`
+    /// claims and nothing else set.
+    fn controller_claims(run_id: Option<&str>, credential_id: Option<&str>) -> ProxyClaims {
+        ProxyClaims {
+            _aud: None,
+            _iss: None,
+            project_id: "project".to_string(),
+            runtime_id: None,
+            run_id: run_id.map(str::to_string),
+            credential_id: credential_id.map(str::to_string),
+            agent_handle: None,
+            agent_display_name: None,
+            agent_description: None,
+            exp: None,
+        }
+    }
+
+    const BYOC_REJECTION: &str = "proxy token missing credential_id for BYOC request";
+
+    #[test]
+    fn managed_ai_credential_id_matches_the_controller_literal() {
+        // The controller answers exactly this id from MANAGED_AI_OPENAI_API_KEY
+        // (runtime-controller::config::MANAGED_AI_CREDENTIAL_ID). Editing
+        // either constant alone must fail a suite.
+        assert_eq!(
+            MANAGED_AI_CREDENTIAL_ID,
+            "4d414e41-4745-4441-8949-4e5354414659"
+        );
+        assert!(Uuid::parse_str(MANAGED_AI_CREDENTIAL_ID).is_ok());
+    }
+
+    #[test]
+    fn dynamic_lease_target_leases_the_claimed_credential_first() {
+        // A BYOC token leases its own id whether or not it carries a run_id.
+        let claims = controller_claims(Some("run-1"), Some("cred-1"));
+        assert_eq!(
+            dynamic_lease_target(Some(&claims)).expect("claimed credential"),
+            ("cred-1", "claim")
+        );
+        let claims = controller_claims(None, Some("cred-1"));
+        assert_eq!(
+            dynamic_lease_target(Some(&claims)).expect("claimed credential"),
+            ("cred-1", "claim")
+        );
+    }
+
+    #[test]
+    fn dynamic_lease_target_falls_back_to_the_managed_credential_for_job_tokens() {
+        // A dispatch job token: run_id set, no credential (the managed lane).
+        let claims = controller_claims(Some("run-1"), None);
+        assert_eq!(
+            dynamic_lease_target(Some(&claims)).expect("managed fallback"),
+            (MANAGED_AI_CREDENTIAL_ID, "managed")
+        );
+        // A blank credential_id is no credential.
+        let claims = controller_claims(Some("run-1"), Some("   "));
+        assert_eq!(
+            dynamic_lease_target(Some(&claims)).expect("managed fallback"),
+            (MANAGED_AI_CREDENTIAL_ID, "managed")
+        );
+    }
+
+    #[test]
+    fn dynamic_lease_target_rejects_credential_less_tokens_without_a_run_id() {
+        // The agent-login and runtime-register envelopes: no run_id, no
+        // credential. They must keep the exact pre-existing rejection and
+        // never reach the managed lease.
+        for claims in [
+            controller_claims(None, None),
+            controller_claims(Some("   "), None),
+            controller_claims(None, Some("")),
+        ] {
+            let error = dynamic_lease_target(Some(&claims)).expect_err("no managed fallback");
+            assert_eq!(error.status, StatusCode::UNAUTHORIZED);
+            assert_eq!(error.message, BYOC_REJECTION);
+        }
+        // No claims at all (controller auth not required) is not a managed turn.
+        let error = dynamic_lease_target(None).expect_err("no managed fallback");
+        assert_eq!(error.status, StatusCode::UNAUTHORIZED);
+        assert_eq!(error.message, BYOC_REJECTION);
+        assert!(credential_id_from_claims(None).is_none());
+        assert!(run_id_from_claims(None).is_none());
+    }
+
+    #[test]
+    fn proxy_auth_mode_is_managed_only_for_credential_less_tokens() {
+        let mut claims = controller_claims(None, None);
+        assert_eq!(proxy_auth_mode(None), "managed");
+        assert_eq!(proxy_auth_mode(Some(&claims)), "managed");
+        claims.credential_id = Some("   ".to_string());
+        assert_eq!(proxy_auth_mode(Some(&claims)), "managed");
+        claims.credential_id = Some("cred-1".to_string());
+        assert_eq!(proxy_auth_mode(Some(&claims)), "byoc");
+    }
+
+    #[test]
+    fn managed_lease_failure_keeps_the_byoc_rejection_prefix() {
+        let error = dynamic_lease_error(
+            "managed",
+            anyhow!("controller credentials returned 404 Not Found"),
+        );
+        assert_eq!(error.status, StatusCode::UNAUTHORIZED);
+        assert!(
+            error
+                .message
+                .starts_with("proxy token missing credential_id for BYOC request"),
+            "unexpected message: {}",
+            error.message
+        );
+        assert!(error.message.contains("404 Not Found"));
+
+        let error = dynamic_lease_error("claim", anyhow!("controller credential lease failed"));
+        assert_eq!(error.status, StatusCode::UNAUTHORIZED);
+        assert_eq!(error.message, "controller credential lease failed");
     }
 
     #[test]

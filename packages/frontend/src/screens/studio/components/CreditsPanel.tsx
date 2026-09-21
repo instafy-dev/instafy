@@ -298,6 +298,9 @@ export function CreditsPanel() {
     if (normalized === "managed_ai_adjustment") {
       return "AI adjustment";
     }
+    if (normalized === "managed_ai_refund") {
+      return "AI refund";
+    }
     if (normalized === "hosted_runtime") {
       return "Hosted runtime";
     }

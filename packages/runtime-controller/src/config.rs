@@ -289,6 +289,18 @@ pub(crate) fn ensure_service_runtime_user_id_via_supabase(
     }
 }
 
+/// Fixed id the proxy leases for the managed ("Instafy AI") lane. It is not
+/// a `user_credentials` row: the internal credential-lease route answers it
+/// from `AppConfig::managed_ai_openai_api_key` without any user lookup, and
+/// `agent_jobs.credential_id` (a foreign key to `user_credentials`) keeps
+/// `NULL` for managed jobs. The same string is a constant in the proxy
+/// (`openai_proxy_server::proxy::MANAGED_AI_CREDENTIAL_ID`); keep them equal.
+pub const MANAGED_AI_CREDENTIAL_ID: &str = "4d414e41-4745-4441-8949-4e5354414659";
+
+pub fn managed_ai_credential_id() -> Uuid {
+    Uuid::from_u128(0x4d41_4e41_4745_4441_8949_4e53_5441_4659)
+}
+
 #[derive(Clone, Debug)]
 pub struct AppConfig {
     pub port: u16,
@@ -356,6 +368,13 @@ pub struct AppConfig {
     pub managed_ai_cached_input_usd_micros_per_1k: i64,
     pub managed_ai_output_usd_micros_per_1k: i64,
     pub managed_ai_startup_check: bool,
+    /// Controller-owned OpenAI API key for the managed lane. Proxies lease it
+    /// through the internal credential-lease route under
+    /// [`MANAGED_AI_CREDENTIAL_ID`], so a per-runtime proxy sidecar with no
+    /// static credentials of its own can still serve managed turns. Unset
+    /// keeps the static-proxy path: managed turns then need a proxy that
+    /// holds its own `OPENAI_API_KEY` or `auth.json`.
+    pub managed_ai_openai_api_key: Option<String>,
     pub tunnel_broker_hook_secret: Option<String>,
     pub git_event_hook_secret: Option<String>,
     pub _controller_external_url: Option<String>,
@@ -888,6 +907,14 @@ impl AppConfig {
                 .ok()
                 .and_then(|raw| raw.parse::<i64>().ok())
                 .unwrap_or(DEFAULT_MANAGED_AI_OUTPUT_USD_MICROS_PER_1K);
+        // Platform key served to proxies as the managed credential lease. Kept
+        // on the controller only; it never reaches runtime containers.
+        // Hosted deployments hand the managed key to the controller as
+        // OPENAI_API_KEY (it is also copied into the controller-side proxy),
+        // so honour that name as the fallback and keep the lease and the
+        // static proxy on one key.
+        let managed_ai_openai_api_key =
+            read_first_env(&["MANAGED_AI_OPENAI_API_KEY", "OPENAI_API_KEY"]);
 
         let tunnel_broker_hook_secret = std::env::var("TUNNEL_BROKER_HOOK_SECRET")
             .ok()
@@ -1119,6 +1146,7 @@ impl AppConfig {
             managed_ai_cached_input_usd_micros_per_1k,
             managed_ai_output_usd_micros_per_1k,
             managed_ai_startup_check,
+            managed_ai_openai_api_key,
             tunnel_broker_hook_secret,
             git_event_hook_secret,
             _controller_external_url: std::env::var("CONTROLLER_EXTERNAL_URL").ok(),

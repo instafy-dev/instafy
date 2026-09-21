@@ -2,6 +2,8 @@ import { describe, expect, it } from "vitest";
 
 import {
   isRecoverableRuntimeStartAlert,
+  isRuntimeAlertSupersededByStart,
+  RUNTIME_ALERT_SUPERSEDE_GRACE_MS,
   resolveAgentWaitingActivityCopy,
 } from "../runtimeAlertPresentation";
 
@@ -13,6 +15,81 @@ describe("isRecoverableRuntimeStartAlert", () => {
         "Runtime agent has not connected yet. Start the runtime so queued jobs can proceed.",
       ),
     ).toBe(true);
+  });
+});
+
+describe("isRuntimeAlertSupersededByStart", () => {
+  const since = 1_700_000_000_000;
+
+  it("never demotes without a live workspace start", () => {
+    expect(
+      isRuntimeAlertSupersededByStart({
+        alertTimestamp: since - 60 * 60 * 1000,
+        workspaceStarting: false,
+        workspaceStartingSince: null,
+      }),
+    ).toBe(false);
+    expect(
+      isRuntimeAlertSupersededByStart({
+        alertTimestamp: since - 60 * 60 * 1000,
+        workspaceStarting: false,
+        workspaceStartingSince: since,
+      }),
+    ).toBe(false);
+  });
+
+  it("never demotes when the start has no recorded edge", () => {
+    expect(
+      isRuntimeAlertSupersededByStart({
+        alertTimestamp: since - 60 * 60 * 1000,
+        workspaceStarting: true,
+        workspaceStartingSince: null,
+      }),
+    ).toBe(false);
+  });
+
+  it("keeps an alert produced by the live start itself at full volume", () => {
+    expect(
+      isRuntimeAlertSupersededByStart({
+        alertTimestamp: since + 2_000,
+        workspaceStarting: true,
+        workspaceStartingSince: since,
+      }),
+    ).toBe(false);
+    expect(
+      isRuntimeAlertSupersededByStart({
+        alertTimestamp: since - RUNTIME_ALERT_SUPERSEDE_GRACE_MS + 1,
+        workspaceStarting: true,
+        workspaceStartingSince: since,
+      }),
+    ).toBe(false);
+  });
+
+  it("demotes an alert that clearly predates the live start", () => {
+    expect(
+      isRuntimeAlertSupersededByStart({
+        alertTimestamp: since - RUNTIME_ALERT_SUPERSEDE_GRACE_MS - 1,
+        workspaceStarting: true,
+        workspaceStartingSince: since,
+      }),
+    ).toBe(true);
+    expect(
+      isRuntimeAlertSupersededByStart({
+        alertTimestamp: since - 45 * 60 * 1000,
+        workspaceStarting: true,
+        workspaceStartingSince: since,
+      }),
+    ).toBe(true);
+  });
+
+  it("keeps an alert without a usable timestamp visible", () => {
+    expect(
+      isRuntimeAlertSupersededByStart({
+        alertTimestamp: undefined,
+        workspaceStarting: true,
+        workspaceStartingSince: since,
+      }),
+    ).toBe(false);
   });
 });
 
