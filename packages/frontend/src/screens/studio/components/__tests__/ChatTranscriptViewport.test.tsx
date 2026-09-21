@@ -181,9 +181,23 @@ describe("ChatSpeakerStickyOverlay", () => {
       "Taylor",
     );
 
+    // Hidden keeps the last pill in the box, faded: the fade-out has a pill
+    // to fade, and the box keeps its height so the roster beside it holds
+    // still.
     const hidden = await renderOverlay(null);
     expect(hidden.overlay.getAttribute("aria-hidden")).toBe("true");
     expect((hidden.overlay.firstElementChild as HTMLElement).className).toContain("opacity-0");
-    expect(hidden.overlay.textContent).toBe("");
+    expect(hidden.overlay.textContent).toContain("Taylor");
+  });
+
+  it("reserves the pill's height before any speaker has shown, so the roster never moves", async () => {
+    const { overlay } = await renderOverlay(null);
+    expect(overlay.textContent).toBe("");
+    // The pill's face plus its border: 28px inline below sm, 32px at sm+.
+    expect(overlay.className).toContain("min-h-[30px]");
+    expect(overlay.className).toContain("sm:min-h-[34px]");
+    // The pill sits in a flex box, not on a text line, so no line-box air
+    // is added above the reserved height.
+    expect((overlay.firstElementChild as HTMLElement).className).toContain("flex");
   });
 });
