@@ -700,6 +700,12 @@ struct ProjectSummary {
     can_share: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     can_manage: Option<bool>,
+    /// The newest of the project's own timestamps and its conversations'
+    /// last messages, so a client with nothing remembered can open the space
+    /// the person last worked in rather than the first row. Only the list
+    /// endpoints compute it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    last_activity_at: Option<String>,
 }
 
 impl ProjectSummary {
@@ -2378,11 +2384,13 @@ async fn list_accessible_projects(
                 "select p.id, p.org_id, p.name, p.icon, p.color, to_jsonb(p) ->> 'avatar_url' as avatar_url, p.owner_user_id, p.project_type, p.status,
                         o.slug as org_slug, o.name as org_name,
                         null::text as project_member_role,
-                        null::text as org_member_role
+                        null::text as org_member_role,
+                        greatest(p.created_at, p.updated_at,
+                                 (select max(c.last_message_at) from conversations c where c.project_id = p.id)) as last_activity_at
                  from projects p
                  left join organizations o on o.id = p.org_id
                  where p.status <> 'deleted'
-                 order by p.id
+                 order by last_activity_at desc nulls last, p.id
                  limit $1",
                 &[&ACCESSIBLE_PROJECT_LIST_LIMIT],
             )
@@ -2410,7 +2418,9 @@ async fn list_accessible_projects(
                  select p.id, p.org_id, p.name, p.icon, p.color, to_jsonb(p) ->> 'avatar_url' as avatar_url, p.owner_user_id, p.project_type, p.status,
                         o.slug as org_slug, o.name as org_name,
                         access_pm.role as project_member_role,
-                        access_om.role as org_member_role
+                        access_om.role as org_member_role,
+                        greatest(p.created_at, p.updated_at,
+                                 (select max(c.last_message_at) from conversations c where c.project_id = p.id)) as last_activity_at
                  from accessible_project_ids accessible
                  join projects p on p.id = accessible.id
                  left join organizations o on o.id = p.org_id
@@ -2419,7 +2429,7 @@ async fn list_accessible_projects(
                  left join org_memberships access_om
                    on access_om.org_id = p.org_id and access_om.user_id = $1
                  where p.status <> 'deleted'
-                 order by p.id
+                 order by last_activity_at desc nulls last, p.id
                  limit $2",
                 &[&user_id, &ACCESSIBLE_PROJECT_LIST_LIMIT],
             )
@@ -5480,6 +5490,11 @@ fn map_project_summary(row: tokio_postgres::Row) -> ProjectSummary {
         can_write: None,
         can_share: None,
         can_manage: None,
+        last_activity_at: row
+            .try_get::<_, Option<DateTime<Utc>>>("last_activity_at")
+            .ok()
+            .flatten()
+            .map(|value| value.to_rfc3339()),
     }
 }
 

@@ -54,6 +54,8 @@ export interface ControllerProjectSummary extends ProjectIdentity {
   ownerUserId?: string | null;
   projectType?: string | null;
   status?: string | null;
+  /** Newest of the project's own timestamps and its conversations' last messages; list endpoints only. */
+  lastActivityAt?: string | null;
   effectiveRole?: "viewer" | "builder" | "admin" | "owner" | string | null;
   canWrite?: boolean;
   canShare?: boolean;

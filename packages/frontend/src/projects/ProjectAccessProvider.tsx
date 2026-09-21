@@ -74,17 +74,27 @@ async function findExistingProjectId(
     if (result.status !== "success") {
       return null;
     }
-    const live = result.projects.find(
-      (project) =>
-        isUUID(project.projectId) &&
-        project.projectId !== exclude &&
-        project.projectType !== "sandbox" &&
-        project.status !== "archived",
-    );
-    return live?.projectId ?? null;
+    // The last space worked in, when the list says which that is; the
+    // controller orders by it too, so a list without the field falls back
+    // to its order.
+    const live = result.projects
+      .filter(
+        (project) =>
+          isUUID(project.projectId) &&
+          project.projectId !== exclude &&
+          project.projectType !== "sandbox" &&
+          project.status !== "archived",
+      )
+      .sort((a, b) => activityTime(b.lastActivityAt) - activityTime(a.lastActivityAt));
+    return live[0]?.projectId ?? null;
   } catch {
     return null;
   }
+}
+
+function activityTime(value: string | null | undefined): number {
+  const parsed = value ? Date.parse(value) : Number.NaN;
+  return Number.isFinite(parsed) ? parsed : 0;
 }
 
 function readStoredProjectId(): string | null {
