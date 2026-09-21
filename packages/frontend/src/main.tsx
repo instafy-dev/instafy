@@ -14,6 +14,9 @@ import { installDesktopUpdateBootstrap } from "./desktop/updates/bootstrap";
 import { installNativeOtaBootstrap } from "./mobile/ota/bootstrap";
 import { installNativeDeepLinkBootstrap } from "./native/nativeDeepLinks";
 import { installStudioPerformanceNavigation } from "./telemetry/studioPerformanceNavigation";
+// Installs the visibility and idle gate into React Query's focusManager before
+// any query mounts, so interval queries pause while nobody is looking.
+import "./runtime/pollingGate";
 
 const NOTIFICATIONS_DEBUG_STORAGE_KEY = "instafy.notifications.debug";
 const SW_PUSH_DEBUG_EVENT = "instafy:sw-push-debug";

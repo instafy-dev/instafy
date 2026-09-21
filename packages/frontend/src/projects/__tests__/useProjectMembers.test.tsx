@@ -4,7 +4,8 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { act, type ReactNode } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { useProjectMembers } from "../useProjectMembers";
+import { PROJECT_ACCESS_REFRESH_EVENT } from "../projectAccessEvents";
+import { MEMBERS_CHANGED_EVENT, useProjectMembers } from "../useProjectMembers";
 
 const mocks = vi.hoisted(() => ({
   userId: "user-1" as string | null,
@@ -54,6 +55,7 @@ describe("useProjectMembers", () => {
   });
 
   afterEach(async () => {
+    vi.useRealTimers();
     await act(async () => root.unmount());
     queryClient.clear();
     container.remove();
@@ -128,4 +130,65 @@ describe("useProjectMembers", () => {
     expect(mocks.listMembers).not.toHaveBeenCalled();
     expect(container.textContent).toBe("");
   });
+
+  it("does not refetch on a timer", async () => {
+    vi.useFakeTimers();
+    mocks.listMembers.mockResolvedValue([
+      { createdAt: "2026-09-06", email: "member@example.com", role: "viewer", userId: "user-2" },
+    ]);
+    await act(async () => root.render(<Providers><Probe /></Providers>));
+    await act(async () => { await vi.advanceTimersByTimeAsync(50); });
+    expect(container.textContent).toContain("member@example.com");
+    expect(mocks.listMembers).toHaveBeenCalledTimes(1);
+
+    await act(async () => { await vi.advanceTimersByTimeAsync(120_000); });
+    expect(mocks.listMembers).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([
+    [PROJECT_ACCESS_REFRESH_EVENT, { projectId: "project-1" }],
+    [PROJECT_ACCESS_REFRESH_EVENT, { projectId: null }],
+    [PROJECT_ACCESS_REFRESH_EVENT, undefined],
+    [MEMBERS_CHANGED_EVENT, { projectId: "project-1", orgId: "org-1" }],
+    ["instafy:controller-stream-reconnected", undefined],
+  ])("refetches the directory on %s with detail %o", async (eventName, detail) => {
+    mocks.listMembers.mockResolvedValueOnce([
+      { createdAt: "2026-09-06", email: "member@example.com", role: "viewer", userId: "user-2" },
+    ]);
+    await act(async () => root.render(<Providers><Probe /></Providers>));
+    await act(async () => {
+      await vi.waitFor(() => { expect(container.textContent).toContain("member@example.com"); });
+    });
+
+    mocks.listMembers.mockResolvedValueOnce([
+      { createdAt: "2026-09-06", email: "member@example.com", role: "viewer", userId: "user-2" },
+      { createdAt: "2026-09-07", email: "joined@example.com", role: "builder", userId: "user-3" },
+    ]);
+    await act(async () => {
+      window.dispatchEvent(new CustomEvent(eventName, { detail }));
+    });
+    await act(async () => {
+      await vi.waitFor(() => { expect(container.textContent).toContain("joined@example.com"); });
+    });
+    expect(mocks.listMembers).toHaveBeenCalledTimes(2);
+  });
+
+  it.each([PROJECT_ACCESS_REFRESH_EVENT, MEMBERS_CHANGED_EVENT])(
+    "ignores %s for another project",
+    async (eventName) => {
+      mocks.listMembers.mockResolvedValue([
+        { createdAt: "2026-09-06", email: "member@example.com", role: "viewer", userId: "user-2" },
+      ]);
+      await act(async () => root.render(<Providers><Probe /></Providers>));
+      await act(async () => {
+        await vi.waitFor(() => { expect(container.textContent).toContain("member@example.com"); });
+      });
+
+      await act(async () => {
+        window.dispatchEvent(new CustomEvent(eventName, { detail: { projectId: "project-2" } }));
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      });
+      expect(mocks.listMembers).toHaveBeenCalledTimes(1);
+    },
+  );
 });

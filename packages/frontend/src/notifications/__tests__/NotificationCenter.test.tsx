@@ -143,6 +143,62 @@ describe("notification center", () => {
     expect(mocks.state).not.toHaveBeenCalledWith(expect.objectContaining({ action: "seen" }));
   });
 
+  it("presents from the unread page refresh already fetched (2 list calls per tick, not 3)", async () => {
+    expect(mocks.list).toHaveBeenCalledTimes(2);
+    expect(mocks.list.mock.calls.map(([args]) => args.view)).toEqual(["all", "unread"]);
+    mocks.foreground = true;
+    mocks.list.mockClear();
+    await act(async () => {
+      window.dispatchEvent(new Event("focus"));
+      await vi.dynamicImportSettled();
+    });
+    expect(mocks.list.mock.calls.map(([args]) => args.view)).toEqual(["all", "unread"]);
+    expect(mocks.show).toHaveBeenCalledWith("Support replied to your report.", "info", 10_000, expect.objectContaining({ id: `notification:${A}:${A}` }));
+  });
+
+  describe("polling", () => {
+    function setVisibility(state: "visible" | "hidden") {
+      Object.defineProperty(document, "visibilityState", { configurable: true, get: () => state });
+      document.dispatchEvent(new Event("visibilitychange"));
+    }
+    beforeEach(async () => {
+      await act(async () => root.unmount());
+      vi.useFakeTimers();
+      setVisibility("visible");
+      window.dispatchEvent(new Event("pointerdown"));
+      mocks.list.mockClear();
+      root = createRoot(container);
+      await act(async () => root.render(<Harness />));
+      expect(mocks.list).toHaveBeenCalledTimes(2);
+    });
+    afterEach(() => { setVisibility("visible"); vi.useRealTimers(); });
+    it("advances 20 s while active and polls once", async () => {
+      await act(async () => { await vi.advanceTimersByTimeAsync(19_999); });
+      expect(mocks.list).toHaveBeenCalledTimes(2);
+      await act(async () => { await vi.advanceTimersByTimeAsync(1); });
+      expect(mocks.list).toHaveBeenCalledTimes(4);
+      expect(mocks.list.mock.calls.slice(2).map(([args]) => args.view)).toEqual(["all", "unread"]);
+    });
+    it("does not poll while the document is hidden and polls once when it is visible again", async () => {
+      await act(async () => setVisibility("hidden"));
+      await act(async () => { await vi.advanceTimersByTimeAsync(120_000); });
+      expect(mocks.list).toHaveBeenCalledTimes(2);
+      await act(async () => setVisibility("visible"));
+      expect(mocks.list).toHaveBeenCalledTimes(4);
+    });
+    it("backs off to 120 s after three minutes without input", async () => {
+      await act(async () => { await vi.advanceTimersByTimeAsync(5_000); });
+      await act(async () => window.dispatchEvent(new Event("pointerdown")));
+      await act(async () => { await vi.advanceTimersByTimeAsync(180_000); });
+      const settled = mocks.list.mock.calls.length;
+      expect(settled).toBe(2 + 9 * 2);
+      await act(async () => { await vi.advanceTimersByTimeAsync(115_000); });
+      expect(mocks.list).toHaveBeenCalledTimes(settled);
+      await act(async () => { await vi.advanceTimersByTimeAsync(5_000); });
+      expect(mocks.list).toHaveBeenCalledTimes(settled + 2);
+    });
+  });
+
   it("acknowledges a queued foreground toast only on actual presentation", async () => {
     mocks.foreground = true;
     await act(async () => {

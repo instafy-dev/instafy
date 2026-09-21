@@ -5,6 +5,10 @@ import type { NotificationPage, NotificationPreferences, ProductNotification } f
 import { claimNotificationPresentation, NOTIFICATION_RECEIVED_EVENT } from "./notificationPresentation";
 import { NOTIFICATION_PREFERENCES_CHANGED_EVENT } from "./notificationPreferencesEvents";
 import { areMessageNotificationsEnabled, isAppInForeground, notifyAssistantMessage } from "./assistantMessageNotifications";
+import { useGatedInterval } from "../runtime/pollingGate";
+
+const POLL_ACTIVE_MS = 20_000;
+const POLL_IDLE_MS = 120_000;
 
 const EMPTY_PAGE: NotificationPage = { items: [], nextCursor: null, unreadCount: 0, asOf: "" };
 
@@ -35,7 +39,11 @@ export function useNotificationCenter({ userId, accessToken, navigate }: { userI
   const oldest = useRef<{ session: typeof session; at: string; id: string } | null>(null);
   const inFlight = useRef<{ session: typeof session; promise: Promise<void> } | null>(null);
   const preferencesRef = useRef<{ session: typeof session; value: NotificationPreferences } | null>(null);
+  // The newest unread page from the last refresh, so presentation does not
+  // request it a second time on every tick.
+  const latestUnread = useRef<{ session: typeof session; items: ProductNotification[] } | null>(null);
   const toastIds = useRef(new Set<string>());
+  const pollRef = useRef<(() => Promise<void>) | null>(null);
   const { showStatus, hideStatus } = useStatus();
 
   const refresh = useCallback((options?: { force?: boolean }): Promise<void> => {
@@ -77,6 +85,7 @@ export function useNotificationCenter({ userId, accessToken, navigate }: { userI
         do {
           unread = await controllerClient.notifications.list({ view: "unread", before: unreadCursor, accessToken });
           if (!valid()) return;
+          if (!unreadCursor) latestUnread.current = { session, items: unread.items };
           unread.items.forEach(item => items.set(item.id, item));
           if (!unread.nextCursor || unread.nextCursor === unreadCursor) break;
           unreadCursor = unread.nextCursor;
@@ -126,11 +135,11 @@ export function useNotificationCenter({ userId, accessToken, navigate }: { userI
       try {
       await refresh();
       if (!current() || stopped) return;
-      // Presentation is independent of Home's paging and never marks a row read.
-      let unread: NotificationPage;
-      try { unread = await controllerClient.notifications.list({ view: "unread", accessToken }); } catch { return; }
-      if (!current() || stopped) return;
-      for (const item of [...unread.items].reverse()) {
+      // Presentation is independent of Home's paging and never marks a row
+      // read. It reuses the unread page refresh() just fetched.
+      const unread = latestUnread.current?.session === session ? latestUnread.current.items : null;
+      if (!unread) return;
+      for (const item of [...unread].reverse()) {
         if (item.seenAt || item.archivedAt || item.readAt) continue;
         const prefs = preferencesRef.current?.session === session ? preferencesRef.current.value : null;
         if (!prefs || prefs.preferences.some((pref) => pref.category === item.category && pref.channel === "local" && !pref.enabled)) continue;
@@ -170,13 +179,16 @@ export function useNotificationCenter({ userId, accessToken, navigate }: { userI
       }
       } finally { presenting = false; }
     };
+    pollRef.current = poll;
     void poll();
-    const timer = window.setInterval(() => void poll(), 20_000);
     const receive = () => void poll();
     window.addEventListener("focus", receive);
     window.addEventListener(NOTIFICATION_RECEIVED_EVENT, receive);
-    return () => { stopped = true; window.clearInterval(timer); window.removeEventListener("focus", receive); window.removeEventListener(NOTIFICATION_RECEIVED_EVENT, receive); };
+    return () => { stopped = true; pollRef.current = null; window.removeEventListener("focus", receive); window.removeEventListener(NOTIFICATION_RECEIVED_EVENT, receive); };
   }, [accessToken, current, navigate, refresh, session, showStatus, userId]);
+  // Every 20 s while the user is active, every 2 min once idle, never while
+  // hidden; focus and NOTIFICATION_RECEIVED_EVENT stay the wake path.
+  useGatedInterval(() => void pollRef.current?.(), POLL_ACTIVE_MS, { idleMs: POLL_IDLE_MS });
 
   const markRead = useCallback(async (items: ProductNotification[]): Promise<boolean> => {
     if (!userId || !accessToken || !current()) return false;
