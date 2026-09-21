@@ -11,6 +11,7 @@ import { pickerListRowTextClassName } from "../../../components/listRowStyles";
 import { EntityRow } from "../../../components/EntityRow";
 import { Heading } from "../../../components/Heading";
 import { Text } from "../../../components/Text";
+import { SettingsNavigationLabelContext } from "../../../components/SettingsNavigationLabelContext";
 import { StudioMenu, StudioMenuItem } from "../../../components/aria/StudioMenu";
 import { StudioDialogPopover } from "../../../components/aria/StudioPopover";
 import { useNativeBackButtonAction } from "../../../native/useNativeBackButtonAction";
@@ -99,6 +100,17 @@ export function SettingsShell({
     return () => observer.disconnect();
   }, []);
   const hasCategories = Boolean(categories && categories.length > 0 && activeCategoryId && onCategoryChange);
+  const activeCategory = categories?.find(category => category.id === activeCategoryId) ?? categories?.[0];
+  const activeChild = activeCategory?.children?.find(child => child.id === activeChildCategoryId)
+    ?? activeCategory?.children?.[0];
+  const repeatedHeading = hasCategories && !useSideNavigation && !useCompactTabs
+    ? activeChild?.label ?? activeCategory?.label ?? null
+    : null;
+  const content = (
+    <SettingsNavigationLabelContext.Provider value={repeatedHeading}>
+      <div className="@container/settings-content min-w-0 space-y-4">{children}</div>
+    </SettingsNavigationLabelContext.Provider>
+  );
   const showTitle = !hideTitle && (titleVisibility === "always" || isLargeScreen);
   const subtitleAllowed = subtitleVisibility === "always" || isLargeScreen;
   const scopeAllowed = scopeVisibility === "always" || isLargeScreen;
@@ -319,10 +331,10 @@ export function SettingsShell({
               </div>
             </nav>
           ) : null}
-          <div className="@container/settings-content min-w-0 space-y-4">{children}</div>
+          {content}
         </div>
       ) : (
-        <div className="@container/settings-content min-w-0 space-y-4">{children}</div>
+        content
       )}
     </div>
   );

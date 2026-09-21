@@ -4,6 +4,7 @@ import { IdentityPhotoButton } from "../components/IdentityPhotoButton";
 import { Button } from "../components/Button";
 import { SettingsFormLayout, SettingsIdentityRow } from "../components/SettingsFormLayout";
 import { SettingsFormActions } from "../components/SettingsFormActions";
+import { useHeadingRepeatedInSettingsNavigation } from "../components/SettingsNavigationLabelContext";
 import { Field } from "../components/Field";
 import { Input } from "../components/Input";
 import { PROFILE_BIO_MAX_LENGTH } from "@instafy/sdk/human-profiles";
@@ -38,6 +39,7 @@ export function ProfileEditor({ variant = "panel", onDone }: ProfileEditorProps)
     bio.trim() !== (profile?.bio ?? "");
   const bioTooLong = Array.from(bio).length > PROFILE_BIO_MAX_LENGTH;
   const compact = variant === "menu";
+  const repeatedHeading = useHeadingRepeatedInSettingsNavigation("Profile");
   const profileUnavailable = loading || (!profile && Boolean(error));
 
   const handleFileUpload = useCallback((file: File) => {
@@ -91,10 +93,10 @@ export function ProfileEditor({ variant = "panel", onDone }: ProfileEditorProps)
     <SettingsFormLayout className="@container/profile-editor" data-testid="profile-editor">
       {!compact ? (
         <div>
-          <Text as="h3" variant="bodyStrong" tone="primary">
+          <Text as="h3" variant="bodyStrong" tone="primary" className={repeatedHeading ? "sr-only" : undefined}>
             Profile
           </Text>
-          <Text variant="caption" tone="muted" className="mt-1">
+          <Text variant="caption" tone="muted" className={repeatedHeading ? undefined : "mt-1"}>
             Introduce yourself to teammates with a name, photo, and short bio.
           </Text>
         </div>

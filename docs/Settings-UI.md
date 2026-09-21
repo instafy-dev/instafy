@@ -11,6 +11,9 @@ including when Studio has another panel open.
   closes the picker and changes the route. Browsing categories does not add history entries.
 - Escape and native Back return one level, then dismiss the picker. Keyboard focus returns
   to its trigger on dismissal and follows the selected category when the layout changes.
+- When the compact picker already names the content section, keep the matching heading
+  for screen readers without repeating it visually. Descriptions, actions and other section
+  headings remain visible. Wide category lists and compact tabs retain content headings.
 
 Your settings has Profile, Appearance, Notifications, Preferences and Advanced categories.
 Appearance owns the device's System/Light/Dark theme; Preferences owns assistant file-saving
