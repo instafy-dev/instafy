@@ -19,6 +19,13 @@ their latest message time, falling back to the chat's update or creation time.
 Files, settings and actions keep their navigation order; there is no relevance
 ranking yet.
 
+The **All chats** drawer is for browsing and managing chats in the current space.
+Its **Filter by name** field filters the loaded chat titles, retaining thread
+context; it does not search message contents. The status menu switches between
+Active, Archived, Hidden and Trash. This filter stays separate from the header
+search so the list can be narrowed without leaving it. Use the header search to
+find words inside messages or search across spaces.
+
 Each message result shows its chat, organization/space, role, date and a plain-text
 excerpt with highlighted matches. Selecting it opens a contiguous history window
 around that exact message and briefly highlights the message. Earlier and later
