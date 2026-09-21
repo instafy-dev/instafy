@@ -282,6 +282,14 @@ export function useChatCredentialGate({
   const [credentialGateStatus, setCredentialGateStatus] = useState<CredentialGateStatusState>(
     () => cachedCredentialGate?.gateStatus ?? createDefaultCredentialGateStatusState(runtimeControllerEnabled),
   );
+  // The cache records what a key resolved live. A seed is another key's
+  // answer and stays cached there on its own clock; re-recording it under this
+  // key with a fresh clock would keep an aging answer alive for another full
+  // TTL and make it the freshest seed for every later space.
+  const seededCredentialGateRef = useRef<CredentialGateCacheEntry | null>(cachedCredentialGate);
+  // The commit that changes the key still carries the previous key's state,
+  // so the key the state belongs to follows one commit behind.
+  const [credentialStateKey, setCredentialStateKey] = useState(credentialGateCacheKey);
   const credentialsRequired =
     runtimeControllerEnabled && credentialRequirements.requiresUserCredentials !== false;
   const credentialsReady = !credentialsRequired || credentialGateStatus.status === "ready";
@@ -323,12 +331,14 @@ export function useChatCredentialGate({
       return;
     }
     const cached = readSeededCredentialGateCache(credentialGateCacheKey, currentUserId);
+    seededCredentialGateRef.current = cached;
     setCredentialRequirements(cached?.requirements ?? createDefaultCredentialRequirementState(true));
     setCredentialGateStatus(cached?.gateStatus ?? createDefaultCredentialGateStatusState(true));
+    setCredentialStateKey(credentialGateCacheKey);
   }, [credentialGateCacheKey, currentUserId, runtimeControllerEnabled]);
 
   useEffect(() => {
-    if (!runtimeControllerEnabled) {
+    if (!runtimeControllerEnabled || credentialStateKey !== credentialGateCacheKey) {
       return;
     }
     const requirementsResolved = credentialRequirements.requiresUserCredentials !== null;
@@ -350,13 +360,17 @@ export function useChatCredentialGate({
     if (!hasResolvedRequirements && !hasResolvedGateStatus) {
       return;
     }
+    const seed = seededCredentialGateRef.current;
+    if (seed && nextRequirements === seed.requirements && nextGateStatus === seed.gateStatus) {
+      return;
+    }
 
     writeCredentialGateCache(credentialGateCacheKey, {
       requirements: { ...nextRequirements },
       gateStatus: { ...nextGateStatus },
       updatedAt: Date.now(),
     });
-  }, [credentialGateCacheKey, credentialGateStatus, credentialRequirements, runtimeControllerEnabled]);
+  }, [credentialGateCacheKey, credentialGateStatus, credentialRequirements, credentialStateKey, runtimeControllerEnabled]);
 
   const openAiOnboarding = useCallback((options?: { mode?: AiConnectWizardMode }) => {
     const mode = options?.mode ?? "default";

@@ -116,27 +116,26 @@ describe("Studio overview destination policy", () => {
 });
 
 describe("resolveWorkspaceEmptyState", () => {
+  const base = { hasActiveTab: false, conversationTabsReady: false, historyError: false, projectAccessBlocked: false };
+
   it("paints a quiet frame while a space's conversation tabs are still hydrating", () => {
-    expect(
-      resolveWorkspaceEmptyState({ hasActiveTab: false, conversationTabsReady: false, projectAccessBlocked: false }),
-    ).toBe("hydrating");
+    expect(resolveWorkspaceEmptyState(base)).toBe("hydrating");
   });
 
   it("keeps the real empty state once tabs are ready and none is open", () => {
-    expect(
-      resolveWorkspaceEmptyState({ hasActiveTab: false, conversationTabsReady: true, projectAccessBlocked: false }),
-    ).toBe("empty");
+    expect(resolveWorkspaceEmptyState({ ...base, conversationTabsReady: true })).toBe("empty");
+  });
+
+  it("drops the quiet frame when the history fetch failed, since nothing will resolve it", () => {
+    expect(resolveWorkspaceEmptyState({ ...base, historyError: true })).toBe("empty");
+    expect(resolveWorkspaceEmptyState({ ...base, conversationTabsReady: true, historyError: true })).toBe("empty");
   });
 
   it("never applies while a tab is active or access is blocked", () => {
-    expect(
-      resolveWorkspaceEmptyState({ hasActiveTab: true, conversationTabsReady: false, projectAccessBlocked: false }),
-    ).toBeNull();
-    expect(
-      resolveWorkspaceEmptyState({ hasActiveTab: true, conversationTabsReady: true, projectAccessBlocked: false }),
-    ).toBeNull();
-    expect(
-      resolveWorkspaceEmptyState({ hasActiveTab: false, conversationTabsReady: false, projectAccessBlocked: true }),
-    ).toBeNull();
+    expect(resolveWorkspaceEmptyState({ ...base, hasActiveTab: true })).toBeNull();
+    expect(resolveWorkspaceEmptyState({ ...base, hasActiveTab: true, conversationTabsReady: true })).toBeNull();
+    expect(resolveWorkspaceEmptyState({ ...base, hasActiveTab: true, historyError: true })).toBeNull();
+    expect(resolveWorkspaceEmptyState({ ...base, projectAccessBlocked: true })).toBeNull();
+    expect(resolveWorkspaceEmptyState({ ...base, historyError: true, projectAccessBlocked: true })).toBeNull();
   });
 });

@@ -140,4 +140,84 @@ describe("useChatCredentialGate cache seeding across spaces", () => {
     expect(captured?.credentialRequirements.requiresUserCredentials).toBeNull();
     expect(captured?.credentialInventoryStatus).toBe("loading");
   });
+
+  const TTL_MS = 5 * 60_000;
+
+  it("keeps a seed on its source clock so it cannot outlive the TTL through later spaces", async () => {
+    const start = 1_700_000_000_000;
+    const now = vi.spyOn(Date, "now").mockReturnValue(start);
+    try {
+      resolvedRequirements();
+      await act(async () => root.render(<Harness options={baseOptions({ currentUserId: "user-3" })} />));
+      expect(captured?.credentialInventoryStatus).toBe("missing");
+
+      // Just inside the TTL the answer still seeds a new space, but it must
+      // not be re-recorded under that space with a fresh clock.
+      now.mockReturnValue(start + TTL_MS - 1_000);
+      pendingRequirements();
+      await remount(baseOptions({ currentUserId: "user-3", activeProjectId: "project-b", activeConversationId: "conv-2" }));
+      expect(captured?.credentialRequirements.requiresUserCredentials).toBe(true);
+      expect(captured?.credentialInventoryStatus).toBe("missing");
+
+      // Two seconds later the only live answer is older than the TTL.
+      now.mockReturnValue(start + TTL_MS + 1_000);
+      await remount(baseOptions({ currentUserId: "user-3", activeProjectId: "project-c", activeConversationId: "conv-3" }));
+      expect(captured?.credentialRequirements.requiresUserCredentials).toBeNull();
+      expect(captured?.credentialInventoryStatus).toBe("loading");
+    } finally {
+      now.mockRestore();
+    }
+  });
+
+  it("never records the previous space's answer under the next space's key", async () => {
+    const start = 1_700_000_000_000;
+    const now = vi.spyOn(Date, "now").mockReturnValue(start);
+    try {
+      resolvedRequirements();
+      await act(async () => root.render(<Harness options={baseOptions({ currentUserId: "user-4" })} />));
+      expect(captured?.credentialInventoryStatus).toBe("missing");
+
+      // A space switch reaches the mounted hook one commit before the tab
+      // strip tears the chat down, so the key changes in place while the
+      // state still belongs to project-a.
+      now.mockReturnValue(start + TTL_MS - 1_000);
+      pendingRequirements();
+      await act(async () => {
+        root.render(
+          <Harness options={baseOptions({ currentUserId: "user-4", activeProjectId: "project-b", activeConversationId: "conv-2" })} />,
+        );
+      });
+      expect(captured?.credentialRequirements.requiresUserCredentials).toBe(true);
+
+      now.mockReturnValue(start + TTL_MS + 1_000);
+      await remount(baseOptions({ currentUserId: "user-4", activeProjectId: "project-c", activeConversationId: "conv-3" }));
+      expect(captured?.credentialRequirements.requiresUserCredentials).toBeNull();
+      expect(captured?.credentialInventoryStatus).toBe("loading");
+    } finally {
+      now.mockRestore();
+    }
+  });
+
+  it("still refreshes the clock when this space resolves the answer live", async () => {
+    const start = 1_700_000_000_000;
+    const now = vi.spyOn(Date, "now").mockReturnValue(start);
+    try {
+      resolvedRequirements();
+      await act(async () => root.render(<Harness options={baseOptions({ currentUserId: "user-5" })} />));
+      expect(captured?.credentialInventoryStatus).toBe("missing");
+
+      // project-b resolves live just inside the TTL, which is a real answer.
+      now.mockReturnValue(start + TTL_MS - 1_000);
+      await remount(baseOptions({ currentUserId: "user-5", activeProjectId: "project-b", activeConversationId: "conv-2" }));
+      expect(captured?.credentialInventoryStatus).toBe("missing");
+
+      now.mockReturnValue(start + TTL_MS + 1_000);
+      pendingRequirements();
+      await remount(baseOptions({ currentUserId: "user-5", activeProjectId: "project-c", activeConversationId: "conv-3" }));
+      expect(captured?.credentialRequirements.requiresUserCredentials).toBe(true);
+      expect(captured?.credentialInventoryStatus).toBe("missing");
+    } finally {
+      now.mockRestore();
+    }
+  });
 });
