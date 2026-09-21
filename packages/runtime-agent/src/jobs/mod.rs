@@ -7303,7 +7303,7 @@ Avoid creating dependency caches or stores in the canonical workspace root when 
               - Broad or cross-chat coordination should search compact context cards and prior conversations first. Save/update compact cards for durable work focus and open questions; do not invent a separate first-class topic-focus object.\n\
               - Same agent handle does not imply global memory in a new chat. Recover cross-chat context explicitly with context cards and `instafy conversation search/show --include-threads` before relying on old thread knowledge.\n\
               - If you emit `request_integration`, your `summary` must actively close the gap with: (1) what is blocked, (2) the exact next UI step using the action card in this message, and (3) the exact retry phrase the user should send.\n\
-              - If you emit `request_secret`, keep `summary` short: what is blocked, and that the value goes in the card on this message. Do not write a retry phrase or any instruction to reply: the card saves the value and continues the run itself. Do not name the environment variable in `summary`; call the value what the provider calls it on screen. Assume the person has never made an API token and has never seen the provider's developer screens. Teaching them is not `summary`'s job: carry the skill's own \"## Getting started\" walkthrough in the conversation beside the card, a step or two at a time, waiting for each answer, and naming the screens the skill declares.\n\
+              - If you emit `request_secret`, keep `summary` short: what is blocked, and that the value goes in the card on this message. Do not write a retry phrase or any instruction to reply: the card saves the value and continues the run itself. Do not name the environment variable in `summary`; call the value what the provider calls it on screen. Assume the person has never made an API token and has never seen the provider's developer screens. Teaching them is not `summary`'s job: carry the skill's own \"## Getting started\" walkthrough in the conversation beside the card, a step or two at a time, waiting for each answer, and naming the screens the skill declares. Emit `request_secret` for a value once; while its card is unanswered, carry on in words and do not emit it again. Write to the person in plain sentences: no \"please\", no em dashes, no exclamation marks.\n\
               - Addresses come only from the skill. If the skill declares an address, use that exact one and no other. If it declares none, name the screen in words and ask the person what they see. Never write a host or a link you did not read in the skill, and never offer two candidate addresses: a guessed address is a link the person will trust because it is yours.\n\
               - If you emit `request_location`, keep `summary` focused on why location is needed and whether approximate or precise location is enough. Do not mention action cards, UI steps, or retry phrases for location; the app handles that.\n\
             - Use `request_location` when the user wants nearby/current-location recommendations or routes and they have not already provided a place/city. Prefer `approximate` unless exact turn-by-turn or meter-level precision is clearly necessary.\n\
@@ -9396,6 +9396,18 @@ fn build_final_messages_from_actions(
                         "whereToGet".to_string(),
                         JsonValue::String(where_to_get.clone()),
                     );
+                }
+                // The hint is the platform's reading of the declaration and
+                // never the model's: the prefix the pack wrote in backticks,
+                // so the field can show `ntn_…` where "Paste it here" said
+                // nothing about what belongs there.
+                if let Some(value_hint) = declared_fields
+                    .and_then(|declared| declared.value_hint.as_deref())
+                    .and_then(|hint| {
+                        card_text::sanitize_value_hint(hint, owner, skill_slug.as_deref())
+                    })
+                {
+                    details.insert("valueHint".to_string(), JsonValue::String(value_hint));
                 }
                 if let Some(skill_slug) = skill_slug.as_ref() {
                     details.insert("skill".to_string(), JsonValue::String(skill_slug.clone()));
@@ -21464,7 +21476,7 @@ mod tests {
                 "| Name | Sensitive | What it is | Where the user gets it |\n",
                 "| --- | --- | --- | --- |\n",
                 "| `NOTION_API_KEY` | Yes | The Installation access token of an internal ",
-                "connection, starting with `ntn_`. | In the Notion developer portal, under Build, ",
+                "connection. It starts with `ntn_`. | In the Notion developer portal, under Build, ",
                 "choose Internal connections, then Create a new connection. |\n",
                 "| `NOTION_PAGE_ID` | No, optional | The id of the page to start from. | Shown in ",
                 "the page address. |\n",
@@ -21504,6 +21516,11 @@ mod tests {
 
         let messages = build_final_messages_from_actions(&actions, Some(dir.path()));
         let details = secret_details(&messages);
+        // The declared shape rides along, from the declaration and never the model.
+        assert_eq!(
+            details.get("valueHint").and_then(JsonValue::as_str),
+            Some("ntn_")
+        );
         assert_eq!(
             details.get("valueLabel").and_then(JsonValue::as_str),
             Some("Installation access token")
@@ -21528,6 +21545,37 @@ mod tests {
             messages[0].content,
             "Add the value in the card on this message."
         );
+    }
+
+    #[test]
+    fn a_declared_prefix_that_is_a_credential_word_never_reaches_the_field() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let skill = dir.path().join(".agents/skills/notion");
+        fs::create_dir_all(&skill).expect("create skill dir");
+        fs::write(
+            skill.join("SKILL.md"),
+            concat!(
+                "## Secrets and settings\n\n",
+                "| Name | Sensitive | What it is | Where the user gets it |\n",
+                "| --- | --- | --- | --- |\n",
+                "| `NOTION_API_KEY` | Yes | The Installation access token of an internal ",
+                "connection. It starts with `Gmail-password`. | On the Configuration tab. |\n",
+            ),
+        )
+        .expect("write SKILL.md");
+        let actions = vec![CodexAction::RequestSecret {
+            name: "NOTION_API_KEY".to_string(),
+            description: None,
+            value_label: None,
+            where_to_get: None,
+            skill: None,
+            sensitive: None,
+            agent_handles: vec!["octo".to_string()],
+            refused_class: None,
+        }];
+        let messages = build_final_messages_from_actions(&actions, Some(dir.path()));
+        let details = secret_details(&messages);
+        assert!(details.get("valueHint").is_none());
     }
 
     #[test]

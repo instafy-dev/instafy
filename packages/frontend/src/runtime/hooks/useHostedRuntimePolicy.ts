@@ -20,6 +20,8 @@ interface UseHostedRuntimePolicyArgs {
   setRuntimeStatusesResolved: (value: boolean) => void;
   refreshRuntimeStatuses: () => Promise<void>;
   ensureHostedRuntime: () => Promise<boolean>;
+  /** Limit details of the latest ensure failure, readable before React commits. */
+  lastHostedEnsureLimitRef: MutableRefObject<HostedRuntimeLimitErrorDetails | null>;
   hasHostedRuntimeInProgress: boolean;
   hostedRuntimeEnsuring: boolean;
   runtimeEnsureError: string | null;
@@ -53,6 +55,7 @@ export function useHostedRuntimePolicy({
   setRuntimeStatusesResolved,
   refreshRuntimeStatuses,
   ensureHostedRuntime,
+  lastHostedEnsureLimitRef,
   hasHostedRuntimeInProgress,
   hostedRuntimeEnsuring,
   runtimeEnsureError,
@@ -91,6 +94,7 @@ export function useHostedRuntimePolicy({
     runtimeEnsureLimit,
     refreshRuntimeStatuses,
     ensureHostedRuntime,
+    lastHostedEnsureLimitRef,
   });
 
   useEffect(() => {

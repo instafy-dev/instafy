@@ -94,6 +94,7 @@ function AccessProbe() {
       data-blocked={String(access.projectAccessBlocked)}
       data-initialized={String(access.projectInitialized)}
       data-pending={String(access.projectAccessPending)}
+      data-provision-failed={String(access.projectProvisionFailed)}
     />
   );
 }
@@ -334,6 +335,34 @@ describe("ProjectAccessProvider capability refresh", () => {
     await act(async () => vi.advanceTimersByTimeAsync(5_000));
     expect(mocks.getSummaryResult).toHaveBeenCalledTimes(1);
     expect(mocks.createControllerProject).not.toHaveBeenCalled();
+  });
+
+  it("resolves access immediately for a space the studio switched to without a URL change", async () => {
+    const OTHER = "22222222-2222-4222-8222-222222222222";
+    mocks.getSummaryResult.mockResolvedValue(summaryFor("admin"));
+    await act(async () => root.render(<ProjectAccessProvider><AccessProbe /></ProjectAccessProvider>));
+    const probe = container.querySelector('[data-testid="access-probe"]');
+    expect(probe?.getAttribute("data-resolved")).toBe("true");
+    mocks.getSummaryResult.mockClear();
+
+    // New space / picker: the store switches, the URL still names the old space.
+    const lookup = deferred<ReturnType<typeof summaryFor>>();
+    mocks.getSummaryResult.mockReturnValue(lookup.promise);
+    mocks.activeProjectId = OTHER;
+    await act(async () => root.render(<ProjectAccessProvider><AccessProbe /></ProjectAccessProvider>));
+    expect(mocks.getSummaryResult).toHaveBeenCalledTimes(1);
+    expect(mocks.getSummaryResult.mock.calls[0]?.[0]).toBe(OTHER);
+    expect(probe?.getAttribute("data-resolved")).toBe("false");
+
+    await act(async () =>
+      lookup.resolve({
+        ...summaryFor("admin"),
+        summary: { ...summaryFor("admin").summary, projectId: OTHER, projectName: "Fresh space" },
+      }),
+    );
+    expect(probe?.getAttribute("data-resolved")).toBe("true");
+    expect(probe?.getAttribute("data-write")).toBe("true");
+    expect(mocks.setProjectName).not.toHaveBeenCalledWith(PROJECT_ID, "Fresh space");
   });
 
   it("demotes a live project after a targeted controller invalidation", async () => {
@@ -613,6 +642,42 @@ describe("ProjectAccessProvider startup with nothing remembered", () => {
     expect(mocks.createControllerProject).toHaveBeenCalledTimes(1);
     expect(mocks.createControllerProject).toHaveBeenCalledWith({ projectType: "customer" });
     expect(mocks.createProject).toHaveBeenCalledWith(expect.objectContaining({ projectId: MINTED_ID }));
+  });
+
+  it("says so and offers a retry when no space could be made, then makes one on retry", async () => {
+    // The last first-run dead end: with no space and a failed create the
+    // studio opened with a shut composer and no word about why.
+    mocks.listProjects.mockResolvedValue({ status: "success", projects: [] });
+    mocks.createControllerProject
+      .mockRejectedValueOnce(new Error("controller unavailable"))
+      .mockResolvedValueOnce({ projectId: MINTED_ID, orgId: "org-1", orgName: "Team", projectName: null });
+    await act(async () => root.render(
+      <ProjectAccessProvider>
+        <AccessProbe />
+        <ProjectAccessRecoveryBanner />
+        <StudioStartupGate><p>Workspace ready</p></StudioStartupGate>
+      </ProjectAccessProvider>,
+    ));
+    await settle();
+
+    const probe = () => container.querySelector('[data-testid="access-probe"]');
+    expect(probe()?.getAttribute("data-initialized")).toBe("true");
+    expect(probe()?.getAttribute("data-provision-failed")).toBe("true");
+    const banner = container.querySelector('[data-testid="project-provision-failed"]');
+    expect(banner?.textContent).toContain("Couldn’t set up your space.");
+    expect(mocks.createProject).not.toHaveBeenCalled();
+
+    const retry = [...container.querySelectorAll("button")].find((button) => button.textContent === "Try again");
+    expect(retry).not.toBeUndefined();
+    await act(async () => {
+      retry!.click();
+    });
+    await settle();
+
+    expect(mocks.createControllerProject).toHaveBeenCalledTimes(2);
+    expect(mocks.createProject).toHaveBeenCalledWith(expect.objectContaining({ projectId: MINTED_ID }));
+    expect(probe()?.getAttribute("data-provision-failed")).toBe("false");
+    expect(container.querySelector('[data-testid="project-provision-failed"]')).toBeNull();
   });
 
   it("still mints when the list cannot be read, as before", async () => {

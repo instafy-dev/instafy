@@ -4,11 +4,11 @@ use axum::Json;
 use chrono::{DateTime, Utc};
 use serde_json::json;
 use std::time::{Duration, Instant};
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 use uuid::Uuid;
 
 use crate::bug_reports::{record_system_bug_report, SystemBugReportInput};
-use crate::credits::process_credit_burn;
+use crate::credits::{process_credit_burn, ManagedAiRefundOutcome};
 use crate::provider_identifiers::provider_id_key;
 use crate::tunnels::revoke_tunnels_for_scope;
 use crate::{publish_controller_event, AppState};
@@ -194,17 +194,183 @@ pub(crate) async fn prune_expired_runtime_events(state: &AppState) -> AnyResult<
     Ok(())
 }
 
+fn api_error_to_anyhow(context: &str, error: (StatusCode, Json<crate::ApiError>)) -> anyhow::Error {
+    let (status, Json(body)) = error;
+    anyhow::anyhow!("{context} ({status}): {}", body.message)
+}
+
+/// Refund the managed-AI reserve of a requeued job that expired without ever
+/// having run. A runtime stop requeues leased jobs too (`payload.requeuedAt`
+/// is stamped on both), and a job that was leased may already have spent a
+/// model turn, so the refund is gated on the same evidence `agent_complete`
+/// uses: never leased, no visible assistant message, no tool updates, and no
+/// usage adjustment on the ledger. Idempotent through the ledger key; runs in
+/// a savepoint so a ledger failure is logged and the expiry sweep still
+/// completes.
+async fn refund_managed_ai_reserve_for_expired_job(
+    transaction: &mut tokio_postgres::Transaction<'_>,
+    project_id: &Uuid,
+    job_id: &Uuid,
+    run_id: Option<Uuid>,
+    lease_attempts: i32,
+    payload: &serde_json::Value,
+) -> AnyResult<()> {
+    const REFUND_REASON: &str = "runtime_not_ready";
+
+    let managed_ai_used = payload
+        .pointer("/metadata/managedAiUsed")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false);
+    if !managed_ai_used {
+        return Ok(());
+    }
+    let Some(prompt_id) = payload
+        .get("prompt_id")
+        .and_then(serde_json::Value::as_str)
+        .and_then(|value| Uuid::parse_str(value).ok())
+    else {
+        return Ok(());
+    };
+    // The lease path increments lease_attempts and a stop-requeue does not
+    // reset it, so a non-zero count means a runtime held this job and may
+    // have called the model before the stop. That charge stands.
+    if lease_attempts > 0 {
+        debug!(
+            project_id = %project_id,
+            job_id = %job_id,
+            prompt_id = %prompt_id,
+            lease_attempts,
+            "expired requeued job was leased before; keeping its managed AI reserve"
+        );
+        return Ok(());
+    }
+
+    let savepoint = transaction
+        .savepoint("managed_ai_refund")
+        .await
+        .context("failed to open managed AI refund savepoint")?;
+    let outcome: AnyResult<ManagedAiRefundOutcome> = async {
+        if crate::agent::run_has_visible_assistant_message(&savepoint, project_id, run_id)
+            .await
+            .map_err(|error| api_error_to_anyhow("check run output for managed AI refund", error))?
+            || crate::agent::count_job_tool_update_messages(&savepoint, project_id, job_id)
+                .await
+                .map_err(|error| {
+                    api_error_to_anyhow("count tool updates for managed AI refund", error)
+                })?
+                > 0
+        {
+            return Ok(ManagedAiRefundOutcome::NotRefundable);
+        }
+        let project = crate::projects::load_project_record(&savepoint, project_id)
+            .await
+            .map_err(|error| api_error_to_anyhow("load project for managed AI refund", error))?;
+        let Some(org_id) = project.org_id else {
+            return Ok(ManagedAiRefundOutcome::NotRefundable);
+        };
+        let outcome = crate::credits::refund_unused_managed_ai_prompt(
+            &savepoint,
+            project_id,
+            &org_id,
+            None,
+            &prompt_id,
+            REFUND_REASON,
+        )
+        .await
+        .map_err(|error| api_error_to_anyhow("refund managed AI prompt", error))?;
+        let ManagedAiRefundOutcome::Applied(refund) = outcome else {
+            return Ok(outcome);
+        };
+        // The daily prompt counter is derived from prompts.metadata.managedAiUsed.
+        crate::dispatch::persist_prompt_ai_access_metadata(&savepoint, &prompt_id, true, false)
+            .await
+            .map_err(|error| api_error_to_anyhow("release managed AI prompt slot", error))?;
+        if let Some(run_id) = run_id {
+            crate::dispatch::persist_run_ai_access_metadata(&savepoint, &[run_id], true, false)
+                .await
+                .map_err(|error| api_error_to_anyhow("release managed AI run slot", error))?;
+            let mut refund_trace = json!(refund);
+            if let Some(map) = refund_trace.as_object_mut() {
+                map.insert(
+                    "refundReason".to_string(),
+                    serde_json::Value::String(REFUND_REASON.to_string()),
+                );
+            }
+            crate::dispatch::persist_run_managed_ai_credit_metadata(
+                &savepoint,
+                &[run_id],
+                &json!({ "promptId": prompt_id, "refund": refund_trace }),
+            )
+            .await
+            .map_err(|error| api_error_to_anyhow("persist managed AI refund trace", error))?;
+        }
+        Ok(ManagedAiRefundOutcome::Applied(refund))
+    }
+    .await;
+
+    match outcome {
+        Ok(ManagedAiRefundOutcome::Applied(refund)) => {
+            savepoint
+                .commit()
+                .await
+                .context("failed to commit managed AI refund savepoint")?;
+            info!(
+                project_id = %project_id,
+                job_id = %job_id,
+                prompt_id = %prompt_id,
+                run_id = ?run_id,
+                ledger_id = %refund.ledger_id,
+                delta = refund.delta,
+                "refunded managed AI prompt reserve for an expired requeued job"
+            );
+        }
+        Ok(ManagedAiRefundOutcome::AlreadyRefunded(existing)) => {
+            savepoint
+                .commit()
+                .await
+                .context("failed to commit managed AI refund savepoint")?;
+            debug!(
+                project_id = %project_id,
+                job_id = %job_id,
+                prompt_id = %prompt_id,
+                ledger_id = %existing.ledger_id,
+                "managed AI prompt reserve was already refunded; nothing to apply"
+            );
+        }
+        Ok(ManagedAiRefundOutcome::NotRefundable) => {
+            savepoint
+                .commit()
+                .await
+                .context("failed to commit managed AI refund savepoint")?;
+        }
+        Err(error) => {
+            warn!(
+                project_id = %project_id,
+                prompt_id = %prompt_id,
+                run_id = ?run_id,
+                ?error,
+                "managed AI refund failed for an expired requeued job; leaving the reserve charged"
+            );
+            savepoint
+                .rollback()
+                .await
+                .context("failed to roll back managed AI refund savepoint")?;
+        }
+    }
+    Ok(())
+}
+
 /// Jobs requeued by a runtime stop expire if nothing resumes them promptly.
 /// Without this, a job killed by credit exhaustion re-runs from scratch
 /// whenever a runtime next appears — even days later — duplicating side
 /// effects and burning fresh credits unprompted.
-async fn expire_stale_requeued_jobs(state: &AppState) -> AnyResult<()> {
+pub(crate) async fn expire_stale_requeued_jobs(state: &AppState) -> AnyResult<()> {
     let mut connection = state
         .pool
         .get()
         .await
         .context("failed to acquire connection for requeued job expiry")?;
-    let transaction = connection
+    let mut transaction = connection
         .transaction()
         .await
         .context("failed to start requeued job expiry transaction")?;
@@ -231,7 +397,8 @@ async fn expire_stale_requeued_jobs(state: &AppState) -> AnyResult<()> {
                  where r.project_id = agent_jobs.project_id
                    and r.status not in ('stopped', 'offline', 'removed')
                )
-             returning id, project_id, run_id, conversation_id, payload, error_message",
+             returning id, project_id, run_id, conversation_id, payload, error_message,
+                       lease_attempts",
             &[&(REQUEUED_JOB_EXPIRY_SECONDS as f64)],
         )
         .await
@@ -257,13 +424,13 @@ async fn expire_stale_requeued_jobs(state: &AppState) -> AnyResult<()> {
         // The job is dead, so its run is too: without this the run stays
         // "in_progress" forever and Home would list it as live work.
         let run_id: Option<Uuid> = row.get("run_id");
+        let project_id: Uuid = row.get("project_id");
+        let payload = row
+            .get::<_, tokio_postgres::types::Json<serde_json::Value>>("payload")
+            .0;
         if let Some(run_id) = run_id {
-            let project_id: Uuid = row.get("project_id");
             let conversation_id: Option<Uuid> = row.get("conversation_id");
             let error_message: Option<String> = row.get("error_message");
-            let payload = row
-                .get::<_, tokio_postgres::types::Json<serde_json::Value>>("payload")
-                .0;
             transaction
                 .execute(
                     "update runs
@@ -290,6 +457,20 @@ async fn expire_stale_requeued_jobs(state: &AppState) -> AnyResult<()> {
             )
             .await;
         }
+
+        // No runtime picked the job up again. If none ever had it, a
+        // managed-AI prompt it carried never reached a model: give the credit
+        // and daily slot back.
+        let lease_attempts: i32 = row.get("lease_attempts");
+        refund_managed_ai_reserve_for_expired_job(
+            &mut transaction,
+            &project_id,
+            &job_id,
+            run_id,
+            lease_attempts,
+            &payload,
+        )
+        .await?;
     }
 
     transaction
@@ -1597,5 +1778,197 @@ mod tests {
             Some(now - ChronoDuration::seconds(90)),
             now,
         ));
+    }
+
+    #[tokio::test]
+    async fn expired_requeued_job_refunds_managed_ai_prompt() -> anyhow::Result<()> {
+        use crate::tests_managed_ai_refund::{
+            credit_balance, daily_prompts_used, ledger_rows, prompt_metadata, run_row,
+            seed_reserved_managed_ai_prompt,
+        };
+        use serde_json::json;
+
+        let Some(fixture) = seed_reserved_managed_ai_prompt("expired-requeue").await? else {
+            eprintln!("skipping requeued job expiry refund test: TEST_DATABASE_URL not set");
+            return Ok(());
+        };
+
+        // A runtime stop requeued the job; nothing came back for it. Dispatch
+        // left a `requested` runtime row for the project, and the sweep only
+        // expires jobs with no live runtime, so that row is stopped too.
+        {
+            let connection = fixture.pool.get().await?;
+            connection
+                .execute(
+                    "update runtimes set status = 'stopped' where project_id = $1",
+                    &[&fixture.project_id],
+                )
+                .await?;
+            connection
+                .execute(
+                    "update agent_jobs
+                     set status = 'queued',
+                         payload = payload || jsonb_build_object(
+                             'requeuedAt', (now() - interval '1 second' * $2)::text
+                         )
+                     where id = $1",
+                    &[
+                        &fixture.job_id,
+                        &((super::REQUEUED_JOB_EXPIRY_SECONDS + 60) as f64),
+                    ],
+                )
+                .await?;
+        }
+
+        super::expire_stale_requeued_jobs(&fixture.state).await?;
+
+        let connection = fixture.pool.get().await?;
+        let job = connection
+            .query_one(
+                "select status, outcome from agent_jobs where id = $1",
+                &[&fixture.job_id],
+            )
+            .await?;
+        assert_eq!(job.get::<_, String>("status"), "failed");
+        assert_eq!(
+            job.get::<_, Option<String>>("outcome").as_deref(),
+            Some("expired")
+        );
+        drop(connection);
+
+        let refund_key = format!("managed-ai-refund:{}", fixture.prompt_id);
+        let rows = ledger_rows(&fixture.pool, &fixture.project_id).await?;
+        assert_eq!(
+            rows.iter()
+                .filter(|(reason, delta, key)| reason == "managed_ai_refund"
+                    && *delta == fixture.burn_amount
+                    && key.as_deref() == Some(refund_key.as_str()))
+                .count(),
+            1,
+            "the reserve is given back once, got {rows:?}"
+        );
+        let restored_balance = fixture.reserved_balance + fixture.burn_amount;
+        assert_eq!(
+            credit_balance(&fixture.pool, &fixture.org_id).await?,
+            restored_balance
+        );
+        let prompt = prompt_metadata(&fixture.pool, &fixture.prompt_id).await?;
+        assert_eq!(prompt["managedAiUsed"], json!(false));
+        assert_eq!(
+            daily_prompts_used(&fixture.pool, &fixture.owner_user_id).await?,
+            0
+        );
+        let (run_status, run_metadata) = run_row(&fixture.pool, &fixture.run_id).await?;
+        assert_eq!(run_status, "failed");
+        assert_eq!(run_metadata["managedAiUsed"], json!(false));
+        assert_eq!(
+            run_metadata["managedAiCredit"]["refund"]["refundReason"],
+            json!("runtime_not_ready")
+        );
+
+        // Sweeping again finds nothing to expire and nothing to refund.
+        super::expire_stale_requeued_jobs(&fixture.state).await?;
+        assert_eq!(
+            credit_balance(&fixture.pool, &fixture.org_id).await?,
+            restored_balance
+        );
+        Ok(())
+    }
+
+    /// A runtime stop requeues leased jobs as well as queued ones. A job that
+    /// was leased may already have spent a model turn before the stop, so its
+    /// expiry must not refund the reserve.
+    #[tokio::test]
+    async fn expired_requeued_job_keeps_managed_ai_charge_after_a_lease() -> anyhow::Result<()> {
+        use crate::tests_managed_ai_refund::{
+            credit_balance, daily_prompts_used, ledger_metadata_by_key, ledger_rows,
+            prompt_metadata, run_row, seed_reserved_managed_ai_prompt,
+        };
+        use serde_json::json;
+
+        let Some(fixture) = seed_reserved_managed_ai_prompt("expired-after-lease").await? else {
+            eprintln!("skipping requeued job expiry keep-charge test: TEST_DATABASE_URL not set");
+            return Ok(());
+        };
+
+        // A runtime leased the job (the lease path bumps lease_attempts), ran
+        // for a while, then its stop requeued the job; nothing came back and
+        // no live runtime remains for the project.
+        {
+            let connection = fixture.pool.get().await?;
+            connection
+                .execute(
+                    "update runtimes set status = 'stopped' where project_id = $1",
+                    &[&fixture.project_id],
+                )
+                .await?;
+            connection
+                .execute(
+                    "update agent_jobs
+                     set status = 'queued',
+                         lease_attempts = 1,
+                         payload = payload || jsonb_build_object(
+                             'requeuedAt', (now() - interval '1 second' * $2)::text
+                         )
+                     where id = $1",
+                    &[
+                        &fixture.job_id,
+                        &((super::REQUEUED_JOB_EXPIRY_SECONDS + 60) as f64),
+                    ],
+                )
+                .await?;
+        }
+
+        super::expire_stale_requeued_jobs(&fixture.state).await?;
+
+        let connection = fixture.pool.get().await?;
+        let job = connection
+            .query_one(
+                "select status, outcome from agent_jobs where id = $1",
+                &[&fixture.job_id],
+            )
+            .await?;
+        assert_eq!(job.get::<_, String>("status"), "failed");
+        assert_eq!(
+            job.get::<_, Option<String>>("outcome").as_deref(),
+            Some("expired")
+        );
+        drop(connection);
+
+        let rows = ledger_rows(&fixture.pool, &fixture.project_id).await?;
+        assert!(
+            rows.iter()
+                .all(|(reason, _, _)| reason != "managed_ai_refund"),
+            "a job that was leased is not refunded on expiry, got {rows:?}"
+        );
+        assert_eq!(
+            credit_balance(&fixture.pool, &fixture.org_id).await?,
+            fixture.reserved_balance
+        );
+        let reserve_metadata = ledger_metadata_by_key(
+            &fixture.pool,
+            &fixture.project_id,
+            &format!("managed-ai-prompt:{}", fixture.prompt_id),
+        )
+        .await?;
+        assert_eq!(reserve_metadata["refunded"], serde_json::Value::Null);
+        let prompt = prompt_metadata(&fixture.pool, &fixture.prompt_id).await?;
+        assert_eq!(
+            prompt["managedAiUsed"],
+            json!(true),
+            "the daily prompt slot stays consumed"
+        );
+        assert_eq!(
+            daily_prompts_used(&fixture.pool, &fixture.owner_user_id).await?,
+            1
+        );
+        let (run_status, run_metadata) = run_row(&fixture.pool, &fixture.run_id).await?;
+        assert_eq!(run_status, "failed");
+        assert_eq!(run_metadata["managedAiUsed"], json!(true));
+        assert_eq!(
+            run_metadata["managedAiCredit"]["refund"],
+            serde_json::Value::Null
+        );
+        Ok(())
     }
 }

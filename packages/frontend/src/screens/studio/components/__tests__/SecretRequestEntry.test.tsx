@@ -515,6 +515,31 @@ describe("SecretRequestEntry", () => {
     expect(byTestId("secret-request-value-NOTION_API_KEY")).not.toBeNull();
   });
 
+  it("shows the declared prefix in the field, and only a bare prefix", async () => {
+    // The first real run saved a sentence in place of the token. A field
+    // that reads `ntn_…` says what belongs there before the paste.
+    const request = secretRequest();
+    mocks.activeMessages.push(request);
+    await renderEntry(request, details({ valueHint: "ntn_" }));
+    expect(byTestId<HTMLInputElement>("secret-request-value-NOTION_API_KEY")?.placeholder).toBe("ntn_…");
+
+    await act(async () => root.unmount());
+    root = createRoot(container);
+    await renderEntry(request, details({ valueHint: "ntn_ <b>paste</b>" }));
+    expect(byTestId<HTMLInputElement>("secret-request-value-NOTION_API_KEY")?.placeholder).toBe(
+      "Paste it here",
+    );
+
+    // A credential word is refused here as in every other card text, for
+    // messages an older runtime persisted without the runtime's own gate.
+    await act(async () => root.unmount());
+    root = createRoot(container);
+    await renderEntry(request, details({ valueHint: "Gmail-password" }));
+    expect(byTestId<HTMLInputElement>("secret-request-value-NOTION_API_KEY")?.placeholder).toBe(
+      "Paste it here",
+    );
+  });
+
   it("does not treat a first ask for a value stored through Manage secrets as a failed one", async () => {
     mocks.listSecrets.mockResolvedValue({
       success: true,

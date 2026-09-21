@@ -183,6 +183,7 @@ import {
   COMPOSER_INLINE_COMPLETION_DEBOUNCE_MS,
   buildComposerInlineCompletionPath,
   buildComposerInlineSuggestion,
+  readComposerInlineCompletionPreference,
   shouldRequestComposerInlineCompletion,
 } from "./composerInlineCompletion";
 import { shouldSuppressOuterAvatarForConversationThread } from "./conversationThreadPreviewLayout";
@@ -3075,23 +3076,30 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     }
     return "thinking";
   }, [activeConversationRuns, hasMultipleTypingAgents, typingIndicatorState?.phase]);
+  const workspaceStarting =
+    waitingForPreferredRuntime ||
+    hostedRuntimeEnsuring ||
+    (!runtimeReady && activeConversationRun?.status === "queued");
+  // When the live start began. Persisted runtime alerts older than this edge
+  // are history; the alert this same start just produced is not.
+  const [workspaceStartingSince, setWorkspaceStartingSince] = useState<number | null>(null);
+  useEffect(() => {
+    setWorkspaceStartingSince((previous) => {
+      if (!workspaceStarting) {
+        return null;
+      }
+      return previous ?? Date.now();
+    });
+  }, [workspaceStarting]);
   const chatRuntimeActivityValue = useMemo(
-    () => ({
-      workspaceStarting:
-        waitingForPreferredRuntime ||
-        hostedRuntimeEnsuring ||
-        (!runtimeReady && activeConversationRun?.status === "queued"),
-    }),
-    [activeConversationRun?.status, hostedRuntimeEnsuring, runtimeReady, waitingForPreferredRuntime],
+    () => ({ workspaceStarting, workspaceStartingSince }),
+    [workspaceStarting, workspaceStartingSince],
   );
   const waitingActivityCopy = resolveAgentWaitingActivityCopy({
     displayNames: hasMultipleTypingAgents
       ? typingAgents.map((agent) => agent.displayName)
       : [typingAgentDisplayName],
-    workspaceStarting:
-      waitingForPreferredRuntime ||
-      hostedRuntimeEnsuring ||
-      (!runtimeReady && activeConversationRun?.status === "queued"),
+    workspaceStarting,
     queued: activeConversationRun?.status === "queued",
     runtimeLimit:
       !runtimeReady && runtimeEnsureLimit?.limitReached
@@ -5115,6 +5123,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
         hasImageAttachments: imageAttachments.length > 0,
         onboardingInputLocked,
         sendingAttachment,
+        inlineCompletionEnabled: readComposerInlineCompletionPreference(),
       })
     ) {
       setComposerInlineCompletion(null);
@@ -5753,6 +5762,9 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
                   aiViewState={gettingStartedAiViewState}
                   canChangeAiChoice={canChangeGettingStartedAiChoice}
                   personalAiConnectionState={gettingStartedPersonalAiConnectionState}
+                  desktopCodexLoginFound={
+                    gettingStartedConnectModalProps.desktopCodexAuthJsonStatus?.exists === true
+                  }
                   onStartWithManagedAi={handleStartWithManagedAi}
                   onConnectOwnAi={handleConnectOwnAi}
                   onChangeAiChoice={handleChangeAiChoice}

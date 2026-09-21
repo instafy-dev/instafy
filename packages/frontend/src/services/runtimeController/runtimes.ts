@@ -299,8 +299,10 @@ export async function stopRuntime(
     });
 
     if (!response.ok) {
-      throw new Error(
-        await readControllerError(response, "stop runtime failed", requestContext),
+      // Keep status and code on the error so callers can tell a controller
+      // refusal (409: nothing left to release) apart from a transport failure.
+      throw new ControllerApiError(
+        await readControllerApiError(response, "stop runtime failed", requestContext),
       );
     }
 

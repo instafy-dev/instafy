@@ -499,10 +499,16 @@ pub(crate) async fn ensure_managed_ai_proxy_ready(
         )
     })?;
 
+    // With a controller-served managed credential, a proxy that reports
+    // requiresCredential=true (remote_dynamic) is still a valid topology: it
+    // leases MANAGED_AI_CREDENTIAL_ID for credential-less tokens.
+    let proxy_serves_managed = |requirements: &ProxyCredentialRequirements| {
+        proxy_can_serve_managed_turns(config, requirements)
+    };
     let mut requirements =
         fetch_proxy_credential_requirements(client, proxy_base_url, Duration::from_secs(2)).await;
     for attempt in 0..14 {
-        if requirements.error.is_none() && !requirements.requires_user_credentials {
+        if requirements.error.is_none() && proxy_serves_managed(&requirements) {
             break;
         }
         sleep_managed_ai_startup_retry(attempt).await;
@@ -522,14 +528,66 @@ pub(crate) async fn ensure_managed_ai_proxy_ready(
         );
     }
 
-    if requirements.requires_user_credentials {
+    if !proxy_serves_managed(&requirements) {
         anyhow::bail!(
-            "managed AI startup check failed for {}: proxy reports requiresCredential=true; provide static proxy credentials (OPENAI_API_KEY or auth.json) or disable MANAGED_AI_ENABLED",
+            "managed AI startup check failed for {}: proxy reports requiresCredential=true; provide static proxy credentials (OPENAI_API_KEY or auth.json), set MANAGED_AI_OPENAI_API_KEY on the controller so proxies lease it, or disable MANAGED_AI_ENABLED",
             proxy_base_url
         );
     }
 
     Ok(())
+}
+
+/// Whether the probed proxy can complete a managed-lane turn. A proxy with
+/// static credentials serves credential-less tokens itself; a proxy without
+/// them (remote_dynamic, the per-runtime sidecar) can only do so when this
+/// controller serves the managed credential lease.
+pub(crate) fn proxy_can_serve_managed_turns(
+    config: &crate::config::AppConfig,
+    requirements: &ProxyCredentialRequirements,
+) -> bool {
+    !requirements.requires_user_credentials || config.managed_ai_openai_api_key.is_some()
+}
+
+pub(crate) fn is_managed_ai_credential_id(credential_id: &Uuid) -> bool {
+    *credential_id == crate::config::managed_ai_credential_id()
+}
+
+/// The lease material for the managed lane. Served straight from controller
+/// configuration: there is no `user_credentials` row, no ownership check and
+/// nothing to refresh. Callers guard this with the proxy lease bearer.
+fn managed_ai_internal_credential(
+    config: &crate::config::AppConfig,
+) -> Result<InternalCredentialResponse, (StatusCode, Json<ApiError>)> {
+    if !config.managed_ai_enabled {
+        return Err(not_found("managed AI is disabled on this controller"));
+    }
+    let key = config
+        .managed_ai_openai_api_key
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| {
+            not_found(
+                "managed AI credential is not configured: set MANAGED_AI_OPENAI_API_KEY on the \
+                 controller or give the proxy static credentials",
+            )
+        })?;
+
+    Ok(InternalCredentialResponse {
+        credential_id: crate::config::MANAGED_AI_CREDENTIAL_ID.to_string(),
+        kind: CREDENTIAL_KIND_OPENAI_API_KEY.to_string(),
+        access_token: None,
+        account_id: None,
+        openai_api_key: Some(key.to_string()),
+        provider: Some(PROVIDER_OPENAI.to_string()),
+        upstream_endpoint: Some(default_endpoint_for_provider(PROVIDER_OPENAI).to_string()),
+        default_model: Some(config.managed_ai_model_id.clone()),
+        auth_mode: None,
+        code_assist_project: None,
+        lease_expires_in_seconds: INTERNAL_CREDENTIAL_LEASE_SECONDS,
+        renewal_authority: "controller",
+    })
 }
 
 fn managed_ai_startup_retry_delay(attempt: u32) -> Duration {
@@ -585,7 +643,7 @@ pub(crate) fn build_managed_ai_access_response(
     let available = config.managed_ai_enabled
         && !has_default_credential
         && proxy_requirements.error.is_none()
-        && !proxy_requirements.requires_user_credentials
+        && proxy_can_serve_managed_turns(config, proxy_requirements)
         && within_daily_limit;
 
     ManagedAiAccessResponse {
@@ -1909,6 +1967,13 @@ async fn get_internal_credential(
     let credential_id = Uuid::from_str(credential_id_raw.trim())
         .map_err(|_| bad_request("credentialId must be a valid UUID"))?;
 
+    // The managed lane: a proxy that received a credential-less token leases
+    // this fixed id. It is answered from controller configuration, before any
+    // database or ownership lookup, so BYOC credentials stay per-user scoped.
+    if is_managed_ai_credential_id(&credential_id) {
+        return managed_ai_internal_credential(&state.config).map(Json);
+    }
+
     let key = state
         .config
         .credential_encryption_key
@@ -2046,6 +2111,13 @@ async fn set_internal_credential_usage(
 
     let credential_id = Uuid::from_str(credential_id_raw.trim())
         .map_err(|_| bad_request("credentialId must be a valid UUID"))?;
+
+    // The managed credential is platform-owned and has no per-user usage
+    // row to update; accept the report so the proxy's fire-and-forget path
+    // stays quiet, and drop it.
+    if is_managed_ai_credential_id(&credential_id) {
+        return Ok(StatusCode::NO_CONTENT);
+    }
 
     let connection = state
         .pool
@@ -2950,14 +3022,17 @@ mod codex_refresh_tests {
 mod credential_lease_contract_tests {
     use super::{
         decode_authoritative_credential_payload, encrypt_secret_payload,
+        is_managed_ai_credential_id, managed_ai_internal_credential,
         materialize_internal_credential, require_proxy_credential_lease_token,
         CREDENTIAL_KIND_CODEX_AUTH_JSON, CREDENTIAL_KIND_OPENAI_API_KEY,
         INTERNAL_CREDENTIAL_LEASE_SECONDS,
     };
-    use axum::http::{HeaderMap, HeaderValue};
+    use axum::http::{HeaderMap, HeaderValue, StatusCode};
+    use axum::Json;
     use serde_json::{json, Value};
     use uuid::Uuid;
 
+    use crate::config::MANAGED_AI_CREDENTIAL_ID;
     use crate::tests::build_app_config;
 
     #[test]
@@ -2990,6 +3065,58 @@ mod credential_lease_contract_tests {
             HeaderValue::from_static("Bearer credential-lease"),
         );
         assert!(require_proxy_credential_lease_token(&unconfigured, &headers).is_err());
+    }
+
+    #[test]
+    fn managed_ai_lease_serves_the_platform_key_without_a_user_lookup() {
+        let mut config = build_app_config("", "", "");
+        config.managed_ai_model_id = "gpt-5.6-luna".to_string();
+
+        // Env unset: the lease is refused and the message must not carry the
+        // "credential not found" prefix the studio maps to reconnecting.
+        let (status, Json(error)) = managed_ai_internal_credential(&config)
+            .expect_err("no managed credential without MANAGED_AI_OPENAI_API_KEY");
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert!(!error.message.starts_with("credential not found"));
+        assert!(error.message.contains("MANAGED_AI_OPENAI_API_KEY"));
+
+        config.managed_ai_openai_api_key = Some("sk-managed".to_string());
+        let lease = managed_ai_internal_credential(&config).expect("managed lease");
+        assert_eq!(lease.credential_id, MANAGED_AI_CREDENTIAL_ID);
+        assert_eq!(lease.kind, CREDENTIAL_KIND_OPENAI_API_KEY);
+        assert_eq!(lease.openai_api_key.as_deref(), Some("sk-managed"));
+        assert_eq!(lease.provider.as_deref(), Some("openai"));
+        assert_eq!(lease.default_model.as_deref(), Some("gpt-5.6-luna"));
+        assert_eq!(
+            lease.upstream_endpoint.as_deref(),
+            Some("https://api.openai.com/v1/responses")
+        );
+        assert_eq!(
+            lease.lease_expires_in_seconds,
+            INTERNAL_CREDENTIAL_LEASE_SECONDS
+        );
+        assert_eq!(lease.renewal_authority, "controller");
+
+        // Disabling the lane also closes the lease, key or not.
+        config.managed_ai_enabled = false;
+        let (status, _) = managed_ai_internal_credential(&config)
+            .expect_err("disabled managed AI must not lease the platform key");
+        assert_eq!(status, StatusCode::NOT_FOUND);
+    }
+
+    #[test]
+    fn managed_ai_credential_id_is_stable_and_never_a_random_row_id() {
+        // Pinned to the literal the proxy leases
+        // (openai_proxy_server::proxy::MANAGED_AI_CREDENTIAL_ID); editing
+        // either constant alone must fail a suite.
+        assert_eq!(
+            MANAGED_AI_CREDENTIAL_ID,
+            "4d414e41-4745-4441-8949-4e5354414659"
+        );
+        let managed = Uuid::parse_str(MANAGED_AI_CREDENTIAL_ID).expect("fixed id parses");
+        assert!(is_managed_ai_credential_id(&managed));
+        assert_eq!(crate::config::managed_ai_credential_id(), managed);
+        assert!(!is_managed_ai_credential_id(&Uuid::new_v4()));
     }
 
     #[test]
@@ -3318,6 +3445,74 @@ mod requirement_tests {
             "unexpected error: {error}"
         );
         assert_eq!(mock.hits_async().await, 15);
+    }
+
+    #[tokio::test]
+    async fn managed_ai_startup_check_accepts_dynamic_proxy_when_controller_serves_managed_credential(
+    ) {
+        // The per-runtime sidecar has no static credentials (remote_dynamic).
+        // Once the controller serves the managed credential lease, that proxy
+        // completes managed turns, so boot must not fail closed on it.
+        let server = MockServer::start_async().await;
+        let mock = server
+            .mock_async(|when, then| {
+                when.method(GET).path("/healthz");
+                then.status(200)
+                    .json_body(json!({ "backend": "remote_dynamic", "requiresCredential": true }));
+            })
+            .await;
+
+        let client = reqwest::Client::new();
+        let mut config = build_app_config(
+            test_origin_private_key(),
+            test_origin_public_key(),
+            "test-key-id",
+        );
+        config.proxy_base_url = Some(server.base_url());
+        config.managed_ai_startup_check = true;
+        config.managed_ai_openai_api_key = Some("sk-managed".to_string());
+
+        ensure_managed_ai_proxy_ready(&client, &config)
+            .await
+            .expect("managed AI proxy should be ready through the managed credential lease");
+
+        assert_eq!(
+            mock.hits_async().await,
+            1,
+            "no retries on a serviceable proxy"
+        );
+    }
+
+    #[test]
+    fn managed_ai_availability_follows_the_managed_credential_on_a_dynamic_proxy() {
+        let mut config = build_app_config(
+            test_origin_private_key(),
+            test_origin_public_key(),
+            "test-key-id",
+        );
+        let dynamic_proxy = ProxyCredentialRequirements {
+            requires_user_credentials: true,
+            proxy_backend: "remote_dynamic".to_string(),
+            error: None,
+        };
+
+        // Unset key: byte-for-byte today's behaviour, the dynamic proxy cannot
+        // serve the managed lane.
+        let managed_ai = build_managed_ai_access_response(&config, &dynamic_proxy, false, 0);
+        assert!(!managed_ai.available);
+
+        config.managed_ai_openai_api_key = Some("sk-managed".to_string());
+        let managed_ai = build_managed_ai_access_response(&config, &dynamic_proxy, false, 0);
+        assert!(managed_ai.available);
+
+        // A probe error still fails closed, key or not.
+        let failing_proxy = ProxyCredentialRequirements {
+            requires_user_credentials: true,
+            proxy_backend: "remote_dynamic".to_string(),
+            error: Some("connection refused".to_string()),
+        };
+        let managed_ai = build_managed_ai_access_response(&config, &failing_proxy, false, 0);
+        assert!(!managed_ai.available);
     }
 
     #[test]

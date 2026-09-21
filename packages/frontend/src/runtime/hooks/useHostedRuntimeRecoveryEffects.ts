@@ -2,7 +2,9 @@ import { useEffect, useState, type MutableRefObject } from "react";
 import type { ControllerRuntimeStatusEntry } from "../../sdk/instafy";
 import {
   IDLE_PAUSE_CLEARED_EVENT,
+  MANUAL_STOP_CHANGED_EVENT,
   isIdlePaused,
+  isManualStopHeld,
 } from "../idlePauseRegistry";
 import {
   BROWSER_RUNTIME_CLAIM_CHANGED_EVENT,
@@ -262,6 +264,24 @@ export function useHostedRuntimeRecoveryEffects({
     return () => window.removeEventListener(IDLE_PAUSE_CLEARED_EVENT, bump);
   }, []);
 
+  // A deliberate Stop is the same kind of module-level hold, but it survives
+  // pointer and keyboard activity; re-evaluate when it is set or lifted.
+  const [manualStopEpoch, setManualStopEpoch] = useState(0);
+  useEffect(() => {
+    if (typeof window === "undefined") {
+      return;
+    }
+    const bump = (event: Event) => {
+      const custom = event as CustomEvent<{ projectId?: string | null }>;
+      if (custom.detail?.projectId === activeProjectId) {
+        setManualStopEpoch((epoch) => epoch + 1);
+      }
+    };
+    window.addEventListener(MANUAL_STOP_CHANGED_EVENT, bump);
+    return () => window.removeEventListener(MANUAL_STOP_CHANGED_EVENT, bump);
+  }, [activeProjectId]);
+  const manualStopHeld = isManualStopHeld(activeProjectId);
+
   useEffect(() => {
     // A machine paused for inactivity must stay paused until the user comes
     // back — auto-ensure would otherwise undo every idle stop within seconds.
@@ -271,6 +291,7 @@ export function useHostedRuntimeRecoveryEffects({
     if (
       !shouldAutoEnsureHostedForFallback({
         disableAutoRuntimeEnsure: suppressAutoRuntimeEnsure,
+        manualStopHeld,
         projectReadyForRuntime,
         runtimeControllerEnabled,
         activeProjectId,
@@ -299,6 +320,8 @@ export function useHostedRuntimeRecoveryEffects({
     hasHostedRuntimeInProgress,
     hasLocalRuntime,
     idlePauseEpoch,
+    manualStopEpoch,
+    manualStopHeld,
     projectReadyForRuntime,
     resolvedPreferredRuntimeId,
     runtimeControllerEnabled,
@@ -322,6 +345,7 @@ export function useHostedRuntimeRecoveryEffects({
     if (
       !shouldAutoEnsureHostedForEmptyState({
         disableAutoRuntimeEnsure: suppressAutoRuntimeEnsure,
+        manualStopHeld,
         projectAccessResolved,
         runtimeControllerEnabled,
         activeProjectId,
@@ -356,6 +380,8 @@ export function useHostedRuntimeRecoveryEffects({
     hasHostedRuntimeInProgress,
     hasLocalRuntime,
     hostedRuntimeEnsuring,
+    manualStopEpoch,
+    manualStopHeld,
     projectAccessResolved,
     projectInitialized,
     projectReadyForRuntime,
@@ -370,6 +396,7 @@ export function useHostedRuntimeRecoveryEffects({
     if (
       !shouldAutoEnsurePreferredHostedRuntime({
         disableAutoRuntimeEnsure: suppressAutoRuntimeEnsure,
+        manualStopHeld,
         runtimeControllerEnabled,
         projectReadyForRuntime,
         activeProjectId,
@@ -402,6 +429,8 @@ export function useHostedRuntimeRecoveryEffects({
     ensureHostedRuntime,
     hasHostedRuntimeInProgress,
     hostedRuntimeEnsuring,
+    manualStopEpoch,
+    manualStopHeld,
     preferredRuntimeEntry,
     projectReadyForRuntime,
     runtimeControllerEnabled,

@@ -17,7 +17,28 @@ export function StudioStartupGate({ children }: { children: ReactNode }) {
 
 export function ProjectAccessRecoveryBanner() {
   const { activeProjectId } = useProjectState();
-  const { projectInitialized, projectAccessUnavailable, projectAccessBlocked } = useProjectAccess();
+  const {
+    projectInitialized,
+    projectAccessUnavailable,
+    projectAccessBlocked,
+    projectProvisionFailed,
+    retryProjectBootstrap,
+  } = useProjectAccess();
+  // No space at all: the account had none and making one failed. Before this
+  // the studio opened with a shut composer and no word about why.
+  if (!activeProjectId && projectInitialized && projectProvisionFailed) {
+    return (
+      <div
+        className="flex shrink-0 flex-wrap items-center justify-between gap-2 border-b border-slate-200 bg-slate-50 px-4 py-2 text-sm text-slate-700 dark:border-[color:var(--color-studio-dark-divider)] dark:bg-[var(--color-studio-dark-panel)] dark:text-slate-200"
+        data-testid="project-provision-failed"
+      >
+        <p role="status">Couldn’t set up your space.</p>
+        <Button variant="outline" size="sm" onPress={retryProjectBootstrap}>
+          Try again
+        </Button>
+      </div>
+    );
+  }
   if (!activeProjectId || !projectInitialized || !projectAccessUnavailable || projectAccessBlocked) {
     return null;
   }

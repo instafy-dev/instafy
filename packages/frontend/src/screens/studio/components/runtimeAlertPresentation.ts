@@ -57,6 +57,28 @@ export function isRecoverableRuntimeStartAlert(
   );
 }
 
+/**
+ * A persisted runtime alert is demoted to a history line only when a newer
+ * workspace start clearly post-dates it. The grace absorbs client/server
+ * clock skew on persisted timestamps and keeps the alert that belongs to the
+ * very ensure now in progress at full volume.
+ */
+export const RUNTIME_ALERT_SUPERSEDE_GRACE_MS = 30_000;
+
+export function isRuntimeAlertSupersededByStart(input: {
+  alertTimestamp: number | null | undefined;
+  workspaceStarting: boolean;
+  workspaceStartingSince: number | null;
+}): boolean {
+  if (!input.workspaceStarting || input.workspaceStartingSince === null) {
+    return false;
+  }
+  if (typeof input.alertTimestamp !== "number" || !Number.isFinite(input.alertTimestamp)) {
+    return false;
+  }
+  return input.alertTimestamp < input.workspaceStartingSince - RUNTIME_ALERT_SUPERSEDE_GRACE_MS;
+}
+
 export interface AgentWaitingRuntimeLimit {
   limitReached: boolean;
   blockerProjectLabel: string | null;

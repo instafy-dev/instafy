@@ -23,6 +23,8 @@ import { cloneRuntimeState } from "./defaults";
 import { useDesktopRuntimeEnsure } from "./hooks/useDesktopRuntimeEnsure";
 import { useHostedRuntimeEnsure } from "./hooks/useHostedRuntimeEnsure";
 import { useHostedRuntimePolicy } from "./hooks/useHostedRuntimePolicy";
+import { clearManualStop, markManualStop } from "./idlePauseRegistry";
+import { stopLeavesNoLiveHostedRuntime } from "./hooks/manualStopDecisions";
 import { useRuntimeControllerSync } from "./hooks/useRuntimeControllerSync";
 import { useRuntimeStatusRefresh } from "./hooks/useRuntimeStatusRefresh";
 import { useRuntimeStatusToasts } from "./hooks/useRuntimeStatusToasts";
@@ -226,6 +228,7 @@ export function RuntimeOperationsProvider({
     hostedRuntimeEnsuring,
     ensureHostedRuntime,
     hasHostedRuntimeInProgress,
+    lastHostedEnsureLimitRef,
   } = useHostedRuntimeEnsure({
     enabled: runtimeControllerEnabled && runtimeMutationEnabled,
     projectId: activeProjectId ?? null,
@@ -298,6 +301,7 @@ export function RuntimeOperationsProvider({
     setRuntimeStatusesResolved,
     refreshRuntimeStatuses,
     ensureHostedRuntime,
+    lastHostedEnsureLimitRef,
     hasHostedRuntimeInProgress,
     hostedRuntimeEnsuring,
     runtimeEnsureError,
@@ -421,18 +425,38 @@ export function RuntimeOperationsProvider({
         );
         return false;
       }
+      // Record that the absence is intentional before the stop lands, so the
+      // next status refresh does not read "no ready machine" and relaunch it.
+      // Only the last live hosted machine carries that meaning: while another
+      // one is ready or booting the hold would outlive it and suppress the
+      // idle-pause wake for a machine the user never stopped.
+      const projectId = resolveProjectId() ?? activeProjectId;
+      const holdManualStop = stopLeavesNoLiveHostedRuntime(state.runtimeStatuses, runtimeId);
+      if (holdManualStop) {
+        markManualStop(projectId);
+      }
       try {
         await controllerClient.runtimes.stop({ runtimeId, reason: "user_stop" });
         showStatus("Runtime termination requested", "info", 2500);
         await refreshRuntimeStatuses();
         return true;
       } catch (error) {
+        if (holdManualStop) {
+          clearManualStop(projectId);
+        }
         const message = error instanceof Error ? error.message : String(error);
         showStatus(`Unable to terminate runtime: ${message}`, "error", 4000);
         return false;
       }
     },
-    [refreshRuntimeStatuses, runtimeMutationEnabled, showStatus, state.runtimeStatuses],
+    [
+      activeProjectId,
+      refreshRuntimeStatuses,
+      resolveProjectId,
+      runtimeMutationEnabled,
+      showStatus,
+      state.runtimeStatuses,
+    ],
   );
 
   const removeRuntimeEntry = useCallback(
@@ -522,6 +546,8 @@ export function RuntimeOperationsProvider({
         showStatus("Local/desktop runtimes cannot be started from here.", "warning", 4000);
         return false;
       }
+      // An explicit Start lifts a deliberate Stop.
+      clearManualStop(projectId);
       try {
         await controllerClient.runtimes.start({
           projectId,

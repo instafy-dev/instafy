@@ -914,7 +914,9 @@ export function SecretRequestEntry({
       {provenance ? quietLine(provenance, "secret-request-provenance") : null}
       <InlineSecretsForm
         projectId={projectId}
-        secrets={[{ name: secretName, valueLabel, sensitive: parsed.sensitive }]}
+        secrets={[
+          { name: secretName, valueLabel, sensitive: parsed.sensitive, valueHint: parsed.valueHint },
+        ]}
         agentHandles={parsed.agentHandles.length > 0 ? parsed.agentHandles : undefined}
         description={parsed.description ?? null}
         namesShownByHost

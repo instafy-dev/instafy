@@ -109,7 +109,7 @@ import { isUUID } from "../utils/uuid";
 import { writeClipboardText } from "../runtime/runtimeMenuShared";
 import { INSTAFY_CLI_URL } from "../config/externalLinks";
 import { SidePaneProvider, useSidePane } from "../workspace/SidePaneProvider";
-import { resolveMobileOverviewSection, useStudioNavigationPosture } from "./studio/useStudioNavigationPosture";
+import { resolveMobileOverviewSection, resolveWorkspaceEmptyState, useStudioNavigationPosture } from "./studio/useStudioNavigationPosture";
 import { SidePaneTabs } from "../workspace/SidePaneTabs";
 import { WorkspaceTabsProvider, useWorkspaceTabs } from "../workspace/WorkspaceTabsProvider";
 import type { WorkspaceGitReviewSource } from "../workspace/gitReviewTypes";
@@ -320,6 +320,8 @@ function StudioLayoutInner() {
     conversations,
     activeConversationId,
     remoteConversationHistoryResolved,
+    remoteConversationHistoryError,
+    retryRemoteConversationHistory,
     createConversation,
     markConversationRead,
     selectConversation,
@@ -1549,9 +1551,13 @@ function StudioLayoutInner() {
         orgName: projectInfo.orgName ?? null
       });
       prepareWorkspaceForNewSession();
+      // The URL is the source of truth for project identity: access
+      // hydration and the routing sync both follow ?projectId, so a store-only
+      // switch would leave the composer locked behind a stale access check.
+      navigateToDestination({ kind: "conversation", projectId: projectInfo.projectId });
       showStatus("Created a new space.", "success", 2500);
     },
-    [createProject, prepareWorkspaceForNewSession, showStatus]
+    [createProject, navigateToDestination, prepareWorkspaceForNewSession, showStatus]
   );
 
   const handleCreateGithubProject = useCallback(
@@ -1584,6 +1590,7 @@ function StudioLayoutInner() {
         orgName: projectInfo.orgName ?? null
       });
       prepareWorkspaceForNewSession({ closeProjectLauncher: false });
+      navigateToDestination({ kind: "conversation", projectId: projectInfo.projectId });
 
       const targetPath = controllerClient.projects.deriveGithubImportTargetPath(github.repo);
       const importIdentity = buildGithubImportRetryIdentity({
@@ -1621,7 +1628,7 @@ function StudioLayoutInner() {
       }
       return { success: true };
     },
-    [createProject, prepareWorkspaceForNewSession, showStatus]
+    [createProject, navigateToDestination, prepareWorkspaceForNewSession, showStatus]
   );
 
   const handleOpenSettingsTab = useCallback(
@@ -1855,9 +1862,26 @@ function StudioLayoutInner() {
       />
     );
   } else if (!activeWorkspaceTab) {
-    workspaceContent = (
-      <div className="flex h-full items-center justify-center text-sm text-slate-500">
-        Open a panel to get started.
+    const emptyState = resolveWorkspaceEmptyState({
+      hasActiveTab: false,
+      conversationTabsReady,
+      historyError: Boolean(remoteConversationHistoryError),
+      projectAccessBlocked,
+    });
+    // The retry line belongs to the failed-fetch path only; a refresh that
+    // fails after the tabs were restored leaves the space usable as is.
+    const showHistoryRetry = !conversationTabsReady && Boolean(remoteConversationHistoryError);
+    workspaceContent = emptyState === "hydrating" ? (
+      <div className="flex h-full" aria-busy="true" data-testid="workspace-tabs-hydrating" />
+    ) : (
+      <div className="flex h-full flex-col items-center justify-center gap-2 text-sm text-slate-500">
+        <p>Open a panel to get started.</p>
+        {showHistoryRetry ? (
+          <div role="status" className="flex items-center gap-2" data-testid="workspace-history-retry">
+            <span>Couldn’t load this space’s chats.</span>
+            <Button size="xs" variant="ghost" onPress={retryRemoteConversationHistory}>Retry</Button>
+          </div>
+        ) : null}
       </div>
     );
   } else if (activeWorkspaceTab.kind === "jobThread") {

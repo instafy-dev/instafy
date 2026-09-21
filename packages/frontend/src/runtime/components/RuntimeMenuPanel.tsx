@@ -4,13 +4,53 @@ import type { RuntimeMenuOption } from "../useRuntimeMenu";
 import { RuntimeMenuOptionsList } from "./RuntimeMenuOptionsList";
 import type { TunnelCopyMode } from "./RuntimeTunnelDetails";
 import {
+  isHostedRuntimeBlockerSpaceError,
   parseHostedRuntimeLimitError,
   type HostedRuntimeLimitErrorDetails,
 } from "../hostedRuntimeLimitError";
+import {
+  buildStudioDestinationSearch,
+  type StudioDestination,
+} from "../../navigation/studioNavigation";
+import { useStudioNavigation } from "../../navigation/useStudioNavigation";
 import { Button, IconButton } from "../../components/Button";
 import { Card } from "../../components/Card";
 import { Spinner } from "../../components/Spinner";
 import { Text } from "../../components/Text";
+
+/**
+ * Studio destination for the blocking space's Machines panel. A panel
+ * destination keeps the current space, so the switch is written as a full
+ * route: project plus panel in one URL, the way a restored visit is.
+ */
+export function blockerSpaceMachinesDestination(projectId: string): StudioDestination {
+  const search = buildStudioDestinationSearch(
+    `?${new URLSearchParams({ projectId }).toString()}`,
+    { kind: "panel", panel: "machines" },
+  );
+  return { kind: "route", search };
+}
+
+/**
+ * Switches to the blocking space's Machines panel through Studio navigation,
+ * so the URL changes and any open drawer or sidebar closes first. Lives in
+ * the panel's own tree so no host has to thread a project switch through.
+ */
+function OpenBlockerSpaceButton({ projectId }: { projectId: string }) {
+  const navigateToDestination = useStudioNavigation();
+  return (
+    <Button
+      onPress={() => navigateToDestination(blockerSpaceMachinesDestination(projectId))}
+      variant="ghost"
+      size="xs"
+      radius="full"
+      className="mt-1 px-0 text-xxs text-rose-700 underline decoration-rose-300 underline-offset-4 hover:bg-transparent hover:text-rose-800 data-[hovered]:bg-transparent dark:text-rose-100"
+      data-testid="runtime-open-blocker-space"
+    >
+      Open space
+    </Button>
+  );
+}
 
 interface RuntimeMenuPanelProps {
   runtimeEnsureError: string | null;
@@ -76,6 +116,12 @@ export function RuntimeMenuPanel({
   const [cachedRuntimeEnsureLimit, setCachedRuntimeEnsureLimit] =
     useState<HostedRuntimeLimitErrorDetails | null>(null);
   const [runtimeActionError, setRuntimeActionError] = useState<string | null>(null);
+  // Kept apart from runtimeActionError: that one is reset whenever the ensure
+  // error changes, and the retried ensure behind a takeover changes it.
+  const [blockerSpaceNotice, setBlockerSpaceNotice] = useState<{
+    message: string;
+    projectId: string | null;
+  } | null>(null);
   const [retryingHostedLocally, setRetryingHostedLocally] = useState(false);
   useEffect(() => {
     if (!hostedRuntimeEnsuring) {
@@ -126,6 +172,14 @@ export function RuntimeMenuPanel({
     displayedRuntimeEnsureLimit,
   );
   const limitReached = limitDetails.limitReached;
+  // Display is gated on `limitReached` below; this only drops the stale
+  // notice once the limit lifts, so a later limit does not resurface a
+  // message about a blocker that is gone.
+  useEffect(() => {
+    if (!limitReached) {
+      setBlockerSpaceNotice(null);
+    }
+  }, [limitReached]);
   const hasTakeoverBlocker = Boolean(limitDetails.blockerRuntimeId);
   const blockerProjectLabel =
     limitDetails.blockerProjectLabel ?? limitDetails.blockerProjectId;
@@ -169,6 +223,7 @@ export function RuntimeMenuPanel({
       return;
     }
     setRuntimeActionError(null);
+    setBlockerSpaceNotice(null);
     try {
       const result = await onTakeOverHostedRuntimeLimit();
       if (result === false) {
@@ -177,12 +232,20 @@ export function RuntimeMenuPanel({
         );
       }
     } catch (error) {
+      if (isHostedRuntimeBlockerSpaceError(error)) {
+        setBlockerSpaceNotice({
+          message: error.message,
+          projectId: error.blockerProjectId ?? limitDetails.blockerProjectId,
+        });
+        return;
+      }
       const message = error instanceof Error ? error.message : String(error);
       setRuntimeActionError(`Unable to take over runtime: ${message}`);
     }
   };
   const handleRetryHosted = async () => {
     setRuntimeActionError(null);
+    setBlockerSpaceNotice(null);
     setRetryingHostedLocally(true);
     try {
       const result = await onRetryHosted?.();
@@ -324,6 +387,19 @@ export function RuntimeMenuPanel({
               >
                 {runtimeActionError}
               </Text>
+            ) : null}
+            {limitReached && blockerSpaceNotice ? (
+              <div
+                className="mt-2 rounded-xl border border-rose-200 bg-rose-50 px-2 py-1.5 text-rose-700 dark:border-rose-500/40 dark:bg-rose-950/30 dark:text-rose-100"
+                data-testid="runtime-blocker-space-notice"
+              >
+                <Text as="p" variant="caption" tone="inherit" className="text-xxs leading-snug">
+                  {blockerSpaceNotice.message}
+                </Text>
+                {blockerSpaceNotice.projectId ? (
+                  <OpenBlockerSpaceButton projectId={blockerSpaceNotice.projectId} />
+                ) : null}
+              </div>
             ) : null}
           </div>
         </Card>

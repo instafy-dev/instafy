@@ -40,6 +40,12 @@ type InlineSecretDescriptor = {
    * have and makes a typo in a URL impossible to see. Default true.
    */
   sensitive?: boolean;
+  /**
+   * The prefix the skill declared for the value ("ntn_"). The field shows it
+   * as `ntn_…` in place of "Paste it here", which said nothing about what
+   * belongs there. A bare token prefix only; anything else is ignored.
+   */
+  valueHint?: string | null;
 };
 
 type SecretValueDraft = {
@@ -121,6 +127,10 @@ export function InlineSecretsForm({
             ? secret.valueLabel.trim()
             : null,
         sensitive: secret.sensitive !== false,
+        valueHint:
+          typeof secret.valueHint === "string" && /^[A-Za-z0-9_-]{2,16}$/.test(secret.valueHint)
+            ? secret.valueHint
+            : null,
       });
     }
     return out;
@@ -380,7 +390,7 @@ export function InlineSecretsForm({
                 <Input id={`${fieldId}-${index}`}
                   value={draft.value}
                   onChange={(event) => setDraftValue(secret.name, event.target.value)}
-                  placeholder="Paste it here"
+                  placeholder={secret.valueHint ? `${secret.valueHint}…` : "Paste it here"}
                   aria-label={`${secret.valueLabel ?? secret.name} value`}
                   type="text"
                   size="sm"

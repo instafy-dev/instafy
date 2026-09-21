@@ -243,6 +243,7 @@ pub(crate) fn build_app_config(private_key: &str, public_key: &str, key_id: &str
             DEFAULT_MANAGED_AI_CACHED_INPUT_USD_MICROS_PER_1K,
         managed_ai_output_usd_micros_per_1k: DEFAULT_MANAGED_AI_OUTPUT_USD_MICROS_PER_1K,
         managed_ai_startup_check: true,
+        managed_ai_openai_api_key: None,
         tunnel_broker_hook_secret: None,
         git_event_hook_secret: None,
         _controller_external_url: None,

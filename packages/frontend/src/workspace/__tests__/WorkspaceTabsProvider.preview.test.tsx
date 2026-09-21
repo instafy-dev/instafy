@@ -384,12 +384,18 @@ describe("conversation preview tabs", () => {
     expect(ids()).toEqual([]);
     expect(api.tabs.some((tab) => tab.kind === "jobThread")).toBe(false);
     expect(api.activeTab?.kind === "panel" && api.activeTab.panel).toBe("home");
+    // The layout relies on this signal to paint a quiet frame instead of the
+    // "Open a panel" copy while the destination tabs are being rebuilt.
+    expect(api.conversationTabsReady).toBe(false);
 
     fixture.projectKey = projectB;
     fixture.conversations = [conversation("x")];
     fixture.activeConversationId = "x";
     fixture.historyResolved = false;
     await render();
+    // Real conversations have landed, so the strip may materialize; only the
+    // saved-tab restore still waits for the rest of history.
+    expect(api.conversationTabsReady).toBe(true);
     await act(async () => api.closeTab(getTabIdForConversation("b")));
     expect(ids()).toEqual([]);
     expect(loadPersistedWorkspaceTabs()?.projects[projectB]).toEqual(destination);
@@ -399,9 +405,35 @@ describe("conversation preview tabs", () => {
     fixture.conversations = [conversation("x"), conversation("y")];
     fixture.historyResolved = true;
     await render();
+    expect(api.conversationTabsReady).toBe(true);
     expect(ids()).toEqual(["x", "y"]);
     expect(previews()).toEqual(["y"]);
     expect(api.activeTab?.kind === "panel" && api.activeTab.panel).toBe("home");
+  });
+
+  it("holds a fresh space's placeholder off the strip until its history resolves", async () => {
+    fixture.activeConversationId = "a";
+    await render();
+    expect(ids()).toEqual(["a"]);
+
+    // Create: the new space starts with one local placeholder and no other
+    // tab, so the layout sees no active tab. It must read this as hydrating,
+    // not as an empty workspace.
+    fixture.projectId = projectB;
+    fixture.projectKey = projectB;
+    fixture.conversations = [{ ...createInitialConversation({ localId: "fresh" }), createdAt: Date.now() - 1_000 }];
+    fixture.activeConversationId = "fresh";
+    fixture.historyResolved = false;
+    await render();
+    expect(ids()).toEqual([]);
+    expect(api.activeTab).toBeNull();
+    expect(api.conversationTabsReady).toBe(false);
+
+    fixture.historyResolved = true;
+    await render();
+    expect(api.conversationTabsReady).toBe(true);
+    expect(ids()).toEqual(["fresh"]);
+    expect(api.activeTab?.kind === "conversation" && api.activeTab.conversationId).toBe("fresh");
   });
 
   it("does not overwrite saved destination tabs when closing a partial hydration tab", async () => {

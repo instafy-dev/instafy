@@ -115,6 +115,40 @@ function readCredentialGateCache(cacheKey: string | null): CredentialGateCacheEn
   return cached;
 }
 
+// Both endpoints behind this cache (/me/credentials and
+// /me/credentials/requirements) are user-scoped, so the freshest entry the
+// same user resolved in any other space is valid seed data for a new one.
+// The live refreshes still run and replace the seed within one round-trip.
+function readCredentialGateCacheForUser(userId: string | null): CredentialGateCacheEntry | null {
+  const userKey = typeof userId === "string" ? userId.trim() : "";
+  if (!userKey) {
+    return null;
+  }
+  const prefix = `${userKey}:`;
+  const now = Date.now();
+  let freshest: CredentialGateCacheEntry | null = null;
+  for (const [key, entry] of credentialGateCache) {
+    if (!key.startsWith(prefix)) {
+      continue;
+    }
+    if (now - entry.updatedAt > CREDENTIAL_GATE_CACHE_TTL_MS) {
+      credentialGateCache.delete(key);
+      continue;
+    }
+    if (!freshest || entry.updatedAt > freshest.updatedAt) {
+      freshest = entry;
+    }
+  }
+  return freshest;
+}
+
+function readSeededCredentialGateCache(
+  cacheKey: string | null,
+  userId: string | null,
+): CredentialGateCacheEntry | null {
+  return readCredentialGateCache(cacheKey) ?? readCredentialGateCacheForUser(userId);
+}
+
 function writeCredentialGateCache(cacheKey: string | null, entry: CredentialGateCacheEntry): void {
   if (!cacheKey) {
     return;
@@ -236,8 +270,11 @@ export function useChatCredentialGate({
     [activeProjectId, currentUserId],
   );
   const cachedCredentialGate = useMemo(
-    () => (runtimeControllerEnabled ? readCredentialGateCache(credentialGateCacheKey) : null),
-    [credentialGateCacheKey, runtimeControllerEnabled],
+    () =>
+      runtimeControllerEnabled
+        ? readSeededCredentialGateCache(credentialGateCacheKey, currentUserId)
+        : null,
+    [credentialGateCacheKey, currentUserId, runtimeControllerEnabled],
   );
   const [credentialRequirements, setCredentialRequirements] = useState<CredentialRequirementState>(
     () => cachedCredentialGate?.requirements ?? createDefaultCredentialRequirementState(runtimeControllerEnabled),
@@ -245,6 +282,14 @@ export function useChatCredentialGate({
   const [credentialGateStatus, setCredentialGateStatus] = useState<CredentialGateStatusState>(
     () => cachedCredentialGate?.gateStatus ?? createDefaultCredentialGateStatusState(runtimeControllerEnabled),
   );
+  // The cache records what a key resolved live. A seed is another key's
+  // answer and stays cached there on its own clock; re-recording it under this
+  // key with a fresh clock would keep an aging answer alive for another full
+  // TTL and make it the freshest seed for every later space.
+  const seededCredentialGateRef = useRef<CredentialGateCacheEntry | null>(cachedCredentialGate);
+  // The commit that changes the key still carries the previous key's state,
+  // so the key the state belongs to follows one commit behind.
+  const [credentialStateKey, setCredentialStateKey] = useState(credentialGateCacheKey);
   const credentialsRequired =
     runtimeControllerEnabled && credentialRequirements.requiresUserCredentials !== false;
   const credentialsReady = !credentialsRequired || credentialGateStatus.status === "ready";
@@ -285,13 +330,15 @@ export function useChatCredentialGate({
       setCredentialGateStatus(createDefaultCredentialGateStatusState(false));
       return;
     }
-    const cached = readCredentialGateCache(credentialGateCacheKey);
+    const cached = readSeededCredentialGateCache(credentialGateCacheKey, currentUserId);
+    seededCredentialGateRef.current = cached;
     setCredentialRequirements(cached?.requirements ?? createDefaultCredentialRequirementState(true));
     setCredentialGateStatus(cached?.gateStatus ?? createDefaultCredentialGateStatusState(true));
-  }, [credentialGateCacheKey, runtimeControllerEnabled]);
+    setCredentialStateKey(credentialGateCacheKey);
+  }, [credentialGateCacheKey, currentUserId, runtimeControllerEnabled]);
 
   useEffect(() => {
-    if (!runtimeControllerEnabled) {
+    if (!runtimeControllerEnabled || credentialStateKey !== credentialGateCacheKey) {
       return;
     }
     const requirementsResolved = credentialRequirements.requiresUserCredentials !== null;
@@ -313,13 +360,17 @@ export function useChatCredentialGate({
     if (!hasResolvedRequirements && !hasResolvedGateStatus) {
       return;
     }
+    const seed = seededCredentialGateRef.current;
+    if (seed && nextRequirements === seed.requirements && nextGateStatus === seed.gateStatus) {
+      return;
+    }
 
     writeCredentialGateCache(credentialGateCacheKey, {
       requirements: { ...nextRequirements },
       gateStatus: { ...nextGateStatus },
       updatedAt: Date.now(),
     });
-  }, [credentialGateCacheKey, credentialGateStatus, credentialRequirements, runtimeControllerEnabled]);
+  }, [credentialGateCacheKey, credentialGateStatus, credentialRequirements, credentialStateKey, runtimeControllerEnabled]);
 
   const openAiOnboarding = useCallback((options?: { mode?: AiConnectWizardMode }) => {
     const mode = options?.mode ?? "default";
@@ -576,8 +627,12 @@ export function useChatCredentialGate({
       setCredentialGateStatus({ status: "missing", error: null });
       return;
     }
-    void refreshCredentials();
-  }, [currentUserId, refreshCredentials, runtimeControllerEnabled]);
+    // A seeded inventory answer must not flip back to "loading" for the
+    // round-trip that only confirms it; a cold gate still reports loading.
+    const seededStatus = readSeededCredentialGateCache(credentialGateCacheKey, currentUserId)?.gateStatus.status;
+    const seeded = seededStatus !== undefined && seededStatus !== "unknown" && seededStatus !== "loading";
+    void refreshCredentials({ silent: seeded });
+  }, [credentialGateCacheKey, currentUserId, refreshCredentials, runtimeControllerEnabled]);
 
   useEffect(() => {
     if (typeof window === "undefined") {

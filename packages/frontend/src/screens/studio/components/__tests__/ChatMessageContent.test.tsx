@@ -1750,13 +1750,13 @@ describe("ChatMessageContent", () => {
     expect(container.querySelector('[data-testid="chat-bubble-assistant"]')).toBeNull();
   });
 
-  it("demotes a runtime alert to a quiet history line while a workspace start is live", async () => {
+  it("demotes a runtime alert to a quiet history line while a newer workspace start is live", async () => {
     const message: ChatMessage = {
       id: "runtime-alert-superseded",
       role: "assistant",
       content:
         "Runtime agent has not connected yet. Start the runtime (e.g. run `pnpm stack:up`) so queued jobs can proceed.",
-      timestamp: Date.now(),
+      timestamp: Date.now() - 45 * 60 * 1000,
       metadata: {
         source: "controller",
         kind: "runtime_alert",
@@ -1769,7 +1769,9 @@ describe("ChatMessageContent", () => {
 
     await act(async () => {
       root.render(
-        <ChatRuntimeActivityContext.Provider value={{ workspaceStarting: true }}>
+        <ChatRuntimeActivityContext.Provider
+          value={{ workspaceStarting: true, workspaceStartingSince: Date.now() }}
+        >
           <AssistantMessageEntry message={message} conversationMessages={[message]} />
         </ChatRuntimeActivityContext.Provider>,
       );
@@ -1780,6 +1782,41 @@ describe("ChatMessageContent", () => {
     expect(notice?.querySelector('[data-runtime-alert-superseded="true"]')).not.toBeNull();
     expect(notice?.textContent).toContain("A new workspace start is in progress");
     expect(notice?.textContent).not.toContain("queued request will continue automatically");
+  });
+
+  it("keeps a runtime alert from the live workspace start at full volume", async () => {
+    const message: ChatMessage = {
+      id: "runtime-alert-fresh",
+      role: "assistant",
+      content:
+        "Runtime agent has not connected yet. Start the runtime (e.g. run `pnpm stack:up`) so queued jobs can proceed.",
+      timestamp: Date.now() - 5_000,
+      metadata: {
+        source: "controller",
+        kind: "runtime_alert",
+        runId: "run-1",
+        details: {
+          reason: "runtime_not_ready",
+        },
+      },
+    };
+
+    await act(async () => {
+      root.render(
+        <ChatRuntimeActivityContext.Provider
+          value={{ workspaceStarting: true, workspaceStartingSince: Date.now() }}
+        >
+          <AssistantMessageEntry message={message} conversationMessages={[message]} />
+        </ChatRuntimeActivityContext.Provider>,
+      );
+    });
+
+    const notice = container.querySelector('[data-testid="chat-controller-notice"]');
+    expect(notice).not.toBeNull();
+    expect(notice?.querySelector('[data-runtime-alert-superseded="true"]')).toBeNull();
+    expect(notice?.textContent).not.toContain("A new workspace start is in progress");
+    expect(notice?.textContent).toContain("Starting the workspace");
+    expect(notice?.textContent).toContain("queued request will continue automatically");
   });
 
   it("does not render a human-authored nested runtime-alert claim as a controller notice", async () => {

@@ -76,11 +76,29 @@ Managed Instafy AI can run without a user-provided provider key and burn the sha
 - Set `MANAGED_AI_OUTPUT_USD_MICROS_PER_1K` (default `1200`, that is `$1.20 / 1M`)
 - Set `BILLING_UNITS_PER_USD` if you want the UI to expose USD equivalents for the shared balance
 
-Managed AI still runs through the proxy. A self-hosted operator may configure a server-owned
-provider credential, while BYOC users connect an API key or sanitized `auth.json` through the
-credential flow. Neither credential path belongs in a Vite environment or browser bundle.
-`MANAGED_AI_STARTUP_CHECK=true` makes the controller fail closed when the managed proxy path is
-not ready.
+Managed AI still runs through the proxy, and the proxy that matters is the one the runtime calls:
+hosted runtimes talk to their own per-runtime proxy sidecar (`http://proxy:8789` in
+`docker/docker-compose.runtime.provider.yml`), not to the controller's `PROXY_BASE_URL` proxy.
+A managed turn carries a proxy token with no credential id, and the sidecar has two ways to serve
+it:
+- Set `MANAGED_AI_OPENAI_API_KEY` on the controller (`OPENAI_API_KEY` in the controller environment is honoured as the fallback, which is how hosted deployments already pass the key). The controller serves that key through the
+  proxy credential-lease route under a fixed managed credential id, so a sidecar without static
+  credentials (`remote_dynamic`) leases it like any other credential. The key stays on the
+  controller; provider hosts and runtime containers never hold it. This is the recommended setup.
+- Give every proxy a runtime calls static credentials (`OPENAI_API_KEY` or an API-key `auth.json`
+  at `/opt/instafy/proxy-codex/auth.json` on each provider host). A sidecar without either
+  refuses managed turns with `proxy token missing credential_id for BYOC request`.
+
+Roll the proxy out first. Setting `MANAGED_AI_OPENAI_API_KEY` is what makes the controller
+advertise managed AI and charge for managed turns, so every provider host must already run a
+proxy image built from this change (`RUNTIME_PROXY_IMAGE`) before the key goes on the
+controller. Set the key first and an older sidecar keeps rejecting the turns the controller is
+already charging for.
+
+BYOC users connect an API key or sanitized `auth.json` through the credential flow. Neither
+credential path belongs in a Vite environment or browser bundle. `MANAGED_AI_STARTUP_CHECK=true`
+makes the controller fail closed when its own proxy can serve neither path; it does not probe
+per-runtime sidecars.
 
 The controller now reserves units at prompt dispatch and then reconciles the final charge after completion from actual input/cached/output token usage. The shared ledger keeps both the usage metadata and any follow-up adjustment row when the final charge differs from the reserve.
 
