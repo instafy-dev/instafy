@@ -39,6 +39,18 @@ import {
 export { PROJECT_ACCESS_REFRESH_EVENT } from "./projectAccessEvents";
 
 const LAST_PROJECT_STORAGE_KEY = "instafy.lastProjectId";
+function readUrlProjectId(): string | null {
+  if (typeof window === "undefined") {
+    return null;
+  }
+  try {
+    const raw = new URLSearchParams(window.location.search).get("projectId")?.trim() ?? "";
+    return raw && isUUID(raw) ? raw : null;
+  } catch {
+    return null;
+  }
+}
+
 const PROJECT_SUMMARY_RETRY_BACKOFF_MS = 5_000;
 const PROJECT_CAPABILITY_REFRESH_INTERVAL_MS = 60_000;
 
@@ -922,12 +934,14 @@ export function ProjectAccessProvider({ children }: { children: ReactNode }) {
     } else if (
       projectCapabilitiesRef.current?.projectId !== targetProjectId &&
       blockedProjectIdRef.current !== targetProjectId &&
-      !projectAccessPendingRef.current
+      !projectAccessPendingRef.current &&
+      readUrlProjectId() !== targetProjectId
     ) {
-      // A space the studio switched to itself (New space, picker) arrives
-      // with no capabilities and no URL change to trigger the bootstrap
-      // lookup. Resolve access now; the composer stays locked until then and
-      // the periodic refresh alone would hold it for a minute.
+      // A store-only switch (no URL change) arrives with no capabilities and
+      // nothing to trigger the URL bootstrap lookup. Resolve access now; the
+      // composer stays locked until then and the periodic refresh alone would
+      // hold it for a minute. When the URL already names the space, the
+      // bootstrap effect owns the lookup.
       void refreshCapabilities();
     }
 
