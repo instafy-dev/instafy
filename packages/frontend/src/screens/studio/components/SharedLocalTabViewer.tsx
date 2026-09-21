@@ -132,8 +132,8 @@ export function SharedLocalTabViewer({ projectId, share, onClose, onEnded }: { p
   const height = imageSize.height ? imageSize.height * scale : undefined;
   const inlineHeight = Math.max(160, bounds.width && imageSize.width ? bounds.width * imageSize.height / imageSize.width : 240);
   const panel = <section aria-label="Shared local browser tab" className={`relative flex min-h-0 min-w-0 flex-col overflow-hidden border border-slate-300 bg-slate-950 ${fullscreen ? "h-full border-0" : "rounded-lg"}`} style={{ paddingBottom: keyboardOccupiedHeight }} data-testid="local-browser-share-viewer">
-    <div className="shrink-0 space-y-1 bg-slate-100 p-2 text-xs text-slate-800 dark:bg-slate-900 dark:text-slate-100">
-      <div className="flex items-center justify-between gap-2">
+    <div className="flex shrink-0 flex-wrap items-center gap-x-2 gap-y-1 bg-slate-100 p-2 text-xs text-slate-800 dark:bg-slate-900 dark:text-slate-100">
+      <div className="flex w-full items-center justify-between gap-2">
         <span role="status">{exploring ? "Explore · Your own view" : image && selfControls ? "Live tab · You control" : image && control?.grant ? "Live tab · Another participant controls" : state}</span><Button size="sm" variant="ghost" onPress={onClose}>Leave</Button>
       </div>
       <div className={keyboardOccupiedHeight > 0 ? "hidden" : "flex flex-wrap items-center gap-2"}>
@@ -153,7 +153,7 @@ export function SharedLocalTabViewer({ projectId, share, onClose, onEnded }: { p
         <Button size="sm" variant="secondary" data-testid="local-tab-explore-action" isDisabled={!exploring && selfControls} onPress={() => command(exploring || explore.requested ? "exploreReturn" : "exploreRequest", exploring || explore.requested ? {} : {viewport:viewerViewport()})}>{exploring ? "Return to follow" : explore.requested ? "Cancel Explore request" : "Explore independently"}</Button>
         {exploring ? <><Button size="sm" variant="ghost" aria-label="Back in your Explore view" onPress={() => command("exploreNavigate",{viewId:explore.view!.viewId,action:"back"})}>Back</Button><Button size="sm" variant="ghost" aria-label="Reload your Explore view" onPress={() => command("exploreNavigate",{viewId:explore.view!.viewId,action:"reload"})}>Reload</Button></> : null}
       </div> : null}
-      {keyboardOccupiedHeight > 0 ? null : exploring ? <p className="text-slate-500 dark:text-slate-400">Your layout and scroll are separate. Saved changes use the owner’s account.</p> : selfControls && !panOnly ? <p className="text-slate-500 dark:text-slate-400">Click the page to type. Scroll moves the shared page.</p> : zoom !== "fit" && image ? <p className="text-slate-500 dark:text-slate-400">Scroll to pan your view.</p> : null}
+      {keyboardOccupiedHeight > 0 ? null : exploring ? <p className="w-full text-slate-500 dark:text-slate-400 [@media(max-height:500px)]:hidden">Your layout and scroll are separate. Saved changes use the owner’s account.</p> : selfControls && !panOnly ? <p className="w-full text-slate-500 dark:text-slate-400 [@media(max-height:500px)]:hidden">Click the page to type. Scroll moves the shared page.</p> : zoom !== "fit" && image ? <p className="w-full text-slate-500 dark:text-slate-400 [@media(max-height:500px)]:hidden">Scroll to pan your view.</p> : null}
     </div>
     <div ref={setViewport} tabIndex={image ? 0 : undefined} role="region" aria-label="Shared tab image viewport" data-testid="local-browser-share-pan"
       className={`relative min-h-0 min-w-0 overflow-auto overscroll-contain ${fullscreen ? "flex-1" : ""}`}

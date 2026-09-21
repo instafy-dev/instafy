@@ -1,7 +1,10 @@
 # Sharing a local browser tab
 
-Status: initial Electron implementation. Physical Android/iOS qualification,
-real-network measurements and multi-controller routing remain open.
+Status: initial Electron implementation. Touch, software keyboard, independent
+scroll/navigation, rotation and control revocation have been exercised in Chrome
+on a physical Samsung SM-S901B running Android 16 alongside Electron. Physical
+iOS, native mobile shells, real-network measurements and multi-controller routing
+remain open.
 
 The browser's location and its audience are separate choices. The browser location
 selector says **This device** and **Workspace**. This device uses Personal Browser
@@ -122,6 +125,10 @@ back to local inspection. Neither Follow nor canonical control changes the sourc
 a different page layout. Approved Explore uses its own responsive page. New frames retain the viewer's pan.
 Stop and removal clear both docked and fullscreen pixels.
 
+Control groups wrap into the available width. On short viewports, such as a
+landscape phone, explanatory text is hidden to leave more room for the page;
+the status and action buttons remain visible.
+
 The expanded viewer follows the device's visible viewport when the software
 keyboard opens. It reserves space for the remote input bar and temporarily hides
 zoom controls and explanatory text, keeping navigation and release controls
@@ -168,7 +175,7 @@ layout and independent page scrolling described above.
 
 ## Next increments
 
-1. Qualify local-tab touch/keyboard/control on physical Android and iOS alongside
+1. Extend local-tab touch/keyboard/control qualification to physical iOS and native mobile shells alongside
    Electron. The earlier server-browser phone results do not cover this path.
 2. Measure native capture, end-to-end latency, quality, CPU and bandwidth on LAN
    and constrained networks. Evaluate event-driven capture and WebRTC/TURN against
