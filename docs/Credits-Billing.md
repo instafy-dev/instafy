@@ -81,7 +81,7 @@ hosted runtimes talk to their own per-runtime proxy sidecar (`http://proxy:8789`
 `docker/docker-compose.runtime.provider.yml`), not to the controller's `PROXY_BASE_URL` proxy.
 A managed turn carries a proxy token with no credential id, and the sidecar has two ways to serve
 it:
-- Set `MANAGED_AI_OPENAI_API_KEY` on the controller. The controller serves that key through the
+- Set `MANAGED_AI_OPENAI_API_KEY` on the controller (`OPENAI_API_KEY` in the controller environment is honoured as the fallback, which is how hosted deployments already pass the key). The controller serves that key through the
   proxy credential-lease route under a fixed managed credential id, so a sidecar without static
   credentials (`remote_dynamic`) leases it like any other credential. The key stays on the
   controller; provider hosts and runtime containers never hold it. This is the recommended setup.

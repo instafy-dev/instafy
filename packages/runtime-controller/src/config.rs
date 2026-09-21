@@ -909,7 +909,12 @@ impl AppConfig {
                 .unwrap_or(DEFAULT_MANAGED_AI_OUTPUT_USD_MICROS_PER_1K);
         // Platform key served to proxies as the managed credential lease. Kept
         // on the controller only; it never reaches runtime containers.
-        let managed_ai_openai_api_key = read_first_env(&["MANAGED_AI_OPENAI_API_KEY"]);
+        // Hosted deployments hand the managed key to the controller as
+        // OPENAI_API_KEY (it is also copied into the controller-side proxy),
+        // so honour that name as the fallback and keep the lease and the
+        // static proxy on one key.
+        let managed_ai_openai_api_key =
+            read_first_env(&["MANAGED_AI_OPENAI_API_KEY", "OPENAI_API_KEY"]);
 
         let tunnel_broker_hook_secret = std::env::var("TUNNEL_BROKER_HOOK_SECRET")
             .ok()
