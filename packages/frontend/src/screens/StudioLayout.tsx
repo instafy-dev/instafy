@@ -138,7 +138,7 @@ import { controllerBaseUrl } from "../services/runtimeController/core";
 import { useAutoDesktopSpeechTunnel } from "../desktop/voiceTunnel/useAutoDesktopSpeechTunnel";
 import { useStudioLayoutChromeState } from "./useStudioLayoutChromeState";
 import { useStudioLayoutWorkspaceRouting } from "./useStudioLayoutWorkspaceRouting";
-import { canRememberTeamWorkspace, resolveTeamNavigationScope, usesGlobalNavigationContext } from "./studio/teamNavigation";
+import { canRememberTeamWorkspace, resolveStudioSearchContext, resolveTeamNavigationScope, usesGlobalNavigationContext } from "./studio/teamNavigation";
 import { readCachedControllerOrgs } from "./studio/components/sidebarOrgSnapshot";
 import { StudioPanelPerformance } from "../telemetry/StudioPanelPerformance";
 
@@ -2046,9 +2046,11 @@ function StudioLayoutInner() {
   const mobileSearchTriggerRef = useRef<HTMLButtonElement | null>(null);
   const overlaySearchTriggerRef = useRef<HTMLButtonElement | null>(null);
   const globalNavigationContext = usesGlobalNavigationContext(navigationScope.page, activeProjectId);
-  const searchOrg = globalNavigationContext ? null : { id: navigationScope.orgKey, name: activeTeamName };
-  const searchSpace = !globalNavigationContext && activeProjectId && activeProjectOrgKey === navigationScope.orgKey && !projectAccessBlocked
-    ? { id: activeProjectId, name: activeProjectName } : null;
+  const { org: searchOrg, space: searchSpace } = resolveStudioSearchContext(
+    { id: navigationScope.orgKey, name: activeTeamName },
+    activeProjectSummary ? { id: activeProjectSummary.id, orgId: activeProjectSummary.orgId, name: activeProjectName } : null,
+    projectAccessBlocked,
+  );
   const searchNavigation = useStudioSearchNavigation({
     viewerUserId: currentUserId, location, activeProjectId,
     projectReady: projectReadyForWorkspace, projectAccessBlocked, conversationsProjectKey,

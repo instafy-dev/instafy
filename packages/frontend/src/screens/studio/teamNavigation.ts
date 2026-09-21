@@ -24,6 +24,19 @@ export function resolveTeamNavigationScope(search: string, activeOrgKey: string)
   return { page, orgKey: requestedKey ?? activeOrgKey };
 }
 
+/** Search follows the visible working context, including on Home and account pages. */
+export function resolveStudioSearchContext(
+  org: { id: string; name: string },
+  project: { id: string; name: string; orgId?: string | null } | null,
+  projectAccessBlocked: boolean,
+) {
+  return {
+    org,
+    space: project && !projectAccessBlocked && (project.orgId ?? "personal") === org.id
+      ? { id: project.id, name: project.name } : null,
+  };
+}
+
 /** Remember workspace destinations, so global pages cannot replace a space's work. */
 export function canRememberTeamWorkspace(search: string, projectId: string | null, orgKey: string) {
   const params = new URLSearchParams(search);

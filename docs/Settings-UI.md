@@ -51,8 +51,9 @@ Forward still follow Router history and restore each visit's scroll position; th
 not introduce another history stack. Utility/file previews and retained form drafts are session
 state, while chat-tab restoration continues to use its existing persistence.
 
-On desktop, `StudioDesktopHeader` keeps the team avatar, space picker, workspace tabs and
-Search button on one 52px row (64px for coarse pointers). Tabs overflow horizontally rather
+On desktop, `StudioDesktopHeader` keeps the team avatar, space picker, Search icon and
+workspace tabs on one 52px row (64px for coarse pointers). Search sits immediately after the
+space picker within the context column. Tabs overflow horizontally rather
 than wrapping or compressing their titles. New chat stays in the sidebar, and the profile
 menu stays in the organization rail. The header's left column shares the expanded navigation
 width, including at narrow desktop sizes, so tabs never extend over that sidebar. Keep the
@@ -68,7 +69,10 @@ has a small identity icon, a name, an optional unread count and a trailing curre
 Recent spaces stay alphabetically ordered; **Browse all spaces** remains below the list.
 
 Search expands into the same header when activated, temporarily hiding the tabs and revealing
-the existing scope chips and full-page results. Cmd/Ctrl+K opens or refocuses it; Escape returns
+the existing scope chips and full-page results. It starts in the team and accessible space shown
+in the header, including on Home and personal settings. A retained space from another team is
+excluded. Remove the space chip to search the team, then the team chip to search all teams.
+Cmd/Ctrl+K opens or refocuses it; Escape returns
 focus to Search. The shortcut yields to modal dialogs and already-handled editor shortcuts.
 The header clears Electron's window controls once; interactive descendants are excluded from
 the window drag region.

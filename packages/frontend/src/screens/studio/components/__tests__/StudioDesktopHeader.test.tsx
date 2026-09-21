@@ -51,6 +51,9 @@ describe("Single-row desktop search", () => {
   it("expands search in place and returns focus to Search without remounting the tabs", async () => {
     await act(async () => root.render(<Harness />));
     const tab = container.querySelector('[data-testid="workspace-tab"]');
+    const controls = Array.from(container.querySelectorAll("button"));
+    expect(controls.map(button => button.getAttribute("aria-label") ?? button.textContent))
+      .toEqual(["Choose space", "Search", "Conversation"]);
     expect(input()).toBeNull();
     await act(async () => trigger().click());
     expect(document.activeElement).toBe(input());

@@ -23,16 +23,17 @@ export function StudioDesktopHeader({ contextRef, searchTriggerRef, searchOpen, 
   }, [onSearch]);
 
   return <header className="studio-context-header instafy-titlebar-drag" aria-label="Working context" data-search-open={searchOpen}>
-    <div ref={contextRef} className="studio-context-slot" />
+    <div className="studio-desktop-context-column">
+      <div ref={contextRef} className="studio-context-slot" />
+      <Button ref={searchTriggerRef} variant="ghost" size="sm" radius="lg"
+        className="studio-desktop-search-trigger" hidden={searchOpen}
+        aria-label="Search" aria-keyshortcuts="Meta+k Control+k" title="Search (⌘K / Ctrl+K)"
+        data-testid="studio-desktop-search-trigger" onPress={onSearch}>
+        <Search className="h-[18px] w-[18px]" aria-hidden="true" />
+      </Button>
+    </div>
     <div className="studio-desktop-tabs" hidden={searchOpen} inert={searchOpen || undefined}>
       {children}
     </div>
-    <Button ref={searchTriggerRef} variant="ghost" size="sm" radius="lg"
-      className="studio-desktop-search-trigger" hidden={searchOpen}
-      aria-label="Search" aria-keyshortcuts="Meta+k Control+k" title="Search (⌘K / Ctrl+K)"
-      data-testid="studio-desktop-search-trigger" onPress={onSearch}>
-      <Search className="h-[18px] w-[18px]" aria-hidden="true" />
-      <span>Search</span>
-    </Button>
   </header>;
 }
