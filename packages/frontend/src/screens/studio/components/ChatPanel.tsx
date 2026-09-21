@@ -183,6 +183,7 @@ import {
   COMPOSER_INLINE_COMPLETION_DEBOUNCE_MS,
   buildComposerInlineCompletionPath,
   buildComposerInlineSuggestion,
+  readComposerInlineCompletionPreference,
   shouldRequestComposerInlineCompletion,
 } from "./composerInlineCompletion";
 import { shouldSuppressOuterAvatarForConversationThread } from "./conversationThreadPreviewLayout";
@@ -5122,6 +5123,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
         hasImageAttachments: imageAttachments.length > 0,
         onboardingInputLocked,
         sendingAttachment,
+        inlineCompletionEnabled: readComposerInlineCompletionPreference(),
       })
     ) {
       setComposerInlineCompletion(null);
