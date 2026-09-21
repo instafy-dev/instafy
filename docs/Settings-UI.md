@@ -12,6 +12,11 @@ including when Studio has another panel open.
 - Escape and native Back return one level, then dismiss the picker. Keyboard focus returns
   to its trigger on dismissal and follows the selected category when the layout changes.
 
+The desktop working-context header owns one continuous divider across the navigation,
+open drawers and workspace. Keep it in both themes and across panel and search changes.
+Active tabs meet that edge without adding a second horizontal line underneath it; tab
+overflow fades affect only scrolling content, leaving the shared divider visible.
+
 Keep account identity in the avatar menu. Personal settings should not repeat an email above
 their categories. Team and space settings retain their scope because it identifies whose
 configuration is being changed.
@@ -72,8 +77,8 @@ existing thin outline, 12px default radius
 and visible keyboard focus treatment. Profile's Save action follows the same 44px mobile
 target and uses a compact 36px height on wider fine-pointer screens.
 
-Use a small, consistent radius scale: 6px for compact search scope chips, 8px for navigation
-and menu rows, 12px for form controls and profile actions, and 16px for cards, dialogs and
+Use a small, consistent radius scale: 6px for compact search scope chips, 8px for menu rows
+and segmented options, 12px for navigation rows, form controls and profile actions, and 16px for cards, dialogs and
 popovers. Human avatars remain circular; team identities use rounded squares. Do not turn
 every action into a pill.
 
@@ -223,3 +228,14 @@ bucket, which also permits uploading before a new bot has an ID. Only that user 
 or delete objects in their directory; overwrite is not allowed. The existing controller
 checks bot ownership when saving `avatarSeed`. Existing saved image URLs remain readable,
 but the editor uses the native file picker rather than an image-URL field.
+
+
+Docked side panels use `DrawerHeader frame="rail"`: a 48px row with 16px horizontal
+insets and a 16px semibold title. Keep path details and filters below that row so the
+heading stays aligned with the workspace tab rail. Loading fallbacks use the same frame.
+Files keeps New file visible and groups New folder, Refresh and Collapse all under More;
+the path has its own row. Desktop layout follows Studio's 900px breakpoint; touch targets
+grow independently for coarse pointers. Navigation selection uses a flat fill with a
+separate keyboard-focus ring. Changes uses the shared segmented selector for Files/All
+changes. Participants is an overlay, so it keeps its shadow while model/reasoning actions
+have 44px targets on narrow screens and coarse pointers.

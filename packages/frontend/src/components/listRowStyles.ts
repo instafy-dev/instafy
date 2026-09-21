@@ -2,10 +2,10 @@ export const LIST_ROW_SURFACE_BASE =
   "group rounded-xl border border-transparent transition-colors";
 
 export const LIST_ROW_SURFACE_IDLE =
-  "hover:border-slate-200 hover:bg-slate-50 dark:hover:border-[color:var(--color-studio-dark-panel-border)] dark:hover:bg-[var(--color-studio-dark-rail-hover)]";
+  "hover:bg-slate-50 dark:hover:bg-[var(--color-studio-dark-rail-hover)]";
 
 export const LIST_ROW_SURFACE_ACTIVE =
-  "border-slate-200 bg-slate-100/90 dark:border-[color:var(--color-studio-dark-active-border)] dark:bg-[var(--color-studio-dark-active)]";
+  "border-transparent !bg-slate-100 dark:!bg-[var(--color-studio-dark-active)]";
 
 export const LIST_ROW_FOCUS_RING =
   "focus:outline-none focus-visible:ring-2 focus-visible:ring-primary-400/35 focus-visible:ring-offset-2 focus-visible:ring-offset-white dark:focus-visible:ring-offset-[var(--color-studio-dark-rail)]";

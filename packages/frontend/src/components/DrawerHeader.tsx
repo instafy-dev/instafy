@@ -8,6 +8,8 @@ export interface DrawerHeaderProps {
   icon?: ReactNode;
   actions?: ReactNode;
   density?: "compact" | "touch";
+  /** Align with the 48px Studio tab rail. Put filters and path details below this frame. */
+  frame?: "content" | "rail";
   className?: string;
   contentClassName?: string;
   titleClassName?: string;
@@ -22,15 +24,17 @@ export function DrawerHeader({
   icon,
   actions,
   density = "compact",
+  frame = "content",
   className,
   contentClassName,
   titleClassName,
   subtitleClassName,
   actionsClassName,
 }: DrawerHeaderProps) {
-  const touchDensity = density === "touch";
+  const railFrame = frame === "rail";
+  const touchDensity = !railFrame && density === "touch";
   return (
-    <div className={["flex items-center justify-between gap-3", className].filter(Boolean).join(" ")}>
+    <div className={["flex min-w-0 items-center justify-between gap-3", railFrame && "h-12 shrink-0 px-4", className].filter(Boolean).join(" ")}>
       <div
         className={[
           "flex min-w-0 items-center",
@@ -46,7 +50,7 @@ export function DrawerHeader({
             as={titleAs}
             variant={touchDensity ? "title" : "bodyStrong"}
             tone="primary"
-            className={["min-w-0 truncate", titleClassName].filter(Boolean).join(" ")}
+            className={["min-w-0 truncate", railFrame && "!text-base !font-semibold", titleClassName].filter(Boolean).join(" ")}
           >
             {title}
           </Text>

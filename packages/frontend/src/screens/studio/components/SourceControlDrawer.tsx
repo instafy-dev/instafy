@@ -1,8 +1,8 @@
+import { DARK_DIVIDER_BORDER_CLASS, DARK_PANEL_BG_CLASS, DARK_PANEL_BORDER_CLASS } from "../../../theme/darkSurfaces";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   CheckSquare,
   CloudUpload,
-  Eye,
   Folder,
   GitBranch,
   MinusSquare,
@@ -17,7 +17,9 @@ import { Checkbox } from "../../../components/Checkbox";
 import { Input } from "../../../components/Input";
 import { Text } from "../../../components/Text";
 import { DrawerHeader } from "../../../components/DrawerHeader";
-import { useBreakpoint } from "../../../hooks/useBreakpoint";
+import { Button as AriaButton } from "react-aria-components";
+import { useStudioDesktopLayout } from "../useStudioDesktopLayout";
+import { segmentedControlGroupClassName, segmentedControlOptionClassName, SEGMENTED_CONTROL_LABEL_CLASS } from "../../../components/segmentedControlStyles";
 import {
   DRAWER_ICON_BUTTON_TONE_CLASS,
   DRAWER_LIST_ROW_META_CLASS,
@@ -71,16 +73,6 @@ function sanitizeScopeTestId(value: string): string {
   return value.replace(/[^a-zA-Z0-9_-]+/g, "-");
 }
 
-function reviewModeButtonClassName(active: boolean): string {
-  return active
-    ? "bg-white text-slate-900 shadow-sm shadow-slate-200/80 hover:bg-white dark:bg-slate-100 dark:text-slate-900 dark:shadow-none dark:hover:bg-white"
-    : "text-slate-700 hover:text-slate-900 dark:text-slate-300 dark:hover:text-slate-100";
-}
-
-function reviewModeRailClassName(): string {
-  return "inline-flex items-center rounded-full border border-slate-200/70 bg-slate-100/90 p-0.5 shadow-sm shadow-slate-200/60 dark:border-slate-800 dark:bg-slate-950/40 dark:shadow-none";
-}
-
 export function SourceControlDrawer({
   onRequestClose,
   openRequest,
@@ -101,7 +93,7 @@ export function SourceControlDrawer({
     projectCapabilitiesResolved === true && canWriteProject === true;
   const { effectiveRuntimeId } = useRuntime();
   const { showStatus } = useStatus();
-  const isLargeScreen = useBreakpoint("lg");
+  const isLargeScreen = useStudioDesktopLayout();
   const { activeConversationId, createConversation, setConversationDraft } = useConversations();
   const { openConversationTab, openGitReviewTab, openPanelTab, requestUrlPush } = useWorkspaceTabs();
   const [status, setStatus] = useState<WorkspaceGitStatus | null>(null);
@@ -1189,46 +1181,45 @@ export function SourceControlDrawer({
   );
 
   return (
-    <div className="relative flex h-full flex-col" data-testid="source-control-drawer">
-      <div className="px-4 py-3">
-        <DrawerHeader
-          title="Changes"
-          icon={<GitBranch className="h-4 w-4 text-slate-400 dark:text-slate-500" aria-hidden="true" />}
-          actions={
-            <>
+    <div className="@container relative flex h-full min-h-0 flex-col" data-testid="source-control-drawer">
+      <DrawerHeader
+        frame="rail"
+        title="Changes"
+        icon={<GitBranch className="h-4 w-4 text-slate-400 dark:text-slate-500" aria-hidden="true" />}
+        actions={
+          <>
+            <IconButton
+              variant="ghost"
+              size="sm"
+              radius="full"
+              aria-label="Refresh changes"
+              title="Refresh"
+              data-testid="source-control-refresh"
+              onPress={() => refresh({ silent: false })}
+              isDisabled={!activeProjectId || loading}
+              className={`max-[899px]:h-11 max-[899px]:w-11 ${DRAWER_ICON_BUTTON_TONE_CLASS}`}
+            >
+              <Refresh className="h-4 w-4" aria-hidden="true" />
+            </IconButton>
+            {onRequestClose ? (
               <IconButton
                 variant="ghost"
-                size="xs"
+                size="sm"
                 radius="full"
-                aria-label="Refresh changes"
-                title="Refresh"
-                data-testid="source-control-refresh"
-                onPress={() => refresh({ silent: false })}
-                isDisabled={!activeProjectId || loading}
-                className={`h-10 w-10 lg:h-6 lg:w-6 ${DRAWER_ICON_BUTTON_TONE_CLASS}`}
+                aria-label="Close changes"
+                title="Close"
+                data-testid="source-control-close"
+                onPress={onRequestClose}
+                className={`max-[899px]:h-11 max-[899px]:w-11 ${DRAWER_ICON_BUTTON_TONE_CLASS}`}
               >
-                <Refresh className="h-4 w-4" aria-hidden="true" />
+                <Xmark className="h-4 w-4" aria-hidden="true" />
               </IconButton>
-              {onRequestClose ? (
-                <IconButton
-                  variant="ghost"
-                  size="xs"
-                  radius="full"
-                  aria-label="Close changes"
-                  title="Close"
-                  data-testid="source-control-close"
-                  onPress={onRequestClose}
-                  className={`h-10 w-10 lg:h-6 lg:w-6 ${DRAWER_ICON_BUTTON_TONE_CLASS}`}
-                >
-                  <Xmark className="h-4 w-4" aria-hidden="true" />
-                </IconButton>
-              ) : null}
-            </>
-          }
-        />
-      </div>
+            ) : null}
+          </>
+        }
+      />
 
-      <div className="flex-1 overflow-hidden">
+      <div className="min-h-0 flex-1 overflow-hidden">
         {loading && !status ? (
           <div className="flex h-full items-center justify-center px-6 text-center">
             <Text tone="secondary">Loading changes…</Text>
@@ -1277,7 +1268,7 @@ export function SourceControlDrawer({
             ) : null}
             {largeChangeSet ? (
               <div
-                className="rounded-xl border border-slate-200/70 bg-slate-50/80 px-3 py-2 text-sm text-slate-700 dark:border-slate-800 dark:bg-slate-900/70 dark:text-slate-200"
+                className={`rounded-xl border border-slate-200/70 bg-slate-50/80 px-3 py-2 text-sm text-slate-700 ${DARK_DIVIDER_BORDER_CLASS} ${DARK_PANEL_BG_CLASS} dark:text-slate-200`}
                 data-testid="source-control-large-changes-note"
               >
                 Large change set detected. Grouping by folder and rendering files progressively to keep the drawer responsive.
@@ -1342,8 +1333,8 @@ export function SourceControlDrawer({
             </div>
 
             <div className="flex-1 overflow-hidden">
-              <div className="flex h-full flex-col overflow-hidden border-t border-slate-200/70 pt-1 dark:border-slate-800">
-                <div className="flex items-center justify-between gap-2 px-1 py-1.5">
+              <div className={`flex h-full flex-col overflow-hidden border-t border-slate-200/70 pt-1 ${DARK_DIVIDER_BORDER_CLASS}`}>
+                <div className="flex flex-wrap items-center justify-between gap-2 px-1 py-1.5">
                   <div className="flex min-w-0 items-center gap-2">
                     {workspaceBusy ? (
                       <span
@@ -1357,29 +1348,24 @@ export function SourceControlDrawer({
                   </div>
                   <div className="flex items-center gap-1">
                     {dirtyCount > 0 ? (
-                      <div className={`mr-1 ${reviewModeRailClassName()}`}>
-                        <Button
-                          variant="ghost"
-                          size="xs"
-                          radius="full"
+                      <div className={`mr-1 ${segmentedControlGroupClassName()}`} role="group" aria-label="Changes view">
+                        <AriaButton
                           onPress={() => setReviewMode("focused")}
                           data-testid="source-control-review-mode-focused"
-                          className={reviewModeButtonClassName(reviewMode === "focused")}
+                          aria-pressed={reviewMode === "focused"}
+                          className={`${segmentedControlOptionClassName(reviewMode === "focused")} min-h-7 text-xs pointer-coarse:min-h-11`}
                         >
-                          Files
-                        </Button>
-                        <Button
-                          variant="ghost"
-                          size="xs"
-                          radius="full"
+                          <span className={SEGMENTED_CONTROL_LABEL_CLASS}>Files</span>
+                        </AriaButton>
+                        <AriaButton
                           onPress={() => setReviewMode("all")}
                           data-testid="source-control-review-mode-all"
-                          className={reviewModeButtonClassName(reviewMode === "all")}
+                          aria-pressed={reviewMode === "all"}
+                          className={`${segmentedControlOptionClassName(reviewMode === "all")} min-h-7 text-xs pointer-coarse:min-h-11`}
                           aria-label="Preview all changes"
-                          title="Preview all changes"
                         >
-                          <Eye className="h-3.5 w-3.5" aria-hidden="true" />
-                        </Button>
+                          <span className={SEGMENTED_CONTROL_LABEL_CLASS}>All changes</span>
+                        </AriaButton>
                       </div>
                     ) : null}
                     <IconButton
@@ -1428,7 +1414,7 @@ export function SourceControlDrawer({
                     </div>
                   ) : showDesktopRollingDiffPreview ? (
                     <div
-                      className="h-full min-h-0 overflow-hidden rounded-2xl border border-slate-200/70 bg-white/80 dark:border-slate-800 dark:bg-slate-950/40"
+                      className={`h-full min-h-0 overflow-hidden rounded-2xl border border-slate-200/70 bg-white/80 ${DARK_DIVIDER_BORDER_CLASS} ${DARK_PANEL_BG_CLASS}`}
                       data-testid="source-control-rolling-diff-preview"
                     >
                       <WorkspaceGitRollingDiffPanel
@@ -1442,11 +1428,11 @@ export function SourceControlDrawer({
                       />
                     </div>
                   ) : showDesktopDiffPreview ? (
-                    <div className="grid h-full min-h-0 grid-cols-[minmax(18rem,22rem)_minmax(0,1fr)] gap-3" data-testid="source-control-review-layout">
+                    <div className="grid h-full min-h-0 grid-cols-1 @min-[640px]:grid-cols-[minmax(18rem,22rem)_minmax(0,1fr)] gap-3" data-testid="source-control-review-layout">
                       <div className="min-h-0 overflow-y-auto pr-1" data-testid="source-control-changes">
                         <div className="flex flex-col gap-1 px-1">{changesListContent}</div>
                       </div>
-                      <div className="min-h-0 overflow-hidden rounded-2xl border border-slate-200/70 bg-white/80 dark:border-slate-800 dark:bg-slate-950/40" data-testid="source-control-diff-preview">
+                      <div className={`min-h-0 overflow-hidden rounded-2xl border border-slate-200/70 bg-white/80 ${DARK_DIVIDER_BORDER_CLASS} ${DARK_PANEL_BG_CLASS}`} data-testid="source-control-diff-preview">
                         <WorkspaceGitDiffPanel
                           path={previewPath}
                           projectId={activeProjectId}
@@ -1467,8 +1453,8 @@ export function SourceControlDrawer({
                 </div>
 
                 {historySupported ? (
-                  <div className="border-t border-slate-200/70 pt-1 dark:border-slate-800">
-                    <div className="flex items-center justify-between gap-2 px-1 py-1.5">
+                  <div className={`border-t border-slate-200/70 pt-1 ${DARK_DIVIDER_BORDER_CLASS}`}>
+                    <div className="flex flex-wrap items-center justify-between gap-2 px-1 py-1.5">
                       <div className="flex min-w-0 items-center gap-2">
                         <Text
                           variant="caption"
@@ -1577,10 +1563,10 @@ export function SourceControlDrawer({
                                   </IconButton>
                                 </div>
                                 {expanded ? (
-                                  <div className="mt-2 border-t border-slate-200/70 pt-2 text-xs text-slate-500 dark:border-slate-800 dark:text-slate-400">
+                                  <div className={`mt-2 border-t border-slate-200/70 pt-2 text-xs text-slate-500 ${DARK_DIVIDER_BORDER_CLASS} dark:text-slate-400`}>
                                     <div className="text-slate-600 dark:text-slate-300">{parsed.fullSubject}</div>
                                     <div className="mt-2 flex flex-wrap items-center gap-2">
-                                      <span className="rounded-full border border-slate-200 px-1.5 py-0.5 font-mono dark:border-slate-700">
+                                      <span className={`rounded-full border border-slate-200 px-1.5 py-0.5 font-mono ${DARK_PANEL_BORDER_CLASS}`}>
                                         {entry.shortCommit}
                                       </span>
                                       <span>{authorLabel}</span>
@@ -1635,7 +1621,7 @@ export function SourceControlDrawer({
             onClick={() => setReviewMode("focused")}
           />
           <div
-            className="relative z-10 flex max-h-[78vh] w-full flex-col overflow-hidden rounded-t-[28px] border border-slate-200/70 bg-white shadow-2xl dark:border-slate-800 dark:bg-slate-950"
+            className={`relative z-10 flex max-h-[78vh] w-full flex-col overflow-hidden rounded-t-[28px] border border-slate-200/70 bg-white shadow-2xl ${DARK_DIVIDER_BORDER_CLASS} ${DARK_PANEL_BG_CLASS}`}
             data-testid="source-control-rolling-diff-sheet"
           >
             <div className="flex items-center justify-between px-3 pt-2">
@@ -1676,7 +1662,7 @@ export function SourceControlDrawer({
             onClick={() => setPreviewPath(null)}
           />
           <div
-            className="relative z-10 flex max-h-[78vh] w-full flex-col overflow-hidden rounded-t-[28px] border border-slate-200/70 bg-white shadow-2xl dark:border-slate-800 dark:bg-slate-950"
+            className={`relative z-10 flex max-h-[78vh] w-full flex-col overflow-hidden rounded-t-[28px] border border-slate-200/70 bg-white shadow-2xl ${DARK_DIVIDER_BORDER_CLASS} ${DARK_PANEL_BG_CLASS}`}
             data-testid="source-control-diff-sheet"
           >
             <div className="flex justify-center pt-2">

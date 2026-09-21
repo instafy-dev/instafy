@@ -1,3 +1,4 @@
+import { fileExplorerAction } from "../utils/filesExplorer.js";
 import { expect, test, type APIResponse, type Page } from "@playwright/test";
 import { openTeamDirectory } from "../utils/sidebar.js";
 import { randomUUID } from "node:crypto";
@@ -260,7 +261,7 @@ async function openWorkspaceFile(page: Page, filePath: string) {
   // with an empty root after module requests fail with ERR_NETWORK_CHANGED.
   // Selecting a file from the normal explorer opens and activates its file tab.
   await page.getByTestId("sidebar-nav-code").click();
-  const refreshButton = page.getByTestId("files-explorer-refresh");
+  const refreshButton = await fileExplorerAction(page, "refresh");
   await expect(refreshButton).toBeEnabled({ timeout: 30_000 });
   await refreshButton.click();
   await page.getByTestId("code-search-input").fill("");

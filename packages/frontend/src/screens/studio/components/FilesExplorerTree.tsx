@@ -1,3 +1,4 @@
+import { DARK_DIVIDER_BORDER_CLASS, DARK_PANEL_BG_CLASS, DARK_RAIL_HOVER_CLASS } from "../../../theme/darkSurfaces";
 import { useCallback, useState, type ReactNode, type RefObject } from "react";
 import { buildMarkdownOutlineTree, type MarkdownOutlineItem, type MarkdownOutlineTreeItem } from "../../../components/markdownOutline";
 import { Button, IconButton } from "../../../components/Button";
@@ -8,6 +9,7 @@ import {
   DRAWER_ICON_BUTTON_TONE_CLASS,
   DRAWER_LIST_ROW_TEXT_CLASS,
   LIST_ROW_SURFACE_BASE,
+  LIST_ROW_FOCUS_WITHIN_RING,
   listRowSurfaceToneClassName,
 } from "../../../components/listRowStyles";
 import { type ControllerWorkspaceEntry } from "../../../sdk/instafy";
@@ -136,7 +138,7 @@ export function FilesExplorerTree({
               const sectionKey = `${normalizedEntryPath}:${section.slug}`;
               const hasChildren = section.children.length > 0;
               const isSectionExpanded = !collapsedMarkdownSectionKeys.has(sectionKey);
-              const sectionRowSurfaceClassName = `${LIST_ROW_SURFACE_BASE} w-full rounded-lg border border-transparent ${touchDensity ? "px-3" : "px-2.5"} text-slate-500 hover:border-slate-200 hover:bg-slate-50 focus-within:border-slate-200 focus-within:bg-slate-50 dark:text-slate-400 dark:hover:border-slate-800 dark:hover:bg-slate-900/40 dark:focus-within:border-slate-800 dark:focus-within:bg-slate-900/40`;
+              const sectionRowSurfaceClassName = `${LIST_ROW_SURFACE_BASE} ${listRowSurfaceToneClassName(false)} ${LIST_ROW_FOCUS_WITHIN_RING} w-full ${touchDensity ? "px-3" : "px-2.5"} text-slate-500 dark:text-slate-400`;
 
               return (
                 <li key={sectionKey}>
@@ -302,7 +304,7 @@ export function FilesExplorerTree({
         <ul className={depth === 0 ? (touchDensity ? "space-y-1.5" : "space-y-1") : touchDensity ? "mt-1 space-y-1.5 pl-2" : "mt-1 space-y-1 pl-2"}>
           {shouldShowCreateFolderRow ? (
             <li key={`__create-folder-${normalizedPath || "root"}`}>
-              <div className={`flex items-center gap-2 rounded-lg border border-slate-200 bg-white ${createRowClassName} text-slate-700 shadow-sm shadow-slate-900/5 dark:border-slate-800 dark:bg-slate-950 dark:text-slate-100 dark:shadow-none`}>
+              <div className={`flex items-center gap-2 rounded-lg border border-slate-200 bg-white ${createRowClassName} text-slate-700 shadow-sm shadow-slate-900/5 ${DARK_DIVIDER_BORDER_CLASS} ${DARK_PANEL_BG_CLASS} dark:text-slate-100 dark:shadow-none`}>
                 <span className={["inline-flex items-center justify-center text-slate-400 dark:text-slate-500", touchDensity ? "h-8 w-8" : "h-5 w-5"].join(" ")}>
                   <Folder aria-hidden="true" />
                 </span>
@@ -337,7 +339,7 @@ export function FilesExplorerTree({
                   title="Create folder"
                   onPress={onCreateFolderCommit}
                   isDisabled={createFolder?.busy === true}
-                  className="text-slate-500 hover:bg-slate-100 data-[hovered]:bg-slate-100 dark:text-slate-400 dark:hover:bg-slate-800/70 dark:data-[hovered]:bg-slate-800/70"
+                  className={`text-slate-500 hover:bg-slate-100 data-[hovered]:bg-slate-100 dark:text-slate-400 ${DARK_RAIL_HOVER_CLASS}`}
                 >
                   <Check className="h-4 w-4" aria-hidden="true" />
                 </IconButton>
@@ -349,7 +351,7 @@ export function FilesExplorerTree({
                   title="Cancel"
                   onPress={onCreateFolderCancel}
                   isDisabled={createFolder?.busy === true}
-                  className="text-slate-500 hover:bg-slate-100 data-[hovered]:bg-slate-100 dark:text-slate-400 dark:hover:bg-slate-800/70 dark:data-[hovered]:bg-slate-800/70"
+                  className={`text-slate-500 hover:bg-slate-100 data-[hovered]:bg-slate-100 dark:text-slate-400 ${DARK_RAIL_HOVER_CLASS}`}
                 >
                   <Xmark className="h-4 w-4" aria-hidden="true" />
                 </IconButton>
@@ -358,7 +360,7 @@ export function FilesExplorerTree({
           ) : null}
           {shouldShowCreateFileRow ? (
             <li key={`__create-file-${normalizedPath || "root"}`}>
-              <div className={`flex items-center gap-2 rounded-lg border border-slate-200 bg-white ${createRowClassName} text-slate-700 shadow-sm shadow-slate-900/5 dark:border-slate-800 dark:bg-slate-950 dark:text-slate-100 dark:shadow-none`}>
+              <div className={`flex items-center gap-2 rounded-lg border border-slate-200 bg-white ${createRowClassName} text-slate-700 shadow-sm shadow-slate-900/5 ${DARK_DIVIDER_BORDER_CLASS} ${DARK_PANEL_BG_CLASS} dark:text-slate-100 dark:shadow-none`}>
                 <span className={["inline-flex items-center justify-center text-slate-400 dark:text-slate-500", touchDensity ? "h-8 w-8" : "h-5 w-5"].join(" ")}>
                   <Page aria-hidden="true" />
                 </span>
@@ -420,7 +422,7 @@ export function FilesExplorerTree({
                 size="sm"
                 radius="lg"
                 fullWidth
-                className={`min-w-0 justify-start text-left ${rowPaddingClassName} ${rowTextClassName} ${LIST_ROW_SURFACE_BASE} text-slate-500 hover:border-slate-200 hover:bg-slate-50 data-[hovered]:border-slate-200 data-[hovered]:bg-slate-50 dark:text-slate-400 dark:hover:border-slate-800 dark:hover:bg-slate-900/40 dark:data-[hovered]:border-slate-800 dark:data-[hovered]:bg-slate-900/40`}
+                className={`min-w-0 justify-start text-left ${rowPaddingClassName} ${rowTextClassName} ${LIST_ROW_SURFACE_BASE} text-slate-500 hover:bg-slate-50 data-[hovered]:bg-slate-50 dark:text-slate-400 ${DARK_RAIL_HOVER_CLASS}`}
                 data-testid="files-settings-toggle"
                 aria-expanded={settingsExpanded}
               >

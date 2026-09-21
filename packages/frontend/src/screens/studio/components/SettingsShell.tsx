@@ -161,9 +161,6 @@ export function SettingsShell({
                 density="compact"
                 className={[
                   "min-h-10 pointer-coarse:min-h-11",
-                  active
-                    ? "focus-visible:!border-primary-300 focus-visible:!ring-0 focus-visible:!ring-offset-0 dark:focus-visible:!border-primary-500/70"
-                    : "",
                   category.danger && !active
                     ? "text-rose-600 dark:text-rose-400"
                     : "",
@@ -185,14 +182,7 @@ export function SettingsShell({
                       titleClassName={pickerListRowTextClassName(child.id === activeChildCategoryId)}
                       surface={child.id === activeChildCategoryId ? "selected" : "interactive"}
                       density="compact"
-                      className={[
-                        "min-h-9 pointer-coarse:min-h-11",
-                        child.id === activeChildCategoryId
-                          ? "focus-visible:!border-primary-300 focus-visible:!ring-0 focus-visible:!ring-offset-0 dark:focus-visible:!border-primary-500/70"
-                          : "",
-                      ]
-                        .filter(Boolean)
-                        .join(" ")}
+                      className="min-h-9 pointer-coarse:min-h-11"
                     />
                   ))}
                 </div>

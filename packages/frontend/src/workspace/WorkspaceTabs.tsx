@@ -975,6 +975,7 @@ function WorkspaceSortableTab({
         role="button"
         tabIndex={0}
         data-workspace-tab-trigger={tabId}
+        data-workspace-tab-active={isActive || undefined}
         title={preview ? `${title} · Preview — double-click to keep open` : title}
         aria-label={preview ? `${title}, preview tab${badge ? `, ${badge} unread messages` : ""}` : undefined}
         aria-haspopup={kind === "conversation" ? "menu" : undefined}
