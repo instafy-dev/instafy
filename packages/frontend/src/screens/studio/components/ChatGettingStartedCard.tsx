@@ -78,6 +78,12 @@ interface ChatGettingStartedCardProps {
   aiViewState: GettingStartedAiViewState;
   canChangeAiChoice: boolean;
   personalAiConnectionState: "missing" | "needs_default" | null;
+  /**
+   * The desktop app found a Codex login on this computer. The connect step
+   * then offers it first, in the card as the modal already does; the web
+   * studio never sets this, so its line stays the ChatGPT-or-key one.
+   */
+  desktopCodexLoginFound?: boolean;
   onStartWithManagedAi: () => void;
   onConnectOwnAi: () => void;
   onChangeAiChoice: () => void;
@@ -138,6 +144,7 @@ export function ChatGettingStartedCard({
   aiViewState,
   canChangeAiChoice,
   personalAiConnectionState,
+  desktopCodexLoginFound = false,
   onStartWithManagedAi,
   onConnectOwnAi,
   onChangeAiChoice,
@@ -373,7 +380,9 @@ export function ChatGettingStartedCard({
                       <Text as="span" variant="caption" tone="inherit" className="mt-0.5 block text-left opacity-80">
                         {personalAiConnectionState === "needs_default"
                           ? "Select which saved connection Instafy should use."
-                          : "Sign in with ChatGPT, or use a key from another AI provider."}
+                          : desktopCodexLoginFound
+                            ? "Use the Codex login on this computer, sign in with ChatGPT, or use a key from another AI provider."
+                            : "Sign in with ChatGPT, or use a key from another AI provider."}
                       </Text>
                     </span>
                   </span>
