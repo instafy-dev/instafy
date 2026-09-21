@@ -3,6 +3,22 @@ const COMPOSER_INLINE_COMPLETION_PATH_PREFIX = ".instafy/chat";
 const COMPOSER_INLINE_BRIDGE_PUNCTUATION_PATTERN = /[.!?]$/;
 const COMPOSER_INLINE_REMAINDER_WORD_START_PATTERN = /^[A-Za-z0-9"'([{]/;
 export const COMPOSER_INLINE_COMPLETION_DEBOUNCE_MS = 80;
+// Ghost text in the chat composer is opt-in: every pause while typing would
+// otherwise send the draft to a model before the user presses send, which
+// costs a managed-lane call and moves unsent text off the device.
+export const COMPOSER_INLINE_COMPLETION_PREFERENCE_KEY = "instafy.composer.inlineCompletion";
+
+export function readComposerInlineCompletionPreference(
+  storage: Pick<Storage, "getItem"> | null | undefined = typeof window === "undefined"
+    ? null
+    : window.localStorage,
+): boolean {
+  try {
+    return storage?.getItem(COMPOSER_INLINE_COMPLETION_PREFERENCE_KEY) === "1";
+  } catch {
+    return false;
+  }
+}
 
 export function buildComposerInlineCompletionPath(
   conversationId: string | null | undefined,
@@ -22,7 +38,11 @@ export function shouldRequestComposerInlineCompletion(params: {
   hasImageAttachments: boolean;
   onboardingInputLocked: boolean;
   sendingAttachment: boolean;
+  inlineCompletionEnabled: boolean;
 }): boolean {
+  if (!params.inlineCompletionEnabled) {
+    return false;
+  }
   if (!params.projectId || !params.anyAgentsEnabled || !params.credentialsReady) {
     return false;
   }

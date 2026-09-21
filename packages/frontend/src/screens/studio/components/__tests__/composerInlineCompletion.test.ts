@@ -4,6 +4,7 @@ import {
   buildComposerInlineCompletionPath,
   buildComposerInlineSuggestion,
   normalizeComposerCompletionTail,
+  readComposerInlineCompletionPreference,
   shouldRequestComposerInlineCompletion,
 } from "../composerInlineCompletion";
 
@@ -23,6 +24,7 @@ describe("composerInlineCompletion", () => {
         hasImageAttachments: false,
         onboardingInputLocked: false,
         sendingAttachment: false,
+        inlineCompletionEnabled: true,
       }),
     ).toBe(true);
 
@@ -35,6 +37,7 @@ describe("composerInlineCompletion", () => {
         hasImageAttachments: false,
         onboardingInputLocked: false,
         sendingAttachment: false,
+        inlineCompletionEnabled: true,
       }),
     ).toBe(false);
   });
@@ -54,5 +57,32 @@ describe("composerInlineCompletion", () => {
   it("does not add an extra space when the tail already begins with spacing or punctuation", () => {
     expect(normalizeComposerCompletionTail("hello?", " thanks")).toBe(" thanks");
     expect(normalizeComposerCompletionTail("hello?", "...and more")).toBe("...and more");
+  });
+
+  it("keeps ghost text off unless the user opted in", () => {
+    const eligible = {
+      projectId: "project-1",
+      inputValue: "can you exp",
+      anyAgentsEnabled: true,
+      credentialsReady: true,
+      hasImageAttachments: false,
+      onboardingInputLocked: false,
+      sendingAttachment: false,
+    };
+    expect(shouldRequestComposerInlineCompletion({ ...eligible, inlineCompletionEnabled: false })).toBe(false);
+    expect(shouldRequestComposerInlineCompletion({ ...eligible, inlineCompletionEnabled: true })).toBe(true);
+  });
+
+  it("reads the opt-in from storage and defaults to off", () => {
+    expect(readComposerInlineCompletionPreference(null)).toBe(false);
+    expect(readComposerInlineCompletionPreference({ getItem: () => null })).toBe(false);
+    expect(readComposerInlineCompletionPreference({ getItem: () => "1" })).toBe(true);
+    expect(
+      readComposerInlineCompletionPreference({
+        getItem: () => {
+          throw new Error("blocked");
+        },
+      }),
+    ).toBe(false);
   });
 });
