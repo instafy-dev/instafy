@@ -568,6 +568,21 @@ describe("ProjectAccessProvider startup with nothing remembered", () => {
     expect(container.querySelector('[data-testid="access-probe"]')?.getAttribute("data-initialized")).toBe("true");
   });
 
+  it("opens the space last worked in, not the first one listed", async () => {
+    mocks.listProjects.mockResolvedValue({
+      status: "success",
+      projects: [
+        { projectId: MINTED_ID, orgId: "org-1", projectType: "customer", status: "active", lastActivityAt: "2026-09-18T10:00:00Z" },
+        { projectId: EXISTING_ID, orgId: "org-1", projectType: "customer", status: "active", lastActivityAt: "2026-09-21T07:00:00Z" },
+      ],
+    });
+    await act(async () => root.render(<ProjectAccessProvider><AccessProbe /></ProjectAccessProvider>));
+    await settle();
+
+    expect(mocks.createControllerProject).not.toHaveBeenCalled();
+    expect(mocks.createProject).toHaveBeenCalledWith(expect.objectContaining({ projectId: EXISTING_ID }));
+  });
+
   it("passes over sandboxes and archived spaces when choosing", async () => {
     mocks.listProjects.mockResolvedValue({
       status: "success",

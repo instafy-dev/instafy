@@ -29059,3 +29059,91 @@ async fn activity_feed_respects_conversation_privacy_and_current_membership() ->
     }
     Ok(())
 }
+
+#[tokio::test]
+async fn accessible_projects_list_the_most_recently_active_space_first() -> anyhow::Result<()> {
+    let Some(pool) = setup_origin_test_pool().await? else {
+        eprintln!("skipping accessible project recency test: TEST_DATABASE_URL not set");
+        return Ok(());
+    };
+
+    // A device with nothing remembered opens the first space the list
+    // returns, so the list has to lead with the one last worked in: here the
+    // older project has the newer conversation.
+    let user_id = Uuid::new_v4();
+    let older_project_id = Uuid::new_v4();
+    let newer_project_id = Uuid::new_v4();
+    let busy_conversation_id = Uuid::new_v4();
+    ensure_test_user(&pool, &user_id).await?;
+
+    {
+        let connection = pool.get().await?;
+        connection
+            .execute(
+                "insert into projects (id, owner_user_id, name, project_type, status, created_at, updated_at)
+                 values ($1, $3, 'Older, busy', 'customer', 'active', now() - interval '3 days', now() - interval '3 days'),
+                        ($2, $3, 'Newer, idle', 'customer', 'active', now() - interval '1 day', now() - interval '1 day')",
+                &[&older_project_id, &newer_project_id, &user_id],
+            )
+            .await?;
+        connection
+            .execute(
+                "insert into conversations (id, project_id, created_by, metadata, visibility, last_message_at)
+                 values ($1, $2, $3, '{}'::jsonb, 'private', now() - interval '1 hour')",
+                &[&busy_conversation_id, &older_project_id, &user_id],
+            )
+            .await?;
+    }
+
+    let config = build_app_config(
+        test_origin_private_key(),
+        test_origin_public_key(),
+        "accessible-project-recency",
+    );
+    let user_token = crate::auth::issue_controller_token(&config, &user_id)
+        .map_err(|error| controller_error("issue project recency token", error))?
+        .token;
+    let response = projects::router()
+        .with_state(build_test_state(pool.clone(), config))
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/projects")
+                .header(
+                    axum::http::header::AUTHORIZATION,
+                    format!("Bearer {user_token}"),
+                )
+                .body(Body::empty())?,
+        )
+        .await?;
+
+    let status = response.status();
+    let body = to_bytes(response.into_body(), usize::MAX).await?;
+    assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
+    let payload: serde_json::Value = serde_json::from_slice(&body)?;
+    let ids = payload["projects"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default()
+        .iter()
+        .filter_map(|project| project["projectId"].as_str().map(str::to_owned))
+        .collect::<Vec<_>>();
+    let older_index = ids
+        .iter()
+        .position(|id| id == &older_project_id.to_string())
+        .expect("older project listed");
+    let newer_index = ids
+        .iter()
+        .position(|id| id == &newer_project_id.to_string())
+        .expect("newer project listed");
+    assert!(
+        older_index < newer_index,
+        "the project with the newer conversation comes first: {ids:?}"
+    );
+    let older = &payload["projects"][older_index];
+    assert!(
+        older["lastActivityAt"].as_str().is_some(),
+        "the list carries lastActivityAt"
+    );
+    Ok(())
+}
