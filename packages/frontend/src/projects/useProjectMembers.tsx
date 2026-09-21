@@ -1,6 +1,12 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { useCallback, useMemo } from "react";
+import { useCallback, useEffect, useMemo } from "react";
 import { useAuth } from "../providers/AuthProvider";
+import {
+  MEMBERS_CHANGED_EVENT,
+  PROJECT_ACCESS_REFRESH_EVENT,
+  type MembersChangedEventDetail,
+  type ProjectAccessRefreshEventDetail,
+} from "./projectAccessEvents";
 import {
   type ControllerProjectMember,
   controllerClient,
@@ -11,7 +17,7 @@ interface ProjectMemberMutationResult {
   error?: string;
 }
 
-export const PROJECT_MEMBERS_REFRESH_INTERVAL_MS = 10_000;
+export { MEMBERS_CHANGED_EVENT } from "./projectAccessEvents";
 
 export function useProjectMembers(projectId: string | null) {
   const { user } = useAuth();
@@ -28,8 +34,6 @@ export function useProjectMembers(projectId: string | null) {
   const membersQuery = useQuery({
     queryKey,
     enabled,
-    refetchInterval: enabled ? PROJECT_MEMBERS_REFRESH_INTERVAL_MS : false,
-    refetchIntervalInBackground: false,
     refetchOnWindowFocus: true,
     queryFn: async () => {
       if (!projectId || !userId) {
@@ -38,6 +42,40 @@ export function useProjectMembers(projectId: string | null) {
       return await listControllerProjectMembers(projectId, { throwOnError: true });
     },
   });
+
+  // No timer. The roster refetches on focus and when the controller stream
+  // reports an access or membership change for this project (a null project
+  // id is an org-wide change), or reopens after a gap.
+  useEffect(() => {
+    if (!enabled || typeof window === "undefined") {
+      return;
+    }
+    const invalidate = () => {
+      void queryClient.invalidateQueries(
+        { queryKey, exact: true },
+        { cancelRefetch: false },
+      );
+    };
+    const handleScopedChange = (event: Event) => {
+      const detail = (
+        event as CustomEvent<
+          ProjectAccessRefreshEventDetail | MembersChangedEventDetail | undefined
+        >
+      ).detail;
+      const targetProjectId = detail?.projectId ?? null;
+      if (targetProjectId === null || targetProjectId === projectId) {
+        invalidate();
+      }
+    };
+    window.addEventListener(PROJECT_ACCESS_REFRESH_EVENT, handleScopedChange);
+    window.addEventListener(MEMBERS_CHANGED_EVENT, handleScopedChange);
+    window.addEventListener("instafy:controller-stream-reconnected", invalidate);
+    return () => {
+      window.removeEventListener(PROJECT_ACCESS_REFRESH_EVENT, handleScopedChange);
+      window.removeEventListener(MEMBERS_CHANGED_EVENT, handleScopedChange);
+      window.removeEventListener("instafy:controller-stream-reconnected", invalidate);
+    };
+  }, [enabled, projectId, queryClient, queryKey]);
 
   const refresh = useCallback(
     async (options?: { force?: boolean }) => {

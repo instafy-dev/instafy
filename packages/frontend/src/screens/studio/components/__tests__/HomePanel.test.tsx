@@ -460,6 +460,19 @@ describe("HomePanel activity states", () => {
     expect(mocks.navigate).not.toHaveBeenCalled();
   });
 
+  it("reads the inbox once on mount and does not start its own inbox interval", async () => {
+    vi.useFakeTimers();
+    try {
+      const refreshInbox = vi.fn(async () => []);
+      await render({ refreshInbox });
+      expect(refreshInbox).toHaveBeenCalledTimes(1);
+      await act(async () => { vi.advanceTimersByTime(120_000); });
+      expect(refreshInbox).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("merges a conversation's inbox and durable updates into one row and acknowledges the exact displayed snapshot", async () => {
     const inbox = inboxItem({ projectId: PROJECT, conversationId: CONVERSATION, lastMessageId: MESSAGE });
     const reply = notification({ eventName: "conversation.reply", category: "conversations", resourceId: CONVERSATION, url: `/studio?projectId=${PROJECT}&conversationControllerId=${CONVERSATION}` });
