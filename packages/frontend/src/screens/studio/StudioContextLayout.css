@@ -1,5 +1,9 @@
-/* Working context is independent of the inner navigation's width. */
-.studio-context-layout { --studio-context-height: 52px; }
+/* Keep the desktop tab strip on the expanded navigation's content edge. */
+.studio-context-layout {
+  --studio-context-height: 52px;
+  --studio-context-column-width: 14rem;
+  --studio-context-inset: 8px;
+}
 .studio-context-header {
   position: absolute;
   left: calc(64px + var(--instafy-safe-area-inset-left));
@@ -10,7 +14,7 @@
   display: flex;
   align-items: center;
   gap: 8px;
-  padding: 0 8px;
+  padding: 0 8px 0 var(--studio-context-inset);
   border-bottom: 1px solid var(--color-slate-200);
   background: var(--color-slate-50);
   -webkit-app-region: drag;
@@ -18,8 +22,10 @@
 .studio-context-header .studio-search-control { -webkit-app-region: no-drag; }
 /* The rail clears 64px; a further 24px clears Electron's traffic-light corner.
    Tabs no longer need their own native inset because context is to their left. */
-.studio-context-layout[data-titlebar-free="true"] .studio-context-header { padding-left: 24px; }
-.studio-context-slot { width: 208px; min-width: 0; flex: none; }
+.studio-context-layout[data-titlebar-free="true"] .studio-context-header { --studio-context-inset: 24px; }
+/* Subtract the header's leading inset and 8px gap, including Electron's inset.
+   Keep this column even when navigation collapses so the pickers remain usable. */
+.studio-context-slot { width: calc(var(--studio-context-column-width) - var(--studio-context-inset) - 8px); min-width: 0; flex: none; }
 .studio-desktop-context { display: flex; align-items: center; gap: 4px; min-width: 0; }
 .studio-desktop-context-separator { flex: none; color: var(--color-slate-400); }
 .studio-desktop-context [data-testid="sidebar-space-button"] { flex: 1; }
@@ -31,7 +37,6 @@
 .studio-context-header [hidden] { display: none; }
 .studio-context-header[data-search-open="true"] .studio-context-slot { width: 100%; max-width: 940px; }
 @media (min-width: 900px) and (max-width: 1099px) {
-  .studio-context-slot { width: 180px; }
   .studio-desktop-search-trigger > span { display: none; }
 }
 .studio-context-layout[data-wide="true"] [data-testid="sidebar-context-navigation"],

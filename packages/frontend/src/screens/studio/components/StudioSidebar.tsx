@@ -310,7 +310,7 @@ export function StudioSidebar({
   const titleBarFree = !mobileOverlay && desktopTitleBarFree();
   const widthClass = isExpanded
     ? isLargeScreen
-      ? pathHeader && touchLikeInput ? "w-60" : "w-56"
+      ? externalHeader ? "w-[var(--studio-context-column-width,14rem)]" : pathHeader && touchLikeInput ? "w-60" : "w-56"
       : mobileExpandedWidthClass
     : "w-[4rem]";
   const getSidebarNavIconClass = useCallback(

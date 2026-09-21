@@ -41,7 +41,10 @@ state, while chat-tab restoration continues to use its existing persistence.
 On desktop, `StudioDesktopHeader` keeps the team avatar, space picker, workspace tabs and
 Search button on one 52px row (64px for coarse pointers). Tabs overflow horizontally rather
 than wrapping or compressing their titles. New chat stays in the sidebar, and the profile
-menu stays in the organization rail. Mobile retains its context and navigation rows.
+menu stays in the organization rail. The header's left column shares the expanded navigation
+width, including at narrow desktop sizes, so tabs never extend over that sidebar. Keep the
+column when navigation collapses to preserve usable pickers; subtract native window-control
+insets within it rather than shifting the tabs. Mobile retains its context and navigation rows.
 
 Search expands into the same header when activated, temporarily hiding the tabs and revealing
 the existing scope chips and full-page results. Cmd/Ctrl+K opens or refocuses it; Escape returns
