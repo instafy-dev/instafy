@@ -392,7 +392,6 @@ export function SettingsPanel({ activeTab: fallbackTab, organizationId, onOrgani
     setQuery: setMemberQuery,
     hasMore: membersHasMore,
     total: membersTotal,
-    refresh: refreshMembers,
     loadMore: loadMoreMembers,
     updateMemberRole,
     removeMember
@@ -401,7 +400,6 @@ export function SettingsPanel({ activeTab: fallbackTab, organizationId, onOrgani
     invitations,
     loading: invitationsLoading,
     error: invitationsError,
-    refresh: refreshInvitations,
     prepareEmailInvite: prepareOrgEmailInvite,
     cancelPendingInvitation: cancelInvitation,
     updatePendingInvitationRole,
@@ -411,7 +409,6 @@ export function SettingsPanel({ activeTab: fallbackTab, organizationId, onOrgani
     invitations: projectInvitations,
     loading: projectInvitationsLoading,
     error: projectInvitationsError,
-    refresh: refreshProjectInvitations,
     prepareEmailInvite: prepareProjectEmailInvite,
     cancelPendingInvitation: cancelProjectInvitation,
     updatePendingInvitationRole: updatePendingProjectInvitationRole,
@@ -420,7 +417,6 @@ export function SettingsPanel({ activeTab: fallbackTab, organizationId, onOrgani
   const {
     loading: inviteLinksLoading,
     error: inviteLinksError,
-    refresh: refreshInviteLinks,
     currentLink: activeInviteLink,
     currentLinkUrl: inviteLinkUrl,
     rotateInviteLink,
@@ -446,50 +442,6 @@ export function SettingsPanel({ activeTab: fallbackTab, organizationId, onOrgani
   useEffect(() => {
     setPreparedProjectEmailInvite(null);
   }, [projectInvitesOrgId, projectInvitesProjectId]);
-
-  useEffect(() => {
-    if (!showOrgMembers || !canLoadOrgSettings) {
-      return;
-    }
-    if (!runtimeControllerEnabled) {
-      return;
-    }
-    if (typeof window === "undefined") {
-      return;
-    }
-    const intervalId = window.setInterval(() => {
-      void refreshMembers({ force: true });
-      void refreshInvitations({ force: true });
-    }, 10_000);
-    return () => window.clearInterval(intervalId);
-  }, [canLoadOrgSettings, refreshInvitations, refreshMembers, showOrgMembers]);
-
-  useEffect(() => {
-    if (!showProjectAccess) {
-      return;
-    }
-    if (!runtimeControllerEnabled) {
-      return;
-    }
-    if (!activeProjectId) {
-      return;
-    }
-    if (typeof window === "undefined") {
-      return;
-    }
-    const intervalId = window.setInterval(() => {
-      void refreshProjectMembers({ force: true });
-      void refreshProjectInvitations({ force: true });
-      void refreshInviteLinks({ force: true });
-    }, 10_000);
-    return () => window.clearInterval(intervalId);
-  }, [
-    activeProjectId,
-    refreshInviteLinks,
-    refreshProjectInvitations,
-    refreshProjectMembers,
-    showProjectAccess,
-  ]);
 
   const handleSelectOrg = (nextOrgId: string) => {
     const trimmed = nextOrgId.trim();

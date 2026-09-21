@@ -338,4 +338,46 @@ describe("useStudioBugReportController support notifications", () => {
     expect(container.querySelector('[data-testid="support-error"]')?.textContent).toContain("couldn’t be loaded");
     expect(container.querySelector('[data-testid="support-loading"]')?.textContent).toBe("false");
   });
+
+  describe("polling gate", () => {
+    function setVisibility(state: "visible" | "hidden") {
+      Object.defineProperty(document, "visibilityState", { configurable: true, get: () => state });
+      document.dispatchEvent(new Event("visibilitychange"));
+    }
+    async function advance(ms: number) {
+      await act(async () => { vi.advanceTimersByTime(ms); });
+      await flushAsyncEffects();
+    }
+    beforeEach(() => {
+      setVisibility("visible");
+      window.dispatchEvent(new Event("pointerdown"));
+      mocks.listReports.mockResolvedValue(page(0, 0));
+    });
+    afterEach(() => setVisibility("visible"));
+
+    it("backs off to 120 s after 3 min without input", async () => {
+      await act(async () => root.render(<Harness userId="user-a" />));
+      await flushAsyncEffects();
+      await advance(5_000);
+      await act(async () => window.dispatchEvent(new Event("pointerdown")));
+      await advance(180_000);
+      expect(mocks.listReports).toHaveBeenCalledTimes(1 + 9);
+      await advance(115_000);
+      expect(mocks.listReports).toHaveBeenCalledTimes(10);
+      await advance(5_000);
+      expect(mocks.listReports).toHaveBeenCalledTimes(11);
+    });
+
+    it("stops polling while hidden and refreshes once when the tab is visible again", async () => {
+      await act(async () => root.render(<Harness userId="user-a" />));
+      await flushAsyncEffects();
+      expect(mocks.listReports).toHaveBeenCalledTimes(1);
+      await act(async () => setVisibility("hidden"));
+      await advance(120_000);
+      expect(mocks.listReports).toHaveBeenCalledTimes(1);
+      await act(async () => setVisibility("visible"));
+      await flushAsyncEffects();
+      expect(mocks.listReports).toHaveBeenCalledTimes(2);
+    });
+  });
 });

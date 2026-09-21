@@ -21,6 +21,23 @@ import { useStatus } from "../status/useStatus";
 import { useBilling } from "./BillingProvider";
 import { useProject } from "../projects/useProject";
 import { runtimeControllerEnabled } from "../sdk/instafy";
+import { isPollingActive, useGatedInterval } from "../runtime/pollingGate";
+
+/**
+ * Window event that says the credit balance or plan changed server-side
+ * (published by the controller as credits.updated and forwarded by the sync
+ * hook). The provider refreshes the snapshot on it, and the ledger too while
+ * the Credits panel is open, so the gated timers below are only a fallback.
+ */
+export const CREDITS_UPDATED_EVENT = "instafy:credits-updated";
+
+// Every tab keeps one status refresh per minute while the user is active,
+// one per five minutes once idle and none while hidden. The Credits panel
+// adds a faster loop only while it is open and the user is active.
+const STATUS_ACTIVE_MS = 60_000;
+const STATUS_IDLE_MS = 300_000;
+const PANEL_STATUS_ACTIVE_MS = 15_000;
+const LEDGER_FALLBACK_ACTIVE_MS = 60_000;
 
 interface CreditsContextValue {
   billing: BillingState;
@@ -149,14 +166,36 @@ export function CreditsProvider({ children }: { children: ReactNode }) {
       return;
     }
     void refresh({ force: true, notifyOnError: false });
-    if (typeof window === "undefined") {
-      return;
-    }
-    const intervalId = window.setInterval(() => {
-      void refresh({ force: true, notifyOnError: false });
-    }, 60_000);
-    return () => window.clearInterval(intervalId);
   }, [activeProjectId, refresh]);
+
+  const refreshRef = useRef(refresh);
+  refreshRef.current = refresh;
+  const activePanelRef = useRef(activePanel);
+  activePanelRef.current = activePanel;
+
+  useGatedInterval(
+    () => {
+      if (!runtimeControllerEnabled) {
+        return;
+      }
+      void refreshRef.current({ force: true, notifyOnError: false });
+    },
+    STATUS_ACTIVE_MS,
+    { idleMs: STATUS_IDLE_MS }
+  );
+
+  // While the Credits panel is open the balance refreshes every 15 s, but
+  // only while the user is active; idle ticks and the wake run into idle are
+  // skipped, and the 60 s loop above stays the slow path.
+  useGatedInterval(
+    () => {
+      if (!runtimeControllerEnabled || activePanelRef.current !== "credits" || !isPollingActive()) {
+        return;
+      }
+      void refreshRef.current({ force: true, notifyOnError: false });
+    },
+    PANEL_STATUS_ACTIVE_MS
+  );
 
   const refreshLedger = useCallback(
     async (options?: { force?: boolean; notifyOnError?: boolean }) => {
@@ -199,49 +238,57 @@ export function CreditsProvider({ children }: { children: ReactNode }) {
     [activeProjectId, showStatus]
   );
 
+  const refreshLedgerRef = useRef(refreshLedger);
+  refreshLedgerRef.current = refreshLedger;
+
+  // The ledger only changes when the balance does, so a new snapshot is the
+  // trigger for a ledger refetch while the panel is open. Opening the panel
+  // loads it once per project; a later balance change forces a refetch.
+  const snapshotKey = `${billing.creditBalance}|${billing.lastCreditBurnAt ?? ""}|${billing.lastCreditRefillAt ?? ""}`;
+  const lastLedgerSnapshotKeyRef = useRef<string | null>(null);
   useEffect(() => {
-    if (activePanel === "credits") {
+    if (activePanel !== "credits") {
+      return;
+    }
+    if (!hasLoaded) {
+      // The first snapshot is still on its way; load the ledger once and
+      // start keying changes only from a real balance, so opening the panel
+      // costs one ledger request rather than two.
+      lastLedgerSnapshotKeyRef.current = null;
       void refreshLedger();
+      return;
     }
-  }, [activePanel, refreshLedger]);
+    const snapshotChanged =
+      lastLedgerSnapshotKeyRef.current !== null && lastLedgerSnapshotKeyRef.current !== snapshotKey;
+    lastLedgerSnapshotKeyRef.current = snapshotKey;
+    void refreshLedger(snapshotChanged ? { force: true, notifyOnError: false } : undefined);
+  }, [activePanel, hasLoaded, refreshLedger, snapshotKey]);
+
+  // Fallback for ledger rows with no net balance effect: once a minute while
+  // active, slower while idle, never while hidden or with the panel closed.
+  useGatedInterval(
+    () => {
+      if (!runtimeControllerEnabled || activePanelRef.current !== "credits") {
+        return;
+      }
+      void refreshLedgerRef.current({ force: true, notifyOnError: false });
+    },
+    LEDGER_FALLBACK_ACTIVE_MS
+  );
 
   useEffect(() => {
-    if (activePanel !== "credits") {
-      return;
-    }
-    if (!runtimeControllerEnabled) {
-      return;
-    }
-    if (!activeProjectId) {
-      return;
-    }
     if (typeof window === "undefined") {
       return;
     }
-    const intervalId = window.setInterval(() => {
-      void refresh({ force: true, notifyOnError: false });
-    }, 5_000);
-    return () => window.clearInterval(intervalId);
-  }, [activePanel, activeProjectId, refresh]);
-
-  useEffect(() => {
-    if (activePanel !== "credits") {
-      return;
-    }
-    if (!runtimeControllerEnabled) {
-      return;
-    }
-    if (!activeProjectId) {
-      return;
-    }
-    if (typeof window === "undefined") {
-      return;
-    }
-    const intervalId = window.setInterval(() => {
-      void refreshLedger({ force: true, notifyOnError: false });
-    }, 10_000);
-    return () => window.clearInterval(intervalId);
-  }, [activePanel, activeProjectId, refreshLedger]);
+    const handleCreditsUpdated = () => {
+      void refreshRef.current({ force: true, notifyOnError: false });
+      if (activePanelRef.current === "credits") {
+        void refreshLedgerRef.current({ force: true, notifyOnError: false });
+      }
+    };
+    window.addEventListener(CREDITS_UPDATED_EVENT, handleCreditsUpdated);
+    return () => window.removeEventListener(CREDITS_UPDATED_EVENT, handleCreditsUpdated);
+  }, []);
 
   const value = useMemo<CreditsContextValue>(
     () => ({
