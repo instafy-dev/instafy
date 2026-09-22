@@ -197,17 +197,35 @@ navigation/Back, keyboard input, saved-state propagation, control/take-back and
 Stop passed; reconnecting to the stopped share was denied. Unsaved owner text
 remained separate. The phone negotiated constrained-baseline H.264 and the sender
 reported software OpenH264, while the desktop stream used hardware VideoToolbox.
-A subsequent capability audit found that this iPhone's constrained H.264 profiles
-did not overlap with the profiles advertised by the host's hardware encoder.
-The iPhone also advertised HEVC. Local six-second codec comparisons sustained
-approximately 30 fps with both software H.264 and hardware HEVC, with lower
-aggregate source/encoder/receiver CPU for HEVC. The new preference permits that
-mutual efficient codec, but its actual iPhone negotiation and sustained performance
-still need physical qualification. Short swipes with idle gaps do not establish
-sustained frame rate or latency. The automation's Home action left the app
-foregrounded, so this run does not qualify iOS suspension or successful
-reconnection after it. A later runner adds a required background-state assertion;
-its first device launch timed out at the iOS automation authorization prompt.
+A subsequent physical run with the capability-based preference negotiated HEVC
+on that iPhone and reported hardware VideoToolbox encoding at both portrait and
+landscape dimensions. The desktop viewer independently retained hardware H.264.
+Two eighteen-second continuous-motion samples in a fresh fixture, before and
+after reconnecting, decoded approximately 30 fps with no dropped frames or
+freeze-counter increases. Two earlier samples averaged approximately 29–30 fps
+with no dropped frames but recorded 2 and 12 freezes, totaling 0.623 and 3.013
+seconds. Those results are retained: the later successful samples do not establish
+consistent latency, battery consumption or sustained WAN quality. Hardware
+encoding is confirmed; the phone did not expose its decoder implementation.
+
+Native keyboard input, saved-state propagation while preserving the owner's
+draft, independent scrolling, rotation and Stop passed again. The runner then
+switched to its own app and asserted that Instafy was backgrounded for more than
+30 seconds, with the WebKit inspector detached. Desktop scrolling continued.
+Closing only the phone's test signaling connections retired its private renderer
+and video peer. Returning to Instafy showed no stale pixels; Reconnect restored
+Follow, and a new Explore request required new approval. The desktop retained
+its view and scroll. Reconnect after Stop remained denied. This qualifies native
+background/foreground transitions plus a controlled connection interruption;
+it does not prove OS-enforced suspension, Wi-Fi/cellular handover or Internet
+outage recovery.
+
+The first interruption fixture closed only the proxy's downstream socket and
+left the controller-facing socket open, retaining an old private view. The
+corrected fixture closes both ends and verified teardown. Detection of a silently
+half-open connection remains a separate qualification gap; the corrected result
+does not establish a timeout for that case. Both fixture runs reused one approved
+XCTest runner without restarting it.
 
 Signaling carries only a connection's own peer to that viewer. The controller
 chooses its Follow/Explore source, enforces the existing audience and derives
