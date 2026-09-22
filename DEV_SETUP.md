@@ -66,7 +66,7 @@ the shared writers refuse unsafe destinations before writing.
 
 Need to run the Rust controller (or the tunnel-enabled Playwright suite) locally? Use this loop:
 
-1. Run `pnpm test:controller` to exercise the controller harness single-threaded. The wrapper auto-resolves `TEST_DATABASE_URL` from the local Supabase stack and starts Supabase for you when needed.
+1. Run `pnpm test:controller` to exercise the controller harness single-threaded. The wrapper auto-resolves `TEST_DATABASE_URL` from the local Supabase stack, starts Supabase for you when needed, and applies any pending migrations to an already-running stack first so the suite never runs against a stale schema. An explicit `TEST_DATABASE_URL` is used as given and never migrated; set `INSTAFY_TEST_CONTROLLER_SKIP_MIGRATIONS=1` to test the local stack exactly as it is, or run `pnpm supabase:migrate` on its own.
 2. (Optional) Export the self-hosted tunnel broker env vars (`TUNNEL_BROKER_BASE_URL`, `TUNNEL_BROKER_TOKEN`, etc.) if you are running tunnel grant/desktop-origin tests.
 3. When you are finished, `pnpm supabase:down` tears the containers down if you no longer need the local database.
 4. Providers: the controller now loads runtime providers from the `runtime_providers` table (seeded by a migration). `pnpm stack:up` starts a local external_http provider (wrapping the docker allocator) unless you set `DEV_PROVIDER_ENDPOINT`; it seeds three provider rows (`runtime`, `instafy-cloud`, `self-hosted`) pointing at that endpoint with `DEV_PROVIDER_AUTH_TOKEN` (defaults to `dev-provider-token`). You can also seed manually with `pnpm providers:seed:default`. Admin API (service-role only): `GET /providers` (list) and `POST /providers` (upsert: `id`, `displayName`, `kind`, optional `ownerOrgId`, `allowedOrgIds`, `endpoint`, `authToken`, `metadata`). Metadata supports allocator-specific config (e.g. `dockerComposeFile`, `dockerService`, `dockerProjectPrefix`, `dockerRepoHost`, `dockerCodexRoot`, `hetznerToken`, `hetznerServerType`, `hetznerImage`, `hetznerLocation`, `hetznerNetworkId`, `hetznerFirewallId`, `hetznerUserData`).
@@ -256,7 +256,7 @@ pnpm test:controller
 pnpm test:controller conversation_message_routes_preserve_inline_reference_content -- --nocapture
 ```
 
-The wrapper auto-populates `TEST_DATABASE_URL` from the local Supabase stack and will start Supabase for you if it is not already running. If you are exercising tunnel issuance, export `TUNNEL_BROKER_BASE_URL` and `TUNNEL_BROKER_TOKEN` first. Stop the stack afterwards with `pnpm supabase:down` if you no longer need it.
+The wrapper auto-populates `TEST_DATABASE_URL` from the local Supabase stack, will start Supabase for you if it is not already running, and brings a running stack up to the repository's migrations before the suite starts. If you are exercising tunnel issuance, export `TUNNEL_BROKER_BASE_URL` and `TUNNEL_BROKER_TOKEN` first. Stop the stack afterwards with `pnpm supabase:down` if you no longer need it.
 
 ---
 
