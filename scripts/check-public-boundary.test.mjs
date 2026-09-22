@@ -558,7 +558,7 @@ test("the canonical policy approves all 47 reviewed binary assets", () => {
   assert.equal(policy.approvedEnvironmentTemplates.size, 16);
   assert.deepEqual(
     [...policy.approvedGitlinks],
-    [["codex", "e834d276eeafce2b86a86ebe926a77013b734a79"]],
+    [["codex", "f3104759ea7a1d0e670da0aeb692b09a3f2ca387"]],
   );
   assert.equal(policy.binaryAssetCount, 47);
   assert.equal(policy.binarySha256.size, 47);
