@@ -1,9 +1,11 @@
+import type { TabVideoSource } from "./browserTabVideo";
 import { randomUUID } from "node:crypto";
 import { parseBrowserTabInput, type BrowserTabInput } from "./browserTabInput";
 
 export type ExploreViewport = { width: number; height: number; dpr: number };
 export type ExploreNavigation = "back" | "forward" | "reload";
 export interface ExplorePage {
+  videoSource?: TabVideoSource;
   frame(): Promise<Uint8Array | null>;
   resize(viewport: ExploreViewport): Promise<void>;
   input(input: BrowserTabInput, current: () => boolean): Promise<void>;
@@ -81,6 +83,12 @@ export class BrowserTabExplore {
   }
   private current(id: string, view: View) {
     return this.views.get(id) === view && view.valid();
+  }
+  videoSource(id: string): TabVideoSource {
+    const view = this.views.get(id);
+    if (!view || !this.current(id,view) || !view.page.videoSource) throw new Error("Explore ended.");
+    const source=view.page.videoSource;
+    return {contents:source.contents,current:()=>this.current(id,view) && source.current(),media:requester=>source.media(requester)};
   }
   async frame(id: string) {
     const view = this.views.get(id);

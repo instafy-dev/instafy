@@ -416,6 +416,10 @@ contextBridge.exposeInMainWorld("instafyDesktop", {
   }): Promise<PersonalBrowserStatus> => {
     return (await ipcRenderer.invoke("instafy:personalBrowserNavigate", options)) as PersonalBrowserStatus;
   },
+  browserTabVideo: (options: {ownerId:string;captureId:string;operation:"open"|"answer"|"sync"|"viewport"|"close"|"stats";value:unknown}): Promise<unknown> => {
+    if (!["open","answer","sync","viewport","close","stats"].includes(options.operation)) throw new Error("Invalid video operation.");
+    return ipcRenderer.invoke(`instafy:browserTabVideo:${options.operation}`,options);
+  },
   browserTabExploreOpen: (options: { ownerId: string; captureId: string; viewport: { width: number; height: number; dpr: number } }): Promise<{ viewId: string }> => ipcRenderer.invoke("instafy:browserTabExploreOpen", options),
   browserTabExploreRenew: (options: { ownerId: string; captureId: string; viewId: string }): Promise<boolean> => ipcRenderer.invoke("instafy:browserTabExplore:renew", options),
   browserTabExploreFrame: (options: { ownerId: string; captureId: string; viewId: string }): Promise<Uint8Array | null> => ipcRenderer.invoke("instafy:browserTabExplore:frame", options),

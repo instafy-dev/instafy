@@ -1,11 +1,11 @@
 # Sharing a local browser tab
 
-Status: initial Electron implementation. Touch, software keyboard, independent
-scroll/navigation, rotation and control revocation have been exercised in Chrome
-on a physical Samsung SM-S901B running Android 16 alongside Electron. The iOS
-Capacitor QA app has also been exercised on an iPhone 13 mini running iOS 26.6
-over Wi-Fi. Native Android, cellular/WAN performance and multi-controller routing
-remain open; these device checks are not a performance sign-off.
+Status: Electron supports native WebRTC video with JPEG compatibility. Earlier
+JPEG checks exercised touch, keyboard, independent scrolling, rotation and
+revocation in physical Android Chrome and the iOS Capacitor QA app. Native video
+has separate desktop qualification; those earlier phone checks do not qualify the
+new transport. Native Android, physical iOS video, cellular/WAN performance and
+multi-controller routing remain open.
 
 The browser's location and its audience are separate choices. The browser location
 selector says **This device** and **Workspace**. This device uses Personal Browser
@@ -84,9 +84,8 @@ At most four Explore pages coexist per share. Each has a four-second native leas
 and a thirty-minute maximum lifetime. Requested CSS viewports are bounded to
 240–1920 by 160–1440; requested DPR is 1–3, reduced when necessary to keep captures
 within 1.92 million pixels. Native capture also limits density to the owner's
-available backing surface; higher requests never upscale an image. JPEG images
-are limited to one MiB, with at most five
-captures per second per view. Private frames are delivered only to their assigned
+available backing surface; higher requests never upscale an image. The JPEG
+fallback is limited to one MiB and five captures per second per view. Private frames are delivered only to their assigned
 connection. Controller snapshots cannot create a native view without a local
 owner approval. No generic JavaScript, host shortcut or debugger API is exposed.
 Older Desktop bridges remain compatible and do not advertise Explore.
@@ -114,6 +113,51 @@ now uses Electron's capture lease, drops up to three transient missing-surface
 frames and bounds capture waits. The Desktop shell explicitly tracks Studio
 windows so authentication callbacks, credential refresh, updates and activation
 cannot select a hidden Explore renderer.
+
+## Native video and receiver quality
+
+Current Desktop and viewers negotiate `videoVersion=1` on the existing authorized
+socket. Main captures the approved tab into an isolated, bundled Chromium worker;
+JPEG encoding and WebSocket image delivery are bypassed once that exact viewer
+has decoded video. Older peers and unsuccessful negotiations keep the JPEG path.
+A source still supplies JPEGs while any of its viewers needs them. Failed video
+connections fall back and retry with fresh signaling; changing Follow/Explore
+closes the old peer and clears its pixels.
+
+The default is up to **30 fps**, with a 4 Mbit/s sender ceiling and a detail content
+hint. Unchanged pages can emit very few frames. Each viewer requests resolution
+from its available area and DPR, capped by the actual capture and the pixel limit.
+Changing receiver resolution does not change the Follow page's layout. Explore
+continues to resize its independent page. Expansion/rotation reacquires capture
+without replacing the peer; it releases the old capture first so Chromium cannot
+retain the smaller source's pixel limit. H.264 is preferred with supported-codec
+fallback. Hardware encoding depends on the platform and dimensions; inspect
+`encoderImplementation` and `powerEfficientEncoder` instead of assuming it.
+
+Native qualification can request 60 fps with an 8 Mbit/s ceiling. It is not the
+shipping default: short local samples on an M1 Max reached approximately 27–30 fps
+at 30 and 46–60 fps at 60, with higher CPU cost and inconsistent 60 fps latency.
+These samples include source, encoder and receiver and do not establish phone,
+WAN or large-group performance. Encoding scales with viewer count; capture is
+shared between viewers of the same source. No SFU or simulcast service is added.
+
+Signaling carries only a connection's own peer to that viewer. The controller
+chooses its Follow/Explore source, enforces the existing audience and derives
+short-lived TURN credentials using the existing `CONTROLLER_BROWSER_TURN_*`
+configuration and `CONTROLLER_BROWSER_WEBRTC_PROJECT_IDS` allowlist. Configured,
+allowed projects use relay-only ICE; configured but unlisted projects keep JPEG.
+With no TURN configuration, direct connectivity is attempted and JPEG remains
+the remote-connectivity fallback. Media does not traverse the controller socket;
+input, approvals and revocation continue to use it. No data channel, audio,
+camera/microphone permission or screen picker is introduced.
+
+Main owns a four-second video lease renewed through the authorized publisher.
+Stop, removal, source retirement and loss of authority destroy the corresponding
+native peer. A lease can renew an existing peer but cannot recreate one. Pending
+negotiations expire, repeated starts are bounded, and established streams retain
+their transport while the share remains authorized. Reconnects mint fresh TURN
+credentials. This uses the existing process-local sharing registry and does not
+solve cross-controller routing.
 
 ## Viewing on a narrow screen
 
@@ -156,12 +200,11 @@ layout and independent page scrolling described above.
   access plus inclusion in the session audience. Only the creator can publish,
   stop, inspect the viewer list or remove viewers. Private runtime authorization is
   unchanged. Scoped runtime/agent credentials cannot join these routes.
-- The first transport relays bounded JPEG frames over authenticated WebSockets.
-  The publisher requests at most five captures per second, capped at 1600 × 1200
-  pixels and one MiB per image. The controller retains only the latest frame and
-  closes slow consumers instead of accumulating frames. Versioned control messages
-  carry the explicit request/grant and bounded tab-input lane described above.
-  This is an initial transport, not WebRTC or a performance sign-off.
+- Native video is preferred when both peers support it. The JPEG compatibility
+  transport relays bounded images over authenticated WebSockets: at most five
+  captures per second, 1600 × 1200 Follow pixels and one MiB per image. The relay
+  retains only the latest image and closes stalled consumers. Both transports
+  preserve the explicit control grants and bounded input lane described above.
 - Session tokens are sent in the initial socket message, never the URL. Space
   access and token validity are rechecked every ten seconds, with a five-second
   authorization timeout. Explicit Stop and publisher disconnect retire the whole
@@ -172,7 +215,7 @@ layout and independent page scrolling described above.
   capacity is eight concurrent connections; registry capacity is
   eight sessions per space, one per owner and 64 per controller process.
 - A session lasts at most one hour and expires after twenty seconds without a
-  publisher frame. Closing or hiding the host browser ends the publisher. The
+  publisher frame or video heartbeat. Closing or hiding the host browser ends the publisher. The
   computer must remain online. Reconnection requires a new explicit share.
 - Registry state is process-local and ephemeral. A controller restart ends every
   share. A replicated deployment needs shared session routing/revocation before
@@ -180,14 +223,16 @@ layout and independent page scrolling described above.
 
 ## Next increments
 
-1. Extend local-tab qualification to the native Android shell and additional
-   mobile browsers. The earlier server-browser phone results do not cover this path.
-2. Measure native capture, end-to-end latency, quality, CPU and bandwidth on LAN
-   and constrained networks. Evaluate event-driven capture and WebRTC/TURN against
-   this baseline; qualify reconnect and multiple controller instances.
-3. Integrate the browser sharing session with the same generic human/agent
-   handover used by server browsers, then extend selected-surface sharing to
-   supported desktop applications.
+1. Qualify native video on physical Android and iOS with an active network,
+   including rotation, software keyboard, background/resume and revocation.
+   USB forwarding without an active Android network is not a WebRTC sign-off.
+2. Measure real LAN/WAN input-to-photon latency, text quality, CPU, battery and
+   bandwidth under loss, network changes and multiple simultaneous participants.
+   Tune 60 fps and codec selection from these results before exposing quality modes.
+3. Add shared session routing/revocation for replicated controllers. Integrate
+   browser sharing with generic human/agent handover, then add authorized capture
+   and input adapters for supported desktop applications. Separate native-app
+   layouts still require separate app views/sessions; video alone cannot supply them.
 
 ## Verification
 
@@ -200,13 +245,19 @@ pnpm --filter @instafy/frontend test:unit
 pnpm --filter @instafy/desktop-app test
 cargo test --manifest-path packages/runtime-controller/Cargo.toml browser_shares
 pnpm --filter @instafy/desktop-app smoke:browser:explore
+pnpm --filter @instafy/desktop-app smoke:browser:video
 ```
 
-The native smoke uses disposable profiles and a loopback fixture. It covers
+The Explore smoke uses disposable profiles and a loopback fixture. It covers
 independent CSS and capture resolutions, shared cookies, native click navigation
 during capture, Back, Reload, resizing and teardown. It does not qualify phone interaction or
 end-to-end network latency. Those checks require an owner in Electron and a
 separately authenticated participant on the actual device.
+
+The video smoke uses the real native permission boundary, distinct receiver
+resolutions, hardware statistics, navigation, rotation, expansion from an initially
+small capture, revocation and native lease expiry. It must run explicitly on a
+graphical host; a missing device or graphical environment is not a passing result.
 
 For the iOS regression check, expand Explore and swipe repeatedly in both
 directions, including after opening/closing the keyboard and rotating the phone.

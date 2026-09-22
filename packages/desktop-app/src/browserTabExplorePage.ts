@@ -1,5 +1,6 @@
 import {
   BrowserWindow,
+  screen,
   type Session,
   type BrowserWindowConstructorOptions,
 } from "electron";
@@ -99,29 +100,48 @@ export function createBrowserTabExplorePage(
       clearTimeout(timeout);
       if (!closed) failure = error;
     });
+  let videoRevision = -1;
+  async function capture() {
+    let timeout: ReturnType<typeof setTimeout> | undefined;
+    try {
+      return await Promise.race([
+        contents.capturePage(undefined, {stayHidden:true,stayAwake:false}),
+        new Promise<never>((_resolve,reject)=>{
+          timeout=setTimeout(()=>reject(new Error("Explore capture timed out.")),3000);
+          timeout.unref?.();
+        }),
+      ]);
+    } finally {clearTimeout(timeout);}
+  }
   return {
+    videoSource: {
+      contents,
+      current: () => !closed && !failure,
+      async media(requester) {
+        await initializing;
+        if (closed || failure || !loaded) throw new Error("Explore ended.");
+        for(let attempts=0;videoRevision!==revision;attempts++) {
+          if(attempts>=3)throw new Error("Explore viewport did not settle.");
+          // One capture settles the hidden compositor after resize; ongoing
+          // frames use Chromium's native stream, never screenshot polling.
+          const generation=revision;
+          await capture();
+          if(closed || failure)throw new Error("Explore ended.");
+          if(generation===revision)videoRevision = generation;
+        }
+        const dpr=Math.min(viewport.dpr,screen.getDisplayMatching(window.getBounds()).scaleFactor);
+        return {sourceId:contents.getMediaSourceId(requester),width:Math.max(1,Math.floor(viewport.width*dpr)),height:Math.max(1,Math.floor(viewport.height*dpr))};
+      },
+    },
     async frame() {
       if (failure) throw failure;
       if (!loaded || closed) return null;
       const generation = revision;
       // Electron's capture lease keeps a hidden renderer painting across
       // navigation. A CDP screenshot can otherwise wait forever for a surface.
-      let captureTimeout: ReturnType<typeof setTimeout> | undefined;
       let image;
       try {
-        image = await Promise.race([
-          contents.capturePage(undefined, {
-            stayHidden: true,
-            stayAwake: false,
-          }),
-          new Promise<never>((_resolve, reject) => {
-            captureTimeout = setTimeout(
-              () => reject(new Error("Explore capture timed out.")),
-              3000,
-            );
-            captureTimeout.unref?.();
-          }),
-        ]);
+        image = await capture();
         transientCaptureFailures = 0;
       } catch (error) {
         // Chromium can briefly have no compositor surface during navigation.
@@ -133,8 +153,6 @@ export function createBrowserTabExplorePage(
         )
           return null;
         throw error;
-      } finally {
-        clearTimeout(captureTimeout);
       }
       if (closed || generation !== revision) return null;
       const width = Math.max(1, Math.round(viewport.width * viewport.dpr));

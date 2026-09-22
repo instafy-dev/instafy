@@ -2,6 +2,7 @@
 //! never runtime, shell, profile or agent authority.
 mod control;
 mod explore;
+mod video;
 use crate::{
     auth::{authenticate_request, require_user_session, RequestContext},
     bad_request, forbidden, internal_error, not_found, too_many_requests, ApiError, AppState,
@@ -57,6 +58,7 @@ struct Share {
     feed: watch::Sender<Feed>,
     control: control::Control,
     explore: explore::Explore,
+    video: video::Video,
 }
 
 struct Connection {
@@ -66,6 +68,7 @@ struct Connection {
     control: watch::Receiver<control::Snapshot>,
     input: Option<tokio::sync::mpsc::Receiver<control::Input>>,
     explore: watch::Receiver<explore::Snapshot>,
+    video: watch::Receiver<video::Snapshot>,
     explore_feed: watch::Receiver<Feed>,
     explore_input: Option<tokio::sync::mpsc::Receiver<explore::Action>>,
 }
@@ -141,6 +144,7 @@ impl Registry {
                 feed,
                 control: control::Control::default(),
                 explore: explore::Explore::default(),
+                video: video::Video::default(),
             },
         );
         Ok(info)
@@ -183,6 +187,7 @@ impl Registry {
             revoked: receiver,
             control: s.control.state.subscribe(),
             explore: s.explore.state.subscribe(),
+            video: s.video.state.subscribe(),
             explore_feed: s.explore.join(connection_id),
             explore_input: if publish {
                 s.explore.receiver.take()
@@ -247,6 +252,7 @@ impl Registry {
             if *viewer == user {
                 s.control.leave(*connection);
                 s.explore.leave(*connection);
+                s.video.leave(*connection);
                 revoked.send_replace(true);
                 false
             } else {
@@ -288,6 +294,7 @@ impl Registry {
             s.viewers.remove(&connection);
             s.control.leave(connection);
             s.explore.leave(connection);
+            s.video.leave(connection);
         }
     }
 }
@@ -575,6 +582,7 @@ struct SocketAuth {
 #[serde(rename_all = "camelCase")]
 struct FrameFlowQuery {
     frame_flow_version: Option<u32>,
+    video_version: Option<u32>,
 }
 
 async fn socket(
@@ -602,6 +610,7 @@ async fn socket(
                 id,
                 publish,
                 flow.frame_flow_version == Some(1),
+                flow.video_version == Some(1),
             )
         }))
 }
@@ -614,6 +623,7 @@ async fn serve(
     id: Uuid,
     publish: bool,
     frame_flow: bool,
+    video_supported: bool,
 ) {
     let Ok(Some(Ok(Message::Text(raw)))) =
         tokio::time::timeout(Duration::from_secs(5), socket.recv()).await
@@ -646,6 +656,7 @@ async fn serve(
         mut control,
         mut input,
         mut explore,
+        mut video,
         mut explore_feed,
         mut explore_input,
     }) = reg.connect(project, id, user, publish)
@@ -658,6 +669,10 @@ async fn serve(
     if publish && auth.explore_version == Some(1) {
         reg.enable_explore(id);
     }
+    if publish && video_supported && video::configuration(&state, project, id).is_some() {
+        reg.enable_video(id);
+    }
+    reg.reconcile_video(id);
     let mut message_window = Instant::now();
     let mut message_count = 0;
     let mut membership = tokio::time::interval(Duration::from_secs(10));
@@ -679,6 +694,7 @@ async fn serve(
     feed.mark_changed();
     control.mark_changed();
     explore.mark_changed();
+    video.mark_changed();
     loop {
         tokio::select! {
             biased;
@@ -693,6 +709,11 @@ async fn serve(
                 if publish && auth.explore_version == Some(1) {
                     let message = explore.borrow().message(connection_id, true);
                     if !matches!(tokio::time::timeout(Duration::from_secs(1), socket.send(Message::Text(message))).await, Ok(Ok(()))) { break; }
+                }
+                if publish && video_supported {
+                    reg.reconcile_video(id);
+                    let message=video.borrow().message(connection_id,true,true);
+                    if !matches!(tokio::time::timeout(Duration::from_secs(1),socket.send(Message::Text(message))).await,Ok(Ok(()))) {break;}
                 }
                 // A heartbeat renews the native input lease; a partition cannot
                 // leave the local owner locked out indefinitely.
@@ -730,11 +751,23 @@ async fn serve(
                             pending_frame = None;
                             continue;
                         }
+                        if video_supported {
+                            if let Some(valid)=reg.video_message(id,connection_id,publish,&raw,video::configuration(&state,project,id)) {
+                                if !valid {break;}
+                                continue;
+                            }
+                        }
                         if !reg.explore_message(id, connection_id, user, publish, &raw).unwrap_or_else(|| reg.control_message(id, connection_id, user, publish, &raw)) { break; }
+                        reg.reconcile_video(id);
                     }
                     // All other messages and binary viewer input remain invalid.
                     _ => break,
                 }
+            }
+            changed = video.changed(), if video_supported => {
+                if changed.is_err() {break;}
+                let message=video.borrow_and_update().message(connection_id,publish,false);
+                if !matches!(tokio::time::timeout(Duration::from_secs(1),socket.send(Message::Text(message))).await,Ok(Ok(()))) {break;}
             }
             changed = explore.changed() => {
                 if changed.is_err() { break; }

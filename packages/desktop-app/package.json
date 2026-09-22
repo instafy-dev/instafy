@@ -10,6 +10,7 @@
   "scripts": {
     "build": "pnpm --filter @instafy/desktop-runtime-agent build && tsup && node scripts/sync-frontend-host-scripts.mjs && node scripts/download-speech-bootstrap-assets.mjs",
     "start": "pnpm --filter @instafy/desktop-runtime-agent build && pnpm build && node scripts/launch.mjs",
+    "smoke:browser:video": "pnpm build && electron scripts/browser-tab-video-smoke.cjs",
     "smoke:browser:explore": "pnpm build && electron scripts/browser-tab-explore-smoke.cjs",
     "smoke:voice:host": "pnpm build && node scripts/voice-host-smoke.mjs",
     "smoke:voice:host:bootstrap": "pnpm build && node scripts/voice-host-smoke.mjs --bootstrap-clean",
@@ -52,6 +53,7 @@
     "afterSign": "scripts/notarize.cjs",
     "files": [
       "dist/**",
+      "assets/browser-tab-video.html",
       "package.json",
       "!**/node_modules/**/*.test.ts",
       "!**/node_modules/**/tests/**"

@@ -24,6 +24,7 @@ export function localTabExplorePublisher(
   captureId: string,
   socket: WebSocket,
   frameSender: ReturnType<typeof localTabFrameSender>,
+  needsFrames: (viewId:string) => boolean = () => true,
 ) {
   type LocalView = {
     viewport: LocalExploreViewport;
@@ -138,6 +139,7 @@ export function localTabExplorePublisher(
         disposed ||
         !view.confirmed ||
         view.framing ||
+        !needsFrames(viewId) ||
         socket.readyState !== WebSocket.OPEN ||
         socket.bufferedAmount >= 1024 * 1024
       )

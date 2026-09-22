@@ -434,6 +434,7 @@ interface Window {
       visible: boolean;
       ownerId: string;
     }) => Promise<InstafyDesktopPersonalBrowserStatus>;
+    browserTabVideo?: (options: {ownerId:string;captureId:string;operation:"open"|"answer"|"sync"|"viewport"|"close"|"stats";value:unknown}) => Promise<unknown>;
     browserTabExploreOpen?: (options: { ownerId: string; captureId: string; viewport: { width: number; height: number; dpr: number } }) => Promise<{ viewId: string }>;
     browserTabExploreRenew?: (options: { ownerId: string; captureId: string; viewId: string }) => Promise<boolean>;
     browserTabExploreFrame?: (options: { ownerId: string; captureId: string; viewId: string }) => Promise<Uint8Array | null>;

@@ -3,6 +3,7 @@ import { dispatchBrowserTabInput } from "./browserTabInput";
 import {
   BrowserWindow,
   WebContentsView,
+  screen,
   dialog,
   type Event,
   type Session,
@@ -234,6 +235,16 @@ export class PersonalBrowserHost {
     return contents && this.currentOwnerId && this.currentProjectId && this.currentVisible
       ? { contents, ownerId: this.currentOwnerId, projectId: this.currentProjectId,
           canControl: !this.agentControlEnabled && this.activeControlOperations === 0,
+          videoSource: {
+            contents,
+            current:()=>!contents.isDestroyed(),
+            media:async requester=>{
+              const bounds=this.fitBoundsToOwner(this.currentBounds);
+              const dpr=this.ownerWindow ? screen.getDisplayMatching(this.ownerWindow.getBounds()).scaleFactor : 1;
+              const scale=Math.min(dpr,Math.sqrt(1_920_000/(bounds.width*bounds.height)));
+              return {sourceId:contents.getMediaSourceId(requester),width:Math.max(1,Math.floor(bounds.width*scale)),height:Math.max(1,Math.floor(bounds.height*scale))};
+            },
+          },
           createExplore: viewport => createBrowserTabExplorePage(contents.session, contents.getURL(), viewport),
           dispatchInput: (input, current) => this.inputShield.withInjectedInput(() => dispatchBrowserTabInput(contents,this.fitBoundsToOwner(this.currentBounds),input,current)),
         } : null;
@@ -249,6 +260,9 @@ export class PersonalBrowserHost {
   inputSharedTab(ownerId: string, captureId: string, grantId: string, input: unknown) { return this.tabCapture.input(ownerId,captureId,grantId,input); }
   openTabExplore(ownerId: string, captureId: string, viewport: unknown) { return this.tabCapture.openExplore(ownerId, captureId, viewport); }
   operateTabExplore(ownerId: string, captureId: string, viewId: string, operation: "renew" | "frame" | "input" | "resize" | "navigate" | "close", value?: unknown) { return this.tabCapture.operateExplore(ownerId, captureId, viewId, operation, value); }
+  videoSharedTab(ownerId: string, captureId: string, operation: "open" | "answer" | "sync" | "viewport" | "close" | "stats", value: unknown) {
+    return this.tabCapture.videoOperation(ownerId,captureId,operation,value);
+  }
   captureSharedTab(ownerId: string, captureId: string) {
     return this.tabCapture.frame(ownerId, captureId);
   }
@@ -825,7 +839,8 @@ export class PersonalBrowserHost {
     }
     configuredPersonalBrowserSessions.add(session);
     session.setPermissionCheckHandler(() => false);
-    session.setPermissionRequestHandler((_webContents, _permission, callback) => callback(false));
+    session.setPermissionRequestHandler((contents, permission, callback, details) =>
+      callback(this.tabCapture.allowsVideoCapture(contents, permission, details)));
     session.on("will-download", (event) => event.preventDefault());
   }
 

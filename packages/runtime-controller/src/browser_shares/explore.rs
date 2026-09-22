@@ -4,7 +4,7 @@ use super::*;
 use serde_json::json;
 use tokio::sync::mpsc;
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub(super) struct Viewport {
     width: u32,
@@ -12,7 +12,7 @@ pub(super) struct Viewport {
     dpr: f64,
 }
 impl Viewport {
-    fn valid(&self) -> bool {
+    pub(super) fn valid(&self) -> bool {
         (240..=1920).contains(&self.width)
             && (160..=1440).contains(&self.height)
             && self.dpr.is_finite()
@@ -129,6 +129,14 @@ impl Default for Explore {
     }
 }
 impl Explore {
+    pub(super) fn view_id(&self, connection: Uuid) -> Option<Uuid> {
+        self.state
+            .borrow()
+            .views
+            .iter()
+            .find(|v| v.connection_id == connection)
+            .map(|v| v.view_id)
+    }
     pub fn join(&mut self, connection: Uuid) -> watch::Receiver<Feed> {
         let (tx, rx) = watch::channel(Feed::Live(None));
         self.frames.insert(connection, tx);

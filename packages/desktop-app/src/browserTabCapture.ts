@@ -1,9 +1,10 @@
+import { BrowserTabVideo, parseTabVideoRequest, type TabVideoSource } from "./browserTabVideo";
 import { BrowserTabExplore, type ExplorePage, type ExploreViewport } from "./browserTabExplore";
 import { randomUUID } from "node:crypto";
 import type { NativeImage } from "electron";
 import { parseBrowserTabInput, type BrowserTabInput } from "./browserTabInput";
 
-type Source = { createExplore?: (viewport: ExploreViewport) => ExplorePage; ownerId: string; projectId: string; canControl?: boolean; dispatchInput?: (input: BrowserTabInput, current: () => boolean) => Promise<void>; contents: {
+type Source = { videoSource?: TabVideoSource; createExplore?: (viewport: ExploreViewport) => ExplorePage; ownerId: string; projectId: string; canControl?: boolean; dispatchInput?: (input: BrowserTabInput, current: () => boolean) => Promise<void>; contents: {
   isDestroyed(): boolean;
   getURL(): string;
   capturePage(): Promise<NativeImage>;
@@ -14,6 +15,7 @@ export class BrowserTabCapture {
   private readonly explore = new BrowserTabExplore();
   private selection: { id: string; source: Source } | null = null;
   private pending = false;
+  private video: BrowserTabVideo | undefined;
   private controlId: string | null = null;
   private controlTimer: ReturnType<typeof setTimeout> | undefined;
   private inputQueue: Promise<void> = Promise.resolve();
@@ -76,6 +78,26 @@ export class BrowserTabCapture {
     if (operation === "navigate") return this.explore.navigate(viewId, value);
     return this.explore.close(viewId);
   }
+  async videoOperation(ownerId: string, captureId: string, operation: "open" | "answer" | "sync" | "viewport" | "close" | "stats", value: unknown) {
+    const selected=this.exploreSelection(ownerId,captureId);
+    if (operation === "open") {
+      const request=parseTabVideoRequest(value);
+      const source=request.viewId ? this.explore.videoSource(request.viewId) : selected.source.videoSource;
+      if (!source) throw new Error("Tab video unavailable.");
+      this.video ??= new BrowserTabVideo();
+      return this.video.open(request,{contents:source.contents,current:()=>this.valid(selected,ownerId) && source.current(),media:requester=>source.media(requester)});
+    }
+    if (operation === "sync") {this.video?.sync(value);return;}
+    const message=value as {id:string;sdp:string;viewport:Parameters<BrowserTabVideo["viewport"]>[1]};
+    if (!message || typeof message.id!=="string") throw new Error("Invalid video operation.");
+    if (operation === "answer") return this.video?.answer(message.id,message.sdp);
+    if (operation === "viewport") return this.video?.viewport(message.id,message.viewport);
+    if (operation === "stats") return this.video?.stats(message.id);
+    this.video?.close(message.id);
+  }
+  allowsVideoCapture(...args: Parameters<BrowserTabVideo["allowsCapturePermission"]>) {
+    return this.video?.allowsCapturePermission(...args) ?? false;
+  }
   get active() { return this.selection !== null; }
 
   start(ownerId: string): { captureId: string } {
@@ -86,7 +108,7 @@ export class BrowserTabCapture {
     return { captureId: this.selection.id };
   }
   stop(captureId?: string) {
-    if (!captureId || this.selection?.id === captureId) { this.revokeControl(); this.explore.closeAll(); this.selection = null; }
+    if (!captureId || this.selection?.id === captureId) { this.revokeControl(); this.video?.dispose(); this.video=undefined; this.explore.closeAll(); this.selection = null; }
   }
   private webPage(source: Source) {
     return !source.contents.isDestroyed() && /^https?:\/\//i.test(source.contents.getURL());

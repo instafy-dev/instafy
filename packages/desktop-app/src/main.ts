@@ -2003,6 +2003,18 @@ app.whenReady().then(() => {
     return personalBrowserHost.show(payload?.visible);
   });
 
+  for (const operation of ["open", "answer", "sync", "viewport", "close", "stats"] as const) {
+    ipcMain.handle(`instafy:browserTabVideo:${operation}`, async (event, payload) => {
+      assertAllowedCaller(event);
+      const lease=captureStudioRendererGeneration(event);
+      assertStudioRendererGenerationCurrent(lease);
+      const ownerId=requirePersonalBrowserOwnerId(payload?.ownerId);
+      if (!personalBrowserHost || typeof payload?.captureId!=="string") throw new Error("Tab sharing ended.");
+      const value=await personalBrowserHost.videoSharedTab(ownerId,payload.captureId,operation,payload.value);
+      assertStudioRendererGenerationCurrent(lease);
+      return value;
+    });
+  }
   ipcMain.handle("instafy:browserTabShareStart", async (event, payload) => {
     assertAllowedCaller(event);
     assertStudioRendererGenerationCurrent(captureStudioRendererGeneration(event));
