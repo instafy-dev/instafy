@@ -4,8 +4,9 @@ Status: Electron supports native WebRTC video with JPEG compatibility. Physical
 Android Chrome has exercised video over Wi-Fi/TURN alongside a desktop viewer,
 including independent scrolling, keyboard input, rotation, reconnect and revocation.
 Physical iOS has exercised video over Wi-Fi/TURN, independent touch input,
-keyboard input, rotation, control handoff and revocation. iOS suspension/reconnect,
-cellular/WAN performance and multi-controller routing remain open.
+keyboard input, rotation, control handoff, native background/foreground, reconnect
+and revocation. OS-enforced suspension, cellular/WAN performance and
+multi-controller routing remain open.
 
 The browser's location and its audience are separate choices. The browser location
 selector says **This device** and **Workspace**. This device uses Personal Browser
@@ -14,9 +15,37 @@ workspace browser and its existing team session/account semantics. **Share tab�
 picker, defaulting to **Selected people**. Choose existing members and select
 **Start sharing**, or explicitly choose **Everyone with space access**. People in
 the chosen audience select **View shared tab** under **Tabs shared with you** in
-the conversation. The publisher controls sit beneath the local tab's address bar;
-**People** expands the audience list, while **Stop sharing** remains visible. **Stop sharing** returns the tab to
-private browsing. No browser runtime is allocated for this viewing session.
+the conversation. The owner's address bar contains **Sharing**, a pending-request
+count, and **Stop**. Sharing opens audience management and control/Explore
+requests in a popover; neither requests nor active participants add page rows.
+**Take back** stays in the toolbar while a participant controls the source.
+Stop returns the tab to private browsing. AI approval preferences and Clear Data
+are in **Browser settings**. No browser runtime is allocated for this viewing session.
+
+Viewers have one 56px toolbar: **Following / Your view**, Back when exploring,
+a mobile keyboard button when input is available, options, and close. The mode
+picker explains shared-account behavior before requesting Explore. Options hold
+zoom, Expand/Minimize, Reload, Request control and Pan view. **Release** remains
+visible while controlling the source. Touch controls keep 44px targets.
+
+The compact layout was exercised in Electron, a constrained Chrome window and
+a physical iPhone 13 mini. In the same portrait phone viewport, persistent
+controls fell from 190px to 56px and the Explore page grew from 375×538 to
+375×672 CSS pixels (about 25% more content height), receiving 750×1344 video.
+Independent scrolling, keyboard input, draft isolation, shared saves, control
+handoff, Release, Take back and Stop passed. An 18-second phone motion sample
+decoded 29.98 fps with no dropped frames or freeze-counter increases; this is a
+short Wi-Fi/TURN check, not WAN or sustained-performance qualification.
+
+Electron shows a temporary page preview beneath its tools popover because DOM
+overlays cannot paint above a native WebContentsView. The preview stays on the
+owner’s device, is bounded to 1600×1200 pixels and one MiB of JPEG, and is cleared
+when the menu closes or browser ownership changes. This is tracked as
+`occluded` separately from browser visibility: the source viewport, sharing and
+input leases stay unchanged. Closing the popover restores the native surface;
+leaving the browser still invalidates sharing as before.
+Approving control keeps focus in the menu: Escape dismisses it without revoking
+the grant. Once the native page is focused, Escape retains its take-back behavior.
 
 The picker includes direct space members and people with inherited organization
 access. Selected-person shares are hidden from other members, and knowing a share
@@ -33,14 +62,14 @@ owner approval because it opens another page using this browser session.
 
 ## Human control handoff
 
-The viewer selects **Request control**. Beneath the source tab's address bar,
-the owner sees the participant's name and chooses **Allow control** or **Decline**.
+The viewer selects **Request control** from options. The owner opens **Sharing**,
+sees the participant's name, and chooses **Allow control** or **Decline**.
 The grant belongs to that exact connection; another window using the same account
 does not inherit it. The viewer can click, type, use standard editing/navigation
-keys and scroll the page. **Release control** returns to viewing.
+keys and scroll the page. **Release** returns to viewing.
 
 While a viewer controls the tab, the native input shield blocks competing local
-page input. **Take back control** in the owner toolbar or **Escape** in the native
+page input. **Take back** in the owner toolbar or **Escape** in the native
 page revokes local input immediately, before waiting for the network. Controller
 state then catches up through the publisher's one-second heartbeat. Agent control
 must be paused before granting a viewer, and cannot resume until human control
@@ -56,8 +85,8 @@ view-only until updated.
 
 ## Independent Explore
 
-A viewer selects **Explore independently**, and the owner approves **Allow Explore**
-under the source address bar. This creates a separate sandboxed page on the owner's
+A viewer opens **Following** and selects **Explore independently**. The owner
+approves **Allow Explore** in **Sharing**. This creates a separate sandboxed page on the owner's
 Electron device, initially at the source URL. Its responsive layout follows the
 participant's available viewer area and pixel density. Expand and Minimize resize
 that private page without resizing the source. Scroll, focus, input, navigation,
@@ -73,8 +102,8 @@ in-memory login or prevent concurrent sessions may behave differently. Approval
 permits normal web navigation in this session, not just reading the initial page.
 The approval row explicitly explains the shared-account behavior.
 
-**Return to follow** destroys the participant's private renderer and rejoins the
-canonical stream without reconnecting the viewer socket. **End Explore** lets the
+**Return to follow** in the **Your view** picker destroys the participant's private renderer and rejoins the
+canonical stream without reconnecting the viewer socket. **End Explore** in Sharing lets the
 owner do the same. Removal, disconnect, Stop sharing and source closure retire the
 view and fence queued input and late frames. A new request requires new approval;
 late heartbeats cannot recreate a closed renderer. The exact connection owns the

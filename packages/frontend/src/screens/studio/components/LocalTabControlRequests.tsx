@@ -2,7 +2,7 @@ import type {
   LocalExploreState,
   LocalExploreControl,
 } from "../../../services/runtimeController/localTabExplore";
-import { useState } from "react";
+import { useLayoutEffect, useRef, useState } from "react";
 import { Button } from "../../../components/Button";
 import type { BrowserSharePerson } from "../../../services/runtimeController/browserShares";
 import type {
@@ -16,13 +16,23 @@ export function LocalTabControlRequests({
   control,
   explore,
   exploreState,
+  showTakeBack = true,
 }: {
+  showTakeBack?: boolean;
   people: readonly BrowserSharePerson[];
   state: LocalTabControlState | null;
   control: LocalTabPublisherControl;
   explore?: LocalExploreControl;
   exploreState?: LocalExploreState | null;
 }) {
+  const requestsRef = useRef<HTMLDivElement>(null);
+  useLayoutEffect(() => {
+    // An approved/declined request removes its focused button. Keep Escape and
+    // keyboard navigation in the management dialog after the server responds.
+    if (document.activeElement === document.body) {
+      requestsRef.current?.closest<HTMLElement>('[role="dialog"]')?.focus();
+    }
+  }, [state?.requests, exploreState?.requests]);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const label = (id: string) => {
@@ -41,8 +51,8 @@ export function LocalTabControlRequests({
     }
   }
   return (
-    <div className="space-y-1 text-xs" data-testid="local-tab-control-owner">
-      {state?.grant ? (
+    <div ref={requestsRef} className="space-y-1 text-xs" data-testid="local-tab-control-owner">
+      {state?.grant && showTakeBack ? (
         <div className="flex flex-wrap items-center gap-2">
           <span role="status">
             {label(state.grant.userId)} controls this tab

@@ -395,14 +395,15 @@ contextBridge.exposeInMainWorld("instafyDesktop", {
     return (await ipcRenderer.invoke("instafy:personalBrowserRelease", options)) as PersonalBrowserStatus;
   },
   personalBrowserSetBounds: async (options: {
+    occluded?: boolean;
     x: number;
     y: number;
     width: number;
     height: number;
     visible?: boolean;
     ownerId: string;
-  }): Promise<PersonalBrowserStatus> => {
-    return (await ipcRenderer.invoke("instafy:personalBrowserSetBounds", options)) as PersonalBrowserStatus;
+  }): Promise<PersonalBrowserStatus & { previewDataUrl?: string }> => {
+    return (await ipcRenderer.invoke("instafy:personalBrowserSetBounds", options)) as PersonalBrowserStatus & { previewDataUrl?: string };
   },
   personalBrowserShow: async (options: {
     visible: boolean;

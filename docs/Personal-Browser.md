@@ -4,6 +4,16 @@
 
 Personal Browser is the desktop-only browser identity for one Instafy user on one device. It renders a native Chromium surface inside the Electron app, keeps that user's browser state locally, and gives an explicitly resumed local agent a narrow, confirmed control channel. It complements rather than replaces the remote Shared Browser.
 
+Browser and sharing tools use floating dialogs. The renderer reports an optional
+`occluded` bounds flag while those dialogs cover the native surface. Main hides
+the WebContentsView and its input shield without changing the page's dimensions
+or logical visibility. On the transition into occlusion, the existing bounds IPC
+can return a bounded page preview to the same owner renderer. It rechecks owner
+and native-page identity after capture; late, oversized and failed previews are
+discarded. The renderer keeps the image only while the menu is open. Sharing remains scoped to the same active owner/page;
+switching away still invalidates it. This presentation flag grants no new input,
+account or agent authority.
+
 For the user-facing profile choices, cross-project/device login continuity, and
 the exact scope of Clear Data, see [Browser profiles](Browser-Profiles.md).
 

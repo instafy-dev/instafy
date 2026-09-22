@@ -17,9 +17,11 @@ import {
   Play,
   Refresh,
   Trash,
+  MoreHoriz,
 } from "iconoir-react";
 import { Button, IconButton } from "../../../components/Button";
 import { StudioDialogModal } from "../../../components/aria/StudioModal";
+import { BrowserToolsOverlayContext, BrowserToolsPopover } from "./BrowserToolsPopover";
 import { BrowserExpandButton } from "./BrowserExpandButton";
 import { BrowserHumanInputStatus } from "./BrowserHumanInputControls";
 import { useBrowserHumanInput } from "./useBrowserHumanInput";
@@ -188,6 +190,15 @@ export function PersonalBrowserSurface({
   });
   const addressInputRef = useRef<HTMLInputElement | null>(null);
   const [address, setAddress] = useState("");
+  const [overlayPreview, setOverlayPreview] = useState<string | null>(null);
+  const [overlayCount, setOverlayCount] = useState(0);
+  const overlayCountRef = useRef(overlayCount);
+  overlayCountRef.current = overlayCount;
+  const reportBoundsRef = useRef<(() => void) | null>(null);
+  const registerOverlay = useCallback(() => {
+    setOverlayCount(count => count + 1);
+    return () => setOverlayCount(count => count - 1);
+  }, []);
   const [fullscreen, setFullscreen] = useState(false);
   const expanded = active && fullscreen;
   const [selectedApprovalMode, setSelectedApprovalMode] = useState<"ask" | "routine">("ask");
@@ -225,6 +236,7 @@ export function PersonalBrowserSurface({
       return undefined;
     }
 
+    let disposed = false;
     let frame: number | null = null;
     const report = () => {
       if (frame !== null) {
@@ -254,11 +266,15 @@ export function PersonalBrowserSurface({
         void bridge.personalBrowserSetBounds?.({
           ...lastValidBoundsRef.current,
           visible: visible && width > 0 && height > 0,
+          occluded: overlayCountRef.current > 0,
           ownerId,
+        }).then(result => {
+          if (!disposed && overlayCountRef.current > 0 && result.previewDataUrl) setOverlayPreview(result.previewDataUrl);
         }).catch(() => undefined);
       });
     };
 
+    reportBoundsRef.current = report;
     report();
     const observer = typeof ResizeObserver === "undefined" ? null : new ResizeObserver(report);
     observer?.observe(viewport);
@@ -267,6 +283,8 @@ export function PersonalBrowserSurface({
     window.visualViewport?.addEventListener("resize", report);
     window.visualViewport?.addEventListener("scroll", report);
     return () => {
+      disposed = true;
+      reportBoundsRef.current = null;
       if (frame !== null) {
         window.cancelAnimationFrame(frame);
       }
@@ -282,6 +300,12 @@ export function PersonalBrowserSurface({
       }).catch(() => undefined);
     };
   }, [expanded, ownerId, visible]);
+
+  useLayoutEffect(() => {
+    if (overlayCount === 0) setOverlayPreview(null);
+    reportBoundsRef.current?.();
+  }, [overlayCount]);
+  useLayoutEffect(() => { setOverlayPreview(null); }, [ownerId]);
 
   const handleNavigate = useCallback(
     (event: FormEvent<HTMLFormElement>) => {
@@ -347,6 +371,7 @@ export function PersonalBrowserSurface({
   );
 
   const content = (
+    <BrowserToolsOverlayContext.Provider value={registerOverlay}>
     <div
       className={active ? "flex h-full min-h-0 flex-1 flex-col" : "hidden"}
       data-testid="personal-browser-surface"
@@ -487,14 +512,37 @@ export function PersonalBrowserSurface({
               )}
             </IconButton>
           ) : null}
-          <IconButton
+          <BrowserToolsPopover label="Browser settings" trigger={<IconButton aria-label="Browser settings" variant="ghost" radius="full" size="sm"><MoreHoriz className="h-4 w-4" aria-hidden="true" /></IconButton>}>
+            {routineApprovalAvailable ? (
+              <div className="flex shrink-0 flex-wrap items-center gap-x-3 gap-y-1 border-b border-slate-200 px-3 py-2 text-xs dark:border-slate-800" data-browser-session-safe-zone="true">
+                <label className="flex min-h-8 cursor-pointer items-center gap-2">
+                  <input
+                    checked={humanInputLocked ? model.status?.approvalMode === "routine" : selectedApprovalMode === "routine"}
+                    className="h-4 w-4"
+                    data-testid="personal-browser-routine-approval"
+                    disabled={humanInputLocked}
+                    onChange={(event) => setSelectedApprovalMode(event.target.checked ? "routine" : "ask")}
+                    type="checkbox"
+                  />
+                  Always allow routine browsing until paused
+                </label>
+                <span className="text-slate-500 dark:text-slate-400">
+                  {humanInputState.active
+                    ? "When ready, use Done, continue to resume and send the next turn."
+                    : humanInputLocked
+                    ? "Take over to change approvals."
+                    : "Choose before Resume. High-impact actions still ask; secrets stay manual."}
+                </span>
+              </div>
+            ) : null}
+          <Button
             aria-label={
               model.clearDataState === "clearing"
                 ? "Clearing personal browser data"
                 : "Clear personal browser data"
             }
             isDisabled={!ready || model.clearDataState === "clearing"}
-            className="max-[540px]:h-10 max-[540px]:w-10"
+            className="w-full justify-start"
             onPress={handleClearData}
             radius="full"
             size="sm"
@@ -506,7 +554,10 @@ export function PersonalBrowserSurface({
             ) : (
               <Trash className="h-3.5 w-3.5" aria-hidden="true" />
             )}
-          </IconButton>
+            Clear personal browser data
+          </Button>
+          </BrowserToolsPopover>
+          {sharingControls}
           <BrowserExpandButton
             expanded={expanded}
             onPress={() => setFullscreen((value) => !value)}
@@ -527,38 +578,16 @@ export function PersonalBrowserSurface({
         }
         testId="personal-browser-chrome"
       />
-      {routineApprovalAvailable ? (
-        <div className="flex shrink-0 flex-wrap items-center gap-x-3 gap-y-1 border-b border-slate-200 px-3 py-2 text-xs dark:border-slate-800" data-browser-session-safe-zone="true">
-          <label className="flex min-h-8 cursor-pointer items-center gap-2">
-            <input
-              checked={humanInputLocked ? model.status?.approvalMode === "routine" : selectedApprovalMode === "routine"}
-              className="h-4 w-4"
-              data-testid="personal-browser-routine-approval"
-              disabled={humanInputLocked}
-              onChange={(event) => setSelectedApprovalMode(event.target.checked ? "routine" : "ask")}
-              type="checkbox"
-            />
-            Always allow routine browsing until paused
-          </label>
-          <span className="text-slate-500 dark:text-slate-400">
-            {humanInputState.active
-              ? "When ready, use Done, continue to resume and send the next turn."
-              : humanInputLocked
-              ? "Take over to change approvals."
-              : "Choose before Resume. High-impact actions still ask; secrets stay manual."}
-          </span>
-        </div>
-      ) : null}
       {ready && humanInputIdentityKey && onContinueAfterHumanInput ? (
         <BrowserHumanInputStatus {...humanInputOptions} state={humanInputState} />
       ) : null}
-      {sharingControls}
       <div
         ref={viewportRef}
         aria-label="Personal browser content"
         className="relative min-h-0 flex-1 overflow-hidden bg-slate-100 dark:bg-slate-950"
         data-testid="personal-browser-viewport"
       >
+        {overlayCount > 0 && overlayPreview ? <img alt="" aria-hidden src={overlayPreview} className="pointer-events-none absolute inset-0 h-full w-full object-fill" data-testid="personal-browser-overlay-preview" /> : null}
         {!ready ? (
           <div className="absolute inset-0 flex items-center justify-center p-6 text-center">
             <div className="max-w-sm text-sm text-slate-500 dark:text-slate-400">
@@ -586,6 +615,7 @@ export function PersonalBrowserSurface({
         ) : null}
       </div>
     </div>
+    </BrowserToolsOverlayContext.Provider>
   );
 
   if (expanded) {

@@ -1,7 +1,8 @@
 import type { LocalExploreState } from "../../../services/runtimeController/localTabExplore";
 import { LocalTabControlRequests } from "./LocalTabControlRequests";
 import type { LocalTabControlState } from "../../../services/runtimeController/localTabControl";
-import { useCallback, useEffect, useId, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
+import { BrowserToolsPopover } from "./BrowserToolsPopover";
 import { SharedLocalTabViewer } from "./SharedLocalTabViewer";
 import { Checkbox } from "../../../components/Checkbox";
 import { Select } from "../../../components/Select";
@@ -53,13 +54,11 @@ function ShareAudiencePicker({ projectId, onShare, onCancel }: { projectId: stri
   </section>;
 }
 
-function ShareParticipants({ projectId, share, controlState, exploreState, peopleId, showPeople }: {
+function ShareParticipants({ projectId, share, controlState, exploreState }: {
   projectId: string;
   share: LocalTabPublication;
   controlState: LocalTabControlState | null;
   exploreState: LocalExploreState | null;
-  peopleId: string;
-  showPeople: boolean;
 }) {
   const [viewers, setViewers] = useState<BrowserShareViewer[]>([]);
   const [error, setError] = useState<string | null>(null);
@@ -90,9 +89,15 @@ function ShareParticipants({ projectId, share, controlState, exploreState, peopl
     } catch { setError("Could not remove this person. Try again or stop sharing."); }
     finally { setBusy(null); }
   }
-  return <>
-    {share.control ? <LocalTabControlRequests people={viewers} state={controlState} control={share.control} explore={share.explore} exploreState={exploreState} /> : null}
-    <div id={peopleId} hidden={!showPeople}>
+  const requestCount = (controlState?.requests?.length ?? 0) + (exploreState?.requests?.length ?? 0);
+  return <BrowserToolsPopover label="Sharing settings" trigger={
+    <Button size="sm" variant="ghost" data-testid="local-browser-share-people" aria-label={requestCount ? `Sharing settings, ${requestCount} pending ${requestCount === 1 ? "request" : "requests"}` : "Sharing settings"}>
+      <span className="h-2 w-2 rounded-full bg-emerald-500" aria-hidden="true" />
+      Sharing{requestCount ? <span className="rounded-full bg-primary-500 px-1.5 text-white" role="status">{requestCount}</span> : null}
+    </Button>
+  }>
+    <p className="font-medium">{share.audience === "space" ? "Everyone in this space" : "Selected people"} · {controlState?.grant ? "Control shared" : "View only"}</p>
+    {share.control ? <LocalTabControlRequests people={viewers} state={controlState} control={share.control} explore={share.explore} exploreState={exploreState} showTakeBack={false} /> : null}
       <section aria-label="Tab audience" className="space-y-1 text-xs" data-testid="local-browser-share-audience">
       {!viewers.length ? <p>{share.audience === "space" ? "No other viewers connected." : "Loading audience…"}</p> : null}
       <div className="max-h-40 space-y-1 overflow-y-auto">{viewers.map(viewer => <div key={viewer.userId} className="flex items-center justify-between gap-2" data-testid="local-browser-share-person">
@@ -102,15 +107,12 @@ function ShareParticipants({ projectId, share, controlState, exploreState, peopl
       <p className="text-slate-500">Removed people cannot rejoin this share. Their space membership stays unchanged.</p>
       {error ? <p role="alert" className="text-rose-600">{error}</p> : null}
       </section>
-    </div>
-  </>;
+  </BrowserToolsPopover>;
 }
 
 export function LocalBrowserTabPublisher({ projectId, userId, ownerId, canShare }: { projectId: string; userId: string; ownerId: string | null; canShare: boolean }) {
   const [sharing, setSharing] = useState(false);
   const [choosing, setChoosing] = useState(false);
-  const [showPeople, setShowPeople] = useState(false);
-  const peopleId = useId();
   const [activeShare, setActiveShare] = useState<LocalTabPublication | null>(null);
   const [exploreState, setExploreState] = useState<LocalExploreState | null>(null);
   const [controlState,setControlState]=useState<LocalTabControlState|null>(null);
@@ -123,7 +125,7 @@ export function LocalBrowserTabPublisher({ projectId, userId, ownerId, canShare 
 
   function start(audience: BrowserShareAudience) {
     if (!ownerId || publisher.current) return;
-    setError(null); setSharing(true); setChoosing(false); setShowPeople(false); setActiveShare(null); setControlState(null); setExploreState(null);
+    setError(null); setSharing(true); setChoosing(false); setActiveShare(null); setControlState(null); setExploreState(null);
     const abort = new AbortController(); publisher.current = abort;
     void publishLocalBrowserTab(projectId, ownerId, abort.signal, message => {
       if (publisher.current !== abort) return;
@@ -131,14 +133,17 @@ export function LocalBrowserTabPublisher({ projectId, userId, ownerId, canShare 
     }, audience, state => { if (publisher.current===abort) setControlState(state); }, state => { if (publisher.current===abort) setExploreState(state); }).then(share => { if (publisher.current === abort) setActiveShare(share ?? null); }).catch(e => { if (publisher.current === abort) { publisher.current = null; setSharing(false); setError(e instanceof Error ? e.message : "Could not share this tab."); } });
   }
   if (!canShare && !sharing && !error) return null;
-  return <div className="shrink-0 space-y-2 border-b border-slate-200 bg-slate-50/60 px-3 py-1.5 dark:border-slate-800 dark:bg-slate-900/40" data-testid="local-browser-sharing" aria-label="This tab's audience" data-browser-session-safe-zone="true">
-    <div className="flex flex-wrap items-center gap-2 text-xs">
-      {sharing ? <><span role="status">{activeShare ? activeShare.audience === "space" ? `Sharing · Everyone in this space · ${controlState?.grant ? "Control shared" : "View only"}` : `Sharing · Selected people · ${controlState?.grant ? "Control shared" : "View only"}` : "Starting tab sharing…"}</span>{activeShare ? <Button size="sm" variant="ghost" aria-expanded={showPeople} aria-controls={peopleId} data-testid="local-browser-share-people" onPress={() => setShowPeople(current => !current)}>People</Button> : null}<Button data-testid="local-browser-share-stop" size="sm" onPress={() => publisher.current?.abort()}>Stop sharing</Button></> : canShare ?
-        <><span className="text-slate-500">Only you can see this tab</span><Button data-testid="local-browser-share-start" size="sm" variant="ghost" onPress={() => setChoosing(true)}>Share tab…</Button></> : null}
-    </div>
-    {choosing && canShare && !sharing ? <ShareAudiencePicker projectId={projectId} onShare={start} onCancel={() => setChoosing(false)} /> : null}
-    {sharing && activeShare ? <ShareParticipants key={activeShare.id} projectId={projectId} share={activeShare} controlState={controlState} exploreState={exploreState} peopleId={peopleId} showPeople={showPeople} /> : null}
-    {error ? <p role="alert" className="text-xs text-rose-600">{error}</p> : null}
+  return <div className="flex shrink-0 items-center gap-1 text-xs" data-testid="local-browser-sharing" aria-label="This tab's audience" data-browser-session-safe-zone="true">
+    {sharing ? <>
+      {activeShare ? <ShareParticipants key={activeShare.id} projectId={projectId} share={activeShare} controlState={controlState} exploreState={exploreState} /> : <span role="status">Sharing…</span>}
+      {activeShare?.control && controlState?.grant ? <Button size="sm" data-testid="local-tab-take-back" aria-label="Take back control" onPress={() => void activeShare.control!.revoke().catch(() => setError("Could not take back control. Try again or stop sharing."))}>Take back</Button> : null}
+      <Button data-testid="local-browser-share-stop" aria-label="Stop sharing" size="sm" variant="secondary" onPress={() => publisher.current?.abort()}>Stop</Button>
+    </> : canShare ? <BrowserToolsPopover label="Share this tab" isOpen={choosing} onOpenChange={setChoosing} trigger={
+      <Button data-testid="local-browser-share-start" size="sm" variant="ghost" title="Only you can see this tab">Share tab…</Button>
+    }>
+      <ShareAudiencePicker projectId={projectId} onShare={start} onCancel={() => setChoosing(false)} />
+    </BrowserToolsPopover> : null}
+    {error ? <BrowserToolsPopover label="Sharing problem" trigger={<Button size="sm" variant="ghost" aria-label="Sharing problem">!</Button>}><p role="alert" className="text-xs text-rose-600">{error}</p></BrowserToolsPopover> : null}
   </div>;
 }
 

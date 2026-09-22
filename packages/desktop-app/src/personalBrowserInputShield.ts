@@ -156,6 +156,13 @@ export class PersonalBrowserInputShield {
       }
       return;
     }
+    // Attaching even a hidden native view can steal focus from a DOM menu.
+    // Keep keyboard interception active, but defer mounting the shield until
+    // the protected page is visible again.
+    if (!this.visible) {
+      this.shieldView?.setVisible(false);
+      return;
+    }
     const view = this.ensureView();
     if (!view || !this.owner) {
       return;

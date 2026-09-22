@@ -82,10 +82,12 @@ function virtualKeyMessages(
 
 export function RemoteBrowserMobileKeyboard({
   enabled,
+  inlineTrigger = false,
   onMessage,
   onOccupiedHeightChange,
 }: {
   enabled: boolean;
+  inlineTrigger?: boolean;
   onMessage: (message: RemoteBrowserVirtualInputMessage) => void;
   onOccupiedHeightChange?: (height: number) => void;
 }) {
@@ -106,7 +108,7 @@ export function RemoteBrowserMobileKeyboard({
 
   useLayoutEffect(() => {
     const bar = barRef.current;
-    const parent = bar?.parentElement;
+    const parent = inlineTrigger ? bar?.closest("section") : bar?.parentElement;
     if (!enabled || !open || !bar || !parent) {
       onOccupiedHeightChange?.(0);
       return;
@@ -131,7 +133,7 @@ export function RemoteBrowserMobileKeyboard({
       window.removeEventListener("resize", measure);
       onOccupiedHeightChange?.(0);
     };
-  }, [enabled, onOccupiedHeightChange, open]);
+  }, [enabled, inlineTrigger, onOccupiedHeightChange, open]);
 
   useEffect(() => {
     const input = inputRef.current;
@@ -316,10 +318,10 @@ export function RemoteBrowserMobileKeyboard({
   return (
     <div
       ref={barRef}
-      className="pointer-events-none absolute inset-x-2 z-30 hidden justify-end [@media(pointer:coarse)]:flex"
+      className={inlineTrigger && !open ? "hidden shrink-0 [@media(pointer:coarse)]:flex" : "pointer-events-none absolute inset-x-2 z-30 hidden justify-end [@media(pointer:coarse)]:flex"}
       data-browser-session-safe-zone="true"
       data-testid="shared-browser-mobile-keyboard"
-      style={{ bottom: "max(0.75rem, env(safe-area-inset-bottom))" }}
+      style={inlineTrigger && !open ? undefined : { bottom: "max(0.75rem, env(safe-area-inset-bottom))" }}
     >
       {open ? (
         <div className="pointer-events-auto flex w-full max-w-sm items-center gap-1 rounded-2xl border border-slate-300/80 bg-white/95 p-1.5 shadow-xl backdrop-blur dark:border-slate-700 dark:bg-slate-950/95">
@@ -356,13 +358,13 @@ export function RemoteBrowserMobileKeyboard({
       ) : (
         <button
           aria-label="Open remote keyboard"
-          className="pointer-events-auto inline-flex h-11 min-w-11 items-center justify-center gap-1.5 rounded-full border border-slate-300/80 bg-white/95 px-3 text-xs font-semibold text-slate-700 shadow-lg backdrop-blur hover:bg-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary-500/50 dark:border-slate-700 dark:bg-slate-950/95 dark:text-slate-200"
+          className={`pointer-events-auto inline-flex h-11 min-w-11 items-center justify-center gap-1.5 rounded-full text-xs font-semibold text-slate-700 hover:bg-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary-500/50 dark:text-slate-200 ${inlineTrigger ? "w-11" : "border border-slate-300/80 bg-white/95 px-3 shadow-lg backdrop-blur dark:border-slate-700 dark:bg-slate-950/95"}`}
           data-testid="shared-browser-mobile-keyboard-open"
           onClick={handleOpen}
           type="button"
         >
           <InputField aria-hidden="true" className="h-4 w-4" />
-          <span>Keyboard</span>
+          {inlineTrigger ? null : <span>Keyboard</span>}
         </button>
       )}
     </div>

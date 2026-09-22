@@ -18,6 +18,7 @@ export type PersonalBrowserBounds = {
   width: number;
   height: number;
   visible?: boolean;
+  occluded?: boolean;
 };
 
 export type PersonalBrowserEditableDescriptor = {
@@ -206,6 +207,7 @@ export function normalizePersonalBrowserBounds(value: unknown): PersonalBrowserB
     width,
     height,
     ...(typeof candidate.visible === "boolean" ? { visible: candidate.visible } : {}),
+    ...(typeof candidate.occluded === "boolean" ? { occluded: candidate.occluded } : {}),
   };
 }
 

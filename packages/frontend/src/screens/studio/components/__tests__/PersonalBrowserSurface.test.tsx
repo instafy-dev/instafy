@@ -115,6 +115,23 @@ describe("PersonalBrowserSurface", () => {
     delete (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT;
   });
 
+  it("opens tools above the native page without changing its bounds or authority", async () => {
+    const model = createModel();
+    const setBounds = vi.fn(async (bounds: InstafyDesktopPersonalBrowserBounds) => ({...model.status!, ...(bounds.occluded ? {previewDataUrl:"data:image/jpeg;base64,AQID"} : {})}));
+    window.instafyDesktop = { notify: vi.fn(), personalBrowserSetBounds: setBounds };
+    await act(async () => root.render(<PersonalBrowserSurface active model={model} transportSelector={null} />));
+    const original = setBounds.mock.calls.at(-1);
+    await act(async () => document.querySelector<HTMLButtonElement>('[aria-label="Browser settings"]')!.click());
+    expect(setBounds).toHaveBeenLastCalledWith({ x:10, y:20, width:400, height:300, ownerId:"owner-1", visible:true, occluded:true });
+    expect(document.querySelector('[role="dialog"][aria-label="Browser settings"]')).not.toBeNull();
+    expect(document.querySelector('[data-testid="personal-browser-overlay-preview"]')?.getAttribute("src")).toBe("data:image/jpeg;base64,AQID");
+    await act(async () => document.querySelector<HTMLButtonElement>('[aria-label="Browser settings"]')!.click());
+    expect(setBounds.mock.calls.at(-1)).toEqual(original);
+    expect(document.querySelector('[data-testid="personal-browser-overlay-preview"]')).toBeNull();
+    expect(model.close).not.toHaveBeenCalled();
+    expect(model.setAgentControlEnabled).not.toHaveBeenCalled();
+  });
+
   it("reports valid viewport bounds and explicitly hides the native view", async () => {
     const setBounds = vi.fn(
       async (bounds: InstafyDesktopPersonalBrowserBounds) => {
@@ -152,18 +169,20 @@ describe("PersonalBrowserSurface", () => {
       width: 400,
       height: 300,
       visible: true,
+      occluded: false,
       ownerId: "owner-1",
     });
     expect(container.textContent).toContain("This device");
     expect(
-      container.querySelector('[data-testid="browser-transport-personal"]')?.textContent,
+      document.querySelector('[data-testid="browser-transport-personal"]')?.textContent,
     ).toBe("This device");
     expect(container.textContent).toContain("Ready");
-    const chrome = container.querySelector('[data-testid="personal-browser-chrome"]')!;
-    const sharing = container.querySelector('[data-testid="sharing-controls"]')!;
-    const viewport = container.querySelector('[data-testid="personal-browser-viewport"]')!;
+    const chrome = document.querySelector('[data-testid="personal-browser-chrome"]')!;
+    const sharing = document.querySelector('[data-testid="sharing-controls"]')!;
+    const viewport = document.querySelector('[data-testid="personal-browser-viewport"]')!;
     expect(chrome.compareDocumentPosition(sharing) & Node.DOCUMENT_POSITION_FOLLOWING).not.toBe(0);
-    expect(sharing.nextElementSibling).toBe(viewport);
+    expect(chrome.contains(sharing)).toBe(true);
+    expect(chrome.parentElement?.nextElementSibling).toBe(viewport);
     expect(
       container
         .querySelector('[data-testid="personal-browser-agent-status"]')
@@ -197,10 +216,10 @@ describe("PersonalBrowserSurface", () => {
         />,
       );
     });
-    const personal = container.querySelector<HTMLButtonElement>(
+    const personal = document.querySelector<HTMLButtonElement>(
       '[data-testid="browser-transport-personal"]',
     );
-    const shared = container.querySelector<HTMLButtonElement>(
+    const shared = document.querySelector<HTMLButtonElement>(
       '[data-testid="browser-transport-shared"]',
     );
     expect(personal?.disabled).toBe(true);
@@ -221,7 +240,7 @@ describe("PersonalBrowserSurface", () => {
     await act(async () => root.render(
       <PersonalBrowserSurface active compactChrome model={model} transportSelector={null} />,
     ));
-    const toggle = container.querySelector<HTMLButtonElement>('[data-testid="personal-browser-fullscreen-toggle"]');
+    const toggle = document.querySelector<HTMLButtonElement>('[data-testid="personal-browser-fullscreen-toggle"]');
     expect(toggle?.getAttribute("aria-label")).toBe("Expand browser");
     await act(async () => toggle?.click());
     expect(document.querySelector('[data-testid="personal-browser-expanded"]')).not.toBeNull();
@@ -229,7 +248,7 @@ describe("PersonalBrowserSurface", () => {
     expect(model.close).not.toHaveBeenCalled();
     expect(model.setAgentControlEnabled).not.toHaveBeenCalled();
     await act(async () => document.querySelector<HTMLButtonElement>('[data-testid="personal-browser-fullscreen-toggle"]')?.click());
-    expect(container.querySelector('[data-testid="personal-browser-viewport"]')).not.toBeNull();
+    expect(document.querySelector('[data-testid="personal-browser-viewport"]')).not.toBeNull();
     expect(model.close).not.toHaveBeenCalled();
   });
 
@@ -239,16 +258,17 @@ describe("PersonalBrowserSurface", () => {
     await act(async () => root.render(
       <PersonalBrowserSurface active model={model} transportSelector={null} />,
     ));
-    const checkbox = container.querySelector<HTMLInputElement>('[data-testid="personal-browser-routine-approval"]');
+    await act(async () => document.querySelector<HTMLButtonElement>('[aria-label="Browser settings"]')!.click());
+    const checkbox = document.querySelector<HTMLInputElement>('[data-testid="personal-browser-routine-approval"]');
     expect(checkbox?.checked).toBe(false);
     await act(async () => checkbox?.click());
-    await act(async () => container.querySelector<HTMLButtonElement>('[aria-label="Resume agent control"]')?.click());
+    await act(async () => document.querySelector<HTMLButtonElement>('[aria-label="Resume agent control"]')?.click());
     expect(model.setAgentControlEnabled).toHaveBeenCalledWith(true, "routine");
     const legacyModel = createModel();
     await act(async () => root.render(
       <PersonalBrowserSurface active model={legacyModel} transportSelector={null} />,
     ));
-    expect(container.querySelector('[data-testid="personal-browser-routine-approval"]')).toBeNull();
+    expect(document.querySelector('[data-testid="personal-browser-routine-approval"]')).toBeNull();
   });
 
   it("keeps profile ownership accessible when compact controls hide their text", async () => {
@@ -263,10 +283,10 @@ describe("PersonalBrowserSurface", () => {
         />,
       );
     });
-    expect(container.querySelector('[role="group"]')?.getAttribute("aria-label"))
+    expect(document.querySelector('[role="group"]')?.getAttribute("aria-label"))
       .toBe("Browser profile");
-    const personal = container.querySelector<HTMLButtonElement>('[data-testid="browser-transport-personal"]')!;
-    const shared = container.querySelector<HTMLButtonElement>('[data-testid="browser-transport-shared"]')!;
+    const personal = document.querySelector<HTMLButtonElement>('[data-testid="browser-transport-personal"]')!;
+    const shared = document.querySelector<HTMLButtonElement>('[data-testid="browser-transport-shared"]')!;
     expect(personal.textContent).toBe("");
     expect(shared.textContent).toBe("");
     expect(personal.getAttribute("aria-label")).toBe("This device");
@@ -286,7 +306,8 @@ describe("PersonalBrowserSurface", () => {
         <PersonalBrowserSurface active model={model} transportSelector={<span>Personal</span>} />,
       );
     });
-    const clear = container.querySelector<HTMLButtonElement>('[aria-label="Clear personal browser data"]')!;
+    await act(async () => document.querySelector<HTMLButtonElement>('[aria-label="Browser settings"]')!.click());
+    const clear = document.querySelector<HTMLButtonElement>('[aria-label="Clear personal browser data"]')!;
     await act(async () => clear.click());
     expect(confirm).toHaveBeenCalledWith(expect.stringContaining("across all your projects on this device"));
     expect(confirm).toHaveBeenCalledWith(expect.stringContaining("does not clear Shared Browser, your Instafy sign-in, or your other browsers"));
@@ -311,10 +332,10 @@ describe("PersonalBrowserSurface", () => {
       );
     });
 
-    const address = container.querySelector<HTMLInputElement>(
+    const address = document.querySelector<HTMLInputElement>(
       '[data-testid="personal-browser-address"]',
     );
-    const alert = container.querySelector<HTMLElement>('[role="alert"]');
+    const alert = document.querySelector<HTMLElement>('[role="alert"]');
     expect(address?.getAttribute("aria-invalid")).toBe("true");
     expect(address?.getAttribute("aria-describedby")).toBe(
       "personal-browser-address-error",
@@ -335,10 +356,10 @@ describe("PersonalBrowserSurface", () => {
         />,
       );
     });
-    const address = container.querySelector<HTMLInputElement>(
+    const address = document.querySelector<HTMLInputElement>(
       '[data-testid="personal-browser-address"]',
     )!;
-    const go = container.querySelector<HTMLButtonElement>(
+    const go = document.querySelector<HTMLButtonElement>(
       '[data-testid="personal-browser-go"]',
     )!;
     expect(go.classList.contains("pointer-coarse:min-h-11")).toBe(true);
@@ -367,18 +388,18 @@ describe("PersonalBrowserSurface", () => {
       );
     });
 
-    const address = container.querySelector<HTMLInputElement>(
+    const address = document.querySelector<HTMLInputElement>(
       '[data-testid="personal-browser-address"]',
     );
-    const go = container.querySelector<HTMLButtonElement>(
+    const go = document.querySelector<HTMLButtonElement>(
       '[data-testid="personal-browser-go"]',
     );
     expect(address?.disabled).toBe(true);
     expect(address?.placeholder).toBe("Pause agent control to navigate");
     expect(go?.disabled).toBe(true);
-    expect(container.querySelector<HTMLButtonElement>('[aria-label="Back"]')?.disabled).toBe(true);
-    expect(container.querySelector<HTMLButtonElement>('[aria-label="Reload"]')?.disabled).toBe(true);
-    expect(container.querySelector<HTMLButtonElement>('[aria-label="Pause agent control"]')).toBeTruthy();
+    expect(document.querySelector<HTMLButtonElement>('[aria-label="Back"]')?.disabled).toBe(true);
+    expect(document.querySelector<HTMLButtonElement>('[aria-label="Reload"]')?.disabled).toBe(true);
+    expect(document.querySelector<HTMLButtonElement>('[aria-label="Pause agent control"]')).toBeTruthy();
     expect(model.navigate).not.toHaveBeenCalled();
   });
 
@@ -402,13 +423,13 @@ describe("PersonalBrowserSurface", () => {
         />,
       );
     });
-    const browserRetry = Array.from(container.querySelectorAll("button")).find(
+    const browserRetry = Array.from(document.querySelectorAll("button")).find(
       (button) => button.textContent?.includes("Retry Personal Browser"),
     );
     expect(browserRetry).toBeTruthy();
     await act(async () => browserRetry?.click());
     expect(retryOpen).toHaveBeenCalledTimes(1);
-    const errorPause = container.querySelector<HTMLButtonElement>('[aria-label="Pause agent control"]');
+    const errorPause = document.querySelector<HTMLButtonElement>('[aria-label="Pause agent control"]');
     expect(errorPause).not.toBeNull();
     await act(async () => errorPause?.click());
     expect(errorModel.setAgentControlEnabled).toHaveBeenCalledExactlyOnceWith(false, undefined);
@@ -432,17 +453,17 @@ describe("PersonalBrowserSurface", () => {
         />,
       );
     });
-    const agentRetry = container.querySelector<HTMLButtonElement>(
+    const agentRetry = document.querySelector<HTMLButtonElement>(
       '[aria-label="Retry agent control"]',
     );
     expect(agentRetry).toBeTruthy();
-    expect(container.querySelector('[aria-label="Pause agent control"]')).toBeNull();
+    expect(document.querySelector('[aria-label="Pause agent control"]')).toBeNull();
     expect(
-      container.querySelector('[data-testid="personal-browser-agent-status"]')
+      document.querySelector('[data-testid="personal-browser-agent-status"]')
         ?.textContent,
     ).toContain("Unavailable");
     expect(
-      container.querySelector('[data-testid="personal-browser-feedback"]')
+      document.querySelector('[data-testid="personal-browser-feedback"]')
         ?.textContent,
     ).toContain("Desktop agent stopped");
     await act(async () => agentRetry?.click());
@@ -463,12 +484,13 @@ describe("PersonalBrowserSurface", () => {
       );
     });
     expect(container.textContent).toContain("Clearing Personal Browser data…");
+    await act(async () => document.querySelector<HTMLButtonElement>('[aria-label="Browser settings"]')!.click());
     expect(
-      container.querySelector<HTMLButtonElement>(
+      document.querySelector<HTMLButtonElement>(
         '[aria-label="Clearing personal browser data"]',
       )?.disabled,
     ).toBe(true);
-    expect(container.querySelector('[aria-label="Back to chat"]')).toBeNull();
+    expect(document.querySelector('[aria-label="Back to chat"]')).toBeNull();
 
     model.clearDataState = "succeeded";
     await act(async () => {
@@ -481,11 +503,11 @@ describe("PersonalBrowserSurface", () => {
       );
     });
     expect(
-      Array.from(container.querySelectorAll('[role="status"]')).some((element) =>
+      Array.from(document.querySelectorAll('[role="status"]')).some((element) =>
         element.textContent?.includes("Personal Browser data cleared."),
       ),
     ).toBe(true);
-    const dismiss = container.querySelector<HTMLButtonElement>(
+    const dismiss = document.querySelector<HTMLButtonElement>(
       '[aria-label="Dismiss browser message"]',
     );
     expect(dismiss).toBeTruthy();
@@ -538,10 +560,10 @@ describe("PersonalBrowserSurface", () => {
     const model = createModel();
     model.status = { ...model.status!, agentControlEnabled: false, humanControlReady: false, tabControlActive: true };
     await act(async () => root.render(<PersonalBrowserSurface active model={model} transportSelector={null} />));
-    const status = container.querySelector('[data-testid="personal-browser-agent-status"]');
+    const status = document.querySelector('[data-testid="personal-browser-agent-status"]');
     expect(status?.getAttribute("title")).toContain("participant controls this tab");
     expect(status?.textContent).toBe("Paused");
-    expect(container.querySelector<HTMLButtonElement>('[aria-label="Resume agent control"]')?.disabled).toBe(true);
+    expect(document.querySelector<HTMLButtonElement>('[aria-label="Resume agent control"]')?.disabled).toBe(true);
   });
 
   it("makes Done the only resume route after user-initiated takeover", async () => {
@@ -553,15 +575,17 @@ describe("PersonalBrowserSurface", () => {
       <PersonalBrowserSurface active model={model} transportSelector={null} humanInputIdentityKey="conversation-a" onContinueAfterHumanInput={onContinue} />,
     ));
     await render();
-    await act(async () => container.querySelector<HTMLButtonElement>('[data-testid="browser-human-input-takeover"]')?.click());
+    await act(async () => document.querySelector<HTMLButtonElement>('[data-testid="browser-human-input-takeover"]')?.click());
     expect(model.setAgentControlEnabled).toHaveBeenCalledExactlyOnceWith(false);
     model.status = { ...model.status!, agentControlEnabled: false, humanControlReady: true };
     await render();
-    expect(container.querySelector('[aria-label="Resume agent control"]')).toBeNull();
-    expect(container.querySelector('[aria-label="Retry agent control"]')).toBeNull();
-    expect(container.textContent).toContain("use Done, continue to resume and send the next turn");
+    expect(document.querySelector('[aria-label="Resume agent control"]')).toBeNull();
+    expect(document.querySelector('[aria-label="Retry agent control"]')).toBeNull();
+    await act(async () => document.querySelector<HTMLButtonElement>('[aria-label="Browser settings"]')!.click());
+    expect(document.body.textContent).toContain("use Done, continue to resume and send the next turn");
+    await act(async () => document.querySelector<HTMLButtonElement>('[aria-label="Browser settings"]')!.click());
     expect(container.textContent).not.toContain("Choose before Resume");
-    await act(async () => container.querySelector<HTMLButtonElement>('[data-testid="browser-human-input-continue"]')?.click());
+    await act(async () => document.querySelector<HTMLButtonElement>('[data-testid="browser-human-input-continue"]')?.click());
     expect(onContinue).toHaveBeenCalledExactlyOnceWith(expect.stringContaining("Take a fresh snapshot"), "ask");
     expect(model.setAgentControlEnabled).toHaveBeenCalledTimes(1);
   });
@@ -578,19 +602,19 @@ describe("PersonalBrowserSurface", () => {
       <PersonalBrowserSurface active model={model} transportSelector={null} humanInputIdentityKey="conversation-a" onContinueAfterHumanInput={onContinue} />,
     ));
     await render();
-    expect(container.querySelector('[aria-label="Resume agent control"]')).toBeNull();
-    expect(container.querySelector('[aria-label="Retry agent control"]')).toBeNull();
-    await act(async () => container.querySelector<HTMLButtonElement>('[data-testid="browser-human-input-continue"]')?.click());
+    expect(document.querySelector('[aria-label="Resume agent control"]')).toBeNull();
+    expect(document.querySelector('[aria-label="Retry agent control"]')).toBeNull();
+    await act(async () => document.querySelector<HTMLButtonElement>('[data-testid="browser-human-input-continue"]')?.click());
     expect(container.textContent).toContain("browser task was not sent");
-    expect(container.querySelector('[aria-label="Resume agent control"]')).toBeNull();
-    expect(container.querySelector('[aria-label="Retry agent control"]')).toBeNull();
+    expect(document.querySelector('[aria-label="Resume agent control"]')).toBeNull();
+    expect(document.querySelector('[aria-label="Retry agent control"]')).toBeNull();
     expect(model.setAgentControlEnabled).not.toHaveBeenCalled();
     expect(model.retryAgentControl).not.toHaveBeenCalled();
-    await act(async () => container.querySelector<HTMLButtonElement>('[data-testid="browser-human-input-continue"]')?.click());
+    await act(async () => document.querySelector<HTMLButtonElement>('[data-testid="browser-human-input-continue"]')?.click());
     model.status = { ...model.status!, agentControlEnabled: true, humanControlReady: false };
     await render();
-    expect(container.querySelector('[aria-label="Retry agent control"]')).toBeNull();
-    const pause = container.querySelector<HTMLButtonElement>('[aria-label="Pause agent control"]');
+    expect(document.querySelector('[aria-label="Retry agent control"]')).toBeNull();
+    const pause = document.querySelector<HTMLButtonElement>('[aria-label="Pause agent control"]');
     expect(pause).not.toBeNull();
     await act(async () => pause?.click());
     expect(model.setAgentControlEnabled).toHaveBeenCalledExactlyOnceWith(false, undefined);

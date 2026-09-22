@@ -353,6 +353,7 @@ type InstafyDesktopPersonalBrowserBounds = {
   width: number;
   height: number;
   visible?: boolean;
+  occluded?: boolean;
   ownerId?: string;
 };
 
@@ -429,7 +430,7 @@ interface Window {
     }) => Promise<InstafyDesktopPersonalBrowserStatus>;
     personalBrowserSetBounds?: (
       bounds: InstafyDesktopPersonalBrowserBounds & { ownerId: string },
-    ) => Promise<InstafyDesktopPersonalBrowserStatus>;
+    ) => Promise<InstafyDesktopPersonalBrowserStatus & { previewDataUrl?: string }>;
     personalBrowserShow?: (options: {
       visible: boolean;
       ownerId: string;

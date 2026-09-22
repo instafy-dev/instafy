@@ -16,14 +16,24 @@ let ended: ReturnType<typeof vi.fn<(id: string) => void>>;
 const share = { id: "share", projectId: "project", ownerUserId: "owner", audience: "space", mode: "view" } as const;
 const image = () => document.querySelector<HTMLImageElement>('[data-testid="local-browser-share-image"]')!;
 const pan = () => document.querySelector<HTMLDivElement>('[data-testid="local-browser-share-pan"]')!;
-const click = (label: string) => act(async () => document.querySelector<HTMLButtonElement>(`[aria-label="${label}"]`)!.click());
+const press = (label: string) => act(async () => document.querySelector<HTMLButtonElement>(`button[aria-label="${label}"]`)!.click());
+async function click(label: string) {
+  if (["Expand shared tab", "Minimize shared tab"].includes(label)) await press("Shared tab options");
+  await press(label);
+}
+async function exploreAction() {
+  await press("Choose shared tab view");
+  await act(async () => document.querySelector<HTMLButtonElement>('[data-testid="local-tab-explore-action"]')!.click());
+}
 async function frame() {
   await act(async () => socket.dispatchEvent(new MessageEvent("message", { data: new Uint8Array([255,216,255,217]).buffer })));
   Object.defineProperties(image(), { naturalWidth: { value: 1600, configurable: true }, naturalHeight: { value: 900, configurable: true } });
   await act(async () => image().dispatchEvent(new Event("load")));
 }
 async function zoom(value: string) {
+  await press("Shared tab options");
   await chooseSelectValue(document.querySelector('[aria-label="Shared tab zoom"]'), value);
+  await press("Shared tab options");
 }
 beforeEach(async () => {
   (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
@@ -169,13 +179,13 @@ it("reserves the mobile input bar without losing typing focus or the release act
   const input = document.querySelector('[aria-label="Type into the focused page field"]');
   const panel = document.querySelector<HTMLElement>('[data-testid="local-browser-share-viewer"]')!;
   expect(panel.style.paddingBottom).toBe("65px");
-  expect(document.querySelector('[aria-label="Shared tab zoom"]')?.closest(".hidden")).not.toBeNull();
-  expect(document.querySelector('[data-testid="local-tab-control-action"]')?.textContent).toBe("Release control");
+  expect(document.querySelector('[aria-label="Shared tab zoom"]')).toBeNull();
+  expect(document.querySelector('[data-testid="local-tab-control-action"]')?.getAttribute("aria-label")).toBe("Release control");
   await frame();
   expect(document.activeElement).toBe(input);
   await click("Close remote keyboard");
   expect(panel.style.paddingBottom).toBe("0px");
-  expect(document.querySelector('[aria-label="Shared tab zoom"]')?.closest(".hidden")).toBeNull();
+  expect(document.querySelector('button[aria-label="Shared tab options"]')).not.toBeNull();
 });
 
 it("requests control and forwards keys only for this connection's grant, then becomes a spectator immediately",async()=>{
@@ -184,6 +194,7 @@ it("requests control and forwards keys only for this connection's grant, then be
   const update=async()=>act(async()=>socket.dispatchEvent(new MessageEvent("message",{data:JSON.stringify(state)})));
   const type=async()=>act(async()=>image().dispatchEvent(new KeyboardEvent("keydown",{key:"a",bubbles:true,cancelable:true})));
   await update();await type();expect(socket.send).not.toHaveBeenCalled();
+  await press("Shared tab options");
   await act(async()=>document.querySelector<HTMLButtonElement>('[data-testid="local-tab-control-action"]')!.click());expect(socket.send).toHaveBeenLastCalledWith('{"type":"requestControl"}');
   state.grant={id:"grant",connectionId:"other-window",userId:"same-user"};await update();await type();expect(socket.send).toHaveBeenCalledTimes(1);
   state.grant.connectionId="self";await update();await type();
@@ -221,13 +232,29 @@ it("Explore requests owner approval, scopes frames and input, and returns to Fol
   const viewId="11111111-1111-4111-8111-111111111111";
   const state={type:"exploreState",available:true,requested:false,view:null as null|{viewId:string;connectionId:string;userId:string;viewport:{width:number;height:number;dpr:number}}};
   const update=async()=>act(async()=>socket.dispatchEvent(new MessageEvent("message",{data:JSON.stringify(state)})));
-  await update();await act(async()=>document.querySelector<HTMLButtonElement>('[data-testid="local-tab-explore-action"]')!.click());
+  await update();await exploreAction();
   expect(JSON.parse(socket.send.mock.calls.at(-1)![0])).toMatchObject({type:"exploreRequest",viewport:{width:390,height:700}});
   state.view={viewId,connectionId:"own",userId:"viewer",viewport:{width:390,height:700,dpr:1}};await update();expect(image()).toBeNull();
   await act(async()=>socket.dispatchEvent(new MessageEvent("message",{data:new Uint8Array([255,216,255,217]).buffer})));expect(image()).toBeNull();
   await act(async()=>socket.dispatchEvent(new MessageEvent("message",{data:localExploreFrame(viewId,new Uint8Array([255,216,255,217])).buffer})));
   await act(async()=>image().dispatchEvent(new KeyboardEvent("keydown",{key:"a",bubbles:true,cancelable:true})));
   expect(JSON.parse(socket.send.mock.calls.at(-1)![0])).toEqual({type:"exploreInput",viewId,input:{type:"text",text:"a"}});
-  await act(async()=>document.querySelector<HTMLButtonElement>('[data-testid="local-tab-explore-action"]')!.click());expect(socket.send).toHaveBeenLastCalledWith('{"type":"exploreReturn"}');
+  await exploreAction();expect(socket.send).toHaveBeenLastCalledWith('{"type":"exploreReturn"}');
   state.view=null;await update();expect(image()).toBeNull();await frame();expect(image()).not.toBeNull();expect(connect).toHaveBeenCalledTimes(1);
+});
+
+it("opens view choices without requesting authority or reconnecting, and restores focus on Escape", async () => {
+  await frame();
+  const trigger = document.querySelector<HTMLButtonElement>('[data-testid="local-tab-view-mode"]')!;
+  await press("Choose shared tab view");
+  expect(document.querySelector('[role="dialog"][aria-label="Shared tab view"]')?.textContent).toContain("owner’s signed-in accounts");
+  expect(socket.send).not.toHaveBeenCalled();
+  await act(async () => {
+    const dialog = document.querySelector<HTMLElement>('[role="dialog"][aria-label="Shared tab view"]')!;
+    dialog.focus();
+    dialog.dispatchEvent(new KeyboardEvent("keydown", {key:"Escape",bubbles:true,cancelable:true}));
+  });
+  expect(document.querySelector('[role="dialog"][aria-label="Shared tab view"]')).toBeNull();
+  expect(connect).toHaveBeenCalledTimes(1);
+  expect(trigger.getAttribute("aria-expanded")).toBe("false");
 });

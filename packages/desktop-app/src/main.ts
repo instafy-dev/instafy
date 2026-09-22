@@ -1966,7 +1966,11 @@ app.whenReady().then(() => {
     if (!personalBrowserHost.isOwnedBy(ownerId)) {
       return personalBrowserHost.getStatus();
     }
-    return personalBrowserHost.setBounds(payload);
+    const wasOccluded = personalBrowserHost.occluded;
+    const status = personalBrowserHost.setBounds(payload);
+    const previewDataUrl = !wasOccluded && personalBrowserHost.occluded
+      ? await personalBrowserHost.captureOverlayPreview(ownerId) : undefined;
+    return { ...status, ...(previewDataUrl ? { previewDataUrl } : {}) };
   });
 
   ipcMain.handle("instafy:personalBrowserRelease", async (event, payload) => {

@@ -212,6 +212,8 @@ export class PersonalBrowserHost {
   private humanInputRequest: PersonalBrowserHumanInputRequest | null = null;
   private currentState: PersonalBrowserState = "closed";
   private currentVisible = false;
+  private currentOccluded = false;
+  private previewPending = false;
   private currentOwnerId: string | null = null;
   private currentProjectId: string | null = null;
   private currentPartition: string | null = null;
@@ -388,6 +390,7 @@ export class PersonalBrowserHost {
       this.controlServer.clearBinding();
       this.currentOwnerId = null;
       this.currentVisible = false;
+      this.currentOccluded = false;
       this.setAgentControlState(false);
       this.clearHumanNavigationAllowance();
       this.currentRuntimeId = null;
@@ -449,6 +452,7 @@ export class PersonalBrowserHost {
   setBounds(value: unknown): PersonalBrowserStatus {
     const bounds = normalizePersonalBrowserBounds(value);
     this.currentBounds = bounds;
+    this.currentOccluded = bounds.occluded === true;
     if (typeof bounds.visible === "boolean") {
       this.currentVisible = bounds.visible;
     }
@@ -458,6 +462,25 @@ export class PersonalBrowserHost {
     }
     this.emitStatus();
     return this.getStatus();
+  }
+
+  get occluded() { return this.currentOccluded; }
+
+  async captureOverlayPreview(ownerId: string): Promise<string | undefined> {
+    const contents = this.getWebContents();
+    if (!contents || !this.isOwnedBy(ownerId) || !this.currentOccluded || this.previewPending) return;
+    this.previewPending = true;
+    try {
+      let image = await contents.capturePage(undefined, { stayHidden: true });
+      if (!this.isOwnedBy(ownerId) || this.getWebContents() !== contents || !this.currentOccluded) return;
+      const { width, height } = image.getSize();
+      if (!width || !height) return;
+      const scale = Math.min(1, 1600 / width, 1200 / height);
+      if (scale < 1) image = image.resize({width:Math.round(width*scale),height:Math.round(height*scale),quality:"good"});
+      const jpeg = image.toJPEG(80);
+      if (jpeg.length <= 1024 * 1024) return `data:image/jpeg;base64,${jpeg.toString("base64")}`;
+    } catch { /* A preview is optional; the menu and live share remain usable. */ }
+    finally { this.previewPending = false; }
   }
 
   show(visible: boolean): PersonalBrowserStatus {
@@ -635,6 +658,7 @@ export class PersonalBrowserHost {
     this.controlServer.clearBinding();
     this.currentRuntimeId = null;
     this.currentVisible = false;
+    this.currentOccluded = false;
     this.setAgentControlState(false);
     this.clearHumanNavigationAllowance();
     this.approvedOrigins.clear();
@@ -684,6 +708,7 @@ export class PersonalBrowserHost {
     this.currentOwnerId = null;
     this.currentRuntimeId = null;
     this.currentVisible = false;
+    this.currentOccluded = false;
     this.setAgentControlState(false);
     this.stopInFlightNavigation();
     this.clearHumanNavigationAllowance();
@@ -746,6 +771,7 @@ export class PersonalBrowserHost {
     this.currentRuntimeId = null;
     this.currentState = "closed";
     this.currentVisible = false;
+    this.currentOccluded = false;
     this.currentError = null;
     this.setAgentControlState(false);
     this.clearHumanNavigationAllowance();
@@ -915,9 +941,9 @@ export class PersonalBrowserHost {
   }
 
   private applyVisibility() {
-    this.view?.setVisible(this.currentVisible);
+    this.view?.setVisible(this.currentVisible && !this.currentOccluded);
     this.syncInputShield();
-    if (!this.currentVisible && this.ownerWindow && !this.ownerWindow.isDestroyed()) {
+    if ((!this.currentVisible || this.currentOccluded) && this.ownerWindow && !this.ownerWindow.isDestroyed()) {
       this.ownerWindow.webContents.focus();
     }
   }
@@ -951,9 +977,13 @@ export class PersonalBrowserHost {
   private syncInputShield() {
     this.inputShield.sync(
       this.agentControlEnabled || this.activeControlOperations > 0 || this.tabCapture.controlActive,
-      this.currentVisible,
+      this.currentVisible && !this.currentOccluded,
       this.fitBoundsToOwner(this.currentBounds),
     );
+    // Adding the native shield for a new grant must not steal menu keyboard focus.
+    if (this.currentOccluded && this.ownerWindow && !this.ownerWindow.isDestroyed()) {
+      this.ownerWindow.webContents.focus();
+    }
   }
 
   private emergencyPauseAgentControl() {
