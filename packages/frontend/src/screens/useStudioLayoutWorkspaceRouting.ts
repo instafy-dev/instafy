@@ -700,7 +700,9 @@ export function useStudioLayoutWorkspaceRouting({
   ]);
 
   useEffect(() => {
-    if (!projectReadyForWorkspace) {
+    // An explicit tab activation can commit history before Router publishes it.
+    // Never recreate a closed preview from that preceding rendered route.
+    if (!projectReadyForWorkspace || window.location.search !== locationSearch) {
       return;
     }
     const pendingSearchResolution = resolvePendingUrlSearchSync({

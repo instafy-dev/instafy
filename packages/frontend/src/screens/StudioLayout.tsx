@@ -1,3 +1,5 @@
+import { StudioDraftsProvider, StudioDraftPanel } from "../workspace/StudioDrafts";
+import { StudioDraftNavigationGuard } from "../navigation/StudioDraftNavigationGuard";
 import { buildHomeFeed } from "./studio/homeFeed";
 import { getHomeNotificationTarget } from "./studio/homeNotifications";
 import { processNotificationClickDestination } from "../notifications/notificationClickDestination";
@@ -172,14 +174,21 @@ type GitReviewOpenDetail = {
 };
 
 export function StudioLayout() {
+  const { user } = useAuth();
+  const location = useLocation();
+  const restorePanelDestination = useStudioNavigation();
   return (
-    <StudioStartupGate>
-      <WorkspaceTabsProvider>
-        <SidePaneProvider>
-          <StudioLayoutInner />
-        </SidePaneProvider>
-      </WorkspaceTabsProvider>
-    </StudioStartupGate>
+    <StudioDraftsProvider key={user?.id ?? "signed-out"}>
+      <StudioDraftNavigationGuard>
+        <StudioStartupGate>
+          <WorkspaceTabsProvider locationSearch={location.search} onRestorePanelDestination={restorePanelDestination}>
+            <SidePaneProvider>
+              <StudioLayoutInner />
+            </SidePaneProvider>
+          </WorkspaceTabsProvider>
+        </StudioStartupGate>
+      </StudioDraftNavigationGuard>
+    </StudioDraftsProvider>
   );
 }
 
@@ -1897,6 +1906,7 @@ function StudioLayoutInner() {
       );
     }
   }
+  workspaceContent = <StudioDraftPanel value={activeWorkspaceTabPanel ?? "chat"}>{workspaceContent}</StudioDraftPanel>;
   const mobileOverviewDock = showMobileBottomDock && mobileOverviewSection ? (
     <MobileBottomDock
       activeSlot={mobileOverviewSection}

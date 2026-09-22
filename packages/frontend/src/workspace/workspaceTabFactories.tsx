@@ -90,6 +90,7 @@ export interface WorkspaceGitReviewTabState {
 
 export interface WorkspacePanelTabState {
   kind: "panel";
+  preview?: boolean;
   id: string;
   panel: StudioPanel;
   title: string;
@@ -102,6 +103,7 @@ export interface WorkspacePanelTabState {
 
 export interface WorkspaceFileTabState {
   kind: "file";
+  preview?: boolean;
   id: string;
   panel: "code";
   title: string;

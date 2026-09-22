@@ -38,6 +38,7 @@ export type StudioDestination =
       panel: StudioPanel;
       settingsTab?: SettingsTab;
       settingsCategory?: string | null;
+      settingsItem?: string | null;
       settingsOrgId?: string | null;
       teamId?: string | null;
       workspaceTab?: "history" | "files" | "sourceControl" | "workspaces" | null;
@@ -78,6 +79,7 @@ export function buildStudioDestinationSearch(search: string, destination: Studio
     if (destination.panel === "settings") {
       params.set("settingsTab", destination.settingsTab ?? "org");
       if (destination.settingsCategory) params.set("settingsCategory", destination.settingsCategory);
+      if (destination.settingsItem) params.set("settingsItem", destination.settingsItem);
       if ((destination.settingsTab ?? "org") === "org" && destination.settingsOrgId) {
         params.set("settingsOrgId", destination.settingsOrgId);
       }

@@ -332,6 +332,16 @@ describe("StudioTopBar mobile navigation integration", () => {
     }
   });
 
+  it.each(["panel", "file"])("offers Keep open for a %s preview in the mobile tab picker", async kind => {
+    const keepTabOpen = vi.fn();
+    mocks.tabs.mockReturnValue({ ...mocks.tabs(), keepTabOpen, tabs: [{ id: "tab-a", kind, panel: "settings", fileId: "file-a", title: "Preview", preview: true }] });
+    await render();
+    await click("mobile-header-more"); await click("topbar-tab-overflow");
+    await click("topbar-tab-keep-open-tab-a");
+    expect(keepTabOpen).toHaveBeenCalledExactlyOnceWith("tab-a");
+    expect(mocks.tabs().focusTab).not.toHaveBeenCalled();
+  });
+
   it("preserves desktop tabs and actions even when mobile props are supplied", async () => {
     mocks.posture.mockReturnValue({ isLargeScreen: true, showTopbarHomeButton: false, showTouchBottomDock: false });
     await render();

@@ -1,3 +1,4 @@
+import { useStudioNavigationProtection } from "../../../workspace/StudioDrafts";
 import { useCallback, useEffect, useId, useMemo, useRef, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Clock, EditPencil, MoreHoriz, Pause, Play, Trash } from "iconoir-react";
@@ -239,6 +240,7 @@ function ProjectAutomationsPanel({ activeProjectId, userId }: { activeProjectId:
   const [editorOpen, setEditorOpen] = useState(false);
   const [draft, setDraft] = useState<AutomationDraft>(() => emptyDraft());
   const [saving, setSaving] = useState(false);
+  useStudioNavigationProtection(editorOpen, "automation editor", saving ? undefined : () => setEditorOpen(false));
 
   const { refetch } = automationsQuery;
   const refresh = useCallback(async () => {

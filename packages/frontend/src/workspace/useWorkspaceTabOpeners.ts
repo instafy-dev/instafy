@@ -21,6 +21,7 @@ import {
 } from "./workspaceTabFactories";
 import type { PersistedWorkspaceGitReviewState } from "./workspaceTabPersistence";
 import { prepareConversationTabOpen } from "./workspaceConversationPreview";
+import { insertPreviewTab } from "./workspacePreviewTabs";
 
 interface UseWorkspaceTabOpenersArgs {
   activeConversationId: string | null;
@@ -243,13 +244,17 @@ export function useWorkspaceTabOpeners({
   );
 
   const openFileTab = useCallback(
-    (file: Pick<CodeFile, "id" | "path" | "label">) => {
+    (file: Pick<CodeFile, "id" | "path" | "label">, options?: { preview?: boolean }) => {
       const existing = tabsRef.current.find(
-        (tab) => tab.kind === "file" && tab.fileId === file.id,
+        (tab): tab is WorkspaceFileTabState => tab.kind === "file" && tab.fileId === file.id,
       );
-      const target = existing ?? createTabForFile(file);
+      const target = existing
+        ? (options?.preview === false && existing.preview ? { ...existing, preview: false } : existing)
+        : { ...createTabForFile(file), preview: options?.preview !== false };
       if (!existing) {
-        commitTabs([...tabsRef.current, target]);
+        commitTabs(insertPreviewTab(tabsRef.current, target));
+      } else if (target !== existing) {
+        commitTabs(tabsRef.current.map((tab) => tab.id === target.id ? target : tab));
       }
       setActiveTabInternal(target);
     },

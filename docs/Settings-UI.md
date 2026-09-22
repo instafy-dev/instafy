@@ -12,6 +12,32 @@ including when Studio has another panel open.
 - Escape and native Back return one level, then dismiss the picker. Keyboard focus returns
   to its trigger on dismissal and follows the selected category when the layout changes.
 
+Utility pages such as Settings, Credits, AI and Machines share one temporary workspace tab.
+Browsing a different utility replaces that preview; settings categories reuse the same Settings
+tab. Chat and file previews each have their own slot. Italic titles identify previews. Double-click,
+reorder, or choose **Keep open** from a tab's context menu or the mobile tab picker to retain it.
+The keyboard context menu (Shift+F10 or the menu key) exposes the same action. Existing kept
+tabs are never downgraded. Focusing, scrolling or visiting a tab again does not keep it open.
+
+Editing a file or an explicit-save profile/identity form keeps its tab, including after saving.
+Profile, team profile, space name and space appearance drafts survive panel/category changes
+in account-scoped session memory. Cancel restores the saved values. Closing a tab does not
+erase a retained identity draft; reopening its editor restores it. Reloading, signing out or
+leaving Studio ends that memory lifetime, so save changes before doing so. Refresh and navigation
+outside Studio warn while these drafts exist. No form drafts or credential values are written
+to browser storage.
+
+Complex agent, AI connection, automation, secret and skill-import dialogs keep their mounted
+owner while open: navigation offers **Keep editing** or **Discard and leave**. Pending saves and
+connection operations must finish before leaving. Immediate preference toggles do not create
+unfinished drafts. New explicit-save editors should use `useStudioDraftState` for retained
+non-secret fields or `useStudioNavigationProtection` for a guarded flow.
+
+A kept utility tab remembers its last settings section within the current space. Back and
+Forward still follow Router history and restore each visit's scroll position; the tab strip does
+not introduce another history stack. Utility/file previews and retained form drafts are session
+state, while chat-tab restoration continues to use its existing persistence.
+
 The desktop working-context header owns one continuous divider across the navigation,
 open drawers and workspace. Keep it in both themes and across panel and search changes.
 Active tabs meet that edge without adding a second horizontal line underneath it; tab

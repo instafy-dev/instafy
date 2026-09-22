@@ -1,3 +1,4 @@
+import { useStudioNavigationProtection } from "../../../workspace/StudioDrafts";
 import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Eye, EyeClosed, Plus } from "iconoir-react";
@@ -369,6 +370,7 @@ function ScopedProjectSecretsCard({ projectId, userId }: { projectId: string | n
   const [valueVisible, setValueVisible] = useState(false);
   const [selectedAgentHandles, setSelectedAgentHandles] = useState<Set<string>>(() => new Set());
   const [saving, setSaving] = useState(false);
+  const [returnToChatPending, setReturnToChatPending] = useState(false);
 
   const pendingPrefillRef = useRef<PendingProjectSecretPrefill | null>(null);
   const activeCreatePrefillRef = useRef<PendingProjectSecretPrefill | null>(null);
@@ -476,6 +478,15 @@ function ScopedProjectSecretsCard({ projectId, userId }: { projectId: string | n
     setAutoFocusValue(false);
   }, [saving]);
 
+  useStudioNavigationProtection(modalOpen, "secret editor", saving ? undefined : closeModal);
+  useEffect(() => {
+    if (!returnToChatPending || saving || modalOpen) return;
+    // Finish saving and release the editor guard before returning to its chat.
+    setReturnToChatPending(false);
+    requestUrlPush();
+    openPanelTab("chat", { activate: true });
+  }, [modalOpen, openPanelTab, requestUrlPush, returnToChatPending, saving]);
+
   const toggleAgentHandle = useCallback((agentHandle: string) => {
     const normalized = normalizeAgentHandle(agentHandle);
     setSelectedAgentHandles((current) => {
@@ -534,8 +545,7 @@ function ScopedProjectSecretsCard({ projectId, userId }: { projectId: string | n
         }
         showStatus("Secret created.", "success", 2500);
         if (createPrefill?.returnPanelTab === "chat") {
-          requestUrlPush();
-          openPanelTab("chat", { activate: true });
+          setReturnToChatPending(true);
         }
       } else {
         const secretId = editingSecretId;
@@ -571,11 +581,9 @@ function ScopedProjectSecretsCard({ projectId, userId }: { projectId: string | n
     editingSecretId,
     modalMode,
     nameDraft,
-    openPanelTab,
     projectId,
     queryClient,
     queryKey,
-    requestUrlPush,
     selectedAgentHandles,
     showStatus,
     valueDraft,

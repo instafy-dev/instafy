@@ -1,3 +1,4 @@
+import { useStudioNavigationProtection } from "../../../workspace/StudioDrafts";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Plus, Refresh } from "iconoir-react";
 import { Button, IconButton } from "../../../components/Button";
@@ -761,6 +762,8 @@ export function SkillsPanel() {
     // Only the toast's "Open chat" action leaves Settings; the flow never navigates.
     onOpenChat: () => openPanelTab("chat"),
   });
+  useStudioNavigationProtection(addSkillModalOpen, "skill import", importPending ? undefined : () => setAddSkillModalOpen(false));
+
   const {
     discoveryQuery,
     setDiscoveryQuery,
