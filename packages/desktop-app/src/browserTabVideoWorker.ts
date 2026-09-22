@@ -139,19 +139,46 @@ export function installBrowserTabVideoWorker() {
       if (peers.get(options.id) !== peer) throw new Error("Video ended.");
       peer.sender = peer.pc.addTrack(source.stream.getVideoTracks()[0], source.stream);
       const codecs = RTCRtpSender.getCapabilities("video")?.codecs;
-      // H.264 is hardware accelerated on several supported devices. Negotiate
-      // other browser-supported codecs when it is unavailable; measure actual
-      // acceleration through getStats rather than assuming it from the name.
-      if (codecs)
-        peer.pc
-          .getTransceivers()[0]
-          .setCodecPreferences(
-            [...codecs].sort(
-              (a, b) =>
-                Number(b.mimeType.toLowerCase() === "video/h264") -
-                Number(a.mimeType.toLowerCase() === "video/h264"),
-            ),
-          );
+      if (codecs) {
+        const h264 = (codec: RTCRtpCodec) => codec.mimeType.toLowerCase() === "video/h264";
+        const settings = source.stream.getVideoTracks()[0].getSettings();
+        let timeout: ReturnType<typeof setTimeout> | undefined;
+        // Prefer codecs the browser can encode efficiently at this size/rate.
+        // H.264 breaks ties; every advertised fallback remains negotiable.
+        // Unsupported or stalled discovery keeps the existing H.264 ordering.
+        const efficient = await Promise.race([
+          Promise.all(codecs.map(async (codec) => {
+            if (/^video\/(rtx|red|ulpfec|flexfec-03)$/i.test(codec.mimeType) ||
+                !navigator.mediaCapabilities?.encodingInfo) return false;
+            try {
+              const info = await navigator.mediaCapabilities.encodingInfo({
+                type: "webrtc",
+                video: {
+                  contentType: codec.mimeType + (codec.sdpFmtpLine ? ";" + codec.sdpFmtpLine : ""),
+                  width: settings.width || source.width,
+                  height: settings.height || source.height,
+                  bitrate: peer.maxFramerate === 60 ? 8_000_000 : 4_000_000,
+                  framerate: peer.maxFramerate,
+                },
+              });
+              return info.supported && info.powerEfficient;
+            } catch {
+              return false;
+            }
+          })),
+          new Promise<boolean[]>((resolve) => {
+            timeout = setTimeout(() => resolve([]), 1000);
+          }),
+        ]);
+        clearTimeout(timeout);
+        if (peers.get(options.id) !== peer) throw new Error("Video ended.");
+        const ranked = codecs.map((codec, index) => ({
+          codec, rank: Number(Boolean(efficient[index])) * 2 + Number(h264(codec)),
+        }));
+        peer.pc.getTransceivers()[0].setCodecPreferences(
+          ranked.sort((a, b) => b.rank - a.rank).map(({ codec }) => codec),
+        );
+      }
       await peer.pc.setLocalDescription(await peer.pc.createOffer());
       await change(peer, () => parameters(peer, source));
       await gather(peer.pc);

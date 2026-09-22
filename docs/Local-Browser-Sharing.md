@@ -137,8 +137,13 @@ from its available area and DPR, capped by the actual capture and the pixel limi
 Changing receiver resolution does not change the Follow page's layout. Explore
 continues to resize its independent page. Expansion/rotation reacquires capture
 without replacing the peer; it releases the old capture first so Chromium cannot
-retain the smaller source's pixel limit. H.264 is preferred with supported-codec
-fallback. Hardware encoding depends on the platform and dimensions; inspect
+retain the smaller source's pixel limit. At negotiation, the worker queries the
+browser's WebRTC encoding capabilities for the capture size and requested frame
+rate. It prefers codecs reported as supported and power-efficient, with H.264
+breaking ties, while retaining every advertised fallback. Missing, rejected or
+one-second stalled queries preserve the previous H.264 preference. This uses
+browser capabilities rather than device names or fixed codec profiles. Actual
+hardware encoding still depends on the platform and dimensions; inspect
 `encoderImplementation` and `powerEfficientEncoder` instead of assuming it.
 
 Native qualification can request 60 fps with an 8 Mbit/s ceiling. It is not the
@@ -192,10 +197,17 @@ navigation/Back, keyboard input, saved-state propagation, control/take-back and
 Stop passed; reconnecting to the stopped share was denied. Unsaved owner text
 remained separate. The phone negotiated constrained-baseline H.264 and the sender
 reported software OpenH264, while the desktop stream used hardware VideoToolbox.
-The cause of that difference is unproven. Short swipes with idle gaps do not
-establish sustained frame rate or latency. The automation's Home action left the
-app foregrounded, so this run does not qualify iOS suspension or successful
-reconnection after it.
+A subsequent capability audit found that this iPhone's constrained H.264 profiles
+did not overlap with the profiles advertised by the host's hardware encoder.
+The iPhone also advertised HEVC. Local six-second codec comparisons sustained
+approximately 30 fps with both software H.264 and hardware HEVC, with lower
+aggregate source/encoder/receiver CPU for HEVC. The new preference permits that
+mutual efficient codec, but its actual iPhone negotiation and sustained performance
+still need physical qualification. Short swipes with idle gaps do not establish
+sustained frame rate or latency. The automation's Home action left the app
+foregrounded, so this run does not qualify iOS suspension or successful
+reconnection after it. A later runner adds a required background-state assertion;
+its first device launch timed out at the iOS automation authorization prompt.
 
 Signaling carries only a connection's own peer to that viewer. The controller
 chooses its Follow/Explore source, enforces the existing audience and derives
@@ -280,7 +292,7 @@ layout and independent page scrolling described above.
 ## Next increments
 
 1. Complete physical iOS suspension/resume and successful reconnect testing,
-   then investigate its software H.264 negotiation and measure sustained motion.
+   then qualify capability-based codec selection and measure sustained motion.
    Preserve the existing Android and iOS interaction checks with active networking;
    USB forwarding without an active phone network is not a WebRTC sign-off.
 2. Measure real LAN/WAN input-to-photon latency, text quality, CPU, battery and
