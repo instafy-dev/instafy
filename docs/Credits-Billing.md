@@ -8,7 +8,7 @@ The important product rule is that Instafy keeps one shared team balance and one
 
 The current controller still stores that balance as integer billing units. The Credits panel can now render those units directly or approximate them in USD using `BILLING_UNITS_PER_USD`, which keeps the accounting integer-safe while making the UI easier to reason about.
 
-The default managed-AI model is `gpt-6-luna` (label `GPT-6 Luna`, 1.05M context), served by OpenAI. The controller pins `CODEX_MODEL_PROVIDER=openai` for managed turns (`secrets.rs`), so the model users see is the model that runs. Managed turns are paid by the operator out of the shared team balance, which is why the cheaper Luna tier is the default there. Bring-your-own ChatGPT logins and OpenAI API keys are paid by the user and keep `gpt-5.6-sol` as their default; that default, and the stale-model floor, are separate from the managed tier and did not move.
+The default managed-AI model is `gpt-6-luna` (label `GPT-6 Luna`), served by OpenAI. The controller pins `CODEX_MODEL_PROVIDER=openai` for managed turns (`secrets.rs`), so the model users see is the model that runs. Managed turns are paid by the operator out of the shared team balance, which is why the cheaper Luna tier is the default there. Bring-your-own ChatGPT logins and OpenAI API keys are paid by the user and keep `gpt-5.6-sol` as their default; that default, and the stale-model floor, are separate from the managed tier and did not move.
 
 The pricing envs define the rates users are actually charged. The defaults match the public `gpt-6-luna` standard-tier API list prices verified on September 22, 2026:
 - input: `$0.10 / 1M` (`MANAGED_AI_INPUT_USD_MICROS_PER_1K=100`)
@@ -75,9 +75,9 @@ Managed Instafy AI can run without a user-provided provider key and burn the sha
 - Set `MANAGED_AI_DAILY_PROMPT_LIMIT` if you want a daily starter cap
 - Set `MANAGED_AI_MODEL_ID` to the upstream model id used for managed turns (default `gpt-6-luna`)
 - Set `MANAGED_AI_MODEL_LABEL` to the managed model name shown in the UI (default `GPT-6 Luna`)
-- Set `MANAGED_AI_INPUT_USD_MICROS_PER_1K` (default `200`, that is `$0.20 / 1M`)
-- Set `MANAGED_AI_CACHED_INPUT_USD_MICROS_PER_1K` (default `20`, that is `$0.02 / 1M`)
-- Set `MANAGED_AI_OUTPUT_USD_MICROS_PER_1K` (default `1200`, that is `$1.20 / 1M`)
+- Set `MANAGED_AI_INPUT_USD_MICROS_PER_1K` (default `100`, that is `$0.10 / 1M`)
+- Set `MANAGED_AI_CACHED_INPUT_USD_MICROS_PER_1K` (default `10`, that is `$0.01 / 1M`)
+- Set `MANAGED_AI_OUTPUT_USD_MICROS_PER_1K` (default `500`, that is `$0.50 / 1M`)
 - Set `BILLING_UNITS_PER_USD` if you want the UI to expose USD equivalents for the shared balance
 
 Managed AI still runs through the proxy, and the proxy that matters is the one the runtime calls:

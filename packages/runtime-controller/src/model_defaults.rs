@@ -7,15 +7,15 @@ pub const DEFAULT_MANAGED_AI_PROVIDER_ID: &str = "openai";
 pub const DEFAULT_OPENAI_MODEL_ID: &str = "gpt-5.6-sol";
 
 /// Default model for the operator-paid managed "Instafy AI" tier (credits).
-/// Luna is priced at $0.20 / $0.02 cached / $1.20 per 1M tokens with a 1.05M
-/// context window (public price pages, 2026-09-17), versus Sol at $5 / $0.50 /
-/// $30. Managed turns are charged to the shared team balance, so the cheaper
-/// model is the default; operators override it with `MANAGED_AI_MODEL_ID`.
+/// GPT-6 Luna is priced at $0.10 / $0.01 cached / $0.50 per 1M tokens (public
+/// price pages, 2026-09-22), versus GPT-6 Sol at $2 / $0.20 / $10. Managed
+/// turns are charged to the shared team balance, so the cheaper model is the
+/// default; operators override it with `MANAGED_AI_MODEL_ID`.
 pub const DEFAULT_MANAGED_AI_MODEL_ID: &str = "gpt-6-luna";
 pub const DEFAULT_MANAGED_AI_MODEL_LABEL: &str = "GPT-6 Luna";
 
 /// Managed-tier list prices in USD micros per 1K tokens, matching
-/// `DEFAULT_MANAGED_AI_MODEL_ID`. 200 micros per 1K tokens is $0.20 per 1M.
+/// `DEFAULT_MANAGED_AI_MODEL_ID`. 100 micros per 1K tokens is $0.10 per 1M.
 pub const DEFAULT_MANAGED_AI_INPUT_USD_MICROS_PER_1K: i64 = 100;
 pub const DEFAULT_MANAGED_AI_CACHED_INPUT_USD_MICROS_PER_1K: i64 = 10;
 pub const DEFAULT_MANAGED_AI_OUTPUT_USD_MICROS_PER_1K: i64 = 500;
