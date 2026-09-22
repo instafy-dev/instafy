@@ -1906,15 +1906,6 @@ pub(crate) async fn process_dispatch_prompt(
         .commit()
         .await
         .map_err(|error| internal_error(format!("failed to commit dispatch prompt: {error}")))?;
-    if let Some(org_id) = managed_ai_credit_org_id {
-        credits::publish_credits_updated(
-            &*connection,
-            &state.events,
-            &org_id,
-            credits::CREDITS_UPDATED_LEDGER,
-        )
-        .await;
-    }
 
     if let Some(user_message) = user_message.as_ref() {
         conversations::publish_conversation_message_event(&state.events, user_message);
@@ -2012,6 +2003,18 @@ pub(crate) async fn process_dispatch_prompt(
                 "updatedAt": conversation.updated_at.to_rfc3339(),
             }),
         );
+    }
+
+    // After the message and run events: the org project lookup must not
+    // delay them.
+    if let Some(org_id) = managed_ai_credit_org_id {
+        credits::publish_credits_updated(
+            state,
+            &*connection,
+            org_id,
+            credits::CREDITS_UPDATED_LEDGER,
+        )
+        .await;
     }
 
     let mut runtime_alert_reason: Option<&'static str> = None;

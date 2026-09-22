@@ -88,7 +88,7 @@ mod agent_profile_http_tests;
 mod message_search_http_tests;
 
 #[path = "controller_event_fanout_tests.rs"]
-mod controller_event_fanout_tests;
+pub(crate) mod controller_event_fanout_tests;
 
 struct TestOriginKeyPair {
     private_pem: String,
@@ -2770,6 +2770,8 @@ async fn project_member_role_changes_and_removal_publish_targeted_access_invalid
         .map_err(|error| controller_error("issue project owner token", error))?
         .token;
     let state = build_test_state(pool.clone(), config);
+    // Roster signals reach only projects a stream watches.
+    let _watch = state.events.watch_project(project_id);
     let mut events = state.events.subscribe();
     let app = projects::router().with_state(state);
 
@@ -7917,6 +7919,8 @@ async fn invite_acceptance_preserves_roles_and_project_builders_cancel_project_i
         .map_err(|error| controller_error("issue org viewer token", error))?
         .token;
     let state = build_test_state(pool.clone(), config);
+    // Roster signals reach only projects a stream watches.
+    let _watch = state.events.watch_project(project_id);
     let mut access_events = state.events.subscribe();
     let app = projects::router().with_state(state);
 
@@ -10748,6 +10752,7 @@ async fn hosted_runtime_sweep_burns_credits() -> anyhow::Result<()> {
         &state,
         &instafy_cloud_provider,
     );
+    let _watch = state.events.watch_project(project_id);
     let mut credit_events = state.events.subscribe();
     runtime::sweep_hosted_runtime_credit_usage(&state).await?;
     assert_eq!(queued_credit_signals(&mut credit_events, project_id), 1);
@@ -10919,7 +10924,7 @@ async fn tunnel_broker_acl_hook_burns_credits() -> anyhow::Result<()> {
     };
 
     let app = tunnels::router().with_state(state.clone());
-    let mut credit_events = state.events.subscribe();
+    let _watch = state.events.watch_project(project_id);
 
     let missing_idempotency = app
         .clone()
@@ -10953,32 +10958,42 @@ async fn tunnel_broker_acl_hook_burns_credits() -> anyhow::Result<()> {
         "unexpected reason: {missing_json:?}"
     );
 
-    let allowed = app
-        .clone()
-        .oneshot(
-            Request::builder()
-                .method("POST")
-                .uri("/tunnel-broker/hooks/acl")
-                .header(axum::http::header::CONTENT_TYPE, "application/json")
-                .header(
-                    axum::http::header::AUTHORIZATION,
-                    format!("Bearer {hook_secret}"),
-                )
-                .body(Body::from(
-                    json!({
-                        "intent": "grant",
-                        "project_id": project_id.to_string(),
-                        "idempotency_key": idempotency_key
-                    })
-                    .to_string(),
-                ))?,
-        )
-        .await?;
-    assert_eq!(allowed.status(), StatusCode::OK);
-    let allowed_body = to_bytes(allowed.into_body(), usize::MAX).await?;
+    // The hook answers the broker first and signals credits.updated from a
+    // detached task; the probe counts the burn row the instant it lands.
+    let (response, burns_at_publish) = controller_event_fanout_tests::send_probed(
+        &app,
+        Request::builder()
+            .method("POST")
+            .uri("/tunnel-broker/hooks/acl")
+            .header(axum::http::header::CONTENT_TYPE, "application/json")
+            .header(
+                axum::http::header::AUTHORIZATION,
+                format!("Bearer {hook_secret}"),
+            )
+            .body(Body::from(
+                json!({
+                    "intent": "grant",
+                    "project_id": project_id.to_string(),
+                    "idempotency_key": idempotency_key
+                })
+                .to_string(),
+            ))?,
+        controller_event_fanout_tests::PublishProbe {
+            events: state.events.subscribe(),
+            kind: crate::credits::CREDITS_UPDATED_EVENT,
+            project_id,
+            count_sql: "select count(*) from org_credit_ledger
+                        where project_id = $1 and idempotency_key = 'acl-test-key-1'",
+            params: vec![project_id],
+        },
+    )
+    .await?;
+    assert_eq!(response.status(), StatusCode::OK);
+    let allowed_body = to_bytes(response.into_body(), usize::MAX).await?;
     let allowed_json: serde_json::Value = serde_json::from_slice(&allowed_body)?;
     assert_eq!(allowed_json["allowed"].as_bool(), Some(true));
-    assert_eq!(queued_credit_signals(&mut credit_events, project_id), 1);
+    assert_eq!(burns_at_publish, 1, "published before the burn commit");
+    let mut credit_events = state.events.subscribe();
 
     let org_id = {
         let connection = pool.get().await?;
@@ -11023,6 +11038,8 @@ async fn tunnel_broker_acl_hook_burns_credits() -> anyhow::Result<()> {
         )
         .await?;
     assert_eq!(allowed_retry.status(), StatusCode::OK);
+    // Nothing is spawned for a deduped burn; give a stray task time anyway.
+    tokio::time::sleep(std::time::Duration::from_millis(250)).await;
     assert_eq!(queued_credit_signals(&mut credit_events, project_id), 0);
 
     {
@@ -11133,6 +11150,7 @@ async fn tunnel_request_burns_credits_when_not_using_broker_hook() -> anyhow::Re
         "runtimeLeaseId": lease_id.to_string()
     });
     let app = tunnels::router().with_state(state.clone());
+    let _watch = state.events.watch_project(project_id);
     let mut credit_events = state.events.subscribe();
     let response = app
         .oneshot(
@@ -19149,6 +19167,7 @@ async fn skill_mode_answered_evaluation_bills_on_first_visible_message() -> anyh
     drop(connection);
 
     let token = mint_agent_message_token(&config, &project_id)?;
+    let _watch = state.events.watch_project(project_id);
     let mut credit_events = state.events.subscribe();
     let status = post_agent_endpoint(
         &state,

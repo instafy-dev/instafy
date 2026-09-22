@@ -62,13 +62,22 @@ Refer to `src/main.rs` for the complete list, including agent callbacks and admi
 
 Some changes are announced as bare signals so open clients refetch instead of polling. Each is
 published only after the change's transaction commits, once per affected project stream, with a
-payload of `{ "reason": ... }` and nothing else. Every project viewer receives them, including
-guests without org or billing access, so they must never carry data a viewer could not fetch.
+payload of `{ "reason": ... }` and nothing else. Project viewers can include guests without org
+or billing access, so a signal must never carry data a viewer could not fetch.
 
-| Kind | Reasons | Published for | Clients refetch |
-| --- | --- | --- | --- |
-| `project.members_changed` | `project_membership`, `org_membership` | the project, or every live project of the org | `/projects/:id/members`, `/orgs/:id/members` |
-| `credits.updated` | `ledger`, `subscription` | every live project of the org | `/credits/status`, `/credits/ledger` |
+| Kind | Payload | Published for | Delivered to | Clients refetch |
+| --- | --- | --- | --- | --- |
+| `project.members_changed` | `{ "reason": "project_membership" }` | the project | every viewer of the project | `/projects/:id/members` |
+| `project.members_changed` | `{ "reason": "org_membership" }` | every live project of the org | org members only; project guests' streams drop it | `/orgs/:id/members` |
+| `credits.updated` | `{ "reason": "ledger" }` or `{ "reason": "subscription" }` | every live project of the org | every viewer of the project | `/credits/status`, `/credits/ledger` |
+
+Delivery rechecks access per event, so a busy org's signals cost database work on every stream
+that receives them. `credits.updated` is therefore spaced per org: each controller node publishes
+it at most once every 2 seconds, and a change inside that interval is announced by one trailing
+publish when it ends. Sweeps publish once per org per pass. A node's broadcast carries signals
+only for projects one of its streams watches; the Redis bus still carries every project to the
+other nodes. The Studio also folds signals into one refresh about 1.2 seconds after the first
+and fetches nothing while its tab is hidden, catching up once it is visible.
 
 `project.access_changed` is different: it targets the affected user only, so their open clients
 refetch their own capabilities.

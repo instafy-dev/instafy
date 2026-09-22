@@ -35,12 +35,15 @@ use crate::tokens::{mint_scoped_token, ScopedTokenRequest};
 
 const ORIGIN_APPLY_TIMEOUT_SECS: u64 = 180;
 
-/// Roster invalidation for everyone viewing a space (the targeted
+/// Roster invalidation for a space's viewers (the targeted
 /// `project.access_changed` still tells the affected user). Signal only:
 /// viewers refetch `/projects/{id}/members` or the org directory through
 /// their own authorization.
 pub(crate) const PROJECT_MEMBERS_CHANGED_EVENT: &str = "project.members_changed";
-const MEMBERS_CHANGED_PROJECT_MEMBERSHIP: &str = "project_membership";
+/// The space's own roster changed: every viewer of the space may know.
+pub(crate) const MEMBERS_CHANGED_PROJECT_MEMBERSHIP: &str = "project_membership";
+/// The org roster changed: delivered to org members only (`/events` drops it
+/// for project guests, who cannot read the org directory).
 const MEMBERS_CHANGED_ORG_MEMBERSHIP: &str = "org_membership";
 
 #[derive(Debug, Clone)]
@@ -4618,7 +4621,7 @@ fn role_can_share_projects(role: &str) -> bool {
     matches!(role, "owner" | "admin" | "builder")
 }
 
-async fn require_org_access(
+pub(crate) async fn require_org_access(
     transaction: &tokio_postgres::Transaction<'_>,
     org_id: &Uuid,
     context: &RequestContext,

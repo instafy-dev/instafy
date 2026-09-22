@@ -387,6 +387,15 @@ async fn post_checkout(
         .commit()
         .await
         .map_err(|error| internal_error(format!("failed to finalize checkout: {error}")))?;
+    if applies_immediately {
+        crate::credits::publish_credits_updated(
+            &state,
+            &*connection,
+            org_id,
+            crate::credits::CREDITS_UPDATED_SUBSCRIPTION,
+        )
+        .await;
+    }
 
     let processor_label = checkout_session.processor.as_str();
 

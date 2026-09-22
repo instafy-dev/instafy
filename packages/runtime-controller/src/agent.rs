@@ -1874,18 +1874,19 @@ pub(crate) async fn agent_message(
         .commit()
         .await
         .map_err(|error| internal_error(format!("failed to commit agent message: {error}")))?;
+
+    publish_conversation_message_event(&state.events, &message_row);
+    crate::notifications::enqueue_message_push_notifications(state.clone(), message_row);
+    // After the message broadcast: the org project lookup must not delay it.
     if let Some(org_id) = deferred_credit_org_id {
         crate::credits::publish_credits_updated(
+            &state,
             &*connection,
-            &state.events,
-            &org_id,
+            org_id,
             crate::credits::CREDITS_UPDATED_LEDGER,
         )
         .await;
     }
-
-    publish_conversation_message_event(&state.events, &message_row);
-    crate::notifications::enqueue_message_push_notifications(state.clone(), message_row);
     if let Err((status, Json(api_error))) =
         crate::multi_agent_plan::maybe_execute_multi_agent_plan_message(
             &state,
@@ -2802,7 +2803,11 @@ pub(crate) async fn agent_complete(
                     .await
                     {
                         Ok(charge) => {
-                            completion_credit_org_id = Some(org_id);
+                            // A zero adjustment only merges metadata into the
+                            // reserve row, and a replayed one writes nothing.
+                            if charge.ledger_row_written {
+                                completion_credit_org_id = Some(org_id);
+                            }
                             if let Some(run_uuid) = run_id {
                                 let reserve_key = format!("managed-ai-prompt:{prompt_uuid}");
                                 let adjustment_key = format!("managed-ai-adjustment:{prompt_uuid}");
@@ -3019,15 +3024,6 @@ pub(crate) async fn agent_complete(
         .commit()
         .await
         .map_err(|error| internal_error(format!("failed to commit completion: {error}")))?;
-    if let Some(org_id) = completion_credit_org_id {
-        crate::credits::publish_credits_updated(
-            &*connection,
-            &state.events,
-            &org_id,
-            crate::credits::CREDITS_UPDATED_LEDGER,
-        )
-        .await;
-    }
 
     crate::send_intents::publish_job_input_state_updates(&state, &job_input_state_updates);
 
@@ -3106,6 +3102,17 @@ pub(crate) async fn agent_complete(
                 "run": run_payload,
             }),
         );
+    }
+
+    // Last: the org project lookup must not delay the completion's events.
+    if let Some(org_id) = completion_credit_org_id {
+        crate::credits::publish_credits_updated(
+            &state,
+            &*connection,
+            org_id,
+            crate::credits::CREDITS_UPDATED_LEDGER,
+        )
+        .await;
     }
 
     Ok(Json(AgentCompleteResponseBody { ok: true }))

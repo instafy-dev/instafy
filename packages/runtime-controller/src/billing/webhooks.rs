@@ -83,7 +83,7 @@ async fn handle_stripe_webhook(
         }
     }
 
-    process_stripe_event(&state, &event).await?;
+    let changed_org = process_stripe_event(&state, &event).await?;
 
     // Recorded only after successful processing so a failed handler is
     // retried by Stripe instead of being skipped as already-processed.
@@ -98,6 +98,17 @@ async fn handle_stripe_webhook(
         {
             warn!(event = %event.id, kind = %event.kind, %error, "failed to record processed webhook event");
         }
+        // After processing persisted the renewal date and cancel flag, so a
+        // prompt refetch reads the final subscription.
+        if let Some(org_id) = changed_org {
+            crate::credits::publish_credits_updated(
+                &state,
+                &*connection,
+                org_id,
+                crate::credits::CREDITS_UPDATED_SUBSCRIPTION,
+            )
+            .await;
+        }
     }
 
     Ok(StatusCode::OK)
@@ -106,13 +117,15 @@ async fn handle_stripe_webhook(
 async fn process_stripe_event(
     state: &AppState,
     event: &StripeWebhookEvent,
-) -> Result<(), (StatusCode, Json<ApiError>)> {
+) -> Result<Option<Uuid>, (StatusCode, Json<ApiError>)> {
     let config = state
         .config
         .stripe
         .as_ref()
         .ok_or_else(|| internal_error("Stripe processor is not configured"))?;
     let object = &event.data.object;
+    // The org whose subscription or credit limit this event changed.
+    let mut changed_org = None;
 
     match event.kind.as_str() {
         "checkout.session.completed" | "checkout.session.async_payment_succeeded" => {
@@ -136,7 +149,7 @@ async fn process_stripe_event(
                     plan = %plan_id,
                     "stripe checkout completed but unpaid; awaiting async payment result"
                 );
-                return Ok(());
+                return Ok(None);
             }
 
             let external_id = stripe_checkout_external_id(object);
@@ -149,6 +162,7 @@ async fn process_stripe_event(
                 external_id.as_deref(),
             )
             .await?;
+            changed_org = Some(org_id);
             info!(
                 event = %event.id,
                 kind = %event.kind,
@@ -212,6 +226,7 @@ async fn process_stripe_event(
                     "canceled",
                 )
                 .await?;
+                changed_org = updated_org(&outcome);
                 log_status_outcome(&outcome, event, subscription_id, "canceled");
             } else {
                 warn!(
@@ -231,6 +246,7 @@ async fn process_stripe_event(
                     "past_due",
                 )
                 .await?;
+                changed_org = updated_org(&outcome);
                 log_status_outcome(&outcome, event, subscription_id, "past_due");
             } else {
                 warn!(
@@ -250,6 +266,7 @@ async fn process_stripe_event(
                     "active",
                 )
                 .await?;
+                changed_org = updated_org(&outcome);
                 log_status_outcome(&outcome, event, subscription_id, "active");
             } else {
                 warn!(
@@ -279,7 +296,7 @@ async fn process_stripe_event(
                     kind = %event.kind,
                     "stripe subscription updated payload missing id"
                 );
-                return Ok(());
+                return Ok(None);
             };
             let Some(status) = mapped else {
                 info!(
@@ -288,7 +305,7 @@ async fn process_stripe_event(
                     subscription_id,
                     "stripe subscription updated ignored (unsupported status)"
                 );
-                return Ok(());
+                return Ok(None);
             };
 
             let metadata = stripe_metadata(object);
@@ -321,6 +338,7 @@ async fn process_stripe_event(
                     status,
                 )
                 .await?;
+                changed_org = updated_org(&outcome);
                 match &outcome {
                     StatusUpdateOutcome::NotFound => {
                         // Unknown subscription id. The only legitimate case is
@@ -343,6 +361,7 @@ async fn process_stripe_event(
                                 &subscription_id,
                             )
                             .await?;
+                            changed_org = Some(org_id);
                             info!(
                                 event = %event.id,
                                 kind = %event.kind,
@@ -373,6 +392,7 @@ async fn process_stripe_event(
                     status,
                 )
                 .await?;
+                changed_org = updated_org(&outcome);
                 log_status_outcome(&outcome, event, &subscription_id, status);
             }
 
@@ -431,6 +451,7 @@ async fn process_stripe_event(
                             "canceled",
                         )
                         .await?;
+                        changed_org = updated_org(&outcome);
                         log_status_outcome(&outcome, event, &subscription_id, "canceled");
                         error!(
                             event = %event.id,
@@ -458,7 +479,14 @@ async fn process_stripe_event(
         }
     }
 
-    Ok(())
+    Ok(changed_org)
+}
+
+fn updated_org(outcome: &StatusUpdateOutcome) -> Option<Uuid> {
+    match outcome {
+        StatusUpdateOutcome::Updated(update) => Some(update.org_id),
+        _ => None,
+    }
 }
 
 fn log_status_outcome(
@@ -640,13 +668,6 @@ async fn apply_subscription_update(
     transaction.commit().await.map_err(|error| {
         internal_error(format!("failed to commit webhook transaction: {error}"))
     })?;
-    crate::credits::publish_credits_updated(
-        &*connection,
-        &state.events,
-        org_id,
-        crate::credits::CREDITS_UPDATED_SUBSCRIPTION,
-    )
-    .await;
 
     Ok(())
 }
@@ -689,15 +710,6 @@ async fn apply_subscription_status_update(
     transaction.commit().await.map_err(|error| {
         internal_error(format!("failed to commit webhook transaction: {error}"))
     })?;
-    if let StatusUpdateOutcome::Updated(update) = &outcome {
-        crate::credits::publish_credits_updated(
-            &*connection,
-            &state.events,
-            &update.org_id,
-            crate::credits::CREDITS_UPDATED_SUBSCRIPTION,
-        )
-        .await;
-    }
 
     Ok(outcome)
 }
@@ -747,13 +759,6 @@ async fn apply_subscription_plan_update(
     transaction.commit().await.map_err(|error| {
         internal_error(format!("failed to commit webhook transaction: {error}"))
     })?;
-    crate::credits::publish_credits_updated(
-        &*connection,
-        &state.events,
-        org_id,
-        crate::credits::CREDITS_UPDATED_SUBSCRIPTION,
-    )
-    .await;
 
     Ok(())
 }
@@ -803,15 +808,6 @@ async fn apply_subscription_plan_update_by_external_id(
     transaction.commit().await.map_err(|error| {
         internal_error(format!("failed to commit webhook transaction: {error}"))
     })?;
-    if let StatusUpdateOutcome::Updated(update) = &outcome {
-        crate::credits::publish_credits_updated(
-            &*connection,
-            &state.events,
-            &update.org_id,
-            crate::credits::CREDITS_UPDATED_SUBSCRIPTION,
-        )
-        .await;
-    }
 
     Ok(outcome)
 }
