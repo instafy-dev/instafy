@@ -1545,7 +1545,7 @@ mod tests {
         );
         assert_eq!(
             env.get("CODEX_MODEL").and_then(JsonValue::as_str),
-            Some("gpt-5.6-luna")
+            Some("gpt-6-luna")
         );
         assert_eq!(
             env.get("CODEX_MODEL_PROVIDER").and_then(JsonValue::as_str),
