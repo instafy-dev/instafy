@@ -486,6 +486,15 @@ async fn adjust_project_credits(
             "failed to commit operator credit adjustment: {error}"
         ))
     })?;
+    // A 'set' to the current balance writes no ledger row but still signals;
+    // operator adjustments are rare and the per-org spacing bounds them.
+    crate::credits::publish_credits_updated(
+        &state,
+        &*connection,
+        org_id,
+        crate::credits::CREDITS_UPDATED_LEDGER,
+    )
+    .await;
 
     Ok(Json(build_credit_snapshot(
         ending_snapshot,

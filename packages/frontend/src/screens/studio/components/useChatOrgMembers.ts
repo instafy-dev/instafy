@@ -4,6 +4,7 @@ import {
   MEMBERS_CHANGED_EVENT,
   PROJECT_ACCESS_REFRESH_EVENT,
 } from "../../../projects/projectAccessEvents";
+import { invalidateAfterInFlight } from "../../../projects/invalidateAfterInFlight";
 import {
   controllerClient,
   type ControllerProjectMember,
@@ -93,12 +94,26 @@ export function useChatOrgMembers({
         { cancelRefetch: false },
       );
     };
+    // A change signal may arrive while a fetch that read the old roster is
+    // still in flight; focus and reconnect joining that fetch is enough.
+    const invalidateAfterChange = () => {
+      void invalidateAfterInFlight(queryClient, {
+        queryKey: [CONTROLLER_ORGANIZATIONS_QUERY_KEY],
+      });
+      void invalidateAfterInFlight(queryClient, {
+        queryKey: [ORG_DIRECTORY_QUERY_KEY],
+      });
+    };
+    const handlerFor = (eventName: string) =>
+      eventName === MEMBERS_CHANGED_EVENT || eventName === PROJECT_ACCESS_REFRESH_EVENT
+        ? invalidateAfterChange
+        : invalidate;
     for (const eventName of CHAT_ORG_MEMBERS_REFRESH_EVENTS) {
-      window.addEventListener(eventName, invalidate);
+      window.addEventListener(eventName, handlerFor(eventName));
     }
     return () => {
       for (const eventName of CHAT_ORG_MEMBERS_REFRESH_EVENTS) {
-        window.removeEventListener(eventName, invalidate);
+        window.removeEventListener(eventName, handlerFor(eventName));
       }
     };
   }, [active, queryClient]);

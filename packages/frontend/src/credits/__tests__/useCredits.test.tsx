@@ -5,7 +5,12 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { BillingState } from "../../types";
 import { installPollingGate, POLLING_IDLE_AFTER_MS } from "../../runtime/pollingGate";
 import * as billingModule from "../BillingProvider";
-import { CREDITS_UPDATED_EVENT, CreditsProvider, useCredits } from "../useCredits";
+import {
+  CREDITS_SIGNAL_REFRESH_DELAY_MS,
+  CREDITS_UPDATED_EVENT,
+  CreditsProvider,
+  useCredits,
+} from "../useCredits";
 
 const mocks = vi.hoisted(() => ({
   fetchCreditSnapshot: vi.fn(),
@@ -212,25 +217,98 @@ describe("useCredits timers", () => {
     expect(mocks.fetchCreditLedger).not.toHaveBeenCalled();
   });
 
-  it("forces both fetches on the credits-updated event when the panel is open, only the status otherwise", async () => {
-    await render();
-    expect(mocks.fetchCreditSnapshot).toHaveBeenCalledTimes(1);
-    await act(async () => {
+  function signalCreditsUpdated() {
+    return act(async () => {
       window.dispatchEvent(new Event(CREDITS_UPDATED_EVENT));
       await Promise.resolve();
     });
+  }
+
+  it("forces both fetches on the credits-updated event when the panel is open, only the status otherwise", async () => {
+    await render();
+    expect(mocks.fetchCreditSnapshot).toHaveBeenCalledTimes(1);
+    await signalCreditsUpdated();
+    await advance(CREDITS_SIGNAL_REFRESH_DELAY_MS);
     expect(mocks.fetchCreditSnapshot).toHaveBeenCalledTimes(2);
     expect(mocks.fetchCreditLedger).not.toHaveBeenCalled();
 
     mocks.activePanel = "credits";
     await render();
     expect(mocks.fetchCreditLedger).toHaveBeenCalledTimes(1);
-    await act(async () => {
-      window.dispatchEvent(new Event(CREDITS_UPDATED_EVENT));
-      await Promise.resolve();
-    });
+    await signalCreditsUpdated();
+    await advance(CREDITS_SIGNAL_REFRESH_DELAY_MS);
     expect(mocks.fetchCreditSnapshot).toHaveBeenCalledTimes(3);
     expect(mocks.fetchCreditLedger).toHaveBeenCalledTimes(2);
+  });
+
+  it("folds a burst of credits-updated signals into one refresh shortly after the first", async () => {
+    await render();
+    expect(mocks.fetchCreditSnapshot).toHaveBeenCalledTimes(1);
+    await signalCreditsUpdated();
+    await advance(400);
+    await signalCreditsUpdated();
+    await signalCreditsUpdated();
+    await advance(CREDITS_SIGNAL_REFRESH_DELAY_MS - 401);
+    expect(mocks.fetchCreditSnapshot).toHaveBeenCalledTimes(1);
+    await advance(1);
+    expect(mocks.fetchCreditSnapshot).toHaveBeenCalledTimes(2);
+    await advance(10_000);
+    expect(mocks.fetchCreditSnapshot).toHaveBeenCalledTimes(2);
+  });
+
+  it("does not fetch on credits-updated while hidden and catches up once when visible", async () => {
+    mocks.activePanel = "credits";
+    await render();
+    expect(mocks.fetchCreditSnapshot).toHaveBeenCalledTimes(1);
+    expect(mocks.fetchCreditLedger).toHaveBeenCalledTimes(1);
+
+    await act(async () => setVisibility("hidden"));
+    await signalCreditsUpdated();
+    await signalCreditsUpdated();
+    await advance(10_000);
+    expect(mocks.fetchCreditSnapshot).toHaveBeenCalledTimes(1);
+    expect(mocks.fetchCreditLedger).toHaveBeenCalledTimes(1);
+
+    // One refresh of each on the way back, shared with the timers' own wake
+    // run, and nothing trailing after it.
+    await act(async () => setVisibility("visible"));
+    expect(mocks.fetchCreditSnapshot).toHaveBeenCalledTimes(2);
+    expect(mocks.fetchCreditLedger).toHaveBeenCalledTimes(2);
+    await advance(CREDITS_SIGNAL_REFRESH_DELAY_MS * 2);
+    expect(mocks.fetchCreditSnapshot).toHaveBeenCalledTimes(2);
+    expect(mocks.fetchCreditLedger).toHaveBeenCalledTimes(2);
+  });
+
+  it("fetches once more when credits-updated arrives during a fetch that began before it", async () => {
+    await render();
+    expect(balance()).toBe("100");
+
+    // The minute tick starts a fetch that reads the old balance...
+    let resolveStale!: (value: ReturnType<typeof snapshot>) => void;
+    mocks.fetchCreditSnapshot.mockReturnValueOnce(
+      new Promise((resolve) => {
+        resolveStale = resolve;
+      }),
+    );
+    await advance(60_000);
+    expect(mocks.fetchCreditSnapshot).toHaveBeenCalledTimes(2);
+
+    // ...a change commits and is signalled while it is still in flight...
+    await signalCreditsUpdated();
+    await advance(CREDITS_SIGNAL_REFRESH_DELAY_MS);
+    expect(mocks.fetchCreditSnapshot).toHaveBeenCalledTimes(2);
+
+    // ...so settling it triggers exactly one more fetch, which sees the change.
+    mocks.fetchCreditSnapshot.mockResolvedValue(snapshot(90));
+    await act(async () => {
+      resolveStale(snapshot(100));
+      await Promise.resolve();
+    });
+    await advance(0);
+    expect(mocks.fetchCreditSnapshot).toHaveBeenCalledTimes(3);
+    expect(balance()).toBe("90");
+    await advance(CREDITS_SIGNAL_REFRESH_DELAY_MS * 2);
+    expect(mocks.fetchCreditSnapshot).toHaveBeenCalledTimes(3);
   });
 
   it("loads the ledger again after switching projects", async () => {

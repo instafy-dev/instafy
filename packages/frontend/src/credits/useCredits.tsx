@@ -22,14 +22,9 @@ import { useBilling } from "./BillingProvider";
 import { useProject } from "../projects/useProject";
 import { runtimeControllerEnabled } from "../sdk/instafy";
 import { isPollingActive, useGatedInterval } from "../runtime/pollingGate";
+import { CREDITS_UPDATED_EVENT } from "./creditsEvents";
 
-/**
- * Window event that says the credit balance or plan changed server-side
- * (published by the controller as credits.updated and forwarded by the sync
- * hook). The provider refreshes the snapshot on it, and the ledger too while
- * the Credits panel is open, so the gated timers below are only a fallback.
- */
-export const CREDITS_UPDATED_EVENT = "instafy:credits-updated";
+export { CREDITS_UPDATED_EVENT } from "./creditsEvents";
 
 // Every tab keeps one status refresh per minute while the user is active,
 // one per five minutes once idle and none while hidden. The Credits panel
@@ -38,6 +33,10 @@ const STATUS_ACTIVE_MS = 60_000;
 const STATUS_IDLE_MS = 300_000;
 const PANEL_STATUS_ACTIVE_MS = 15_000;
 const LEDGER_FALLBACK_ACTIVE_MS = 60_000;
+// credits.updated reaches every open tab of the org. Signals share one
+// refresh this long after the first, and a hidden tab fetches nothing until
+// it is visible again, then catches up once.
+export const CREDITS_SIGNAL_REFRESH_DELAY_MS = 1_200;
 
 interface CreditsContextValue {
   billing: BillingState;
@@ -55,6 +54,10 @@ interface CreditsContextValue {
 }
 
 const CreditsContext = createContext<CreditsContextValue | null>(null);
+
+function documentHidden(): boolean {
+  return typeof document !== "undefined" && document.visibilityState === "hidden";
+}
 
 function mergeSnapshotIntoBilling(current: BillingState, snapshot: CreditSnapshot): BillingState {
   return {
@@ -86,6 +89,14 @@ export function CreditsProvider({ children }: { children: ReactNode }) {
   const [ledgerError, setLedgerError] = useState<string | null>(null);
   const ledgerInFlightRef = useRef(false);
   const lastLedgerProjectRef = useRef<string | null>(null);
+  // Every credits.updated bumps signalSeqRef. A fetch records the sequence it
+  // started at, so it covers every signal before it; a newer signal during a
+  // fetch queues exactly one more fetch for when it settles.
+  const signalSeqRef = useRef(0);
+  const snapshotSeqRef = useRef(0);
+  const snapshotRefetchRef = useRef(false);
+  const ledgerSeqRef = useRef(0);
+  const ledgerRefetchRef = useRef(false);
 
   const applyBilling = useCallback(
     (updater: (current: BillingState) => BillingState) => {
@@ -110,6 +121,11 @@ export function CreditsProvider({ children }: { children: ReactNode }) {
         return;
       }
       if (snapshotInFlightRef.current) {
+        // The fetch in flight may have read the balance before a newer
+        // credits.updated; fetch once more when it settles.
+        if (snapshotSeqRef.current < signalSeqRef.current) {
+          snapshotRefetchRef.current = true;
+        }
         return;
       }
       if (!options?.force && lastSnapshotProjectRef.current === activeProjectId) {
@@ -118,6 +134,7 @@ export function CreditsProvider({ children }: { children: ReactNode }) {
       const notifyOnError = options?.notifyOnError ?? Boolean(options?.force);
       const projectAtStart = activeProjectId;
       snapshotInFlightRef.current = true;
+      snapshotSeqRef.current = signalSeqRef.current;
       setIsLoading(true);
       setLastError(null);
       try {
@@ -147,6 +164,11 @@ export function CreditsProvider({ children }: { children: ReactNode }) {
       } finally {
         snapshotInFlightRef.current = false;
         setIsLoading(false);
+        // A hidden tab leaves it to the visibility catch-up.
+        if (snapshotRefetchRef.current && !documentHidden()) {
+          snapshotRefetchRef.current = false;
+          void refreshRef.current({ force: true, notifyOnError: false });
+        }
       }
     },
     [activeProjectId, applyBilling, showStatus]
@@ -203,6 +225,9 @@ export function CreditsProvider({ children }: { children: ReactNode }) {
         return;
       }
       if (ledgerInFlightRef.current) {
+        if (ledgerSeqRef.current < signalSeqRef.current) {
+          ledgerRefetchRef.current = true;
+        }
         return;
       }
       if (!options?.force && lastLedgerProjectRef.current === activeProjectId) {
@@ -210,6 +235,7 @@ export function CreditsProvider({ children }: { children: ReactNode }) {
       }
       const notifyOnError = options?.notifyOnError ?? Boolean(options?.force);
       ledgerInFlightRef.current = true;
+      ledgerSeqRef.current = signalSeqRef.current;
       setLedgerLoading(true);
       setLedgerError(null);
       try {
@@ -233,6 +259,12 @@ export function CreditsProvider({ children }: { children: ReactNode }) {
       } finally {
         ledgerInFlightRef.current = false;
         setLedgerLoading(false);
+        if (ledgerRefetchRef.current && !documentHidden()) {
+          ledgerRefetchRef.current = false;
+          if (activePanelRef.current === "credits") {
+            void refreshLedgerRef.current({ force: true, notifyOnError: false });
+          }
+        }
       }
     },
     [activeProjectId, showStatus]
@@ -277,17 +309,46 @@ export function CreditsProvider({ children }: { children: ReactNode }) {
   );
 
   useEffect(() => {
-    if (typeof window === "undefined") {
+    if (typeof window === "undefined" || typeof document === "undefined") {
       return;
     }
-    const handleCreditsUpdated = () => {
-      void refreshRef.current({ force: true, notifyOnError: false });
-      if (activePanelRef.current === "credits") {
+    let timer: number | null = null;
+    // Refetch what the newest signal is not covered by yet. A fetch that
+    // started after it (a timer tick, the wake refresh) already covers it.
+    const catchUp = () => {
+      if (snapshotSeqRef.current < signalSeqRef.current) {
+        void refreshRef.current({ force: true, notifyOnError: false });
+      }
+      if (activePanelRef.current === "credits" && ledgerSeqRef.current < signalSeqRef.current) {
         void refreshLedgerRef.current({ force: true, notifyOnError: false });
       }
     };
+    const handleCreditsUpdated = () => {
+      signalSeqRef.current += 1;
+      if (documentHidden() || timer !== null) {
+        return;
+      }
+      timer = window.setTimeout(() => {
+        timer = null;
+        if (!documentHidden()) {
+          catchUp();
+        }
+      }, CREDITS_SIGNAL_REFRESH_DELAY_MS);
+    };
+    const handleVisibilityChange = () => {
+      if (!documentHidden()) {
+        catchUp();
+      }
+    };
     window.addEventListener(CREDITS_UPDATED_EVENT, handleCreditsUpdated);
-    return () => window.removeEventListener(CREDITS_UPDATED_EVENT, handleCreditsUpdated);
+    document.addEventListener("visibilitychange", handleVisibilityChange);
+    return () => {
+      if (timer !== null) {
+        window.clearTimeout(timer);
+      }
+      window.removeEventListener(CREDITS_UPDATED_EVENT, handleCreditsUpdated);
+      document.removeEventListener("visibilitychange", handleVisibilityChange);
+    };
   }, []);
 
   const value = useMemo<CreditsContextValue>(

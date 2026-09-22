@@ -206,7 +206,8 @@ fn api_error_to_anyhow(context: &str, error: (StatusCode, Json<crate::ApiError>)
 /// uses: never leased, no visible assistant message, no tool updates, and no
 /// usage adjustment on the ledger. Idempotent through the ledger key; runs in
 /// a savepoint so a ledger failure is logged and the expiry sweep still
-/// completes.
+/// completes. Returns the org id when this call wrote the refund, for a
+/// `credits.updated` once the sweep commits.
 async fn refund_managed_ai_reserve_for_expired_job(
     transaction: &mut tokio_postgres::Transaction<'_>,
     project_id: &Uuid,
@@ -214,7 +215,7 @@ async fn refund_managed_ai_reserve_for_expired_job(
     run_id: Option<Uuid>,
     lease_attempts: i32,
     payload: &serde_json::Value,
-) -> AnyResult<()> {
+) -> AnyResult<Option<Uuid>> {
     const REFUND_REASON: &str = "runtime_not_ready";
 
     let managed_ai_used = payload
@@ -222,14 +223,14 @@ async fn refund_managed_ai_reserve_for_expired_job(
         .and_then(serde_json::Value::as_bool)
         .unwrap_or(false);
     if !managed_ai_used {
-        return Ok(());
+        return Ok(None);
     }
     let Some(prompt_id) = payload
         .get("prompt_id")
         .and_then(serde_json::Value::as_str)
         .and_then(|value| Uuid::parse_str(value).ok())
     else {
-        return Ok(());
+        return Ok(None);
     };
     // The lease path increments lease_attempts and a stop-requeue does not
     // reset it, so a non-zero count means a runtime held this job and may
@@ -242,13 +243,14 @@ async fn refund_managed_ai_reserve_for_expired_job(
             lease_attempts,
             "expired requeued job was leased before; keeping its managed AI reserve"
         );
-        return Ok(());
+        return Ok(None);
     }
 
     let savepoint = transaction
         .savepoint("managed_ai_refund")
         .await
         .context("failed to open managed AI refund savepoint")?;
+    let mut refunded_org_id = None;
     let outcome: AnyResult<ManagedAiRefundOutcome> = async {
         if crate::agent::run_has_visible_assistant_message(&savepoint, project_id, run_id)
             .await
@@ -281,6 +283,7 @@ async fn refund_managed_ai_reserve_for_expired_job(
         let ManagedAiRefundOutcome::Applied(refund) = outcome else {
             return Ok(outcome);
         };
+        refunded_org_id = Some(org_id);
         // The daily prompt counter is derived from prompts.metadata.managedAiUsed.
         crate::dispatch::persist_prompt_ai_access_metadata(&savepoint, &prompt_id, true, false)
             .await
@@ -323,6 +326,7 @@ async fn refund_managed_ai_reserve_for_expired_job(
                 delta = refund.delta,
                 "refunded managed AI prompt reserve for an expired requeued job"
             );
+            return Ok(refunded_org_id);
         }
         Ok(ManagedAiRefundOutcome::AlreadyRefunded(existing)) => {
             savepoint
@@ -357,7 +361,7 @@ async fn refund_managed_ai_reserve_for_expired_job(
                 .context("failed to roll back managed AI refund savepoint")?;
         }
     }
-    Ok(())
+    Ok(None)
 }
 
 /// Jobs requeued by a runtime stop expire if nothing resumes them promptly.
@@ -405,6 +409,7 @@ pub(crate) async fn expire_stale_requeued_jobs(state: &AppState) -> AnyResult<()
         .context("failed to expire stale requeued jobs")?;
 
     let mut job_input_state_updates = Vec::new();
+    let mut refunded_org_ids = std::collections::BTreeSet::new();
     for row in &rows {
         let job_id: Uuid = row.get("id");
         let updates = crate::send_intents::reject_unacknowledged_inputs_for_job(
@@ -462,7 +467,7 @@ pub(crate) async fn expire_stale_requeued_jobs(state: &AppState) -> AnyResult<()
         // managed-AI prompt it carried never reached a model: give the credit
         // and daily slot back.
         let lease_attempts: i32 = row.get("lease_attempts");
-        refund_managed_ai_reserve_for_expired_job(
+        if let Some(org_id) = refund_managed_ai_reserve_for_expired_job(
             &mut transaction,
             &project_id,
             &job_id,
@@ -470,7 +475,10 @@ pub(crate) async fn expire_stale_requeued_jobs(state: &AppState) -> AnyResult<()
             lease_attempts,
             &payload,
         )
-        .await?;
+        .await?
+        {
+            refunded_org_ids.insert(org_id);
+        }
     }
 
     transaction
@@ -478,6 +486,8 @@ pub(crate) async fn expire_stale_requeued_jobs(state: &AppState) -> AnyResult<()
         .await
         .context("failed to commit requeued job expiry")?;
     crate::send_intents::publish_job_input_state_updates(state, &job_input_state_updates);
+    drop(connection);
+    publish_credits_updated_for_orgs(state, refunded_org_ids).await;
 
     for row in rows {
         let job_id: Uuid = row.get("id");
@@ -857,6 +867,9 @@ pub(crate) async fn sweep_hosted_runtime_credit_usage(state: &AppState) -> AnyRe
     // Per-runtime burns and safe stops acquire their own pool slot.
     drop(connection);
 
+    // Orgs whose balance this pass moved: one credits.updated each, after
+    // the pass, however many of their runtimes burned.
+    let mut burned_org_ids = std::collections::BTreeSet::new();
     for row in rows {
         let runtime_id: Uuid = row.get("runtime_id");
         let project_id: Uuid = row.get("project_id");
@@ -929,6 +942,8 @@ pub(crate) async fn sweep_hosted_runtime_credit_usage(state: &AppState) -> AnyRe
                         %error,
                         "failed to commit hosted runtime credit burn"
                     );
+                } else if crate::credits::credit_ledger_row_written(&metadata) {
+                    burned_org_ids.insert(org_id);
                 }
             }
             Err((status, Json(err))) if status == StatusCode::BAD_REQUEST => {
@@ -964,8 +979,35 @@ pub(crate) async fn sweep_hosted_runtime_credit_usage(state: &AppState) -> AnyRe
             }
         }
     }
+    publish_credits_updated_for_orgs(state, burned_org_ids).await;
 
     Ok(())
+}
+
+/// One `credits.updated` per org after a sweep's writes have committed.
+async fn publish_credits_updated_for_orgs(
+    state: &AppState,
+    org_ids: std::collections::BTreeSet<Uuid>,
+) {
+    if org_ids.is_empty() {
+        return;
+    }
+    let connection = match state.pool.get().await {
+        Ok(connection) => connection,
+        Err(error) => {
+            warn!(%error, "failed to get a connection for sweep credits.updated");
+            return;
+        }
+    };
+    for org_id in org_ids {
+        crate::credits::publish_credits_updated(
+            state,
+            &*connection,
+            org_id,
+            crate::credits::CREDITS_UPDATED_LEDGER,
+        )
+        .await;
+    }
 }
 
 async fn stop_runtime_for_credit_exhaustion(state: &AppState, runtime_id: Uuid) -> AnyResult<()> {
@@ -1820,7 +1862,14 @@ mod tests {
                 .await?;
         }
 
+        let _watch = fixture.state.events.watch_project(fixture.project_id);
+        let mut credit_events = fixture.state.events.subscribe();
         super::expire_stale_requeued_jobs(&fixture.state).await?;
+        assert_eq!(
+            crate::tests::queued_credit_signals(&mut credit_events, fixture.project_id),
+            1,
+            "the refund is signalled once the sweep commits"
+        );
 
         let connection = fixture.pool.get().await?;
         let job = connection
@@ -1872,7 +1921,11 @@ mod tests {
             credit_balance(&fixture.pool, &fixture.org_id).await?,
             restored_balance
         );
-        Ok(())
+        assert_eq!(
+            crate::tests::queued_credit_signals(&mut credit_events, fixture.project_id),
+            0
+        );
+        fixture.cleanup().await
     }
 
     /// A runtime stop requeues leased jobs as well as queued ones. A job that
@@ -1919,7 +1972,14 @@ mod tests {
                 .await?;
         }
 
+        let _watch = fixture.state.events.watch_project(fixture.project_id);
+        let mut credit_events = fixture.state.events.subscribe();
         super::expire_stale_requeued_jobs(&fixture.state).await?;
+        assert_eq!(
+            crate::tests::queued_credit_signals(&mut credit_events, fixture.project_id),
+            0,
+            "no refund, no signal"
+        );
 
         let connection = fixture.pool.get().await?;
         let job = connection
@@ -1969,6 +2029,6 @@ mod tests {
             run_metadata["managedAiCredit"]["refund"],
             serde_json::Value::Null
         );
-        Ok(())
+        fixture.cleanup().await
     }
 }
