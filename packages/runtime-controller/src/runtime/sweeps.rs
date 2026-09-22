@@ -495,7 +495,7 @@ pub(crate) async fn expire_stale_requeued_jobs(state: &AppState) -> AnyResult<()
 /// Tells the frontend a runtime stopped and why, so a deliberate pause
 /// (idle, credits) renders as an explained state instead of an "unexpected
 /// stop" that gets silently auto-restarted.
-fn notify_runtime_stopped(
+pub(super) fn notify_runtime_stopped(
     state: &AppState,
     project_id: Uuid,
     runtime_id: Uuid,
