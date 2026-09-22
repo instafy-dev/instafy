@@ -21,7 +21,7 @@ import { useStatus } from "../status/useStatus";
 import { useTelemetry } from "../telemetry/useTelemetry";
 import { cloneRuntimeState } from "./defaults";
 import { useDesktopRuntimeEnsure } from "./hooks/useDesktopRuntimeEnsure";
-import { useHostedRuntimeEnsure } from "./hooks/useHostedRuntimeEnsure";
+import { useHostedRuntimeEnsure, type EnsureHostedRuntimeOptions } from "./hooks/useHostedRuntimeEnsure";
 import { useHostedRuntimePolicy } from "./hooks/useHostedRuntimePolicy";
 import { clearManualStop, markManualStop } from "./idlePauseRegistry";
 import { stopLeavesNoLiveHostedRuntime } from "./hooks/manualStopDecisions";
@@ -56,7 +56,7 @@ interface RuntimeOperationsContextValue {
   runtimeEnsureLimit: HostedRuntimeLimitErrorDetails | null;
   hostedRuntimeEnsuring: boolean;
   hostedRuntimeTakeoverInProgress: boolean;
-  ensureHostedRuntime: () => Promise<boolean>;
+  ensureHostedRuntime: (options?: EnsureHostedRuntimeOptions) => Promise<boolean>;
   takeOverHostedRuntimeLimit: () => Promise<boolean>;
   desktopRuntimeEnsuring: boolean;
   ensureDesktopRuntime: () => Promise<boolean>;
@@ -682,7 +682,7 @@ export function RuntimeOperationsProvider({
           parentConversationId?: string | null;
           threadKind?: string | null;
         }) => Promise<string | null>;
-        ensureHostedRuntime: () => Promise<boolean>;
+        ensureHostedRuntime: (options?: EnsureHostedRuntimeOptions) => Promise<boolean>;
       };
     };
 
