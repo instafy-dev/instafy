@@ -307,6 +307,62 @@ describe("ChatTypingRows", () => {
     expect(container.textContent).not.toContain("Starting…");
   });
 
+  it("drops the status row at once when the reply landed while it was up", async () => {
+    // Seen on production: octo's reply appeared with its avatar above it,
+    // and a second octo avatar sat under the finished answer for seconds,
+    // because the spacer meant for a reply still on its way outlived one
+    // that had already arrived.
+    const props = {
+      peerTypingLabel: null,
+      isAssistantTypingCoveredByJobThreadPreview: false,
+      typingAgents: [],
+      hasMultipleTypingAgents: false,
+      typingAgentHandle: "octo",
+      typingAgentAvatarSeed: "octo",
+      typingStatusLabel: "Thinking…",
+      typingStatusAriaLabel: "Thinking",
+      isThinkingLabelExpanded: false,
+      onToggleThinkingLabel: () => undefined,
+      renderAssistantAvatar: () => <span data-testid="assistant-avatar" />,
+    };
+    vi.useFakeTimers();
+    await act(async () => {
+      root.render(
+        <ChatTypingRows
+          {...props}
+          isAssistantTyping
+          typingIndicatorState={{ phase: "thinking", label: "Thinking…" }}
+          latestDisplayedMessageId="question"
+        />,
+      );
+    });
+    // The reply lands while the run is still finishing.
+    await act(async () => {
+      root.render(
+        <ChatTypingRows
+          {...props}
+          isAssistantTyping
+          typingIndicatorState={{ phase: "thinking", label: "Thinking…" }}
+          latestDisplayedMessageId="reply"
+        />,
+      );
+    });
+    // Then the run ends.
+    await act(async () => {
+      root.render(
+        <ChatTypingRows
+          {...props}
+          isAssistantTyping={false}
+          typingIndicatorState={null}
+          latestDisplayedMessageId="reply"
+        />,
+      );
+    });
+
+    expect(container.querySelector('[data-testid="assistant-typing-indicator"]')).toBeNull();
+    expect(container.querySelector('[data-testid="assistant-avatar"]')).toBeNull();
+  });
+
   it("keeps a hidden assistant status spacer until the next message lands", async () => {
     vi.useFakeTimers();
     await act(async () => {

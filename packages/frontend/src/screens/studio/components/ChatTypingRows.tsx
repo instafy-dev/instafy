@@ -170,14 +170,30 @@ export function ChatTypingRows({
   const [lingeringAssistantStatus, setLingeringAssistantStatus] =
     useState<AssistantTypingStatusSnapshot | null>(null);
   const latestDisplayedMessageIdRef = useRef(latestDisplayedMessageId);
+  // The latest message when the status row appeared. The hidden spacer that
+  // outlives the status exists to hold the place of a reply that has not
+  // landed yet; when the reply landed while the status was up, the spacer
+  // is a second octo avatar under a finished answer, for up to twelve
+  // seconds.
+  const statusAnchorMessageIdRef = useRef<string | null>(null);
+  const wasShowingAssistantStatusRef = useRef(false);
 
   useEffect(() => {
     if (showAssistantStatus) {
+      if (!wasShowingAssistantStatusRef.current) {
+        wasShowingAssistantStatusRef.current = true;
+        statusAnchorMessageIdRef.current = latestDisplayedMessageId ?? null;
+      }
       setLingeringAssistantStatus(assistantStatusSnapshot);
       return;
     }
+    wasShowingAssistantStatusRef.current = false;
 
     if (!lingeringAssistantStatus) {
+      return;
+    }
+    if ((latestDisplayedMessageId ?? null) !== statusAnchorMessageIdRef.current) {
+      setLingeringAssistantStatus(null);
       return;
     }
 
@@ -188,6 +204,7 @@ export function ChatTypingRows({
     return () => window.clearTimeout(timeoutId);
   }, [
     assistantStatusSnapshot,
+    latestDisplayedMessageId,
     lingeringAssistantStatus,
     showAssistantStatus,
   ]);
