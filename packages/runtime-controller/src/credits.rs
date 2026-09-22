@@ -373,12 +373,18 @@ pub(crate) fn calculate_managed_ai_usage_charge(
     config: &AppConfig,
     usage: ManagedAiTokenUsage,
 ) -> ManagedAiUsageCharge {
+    // `input_tokens` is the whole prompt, cached prefix included: Codex and the
+    // OpenAI Responses API report `cached_input_tokens` as a subset of it. Only
+    // the uncached remainder is billed at the input rate; the cached part is
+    // billed once, at the cached rate.
+    let cached_input_tokens = usage.cached_input_tokens.min(usage.input_tokens);
+    let uncached_input_tokens = usage.input_tokens - cached_input_tokens;
     let input_cost_usd_micros = token_cost_usd_micros(
-        usage.input_tokens,
+        uncached_input_tokens,
         config.managed_ai_input_usd_micros_per_1k,
     );
     let cached_input_cost_usd_micros = token_cost_usd_micros(
-        usage.cached_input_tokens,
+        cached_input_tokens,
         config.managed_ai_cached_input_usd_micros_per_1k,
     );
     let output_cost_usd_micros = token_cost_usd_micros(
@@ -3138,16 +3144,58 @@ mod tests {
             },
         );
 
-        // GPT-6 Luna list-price defaults (USD micros per 1K tokens: 100 / 10 / 500):
-        // 1,000 input = 100, 500 cached = 5, 250 output = 125, total 230 micros,
-        // which rounds up to one billing unit at 1,000 units per USD.
+        // GPT-6 Luna list-price defaults (USD micros per 1K tokens: 100 / 10 / 500).
+        // The 500 cached tokens are part of the 1,000 input tokens: 500 uncached
+        // = 50, 500 cached = 5, 250 output = 125, total 180 micros, which rounds
+        // up to one billing unit at 1,000 units per USD.
         assert_eq!(charge.reserve_units, 1);
-        assert_eq!(charge.input_cost_usd_micros, 100);
+        assert_eq!(charge.input_cost_usd_micros, 50);
         assert_eq!(charge.cached_input_cost_usd_micros, 5);
         assert_eq!(charge.output_cost_usd_micros, 125);
-        assert_eq!(charge.total_cost_usd_micros, 230);
+        assert_eq!(charge.total_cost_usd_micros, 180);
         assert_eq!(charge.charged_units, 1);
         assert_eq!(charge.adjustment_units, 0);
+    }
+
+    #[test]
+    fn managed_ai_charge_bills_cached_input_once() {
+        let config = crate::tests::build_app_config(
+            crate::tests::test_origin_private_key(),
+            crate::tests::test_origin_public_key(),
+            "test-key",
+        );
+        // A real production turn (2026-09-22): 50,351 input tokens of which
+        // 24,548 were a cached prefix, 173 output. Billing the cached prefix at
+        // the input rate as well charged 5,369 micros (6 units) for a turn
+        // whose list cost is 2,914 micros (3 units).
+        let charge = calculate_managed_ai_usage_charge(
+            &config,
+            ManagedAiTokenUsage {
+                input_tokens: 50_351,
+                cached_input_tokens: 24_548,
+                output_tokens: 173,
+            },
+        );
+        assert_eq!(charge.input_cost_usd_micros, 2_581);
+        assert_eq!(charge.cached_input_cost_usd_micros, 246);
+        assert_eq!(charge.output_cost_usd_micros, 87);
+        assert_eq!(charge.total_cost_usd_micros, 2_914);
+        assert_eq!(charge.charged_units, 3);
+        assert_eq!(charge.adjustment_units, 2);
+
+        // A cached count above the input count never bills more than the
+        // input tokens, all at the cached rate.
+        let clamped = calculate_managed_ai_usage_charge(
+            &config,
+            ManagedAiTokenUsage {
+                input_tokens: 1_000,
+                cached_input_tokens: 5_000,
+                output_tokens: 0,
+            },
+        );
+        assert_eq!(clamped.input_cost_usd_micros, 0);
+        assert_eq!(clamped.cached_input_cost_usd_micros, 10);
+        assert_eq!(clamped.total_cost_usd_micros, 10);
     }
 
     #[test]
