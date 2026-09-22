@@ -3,8 +3,9 @@
 Status: Electron supports native WebRTC video with JPEG compatibility. Physical
 Android Chrome has exercised video over Wi-Fi/TURN alongside a desktop viewer,
 including independent scrolling, keyboard input, rotation, reconnect and revocation.
-Earlier physical iOS checks cover JPEG only. Physical iOS video, cellular/WAN
-performance and multi-controller routing remain open.
+Physical iOS has exercised video over Wi-Fi/TURN, independent touch input,
+keyboard input, rotation, control handoff and revocation. iOS suspension/reconnect,
+cellular/WAN performance and multi-controller routing remain open.
 
 The browser's location and its audience are separate choices. The browser location
 selector says **This device** and **Workspace**. This device uses Personal Browser
@@ -184,6 +185,18 @@ stayed connected after batching; the prior build disconnected. Keyboard and
 landscape resizing worked, although the smaller/landscape streams temporarily
 used software H.264 encoding. Returning to portrait restored hardware encoding.
 
+A physical iPhone 13 mini check received 750 × 1076 video for a 375 × 538
+portrait Explore page, then 1424 × 494 for a 712 × 247 landscape page. A desktop
+viewer kept its own 390 × 686 layout and scroll. Native touch scrolling,
+navigation/Back, keyboard input, saved-state propagation, control/take-back and
+Stop passed; reconnecting to the stopped share was denied. Unsaved owner text
+remained separate. The phone negotiated constrained-baseline H.264 and the sender
+reported software OpenH264, while the desktop stream used hardware VideoToolbox.
+The cause of that difference is unproven. Short swipes with idle gaps do not
+establish sustained frame rate or latency. The automation's Home action left the
+app foregrounded, so this run does not qualify iOS suspension or successful
+reconnection after it.
+
 Signaling carries only a connection's own peer to that viewer. The controller
 chooses its Follow/Explore source, enforces the existing audience and derives
 short-lived TURN credentials using the existing `CONTROLLER_BROWSER_TURN_*`
@@ -266,9 +279,10 @@ layout and independent page scrolling described above.
 
 ## Next increments
 
-1. Qualify native video on physical Android and iOS with an active network,
-   including rotation, software keyboard, background/resume and revocation.
-   USB forwarding without an active Android network is not a WebRTC sign-off.
+1. Complete physical iOS suspension/resume and successful reconnect testing,
+   then investigate its software H.264 negotiation and measure sustained motion.
+   Preserve the existing Android and iOS interaction checks with active networking;
+   USB forwarding without an active phone network is not a WebRTC sign-off.
 2. Measure real LAN/WAN input-to-photon latency, text quality, CPU, battery and
    bandwidth under loss, network changes and multiple simultaneous participants.
    Tune 60 fps and codec selection from these results before exposing quality modes.
