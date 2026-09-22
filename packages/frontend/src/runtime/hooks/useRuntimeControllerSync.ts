@@ -25,7 +25,15 @@ import {
   CONVERSATION_SEND_QUEUE_EVENT,
   type ConversationSendQueueEventDetail,
 } from "../../services/runtimeController/sendQueue";
-import { PROJECT_ACCESS_REFRESH_EVENT } from "../../projects/projectAccessEvents";
+import {
+  MEMBERS_CHANGED_EVENT,
+  PROJECT_ACCESS_REFRESH_EVENT,
+  type MembersChangedEventDetail,
+} from "../../projects/projectAccessEvents";
+import {
+  CREDITS_UPDATED_EVENT,
+  type CreditsUpdatedEventDetail,
+} from "../../credits/creditsEvents";
 
 const { fetch: fetchRunsFromController, subscribe: subscribeToRunsFromController } = controllerClient.runs;
 const { fetchLocalPresence: fetchLocalWorkspacePresence, fetchSummary: fetchOriginSummary } =
@@ -404,6 +412,25 @@ export function useRuntimeControllerSync({
                 // A null project id is an org-wide access invalidation and
                 // must refresh whichever project is active now, not whichever
                 // project this stream captured before a navigation switch.
+                detail: { projectId: event.project_id ?? null },
+              }),
+            );
+          }
+          // Roster and credit signals carry no data; listeners refetch
+          // through their own authorized endpoints.
+          if (
+            event.kind === "project.members_changed" &&
+            typeof window !== "undefined"
+          ) {
+            window.dispatchEvent(
+              new CustomEvent<MembersChangedEventDetail>(MEMBERS_CHANGED_EVENT, {
+                detail: { projectId: event.project_id ?? null },
+              }),
+            );
+          }
+          if (event.kind === "credits.updated" && typeof window !== "undefined") {
+            window.dispatchEvent(
+              new CustomEvent<CreditsUpdatedEventDetail>(CREDITS_UPDATED_EVENT, {
                 detail: { projectId: event.project_id ?? null },
               }),
             );

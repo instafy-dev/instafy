@@ -58,6 +58,21 @@ This document explains how the Instafy runtime controller is structured and how 
 
 Refer to `src/main.rs` for the complete list, including agent callbacks and admin endpoints (`/runtime/stop`, `/runtime/idle-reaper`).
 
+### Invalidation signals on `/events`
+
+Some changes are announced as bare signals so open clients refetch instead of polling. Each is
+published only after the change's transaction commits, once per affected project stream, with a
+payload of `{ "reason": ... }` and nothing else. Every project viewer receives them, including
+guests without org or billing access, so they must never carry data a viewer could not fetch.
+
+| Kind | Reasons | Published for | Clients refetch |
+| --- | --- | --- | --- |
+| `project.members_changed` | `project_membership`, `org_membership` | the project, or every live project of the org | `/projects/:id/members`, `/orgs/:id/members` |
+| `credits.updated` | `ledger`, `subscription` | every live project of the org | `/credits/status`, `/credits/ledger` |
+
+`project.access_changed` is different: it targets the affected user only, so their open clients
+refetch their own capabilities.
+
 ### Conversation recipients
 
 Private creation accepts at most 32 UUID `initialParticipantUserIds`. Each target must already

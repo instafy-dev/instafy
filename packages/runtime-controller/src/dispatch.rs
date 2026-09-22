@@ -1508,6 +1508,9 @@ pub(crate) async fn process_dispatch_prompt(
             .iter()
             .any(|(_, target)| target.credential_id.is_none());
 
+    // Set when this dispatch wrote the managed-AI reserve burn, so the org's
+    // viewers get credits.updated once the dispatch transaction commits.
+    let mut managed_ai_credit_org_id: Option<Uuid> = None;
     if uses_managed_ai && skill_mode_ambient_evaluation {
         // Deferred billing: ambient evaluations are free unless the agent
         // actually speaks. The flat prompt burn (and the managedAiUsed
@@ -1644,6 +1647,9 @@ pub(crate) async fn process_dispatch_prompt(
             &mut credit_burn_metadata,
         )
         .await?;
+        if credits::credit_ledger_row_written(&credit_burn_metadata) {
+            managed_ai_credit_org_id = Some(org_id);
+        }
         let reserve_idempotency_key = format!("managed-ai-prompt:{prompt_id}");
         let managed_ai_credit_trace = match build_managed_ai_reserve_trace(
             &transaction,
@@ -1900,6 +1906,15 @@ pub(crate) async fn process_dispatch_prompt(
         .commit()
         .await
         .map_err(|error| internal_error(format!("failed to commit dispatch prompt: {error}")))?;
+    if let Some(org_id) = managed_ai_credit_org_id {
+        credits::publish_credits_updated(
+            &*connection,
+            &state.events,
+            &org_id,
+            credits::CREDITS_UPDATED_LEDGER,
+        )
+        .await;
+    }
 
     if let Some(user_message) = user_message.as_ref() {
         conversations::publish_conversation_message_event(&state.events, user_message);

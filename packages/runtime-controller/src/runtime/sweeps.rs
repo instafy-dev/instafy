@@ -929,6 +929,14 @@ pub(crate) async fn sweep_hosted_runtime_credit_usage(state: &AppState) -> AnyRe
                         %error,
                         "failed to commit hosted runtime credit burn"
                     );
+                } else if crate::credits::credit_ledger_row_written(&metadata) {
+                    crate::credits::publish_credits_updated(
+                        &*burn_connection,
+                        &state.events,
+                        &org_id,
+                        crate::credits::CREDITS_UPDATED_LEDGER,
+                    )
+                    .await;
                 }
             }
             Err((status, Json(err))) if status == StatusCode::BAD_REQUEST => {

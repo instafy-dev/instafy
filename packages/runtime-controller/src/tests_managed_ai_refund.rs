@@ -408,6 +408,7 @@ async fn managed_ai_prompt_refunds_when_completion_fails_before_upstream() -> an
         eprintln!("skipping managed AI refund test: TEST_DATABASE_URL not set");
         return Ok(());
     };
+    let mut credit_events = fixture.state.events.subscribe();
 
     let status = post_agent_complete(
         &fixture,
@@ -420,6 +421,11 @@ async fn managed_ai_prompt_refunds_when_completion_fails_before_upstream() -> an
     )
     .await?;
     assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        crate::tests::queued_credit_signals(&mut credit_events, fixture.project_id),
+        1,
+        "the committed refund is signalled"
+    );
 
     let refund_key = format!("managed-ai-refund:{}", fixture.prompt_id);
     let reserve_key = format!("managed-ai-prompt:{}", fixture.prompt_id);
@@ -501,6 +507,8 @@ async fn managed_ai_prompt_keeps_charge_when_failure_may_have_reached_upstream(
         label: &'static str,
         error_message: &'static str,
         artifacts: serde_json::Value,
+        /// Usage reconciliation writes the ledger; a kept charge alone does not.
+        credit_signals: usize,
     }
     let cases = [
         Case {
@@ -523,12 +531,14 @@ async fn managed_ai_prompt_keeps_charge_when_failure_may_have_reached_upstream(
                     ]
                 }
             ]),
+            credit_signals: 1,
         },
         Case {
             // An upstream error is not proof the model was never called.
             label: "upstream-error",
             error_message: "unexpected status 500 Internal Server Error",
             artifacts: json!([]),
+            credit_signals: 0,
         },
     ];
 
@@ -537,6 +547,7 @@ async fn managed_ai_prompt_keeps_charge_when_failure_may_have_reached_upstream(
             eprintln!("skipping managed AI keep-charge test: TEST_DATABASE_URL not set");
             return Ok(());
         };
+        let mut credit_events = fixture.state.events.subscribe();
 
         let status = post_agent_complete(
             &fixture,
@@ -549,6 +560,12 @@ async fn managed_ai_prompt_keeps_charge_when_failure_may_have_reached_upstream(
         )
         .await?;
         assert_eq!(status, StatusCode::OK, "{}", case.label);
+        assert_eq!(
+            crate::tests::queued_credit_signals(&mut credit_events, fixture.project_id),
+            case.credit_signals,
+            "{}",
+            case.label
+        );
 
         let rows = ledger_rows(&fixture.pool, &fixture.project_id).await?;
         assert!(

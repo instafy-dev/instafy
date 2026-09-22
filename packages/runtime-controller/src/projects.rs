@@ -30,10 +30,18 @@ use crate::origins::{
     acquire_fresh_lease, release_lease,
     resolve_accessible_origin_for_protocol_with_hosted_fallback, LeaseAcquireOutcome,
 };
-use crate::state::{publish_project_access_changed, AppState};
+use crate::state::{publish_project_access_changed, publish_project_signal, AppState, EventHub};
 use crate::tokens::{mint_scoped_token, ScopedTokenRequest};
 
 const ORIGIN_APPLY_TIMEOUT_SECS: u64 = 180;
+
+/// Roster invalidation for everyone viewing a space (the targeted
+/// `project.access_changed` still tells the affected user). Signal only:
+/// viewers refetch `/projects/{id}/members` or the org directory through
+/// their own authorization.
+pub(crate) const PROJECT_MEMBERS_CHANGED_EVENT: &str = "project.members_changed";
+const MEMBERS_CHANGED_PROJECT_MEMBERSHIP: &str = "project_membership";
+const MEMBERS_CHANGED_ORG_MEMBERSHIP: &str = "org_membership";
 
 #[derive(Debug, Clone)]
 pub(crate) struct ScopeParams {
@@ -2195,6 +2203,54 @@ async fn get_project_member_profile(
     Ok(Json(profile))
 }
 
+/// Live (not deleted) projects of an org: the streams an org-wide signal
+/// must reach, since every event stream is scoped to one project.
+pub(crate) async fn load_org_project_ids(
+    client: &impl tokio_postgres::GenericClient,
+    org_id: &Uuid,
+) -> Result<Vec<Uuid>, tokio_postgres::Error> {
+    let rows = client
+        .query(
+            "select id from projects
+             where org_id = $1 and lower(coalesce(status, '')) <> 'deleted'",
+            &[org_id],
+        )
+        .await?;
+    Ok(rows.into_iter().map(|row| row.get("id")).collect())
+}
+
+/// Publishes `project.members_changed` on every project stream of the org
+/// after an org membership change has committed. Best effort: the membership
+/// change already succeeded, and clients still refresh on focus/reconnect.
+async fn publish_org_members_changed(
+    client: &impl tokio_postgres::GenericClient,
+    events: &EventHub,
+    org_id: &Uuid,
+) {
+    match load_org_project_ids(client, org_id).await {
+        Ok(project_ids) => publish_project_signal(
+            events,
+            PROJECT_MEMBERS_CHANGED_EVENT,
+            &project_ids,
+            MEMBERS_CHANGED_ORG_MEMBERSHIP,
+        ),
+        Err(error) => tracing::warn!(
+            org_id = %org_id,
+            %error,
+            "failed to load org projects for members_changed; roster viewers refresh on focus"
+        ),
+    }
+}
+
+fn publish_project_members_changed(events: &EventHub, project_id: Uuid) {
+    publish_project_signal(
+        events,
+        PROJECT_MEMBERS_CHANGED_EVENT,
+        &[project_id],
+        MEMBERS_CHANGED_PROJECT_MEMBERSHIP,
+    );
+}
+
 async fn update_project_member(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -2242,6 +2298,7 @@ async fn update_project_member(
     })?;
 
     publish_project_access_changed(&state.events, Some(project_id), user_id);
+    publish_project_members_changed(&state.events, project_id);
 
     Ok(Json(ProjectMemberResponse { member }))
 }
@@ -2289,6 +2346,7 @@ async fn remove_project_member(
     })?;
 
     publish_project_access_changed(&state.events, Some(project_id), user_id);
+    publish_project_members_changed(&state.events, project_id);
 
     Ok(StatusCode::NO_CONTENT)
 }
@@ -2551,6 +2609,7 @@ async fn add_org_member(
     })?;
 
     publish_project_access_changed(&state.events, None, user_id);
+    publish_org_members_changed(&*connection, &state.events, &org_id).await;
 
     Ok(Json(OrgMemberResponse { member }))
 }
@@ -2616,6 +2675,7 @@ async fn update_org_member(
     })?;
 
     publish_project_access_changed(&state.events, None, user_id);
+    publish_org_members_changed(&*connection, &state.events, &org_id).await;
 
     Ok(Json(OrgMemberResponse { member }))
 }
@@ -2670,6 +2730,7 @@ async fn remove_org_member(
     })?;
 
     publish_project_access_changed(&state.events, None, user_id);
+    publish_org_members_changed(&*connection, &state.events, &org_id).await;
 
     Ok(StatusCode::NO_CONTENT)
 }
@@ -4052,6 +4113,7 @@ async fn accept_org_invitation(
             })?;
 
             publish_project_access_changed(&state.events, Some(project_id), user_id);
+            publish_project_members_changed(&state.events, project_id);
 
             return Ok(Json(OrgInvitationAcceptResponse {
                 org_id,
@@ -4082,6 +4144,7 @@ async fn accept_org_invitation(
             })?;
 
             publish_project_access_changed(&state.events, None, user_id);
+            publish_org_members_changed(&*connection, &state.events, &org_id).await;
 
             return Ok(Json(OrgInvitationAcceptResponse {
                 org_id,
@@ -4203,6 +4266,10 @@ async fn accept_org_invitation(
     })?;
 
     publish_project_access_changed(&state.events, project_id, user_id);
+    match project_id {
+        Some(project_id) => publish_project_members_changed(&state.events, project_id),
+        None => publish_org_members_changed(&*connection, &state.events, &org_id).await,
+    }
 
     Ok(Json(OrgInvitationAcceptResponse {
         org_id,

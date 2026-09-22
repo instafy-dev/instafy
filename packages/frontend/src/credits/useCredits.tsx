@@ -22,14 +22,9 @@ import { useBilling } from "./BillingProvider";
 import { useProject } from "../projects/useProject";
 import { runtimeControllerEnabled } from "../sdk/instafy";
 import { isPollingActive, useGatedInterval } from "../runtime/pollingGate";
+import { CREDITS_UPDATED_EVENT } from "./creditsEvents";
 
-/**
- * Window event that says the credit balance or plan changed server-side
- * (published by the controller as credits.updated and forwarded by the sync
- * hook). The provider refreshes the snapshot on it, and the ledger too while
- * the Credits panel is open, so the gated timers below are only a fallback.
- */
-export const CREDITS_UPDATED_EVENT = "instafy:credits-updated";
+export { CREDITS_UPDATED_EVENT } from "./creditsEvents";
 
 // Every tab keeps one status refresh per minute while the user is active,
 // one per five minutes once idle and none while hidden. The Credits panel

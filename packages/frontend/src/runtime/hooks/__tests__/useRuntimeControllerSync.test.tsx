@@ -51,6 +51,8 @@ vi.mock("../../utils/runtimeDebug", () => ({
 }));
 
 import { useRuntimeControllerSync } from "../useRuntimeControllerSync";
+import { MEMBERS_CHANGED_EVENT } from "../../../projects/projectAccessEvents";
+import { CREDITS_UPDATED_EVENT } from "../../../credits/creditsEvents";
 
 function deferred<T>() {
   let resolve!: (value: T) => void;
@@ -306,6 +308,66 @@ describe("useRuntimeControllerSync controller access results", () => {
     });
     expect(unsubscribe).toHaveBeenCalledOnce();
     expect(dependencies.markControllerUnavailable).not.toHaveBeenCalled();
+  });
+
+  it("forwards roster and credit signals as window events", async () => {
+    const dependencies = createHookDependencies();
+    let subscription: SubscribeControllerRunsParams | null = null;
+    controllerMocks.fetchRuns.mockResolvedValue(fetchResult());
+    controllerMocks.subscribeToRuns.mockImplementation(
+      (params: SubscribeControllerRunsParams) => {
+        subscription = params;
+        return vi.fn();
+      },
+    );
+    const membersChanged = vi.fn<(event: Event) => void>();
+    const creditsUpdated = vi.fn<(event: Event) => void>();
+    window.addEventListener(MEMBERS_CHANGED_EVENT, membersChanged);
+    window.addEventListener(CREDITS_UPDATED_EVENT, creditsUpdated);
+
+    try {
+      await act(async () => {
+        root.render(
+          <Harness projectId="project-current" dependencies={dependencies} />,
+        );
+      });
+      await vi.waitFor(() => expect(subscription).not.toBeNull());
+
+      await act(async () => {
+        subscription?.onEvent?.({
+          kind: "telemetry.warning",
+          project_id: "project-current",
+          data: { message: "unrelated" },
+        });
+      });
+      expect(membersChanged).not.toHaveBeenCalled();
+      expect(creditsUpdated).not.toHaveBeenCalled();
+
+      await act(async () => {
+        subscription?.onEvent?.({
+          kind: "project.members_changed",
+          project_id: "project-current",
+          data: { reason: "org_membership" },
+        });
+        subscription?.onEvent?.({
+          kind: "credits.updated",
+          project_id: "project-current",
+          data: { reason: "ledger" },
+        });
+      });
+
+      expect(membersChanged).toHaveBeenCalledOnce();
+      expect((membersChanged.mock.calls[0][0] as CustomEvent).detail).toEqual({
+        projectId: "project-current",
+      });
+      expect(creditsUpdated).toHaveBeenCalledOnce();
+      expect((creditsUpdated.mock.calls[0][0] as CustomEvent).detail).toEqual({
+        projectId: "project-current",
+      });
+    } finally {
+      window.removeEventListener(MEMBERS_CHANGED_EVENT, membersChanged);
+      window.removeEventListener(CREDITS_UPDATED_EVENT, creditsUpdated);
+    }
   });
 
   it("reconciles runs after a disconnected stream reopens", async () => {

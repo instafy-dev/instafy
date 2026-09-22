@@ -684,6 +684,32 @@ pub(crate) fn publish_project_access_changed(
     });
 }
 
+/// Publishes one untargeted, signal-only event per project so every open
+/// stream of those projects learns that something it can already read has
+/// changed, and refetches it through its own authorized endpoint. The events
+/// take the ordinary per-event project access recheck, so the payload is the
+/// reason alone and must never carry data a project viewer could not fetch
+/// (no balance, plan, member or role). Publish only after the transaction
+/// that made the change has committed.
+pub(crate) fn publish_project_signal(
+    hub: &EventHub,
+    kind: &str,
+    project_ids: &[Uuid],
+    reason: &str,
+) {
+    for project_id in project_ids {
+        publish_controller_event(
+            hub,
+            kind,
+            Some(*project_id),
+            None,
+            None,
+            None,
+            serde_json::json!({ "reason": reason }),
+        );
+    }
+}
+
 fn session_channel(session_id: Option<Uuid>) -> Option<String> {
     session_id.map(|value| format!("session:{value}"))
 }

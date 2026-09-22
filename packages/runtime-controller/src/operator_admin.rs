@@ -486,6 +486,13 @@ async fn adjust_project_credits(
             "failed to commit operator credit adjustment: {error}"
         ))
     })?;
+    crate::credits::publish_credits_updated(
+        &*connection,
+        &state.events,
+        &org_id,
+        crate::credits::CREDITS_UPDATED_LEDGER,
+    )
+    .await;
 
     Ok(Json(build_credit_snapshot(
         ending_snapshot,

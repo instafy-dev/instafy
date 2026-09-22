@@ -640,6 +640,13 @@ async fn apply_subscription_update(
     transaction.commit().await.map_err(|error| {
         internal_error(format!("failed to commit webhook transaction: {error}"))
     })?;
+    crate::credits::publish_credits_updated(
+        &*connection,
+        &state.events,
+        org_id,
+        crate::credits::CREDITS_UPDATED_SUBSCRIPTION,
+    )
+    .await;
 
     Ok(())
 }
@@ -682,6 +689,15 @@ async fn apply_subscription_status_update(
     transaction.commit().await.map_err(|error| {
         internal_error(format!("failed to commit webhook transaction: {error}"))
     })?;
+    if let StatusUpdateOutcome::Updated(update) = &outcome {
+        crate::credits::publish_credits_updated(
+            &*connection,
+            &state.events,
+            &update.org_id,
+            crate::credits::CREDITS_UPDATED_SUBSCRIPTION,
+        )
+        .await;
+    }
 
     Ok(outcome)
 }
@@ -731,6 +747,13 @@ async fn apply_subscription_plan_update(
     transaction.commit().await.map_err(|error| {
         internal_error(format!("failed to commit webhook transaction: {error}"))
     })?;
+    crate::credits::publish_credits_updated(
+        &*connection,
+        &state.events,
+        org_id,
+        crate::credits::CREDITS_UPDATED_SUBSCRIPTION,
+    )
+    .await;
 
     Ok(())
 }
@@ -780,6 +803,15 @@ async fn apply_subscription_plan_update_by_external_id(
     transaction.commit().await.map_err(|error| {
         internal_error(format!("failed to commit webhook transaction: {error}"))
     })?;
+    if let StatusUpdateOutcome::Updated(update) = &outcome {
+        crate::credits::publish_credits_updated(
+            &*connection,
+            &state.events,
+            &update.org_id,
+            crate::credits::CREDITS_UPDATED_SUBSCRIPTION,
+        )
+        .await;
+    }
 
     Ok(outcome)
 }

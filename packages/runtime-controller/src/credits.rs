@@ -22,7 +22,8 @@ use uuid::Uuid;
 use crate::auth::{authenticate_request, RequestContext};
 use crate::dispatch::DispatchPromptNormalized;
 use crate::model_defaults::DEFAULT_MANAGED_AI_PROVIDER_ID;
-use crate::projects::ensure_project_org;
+use crate::projects::{ensure_project_org, load_org_project_ids};
+use crate::state::{publish_project_signal, EventHub};
 use crate::{
     bad_request, ensure_project_access, internal_error, load_project_record,
     parse_optional_uuid_param, unauthorized, ApiError, AppConfig, AppState, ProjectRecord,
@@ -30,6 +31,43 @@ use crate::{
 
 const AUTO_REFILL_DAILY_WINDOW_ID: &str = "daily";
 const AUTO_REFILL_DAILY_REASON: &str = "auto_refill_daily";
+
+/// Org credit state (balance, limit or plan) changed. Signal only: viewers
+/// refetch `/credits/status` and the ledger through their own authorization.
+pub(crate) const CREDITS_UPDATED_EVENT: &str = "credits.updated";
+/// A committed `org_credit_ledger` row moved the balance.
+pub(crate) const CREDITS_UPDATED_LEDGER: &str = "ledger";
+/// A committed subscription change moved the plan or credit limit.
+pub(crate) const CREDITS_UPDATED_SUBSCRIPTION: &str = "subscription";
+
+/// Publishes `credits.updated` on every project stream of the org. Call it
+/// only after the transaction that wrote the ledger row or subscription has
+/// committed, with a client outside that transaction. Best effort: the
+/// change already succeeded, and clients keep a slow fallback refresh.
+pub(crate) async fn publish_credits_updated(
+    client: &impl GenericClient,
+    events: &EventHub,
+    org_id: &Uuid,
+    reason: &str,
+) {
+    match load_org_project_ids(client, org_id).await {
+        Ok(project_ids) => {
+            publish_project_signal(events, CREDITS_UPDATED_EVENT, &project_ids, reason)
+        }
+        Err(error) => tracing::warn!(
+            org_id = %org_id,
+            %error,
+            "failed to load org projects for credits.updated; viewers keep the fallback refresh"
+        ),
+    }
+}
+
+/// Whether a burn or refill that returned `Ok` wrote a new ledger row (as
+/// opposed to replaying an idempotency key). Both set `deduped` on the
+/// metadata they were given.
+pub(crate) fn credit_ledger_row_written(metadata: &JsonValue) -> bool {
+    metadata.get("deduped").and_then(JsonValue::as_bool) == Some(false)
+}
 
 pub(crate) fn router() -> Router<AppState> {
     Router::new()
@@ -875,6 +913,10 @@ pub(crate) async fn credit_event(
             );
             internal_error(format!("failed to commit credit event: {error}"))
         })?;
+        if credit_ledger_row_written(&metadata_with_context) {
+            publish_credits_updated(&*connection, &state.events, &org_id, CREDITS_UPDATED_LEDGER)
+                .await;
+        }
 
         snapshot
     };
