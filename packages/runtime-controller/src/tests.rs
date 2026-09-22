@@ -254,6 +254,7 @@ pub(crate) fn build_app_config(private_key: &str, public_key: &str, key_id: &str
         dev_mode: false,
         runtime_idle_release_seconds: 150,
         runtime_idle_stop_seconds: 1800,
+        runtime_limit_reclaim_idle_seconds: 120,
         max_orgs_per_user: 5,
         max_active_hosted_runtimes_global: 0,
         auto_create_projects: false,
