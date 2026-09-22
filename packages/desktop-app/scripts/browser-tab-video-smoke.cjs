@@ -24,7 +24,7 @@ function finish(code) {
 setTimeout(() => {
   console.error("Native video smoke timed out");
   finish(1);
-}, 45000).unref();
+}, 60000).unref();
 async function eventually(read, accept) {
   const end = Date.now() + 10000;
   while (Date.now() < end) {
@@ -118,7 +118,7 @@ app
           ),
         (v) => v.width > 0 && v.height > 0,
       );
-      return { id, receiver };
+      return { id, receiver, captureTrack: offer.match(/^a=msid:(.+)$/m)?.[1] };
     }
     const first = await connect(2),
       second = await connect(1);
@@ -162,6 +162,37 @@ app
         bytes: out.bytesSent,
       }),
     );
+    const additional = [];
+    for (let i = 0; i < 6; i++) additional.push(await connect(i % 2 ? 2 : 1));
+    assert.ok(first.captureTrack);
+    for (const peer of [second, ...additional]) {
+      assert.equal(peer.captureTrack, first.captureTrack, "Follow viewers share one capture");
+    }
+    await assert.rejects(
+      capture.videoOperation("owner", captureId, "open", {
+        id: randomUUID(),
+        viewId: null,
+        viewport: { width: 375, height: 650, dpr: 1 },
+        configuration: { iceServers: [], iceTransportPolicy: "all" },
+      }),
+      /Video unavailable/,
+    );
+    const decodedFrames = (peer) =>
+      peer.receiver.webContents.executeJavaScript(
+        `(async()=>[...(await pc.getStats()).values()].find(s=>s.type==='inbound-rtp'&&s.kind==='video').framesDecoded)()`,
+      );
+    const remaining = [first, second];
+    const beforeRemoval = await Promise.all(remaining.map(decodedFrames));
+    requests.splice(2);
+    await capture.videoOperation("owner", captureId, "sync", requests);
+    for (const peer of additional) {
+      assert.equal(await capture.videoOperation("owner", captureId, "stats", { id: peer.id }), null);
+      peer.receiver.destroy();
+    }
+    for (let i = 0; i < remaining.length; i++) {
+      await eventually(() => decodedFrames(remaining[i]), (frames) => frames > beforeRemoval[i]);
+    }
+    console.log("Eight viewers decode; ninth rejected; removing viewers preserves remaining streams.");
     await page.navigate("reload");
     await pause(300);
     await page.resize({ width: 650, height: 375, dpr: 2 });
@@ -240,7 +271,7 @@ app
     await pause(4500);
     assert.equal(await capture.videoOperation("owner", captureId, "stats", { id: last.id }), null);
     console.log(
-      "Native tab video passed: distinct receiver resolutions, hardware reporting, navigation, rotation, revocation and native lease expiry.",
+      "Native tab video passed: eight viewers, shared capture, peer limit, distinct resolutions, navigation, rotation, revocation and native lease expiry.",
     );
     finish(0);
   })

@@ -141,6 +141,28 @@ These samples include source, encoder and receiver and do not establish phone,
 WAN or large-group performance. Encoding scales with viewer count; capture is
 shared between viewers of the same source. No SFU or simulcast service is added.
 
+A later local qualification on the same M1 Max sustained approximately 30 fps
+for eight Follow viewers, alternating 640 × 400 and 1280 × 800 streams from one
+capture. All reported hardware encoding and no dropped frames or freezes during
+the eight-second measurement. Combined source/encoder/receiver CPU reached
+176% of one core and encoded payload reached 1.77 MB/s. This short, local result
+does not establish sustained host-only cost or performance over the Internet.
+The native smoke checks the eight-peer bound, shared capture and removal without
+interrupting remaining viewers.
+
+Receiver buffer tuning remains unchanged. A local comparison of the browser's
+default with `jitterBufferTarget = 0`, using two reversed-order runs per size/rate
+and 24 input-to-decoded-frame samples per condition, found no consistent latency
+improvement. The newer run reached approximately 60 fps locally, but consumed
+more CPU than 30 fps. It does not resolve physical phone or network qualification.
+
+Local UDP TURN tests also injected 3% ChannelData loss per proxy leg and
+25–45 ms variable delay. The stream stayed connected and recovered when the
+impairment ended, but scrolling froze repeatedly during loss; average fps alone
+hid that interruption. An experimental balanced degradation policy did not
+establish a reliable improvement and is not shipped. Loss resilience remains a
+qualification and tuning gap, alongside real WAN and network-change testing.
+
 Signaling carries only a connection's own peer to that viewer. The controller
 chooses its Follow/Explore source, enforces the existing audience and derives
 short-lived TURN credentials using the existing `CONTROLLER_BROWSER_TURN_*`
@@ -254,10 +276,12 @@ during capture, Back, Reload, resizing and teardown. It does not qualify phone i
 end-to-end network latency. Those checks require an owner in Electron and a
 separately authenticated participant on the actual device.
 
-The video smoke uses the real native permission boundary, distinct receiver
-resolutions, hardware statistics, navigation, rotation, expansion from an initially
-small capture, revocation and native lease expiry. It must run explicitly on a
-graphical host; a missing device or graphical environment is not a passing result.
+The video smoke uses the real native permission boundary, eight simultaneous
+viewers sharing a capture, the peer limit, removal preserving other streams,
+distinct receiver resolutions, hardware statistics, navigation, rotation,
+expansion from an initially small capture, revocation and native lease expiry.
+It must run explicitly on a graphical host; a missing device or graphical
+environment is not a passing result.
 
 For the iOS regression check, expand Explore and swipe repeatedly in both
 directions, including after opening/closing the keyboard and rotating the phone.
