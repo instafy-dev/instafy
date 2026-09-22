@@ -7,6 +7,10 @@ import {
   readLocalSupabaseStatusEnv,
   resolveLocalSupabaseDbUrl,
 } from "./lib/localSupabaseEnv.mjs";
+import {
+  SKIP_MIGRATIONS_ENV,
+  shouldApplyLocalMigrations,
+} from "./lib/controllerTestMigrations.mjs";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -30,6 +34,14 @@ function resolveExplicitDatabaseUrl() {
 function ensureSupabaseEnv() {
   const existingEnv = readLocalSupabaseStatusEnv({ cwd: repoRoot, required: false });
   if (existingEnv) {
+    // `supabase:up` migrates on start; an already-running stack has to be
+    // brought up to date here or the suite runs against a stale schema.
+    if (shouldApplyLocalMigrations({ explicitDbUrl: null, env: process.env })) {
+      console.log(
+        `[test-controller] Applying pending migrations to the local stack (set ${SKIP_MIGRATIONS_ENV}=1 to skip)...`
+      );
+      run("pnpm", ["supabase:migrate"]);
+    }
     return existingEnv;
   }
 
@@ -47,7 +59,11 @@ function printUsage() {
 
 Examples:
   pnpm test:controller conversation_message_routes_preserve_inline_reference_content -- --nocapture
-  TEST_DATABASE_URL=postgresql://... pnpm test:controller record_controller_assistant_message_preserves_inline_reference_content`);
+  TEST_DATABASE_URL=postgresql://... pnpm test:controller record_controller_assistant_message_preserves_inline_reference_content
+
+Against the local stack, pending migrations are applied first. An explicit
+TEST_DATABASE_URL is used as given and never migrated. Set ${SKIP_MIGRATIONS_ENV}=1
+to test the local stack exactly as it is.`);
 }
 
 function main() {

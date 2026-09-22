@@ -4,8 +4,9 @@
  * without booting the entire runtime/controller pipeline.
  *
  * Usage:
- *   pnpm supabase:up   # launches Supabase, applies migrations, prints env hints
- *   pnpm supabase:down # stops Supabase
+ *   pnpm supabase:up      # launches Supabase, applies migrations, prints env hints
+ *   pnpm supabase:migrate # applies pending migrations to the already-running local stack
+ *   pnpm supabase:down    # stops Supabase
  */
 
 import { spawnSync } from "node:child_process";
@@ -205,6 +206,16 @@ function printEnvHints(env) {
 try {
   if (action === "down") {
     stopSupabase();
+    process.exit(0);
+  }
+  if (action === "migrate") {
+    // Only ever the local stack: `migration up --local` cannot reach another
+    // database, and a stack that is not running is a setup problem to report,
+    // not a reason to start one behind the caller's back.
+    if (!readSupabaseEnv()) {
+      throw new Error("local Supabase is not running; start it with 'pnpm supabase:up'");
+    }
+    applySupabaseMigrations();
     process.exit(0);
   }
 
