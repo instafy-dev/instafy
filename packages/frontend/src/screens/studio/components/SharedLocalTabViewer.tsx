@@ -24,6 +24,8 @@ export function SharedLocalTabViewer({ projectId, share, onClose, onEnded }: { p
   },[videoElement,videoStream]);
   const [image, setImage] = useState<string | null>(null);
   const [state, setState] = useState("Connecting…");
+  const [canReconnect, setCanReconnect] = useState(false);
+  const [connectionAttempt, setConnectionAttempt] = useState(0);
   const [explore,setExplore] = useState<LocalExploreState | null>(null);
   const exploreRef = useRef(explore); exploreRef.current = explore;
   const exploring = Boolean(explore?.view);
@@ -53,22 +55,35 @@ export function SharedLocalTabViewer({ projectId, share, onClose, onEnded }: { p
   },[command]);
   useEffect(()=>{
     if(!surface)return;
+    // Rebinding discards gestures queued for the previous view or control grant.
     return attachRemoteBrowserInput(surface,{
       enabled:()=>Boolean((exploreRef.current?.view || (controlRef.current?.grant && controlRef.current.grant.connectionId===controlRef.current.connectionId)) && !panRef.current),
       getViewport:()=>({width:1,height:1,dpr:1,deviceWidth:1,deviceHeight:1}),
       send:sendInput,
     }).dispose;
-  },[surface,sendInput]);
+  },[surface,sendInput,explore?.view?.viewId,control?.grant?.id]);
   useEffect(() => {
     const abort = new AbortController();
+    setState("Connecting…");
+    setCanReconnect(false);
+    setPanOnly(false);
+    setZoom("fit");
     let imageUrl: string | null = null;
     let stalled: number | undefined;
     function clear() { videoRef.current?.dispose();videoRef.current=null;setVideoStream(null);setVideoReady(false);acknowledgeFrame.current?.(); setExplore(null); exploreRef.current=null; setControl(null); controlRef.current=null; if (imageUrl) URL.revokeObjectURL(imageUrl); imageUrl = null; setImage(null); }
-    void browserShareClient(projectId).then(client => typeof RTCPeerConnection!=="undefined" ? client.connect(share.id,"watch",abort.signal,undefined,undefined,1) : client.connect(share.id,"watch",abort.signal)).then(socket => {
+    void browserShareClient(projectId).then(async client => {
+      if (abort.signal.aborted) return null;
+      if (connectionAttempt > 0 && !(await client.list()).some(entry => entry.id === share.id)) {
+        if (!abort.signal.aborted) { setState("Sharing ended or access was removed."); onEnded(share.id); }
+        return null;
+      }
+      return typeof RTCPeerConnection!=="undefined" ? client.connect(share.id,"watch",abort.signal,undefined,undefined,1) : client.connect(share.id,"watch",abort.signal);
+    }).then(socket => {
+      if (!socket) return;
       if (abort.signal.aborted) { socket.close(); return; }
       socketRef.current=socket;
       if(typeof RTCPeerConnection!=="undefined")videoRef.current=localTabVideoViewer(socket,stream=>{
-        if(abort.signal.aborted)return;
+        if(abort.signal.aborted || socketRef.current !== socket)return;
         setVideoStream(stream);setVideoReady(false);
       });
       const armStall = (timeout = 10_000) => {
@@ -77,7 +92,7 @@ export function SharedLocalTabViewer({ projectId, share, onClose, onEnded }: { p
       };
       armStall();
       socket.addEventListener("message", event => {
-        if (abort.signal.aborted) return;
+        if (abort.signal.aborted || socketRef.current !== socket) return;
         if (typeof event.data === "string") {
           try {
             const value=JSON.parse(event.data), independent=readLocalExploreState(value);
@@ -113,10 +128,14 @@ export function SharedLocalTabViewer({ projectId, share, onClose, onEnded }: { p
         setImage(imageUrl); setState("Live tab from a desktop · View only");
         if (previous) URL.revokeObjectURL(previous);
       });
-      socket.addEventListener("close", () => { window.clearTimeout(stalled); clear(); if (!abort.signal.aborted) { setState("Sharing ended"); onEnded(share.id); } });
-    }).catch(() => { if (!abort.signal.aborted) { clear(); setState("This tab share is unavailable or has ended."); onEnded(share.id); } });
-    return () => { videoRef.current?.dispose();videoRef.current=null;acknowledgeFrame.current=null; socketRef.current=null; controlRef.current=null; exploreRef.current=null; abort.abort(); window.clearTimeout(stalled); if (imageUrl) URL.revokeObjectURL(imageUrl); };
-  }, [projectId, share.id, onEnded]);
+      socket.addEventListener("close", () => {
+        if (abort.signal.aborted) return;
+        window.clearTimeout(stalled); socketRef.current=null; clear();
+        setState("Connection closed. Reconnect to check this share."); setCanReconnect(true);
+      });
+    }).catch(() => { if (!abort.signal.aborted) { clear(); setState("Could not connect. Check your connection and try again."); setCanReconnect(true); } });
+    return () => { abort.abort(); videoRef.current?.dispose();videoRef.current=null;acknowledgeFrame.current=null; socketRef.current=null; controlRef.current=null; exploreRef.current=null; window.clearTimeout(stalled); if (imageUrl) URL.revokeObjectURL(imageUrl); };
+  }, [projectId, share.id, onEnded, connectionAttempt]);
   const [fullscreen, setFullscreen] = useState(false);
   const expandedViewportStyle = useExpandedBrowserViewport(fullscreen);
   const [keyboardOccupiedHeight, setKeyboardOccupiedHeight] = useState(0);
@@ -156,6 +175,7 @@ export function SharedLocalTabViewer({ projectId, share, onClose, onEnded }: { p
       <div className="flex w-full items-center justify-between gap-2">
         <span role="status">{exploring ? "Explore · Your own view" : hasPicture && selfControls ? "Live tab · You control" : hasPicture && control?.grant ? "Live tab · Another participant controls" : state}</span><Button size="sm" variant="ghost" onPress={onClose}>Leave</Button>
       </div>
+      {canReconnect ? <Button size="sm" variant="secondary" data-testid="local-tab-reconnect" onPress={() => { setCanReconnect(false); setConnectionAttempt(attempt => attempt + 1); }}>Reconnect</Button> : null}
       <div className={keyboardOccupiedHeight > 0 ? "hidden" : "flex flex-wrap items-center gap-2"}>
         <Select aria-label="Shared tab zoom" value={zoom} disabled={!hasPicture} fullWidth={false} size="xs" onChange={event => {
           setZoom(event.target.value);

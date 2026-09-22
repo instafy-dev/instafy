@@ -136,6 +136,31 @@ export function attachRemoteBrowserInput(
   let pendingBeforeInputText: string | null = null;
   let beforeInputTimer: number | null = null;
   const enabled = () => !disposed && (options.enabled?.() ?? true);
+  let pendingWheel: Extract<RemoteBrowserInputMessage, { type: "wheel" }> | null = null;
+  let wheelTimer: number | null = null;
+  const flushWheel = () => {
+    if (wheelTimer !== null) window.clearTimeout(wheelTimer);
+    wheelTimer = null;
+    const message = pendingWheel;
+    pendingWheel = null;
+    if (message && enabled()) options.send(message);
+  };
+  const send = (message: RemoteBrowserInputMessage) => {
+    if (message.type !== "wheel") {
+      flushWheel();
+      options.send(message);
+      return;
+    }
+    if (pendingWheel && pendingWheel.modifiers !== message.modifiers) flushWheel();
+    pendingWheel = {
+      ...message,
+      deltaX: boundedDelta((pendingWheel?.deltaX ?? 0) + message.deltaX),
+      deltaY: boundedDelta((pendingWheel?.deltaY ?? 0) + message.deltaY),
+    };
+    // High-refresh touchscreens exceed the input lane's message budget. Batch
+    // continuous displacement every 16 ms, independently of display refresh rate.
+    if (wheelTimer === null) wheelTimer = window.setTimeout(flushWheel, 16);
+  };
 
   const clearPendingBeforeInput = () => {
     pendingBeforeInputText = null;
@@ -184,7 +209,7 @@ export function attachRemoteBrowserInput(
       return false;
     }
     lastRemotePoint = point;
-    options.send({
+    send({
       type: "mouse",
       kind,
       ...point,
@@ -200,7 +225,7 @@ export function attachRemoteBrowserInput(
     if (!enabled() || pressedPointerId === null || !lastRemotePoint) {
       return false;
     }
-    options.send({
+    send({
       type: "mouse",
       kind: "mouseReleased",
       ...lastRemotePoint,
@@ -247,6 +272,7 @@ export function attachRemoteBrowserInput(
     event.preventDefault();
   };
   const onPointerUp = (event: PointerEvent) => {
+    flushWheel();
     if (event.pointerType === "touch") {
       const gesture = touchGesture;
       if (!gesture) {
@@ -290,6 +316,7 @@ export function attachRemoteBrowserInput(
     }
   };
   const onPointerCancelled = (event: PointerEvent) => {
+    flushWheel();
     if (touchGesture && touchGesture.pointerId === event.pointerId) {
       touchGesture = null;
       return;
@@ -341,7 +368,7 @@ export function attachRemoteBrowserInput(
       const deltaY = gesture.lastY - event.clientY;
       gesture.lastX = event.clientX;
       gesture.lastY = event.clientY;
-      options.send({
+      send({
         type: "wheel",
         ...point,
         deltaX: boundedDelta(deltaX),
@@ -364,7 +391,7 @@ export function attachRemoteBrowserInput(
     if (!point) {
       return;
     }
-    options.send({
+    send({
       type: "wheel",
       ...point,
       deltaX: boundedDelta(event.deltaX),
@@ -379,7 +406,7 @@ export function attachRemoteBrowserInput(
     }
     const modifiers = cdpScreencastModifiers(event);
     const text = remoteBrowserKeyDownText(event.key, modifiers, event.getModifierState("AltGraph"));
-    options.send({
+    send({
       type: "key",
       kind: text ? "keyDown" : "rawKeyDown",
       key: event.key.slice(0, 128),
@@ -403,7 +430,7 @@ export function attachRemoteBrowserInput(
     if (!enabled() || event.isComposing || event.key === "Process") {
       return;
     }
-    options.send({
+    send({
       type: "key",
       kind: "keyUp",
       key: event.key.slice(0, 128),
@@ -445,7 +472,7 @@ export function attachRemoteBrowserInput(
       clearPendingBeforeInput();
       return;
     }
-    options.send({ type: "text", text });
+    send({ type: "text", text });
   };
   const onPaste = (event: ClipboardEvent) => {
     event.preventDefault();
@@ -456,7 +483,7 @@ export function attachRemoteBrowserInput(
     if (!text) {
       return;
     }
-    options.send({ type: "text", text });
+    send({ type: "text", text });
     suppressPairedBeforeInput(text);
   };
   const onCompositionStart = () => clearPendingBeforeInput();
@@ -466,7 +493,7 @@ export function attachRemoteBrowserInput(
     }
     const text = boundedCdpScreencastText(event.data);
     if (text) {
-      options.send({ type: "text", text });
+      send({ type: "text", text });
       suppressPairedBeforeInput(text);
     }
   };
@@ -484,7 +511,7 @@ export function attachRemoteBrowserInput(
       }
       const text = boundedCdpScreencastText(message.text);
       if (text) {
-        options.send({ type: "text", text });
+        send({ type: "text", text });
         event.preventDefault();
       }
       return;
@@ -512,7 +539,7 @@ export function attachRemoteBrowserInput(
       message.windowsVirtualKeyCode,
     );
     const nativeVirtualKeyCode = boundedVirtualKeyCode(message.nativeVirtualKeyCode);
-    options.send({
+    send({
       type: "key",
       kind: message.kind,
       key: message.key.slice(0, 128),
@@ -557,6 +584,8 @@ export function attachRemoteBrowserInput(
   return {
     dispose: () => {
       disposed = true;
+      if (wheelTimer !== null) window.clearTimeout(wheelTimer);
+      pendingWheel = null;
       clearPendingBeforeInput();
       if (pointerMoveFrame !== null) {
         window.cancelAnimationFrame(pointerMoveFrame);

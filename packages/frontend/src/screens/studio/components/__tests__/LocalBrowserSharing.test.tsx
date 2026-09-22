@@ -88,7 +88,7 @@ it("lets the owner watch from another device and removes pixels immediately on s
   expect(container.querySelector("img")?.getAttribute("src")).toBe("blob:frame");
   await act(async () => socket.dispatchEvent(new Event("close")));
   expect(container.querySelector("img")).toBeNull();
-  expect(container.textContent).toContain("Sharing ended");
+  expect(container.textContent).toContain("Connection closed");
   expect(container.querySelector('[data-testid="local-browser-share-join"]')).toBeNull();
   expect(URL.revokeObjectURL).toHaveBeenCalledWith("blob:frame");
 });

@@ -1,11 +1,10 @@
 # Sharing a local browser tab
 
-Status: Electron supports native WebRTC video with JPEG compatibility. Earlier
-JPEG checks exercised touch, keyboard, independent scrolling, rotation and
-revocation in physical Android Chrome and the iOS Capacitor QA app. Native video
-has separate desktop qualification; those earlier phone checks do not qualify the
-new transport. Native Android, physical iOS video, cellular/WAN performance and
-multi-controller routing remain open.
+Status: Electron supports native WebRTC video with JPEG compatibility. Physical
+Android Chrome has exercised video over Wi-Fi/TURN alongside a desktop viewer,
+including independent scrolling, keyboard input, rotation, reconnect and revocation.
+Earlier physical iOS checks cover JPEG only. Physical iOS video, cellular/WAN
+performance and multi-controller routing remain open.
 
 The browser's location and its audience are separate choices. The browser location
 selector says **This device** and **Workspace**. This device uses Personal Browser
@@ -79,6 +78,13 @@ owner do the same. Removal, disconnect, Stop sharing and source closure retire t
 view and fence queued input and late frames. A new request requires new approval;
 late heartbeats cannot recreate a closed renderer. The exact connection owns the
 view, including when another window uses the same participant account.
+
+A connection interrupted by background suspension or network loss clears its
+pixels and input authority immediately. **Reconnect** checks the current audience
+and opens a fresh authenticated viewer connection. It returns to Follow;
+control and Explore need new approval, and an ended or removed share cannot
+reconnect. Unsaved state in a retired Explore page is lost. A connection failure
+alone does not permanently hide an otherwise available share.
 
 At most four Explore pages coexist per share. Each has a four-second native lease
 and a thirty-minute maximum lifetime. Requested CSS viewports are bounded to
@@ -162,6 +168,21 @@ impairment ended, but scrolling froze repeatedly during loss; average fps alone
 hid that interruption. An experimental balanced degradation policy did not
 establish a reliable improvement and is not shipped. Loss resilience remains a
 qualification and tuning gap, alongside real WAN and network-change testing.
+
+A physical Android Wi-Fi/TCP TURN check received 720 × 914 video for a
+360 × 457 portrait Explore page, while a desktop viewer independently received
+780 × 1372. During an eight-second continuous swipe, steady one-second samples
+decoded approximately 24–27 fps with no drops or freeze-counter increases during
+motion. Freeze counters increased when the page became static, so measurements
+must separate active scrolling from content-driven frame suppression. This is a
+short functional check, not sustained phone or WAN latency qualification.
+
+High-refresh touch events are accumulated over 16 ms before sending scroll
+displacement through the shared input handler. This avoids exceeding the
+controller's message budget during normal swipes. A twelve-swipe phone check
+stayed connected after batching; the prior build disconnected. Keyboard and
+landscape resizing worked, although the smaller/landscape streams temporarily
+used software H.264 encoding. Returning to portrait restored hardware encoding.
 
 Signaling carries only a connection's own peer to that viewer. The controller
 chooses its Follow/Explore source, enforces the existing audience and derives

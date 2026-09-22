@@ -11,6 +11,7 @@ let container: HTMLDivElement;
 let root: Root;
 let socket: EventTarget & { close: ReturnType<typeof vi.fn>; send: ReturnType<typeof vi.fn> };
 let connect: ReturnType<typeof vi.fn>;
+let list: ReturnType<typeof vi.fn>;
 let ended: ReturnType<typeof vi.fn<(id: string) => void>>;
 const share = { id: "share", projectId: "project", ownerUserId: "owner", audience: "space", mode: "view" } as const;
 const image = () => document.querySelector<HTMLImageElement>('[data-testid="local-browser-share-image"]')!;
@@ -29,7 +30,8 @@ beforeEach(async () => {
   container = document.createElement("div"); document.body.append(container); root = createRoot(container);
   socket = Object.assign(new EventTarget(), { close: vi.fn(), send: vi.fn() });
   connect = vi.fn().mockResolvedValue(socket); ended = vi.fn();
-  vi.mocked(browserShareClient).mockResolvedValue({ connect } as never);
+  list = vi.fn().mockResolvedValue([share]);
+  vi.mocked(browserShareClient).mockResolvedValue({ connect, list } as never);
   let sequence = 0;
   vi.stubGlobal("URL", Object.assign(URL, { createObjectURL: vi.fn(() => `blob:frame-${++sequence}`), revokeObjectURL: vi.fn() }));
   vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockReturnValue({ x:0, y:0, left:0, top:0, right:390, bottom:700, width:390, height:700, toJSON: () => ({}) });
@@ -74,8 +76,53 @@ it("clears an expanded, zoomed frame immediately when access is revoked", async 
   await frame(); await click("Expand shared tab"); await zoom("2");
   await act(async () => socket.dispatchEvent(new Event("close")));
   expect(document.querySelector('[data-testid="local-browser-share-image"]')).toBeNull();
-  expect(document.body.textContent).toContain("Sharing ended"); expect(ended).toHaveBeenCalledWith("share");
+  expect(document.body.textContent).toContain("Connection closed"); expect(ended).not.toHaveBeenCalled();
   expect(URL.revokeObjectURL).toHaveBeenCalledWith("blob:frame-1");
+});
+
+it("reconnects as a viewer without restoring input authority or accepting late events from the old socket", async () => {
+  Object.assign(socket, { readyState: WebSocket.OPEN, bufferedAmount: 0 });
+  const grant = JSON.stringify({ type: "controlState", available: true, connectionId: "old",
+    requested: false, grant: { id: "grant", connectionId: "old", userId: "viewer" } });
+  await frame();
+  await act(async () => socket.dispatchEvent(new MessageEvent("message", { data: grant })));
+  await click("Expand shared tab");
+  const oldSocket = socket;
+  await act(async () => oldSocket.dispatchEvent(new Event("close")));
+  socket = Object.assign(new EventTarget(), { close: vi.fn(), send: vi.fn(), readyState: WebSocket.OPEN, bufferedAmount: 0 });
+  connect.mockResolvedValue(socket);
+  await act(async () => document.querySelector<HTMLButtonElement>('[data-testid="local-tab-reconnect"]')!.click());
+  expect(list).toHaveBeenCalledTimes(1);
+  expect(connect).toHaveBeenCalledTimes(2);
+  expect(connect.mock.calls[0][2].aborted).toBe(true);
+  await frame();
+  await act(async () => {
+    oldSocket.dispatchEvent(new MessageEvent("message", { data: grant }));
+    oldSocket.dispatchEvent(new Event("close"));
+    image().dispatchEvent(new KeyboardEvent("keydown", { key: "a", bubbles: true, cancelable: true }));
+  });
+  expect(image()).not.toBeNull();
+  expect(socket.send).not.toHaveBeenCalled();
+  expect(document.body.textContent).toContain("View only");
+  expect(document.querySelector('[role="dialog"][aria-label="Shared browser tab"]')).not.toBeNull();
+  expect(ended).not.toHaveBeenCalled();
+});
+
+it("only retires a share when a fresh authorized listing confirms it is gone", async () => {
+  await frame();
+  await act(async () => socket.dispatchEvent(new Event("close")));
+  list.mockRejectedValueOnce(new Error("offline"));
+  const reconnect = () => act(async () => document.querySelector<HTMLButtonElement>('[data-testid="local-tab-reconnect"]')!.click());
+  await reconnect();
+  expect(ended).not.toHaveBeenCalled();
+  expect(document.body.textContent).toContain("Check your connection");
+  list.mockResolvedValue([]);
+  await reconnect();
+  expect(ended).toHaveBeenCalledWith("share");
+  expect(connect).toHaveBeenCalledTimes(1);
+  expect(image()).toBeNull();
+  expect(document.body.textContent).toContain("Sharing ended or access was removed");
+  expect(document.querySelector('[data-testid="local-tab-reconnect"]')).toBeNull();
 });
 
 it("keeps the expanded viewer inside the phone's visible area when the keyboard opens", async () => {
@@ -143,6 +190,29 @@ it("requests control and forwards keys only for this connection's grant, then be
   expect(JSON.parse(socket.send.mock.calls.at(-1)![0])).toEqual({type:"input",grantId:"grant",input:{type:"text",text:"a"}});
   state.grant=null;await update();await type();expect(socket.send).toHaveBeenCalledTimes(2);
   expect(image()).not.toBeNull();expect(connect).toHaveBeenCalledTimes(1);
+});
+
+it("discards batched scroll input when the connection receives a different grant", async () => {
+  Object.assign(socket, { readyState: WebSocket.OPEN, bufferedAmount: 0 });
+  await frame();
+  const grant = (id: string) => new MessageEvent("message", { data: JSON.stringify({
+    type: "controlState", available: true, connectionId: "self", requested: false,
+    grant: { id, connectionId: "self", userId: "viewer" },
+  }) });
+  await act(async () => socket.dispatchEvent(grant("old")));
+  vi.useFakeTimers();
+  try {
+    await act(async () => {
+      image().dispatchEvent(new WheelEvent("wheel", {
+        clientX: 100, clientY: 100, deltaY: 20, bubbles: true, cancelable: true,
+      }));
+      socket.dispatchEvent(grant("new"));
+    });
+    await act(async () => vi.advanceTimersByTime(20));
+    expect(socket.send).not.toHaveBeenCalled();
+  } finally {
+    vi.useRealTimers();
+  }
 });
 
 it("Explore requests owner approval, scopes frames and input, and returns to Follow without reconnecting",async()=>{
