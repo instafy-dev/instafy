@@ -62,6 +62,16 @@ describe("LandingPage entry", () => {
     expect(container.querySelector('a[href^="/login"]')).toBeNull();
   });
 
+  // Google brand verification requires the home page to say why user data is
+  // requested and to link the privacy policy.
+  it("states the sign-in data use next to the entry and links privacy and terms", async () => {
+    await renderPage();
+    const note = container.querySelector('[data-testid="landing-sign-in-data-note"]');
+    expect(note?.textContent).toContain("Instafy uses only your name, email address, and profile");
+    expect(note?.querySelector('a[href="/privacy"]')?.textContent).toBe("Privacy Policy");
+    expect(note?.querySelector('a[href="/terms"]')?.textContent).toBe("Terms");
+  });
+
   it("keeps the headline over the tentacle scene without an eyebrow line", async () => {
     await renderPage();
     const heading = container.querySelector('[data-testid="landing-hero-heading"]');
