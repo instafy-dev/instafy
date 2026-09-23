@@ -60,3 +60,5 @@ unicode-normalization = "0.1"
 tempfile = "3"
 tower = "0.5"
 httpmock = "0.7"
+# Paused-clock tests prove the minute-scale provider deadlines without waiting.
+tokio = { version = "1", features = ["test-util"] }

@@ -2156,6 +2156,185 @@ pub(crate) async fn require_origin_test_pool(test_name: &str) -> anyhow::Result<
     })
 }
 
+/// A deliberately small pool on the shared test database. Connection-hygiene
+/// tests use it to prove a code path returns its pool slot before slow
+/// external I/O: with the slot still checked out, a concurrent `get` stalls.
+pub(crate) async fn require_origin_test_pool_with_max_size(
+    test_name: &str,
+    max_size: u32,
+) -> anyhow::Result<PgPool> {
+    setup_origin_test_pool_with_max_size(max_size)
+        .await?
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "{test_name} requires TEST_DATABASE_URL; run it through `pnpm test:controller`"
+            )
+        })
+}
+
+/// Rows a shared-database test creates, deleted by [`with_shared_db_fixture`]
+/// however the test ends. Deleting an organization or a project cascades to
+/// its runtimes, leases, runtime events and tunnel grants.
+#[derive(Default)]
+pub(crate) struct SharedDbFixture {
+    pub(crate) organizations: Vec<Uuid>,
+    pub(crate) projects: Vec<Uuid>,
+}
+
+/// Run a shared-database test body, then delete its fixture rows even when
+/// the body returns early with `?` or fails an assertion. A leftover row is
+/// not inert: a stale `ready` runtime, for example, matches the
+/// heartbeat-timeout sweep's query and leaks into every later sweep test.
+///
+/// Cleanup uses its own connection, never the test's pool. Connection-hygiene
+/// tests run on a pool of one or two slots, and a failing body is exactly the
+/// case where the code under test may still hold them. Tasks the body started
+/// with [`spawn_aborting`] are aborted when the body is dropped, which rolls
+/// back any launch guard they held before the delete runs; `lock_timeout`
+/// keeps a task that was missed from hanging the suite.
+pub(crate) async fn with_shared_db_fixture(
+    fixture: SharedDbFixture,
+    body: impl std::future::Future<Output = anyhow::Result<()>>,
+) -> anyhow::Result<()> {
+    use futures_util::FutureExt;
+
+    let outcome = std::panic::AssertUnwindSafe(body).catch_unwind().await;
+    let cleanup = delete_shared_db_fixture(&fixture).await;
+    match outcome {
+        Ok(result) => {
+            if let (Err(_), Err(cleanup_error)) = (&result, &cleanup) {
+                eprintln!("[runtime-controller tests] fixture cleanup failed: {cleanup_error:#}");
+            }
+            result.and(cleanup)
+        }
+        Err(panic) => {
+            if let Err(cleanup_error) = cleanup {
+                eprintln!(
+                    "[runtime-controller tests] fixture cleanup failed after a panic: {cleanup_error:#}"
+                );
+            }
+            std::panic::resume_unwind(panic)
+        }
+    }
+}
+
+async fn delete_shared_db_fixture(fixture: &SharedDbFixture) -> anyhow::Result<()> {
+    if fixture.organizations.is_empty() && fixture.projects.is_empty() {
+        return Ok(());
+    }
+    let url =
+        std::env::var("TEST_DATABASE_URL").context("fixture cleanup requires TEST_DATABASE_URL")?;
+    let (client, connection) = tokio_postgres::connect(&url, NoTls).await?;
+    let driver = tokio::spawn(connection);
+    client.batch_execute("set lock_timeout = '30s'").await?;
+    client
+        .execute(
+            "delete from projects where id = any($1)",
+            &[&fixture.projects],
+        )
+        .await?;
+    client
+        .execute(
+            "delete from organizations where id = any($1)",
+            &[&fixture.organizations],
+        )
+        .await?;
+    drop(client);
+    let _ = driver.await;
+    Ok(())
+}
+
+/// A task spawned by a shared-database test body. It is aborted when dropped
+/// unawaited (an early `?` or a failed assertion), so it cannot keep a pool
+/// slot or a row lock alive into fixture cleanup.
+pub(crate) struct AbortingTask<T>(JoinHandle<T>);
+
+pub(crate) fn spawn_aborting<F>(future: F) -> AbortingTask<F::Output>
+where
+    F: std::future::Future + Send + 'static,
+    F::Output: Send + 'static,
+{
+    AbortingTask(tokio::spawn(future))
+}
+
+impl<T> AbortingTask<T> {
+    pub(crate) fn is_finished(&self) -> bool {
+        self.0.is_finished()
+    }
+}
+
+impl<T> std::future::Future for AbortingTask<T> {
+    type Output = Result<T, tokio::task::JoinError>;
+
+    fn poll(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Self::Output> {
+        std::pin::Pin::new(&mut self.0).poll(cx)
+    }
+}
+
+impl<T> Drop for AbortingTask<T> {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
+/// A fake runtime provider that accepts `POST {path}` and never answers, for
+/// paused-clock deadline tests.
+///
+/// On a paused clock the runtime jumps to the next timer whenever it would
+/// otherwise wait for I/O, which can fire a deadline before the request has
+/// even crossed the loopback socket. A blocking task inhibits that
+/// auto-advance until the provider holds the request; the deadline then
+/// elapses in virtual time, so the test measures exactly the bound.
+pub(crate) struct SilentProvider {
+    pub(crate) endpoint: String,
+    request_arrived: JoinHandle<bool>,
+    _server: AbortingTask<()>,
+}
+
+impl SilentProvider {
+    /// Must be created before the call under test starts.
+    pub(crate) async fn start(path: &'static str) -> anyhow::Result<Self> {
+        let (arrived_tx, arrived_rx) = std::sync::mpsc::channel::<()>();
+        let app = axum::Router::new().route(
+            path,
+            axum::routing::post(move || {
+                let arrived_tx = arrived_tx.clone();
+                async move {
+                    let _ = arrived_tx.send(());
+                    std::future::pending::<()>().await;
+                    StatusCode::NO_CONTENT
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+        let endpoint = format!("http://{}", listener.local_addr()?);
+        let server = spawn_aborting(async move {
+            axum::serve(listener, app)
+                .await
+                .expect("serve silent runtime provider");
+        });
+        // Wall-clock cap, so a request that never arrives cannot hang the test.
+        let request_arrived = tokio::task::spawn_blocking(move || {
+            arrived_rx
+                .recv_timeout(std::time::Duration::from_secs(10))
+                .is_ok()
+        });
+        Ok(Self {
+            endpoint,
+            request_arrived,
+            _server: server,
+        })
+    }
+
+    /// Whether the provider received the request the deadline cut short.
+    pub(crate) async fn request_arrived(self) -> bool {
+        self.request_arrived.await.unwrap_or(false)
+    }
+}
+
 async fn cleanup_origin_project(pool: &PgPool, project_id: &Uuid) -> anyhow::Result<()> {
     let connection = pool.get().await?;
     connection

@@ -1,7 +1,8 @@
 # Hosted Runtime Machines
 
 How hosted runtimes are sized, paused, billed, and attributed. Code:
-`packages/runtime-controller/src/runtime/` (sizes.rs, sweeps.rs, ensure.rs),
+`packages/runtime-controller/src/runtime/` (sizes.rs, sweeps.rs, ensure.rs,
+stop.rs, provider.rs),
 `packages/runtime-provider-core/src/allocator/docker.rs`,
 `docker/docker-compose.runtime.provider.yml`.
 
@@ -66,6 +67,58 @@ Jobs requeued by any stop are stamped (`payload.requeuedAt`) and expire after
 15 minutes **only if the project has no live runtime** — an interrupted run
 must not replay days later, but a queued job behind a busy machine is fine.
 The stamp is cleared when a job is leased.
+
+## Provider call deadlines
+
+Every call the controller makes to a runtime provider has an overall deadline
+that covers auth-token fallback retries and reading the response. A deadline
+only stops the controller from waiting; it never cancels work the provider
+already accepted. The bounds are code constants in `runtime/provider.rs` and
+`runtime/ensure.rs`, not configuration:
+
+| Call | Used by | Deadline | When it expires |
+|---|---|---|---|
+| `POST /runtime/ensure` | launch | 120 s | Handled like any provider error: the new lease is quarantined as `cleanup_pending`, then a compensating release (up to 15 min) runs outside the database fence. |
+| `POST /runtime/release` | stop, remove, the idle, credit, heartbeat and launch-timeout sweeps, idle-slot reclaim, the dev-only offline endpoint | 180 s | The stop fails with 502 (a sweep logs it and moves on) and the generation stays quarantined (see below). The dev-only offline endpoint only logs it. |
+| `POST /runtime/inspect` | OOM post-mortem in the heartbeat-timeout sweep | 15 s | The attribution is unknown and the stop proceeds as `heartbeat_timeout`. |
+
+An idle-slot reclaim (stopping an organization's idle machine so a waiting
+space can launch) runs while that launch holds the controller's single
+provider-launch slot, so the tunnel-broker revoke after its release is bounded
+as well: after 15 s the controller stops waiting, and the stopped runtime's
+tunnel grants stay active until they expire, the same outcome as a broker
+error.
+
+No provider call holds a pooled database connection or an open transaction
+while it waits, with one deliberate exception: a launch keeps one
+runtime, lease and project row guard across `/runtime/ensure`, so a stop or a
+project deletion cannot overtake it. At most one such guard exists per
+controller process; other launches queue for it outside the pool.
+
+### Cleanup after a failed release (502)
+
+A stop is two-phase. It first commits a quarantine: the lease becomes
+`cleanup_pending`, the runtime returns to `requested` with its endpoint and
+heartbeat cleared, jobs on it are requeued or failed, and a
+`provider_release_cleanup_pending` event is recorded. Only then does it ask the
+provider to release. If the release fails or passes its 180 s deadline, the
+stop answers **502** ("runtime provider cleanup is still pending; retry the
+stop") and the quarantine stays in place:
+
+- New ensures for that runtime fail closed with 409 ("runtime cleanup is still
+  pending; retry after the provider release completes") and late registrations
+  are refused, so no second machine starts under the same generation.
+- Retrying the stop sends the release again for the same lease. The idle and
+  active-job preconditions are not re-checked; they held before the quarantine.
+- Cleanup is also retried without a caller: the next ensure for that runtime
+  retries the quarantined release before launching, and the launch-timeout
+  sweep retries quarantined runtimes whose lease is older than 15 minutes.
+- Once the provider acknowledges a release, the stop finalizes: the lease is
+  `released`, the runtime `stopped`, and a `provider_release_acknowledged`
+  event is recorded.
+
+The provider serializes ensure and release per runtime, so a retried release
+queues behind any release or late launch still running there.
 
 ## Caches
 
