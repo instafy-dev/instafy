@@ -2,6 +2,20 @@ import type { CSSProperties } from "react";
 
 const STUDIO_VIEWPORT_HEIGHT_VALUE = "var(--studio-vh, 100dvh)";
 
+/** A landscape phone's keyboard can leave less space than two headers and a composer. */
+export function shouldHideContextWhileTyping({
+  isTouchConversation,
+  keyboardOpen,
+  viewportHeightPx,
+}: {
+  isTouchConversation: boolean;
+  keyboardOpen: boolean;
+  viewportHeightPx: number | null;
+}): boolean {
+  return isTouchConversation && keyboardOpen && viewportHeightPx !== null &&
+    Number.isFinite(viewportHeightPx) && viewportHeightPx > 0 && viewportHeightPx < 240;
+}
+
 export function resolveStudioViewportHeightPx(viewportHeight: number | null | undefined): number | null {
   if (viewportHeight === null || viewportHeight === undefined || !Number.isFinite(viewportHeight) || viewportHeight <= 0) {
     return null;

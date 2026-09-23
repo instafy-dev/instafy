@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState, type PointerEvent as ReactPoi
 import type { WorkspaceGitReviewSource } from "../workspace/gitReviewTypes";
 import { useMobileSidebarHistory } from "./useMobileSidebarHistory";
 import { useNativeBackButtonAction } from "../native/useNativeBackButtonAction";
+import { useSidebarToggleFocus } from "./studio/useSidebarToggleFocus";
 
 export type LeftDrawerPanel = "history" | "files" | "sourceControl" | "workspaces";
 
@@ -84,6 +85,17 @@ export function useStudioLayoutChromeState({
     [],
   );
   const [leftDrawer, setLeftDrawer] = useState<null | LeftDrawerPanel>(null);
+  const prepareSidebarToggleFocus = useSidebarToggleFocus(isLargeScreen, sidebarCollapsed);
+  const toggleSidebar = useCallback(() => {
+    if (isLargeScreen) {
+      prepareSidebarToggleFocus();
+      setSidebarCollapsed((previous) => !previous);
+      return;
+    }
+    // Navigation overlays the current destination. Clearing leftDrawer here
+    // rewrites its URL and discards the drawer's same-destination history entry.
+    setMobileSidebarOpen((previous) => !previous);
+  }, [isLargeScreen, prepareSidebarToggleFocus, setMobileSidebarOpen, setSidebarCollapsed]);
   const [mobileGitReviewSheet, setMobileGitReviewSheet] = useState<WorkspaceGitReviewSource | null>(null);
   const [sourceControlOpenRequest, setSourceControlOpenRequest] = useState<SourceControlOpenRequest | null>(null);
   const [leftDrawerWidth, setLeftDrawerWidth] = useState<number>(() => {
@@ -222,7 +234,7 @@ export function useStudioLayoutChromeState({
   useEffect(() => {
     // A mobile workspace URL has its own route-aware dismissal owner. Let it
     // pop/replace the visit rather than clearing UI state beneath the route.
-    if (!leftDrawer || (!isLargeScreen && leftDrawer === "workspaces")) {
+    if (!leftDrawer || mobileSidebarOpen || (!isLargeScreen && leftDrawer === "workspaces")) {
       return;
     }
     const handleKeyDown = (event: KeyboardEvent) => {
@@ -234,7 +246,7 @@ export function useStudioLayoutChromeState({
     return () => {
       window.removeEventListener("keydown", handleKeyDown);
     };
-  }, [isLargeScreen, leftDrawer]);
+  }, [isLargeScreen, leftDrawer, mobileSidebarOpen]);
 
   return {
     filesExplorerPortalTarget,
@@ -252,6 +264,7 @@ export function useStudioLayoutChromeState({
     setMobileGitReviewSheet,
     setMobileSidebarOpen,
     setSidebarCollapsed,
+    toggleSidebar,
     sidebarCollapsed,
     sourceControlOpenRequest,
     setSourceControlOpenRequest,

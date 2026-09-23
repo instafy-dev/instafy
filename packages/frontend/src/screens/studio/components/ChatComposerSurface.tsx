@@ -15,6 +15,7 @@ import {
   Menu,
   Microphone,
   NavArrowDown,
+  NavArrowLeft,
   Pause,
   Play,
   Send,
@@ -100,6 +101,7 @@ type ChatComposerSurfaceProps = {
   voiceStatusMessage: string;
   providerTriggerNoticeProps: ComponentProps<typeof ProviderTriggerNotice> | null;
   showComposerNavigationButton: boolean;
+  composerNavigationDestination?: "drawer" | "chats";
   onOpenNavigation: () => void;
   homeAttentionCount: number;
   homeAttentionBadge: string;
@@ -236,6 +238,7 @@ export function ChatComposerSurface({
   voiceStatusMessage,
   providerTriggerNoticeProps,
   showComposerNavigationButton,
+  composerNavigationDestination = "drawer",
   onOpenNavigation,
   homeAttentionCount,
   homeAttentionBadge,
@@ -460,6 +463,7 @@ export function ChatComposerSurface({
   // Keep Lexical in the same tree position while its primary action changes.
   // The editor grows line by line, capped per viewport in chatInputGrowth.ts.
   const composerInlineControlsInTextRow = !browserComposerCondensed && !showVoiceActiveStrip;
+  const mobileChatsNavigation = showComposerNavigationButton && composerNavigationDestination === "chats";
   const foldSuggestionIntoMenu = showMobileGhostSuggestionAcceptButton;
   const imageUploadDisabled = mutationDisabled || sendingAttachment || onboardingInputLocked;
 
@@ -876,14 +880,17 @@ export function ChatComposerSurface({
       variant="ghost"
       size="md"
       radius="xl"
-      aria-label="Open navigation and recent chats"
-      aria-haspopup="dialog"
+      aria-label={mobileChatsNavigation ? "Back to chats" : "Open navigation and recent chats"}
+      title={mobileChatsNavigation ? "Back to chats" : "Open navigation and recent chats"}
+      aria-haspopup={mobileChatsNavigation ? undefined : "dialog"}
       data-testid="chat-composer-navigation-button"
       className={composerGhostActionClass}
     >
       <span className="relative flex h-full w-full items-center justify-center">
-        <Menu className={composerActionIconClass} aria-hidden="true" />
-        {homeAttentionCount > 0 ? (
+        {mobileChatsNavigation
+          ? <NavArrowLeft className={composerActionIconClass} aria-hidden="true" />
+          : <Menu className={composerActionIconClass} aria-hidden="true" />}
+        {!mobileChatsNavigation && homeAttentionCount > 0 ? (
           <span
             aria-hidden="true"
             data-testid="chat-composer-navigation-badge"
@@ -995,11 +1002,16 @@ export function ChatComposerSurface({
         <form
           onSubmit={onSubmit}
           className={
-            browserModeActive || compactBrowserViewport
+            mobileChatsNavigation
+              ? `pointer-events-auto ${CHAT_COMPOSER_COLUMN_CLASS_NAME} px-3.5`
+              : browserModeActive || compactBrowserViewport
               ? "pointer-events-auto px-2"
               : `pointer-events-auto ${CHAT_COMPOSER_COLUMN_CLASS_NAME} px-3 sm:px-4`
           }
           style={{
+            paddingInline: mobileChatsNavigation
+              ? "clamp(0.875rem, var(--instafy-safe-area-inset-bottom), 1.125rem)"
+              : undefined,
             paddingBottom: nativeKeyboardOpen
               ? "0.5rem"
               : "max(var(--instafy-safe-area-inset-bottom), 0.5rem)",
@@ -1306,16 +1318,16 @@ export function ChatComposerSurface({
             ) : null}
             <Surface
               tone="default"
-              radius="3xl"
+              radius={mobileChatsNavigation ? "none" : "3xl"}
               shadow="none"
               // The composer keeps the raised-control background but borrows the
               // panel border tier: raised-control (13%) is meant for small
               // controls, and reads too hard along a full-width composer edge.
-              className={
+              className={(mobileChatsNavigation ? "rounded-[1.75rem] " : "") + (
                 browserComposerCondensed
                   ? `grid grid-cols-[minmax(0,1fr)_auto] items-center overflow-hidden border-slate-200/70 bg-slate-50 p-1.5 ${DARK_RAISED_CONTROL_BG_CLASS} ${DARK_PANEL_BORDER_CLASS}`
                   : `flex flex-col overflow-hidden border-slate-200/70 bg-slate-50 p-1.5 ${DARK_RAISED_CONTROL_BG_CLASS} ${DARK_PANEL_BORDER_CLASS}`
-              }
+              )}
               data-testid="chat-composer-surface"
               data-browser-composer-condensed={browserComposerCondensed ? "true" : undefined}
             >
@@ -1338,7 +1350,7 @@ export function ChatComposerSurface({
                 className={
                   browserComposerCondensed
                     ? "relative pb-0"
-                    : "relative flex items-end gap-2"
+                    : `relative flex items-end ${mobileChatsNavigation ? "gap-1" : "gap-2"}`
                 }
                 data-testid="chat-composer-text-row"
                 onDragOver={onDragOver}
@@ -1350,7 +1362,7 @@ export function ChatComposerSurface({
                     data-testid="chat-composer-leading-controls"
                   >
                     {navigationButtonNode}
-                    {actionMenuNode}
+                    {!mobileChatsNavigation ? actionMenuNode : null}
                   </div>
                 ) : null}
                 <div
@@ -1374,6 +1386,7 @@ export function ChatComposerSurface({
                     className="flex flex-none items-center justify-end gap-0.5"
                     data-testid="chat-composer-trailing-controls"
                   >
+                    {mobileChatsNavigation ? actionMenuNode : null}
                     {voiceStripNode}
                     {renderSendButton()}
                   </div>
