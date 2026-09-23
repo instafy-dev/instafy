@@ -566,16 +566,27 @@ async fn inspect_runtime_oom(state: &AppState, runtime_id: &Uuid) -> Option<bool
     };
     let project_id: Uuid = row.get("project_id");
     let provider: String = row.get("provider");
-    if !crate::provider_identifiers::is_instafy_cloud_provider_id(&provider) {
+    inspect_runtime_oom_via_provider(state, &provider, &project_id, runtime_id).await
+}
+
+/// The provider half of [`inspect_runtime_oom`]. It runs with no pool slot
+/// checked out and gives up at `RUNTIME_PROVIDER_INSPECT_TIMEOUT`.
+async fn inspect_runtime_oom_via_provider(
+    state: &AppState,
+    provider: &str,
+    project_id: &Uuid,
+    runtime_id: &Uuid,
+) -> Option<bool> {
+    if !crate::provider_identifiers::is_instafy_cloud_provider_id(provider) {
         return None;
     }
-    let provider_cfg = select_provider_config(state, &provider)?;
+    let provider_cfg = select_provider_config(state, provider)?;
     let body = call_provider_endpoint(
         state,
         &provider_cfg,
         "/runtime/inspect",
         &ProviderReleaseRequest {
-            project_id: &project_id,
+            project_id,
             runtime_id,
             lease_id: None,
         },
@@ -2059,104 +2070,166 @@ mod tests {
             1,
         )
         .await?;
+        let project_id = Uuid::new_v4();
+        // The runtime below is deliberately stale, so it matches
+        // AUTO_STOP_STALE_RUNTIMES_QUERY; it must not outlive a failed run.
+        let fixture = crate::tests::SharedDbFixture {
+            projects: vec![project_id],
+            ..Default::default()
+        };
 
-        let inspect_reached = Arc::new(Notify::new());
-        let inspect_respond = Arc::new(Notify::new());
-        let provider_app = axum::Router::new().route(
-            "/runtime/inspect",
-            axum::routing::post({
-                let inspect_reached = inspect_reached.clone();
-                let inspect_respond = inspect_respond.clone();
-                move || {
+        crate::tests::with_shared_db_fixture(fixture, async {
+            let inspect_reached = Arc::new(Notify::new());
+            let inspect_respond = Arc::new(Notify::new());
+            let provider_app = axum::Router::new().route(
+                "/runtime/inspect",
+                axum::routing::post({
                     let inspect_reached = inspect_reached.clone();
                     let inspect_respond = inspect_respond.clone();
-                    async move {
-                        inspect_reached.notify_one();
-                        inspect_respond.notified().await;
-                        Json(json!({ "oom_killed": true }))
+                    move || {
+                        let inspect_reached = inspect_reached.clone();
+                        let inspect_respond = inspect_respond.clone();
+                        async move {
+                            inspect_reached.notify_one();
+                            inspect_respond.notified().await;
+                            Json(json!({ "oom_killed": true }))
+                        }
                     }
-                }
-            }),
-        );
-        let provider_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
-        let provider_address = provider_listener.local_addr()?;
-        let provider_server = tokio::spawn(async move {
-            axum::serve(provider_listener, provider_app)
+                }),
+            );
+            let provider_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+            let provider_address = provider_listener.local_addr()?;
+            let _provider_server = crate::tests::spawn_aborting(async move {
+                axum::serve(provider_listener, provider_app)
+                    .await
+                    .expect("serve slow OOM inspection provider");
+            });
+
+            // Inspection only runs for hosted runtimes; a suffixed id keeps
+            // this route separate from the trusted production provider id.
+            let provider_id = "instafy_cloud_connection_hygiene_test";
+            let runtime_id = Uuid::new_v4();
+            {
+                let connection = pool.get().await?;
+                connection
+                    .execute(
+                        "insert into projects (id, project_type, status)
+                         values ($1, 'customer', 'active')",
+                        &[&project_id],
+                    )
+                    .await?;
+                connection
+                    .execute(
+                        "insert into runtimes (
+                             id, project_id, provider, status, idle_ttl_seconds, last_seen_at
+                         ) values ($1, $2, $3, 'ready', 1, now() - interval '1 hour')",
+                        &[&runtime_id, &project_id, &provider_id],
+                    )
+                    .await?;
+            }
+
+            let mut config = crate::tests::build_app_config(
+                crate::tests::test_origin_private_key(),
+                crate::tests::test_origin_public_key(),
+                "oom-inspection-connection-hygiene",
+            );
+            config.runtime_providers = vec![crate::config::RuntimeProviderConfig {
+                id: provider_id.to_string(),
+                display_name: "Slow OOM inspection provider".to_string(),
+                kind: "test".to_string(),
+                owner_org_id: None,
+                allowed_org_ids: vec![],
+                endpoint: Some(format!("http://{provider_address}")),
+                auth_token: None,
+                metadata: None,
+            }];
+            let state = crate::tests::build_test_state(pool.clone(), config);
+
+            let inspection = crate::tests::spawn_aborting({
+                let state = state.clone();
+                async move { super::inspect_runtime_oom(&state, &runtime_id).await }
+            });
+            tokio::time::timeout(Duration::from_secs(5), inspect_reached.notified())
                 .await
-                .expect("serve slow OOM inspection provider");
-        });
+                .expect("OOM inspection never reached the provider");
 
-        // Inspection only runs for hosted runtimes; a suffixed id keeps this
-        // route separate from the trusted production provider id.
-        let provider_id = "instafy_cloud_connection_hygiene_test";
-        let project_id = Uuid::new_v4();
-        let runtime_id = Uuid::new_v4();
-        {
-            let connection = pool.get().await?;
-            connection
-                .execute(
-                    "insert into projects (id, project_type, status)
-                     values ($1, 'customer', 'active')",
-                    &[&project_id],
-                )
-                .await?;
-            connection
-                .execute(
-                    "insert into runtimes (
-                         id, project_id, provider, status, idle_ttl_seconds, last_seen_at
-                     ) values ($1, $2, $3, 'ready', 1, now() - interval '1 hour')",
-                    &[&runtime_id, &project_id, &provider_id],
-                )
-                .await?;
-        }
+            // The provider is paused mid-request. The single pool slot must
+            // be free for the rest of the controller while it waits.
+            let probe = tokio::time::timeout(Duration::from_secs(2), pool.get())
+                .await
+                .expect(
+                    "OOM inspection kept the only pool connection checked out across the provider call",
+                )?;
+            probe.query_one("select 1", &[]).await?;
+            drop(probe);
 
+            // Only completion is asserted: the post-mortem is best-effort and
+            // its parsed value is outside what this test covers.
+            inspect_respond.notify_one();
+            tokio::time::timeout(Duration::from_secs(5), inspection)
+                .await
+                .expect("OOM inspection did not finish after the provider answered")?;
+            Ok(())
+        })
+        .await
+    }
+
+    /// The post-mortem runs inside the heartbeat-timeout sweep, one stale
+    /// runtime after another. A provider that accepts `/runtime/inspect` and
+    /// never answers must cost at most `RUNTIME_PROVIDER_INSPECT_TIMEOUT`
+    /// ("unknown"), not stall the stop behind it. The paused clock runs the
+    /// 15 s bound instantly; no database is used.
+    #[tokio::test(start_paused = true)]
+    async fn oom_inspection_gives_up_on_a_silent_provider_after_15_seconds() -> anyhow::Result<()> {
+        use std::time::Duration;
+
+        use super::RUNTIME_PROVIDER_INSPECT_TIMEOUT;
+
+        let provider = crate::tests::SilentProvider::start("/runtime/inspect").await?;
+        // Inspection never touches the database; an unconnected pool suffices.
+        let manager = bb8_postgres::PostgresConnectionManager::new_from_stringlike(
+            "postgres://postgres:postgres@127.0.0.1:1/postgres",
+            crate::config::database_tls(),
+        )?;
+        let pool = bb8::Pool::builder().max_size(1).build_unchecked(manager);
+        let provider_id = "instafy_cloud_inspect_deadline_test";
         let mut config = crate::tests::build_app_config(
             crate::tests::test_origin_private_key(),
             crate::tests::test_origin_public_key(),
-            "oom-inspection-connection-hygiene",
+            "oom-inspection-deadline",
         );
         config.runtime_providers = vec![crate::config::RuntimeProviderConfig {
             id: provider_id.to_string(),
-            display_name: "Slow OOM inspection provider".to_string(),
+            display_name: "Silent OOM inspection provider".to_string(),
             kind: "test".to_string(),
             owner_org_id: None,
             allowed_org_ids: vec![],
-            endpoint: Some(format!("http://{provider_address}")),
+            endpoint: Some(provider.endpoint.clone()),
             auth_token: None,
             metadata: None,
         }];
-        let state = crate::tests::build_test_state(pool.clone(), config);
+        let state = crate::tests::build_test_state(pool, config);
 
-        let inspection = tokio::spawn({
-            let state = state.clone();
-            async move { super::inspect_runtime_oom(&state, &runtime_id).await }
-        });
-        tokio::time::timeout(Duration::from_secs(5), inspect_reached.notified())
-            .await
-            .expect("OOM inspection never reached the provider");
+        let started = tokio::time::Instant::now();
+        let attribution = super::inspect_runtime_oom_via_provider(
+            &state,
+            provider_id,
+            &Uuid::new_v4(),
+            &Uuid::new_v4(),
+        )
+        .await;
+        let waited = started.elapsed();
 
-        // The provider is paused mid-request. The single pool slot must be
-        // free for the rest of the controller while it waits.
-        let probe = tokio::time::timeout(Duration::from_secs(2), pool.get())
-            .await
-            .expect(
-                "OOM inspection kept the only pool connection checked out across the provider call",
-            )?;
-        probe.query_one("select 1", &[]).await?;
-        drop(probe);
-
-        // Only completion is asserted: the post-mortem is best-effort and
-        // its parsed value is outside what this test covers.
-        inspect_respond.notify_one();
-        tokio::time::timeout(Duration::from_secs(5), inspection)
-            .await
-            .expect("OOM inspection did not finish after the provider answered")?;
-
-        pool.get()
-            .await?
-            .execute("delete from projects where id = $1", &[&project_id])
-            .await?;
-        provider_server.abort();
+        assert!(
+            provider.request_arrived().await,
+            "the inspection never reached the provider"
+        );
+        assert_eq!(attribution, None, "an unanswered post-mortem is unknown");
+        assert!(
+            waited >= RUNTIME_PROVIDER_INSPECT_TIMEOUT
+                && waited < RUNTIME_PROVIDER_INSPECT_TIMEOUT + Duration::from_secs(1),
+            "the inspection gave up after {waited:?}"
+        );
         Ok(())
     }
 }

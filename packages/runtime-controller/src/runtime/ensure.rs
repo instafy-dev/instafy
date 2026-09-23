@@ -54,6 +54,12 @@ const RUNTIME_PROVIDER_ENSURE_FENCE_TIMEOUT: Duration = Duration::from_secs(120)
 // the controller pool is configured with only two connections.
 static RUNTIME_PROVIDER_ENSURE_FENCE_CAPACITY: Semaphore = Semaphore::const_new(1);
 const RUNTIME_PROVIDER_COMPENSATING_RELEASE_TIMEOUT: Duration = Duration::from_secs(15 * 60);
+// An idle-slot reclaim runs inside the waiting launch's provider admission,
+// which serializes every provider launch in this process. Its provider release
+// is already bounded (RUNTIME_PROVIDER_RELEASE_TIMEOUT); the tunnel broker
+// revoke that follows must be too. Giving up has the same effect as a broker
+// error: the stopped runtime's local grants stay active until they expire.
+const RECLAIM_TUNNEL_REVOKE_TIMEOUT: Duration = Duration::from_secs(15);
 
 #[cfg(test)]
 #[derive(Clone)]
@@ -781,7 +787,10 @@ async fn hosted_runtime_blocker_is_reclaimable(
 ///
 /// Returns whether the slot was actually released. Must be called with no
 /// allocation transaction open: the stop takes its own pool connection and
-/// then waits on the provider's release endpoint over the network.
+/// then waits on the provider's release endpoint over the network. The caller
+/// still holds the provider launch admission, so every external call in here
+/// is bounded: the release by `RUNTIME_PROVIDER_RELEASE_TIMEOUT` and the
+/// tunnel revoke by `RECLAIM_TUNNEL_REVOKE_TIMEOUT`.
 async fn reclaim_idle_hosted_runtime_blocker(
     state: &AppState,
     blocker: &ActiveHostedRuntimeBlocker,
@@ -824,22 +833,33 @@ async fn reclaim_idle_hosted_runtime_blocker(
                 project_id = %runtime.project_id,
                 "reclaimed an idle hosted runtime for a space waiting on the organization limit"
             );
-            if let Err((status, payload)) = crate::tunnels::revoke_tunnels_for_scope(
-                state,
-                &runtime.project_id,
-                Some(&runtime.id),
-                stopped.outcome.released_runtime_lease_id.as_ref(),
-                &stop_reason_label,
+            match tokio::time::timeout(
+                RECLAIM_TUNNEL_REVOKE_TIMEOUT,
+                crate::tunnels::revoke_tunnels_for_scope(
+                    state,
+                    &runtime.project_id,
+                    Some(&runtime.id),
+                    stopped.outcome.released_runtime_lease_id.as_ref(),
+                    &stop_reason_label,
+                ),
             )
             .await
             {
-                warn!(
+                Ok(Ok(_)) => {}
+                Ok(Err((status, payload))) => warn!(
                     runtime_id = %runtime.id,
                     project_id = %runtime.project_id,
                     %status,
                     error = payload.0.message,
                     "failed to revoke tunnels while reclaiming an idle hosted runtime"
-                );
+                ),
+                Err(_) => warn!(
+                    runtime_id = %runtime.id,
+                    project_id = %runtime.project_id,
+                    timeout_seconds = RECLAIM_TUNNEL_REVOKE_TIMEOUT.as_secs(),
+                    "timed out revoking tunnels while reclaiming an idle hosted runtime; \
+                     its remaining grants stay active until they expire"
+                ),
             }
             // The space that lost its machine is told, so its studio stops
             // showing a runtime that no longer exists.

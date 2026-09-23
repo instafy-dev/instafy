@@ -1143,11 +1143,16 @@ async fn queued_launch_uses_provider_snapshot_refreshed_after_admission_wait() -
     Ok(())
 }
 
-/// A launch deliberately keeps one runtime -> lease -> project guard across
-/// the provider ensure (see `provider_launch_guard_orders_ensure_before_tombstone_and_release`).
-/// That fence must stay the only pool slot pinned by provider I/O: a second
+/// Guard on existing behaviour rather than a regression test for a fix: the
+/// launch path already returned its database-only probe connection before
+/// waiting for provider admission. A launch deliberately keeps one runtime ->
+/// lease -> project guard across the provider ensure (see
+/// `provider_launch_guard_orders_ensure_before_tombstone_and_release`), and
+/// that fence must stay the only pool slot pinned by provider I/O: a second
 /// launch queues for admission outside the pool, so with two connections the
-/// rest of the controller still gets one while the provider is slow.
+/// rest of the controller still gets one while the provider is slow. Holding
+/// the probe connection across the admission wait makes the pool probe below
+/// time out.
 #[tokio::test]
 async fn slow_provider_ensure_pins_at_most_one_pool_connection() -> anyhow::Result<()> {
     use std::sync::Arc;
@@ -1159,157 +1164,160 @@ async fn slow_provider_ensure_pins_at_most_one_pool_connection() -> anyhow::Resu
         2,
     )
     .await?;
-
-    let ensure_started = Arc::new(Semaphore::new(0));
-    let finish_ensure = Arc::new(Semaphore::new(0));
-    let provider_app = axum::Router::new().route(
-        "/runtime/ensure",
-        axum::routing::post({
-            let ensure_started = ensure_started.clone();
-            let finish_ensure = finish_ensure.clone();
-            move || {
-                let ensure_started = ensure_started.clone();
-                let finish_ensure = finish_ensure.clone();
-                async move {
-                    ensure_started.add_permits(1);
-                    finish_ensure
-                        .acquire_owned()
-                        .await
-                        .expect("finish ensure semaphore closed")
-                        .forget();
-                    Json(json!({ "message": "runtime ensured" }))
-                }
-            }
-        }),
-    );
-    let provider_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
-    let provider_address = provider_listener.local_addr()?;
-    let provider_server = tokio::spawn(async move {
-        axum::serve(provider_listener, provider_app)
-            .await
-            .expect("serve slow ensure provider");
-    });
-
     let org_id = Uuid::new_v4();
     let slow_project_id = Uuid::new_v4();
     let queued_project_id = Uuid::new_v4();
-    let provider_id = "runtime_connection_hygiene_test";
-    {
-        let connection = pool.get().await?;
-        connection
-            .execute(
-                "insert into organizations (id, slug, name) values ($1, $2, $3)",
-                &[
-                    &org_id,
-                    &format!("runtime-connection-hygiene-{org_id}"),
-                    &"Runtime connection hygiene test",
-                ],
-            )
-            .await?;
-        connection
-            .execute(
-                "insert into projects (id, org_id, project_type, status)
-                 values ($1, $3, 'customer', 'active'),
-                        ($2, $3, 'customer', 'active')",
-                &[&slow_project_id, &queued_project_id, &org_id],
-            )
-            .await?;
-    }
-
-    let mut config = crate::tests::build_app_config(
-        crate::tests::test_origin_private_key(),
-        crate::tests::test_origin_public_key(),
-        "runtime-connection-hygiene",
-    );
-    config.runtime_providers = vec![crate::config::RuntimeProviderConfig {
-        id: provider_id.to_string(),
-        display_name: "Slow ensure provider".to_string(),
-        kind: "test".to_string(),
-        owner_org_id: None,
-        allowed_org_ids: vec![],
-        endpoint: Some(format!("http://{provider_address}")),
-        auth_token: None,
-        metadata: None,
-    }];
-    let state = crate::tests::build_test_state(pool.clone(), config);
-
-    let slow_state = state.clone();
-    let mut slow_launch = tokio::spawn(async move {
-        ensure_runtime_launch(
-            &slow_state,
-            slow_project_id,
-            None,
-            provider_id.to_string(),
-            600,
-            Some("Slow provider launch".to_string()),
-            None,
-            RuntimeLeaseScope::Exclusive,
-            OriginEnsureOptions::new(None, None, None),
-        )
-        .await
-    });
-    tokio::select! {
-        permit = tokio::time::timeout(Duration::from_secs(5), ensure_started.acquire_owned()) => {
-            permit??.forget();
-        }
-        result = &mut slow_launch => {
-            let detail = match result? {
-                Ok(_) => "slow launch returned before contacting the provider".to_string(),
-                Err((status, body)) => format!("slow launch failed ({status}): {}", body.0.message),
-            };
-            anyhow::bail!(detail);
-        }
-    }
-
-    // A second launch finishes its database-only probe, returns that
-    // connection, and then waits for provider admission behind the slow one.
-    let admission_hook = ProviderLaunchAdmissionTestHook {
-        reached: Arc::new(Notify::new()),
-        proceed: Arc::new(Notify::new()),
-        waiting: Arc::new(Notify::new()),
+    let fixture = crate::tests::SharedDbFixture {
+        organizations: vec![org_id],
+        projects: vec![slow_project_id, queued_project_id],
     };
-    let queued_state = state.clone();
-    let queued_hook = admission_hook.clone();
-    let queued_launch = tokio::spawn(async move {
-        ensure_runtime_launch_inner(
-            &queued_state,
-            queued_project_id,
-            None,
-            provider_id.to_string(),
-            600,
-            Some("Queued provider launch".to_string()),
-            None,
-            RuntimeLeaseScope::Exclusive,
-            OriginEnsureOptions::new(None, None, None),
-            Some(queued_hook),
-        )
-        .await
-    });
-    tokio::time::timeout(Duration::from_secs(5), admission_hook.reached.notified()).await?;
-    admission_hook.proceed.notify_one();
-    tokio::time::timeout(Duration::from_secs(5), admission_hook.waiting.notified()).await?;
 
-    // One slot is the slow launch's guard. The other must still be available
-    // to an unrelated request while the provider is paused.
-    let probe = tokio::time::timeout(Duration::from_secs(2), pool.get())
-        .await
-        .expect("a slow provider ensure left no pool connection for other requests")?;
-    probe.query_one("select 1", &[]).await?;
-    drop(probe);
+    crate::tests::with_shared_db_fixture(fixture, async {
+        let ensure_started = Arc::new(Semaphore::new(0));
+        let finish_ensure = Arc::new(Semaphore::new(0));
+        let provider_app = axum::Router::new().route(
+            "/runtime/ensure",
+            axum::routing::post({
+                let ensure_started = ensure_started.clone();
+                let finish_ensure = finish_ensure.clone();
+                move || {
+                    let ensure_started = ensure_started.clone();
+                    let finish_ensure = finish_ensure.clone();
+                    async move {
+                        ensure_started.add_permits(1);
+                        finish_ensure
+                            .acquire_owned()
+                            .await
+                            .expect("finish ensure semaphore closed")
+                            .forget();
+                        Json(json!({ "message": "runtime ensured" }))
+                    }
+                }
+            }),
+        );
+        let provider_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+        let provider_address = provider_listener.local_addr()?;
+        let _provider_server = crate::tests::spawn_aborting(async move {
+            axum::serve(provider_listener, provider_app)
+                .await
+                .expect("serve slow ensure provider");
+        });
 
-    finish_ensure.add_permits(2);
-    for (label, handle) in [("slow", slow_launch), ("queued", queued_launch)] {
-        tokio::time::timeout(Duration::from_secs(10), handle)
-            .await??
-            .map_err(|(status, body)| {
-                anyhow::anyhow!("{label} launch failed ({status}): {}", body.0.message)
-            })?;
-    }
+        let provider_id = "runtime_connection_hygiene_test";
+        {
+            let connection = pool.get().await?;
+            connection
+                .execute(
+                    "insert into organizations (id, slug, name) values ($1, $2, $3)",
+                    &[
+                        &org_id,
+                        &format!("runtime-connection-hygiene-{org_id}"),
+                        &"Runtime connection hygiene test",
+                    ],
+                )
+                .await?;
+            connection
+                .execute(
+                    "insert into projects (id, org_id, project_type, status)
+                     values ($1, $3, 'customer', 'active'),
+                            ($2, $3, 'customer', 'active')",
+                    &[&slow_project_id, &queued_project_id, &org_id],
+                )
+                .await?;
+        }
 
-    pool.get()
-        .await?
-        .execute("delete from organizations where id = $1", &[&org_id])
-        .await?;
-    provider_server.abort();
-    Ok(())
+        let mut config = crate::tests::build_app_config(
+            crate::tests::test_origin_private_key(),
+            crate::tests::test_origin_public_key(),
+            "runtime-connection-hygiene",
+        );
+        config.runtime_providers = vec![crate::config::RuntimeProviderConfig {
+            id: provider_id.to_string(),
+            display_name: "Slow ensure provider".to_string(),
+            kind: "test".to_string(),
+            owner_org_id: None,
+            allowed_org_ids: vec![],
+            endpoint: Some(format!("http://{provider_address}")),
+            auth_token: None,
+            metadata: None,
+        }];
+        let state = crate::tests::build_test_state(pool.clone(), config);
+
+        let slow_state = state.clone();
+        let mut slow_launch = crate::tests::spawn_aborting(async move {
+            ensure_runtime_launch(
+                &slow_state,
+                slow_project_id,
+                None,
+                provider_id.to_string(),
+                600,
+                Some("Slow provider launch".to_string()),
+                None,
+                RuntimeLeaseScope::Exclusive,
+                OriginEnsureOptions::new(None, None, None),
+            )
+            .await
+        });
+        tokio::select! {
+            permit = tokio::time::timeout(Duration::from_secs(5), ensure_started.acquire_owned()) => {
+                permit??.forget();
+            }
+            result = &mut slow_launch => {
+                let detail = match result? {
+                    Ok(_) => "slow launch returned before contacting the provider".to_string(),
+                    Err((status, body)) => {
+                        format!("slow launch failed ({status}): {}", body.0.message)
+                    }
+                };
+                anyhow::bail!(detail);
+            }
+        }
+
+        // A second launch finishes its database-only probe, returns that
+        // connection, and then waits for provider admission behind the slow one.
+        let admission_hook = ProviderLaunchAdmissionTestHook {
+            reached: Arc::new(Notify::new()),
+            proceed: Arc::new(Notify::new()),
+            waiting: Arc::new(Notify::new()),
+        };
+        let queued_state = state.clone();
+        let queued_hook = admission_hook.clone();
+        let queued_launch = crate::tests::spawn_aborting(async move {
+            ensure_runtime_launch_inner(
+                &queued_state,
+                queued_project_id,
+                None,
+                provider_id.to_string(),
+                600,
+                Some("Queued provider launch".to_string()),
+                None,
+                RuntimeLeaseScope::Exclusive,
+                OriginEnsureOptions::new(None, None, None),
+                Some(queued_hook),
+            )
+            .await
+        });
+        tokio::time::timeout(Duration::from_secs(5), admission_hook.reached.notified()).await?;
+        admission_hook.proceed.notify_one();
+        tokio::time::timeout(Duration::from_secs(5), admission_hook.waiting.notified()).await?;
+
+        // One slot is the slow launch's guard. The other must still be
+        // available to an unrelated request while the provider is paused.
+        let probe = tokio::time::timeout(Duration::from_secs(2), pool.get())
+            .await
+            .expect("a slow provider ensure left no pool connection for other requests")?;
+        probe.query_one("select 1", &[]).await?;
+        drop(probe);
+
+        finish_ensure.add_permits(2);
+        for (label, handle) in [("slow", slow_launch), ("queued", queued_launch)] {
+            tokio::time::timeout(Duration::from_secs(10), handle)
+                .await??
+                .map_err(|(status, body)| {
+                    anyhow::anyhow!("{label} launch failed ({status}): {}", body.0.message)
+                })?;
+        }
+        Ok(())
+    })
+    .await
 }
