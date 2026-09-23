@@ -75,6 +75,8 @@ mod notification_conversation_read_tests;
 
 #[path = "org_accent_tests.rs"]
 mod org_accent_tests;
+#[path = "participation_billing_tests.rs"]
+mod participation_billing_tests;
 #[path = "project_identity_tests.rs"]
 mod project_identity_tests;
 

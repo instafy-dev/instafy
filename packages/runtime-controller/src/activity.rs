@@ -185,6 +185,12 @@ pub(crate) fn is_visible_reply(
     {
         return false;
     }
+    if ["/presentation/hidden", "/details/presentation/hidden"]
+        .iter()
+        .any(|path| metadata.pointer(path).and_then(JsonValue::as_bool) == Some(true))
+    {
+        return false;
+    }
     let message_type = message_type(metadata);
     let timeline_type = matches!(
         message_type.as_str(),
@@ -199,6 +205,10 @@ pub(crate) fn is_visible_reply(
             | "agent_job_thread"
             | "token_usage"
             | "reasoning"
+            | "learn_router"
+            | "todo_list"
+            | "browser_decision"
+            | "error"
     );
     let status_agent_message = message_type == "status"
         && metadata
