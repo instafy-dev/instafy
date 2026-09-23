@@ -59,6 +59,21 @@ describe("Chat browser request handoff", () => {
     value.busy = false; await render(); await advance(); expect(await attempt.result).toBeNull();
   });
 
+  it("continues an action wrapped by the controller's persisted job-message metadata", async () => {
+    const message = request();
+    value.messages = [{ ...message, metadata: {
+      messageType: "action_request",
+      details: { ...message.metadata, runtimeId: "ordinary-chat-runtime" },
+    } }];
+    await render();
+    const attempt = await begin();
+    expect(value.activate).toHaveBeenCalledExactlyOnceWith("personal");
+    value.open = true; value.personalReady = true;
+    await render(); await advance();
+    expect(await attempt.result).toBeNull();
+    expect(value.continueTask).toHaveBeenCalledExactlyOnceWith("personal", expect.stringContaining("Continue comparing our earlier choices."));
+  });
+
   it("keeps an unavailable native profile from silently becoming a Workspace task", async () => {
     value.messages = [request("device")]; value.transport = "shared"; value.personalAvailable = false; await render();
     const attempt = await begin();

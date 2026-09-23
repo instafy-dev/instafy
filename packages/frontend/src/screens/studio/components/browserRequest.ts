@@ -1,4 +1,5 @@
 import type { ChatMessage } from "../types";
+import { extractMessageDetails, getMessageType } from "./chatMessageMetadata";
 import type { BrowserTransport } from "./usePersonalBrowserBridge";
 
 export type BrowserRequest = {
@@ -8,9 +9,8 @@ export type BrowserRequest = {
 
 export function browserRequestFromMessage(message: ChatMessage): BrowserRequest | null {
   if (message.role !== "assistant") return null;
-  const metadata = message.metadata as Record<string, unknown> | null;
-  if (metadata?.messageType !== "action_request") return null;
-  const details = metadata.details as Record<string, unknown> | undefined;
+  if (getMessageType(message) !== "action_request") return null;
+  const details = extractMessageDetails(message.metadata);
   const value = details?.browserRequest as Record<string, unknown> | undefined;
   if (!value || typeof value.task !== "string" || !value.task.trim() || value.task.length > 8_000) return null;
   if (value.location !== "auto" && value.location !== "device" && value.location !== "workspace") return null;
