@@ -8,8 +8,7 @@ use std::time::Duration;
 use anyhow::{Context, Result, anyhow};
 use codex_config::{DEFAULT_MCP_SERVER_ENVIRONMENT_ID, McpServerConfig, McpServerTransportConfig};
 use codex_core::config::{
-    Config, ConfigBuilder, ConfigOverrides, ManagedFeatures, find_codex_home,
-    set_project_trust_level,
+    Config, ConfigBuilder, ConfigOverrides, ManagedFeatures, set_project_trust_level,
 };
 use codex_core::test_support::EmptyUserInstructionsProvider;
 use codex_core::{
@@ -951,19 +950,20 @@ impl CodexClient {
         }
 
         let runtime_codex_home = match ensure_runtime_codex_home(self.workspace_dir()) {
-            Ok(codex_home) => Some(codex_home),
+            Ok(codex_home) => codex_home,
             Err(error) => {
                 tracing::warn!(
                     error = %error,
                     workspace_dir = %self.workspace_dir().display(),
                     "failed to ensure CODEX_HOME before runtime-agent run"
                 );
-                None
+                let fallback_home = self.config.workspace_dir.join(".codex-runtime-fallback");
+                prepare_fallback_codex_home(self.workspace_dir(), &fallback_home)?;
+                ensure_codex_home_writable(&fallback_home)?;
+                fallback_home
             }
         };
 
-        if let Some(codex_home) =
-            runtime_codex_home.or_else(|| find_codex_home().ok().map(|path| path.into()))
         {
             match AbsolutePathBuf::from_absolute_path(self.config.workspace_dir.as_path()) {
                 Ok(workspace_root) => {
@@ -972,13 +972,13 @@ impl CodexClient {
                             .await
                             .unwrap_or(workspace_root);
                     if let Err(error) = set_project_trust_level(
-                        &codex_home,
+                        &runtime_codex_home,
                         trust_root.as_path(),
                         TrustLevel::Trusted,
                     ) {
                         tracing::warn!(
                             ?error,
-                            codex_home = %codex_home.display(),
+                            codex_home = %runtime_codex_home.display(),
                             trust_root = %trust_root.display(),
                             "failed to mark workspace trust root as trusted"
                         );
@@ -1073,7 +1073,8 @@ impl CodexClient {
             }
         }
 
-        let mut config = match Config::load_with_cli_overrides_and_harness_overrides(
+        let mut config = match load_runtime_codex_config(
+            &runtime_codex_home,
             cli_overrides.clone(),
             overrides.clone(),
         )
@@ -1093,7 +1094,8 @@ impl CodexClient {
                 };
 
                 if repaired {
-                    match Config::load_with_cli_overrides_and_harness_overrides(
+                    match load_runtime_codex_config(
+                        &runtime_codex_home,
                         cli_overrides.clone(),
                         overrides.clone(),
                     )
@@ -3703,6 +3705,22 @@ fn resolve_codex_home(workspace_dir: &Path) -> PathBuf {
         .unwrap_or_else(|| workspace_dir.join(".codex"))
 }
 
+async fn load_runtime_codex_config(
+    codex_home: &Path,
+    cli_overrides: Vec<(String, codex_config::TomlValue)>,
+    overrides: ConfigOverrides,
+) -> std::io::Result<Config> {
+    // Codex's default loader discovers the desktop user's home independently
+    // of resolve_codex_home. Pin the same runtime home that we repair and trust,
+    // so an ordinary Chat turn cannot inherit unrelated host tools or plugins.
+    ConfigBuilder::default()
+        .codex_home(codex_home.to_path_buf())
+        .cli_overrides(cli_overrides)
+        .harness_overrides(overrides)
+        .build()
+        .await
+}
+
 fn ensure_runtime_codex_home(workspace_dir: &Path) -> Result<PathBuf> {
     let codex_home = resolve_codex_home(workspace_dir);
     ensure_codex_home_writable(&codex_home)?;
@@ -5057,6 +5075,34 @@ required = true
         assert_eq!(sanitized.matches("[mcp_servers.datagouv]").count(), 1);
         assert!(sanitized.contains("required = false"));
         assert!(!sanitized.contains("required = true"));
+    }
+
+    #[tokio::test]
+    async fn runtime_codex_configuration_loads_from_the_resolved_home() {
+        let workspace = tempfile::tempdir().expect("workspace tempdir");
+        let runtime_home = workspace.path().join(".codex");
+        std::fs::create_dir_all(&runtime_home).expect("runtime home");
+        std::fs::write(
+            runtime_home.join("config.toml"),
+            "model = 'runtime-config-marker'\n[mcp_servers.runtime_marker]\ncommand = 'runtime-marker'\n",
+        )
+        .expect("runtime config");
+
+        let config = load_runtime_codex_config(
+            &runtime_home,
+            vec![],
+            ConfigOverrides {
+                cwd: Some(workspace.path().to_path_buf()),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("load runtime config");
+
+        assert_eq!(config.codex_home.as_path(), runtime_home);
+        assert_eq!(config.model.as_deref(), Some("runtime-config-marker"));
+        assert_eq!(config.mcp_servers.len(), 1);
+        assert!(config.mcp_servers.contains_key("runtime_marker"));
     }
 
     #[test]
