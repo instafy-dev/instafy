@@ -391,6 +391,29 @@ fn startup_in_dev_mode_keeps_the_development_fallbacks() {
 }
 
 #[test]
+fn startup_refuses_the_signing_fallback_when_dev_mode_is_not_enabled() {
+    // DEV_MODE unlocks the published signing fallback, so only an explicit
+    // enabling value may select it. Setting the variable to a disabling,
+    // empty or unrecognised value is production configuration.
+    let server = MockServer::start();
+    let requests = server.mock(|_when, then| {
+        then.status(500);
+    });
+    for value in ["false", "0", "off", "", "prod"] {
+        let result = run_controller(&server, |command| {
+            command
+                .env("DEV_MODE", value)
+                .env_remove("USER_TOKEN_SECRET");
+        });
+        assert_normal_error(&result, "USER_TOKEN_SECRET must be set outside DEV_MODE");
+        assert!(!result.output.contains(
+            "USER_TOKEN_SECRET is unset, so session tokens are signed with the published"
+        ));
+    }
+    requests.assert_hits(0);
+}
+
+#[test]
 fn startup_warns_while_stored_credentials_use_the_published_derived_key() {
     // Controllers that ran without either variable encrypted credentials under
     // a key anyone can derive. It stays accepted so those rows remain readable

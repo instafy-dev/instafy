@@ -159,8 +159,8 @@ fn resolve_user_token_secret(dev_mode: bool, configured: Option<&str>) -> anyhow
     }
 }
 
-/// Resolve the key that encrypts stored credentials, project secrets and OAuth
-/// tokens.
+/// Resolve the key that encrypts stored credentials, project secrets, OAuth
+/// tokens, saved browser profiles and GitHub device-login sessions.
 ///
 /// Earlier releases derived it from USER_TOKEN_SECRET whenever it was unset.
 /// That couples two secrets with opposite lifecycles: the signing secret must
@@ -189,10 +189,11 @@ fn resolve_credential_encryption_key(
 }
 
 /// Whether this is the key earlier releases derived from the published
-/// development USER_TOKEN_SECRET. Anyone can compute it, so credentials stored
-/// under it are readable by anyone holding a copy of the database. It is still
-/// accepted, because refusing it would strand those rows until they are
-/// re-encrypted, but the controller warns on every boot while it is in use.
+/// development USER_TOKEN_SECRET. Anyone can compute it, so the encrypted rows
+/// are readable by anyone who can read them at all: a service-role key, a
+/// database role, a backup or any other SQL read path. It is still accepted,
+/// because refusing it would strand those rows until they are re-encrypted,
+/// but the controller warns on every boot while it is in use.
 fn is_published_credential_encryption_key(key: &CredentialEncryptionKey) -> bool {
     key.as_bytes()
         == CredentialEncryptionKey::derive_from_user_token_secret(DEV_USER_TOKEN_SECRET).as_bytes()
@@ -656,8 +657,9 @@ impl AppConfig {
         if !dev_mode && is_published_credential_encryption_key(&credential_encryption_key) {
             warn!(
                 "CREDENTIAL_ENCRYPTION_KEY is the key derived from the published development \
-                 USER_TOKEN_SECRET. Anyone with a copy of the database can decrypt stored \
-                 credentials; re-encrypt them under a freshly generated key"
+                 USER_TOKEN_SECRET. Anyone who can read the encrypted rows, through any \
+                 service-role or SQL read path, can decrypt them; re-encrypt them under a \
+                 freshly generated key"
             );
         }
 

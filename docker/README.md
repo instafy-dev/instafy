@@ -16,7 +16,11 @@ This folder hosts files related to the **runtime container** that executes agent
 
 ## Quick start (headless codex-core)
 
-1. Ensure your local Supabase (Postgres/auth) is running (`pnpm supabase:up`) and the Rust runtime controller/proxy are available (`pnpm dev:controller`, `pnpm dev:proxy`).
+1. Ensure your local Supabase (Postgres/auth) is running (`pnpm supabase:up`). Step 3 starts the Rust
+   runtime controller and proxy with a per-checkout session signing secret and credential key. To run
+   the controller by hand instead (`pnpm dev:controller`), export `USER_TOKEN_SECRET` and
+   `CREDENTIAL_ENCRYPTION_KEY` first, or set `DEV_MODE=1` on a machine nobody else can reach: outside
+   `DEV_MODE` it refuses to start without them, and `DEV_MODE` signs sessions with a published value.
 2. Configure an absolute protected env root, then copy the base env file:
    ```bash
    export INSTAFY_ENV_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/instafy/env"
@@ -82,9 +86,10 @@ Stop everything with `pnpm runtime:down`, which tears down the controller stack.
 - Supply server-only Supabase and proxy credentials through your orchestrator's secret store.
   The controller image also requires `USER_TOKEN_SECRET` (`openssl rand -hex 32`) and
   `CREDENTIAL_ENCRYPTION_KEY` (`openssl rand -base64 32`) and refuses to start without them
-  outside `DEV_MODE`. When upgrading a controller that ran without them, follow
-  [the controller upgrade steps](../packages/runtime-controller/README.md#upgrading-a-controller-without-explicit-secrets)
-  first so stored credentials stay readable.
+  outside `DEV_MODE`. When upgrading a controller that ran without them, provision both on the
+  release you already run by following
+  [the controller upgrade steps](../packages/runtime-controller/README.md#upgrading-a-controller-without-explicit-secrets),
+  then roll out the new release, so stored credentials stay readable.
   `PROXY_CREDENTIAL_LEASE_TOKEN` is a controller-to-proxy credential only; never place it in a
   runtime/agent environment.
 - Keep runtimes ephemeral (evaporate anytime); canonical workspace state lives in git-canonical (or local-canonical for opt-out users).

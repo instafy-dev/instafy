@@ -292,7 +292,8 @@ fetched through the controller `/fs/*` endpoints rather than Supabase Storage. W
 set `WORKSPACE_ROOT=/absolute/path/to/workspaces` so each project maps to `<WORKSPACE_ROOT>/<project_id>`.
 Outside `DEV_MODE` the controller refuses to start without `USER_TOKEN_SECRET` (at least 32 bytes) and
 `CREDENTIAL_ENCRYPTION_KEY` (base64, 32 bytes). `pnpm controller:up` generates both per checkout under `tmp/`;
-a bare `cargo run` needs `DEV_MODE=1` or both values exported.
+a bare `cargo run` or `pnpm dev:controller` needs both values exported, or `DEV_MODE=1` on a machine nobody else
+can reach, because `DEV_MODE` signs sessions with the development value published in this repository.
 
 ### Desktop runtimes & origins
 
