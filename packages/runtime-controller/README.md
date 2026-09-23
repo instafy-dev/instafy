@@ -255,6 +255,8 @@ Key environment variables (see `AppConfig::from_env` for defaults):
 - `SUPABASE_JWKS_URL` — optional override for JWKS discovery (defaults to `<SUPABASE_PROJECT_URL>/auth/v1/.well-known/jwks.json`).
 - `SUPABASE_JWKS_REFRESH_SECONDS` — interval for refreshing the JWKS cache (defaults to 300 seconds; minimum 30).
 - `CONTROLLER_INTERNAL_TOKEN` — internal bearer token required for privileged automation.
+- `USER_TOKEN_SECRET` — HS256 key that signs the controller session tokens issued by `POST /auth/session`. Any token that verifies against it is accepted as a session for the user it names, so outside `DEV_MODE` the controller refuses to start when it is unset, shorter than 32 bytes, or the development value published in this repository. Generate it with `openssl rand -hex 32`. With `CREDENTIAL_ENCRYPTION_KEY` set, rotating it only signs every user out (tokens last `USER_TOKEN_TTL_SECONDS`, default 900).
+- `CREDENTIAL_ENCRYPTION_KEY` — base64-encoded 32-byte key that encrypts stored credentials, project secrets and OAuth tokens. Required outside `DEV_MODE`. Generate it with `openssl rand -base64 32`, keep it in your secret store, and do not change it without re-encrypting the stored rows: a different key makes existing credentials unreadable. Before upgrading a controller that ran without it, see [Upgrading a controller without explicit secrets](#upgrading-a-controller-without-explicit-secrets).
 - `AGENT_LOGIN_KEY` — shared secret agents use to mint scoped tokens via `/agent/login`.
 - `WORKSPACE_ROOT` — runtime/controller root directory containing per-project workspaces. In local-canonical desktop mode, the source-of-truth folder can live outside this hosted layout. In git-canonical hosted mode, this root holds the materialized working copies.
 - `PROXY_BASE_URL`/`PROXY_SIGNING_SECRET` — optional AI proxy envelope support.
@@ -289,6 +291,33 @@ Key environment variables (see `AppConfig::from_env` for defaults):
 
 Additional fields include Redis settings for cross-controller `/events` fanout (`REDIS_URL`, optional `REDIS_NAMESPACE`, optional `REDIS_EVENTS_CHANNEL`), agent token TTLs, and GitHub workflow metadata. Keep environment-specific values in your orchestration layer (e.g., AWS ECS task definitions).
 
+### Upgrading a controller without explicit secrets
+
+Earlier releases started without `USER_TOKEN_SECRET` by falling back to a development value
+published in this repository, and without `CREDENTIAL_ENCRYPTION_KEY` by deriving the key from
+`USER_TOKEN_SECRET`. Both fallbacks now apply only under `DEV_MODE`. Set both values together, in
+this order:
+
+1. Work out which key encrypted your stored credentials. If `CREDENTIAL_ENCRYPTION_KEY` was
+   already set, keep it. Otherwise it was derived from the `USER_TOKEN_SECRET` the controller ran
+   with (the published `dev-user-token-secret` when that was unset):
+
+   ```bash
+   printf '%s%s' 'instafy:credential-encryption-key:v1:' "$PREVIOUS_USER_TOKEN_SECRET" \
+     | openssl dgst -sha256 -binary | base64
+   ```
+
+   Set `CREDENTIAL_ENCRYPTION_KEY` to that output so existing credentials stay readable. A
+   controller with no stored credentials can use a freshly generated key instead.
+2. Set `USER_TOKEN_SECRET` to a newly generated value. Once the key is explicit, changing the
+   signing secret no longer affects stored credentials.
+
+If the controller ever served a network others could reach while `USER_TOKEN_SECRET` was unset,
+treat every session it accepted as untrusted. If its key was derived from the published value,
+anyone with a copy of the database can also decrypt the stored credentials: the controller logs a
+warning at every start while that key is configured. Those credentials need to be re-encrypted
+under a freshly generated key or revoked and reconnected by their owners.
+
 ## Local Development
 
 ### Startup service identity
@@ -317,8 +346,8 @@ cargo test --locked --manifest-path packages/runtime-controller/Cargo.toml --tes
 ### Running the controller
 
 1. Ensure Postgres + Supabase stack are running locally with the expected schema (see `packages/runtime-controller/migrations/`).
-2. Set the required env vars (at minimum `DATABASE_URL`, `SUPABASE_PROJECT_URL`, `CONTROLLER_INTERNAL_TOKEN`, `WORKSPACE_ROOT`, and an Ed25519 keypair via `RUNTIME_SIGNING_PRIVATE_KEY` / `RUNTIME_SIGNING_PUBLIC_KEY`).
-3. Use the provided scripts: `pnpm controller:up` to boot Supabase + the controller, and the matching `*:down` command when finished. Avoid backgrounding the controller manually; orphaned listeners block Playwright.
+2. Set the required env vars (at minimum `DATABASE_URL`, `SUPABASE_PROJECT_URL`, `CONTROLLER_INTERNAL_TOKEN`, `WORKSPACE_ROOT`, and an Ed25519 keypair via `RUNTIME_SIGNING_PRIVATE_KEY` / `RUNTIME_SIGNING_PUBLIC_KEY`). Outside `DEV_MODE`, also set `USER_TOKEN_SECRET` and `CREDENTIAL_ENCRYPTION_KEY`; a bare `cargo run` for local work needs `DEV_MODE=1` or both values.
+3. Use the provided scripts: `pnpm controller:up` to boot Supabase + the controller, and the matching `*:down` command when finished. It generates a per-checkout `USER_TOKEN_SECRET` (`tmp/user-token-secret`) and `CREDENTIAL_ENCRYPTION_KEY` (`tmp/credential-encryption-key.b64`) unless you export your own. Avoid backgrounding the controller manually; orphaned listeners block Playwright.
 4. Run `cargo test` inside `packages/runtime-controller` for unit coverage.
 5. Trigger flows from the Studio or harness to observe `/events` and verify run output.
 

@@ -33,6 +33,7 @@ import {
 import { ensureSupabaseEmailTemplateMounts } from "./lib/supabaseEmailTemplateMounts.mjs";
 import { computeGitServicesImageFingerprint } from "./lib/gitServicesImageFingerprint.mjs";
 import { resolveRustBinaryLaunch } from "./lib/prebuiltRustBinary.mjs";
+import { ensureLocalUserTokenSecret } from "./lib/localUserTokenSecret.mjs";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -66,6 +67,7 @@ const credentialEncryptionKeyPath = path.join(
   "tmp",
   "credential-encryption-key.b64"
 );
+const userTokenSecretPath = path.join(repoRoot, "tmp", "user-token-secret");
 const runtimeProvenancePath = path.join(repoRoot, "tmp", "runtime-provenance.json");
 const runtimePruneScript = path.join(repoRoot, "scripts", "prune-runtime-agents.mjs");
 const UUID_PATTERN =
@@ -3129,6 +3131,12 @@ async function startControllerIfNeeded(
   env.RUNTIME_SIGNING_PUBLIC_KEY = originKeys.publicKey;
   env.RUNTIME_SIGNING_KEY_ID = originKeys.keyId;
   env.CREDENTIAL_ENCRYPTION_KEY = ensureCredentialEncryptionKey();
+  // Never sign local sessions with the development fallback published in the
+  // source: the controller listens on every interface, not only loopback.
+  env.USER_TOKEN_SECRET = ensureLocalUserTokenSecret({
+    explicit: process.env.USER_TOKEN_SECRET,
+    filePath: userTokenSecretPath,
+  });
   const proxyAuthPath = resolveProxyAuthPath(resolveProxyCodexHome());
   if (fileExists(proxyAuthPath)) {
     env.CODEX_AUTH_PATH = proxyAuthPath;

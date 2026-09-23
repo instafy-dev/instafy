@@ -80,6 +80,11 @@ Stop everything with `pnpm runtime:down`, which tears down the controller stack.
 - Use your own infrastructure tooling to provision the controller/proxy, optional warm pool, and
   Git-canonical services.
 - Supply server-only Supabase and proxy credentials through your orchestrator's secret store.
+  The controller image also requires `USER_TOKEN_SECRET` (`openssl rand -hex 32`) and
+  `CREDENTIAL_ENCRYPTION_KEY` (`openssl rand -base64 32`) and refuses to start without them
+  outside `DEV_MODE`. When upgrading a controller that ran without them, follow
+  [the controller upgrade steps](../packages/runtime-controller/README.md#upgrading-a-controller-without-explicit-secrets)
+  first so stored credentials stay readable.
   `PROXY_CREDENTIAL_LEASE_TOKEN` is a controller-to-proxy credential only; never place it in a
   runtime/agent environment.
 - Keep runtimes ephemeral (evaporate anytime); canonical workspace state lives in git-canonical (or local-canonical for opt-out users).

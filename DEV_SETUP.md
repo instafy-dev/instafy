@@ -290,6 +290,9 @@ In local development you can run the controller via `cargo run` (see `packages/r
 at a shared dev instance. Large artifacts (images/logs) should be written to the shared workspace (local dir/EFS) and
 fetched through the controller `/fs/*` endpoints rather than Supabase Storage. When running the controller locally,
 set `WORKSPACE_ROOT=/absolute/path/to/workspaces` so each project maps to `<WORKSPACE_ROOT>/<project_id>`.
+Outside `DEV_MODE` the controller refuses to start without `USER_TOKEN_SECRET` (at least 32 bytes) and
+`CREDENTIAL_ENCRYPTION_KEY` (base64, 32 bytes). `pnpm controller:up` generates both per checkout under `tmp/`;
+a bare `cargo run` needs `DEV_MODE=1` or both values exported.
 
 ### Desktop runtimes & origins
 
