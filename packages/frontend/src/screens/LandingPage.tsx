@@ -124,6 +124,17 @@ export function LandingPage() {
                 <p className="mt-3 text-sm text-slate-500 dark:text-slate-400">
                   Open a space. Bring your crew. Take it from there.
                 </p>
+                <p className="mt-4 max-w-lg text-xs leading-relaxed text-slate-500 dark:text-slate-400" data-testid="landing-sign-in-data-note">
+                  Sign in with Google, GitHub, or email. Instafy uses only your name, email address, and profile
+                  picture to create and secure your account.{" "}
+                  <Link to="/privacy" className="underline underline-offset-2 hover:text-slate-700 dark:hover:text-slate-200">
+                    Privacy Policy
+                  </Link>
+                  {" · "}
+                  <Link to="/terms" className="underline underline-offset-2 hover:text-slate-700 dark:hover:text-slate-200">
+                    Terms
+                  </Link>
+                </p>
               </div>
               <Link to="/studio" className={`${PRIMARY_LINK} shrink-0`}>
                 {entryLabel} <span aria-hidden="true">↗</span>
