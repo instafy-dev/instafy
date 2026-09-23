@@ -88,24 +88,11 @@ Gitleaks gates without secrets or write permission. This gives release tooling
 an exact-main attestation while the pull-request lane remains base-owned and
 continues to treat candidate bytes only as unexecuted data.
 
-The boundary job alone has a temporary, default-off runner bootstrap switch:
-`CI_BOOTSTRAP_SELF_HOSTED=true`. It selects a disposable Linux ARM64 runner only
-while this repository is private, for same-repository `pull_request_target`
-events targeting `main` or pushes to protected `main`. Public repositories,
-fork pull requests, other events, and an unset or disabled switch retain
-`ubuntu-latest`. The respective organization runner groups are `instafy-ci-pr`
-and `instafy-ci-main`. A unique
-`instafy-ci-bootstrap-<repository-id>-<run-id>-<attempt>-boundary` label replaces
-the ordinary role label, so the bootstrap runner is scoped to this job and
-attempt. Runner provisioning must independently authenticate that exact job
-and destroy the disposable guest after it finishes. This switch does not
-enable other CI jobs, change protection, or authorize release work.
-
-Routing preserves the existing read-only permissions, trusted checkouts,
-candidate-as-data boundary, scanner version and scans. The installer verifies
-the pinned Gitleaks 8.30.1 archive for either Linux x64 or ARM64 and rejects
-unsupported architectures. Remove or disable the switch to restore hosted
-routing; no runner credentials or host configuration belong in this tree.
+The boundary job runs on GitHub-hosted `ubuntu-latest`, like every other public
+job; the public repository contains no self-hosted runner routing (see
+`scripts/check-hosted-only-runners.test.mjs`). The installer verifies the pinned
+Gitleaks 8.30.1 archive for either Linux x64 or ARM64 and rejects unsupported
+architectures.
 
 The standalone UI configs are `packages/frontend/playwright.ci-ui.config.ts`
 and `packages/frontend/vite.ci-ui.config.ts`. Avoid `.br` inside these source
@@ -116,136 +103,30 @@ scanner rules, archive depth and unexpected-read failure behavior are unchanged.
 `node --test scripts/browser-ci-workflow.test.mjs` covers the names, all consumers
 and the existing browser-lane behavior.
 
-The independent, default-off `CI_EXPANDED_SELF_HOSTED=true` switch covers only
-four additional short jobs. It does not replace the boundary switch:
-
-| Job | Eligible events | Literal runner-label suffix |
-| --- | --- | --- |
-| Secret scan | Protected `main` push | `public-secret-scan` |
-| Go packages | Same-repository PR to `main`; protected `main` push | `public-go` |
-| Require reviewed Changeset release intent | Same-repository PR to `main` | `public-npm-policy` |
-| Rust formatting | Same-repository PR to `main`; protected `main` push | `public-rust-fmt` |
-
-All four require this repository to remain private; forks, public visibility
-and unsupported events keep their existing hosted selection. The three
-non-PR-policy jobs also support the exact-main manual route described below.
-Each disposable Linux ARM64 runner uses the same trust-specific organization
-group and unique `instafy-ci-bootstrap-<repository-id>-<run-id>-<attempt>-<suffix>`
-label format as the boundary lane, without an ordinary role label. Labels are
-placement constraints, not an exclusive job reservation: provisioning must
-authenticate the exact workflow source and assignment, retain bounded job and
-cleanup deadlines, and destroy the guest. Unknown cleanup must quarantine
-capacity, not trigger a blind retry. No host credentials belong in the guest.
-Before checkout, each self-hosted job requires an actual non-root Linux ARM64
-process, Node22, the ephemeral marker, no private environment directory and its
-baseline tools. This prerequisite check does not itself prove guest isolation.
-
-Release jobs remain outside these switches. JavaScript, Rust compilation/tests
-and the two browser lanes have their own independent switches described below.
-The four job names, permissions and timeouts are unchanged; the main scanner
-uses the same pinned x64/ARM64 Gitleaks archives as the boundary. Disable the
-expanded switch to restore hosted routing for new runs; already queued jobs
-do not automatically move pools. Run `node --test scripts/check-expanded-ci-routing.test.mjs`
-for routing regressions. These tests are not real ARM64 workload or teardown
-qualification, which is required before enabling the switch.
+Every Public Build job (secret scan, Go, Rust formatting, the npm policy check
+and the split JavaScript/Rust lanes below) runs on GitHub-hosted Ubuntu. Run
+`node --test scripts/check-hosted-only-runners.test.mjs` to prove that no
+workflow names a self-hosted label, runner group or routing switch; it is
+part of the JavaScript contracts lane.
 
 ### Protected-main manual CI
 
-The existing lane-specific switches also cover 31 job definitions on an explicit
-`workflow_dispatch` of protected, current `main`: 20 direct Public Build jobs,
-the five Browser jobs, Auth Email, Controller database tests, the Git conflict
-fixture, and npm Select, Version and Pack. No new switch enables unrelated lanes.
-These manual routes require the canonical repository and ID, private visibility,
-the exact defining workflow ref on main, and workflow SHA equal to the event SHA.
-Other branches, public visibility, unrelated callers and disabled switches retain
-the original hosted selection.
-
-Browser permits either its direct manual workflow or the existing exact Public
-Build caller. GitHub's [reusable-workflow context](https://docs.github.com/en/actions/reference/workflows-and-actions/reusing-workflow-configurations#github-context)
-belongs to the caller; these two cases therefore have different run paths and job
-names. Admission must distinguish them explicitly and retain exact-attempt callee
-metadata and both workflow pins for the Build case.
-
-Every manual job uses the existing Linux ARM64 main group and unique
-repository/run/attempt/job label, with its unchanged commands, resource profile,
-timeout and cleanup. The manager must independently re-read protected main and
-reject a dispatch whose event SHA is no longer current; inputs cannot choose an
-alternate source. The six reviewed workflow pins and exact manual tuples must be
-enrolled before activation, including the standalone Browser workflow identity.
-Source tests are not a cold workload or cleanup qualification.
-
-Npm Version retains its existing exact-main freshness check before exposing the
-version bot credential; this route is not credential-free. Npm Publish still uses
-its original hosted runner and trusted-publisher OIDC. Image publication retains
-its independent BUILD route. No schedule, PR, automatic route or release authority
-is broadened by these manual additions.
-
-`node --test scripts/check-manual-ci-routing.test.mjs` exercises the real selectors
-and npm preflights and reconstructs all six complete preceding workflows.
-It is also imported by the existing expanded-CI test entrypoint. The preceding
-automatic-route tests use only that finite inverse; their original expectations
-and byte hashes remain, alongside raw old/new selector equivalence checks.
-
-The separate, default-off `CI_PUBLIC_CONTROL_SELF_HOSTED=true` switch covers
-four protected-`main` push jobs: npm `select` (15 minutes, suffix
-`public-npm-select`), npm `version` (15 minutes, suffix `public-npm-version`),
-npm `pack` (25 minutes, suffix `public-npm-pack`) and the
-image coordinator (5 minutes, suffix `public-image-coordinator`). All require the
-canonical private repository and repository ID, a protected main ref and their exact main workflow ref. They use
-the disposable Linux ARM64 main group and per-run/attempt labels above. Public
-visibility, PRs, forks, schedules and unsupported events retain
-`ubuntu-24.04`. The three npm jobs also support the manual route above;
-the image coordinator's scheduled/manual BUILD route is separate.
-
-This source routing is not runner admission or a successful publication proof.
-Before enabling it, provisioning must independently authenticate each exact
-workflow/job/event tuple, install and qualify its baseline tools (`gh` for
-Select, Version and the coordinator, plus `jq` and GNU `date -d` for the coordinator), and prove cold job
-execution and teardown. The first steps fail closed on missing tools, wrong
-source identity or a nonisolated runner; they do not install dependencies.
-The npm selector retains read-only repository access. The coordinator retains
-its existing GitHub-token `actions: write` permission to dispatch the two fixed
-publishers, without receiving package, registry or production credentials.
-Pack retains read-only actions/repository permissions and its exact selected
-publish plan, package tests, pack verification and immutable artifact upload.
-Its non-root Node22 preflight requires only the existing baseline tools; the
-unchanged setup step then selects Node24 for the pack commands. It does not
-receive npm OIDC or the version bot's credential. Version retains its existing
-bot credential only in its two original steps, so this lane is not credential-free.
-Before those steps, a fresh read must prove the event SHA is still protected main
-and the checkout is exactly that SHA. API failure, source drift or failed runner
-qualification prevents bot exposure. The original hosted fallback is unchanged.
-This source-only route still needs exact runner admission and real cold
-execution/cleanup qualification. npm publish remains hosted with its existing
-trusted-publisher OIDC authority. A push coordinator can defer while Build is
-incomplete. Its scheduled/manual follow-up and the image publishers have the
-separate optional BUILD route below; the push-only control switch does not
-enable that route. No `workflow_run` trigger is added. Run the source/fixture regressions with:
-
-```bash
-node --test scripts/check-public-release-workflows.test.mjs scripts/check-expanded-ci-routing.test.mjs
-```
-
-`TRUSTED_AMD64_BUILD_RUNNER_MODE=self-hosted` independently selects the
-organization group `instafy-trusted-build` and static labels
-`self-hosted`, `Linux`, `X64`, `instafy-build` for all four jobs in each exact-main
-image publisher, plus scheduled/manual image reconciliation. The canonical
-repository ID must still be private; main must be protected and the workflow
-ref and source SHA must match. Manual requests must name that same source SHA.
-PRs, forks, public visibility, other refs and a disabled/unset switch retain
-their original hosted runners. The existing isolated ARM64 push coordinator
-route takes precedence and is unchanged. This BUILD route uses trusted,
-ephemeral jobs with the existing Docker-capable build profile; its static labels
-are placement, not a claim of VM or network isolation.
+Explicit `workflow_dispatch` runs of protected `main` (Public Build, the
+Browser workflows, Auth Email, Controller database tests, the Git conflict
+fixture, npm Select/Version/Pack and the image publishers) run on the same
+GitHub-hosted runners as push and pull-request events, with the same commands,
+permissions and timeouts. The publishers' first step still requires
+`inputs.commit_sha` to equal the current protected-main commit;
+npm publish keeps its hosted `npm-release` environment and trusted-publisher
+OIDC. Run `node --test scripts/check-public-release-workflows.test.mjs` for
+the release-workflow regressions.
 
 The seven service cells, four runtime flavor/architecture cells, original
 30/75-minute limits, approval, scan-before-login gates, immutable manifests,
 GitHub-token permissions and provenance settings are unchanged. Runtime builds
-still produce both amd64 and ARM64 images; on BUILD the scanner uses the existing
-pinned x64 Trivy binary rather than the target image's architecture. Hosted
-runner matrix selections and scanner pins are unchanged. The five-minute
-coordinator never waits for child publishers, so it releases a shared BUILD
-runner before those jobs need it.
+produce both amd64 and ARM64 images natively on architecture-matched hosted
+runners, each scanned with its pinned per-architecture Trivy binary. The
+five-minute coordinator never waits for child publishers.
 
 Debian service final stages explicitly refresh inherited security packages and
 check distribution-specific minimum versions after installation. Installing an
@@ -255,51 +136,11 @@ SQLite and Perl-base floors. `node --test scripts/check-production-image-inputs.
 checks every Debian publisher cell plus the standalone speech-host image.
 These source checks do not replace the unchanged scan-before-publication gate.
 
-Self-hosted amd64 image cells select the digest-pinned **amd64** BuildKit
-v0.32.2 image, even when the Docker daemon itself is ARM64. This lets a
-Rosetta-enabled Docker VM use its registered x86 translator. An ARM BuildKit
-daemon can fail its x86 capability probe and silently inject its bundled QEMU
-instead; a Rust compiler crash mentioning `/dev/.buildkit_qemu_emulator` is
-evidence of that fallback, not proof of an application defect. ARM image cells
-and hosted builders keep their native/default builder. This selection does not
-install Rosetta or make an unsupported host compatible. Qualify each runner
-with an actual target compiler build and execution before enrollment; a builder
-label or `buildx inspect` alone is insufficient. Do not restart the Docker VM or
-change system-wide emulation while image jobs are active.
-
-Self-hosted image jobs give the optional GitHub cache export two minutes and
-ignore cache-export errors only. Compilation, image loading, security scans,
-registry pushes and manifest checks still fail closed. Hosted jobs retain their
-existing cache settings. Builders remain ephemeral: retaining Docker volumes
-would violate the current BUILD runner's clean-daemon admission check. This
-bound limits upload delays; it does not establish a persistent local cache or
-guarantee a warm build after an interrupted export.
-
-Before enabling this route, an operator must deliberately enroll this repository
-and these three exact `@refs/heads/main` workflow refs in the BUILD group's
-protected workflow allowlist and its existing registration policy. Qualify actual
-Buildx builds and Trivy scans for both platforms, at least 20 GiB free disk,
-artifact commands and ephemeral cleanup on that profile. Source tests do not
-prove physical capacity or successful image publication. Disable the switch to
-restore hosted selection for new runs; queued jobs do not move automatically.
-
-The version freshness regressions use credential-free Bash fixtures and an offline
-`jq` projection of inert branch responses; both tools must be installed locally.
-
-The path-filtered `Public Git Conflict Contract` has its own default-off
-`CI_GIT_CONFLICT_SELF_HOSTED=true` switch. Only same-repository, non-fork PRs to
-`main` and protected `main` pushes while this repository is private may select
-the disposable Linux ARM64 pool. Exact-main manual runs use the route above;
-public visibility, forks and unsupported events retain `ubuntu-latest`.
-It uses the same trust-specific groups and
-per-run/attempt label format above, with literal suffix `deterministic-conflict`.
-The first step checks the isolated runner prerequisites before an exact-event,
-non-persistent checkout. The five-minute `Deterministic conflict fixture` keeps
-its read-only permission and original local Git conflict/rebase/push assertions.
-Run `node --test scripts/check-git-conflict-ci.test.mjs` for routing and fixture
-regressions; the workflow runs these tests as well. Enabling this switch still
-requires independently reviewed exact-workflow admission and an actual cold
-job/cleanup proof. It enables no release job.
+The path-filtered `Public Git Conflict Contract` runs its five-minute
+`Deterministic conflict fixture` on hosted `ubuntu-latest` with read-only
+permission, an exact-event non-persistent checkout and the original local Git
+conflict/rebase/push assertions. Run `node --test scripts/check-git-conflict-ci.test.mjs`
+for the fixture regressions; the workflow runs these tests as well.
 
 The trusted gate rejects unreviewed environment templates, live
 environment/auth files, private-only package/product markers, personal paths,
@@ -337,8 +178,7 @@ tests do not configure GitHub): code-owner review enabled, blanket approvals
 zero, stale approvals dismissed after code changes, and existing required checks
 unchanged. Confirm an unapproved non-owner PR needs review and an existing
 owner-authored bot PR gains no extra review requirement. Do not bypass a merge
-block merely to test it. Retain the self-hosted runner groups' server-side
-exclusion of public repositories; YAML runner selection alone is not isolation.
+block merely to test it.
 After the visibility change, select **Require approval for all external
 contributors** in this repository's Actions settings before approving any fork
 run. That setting is not exposed while this repository is internal; do not
@@ -363,43 +203,21 @@ has a 30-minute limit, checks out the same exact event commit and recursive
 submodules, and performs its own unfiltered frozen
 monorepo installation on Node20. No existing check is removed:
 
-| Child | Checks | Runner-label suffix |
-| --- | --- | --- |
-| JavaScript contracts and migrations | Workflow/release/migration/self-host contracts and real empty-database migration application | `public-js-contracts` |
-| JavaScript frontend | Frontend lint, build and the complete unit suite | `public-js-frontend` |
-| JavaScript CLI and provider contract | CLI package artifact and automations; provider-contract packing | `public-js-cli` |
-| JavaScript Desktop and runtime | Runtime helper build/tests and complete Desktop build/tests | `public-js-desktop` |
+| Child | Checks |
+| --- | --- |
+| JavaScript contracts and migrations | Workflow/release/migration/self-host contracts and real empty-database migration application |
+| JavaScript frontend | Frontend lint, build and the complete unit suite |
+| JavaScript CLI and provider contract | CLI package artifact and automations; provider-contract packing |
+| JavaScript Desktop and runtime | Runtime helper build/tests and complete Desktop build/tests |
 
 The aggregate keeps the existing required name and fails if any fixed child
 fails, times out, is cancelled, skipped or missing. It receives no repository
-credentials and checks out no source. Its own label suffix is
-`public-js-aggregate`, with a five-minute limit; it starts only after the child
-jobs end, so it does not occupy a worker while waiting for another worker.
+credentials and checks out no source. It has a five-minute limit and starts
+only after the child jobs end.
 
-All five jobs default to hosted Ubuntu. The independent
-`CI_JAVASCRIPT_SELF_HOSTED=true` switch selects isolated Linux ARM64 workers
-only for private, same-repository PRs to main and protected-main pushes, using
-the same group and per-job identity rules above. Neither the bootstrap switch
-nor the expanded four-job switch enables these jobs. Exact-main manual dispatches
-use the route above; other manual refs, forks and public visibility stay hosted.
-Use canonical lowercase switch values.
-
-Do not enable this switch until the manager admits all five exact job names,
-labels and time budgets from the reviewed protected-main workflow. Its
-existing 35-minute worker lifecycle may be retained; publication, migrations
-outside the disposable fixture and credentials remain out of scope. Before
-checkout, workers verify their native Linux ARM64 identity and ephemeral
-marker; the migration child additionally checks a real Linux ARM64 Docker
-daemon. Image acquisition needs a guest-owned Docker daemon configured to use
-the restricted egress proxy. Node20 downloads, including Desktop speech assets,
-must support that proxy without disabling TLS verification. Every child still
-installs the full workspace, including approved dependency build scripts.
-Splitting the source is not proof that cold installation/builds finish within
-30 minutes: each actual ARM64 workload and complete cleanup needs qualification.
-Disable the JavaScript switch to restore hosted selection for new runs;
-already queued runs do not change runners. No required-check rule changes
-are needed. Run `node --test scripts/check-javascript-ci.test.mjs` for routing,
-coverage and aggregate regressions; these are not live workload qualification.
+All five jobs run on hosted `ubuntu-latest`. Run
+`node --test scripts/check-javascript-ci.test.mjs` for coverage and aggregate
+regressions.
 
 ### Bounded Rust CI
 
@@ -413,18 +231,18 @@ scheduled only after their children finish; they do not hold a worker while
 waiting for other workers. Only the canceled-main exception above skips them;
 pull requests and manual runs retain always-run, fail-closed aggregation.
 
-| Child | Preserved commands | Runner-label suffix |
-| --- | --- | --- |
-| Rust check runtime controller | Controller `cargo check --locked --tests` | `public-rust-check-controller` |
-| Rust check runtime agent | Agent `cargo check --locked --tests` | `public-rust-check-agent` |
-| Rust check git service | Git service `cargo check --locked --tests` | `public-rust-check-git` |
-| Rust check runtime provider | Provider service `cargo check --locked --tests` | `public-rust-check-provider` |
-| Rust check tunnel broker | Tunnel workspace `cargo check --locked --tests` | `public-rust-check-tunnel` |
-| Rust test runtime contracts | Complete runtime-contracts suite | `public-rust-test-contracts` |
-| Rust test runtime agent | Agent `--no-run`, followed by `--lib --test controller_client -- --test-threads=1` | `public-rust-test-agent` |
-| Rust test OpenAI proxy | Complete openai-proxy-server suite | `public-rust-test-proxy` |
-| Rust test origin server | Complete origin-http-server suite | `public-rust-test-origin` |
-| Rust test git service | Complete git-service suite | `public-rust-test-git` |
+| Child | Preserved commands |
+| --- | --- |
+| Rust check runtime controller | Controller `cargo check --locked --tests` |
+| Rust check runtime agent | Agent `cargo check --locked --tests` |
+| Rust check git service | Git service `cargo check --locked --tests` |
+| Rust check runtime provider | Provider service `cargo check --locked --tests` |
+| Rust check tunnel broker | Tunnel workspace `cargo check --locked --tests` |
+| Rust test runtime contracts | Complete runtime-contracts suite |
+| Rust test runtime agent | Agent `--no-run`, followed by `--lib --test controller_client -- --test-threads=1` |
+| Rust test OpenAI proxy | Complete openai-proxy-server suite |
+| Rust test origin server | Complete origin-http-server suite |
+| Rust test git service | Complete git-service suite |
 
 All eleven original Cargo commands retain their arguments and repository-root
 working directory. Test children also retain the full frozen Node20/pnpm
@@ -432,75 +250,14 @@ installation, including the pinned Playwright fixture required by agent tests.
 Stable native Rust and debug-info settings are unchanged. Each child has its
 own target directory; Cargo caches are partitioned by job, operating system,
 CPU architecture and the exact workspace Cargo lockfiles, with no cross-arch
-or old-lock fallback. Self-hosted Rust compile/test children restore these caches
-with the pinned restore-only action; they do not upload caches in a post-job step.
-This keeps an optional large cache save from exhausting the job after its Cargo
-checks pass. A cache miss still runs every command cold and must fit the same
-30-minute limit. GitHub-hosted children retain the original restore/save action,
-keys and paths. An uncanceled Build never ignores a test failure, child
-cancellation or aggregate failure.
-The existing unused-toolchain disk cleanup runs only on
-GitHub-hosted images, never against a self-hosted host or guest image.
+or old-lock fallback, using the pinned save/restore cache action. A cache miss
+still runs every command cold and must fit the same 30-minute limit. An
+uncanceled Build never ignores a test failure, child cancellation or aggregate
+failure. Test children free unused hosted-image toolchains before compiling.
 
-Only the self-hosted Linux `Rust test runtime agent` Cargo step defaults unset
-`RUSTFLAGS` to `-C link-arg=-fuse-ld=lld`; its scoped prerequisites already install
-and verify `lld`. Explicit flags, including an empty opt-out, are preserved.
-Hosted and non-Linux execution and other Rust children are unchanged. The default
-retains the existing compiler driver and both full Cargo commands, including
-compilation of every integration target before the database-free tests run.
-It addresses a separately observed default-linker signal9 failure in that broad
-compile path, which does not use the Shared fixture's JavaScript compiler helper.
-Signal9 alone does not prove an out-of-memory cause. Cold completion and memory
-use still require the real job; source regressions are not that qualification.
-
-All twelve jobs default to `ubuntu-latest`. Only the independent
-`CI_RUST_SELF_HOSTED=true` switch may select isolated Linux ARM64 workers, for
-private same-repository PRs to `main` and protected-main pushes. It uses the
-same trust-specific organization groups and per-run, per-attempt, per-job
-labels as the JavaScript split. The aggregate suffixes are
-`public-rust-check-aggregate` and `public-rust-test-aggregate`. Other switches
-do not enable Rust compilation or tests; Rust formatting remains separately
-controlled by `CI_EXPANDED_SELF_HOSTED`. Exact-main manual dispatches use the
-route above; forks, public visibility and unsupported contexts keep hosted runners.
-
-Do not enable this switch before independently enrolling the reviewed workflow
-and all twelve exact job identities in the runner manager. Its existing
-35-minute worker lifecycle remains sufficient only if the actual cold setup
-and each full child workload fit their allotted window. Before checkout,
-self-hosted children require non-root Linux ARM64, Node22, the ephemeral marker,
-no private environment directory, and native Rust/C build tools. Those checks
-do not prove that native libraries, downloads or workload timings are ready.
-Each self-hosted child then installs the fixed missing native package set
-(`clang`, `lld`, `cmake`, `libcap-dev`, `protobuf-compiler`) in a visible,
-five-minute GitHub step inside the unchanged 30-minute job. The package list
-stays unchanged. The install waits at most 120 seconds for the
-DPkg lock if Ubuntu's automatic updater is finishing; it never deletes lock
-files, kills the updater or skips package verification. Lock exhaustion still
-fails within the existing five-minute step. Hosted jobs and
-aggregates do not run that step. The manager must first qualify only APT's
-fixed proxy configuration in the fresh guest; package installation stays in
-the workflow, without changing the base image, repository trust or TLS rules.
-The corresponding qualification resource profile is 8GiB/two CPUs and two
-parallel Cargo jobs for these ten children only; aggregates and unrelated
-jobs retain their existing resources. That configuration is not compile or
-memory evidence.
-Qualify each real cold ARM64 compile/test, Cargo and Node20 proxy downloads,
-memory/disk use and complete guest teardown first. A split or a warm cache hit
-is not that qualification; never reduce the test selection or ignore a timeout
-to make a job green. No database, provider, signing or release credentials are
-introduced by this lane.
-
-The same restore-only compiler-cache policy applies to the two self-hosted
-Shared Browser children and Controller database tests. Their hosted compiler
-caches and pnpm caches are unchanged. Shared Browser no longer restores the
-standalone migration-image cache (see below). Cache restoration
-is an optimization, not evidence that a cold workload has passed.
-
-Disable the Rust switch to restore hosted selection for new runs; already
-queued jobs retain their selected pools. No required-check rule changes are
-needed. Run `node --test scripts/check-rust-ci.test.mjs` for the exact command
-inventory, routing and strict aggregate regressions. These source tests do not
-run Cargo or establish real ARM workload completion.
+All twelve jobs run on hosted `ubuntu-latest`. Run
+`node --test scripts/check-rust-ci.test.mjs` for the exact command inventory
+and strict aggregate regressions; these source tests do not run Cargo.
 
 The empty-database test
 prefetches its digest-pinned Postgres image with bounded retry/backoff and then
@@ -570,10 +327,9 @@ testing the pinned ancillary inventory. Run
 `node --test scripts/lib/supabaseSerialPull.test.mjs` for offline regression tests.
 These do not qualify real cold downloads or concurrent connection usage.
 
-The independent, default-off `CI_DATABASE_SELF_HOSTED=true` switch covers only
 `Controller database tests` (30 minutes) and `signup -> email -> activate`
-(25 minutes). Both preserve their complete existing commands, frozen Node20
-workspace installation, and read-only checkout. Controller tests use the local
+(25 minutes) run on hosted `ubuntu-latest` with their complete commands, frozen
+Node20 workspace installation, and read-only checkout. Controller tests use the local
 Postgres-only stack and all public migrations; auth-email explicitly sets
 `SUPABASE_AUTH_ONLY=1` for its startup step. This fixed profile retains Postgres,
 GoTrue, Kong, Mailpit and PostgREST; PostgREST is needed for the unchanged CLI
@@ -595,32 +351,11 @@ explicitly stops stale stacks first. A passing Auth-only run does not qualify th
 separate browser-test workloads used by Shared Browser. Neither lane needs
 production credentials, an external mailbox, a deployment, or released images.
 
-Only private, same-repository PRs to `main` and protected-main pushes may use
-native Linux ARM64 guests in the corresponding `instafy-ci-pr` or
-`instafy-ci-main` group. Exact-main manual dispatches use the route above;
-forks, public visibility, other manual refs and disabled switches retain hosted
-Ubuntu. Exclusive label suffixes are
-`public-controller-db` and `public-auth-email`, prefixed with the repository ID,
-run ID and attempt as in the other bounded lanes. Separate source authentication,
-exact job assignment, complete guest destruction and credential revocation are
-still provisioning requirements; the inline prerequisite check cannot prove them.
-
 The controller needs native Rust, a C/C++ compiler, Make, pkg-config and OpenSSL
-development files. Its protobuf compiler is vendored by the locked Rust build,
-not a host installation. Cargo uses two compile jobs and an OS/architecture/lock-
-specific cache. Auth-email does not compile Rust. Both need a real ARM64 Linux
-Docker daemon, with its own restricted download proxy and loopback bypass for
-the disposable stack. No cross-architecture Docker cache is introduced. Keep
-TLS verification enabled. Both workflows stop their local stack on exit; failed
-or interrupted cleanup still requires destruction of the whole guest.
-
-Run `node --test scripts/check-database-ci-routing.test.mjs` for selector,
-command-parity, prerequisite and cache regressions. These are not real cold ARM
-workload qualification. Before enabling the switch, the manager must admit both
-exact workflow identities, their PR/push/manual tuples and the 25-minute Listener
-budget, then prove both complete workloads and cleanup within the unchanged
-bounded worker lifecycle. Disable the switch for hosted routing of new runs;
-already queued runs do not move pools automatically.
+development files, all present on the hosted image; its protobuf compiler is
+vendored by the locked Rust build. Cargo uses two compile jobs and an
+OS/architecture/lock-specific cache. Auth-email does not compile Rust. Both
+workflows stop their local stack on exit.
 
 ## Support workflow simulation
 
@@ -655,45 +390,18 @@ The privacy check verifies owner isolation, operator boundaries, and account mis
 
 ## Secret-free browser CI lanes
 
-The independent, default-off `CI_BROWSER_SELF_HOSTED=true` switch covers only
 `Browser verification / Browser UI rendering` and
-`Browser verification / Personal Browser E2E`, called by Public
-Build. It requires private visibility, a same-repository PR to `main` or a
-protected-main push, and the exact `build.yml` caller. The manual route above
-also permits the direct Browser workflow. Forks, public visibility, other
-manual refs and unrelated callers retain `ubuntu-24.04`; Shared Browser has its
-own independent switch below. Both short browser jobs have a 30-minute
-limit, including their hosted fallback, to leave room for cold workspace,
-browser and system-package installation. This is a conservative capacity bound,
-not a measured completion claim. The worker lifecycle remains bounded to
-35 minutes with its existing cleanup reserve; browser test-level timeouts,
+`Browser verification / Personal Browser E2E`, called by Public Build, run on
+hosted `ubuntu-24.04` with a 30-minute limit each; browser test-level timeouts,
 commands, permissions, locked installations and required reports are unchanged.
-
-The two label suffixes are `public-browser-ui` and `public-browser-personal`,
-using the same trust-specific groups and per-run/attempt labels described
-above. Provisioning must authenticate both caller and callee bytes at the same
-tested commit and protected main, including the exact attempt's reusable-workflow
-metadata. A caller-supplied input or matching label is not source authority.
-Initially enable this switch only for supervised cold ARM64 qualification;
-require both jobs and their cleanup to pass before routine use. Workers require
-Node22, Xvfb and xauth before checkout; the unchanged
-Playwright installation obtains Chromium and system libraries. The self-hosted
-Personal job also explicitly installs Ubuntu24.04's GTK3 runtime package for
-Electron before building its fixture. Restricted
-workers also prepare the exact locked Electron binary with
+Personal CI prepares the exact locked Electron binary with
 `pnpm --filter @instafy/desktop-app exec install-electron` before the test process.
 [Electron 42 and newer download lazily](https://www.electronjs.org/blog/electron-42-0), so a successful package install alone
 does not prove that binary exists. The five-minute preparation step enables
 Node's environment-proxy support (available since Node 22.21); it uses the installed package and its bundled
 checksums, not an unpinned `npx` download. Proxy settings still do not enter the
-scrubbed Playwright or Electron fixture environments. Restricted
-workers must configure the disposable guest's APT proxy too: sudo does not
-preserve the browser installer's proxy environment. Keep TLS and browser
-sandbox protections intact. No template, host paths or proxy credentials belong
-in the public workflow. Disable the switch to restore hosted routing for new
-runs; queued jobs retain their original selection. The routing and prerequisite
-regressions run in `node --test scripts/browser-ci-workflow.test.mjs`; they are
-not a substitute for real browser execution and teardown.
+scrubbed Playwright or Electron fixture environments. The workflow regressions
+run in `node --test scripts/browser-ci-workflow.test.mjs`.
 
 ### Bounded Shared Browser CI
 
@@ -704,10 +412,10 @@ cancelled or failed children
 fail the aggregate. It has no repository permissions or checkout and starts
 only after the children end, without holding a worker while waiting.
 
-| Child | Complete command | Runner-label suffix |
-| --- | --- | --- |
-| Shared Browser profile lifecycle | `xvfb-run -a node scripts/browser-profile-e2e.mjs` | `public-shared-browser-profile` |
-| Shared Browser Studio journey | `xvfb-run -a node scripts/shared-browser-studio-e2e.mjs` | `public-shared-browser-studio` |
+| Child | Complete command |
+| --- | --- |
+| Shared Browser profile lifecycle | `xvfb-run -a node scripts/browser-profile-e2e.mjs` |
+| Shared Browser Studio journey | `xvfb-run -a node scripts/shared-browser-studio-e2e.mjs` |
 
 Each child has a 30-minute limit and repeats the full locked workspace,
 Chromium, Go/Rust, system-library and fixture-safety preparation. Each owns a
@@ -719,16 +427,6 @@ replaced by the aggregate. Only the same fixed credential-free receipt paths
 are uploaded, separately per child. Compiler cache keys include the
 operating system and architecture; compiler targets are child-specific with
 no old-lock or cross-architecture fallback.
-
-The two self-hosted compiler restores set `SEGMENT_DOWNLOAD_TIMEOUT_MINS=2`.
-For the pinned action's Azure SDK downloader, this limits each 128 MiB segment
-to two minutes of wall time, even if bytes are arriving. It is not a total
-restore/job or inactivity timeout; legacy/non-Azure download paths do not use
-this setting. A segment timeout aborts that download and continues as a cache
-miss; migrations, compilation and both full fixtures still run. The 30-minute
-job limit remains, so cold compilation must fit it. Hosted restores, cache keys
-and paths are unchanged. See the
-[cache action's timeout guidance](https://github.com/actions/cache/blob/55cc8345863c7cc4c66a329aec7e433d2d1c52a9/tips-and-workarounds.md#cache-segment-restore-timeout).
 
 The children use `pnpm supabase:up` to prepare their actual CLI-selected images
 and apply migrations. They do not restore `~/.instafy-image-cache` or run
@@ -760,31 +458,10 @@ Existing-stack reuse is unchanged: stop a previous stack before switching
 profiles. This source change does not qualify cold Shared Browser execution;
 both complete child scenarios and cleanup must still pass on the target runner.
 
-All three jobs default to hosted Ubuntu24.04. The separate, default-off
-`CI_SHARED_BROWSER_SELF_HOSTED=true` switch uses the same private, same-repository
-PR/protected-main and exact Public Build caller guards as the other browser
-lanes. Its aggregate suffix is `public-shared-browser-aggregate`. Forks, public
-visibility, other manual refs and unrelated callers stay hosted; exact-main
-manual runs follow the route above. The manager must pin
-both caller and callee source at the same tested commit and protected main and
-authenticate exact-attempt reusable-workflow metadata before issuing a runner.
-Neither the ordinary browser switch nor another CI switch enables this lane.
-
-Only the two Shared compiler children use 8GiB/two CPUs, two parallel Cargo
-jobs, and fresh-guest APT plus Docker proxy preparation; the aggregate retains
-standard resources and neither daemon setup. Native package installation is
-visible in the workflow and bounded inside each job. The base template, TLS
-checks, network restrictions and 35-minute worker/cleanup budget are unchanged.
-Before checkout, each child verifies a non-root ephemeral Linux ARM64 runner,
-Node22 and an actual Linux ARM64 Docker daemon.
-
-The self-hosted fixture step explicitly opts into compiler-only proxy handling.
-The six Go/Cargo build calls receive only validated credential-free HTTP/HTTPS
-proxy origins and their derived tool aliases, alongside the existing scrubbed
-compiler environment. Database commands, display probes, production runtime
-helpers, controller services and browser processes retain their existing
-proxy/credential scrubbing. No general inherited environment, bypass list,
-private endpoint, credential or TLS override is added to the public source.
+All three jobs run on hosted `ubuntu-24.04`. CI sets
+`INSTAFY_SHARED_BROWSER_COMPILER_PROXY=0`; the fixtures' compiler-only proxy
+opt-in remains available for local runs and never enters database commands,
+display probes, controller services or browser processes.
 
 On Linux, the four Cargo fixture builds default to `RUSTFLAGS="-C link-arg=-fuse-ld=lld"`
 only when `RUSTFLAGS` is unset. This keeps the existing compiler driver and
@@ -796,13 +473,9 @@ changing Cargo arguments, features, fixture assertions or runtime environments.
 A warm final-link result alone does not qualify cold end-to-end CI or its memory
 and time budgets.
 
-Cold ARM64 completion within 30 minutes is unproven: prior hosted timings or
-warm caches do not qualify these split jobs. Keep activation supervised until
-both full jobs and guest teardown pass; do not shorten scenarios or ignore
-timeouts. Disable the switch to restore hosted selection for new runs;
-already queued jobs keep their chosen pool. Run
+Run
 `node --test scripts/check-shared-browser-ci.test.mjs scripts/browser-profile-e2e.test.mjs scripts/shared-browser-studio-e2e.test.mjs`
-for local routing and environment regressions, not live browser qualification.
+for the workflow, fixture and environment regressions, not live browser qualification.
 
 These lanes use disposable data, do not load local `.env` files, and do not
 need a real account, model API key, or production controller. Personal and UI

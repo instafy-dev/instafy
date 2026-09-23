@@ -5,7 +5,7 @@ import test from "node:test";
 import "./check-hosted-sdk-cleanup.test.mjs";
 import "./check-image-coordinator.test.mjs";
 import "./check-public-control-ci.test.mjs";
-import "./check-image-build-routing.test.mjs";
+import "./check-hosted-only-runners.test.mjs";
 
 const repositoryRoot = path.resolve(import.meta.dirname, "..");
 const workflowRoot = path.join(repositoryRoot, ".github", "workflows");
@@ -179,7 +179,6 @@ test("Changesets separates pull-request, version, pack, and npm publish authorit
   assert.doesNotMatch(version, /cache:/u);
   assertOrdered(
     version,
-    "Qualify isolated protected-main control runner",
     "Checkout the exact protected-main event commit",
     "Install the exact dependency graph without lifecycle scripts",
     "Require exact current protected main before bot authorization",
@@ -285,7 +284,7 @@ test("runtime images publish only exact protected main from a fixed namespace", 
   assert.doesNotMatch(source, /setup-qemu/u);
   assert.doesNotMatch(source, /binfmt/u);
   assert.match(publish, /- release-approval/u);
-  assert.match(publish, /\|\| matrix\.runner \}\}/u);
+  assert.match(publish, /^    runs-on: \$\{\{ matrix\.runner \}\}$/mu);
   assert.match(publish, /runner: ubuntu-24\.04\n/u);
   assert.match(publish, /runner: ubuntu-24\.04-arm\n/u);
   assert.match(publish, /trivy_asset: Linux-64bit/u);

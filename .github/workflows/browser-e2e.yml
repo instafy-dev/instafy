@@ -10,51 +10,9 @@ permissions:
 jobs:
   personal:
     name: Personal Browser E2E
-    runs-on: >-
-      ${{ vars.CI_BROWSER_SELF_HOSTED == 'true'
-          && github.repository == 'instafy-dev/instafy'
-          && github.event.repository.private == true
-          && github.workflow_ref == format('instafy-dev/instafy/.github/workflows/build.yml@{0}', github.ref)
-          && ((github.event_name == 'pull_request'
-               && github.ref == format('refs/pull/{0}/merge', github.event.pull_request.number)
-               && github.event.pull_request.base.ref == 'main'
-               && github.event.pull_request.base.repo.full_name == github.repository
-               && github.event.pull_request.head.repo.full_name == github.repository
-               && github.event.pull_request.head.repo.fork == false)
-              || (github.event_name == 'push' && github.ref == 'refs/heads/main' && github.ref_protected == true))
-          && fromJSON(format('{{"group":"org/instafy-ci-{3}","labels":["self-hosted","Linux","ARM64","instafy-ci-bootstrap-{0}-{1}-{2}-public-browser-personal","instafy-ci-trust-{3}"]}}', github.repository_id, github.run_id, github.run_attempt, github.event_name == 'push' && 'main' || 'pr'))
-          || (vars.CI_BROWSER_SELF_HOSTED == 'true'
-              && github.repository == 'instafy-dev/instafy'
-              && github.repository_id == '1309636737'
-              && github.event.repository.private == true
-              && github.event_name == 'workflow_dispatch'
-              && github.ref == 'refs/heads/main'
-              && github.ref_protected == true
-              && (github.workflow_ref == 'instafy-dev/instafy/.github/workflows/build.yml@refs/heads/main' || github.workflow_ref == 'instafy-dev/instafy/.github/workflows/browser-e2e.yml@refs/heads/main')
-              && github.workflow_sha == github.sha
-              && fromJSON(format('{{"group":"org/instafy-ci-main","labels":["self-hosted","Linux","ARM64","instafy-ci-bootstrap-{0}-{1}-{2}-public-browser-personal","instafy-ci-trust-main"]}}', github.repository_id, github.run_id, github.run_attempt)))
-          || 'ubuntu-24.04' }}
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
-      - name: Qualify isolated browser CI runner
-        if: runner.environment == 'self-hosted'
-        shell: bash
-        run: |
-          node <<'NODE'
-          const assert = require('node:assert/strict');
-          const { execFileSync } = require('node:child_process');
-          assert.equal(process.platform, 'linux');
-          assert.equal(process.arch, 'arm64');
-          assert.ok(Number.isSafeInteger(process.getuid()) && process.getuid() > 0);
-          assert.equal(process.versions.node.split('.')[0], '22');
-          assert.equal(process.env.RUNNER_OS, 'Linux');
-          assert.equal(process.env.RUNNER_ARCH, 'ARM64');
-          assert.equal(process.env.INSTAFY_CI_JOB_ISOLATION, 'ephemeral');
-          assert.ok(!process.env.INSTAFY_ENV_DIR);
-          for (const tool of ['bash', 'git', 'curl', 'tar', 'unzip', 'sudo', 'apt-get', 'xvfb-run', 'Xvfb', 'xauth']) {
-            execFileSync('/bin/bash', ['-c', 'command -v "$1" >/dev/null', 'browser-ci-preflight', tool], { timeout: 1000, stdio: 'ignore' });
-          }
-          NODE
       - name: Checkout the tested revision
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
@@ -78,9 +36,6 @@ jobs:
         run: pnpm --filter @instafy/desktop-app exec install-electron
       - name: Install browser and display dependencies
         run: pnpm --filter @instafy/frontend exec playwright install --with-deps chromium
-      - name: Install Linux Electron runtime dependency
-        if: runner.environment == 'self-hosted'
-        run: sudo -n env DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends libgtk-3-0t64
       - name: Build the native fixture app
         run: |
           pnpm --filter @instafy/desktop-runtime-agent build
@@ -101,51 +56,9 @@ jobs:
 
   browser-ui:
     name: Browser UI rendering
-    runs-on: >-
-      ${{ vars.CI_BROWSER_SELF_HOSTED == 'true'
-          && github.repository == 'instafy-dev/instafy'
-          && github.event.repository.private == true
-          && github.workflow_ref == format('instafy-dev/instafy/.github/workflows/build.yml@{0}', github.ref)
-          && ((github.event_name == 'pull_request'
-               && github.ref == format('refs/pull/{0}/merge', github.event.pull_request.number)
-               && github.event.pull_request.base.ref == 'main'
-               && github.event.pull_request.base.repo.full_name == github.repository
-               && github.event.pull_request.head.repo.full_name == github.repository
-               && github.event.pull_request.head.repo.fork == false)
-              || (github.event_name == 'push' && github.ref == 'refs/heads/main' && github.ref_protected == true))
-          && fromJSON(format('{{"group":"org/instafy-ci-{3}","labels":["self-hosted","Linux","ARM64","instafy-ci-bootstrap-{0}-{1}-{2}-public-browser-ui","instafy-ci-trust-{3}"]}}', github.repository_id, github.run_id, github.run_attempt, github.event_name == 'push' && 'main' || 'pr'))
-          || (vars.CI_BROWSER_SELF_HOSTED == 'true'
-              && github.repository == 'instafy-dev/instafy'
-              && github.repository_id == '1309636737'
-              && github.event.repository.private == true
-              && github.event_name == 'workflow_dispatch'
-              && github.ref == 'refs/heads/main'
-              && github.ref_protected == true
-              && (github.workflow_ref == 'instafy-dev/instafy/.github/workflows/build.yml@refs/heads/main' || github.workflow_ref == 'instafy-dev/instafy/.github/workflows/browser-e2e.yml@refs/heads/main')
-              && github.workflow_sha == github.sha
-              && fromJSON(format('{{"group":"org/instafy-ci-main","labels":["self-hosted","Linux","ARM64","instafy-ci-bootstrap-{0}-{1}-{2}-public-browser-ui","instafy-ci-trust-main"]}}', github.repository_id, github.run_id, github.run_attempt)))
-          || 'ubuntu-24.04' }}
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
-      - name: Qualify isolated browser CI runner
-        if: runner.environment == 'self-hosted'
-        shell: bash
-        run: |
-          node <<'NODE'
-          const assert = require('node:assert/strict');
-          const { execFileSync } = require('node:child_process');
-          assert.equal(process.platform, 'linux');
-          assert.equal(process.arch, 'arm64');
-          assert.ok(Number.isSafeInteger(process.getuid()) && process.getuid() > 0);
-          assert.equal(process.versions.node.split('.')[0], '22');
-          assert.equal(process.env.RUNNER_OS, 'Linux');
-          assert.equal(process.env.RUNNER_ARCH, 'ARM64');
-          assert.equal(process.env.INSTAFY_CI_JOB_ISOLATION, 'ephemeral');
-          assert.ok(!process.env.INSTAFY_ENV_DIR);
-          for (const tool of ['bash', 'git', 'curl', 'tar', 'unzip', 'sudo', 'apt-get', 'xvfb-run', 'Xvfb', 'xauth']) {
-            execFileSync('/bin/bash', ['-c', 'command -v "$1" >/dev/null', 'browser-ci-preflight', tool], { timeout: 1000, stdio: 'ignore' });
-          }
-          NODE
       - name: Checkout the tested revision
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
@@ -188,51 +101,9 @@ jobs:
       - shared-studio
     if: ${{ always() && !(github.repository == 'instafy-dev/instafy' && github.event_name == 'push' && github.ref == 'refs/heads/main' && github.ref_protected == true && cancelled()) }}
     permissions: {}
-    runs-on: >-
-      ${{ vars.CI_SHARED_BROWSER_SELF_HOSTED == 'true'
-          && github.repository == 'instafy-dev/instafy'
-          && github.event.repository.private == true
-          && github.workflow_ref == format('instafy-dev/instafy/.github/workflows/build.yml@{0}', github.ref)
-          && ((github.event_name == 'pull_request'
-               && github.ref == format('refs/pull/{0}/merge', github.event.pull_request.number)
-               && github.event.pull_request.base.ref == 'main'
-               && github.event.pull_request.base.repo.full_name == github.repository
-               && github.event.pull_request.head.repo.full_name == github.repository
-               && github.event.pull_request.head.repo.fork == false)
-              || (github.event_name == 'push' && github.ref == 'refs/heads/main' && github.ref_protected == true))
-          && fromJSON(format('{{"group":"org/instafy-ci-{3}","labels":["self-hosted","Linux","ARM64","instafy-ci-bootstrap-{0}-{1}-{2}-public-shared-browser-aggregate","instafy-ci-trust-{3}"]}}', github.repository_id, github.run_id, github.run_attempt, github.event_name == 'push' && 'main' || 'pr'))
-          || (vars.CI_SHARED_BROWSER_SELF_HOSTED == 'true'
-              && github.repository == 'instafy-dev/instafy'
-              && github.repository_id == '1309636737'
-              && github.event.repository.private == true
-              && github.event_name == 'workflow_dispatch'
-              && github.ref == 'refs/heads/main'
-              && github.ref_protected == true
-              && (github.workflow_ref == 'instafy-dev/instafy/.github/workflows/build.yml@refs/heads/main' || github.workflow_ref == 'instafy-dev/instafy/.github/workflows/browser-e2e.yml@refs/heads/main')
-              && github.workflow_sha == github.sha
-              && fromJSON(format('{{"group":"org/instafy-ci-main","labels":["self-hosted","Linux","ARM64","instafy-ci-bootstrap-{0}-{1}-{2}-public-shared-browser-aggregate","instafy-ci-trust-main"]}}', github.repository_id, github.run_id, github.run_attempt)))
-          || 'ubuntu-24.04' }}
+    runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
-      - name: Qualify isolated Shared Browser CI runner
-        if: runner.environment == 'self-hosted'
-        shell: bash
-        run: |
-          node <<'NODE'
-          const assert = require('node:assert/strict');
-          const { execFileSync } = require('node:child_process');
-          assert.equal(process.platform, 'linux');
-          assert.equal(process.arch, 'arm64');
-          assert.ok(Number.isSafeInteger(process.getuid()) && process.getuid() > 0);
-          assert.equal(process.versions.node.split('.')[0], '22');
-          assert.equal(process.env.RUNNER_OS, 'Linux');
-          assert.equal(process.env.RUNNER_ARCH, 'ARM64');
-          assert.equal(process.env.INSTAFY_CI_JOB_ISOLATION, 'ephemeral');
-          assert.ok(!process.env.INSTAFY_ENV_DIR);
-          for (const tool of ['bash']) {
-            execFileSync('/bin/bash', ['-c', 'command -v "$1" >/dev/null', 'browser-ci-preflight', tool], { timeout: 1000, stdio: 'ignore' });
-          }
-          NODE
       - name: Require both complete Shared Browser fixtures
         env:
           SHARED_BROWSER_RESULTS: ${{ toJSON(needs) }}
@@ -249,30 +120,7 @@ jobs:
 
   shared-profile-lifecycle:
     name: Shared Browser profile lifecycle
-    runs-on: >-
-      ${{ vars.CI_SHARED_BROWSER_SELF_HOSTED == 'true'
-          && github.repository == 'instafy-dev/instafy'
-          && github.event.repository.private == true
-          && github.workflow_ref == format('instafy-dev/instafy/.github/workflows/build.yml@{0}', github.ref)
-          && ((github.event_name == 'pull_request'
-               && github.ref == format('refs/pull/{0}/merge', github.event.pull_request.number)
-               && github.event.pull_request.base.ref == 'main'
-               && github.event.pull_request.base.repo.full_name == github.repository
-               && github.event.pull_request.head.repo.full_name == github.repository
-               && github.event.pull_request.head.repo.fork == false)
-              || (github.event_name == 'push' && github.ref == 'refs/heads/main' && github.ref_protected == true))
-          && fromJSON(format('{{"group":"org/instafy-ci-{3}","labels":["self-hosted","Linux","ARM64","instafy-ci-bootstrap-{0}-{1}-{2}-public-shared-browser-profile","instafy-ci-trust-{3}"]}}', github.repository_id, github.run_id, github.run_attempt, github.event_name == 'push' && 'main' || 'pr'))
-          || (vars.CI_SHARED_BROWSER_SELF_HOSTED == 'true'
-              && github.repository == 'instafy-dev/instafy'
-              && github.repository_id == '1309636737'
-              && github.event.repository.private == true
-              && github.event_name == 'workflow_dispatch'
-              && github.ref == 'refs/heads/main'
-              && github.ref_protected == true
-              && (github.workflow_ref == 'instafy-dev/instafy/.github/workflows/build.yml@refs/heads/main' || github.workflow_ref == 'instafy-dev/instafy/.github/workflows/browser-e2e.yml@refs/heads/main')
-              && github.workflow_sha == github.sha
-              && fromJSON(format('{{"group":"org/instafy-ci-main","labels":["self-hosted","Linux","ARM64","instafy-ci-bootstrap-{0}-{1}-{2}-public-shared-browser-profile","instafy-ci-trust-main"]}}', github.repository_id, github.run_id, github.run_attempt)))
-          || 'ubuntu-24.04' }}
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
     env:
       CARGO_BUILD_JOBS: "2"
@@ -281,28 +129,6 @@ jobs:
       CARGO_TARGET_DIR: ${{ github.workspace }}/.cargo-target
       TEST_DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:54322/postgres
     steps:
-      - name: Qualify isolated Shared Browser CI runner
-        if: runner.environment == 'self-hosted'
-        shell: bash
-        run: |
-          node <<'NODE'
-          const assert = require('node:assert/strict');
-          const { execFileSync } = require('node:child_process');
-          assert.equal(process.platform, 'linux');
-          assert.equal(process.arch, 'arm64');
-          assert.ok(Number.isSafeInteger(process.getuid()) && process.getuid() > 0);
-          assert.equal(process.versions.node.split('.')[0], '22');
-          assert.equal(process.env.RUNNER_OS, 'Linux');
-          assert.equal(process.env.RUNNER_ARCH, 'ARM64');
-          assert.equal(process.env.INSTAFY_CI_JOB_ISOLATION, 'ephemeral');
-          assert.ok(!process.env.INSTAFY_ENV_DIR);
-          for (const tool of ['bash', 'git', 'curl', 'tar', 'unzip', 'sudo', 'apt-get', 'xvfb-run', 'Xvfb', 'xauth', 'docker', 'cargo', 'rustc', 'rustup', 'cc', 'pkg-config']) {
-            execFileSync('/bin/bash', ['-c', 'command -v "$1" >/dev/null', 'browser-ci-preflight', tool], { timeout: 1000, stdio: 'ignore' });
-          }
-          const daemon = JSON.parse(execFileSync('docker', ['info', '--format', '{{json .}}'], { timeout: 5000, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }));
-          assert.equal(daemon.OSType, 'linux');
-          assert.ok(['aarch64', 'arm64'].includes(daemon.Architecture));
-          NODE
       - name: Checkout the tested revision
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
@@ -327,7 +153,6 @@ jobs:
           rustup toolchain install stable --profile minimal
           rustup default stable
       - name: Free space on the disposable hosted runner
-        if: runner.environment == 'github-hosted'
         run: |
           sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
           df -h /
@@ -354,20 +179,7 @@ jobs:
             [[ "$(dpkg-query --show --showformat='${Status}' "$package")" == 'install ok installed' ]]
           done
           pkg-config --exists libcap openssl
-      - name: Restore compiler cache without saving
-        if: runner.environment == 'self-hosted'
-        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        env:
-          SEGMENT_DOWNLOAD_TIMEOUT_MINS: "2"
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            .cargo-target
-          key: shared-browser-cargo-v1-${{ runner.os }}-${{ runner.arch }}-public-shared-browser-profile-${{ hashFiles('packages/*/Cargo.lock') }}
-
       - name: Restore architecture-specific compiler cache
-        if: runner.environment == 'github-hosted'
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
@@ -384,7 +196,7 @@ jobs:
         run: node --test scripts/browser-profile-e2e.test.mjs scripts/shared-browser-studio-e2e.test.mjs scripts/lib/sharedStudioProvider.test.mjs scripts/check-shared-browser-ci.test.mjs
       - name: Exercise real Chromium and controller profile lifecycle
         env:
-          INSTAFY_SHARED_BROWSER_COMPILER_PROXY: ${{ runner.environment == 'self-hosted' && '1' || '0' }}
+          INSTAFY_SHARED_BROWSER_COMPILER_PROXY: '0'
         run: xvfb-run -a node scripts/browser-profile-e2e.mjs
       - name: Retain only credential-free browser results
         if: always()
@@ -401,30 +213,7 @@ jobs:
 
   shared-studio:
     name: Shared Browser Studio journey
-    runs-on: >-
-      ${{ vars.CI_SHARED_BROWSER_SELF_HOSTED == 'true'
-          && github.repository == 'instafy-dev/instafy'
-          && github.event.repository.private == true
-          && github.workflow_ref == format('instafy-dev/instafy/.github/workflows/build.yml@{0}', github.ref)
-          && ((github.event_name == 'pull_request'
-               && github.ref == format('refs/pull/{0}/merge', github.event.pull_request.number)
-               && github.event.pull_request.base.ref == 'main'
-               && github.event.pull_request.base.repo.full_name == github.repository
-               && github.event.pull_request.head.repo.full_name == github.repository
-               && github.event.pull_request.head.repo.fork == false)
-              || (github.event_name == 'push' && github.ref == 'refs/heads/main' && github.ref_protected == true))
-          && fromJSON(format('{{"group":"org/instafy-ci-{3}","labels":["self-hosted","Linux","ARM64","instafy-ci-bootstrap-{0}-{1}-{2}-public-shared-browser-studio","instafy-ci-trust-{3}"]}}', github.repository_id, github.run_id, github.run_attempt, github.event_name == 'push' && 'main' || 'pr'))
-          || (vars.CI_SHARED_BROWSER_SELF_HOSTED == 'true'
-              && github.repository == 'instafy-dev/instafy'
-              && github.repository_id == '1309636737'
-              && github.event.repository.private == true
-              && github.event_name == 'workflow_dispatch'
-              && github.ref == 'refs/heads/main'
-              && github.ref_protected == true
-              && (github.workflow_ref == 'instafy-dev/instafy/.github/workflows/build.yml@refs/heads/main' || github.workflow_ref == 'instafy-dev/instafy/.github/workflows/browser-e2e.yml@refs/heads/main')
-              && github.workflow_sha == github.sha
-              && fromJSON(format('{{"group":"org/instafy-ci-main","labels":["self-hosted","Linux","ARM64","instafy-ci-bootstrap-{0}-{1}-{2}-public-shared-browser-studio","instafy-ci-trust-main"]}}', github.repository_id, github.run_id, github.run_attempt)))
-          || 'ubuntu-24.04' }}
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
     env:
       CARGO_BUILD_JOBS: "2"
@@ -433,28 +222,6 @@ jobs:
       CARGO_TARGET_DIR: ${{ github.workspace }}/.cargo-target
       TEST_DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:54322/postgres
     steps:
-      - name: Qualify isolated Shared Browser CI runner
-        if: runner.environment == 'self-hosted'
-        shell: bash
-        run: |
-          node <<'NODE'
-          const assert = require('node:assert/strict');
-          const { execFileSync } = require('node:child_process');
-          assert.equal(process.platform, 'linux');
-          assert.equal(process.arch, 'arm64');
-          assert.ok(Number.isSafeInteger(process.getuid()) && process.getuid() > 0);
-          assert.equal(process.versions.node.split('.')[0], '22');
-          assert.equal(process.env.RUNNER_OS, 'Linux');
-          assert.equal(process.env.RUNNER_ARCH, 'ARM64');
-          assert.equal(process.env.INSTAFY_CI_JOB_ISOLATION, 'ephemeral');
-          assert.ok(!process.env.INSTAFY_ENV_DIR);
-          for (const tool of ['bash', 'git', 'curl', 'tar', 'unzip', 'sudo', 'apt-get', 'xvfb-run', 'Xvfb', 'xauth', 'docker', 'cargo', 'rustc', 'rustup', 'cc', 'pkg-config']) {
-            execFileSync('/bin/bash', ['-c', 'command -v "$1" >/dev/null', 'browser-ci-preflight', tool], { timeout: 1000, stdio: 'ignore' });
-          }
-          const daemon = JSON.parse(execFileSync('docker', ['info', '--format', '{{json .}}'], { timeout: 5000, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }));
-          assert.equal(daemon.OSType, 'linux');
-          assert.ok(['aarch64', 'arm64'].includes(daemon.Architecture));
-          NODE
       - name: Checkout the tested revision
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
@@ -479,7 +246,6 @@ jobs:
           rustup toolchain install stable --profile minimal
           rustup default stable
       - name: Free space on the disposable hosted runner
-        if: runner.environment == 'github-hosted'
         run: |
           sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
           df -h /
@@ -506,20 +272,7 @@ jobs:
             [[ "$(dpkg-query --show --showformat='${Status}' "$package")" == 'install ok installed' ]]
           done
           pkg-config --exists libcap openssl
-      - name: Restore compiler cache without saving
-        if: runner.environment == 'self-hosted'
-        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        env:
-          SEGMENT_DOWNLOAD_TIMEOUT_MINS: "2"
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            .cargo-target
-          key: shared-browser-cargo-v1-${{ runner.os }}-${{ runner.arch }}-public-shared-browser-studio-${{ hashFiles('packages/*/Cargo.lock') }}
-
       - name: Restore architecture-specific compiler cache
-        if: runner.environment == 'github-hosted'
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
@@ -536,7 +289,7 @@ jobs:
         run: node --test scripts/browser-profile-e2e.test.mjs scripts/shared-browser-studio-e2e.test.mjs scripts/lib/sharedStudioProvider.test.mjs scripts/check-shared-browser-ci.test.mjs
       - name: Exercise signed-in Studio launch, input, snapshot restore and clear
         env:
-          INSTAFY_SHARED_BROWSER_COMPILER_PROXY: ${{ runner.environment == 'self-hosted' && '1' || '0' }}
+          INSTAFY_SHARED_BROWSER_COMPILER_PROXY: '0'
         run: xvfb-run -a node scripts/shared-browser-studio-e2e.mjs
       - name: Retain only credential-free browser results
         if: always()
