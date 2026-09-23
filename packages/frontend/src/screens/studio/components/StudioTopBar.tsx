@@ -62,6 +62,7 @@ const COMPACT_TAB_SELECTOR_CLASS =
 export interface StudioTopBarProps {
   newChatInSidebar?: boolean;
   contextHeaderAbove?: boolean;
+  inlineDesktop?: boolean;
   mobileNavigation?: {
     history: StudioHistory;
     visitKey: string;
@@ -69,7 +70,7 @@ export interface StudioTopBarProps {
   };
 }
 
-export function StudioTopBar({ mobileNavigation, newChatInSidebar = false, contextHeaderAbove = false }: StudioTopBarProps = {}) {
+export function StudioTopBar({ mobileNavigation, newChatInSidebar = false, contextHeaderAbove = false, inlineDesktop = false }: StudioTopBarProps = {}) {
   const {
     activeProjectName,
     onStartNewConversation,
@@ -377,11 +378,13 @@ export function StudioTopBar({ mobileNavigation, newChatInSidebar = false, conte
     </IconButton>
   );
 
+  const Header = inlineDesktop && isLargeScreen ? "div" : "header";
   return (
-      <header
+      <Header
+        role={inlineDesktop && isLargeScreen ? "navigation" : undefined}
         aria-label={isGlobalPage ? "Team navigation" : `${resolvedProjectName} workspace navigation`}
         className={[
-          "sticky top-0 z-40",
+          inlineDesktop && isLargeScreen ? "studio-desktop-tabbar" : "sticky top-0 z-40",
           // On a shell that has vacated the title bar the tab strip IS the
           // title bar, so the header must not pad itself clear of the window
           // buttons -- that padding is what produced an empty band across the
@@ -389,7 +392,7 @@ export function StudioTopBar({ mobileNavigation, newChatInSidebar = false, conte
           // rail absorbs the buttons instead. Everywhere else (iOS notches,
           // older shells) the inset still applies and must: it is the same
           // variable.
-          titleBarFree || contextHeaderAbove ? "" : "pt-[var(--instafy-safe-area-inset-top)]",
+          titleBarFree || contextHeaderAbove || inlineDesktop ? "" : "pt-[var(--instafy-safe-area-inset-top)]",
           // With the shell's drag strip reduced to a corner, this row is the
           // window's drag handle. The class also opts interactive descendants
           // back out of dragging -- see instafy-titlebar-drag in tailwind.css.
@@ -427,8 +430,10 @@ export function StudioTopBar({ mobileNavigation, newChatInSidebar = false, conte
       </Text>
       {useDesktopTabChrome ? (
         <WorkspaceTabs
+          titleBarInset={!inlineDesktop}
+          flushStart={!inlineDesktop}
           leading={<><StudioHistoryControls />{desktopParentConversationButton}</>}
-          className={`bg-transparent pr-0 pt-0 dark:bg-transparent ${contextHeaderAbove ? "studio-context-tab-rail" : ""}`}
+          className="bg-transparent pr-0 pt-0 dark:bg-transparent"
           emptyStateContent={!hasDesktopTabs ? desktopEmptyStateTab : undefined}
           tabStripActions={
             shouldShowNewChat ? (
@@ -464,7 +469,7 @@ export function StudioTopBar({ mobileNavigation, newChatInSidebar = false, conte
           }
         />
       ) : isLargeScreen ? (
-        <div className="flex items-center gap-2 px-4 py-2 sm:px-5">
+        <div className={`flex items-center gap-2 px-4 sm:px-5 ${inlineDesktop ? "h-12" : "py-2"}`}>
           <StudioHistoryControls />
           {parentConversationButton}
           <div className="min-w-0 flex-1">{projectNameLabel}</div>
@@ -629,6 +634,6 @@ export function StudioTopBar({ mobileNavigation, newChatInSidebar = false, conte
           <StudioHistoryControls />
         </div>
       ) : null}
-    </header>
+    </Header>
   );
 }

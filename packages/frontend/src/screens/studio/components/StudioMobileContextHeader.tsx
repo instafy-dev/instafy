@@ -70,11 +70,9 @@ export function StudioMobileContextHeader({
 
   return (
     <header
-      className={`studio-mobile-context-header flex min-h-14 min-w-0 shrink-0 items-center gap-0.5 border-b border-transparent bg-slate-50 pb-1 text-slate-900 dark:text-slate-100 ${DARK_RAIL_BG_CLASS}`}
+      className={`studio-mobile-context-header border-b border-transparent bg-slate-50 text-slate-900 dark:text-slate-100 ${DARK_RAIL_BG_CLASS}`}
       style={{
         paddingTop: "calc(var(--instafy-safe-area-inset-top, env(safe-area-inset-top, 0px)) + 4px)",
-        paddingLeft: 4,
-        paddingRight: 4,
       }}
       aria-label="Working context"
       data-testid="studio-mobile-context-header"
@@ -92,7 +90,7 @@ export function StudioMobileContextHeader({
         <AttentionBadge count={unreadCount} aria-hidden title={`${unreadUpdatesDescription(unreadCount)} across teams`} className="absolute right-0 top-1" testId="studio-mobile-home-attention" />
       </IconButton>
       {unreadCount > 0 ? <span id={homeAttentionId} className="sr-only">{unreadUpdatesDescription(unreadCount)} across teams</span> : null}
-      <div className="flex min-w-0 flex-1 items-center gap-[3px]" role="group" aria-label="Team and space">
+      <div className="flex min-w-0 flex-1 items-center gap-[3px] text-sm" role="group" aria-label="Team and space">
         <StudioSidebarTeamMenu
           key={teamId}
           teamName={teamName} teamAvatarUrl={teamAvatarUrl} accentColor={accentColor}

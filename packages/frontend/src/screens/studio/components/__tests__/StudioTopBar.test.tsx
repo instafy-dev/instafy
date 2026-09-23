@@ -77,8 +77,8 @@ vi.mock("../StudioNewChatButton", () => ({
   StudioNewChatButton: ({ testId }: { testId?: string }) => <button data-testid={testId} aria-label="New chat" />,
 }));
 vi.mock("../../../../workspace/WorkspaceTabs", () => ({
-  WorkspaceTabs: ({ leading, emptyStateContent, tabStripActions, actions }: WorkspaceTabsProps) => (
-    <div data-testid="workspace-tabs">{leading}{emptyStateContent}{tabStripActions}{actions}</div>
+  WorkspaceTabs: ({ leading, emptyStateContent, tabStripActions, actions, titleBarInset, flushStart }: WorkspaceTabsProps) => (
+    <div data-testid="workspace-tabs" data-titlebar-inset={titleBarInset} data-flush-start={flushStart}>{leading}{emptyStateContent}{tabStripActions}{actions}</div>
   ),
 }));
 // A ready release must not add an acquisition action back into navigation.
@@ -115,6 +115,18 @@ describe("StudioTopBar navigation", () => {
     container.remove();
     vi.clearAllMocks();
     delete (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT;
+  });
+
+  it("embeds desktop tabs without nesting headers or repeating the native inset", async () => {
+    mocks.isLargeScreen = true;
+    mocks.titleBarFree = true;
+    await act(async () => root.render(<StudioTopBar inlineDesktop newChatInSidebar />));
+    const tabs = container.querySelector('[data-testid="workspace-tabs"]')!;
+    expect(tabs.getAttribute("data-titlebar-inset")).toBe("false");
+    expect(tabs.getAttribute("data-flush-start")).toBe("false");
+    expect(tabs.closest('[role="navigation"]')).not.toBeNull();
+    expect(container.querySelector("header")).toBeNull();
+    expect(container.querySelector('[data-testid="chat-new-conversation"]')).toBeNull();
   });
 
   it.each([

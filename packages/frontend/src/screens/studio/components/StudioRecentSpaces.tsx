@@ -98,7 +98,7 @@ export function StudioRecentSpaces({
   const recentList = (
     <div id={listId} data-testid="sidebar-recent-spaces-list">
       {visibleSpaces.length > 0 ? (
-        <ul aria-label="Recent spaces" className="grid grid-cols-3 gap-1">
+        <ul aria-label="Recent spaces" className="flex flex-col gap-1">
           {visibleSpaces.map((space) => {
             const selected = space.id === activeProjectId;
             const name = spaceName(space);
@@ -108,7 +108,7 @@ export function StudioRecentSpaces({
               <li key={space.id} className="min-w-0">
                 <Button
                   variant="ghost"
-                  size="icon"
+                  size="sm"
                   radius="lg"
                   fullWidth
                   data-testid={`sidebar-recent-space-${space.id}`}
@@ -119,15 +119,15 @@ export function StudioRecentSpaces({
                     setPopoverOpen(false);
                     onSelectSpace(space.id);
                   }}
-                  className={`relative min-h-[88px] min-w-0 flex-col !justify-start gap-1.5 px-1 pb-1.5 pt-2.5 focus-visible:ring-offset-0 data-[pressed]:!translate-y-0 data-[pressed]:!scale-100 aria-[current=page]:bg-slate-100 ${DARK_FLOATING_SELECTION_CLASS}`}
+                  className={`min-h-11 min-w-0 !justify-start gap-2.5 text-left focus-visible:ring-offset-0 data-[pressed]:!translate-y-0 data-[pressed]:!scale-100 aria-[current=page]:bg-slate-100 ${DARK_FLOATING_SELECTION_CLASS}`}
                 >
-                  {selected ? <Check aria-hidden="true" className="pointer-events-none absolute right-1.5 top-1.5 h-3 w-3 text-slate-600 dark:text-slate-300" /> : null}
-                  <span className="relative inline-flex shrink-0">
-                    <SpaceIdentity name={name} icon={space.icon} color={space.color} avatarUrl={space.avatarUrl} className="!h-8 !w-8" />
-                    <AttentionBadge count={attention} aria-hidden testId={`sidebar-recent-space-attention-${space.id}`}
-                      title={unreadDescription(attention)} className="absolute -right-1.5 -top-1.5" />
+                  <SpaceIdentity name={name} icon={space.icon} color={space.color} avatarUrl={space.avatarUrl} className="!h-7 !w-7 shrink-0 !rounded-md !text-sm" />
+                  <span className={`min-w-0 flex-1 truncate text-sm ${selected ? "font-medium text-slate-900 dark:text-slate-100" : "font-normal text-slate-700 dark:text-slate-300"}`}>{name}</span>
+                  <AttentionBadge count={attention} aria-hidden testId={`sidebar-recent-space-attention-${space.id}`}
+                    title={unreadDescription(attention)} className="shrink-0" />
+                  <span aria-hidden="true" className="h-4 w-4 shrink-0 text-slate-600 dark:text-slate-300">
+                    {selected ? <Check className="h-4 w-4" /> : null}
                   </span>
-                  <span className={`line-clamp-2 min-h-8 w-full min-w-0 text-center text-xs leading-4 [overflow-wrap:anywhere] ${selected ? "font-medium text-slate-900 dark:text-slate-100" : "font-normal text-slate-700 dark:text-slate-300"}`}>{name}</span>
                 </Button>
               </li>
             );

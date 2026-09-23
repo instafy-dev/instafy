@@ -150,16 +150,11 @@ describe("shared Studio account controller", () => {
     expect(mocks.showStatus).toHaveBeenCalledWith(action === "check" ? "Update detected. Instafy is staging it now." : "Restarting to apply the staged update.", "success", 3000);
   });
 
-  it("retains diagnostics, runtime logs, tunnel copying and app log controls", async () => {
-    await render(); await click("topbar-profile-button");
-    await act(async () => document.querySelector<HTMLDetailsElement>("details")!.setAttribute("open", ""));
-    await click("profile-diagnostics-button");
-    await click("test-runtime-logs"); await click("test-copy-tunnel");
-    expect(mocks.onShowLogs).toHaveBeenCalledOnce();
-    expect(mocks.copyTunnel).toHaveBeenCalledExactlyOnceWith("url", "runtime-a");
-    await click("test-app-logs"); await click("test-clear-app-logs");
-    expect(mocks.clearLogs).toHaveBeenCalledOnce();
-    expect(mocks.nativeBack).toHaveBeenCalledWith(true, expect.any(Function), 270);
+  it("keeps developer tools outside the account menu", async () => {
+    await render({ presentation: "header", onProfile: vi.fn() }); await click("topbar-profile-button");
+    expect(document.querySelector("details")).toBeNull();
+    expect(document.querySelector('[data-testid="profile-diagnostics-button"]')).toBeNull();
+    expect(document.querySelector('[data-testid="profile-settings-button"]')).not.toBeNull();
   });
 
   it("retains sidebar footer measurement without mounting navigation in the account controller", async () => {

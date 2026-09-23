@@ -99,6 +99,8 @@ describe("settings sections in all scopes", () => {
     ["project", "overview", "providers"],
     ["profile", "account", "preferences"],
     ["profile", "account", "notifications"],
+    ["profile", "account", "appearance"],
+    ["profile", "account", "advanced"],
   ] as const)("round trips %s categories and defaults", (tab, defaultCategory, category) => {
     const search = buildSettingsSectionSearch("?projectId=space&filter=local", tab, category);
     expect(resolveSettingsRoute(`?${search}`)).toEqual({ tab, category, itemId: null });

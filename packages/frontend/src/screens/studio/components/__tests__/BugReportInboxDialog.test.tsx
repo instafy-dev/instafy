@@ -92,6 +92,16 @@ describe("BugReportInboxDialog", () => {
   let container: HTMLDivElement;
   let root: Root;
 
+  it("opens local diagnostics from Support without sending a report or reply", async () => {
+    const onOpenChange = vi.fn();
+    const onOpenDiagnostics = vi.fn();
+    await act(async () => root.render(<BugReportInboxDialog isOpen onOpenChange={onOpenChange} onOpenDiagnostics={onOpenDiagnostics} />));
+    await act(async () => document.querySelector<HTMLButtonElement>('[data-testid="support-diagnostics"]')!.click());
+    expect(onOpenChange).toHaveBeenCalledWith(false);
+    expect(onOpenDiagnostics).toHaveBeenCalledOnce();
+    expect(mocks.postMessage).not.toHaveBeenCalled();
+  });
+
   beforeEach(() => {
     (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
     container = document.createElement("div");

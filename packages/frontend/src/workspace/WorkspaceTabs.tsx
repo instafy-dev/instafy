@@ -45,6 +45,10 @@ import { useWorkspaceUi } from "./useWorkspace";
 type WorkspaceTabKind = "panel" | "file" | "conversation" | "jobThread" | "explorer" | "gitDiff" | "gitReview";
 
 export interface WorkspaceTabsProps {
+  /** The enclosing header may already clear native window controls. */
+  titleBarInset?: boolean;
+  /** Square the first tab only when the strip meets the workspace edge. */
+  flushStart?: boolean;
   className?: string;
   leading?: ReactNode;
   emptyStateContent?: ReactNode;
@@ -91,6 +95,8 @@ function clampConversationMenuPosition(clientX: number, clientY: number) {
 }
 
 export function WorkspaceTabs({
+  titleBarInset = true,
+  flushStart = true,
   className,
   leading,
   emptyStateContent,
@@ -645,7 +651,7 @@ export function WorkspaceTabs({
           // overflow controls, past the integrated macOS drag corner. Padding
           // only the scrolling tab content leaves leading controls underneath it.
           // pl-6 equals DESKTOP_TITLE_BAR_TAB_OFFSET_PX (24px).
-          titleBarFree ? "pl-6" : "",
+          titleBarFree && titleBarInset ? "pl-6" : "",
           className ?? "",
         ]
           .filter(Boolean)
@@ -708,7 +714,7 @@ export function WorkspaceTabs({
                       preview={isWorkspacePreviewTab(tab)}
                       closable={tab.closable}
                       isActive={tab.id === activeTabId}
-                      isFirstTab={index === 0}
+                      isFirstTab={index === 0 && flushStart}
                       previousTabIsActive={tabs[index - 1]?.id === activeTabId}
                       nextTabIsActive={tabs[index + 1]?.id === activeTabId}
                       badge={tab.badge ?? null}

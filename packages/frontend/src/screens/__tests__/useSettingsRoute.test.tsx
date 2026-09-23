@@ -62,12 +62,12 @@ describe("URL-driven settings selection", () => {
     await act(async () => navigate(-1)); expect(state().category).toBe("billing");
   });
 
-  it("restores Notifications through Back and Forward in account settings", async () => {
-    await act(async () => root.render(<MemoryRouter initialEntries={["/studio?panel=settings&settingsTab=profile&settingsCategory=notifications"]}><Harness /></MemoryRouter>));
-    expect(state().category).toBe("notifications");
+  it.each(["notifications", "appearance", "advanced"])("restores %s through Back and Forward in account settings", async (category) => {
+    await act(async () => root.render(<MemoryRouter initialEntries={[`/studio?panel=settings&settingsTab=profile&settingsCategory=${category}`]}><Harness /></MemoryRouter>));
+    expect(state().category).toBe(category);
     await act(async () => select("preferences"));
     await act(async () => navigate(-1));
-    expect(state().category).toBe("notifications");
+    expect(state().category).toBe(category);
     await act(async () => navigate(1));
     expect(state().category).toBe("preferences");
   });
