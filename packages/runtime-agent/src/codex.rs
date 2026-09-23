@@ -3156,6 +3156,7 @@ impl CodexEventStreamAdapter {
                         "id": command.call_id,
                         "type": "command_execution",
                         "command": command_text,
+                        "command_argv": command.command,
                         "status": "in_progress",
                         "aggregated_output": "",
                         "exit_code": JsonValue::Null,
@@ -3193,6 +3194,7 @@ impl CodexEventStreamAdapter {
                         "id": command.call_id,
                         "type": "command_execution",
                         "command": command_text,
+                        "command_argv": command.command,
                         "status": status,
                         "aggregated_output": aggregated_output,
                         "exit_code": command.exit_code,
@@ -5227,6 +5229,10 @@ required = true
         assert_eq!(started.len(), 1);
         assert_eq!(started[0]["type"], "item.started");
         assert_eq!(started[0]["item"]["command"], "bash -lc ls");
+        assert_eq!(
+            started[0]["item"]["command_argv"],
+            json!(["bash", "-lc", "ls"])
+        );
 
         let updated = adapter.collect(&Event {
             id: "evt_delta".to_string(),
@@ -5263,7 +5269,49 @@ required = true
         assert_eq!(completed[0]["type"], "item.completed");
         assert_eq!(completed[0]["item"]["status"], "completed");
         assert_eq!(completed[0]["item"]["exit_code"], 0);
+        assert_eq!(
+            completed[0]["item"]["command_argv"],
+            json!(["bash", "-lc", "ls"])
+        );
         assert_eq!(completed[0]["item"]["aggregated_output"], "README.md\n");
+    }
+
+    #[test]
+    fn codex_event_stream_preserves_shell_script_as_one_argv_entry() {
+        let mut adapter = CodexEventStreamAdapter::default();
+        let cwd = AbsolutePathBuf::from_absolute_path(Path::new("/tmp")).unwrap();
+        let argv = vec![
+            "/bin/zsh".to_string(),
+            "-lc".to_string(),
+            "instafy conversation search 'prior discussion' --json".to_string(),
+        ];
+        let events = adapter.collect(&Event {
+            id: "lookup_end".into(),
+            msg: EventMsg::ExecCommandEnd(ExecCommandEndEvent {
+                call_id: "lookup_call".into(),
+                process_id: None,
+                turn_id: "lookup_turn".into(),
+                completed_at_ms: 0,
+                command: argv.clone(),
+                cwd: cwd.into(),
+                parsed_cmd: Vec::new(),
+                source: ExecCommandSource::Agent,
+                interaction_input: None,
+                stdout: "{}".into(),
+                stderr: String::new(),
+                aggregated_output: "{}".into(),
+                exit_code: 0,
+                duration: Duration::from_millis(1),
+                formatted_output: "{}".into(),
+                status: ExecCommandStatus::Completed,
+            }),
+        });
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0]["item"]["command_argv"], json!(argv));
+        assert_eq!(
+            events[0]["item"]["command"],
+            "/bin/zsh -lc instafy conversation search 'prior discussion' --json"
+        );
     }
 
     #[test]

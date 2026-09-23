@@ -38,6 +38,7 @@ Runtime jobs should use the narrowest final-output contract that still gives Stu
 - `strict_structured`: default for executable automation. The Responses API receives the JSON schema because Studio needs `summary`, `files`, `actions`, and `suggestions` to apply file changes or render product actions.
 - `schema_free_structured`: planning/checkpoint turns still prompt for a parseable JSON object, but the API-level schema is disabled because lead synthesis and action planning proved more reliable without strict final-output enforcement. Studio validates/parses after the model returns.
 - `plain_text_report`: pre-observed read-only worker lanes produce evidence prose. They should not be forced through the JSON final schema because no file/app action is expected.
+- `plain_text_write`: ordinary workspace-change jobs edit through tools and finish with a short summary; file changes are collected from disk. Required prior-context retrieval does not change this format. Read-only and coordination-required scopes retain their restrictions.
 
 The selected mode is recorded in the runtime prompt-context artifact as `finalOutputMode` so no-final failures can be debugged without reverse-engineering prompt shape.
 
@@ -50,13 +51,44 @@ Multi-agent dispatch and recovered-context routing are now skill/model-authored 
 Before a normal root turn enters detailed planning, the runtime asks for one small structured routing object:
 
 - `route`: `direct`, `multi_agent_candidate`, `cross_chat_lookup`, or `write_coordination_required`.
-- `requiresContextLookup`: true only when answering depends on old conversation/thread/context evidence.
-- `requiresCommandExecution`: true only when the runtime must run Instafy CLI lookup before answering.
+- `requiresContextLookup`: true when necessary prior conversation/thread/context evidence must be retrieved because it is absent from the supplied current conversation.
+- `requiresCommandExecution`: true when a separate fresh observation of workspace, process, Git, or other current tool-observed state is needed. The CLI transport for context retrieval does not itself set this flag.
+- `requiresWorkspaceFileChanges`: true when success requires workspace changes, independently of either evidence requirement.
+- `observationCommands`: up to three proposed current-state observations; the host executes only its existing allowlist. Rejected or missing proposals leave the observation requirement for the main agent under its normal permissions.
 - `selectedSkills`, `reason`, and `confidence`: observability for why the route was chosen.
+
+The preflight receives sanitized user/assistant history under the normal stateless conversation budget. History metadata and non-conversational roles are excluded; quoted history supplies evidence, not permissions. Compaction metrics record included, summarized and omitted turns.
 
 The runtime uses that metadata to decide whether to load the focused collaboration skill, inject cross-chat lookup guidance, or keep the turn direct. This keeps policy in the pinned skill while still giving the runtime a deterministic, inspectable branch point.
 
 Keep the shape small. BAML-style typed prompt/output definitions could be a good future home for these schemas if the number of structured actions grows, but this slice intentionally avoids a new toolchain. TOON-style compact encodings are more interesting for large repeated context payloads than for this tiny routing object; the runtime currently persists and validates JSON.
+
+## Execution Evidence and Recovery
+
+For ordinary task execution, context retrieval and current-state observation are independent
+obligations. Dedicated browser, MCP, worker, lead-continuation and team-planning lanes retain
+their existing tool and evidence contracts. A successful
+conversation lookup cannot satisfy a separately required workspace observation, and a
+workspace read cannot stand in for prior conversation evidence. Explicit lookup flags take
+precedence over legacy metadata, including explicit `false`; links alone do not waive a
+required lookup.
+
+Evidence comes from successful terminal command receipts, with exact argv retained separately
+from display text. Failed, incomplete or malformed receipts do not count. The recognizer accepts
+bounded literal read sequences conservatively: a successful `&&` segment proves its reads,
+while earlier commands before a semicolon or newline are not proven by the final exit status.
+Unsupported shell shapes may remain unrecognized even if a read actually occurred. Legacy
+single-command interpreter receipts remain generic execution evidence, not proof of correct
+program semantics or answers. This classification does not grant execution permission.
+
+The existing single recovery attempt preserves the original tool permissions, write scope and
+final-response format. Its feedback names missing evidence and reports fixed diagnostic counts
+without replaying raw scripts. Successful evidence is accumulated across attempts, including
+when a provider reuses event IDs. Failed pre-observations do not satisfy a requirement, and
+cancellation interrupts recovery backoff. Missing context retrieval remains blocking after the
+retry; an ordinary observation-only job retains the existing warning path when its retry
+produces a usable result. The `codex/routing-evidence-recovery` artifact records cumulative
+requirements, evidence and receipt counts, not command contents.
 
 ## Context Recovery Contract
 
