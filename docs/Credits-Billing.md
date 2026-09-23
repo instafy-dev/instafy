@@ -106,6 +106,13 @@ per-runtime sidecars.
 
 The controller now reserves units at prompt dispatch and then reconciles the final charge after completion from actual input/cached/output token usage. Cached tokens are a subset of the reported input tokens, so only the uncached remainder is billed at the input rate and the cached prefix is billed once at the cached rate. The shared ledger keeps both the usage metadata and any follow-up adjustment row when the final charge differs from the reserve.
 
+Ambient multi-human evaluation turns defer the managed reserve and prompt count until
+the agent actually answers. Telemetry and explicitly hidden progress do not start a
+charge; a completion-only answer does, before usage reconciliation. Streaming followed
+by completion charges once. A swallowed `NO_RESPONSE` stays uncharged, while a later
+real answer starts normal billing. BYOC and scheduled-automation billing keep their
+existing rules. See [group participation](Group-Conversation-Participation.md).
+
 Starter guidance with the current defaults:
 - 200 units/day is the whole shared free budget
 - managed AI has a soft cap of 20 prompts/day by default
