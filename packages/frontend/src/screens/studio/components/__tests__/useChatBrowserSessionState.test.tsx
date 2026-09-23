@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 
-import { act } from "react";
+import { act, useEffect } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { useChatBrowserSessionState } from "../useChatBrowserSessionState";
@@ -8,8 +8,9 @@ import { useChatBrowserSessionState } from "../useChatBrowserSessionState";
 type BrowserSessionState = ReturnType<typeof useChatBrowserSessionState>;
 
 const setSessionRuntimeOverride = vi.fn();
-function TestHarness({ resultRef, userId = "user-1", projectId = "project-1" }: {
+function TestHarness({ resultRef, userId = "user-1", projectId = "project-1", onHydrated }: {
   resultRef: { current: BrowserSessionState | null }; userId?: string | null; projectId?: string;
+  onHydrated?: (userId: string | null, runtimeId: string | null) => void;
 }) {
   resultRef.current = useChatBrowserSessionState({
     currentUserId: userId,
@@ -21,6 +22,10 @@ function TestHarness({ resultRef, userId = "user-1", projectId = "project-1" }: 
     refreshRuntimeStatuses: vi.fn(),
     setSessionRuntimeOverride,
   });
+  const { browserSessionStateHydrated, exactBrowserRuntimeId } = resultRef.current;
+  useEffect(() => {
+    if (browserSessionStateHydrated) onHydrated?.(userId, exactBrowserRuntimeId);
+  }, [browserSessionStateHydrated, exactBrowserRuntimeId, onHydrated, userId]);
   return null;
 }
 
@@ -32,6 +37,7 @@ describe("useChatBrowserSessionState", () => {
   beforeEach(() => {
     (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
     window.sessionStorage.clear();
+    window.localStorage.clear();
     setSessionRuntimeOverride.mockClear();
     container = document.createElement("div");
     document.body.appendChild(container);
@@ -42,7 +48,9 @@ describe("useChatBrowserSessionState", () => {
   afterEach(async () => {
     await act(async () => root.unmount());
     container.remove();
+    vi.restoreAllMocks();
     window.sessionStorage.clear();
+    window.localStorage.clear();
     delete (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT;
   });
 
@@ -136,6 +144,7 @@ describe("useChatBrowserSessionState", () => {
       expect(resultRef.current?.browserSessionOpen).toBe(false);
       expect(setSessionRuntimeOverride).not.toHaveBeenCalled();
       expect(window.sessionStorage.getItem(`instafy:browser-session:${next.userId}:${next.projectId}:conversation-1`)).toBeNull();
+      expect(window.localStorage.getItem(`instafy:browser-session:${next.userId}:${next.projectId}:conversation-1`)).toBeNull();
       await act(async () => resultRef.current?.handleBrowserRuntimeIdResolved("second-browser"));
       await act(async () => root.render(<TestHarness resultRef={resultRef} />));
       expect(resultRef.current?.exactBrowserRuntimeId).toBe("first-browser");
@@ -143,4 +152,47 @@ describe("useChatBrowserSessionState", () => {
       expect(resultRef.current?.exactBrowserRuntimeId).toBe("second-browser");
     },
   );
+  it("restores the exact workspace binding after the browser tab has closed", async () => {
+    await act(async () => root.render(<TestHarness resultRef={resultRef} />));
+    await act(async () => resultRef.current?.resumeBrowserSession("saved-browser"));
+    await act(async () => root.unmount());
+    window.sessionStorage.clear();
+    root = createRoot(container);
+    await act(async () => root.render(<TestHarness resultRef={resultRef} />));
+    expect(resultRef.current?.browserSessionStateHydrated).toBe(true);
+    expect(resultRef.current?.exactBrowserRuntimeId).toBe("saved-browser");
+    expect(resultRef.current?.browserSessionOpen).toBe(true);
+  });
+
+  it("keeps a live tab's binding ahead of another tab's saved selection", async () => {
+    const key = "instafy:browser-session:user-1:project-1:conversation-1";
+    window.sessionStorage.setItem(key, JSON.stringify({ runtimeId: "live", exactRuntimeId: "live" }));
+    window.localStorage.setItem(key, JSON.stringify({ runtimeId: "other", exactRuntimeId: "other" }));
+    await act(async () => root.render(<TestHarness resultRef={resultRef} />));
+    expect(resultRef.current?.exactBrowserRuntimeId).toBe("live");
+  });
+
+  it("can resume and save with local storage when session storage is blocked", async () => {
+    const key = "instafy:browser-session:user-1:project-1:conversation-1";
+    window.localStorage.setItem(key, JSON.stringify({ runtimeId: "saved", exactRuntimeId: "saved" }));
+    vi.spyOn(window, "sessionStorage", "get").mockImplementation(() => { throw new Error("Unavailable"); });
+    await act(async () => root.render(<TestHarness resultRef={resultRef} />));
+    expect(resultRef.current?.exactBrowserRuntimeId).toBe("saved");
+    await act(async () => resultRef.current?.resumeBrowserSession("next"));
+    expect(JSON.parse(window.localStorage.getItem(key)!)).toMatchObject({ exactRuntimeId: "next" });
+  });
+
+  it("never announces the previous account's runtime as hydrated under a new account", async () => {
+    const onHydrated = vi.fn();
+    for (const [userId, runtimeId] of [["user-1", "first"], ["user-2", "second"]]) {
+      window.localStorage.setItem(`instafy:browser-session:${userId}:project-1:conversation-1`,
+        JSON.stringify({ runtimeId, exactRuntimeId: runtimeId }));
+    }
+    await act(async () => root.render(<TestHarness resultRef={resultRef} onHydrated={onHydrated} />));
+    onHydrated.mockClear();
+    await act(async () => root.render(<TestHarness resultRef={resultRef} userId="user-2" onHydrated={onHydrated} />));
+    expect(onHydrated).toHaveBeenCalledWith("user-2", "second");
+    expect(onHydrated).not.toHaveBeenCalledWith("user-2", "first");
+  });
+
 });

@@ -36,6 +36,7 @@ use tokio::sync::{Mutex as AsyncMutex, mpsc::UnboundedSender};
 use tracing::{debug, warn};
 use uuid::Uuid;
 
+mod browser_request;
 mod card_text;
 mod conversation_context;
 mod git_sync;
@@ -7407,6 +7408,7 @@ Avoid creating dependency caches or stores in the canonical workspace root when 
               - { type: 'request_secret', name: string, optional valueLabel: string, optional description: string, optional whereToGet: string, optional skill: string, optional sensitive: boolean, optional agentHandles: string[] }\n\
               - { type: 'request_integration', provider: string, optional description: string, optional requiredScopes: string[], optional capabilities: string[], optional authMethods: string[], optional suggestedSecretNames: string[], optional suggestedSecrets: { name: string, optional description: string }[], optional agentHandles: string[] }\n\
               - { type: 'request_location', optional precision: 'approximate' | 'precise', optional description: string }\n\
+              - { type: 'request_browser', task: string, optional browserLocation: 'auto' | 'device' | 'workspace' }\n\
               - { type: 'multi_agent_plan', rationale: string, thresholdReason: string, mode: 'read_only' | 'write_scoped', optional handoffPaths: string[], agents: [{ handle: string, label: string, prompt: string, scopeSummary: string, optional writeScope: object }, ...at least 2 useful sibling lanes], lead: { leadHandle: string, continuationPrompt: string, expectedReportFormat: string }, optional runtimeRouting: { strategy: 'reuse' | 'spread', optional desiredSlots: number, optional rationale: string }, optional presentation: { optional workerEvidenceVisibility: 'hidden' | 'compact' | 'expanded' | 'surface_on_failure', optional leadSummaryVisibility: 'hidden' | 'compact', optional showThresholdReason: boolean } }\n\
               - { type: 'goal_update', status: 'active' | 'paused' | 'completed' | 'blocked' | 'canceled', optional objective: string, optional progressSummary: string, optional doneWhen: string, optional stopWhen: string, optional operation: 'clear' }\n\
               - Emit `goal_update` when the latest user request explicitly asks to create, set, start, update, pause, resume, complete, block, cancel, or clear a conversation goal, or when an active conversation goal is included and this turn has concrete evidence that the goal changed. Use status `active` with `objective` to create or update a goal. Do not infer goals from ordinary questions or small one-off requests.\n\
@@ -7468,7 +7470,7 @@ Avoid creating dependency caches or stores in the canonical workspace root when 
             - When the user references another conversation (see \"Referenced conversations\"), treat it as additional context.\n\
             - If the user asks about token usage for a previous answer, retrieve it (do not guess) via `instafy history messages --conversation <conversation-id>` (or `instafy api get` fallback) and then reply in the exact format `Token usage — input: <n>, cached: <n>, output: <n>`.\n\
             - When the request depends on observable workspace, runtime, repo, process, or server state, use the appropriate tool calls before answering and report concrete observed output (for example: exit code, process status, line counts, tail output).\n\
-            - For browser/UI tasks (for example browser previews, screenshots, or \"open this page\" requests), you MUST execute real browser automation and report concrete observed page output (title/text/state), not hypothetical instructions.\n\
+            - For browser/UI tasks, execute real browser automation and report observed page output. When interactive browser tools are not exposed, follow instafy-browser-automation and emit request_browser to continue in Studio's browser. That action is a handoff, not evidence that a page was opened or a task completed.\n\
             - For nearby/location-dependent browsing requests (for example \"good coffee nearby\"), do not stop at a generic search-results page if the user asked for a recommendation. Continue until you can report at least one concrete candidate or the exact blocker.\n\
             - For recommendation-seeking browser tasks, prefer map/listing/review pages over repeating search-result links. If needed, inspect a few likely candidates and summarize the strongest observed option with concrete details.\n\
             - Use loaded skills and learned blocks for workflow behavior. Treat Rust/runtime prompts as execution invariants only, not as the source of task-specific strategy.\n\
@@ -7679,6 +7681,7 @@ struct CodexSuggestedSecret {
 
 #[derive(Debug, Clone)]
 enum CodexAction {
+    RequestBrowser(browser_request::BrowserRequest),
     MultiAgentPlan {
         plan: JsonValue,
         agent_count: usize,
@@ -7752,13 +7755,18 @@ fn outcome_defers_workspace_file_changes(outcome: &CodexOutcome) -> bool {
     outcome.actions.iter().any(|action| {
         matches!(
             action,
-            CodexAction::MultiAgentPlan { .. } | CodexAction::CoordinationRequired { .. }
+            CodexAction::MultiAgentPlan { .. }
+                | CodexAction::CoordinationRequired { .. }
+                | CodexAction::RequestBrowser(_)
         )
     })
 }
 
-fn outcome_defers_command_execution(_outcome: &CodexOutcome) -> bool {
-    false
+fn outcome_defers_command_execution(outcome: &CodexOutcome) -> bool {
+    outcome
+        .actions
+        .iter()
+        .any(|action| matches!(action, CodexAction::RequestBrowser(_)))
 }
 
 fn workspace_file_changes_still_required(
@@ -8100,6 +8108,13 @@ fn parse_codex_actions(value: &JsonValue) -> Vec<CodexAction> {
                 agent_handles,
                 refused_class: None,
             });
+            continue;
+        }
+
+        if normalized_type == "request_browser" {
+            if let Some(request) = browser_request::BrowserRequest::parse(map) {
+                out.push(CodexAction::RequestBrowser(request));
+            }
             continue;
         }
 
@@ -9143,6 +9158,7 @@ fn ensure_onboarding_suggestions(suggested_replies: &mut Vec<String>, actions: &
             // which is what made the card read as two competing routes.
             CodexAction::RequestSecret { .. } => {}
             CodexAction::RequestLocation { .. } => {}
+            CodexAction::RequestBrowser(_) => {}
         }
     }
 }
@@ -9373,11 +9389,18 @@ fn build_final_messages_from_actions(
     let mut seen_secret_requests: HashSet<String> = HashSet::new();
     let mut seen_integration_requests: HashSet<String> = HashSet::new();
     let mut emitted_location_request = false;
+    let mut emitted_browser_request = false;
     // Index in `out` and value label of each card that takes a value.
     let mut value_cards: Vec<(usize, Option<String>)> = Vec::new();
 
     for action in actions {
         match action {
+            CodexAction::RequestBrowser(request) => {
+                if !emitted_browser_request {
+                    out.push(request.message());
+                    emitted_browser_request = true;
+                }
+            }
             CodexAction::MultiAgentPlan {
                 plan,
                 agent_count,
@@ -22977,6 +23000,34 @@ mod tests {
             details.get("provider").and_then(JsonValue::as_str),
             Some("example")
         );
+    }
+
+    #[test]
+    fn browser_request_actions_emit_one_handoff_and_defer_work_until_tools_are_attached() {
+        let actions = parse_codex_actions(&json!({"actions": [
+            {"type": "request_browser", "task": "Continue comparing the saved items"},
+            {"type": "request_browser", "task": "Repeated request", "browserLocation": "device"},
+            {"type": "request_browser", "task": "", "browserLocation": "auto"}
+        ]}));
+        assert_eq!(actions.len(), 2);
+        let messages = build_final_messages_from_actions(&actions, None);
+        assert_eq!(messages.len(), 1);
+        assert_eq!(
+            messages[0].metadata.as_ref().unwrap()["details"]["browserRequest"]["task"],
+            "Continue comparing the saved items"
+        );
+        let mut outcome = CodexOutcome {
+            summary: String::new(),
+            suggested_replies: vec![],
+            files: vec![],
+            snippet: None,
+            actions,
+        };
+        assert!(outcome_defers_workspace_file_changes(&outcome));
+        assert!(outcome_defers_command_execution(&outcome));
+        outcome.actions.clear();
+        assert!(!outcome_defers_workspace_file_changes(&outcome));
+        assert!(!outcome_defers_command_execution(&outcome));
     }
 
     #[test]

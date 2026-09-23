@@ -23,6 +23,36 @@ for OAuth. It imports neither their profiles nor their cookies. Opening the
 Shared Browser does not copy Personal logins into it, and the fresh observer
 cannot import either profile.
 
+## Opening and continuing a browser task from Chat
+
+When an interactive browser is not attached to a Chat turn, the bundled browser
+skill can return an **Open browser and continue** card. Selecting it opens the
+conversation's browser and sends the task to that exact browser once it is ready.
+This is a user-selected handoff; displaying an old message never runs it again.
+Paused native control uses the existing Resume flow in Ask mode; already active
+control keeps its settings. A pending manual step must be finished with **Done, continue** before another task can start.
+
+Studio first reuses the browser location saved for this conversation on this
+device. For a new conversation, it uses the user's explicit location preference,
+otherwise **This device** in supported Desktop builds and **Workspace** on web
+or mobile. An explicit request for either location overrides that selection for
+the conversation without changing the user's default. An unavailable saved
+Personal Browser does not silently become a different Workspace profile.
+
+Browser location and the exact Workspace runtime binding are stored locally per
+Instafy user, project and conversation, so closing the Studio tab does not erase
+them. A live tab keeps its own runtime selection. The controller still checks
+access and availability; an expired runtime cannot be restored from an identifier.
+This record is not synced across devices. Use the existing resume link for a
+Workspace session on another device.
+
+The skill carries task-relevant context, such as the site and work already done,
+into the browser turn and inspects current state before continuing. This does
+not save page snapshots or export cookies. A native app restart preserves the
+profile, but not the open page or unsaved form contents; the agent may need to
+navigate back using the conversation context. Site-specific carts and login
+expiry still follow the site's behavior.
+
 ## What survives a change?
 
 - **Personal, another project on the same device:** the same user's profile is

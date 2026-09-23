@@ -100,6 +100,7 @@ Useful env toggles:
 	- `LIVE_BROWSER_SIM_PROMPT='...'` — exact user prompt to simulate.
 	- `LIVE_BROWSER_SIM_EXPECT_PLAYWRIGHT_CLI=1` — assert at least one Playwright CLI command execution was emitted.
 	- `LIVE_BROWSER_SIM_EXPECT_PROVIDER='playwright-browser-session-direct'` — assert selected provider path.
+- `LIVE_BROWSER_SIM_EXPECT_HANDOFF=1` — require one `request_browser` card when running without an interactive browser attached (use `LIVE_BROWSER_SIM_RUNTIME_FLAVOR=base`). Use `LIVE_BROWSER_SIM_EXPECT_LOCATION=device|workspace` when testing an explicit location choice; otherwise it expects `auto`. This checks a real model's capability handoff, not browser execution or the Studio button.
 - `CODEX_DEBUG_REQUEST_TOOLS=1` — print the exact tool names sent to the model.
 - `CODEX_DEBUG_MCP_PREFLIGHT=1` / `CODEX_DEBUG_BROWSER_EVENTS=1` — log MCP startup + browser turn events.
 

@@ -120,6 +120,24 @@ describe("Personal handoff with the real React browser bridge", () => {
     return { pending, settled: () => settled };
   }
 
+  it("opens a Chat task through native Ask control and dispatches only after the exact runtime is ready", async () => {
+    await render();
+    let pending!: Promise<boolean>;
+    await act(async () => { pending = resultRef.current!.handoff.startPersonal("Continue comparing the saved items"); });
+    expect(setEnabled).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ enabled: true, approvalMode: "ask" }));
+    expect(value.onSubmit).not.toHaveBeenCalled();
+    await act(async () => startup.resolve({ pid: 42, runtimeId: "personal-fresh" }));
+    await act(async () => { await vi.advanceTimersByTimeAsync(100); });
+    expect(await pending).toBe(true);
+    expect(value.onSubmit).toHaveBeenCalledWith("conversation-1", "Continue comparing the saved items", expect.objectContaining({
+      runtimeOverride: expect.objectContaining({ runtimeId: "personal-fresh" }),
+      metadata: expect.objectContaining({ browserTransport: "desktop-personal" }),
+    }));
+    await act(async () => { expect(await resultRef.current!.handoff.startPersonal("Inspect the cart")).toBe(true); });
+    expect(setEnabled).toHaveBeenCalledTimes(1);
+    expect(value.onSubmit).toHaveBeenCalledTimes(2);
+  });
+
   it("retries Done after a native failure without reading the pre-Resume unavailable phase as a new failure", async () => {
     await failFirstResume();
     const attempt = await retry();

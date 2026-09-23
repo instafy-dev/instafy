@@ -134,6 +134,38 @@ describe("useChatBrowserHandoff", () => {
     expect(value.onSubmit).not.toHaveBeenCalled();
   });
 
+  it("does not bypass a pending manual-input step for a new browser request", async () => {
+    const value = options({ transport: "personal", personal: personal({
+      status: { ...personal().status!, humanInputRequest: {
+        version: 1, handoffId: "manual-step", origin: "https://example.test",
+        createdAtMs: 1000, expiresAtMs: 60000, fields: [{ label: "Password" }],
+      } },
+    }) });
+    await render(value);
+    await expect(resultRef.current!.startPersonal("Continue shopping")).rejects.toThrow("Finish the current manual step");
+    expect(value.personal.setAgentControlEnabled).not.toHaveBeenCalled();
+    expect(value.onSubmit).not.toHaveBeenCalled();
+  });
+
+  it("checks a reused native runtime again at dispatch", async () => {
+    const value = options({ transport: "personal", personal: personal({
+      runtimeOverride: { runtimeId: "personal-live", runtimeDisplayName: "Personal Browser", preferRuntime: false },
+    }) });
+    await render(value);
+    let check!: () => void;
+    const dispatch = deferred<void>();
+    vi.mocked(value.onSubmit).mockImplementation(async (_conversation, _message, opts) => {
+      check = opts!.assertDispatchCurrent!;
+      await dispatch.promise;
+      check();
+    });
+    const pending = resultRef.current!.startPersonal("Inspect the current page").catch((error: Error) => error);
+    expect(check).not.toThrow();
+    await render({ ...value, personal: personal() });
+    dispatch.resolve();
+    expect(await pending).toMatchObject({ message: expect.stringContaining("Browser control changed") });
+  });
+
   it("waits for a fresh Personal runtime with ready control before exact dispatch", async () => {
     const oldOverride = { runtimeId: "personal-old", runtimeDisplayName: "Personal Browser", preferRuntime: false };
     const value = options({ transport: "personal", personal: personal({ runtimeOverride: oldOverride }) });

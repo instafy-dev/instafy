@@ -345,6 +345,8 @@ fn default_final_output_json_schema() -> JsonValue {
                   "sensitive",
                   "provider",
                   "precision",
+                  "task",
+                  "browserLocation",
                   "requiredScopes",
                   "capabilities",
                   "authMethods",
@@ -362,6 +364,11 @@ fn default_final_output_json_schema() -> JsonValue {
                   "sensitive": { "type": ["boolean", "null"] },
                   "provider": { "type": ["string", "null"] },
                   "precision": { "type": ["string", "null"] },
+                  "task": { "type": ["string", "null"] },
+                  "browserLocation": {
+                    "type": ["string", "null"], "enum": ["auto", "device", "workspace", null],
+                    "description": "For request_browser, use auto so Studio can resume the correct session or select an available device. Use device or workspace only when the user explicitly distinguishes the physical device from the remote Workspace; browser ownership alone does not choose a location."
+                  },
                   "requiredScopes": {
                     "type": ["array", "null"],
                     "items": { "type": "string" }

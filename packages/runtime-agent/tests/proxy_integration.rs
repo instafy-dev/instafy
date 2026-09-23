@@ -1264,10 +1264,7 @@ async fn codex_proxy_live_browser_prompt_simulation() -> Result<()> {
         .filter(|value| !value.is_empty())
         .is_none()
     {
-        eprintln!(
-            "[live-browser-sim] skipping (auth.json tokens missing access_token; run `codex login`)",
-        );
-        return Ok(());
+        anyhow::bail!("live browser simulation requires a Codex access token; run `codex login`");
     }
 
     if let Value::Object(ref mut obj) = proxy_auth_json {
@@ -1342,7 +1339,7 @@ async fn codex_proxy_live_browser_prompt_simulation() -> Result<()> {
         "WORKSPACE_DIR",
         workspace_root.as_os_str().to_string_lossy(),
     );
-    let _guard_project = EnvGuard::set("PROJECT_ID", project_id.to_string());
+    let _guard_project = EnvGuard::set("SPACE_ID", project_id.to_string());
     let _guard_agent_key = EnvGuard::set("AGENT_LOGIN_KEY", "integration-agent-key");
     let _guard_runtime_token = EnvGuard::set("RUNTIME_ACCESS_TOKEN", "integration-runtime-token");
     let _guard_origin_id = EnvGuard::set("ORIGIN_ID", Uuid::new_v4().to_string());
@@ -1384,6 +1381,10 @@ async fn codex_proxy_live_browser_prompt_simulation() -> Result<()> {
         .filter(|value| !value.is_empty())
         .unwrap_or_else(|| "Open a browser session and go to example.com".to_string());
     let expect_playwright_cli = std::env::var("LIVE_BROWSER_SIM_EXPECT_PLAYWRIGHT_CLI")
+        .ok()
+        .as_deref()
+        == Some("1");
+    let expect_browser_request = std::env::var("LIVE_BROWSER_SIM_EXPECT_HANDOFF")
         .ok()
         .as_deref()
         == Some("1");
@@ -1458,6 +1459,39 @@ async fn codex_proxy_live_browser_prompt_simulation() -> Result<()> {
             execution.provider, expected,
             "unexpected provider for browser simulation"
         );
+    }
+
+    if expect_browser_request {
+        let requests: Vec<_> = execution
+            .messages
+            .iter()
+            .chain(execution.final_messages.iter())
+            .filter(|message| {
+                message
+                    .metadata
+                    .as_ref()
+                    .and_then(|metadata| metadata.get("details"))
+                    .and_then(|details| details.get("browserRequest"))
+                    .is_some()
+            })
+            .collect();
+        assert_eq!(
+            requests.len(),
+            1,
+            "expected one browser handoff card from a real model turn"
+        );
+        let request = &requests[0].metadata.as_ref().unwrap()["details"]["browserRequest"];
+        let expected_location =
+            std::env::var("LIVE_BROWSER_SIM_EXPECT_LOCATION").unwrap_or_else(|_| "auto".to_owned());
+        assert_eq!(request["location"], expected_location);
+        assert!(
+            !request["task"]
+                .as_str()
+                .unwrap_or_default()
+                .trim()
+                .is_empty()
+        );
+        eprintln!("[live-browser-sim] verified browser handoff: {}", request);
     }
 
     if expect_playwright_cli {
