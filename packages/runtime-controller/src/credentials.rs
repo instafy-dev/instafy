@@ -2785,7 +2785,7 @@ mod provider_metadata_tests {
         // BYO ChatGPT logins are subscription-paid and keep Sol even though the
         // credits-funded managed tier defaults to the cheaper Luna.
         assert_eq!(default_chatgpt_model_id(), "gpt-5.6-sol");
-        assert_eq!(default_managed_ai_model_id(), "gpt-5.6-luna");
+        assert_eq!(default_managed_ai_model_id(), "gpt-6-luna");
         assert_eq!(
             default_model_for_credential(CREDENTIAL_KIND_CODEX_AUTH_JSON, PROVIDER_OPENAI),
             "gpt-5.6-sol"
@@ -3070,7 +3070,7 @@ mod credential_lease_contract_tests {
     #[test]
     fn managed_ai_lease_serves_the_platform_key_without_a_user_lookup() {
         let mut config = build_app_config("", "", "");
-        config.managed_ai_model_id = "gpt-5.6-luna".to_string();
+        config.managed_ai_model_id = "gpt-6-luna".to_string();
 
         // Env unset: the lease is refused and the message must not carry the
         // "credential not found" prefix the studio maps to reconnecting.
@@ -3086,7 +3086,7 @@ mod credential_lease_contract_tests {
         assert_eq!(lease.kind, CREDENTIAL_KIND_OPENAI_API_KEY);
         assert_eq!(lease.openai_api_key.as_deref(), Some("sk-managed"));
         assert_eq!(lease.provider.as_deref(), Some("openai"));
-        assert_eq!(lease.default_model.as_deref(), Some("gpt-5.6-luna"));
+        assert_eq!(lease.default_model.as_deref(), Some("gpt-6-luna"));
         assert_eq!(
             lease.upstream_endpoint.as_deref(),
             Some("https://api.openai.com/v1/responses")

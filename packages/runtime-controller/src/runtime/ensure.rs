@@ -542,7 +542,7 @@ async fn mark_runtime_launch_failed_if_current(
     Ok(true)
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct ActiveHostedRuntimeBlocker {
     runtime_id: Uuid,
     project_id: Uuid,
@@ -589,6 +589,29 @@ fn hosted_runtime_limit_details(
             .filter(|value| !value.is_empty())
             .map(ToOwned::to_owned),
     }
+}
+
+/// The 402 a space gets when the organization's hosted runtimes are all in use.
+/// Shared so that a reclaim attempt which did not free the slot refuses with
+/// exactly the same payload as one that was never tried.
+fn hosted_runtime_limit_refusal(
+    active_count: i64,
+    max_active_hosted_runtimes: i64,
+    blocker: Option<&ActiveHostedRuntimeBlocker>,
+) -> (StatusCode, Json<ApiError>) {
+    (
+        StatusCode::PAYMENT_REQUIRED,
+        Json(ApiError::with_details(
+            format_hosted_runtime_limit_message(active_count, max_active_hosted_runtimes, blocker),
+            "runtime_limit_reached",
+            serde_json::to_value(hosted_runtime_limit_details(
+                active_count,
+                max_active_hosted_runtimes,
+                blocker,
+            ))
+            .unwrap_or_else(|_| json!({})),
+        )),
+    )
 }
 
 fn format_hosted_runtime_limit_message(
@@ -663,6 +686,201 @@ async fn load_active_hosted_runtime_blocker(
         project_name: record.get("project_name"),
         display_name: record.get("display_name"),
     }))
+}
+
+/// Whether the runtime currently holding the organization's last hosted slot
+/// can be handed to a space that is waiting for it.
+///
+/// Every signal is durable (database) and every one of them is a reason to
+/// refuse: the in-memory activity tracker cannot prove idleness, and being
+/// wrong here means stopping a machine somebody is using. Mirrors the idle
+/// sweep's predicate (`auto_stop_idle_hosted_runtimes`) and adds the two
+/// conditions a demand-driven reclaim needs on top of it — a settled runtime
+/// rather than one that is still booting, and no queued work waiting for it.
+async fn hosted_runtime_blocker_is_reclaimable(
+    transaction: &Transaction<'_>,
+    runtime_id: &Uuid,
+    idle_seconds: i64,
+) -> bool {
+    let row = transaction
+        .query_one(
+            "select exists (
+               select 1
+               from runtimes r
+               join runtime_leases rl on rl.id = r.active_lease_id
+               where r.id = $1
+                 -- Settled and serving. A requested/launching generation may
+                 -- have a launch in flight at the provider; stopping it races
+                 -- that launch and can strand a cleanup_pending lease.
+                 and r.status in ('ready', 'running')
+                 and rl.released_at is null
+                 and rl.status = 'active'
+                 -- Boot grace, measured on the lease rather than the runtime
+                 -- row, which is reused across wake cycles.
+                 and coalesce(rl.launched_at, rl.requested_at, r.created_at)
+                     < now() - interval '1 second' * $2
+                 -- Nothing leased on the machine itself.
+                 and not exists (
+                   select 1 from agent_jobs j
+                   where j.leased_by_runtime_id = r.id and j.status = 'leased'
+                 )
+                 -- Nothing waiting to be picked up in that space, and nothing
+                 -- pinned to this machine. The idle sweep has no equivalent:
+                 -- it only looks at recency, so it would reclaim a runtime
+                 -- whose owner pressed send a moment ago.
+                 and not exists (
+                   select 1 from agent_jobs j
+                   where j.status in ('queued', 'leased')
+                     and (j.project_id = r.project_id or j.target_runtime_id = r.id)
+                 )
+                 -- No open turn someone is watching.
+                 and not exists (
+                   select 1 from runs u
+                   where u.project_id = r.project_id
+                     and u.status in ('queued', 'in_progress', 'awaiting_approval')
+                 )
+                 -- No recent agent work in that space.
+                 and not exists (
+                   select 1 from agent_jobs j
+                   where j.project_id = r.project_id
+                     and greatest(
+                       coalesce(j.updated_at, to_timestamp(0)),
+                       coalesce(j.heartbeat_at, to_timestamp(0)),
+                       coalesce(j.leased_at, to_timestamp(0))
+                     ) > now() - interval '1 second' * $2
+                 )
+                 -- Nobody sitting in that space right now.
+                 and not exists (
+                   select 1 from project_user_activity a
+                   where a.project_id = r.project_id
+                     and a.last_active_at > now() - interval '1 second' * $2
+                 )
+             ) as reclaimable",
+            &[runtime_id, &(idle_seconds as f64)],
+        )
+        .await;
+
+    match row {
+        Ok(row) => row.get("reclaimable"),
+        Err(error) => {
+            // Fails CLOSED, unlike the org cap count above: refusing the
+            // launch only asks the user to stop the machine themselves, while
+            // reclaiming on an unproven predicate interrupts someone's work.
+            // Schema lag (project_user_activity) lands here too.
+            warn!(
+                runtime_id = %runtime_id,
+                error = ?error,
+                "could not prove the blocking hosted runtime is idle; not reclaiming it"
+            );
+            false
+        }
+    }
+}
+
+/// Stop an idle blocking runtime so the waiting space can have the slot.
+///
+/// Returns whether the slot was actually released. Must be called with no
+/// allocation transaction open: the stop takes its own pool connection and
+/// then waits on the provider's release endpoint over the network.
+async fn reclaim_idle_hosted_runtime_blocker(
+    state: &AppState,
+    blocker: &ActiveHostedRuntimeBlocker,
+) -> bool {
+    let stop_options = StopOptions {
+        source: "runtime_limit_reclaim",
+        reason: Some("idle_runtime_limit_reclaim".to_string()),
+        // The predicate above proved idleness a moment ago; this re-proves the
+        // narrow part of it under the runtime row lock, which is the race that
+        // matters. `require_idle_timeout` stays off because it measures the
+        // heartbeat, not work.
+        skip_if_active_jobs: true,
+        require_idle_timeout: false,
+        allow_cleanup_pending_release: false,
+        expected_identity: None,
+    };
+    let stop_reason_label = stop_options
+        .reason
+        .clone()
+        .unwrap_or_else(|| stop_options.source.to_string());
+
+    match stop_runtime_safely(state, &blocker.runtime_id, stop_options).await {
+        Ok(stopped) => {
+            if let Some(skip_reason) = stopped.outcome.skip_reason.as_deref() {
+                info!(
+                    runtime_id = %blocker.runtime_id,
+                    project_id = %blocker.project_id,
+                    %skip_reason,
+                    "blocking hosted runtime became busy before it could be reclaimed"
+                );
+                return false;
+            }
+            if !stopped.outcome.status_changed {
+                return false;
+            }
+
+            let runtime = &stopped.runtime;
+            info!(
+                runtime_id = %runtime.id,
+                project_id = %runtime.project_id,
+                "reclaimed an idle hosted runtime for a space waiting on the organization limit"
+            );
+            if let Err((status, payload)) = crate::tunnels::revoke_tunnels_for_scope(
+                state,
+                &runtime.project_id,
+                Some(&runtime.id),
+                stopped.outcome.released_runtime_lease_id.as_ref(),
+                &stop_reason_label,
+            )
+            .await
+            {
+                warn!(
+                    runtime_id = %runtime.id,
+                    project_id = %runtime.project_id,
+                    %status,
+                    error = payload.0.message,
+                    "failed to revoke tunnels while reclaiming an idle hosted runtime"
+                );
+            }
+            // The space that lost its machine is told, so its studio stops
+            // showing a runtime that no longer exists.
+            super::sweeps::notify_runtime_stopped(
+                state,
+                runtime.project_id,
+                runtime.id,
+                &stop_reason_label,
+                "runtime_limit_reclaim",
+            );
+            // A job slipped in between the predicate and the stop and was
+            // requeued. Deliberately NOT re-ensured here, unlike the idle
+            // sweep: requesting a machine for this space again would either
+            // consume the slot the waiting space is about to take, or bounce
+            // off the same limit. The job stays queued and starts as soon as
+            // a runtime is free, which is the behaviour the limit implies.
+            if !stopped.outcome.requeued_jobs.is_empty() {
+                info!(
+                    runtime_id = %runtime.id,
+                    project_id = %runtime.project_id,
+                    requeued_job_count = stopped.outcome.requeued_jobs.len(),
+                    "reclaimed a hosted runtime that had just been given work; \
+                     the requeued jobs wait for a free runtime"
+                );
+            }
+            true
+        }
+        Err((status, body)) => {
+            // Includes the 502 that leaves the blocker quarantined but still
+            // counted. The caller refuses the launch exactly as it would have
+            // without this attempt.
+            warn!(
+                runtime_id = %blocker.runtime_id,
+                project_id = %blocker.project_id,
+                %status,
+                error = body.0.message,
+                "failed to reclaim an idle hosted runtime"
+            );
+            false
+        }
+    }
 }
 
 fn lease_is_reusable(lease: &RuntimeLeaseDetails) -> bool {
@@ -1463,6 +1681,10 @@ async fn ensure_runtime_launch_inner(
     let metadata = super::managed::sanitize_managed_runtime_request_metadata(&provider, metadata)
         .map_err(bad_request)?;
     let (metadata, runtime_size) = normalize_runtime_size_metadata(metadata);
+    // One reclaim per request. The retry re-runs the whole allocation, and a
+    // second refusal means the slot was taken by someone else; looping on it
+    // would stop one machine after another on a single prompt.
+    let mut hosted_slot_reclaim_attempted = false;
     let (runtime, lease, origin_info, origin_instance_id, provider_cfg, launch_metadata) = 'allocation: loop {
         let provider_cfg = if crate::provider_identifiers::is_self_hosted_provider_id(&provider) {
             None
@@ -1786,22 +2008,53 @@ async fn ensure_runtime_launch_inner(
                         }
                     };
 
-                return Err((
-                    StatusCode::PAYMENT_REQUIRED,
-                    Json(ApiError::with_details(
-                        format_hosted_runtime_limit_message(
+                // The organization's slot may be held by a machine nobody is
+                // using: a space the person finished with minutes ago. Take it
+                // over for them instead of making them find and stop it by
+                // hand. A blocker with any sign of life is left alone and the
+                // refusal below still explains where it is.
+                let reclaim_idle_seconds = state.config.runtime_limit_reclaim_idle_seconds;
+                if let Some(candidate) = blocker.clone() {
+                    if reclaim_idle_seconds > 0
+                        && !hosted_slot_reclaim_attempted
+                        // Never the caller's own machine: reuse above already
+                        // decided it was unusable, so stopping it here would
+                        // take away the very runtime this request is booting.
+                        && candidate.project_id != project_id
+                        && hosted_runtime_blocker_is_reclaimable(
+                            &transaction,
+                            &candidate.runtime_id,
+                            reclaim_idle_seconds,
+                        )
+                        .await
+                    {
+                        hosted_slot_reclaim_attempted = true;
+                        // The stop needs its own connection and then waits on
+                        // the provider over the network, so this transaction
+                        // has to go first — the same rule the stale-generation
+                        // cleanup follows before this loop.
+                        transaction.rollback().await.map_err(|error| {
+                            internal_error(format!(
+                                "failed to roll back before reclaiming a hosted runtime slot: {error}"
+                            ))
+                        })?;
+                        drop(conn);
+
+                        if reclaim_idle_hosted_runtime_blocker(state, &candidate).await {
+                            continue 'allocation;
+                        }
+                        return Err(hosted_runtime_limit_refusal(
                             active_count,
                             max_active_hosted_runtimes,
-                            blocker.as_ref(),
-                        ),
-                        "runtime_limit_reached",
-                        serde_json::to_value(hosted_runtime_limit_details(
-                            active_count,
-                            max_active_hosted_runtimes,
-                            blocker.as_ref(),
-                        ))
-                        .unwrap_or_else(|_| json!({})),
-                    )),
+                            Some(&candidate),
+                        ));
+                    }
+                }
+
+                return Err(hosted_runtime_limit_refusal(
+                    active_count,
+                    max_active_hosted_runtimes,
+                    blocker.as_ref(),
                 ));
             }
 
@@ -2501,6 +2754,10 @@ async fn ensure_tenant_runtime_lease(
 #[cfg(test)]
 #[path = "ensure_concurrency_tests.rs"]
 mod concurrency_tests;
+
+#[cfg(test)]
+#[path = "ensure_reclaim_tests.rs"]
+mod reclaim_tests;
 
 #[cfg(test)]
 mod tests {

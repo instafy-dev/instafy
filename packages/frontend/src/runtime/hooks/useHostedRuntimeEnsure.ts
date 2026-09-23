@@ -18,6 +18,11 @@ import {
 import { getDefaultRuntimeMetadata } from "../utils/webdevRuntime";
 import type { ShowStatusFn } from "./types";
 
+export interface EnsureHostedRuntimeOptions {
+  /** Request a machine even when a hosted runtime row already looks like it is starting. */
+  force?: boolean;
+}
+
 interface UseHostedRuntimeEnsureOptions {
   enabled: boolean;
   projectId: string | null;
@@ -259,7 +264,8 @@ export function useHostedRuntimeEnsure({
     showDesktopRuntimeHelp,
   ]);
 
-  const ensureHostedRuntime = useCallback(async () => {
+  const ensureHostedRuntime = useCallback(async (options?: EnsureHostedRuntimeOptions) => {
+    const force = options?.force === true;
     const effectiveProjectId = resolveEffectiveProjectId();
     // A new request starts with no recorded limit; only a launch that fails
     // with the limit below writes one.
@@ -307,6 +313,23 @@ export function useHostedRuntimeEnsure({
     });
 
     const statusesAfterRefresh = getLatestRuntimeStatuses();
+
+    // A forced request skips the "already starting / already running" reuse
+    // below. It exists for one caller: the user just stopped the machine that
+    // held the org's slot ("Stop blocker and retry"). At that moment this
+    // project can still carry the runtime row the controller created for the
+    // queued prompt before the slot check refused it: status `requested`,
+    // never seen, never going to start. For three minutes that row reads as
+    // booting, so a plain ensure would report "starting…" and request
+    // nothing, and the queued message would wait until the row aged out.
+    // The launch below still reuses a runtime that is actually ready.
+    if (force) {
+      debugLog("hosted-runtime:ensure-forced", {
+        projectId: effectiveProjectId,
+        runtimeStatuses: statusesAfterRefresh.length,
+      });
+      return performHostedRuntimeEnsure();
+    }
 
     const pendingHosted = statusesAfterRefresh.find((entry) => {
       if (!entry) return false;

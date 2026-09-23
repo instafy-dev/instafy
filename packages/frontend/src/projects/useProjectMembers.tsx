@@ -7,6 +7,7 @@ import {
   type MembersChangedEventDetail,
   type ProjectAccessRefreshEventDetail,
 } from "./projectAccessEvents";
+import { invalidateAfterInFlight } from "./invalidateAfterInFlight";
 import {
   type ControllerProjectMember,
   controllerClient,
@@ -64,7 +65,8 @@ export function useProjectMembers(projectId: string | null) {
       ).detail;
       const targetProjectId = detail?.projectId ?? null;
       if (targetProjectId === null || targetProjectId === projectId) {
-        invalidate();
+        // A fetch in flight may have read the roster before this change.
+        void invalidateAfterInFlight(queryClient, { queryKey, exact: true });
       }
     };
     window.addEventListener(PROJECT_ACCESS_REFRESH_EVENT, handleScopedChange);

@@ -7,18 +7,18 @@ pub const DEFAULT_MANAGED_AI_PROVIDER_ID: &str = "openai";
 pub const DEFAULT_OPENAI_MODEL_ID: &str = "gpt-5.6-sol";
 
 /// Default model for the operator-paid managed "Instafy AI" tier (credits).
-/// Luna is priced at $0.20 / $0.02 cached / $1.20 per 1M tokens with a 1.05M
-/// context window (public price pages, 2026-09-17), versus Sol at $5 / $0.50 /
-/// $30. Managed turns are charged to the shared team balance, so the cheaper
-/// model is the default; operators override it with `MANAGED_AI_MODEL_ID`.
-pub const DEFAULT_MANAGED_AI_MODEL_ID: &str = "gpt-5.6-luna";
-pub const DEFAULT_MANAGED_AI_MODEL_LABEL: &str = "GPT-5.6 Luna";
+/// GPT-6 Luna is priced at $0.10 / $0.01 cached / $0.50 per 1M tokens (public
+/// price pages, 2026-09-22), versus GPT-6 Sol at $2 / $0.20 / $10. Managed
+/// turns are charged to the shared team balance, so the cheaper model is the
+/// default; operators override it with `MANAGED_AI_MODEL_ID`.
+pub const DEFAULT_MANAGED_AI_MODEL_ID: &str = "gpt-6-luna";
+pub const DEFAULT_MANAGED_AI_MODEL_LABEL: &str = "GPT-6 Luna";
 
 /// Managed-tier list prices in USD micros per 1K tokens, matching
-/// `DEFAULT_MANAGED_AI_MODEL_ID`. 200 micros per 1K tokens is $0.20 per 1M.
-pub const DEFAULT_MANAGED_AI_INPUT_USD_MICROS_PER_1K: i64 = 200;
-pub const DEFAULT_MANAGED_AI_CACHED_INPUT_USD_MICROS_PER_1K: i64 = 20;
-pub const DEFAULT_MANAGED_AI_OUTPUT_USD_MICROS_PER_1K: i64 = 1_200;
+/// `DEFAULT_MANAGED_AI_MODEL_ID`. 100 micros per 1K tokens is $0.10 per 1M.
+pub const DEFAULT_MANAGED_AI_INPUT_USD_MICROS_PER_1K: i64 = 100;
+pub const DEFAULT_MANAGED_AI_CACHED_INPUT_USD_MICROS_PER_1K: i64 = 10;
+pub const DEFAULT_MANAGED_AI_OUTPUT_USD_MICROS_PER_1K: i64 = 500;
 
 pub const DEFAULT_DEEPSEEK_MODEL_ID: &str = "deepseek-chat";
 pub const DEFAULT_ZAI_MODEL_ID: &str = "glm-5";
@@ -142,8 +142,9 @@ mod tests {
     fn managed_tier_defaults_to_luna_while_byo_credentials_keep_sol() {
         // Owner decision 2026-09-17: only the operator-paid managed tier moves
         // to Luna. ChatGPT logins, API keys, and the stale-model floor stay on Sol.
-        assert_eq!(default_managed_ai_model_id(), "gpt-5.6-luna");
-        assert_eq!(default_managed_ai_model_label(), "GPT-5.6 Luna");
+        // 2026-09-22: the managed tier follows Luna to GPT-6 Luna on its release.
+        assert_eq!(default_managed_ai_model_id(), "gpt-6-luna");
+        assert_eq!(default_managed_ai_model_label(), "GPT-6 Luna");
         assert_eq!(default_chatgpt_model_id(), "gpt-5.6-sol");
         assert_eq!(default_model_for_provider("openai"), "gpt-5.6-sol");
         assert_eq!(default_model_for_provider(""), "gpt-5.6-sol");
@@ -152,10 +153,14 @@ mod tests {
 
     #[test]
     fn managed_tier_price_defaults_match_luna_list_prices() {
-        // USD micros per 1K tokens: 200 is $0.20 per 1M, 20 is $0.02, 1200 is $1.20.
-        assert_eq!(DEFAULT_MANAGED_AI_INPUT_USD_MICROS_PER_1K, 200);
-        assert_eq!(DEFAULT_MANAGED_AI_CACHED_INPUT_USD_MICROS_PER_1K, 20);
-        assert_eq!(DEFAULT_MANAGED_AI_OUTPUT_USD_MICROS_PER_1K, 1_200);
+        // GPT-6 Luna standard-tier list prices, verified 2026-09-22. USD micros
+        // per 1K tokens: 100 is $0.10 per 1M, 10 is $0.01, 500 is $0.50. The rates
+        // must move with DEFAULT_MANAGED_AI_MODEL_ID or users are billed for the
+        // wrong model.
+        assert_eq!(DEFAULT_MANAGED_AI_MODEL_ID, "gpt-6-luna");
+        assert_eq!(DEFAULT_MANAGED_AI_INPUT_USD_MICROS_PER_1K, 100);
+        assert_eq!(DEFAULT_MANAGED_AI_CACHED_INPUT_USD_MICROS_PER_1K, 10);
+        assert_eq!(DEFAULT_MANAGED_AI_OUTPUT_USD_MICROS_PER_1K, 500);
     }
 
     #[test]
@@ -197,7 +202,7 @@ mod tests {
                 Some(DEFAULT_MANAGED_AI_MODEL_ID.to_string())
             )
             .as_deref(),
-            Some("gpt-5.6-luna")
+            Some("gpt-6-luna")
         );
     }
 

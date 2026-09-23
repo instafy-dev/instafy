@@ -1053,6 +1053,14 @@ async fn post_tunnel_broker_acl_hook(
                     .commit()
                     .await
                     .map_err(|error| internal_error(format!("failed to commit burn: {error}")))?;
+                // Detached: the broker is waiting on this ACL decision.
+                if crate::credits::credit_ledger_row_written(&metadata) {
+                    crate::credits::spawn_credits_updated(
+                        &state,
+                        org_id,
+                        crate::credits::CREDITS_UPDATED_LEDGER,
+                    );
+                }
                 return Ok(Json(TunnelBrokerAclResponse {
                     allowed: true,
                     reason: None,
@@ -2523,6 +2531,16 @@ async fn ensure_tunnel_entitlement(
         .commit()
         .await
         .map_err(|error| internal_error(format!("failed to finalize entitlement: {error}")))?;
+    // Only a successful burn records the post-burn balance.
+    if entitlement.contains_key("balanceAfter") {
+        crate::credits::publish_credits_updated(
+            state,
+            &*connection,
+            org_id,
+            crate::credits::CREDITS_UPDATED_LEDGER,
+        )
+        .await;
+    }
 
     Ok(JsonValue::Object(entitlement))
 }

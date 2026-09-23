@@ -41,6 +41,18 @@ const OAUTH_PROVIDER_LABELS: Record<LoginOAuthProvider, string> = {
   google: "Google",
 };
 
+/**
+ * The query the auth server forwards to the provider. `prompt=select_account`
+ * asks GitHub and Google for their account picker: without it the provider
+ * silently uses whichever account the browser is signed into, so choosing a
+ * remembered account (or meaning a different one) landed on an authorize
+ * screen for the wrong account with no way to switch from there. The auth
+ * server passes it through unchanged (checked against production).
+ */
+export function oauthLoginQueryParams(anonKey: string | null | undefined): Record<string, string> {
+  return anonKey ? { apikey: anonKey, prompt: "select_account" } : { prompt: "select_account" };
+}
+
 interface UseNativeGithubAuthOptions {
   redirectTarget: string;
   setError: (value: string | null) => void;
@@ -539,7 +551,7 @@ export function useNativeGithubAuth({
     let nativeAttempt: PendingNativeAuthAttempt | null = null;
     try {
       const redirectTo = resolveSupabaseRedirectTo("/login");
-      const queryParams = supabaseAnonKey ? { apikey: supabaseAnonKey } : undefined;
+      const queryParams = oauthLoginQueryParams(supabaseAnonKey);
       if (redirectTarget.startsWith("/") && !redirectTarget.startsWith("//")) {
         try {
           window.sessionStorage?.setItem(OAUTH_REDIRECT_TARGET_KEY, redirectTarget);

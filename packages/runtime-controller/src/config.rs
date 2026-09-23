@@ -392,6 +392,10 @@ pub struct AppConfig {
     /// credits until the org runs dry. 0 disables. Distinct from
     /// runtime_idle_release_seconds, which only releases job leases.
     pub runtime_idle_stop_seconds: i64,
+    /// How long a hosted runtime in another space must have been idle before a
+    /// space that is blocked by the org's runtime limit may reclaim its slot.
+    /// 0 disables demand-driven reclaim and restores the plain refusal.
+    pub runtime_limit_reclaim_idle_seconds: i64,
     /// Max organizations a single non-service user may own. Bounds open-signup
     /// abuse: every org auto-subscribes to Starter (daily credits + runtime
     /// slots), so unbounded org creation multiplies free compute. 0 disables.
@@ -966,6 +970,17 @@ impl AppConfig {
             .and_then(|raw| raw.parse::<i64>().ok())
             .filter(|value| *value >= 0)
             .unwrap_or(1800);
+        // Demand-driven slot reclaim. Deliberately far shorter than the idle
+        // sweep above: nobody is waiting during a background sweep, whereas
+        // here a person is staring at a blocked prompt. Short enough to help
+        // when they moved to another space, long enough that a machine someone
+        // is still using (or that just booted) is never taken. 0 disables.
+        let runtime_limit_reclaim_idle_seconds =
+            std::env::var("RUNTIME_LIMIT_RECLAIM_IDLE_SECONDS")
+                .ok()
+                .and_then(|raw| raw.parse::<i64>().ok())
+                .filter(|value| *value >= 0)
+                .unwrap_or(120);
         // 0 disables the cap. Default 5: a legit user has 1 auto-created
         // personal org plus room for a few team/project orgs; well below the
         // volume an abuser needs to multiply free Starter credits.
@@ -1157,6 +1172,7 @@ impl AppConfig {
             dev_mode,
             runtime_idle_release_seconds,
             runtime_idle_stop_seconds,
+            runtime_limit_reclaim_idle_seconds,
             max_orgs_per_user,
             max_active_hosted_runtimes_global,
             auto_create_projects,

@@ -8,6 +8,7 @@ import { LoadingStatus } from "../../../components/LoadingStatus";
 import { Text } from "../../../components/Text";
 import { BILLING_PLANS, type BillingPlanDefinition } from "../../../credits/plans";
 import { fetchCreditPolicy, type CreditPolicy } from "../../../credits/creditService";
+import { parseLedgerTokenUsage } from "../../../credits/ledgerTokenUsage";
 import {
   requestBillingPortalSession,
   requestCheckoutSession,
@@ -339,19 +340,8 @@ export function CreditsPanel() {
       }
       return raw as Record<string, unknown>;
     })();
-    const parseCount = (value: unknown): number | null => {
-      if (typeof value === "number" && Number.isFinite(value)) {
-        return value;
-      }
-      if (typeof value === "string") {
-        const parsed = Number(value.trim());
-        return Number.isFinite(parsed) ? parsed : null;
-      }
-      return null;
-    };
-    const inputTokens = parseCount(usage?.["input_tokens"]);
-    const cachedInputTokens = parseCount(usage?.["cached_input_tokens"]);
-    const outputTokens = parseCount(usage?.["output_tokens"]);
+    const { inputTokens, cachedInputTokens, outputTokens, totalTokens } =
+      parseLedgerTokenUsage(usage);
     const provider = formatProviderLabel(
       findStringValue("managedAiProvider") ?? findStringValue("provider"),
     );
@@ -359,7 +349,6 @@ export function CreditsPanel() {
     const managedAiModelLabel = findStringValue("managedAiModelLabel");
 
     if (provider || managedAiLabel || managedAiModelLabel || usage) {
-      const totalTokens = (inputTokens ?? 0) + (cachedInputTokens ?? 0) + (outputTokens ?? 0);
       const inlineParts = [managedAiLabel, managedAiModelLabel, provider]
         .filter((value): value is string => Boolean(value && value.trim().length > 0));
       if (totalTokens > 0) {

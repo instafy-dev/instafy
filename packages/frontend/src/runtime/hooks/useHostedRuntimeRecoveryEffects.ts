@@ -23,6 +23,7 @@ import {
   shouldAutoEnsurePreferredHostedRuntime,
   shouldPollHostedBootingRuntime,
 } from "./hostedRuntimeRecoveryDecisions";
+import type { EnsureHostedRuntimeOptions } from "./useHostedRuntimeEnsure";
 
 interface UseHostedRuntimeRecoveryEffectsArgs {
   activeProjectId: string | null;
@@ -41,7 +42,7 @@ interface UseHostedRuntimeRecoveryEffectsArgs {
   hasLocalRuntime: boolean;
   disableAutoRuntimeEnsure: boolean;
   resolvedPreferredRuntimeId: string | null;
-  ensureHostedRuntime: () => Promise<boolean>;
+  ensureHostedRuntime: (options?: EnsureHostedRuntimeOptions) => Promise<boolean>;
   refreshRuntimeStatuses: () => Promise<void>;
   debugLog: (message: string, data?: unknown) => void;
   autoEnsureHostedRef: MutableRefObject<boolean>;

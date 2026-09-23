@@ -58,6 +58,30 @@ This document explains how the Instafy runtime controller is structured and how 
 
 Refer to `src/main.rs` for the complete list, including agent callbacks and admin endpoints (`/runtime/stop`, `/runtime/idle-reaper`).
 
+### Invalidation signals on `/events`
+
+Some changes are announced as bare signals so open clients refetch instead of polling. Each is
+published only after the change's transaction commits, once per affected project stream, with a
+payload of `{ "reason": ... }` and nothing else. Project viewers can include guests without org
+or billing access, so a signal must never carry data a viewer could not fetch.
+
+| Kind | Payload | Published for | Delivered to | Clients refetch |
+| --- | --- | --- | --- | --- |
+| `project.members_changed` | `{ "reason": "project_membership" }` | the project | every viewer of the project | `/projects/:id/members` |
+| `project.members_changed` | `{ "reason": "org_membership" }` | every live project of the org | org members only; project guests' streams drop it | `/orgs/:id/members` |
+| `credits.updated` | `{ "reason": "ledger" }` or `{ "reason": "subscription" }` | every live project of the org | every viewer of the project | `/credits/status`, `/credits/ledger` |
+
+Delivery rechecks access per event, so a busy org's signals cost database work on every stream
+that receives them. `credits.updated` is therefore spaced per org: each controller node publishes
+it at most once every 2 seconds, and a change inside that interval is announced by one trailing
+publish when it ends. Sweeps publish once per org per pass. A node's broadcast carries signals
+only for projects one of its streams watches; the Redis bus still carries every project to the
+other nodes. The Studio also folds signals into one refresh about 1.2 seconds after the first
+and fetches nothing while its tab is hidden, catching up once it is visible.
+
+`project.access_changed` is different: it targets the affected user only, so their open clients
+refetch their own capabilities.
+
 ### Conversation recipients
 
 Private creation accepts at most 32 UUID `initialParticipantUserIds`. Each target must already
@@ -236,10 +260,11 @@ Key environment variables (see `AppConfig::from_env` for defaults):
 - `PROXY_BASE_URL`/`PROXY_SIGNING_SECRET` — optional AI proxy envelope support.
 - `MANAGED_AI_ENABLED` — enables the platform-managed AI lane. The proxy a runtime calls must be able to complete a credential-less turn: either it holds static credentials itself, or this controller serves the managed credential lease (`MANAGED_AI_OPENAI_API_KEY`).
 - `MANAGED_AI_OPENAI_API_KEY` (falls back to `OPENAI_API_KEY` in the controller environment) — controller-owned OpenAI API key for the managed lane. The controller serves it through the proxy credential-lease route under the fixed id `4d414e41-4745-4441-8949-4e5354414659` (the proxy's `MANAGED_AI_CREDENTIAL_ID`), so a per-runtime proxy sidecar with no `OPENAI_API_KEY` or `auth.json` of its own (`remote_dynamic`) still serves managed turns. The key stays on the controller; runtime containers never see it. Unset keeps the static-proxy path unchanged: managed turns then need every proxy a runtime calls to hold static credentials. Rollout order matters: every provider host must already run a proxy image built from this change (`RUNTIME_PROXY_IMAGE` in `docker/docker-compose.runtime.provider.yml`) before this key is set on the controller. Setting the key is what makes the controller advertise managed AI and charge for managed turns, and an older sidecar still rejects those turns with `proxy token missing credential_id for BYOC request`.
-- `MANAGED_AI_MODEL_ID` sets the upstream model id used for managed AI turns (defaults to `gpt-5.6-luna`; bring-your-own ChatGPT logins and API keys default to `gpt-5.6-sol` separately).
-- `MANAGED_AI_MODEL_LABEL` sets the managed model name shown in the UI (defaults to `GPT-5.6 Luna`).
-- `MANAGED_AI_INPUT_USD_MICROS_PER_1K`, `MANAGED_AI_CACHED_INPUT_USD_MICROS_PER_1K`, `MANAGED_AI_OUTPUT_USD_MICROS_PER_1K` set the managed AI rates users are charged (defaults `200` / `20` / `1200`, the Luna list prices of `$0.20` / `$0.02` / `$1.20` per 1M tokens).
+- `MANAGED_AI_MODEL_ID` sets the upstream model id used for managed AI turns (defaults to `gpt-6-luna`; bring-your-own ChatGPT logins and API keys default to `gpt-5.6-sol` separately).
+- `MANAGED_AI_MODEL_LABEL` sets the managed model name shown in the UI (defaults to `GPT-6 Luna`).
+- `MANAGED_AI_INPUT_USD_MICROS_PER_1K`, `MANAGED_AI_CACHED_INPUT_USD_MICROS_PER_1K`, `MANAGED_AI_OUTPUT_USD_MICROS_PER_1K` set the managed AI rates users are charged (defaults `100` / `10` / `500`, the GPT-6 Luna standard-tier list prices of `$0.10` / `$0.01` / `$0.50` per 1M tokens). Change them together with `MANAGED_AI_MODEL_ID`.
 - `MANAGED_AI_STARTUP_CHECK` — when `true`, controller boot fails unless `PROXY_BASE_URL/healthz` answers and either reports `requiresCredential=false` (the proxy has static credentials such as `OPENAI_API_KEY` or `auth.json`) or `MANAGED_AI_OPENAI_API_KEY` is set (a `remote_dynamic` proxy leases it). Defaults to on outside `DEV_MODE`. The check probes only the controller's own proxy; hosted runtimes call their per-runtime sidecar, which is why the managed credential lease exists.
+- `RUNTIME_LIMIT_RECLAIM_IDLE_SECONDS` — when an organization's hosted runtime limit refuses a launch, the controller stops an idle runtime in another space of the same organization and gives the slot to the waiting space. A runtime only qualifies when it is settled, has no leased or queued work and no open run, and has seen no agent or user activity for this many seconds (default `120`). `0` disables the reclaim and restores the plain `runtime_limit_reached` refusal.
 - Shared Browser managed TURN (optional; unset the TURN values to disable):
   - `CONTROLLER_BROWSER_TURN_URLS` — comma-separated `turn:`/`turns:` URLs advertised to WebRTC clients (maximum 4; credentials must not be embedded in a URL).
   - `CONTROLLER_BROWSER_TURN_SHARED_SECRET` — coturn REST `static-auth-secret` (32–4096 bytes). Keep this controller-only and store it as an orchestration secret.

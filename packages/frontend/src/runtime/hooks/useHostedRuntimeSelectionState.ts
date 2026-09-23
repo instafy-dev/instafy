@@ -29,6 +29,7 @@ import {
   resolveShouldPromptCloudFallback,
   resolveWaitingForPreferredRuntime,
 } from "./hostedRuntimePolicySelectors";
+import type { EnsureHostedRuntimeOptions } from "./useHostedRuntimeEnsure";
 
 interface UseHostedRuntimeSelectionStateArgs {
   activeProjectId: string | null;
@@ -37,7 +38,7 @@ interface UseHostedRuntimeSelectionStateArgs {
   runtimeEnsureError: string | null;
   runtimeEnsureLimit: HostedRuntimeLimitErrorDetails | null;
   refreshRuntimeStatuses: () => Promise<void>;
-  ensureHostedRuntime: () => Promise<boolean>;
+  ensureHostedRuntime: (options?: EnsureHostedRuntimeOptions) => Promise<boolean>;
   /**
    * Limit details of the latest ensure failure, written by the ensure hook
    * before it resolves. The `runtimeEnsureLimit` prop lags behind it by a
@@ -252,7 +253,10 @@ export function useHostedRuntimeSelectionState({
         stopRefused = true;
       }
       await refreshRuntimeStatuses();
-      const ensured = await ensureHostedRuntime();
+      // Forced: the stale `requested` row this project may still hold from
+      // the refused prompt must not make the retry report "starting…" and
+      // request nothing (instafy-dev/instafy#372).
+      const ensured = await ensureHostedRuntime({ force: true });
       if (!ensured && stopRefused) {
         // Only a repeated limit means the blocker is still in the way. Any
         // other failure (credits, capacity, provider) is already reported by

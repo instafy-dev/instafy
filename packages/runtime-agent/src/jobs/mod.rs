@@ -7272,7 +7272,8 @@ Avoid creating dependency caches or stores in the canonical workspace root when 
             - For integration requests (for example \"connect <provider>\"), if runtime/tool capability is unclear, do a skills preflight: check installed skills first, and if no clear match exists, use skill discovery/import before concluding unsupported.\n\
             - If a command/API fails with auth or permission errors (401/403/not authorized/missing token), include `actions` in the same response so the UI can guide onboarding.\n\
             - Missing secret/env UX: emit the relevant `request_secret`/`request_integration` action immediately, then ask one short follow-up question: whether the user already has the credential and whether they want help finding/creating it.\n\
-            - For auth/integration tasks, check which values the space already has before requesting a new secret. The inventory is already in your environment as `INSTAFY_PROJECT_SECRET_INVENTORY`; read that rather than shelling out for it, and never run a command to list secrets during first-run skill setup.\n\
+            - For auth/integration tasks, check which values the space already has before requesting a new secret. The inventory is already in your environment as `INSTAFY_PROJECT_SECRET_INVENTORY`; read that rather than shelling out for it, and never run a command to list secrets during first-run skill setup. When the person says they saved a value, the environment is the answer to what is present, not the wording of their message: check it, or run the skill's status check, before saying any value is still missing.\n\
+            - A conversation that began with a skill setup (`/skills import ... --start` or `/skills start`) stays that setup until the skill's \"## Getting started\" is done. On every later turn, including the one a saved card continues, first pick the setup up at its next unanswered step, re-reading that SKILL.md if you need to (confirm what it asks you to confirm, write the files it names, offer its schedule), and only then take up anything new. While the setup lasts, write to the person in plain sentences: no \"please\", no em dashes, no exclamation marks, no jokes.\n\
               - Use `actions` to request interactive UI help when needed (e.g. secrets/integrations). Supported actions:\n\
               - { type: 'request_secret', name: string, optional valueLabel: string, optional description: string, optional whereToGet: string, optional skill: string, optional sensitive: boolean, optional agentHandles: string[] }\n\
               - { type: 'request_integration', provider: string, optional description: string, optional requiredScopes: string[], optional capabilities: string[], optional authMethods: string[], optional suggestedSecretNames: string[], optional suggestedSecrets: { name: string, optional description: string }[], optional agentHandles: string[] }\n\
@@ -9243,6 +9244,8 @@ fn build_final_messages_from_actions(
     let mut seen_secret_requests: HashSet<String> = HashSet::new();
     let mut seen_integration_requests: HashSet<String> = HashSet::new();
     let mut emitted_location_request = false;
+    // Index in `out` and value label of each card that takes a value.
+    let mut value_cards: Vec<(usize, Option<String>)> = Vec::new();
 
     for action in actions {
         match action {
@@ -9452,6 +9455,7 @@ fn build_final_messages_from_actions(
                     .clone()
                     .unwrap_or_else(|| "Add the value in the card on this message.".to_string());
 
+                value_cards.push((out.len(), value_label.clone()));
                 out.push(JobMessage {
                     content,
                     message_type: Some("secret_request".to_string()),
@@ -9678,7 +9682,50 @@ fn build_final_messages_from_actions(
         }
     }
 
+    // One turn that asks for several values continues from whichever card is
+    // saved last, and that card's phrase is all the agent reads. Naming only
+    // its own value made the agent conclude the others were still missing
+    // (seen on production with FreeFinance's Client-Id and Client-Secret), so
+    // every card of the turn says the same thing, naming all of them.
+    if value_cards.len() > 1 {
+        let combined = combined_saved_phrase(&value_cards);
+        for (index, _) in &value_cards {
+            if let Some(ui) = out[*index]
+                .metadata
+                .as_mut()
+                .and_then(|metadata| metadata.get_mut("ui"))
+                .and_then(JsonValue::as_object_mut)
+            {
+                ui.insert(
+                    "suggestedReply".to_string(),
+                    JsonValue::String(combined.clone()),
+                );
+            }
+        }
+    }
+
     out
+}
+
+/// "I saved the Client-Id and the Client-Secret. Ready to continue." Any card
+/// without a label makes it the plain plural, because a list with "the value"
+/// in it reads as a mistake.
+fn combined_saved_phrase(value_cards: &[(usize, Option<String>)]) -> String {
+    let labels: Option<Vec<&str>> = value_cards
+        .iter()
+        .map(|(_, label)| label.as_deref())
+        .collect();
+    let Some(labels) = labels else {
+        return "I saved the values. Ready to continue.".to_string();
+    };
+    let named: Vec<String> = labels.iter().map(|label| format!("the {label}")).collect();
+    let list = match named.as_slice() {
+        [] => return "I saved the values. Ready to continue.".to_string(),
+        [only] => only.clone(),
+        [first, second] => format!("{first} and {second}"),
+        [rest @ .., last] => format!("{} and {last}", rest.join(", ")),
+    };
+    format!("I saved {list}. Ready to continue.")
 }
 
 fn parse_file_descriptor(value: &JsonValue) -> Option<CodexFileDescriptor> {
@@ -21494,6 +21541,80 @@ mod tests {
             .and_then(JsonValue::as_object)
             .cloned()
             .expect("details")
+    }
+
+    #[test]
+    fn every_card_of_a_multi_value_turn_names_all_the_values() {
+        // Seen on production: two cards, the Client-Id saved first, the
+        // Client-Secret last. The last card's phrase named only its own value
+        // and the agent concluded the Client-Id was still missing.
+        let request = |name: &str, label: Option<&str>| CodexAction::RequestSecret {
+            name: name.to_string(),
+            description: None,
+            value_label: label.map(str::to_string),
+            where_to_get: None,
+            skill: None,
+            sensitive: None,
+            agent_handles: vec!["octo".to_string()],
+            refused_class: None,
+        };
+        let phrase = |message: &JobMessage| {
+            message
+                .metadata
+                .as_ref()
+                .and_then(|metadata| metadata.get("ui"))
+                .and_then(|ui| ui.get("suggestedReply"))
+                .and_then(JsonValue::as_str)
+                .map(str::to_string)
+        };
+
+        let two = build_final_messages_from_actions(
+            &[
+                request("FREEFINANCE_API_CLIENT_ID", Some("Client-Id")),
+                request("FREEFINANCE_API_CLIENT_SECRET", Some("Client-Secret")),
+            ],
+            None,
+        );
+        assert_eq!(two.len(), 2);
+        for message in &two {
+            assert_eq!(
+                phrase(message).as_deref(),
+                Some("I saved the Client-Id and the Client-Secret. Ready to continue.")
+            );
+        }
+
+        let three = build_final_messages_from_actions(
+            &[
+                request("A_TOKEN", Some("API token")),
+                request("A_SECRET", Some("secret")),
+                request("A_REGION", Some("region")),
+            ],
+            None,
+        );
+        assert_eq!(
+            phrase(&three[2]).as_deref(),
+            Some("I saved the API token, the secret and the region. Ready to continue.")
+        );
+
+        // One card without a label makes it the plain plural.
+        let unlabelled = build_final_messages_from_actions(
+            &[
+                request("A_TOKEN", Some("API token")),
+                request("A_SECRET", None),
+            ],
+            None,
+        );
+        assert_eq!(
+            phrase(&unlabelled[0]).as_deref(),
+            Some("I saved the values. Ready to continue.")
+        );
+
+        // A single card keeps its own phrase.
+        let one = build_final_messages_from_actions(&[request("A_TOKEN", Some("API token"))], None);
+        assert_eq!(
+            phrase(&one[0]).as_deref(),
+            Some("I saved the API token. Ready to continue.")
+        );
     }
 
     #[test]

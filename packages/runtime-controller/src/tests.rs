@@ -87,6 +87,9 @@ mod agent_profile_http_tests;
 #[path = "message_search_http_tests.rs"]
 mod message_search_http_tests;
 
+#[path = "controller_event_fanout_tests.rs"]
+pub(crate) mod controller_event_fanout_tests;
+
 struct TestOriginKeyPair {
     private_pem: String,
     public_pem: String,
@@ -254,6 +257,7 @@ pub(crate) fn build_app_config(private_key: &str, public_key: &str, key_id: &str
         dev_mode: false,
         runtime_idle_release_seconds: 150,
         runtime_idle_stop_seconds: 1800,
+        runtime_limit_reclaim_idle_seconds: 120,
         max_orgs_per_user: 5,
         max_active_hosted_runtimes_global: 0,
         auto_create_projects: false,
@@ -2665,6 +2669,48 @@ async fn accessible_project_discovery_unions_org_and_direct_memberships() -> any
     Ok(())
 }
 
+/// A committed membership change publishes the targeted
+/// `project.access_changed` first, then one untargeted, reason-only
+/// `project.members_changed` per affected project. Call it after the request
+/// returned: both are already queued. Returns the access event and the
+/// projects that got the roster signal with `roster_reason`.
+async fn recv_membership_change(
+    events: &mut tokio::sync::broadcast::Receiver<crate::state::ControllerEvent>,
+    roster_reason: &str,
+) -> anyhow::Result<(crate::state::ControllerEvent, Vec<Uuid>)> {
+    let access = timeout(std::time::Duration::from_secs(2), events.recv())
+        .await
+        .map_err(|_| anyhow::anyhow!("timed out waiting for access invalidation"))??;
+    let mut roster_projects = Vec::new();
+    while let Ok(event) = events.try_recv() {
+        assert_eq!(event.kind, crate::projects::PROJECT_MEMBERS_CHANGED_EVENT);
+        assert_eq!(event.target_user_id, None);
+        assert_eq!(event.data, json!({ "reason": roster_reason }));
+        roster_projects.push(event.project_id.expect("roster signal is project scoped"));
+    }
+    Ok((access, roster_projects))
+}
+
+/// How many `credits.updated` signals are already queued for `project_id`,
+/// checking each is the untargeted, reason-only ledger signal. Call it after
+/// the request or sweep returned: the publish precedes the response.
+pub(crate) fn queued_credit_signals(
+    events: &mut tokio::sync::broadcast::Receiver<crate::state::ControllerEvent>,
+    project_id: Uuid,
+) -> usize {
+    let mut count = 0;
+    while let Ok(event) = events.try_recv() {
+        if event.kind == crate::credits::CREDITS_UPDATED_EVENT
+            && event.project_id == Some(project_id)
+        {
+            assert_eq!(event.target_user_id, None);
+            assert_eq!(event.data, json!({ "reason": "ledger" }));
+            count += 1;
+        }
+    }
+    count
+}
+
 #[tokio::test]
 async fn project_member_role_changes_and_removal_publish_targeted_access_invalidations(
 ) -> anyhow::Result<()> {
@@ -2724,6 +2770,8 @@ async fn project_member_role_changes_and_removal_publish_targeted_access_invalid
         .map_err(|error| controller_error("issue project owner token", error))?
         .token;
     let state = build_test_state(pool.clone(), config);
+    // Roster signals reach only projects a stream watches.
+    let _watch = state.events.watch_project(project_id);
     let mut events = state.events.subscribe();
     let app = projects::router().with_state(state);
 
@@ -2744,13 +2792,13 @@ async fn project_member_role_changes_and_removal_publish_targeted_access_invalid
             serde_json::from_slice(&to_bytes(response.into_body(), usize::MAX).await?)?;
         assert_eq!(payload["member"]["role"], expected_role);
 
-        let event = timeout(std::time::Duration::from_secs(2), events.recv())
-            .await
-            .map_err(|_| anyhow::anyhow!("timed out waiting for role invalidation"))??;
+        let (event, roster_projects) =
+            recv_membership_change(&mut events, "project_membership").await?;
         assert_eq!(event.kind, "project.access_changed");
         assert_eq!(event.project_id, Some(project_id));
         assert_eq!(event.target_user_id, Some(member_user_id));
         assert_eq!(event.data, json!({ "reason": "membership_changed" }));
+        assert_eq!(roster_projects, vec![project_id]);
     }
 
     let removed = app
@@ -2764,13 +2812,13 @@ async fn project_member_role_changes_and_removal_publish_targeted_access_invalid
         .await?;
     assert_eq!(removed.status(), StatusCode::NO_CONTENT);
 
-    let event = timeout(std::time::Duration::from_secs(2), events.recv())
-        .await
-        .map_err(|_| anyhow::anyhow!("timed out waiting for removal invalidation"))??;
+    let (event, roster_projects) =
+        recv_membership_change(&mut events, "project_membership").await?;
     assert_eq!(event.kind, "project.access_changed");
     assert_eq!(event.project_id, Some(project_id));
     assert_eq!(event.target_user_id, Some(member_user_id));
     assert_eq!(event.data, json!({ "reason": "membership_changed" }));
+    assert_eq!(roster_projects, vec![project_id]);
 
     let membership_count: i64 = pool
         .get()
@@ -7871,6 +7919,8 @@ async fn invite_acceptance_preserves_roles_and_project_builders_cancel_project_i
         .map_err(|error| controller_error("issue org viewer token", error))?
         .token;
     let state = build_test_state(pool.clone(), config);
+    // Roster signals reach only projects a stream watches.
+    let _watch = state.events.watch_project(project_id);
     let mut access_events = state.events.subscribe();
     let app = projects::router().with_state(state);
 
@@ -7920,13 +7970,20 @@ async fn invite_acceptance_preserves_roles_and_project_builders_cancel_project_i
             serde_json::from_slice(&to_bytes(accepted.into_body(), usize::MAX).await?)?;
         assert_eq!(payload["role"], expected_role);
 
-        let event = timeout(std::time::Duration::from_secs(2), access_events.recv())
-            .await
-            .map_err(|_| anyhow::anyhow!("timed out waiting for invite access invalidation"))??;
+        // An org-wide invite fans the roster signal out to every live org
+        // project; this fixture's org has exactly one.
+        let roster_reason = if event_project_id.is_some() {
+            "project_membership"
+        } else {
+            "org_membership"
+        };
+        let (event, roster_projects) =
+            recv_membership_change(&mut access_events, roster_reason).await?;
         assert_eq!(event.kind, "project.access_changed");
         assert_eq!(event.project_id, event_project_id);
         assert_eq!(event.target_user_id, Some(target_user_id));
         assert_eq!(event.data, json!({ "reason": "membership_changed" }));
+        assert_eq!(roster_projects, vec![project_id]);
     }
 
     {
@@ -10695,7 +10752,10 @@ async fn hosted_runtime_sweep_burns_credits() -> anyhow::Result<()> {
         &state,
         &instafy_cloud_provider,
     );
+    let _watch = state.events.watch_project(project_id);
+    let mut credit_events = state.events.subscribe();
     runtime::sweep_hosted_runtime_credit_usage(&state).await?;
+    assert_eq!(queued_credit_signals(&mut credit_events, project_id), 1);
 
     {
         let connection = pool.get().await?;
@@ -10718,8 +10778,10 @@ async fn hosted_runtime_sweep_burns_credits() -> anyhow::Result<()> {
         assert_eq!(rows[0].get::<_, i32>("delta"), -burn_amount);
     }
 
-    // A second sweep within the same bucket should not double-burn.
+    // A second sweep within the same bucket should not double-burn, and a
+    // deduped burn publishes nothing.
     runtime::sweep_hosted_runtime_credit_usage(&state).await?;
+    assert_eq!(queued_credit_signals(&mut credit_events, project_id), 0);
 
     {
         let connection = pool.get().await?;
@@ -10862,6 +10924,7 @@ async fn tunnel_broker_acl_hook_burns_credits() -> anyhow::Result<()> {
     };
 
     let app = tunnels::router().with_state(state.clone());
+    let _watch = state.events.watch_project(project_id);
 
     let missing_idempotency = app
         .clone()
@@ -10895,31 +10958,42 @@ async fn tunnel_broker_acl_hook_burns_credits() -> anyhow::Result<()> {
         "unexpected reason: {missing_json:?}"
     );
 
-    let allowed = app
-        .clone()
-        .oneshot(
-            Request::builder()
-                .method("POST")
-                .uri("/tunnel-broker/hooks/acl")
-                .header(axum::http::header::CONTENT_TYPE, "application/json")
-                .header(
-                    axum::http::header::AUTHORIZATION,
-                    format!("Bearer {hook_secret}"),
-                )
-                .body(Body::from(
-                    json!({
-                        "intent": "grant",
-                        "project_id": project_id.to_string(),
-                        "idempotency_key": idempotency_key
-                    })
-                    .to_string(),
-                ))?,
-        )
-        .await?;
-    assert_eq!(allowed.status(), StatusCode::OK);
-    let allowed_body = to_bytes(allowed.into_body(), usize::MAX).await?;
+    // The hook answers the broker first and signals credits.updated from a
+    // detached task; the probe counts the burn row the instant it lands.
+    let (response, burns_at_publish) = controller_event_fanout_tests::send_probed(
+        &app,
+        Request::builder()
+            .method("POST")
+            .uri("/tunnel-broker/hooks/acl")
+            .header(axum::http::header::CONTENT_TYPE, "application/json")
+            .header(
+                axum::http::header::AUTHORIZATION,
+                format!("Bearer {hook_secret}"),
+            )
+            .body(Body::from(
+                json!({
+                    "intent": "grant",
+                    "project_id": project_id.to_string(),
+                    "idempotency_key": idempotency_key
+                })
+                .to_string(),
+            ))?,
+        controller_event_fanout_tests::PublishProbe {
+            events: state.events.subscribe(),
+            kind: crate::credits::CREDITS_UPDATED_EVENT,
+            project_id,
+            count_sql: "select count(*) from org_credit_ledger
+                        where project_id = $1 and idempotency_key = 'acl-test-key-1'",
+            params: vec![project_id],
+        },
+    )
+    .await?;
+    assert_eq!(response.status(), StatusCode::OK);
+    let allowed_body = to_bytes(response.into_body(), usize::MAX).await?;
     let allowed_json: serde_json::Value = serde_json::from_slice(&allowed_body)?;
     assert_eq!(allowed_json["allowed"].as_bool(), Some(true));
+    assert_eq!(burns_at_publish, 1, "published before the burn commit");
+    let mut credit_events = state.events.subscribe();
 
     let org_id = {
         let connection = pool.get().await?;
@@ -10964,6 +11038,9 @@ async fn tunnel_broker_acl_hook_burns_credits() -> anyhow::Result<()> {
         )
         .await?;
     assert_eq!(allowed_retry.status(), StatusCode::OK);
+    // Nothing is spawned for a deduped burn; give a stray task time anyway.
+    tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+    assert_eq!(queued_credit_signals(&mut credit_events, project_id), 0);
 
     {
         let connection = pool.get().await?;
@@ -11073,6 +11150,8 @@ async fn tunnel_request_burns_credits_when_not_using_broker_hook() -> anyhow::Re
         "runtimeLeaseId": lease_id.to_string()
     });
     let app = tunnels::router().with_state(state.clone());
+    let _watch = state.events.watch_project(project_id);
+    let mut credit_events = state.events.subscribe();
     let response = app
         .oneshot(
             Request::builder()
@@ -11094,6 +11173,7 @@ async fn tunnel_request_burns_credits_when_not_using_broker_hook() -> anyhow::Re
         "tunnel request failed: {}",
         String::from_utf8_lossy(&bytes)
     );
+    assert_eq!(queued_credit_signals(&mut credit_events, project_id), 1);
 
     let org_id = {
         let connection = pool.get().await?;
@@ -19087,6 +19167,8 @@ async fn skill_mode_answered_evaluation_bills_on_first_visible_message() -> anyh
     drop(connection);
 
     let token = mint_agent_message_token(&config, &project_id)?;
+    let _watch = state.events.watch_project(project_id);
+    let mut credit_events = state.events.subscribe();
     let status = post_agent_endpoint(
         &state,
         &token,
@@ -19109,6 +19191,8 @@ async fn skill_mode_answered_evaluation_bills_on_first_visible_message() -> anyh
     )
     .await?;
     assert_eq!(status, StatusCode::OK);
+    // The deferred burn committed with the message.
+    assert_eq!(queued_credit_signals(&mut credit_events, project_id), 1);
 
     let connection = pool.get().await?;
     let assistant_count: i64 = connection
