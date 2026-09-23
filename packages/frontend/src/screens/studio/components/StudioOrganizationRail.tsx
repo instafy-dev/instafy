@@ -92,12 +92,12 @@ export function StudioOrganizationRail({
           ? "[&>*:not([data-rail-surface])]:relative [&>*:not([data-rail-surface])]:z-[1]"
           : `border-r border-slate-200/70 bg-slate-50 pt-[var(--instafy-safe-area-inset-top)] ${DARK_RAIL_SURFACE_CLASS}`,
       ].join(" ")}
-      style={titleBarFree ? { paddingTop: `${DESKTOP_TITLE_BAR_HEIGHT_PX}px` } : undefined}
+      style={titleBarFree ? { paddingTop: `var(--studio-context-height, ${DESKTOP_TITLE_BAR_HEIGHT_PX}px)` } : undefined}
     >
       {titleBarFree ? <div aria-hidden="true" data-rail-surface=""
         className={`absolute inset-x-0 bottom-0 z-0 border-r border-slate-200/70 bg-slate-50 ${DARK_RAIL_SURFACE_CLASS}`}
-        style={{ top: `${DESKTOP_TITLE_BAR_HEIGHT_PX}px` }} /> : null}
-      <div className="shrink-0 py-2">
+        style={{ top: `var(--studio-context-height, ${DESKTOP_TITLE_BAR_HEIGHT_PX}px)` }} /> : null}
+      <div className="flex h-[var(--studio-context-height,60px)] shrink-0 items-center">
         <IconButton variant="ghost" size="sm" radius="lg" onPress={onHome}
           aria-label="Home — all teams" title="Home — all teams" aria-current={homeActive ? "page" : undefined}
           aria-describedby={homeAttentionCount > 0 ? homeAttentionId : undefined}

@@ -104,6 +104,7 @@ export interface StudioSidebarProps {
   navigationHeaderPortalTarget?: HTMLElement | null;
   /** The surrounding shell provides the team and space context header. */
   navigationHeaderExternal?: boolean;
+  compactContextHeader?: boolean;
   renderNavigationHeader?: (context: StudioNavigationContext) => ReactNode;
   onNavigationHeaderAction?: () => void;
 }
@@ -138,6 +139,7 @@ export function StudioSidebar({
   navigationPresentation = "tiles",
   navigationHeaderPortalTarget = null,
   navigationHeaderExternal = false,
+  compactContextHeader = false,
   renderNavigationHeader,
   onNavigationHeaderAction,
 }: StudioSidebarProps) {
@@ -308,7 +310,7 @@ export function StudioSidebar({
   const titleBarFree = !mobileOverlay && desktopTitleBarFree();
   const widthClass = isExpanded
     ? isLargeScreen
-      ? pathHeader && touchLikeInput ? "w-60" : "w-56"
+      ? externalHeader ? "w-[var(--studio-context-column-width,14rem)]" : pathHeader && touchLikeInput ? "w-60" : "w-56"
       : mobileExpandedWidthClass
     : "w-[4rem]";
   const getSidebarNavIconClass = useCallback(
@@ -1043,7 +1045,7 @@ export function StudioSidebar({
   const teamMenu = <StudioSidebarTeamMenu
     key={JSON.stringify([activeTeamUserKey, activeOrgKey, activeProjectId, activePanel, desktopRail, externalHeader || showLabels, navigationPresentation, externalHeader])}
     teamName={activeOrgName} teamAvatarUrl={activeOrgAvatarUrl} accentColor={activeOrgAccentColor}
-    presentation={pathControls && (!externalHeader || !desktopRail) ? "path" : "standard"} compact={!externalHeader && !showLabels}
+    presentation={pathControls && (compactContextHeader || !externalHeader || !desktopRail) ? "path" : "standard"} compact={!externalHeader && !showLabels}
     active={activePanel === "team" || activePanel === "settings"}
     rowClassName={`${sidebarRowLayoutClass} ${getSidebarRowToneClass(activePanel === "team" || activePanel === "settings")}`}
     iconClassName={getSidebarNavIconClass(activePanel === "team" || activePanel === "settings")}
@@ -1072,13 +1074,13 @@ export function StudioSidebar({
       collapsed={!externalHeader && !showLabels}
       expanded={recentSpacesExpanded}
       onExpandedChange={setRecentSpacesExpanded}
-      rowClassName={pathControls ? `gap-1 !px-1 ${desktopRail ? "min-h-9" : "!min-h-12"}` : `${sidebarRowLayoutClass} ${getSidebarRowToneClass(workspaceSwitcherOpen && workspaceSwitcherMode === "spaces")}`}
+      rowClassName={pathControls ? desktopRail ? `gap-1 ${compactContextHeader ? "!px-2" : "!px-1"} min-h-9` : "!px-2 !min-h-12" : `${sidebarRowLayoutClass} ${getSidebarRowToneClass(workspaceSwitcherOpen && workspaceSwitcherMode === "spaces")}`}
       iconClassName={pathControls ? "flex h-5 w-5 shrink-0 items-center justify-center" : getSidebarNavIconClass(workspaceSwitcherOpen && workspaceSwitcherMode === "spaces")}
       triggerRef={spaceTriggerRef}
     />
   );
   const navigationPath = <div
-    className="sidebar-navigation-path flex min-w-0 flex-1 items-center gap-0.5"
+    className={`sidebar-navigation-path flex min-w-0 flex-1 items-center ${desktopRail ? "gap-0.5" : "gap-[3px]"}`}
     role="group" aria-label="Team and space" data-testid="sidebar-navigation-path"
     inert={externalHeader && mobileDrillInOpen || undefined} aria-hidden={externalHeader && mobileDrillInOpen || undefined}>
     <div className={`sidebar-path-team flex ${externalHeader && desktopRail ? "min-w-0 max-w-64" : "shrink-0"}`}>{teamMenu}</div>

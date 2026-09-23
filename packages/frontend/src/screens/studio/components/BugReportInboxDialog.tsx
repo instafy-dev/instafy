@@ -46,6 +46,7 @@ interface BugReportInboxDialogProps {
   initialReportRequest?: { reportId: string; requestKey: number } | null;
   onOpenChange: (open: boolean) => void;
   onReportIssue?: () => void;
+  onOpenDiagnostics?: () => void;
   onSupportActivityAcknowledged?: () => void;
 }
 
@@ -119,6 +120,7 @@ export function BugReportInboxDialog({
   initialReportRequest = null,
   onOpenChange,
   onReportIssue,
+  onOpenDiagnostics,
   onSupportActivityAcknowledged,
 }: BugReportInboxDialogProps) {
   const { showStatus } = useStatus();
@@ -617,6 +619,13 @@ export function BugReportInboxDialog({
             <Refresh className="h-4 w-4" aria-hidden="true" />
             Refresh
           </Button>
+          {onOpenDiagnostics ? (
+            <Button variant="ghost" size="sm" isDisabled={sendingReply}
+              data-testid="support-diagnostics"
+              onPress={() => { onOpenChange(false); onOpenDiagnostics(); }}>
+              Diagnostics
+            </Button>
+          ) : null}
         </div>
 
         <div className="grid min-h-0 flex-1 grid-cols-1 overflow-hidden lg:grid-cols-[21rem_minmax(0,1fr)]">

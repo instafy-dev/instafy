@@ -1,5 +1,6 @@
 import type { ReactNode } from "react";
 import { Text } from "../../../components/Text";
+import { useHeadingRepeatedInSettingsNavigation } from "../../../components/SettingsNavigationLabelContext";
 import { useStudioDesktopLayout } from "../useStudioDesktopLayout";
 
 interface SettingsSectionProps {
@@ -22,17 +23,18 @@ export function SettingsSection({
   "data-testid": dataTestId,
 }: SettingsSectionProps) {
   const isLargeScreen = useStudioDesktopLayout();
+  const repeatedHeading = useHeadingRepeatedInSettingsNavigation(title);
   const showDescription = Boolean(description && (descriptionVisibility === "always" || isLargeScreen));
 
   return (
     <section className={["@container/settings-section space-y-3", className].filter(Boolean).join(" ")} data-testid={dataTestId}>
       <div className="flex flex-col gap-2 @min-[28rem]/settings-section:grid @min-[28rem]/settings-section:grid-cols-[minmax(0,1fr)_auto] @min-[28rem]/settings-section:items-start">
         <div className="min-w-0">
-          <Text as="h3" variant="bodyStrong" tone="primary">
+          <Text as="h3" variant="bodyStrong" tone="primary" className={repeatedHeading ? "sr-only" : undefined}>
             {title}
           </Text>
           {showDescription ? (
-            <Text variant="caption" tone="muted" className="mt-1">
+            <Text variant="caption" tone="muted" className={repeatedHeading ? undefined : "mt-1"}>
               {description}
             </Text>
           ) : null}

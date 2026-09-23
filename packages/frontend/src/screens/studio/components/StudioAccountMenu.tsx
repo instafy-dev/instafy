@@ -8,15 +8,9 @@ import {
   type PointerEvent as ReactPointerEvent,
   type RefObject,
 } from "react";
-import { Capacitor } from "@capacitor/core";
-import { StudioDialogModal } from "../../../components/aria/StudioModal";
 import { useProfile } from "../../../profile/ProfileProvider";
 import { useAuth } from "../../../providers/AuthProvider";
-import { useProjects } from "../../../projects/useProjects";
-import { useRuntimeMenuOptions } from "../../../runtime/useRuntimeMenu";
-import type { TunnelCopyMode } from "../../../runtime/components/RuntimeTunnelDetails";
 import { useStatus } from "../../../status/useStatus";
-import { useAppLogs } from "../../../debug/useAppLogs";
 import { useNativeBackButtonAction } from "../../../native/useNativeBackButtonAction";
 import { useStudioDesktopLayout } from "../useStudioDesktopLayout";
 import { useWorkspaceControls } from "../workspaceControls";
@@ -34,8 +28,6 @@ import { DESKTOP_APP_PUBLIC_LATEST_URL } from "../../../updates/desktopReleaseMa
 import { useAppUpdateMetadata } from "../../../updates/useAppUpdateMetadata";
 import { useDesktopReleaseLookup } from "../../../updates/useDesktopReleaseLookup";
 import { StudioSidebarAccountSection } from "./StudioSidebarAccountSection";
-import { DevDiagnosticsMenu } from "./DevDiagnosticsMenu";
-import { BuildLogOverlay } from "./BuildLogOverlay";
 
 export interface StudioAccountMenuProps {
   presentation?: "sidebar" | "header";
@@ -58,48 +50,27 @@ export function StudioAccountMenu({
   onSignOut,
 }: StudioAccountMenuProps) {
   const controls = useWorkspaceControls();
-  const {
-    userEmail,
-    onShowLogs,
-    hasLogs,
-    onOpenBugReport,
-    shakeToReportEnabled = false,
-    onToggleShakeToReport,
-    onSimulateShakeToReport,
-    onTestShakeToReport,
-    shakeToReportStatus,
-    shakeToReportDetail,
-  } = controls;
+  const { userEmail } = controls;
   const onOpenProfileSettings = onProfile ?? controls.onOpenProfileSettings;
   const onOpenBugReportInbox = onSupport ?? controls.onOpenBugReportInbox;
   const handleSignOut = onSignOut ?? controls.onSignOut;
   const { profile } = useProfile();
   const { user } = useAuth();
-  const { activeProjectId } = useProjects();
-  const { runtime: runtimeContext, runtimeOptions } = useRuntimeMenuOptions();
   const { showStatus } = useStatus();
   const isLargeScreen = useStudioDesktopLayout();
   const localFooterRef = useRef<HTMLDivElement | null>(null);
   const [profileMenuOpen, setProfileMenuOpen] = useState(false);
-  const [devMenuOpen, setDevMenuOpen] = useState(false);
   const [updateDialogOpen, setUpdateDialogOpen] = useState(false);
   const [updateDialogShowDetails, setUpdateDialogShowDetails] = useState(false);
   const [updateActionPending, setUpdateActionPending] = useState(false);
-  const [appLogsOverlayOpen, setAppLogsOverlayOpen] = useState(false);
   const updateLongPressTimerRef = useRef<number | null>(null);
   const suppressUpdateRowClickRef = useRef(false);
-  const { logs: appLogs, hasLogs: hasAppLogs, hasErrors: hasAppLogErrors, clearLogs: clearAppLogs } =
-    useAppLogs();
   useNativeBackButtonAction(updateDialogOpen, () => {
     if (!updateActionPending) setUpdateDialogOpen(false);
   }, 260);
-  useNativeBackButtonAction(devMenuOpen, () => setDevMenuOpen(false), 260);
-  useNativeBackButtonAction(appLogsOverlayOpen, () => setAppLogsOverlayOpen(false), 270);
   useEffect(() => {
     setProfileMenuOpen(false);
-    setDevMenuOpen(false);
     setUpdateDialogOpen(false);
-    setAppLogsOverlayOpen(false);
   }, [userEmail]);
 
   const fullName = profile?.fullName?.trim() || null;
@@ -270,26 +241,6 @@ export function StudioAccountMenu({
     }
   }, [refreshUpdateMetadata, showStatus, updateMetadata]);
 
-  const handleCopyTunnel = useCallback(
-    (mode: TunnelCopyMode, runtimeId: string | null) => {
-      void runtimeContext.copyTunnelDetails(mode, runtimeId);
-    },
-    [runtimeContext],
-  );
-
-  const appLogExport = useMemo(() => {
-    const payload = {
-      createdAt: new Date().toISOString(),
-      location: typeof window !== "undefined" ? window.location.href : null,
-      userAgent: typeof navigator !== "undefined" ? navigator.userAgent : null,
-      mode: import.meta.env.MODE,
-      userEmail,
-      activeProjectId,
-      logs: appLogs,
-    };
-    return JSON.stringify(payload, null, 2);
-  }, [activeProjectId, appLogs, userEmail]);
-
   return <>
     <StudioSidebarAccountSection
       footerRef={footerRef ?? localFooterRef}
@@ -312,8 +263,6 @@ export function StudioAccountMenu({
       clearUpdateLongPress={clearUpdateLongPress}
       onOpenProfileSettings={onOpenProfileSettings}
       onOpenSupport={onOpenBugReportInbox}
-      onOpenDiagnostics={() => setDevMenuOpen(true)}
-      hasAppLogErrors={hasAppLogErrors}
       onSignOut={handleSignOut}
       updateDialogOpen={updateDialogOpen}
       onUpdateDialogOpenChange={setUpdateDialogOpen}
@@ -323,57 +272,5 @@ export function StudioAccountMenu({
       onUpdatePrimaryAction={handleUpdatePrimaryAction}
       updateActionPending={updateActionPending}
     />
-      <StudioDialogModal
-        isOpen={devMenuOpen}
-        onOpenChange={(open) => setDevMenuOpen(open)}
-        isDismissable
-        dialogAriaLabel="Diagnostics"
-        data-testid="sidebar-dev-diagnostics-modal"
-        modalClassName="max-h-[min(90dvh,42rem)] max-w-xl overflow-hidden p-0"
-      >
-        <DevDiagnosticsMenu
-            onClose={() => setDevMenuOpen(false)}
-            onShowLogs={onShowLogs}
-            hasLogs={hasLogs}
-            onShowAppLogs={() => setAppLogsOverlayOpen(true)}
-            hasAppLogs={hasAppLogs}
-            onShowBugReports={onOpenBugReportInbox}
-            onReportBug={onOpenBugReport}
-            shakeToReportEnabled={shakeToReportEnabled}
-            onToggleShakeToReport={Capacitor.isNativePlatform() ? onToggleShakeToReport : undefined}
-            onSimulateShakeToReport={
-              Capacitor.isNativePlatform() && onSimulateShakeToReport
-                ? () => {
-                    setDevMenuOpen(false);
-                    onSimulateShakeToReport();
-                  }
-                : undefined
-            }
-            onTestShakeToReport={
-              Capacitor.isNativePlatform() && onTestShakeToReport
-                ? () => {
-                    setDevMenuOpen(false);
-                    onTestShakeToReport();
-                  }
-                : undefined
-            }
-            shakeToReportStatus={shakeToReportStatus}
-            shakeToReportDetail={shakeToReportDetail}
-            runtimeOptions={runtimeOptions}
-            onCopyTunnel={handleCopyTunnel}
-          />
-      </StudioDialogModal>
-      {appLogsOverlayOpen ? (
-        <BuildLogOverlay
-          logs={appLogs}
-          onClear={clearAppLogs}
-          onClose={() => setAppLogsOverlayOpen(false)}
-          title="App logs"
-          ariaLabel="App logs"
-          emptySummary=""
-          emptyBody="Warnings, errors, and unhandled exceptions will appear here."
-          copyText={appLogExport}
-        />
-      ) : null}
   </>;
 }

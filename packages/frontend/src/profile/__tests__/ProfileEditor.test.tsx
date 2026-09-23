@@ -3,6 +3,7 @@ import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { StudioDraftsProvider } from "../../workspace/StudioDrafts";
+import { SettingsNavigationLabelContext } from "../../components/SettingsNavigationLabelContext";
 import { ProfileEditor } from "../ProfileEditor";
 
 const mocks = vi.hoisted(() => ({
@@ -79,6 +80,23 @@ describe("ProfileEditor", () => {
       input.dispatchEvent(new Event("change", { bubbles: true }));
     });
   }
+
+  it("keeps the profile introduction and draft when its heading is already shown by the picker", async () => {
+    const show = (label: string | null) => act(async () => root.render(
+      <SettingsNavigationLabelContext.Provider value={label}><ProfileEditor /></SettingsNavigationLabelContext.Provider>,
+    ));
+    await show(null);
+    await type("profile-display-name", "Draft name");
+    expect(container.querySelector("h3")?.classList.contains("sr-only")).toBe(false);
+    await show("Profile");
+    expect(container.querySelector("h3")?.classList.contains("sr-only")).toBe(true);
+    expect(container.querySelector("h3")?.hasAttribute("aria-hidden")).toBe(false);
+    expect(container.textContent).toContain("Introduce yourself to teammates with a name, photo, and short bio.");
+    expect(container.querySelector<HTMLInputElement>("#profile-display-name")?.value).toBe("Draft name");
+    await show(null);
+    expect(container.querySelector("h3")?.classList.contains("sr-only")).toBe(false);
+    expect(mocks.updateProfile).not.toHaveBeenCalled();
+  });
 
   it("retains an unsaved profile through utility and settings-category navigation", async () => {
     const show = (visible: boolean, account = "a") => act(async () => root.render(

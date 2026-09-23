@@ -1,9 +1,41 @@
 import { describe, expect, it } from "vitest";
 import { buildStudioDestinationSearch } from "../../../navigation/studioNavigation";
-import { canRememberTeamWorkspace, resolveTeamNavigationScope, usesGlobalNavigationContext } from "../teamNavigation";
+import { canRememberTeamWorkspace, resolveStudioSearchContext, resolveTeamNavigationScope, usesGlobalNavigationContext } from "../teamNavigation";
 
 const teamA = "11111111-1111-4111-8111-111111111111";
 const teamB = "22222222-2222-4222-8222-222222222222";
+
+describe("search working context", () => {
+  const project = { id: "space-a", name: "Autofix", orgId: teamA };
+  it.each([
+    "?projectId=space-a",
+    `?projectId=space-a&panel=home&teamId=${teamA}`,
+    `?projectId=space-a&panel=settings&settingsTab=profile&teamId=${teamA}`,
+    `?projectId=space-a&panel=team&teamId=${teamA}`,
+  ])("keeps the visible team and space when searching from %s", search => {
+    const scope = resolveTeamNavigationScope(search, teamA);
+    expect(resolveStudioSearchContext({ id: scope.orgKey, name: "Workshop" }, project, false)).toEqual({
+      org: { id: teamA, name: "Workshop" }, space: { id: "space-a", name: "Autofix" },
+    });
+  });
+  it("searches the selected team without a retained space from a different team", () => {
+    const scope = resolveTeamNavigationScope(`?panel=home&teamId=${teamB}`, teamA);
+    expect(resolveStudioSearchContext({ id: scope.orgKey, name: "Other team" }, project, false)).toEqual({
+      org: { id: teamB, name: "Other team" }, space: null,
+    });
+  });
+  it("keeps unloaded or inaccessible spaces out of the initial search scope", () => {
+    const org = { id: teamA, name: "Workshop" };
+    expect(resolveStudioSearchContext(org, null, false)).toEqual({ org, space: null });
+    expect(resolveStudioSearchContext(org, project, true)).toEqual({ org, space: null });
+  });
+  it("uses Personal for spaces without an organization", () => {
+    const org = { id: "personal", name: "Personal" };
+    expect(resolveStudioSearchContext(org, { id: "personal-space", name: "Notes" }, false)).toEqual({
+      org, space: { id: "personal-space", name: "Notes" },
+    });
+  });
+});
 
 describe("team navigation scope", () => {
   it("keeps an empty team's overview independent of the active space and browser Back", () => {

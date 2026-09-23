@@ -127,6 +127,7 @@ export function useStudioSearch({ scopeKey, org, space, records, loading = false
   const openSearch = () => {
     const alreadyRequested = openRequestedRef.current;
     openRequestedRef.current = true;
+    inputRef.current?.focus({ preventScroll: true });
     restoreFocusRef.current = false;
     setSearch(previous => ({ scopeKey, open: true, query: previous.scopeKey === scopeKey ? previous.query : '', scope: previous.scopeKey === scopeKey ? resolveScope(previous.scope) : defaultScope }));
     onRequestChange?.({ open: true, scope, query });

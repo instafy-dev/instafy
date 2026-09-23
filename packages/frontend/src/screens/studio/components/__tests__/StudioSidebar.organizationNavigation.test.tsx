@@ -246,7 +246,18 @@ describe("StudioSidebar organization navigation", () => {
     expect(onActivateProject).toHaveBeenCalledExactlyOnceWith("space-a", "org-a");
   });
 
-  it("keeps the production search input mounted across focus and collapse, and separates scope removal from navigation", async () => {
+  it("uses a compact team avatar in the desktop header while retaining team and space menus", async () => {
+    await render({ navigationPresentation: "path", navigationHeaderExternal: true, compactContextHeader: true, navigationHeaderPortalTarget: headerPortal });
+    const team = headerPortal.querySelector<HTMLButtonElement>('[data-testid="sidebar-team-menu-trigger"]')!;
+    expect(team.getAttribute("aria-label")).toBe("Team menu: Alpha");
+    expect(team.textContent).not.toContain("Alpha");
+    expect(headerPortal.querySelector('[data-testid="sidebar-space-button"]')).not.toBeNull();
+    await act(async () => team.click());
+    expect(document.querySelector('[data-testid="sidebar-team-menu-settings"]')).not.toBeNull();
+    expect(document.querySelector('[data-testid="sidebar-team-menu-switch"]')).not.toBeNull();
+  });
+
+  it("keeps a persistent search input mounted across focus and collapse, and separates scope removal from navigation", async () => {
     function SearchNavigation({ collapsed }: { collapsed: boolean }) {
       const search = useStudioSearch({ scopeKey: "member:org-a:space-a", org: { id: "org-a", name: "Alpha" }, space: { id: "space-a", name: "Core" }, records: [], persistentControl: true });
       return <><StudioSidebar

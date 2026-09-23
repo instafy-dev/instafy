@@ -1,3 +1,15 @@
+/* Both the workspace and navigation drawer use this geometry. Their parents
+   own horizontal safe-area insets; the drawer must not add another side inset. */
+.studio-mobile-context-header {
+  display: flex;
+  flex: none;
+  align-items: center;
+  min-height: 56px;
+  min-width: 0;
+  gap: 2px;
+  padding: 4px;
+}
+
 /* Keep the 48px tap target independent of the compact visible breadcrumb. */
 .studio-mobile-context-header .studio-breadcrumb-trigger {
   position: relative;
