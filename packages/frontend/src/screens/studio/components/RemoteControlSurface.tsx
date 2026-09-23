@@ -12,7 +12,7 @@ export function RemoteControlSurface({ controller, working, onTakeOver, actionLa
   const status = `${controller} has control`;
   return (
     <div className="browser-agent-surface" data-working={working} data-testid="browser-agent-surface" data-controller={controller}>
-      <div className="browser-agent-glow" aria-hidden="true" />
+      <div className="browser-agent-glow" aria-hidden="true"><div className="browser-agent-grid" /></div>
       {onTakeOver ? (
         <button type="button" className="browser-agent-surface-target"
           aria-label={`${status}. ${actionLabel}`}

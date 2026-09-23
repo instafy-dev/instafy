@@ -347,7 +347,8 @@ control also keeps a 44px minimum touch target on coarse-pointer devices.
 ### Manual input handoff
 
 While another participant controls the view (human or AI), a faint glow flows
-slowly around the outer 12 pixels of the page. The existing toolbar identifies
+slowly around the outer 12 pixels of the page, over a faint grid with smaller
+subdivisions. The texture stays still while the light moves. The existing toolbar identifies
 the controller. Your own control and independent browsing have no glow. The
 center stays clear on light and dark pages independently of the Studio theme.
 The cue is presentation only; it does not grant input or block local viewer pan

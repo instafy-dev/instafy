@@ -26,6 +26,16 @@ const SHIELD_HTML = `<!doctype html>
         mask-composite: add;
         box-shadow: inset 0 0 0 1px #a5b4fc24;
       }
+      .grid, .grid::before {
+        position: absolute; inset: 0;
+        background-image: linear-gradient(90deg, #a5b4fc66 1px, transparent 1px), linear-gradient(#a5b4fc66 1px, transparent 1px);
+        background-size: 24px 24px;
+      }
+      .grid::before {
+        content: ""; background-size: 8px 8px;
+        mask-image: conic-gradient(#000 0 25%, transparent 25% 50%, #000 50% 75%, transparent 75%);
+        mask-size: 48px 48px; opacity: 0.7;
+      }
       .glow::before, .glow::after {
         content: ""; position: absolute; inset: -20% auto -20% -40%; width: 180%;
         background: linear-gradient(112deg, transparent 24%, #818cf82e 36%, #a5b4fc80 44%, #e0f2feb3 49%, #99f6e48c 53%, #818cf833 64%, transparent 76%);
@@ -48,7 +58,7 @@ const SHIELD_HTML = `<!doctype html>
       @media (prefers-reduced-motion: reduce) { .glow::before, .glow::after { animation: none; transform: none; will-change: auto !important; } }
     </style>
   </head>
-  <body role="button" tabindex="0" aria-label="AI has browser control. Click to take over, or press Escape to pause."><div class="glow" aria-hidden="true"></div><div class="status">Click to take over · Esc to pause</div></body>
+  <body role="button" tabindex="0" aria-label="AI has browser control. Click to take over, or press Escape to pause."><div class="glow" aria-hidden="true"><div class="grid"></div></div><div class="status">Click to take over · Esc to pause</div></body>
 </html>`;
 
 const SHIELD_URL = `data:text/html;charset=utf-8,${encodeURIComponent(SHIELD_HTML)}`;
