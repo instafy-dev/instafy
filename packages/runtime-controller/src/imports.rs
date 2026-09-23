@@ -1,5 +1,3 @@
-use aes_gcm::aead::{Aead, KeyInit};
-use aes_gcm::{Aes256Gcm, Nonce};
 use std::collections::BTreeMap;
 use std::io::{Cursor, Read, Seek, SeekFrom, Write};
 use std::path::{Component, Path, PathBuf};
@@ -11,8 +9,6 @@ use axum::extract::{Path as AxumPath, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::routing::post;
 use axum::{Json, Router};
-use base64::engine::general_purpose::STANDARD as BASE64;
-use base64::Engine;
 use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use futures_util::StreamExt;
 use once_cell::sync::Lazy;
@@ -31,7 +27,6 @@ use zip::write::{FileOptions, ZipWriter};
 use zip::ZipArchive;
 
 use crate::auth::{authenticate_request, claims_have_scopes, RequestContext};
-use crate::config::CredentialEncryptionKey;
 use crate::device_auth::{
     load_user_github_access_token, resolve_github_device_auth_session,
     GithubDeviceAuthSessionResolution,
@@ -1280,28 +1275,12 @@ async fn ensure_github_import_write_access(
     ))
 }
 
-fn decrypt_project_secret_payload(
-    key: &CredentialEncryptionKey,
-    nonce_b64: &str,
-    ciphertext_b64: &str,
-) -> anyhow::Result<Vec<u8>> {
-    let cipher = Aes256Gcm::new_from_slice(key.as_bytes())?;
-    let nonce_raw = BASE64.decode(nonce_b64.trim().as_bytes())?;
-    anyhow::ensure!(nonce_raw.len() == 12, "invalid nonce length");
-    let nonce = Nonce::from_slice(&nonce_raw);
-    let ciphertext = BASE64.decode(ciphertext_b64.trim().as_bytes())?;
-    let plaintext = cipher
-        .decrypt(nonce, ciphertext.as_ref())
-        .map_err(|error| anyhow::anyhow!("failed to decrypt secret payload: {error:?}"))?;
-    Ok(plaintext)
-}
-
 async fn load_project_secret_value_by_name(
     state: &AppState,
     project_id: &Uuid,
     secret_name: &str,
 ) -> Result<Option<String>, (StatusCode, Json<ApiError>)> {
-    let Some(key) = state.config.credential_encryption_key.as_ref() else {
+    let Some(keys) = state.config.credential_keys.as_ref() else {
         return Ok(None);
     };
 
@@ -1345,7 +1324,8 @@ async fn load_project_secret_value_by_name(
 
     let nonce_b64: String = row.get("nonce_b64");
     let ciphertext_b64: String = row.get("ciphertext_b64");
-    let plaintext = decrypt_project_secret_payload(key, &nonce_b64, &ciphertext_b64)
+    let plaintext = keys
+        .open(&nonce_b64, &ciphertext_b64)
         .map_err(|error| internal_error(format!("failed to decrypt project secret: {error}")))?;
     let value =
         String::from_utf8(plaintext).map_err(|_| internal_error("secret payload must be utf-8"))?;

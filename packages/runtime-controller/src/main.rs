@@ -26,6 +26,8 @@ mod bug_reports;
 mod config;
 mod connection_limit;
 mod conversations;
+mod credential_keys;
+mod credential_rotation;
 mod credentials;
 mod credits;
 mod desktop_updates;
@@ -456,6 +458,7 @@ async fn main() -> anyhow::Result<()> {
         .merge(speech_proxy::router())
         .merge(credits::router())
         .merge(credentials::router())
+        .merge(credential_rotation::router())
         .merge(secrets::router())
         .merge(browser_profile::router())
         .merge(skills_discovery::router())

@@ -19,6 +19,7 @@ use tokio::sync::RwLock;
 use tokio_postgres_rustls::MakeRustlsConnect;
 use tracing::{info, warn};
 
+use crate::credential_keys::CredentialKeyRing;
 use crate::jwks;
 use crate::model_defaults::{
     default_managed_ai_model_id, default_managed_ai_model_label,
@@ -93,15 +94,12 @@ impl CredentialEncryptionKey {
         Self::derive_from_user_token_secret(seed)
     }
 
-    fn from_base64(raw: &str) -> anyhow::Result<Self> {
-        let decoded = BASE64.decode(raw.trim().as_bytes())?;
-        anyhow::ensure!(
-            decoded.len() == 32,
-            "CREDENTIAL_ENCRYPTION_KEY must decode to 32 bytes"
-        );
-        let mut key = [0u8; 32];
-        key.copy_from_slice(&decoded);
-        Ok(Self(key))
+    /// Decode a configured key. The error never carries decoder detail, which
+    /// would quote a byte and its offset from the value.
+    fn from_base64(raw: &str) -> Option<Self> {
+        let decoded = BASE64.decode(raw.trim().as_bytes()).ok()?;
+        let key: [u8; 32] = decoded.try_into().ok()?;
+        Some(Self(key))
     }
 }
 
@@ -175,7 +173,9 @@ fn resolve_credential_encryption_key(
     user_token_secret: &str,
 ) -> anyhow::Result<CredentialEncryptionKey> {
     match configured.map(str::trim).filter(|value| !value.is_empty()) {
-        Some(raw) => CredentialEncryptionKey::from_base64(raw),
+        Some(raw) => CredentialEncryptionKey::from_base64(raw).ok_or_else(|| {
+            anyhow::anyhow!("CREDENTIAL_ENCRYPTION_KEY must be a base64-encoded 32-byte key")
+        }),
         None if dev_mode => Ok(CredentialEncryptionKey::derive_from_user_token_secret(
             user_token_secret,
         )),
@@ -195,8 +195,44 @@ fn resolve_credential_encryption_key(
 /// because refusing it would strand those rows until they are re-encrypted,
 /// but the controller warns on every boot while it is in use.
 fn is_published_credential_encryption_key(key: &CredentialEncryptionKey) -> bool {
-    key.as_bytes()
-        == CredentialEncryptionKey::derive_from_user_token_secret(DEV_USER_TOKEN_SECRET).as_bytes()
+    key.as_bytes() == published_credential_encryption_key().as_bytes()
+}
+
+/// The key earlier releases derived from the published development
+/// USER_TOKEN_SECRET. The credential census checks rows against it even when
+/// it is not configured, so an operator can prove none remain under it.
+pub(crate) fn published_credential_encryption_key() -> CredentialEncryptionKey {
+    CredentialEncryptionKey::derive_from_user_token_secret(DEV_USER_TOKEN_SECRET)
+}
+
+/// Build the key ring from the primary key and
+/// `CREDENTIAL_ENCRYPTION_PREVIOUS_KEYS`: comma-separated base64 32-byte keys
+/// that only decrypt, so rows sealed before a rotation stay readable until the
+/// re-encryption pass moves them to the primary key. Empty entries are ignored;
+/// every other entry must be a valid, distinct key that is not the primary.
+/// Messages name entries by position and never include a value.
+fn resolve_credential_key_ring(
+    primary: CredentialEncryptionKey,
+    configured_previous: Option<&str>,
+) -> anyhow::Result<CredentialKeyRing> {
+    let previous = configured_previous
+        .unwrap_or_default()
+        .split(',')
+        .map(str::trim)
+        .filter(|entry| !entry.is_empty())
+        .enumerate()
+        .map(|(index, entry)| {
+            CredentialEncryptionKey::from_base64(entry).ok_or_else(|| {
+                anyhow::anyhow!(
+                    "CREDENTIAL_ENCRYPTION_PREVIOUS_KEYS entry {} must be a base64-encoded \
+                     32-byte key",
+                    index + 1
+                )
+            })
+        })
+        .collect::<anyhow::Result<Vec<_>>>()?;
+    CredentialKeyRing::new(primary, previous)
+        .map_err(|error| anyhow::anyhow!("CREDENTIAL_ENCRYPTION_PREVIOUS_KEYS: {error}"))
 }
 
 pub(crate) const DEFAULT_SERVICE_RUNTIME_USER_EMAIL: &str = "service-runtime@instafy.dev";
@@ -422,7 +458,9 @@ pub struct AppConfig {
     pub proxy_signing_secret: Option<String>,
     pub proxy_base_url: Option<String>,
     pub proxy_token_ttl_seconds: i64,
-    pub credential_encryption_key: Option<CredentialEncryptionKey>,
+    /// Seals stored secrets under `CREDENTIAL_ENCRYPTION_KEY` and also opens
+    /// rows under `CREDENTIAL_ENCRYPTION_PREVIOUS_KEYS`. `None` only in tests.
+    pub credential_keys: Option<CredentialKeyRing>,
     /// Projects explicitly permitted to persist the shared hosted-browser
     /// profile. Empty by default: durable shared logins are a privacy-sensitive
     /// capability and must never be enabled from client-supplied metadata.
@@ -659,8 +697,33 @@ impl AppConfig {
                 "CREDENTIAL_ENCRYPTION_KEY is the key derived from the published development \
                  USER_TOKEN_SECRET. Anyone who can read the encrypted rows, through any \
                  service-role or SQL read path, can decrypt them; re-encrypt them under a \
-                 freshly generated key"
+                 freshly generated key: set it as CREDENTIAL_ENCRYPTION_KEY, move this one to \
+                 CREDENTIAL_ENCRYPTION_PREVIOUS_KEYS and run the credential re-encryption"
             );
+        }
+        let credential_keys = resolve_credential_key_ring(
+            credential_encryption_key,
+            std::env::var("CREDENTIAL_ENCRYPTION_PREVIOUS_KEYS")
+                .ok()
+                .as_deref(),
+        )?;
+        if !credential_keys.previous().is_empty() {
+            let published_previous = credential_keys
+                .previous()
+                .iter()
+                .any(is_published_credential_encryption_key);
+            info!(
+                previous_keys = credential_keys.previous().len(),
+                "credential encryption previous keys configured for decryption only"
+            );
+            if published_previous {
+                warn!(
+                    "CREDENTIAL_ENCRYPTION_PREVIOUS_KEYS lists the key derived from the published \
+                     development USER_TOKEN_SECRET. Rows under it stay readable to anyone who can \
+                     read them until the credential re-encryption moves them to the primary key; \
+                     remove it once the census reports none under it"
+                );
+            }
         }
 
         let port = std::env::var("PORT")
@@ -1218,7 +1281,7 @@ impl AppConfig {
             proxy_signing_secret,
             proxy_base_url,
             proxy_token_ttl_seconds,
-            credential_encryption_key: Some(credential_encryption_key),
+            credential_keys: Some(credential_keys),
             browser_profile_persist_project_ids,
             browser_profile_snapshot_secs,
             progress_callback_secret,
@@ -1397,9 +1460,11 @@ mod tests {
     use super::{
         database_pool_size_from_values, is_published_credential_encryption_key,
         normalize_public_app_url, parse_browser_profile_persist_project_ids,
-        resolve_credential_encryption_key, resolve_user_token_secret, CredentialEncryptionKey,
+        published_credential_encryption_key, resolve_credential_encryption_key,
+        resolve_credential_key_ring, resolve_user_token_secret, CredentialEncryptionKey,
         DEV_USER_TOKEN_SECRET,
     };
+    use crate::credential_keys::MAX_PREVIOUS_CREDENTIAL_KEYS;
     use base64::Engine;
     use uuid::Uuid;
 
@@ -1506,6 +1571,89 @@ mod tests {
         assert!(!is_published_credential_encryption_key(
             &CredentialEncryptionKey::for_test(STRONG_SECRET)
         ));
+    }
+
+    fn encoded(bytes: [u8; 32]) -> String {
+        base64::engine::general_purpose::STANDARD.encode(bytes)
+    }
+
+    #[test]
+    fn previous_credential_keys_are_optional_and_decrypt_only() {
+        let primary = CredentialEncryptionKey::for_test("primary");
+        for configured in [None, Some(""), Some(" , ,\n")] {
+            let ring = resolve_credential_key_ring(primary.clone(), configured)
+                .expect("no previous keys is the normal configuration");
+            assert!(ring.previous().is_empty());
+            assert_eq!(ring.primary().as_bytes(), primary.as_bytes());
+        }
+
+        let published = published_credential_encryption_key();
+        let configured = format!(
+            " {} ,{},",
+            encoded([9u8; 32]),
+            encoded(*published.as_bytes())
+        );
+        let ring = resolve_credential_key_ring(primary.clone(), Some(&configured))
+            .expect("two valid previous keys");
+        assert_eq!(ring.primary().as_bytes(), primary.as_bytes());
+        assert_eq!(ring.previous().len(), 2);
+        assert_eq!(ring.previous()[0].as_bytes(), &[9u8; 32]);
+        assert!(is_published_credential_encryption_key(&ring.previous()[1]));
+    }
+
+    #[test]
+    fn previous_credential_keys_are_validated_without_echoing_values() {
+        let primary = CredentialEncryptionKey::for_test("primary");
+        let valid = encoded([3u8; 32]);
+        let short = base64::engine::general_purpose::STANDARD.encode([4u8; 16]);
+        let long = base64::engine::general_purpose::STANDARD.encode([5u8; 33]);
+        let not_base64 = "not*a*key*at*all";
+        for (configured, expected) in [
+            (
+                format!("{valid},{short}"),
+                "entry 2 must be a base64-encoded 32-byte key",
+            ),
+            (long.clone(), "entry 1 must be a base64-encoded 32-byte key"),
+            (
+                not_base64.to_string(),
+                "entry 1 must be a base64-encoded 32-byte key",
+            ),
+            (
+                encoded(*primary.as_bytes()),
+                "previous credential encryption key 1 is the primary key",
+            ),
+            (format!("{valid},{valid}"), "keys 1 and 2 are the same key"),
+        ] {
+            let error = resolve_credential_key_ring(primary.clone(), Some(&configured))
+                .expect_err("invalid previous keys must refuse startup")
+                .to_string();
+            assert!(
+                error.starts_with("CREDENTIAL_ENCRYPTION_PREVIOUS_KEYS"),
+                "{error}"
+            );
+            assert!(error.contains(expected), "{error}");
+            for value in [valid.as_str(), short.as_str(), long.as_str(), not_base64] {
+                assert!(!error.contains(value), "error echoed a configured value");
+            }
+            assert!(!error.contains(&encoded(*primary.as_bytes())));
+        }
+
+        let too_many = (0..=MAX_PREVIOUS_CREDENTIAL_KEYS as u8)
+            .map(|index| encoded([index + 10; 32]))
+            .collect::<Vec<_>>()
+            .join(",");
+        assert!(resolve_credential_key_ring(primary, Some(&too_many)).is_err());
+    }
+
+    #[test]
+    fn a_malformed_primary_key_is_refused_without_decoder_detail() {
+        let error = resolve_credential_encryption_key(false, Some("abc*def"), STRONG_SECRET)
+            .expect_err("malformed key")
+            .to_string();
+        assert_eq!(
+            error,
+            "CREDENTIAL_ENCRYPTION_KEY must be a base64-encoded 32-byte key"
+        );
     }
 
     /// The HS256 fallback must never disable JWKS refresh.

@@ -736,7 +736,7 @@ mod tests {
             proxy_signing_secret: None,
             proxy_base_url: None,
             proxy_token_ttl_seconds: 900,
-            credential_encryption_key: None,
+            credential_keys: None,
             browser_profile_persist_project_ids: vec![],
             browser_profile_snapshot_secs: 30,
             progress_callback_secret: None,

@@ -418,21 +418,92 @@ fn startup_warns_while_stored_credentials_use_the_published_derived_key() {
     // Controllers that ran without either variable encrypted credentials under
     // a key anyone can derive. It stays accepted so those rows remain readable
     // until they are re-encrypted, but every boot says so.
-    use sha2::{Digest, Sha256};
-    let published = Sha256::new()
-        .chain_update(b"instafy:credential-encryption-key:v1:")
-        .chain_update(b"dev-user-token-secret")
-        .finalize();
     let server = MockServer::start();
     let jwks = jwks_fixture(&server);
     let result = run_controller(&server, |command| {
         command
             .env("SERVICE_RUNTIME_USER_ID", SERVICE_ID)
-            .env("CREDENTIAL_ENCRYPTION_KEY", BASE64.encode(published));
+            .env("CREDENTIAL_ENCRYPTION_KEY", published_credential_key_b64());
     });
     assert_normal_error(&result, "failed to parse DATABASE_URL");
     assert!(result
         .output
         .contains("CREDENTIAL_ENCRYPTION_KEY is the key derived from the published development"));
+    jwks.assert_hits(1);
+}
+
+fn published_credential_key_b64() -> String {
+    use sha2::{Digest, Sha256};
+    BASE64.encode(
+        Sha256::new()
+            .chain_update(b"instafy:credential-encryption-key:v1:")
+            .chain_update(b"dev-user-token-secret")
+            .finalize(),
+    )
+}
+
+#[test]
+fn startup_refuses_invalid_previous_credential_keys_before_network_io() {
+    // A decrypt-only key that does not parse, or a "previous" key that is
+    // still the primary, is a rotation that would silently not happen.
+    let server = MockServer::start();
+    let requests = server.mock(|_when, then| {
+        then.status(500);
+    });
+    let valid = BASE64.encode([0x5au8; 32]);
+    let short = BASE64.encode([0x5bu8; 16]);
+    for (configured, diagnostic) in [
+        (
+            format!("{valid},{short}"),
+            "CREDENTIAL_ENCRYPTION_PREVIOUS_KEYS entry 2 must be a base64-encoded 32-byte key",
+        ),
+        (
+            "not*a*key".to_string(),
+            "CREDENTIAL_ENCRYPTION_PREVIOUS_KEYS entry 1 must be a base64-encoded 32-byte key",
+        ),
+        (
+            CREDENTIAL_ENCRYPTION_KEY.to_string(),
+            "previous credential encryption key 1 is the primary key",
+        ),
+        (
+            format!("{valid},{valid}"),
+            "previous credential encryption keys 1 and 2 are the same key",
+        ),
+    ] {
+        let result = run_controller(&server, |command| {
+            command.env("CREDENTIAL_ENCRYPTION_PREVIOUS_KEYS", &configured);
+        });
+        assert_normal_error(&result, diagnostic);
+        assert!(!result.output.contains(&valid));
+        assert!(!result.output.contains(&short));
+        assert!(!result.output.contains("not*a*key"));
+    }
+    requests.assert_hits(0);
+}
+
+#[test]
+fn startup_accepts_previous_credential_keys_and_warns_while_the_published_key_is_listed() {
+    // The rotation state: a fresh primary key, the published derived key kept
+    // for decryption until the re-encryption pass has moved every row.
+    let server = MockServer::start();
+    let jwks = jwks_fixture(&server);
+    let published = published_credential_key_b64();
+    let retired = BASE64.encode([0x6cu8; 32]);
+    let result = run_controller(&server, |command| {
+        command.env("SERVICE_RUNTIME_USER_ID", SERVICE_ID).env(
+            "CREDENTIAL_ENCRYPTION_PREVIOUS_KEYS",
+            format!(" {retired} , {published} ,"),
+        );
+    });
+    // Configuration completed: startup got as far as the database.
+    assert_normal_error(&result, "failed to parse DATABASE_URL");
+    assert!(result
+        .output
+        .contains("CREDENTIAL_ENCRYPTION_PREVIOUS_KEYS lists the key derived from the published"));
+    assert!(!result
+        .output
+        .contains("CREDENTIAL_ENCRYPTION_KEY is the key derived from the published development"));
+    assert!(!result.output.contains(&retired));
+    assert!(!result.output.contains(&published));
     jwks.assert_hits(1);
 }

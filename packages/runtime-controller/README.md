@@ -55,6 +55,8 @@ This document explains how the Instafy runtime controller is structured and how 
 | POST | `/projects/:id/git/access_token` | Mint project Git tokens. `git.delete` is a 60-second, service-auth-only, single-scope cleanup capability. |
 |  |  | Controller no longer serves `/fs/*`; clients should use project origin endpoints (`/entries`, `/files`, `/raw`). |
 | POST | `/projects/:id/origin/presence/beat` | Project-scoped presence updates from an origin. |
+| GET | `/operator/credential-encryption/census` | Service-role only. Read-only count of stored secrets per table by the key that opens them. See [Rotating the credential encryption key](#rotating-the-credential-encryption-key). |
+| POST | `/operator/credential-encryption/reencrypt` | Service-role only. Rewrites stored secrets still under a previous key with the primary key. |
 
 Refer to `src/main.rs` for the complete list, including agent callbacks and admin endpoints (`/runtime/stop`, `/runtime/idle-reaper`).
 
@@ -256,7 +258,8 @@ Key environment variables (see `AppConfig::from_env` for defaults):
 - `SUPABASE_JWKS_REFRESH_SECONDS` — interval for refreshing the JWKS cache (defaults to 300 seconds; minimum 30).
 - `CONTROLLER_INTERNAL_TOKEN` — internal bearer token required for privileged automation.
 - `USER_TOKEN_SECRET` — HS256 key that signs the controller session tokens issued by `POST /auth/session`. Any token that verifies against it is accepted as a session for the user it names, so outside `DEV_MODE` (enabled only by `1`, `true`, `yes` or `on`, in any case) the controller refuses to start when it is unset, shorter than 32 bytes, or the development value published in this repository. Generate it with `openssl rand -hex 32`. The controller checks a session token's signature, audience and expiry, not when it was issued, so a token signed with a leaked value can carry any expiry: replacing the secret is what invalidates it, not waiting out `USER_TOKEN_TTL_SECONDS`. With `CREDENTIAL_ENCRYPTION_KEY` set, rotating it only signs every user out.
-- `CREDENTIAL_ENCRYPTION_KEY` — base64-encoded 32-byte key that encrypts the stored secrets in `user_credentials`, `project_secrets`, `user_oauth_tokens`, `project_browser_profiles` and `github_device_auth_sessions`. Required outside `DEV_MODE`. Generate it with `openssl rand -base64 32`, keep it in your secret store, and do not change it without re-encrypting those rows: a different key makes them unreadable. Before upgrading a controller that ran without it, see [Upgrading a controller without explicit secrets](#upgrading-a-controller-without-explicit-secrets).
+- `CREDENTIAL_ENCRYPTION_KEY` — base64-encoded 32-byte key that encrypts the stored secrets in `user_credentials`, `project_secrets`, `user_oauth_tokens`, `project_browser_profiles` and `github_device_auth_sessions`. Required outside `DEV_MODE`. Generate it with `openssl rand -base64 32` and keep it in your secret store. Replacing it outright makes those rows unreadable; change it by following [Rotating the credential encryption key](#rotating-the-credential-encryption-key). Before upgrading a controller that ran without it, see [Upgrading a controller without explicit secrets](#upgrading-a-controller-without-explicit-secrets).
+- `CREDENTIAL_ENCRYPTION_PREVIOUS_KEYS` — optional, comma-separated base64-encoded 32-byte keys the controller only decrypts with, so rows sealed under an earlier `CREDENTIAL_ENCRYPTION_KEY` stay readable during a rotation. New values are always encrypted with `CREDENTIAL_ENCRYPTION_KEY`. The controller refuses to start when an entry is malformed, repeated or equal to `CREDENTIAL_ENCRYPTION_KEY`, or when more than 8 are listed, and warns on every start while one of them is the key derived from the published development value. It is a secret like the primary key: keep it out of runtime and agent environments.
 - `AGENT_LOGIN_KEY` — shared secret agents use to mint scoped tokens via `/agent/login`.
 - `WORKSPACE_ROOT` — runtime/controller root directory containing per-project workspaces. In local-canonical desktop mode, the source-of-truth folder can live outside this hosted layout. In git-canonical hosted mode, this root holds the materialized working copies.
 - `PROXY_BASE_URL`/`PROXY_SIGNING_SECRET` — optional AI proxy envelope support.
@@ -282,7 +285,7 @@ Key environment variables (see `AppConfig::from_env` for defaults):
   - Set `RUNTIME_SIGNING_TOKEN_TTL_SECONDS` to control token lifetime (seconds).
 - `ORIGIN_INTERNAL_TOKEN` — reused as the bearer credential desktop agents/origins send when registering themselves via `POST /origin/register`.
 - Operator access (all unset by default; the service-role bearer always qualifies):
-  - `OPERATOR_CONSOLE_ORG_ID` / `OPERATOR_CONSOLE_ALLOWED_USER_IDS` — owners/admins of that organization, or the comma-separated user UUIDs, pass every operator gate (OTA, desktop updates, telemetry, edge downloads, `/operator/*`, bug-report triage).
+  - `OPERATOR_CONSOLE_ORG_ID` / `OPERATOR_CONSOLE_ALLOWED_USER_IDS` — owners/admins of that organization, or the comma-separated user UUIDs, pass every operator gate (OTA, desktop updates, telemetry, edge downloads, `/operator/*`, bug-report triage) except `/operator/credential-encryption/*`, which reads or rewrites every user's stored secrets and accepts only the service-role bearer.
   - `BUG_REPORTS_OPERATOR_USER_IDS` — comma-separated user UUIDs granted the operator projection and `PATCH` triage on `/bug-reports` only; the list grants nothing on any other operator route.
 - Push notifications:
   - `WEB_PUSH_VAPID_PUBLIC_KEY` / `WEB_PUSH_VAPID_PRIVATE_KEY` / `WEB_PUSH_VAPID_SUBJECT` — enable PWA Web Push (service-worker based) notifications.
@@ -328,7 +331,65 @@ untrusted; replacing `USER_TOKEN_SECRET` in step 3 is what invalidates those tok
 If the key was derived from the published value, anyone who can read the encrypted rows can
 decrypt them, through a service-role key, a database role, a backup or any other SQL read path.
 Pinning the key keeps them readable to the controller but does not protect them: re-encrypt them
-under a freshly generated key, or revoke those credentials and have their owners reconnect them.
+under a freshly generated key by [rotating the credential encryption key](#rotating-the-credential-encryption-key),
+or revoke those credentials and have their owners reconnect them. The rotation census counts rows
+under the published key whether or not it is still configured, which is how you prove none remain.
+
+### Rotating the credential encryption key
+
+`CREDENTIAL_ENCRYPTION_KEY` encrypts the stored secrets in `user_credentials`, `project_secrets`,
+`user_oauth_tokens`, `project_browser_profiles` and `github_device_auth_sessions` (AES-256-GCM, a
+random nonce per value). The controller encrypts every new value with it and decrypts with it or
+with any key in `CREDENTIAL_ENCRYPTION_PREVIOUS_KEYS`, so a rotation keeps every stored secret
+readable at every step. Rotate when the key may have been exposed, including when it is the key
+derived from the published development value.
+
+1. Generate a new key with `openssl rand -base64 32`.
+2. Deploy `CREDENTIAL_ENCRYPTION_KEY=<new key>` and `CREDENTIAL_ENCRYPTION_PREVIOUS_KEYS=<old key>`
+   to every controller that shares the database. A controller that knows only the old key cannot
+   read values written under the new one, so if old and new controllers serve traffic at the same
+   time during your rollout (a rolling or blue/green deploy), first deploy
+   `CREDENTIAL_ENCRYPTION_KEY=<old key>` with `CREDENTIAL_ENCRYPTION_PREVIOUS_KEYS=<new key>`
+   everywhere, then swap the two. Both steps need a release that supports
+   `CREDENTIAL_ENCRYPTION_PREVIOUS_KEYS`.
+3. Take a census with the service-role bearer (`CONTROLLER_INTERNAL_TOKEN` or the Supabase
+   service-role key). It only reads:
+
+   ```bash
+   curl -fsS -H "Authorization: Bearer $CONTROLLER_INTERNAL_TOKEN" \
+     "$CONTROLLER_URL/operator/credential-encryption/census"
+   ```
+
+   For each table and in `totals` it reports `rows`, how many the primary key opens (`primary`),
+   how many each previous key opens (`previous`, in `CREDENTIAL_ENCRYPTION_PREVIOUS_KEYS` order),
+   how many no configured key opens (`undecryptable`), and `underPublishedDevelopmentKey`: rows
+   under the key derived from the published development value, counted whether or not that key is
+   configured. Keys appear only as one-way `keyId`s.
+4. Re-encrypt:
+
+   ```bash
+   curl -fsS -X POST -H "Authorization: Bearer $CONTROLLER_INTERNAL_TOKEN" \
+     "$CONTROLLER_URL/operator/credential-encryption/reencrypt"
+   ```
+
+   Each row that only a previous key opens is rewritten under the primary key in its own
+   transaction, under a row lock, after the new ciphertext is checked to decrypt to the same
+   value. Rows already under the primary key and rows no configured key opens are never written,
+   and nothing else about a row changes, except that a trigger updates `user_credentials.updated_at`.
+   The response counts `scanned`, `alreadyPrimary`, `reencrypted`, `undecryptable` and `vanished`
+   (deleted during the pass) per table. `batchSize` (rows listed per page, default 100, at most
+   1000) and `maxRows` (stop after rewriting that many) are optional query parameters; a response
+   with `"complete": false` stopped at `maxRows`, so run it again. The pass is safe to repeat and to
+   run while the controller serves traffic; if a proxy in front of the controller cuts a long request
+   off, rows already rewritten stay rewritten, so pass `maxRows` and repeat. Neither route logs or
+   returns secret values or keys.
+5. Take the census again. Continue only when every count in `totals.previous` is `0` and, if the old
+   key was the published development key, `totals.underPublishedDevelopmentKey` is `0`. A non-zero
+   `undecryptable` means rows under a key that is not configured at all: the pass leaves them
+   alone, and removing a previous key cannot make them readable. Find their key first.
+6. Deploy without the old key in `CREDENTIAL_ENCRYPTION_PREVIOUS_KEYS` and take one more census:
+   `undecryptable` must not have grown. Then destroy the old key. Database backups taken before the
+   pass still hold values under it, so treat those backups as readable by anyone who holds it.
 
 ## Local Development
 
