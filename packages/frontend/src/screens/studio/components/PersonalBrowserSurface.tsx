@@ -201,17 +201,13 @@ export function PersonalBrowserSurface({
   }, []);
   const [fullscreen, setFullscreen] = useState(false);
   const expanded = active && fullscreen;
-  const [selectedApprovalMode, setSelectedApprovalMode] = useState<"ask" | "routine">("ask");
+  const selectedApprovalMode = model.preferredApprovalMode;
   const [dismissedClearDataFeedbackKey, setDismissedClearDataFeedbackKey] =
     useState<string | null>(null);
   const ready = model.status?.state === "ready";
   const visible = active && model.available && ready;
   const ownerId = model.ownerId;
   const routineApprovalAvailable = model.status?.approvalModes?.includes("routine") === true;
-
-  useEffect(() => {
-    setSelectedApprovalMode("ask");
-  }, [ownerId]);
 
   useEffect(() => {
     if (!active) setFullscreen(false);
@@ -521,10 +517,10 @@ export function PersonalBrowserSurface({
                     className="h-4 w-4"
                     data-testid="personal-browser-routine-approval"
                     disabled={humanInputLocked}
-                    onChange={(event) => setSelectedApprovalMode(event.target.checked ? "routine" : "ask")}
+                    onChange={(event) => model.setPreferredApprovalMode(event.target.checked ? "routine" : "ask")}
                     type="checkbox"
                   />
-                  Always allow routine browsing until paused
+                  Allow routine browsing without asking each time
                 </label>
                 <span className="text-slate-500 dark:text-slate-400">
                   {humanInputState.active

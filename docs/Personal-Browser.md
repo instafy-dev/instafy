@@ -122,29 +122,35 @@ Personal Browser is gated at several layers.
 
 ### Origin approval
 
-In the default Ask mode, the first agent navigation to, or interaction with, an HTTP(S) origin shows a native Electron confirmation. The positive choice is **Allow for this session**. Approval is held in memory for the current project/browser session and is cleared when the browser closes, its identity changes, or browser data is cleared.
+In Ask mode, the first agent navigation to, or interaction with, an HTTP(S) origin shows a native Electron confirmation. The positive choice is **Allow for this session**. Approval is held in memory for the current project/browser session and is cleared when the browser closes, its identity changes, or browser data is cleared.
 
 The user can navigate manually without granting agent access. Cross-origin agent navigation and link activation require approval for the destination origin, unless routine browsing was explicitly granted as described below.
 
-### One-shot activation confirmation
+### Routine browsing and stricter approval
 
-In the default **Ask** mode, every agent activation of a button, link, submit-like input, or form submission shows a native **Allow once** confirmation, independent of its label. Explicit same-origin URL navigation is also confirmed after that origin has already been approved. Password, OTP, and payment entry remains hard-blocked rather than confirmable.
+Studio selects **Allow routine browsing without asking each time** by default for
+Personal Browser control. The setting is available in Browser settings before
+Resume and also applies to Chat's **Open browser and continue** handoff. Existing
+active control keeps its approval mode. Older Desktop hosts without routine-mode
+support use Ask mode.
 
-At Resume, the user may explicitly choose **Always allow routine browsing**.
-Electron requires a native confirmation before enabling this mode. It permits
-ordinary navigation, clicks and non-sensitive field filling across sites in the
+Electron requires one native confirmation before enabling routine mode. It permits
+ordinary navigation, searches, clicks, non-sensitive field filling and form
+submissions, including Enter/Space activation, across sites in the
 current project/browser control session without repeated site/action prompts.
-Recognized consequential controls and URLs, form submissions, and Enter/Space
-activation still ask; secret-entry blocks and fresh-target validation remain.
+Recognized consequential controls and URLs still ask; secret-entry blocks and
+fresh-target validation remain.
 Pause, Escape, closing, clearing data, or changing the user/project/renderer
 revokes this grant. The visible checkbox may retain its selection while this
 browser surface stays open, but a later Resume requires a fresh native
 confirmation; no permission is saved to the browser profile or shared with teammates.
 
-Submission checks use the browser's actual form association and normalized button
-type, not a button's label. Genuine submission controls still ask; ordinary
-non-submitting buttons may use the routine grant. Form ownership is part of the
-fresh-target check, so a changed association requires a new observation.
+Uncheck the setting to use **Ask** mode. Every agent activation of a button, link,
+submit-like input, or form submission then shows a native **Allow once**
+confirmation, independent of its label. Explicit same-origin URL navigation is
+also confirmed after that origin has already been approved. Form ownership is
+part of the fresh-target check in either mode, so a changed association requires
+a new observation.
 
 Routine mode uses a conservative text/descriptor classifier, not a proof that
 ordinary controls are harmless. A website can attach unexpected side effects to
@@ -293,11 +299,11 @@ Manual smoke sequence:
 1. Sign in to Instafy and open a project in the Electron app.
 2. Open the Browser subtab and select **This device (Personal Browser)**.
 3. Navigate manually to a test site and, if needed, sign in manually.
-4. Choose **Resume**; confirm the site origin when the agent first requests it.
+4. Choose **Resume** and approve routine browsing once; navigate and search without further routine prompts.
 5. Send a browser task and verify the controller targets the exact Personal Browser runtime ID.
 6. Switch Chat ↔ Browser and confirm the native view remains usable; briefly remount/reopen the same Studio conversation and confirm the released native page is reclaimed paused rather than reset.
 7. Verify Pause produces no agent action and no hosted fallback.
-8. Exercise a harmless link, button, and form submission and verify **Allow once** appears for each activation.
+8. In Browser settings, uncheck routine browsing before Resume. In this stricter Ask mode, exercise a harmless link, button, and form submission and verify **Allow once** appears for each activation.
 9. Verify password, OTP, and payment-field typing is rejected while manual typing still works.
 10. Restart the app and verify the local login persists; then use **Clear personal browser data** and verify it is removed.
 

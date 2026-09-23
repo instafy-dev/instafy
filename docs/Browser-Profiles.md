@@ -29,7 +29,8 @@ When an interactive browser is not attached to a Chat turn, the bundled browser
 skill can return an **Open browser and continue** card. Selecting it opens the
 conversation's browser and sends the task to that exact browser once it is ready.
 This is a user-selected handoff; displaying an old message never runs it again.
-Paused native control uses the existing Resume flow in Ask mode; already active
+Paused native control uses the existing Resume flow with the Browser settings
+approval choice (routine browsing by default on supported Desktop hosts); already active
 control keeps its settings. A pending manual step must be finished with **Done, continue** before another task can start.
 
 Studio first reuses the browser location saved for this conversation on this
@@ -86,9 +87,12 @@ Both interactive modes have an **Expand** control, including compact layouts.
 It fills the app viewport; it does not create a different browser, profile or
 OS window. Collapse returns to the docked browser with the same page.
 
-**Always allow routine browsing** is an early, explicit choice: at the first
-Shared site prompt for that turn, or before Personal Resume until paused.
-It avoids repeated routine site/action prompts without changing cookie sharing.
+Shared offers **Always allow routine browsing** at the first site prompt for that
+turn. Personal Browser defaults to **Allow routine browsing without asking each
+time** in Browser settings and confirms that choice once when control starts.
+Uncheck it before Resume for stricter Ask mode. Routine browsing covers ordinary
+navigation, search, clicks and non-sensitive forms without repeated site/action
+prompts; it does not change cookie sharing.
 Recognized high-impact actions still ask and secret entry remains manual; a
 website can attach unexpected side effects to an otherwise ordinary control.
 See each mode's policy for scope and revocation.

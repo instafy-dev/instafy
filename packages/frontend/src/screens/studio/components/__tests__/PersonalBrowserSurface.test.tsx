@@ -19,6 +19,8 @@ function setInputValue(input: HTMLInputElement, value: string) {
 
 function createModel(): PersonalBrowserModel {
   return {
+    preferredApprovalMode: "routine",
+    setPreferredApprovalMode: vi.fn(),
     agentError: null,
     agentPhase: "ready",
     available: true,
@@ -260,10 +262,15 @@ describe("PersonalBrowserSurface", () => {
     ));
     await act(async () => document.querySelector<HTMLButtonElement>('[aria-label="Browser settings"]')!.click());
     const checkbox = document.querySelector<HTMLInputElement>('[data-testid="personal-browser-routine-approval"]');
-    expect(checkbox?.checked).toBe(false);
-    await act(async () => checkbox?.click());
+    expect(checkbox?.checked).toBe(true);
     await act(async () => document.querySelector<HTMLButtonElement>('[aria-label="Resume agent control"]')?.click());
     expect(model.setAgentControlEnabled).toHaveBeenCalledWith(true, "routine");
+    await act(async () => checkbox?.click());
+    expect(model.setPreferredApprovalMode).toHaveBeenCalledWith("ask");
+    model.preferredApprovalMode = "ask";
+    await act(async () => root.render(<PersonalBrowserSurface active model={model} transportSelector={null} />));
+    await act(async () => document.querySelector<HTMLButtonElement>('[aria-label="Resume agent control"]')?.click());
+    expect(model.setAgentControlEnabled).toHaveBeenLastCalledWith(true, "ask");
     const legacyModel = createModel();
     await act(async () => root.render(
       <PersonalBrowserSurface active model={legacyModel} transportSelector={null} />,
@@ -566,9 +573,10 @@ describe("PersonalBrowserSurface", () => {
     expect(document.querySelector<HTMLButtonElement>('[aria-label="Resume agent control"]')?.disabled).toBe(true);
   });
 
-  it("makes Done the only resume route after user-initiated takeover", async () => {
+  it.each(["routine", "ask"] as const)("makes Done the only resume route after takeover with %s selected", async (approvalMode) => {
     const model = createModel();
-    model.status = { ...model.status!, humanControlReady: false, approvalModes: ["ask", "routine"], approvalMode: "ask" };
+    model.preferredApprovalMode = approvalMode;
+    model.status = { ...model.status!, humanControlReady: false, approvalModes: ["ask", "routine"], approvalMode };
     model.setAgentControlEnabled = vi.fn(async () => ({ ...model.status!, agentControlEnabled: false, humanControlReady: true }));
     const onContinue = vi.fn(async () => true);
     const render = async () => act(async () => root.render(
@@ -586,7 +594,7 @@ describe("PersonalBrowserSurface", () => {
     await act(async () => document.querySelector<HTMLButtonElement>('[aria-label="Browser settings"]')!.click());
     expect(container.textContent).not.toContain("Choose before Resume");
     await act(async () => document.querySelector<HTMLButtonElement>('[data-testid="browser-human-input-continue"]')?.click());
-    expect(onContinue).toHaveBeenCalledExactlyOnceWith(expect.stringContaining("Take a fresh snapshot"), "ask");
+    expect(onContinue).toHaveBeenCalledExactlyOnceWith(expect.stringContaining("Take a fresh snapshot"), approvalMode);
     expect(model.setAgentControlEnabled).toHaveBeenCalledTimes(1);
   });
 

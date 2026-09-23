@@ -53,7 +53,7 @@ describe("Personal handoff with the real React browser bridge", () => {
     resultRef = { current: null };
     startup = deferred();
     nativeStatus = { supported: true, enabled: true, state: "closed", visible: false, url: "https://example.test/form",
-      canGoBack: false, canGoForward: false, agentControlEnabled: false, humanControlReady: true };
+      canGoBack: false, canGoForward: false, agentControlEnabled: false, humanControlReady: true, approvalModes: ["ask", "routine"] };
     controller.resolveRequestContext.mockResolvedValue({
       baseUrl: "https://controller.example.test", accessToken: "inert-test-token", credentialSource: "ambient", generation: 1,
     });
@@ -120,11 +120,18 @@ describe("Personal handoff with the real React browser bridge", () => {
     return { pending, settled: () => settled };
   }
 
-  it("opens a Chat task through native Ask control and dispatches only after the exact runtime is ready", async () => {
+  it.each([
+    { preferred: "routine", legacy: false, expected: "routine" },
+    { preferred: "ask", legacy: false, expected: "ask" },
+    { preferred: "routine", legacy: true, expected: "ask" },
+  ] as const)("uses $expected approval for preference $preferred (legacy: $legacy) and waits for the exact runtime", async ({ preferred, legacy, expected }) => {
+    if (legacy) nativeStatus = { ...nativeStatus, approvalModes: undefined };
     await render();
+    expect(resultRef.current!.personal.preferredApprovalMode).toBe("routine");
+    await act(async () => resultRef.current!.personal.setPreferredApprovalMode(preferred));
     let pending!: Promise<boolean>;
     await act(async () => { pending = resultRef.current!.handoff.startPersonal("Continue comparing the saved items"); });
-    expect(setEnabled).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ enabled: true, approvalMode: "ask" }));
+    expect(setEnabled).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ enabled: true, approvalMode: expected }));
     expect(value.onSubmit).not.toHaveBeenCalled();
     await act(async () => startup.resolve({ pid: 42, runtimeId: "personal-fresh" }));
     await act(async () => { await vi.advanceTimersByTimeAsync(100); });
@@ -136,6 +143,11 @@ describe("Personal handoff with the real React browser bridge", () => {
     await act(async () => { expect(await resultRef.current!.handoff.startPersonal("Inspect the cart")).toBe(true); });
     expect(setEnabled).toHaveBeenCalledTimes(1);
     expect(value.onSubmit).toHaveBeenCalledTimes(2);
+    await act(async () => { await resultRef.current!.personal.retryAgentControl(); });
+    expect(setEnabled).toHaveBeenLastCalledWith({
+      enabled: true, ownerId: nativeStatus.ownerId,
+      ...(legacy ? {} : { approvalMode: preferred }),
+    });
   });
 
   it("retries Done after a native failure without reading the pre-Resume unavailable phase as a new failure", async () => {

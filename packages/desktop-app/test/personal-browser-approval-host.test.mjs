@@ -10,12 +10,14 @@ import ts from "typescript";
 const packageRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const require = createRequire(import.meta.url);
 const security = require(path.join(packageRoot, "dist/personalBrowserSecurity.js"));
+const pageBridge = require(path.join(packageRoot, "dist/personalBrowserPageBridge.js"));
+const control = require(path.join(packageRoot, "dist/personalBrowserControlServer.js"));
 const hostCode = ts.transpileModule(
   fs.readFileSync(path.join(packageRoot, "src/personalBrowserHost.ts"), "utf8"),
   { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } },
 ).outputText;
 
-function fixture(choose = async () => ({ response: 1 })) {
+function fixture(choose = async () => ({ response: 1 }), pageOverrides = {}) {
   const dialogs = [];
   class ControlServer {
     credentials = null;
@@ -37,10 +39,10 @@ function fixture(choose = async () => ({ response: 1 })) {
     "./browserTabInput": require(path.join(packageRoot, "dist/browserTabInput.js")),
     "./browserTabExplorePage": { createBrowserTabExplorePage() { throw new Error("Unexpected native Explore page"); } },
     "./personalBrowserSecurity": security,
-    "./personalBrowserPageBridge": { clearPersonalBrowserHumanInput: async () => {} },
+    "./personalBrowserPageBridge": { ...pageBridge, clearPersonalBrowserHumanInput: async () => {}, ...pageOverrides },
     "./personalBrowserHumanInput": {},
     "./personalBrowserInputShield": { PersonalBrowserInputShield: InputShield },
-    "./personalBrowserControlServer": { PersonalBrowserControlServer: ControlServer },
+    "./personalBrowserControlServer": { ...control, PersonalBrowserControlServer: ControlServer },
   };
   vm.runInNewContext(hostCode, {
     module, exports: module.exports, URL, setTimeout, clearTimeout,
@@ -87,6 +89,40 @@ test("Personal routine grant requires native consent and ends synchronously on P
   host.enablePreparedAgentControl(await host.prepareAgentControl());
   assert.equal(host.getStatus().approvalMode, "ask", "a later Resume must not inherit routine trust");
 });
+
+for (const { mode, formAction, confirmSubmission } of [
+  { mode: "routine", formAction: "Search", confirmSubmission: false },
+  { mode: "ask", formAction: "Search", confirmSubmission: true },
+  { mode: "routine", formAction: "Place order", confirmSubmission: true },
+]) {
+  test(`type-and-submit uses ${mode} approval for the post-typing ${formAction} form`, async () => {
+    const descriptor = { found: true, disabled: false, identity: "fixture-document:1", tag: "input", type: "text", formOwnerIdentity: "fixture-form", formActionText: "Search" };
+    const keys = [];
+    const { host, dialogs } = fixture(undefined, {
+      snapshotPersonalBrowserPage: async () => ({
+        url: "https://example.test/", documentToken: "fixture-document",
+        interactive: [{ index: 0, tag: "input", type: "text", identity: descriptor.identity, descriptor: { ...descriptor } }],
+      }),
+      inspectPersonalBrowserTarget: async () => ({ ...descriptor }),
+      typeIntoPersonalBrowserTarget: async () => {
+        descriptor.formActionText = formAction;
+        return { typed: true, targetChanged: false, descriptor: { ...descriptor } };
+      },
+      pressPersonalBrowserTarget: async (_contents, _target, key) => {
+        keys.push(key);
+        return { pressed: true, targetChanged: false };
+      },
+    });
+    host.enablePreparedAgentControl(await host.prepareAgentControl(mode));
+    await host.handleControlOperation("snapshot", {});
+    const priorDialogs = dialogs.length;
+    const result = await host.handleControlOperation("type", { index: 0, text: "Ada Lovelace", submit: true });
+    assert.equal(result.submitted, true);
+    assert.deepEqual(keys, ["Enter"]);
+    assert.equal(dialogs.length - priorDialogs, confirmSubmission ? 1 : 0);
+    if (confirmSubmission) assert.equal(dialogs.at(-1).title, "Confirm form submission");
+  });
+}
 
 test("Personal routine grant cannot survive native denial or a raced revocation", async () => {
   const denied = fixture(async () => ({ response: 0 }));

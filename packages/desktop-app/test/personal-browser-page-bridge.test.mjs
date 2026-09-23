@@ -232,7 +232,7 @@ function expectationFor(descriptor) {
   };
 }
 
-test("native descriptors retain actual external form ownership and confirm associated submission controls", async () => {
+test("native descriptors retain external form ownership and respect the submission approval mode", async () => {
   const harness = createPageHarness();
   const form = new harness.HTMLFormElement({ "aria-label": "Details" });
   const controls = [
@@ -253,9 +253,11 @@ test("native descriptors retain actual external form ownership and confirm assoc
     assert.equal(item.descriptor.formActionText, "Continue");
     if (index < 3) {
       assert.equal(item.descriptor.type, "submit");
-      assert.equal(security.personalBrowserActivationRequiresConfirmation(item.descriptor, "routine"), true);
+      assert.equal(security.personalBrowserActivationRequiresConfirmation(item.descriptor, "ask"), true);
+      assert.equal(security.personalBrowserActivationRequiresConfirmation(item.descriptor, "routine"), false);
     } else {
       assert.equal(security.personalBrowserKeyRequiresConfirmation("Enter", item.descriptor), true);
+      assert.equal(security.personalBrowserKeyRequiresConfirmation("Enter", item.descriptor, "routine"), false);
     }
   }
 });

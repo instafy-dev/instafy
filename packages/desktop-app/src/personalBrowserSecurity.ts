@@ -307,14 +307,7 @@ export function personalBrowserActivationRequiresConfirmation(
   const role = value.role?.trim().toLowerCase();
   const type = value.type?.trim().toLowerCase();
   if (approvalMode === "routine") {
-    return (
-      isHighImpactPersonalBrowserAction(value) ||
-      (tag === "input" && ["submit", "image"].includes(type ?? "")) ||
-      (tag === "button" && !["button", "reset"].includes(type ?? "") &&
-        // Submit semantics come from the native type and form owner, not a
-        // human-readable label. Older/incomplete descriptors fail closed.
-        value.formOwnerIdentity !== "")
-    );
+    return isHighImpactPersonalBrowserAction(value);
   }
   return (
     isHighImpactPersonalBrowserAction(value) ||
@@ -336,8 +329,10 @@ export function personalBrowserKeyRequiresConfirmation(
   value: PersonalBrowserActionDescriptor,
   approvalMode: PersonalBrowserApprovalMode = "ask",
 ): boolean {
-  // Activation keys can implicitly submit a form, even without a submit label.
-  if (approvalMode === "routine" && isPersonalBrowserActivationKey(key)) return true;
+  // The session-wide routine grant also covers ordinary keyboard submissions.
+  if (approvalMode === "routine") {
+    return isPersonalBrowserActivationKey(key) && isHighImpactPersonalBrowserAction(value);
+  }
   return (
     isPersonalBrowserActivationKey(key) &&
     (personalBrowserActivationRequiresConfirmation(value) ||

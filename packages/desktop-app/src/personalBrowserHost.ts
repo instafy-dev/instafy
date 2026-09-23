@@ -589,7 +589,7 @@ export class PersonalBrowserHost {
         type: "warning",
         title: "Allow routine browsing for this session?",
         message: "Always allow routine browsing in this project while agent control is resumed?",
-        detail: "The agent may read sites, navigate, click ordinary controls and fill non-sensitive fields without asking each time. Recognized consequential actions and form submissions still ask; password, verification-code and payment fields remain blocked. Websites can attach unexpected side effects to ordinary controls. Pause or Escape ends this permission.",
+        detail: "The agent may navigate, search, click ordinary controls, and fill or submit non-sensitive forms without asking each time. Recognized consequential actions still ask; passwords, verification codes and payment details stay manual. Pause or Escape ends this permission.",
         buttons: ["Cancel", "Allow routine browsing"],
         defaultId: 0,
         cancelId: 0,
@@ -1620,7 +1620,10 @@ export class PersonalBrowserHost {
           compareSecurity: false,
         });
         this.assertNonSensitiveActivation(submitTarget.descriptor);
-        if (!(await this.confirmAgentActivation(submitTarget.descriptor, { formSubmission: true }))) {
+        const submissionNeedsConfirmation = this.approvalMode === "ask" ||
+          personalBrowserKeyRequiresConfirmation("Enter", submitTarget.descriptor, this.approvalMode);
+        if (submissionNeedsConfirmation &&
+          !(await this.confirmAgentActivation(submitTarget.descriptor, { formSubmission: true }))) {
           throw new PersonalBrowserControlError(403, "form_submission_denied", "The user denied form submission.");
         }
         this.assertControlEpoch(operationEpoch);

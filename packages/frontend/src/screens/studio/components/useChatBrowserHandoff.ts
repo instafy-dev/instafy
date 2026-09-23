@@ -164,7 +164,10 @@ export function useChatBrowserHandoff(options: Options) {
       throw new Error("Finish the current manual step and choose Done, continue before starting another browser task.");
     }
     const runtimeOverride = captured.personal.runtimeOverride;
-    if (!runtimeOverride) return continuePersonal(message, "ask");
+    if (!runtimeOverride) {
+      return continuePersonal(message, captured.personal.status?.approvalModes?.includes("routine")
+        ? captured.personal.preferredApprovalMode : "ask");
+    }
     await captured.onSubmit(captured.conversationId, message, {
       agentHandles: [captured.agentHandle],
       imageFiles: [],
