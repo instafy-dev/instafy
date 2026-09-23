@@ -351,7 +351,10 @@ derived from the published development value.
    time during your rollout (a rolling or blue/green deploy), first deploy
    `CREDENTIAL_ENCRYPTION_KEY=<old key>` with `CREDENTIAL_ENCRYPTION_PREVIOUS_KEYS=<new key>`
    everywhere, then swap the two. Both steps need a release that supports
-   `CREDENTIAL_ENCRYPTION_PREVIOUS_KEYS`.
+   `CREDENTIAL_ENCRYPTION_PREVIOUS_KEYS`. Provision it the way you provision
+   `CREDENTIAL_ENCRYPTION_KEY`: from your secret store, into the controller's environment only. If
+   your deployment tooling allowlists or audits the variables a controller may receive, add
+   `CREDENTIAL_ENCRYPTION_PREVIOUS_KEYS` there before this deploy, or it will be dropped or refused.
 3. Take a census with the service-role bearer (`CONTROLLER_INTERNAL_TOKEN` or the Supabase
    service-role key). It only reads:
 
@@ -388,8 +391,10 @@ derived from the published development value.
    `undecryptable` means rows under a key that is not configured at all: the pass leaves them
    alone, and removing a previous key cannot make them readable. Find their key first.
 6. Deploy without the old key in `CREDENTIAL_ENCRYPTION_PREVIOUS_KEYS` and take one more census:
-   `undecryptable` must not have grown. Then destroy the old key. Database backups taken before the
-   pass still hold values under it, so treat those backups as readable by anyone who holds it.
+   `undecryptable` must not have grown. Once no previous key is left, remove the variable from your
+   secret store and from any environment allowlist you added it to. Then destroy the old key.
+   Database backups taken before the pass still hold values under it, so treat those backups as
+   readable by anyone who holds it.
 
 ## Local Development
 

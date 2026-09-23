@@ -421,12 +421,18 @@ pub(crate) struct CredentialReencryption {
     pub(crate) totals: ReencryptionCounts,
 }
 
+#[derive(Debug, PartialEq, Eq)]
 enum RowOutcome {
     AlreadyPrimary,
     Reencrypted,
     Undecryptable,
     Vanished,
 }
+
+/// Seals a row's plaintext for the rewrite. The pass uses the key ring's own
+/// `seal`; tests substitute faulty sealers to prove that a value which fails
+/// the post-seal check is never written.
+type Sealer<'a> = &'a (dyn Fn(&[u8]) -> anyhow::Result<(String, String)> + Sync);
 
 /// Rewrite every row that only a previous key opens under the primary key.
 pub(crate) async fn run_reencryption(
@@ -436,6 +442,7 @@ pub(crate) async fn run_reencryption(
     max_rows: Option<u64>,
 ) -> anyhow::Result<CredentialReencryption> {
     let (primary_key, previous_keys) = describe_keys(keys);
+    let seal = |plaintext: &[u8]| keys.seal(plaintext);
     let mut totals = ReencryptionCounts::default();
     let mut tables = Vec::with_capacity(SEALED_TABLES.len());
     let mut complete = true;
@@ -459,7 +466,7 @@ pub(crate) async fn run_reencryption(
                     break 'pages;
                 }
                 counts.scanned += 1;
-                match reencrypt_row(&mut connection, table, keys, key).await? {
+                match reencrypt_row(&mut connection, table, keys, key, &seal).await? {
                     RowOutcome::AlreadyPrimary => counts.already_primary += 1,
                     RowOutcome::Reencrypted => counts.reencrypted += 1,
                     RowOutcome::Undecryptable => counts.undecryptable += 1,
@@ -504,6 +511,7 @@ async fn reencrypt_row(
     table: &SealedTable,
     keys: &CredentialKeyRing,
     key: &RowKey,
+    seal: Sealer<'_>,
 ) -> anyhow::Result<RowOutcome> {
     // An unlocked read first, so rows already under the primary key (after a
     // rotation, nearly all of them) are never locked against live traffic.
@@ -534,7 +542,9 @@ async fn reencrypt_row(
             });
         }
     };
-    let (new_nonce, new_ciphertext) = keys.seal(&plaintext)?;
+    // Returning early drops the transaction, which rolls it back and releases
+    // the row lock: a value that fails this check is never written.
+    let (new_nonce, new_ciphertext) = seal(&plaintext)?;
     let (check, slot) = keys.open_with_slot(&new_nonce, &new_ciphertext)?;
     anyhow::ensure!(
         slot == CredentialKeySlot::Primary && check == plaintext,
