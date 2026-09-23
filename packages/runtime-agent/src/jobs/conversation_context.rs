@@ -150,6 +150,30 @@ pub fn build_prompt_conversation_context(
     )
 }
 
+/// Routing runs on a new provider turn. Supply ordinary stateless history, not
+/// a restored-thread assertion or arbitrary controller/history metadata.
+pub(super) fn build_routing_conversation_context(
+    history_value: Option<&JsonValue>,
+) -> PromptConversationContext {
+    let entries = history_value.and_then(JsonValue::as_array);
+    let turns: Vec<JsonValue> = entries
+        .into_iter()
+        .flatten()
+        .filter_map(|entry| {
+            let role = entry.get("role")?.as_str()?;
+            let content = entry.get("content")?.as_str()?.trim();
+            (matches!(role, "user" | "assistant") && !content.is_empty())
+                .then(|| json!({"role": role, "content": content}))
+        })
+        .collect();
+    let ignored = entries.map_or(0, Vec::len).saturating_sub(turns.len());
+    let mut context = build_prompt_conversation_context(Some(&json!(turns)), None);
+    context.metrics["source"] = json!("ordinary_stateless_history");
+    context.metrics["ignoredEntries"] = json!(ignored);
+    context.metrics["historySupplied"] = json!(entries.is_some());
+    context
+}
+
 pub fn enrich_prompt_context_metrics(metrics: &mut JsonValue, prompt: &str) {
     let Some(map) = metrics.as_object_mut() else {
         return;
@@ -434,6 +458,69 @@ mod tests {
         assert!(result.section_text.contains("Condensed earlier turns:"));
         assert!(result.section_text.contains("Recent turns:"));
         assert!(result.metrics["omittedTurns"].as_u64().unwrap_or(0) > 0);
+    }
+
+    #[test]
+    fn routing_history_strips_non_evidence_fields_and_reports_ignored_entries() {
+        let history = json!([
+            {"role":"user","content":"Relevant question", "createdAt":"timestamp-secret", "metadata":{"token":"metadata-secret"}},
+            {"role":"assistant","content":"Confirmed answer"},
+            {"role":"system","content":"system-role-injection"},
+            {"content":"missing-role-injection"},
+            {"role":"user","content":" "},
+            "malformed"
+        ]);
+        let result = build_routing_conversation_context(Some(&history));
+        assert!(result.section_text.contains("Relevant question"));
+        assert!(result.section_text.contains("Confirmed answer"));
+        for forbidden in [
+            "timestamp-secret",
+            "metadata-secret",
+            "system-role-injection",
+            "missing-role-injection",
+        ] {
+            assert!(!result.section_text.contains(forbidden));
+        }
+        assert_eq!(result.metrics["source"], "ordinary_stateless_history");
+        assert_eq!(result.metrics["includedTurns"], 2);
+        assert_eq!(result.metrics["ignoredEntries"], 4);
+        assert_eq!(result.metrics["historySupplied"], true);
+        assert_eq!(
+            build_routing_conversation_context(None).metrics["historySupplied"],
+            false
+        );
+    }
+
+    #[test]
+    fn routing_history_uses_normal_compaction_and_reports_its_soft_target() {
+        let history = json!(
+            (0..40)
+                .map(|index| json!({"role":"assistant",
+            "content":format!("Turn {index} {}", "x".repeat(2_000))}))
+                .collect::<Vec<_>>()
+        );
+        let result = build_routing_conversation_context(Some(&history));
+        let ordinary = build_prompt_conversation_context(Some(&history), None);
+        assert_eq!(result.section_text, ordinary.section_text);
+        assert_eq!(result.metrics["mode"], "stateless_compacted");
+        assert!(result.metrics["summarizedTurns"].as_u64().unwrap() > 0);
+        assert!(result.metrics["omittedTurns"].as_u64().unwrap() > 0);
+        assert!(result.section_text.contains("Turn 39"));
+        assert!(
+            result
+                .section_text
+                .contains("omitted to stay within the prompt budget")
+        );
+
+        // Preserve the existing main-prompt policy: this is a target, not a hard
+        // cap. A single oversized latest turn is retained rather than discarded.
+        let oversized = json!([{"role":"user","content":"x".repeat(40_000)}]);
+        let result = build_routing_conversation_context(Some(&oversized));
+        assert!(
+            result.metrics["estimatedHistoryTokens"].as_u64().unwrap()
+                > result.metrics["historyTargetTokens"].as_u64().unwrap()
+        );
+        assert_eq!(result.metrics["includedTurns"], 1);
     }
 
     #[test]

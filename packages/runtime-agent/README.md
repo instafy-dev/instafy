@@ -71,6 +71,14 @@ Proxy routing (burn/refund) still relies on the shared runtime proxy. Set the pr
 
 See `TODO.md` for upcoming work: streaming progress, implementing plan/approval, and tying into credit accounting.
 
+## Routing evidence
+
+Ordinary routing receives sanitized current-conversation history. Required prior-context
+retrieval and fresh workspace observations are tracked independently from successful command
+receipts. The existing bounded recovery attempt preserves permissions and output format while
+retaining evidence from the first attempt. See [Execution Evidence and Recovery](../../docs/Multi-Agent-Evaluation.md#execution-evidence-and-recovery)
+for receipt limitations and compatibility behavior.
+
 ## Realistic browser-skill simulation (local Codex auth)
 
 Use this when iterating browser skills before release. It runs a live runtime-agent apply job through the local proxy, loading credentials from `~/.codex/auth.json`.
