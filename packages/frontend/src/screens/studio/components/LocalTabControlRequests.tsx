@@ -32,7 +32,7 @@ export function LocalTabControlRequests({
     if (document.activeElement === document.body) {
       requestsRef.current?.closest<HTMLElement>('[role="dialog"]')?.focus();
     }
-  }, [state?.requests, exploreState?.requests]);
+  }, [state?.requests, exploreState?.requests, exploreState?.views]);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const label = (id: string) => {
@@ -98,14 +98,14 @@ export function LocalTabControlRequests({
             key={`explore-${request.connectionId}`}
             className="flex flex-wrap items-center gap-2"
           >
-            <span>{label(request.userId)} wants to explore independently</span>
+            <span>{label(request.userId)} wants to browse independently</span>
             <Button
               size="sm"
               data-testid="local-tab-allow-explore"
               isDisabled={busy || (exploreState.views?.length ?? 0) >= 4}
               onPress={() => void act(() => explore.approve(request))}
             >
-              Allow Explore
+              Allow browsing
             </Button>
             <Button
               size="sm"
@@ -115,24 +115,9 @@ export function LocalTabControlRequests({
               Decline
             </Button>
             <span className="text-slate-500">
-              Opens a separate page using this browser’s signed-in accounts.
-              Saved changes may appear in your tab.
+              Their page and scroll are separate. Website logins and saved data
+              are shared; changes depend on the website.
             </span>
-          </div>
-        ) : null,
-      )}
-      {exploreState?.views?.map((view) =>
-        explore ? (
-          <div key={view.viewId} className="flex flex-wrap items-center gap-2">
-            <span>{label(view.userId)} is exploring independently</span>
-            <Button
-              size="sm"
-              variant="ghost"
-              data-testid="local-tab-end-explore"
-              onPress={() => void act(() => explore.close(view.viewId))}
-            >
-              End Explore
-            </Button>
           </div>
         ) : null,
       )}

@@ -176,17 +176,17 @@ export function SharedLocalTabViewer({ projectId, share, onClose, onEnded }: { p
   const inlineHeight = Math.max(160, bounds.width && imageSize.width ? bounds.width * imageSize.height / imageSize.width : 240);
   const panel = <section aria-label="Shared local browser tab" className={`relative flex min-h-0 min-w-0 flex-col overflow-hidden border border-slate-300 bg-slate-950 ${fullscreen ? "h-full border-0" : "rounded-lg"}`} style={{ paddingBottom: keyboardOccupiedHeight }} data-testid="local-browser-share-viewer">
     <div role="toolbar" aria-label="Shared tab controls" data-testid="local-tab-toolbar" className="flex h-14 shrink-0 items-center gap-1 bg-slate-100 px-1.5 text-xs text-slate-800 dark:bg-slate-900 dark:text-slate-100">
-      {exploring ? <IconButton className="!h-11 !w-11 shrink-0" variant="ghost" aria-label="Back in your Explore view" onPress={() => command("exploreNavigate", {viewId:explore!.view!.viewId,action:"back"})}><NavArrowLeft aria-hidden="true" className="h-5 w-5" /></IconButton> : null}
+      {exploring ? <IconButton className="!h-11 !w-11 shrink-0" variant="ghost" aria-label="Back in your browsing page" onPress={() => command("exploreNavigate", {viewId:explore!.view!.viewId,action:"back"})}><NavArrowLeft aria-hidden="true" className="h-5 w-5" /></IconButton> : null}
       <BrowserToolsPopover label="Shared tab view" isOpen={modeOpen} onOpenChange={setModeOpen} trigger={
         <Button variant="ghost" className="!h-11 min-w-0 gap-1" aria-label="Choose shared tab view" data-testid="local-tab-view-mode">
-          <span className="truncate">{exploring ? "Your view" : selfControls ? "You control" : explore?.requested ? "Request pending" : "Following"}</span><NavArrowDown aria-hidden="true" className="h-4 w-4 shrink-0" />
+          <span className="truncate">{exploring ? "Browsing" : selfControls ? "You control" : explore?.requested ? "Browse requested" : control?.requested ? "Control requested" : "Following"}</span><NavArrowDown aria-hidden="true" className="h-4 w-4 shrink-0" />
         </Button>
       }>
-        <p className="font-medium">{exploring ? "Your view" : "Following the shared tab"}</p>
-        <p className="text-xs text-slate-500">{exploring ? "Your layout and scroll are separate. Saved changes use the owner’s account." : "Follow the owner’s page, or ask to explore with your own layout and scroll. Explore uses the owner’s signed-in accounts; saved changes may appear in their tab."}</p>
-        {explore?.available ? <Button size="sm" variant="secondary" data-testid="local-tab-explore-action" isDisabled={!exploring && selfControls} onPress={() => { command(exploring || explore.requested ? "exploreReturn" : "exploreRequest", exploring || explore.requested ? {} : {viewport:viewerViewport()}); setModeOpen(false); }}>{exploring ? "Return to follow" : explore.requested ? "Cancel Explore request" : "Explore independently"}</Button> : null}
+        <p className="font-medium">{exploring ? "Browsing independently" : selfControls ? "Controlling the shared tab" : "Following the shared tab"}</p>
+        <p className="text-xs text-slate-500">{exploring ? "Your page and scroll are separate. Website logins and saved data are shared. Reload to see others’ changes; behavior depends on the website." : "Watch the owner’s page, or ask to browse with your own page and scroll. Independent browsing shares this browser’s website logins and saved data."}</p>
+        {explore?.available ? <Button size="sm" variant="secondary" data-testid="local-tab-explore-action" isDisabled={!exploring && selfControls} onPress={() => { command(exploring || explore.requested ? "exploreReturn" : "exploreRequest", exploring || explore.requested ? {} : {viewport:viewerViewport()}); setModeOpen(false); }}>{exploring ? "Follow owner again" : explore.requested ? "Cancel browsing request" : "Browse independently"}</Button> : null}
       </BrowserToolsPopover>
-      <span role="status" className="sr-only">{exploring ? "Explore · Your own view" : hasPicture && selfControls ? "Live tab · You control" : hasPicture && control?.grant ? "Live tab · Another participant controls" : state}</span>
+      <span role="status" className="sr-only">{exploring ? "Browsing independently · Shared website session" : hasPicture && selfControls ? "Live tab · You control" : hasPicture && control?.grant ? "Live tab · Another participant controls" : state}</span>
       <div className="flex-1" />
       {selfControls && !exploring ? <Button size="sm" className="!h-11 shrink-0" variant="secondary" data-testid="local-tab-control-action" aria-label="Release control" onPress={() => command("releaseControl")}>Release</Button> : null}
       <RemoteBrowserMobileKeyboard inlineTrigger enabled={(selfControls || exploring) && !panOnly && hasPicture} onMessage={sendInput} onOccupiedHeightChange={setKeyboardOccupiedHeight} />
@@ -201,11 +201,11 @@ export function SharedLocalTabViewer({ projectId, share, onClose, onEnded }: { p
         </Select>
         <div className="flex flex-col items-stretch gap-1">
           <Button size="sm" variant="ghost" onPress={() => { setToolsOpen(false); setFullscreen(current => !current); }} aria-label={fullscreen ? "Minimize shared tab" : "Expand shared tab"}>{fullscreen ? "Minimize" : "Expand"}</Button>
-          {exploring ? <Button size="sm" variant="ghost" aria-label="Reload your Explore view" onPress={() => { command("exploreNavigate",{viewId:explore!.view!.viewId,action:"reload"}); setToolsOpen(false); }}>Reload</Button> : null}
-          {!exploring && !selfControls && hasPicture && control?.available ? <Button size="sm" variant="ghost" data-testid="local-tab-control-action" onPress={() => { command(control.requested ? "releaseControl" : "requestControl"); setToolsOpen(false); }}>{control.requested ? "Cancel request" : "Request control"}</Button> : null}
+          {exploring ? <Button size="sm" variant="ghost" aria-label="Reload your browsing page" onPress={() => { command("exploreNavigate",{viewId:explore!.view!.viewId,action:"reload"}); setToolsOpen(false); }}>Reload</Button> : null}
+          {!exploring && !selfControls && hasPicture && control?.available ? <Button size="sm" variant="ghost" data-testid="local-tab-control-action" onPress={() => { command(control.requested ? "releaseControl" : "requestControl"); setToolsOpen(false); }}>{control.requested ? "Cancel control request" : "Request control"}</Button> : null}
           {selfControls || exploring ? <Button size="sm" variant="ghost" aria-pressed={panOnly} onPress={() => { setPanOnly(current => !current); setToolsOpen(false); }}>{panOnly ? "Control page" : "Pan view"}</Button> : null}
         </div>
-        <p className="text-xs text-slate-500">{exploring ? "Your layout and scroll are separate. Saved changes use the owner’s account." : selfControls ? "You can click and type using the owner’s account. Release returns control to the owner." : "You are viewing the shared page. Request control to click and type using the owner’s account."}</p>
+        <p className="text-xs text-slate-500">{exploring ? "Your page and scroll are separate. Website logins and saved data are shared. Reload to see others’ changes; behavior depends on the website." : selfControls ? "You can click and type using the owner’s account. Release returns control to the owner." : "You are viewing the shared page. Request control to click and type using the owner’s account."}</p>
       </BrowserToolsPopover>
       <IconButton className="!h-11 !w-11 shrink-0" variant="ghost" aria-label="Leave shared tab" onPress={onClose}><Xmark aria-hidden="true" className="h-5 w-5" /></IconButton>
     </div>

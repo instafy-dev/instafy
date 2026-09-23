@@ -247,7 +247,7 @@ it("opens view choices without requesting authority or reconnecting, and restore
   await frame();
   const trigger = document.querySelector<HTMLButtonElement>('[data-testid="local-tab-view-mode"]')!;
   await press("Choose shared tab view");
-  expect(document.querySelector('[role="dialog"][aria-label="Shared tab view"]')?.textContent).toContain("owner’s signed-in accounts");
+  expect(document.querySelector('[role="dialog"][aria-label="Shared tab view"]')?.textContent).toContain("this browser’s website logins and saved data");
   expect(socket.send).not.toHaveBeenCalled();
   await act(async () => {
     const dialog = document.querySelector<HTMLElement>('[role="dialog"][aria-label="Shared tab view"]')!;
@@ -257,4 +257,26 @@ it("opens view choices without requesting authority or reconnecting, and restore
   expect(document.querySelector('[role="dialog"][aria-label="Shared tab view"]')).toBeNull();
   expect(connect).toHaveBeenCalledTimes(1);
   expect(trigger.getAttribute("aria-expanded")).toBe("false");
+});
+
+
+it("shows pending browsing and control requests in the compact toolbar without implying approval", async () => {
+  await frame();
+  const label = () => document.querySelector('[data-testid="local-tab-view-mode"]')?.textContent;
+  const update = async (state: object) => act(async () => socket.dispatchEvent(new MessageEvent("message", {data:JSON.stringify(state)})));
+  expect(label()).toBe("Following");
+  await update({type:"controlState",available:true,connectionId:"own",requested:true,grant:null});
+  expect(label()).toBe("Control requested");
+  expect(document.querySelector('[aria-label="Release control"]')).toBeNull();
+  await update({type:"controlState",available:true,connectionId:"own",requested:false,grant:null});
+  expect(label()).toBe("Following");
+  await update({type:"exploreState",available:true,requested:true,view:null});
+  expect(label()).toBe("Browse requested");
+  await update({type:"exploreState",available:true,requested:false,view:{viewId:"11111111-1111-4111-8111-111111111111",connectionId:"own",userId:"viewer",viewport:{width:390,height:700,dpr:1}}});
+  expect(label()).toBe("Browsing");
+  await press("Choose shared tab view");
+  const description = document.querySelector('[role="dialog"][aria-label="Shared tab view"]')?.textContent;
+  expect(description).toContain("Website logins and saved data are shared");
+  expect(description).toContain("behavior depends on the website");
+  expect(document.querySelectorAll('[data-testid="local-tab-toolbar"]')).toHaveLength(1);
 });

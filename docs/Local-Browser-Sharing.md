@@ -18,11 +18,14 @@ the chosen audience select **View shared tab** under **Tabs shared with you** in
 the conversation. The owner's address bar contains **Sharing**, a pending-request
 count, and **Stop**. Sharing opens audience management and control/Explore
 requests in a popover; neither requests nor active participants add page rows.
+Each audience member appears once, with their current activity and actions.
+**End browsing** closes that person’s independent pages while keeping them in the
+audience; **Remove** ends all of their access to this share.
 **Take back** stays in the toolbar while a participant controls the source.
 Stop returns the tab to private browsing. AI approval preferences and Clear Data
 are in **Browser settings**. No browser runtime is allocated for this viewing session.
 
-Viewers have one 56px toolbar: **Following / Your view**, Back when exploring,
+Viewers have one 56px toolbar: **Following / Browsing**, Back when exploring,
 a mobile keyboard button when input is available, options, and close. The mode
 picker explains shared-account behavior before requesting Explore. Options hold
 zoom, Expand/Minimize, Reload, Request control and Pan view. **Release** remains
@@ -85,11 +88,11 @@ view-only until updated.
 
 ## Independent Explore
 
-A viewer opens **Following** and selects **Explore independently**. The owner
-approves **Allow Explore** in **Sharing**. This creates a separate sandboxed page on the owner's
+A viewer opens **Following** and selects **Browse independently**. The owner
+approves **Allow browsing** in **Sharing**. This creates a separate sandboxed page on the owner's
 Electron device, initially at the source URL. Its responsive layout follows the
 participant's available viewer area and pixel density. Expand and Minimize resize
-that private page without resizing the source. Scroll, focus, input, navigation,
+that separate page without resizing the source. Scroll, focus, input, navigation,
 Back and Reload apply to the approved participant's page only. Follow continues
 to display the source's shared layout and scroll position.
 
@@ -102,8 +105,28 @@ in-memory login or prevent concurrent sessions may behave differently. Approval
 permits normal web navigation in this session, not just reading the initial page.
 The approval row explicitly explains the shared-account behavior.
 
-**Return to follow** in the **Your view** picker destroys the participant's private renderer and rejoins the
-canonical stream without reconnecting the viewer socket. **End Explore** in Sharing lets the
+This behaves like multiple tabs in one browser profile, not a collaborative
+transaction layer. A cart stored in cookies or server-side account state can be
+shared, but a site's page memory, sessionStorage, cart initialization and
+concurrent-write behavior still matter. Pages may need navigation or Reload to
+show another person's changes. Shared locale or currency settings can also affect
+other pages. Instafy does not merge carts, resolve conflicting edits, or guarantee
+that simultaneous actions survive on every website.
+
+A September 23, 2026 manual test used an Electron owner and two distinct Instafy
+participants at a real guest storefront (Pimoroni), with 390px and 1280px viewer
+widths. They navigated and scrolled separate product pages. Initial additions from
+two fresh guest pages left only one item in the eventual shared cart; the cause
+of that initial lost addition was not instrumented. After that cart existed,
+another addition produced both products, and all three pages showed the same
+items after navigation or Reload. A quantity edit likewise appeared after Reload.
+The site also exposed stale cart badges and locale/currency displays. Test items
+were removed and the cart was empty before cleanup; checkout was never opened.
+This verifies independent layouts and shared-session changes, not universal
+conflict-free shopping.
+
+**Follow owner again** in the **Browsing** picker destroys the participant's separate renderer and rejoins the
+canonical stream without reconnecting the viewer socket. **End browsing** in Sharing lets the
 owner do the same. Removal, disconnect, Stop sharing and source closure retire the
 view and fence queued input and late frames. A new request requires new approval;
 late heartbeats cannot recreate a closed renderer. The exact connection owns the

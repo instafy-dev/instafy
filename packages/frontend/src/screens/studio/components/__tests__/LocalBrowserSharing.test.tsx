@@ -40,7 +40,7 @@ it("defaults to selected people and never captures until a nonempty audience is 
   expect(document.querySelector('[data-testid="local-browser-share-people"]')?.textContent).toContain("Sharing");
   expect(document.querySelector('[data-testid="local-browser-share-audience"]')).toBeNull();
   await click("local-browser-share-people");
-  expect(document.querySelector('[role="dialog"][aria-label="Sharing settings"]')?.textContent).toContain("Selected people · View only");
+  expect(document.querySelector('[role="dialog"][aria-label="Sharing settings"]')?.textContent).toContain("Selected people");
   await click("local-browser-share-people");
   expect(document.querySelector('[data-testid="local-browser-share-audience"]')).toBeNull();
   expect(publishLocalBrowserTab).toHaveBeenCalledTimes(1);
@@ -58,11 +58,11 @@ it("requires an explicit choice for space-wide sharing and removes one viewer wi
   await click("local-browser-share-confirm");
   expect(publishLocalBrowserTab).toHaveBeenCalledWith("project", "binding", expect.any(AbortSignal), expect.any(Function), { audience: "space" }, expect.any(Function), expect.any(Function));
   await click("local-browser-share-people");
-  expect(document.body.textContent).toContain("Everyone in this space · View only");
+  expect(document.body.textContent).toContain("Everyone in this space");
   await act(async () => (document.querySelector('[aria-label="Remove Alice"]') as HTMLElement).click());
   expect(removeViewer).toHaveBeenCalledWith("share", "alice");
   expect(document.body.textContent).toContain("Alice · Removed from this share");
-  expect(document.body.textContent).toContain("Bob · Viewing");
+  expect(document.body.textContent).toContain("Bob · Following");
   // A stale audience poll must not undo an acknowledged removal.
   await act(async () => vi.advanceTimersByTimeAsync(3000));
   expect(document.querySelector('[aria-label="Remove Alice"]')).toBeNull();
@@ -78,7 +78,7 @@ it("shows failed removal without falsely claiming that access ended", async () =
   await click("local-browser-share-people");
   await act(async () => (document.querySelector('[aria-label="Remove Alice"]') as HTMLElement).click());
   expect(document.body.textContent).toContain("Could not remove this person");
-  expect(document.body.textContent).toContain("Alice · Viewing");
+  expect(document.body.textContent).toContain("Alice · Following");
   expect(document.querySelector('[aria-label="Remove Alice"]')).not.toBeNull();
 });
 
@@ -126,7 +126,7 @@ it("uses one audience fetch for People and control/Explore labels, and stops pol
   expect(viewers).toHaveBeenCalledTimes(2);
   await click("local-browser-share-people");
   expect(document.body.textContent).toContain("Alice requests control");
-  expect(document.body.textContent).toContain("Alice · Viewing");
+  expect(document.body.textContent).toContain("Alice · Following");
   expect(viewers).toHaveBeenCalledTimes(2);
 
   await act(async () => publication[6]!({
@@ -134,7 +134,7 @@ it("uses one audience fetch for People and control/Explore labels, and stops pol
     requests: [{ connectionId: "bob-tab", userId: "bob", viewport: { width: 390, height: 650, dpr: 2 } }],
     views: [],
   }));
-  expect(document.body.textContent).toContain("Bob wants to explore independently");
+  expect(document.body.textContent).toContain("Bob wants to browse independently");
   expect(viewers).toHaveBeenCalledTimes(3);
   await act(async () => vi.advanceTimersByTimeAsync(3000));
   expect(viewers).toHaveBeenCalledTimes(4);
@@ -152,7 +152,24 @@ it("uses one audience fetch for People and control/Explore labels, and stops pol
   await click("local-browser-share-people");
   const exploreButton = document.querySelector<HTMLButtonElement>('[data-testid="local-tab-allow-explore"]')!;
   await act(async () => exploreButton.focus());
+  await act(async () => publication[6]!({type:"exploreState",available:true,requested:false,view:null,requests:[],views:[{viewId:"bob-view",connectionId:"bob-tab",userId:"bob",viewport:{width:390,height:650,dpr:2}},{viewId:"bob-view-2",connectionId:"bob-other-tab",userId:"bob",viewport:{width:1280,height:650,dpr:1}}]}));
+  expect(document.querySelector('[data-testid="local-browser-share-audience"]')?.textContent).toContain("Alice · Controlling your tab");
+  expect(document.querySelector('[data-testid="local-browser-share-audience"]')?.textContent).toContain("Bob · Browsing independently");
+  expect(document.body.textContent).not.toContain("View only");
+  expect(document.querySelectorAll('[data-testid="local-browser-share-person"]')).toHaveLength(2);
+  expect(document.querySelectorAll('[data-testid="local-tab-end-explore"]')).toHaveLength(1);
+  await click("local-tab-end-explore");
+  expect(published.explore.close.mock.calls).toEqual([["bob-view"], ["bob-view-2"]]);
+  expect(removeViewer).not.toHaveBeenCalled();
+  // Failed closure retains its action and does not claim browsing has ended.
+  published.explore.close.mockRejectedValueOnce(new Error("offline"));
+  await click("local-tab-end-explore");
+  expect(document.body.textContent).toContain("Could not end browsing");
+  expect(document.querySelector('[data-testid="local-tab-end-explore"]')).not.toBeNull();
   await act(async () => publication[6]!({type:"exploreState",available:true,requested:false,view:null,requests:[],views:[]}));
+  expect(document.querySelector('[data-testid="local-tab-end-explore"]')).toBeNull();
+  expect(document.body.textContent).toContain("Bob · Following");
+
   expect(document.activeElement).toBe(document.querySelector('[role="dialog"][aria-label="Sharing settings"]'));
   await act(async () => document.activeElement!.dispatchEvent(new KeyboardEvent("keydown", {key:"Escape",bubbles:true,cancelable:true})));
   expect(document.querySelector('[role="dialog"][aria-label="Sharing settings"]')).toBeNull();

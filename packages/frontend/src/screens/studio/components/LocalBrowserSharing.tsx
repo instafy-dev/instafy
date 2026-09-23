@@ -49,7 +49,7 @@ function ShareAudiencePicker({ projectId, onShare, onCancel }: { projectId: stri
       {hasMore ? <p className="text-xs">Search by name or email to find more people.</p> : null}
       {error ? <p role="alert" className="text-xs text-rose-600">{error}</p> : null}
     </> : null}
-    <p className="text-xs text-slate-500">People start as viewers. You choose whether to allow control. Shared pages can include signed-in accounts.</p>
+    <p className="text-xs text-slate-500">People start as viewers. You choose whether to allow control or independent browsing. Both can use this browser’s website logins and change shared data.</p>
     <div className="flex gap-2"><Button size="sm" data-testid="local-browser-share-confirm" isDisabled={audience === "selected" && !selected.length} onPress={() => onShare(audience === "space" ? { audience } : { audience, viewerUserIds: selected.map(p => p.userId) })}>Start sharing</Button><Button size="sm" variant="ghost" onPress={onCancel}>Cancel</Button></div>
   </section>;
 }
@@ -89,6 +89,22 @@ function ShareParticipants({ projectId, share, controlState, exploreState }: {
     } catch { setError("Could not remove this person. Try again or stop sharing."); }
     finally { setBusy(null); }
   }
+  async function endBrowsing(userId: string) {
+    setBusy(userId); setError(null);
+    try {
+      for (const view of exploreState?.views ?? []) {
+        if (view.userId === userId) await share.explore?.close(view.viewId);
+      }
+    } catch { setError("Could not end browsing. Try again or stop sharing."); }
+    finally { setBusy(null); }
+  }
+  // Keep active participants manageable even if the audience lookup is delayed.
+  const participants = [...viewers];
+  for (const participant of [...(exploreState?.views ?? []), ...(controlState?.grant ? [controlState.grant] : [])]) {
+    if (!participants.some(viewer => viewer.userId === participant.userId)) {
+      participants.push({ userId: participant.userId, fullName: null, email: null, active: true, removed: removed.current.has(participant.userId) });
+    }
+  }
   const requestCount = (controlState?.requests?.length ?? 0) + (exploreState?.requests?.length ?? 0);
   return <BrowserToolsPopover label="Sharing settings" trigger={
     <Button size="sm" variant="ghost" data-testid="local-browser-share-people" aria-label={requestCount ? `Sharing settings, ${requestCount} pending ${requestCount === 1 ? "request" : "requests"}` : "Sharing settings"}>
@@ -96,13 +112,16 @@ function ShareParticipants({ projectId, share, controlState, exploreState }: {
       Sharing{requestCount ? <span className="rounded-full bg-primary-500 px-1.5 text-white" role="status">{requestCount}</span> : null}
     </Button>
   }>
-    <p className="font-medium">{share.audience === "space" ? "Everyone in this space" : "Selected people"} · {controlState?.grant ? "Control shared" : "View only"}</p>
+    <p className="font-medium">{share.audience === "space" ? "Everyone in this space" : "Selected people"}</p>
     {share.control ? <LocalTabControlRequests people={viewers} state={controlState} control={share.control} explore={share.explore} exploreState={exploreState} showTakeBack={false} /> : null}
       <section aria-label="Tab audience" className="space-y-1 text-xs" data-testid="local-browser-share-audience">
-      {!viewers.length ? <p>{share.audience === "space" ? "No other viewers connected." : "Loading audience…"}</p> : null}
-      <div className="max-h-40 space-y-1 overflow-y-auto">{viewers.map(viewer => <div key={viewer.userId} className="flex items-center justify-between gap-2" data-testid="local-browser-share-person">
-        <span className="min-w-0 break-words">{personLabel(viewer)} · {viewer.removed ? "Removed from this share" : viewer.active ? "Viewing" : "Can view"}{viewer.fullName && viewer.email ? <span className="block text-slate-500">{viewer.email}</span> : null}</span>
-        {!viewer.removed ? <Button size="sm" variant="ghost" isDisabled={busy !== null} aria-label={`Remove ${personLabel(viewer)}`} onPress={() => void remove(viewer.userId)}>Remove</Button> : null}
+      {!participants.length ? <p>{share.audience === "space" ? "No other viewers connected." : "Loading audience…"}</p> : null}
+      <div className="max-h-64 space-y-1 overflow-y-auto">{participants.map(viewer => <div key={viewer.userId} className="space-y-1 border-t border-slate-200 py-2 first:border-0 dark:border-slate-700" data-testid="local-browser-share-person">
+        <span className="block min-w-0 break-words">{personLabel(viewer)} · {viewer.removed ? "Removed from this share" : controlUserId === viewer.userId ? "Controlling your tab" : exploreState?.views?.some(view => view.userId === viewer.userId) ? "Browsing independently" : viewer.active ? "Following" : "Can view"}{viewer.fullName && viewer.email ? <span className="block text-slate-500">{viewer.email}</span> : null}</span>
+        {!viewer.removed ? <div className="flex flex-wrap gap-1">
+          {share.explore && exploreState?.views?.some(view => view.userId === viewer.userId) ? <Button size="sm" variant="secondary" data-testid="local-tab-end-explore" aria-label={`End browsing for ${personLabel(viewer)}`} isDisabled={busy !== null} onPress={() => void endBrowsing(viewer.userId)}>End browsing</Button> : null}
+          <Button size="sm" variant="ghost" isDisabled={busy !== null} aria-label={`Remove ${personLabel(viewer)}`} onPress={() => void remove(viewer.userId)}>Remove</Button>
+        </div> : null}
       </div>)}</div>
       <p className="text-slate-500">Removed people cannot rejoin this share. Their space membership stays unchanged.</p>
       {error ? <p role="alert" className="text-rose-600">{error}</p> : null}
