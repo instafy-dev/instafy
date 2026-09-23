@@ -2318,34 +2318,25 @@ async fn ensure_runtime_launch_inner(
         return Err(error);
     }
 
-    let provider_result = match tokio::time::timeout(
+    let provider_result = call_provider_endpoint(
+        state,
+        &provider_cfg,
+        "/runtime/ensure",
+        &ProviderEnsureRequest {
+            project_id: &project_id,
+            runtime_id: &runtime.id,
+            lease_id: &lease.id,
+            provider: provider_cfg.id.as_str(),
+            runtime_token: runtime_token.as_str(),
+            metadata: allocator_metadata.as_ref(),
+            origin_instance_id: origin_instance_id.as_ref(),
+            origin_mode: origin_options.mode.as_ref(),
+            origin_protocols: origin_options.protocols.clone(),
+            origin_metadata: origin_options.metadata.as_ref(),
+        },
         RUNTIME_PROVIDER_ENSURE_FENCE_TIMEOUT,
-        call_provider_endpoint(
-            state,
-            &provider_cfg,
-            "/runtime/ensure",
-            &ProviderEnsureRequest {
-                project_id: &project_id,
-                runtime_id: &runtime.id,
-                lease_id: &lease.id,
-                provider: provider_cfg.id.as_str(),
-                runtime_token: runtime_token.as_str(),
-                metadata: allocator_metadata.as_ref(),
-                origin_instance_id: origin_instance_id.as_ref(),
-                origin_mode: origin_options.mode.as_ref(),
-                origin_protocols: origin_options.protocols.clone(),
-                origin_metadata: origin_options.metadata.as_ref(),
-            },
-        ),
     )
-    .await
-    {
-        Ok(result) => result,
-        Err(_) => Err(anyhow::anyhow!(
-            "runtime provider ensure timed out after {} seconds",
-            RUNTIME_PROVIDER_ENSURE_FENCE_TIMEOUT.as_secs()
-        )),
-    };
+    .await;
 
     // On success the guard is read-only and can be rolled back cheaply. A
     // provider error is ambiguous, however: before releasing the row locks,
@@ -2403,27 +2394,21 @@ async fn ensure_runtime_launch_inner(
     // serializes ensure/release per runtime, so this release runs after any
     // late allocator completion and removes the result deterministically.
     let compensation_error = if provider_result.is_err() {
-        match tokio::time::timeout(
+        match call_provider_endpoint(
+            state,
+            &provider_cfg,
+            "/runtime/release",
+            &ProviderReleaseRequest {
+                project_id: &project_id,
+                runtime_id: &runtime.id,
+                lease_id: Some(&lease.id),
+            },
             RUNTIME_PROVIDER_COMPENSATING_RELEASE_TIMEOUT,
-            call_provider_endpoint(
-                state,
-                &provider_cfg,
-                "/runtime/release",
-                &ProviderReleaseRequest {
-                    project_id: &project_id,
-                    runtime_id: &runtime.id,
-                    lease_id: Some(&lease.id),
-                },
-            ),
         )
         .await
         {
-            Ok(Ok(_)) => None,
-            Ok(Err(error)) => Some(error.to_string()),
-            Err(_) => Some(format!(
-                "compensating provider release timed out after {} seconds",
-                RUNTIME_PROVIDER_COMPENSATING_RELEASE_TIMEOUT.as_secs()
-            )),
+            Ok(_) => None,
+            Err(error) => Some(error.to_string()),
         }
     } else {
         None

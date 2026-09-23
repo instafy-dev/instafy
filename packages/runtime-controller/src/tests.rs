@@ -2156,6 +2156,22 @@ pub(crate) async fn require_origin_test_pool(test_name: &str) -> anyhow::Result<
     })
 }
 
+/// A deliberately small pool on the shared test database. Connection-hygiene
+/// tests use it to prove a code path returns its pool slot before slow
+/// external I/O: with the slot still checked out, a concurrent `get` stalls.
+pub(crate) async fn require_origin_test_pool_with_max_size(
+    test_name: &str,
+    max_size: u32,
+) -> anyhow::Result<PgPool> {
+    setup_origin_test_pool_with_max_size(max_size)
+        .await?
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "{test_name} requires TEST_DATABASE_URL; run it through `pnpm test:controller`"
+            )
+        })
+}
+
 async fn cleanup_origin_project(pool: &PgPool, project_id: &Uuid) -> anyhow::Result<()> {
     let connection = pool.get().await?;
     connection

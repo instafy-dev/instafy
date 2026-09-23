@@ -27,6 +27,7 @@ use super::db::{
 };
 use super::provider::{
     call_provider_endpoint, lock_and_load_authoritative_provider_config, ProviderReleaseRequest,
+    RUNTIME_PROVIDER_RELEASE_TIMEOUT,
 };
 
 #[derive(Debug, Deserialize)]
@@ -1120,6 +1121,10 @@ async fn release_runtime_via_resolved_provider(
         return ProviderReleaseOutcome::default();
     }
 
+    // Every caller has already committed the `cleanup_pending` quarantine and
+    // returned its pooled connection. A timeout leaves that fence in place, so
+    // the stop stays retryable instead of hanging the caller (or the whole
+    // sequential sweep) on an unresponsive provider.
     match call_provider_endpoint(
         state,
         provider_cfg,
@@ -1129,6 +1134,7 @@ async fn release_runtime_via_resolved_provider(
             runtime_id: &runtime.id,
             lease_id: Some(lease_id),
         },
+        RUNTIME_PROVIDER_RELEASE_TIMEOUT,
     )
     .await
     {
@@ -2443,6 +2449,179 @@ mod tests {
         Ok(())
     }
 
+    /// Every sweep, reclaim and explicit stop funnels through
+    /// `stop_runtime_safely`. While the provider release is in flight the
+    /// quarantine must already be committed (so the fence holds) and no pool
+    /// slot may be checked out (so a slow provider cannot starve the pool).
+    #[tokio::test]
+    async fn safe_stop_holds_no_connection_while_the_provider_releases() -> anyhow::Result<()> {
+        use std::sync::Arc;
+        use tokio::sync::Notify;
+
+        let pool = crate::tests::require_origin_test_pool_with_max_size(
+            "safe stop connection hygiene test",
+            1,
+        )
+        .await?;
+
+        let release_reached = Arc::new(Notify::new());
+        let release_respond = Arc::new(Notify::new());
+        let provider_app = axum::Router::new().route(
+            "/runtime/release",
+            axum::routing::post({
+                let release_reached = release_reached.clone();
+                let release_respond = release_respond.clone();
+                move || {
+                    let release_reached = release_reached.clone();
+                    let release_respond = release_respond.clone();
+                    async move {
+                        release_reached.notify_one();
+                        release_respond.notified().await;
+                        StatusCode::NO_CONTENT
+                    }
+                }
+            }),
+        );
+        let provider_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+        let provider_address = provider_listener.local_addr()?;
+        let provider_server = tokio::spawn(async move {
+            axum::serve(provider_listener, provider_app)
+                .await
+                .expect("serve slow release provider");
+        });
+
+        let provider_id = "runtime_stop_connection_hygiene_test";
+        let project_id = Uuid::new_v4();
+        let runtime_id = Uuid::new_v4();
+        let lease_id = Uuid::new_v4();
+        {
+            let connection = pool.get().await?;
+            connection
+                .execute(
+                    "insert into projects (id, project_type, status)
+                     values ($1, 'customer', 'active')",
+                    &[&project_id],
+                )
+                .await?;
+            connection
+                .execute(
+                    "insert into runtimes
+                        (id, project_id, provider, status, endpoint_url,
+                         idle_ttl_seconds, last_seen_at)
+                     values ($1, $2, $3, 'ready', 'http://runtime.test', 600, now())",
+                    &[&runtime_id, &project_id, &provider_id],
+                )
+                .await?;
+            connection
+                .execute(
+                    "insert into runtime_leases
+                        (id, project_id, runtime_id, status, requested_at, launched_at)
+                     values ($1, $2, $3, 'active', now(), now())",
+                    &[&lease_id, &project_id, &runtime_id],
+                )
+                .await?;
+            connection
+                .execute(
+                    "update runtimes set active_lease_id = $2 where id = $1",
+                    &[&runtime_id, &lease_id],
+                )
+                .await?;
+        }
+
+        let mut config = build_app_config(
+            test_origin_private_key(),
+            test_origin_public_key(),
+            "safe-stop-connection-hygiene",
+        );
+        config.runtime_providers = vec![RuntimeProviderConfig {
+            id: provider_id.to_string(),
+            display_name: "Slow release provider".to_string(),
+            kind: "test".to_string(),
+            owner_org_id: None,
+            allowed_org_ids: vec![],
+            endpoint: Some(format!("http://{provider_address}")),
+            auth_token: None,
+            metadata: None,
+        }];
+        let state = build_test_state(pool.clone(), config);
+
+        let stop = tokio::spawn({
+            let state = state.clone();
+            async move {
+                super::stop_runtime_safely(
+                    &state,
+                    &runtime_id,
+                    super::StopOptions {
+                        source: "connection_hygiene_test",
+                        reason: Some("connection_hygiene_test".to_string()),
+                        skip_if_active_jobs: false,
+                        require_idle_timeout: false,
+                        allow_cleanup_pending_release: false,
+                        expected_identity: None,
+                    },
+                )
+                .await
+            }
+        });
+        timeout(Duration::from_secs(5), release_reached.notified())
+            .await
+            .expect("safe stop never reached the provider release");
+
+        {
+            let probe = timeout(Duration::from_secs(2), pool.get()).await.expect(
+                "safe stop kept the only pool connection checked out across the provider release",
+            )?;
+            let fence = probe
+                .query_one(
+                    "select r.status as runtime_status, r.active_lease_id,
+                            l.status as lease_status, l.released_at
+                     from runtimes r
+                     join runtime_leases l on l.id = $2
+                     where r.id = $1",
+                    &[&runtime_id, &lease_id],
+                )
+                .await?;
+            assert_eq!(fence.get::<_, String>("runtime_status"), "requested");
+            assert_eq!(
+                fence.get::<_, Option<Uuid>>("active_lease_id"),
+                Some(lease_id)
+            );
+            assert_eq!(fence.get::<_, String>("lease_status"), "cleanup_pending");
+            assert!(fence
+                .get::<_, Option<chrono::DateTime<chrono::Utc>>>("released_at")
+                .is_none());
+        }
+
+        release_respond.notify_one();
+        let stopped = timeout(Duration::from_secs(5), stop)
+            .await??
+            .map_err(|(status, body)| anyhow::anyhow!("{status}: {}", body.0.message))?;
+        assert!(stopped.outcome.status_changed);
+        assert_eq!(stopped.outcome.released_runtime_lease_id, Some(lease_id));
+
+        {
+            let connection = pool.get().await?;
+            let row = connection
+                .query_one(
+                    "select r.status as runtime_status, r.active_lease_id,
+                            l.status as lease_status
+                     from runtimes r
+                     join runtime_leases l on l.id = $2
+                     where r.id = $1",
+                    &[&runtime_id, &lease_id],
+                )
+                .await?;
+            assert_eq!(row.get::<_, String>("runtime_status"), "stopped");
+            assert!(row.get::<_, Option<Uuid>>("active_lease_id").is_none());
+            assert_eq!(row.get::<_, String>("lease_status"), "released");
+            connection
+                .execute("delete from projects where id = $1", &[&project_id])
+                .await?;
+        }
+        provider_server.abort();
+        Ok(())
+    }
+
     #[tokio::test]
     async fn strict_provider_release_reports_provider_acceptance() {
         let server = MockServer::start_async().await;
@@ -2668,6 +2847,9 @@ pub(crate) async fn runtime_mark_offline(
             "failed to finalize runtime offline update: {error}"
         ))
     })?;
+    // The provider release below is network I/O; never keep a pool slot
+    // checked out while it runs.
+    drop(connection);
     crate::send_intents::publish_job_input_state_updates(
         &state,
         &job_disposition.job_input_state_updates,
@@ -2697,6 +2879,7 @@ pub(crate) async fn runtime_mark_offline(
                 runtime_id: &runtime_id,
                 lease_id: runtime.active_lease_id.as_ref(),
             },
+            RUNTIME_PROVIDER_RELEASE_TIMEOUT,
         )
         .await
         {

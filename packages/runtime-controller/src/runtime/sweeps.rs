@@ -15,7 +15,10 @@ use crate::{publish_controller_event, AppState};
 
 use super::db::{fetch_runtime_for_update, release_origin_instances_for_runtime};
 use super::ensure::ensure_runtime_for_requeued_jobs;
-use super::provider::{call_provider_endpoint, select_provider_config, ProviderReleaseRequest};
+use super::provider::{
+    call_provider_endpoint, select_provider_config, ProviderReleaseRequest,
+    RUNTIME_PROVIDER_INSPECT_TIMEOUT,
+};
 use super::status::release_leases_for_project;
 use super::stop::{stop_runtime_safely, SafeRuntimeStop, StopOptions};
 
@@ -548,14 +551,19 @@ fn notify_runtime_stopped_with_extra(
 /// Asks the runtime's provider whether the container died to the OOM killer.
 /// Best-effort and read-only: any failure just means "unknown".
 async fn inspect_runtime_oom(state: &AppState, runtime_id: &Uuid) -> Option<bool> {
-    let connection = state.pool.get().await.ok()?;
-    let row = connection
-        .query_opt(
-            "select project_id, provider from runtimes where id = $1",
-            &[runtime_id],
-        )
-        .await
-        .ok()??;
+    // The pool slot is returned at the end of this block, before the provider
+    // round trip: this sweep runs every tick, and one slow provider must not
+    // pin a connection the rest of the controller needs.
+    let row = {
+        let connection = state.pool.get().await.ok()?;
+        connection
+            .query_opt(
+                "select project_id, provider from runtimes where id = $1",
+                &[runtime_id],
+            )
+            .await
+            .ok()??
+    };
     let project_id: Uuid = row.get("project_id");
     let provider: String = row.get("provider");
     if !crate::provider_identifiers::is_instafy_cloud_provider_id(&provider) {
@@ -571,6 +579,7 @@ async fn inspect_runtime_oom(state: &AppState, runtime_id: &Uuid) -> Option<bool
             runtime_id,
             lease_id: None,
         },
+        RUNTIME_PROVIDER_INSPECT_TIMEOUT,
     )
     .await
     .ok()??;
@@ -2030,5 +2039,124 @@ mod tests {
             serde_json::Value::Null
         );
         fixture.cleanup().await
+    }
+
+    /// The heartbeat-timeout sweep asks the provider for an OOM post-mortem
+    /// on every stale runtime. With the only pool slot checked out across that
+    /// call, every other request stalled until the provider answered.
+    #[tokio::test]
+    async fn oom_inspection_returns_its_connection_before_waiting_on_the_provider(
+    ) -> anyhow::Result<()> {
+        use std::sync::Arc;
+        use std::time::Duration;
+
+        use axum::Json;
+        use serde_json::json;
+        use tokio::sync::Notify;
+
+        let pool = crate::tests::require_origin_test_pool_with_max_size(
+            "OOM inspection connection hygiene test",
+            1,
+        )
+        .await?;
+
+        let inspect_reached = Arc::new(Notify::new());
+        let inspect_respond = Arc::new(Notify::new());
+        let provider_app = axum::Router::new().route(
+            "/runtime/inspect",
+            axum::routing::post({
+                let inspect_reached = inspect_reached.clone();
+                let inspect_respond = inspect_respond.clone();
+                move || {
+                    let inspect_reached = inspect_reached.clone();
+                    let inspect_respond = inspect_respond.clone();
+                    async move {
+                        inspect_reached.notify_one();
+                        inspect_respond.notified().await;
+                        Json(json!({ "oom_killed": true }))
+                    }
+                }
+            }),
+        );
+        let provider_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+        let provider_address = provider_listener.local_addr()?;
+        let provider_server = tokio::spawn(async move {
+            axum::serve(provider_listener, provider_app)
+                .await
+                .expect("serve slow OOM inspection provider");
+        });
+
+        // Inspection only runs for hosted runtimes; a suffixed id keeps this
+        // route separate from the trusted production provider id.
+        let provider_id = "instafy_cloud_connection_hygiene_test";
+        let project_id = Uuid::new_v4();
+        let runtime_id = Uuid::new_v4();
+        {
+            let connection = pool.get().await?;
+            connection
+                .execute(
+                    "insert into projects (id, project_type, status)
+                     values ($1, 'customer', 'active')",
+                    &[&project_id],
+                )
+                .await?;
+            connection
+                .execute(
+                    "insert into runtimes (
+                         id, project_id, provider, status, idle_ttl_seconds, last_seen_at
+                     ) values ($1, $2, $3, 'ready', 1, now() - interval '1 hour')",
+                    &[&runtime_id, &project_id, &provider_id],
+                )
+                .await?;
+        }
+
+        let mut config = crate::tests::build_app_config(
+            crate::tests::test_origin_private_key(),
+            crate::tests::test_origin_public_key(),
+            "oom-inspection-connection-hygiene",
+        );
+        config.runtime_providers = vec![crate::config::RuntimeProviderConfig {
+            id: provider_id.to_string(),
+            display_name: "Slow OOM inspection provider".to_string(),
+            kind: "test".to_string(),
+            owner_org_id: None,
+            allowed_org_ids: vec![],
+            endpoint: Some(format!("http://{provider_address}")),
+            auth_token: None,
+            metadata: None,
+        }];
+        let state = crate::tests::build_test_state(pool.clone(), config);
+
+        let inspection = tokio::spawn({
+            let state = state.clone();
+            async move { super::inspect_runtime_oom(&state, &runtime_id).await }
+        });
+        tokio::time::timeout(Duration::from_secs(5), inspect_reached.notified())
+            .await
+            .expect("OOM inspection never reached the provider");
+
+        // The provider is paused mid-request. The single pool slot must be
+        // free for the rest of the controller while it waits.
+        let probe = tokio::time::timeout(Duration::from_secs(2), pool.get())
+            .await
+            .expect(
+                "OOM inspection kept the only pool connection checked out across the provider call",
+            )?;
+        probe.query_one("select 1", &[]).await?;
+        drop(probe);
+
+        // Only completion is asserted: the post-mortem is best-effort and
+        // its parsed value is outside what this test covers.
+        inspect_respond.notify_one();
+        tokio::time::timeout(Duration::from_secs(5), inspection)
+            .await
+            .expect("OOM inspection did not finish after the provider answered")?;
+
+        pool.get()
+            .await?
+            .execute("delete from projects where id = $1", &[&project_id])
+            .await?;
+        provider_server.abort();
+        Ok(())
     }
 }

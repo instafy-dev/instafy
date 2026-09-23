@@ -1898,6 +1898,11 @@ pub(crate) async fn agent_message(
         )
         .await;
     }
+    // A spread plan may launch extra runtimes, which waits on the provider
+    // and takes its own pool connections. Holding this one across that would
+    // pin a slot for every provider round trip and can starve the launch of
+    // the connections it needs on a small pool.
+    drop(connection);
     if let Err((status, Json(api_error))) =
         crate::multi_agent_plan::maybe_execute_multi_agent_plan_message(
             &state,
