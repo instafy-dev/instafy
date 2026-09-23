@@ -252,7 +252,7 @@ export class PersonalBrowserHost {
           createExplore: viewport => createBrowserTabExplorePage(contents.session, contents.getURL(), viewport),
           dispatchInput: (input, current) => this.inputShield.withInjectedInput(() => dispatchBrowserTabInput(contents,this.fitBoundsToOwner(this.currentBounds),input,current)),
         } : null;
-  }, () => { this.syncInputShield(); this.emitStatus(); });
+  }, () => { this.takeoverRequestId = undefined; this.syncInputShield(); this.emitStatus(); });
 
   startTabShare(ownerId: string) {
     const result = this.tabCapture.start(ownerId);
@@ -306,7 +306,7 @@ export class PersonalBrowserHost {
         }),
       onEmergencyEscape: () => this.emergencyPauseAgentControl(),
       onTakeOverRequest: () => {
-        if (!this.agentControlEnabled || !this.currentOwnerId || !this.currentVisible || this.currentOccluded) return;
+        if (!(this.agentControlEnabled || this.tabCapture.controlActive) || !this.currentOwnerId || !this.currentVisible || this.currentOccluded) return;
         this.takeoverRequestId = randomUUID();
         this.emitStatus();
       },
@@ -990,7 +990,8 @@ export class PersonalBrowserHost {
       this.agentControlEnabled || this.activeControlOperations > 0 || this.tabCapture.controlActive,
       this.currentVisible && !this.currentOccluded,
       this.fitBoundsToOwner(this.currentBounds),
-      this.agentControlEnabled && this.currentBounds.agentWorking === true,
+      this.tabCapture.controlActive || (this.agentControlEnabled && this.currentBounds.agentWorking === true),
+      this.tabCapture.controlActive ? "participant" : "agent",
     );
     // Adding the native shield for a new grant must not steal menu keyboard focus.
     if (this.currentOccluded && this.ownerWindow && !this.ownerWindow.isDestroyed()) {

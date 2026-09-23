@@ -3,6 +3,7 @@ import type { RunRecord } from "../../../../types";
 import {
   applySharedBrowserRfbHumanInput,
   resolveSharedBrowserControlOwner,
+  remoteSharedBrowserController,
   sharedBrowserHumanInputEnabled,
 } from "../sharedBrowserControlOwner";
 
@@ -136,4 +137,22 @@ describe("Shared Browser control ownership", () => {
     applySharedBrowserRfbHumanInput(rfb, true);
     expect(rfb.viewOnly).toBe(false);
   });
+});
+
+
+it("indicates other controllers, never self ownership, unknown identity, or stale collaboration", () => {
+  const client = {
+    connectionStatus: "connected" as const, participantId: "self", error: null,
+    state: { revision: 1, requests: [], controlOwner: { kind: "human" as const, participantId: "other" },
+      participants: [{ id: "other", displayName: "Alice", color: "#fff", pageId: "page", cursor: null, canControl: true }] },
+  };
+  expect(remoteSharedBrowserController(client, null)).toEqual({ kind: "human", displayName: "Alice" });
+  expect(remoteSharedBrowserController({ ...client, participantId: "other" }, null)).toBeNull();
+  expect(remoteSharedBrowserController({ ...client, participantId: null }, null)).toBeNull();
+  expect(remoteSharedBrowserController({ ...client, connectionStatus: "connecting" }, null)).toBeNull();
+  expect(remoteSharedBrowserController({ ...client, state: null }, null)).toBeNull();
+  expect(remoteSharedBrowserController({ ...client, state: { ...client.state, controlOwner: null } }, null)).toBeNull();
+  expect(remoteSharedBrowserController({ ...client, state: { ...client.state, participants: [] } }, null)?.displayName).toBe("Another participant");
+  const ai = { kind: "agent" as const, displayName: "Assistant" };
+  expect(remoteSharedBrowserController(client, ai)).toBe(ai);
 });

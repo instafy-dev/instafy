@@ -183,6 +183,10 @@ test("surface clicks request confirmation, animation does not steal focus, and h
   shield.sync(true, true, bounds, false);
   assert.match(view.webContents.scripts.at(-1), /working = "false"/);
   assert.equal(view.webContents.focusCount, 1, "decorative activity updates must not steal composer focus");
+  shield.sync(true, true, bounds, false, "participant");
+  assert.match(view.webContents.scripts.at(-1), /Another participant has control/);
+  assert.doesNotMatch(view.webContents.scripts.at(-1), /AI/);
+  assert.equal(view.webContents.focusCount, 1, "controller identity changes must not steal focus");
   shield.sync(false, true, bounds);
   shield.sync(true, true, bounds);
   assert.equal(view.webContents.focusCount, 2, "resuming control restores shield focus");

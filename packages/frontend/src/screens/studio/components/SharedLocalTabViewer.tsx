@@ -1,3 +1,4 @@
+import { RemoteControlSurface } from "./RemoteControlSurface";
 import { localTabVideoViewer } from "../../../services/runtimeController/localTabVideoViewer";
 import { readLocalExploreState, readLocalTabFrame, type LocalExploreState } from "../../../services/runtimeController/localTabExplore";
 import { attachRemoteBrowserInput, type RemoteBrowserInputMessage } from "./remoteBrowserInput";
@@ -210,6 +211,7 @@ export function SharedLocalTabViewer({ projectId, share, onClose, onEnded }: { p
       <IconButton className="!h-11 !w-11 shrink-0" variant="ghost" aria-label="Leave shared tab" onPress={onClose}><Xmark aria-hidden="true" className="h-5 w-5" /></IconButton>
     </div>
     {!hasPicture ? <div className="flex items-center justify-between gap-2 p-3 text-xs text-slate-300"><span>{state}</span>{canReconnect ? <Button size="sm" variant="secondary" data-testid="local-tab-reconnect" onPress={() => { setCanReconnect(false); setConnectionAttempt(attempt => attempt + 1); }}>Reconnect</Button> : null}</div> : null}
+    <div className={`relative min-h-0 min-w-0 ${fullscreen ? "flex flex-1 flex-col" : ""}`}>
     <div ref={setViewport} tabIndex={hasPicture ? 0 : undefined} role="region" aria-label="Shared tab image viewport" data-testid="local-browser-share-pan"
       className={`relative min-h-0 min-w-0 overflow-auto overscroll-contain ${fullscreen ? "flex-1" : ""}`}
       style={fullscreen ? undefined : { height: exploring ? "min(55vh,480px)" : hasPicture ? inlineHeight : 0, maxHeight: "55vh" }}>
@@ -225,6 +227,8 @@ export function SharedLocalTabViewer({ projectId, share, onClose, onEnded }: { p
             onResize={event=>{const v=event.currentTarget;if(videoRef.current?.playing && v.srcObject===videoStream && v.videoWidth && v.videoHeight)setImageSize(current=>current.width===v.videoWidth && current.height===v.videoHeight ? current : {width:v.videoWidth,height:v.videoHeight});}} /> : null}
         </div>
       </div> : null}
+    </div>
+    {hasPicture && !selfControls && !exploring ? <RemoteControlSurface controller="Another participant" working /> : null}
     </div>
   </section>;
   // Moving the presentation into a dialog keeps this component's socket alive.

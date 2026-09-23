@@ -1,8 +1,9 @@
 import type { LocalExploreState } from "../../../services/runtimeController/localTabExplore";
 import { LocalTabControlRequests } from "./LocalTabControlRequests";
 import type { LocalTabControlState } from "../../../services/runtimeController/localTabControl";
-import { useCallback, useEffect, useRef, useState } from "react";
-import { BrowserToolsPopover } from "./BrowserToolsPopover";
+import { useCallback, useContext, useEffect, useLayoutEffect, useRef, useState } from "react";
+import { BrowserToolsOverlayContext, BrowserToolsPopover } from "./BrowserToolsPopover";
+import { StudioDialogModal } from "../../../components/aria/StudioModal";
 import { SharedLocalTabViewer } from "./SharedLocalTabViewer";
 import { Checkbox } from "../../../components/Checkbox";
 import { Select } from "../../../components/Select";
@@ -106,10 +107,11 @@ function ShareParticipants({ projectId, share, controlState, exploreState }: {
     }
   }
   const requestCount = (controlState?.requests?.length ?? 0) + (exploreState?.requests?.length ?? 0);
+  const controller = viewers.find(viewer => viewer.userId === controlUserId);
   return <BrowserToolsPopover label="Sharing settings" trigger={
     <Button size="sm" variant="ghost" data-testid="local-browser-share-people" aria-label={requestCount ? `Sharing settings, ${requestCount} pending ${requestCount === 1 ? "request" : "requests"}` : "Sharing settings"}>
       <span className="h-2 w-2 rounded-full bg-emerald-500" aria-hidden="true" />
-      Sharing{requestCount ? <span className="rounded-full bg-primary-500 px-1.5 text-white" role="status">{requestCount}</span> : null}
+      <span className="max-w-32 truncate">{controlUserId ? `${controller?.fullName || controller?.email || "Participant"} controls` : "Sharing"}</span>{requestCount ? <span className="rounded-full bg-primary-500 px-1.5 text-white" role="status">{requestCount}</span> : null}
     </Button>
   }>
     <p className="font-medium">{share.audience === "space" ? "Everyone in this space" : "Selected people"}</p>
@@ -129,7 +131,38 @@ function ShareParticipants({ projectId, share, controlState, exploreState }: {
   </BrowserToolsPopover>;
 }
 
-export function LocalBrowserTabPublisher({ projectId, userId, ownerId, canShare }: { projectId: string; userId: string; ownerId: string | null; canShare: boolean }) {
+/** A native-page click asks first; the existing toolbar action stays immediate. */
+function ParticipantTakeBack({ requestId, controlId, revoke }: { requestId?: string; controlId: string | null; revoke: () => Promise<void> }) {
+  const [requestedControl, setRequestedControl] = useState<string | null>(null);
+  const open = controlId !== null && requestedControl === controlId;
+  const dismiss = () => setRequestedControl(null);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const seenRequest = useRef<string | undefined>(undefined);
+  const registerOverlay = useContext(BrowserToolsOverlayContext);
+  useEffect(() => {
+    if (requestId && requestId !== seenRequest.current) { seenRequest.current = requestId; setError(null); setRequestedControl(controlId); }
+  }, [requestId, controlId]);
+  useLayoutEffect(() => open ? registerOverlay?.() : undefined, [open, registerOverlay]);
+  async function takeBack() {
+    setBusy(true); setError(null);
+    try { await revoke(); dismiss(); }
+    catch { setError("Could not take back control. Try again or stop sharing."); }
+    finally { setBusy(false); }
+  }
+  return <StudioDialogModal isOpen={open} onOpenChange={next => { if (!next) dismiss(); }} isDismissable={!busy} isKeyboardDismissDisabled={busy}
+    dialogAriaLabel="Take back control" modalClassName="!max-w-sm" dialogClassName="p-5" data-browser-session-safe-zone="true">
+    <h2 className="text-base font-semibold">Take back control?</h2>
+    <p className="mt-2 text-sm text-slate-600 dark:text-slate-300">Another participant is using your tab. They can keep watching when you take back control.</p>
+    {error ? <p role="alert" className="mt-3 text-sm text-rose-600">{error}</p> : null}
+    <div className="mt-5 flex justify-end gap-2">
+      <Button className="min-h-10 pointer-coarse:min-h-11" variant="ghost" isDisabled={busy} onPress={dismiss}>Keep watching</Button>
+      <Button className="min-h-10 pointer-coarse:min-h-11" isDisabled={busy} onPress={() => void takeBack()}>{busy ? "Taking back…" : "Take back"}</Button>
+    </div>
+  </StudioDialogModal>;
+}
+
+export function LocalBrowserTabPublisher({ projectId, userId, ownerId, canShare, takeoverRequestId }: { projectId: string; userId: string; ownerId: string | null; canShare: boolean; takeoverRequestId?: string }) {
   const [sharing, setSharing] = useState(false);
   const [choosing, setChoosing] = useState(false);
   const [activeShare, setActiveShare] = useState<LocalTabPublication | null>(null);
@@ -156,6 +189,7 @@ export function LocalBrowserTabPublisher({ projectId, userId, ownerId, canShare 
     {sharing ? <>
       {activeShare ? <ShareParticipants key={activeShare.id} projectId={projectId} share={activeShare} controlState={controlState} exploreState={exploreState} /> : <span role="status">Sharing…</span>}
       {activeShare?.control && controlState?.grant ? <Button size="sm" data-testid="local-tab-take-back" aria-label="Take back control" onPress={() => void activeShare.control!.revoke().catch(() => setError("Could not take back control. Try again or stop sharing."))}>Take back</Button> : null}
+      {activeShare?.control ? <ParticipantTakeBack key={activeShare.id} requestId={takeoverRequestId} controlId={canShare ? controlState?.grant?.id ?? null : null} revoke={activeShare.control.revoke} /> : null}
       <Button data-testid="local-browser-share-stop" aria-label="Stop sharing" size="sm" variant="secondary" onPress={() => publisher.current?.abort()}>Stop</Button>
     </> : canShare ? <BrowserToolsPopover label="Share this tab" isOpen={choosing} onOpenChange={setChoosing} trigger={
       <Button data-testid="local-browser-share-start" size="sm" variant="ghost" title="Only you can see this tab">Share tab…</Button>

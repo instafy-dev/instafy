@@ -346,11 +346,16 @@ control also keeps a 44px minimum touch target on coarse-pointer devices.
 
 ### Manual input handoff
 
-While the AI controls the browser, a translucent mosaic shimmers across the
-page. Clicking it or the toolbar control icon opens a **Take over** dialog.
+While another participant controls the view (human or AI), a faint glow flows
+slowly around the outer 12 pixels of the page. The existing toolbar identifies
+the controller. Your own control and independent browsing have no glow. The
+center stays clear on light and dark pages independently of the Studio theme.
+The cue is presentation only; it does not grant input or block local viewer pan
+and zoom. Human control still uses the existing request/grant/release actions.
+For AI control, clicking the page or toolbar control icon opens a **Take over** dialog.
 Canceling leaves control unchanged; confirming starts the existing handoff.
-**Let AI continue** then appears in the existing toolbar. The mosaic respects
-reduced-motion preferences and adds no header row. Agent-requested handoff
+**Let AI continue** then appears in the existing toolbar. Reduced-motion
+preferences use a static edge glow. Agent-requested handoff
 uses `request_human_input` with one to eight indices from a fresh snapshot. The
 trusted helper highlights those exact editable elements with fixed amber outlines
 and emits bounded, page/initiator-bound guidance through the existing action feed.

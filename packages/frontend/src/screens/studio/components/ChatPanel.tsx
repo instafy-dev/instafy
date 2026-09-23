@@ -5647,6 +5647,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
                     projectId={activeProjectId}
                     userId={currentUserId}
                     ownerId={personalBrowser.ownerId}
+                    takeoverRequestId={personalBrowser.status?.ownerId === personalBrowser.ownerId && personalBrowser.status?.tabControlActive ? personalBrowser.status.takeoverRequestId : undefined}
                     canShare={browserSubtab === "browser" && browserTransport === "personal" && personalBrowser.status?.state === "ready" && typeof window.instafyDesktop?.browserTabShareStart === "function"}
                   />
                 ) : null}

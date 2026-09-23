@@ -34,7 +34,7 @@ import { useExpandedBrowserViewport } from "./useExpandedBrowserViewport";
 import { BrowserCursorOverlay } from "./BrowserCursorOverlay";
 import { BrowserExpandButton } from "./BrowserExpandButton";
 import { BrowserHumanInputStatus } from "./BrowserHumanInputControls";
-import { BrowserAgentSurface } from "./BrowserAgentSurface";
+import { RemoteControlSurface } from "./RemoteControlSurface";
 import { useBrowserHumanInput } from "./useBrowserHumanInput";
 import { browserPageOrigin, selectSharedBrowserHumanInput } from "./browserHandoffRouting";
 import { ActionTicker } from "./ActionTicker";
@@ -100,6 +100,7 @@ import {
   applySharedBrowserRfbHumanInput,
   HUMAN_SHARED_BROWSER_CONTROL_OWNER,
   sharedBrowserHumanInputEnabled,
+  remoteSharedBrowserController,
   type SharedBrowserControlOwner,
 } from "./sharedBrowserControlOwner";
 
@@ -515,6 +516,7 @@ export function BrowserSessionModal({
       : controlOwner.kind === "agent"
         ? controlOwner
         : null;
+  const remoteController = remoteSharedBrowserController(collaboration.client, effectiveAgentControlOwner);
   const humanInputEnabled =
     canControlBrowser &&
     collaborationSelfOwnsControl(collaboration.client) &&
@@ -2763,12 +2765,12 @@ export function BrowserSessionModal({
           </div>
           {!shouldCollapseDocked && displayStatus === "connected" ? (
             <>
-              {effectiveAgentControlOwner ? (
+              {remoteController && transportActive ? (
                 <div
-                  className="absolute inset-0 z-10"
-                  data-testid="shared-browser-agent-control-overlay"
+                  className="pointer-events-none absolute inset-0 z-10"
+                  data-testid={remoteController.kind === "agent" ? "shared-browser-agent-control-overlay" : "shared-browser-participant-control-overlay"}
                 >
-                  <BrowserAgentSurface working={transportActive && !browserHumanInputState.active}
+                  <RemoteControlSurface controller={remoteController.displayName} working={!browserHumanInputState.active}
                     onTakeOver={browserHumanInputOptions.canTakeOver ? browserHumanInputState.requestTakeOver : undefined} />
                 </div>
               ) : null}

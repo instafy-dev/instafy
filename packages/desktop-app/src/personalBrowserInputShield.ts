@@ -19,20 +19,23 @@ const SHIELD_HTML = `<!doctype html>
     <style>
       :root, body { width: 100%; height: 100%; margin: 0; background: transparent; }
       body { cursor: pointer; overflow: hidden; user-select: none; }
-      /* Match BrowserAgentSurface's mosaic in this isolated native document. */
-      .mosaic {
-        position: fixed; inset: 0; pointer-events: none; opacity: 0;
-        mask-image: repeating-linear-gradient(90deg, #000 0 22px, transparent 22px 26px), repeating-linear-gradient(0deg, #000 0 22px, transparent 22px 26px);
-        mask-composite: intersect;
+      /* Match RemoteControlSurface's edge glow in this isolated native document. */
+      .glow {
+        position: fixed; inset: 0; pointer-events: none;
+        mask-image: linear-gradient(to right, #000, transparent 12px, transparent calc(100% - 12px), #000), linear-gradient(to bottom, #000, transparent 12px, transparent calc(100% - 12px), #000);
+        mask-composite: add;
+        box-shadow: inset 0 0 0 1px #a5b4fc24;
       }
-      .mosaic::before, .mosaic::after {
-        content: ""; position: absolute; inset: 0 auto 0 -100%; width: 300%;
-        background: radial-gradient(ellipse 24% 65% at 50% 50%, #818cf81f, #38bdf80a 50%, transparent 75%);
-        animation: mosaic-wave 12s ease-in-out infinite alternate paused;
+      .glow::before, .glow::after {
+        content: ""; position: absolute; inset: -20% auto -20% -40%; width: 180%;
+        background: linear-gradient(112deg, transparent 24%, #818cf82e 36%, #a5b4fc80 44%, #e0f2feb3 49%, #99f6e48c 53%, #818cf833 64%, transparent 76%);
+        animation: agent-edge-flow 12s ease-in-out infinite alternate paused;
       }
-      .mosaic::after { background: radial-gradient(ellipse 28% 55% at 50% 50%, #a78bfa18, #818cf808 50%, transparent 75%); animation-duration: 17s; animation-direction: alternate-reverse; }
-      body[data-working="true"] .mosaic { opacity: 1; }
-      body[data-working="true"] .mosaic::before, body[data-working="true"] .mosaic::after { animation-play-state: running; will-change: transform; }
+      .glow::after {
+        background: linear-gradient(68deg, transparent 25%, #a5b4fc33 40%, #ddd6fe8c 50%, #818cf84d 58%, transparent 75%);
+        animation-duration: 19s; animation-direction: alternate-reverse;
+      }
+      body[data-working="true"] .glow::before, body[data-working="true"] .glow::after { animation-play-state: running; will-change: transform; }
       .status {
         position: fixed; bottom: 16px; left: 50%; transform: translateX(-50%);
         padding: 8px 14px; border: 1px solid #ffffff26; border-radius: 999px;
@@ -40,12 +43,12 @@ const SHIELD_HTML = `<!doctype html>
         font: 500 12px/1.4 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
         white-space: nowrap; opacity: 0; pointer-events: none;
       }
-      body:hover .status { opacity: 1; }
-      @keyframes mosaic-wave { 0% { transform: translate(-28%, -8%) rotate(-8deg); } 50% { transform: translate(0, 8%) rotate(0deg); } 100% { transform: translate(28%, -8%) rotate(8deg); } }
-      @media (prefers-reduced-motion: reduce) { .mosaic::before, .mosaic::after { animation: none; transform: none; will-change: auto !important; } }
+      body:focus-visible .status { opacity: 1; }
+      @keyframes agent-edge-flow { 0% { transform: translate(-24%, -6%) rotate(-7deg); } 50% { transform: translate(0, 6%) rotate(0deg); } 100% { transform: translate(24%, -6%) rotate(7deg); } }
+      @media (prefers-reduced-motion: reduce) { .glow::before, .glow::after { animation: none; transform: none; will-change: auto !important; } }
     </style>
   </head>
-  <body role="button" tabindex="0" aria-label="AI has browser control. Click to take over, or press Escape to pause."><div class="mosaic" aria-hidden="true"></div><div class="status">Click to take over · Esc to pause</div></body>
+  <body role="button" tabindex="0" aria-label="AI has browser control. Click to take over, or press Escape to pause."><div class="glow" aria-hidden="true"></div><div class="status">Click to take over · Esc to pause</div></body>
 </html>`;
 
 const SHIELD_URL = `data:text/html;charset=utf-8,${encodeURIComponent(SHIELD_HTML)}`;
@@ -61,8 +64,9 @@ export class PersonalBrowserInputShield {
   private readonly onEmergencyEscape: PersonalBrowserInputShieldOptions["onEmergencyEscape"];
   private readonly onTakeOverRequest: () => void;
   private working = false;
+  private controller: "agent" | "participant" = "agent";
   private loaded = false;
-  private appliedWorking: boolean | null = null;
+  private appliedAppearance: string | null = null;
   private owner: View | null = null;
   private protectedContents: WebContents | null = null;
   private shieldView: WebContentsView | null = null;
@@ -101,11 +105,12 @@ export class PersonalBrowserInputShield {
     this.syncView();
   }
 
-  sync(active: boolean, visible: boolean, bounds: Rectangle, working = false) {
+  sync(active: boolean, visible: boolean, bounds: Rectangle, working = false, controller: "agent" | "participant" = "agent") {
     this.active = active;
     this.visible = visible;
     this.bounds = bounds;
     this.working = active && visible && working;
+    this.controller = controller;
     this.syncActivity();
     this.syncView();
   }
@@ -119,7 +124,7 @@ export class PersonalBrowserInputShield {
     const view = this.shieldView;
     this.shieldView = null;
     this.loaded = false;
-    this.appliedWorking = null;
+    this.appliedAppearance = null;
     if (!view) {
       this.owner = null;
       return;
@@ -166,9 +171,16 @@ export class PersonalBrowserInputShield {
 
   private syncActivity() {
     const view = this.shieldView;
-    if (!this.loaded || !view || view.webContents.isDestroyed() || this.appliedWorking === this.working) return;
-    this.appliedWorking = this.working;
-    void view.webContents.executeJavaScript(`document.body.dataset.working = "${this.working}"`).catch(() => undefined);
+    const appearance = `${this.working}:${this.controller}`;
+    if (!this.loaded || !view || view.webContents.isDestroyed() || this.appliedAppearance === appearance) return;
+    this.appliedAppearance = appearance;
+    const participant = this.controller === "participant";
+    const label = participant ? "Another participant has control. Click to take back, or press Escape." : "AI has browser control. Click to take over, or press Escape to pause.";
+    const hint = participant ? "Click to take back control · Esc to take back" : "Click to take over · Esc to pause";
+    // Only our isolated shield document receives these fixed UI strings.
+    void view.webContents.executeJavaScript(`document.body.dataset.working = "${this.working}";
+      document.body.setAttribute("aria-label", ${JSON.stringify(label)});
+      document.querySelector(".status").textContent = ${JSON.stringify(hint)};`).catch(() => undefined);
   }
 
   private ensureView(): WebContentsView | null {

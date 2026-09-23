@@ -280,3 +280,27 @@ it("shows pending browsing and control requests in the compact toolbar without i
   expect(description).toContain("behavior depends on the website");
   expect(document.querySelectorAll('[data-testid="local-tab-toolbar"]')).toHaveLength(1);
 });
+
+
+it("shows the edge cue while following, clears it for self control, independent browsing and disconnect", async () => {
+  const cue = () => document.querySelector('[data-testid="browser-agent-surface"]');
+  const state = (value: unknown) => act(async () => socket.dispatchEvent(new MessageEvent("message", {data: JSON.stringify(value)})));
+  const control = {type:"controlState",available:true,connectionId:"self",requested:false,grant:null};
+  expect(cue()).toBeNull();
+  await frame();
+  expect(cue()?.textContent).toContain("Another participant has control");
+  expect(cue()?.querySelector("button")).toBeNull(); // Following must still allow local pan/zoom.
+  await state({...control,grant:{id:"other-grant",connectionId:"other",userId:"other"}});
+  expect(cue()).not.toBeNull();
+  await state({...control,grant:{id:"own-grant",connectionId:"self",userId:"me"}});
+  expect(cue()).toBeNull();
+  await state(control);
+  expect(cue()).not.toBeNull();
+  await state({type:"exploreState",available:true,requested:false,view:{viewId:"11111111-1111-4111-8111-111111111111",connectionId:"self",userId:"me",viewport:{width:390,height:700,dpr:1}}});
+  expect(cue()).toBeNull();
+  await state({type:"exploreState",available:true,requested:false,view:null});
+  await frame();
+  expect(cue()).not.toBeNull();
+  await act(async () => socket.dispatchEvent(new Event("close")));
+  expect(cue()).toBeNull();
+});
