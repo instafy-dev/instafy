@@ -34,6 +34,7 @@ import { useExpandedBrowserViewport } from "./useExpandedBrowserViewport";
 import { BrowserCursorOverlay } from "./BrowserCursorOverlay";
 import { BrowserExpandButton } from "./BrowserExpandButton";
 import { BrowserHumanInputStatus } from "./BrowserHumanInputControls";
+import { BrowserAgentSurface } from "./BrowserAgentSurface";
 import { useBrowserHumanInput } from "./useBrowserHumanInput";
 import { browserPageOrigin, selectSharedBrowserHumanInput } from "./browserHandoffRouting";
 import { ActionTicker } from "./ActionTicker";
@@ -2499,6 +2500,8 @@ export function BrowserSessionModal({
     </div>
   ) : null;
 
+  const humanInputControls = !shouldCollapseDocked && humanInputIdentityKey
+    ? <BrowserHumanInputStatus {...browserHumanInputOptions} state={browserHumanInputState} /> : null;
   const panelContent = renderCollapsedConnectedIntoShelf ? (
     <div aria-hidden="true" className="pointer-events-none h-px w-px overflow-hidden opacity-0">
       <div ref={setContainerElement} className="h-full w-full overflow-hidden" />
@@ -2539,6 +2542,7 @@ export function BrowserSessionModal({
             )}
           </div>
           <div className="flex flex-none items-center gap-1">
+            {humanInputControls}
             <SharedBrowserDataClearAction
               canClear={canClearBrowserData}
               onClearSettled={handleBrowserDataClearSettled}
@@ -2574,6 +2578,7 @@ export function BrowserSessionModal({
           interactionEnabled={humanInputEnabled}
           toolbarActions={
             <>
+              {humanInputControls}
               <SharedBrowserCollaborationControls
                 client={collaboration.client}
                 compact={sharedBrowserChrome.compact ?? false}
@@ -2637,9 +2642,6 @@ export function BrowserSessionModal({
       >
         {sessionChooserOpen ? <SharedBrowserProfileStatus projectId={projectId} runtimeId={selectedSessionRuntimeId} currentUserId={currentUserId} active /> : null}
       </SharedBrowserSessionControl> : null}
-      {!shouldCollapseDocked && humanInputIdentityKey ? (
-        <BrowserHumanInputStatus {...browserHumanInputOptions} state={browserHumanInputState} />
-      ) : null}
       <div
         key="shared-browser-viewport"
         data-testid="browser-session-viewport"
@@ -2763,10 +2765,12 @@ export function BrowserSessionModal({
             <>
               {effectiveAgentControlOwner ? (
                 <div
-                  aria-hidden="true"
-                  className="absolute inset-0 z-10 cursor-not-allowed"
+                  className="absolute inset-0 z-10"
                   data-testid="shared-browser-agent-control-overlay"
-                />
+                >
+                  <BrowserAgentSurface working={transportActive && !browserHumanInputState.active}
+                    onTakeOver={browserHumanInputOptions.canTakeOver ? browserHumanInputState.requestTakeOver : undefined} />
+                </div>
               ) : null}
               <BrowserCursorOverlay
                 containerRef={containerRef}

@@ -111,7 +111,7 @@ Personal Browser is gated at several layers.
 - The desktop feature is enabled by default. `INSTAFY_DESKTOP_PERSONAL_BROWSER=0` (or `false`, `no`, or `off`) is an emergency installation-level kill switch.
 - Opening the browser does not authorize the agent. `agentControlEnabled` starts false, and the local runtime does not start until the user resumes control.
 - The user must explicitly choose **Resume** before agent work can start.
-- While control is resumed, Electron places a transparent native `WebContentsView` input shield above the Personal page. Pointer, wheel, drag, context-menu, and keyboard input cannot race agent mutations, and the browser bar's human navigation controls are disabled in both Studio and Electron main. The shield shows **Browser controlled · Esc to take back**; Escape synchronously revokes the broker and then suspends the Personal runtime. Pause removes the shield and returns focus to the page only after already-dispatched native operations settle.
+- While control is resumed, Electron places a transparent native `WebContentsView` input shield above the Personal page. Pointer, wheel, drag, context-menu, and keyboard input cannot race agent mutations, and the browser bar's human navigation controls are disabled in both Studio and Electron main. During a browser task, the shield shows a translucent mosaic with slow waves of light. Clicking it opens a **Take over** dialog; canceling keeps agent control. The same dialog is available from the toolbar control icon. Reduced-motion preferences use a static mosaic. Escape synchronously revokes the broker and then suspends the Personal runtime. Pause removes the shield and returns focus to the page only after already-dispatched native operations settle.
 - Pause synchronously revokes the broker binding before waiting on navigation or runtime shutdown, then stops the Personal Browser runtime and invalidates in-flight work. Resume creates a fresh broker token; every restarted/started Personal runtime receives a fresh runtime ID. A request that races revocation fails with `401 stale_token`; a paused but still-current operation is rejected with `423 agent_control_paused`.
 - Closing the Personal Browser, changing project/account/renderer identity, clearing its binding, or stopping the app invalidates the live capability.
 - The frontend owner lease is also conversation-scoped. Changing conversations
@@ -217,9 +217,10 @@ instafy_personal_browser.request_human_input
 
 ### Manual steps and continuation
 
-**Take over** pauses agent control for a manual step, even when the AI has not
-requested one. The agent can also call `request_human_input` with fresh snapshot
-indices. The native host applies fixed amber outlines to the actual editable
+**Take over** in the surface dialog pauses agent control for a manual step, even
+when the AI has not requested one. After control returns, **Let AI continue**
+appears in the existing browser toolbar; no extra takeover header is added.
+The agent can also call `request_human_input` with fresh snapshot indices. The native host applies fixed amber outlines to the actual editable
 elements, so they move with scrolling and reflow; replaced elements do not inherit
 old highlights. Guidance contains only generic field labels and an expiring
 request identity, never field values or DOM-derived text. The broker is revoked
@@ -229,15 +230,16 @@ finish; revocation alone is not sufficient. Until then, manual input and Resume
 remain blocked. A 15-second drain timeout reports an error but keeps the shield
 locked rather than falsely claiming control has returned.
 
-**Done, continue** is an explicit new browser turn, not resumption of a suspended
+**Let AI continue** is an explicit new browser turn, not resumption of a suspended
 tool call. During a manual step, it is the only resume-and-send action: ordinary
 toolbar Resume and Retry agent control are hidden, including after a failed
-continuation. Retrying Done waits for the fresh runtime's readiness rather than
-reusing the previous attempt's error; startup remains bounded to 30 seconds and
-never dispatches through a stale runtime. Pause remains available whenever agent
-control is enabled. If startup fails before a fresh runtime can be identified,
-use Pause to return manual control before retrying Done.
-Done clears highlights and creates fresh control authority; the new
+continuation. Retrying waits for the fresh runtime's readiness rather than reusing
+the previous attempt's error; startup remains bounded to 30 seconds and
+never dispatches through a stale runtime. The toolbar Pause control remains
+available during continuation startup; Escape can always revoke native agent
+control. If startup fails before a fresh runtime can be identified,
+use Pause to return manual control before retrying continuation.
+Continuation clears highlights and creates fresh control authority; the new
 turn observes the page again instead of replaying old indices. Changing the
 account/project/page binding or an expired request cannot silently continue work.
 Passwords, codes and payment values stay in the page and must not be entered in

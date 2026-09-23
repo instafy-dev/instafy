@@ -1,0 +1,94 @@
+.browser-agent-surface {
+  position: absolute;
+  inset: 0;
+  z-index: 20;
+  pointer-events: none;
+  overflow: hidden;
+  border-radius: inherit;
+}
+
+.browser-agent-mosaic {
+  position: absolute;
+  inset: 0;
+  opacity: 0;
+  transition: opacity 300ms ease;
+  mask-image: repeating-linear-gradient(90deg, #000 0 22px, transparent 22px 26px), repeating-linear-gradient(0deg, #000 0 22px, transparent 22px 26px);
+  mask-composite: intersect;
+}
+
+.browser-agent-mosaic::before,
+.browser-agent-mosaic::after {
+  content: "";
+  position: absolute;
+  inset: 0 auto 0 -100%;
+  width: 300%;
+  background: radial-gradient(ellipse 24% 65% at 50% 50%, #818cf81f, #38bdf80a 50%, transparent 75%);
+  animation: browser-mosaic-wave 12s ease-in-out infinite alternate;
+  animation-play-state: paused;
+}
+
+.browser-agent-mosaic::after {
+  background: radial-gradient(ellipse 28% 55% at 50% 50%, #a78bfa18, #818cf808 50%, transparent 75%);
+  animation-duration: 17s;
+  animation-direction: alternate-reverse;
+}
+
+.browser-agent-surface[data-working="true"] .browser-agent-mosaic {
+  opacity: 1;
+}
+
+.browser-agent-surface[data-working="true"] .browser-agent-mosaic::before,
+.browser-agent-surface[data-working="true"] .browser-agent-mosaic::after {
+  will-change: transform;
+  animation-play-state: running;
+}
+
+.browser-agent-surface-target {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  cursor: pointer;
+  pointer-events: auto;
+  touch-action: manipulation;
+}
+
+.browser-agent-surface-target:focus-visible {
+  outline: 2px solid #818cf8;
+  outline-offset: -3px;
+}
+
+.browser-agent-surface-hint {
+  position: absolute;
+  inset-block-end: 16px;
+  inset-inline-start: 50%;
+  transform: translateX(-50%);
+  max-width: calc(100% - 24px);
+  padding: 8px 14px;
+  border: 1px solid #ffffff26;
+  border-radius: 999px;
+  background: #0f172ae6;
+  color: white;
+  font: 500 12px/1.4 system-ui, sans-serif;
+  white-space: nowrap;
+  opacity: 0;
+  transition: opacity 150ms ease;
+}
+
+.browser-agent-surface-target:hover .browser-agent-surface-hint,
+.browser-agent-surface-target:focus-visible .browser-agent-surface-hint { opacity: 1; }
+
+@keyframes browser-mosaic-wave {
+  0% { transform: translate(-28%, -8%) rotate(-8deg); }
+  50% { transform: translate(0, 8%) rotate(0deg); }
+  100% { transform: translate(28%, -8%) rotate(8deg); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .browser-agent-mosaic { transition: none; }
+  .browser-agent-mosaic::before, .browser-agent-mosaic::after { animation: none; transform: none; will-change: auto !important; }
+  .browser-agent-surface-hint { transition: none; }
+}

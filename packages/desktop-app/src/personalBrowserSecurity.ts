@@ -19,6 +19,8 @@ export type PersonalBrowserBounds = {
   height: number;
   visible?: boolean;
   occluded?: boolean;
+  /** Decorative activity only; never grants control. */
+  agentWorking?: boolean;
 };
 
 export type PersonalBrowserEditableDescriptor = {
@@ -208,6 +210,7 @@ export function normalizePersonalBrowserBounds(value: unknown): PersonalBrowserB
     height,
     ...(typeof candidate.visible === "boolean" ? { visible: candidate.visible } : {}),
     ...(typeof candidate.occluded === "boolean" ? { occluded: candidate.occluded } : {}),
+    ...(typeof candidate.agentWorking === "boolean" ? { agentWorking: candidate.agentWorking } : {}),
   };
 }
 

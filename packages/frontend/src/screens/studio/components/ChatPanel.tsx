@@ -5636,6 +5636,9 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
               ) : null}
               <PersonalBrowserSurface
                 active={browserTransport === "personal" && browserSubtab === "browser"}
+                agentWorking={activeConversationRuns.some((run) =>
+                  run.metadata?.browserTransport === "desktop-personal" &&
+                  (run.status === "in_progress" || run.status === "queued"))}
                 compactChrome={compactBrowserBar}
                 model={personalBrowser}
                 sharingControls={activeProjectId && currentUserId ? (

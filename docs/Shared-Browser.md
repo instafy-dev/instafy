@@ -346,7 +346,11 @@ control also keeps a 44px minimum touch target on coarse-pointer devices.
 
 ### Manual input handoff
 
-The browser bar exposes **Take over** for a manual step. Agent-requested handoff
+While the AI controls the browser, a translucent mosaic shimmers across the
+page. Clicking it or the toolbar control icon opens a **Take over** dialog.
+Canceling leaves control unchanged; confirming starts the existing handoff.
+**Let AI continue** then appears in the existing toolbar. The mosaic respects
+reduced-motion preferences and adds no header row. Agent-requested handoff
 uses `request_human_input` with one to eight indices from a fresh snapshot. The
 trusted helper highlights those exact editable elements with fixed amber outlines
 and emits bounded, page/initiator-bound guidance through the existing action feed.
@@ -357,11 +361,11 @@ fresh agent snapshot; a replacement element does not inherit a stale highlight.
 The tool latches later agent observation and action for that turn. It does not
 remove the agent-control marker: manual input remains locked until the existing
 confirmed-shutdown path restores the human driver. A canceled controller run alone
-is not release proof. **Done, continue** explicitly starts a new turn on the same
+is not release proof. **Let AI continue** explicitly starts a new turn on the same
 runtime/page with a fresh observation. It sends only a fixed continuation message,
 never the user's entered values. Account, conversation, runtime or page changes
 invalidate the continuation. Manual navigation drops stale field guidance but
-keeps the manual-step controls, so login redirects can finish before Done starts
+keeps the manual-step controls, so login redirects can finish before continuation starts
 a fresh turn. A target change during asynchronous continuation aborts it; no
 hidden or stale completion may send it automatically.
 

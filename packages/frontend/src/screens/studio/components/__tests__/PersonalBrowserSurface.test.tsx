@@ -124,7 +124,7 @@ describe("PersonalBrowserSurface", () => {
     await act(async () => root.render(<PersonalBrowserSurface active model={model} transportSelector={null} />));
     const original = setBounds.mock.calls.at(-1);
     await act(async () => document.querySelector<HTMLButtonElement>('[aria-label="Browser settings"]')!.click());
-    expect(setBounds).toHaveBeenLastCalledWith({ x:10, y:20, width:400, height:300, ownerId:"owner-1", visible:true, occluded:true });
+    expect(setBounds).toHaveBeenLastCalledWith({ x:10, y:20, width:400, height:300, ownerId:"owner-1", visible:true, occluded:true, agentWorking:false });
     expect(document.querySelector('[role="dialog"][aria-label="Browser settings"]')).not.toBeNull();
     expect(document.querySelector('[data-testid="personal-browser-overlay-preview"]')?.getAttribute("src")).toBe("data:image/jpeg;base64,AQID");
     await act(async () => document.querySelector<HTMLButtonElement>('[aria-label="Browser settings"]')!.click());
@@ -171,7 +171,7 @@ describe("PersonalBrowserSurface", () => {
       width: 400,
       height: 300,
       visible: true,
-      occluded: false,
+      occluded: false, agentWorking: false,
       ownerId: "owner-1",
     });
     expect(container.textContent).toContain("This device");
@@ -544,6 +544,34 @@ describe("PersonalBrowserSurface", () => {
     expect(container.textContent).toContain("Personal Browser data cleared.");
   });
 
+  it("occludes the native page for its owner's takeover popup without revoking control on cancel", async () => {
+    const model = createModel();
+    model.status = { ...model.status!, humanControlReady: false };
+    const setBounds = vi.fn(async () => ({}));
+    window.instafyDesktop = { personalBrowserSetBounds: setBounds } as unknown as typeof window.instafyDesktop;
+    const onContinue = vi.fn(async () => true);
+    const render = async () => act(async () => root.render(
+      <PersonalBrowserSurface active agentWorking model={model} transportSelector={null}
+        humanInputIdentityKey="conversation-a" onContinueAfterHumanInput={onContinue} />,
+    ));
+    await render();
+    expect(setBounds).toHaveBeenLastCalledWith(expect.objectContaining({ agentWorking: true, occluded: false, ownerId: "owner-1" }));
+    model.status = { ...model.status!, ownerId: "another-owner", takeoverRequestId: "unrelated-click" };
+    await render();
+    expect(document.querySelector('[role="dialog"]')).toBeNull();
+    model.status = { ...model.status!, ownerId: "owner-1", takeoverRequestId: "surface-click" };
+    await render();
+    expect(document.querySelector('[role="dialog"]')).not.toBeNull();
+    expect(setBounds).toHaveBeenLastCalledWith(expect.objectContaining({ occluded: true }));
+    expect(model.setAgentControlEnabled).not.toHaveBeenCalled();
+    await act(async () => document.querySelector<HTMLButtonElement>('[data-testid="browser-human-input-cancel"]')?.click());
+    expect(document.querySelector('[role="dialog"]')).toBeNull();
+    expect(setBounds).toHaveBeenLastCalledWith(expect.objectContaining({ occluded: false }));
+    expect(model.setAgentControlEnabled).not.toHaveBeenCalled();
+    await render();
+    expect(document.querySelector('[role="dialog"]')).toBeNull();
+  });
+
   it("never latches another native owner's handoff while reclaim is pending", async () => {
     const model = createModel();
     model.ownerId = null;
@@ -554,12 +582,12 @@ describe("PersonalBrowserSurface", () => {
       <PersonalBrowserSurface active model={model} transportSelector={null} humanInputIdentityKey="conversation-b" onContinueAfterHumanInput={onContinue} />,
     ));
     await render();
-    expect(container.textContent).not.toContain("Done, continue");
+    expect(container.textContent).not.toContain("Let AI continue");
     expect(container.textContent).not.toContain("highlighted field");
     model.ownerId = "replacement-owner";
     model.status = { ...model.status!, ownerId: "replacement-owner", humanInputRequest: undefined };
     await render();
-    expect(container.textContent).not.toContain("Done, continue");
+    expect(container.textContent).not.toContain("Let AI continue");
     expect(onContinue).not.toHaveBeenCalled();
   });
 
@@ -573,7 +601,7 @@ describe("PersonalBrowserSurface", () => {
     expect(document.querySelector<HTMLButtonElement>('[aria-label="Resume agent control"]')?.disabled).toBe(true);
   });
 
-  it.each(["routine", "ask"] as const)("makes Done the only resume route after takeover with %s selected", async (approvalMode) => {
+  it.each(["routine", "ask"] as const)("makes continuation the only resume route after takeover with %s selected", async (approvalMode) => {
     const model = createModel();
     model.preferredApprovalMode = approvalMode;
     model.status = { ...model.status!, humanControlReady: false, approvalModes: ["ask", "routine"], approvalMode };
@@ -583,6 +611,7 @@ describe("PersonalBrowserSurface", () => {
       <PersonalBrowserSurface active model={model} transportSelector={null} humanInputIdentityKey="conversation-a" onContinueAfterHumanInput={onContinue} />,
     ));
     await render();
+    await act(async () => document.querySelector<HTMLButtonElement>('[data-testid="browser-human-input-request"]')?.click());
     await act(async () => document.querySelector<HTMLButtonElement>('[data-testid="browser-human-input-takeover"]')?.click());
     expect(model.setAgentControlEnabled).toHaveBeenCalledExactlyOnceWith(false);
     model.status = { ...model.status!, agentControlEnabled: false, humanControlReady: true };
@@ -590,7 +619,7 @@ describe("PersonalBrowserSurface", () => {
     expect(document.querySelector('[aria-label="Resume agent control"]')).toBeNull();
     expect(document.querySelector('[aria-label="Retry agent control"]')).toBeNull();
     await act(async () => document.querySelector<HTMLButtonElement>('[aria-label="Browser settings"]')!.click());
-    expect(document.body.textContent).toContain("use Done, continue to resume and send the next turn");
+    expect(document.body.textContent).toContain("choose Let AI continue in the browser toolbar");
     await act(async () => document.querySelector<HTMLButtonElement>('[aria-label="Browser settings"]')!.click());
     expect(container.textContent).not.toContain("Choose before Resume");
     await act(async () => document.querySelector<HTMLButtonElement>('[data-testid="browser-human-input-continue"]')?.click());
@@ -598,7 +627,7 @@ describe("PersonalBrowserSurface", () => {
     expect(model.setAgentControlEnabled).toHaveBeenCalledTimes(1);
   });
 
-  it("keeps failed handoff retries on Done while leaving Pause reachable after control resumes", async () => {
+  it("keeps failed handoff retries on continuation while leaving Pause reachable after control resumes", async () => {
     const model = createModel();
     model.agentPhase = "unavailable";
     model.agentError = "The previous continuation could not start";

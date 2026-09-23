@@ -60,6 +60,7 @@ export type PersonalBrowserStatus = {
   canGoBack: boolean;
   canGoForward: boolean;
   agentControlEnabled: boolean;
+  takeoverRequestId?: string;
   sharing?: boolean;
   ownerId?: string;
   projectId?: string;
@@ -396,6 +397,7 @@ contextBridge.exposeInMainWorld("instafyDesktop", {
   },
   personalBrowserSetBounds: async (options: {
     occluded?: boolean;
+    agentWorking?: boolean;
     x: number;
     y: number;
     width: number;

@@ -161,7 +161,7 @@ export function useChatBrowserHandoff(options: Options) {
     assertCurrent(captured, epoch);
     if (captured.transport !== "personal") return false;
     if (captured.personal.status?.humanInputRequest) {
-      throw new Error("Finish the current manual step and choose Done, continue before starting another browser task.");
+      throw new Error("Finish the current manual step and choose Let AI continue before starting another browser task.");
     }
     const runtimeOverride = captured.personal.runtimeOverride;
     if (!runtimeOverride) {

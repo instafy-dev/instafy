@@ -21,6 +21,8 @@ export type BrowserHumanInputOptions = {
   /** Live origin ownership / native revoked capability, never canceled-run status. */
   humanControlConfirmed: boolean;
   canContinue?: boolean;
+  /** A click on a native surface requests the same confirmation as the DOM surface. */
+  takeoverRequestId?: string;
   /** Callbacks must preserve the captured exact target across their own awaits. */
   onTakeOver: () => Promise<boolean | void>;
   onContinue: (message: string) => Promise<boolean>;
@@ -32,10 +34,12 @@ export function useBrowserHumanInput(options: BrowserHumanInputOptions) {
   const [dismissedId, setDismissedId] = useState<string | null>(null);
   const [busy, setBusy] = useState<"takeover" | "continue" | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [takeoverIdentity, setTakeoverIdentity] = useState<string | null>(null);
   const [now, setNow] = useState(Date.now);
   const generation = useRef(0);
   const identityRef = useRef(identityKey);
   const busyRef = useRef(false);
+  const seenTakeoverRequest = useRef<string | null>(null);
   // Invalidate stale asynchronous completions during render, before effects.
   if (identityRef.current !== identityKey) {
     identityRef.current = identityKey;
@@ -47,7 +51,14 @@ export function useBrowserHumanInput(options: BrowserHumanInputOptions) {
     setDismissedId(null);
     setBusy(null);
     setError(null);
+    setTakeoverIdentity(null);
   }, [identityKey]);
+  useEffect(() => {
+    const key = options.takeoverRequestId ? `${identityKey}:${options.takeoverRequestId}` : null;
+    if (!key || seenTakeoverRequest.current === key) return;
+    seenTakeoverRequest.current = key;
+    if (canTakeOver) setTakeoverIdentity(identityKey);
+  }, [options.takeoverRequestId, identityKey, canTakeOver]);
   useEffect(() => () => { generation.current += 1; }, []);
   useEffect(() => {
     if (!request) return;
@@ -57,7 +68,7 @@ export function useBrowserHumanInput(options: BrowserHumanInputOptions) {
   }, [request]);
   const liveRequest = request && request.expiresAtMs > now && request.handoffId !== dismissedId ? request : null;
   // Keep only the manual-step UI across a user-driven login/navigation. The
-  // origin-bound field guidance may disappear, but Done still starts a fresh
+  // origin-bound field guidance may disappear, but continuation still starts a fresh
   // exact-page turn once authoritative human ownership is confirmed.
   useEffect(() => {
     if (liveRequest) setStartedIdentity(identityKey);
@@ -73,6 +84,7 @@ export function useBrowserHumanInput(options: BrowserHumanInputOptions) {
     setError(null);
     try {
       if (await onTakeOver() === false) throw new Error("Agent control could not be stopped. Try again.");
+      if (generation.current === epoch) setTakeoverIdentity(null);
     } catch (cause) {
       if (generation.current === epoch) setError(cause instanceof Error ? cause.message : "Unable to take control.");
     } finally {
@@ -99,5 +111,8 @@ export function useBrowserHumanInput(options: BrowserHumanInputOptions) {
     }
   }, [active, canContinue, humanControlConfirmed, onContinue, request?.handoffId]);
 
-  return { active, request: liveRequest, busy, error, takeOver, continueTask };
+  const requestTakeOver = () => { if (canTakeOver && !busyRef.current) setTakeoverIdentity(identityKey); };
+  const dismissTakeOver = () => { if (!busyRef.current) setTakeoverIdentity(null); };
+  return { active, request: liveRequest, busy, error, takeOver, continueTask,
+    takeoverRequested: takeoverIdentity === identityKey, requestTakeOver, dismissTakeOver };
 }

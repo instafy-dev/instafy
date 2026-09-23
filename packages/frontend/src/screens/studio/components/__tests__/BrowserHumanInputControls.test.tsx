@@ -17,7 +17,39 @@ describe("BrowserHumanInputControls", () => {
   });
   afterEach(async () => { await act(async () => root.unmount()); container.remove(); vi.useRealTimers(); });
   const render = async () => { await act(async () => root.render(<BrowserHumanInputControls {...props} />)); };
-  const click = async (testId: string) => { await act(async () => container.querySelector<HTMLButtonElement>(`[data-testid="${testId}"]`)!.click()); };
+  const click = async (testId: string) => {
+    if (testId === "browser-human-input-takeover" && !document.querySelector('[data-testid="browser-human-input-takeover"]')) {
+      await act(async () => container.querySelector<HTMLButtonElement>('[data-testid="browser-human-input-request"]')!.click());
+    }
+    await act(async () => document.querySelector<HTMLButtonElement>(`[data-testid="${testId}"]`)!.click());
+  };
+
+  it("asks before taking over and leaves control untouched when dismissed", async () => {
+    await render();
+    expect(container.textContent).not.toContain("Need to fill something yourself");
+    await click("browser-human-input-request");
+    expect(document.querySelector('[role="dialog"][aria-label="Take over browser"]')).not.toBeNull();
+    expect(props.onTakeOver).not.toHaveBeenCalled();
+    await click("browser-human-input-cancel");
+    expect(document.querySelector('[role="dialog"]')).toBeNull();
+    expect(props.onTakeOver).not.toHaveBeenCalled();
+    expect(container.querySelector('[data-testid="browser-human-input-continue"]')).toBeNull();
+  });
+
+  it("handles each native click once and discards a popup when its browser changes", async () => {
+    props.takeoverRequestId = "native-click-1";
+    await render();
+    expect(document.querySelector('[role="dialog"]')).not.toBeNull();
+    await click("browser-human-input-cancel");
+    props.canTakeOver = false; await render();
+    props.canTakeOver = true; await render();
+    expect(document.querySelector('[role="dialog"]')).toBeNull();
+    props.takeoverRequestId = "native-click-2"; await render();
+    expect(document.querySelector('[role="dialog"]')).not.toBeNull();
+    props = { ...props, identityKey: "replacement-browser", takeoverRequestId: undefined }; await render();
+    expect(document.querySelector('[role="dialog"]')).toBeNull();
+    expect(props.onTakeOver).not.toHaveBeenCalled();
+  });
 
   it("supports manual takeover without an AI request and waits for authoritative ownership", async () => {
     await render(); await click("browser-human-input-takeover");
@@ -29,7 +61,7 @@ describe("BrowserHumanInputControls", () => {
     expect(props.onContinue).not.toHaveBeenCalled();
     await click("browser-human-input-continue");
     expect(props.onContinue).toHaveBeenCalledExactlyOnceWith(BROWSER_HUMAN_INPUT_CONTINUE_PROMPT);
-    expect(container.textContent).not.toContain("Done, continue");
+    expect(container.textContent).not.toContain("Let AI continue");
   });
 
   it("does not continue automatically or duplicate an in-flight explicit continuation", async () => {
@@ -42,13 +74,13 @@ describe("BrowserHumanInputControls", () => {
     expect(props.onContinue).toHaveBeenCalledTimes(1);
     await act(async () => finish(false));
     expect(container.textContent).toContain("was not sent");
-    expect(container.textContent).toContain("Done, continue");
+    expect(container.textContent).toContain("Let AI continue");
   });
 
   it("clears user-initiated continuation when page/identity changes", async () => {
     await render(); await click("browser-human-input-takeover");
     props = { ...props, identityKey: "another-page", humanControlConfirmed: true }; await render();
-    expect(container.textContent).not.toContain("Done, continue");
+    expect(container.textContent).not.toContain("Let AI continue");
     expect(props.onContinue).not.toHaveBeenCalled();
   });
 
@@ -60,7 +92,7 @@ describe("BrowserHumanInputControls", () => {
     await render();
     await act(async () => reject(new Error("Failure from the previous browser")));
     expect(container.textContent).not.toContain("Failure from the previous browser");
-    expect(container.textContent).not.toContain("Done, continue");
+    expect(container.textContent).not.toContain("Let AI continue");
     expect(props.onContinue).not.toHaveBeenCalled();
   });
 
@@ -73,7 +105,7 @@ describe("BrowserHumanInputControls", () => {
     props = { ...props, identityKey: "different-browser", request: { ...props.request, handoffId: "second" }, onContinue: vi.fn(async () => true) };
     await render();
     await act(async () => finish(true));
-    expect(container.textContent).toContain("Done, continue");
+    expect(container.textContent).toContain("Let AI continue");
     expect(props.onContinue).not.toHaveBeenCalled();
     await click("browser-human-input-continue");
     expect(props.onContinue).toHaveBeenCalledExactlyOnceWith(BROWSER_HUMAN_INPUT_CONTINUE_PROMPT);
@@ -87,8 +119,8 @@ describe("BrowserHumanInputControls", () => {
     props = { ...props, request: null };
     await render();
     expect(container.textContent).not.toContain("highlighted field");
-    expect(container.textContent).toContain("Complete your manual step directly");
-    expect(container.textContent).toContain("Done, continue");
+    expect(container.textContent).toContain("Finish your changes on the page");
+    expect(container.textContent).toContain("Let AI continue");
     expect(props.onContinue).not.toHaveBeenCalled();
     await click("browser-human-input-continue");
     expect(props.onContinue).toHaveBeenCalledExactlyOnceWith(BROWSER_HUMAN_INPUT_CONTINUE_PROMPT);
@@ -101,7 +133,7 @@ describe("BrowserHumanInputControls", () => {
     expect(container.querySelector<HTMLButtonElement>('[data-testid="browser-human-input-continue"]')!.disabled).toBe(true);
     await act(async () => vi.advanceTimersByTime(1001));
     expect(container.textContent).not.toContain("highlighted field");
-    expect(container.textContent).toContain("Done, continue");
+    expect(container.textContent).toContain("Let AI continue");
     expect(container.querySelector<HTMLButtonElement>('[data-testid="browser-human-input-continue"]')!.disabled).toBe(true);
     expect(props.onContinue).not.toHaveBeenCalled();
   });

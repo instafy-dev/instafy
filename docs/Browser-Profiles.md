@@ -31,7 +31,7 @@ conversation's browser and sends the task to that exact browser once it is ready
 This is a user-selected handoff; displaying an old message never runs it again.
 Paused native control uses the existing Resume flow with the Browser settings
 approval choice (routine browsing by default on supported Desktop hosts); already active
-control keeps its settings. A pending manual step must be finished with **Done, continue** before another task can start.
+control keeps its settings. A pending manual step must be finished with **Let AI continue** before another task can start.
 
 Studio first reuses the browser location saved for this conversation on this
 device. For a new conversation, it uses the user's explicit location preference,
@@ -97,10 +97,10 @@ Recognized high-impact actions still ask and secret entry remains manual; a
 website can attach unexpected side effects to an otherwise ordinary control.
 See each mode's policy for scope and revocation.
 
-**Take over → fill highlighted fields → Done, continue** is a sequential handoff.
+**Take over → fill highlighted fields → Let AI continue** is a sequential handoff.
 The browser must confirm that agent operations have stopped before manual input
-is enabled. Done sends a fixed continuation, not entered values, and starts a
-fresh browser turn on that page. Shared page contents are still visible to
+is enabled. **Let AI continue** sends a fixed message without entered values and
+starts a fresh browser turn on that page. Shared page contents are still visible to
 project members; expansion and manual input do not make a Shared page private.
 
 ## Clearing data
