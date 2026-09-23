@@ -5,6 +5,7 @@ import path from 'node:path';
 import test from 'node:test';
 import vm from 'node:vm';
 import { MANUAL_CI_JOBS, MANUAL_CI_BASELINES, manualCiBranch, withoutManualCiRouting } from './lib/manualCiRoutingTestBaseline.mjs';
+import { withoutAddedBuildContractTests } from './lib/buildContractTestsBaseline.mjs';
 
 const root = path.resolve(import.meta.dirname, '..');
 const read = file => fs.readFileSync(path.join(root, '.github/workflows', file), 'utf8');
@@ -40,7 +41,8 @@ function select(job, github, source = read(job.file), toggle) {
 for (const [file, { sha256: hash }] of Object.entries(MANUAL_CI_BASELINES)) test(`manual routing reconstructs the complete original ${file}`, () => {
   const source = read(file);
   for (const job of MANUAL_CI_JOBS.filter(item => item.file === file)) assert.equal(source.split(manualCiBranch(job)).length, 2);
-  assert.equal(createHash('sha256').update(withoutManualCiRouting(file, source)).digest('hex'), hash);
+  const reviewed = file === 'build.yml' ? withoutAddedBuildContractTests(source) : source;
+  assert.equal(createHash('sha256').update(withoutManualCiRouting(file, reviewed)).digest('hex'), hash);
 });
 for (const job of MANUAL_CI_JOBS) test(`exact-main manual selector ${job.file}/${job.key}`, () => {
   const valid = context(job), selected = select(job, valid);

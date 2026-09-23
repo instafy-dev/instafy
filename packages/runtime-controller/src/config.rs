@@ -111,6 +111,94 @@ impl std::fmt::Debug for CredentialEncryptionKey {
     }
 }
 
+/// The value USER_TOKEN_SECRET falls back to when unset. It is published in
+/// this repository, so it is acceptable only under DEV_MODE.
+const DEV_USER_TOKEN_SECRET: &str = "dev-user-token-secret";
+
+/// RFC 7518 section 3.2: an HS256 key must be at least as long as the hash
+/// output, which also rules out short placeholders such as the one above.
+const MIN_USER_TOKEN_SECRET_BYTES: usize = 32;
+
+/// Resolve the HS256 secret that signs controller session tokens.
+///
+/// `authenticate_request` accepts any token that verifies against this secret
+/// and returns a full user session for whatever `sub` it names; there is no
+/// session table or revocation list behind it. A secret anyone can read
+/// therefore lets anyone who can reach the controller act as any user.
+/// Outside DEV_MODE the controller refuses to start instead of signing with a
+/// missing, published or short secret. Messages never include the value.
+fn resolve_user_token_secret(dev_mode: bool, configured: Option<&str>) -> anyhow::Result<String> {
+    let configured = configured.map(str::trim).filter(|value| !value.is_empty());
+    if dev_mode {
+        return Ok(match configured {
+            Some(secret) => secret.to_string(),
+            None => {
+                warn!(
+                    "DEV_MODE: USER_TOKEN_SECRET is unset, so session tokens are signed with the \
+                     published development value; anyone who can reach this controller can sign \
+                     in as any user"
+                );
+                DEV_USER_TOKEN_SECRET.to_string()
+            }
+        });
+    }
+    match configured {
+        None => anyhow::bail!(
+            "USER_TOKEN_SECRET must be set outside DEV_MODE. It signs controller session tokens; \
+             generate one with `openssl rand -hex 32`, or set DEV_MODE=1 for local development"
+        ),
+        Some(DEV_USER_TOKEN_SECRET) => anyhow::bail!(
+            "USER_TOKEN_SECRET is the development value published in the Instafy source; anyone \
+             could forge a session with it. Generate a new one with `openssl rand -hex 32`"
+        ),
+        Some(secret) if secret.len() < MIN_USER_TOKEN_SECRET_BYTES => anyhow::bail!(
+            "USER_TOKEN_SECRET must be at least {MIN_USER_TOKEN_SECRET_BYTES} bytes outside \
+             DEV_MODE. Generate one with `openssl rand -hex 32`"
+        ),
+        Some(secret) => Ok(secret.to_string()),
+    }
+}
+
+/// Resolve the key that encrypts stored credentials, project secrets, OAuth
+/// tokens, saved browser profiles and GitHub device-login sessions.
+///
+/// Earlier releases derived it from USER_TOKEN_SECRET whenever it was unset.
+/// That couples two secrets with opposite lifecycles: the signing secret must
+/// be rotatable at any time (the cost is a sign-in), while this key cannot
+/// change without re-encrypting every stored row. Rotating the signing secret
+/// would therefore silently make every stored credential unreadable, and so
+/// would the first real USER_TOKEN_SECRET on a controller that ran without one.
+/// Outside DEV_MODE the key must be configured explicitly.
+fn resolve_credential_encryption_key(
+    dev_mode: bool,
+    configured: Option<&str>,
+    user_token_secret: &str,
+) -> anyhow::Result<CredentialEncryptionKey> {
+    match configured.map(str::trim).filter(|value| !value.is_empty()) {
+        Some(raw) => CredentialEncryptionKey::from_base64(raw),
+        None if dev_mode => Ok(CredentialEncryptionKey::derive_from_user_token_secret(
+            user_token_secret,
+        )),
+        None => anyhow::bail!(
+            "CREDENTIAL_ENCRYPTION_KEY must be set outside DEV_MODE to a base64-encoded 32-byte \
+             key (`openssl rand -base64 32`). A controller that previously ran without it stored \
+             credentials under a key derived from USER_TOKEN_SECRET; see the runtime-controller \
+             README before choosing a value, or those credentials become unreadable"
+        ),
+    }
+}
+
+/// Whether this is the key earlier releases derived from the published
+/// development USER_TOKEN_SECRET. Anyone can compute it, so the encrypted rows
+/// are readable by anyone who can read them at all: a service-role key, a
+/// database role, a backup or any other SQL read path. It is still accepted,
+/// because refusing it would strand those rows until they are re-encrypted,
+/// but the controller warns on every boot while it is in use.
+fn is_published_credential_encryption_key(key: &CredentialEncryptionKey) -> bool {
+    key.as_bytes()
+        == CredentialEncryptionKey::derive_from_user_token_secret(DEV_USER_TOKEN_SECRET).as_bytes()
+}
+
 pub(crate) const DEFAULT_SERVICE_RUNTIME_USER_EMAIL: &str = "service-runtime@instafy.dev";
 
 fn parse_browser_profile_persist_project_ids(raw: &str) -> anyhow::Result<Vec<Uuid>> {
@@ -549,6 +637,32 @@ impl AppConfig {
         // startup work so partial or unsafe configuration fails immediately.
         let browser_turn_rest = crate::browser_turn::BrowserTurnRestConfig::from_env()?;
 
+        let dev_mode = std::env::var("DEV_MODE")
+            .ok()
+            .map(|value| value.to_lowercase())
+            .map(|value| matches!(value.as_str(), "1" | "true" | "yes" | "on"))
+            .unwrap_or(false);
+        // The session signing secret and the credential encryption key are
+        // checked here, before any network IO, for the same reason: a
+        // controller running on a published or missing value must not start.
+        let user_token_secret = resolve_user_token_secret(
+            dev_mode,
+            std::env::var("USER_TOKEN_SECRET").ok().as_deref(),
+        )?;
+        let credential_encryption_key = resolve_credential_encryption_key(
+            dev_mode,
+            std::env::var("CREDENTIAL_ENCRYPTION_KEY").ok().as_deref(),
+            &user_token_secret,
+        )?;
+        if !dev_mode && is_published_credential_encryption_key(&credential_encryption_key) {
+            warn!(
+                "CREDENTIAL_ENCRYPTION_KEY is the key derived from the published development \
+                 USER_TOKEN_SECRET. Anyone who can read the encrypted rows, through any \
+                 service-role or SQL read path, can decrypt them; re-encrypt them under a \
+                 freshly generated key"
+            );
+        }
+
         let port = std::env::var("PORT")
             .ok()
             .and_then(|raw| raw.parse::<u16>().ok())
@@ -688,11 +802,6 @@ impl AppConfig {
             .and_then(|raw| raw.parse::<i64>().ok())
             .filter(|ttl| *ttl > 0)
             .unwrap_or(3600);
-        let user_token_secret = std::env::var("USER_TOKEN_SECRET")
-            .ok()
-            .map(|raw| raw.trim().to_string())
-            .filter(|value| !value.is_empty())
-            .unwrap_or_else(|| "dev-user-token-secret".to_string());
         let user_token_ttl_seconds = std::env::var("USER_TOKEN_TTL_SECONDS")
             .ok()
             .and_then(|raw| raw.parse::<i64>().ok())
@@ -763,25 +872,6 @@ impl AppConfig {
             .and_then(|raw| raw.parse::<i64>().ok())
             .filter(|ttl| *ttl > 0)
             .unwrap_or(1800);
-
-        let credential_encryption_key = match std::env::var("CREDENTIAL_ENCRYPTION_KEY") {
-            Ok(value) => {
-                let trimmed = value.trim();
-                if trimmed.is_empty() {
-                    None
-                } else {
-                    Some(CredentialEncryptionKey::from_base64(trimmed)?)
-                }
-            }
-            Err(_) => None,
-        }
-        // Keep credential storage working even when deployments forget to provide a dedicated key.
-        // Operators can still override with `CREDENTIAL_ENCRYPTION_KEY` for independent rotation.
-        .or_else(|| {
-            Some(CredentialEncryptionKey::derive_from_user_token_secret(
-                &user_token_secret,
-            ))
-        });
 
         let browser_profile_persist_project_ids =
             std::env::var("BROWSER_PROFILE_PERSIST_PROJECT_IDS")
@@ -940,11 +1030,6 @@ impl AppConfig {
             .map(|value| matches!(value.as_str(), "1" | "true" | "yes" | "on"))
             .unwrap_or(false);
         let dev_isolation_mode = std::env::var("DEV_ISOLATION_MODE")
-            .ok()
-            .map(|value| value.to_lowercase())
-            .map(|value| matches!(value.as_str(), "1" | "true" | "yes" | "on"))
-            .unwrap_or(false);
-        let dev_mode = std::env::var("DEV_MODE")
             .ok()
             .map(|value| value.to_lowercase())
             .map(|value| matches!(value.as_str(), "1" | "true" | "yes" | "on"))
@@ -1133,7 +1218,7 @@ impl AppConfig {
             proxy_signing_secret,
             proxy_base_url,
             proxy_token_ttl_seconds,
-            credential_encryption_key,
+            credential_encryption_key: Some(credential_encryption_key),
             browser_profile_persist_project_ids,
             browser_profile_snapshot_secs,
             progress_callback_secret,
@@ -1310,10 +1395,118 @@ impl StripeConfig {
 #[cfg(test)]
 mod tests {
     use super::{
-        database_pool_size_from_values, normalize_public_app_url,
-        parse_browser_profile_persist_project_ids,
+        database_pool_size_from_values, is_published_credential_encryption_key,
+        normalize_public_app_url, parse_browser_profile_persist_project_ids,
+        resolve_credential_encryption_key, resolve_user_token_secret, CredentialEncryptionKey,
+        DEV_USER_TOKEN_SECRET,
     };
+    use base64::Engine;
     use uuid::Uuid;
+
+    const STRONG_SECRET: &str = "0123456789abcdef0123456789abcdef";
+
+    #[test]
+    fn user_token_secret_is_refused_outside_dev_mode_when_unset_published_or_short() {
+        // authenticate_request turns any token that verifies against this
+        // secret into a full session for the `sub` it names. A missing value
+        // used to fall back to the published one, which let anyone who could
+        // reach the controller sign in as any user.
+        let short = "a-private-but-short-secret";
+        assert!(short.len() < 32);
+        for configured in [
+            None,
+            Some(""),
+            Some("   "),
+            Some(DEV_USER_TOKEN_SECRET),
+            Some(" dev-user-token-secret\n"),
+            Some(short),
+            Some(&STRONG_SECRET[..31]),
+        ] {
+            let error = resolve_user_token_secret(false, configured)
+                .expect_err("outside DEV_MODE the controller must refuse to start")
+                .to_string();
+            assert!(error.contains("USER_TOKEN_SECRET"), "{error}");
+            assert!(
+                !error.contains(short),
+                "refusals must never echo the configured value"
+            );
+        }
+    }
+
+    #[test]
+    fn user_token_secret_accepts_a_strong_value_outside_dev_mode() {
+        assert_eq!(
+            resolve_user_token_secret(false, Some(&format!("  {STRONG_SECRET}\n")))
+                .expect("a 32-byte secret boots"),
+            STRONG_SECRET
+        );
+    }
+
+    #[test]
+    fn dev_mode_keeps_the_development_signing_fallback() {
+        assert_eq!(
+            resolve_user_token_secret(true, None).expect("dev fallback"),
+            DEV_USER_TOKEN_SECRET
+        );
+        assert_eq!(
+            resolve_user_token_secret(true, Some("  ")).expect("dev fallback"),
+            DEV_USER_TOKEN_SECRET
+        );
+        assert_eq!(
+            resolve_user_token_secret(true, Some("short")).expect("dev accepts any value"),
+            "short"
+        );
+    }
+
+    #[test]
+    fn credential_encryption_key_is_required_outside_dev_mode() {
+        // Deriving it from USER_TOKEN_SECRET made rotating the signing secret
+        // silently strand every stored credential.
+        for configured in [None, Some(""), Some("  \n")] {
+            let error = resolve_credential_encryption_key(false, configured, STRONG_SECRET)
+                .expect_err("outside DEV_MODE the key must be explicit")
+                .to_string();
+            assert!(error.contains("CREDENTIAL_ENCRYPTION_KEY"), "{error}");
+        }
+    }
+
+    #[test]
+    fn credential_encryption_key_uses_the_configured_key_in_every_mode() {
+        let raw = [7u8; 32];
+        let encoded = base64::engine::general_purpose::STANDARD.encode(raw);
+        for dev_mode in [false, true] {
+            let key =
+                resolve_credential_encryption_key(dev_mode, Some(&format!(" {encoded} ")), "x")
+                    .expect("valid configured key");
+            assert_eq!(key.as_bytes(), &raw);
+            assert!(resolve_credential_encryption_key(
+                dev_mode,
+                Some("bm90LTMyLWJ5dGVz"),
+                STRONG_SECRET
+            )
+            .is_err());
+        }
+    }
+
+    #[test]
+    fn dev_mode_keeps_the_derived_credential_key_fallback() {
+        let key = resolve_credential_encryption_key(true, None, STRONG_SECRET)
+            .expect("dev fallback derives the key");
+        assert_eq!(
+            key.as_bytes(),
+            CredentialEncryptionKey::for_test(STRONG_SECRET).as_bytes()
+        );
+    }
+
+    #[test]
+    fn the_key_derived_from_the_published_signing_secret_is_recognised() {
+        assert!(is_published_credential_encryption_key(
+            &CredentialEncryptionKey::for_test(DEV_USER_TOKEN_SECRET)
+        ));
+        assert!(!is_published_credential_encryption_key(
+            &CredentialEncryptionKey::for_test(STRONG_SECRET)
+        ));
+    }
 
     /// The HS256 fallback must never disable JWKS refresh.
     ///

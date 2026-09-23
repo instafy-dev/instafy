@@ -19,6 +19,10 @@ const SERVICE_ID: &str = "00000000-0000-4000-8000-000000000001";
 const SERVICE_EMAIL: &str = "controller-startup@example.test";
 const SERVICE_KEY: &str = "inert-startup-service-role";
 const SERVICE_PASSWORD: &str = "inert-startup-password-override";
+// Inert fixtures, never a deployed value. Outside DEV_MODE the controller now
+// refuses to start without both.
+const USER_TOKEN_SECRET: &str = "inert-startup-user-token-secret-0123456789";
+const CREDENTIAL_ENCRYPTION_KEY: &str = "aW5lcnQtc3RhcnR1cC1jcmVkZW50aWFsLWtleS0zMmI=";
 const ADMIN_PATH: &str = "/auth/v1/admin/users";
 const JWKS_PATH: &str = "/auth/v1/.well-known/jwks.json";
 const OUTPUT_LIMIT: u64 = 32 * 1024;
@@ -75,6 +79,8 @@ fn run_controller(server: &MockServer, configure: impl FnOnce(&mut Command)) -> 
         .env("SUPABASE_JWT_SECRET", "inert-startup-hmac-fallback")
         .env("SUPABASE_SERVICE_ROLE_KEY", SERVICE_KEY)
         .env("SERVICE_RUNTIME_USER_EMAIL", SERVICE_EMAIL)
+        .env("USER_TOKEN_SECRET", USER_TOKEN_SECRET)
+        .env("CREDENTIAL_ENCRYPTION_KEY", CREDENTIAL_ENCRYPTION_KEY)
         .env("MANAGED_AI_ENABLED", "false")
         .env("MANAGED_AI_STARTUP_CHECK", "false")
         .env("RUST_LOG", "info")
@@ -116,6 +122,8 @@ fn run_controller(server: &MockServer, configure: impl FnOnce(&mut Command)) -> 
     // credentials. Do not include raw child output in assertion messages.
     assert!(!output.contains(SERVICE_KEY));
     assert!(!output.contains(SERVICE_PASSWORD));
+    assert!(!output.contains(USER_TOKEN_SECRET));
+    assert!(!output.contains(CREDENTIAL_ENCRYPTION_KEY));
     StartupExit { status, output }
 }
 
@@ -311,4 +319,120 @@ fn startup_propagates_configuration_errors_before_network_io() {
     });
     assert_normal_error(&result, "DATABASE_URL must be set");
     requests.assert_hits(0);
+}
+
+#[test]
+fn startup_refuses_a_missing_published_or_short_signing_secret_before_network_io() {
+    // USER_TOKEN_SECRET signs controller session tokens. The published
+    // development fallback let anyone who could reach a controller mint a
+    // session as any user, so outside DEV_MODE startup must stop here.
+    let server = MockServer::start();
+    let requests = server.mock(|_when, then| {
+        then.status(500);
+    });
+    let short = "inert-but-short-secret";
+    for configured in [None, Some(""), Some("dev-user-token-secret"), Some(short)] {
+        let result = run_controller(&server, |command| match configured {
+            Some(value) => {
+                command.env("USER_TOKEN_SECRET", value);
+            }
+            None => {
+                command.env_remove("USER_TOKEN_SECRET");
+            }
+        });
+        assert_normal_error(&result, "USER_TOKEN_SECRET");
+        assert!(!result.output.contains(short));
+    }
+    requests.assert_hits(0);
+}
+
+#[test]
+fn startup_refuses_a_missing_credential_encryption_key_before_network_io() {
+    // Deriving the key from USER_TOKEN_SECRET made rotating the signing secret
+    // silently strand every stored credential.
+    let server = MockServer::start();
+    let requests = server.mock(|_when, then| {
+        then.status(500);
+    });
+    for configured in [None, Some("  ")] {
+        let result = run_controller(&server, |command| match configured {
+            Some(value) => {
+                command.env("CREDENTIAL_ENCRYPTION_KEY", value);
+            }
+            None => {
+                command.env_remove("CREDENTIAL_ENCRYPTION_KEY");
+            }
+        });
+        assert_normal_error(
+            &result,
+            "CREDENTIAL_ENCRYPTION_KEY must be set outside DEV_MODE",
+        );
+    }
+    requests.assert_hits(0);
+}
+
+#[test]
+fn startup_in_dev_mode_keeps_the_development_fallbacks() {
+    let server = MockServer::start();
+    let jwks = jwks_fixture(&server);
+    let result = run_controller(&server, |command| {
+        command
+            .env("DEV_MODE", "1")
+            .env("SERVICE_RUNTIME_USER_ID", SERVICE_ID)
+            .env_remove("USER_TOKEN_SECRET")
+            .env_remove("CREDENTIAL_ENCRYPTION_KEY");
+    });
+    // Configuration completed: startup got as far as the database.
+    assert_normal_error(&result, "failed to parse DATABASE_URL");
+    assert!(result
+        .output
+        .contains("USER_TOKEN_SECRET is unset, so session tokens are signed with the published"));
+    jwks.assert_hits(1);
+}
+
+#[test]
+fn startup_refuses_the_signing_fallback_when_dev_mode_is_not_enabled() {
+    // DEV_MODE unlocks the published signing fallback, so only an explicit
+    // enabling value may select it. Setting the variable to a disabling,
+    // empty or unrecognised value is production configuration.
+    let server = MockServer::start();
+    let requests = server.mock(|_when, then| {
+        then.status(500);
+    });
+    for value in ["false", "0", "off", "", "prod"] {
+        let result = run_controller(&server, |command| {
+            command
+                .env("DEV_MODE", value)
+                .env_remove("USER_TOKEN_SECRET");
+        });
+        assert_normal_error(&result, "USER_TOKEN_SECRET must be set outside DEV_MODE");
+        assert!(!result.output.contains(
+            "USER_TOKEN_SECRET is unset, so session tokens are signed with the published"
+        ));
+    }
+    requests.assert_hits(0);
+}
+
+#[test]
+fn startup_warns_while_stored_credentials_use_the_published_derived_key() {
+    // Controllers that ran without either variable encrypted credentials under
+    // a key anyone can derive. It stays accepted so those rows remain readable
+    // until they are re-encrypted, but every boot says so.
+    use sha2::{Digest, Sha256};
+    let published = Sha256::new()
+        .chain_update(b"instafy:credential-encryption-key:v1:")
+        .chain_update(b"dev-user-token-secret")
+        .finalize();
+    let server = MockServer::start();
+    let jwks = jwks_fixture(&server);
+    let result = run_controller(&server, |command| {
+        command
+            .env("SERVICE_RUNTIME_USER_ID", SERVICE_ID)
+            .env("CREDENTIAL_ENCRYPTION_KEY", BASE64.encode(published));
+    });
+    assert_normal_error(&result, "failed to parse DATABASE_URL");
+    assert!(result
+        .output
+        .contains("CREDENTIAL_ENCRYPTION_KEY is the key derived from the published development"));
+    jwks.assert_hits(1);
 }
