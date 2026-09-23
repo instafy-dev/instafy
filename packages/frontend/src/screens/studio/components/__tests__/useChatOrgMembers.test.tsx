@@ -191,6 +191,40 @@ describe("useChatOrgMembers", () => {
     expect(probe()?.dataset.canShare).toBe("false");
   });
 
+  it("fetches the directory again when a members change arrives during a fetch that began before it", async () => {
+    mocks.listOrganizations.mockResolvedValue(builderOrg);
+    mocks.listMembers.mockResolvedValueOnce([builderMember]);
+    await render(<Probe />);
+    await vi.waitFor(() => {
+      expect(probe()?.textContent).toContain("first@example.com");
+    });
+
+    // A refetch reads the directory before the change commits...
+    let resolveStale!: (members: unknown[]) => void;
+    mocks.listMembers.mockReturnValueOnce(
+      new Promise((resolve) => {
+        resolveStale = resolve;
+      }),
+    );
+    mocks.listMembers.mockResolvedValueOnce([
+      builderMember,
+      { ...builderMember, email: "joined@example.com", userId: "user-3" },
+    ]);
+    await act(async () => {
+      void queryClient.refetchQueries({ queryKey: ["org-directory"] });
+    });
+    expect(mocks.listMembers).toHaveBeenCalledTimes(2);
+
+    // ...the org roster signal joins it, then fetches once more after it.
+    await dispatch(MEMBERS_CHANGED_EVENT);
+    expect(mocks.listMembers).toHaveBeenCalledTimes(2);
+    await act(async () => resolveStale([builderMember]));
+    await vi.waitFor(() => {
+      expect(probe()?.textContent).toContain("joined@example.com");
+    });
+    expect(mocks.listMembers).toHaveBeenCalledTimes(3);
+  });
+
   it("clears a previously authorized directory when a later refresh fails", async () => {
     mocks.listOrganizations.mockResolvedValueOnce(builderOrg);
     mocks.listMembers.mockResolvedValueOnce([

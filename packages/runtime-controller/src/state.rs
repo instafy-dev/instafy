@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::sync::{Arc, RwLock as StdRwLock};
+use std::sync::{Arc, Mutex as StdMutex, RwLock as StdRwLock};
 
 use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use serde::{Deserialize, Serialize};
@@ -343,6 +343,10 @@ impl LocalWorkspaceRegistry {
 pub(crate) struct EventHub {
     sender: broadcast::Sender<ControllerEvent>,
     outbound: Option<mpsc::Sender<ControllerEvent>>,
+    /// Open `/events` streams on this node, per project.
+    project_watchers: Arc<StdMutex<HashMap<Uuid, usize>>>,
+    /// Per-org spacing of `credits.updated`.
+    pub(crate) credit_signals: SignalCoalescer,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -534,18 +538,20 @@ fn is_entry_expired(entry: &LocalWorkspaceEntry, ttl: ChronoDuration) -> bool {
 
 impl EventHub {
     pub(crate) fn new() -> Self {
-        let (sender, _receiver) = broadcast::channel(256);
-        Self {
-            sender,
-            outbound: None,
-        }
+        Self::with_outbound(None)
     }
 
     pub(crate) fn new_with_outbound(outbound: mpsc::Sender<ControllerEvent>) -> Self {
+        Self::with_outbound(Some(outbound))
+    }
+
+    fn with_outbound(outbound: Option<mpsc::Sender<ControllerEvent>>) -> Self {
         let (sender, _receiver) = broadcast::channel(256);
         Self {
             sender,
-            outbound: Some(outbound),
+            outbound,
+            project_watchers: Arc::new(StdMutex::new(HashMap::new())),
+            credit_signals: SignalCoalescer::new(CREDITS_UPDATED_INTERVAL),
         }
     }
 
@@ -553,15 +559,159 @@ impl EventHub {
         self.sender.subscribe()
     }
 
+    /// Counts one open stream of `project_id` on this node until the
+    /// returned guard is dropped. Project signals reach this node's
+    /// broadcast only for watched projects.
+    pub(crate) fn watch_project(&self, project_id: Uuid) -> ProjectWatch {
+        *lock_unpoisoned(&self.project_watchers)
+            .entry(project_id)
+            .or_insert(0) += 1;
+        ProjectWatch {
+            watchers: self.project_watchers.clone(),
+            project_id,
+        }
+    }
+
     pub(crate) fn publish(&self, event: ControllerEvent) {
         if let Some(outbound) = &self.outbound {
             let _ = outbound.try_send(event.clone());
         }
-        let _ = self.sender.send(event);
+        self.send_local(event);
     }
 
     pub(crate) fn publish_local(&self, event: ControllerEvent) {
+        self.send_local(event);
+    }
+
+    /// An org-wide signal is one event per project, and a large org would
+    /// otherwise flood the 256-slot broadcast every stream on this node
+    /// shares, lagging them and dropping other tenants' events. No stream can
+    /// match a project nobody here watches, so those signals skip the local
+    /// broadcast. The bus still carries them: other nodes apply the same check
+    /// to their own streams in `publish_local`.
+    fn send_local(&self, event: ControllerEvent) {
+        if PROJECT_SIGNAL_KINDS.contains(&event.kind.as_str())
+            && !event.project_id.is_some_and(|project_id| {
+                lock_unpoisoned(&self.project_watchers).contains_key(&project_id)
+            })
+        {
+            return;
+        }
         let _ = self.sender.send(event);
+    }
+}
+
+/// The kinds `publish_project_signal` fans out per project.
+const PROJECT_SIGNAL_KINDS: [&str; 2] = [
+    crate::projects::PROJECT_MEMBERS_CHANGED_EVENT,
+    crate::credits::CREDITS_UPDATED_EVENT,
+];
+
+/// Minimum spacing of `credits.updated` for one org on one node.
+pub(crate) const CREDITS_UPDATED_INTERVAL: std::time::Duration = std::time::Duration::from_secs(2);
+
+fn lock_unpoisoned<T>(mutex: &StdMutex<T>) -> std::sync::MutexGuard<'_, T> {
+    mutex
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+/// One open stream's claim on a project; see `EventHub::watch_project`.
+/// `/events` keeps it inside its response stream, so a finished, failed or
+/// disconnected stream always stops counting.
+pub(crate) struct ProjectWatch {
+    watchers: Arc<StdMutex<HashMap<Uuid, usize>>>,
+    project_id: Uuid,
+}
+
+impl Drop for ProjectWatch {
+    fn drop(&mut self) {
+        let mut watchers = lock_unpoisoned(&self.watchers);
+        if let Some(count) = watchers.get_mut(&self.project_id) {
+            *count = count.saturating_sub(1);
+            if *count == 0 {
+                watchers.remove(&self.project_id);
+            }
+        }
+    }
+}
+
+/// Spaces out a per-key signal (per org) on this node. The first signal
+/// publishes at once; later ones inside the interval fold into a single
+/// trailing publish when it ends, so the last change is always announced and
+/// a key publishes at most once per interval.
+#[derive(Clone)]
+pub(crate) struct SignalCoalescer {
+    interval: std::time::Duration,
+    windows: Arc<StdMutex<HashMap<Uuid, SignalWindow>>>,
+}
+
+struct SignalWindow {
+    published_at: tokio::time::Instant,
+    /// Reason of the newest change waiting for the trailing publish.
+    trailing: Option<&'static str>,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum SignalAdmission {
+    /// Publish now.
+    Now,
+    /// Schedule the one trailing publish (`take_trailing`) after this delay.
+    Trailing(std::time::Duration),
+    /// The scheduled trailing publish will announce this change too.
+    Coalesced,
+}
+
+impl SignalCoalescer {
+    pub(crate) fn new(interval: std::time::Duration) -> Self {
+        Self {
+            interval,
+            windows: Arc::new(StdMutex::new(HashMap::new())),
+        }
+    }
+
+    pub(crate) fn admit(
+        &self,
+        key: Uuid,
+        reason: &'static str,
+        now: tokio::time::Instant,
+    ) -> SignalAdmission {
+        let interval = self.interval;
+        let mut windows = lock_unpoisoned(&self.windows);
+        windows.retain(|_, window| {
+            window.trailing.is_some()
+                || now.saturating_duration_since(window.published_at) < interval
+        });
+        let Some(window) = windows.get_mut(&key) else {
+            windows.insert(
+                key,
+                SignalWindow {
+                    published_at: now,
+                    trailing: None,
+                },
+            );
+            return SignalAdmission::Now;
+        };
+        if window.trailing.replace(reason).is_some() {
+            return SignalAdmission::Coalesced;
+        }
+        SignalAdmission::Trailing(
+            interval.saturating_sub(now.saturating_duration_since(window.published_at)),
+        )
+    }
+
+    /// Runs the scheduled trailing publish: returns the newest pending reason
+    /// and restarts the key's interval at `now`.
+    pub(crate) fn take_trailing(
+        &self,
+        key: Uuid,
+        now: tokio::time::Instant,
+    ) -> Option<&'static str> {
+        let mut windows = lock_unpoisoned(&self.windows);
+        let window = windows.get_mut(&key)?;
+        let reason = window.trailing.take()?;
+        window.published_at = now;
+        Some(reason)
     }
 }
 
@@ -682,6 +832,33 @@ pub(crate) fn publish_project_access_changed(
         data: serde_json::json!({ "reason": "membership_changed" }),
         timestamp: Utc::now(),
     });
+}
+
+/// Publishes one untargeted, signal-only event per project so every open
+/// stream of those projects learns that something it can already read has
+/// changed, and refetches it through its own authorized endpoint. The events
+/// take the ordinary per-event project access recheck, so the payload is the
+/// reason alone and must never carry data a project viewer could not fetch
+/// (no balance, plan, member or role). Publish only after the transaction
+/// that made the change has committed. A node's broadcast carries them only
+/// for projects that one of its streams watches (`EventHub::send_local`).
+pub(crate) fn publish_project_signal(
+    hub: &EventHub,
+    kind: &str,
+    project_ids: &[Uuid],
+    reason: &str,
+) {
+    for project_id in project_ids {
+        publish_controller_event(
+            hub,
+            kind,
+            Some(*project_id),
+            None,
+            None,
+            None,
+            serde_json::json!({ "reason": reason }),
+        );
+    }
 }
 
 fn session_channel(session_id: Option<Uuid>) -> Option<String> {

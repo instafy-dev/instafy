@@ -49,7 +49,7 @@ describe("useHostedRuntimeSelectionState takeover", () => {
   let root: Root;
   let takeOver: (() => Promise<boolean>) | null = null;
   let refreshRuntimeStatuses: Mock<() => Promise<void>>;
-  let ensureHostedRuntime: Mock<() => Promise<boolean>>;
+  let ensureHostedRuntime: Mock<(options?: { force?: boolean }) => Promise<boolean>>;
   // Stands in for the ensure hook's ref: the mocked ensure writes what its
   // failure was, the way the real one does before it resolves.
   const lastHostedEnsureLimitRef: { current: HostedRuntimeLimitErrorDetails | null } = {
@@ -76,7 +76,7 @@ describe("useHostedRuntimeSelectionState takeover", () => {
     stop.mockReset();
     lastHostedEnsureLimitRef.current = null;
     refreshRuntimeStatuses = vi.fn<() => Promise<void>>(async () => {});
-    ensureHostedRuntime = vi.fn<() => Promise<boolean>>(async () => true);
+    ensureHostedRuntime = vi.fn<(options?: { force?: boolean }) => Promise<boolean>>(async () => true);
     container = document.createElement("div");
     document.body.appendChild(container);
     root = createRoot(container);
@@ -110,6 +110,8 @@ describe("useHostedRuntimeSelectionState takeover", () => {
     });
     expect(refreshRuntimeStatuses).toHaveBeenCalledTimes(1);
     expect(ensureHostedRuntime).toHaveBeenCalledTimes(1);
+    // The retry is forced: the stale `requested` row this project may still hold must not make it report "starting…" (instafy-dev/instafy#372).
+    expect(ensureHostedRuntime).toHaveBeenCalledWith({ force: true });
     // The blocker's space stays stopped; the current project is not held
     // because the user is asking for its machine.
     expect(isManualStopHeld(BLOCKER_PROJECT_ID)).toBe(true);
@@ -127,6 +129,8 @@ describe("useHostedRuntimeSelectionState takeover", () => {
     expect(result).toBe(true);
     expect(refreshRuntimeStatuses).toHaveBeenCalledTimes(1);
     expect(ensureHostedRuntime).toHaveBeenCalledTimes(1);
+    // The retry is forced: the stale `requested` row this project may still hold must not make it report "starting…" (instafy-dev/instafy#372).
+    expect(ensureHostedRuntime).toHaveBeenCalledWith({ force: true });
     expect(isManualStopHeld(BLOCKER_PROJECT_ID)).toBe(false);
   });
 

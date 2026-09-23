@@ -173,6 +173,39 @@ describe("useProjectMembers", () => {
     expect(mocks.listMembers).toHaveBeenCalledTimes(2);
   });
 
+  it("fetches again when a members change arrives during a fetch that began before it", async () => {
+    const member = { createdAt: "2026-09-06", email: "member@example.com", role: "viewer", userId: "user-2" };
+    const joined = { createdAt: "2026-09-07", email: "joined@example.com", role: "builder", userId: "user-3" };
+    mocks.listMembers.mockResolvedValueOnce([member]);
+    await act(async () => root.render(<Providers><Probe /></Providers>));
+    await act(async () => {
+      await vi.waitFor(() => { expect(container.textContent).toContain("member@example.com"); });
+    });
+
+    // A refetch (focus, say) reads the roster before the change commits...
+    let resolveStale!: (members: unknown[]) => void;
+    mocks.listMembers.mockReturnValueOnce(new Promise((resolve) => { resolveStale = resolve; }));
+    mocks.listMembers.mockResolvedValueOnce([member, joined]);
+    await act(async () => {
+      void queryClient.refetchQueries({ queryKey: ["project-members", "user-1", "project-1"], exact: true });
+    });
+    expect(mocks.listMembers).toHaveBeenCalledTimes(2);
+
+    // ...the signal joins that fetch instead of cancelling it...
+    await act(async () => {
+      window.dispatchEvent(new CustomEvent(MEMBERS_CHANGED_EVENT, { detail: { projectId: "project-1" } }));
+      window.dispatchEvent(new CustomEvent(MEMBERS_CHANGED_EVENT, { detail: { projectId: "project-1" } }));
+    });
+    expect(mocks.listMembers).toHaveBeenCalledTimes(2);
+
+    // ...and one more fetch after it settles picks the change up.
+    await act(async () => resolveStale([member]));
+    await act(async () => {
+      await vi.waitFor(() => { expect(container.textContent).toContain("joined@example.com"); });
+    });
+    expect(mocks.listMembers).toHaveBeenCalledTimes(3);
+  });
+
   it.each([PROJECT_ACCESS_REFRESH_EVENT, MEMBERS_CHANGED_EVENT])(
     "ignores %s for another project",
     async (eventName) => {

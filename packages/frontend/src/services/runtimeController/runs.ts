@@ -59,6 +59,10 @@ const WORKSPACE_EVENT_KINDS = [
   "workspace.file_changed",
 ] as const;
 const PROJECT_ACCESS_EVENT_KINDS = ["project.access_changed"] as const;
+// Signal-only invalidations: the payload is just a reason, and listeners
+// refetch the roster or /credits/status through their own authorization.
+const PROJECT_MEMBERS_EVENT_KINDS = ["project.members_changed"] as const;
+const CREDITS_EVENT_KINDS = ["credits.updated"] as const;
 const FORWARD_EVENT_KINDS = [
   ...RUNTIME_TELEMETRY_EVENT_KINDS,
   ...TELEMETRY_EVENT_KINDS,
@@ -70,6 +74,8 @@ const FORWARD_EVENT_KINDS = [
   ...TUNNEL_EVENT_KINDS,
   ...WORKSPACE_EVENT_KINDS,
   ...PROJECT_ACCESS_EVENT_KINDS,
+  ...PROJECT_MEMBERS_EVENT_KINDS,
+  ...CREDITS_EVENT_KINDS,
 ] as const;
 
 export interface ControllerEventPayload {

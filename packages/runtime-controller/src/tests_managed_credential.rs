@@ -37,7 +37,7 @@ async fn managed_credential_lease_route_serves_the_platform_key_under_the_lease_
     };
 
     let mut config = managed_config("managed-credential-lease");
-    config.managed_ai_model_id = "gpt-5.6-luna".to_string();
+    config.managed_ai_model_id = "gpt-6-luna".to_string();
     config.managed_ai_openai_api_key = Some("sk-managed-test".to_string());
     let app = crate::credentials::router().with_state(build_test_state(pool.clone(), config));
 
@@ -64,7 +64,7 @@ async fn managed_credential_lease_route_serves_the_platform_key_under_the_lease_
             assert_eq!(lease["kind"], json!("openai_api_key"));
             assert_eq!(lease["openaiApiKey"], json!("sk-managed-test"));
             assert_eq!(lease["provider"], json!("openai"));
-            assert_eq!(lease["defaultModel"], json!("gpt-5.6-luna"));
+            assert_eq!(lease["defaultModel"], json!("gpt-6-luna"));
             assert_eq!(lease["renewalAuthority"], json!("controller"));
             assert!(lease["leaseExpiresInSeconds"].as_u64().unwrap_or(0) > 0);
         }

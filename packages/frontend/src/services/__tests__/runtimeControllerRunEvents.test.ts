@@ -536,6 +536,47 @@ describe("runtime controller run event streaming", () => {
     expect(onEvent).toHaveBeenCalledTimes(1);
   });
 
+  it("requests and forwards the roster and credit signals", async () => {
+    const { subscribeToRunsFromController } = await import(
+      "../runtimeController/runs"
+    );
+    const onEvent = vi.fn();
+    const onRun = vi.fn();
+    const onOpen = vi.fn();
+    const unsubscribe = subscribeToRunsFromController({
+      projectId: "11111111-1111-4111-8111-111111111111",
+      quietErrors: true,
+      onRun,
+      onEvent,
+      onOpen,
+    });
+
+    await vi.waitFor(() => expect(onOpen).toHaveBeenCalledOnce());
+    const request = streamingRequests[0];
+    const kinds = new URL(request.url).searchParams.getAll("kinds[]");
+    expect(kinds).toContain("project.members_changed");
+    expect(kinds).toContain("credits.updated");
+
+    const membersChanged = {
+      kind: "project.members_changed",
+      project_id: "11111111-1111-4111-8111-111111111111",
+      data: { reason: "org_membership" },
+    };
+    const creditsUpdated = {
+      kind: "credits.updated",
+      project_id: "11111111-1111-4111-8111-111111111111",
+      data: { reason: "ledger" },
+    };
+    request.write(`data: ${JSON.stringify(membersChanged)}\n\n`);
+    request.write(`data: ${JSON.stringify(creditsUpdated)}\n\n`);
+
+    await vi.waitFor(() => expect(onEvent).toHaveBeenCalledTimes(2));
+    expect(onEvent).toHaveBeenNthCalledWith(1, membersChanged);
+    expect(onEvent).toHaveBeenNthCalledWith(2, creditsUpdated);
+    expect(onRun).not.toHaveBeenCalled();
+    unsubscribe();
+  });
+
   it("discards a pending event when the stream ends without a blank line", async () => {
     const { subscribeToRunsFromController } = await import(
       "../runtimeController/runs"

@@ -6,6 +6,7 @@ import type { HostedRuntimeLimitErrorDetails } from "../hostedRuntimeLimitError"
 import { useHostedRuntimeProjectEffects } from "./useHostedRuntimeProjectEffects";
 import { useHostedRuntimeRecoveryEffects } from "./useHostedRuntimeRecoveryEffects";
 import { useHostedRuntimeSelectionState } from "./useHostedRuntimeSelectionState";
+import type { EnsureHostedRuntimeOptions } from "./useHostedRuntimeEnsure";
 
 const runtimeControllerEnabled = controllerClient.core.enabled;
 
@@ -19,7 +20,7 @@ interface UseHostedRuntimePolicyArgs {
   runtimeStatusesResolved: boolean;
   setRuntimeStatusesResolved: (value: boolean) => void;
   refreshRuntimeStatuses: () => Promise<void>;
-  ensureHostedRuntime: () => Promise<boolean>;
+  ensureHostedRuntime: (options?: EnsureHostedRuntimeOptions) => Promise<boolean>;
   /** Limit details of the latest ensure failure, readable before React commits. */
   lastHostedEnsureLimitRef: MutableRefObject<HostedRuntimeLimitErrorDetails | null>;
   hasHostedRuntimeInProgress: boolean;

@@ -18,7 +18,8 @@ use crate::auth::{authenticate_request, RequestContext};
 use crate::conversations::{ensure_conversation_access, load_conversation_record};
 use crate::errors::ApiError;
 use crate::projects::{
-    ensure_project_access, parse_optional_uuid_param, resolve_scope, ScopeParams,
+    ensure_project_access, parse_optional_uuid_param, require_org_access, resolve_scope,
+    ScopeParams, MEMBERS_CHANGED_PROJECT_MEMBERSHIP, PROJECT_MEMBERS_CHANGED_EVENT,
 };
 use crate::state::{AppState, ControllerEvent};
 use crate::{database_unavailable, forbidden, load_project_record, too_many_requests};
@@ -85,6 +86,9 @@ async fn events_stream(
         ));
     }
 
+    // Watch before subscribing, so no project signal published after the
+    // subscription skips this node's broadcast.
+    let watch = Arc::new(state.events.watch_project(filters.project_id));
     let receiver = state.events.subscribe();
     let filters = Arc::new(filters);
     let context = Arc::new(context);
@@ -105,9 +109,12 @@ async fn events_stream(
         let state = state.clone();
         let context = context.clone();
         let permit = permit.clone();
+        let watch = watch.clone();
         async move {
-            // Keep the connection permit alive for as long as the response stream.
+            // Keep the connection permit and the project watch alive for as
+            // long as the response stream.
             let _permit = &permit;
+            let _watch = &watch;
             match result {
                 Ok(event) => {
                     if !filters.matches(&event) {
@@ -357,6 +364,7 @@ async fn ensure_event_access_inner(
     if let Some(event) = event {
         private_runtime_visibility::ensure_visible(state, &transaction, project_id, event, context)
             .await?;
+        ensure_org_roster_signal_visible(&transaction, &project, event, context).await?;
     }
 
     transaction
@@ -364,6 +372,33 @@ async fn ensure_event_access_inner(
         .await
         .map_err(|error| database_unavailable("Controller event access", error))?;
     Ok(())
+}
+
+/// An org roster change reaches only subscribers who can read the org
+/// directory (`require_org_access`): a project guest must not learn that or
+/// when the org roster changed. Every `project.members_changed` except the
+/// space's own `project_membership` counts as an org roster change, and any
+/// error, including a failed membership query, drops the event.
+async fn ensure_org_roster_signal_visible(
+    transaction: &tokio_postgres::Transaction<'_>,
+    project: &crate::ProjectRecord,
+    event: &ControllerEvent,
+    context: &RequestContext,
+) -> Result<(), (StatusCode, Json<ApiError>)> {
+    if event.kind != PROJECT_MEMBERS_CHANGED_EVENT
+        || event.data.get("reason").and_then(serde_json::Value::as_str)
+            == Some(MEMBERS_CHANGED_PROJECT_MEMBERSHIP)
+    {
+        return Ok(());
+    }
+    let Some(org_id) = project.org_id else {
+        return Err(forbidden(
+            "organization roster changes need an organization",
+        ));
+    };
+    require_org_access(transaction, &org_id, context)
+        .await
+        .map(|_| ())
 }
 
 fn normalize_event_kinds(kind: Option<String>, mut kinds: Vec<String>) -> Vec<String> {

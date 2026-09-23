@@ -22,7 +22,8 @@ use uuid::Uuid;
 use crate::auth::{authenticate_request, RequestContext};
 use crate::dispatch::DispatchPromptNormalized;
 use crate::model_defaults::DEFAULT_MANAGED_AI_PROVIDER_ID;
-use crate::projects::ensure_project_org;
+use crate::projects::{ensure_project_org, load_org_project_ids};
+use crate::state::{publish_project_signal, EventHub, SignalAdmission};
 use crate::{
     bad_request, ensure_project_access, internal_error, load_project_record,
     parse_optional_uuid_param, unauthorized, ApiError, AppConfig, AppState, ProjectRecord,
@@ -30,6 +31,110 @@ use crate::{
 
 const AUTO_REFILL_DAILY_WINDOW_ID: &str = "daily";
 const AUTO_REFILL_DAILY_REASON: &str = "auto_refill_daily";
+
+/// Org credit state (balance, limit or plan) changed. Signal only: viewers
+/// refetch `/credits/status` and the ledger through their own authorization.
+pub(crate) const CREDITS_UPDATED_EVENT: &str = "credits.updated";
+/// A committed `org_credit_ledger` row moved the balance.
+pub(crate) const CREDITS_UPDATED_LEDGER: &str = "ledger";
+/// A committed subscription change moved the plan or credit limit.
+pub(crate) const CREDITS_UPDATED_SUBSCRIPTION: &str = "subscription";
+
+/// Announces `credits.updated` on every project stream of the org. Call it
+/// only after the transaction that wrote the ledger row or subscription has
+/// committed, with a client outside that transaction. Best effort: the
+/// change already succeeded, and clients keep a slow fallback refresh.
+///
+/// Every stream that receives the event costs a delivery access check and
+/// every client a refetch, so an org publishes at most once per
+/// `CREDITS_UPDATED_INTERVAL` on this node: a change inside the interval is
+/// folded into one trailing publish when it ends, never dropped.
+pub(crate) async fn publish_credits_updated(
+    state: &AppState,
+    client: &impl GenericClient,
+    org_id: Uuid,
+    reason: &'static str,
+) {
+    match state
+        .events
+        .credit_signals
+        .admit(org_id, reason, tokio::time::Instant::now())
+    {
+        SignalAdmission::Now => {
+            publish_credits_updated_now(client, &state.events, org_id, reason).await
+        }
+        SignalAdmission::Trailing(delay) => spawn_trailing_credits_updated(state, org_id, delay),
+        SignalAdmission::Coalesced => {}
+    }
+}
+
+/// `publish_credits_updated` off the caller's path, for handlers whose
+/// response must not wait for the org's project lookup.
+pub(crate) fn spawn_credits_updated(state: &AppState, org_id: Uuid, reason: &'static str) {
+    match state
+        .events
+        .credit_signals
+        .admit(org_id, reason, tokio::time::Instant::now())
+    {
+        SignalAdmission::Now => {
+            let state = state.clone();
+            tokio::spawn(async move {
+                publish_credits_updated_with_pool(&state, org_id, reason).await;
+            });
+        }
+        SignalAdmission::Trailing(delay) => spawn_trailing_credits_updated(state, org_id, delay),
+        SignalAdmission::Coalesced => {}
+    }
+}
+
+fn spawn_trailing_credits_updated(state: &AppState, org_id: Uuid, delay: std::time::Duration) {
+    let state = state.clone();
+    tokio::spawn(async move {
+        tokio::time::sleep(delay).await;
+        let now = tokio::time::Instant::now();
+        if let Some(reason) = state.events.credit_signals.take_trailing(org_id, now) {
+            publish_credits_updated_with_pool(&state, org_id, reason).await;
+        }
+    });
+}
+
+async fn publish_credits_updated_with_pool(state: &AppState, org_id: Uuid, reason: &'static str) {
+    match state.pool.get().await {
+        Ok(connection) => {
+            publish_credits_updated_now(&*connection, &state.events, org_id, reason).await
+        }
+        Err(error) => tracing::warn!(
+            org_id = %org_id,
+            %error,
+            "failed to get a connection for credits.updated; viewers keep the fallback refresh"
+        ),
+    }
+}
+
+async fn publish_credits_updated_now(
+    client: &impl GenericClient,
+    events: &EventHub,
+    org_id: Uuid,
+    reason: &str,
+) {
+    match load_org_project_ids(client, &org_id).await {
+        Ok(project_ids) => {
+            publish_project_signal(events, CREDITS_UPDATED_EVENT, &project_ids, reason)
+        }
+        Err(error) => tracing::warn!(
+            org_id = %org_id,
+            %error,
+            "failed to load org projects for credits.updated; viewers keep the fallback refresh"
+        ),
+    }
+}
+
+/// Whether a burn or refill that returned `Ok` wrote a new ledger row (as
+/// opposed to replaying an idempotency key). Both set `deduped` on the
+/// metadata they were given.
+pub(crate) fn credit_ledger_row_written(metadata: &JsonValue) -> bool {
+    metadata.get("deduped").and_then(JsonValue::as_bool) == Some(false)
+}
 
 pub(crate) fn router() -> Router<AppState> {
     Router::new()
@@ -236,6 +341,9 @@ pub(crate) struct ManagedAiUsageCharge {
     pub(crate) reserve_units: i32,
     pub(crate) charged_units: i32,
     pub(crate) adjustment_units: i32,
+    /// Whether reconciliation wrote a new adjustment ledger row: false for a
+    /// zero adjustment (metadata merge only) and for a replayed one.
+    pub(crate) ledger_row_written: bool,
     pub(crate) input_cost_usd_micros: i64,
     pub(crate) cached_input_cost_usd_micros: i64,
     pub(crate) output_cost_usd_micros: i64,
@@ -265,12 +373,18 @@ pub(crate) fn calculate_managed_ai_usage_charge(
     config: &AppConfig,
     usage: ManagedAiTokenUsage,
 ) -> ManagedAiUsageCharge {
+    // `input_tokens` is the whole prompt, cached prefix included: Codex and the
+    // OpenAI Responses API report `cached_input_tokens` as a subset of it. Only
+    // the uncached remainder is billed at the input rate; the cached part is
+    // billed once, at the cached rate.
+    let cached_input_tokens = usage.cached_input_tokens.min(usage.input_tokens);
+    let uncached_input_tokens = usage.input_tokens - cached_input_tokens;
     let input_cost_usd_micros = token_cost_usd_micros(
-        usage.input_tokens,
+        uncached_input_tokens,
         config.managed_ai_input_usd_micros_per_1k,
     );
     let cached_input_cost_usd_micros = token_cost_usd_micros(
-        usage.cached_input_tokens,
+        cached_input_tokens,
         config.managed_ai_cached_input_usd_micros_per_1k,
     );
     let output_cost_usd_micros = token_cost_usd_micros(
@@ -298,6 +412,7 @@ pub(crate) fn calculate_managed_ai_usage_charge(
         reserve_units,
         charged_units,
         adjustment_units: charged_units - reserve_units,
+        ledger_row_written: false,
         input_cost_usd_micros,
         cached_input_cost_usd_micros,
         output_cost_usd_micros,
@@ -437,7 +552,7 @@ pub(crate) async fn credit_status(
             internal_error(format!("failed to start credits status transaction: {error}"))
         })?;
 
-            let _ = attempt_daily_refill(
+            let refilled = attempt_daily_refill(
                 &transaction,
                 &project_id,
                 &org_id,
@@ -445,7 +560,8 @@ pub(crate) async fn credit_status(
                 0,
                 "credits.status",
             )
-            .await?;
+            .await?
+            .is_some();
 
             let subscription = load_org_subscription_summary(&transaction, &org_id).await?;
             let snapshot = get_credit_snapshot(&transaction, &org_id).await?;
@@ -457,6 +573,11 @@ pub(crate) async fn credit_status(
                 );
                 internal_error(format!("failed to finalize credits status refill: {error}"))
             })?;
+            // Only the day's first status read writes a refill row, so the
+            // signal cannot feed back into the refetches it causes.
+            if refilled {
+                publish_credits_updated(&state, &*connection, org_id, CREDITS_UPDATED_LEDGER).await;
+            }
             (snapshot, subscription)
         };
 
@@ -875,6 +996,9 @@ pub(crate) async fn credit_event(
             );
             internal_error(format!("failed to commit credit event: {error}"))
         })?;
+        if credit_ledger_row_written(&metadata_with_context) {
+            publish_credits_updated(&state, &*connection, org_id, CREDITS_UPDATED_LEDGER).await;
+        }
 
         snapshot
     };
@@ -1585,6 +1709,7 @@ pub(crate) async fn reconcile_managed_ai_usage_charge(
     )
     .await?;
 
+    let mut ledger_row_written = false;
     if adjustment_units > 0 {
         let mut metadata = json!({
             "category": "ai_usage",
@@ -1617,6 +1742,7 @@ pub(crate) async fn reconcile_managed_ai_usage_charge(
             &mut metadata,
         )
         .await?;
+        ledger_row_written = credit_ledger_row_written(&metadata);
     } else if adjustment_units < 0 {
         let mut metadata = json!({
             "category": "ai_usage",
@@ -1650,11 +1776,13 @@ pub(crate) async fn reconcile_managed_ai_usage_charge(
             &mut metadata,
         )
         .await?;
+        ledger_row_written = credit_ledger_row_written(&metadata);
     }
 
     Ok(ManagedAiUsageCharge {
         reserve_units: reserved_units,
         adjustment_units,
+        ledger_row_written,
         ..charge
     })
 }
@@ -3016,16 +3144,58 @@ mod tests {
             },
         );
 
-        // Luna list-price defaults (USD micros per 1K tokens: 200 / 20 / 1200):
-        // 1,000 input = 200, 500 cached = 10, 250 output = 300, total 510 micros,
-        // which rounds up to one billing unit at 1,000 units per USD.
+        // GPT-6 Luna list-price defaults (USD micros per 1K tokens: 100 / 10 / 500).
+        // The 500 cached tokens are part of the 1,000 input tokens: 500 uncached
+        // = 50, 500 cached = 5, 250 output = 125, total 180 micros, which rounds
+        // up to one billing unit at 1,000 units per USD.
         assert_eq!(charge.reserve_units, 1);
-        assert_eq!(charge.input_cost_usd_micros, 200);
-        assert_eq!(charge.cached_input_cost_usd_micros, 10);
-        assert_eq!(charge.output_cost_usd_micros, 300);
-        assert_eq!(charge.total_cost_usd_micros, 510);
+        assert_eq!(charge.input_cost_usd_micros, 50);
+        assert_eq!(charge.cached_input_cost_usd_micros, 5);
+        assert_eq!(charge.output_cost_usd_micros, 125);
+        assert_eq!(charge.total_cost_usd_micros, 180);
         assert_eq!(charge.charged_units, 1);
         assert_eq!(charge.adjustment_units, 0);
+    }
+
+    #[test]
+    fn managed_ai_charge_bills_cached_input_once() {
+        let config = crate::tests::build_app_config(
+            crate::tests::test_origin_private_key(),
+            crate::tests::test_origin_public_key(),
+            "test-key",
+        );
+        // A real production turn (2026-09-22): 50,351 input tokens of which
+        // 24,548 were a cached prefix, 173 output. Billing the cached prefix at
+        // the input rate as well charged 5,369 micros (6 units) for a turn
+        // whose list cost is 2,914 micros (3 units).
+        let charge = calculate_managed_ai_usage_charge(
+            &config,
+            ManagedAiTokenUsage {
+                input_tokens: 50_351,
+                cached_input_tokens: 24_548,
+                output_tokens: 173,
+            },
+        );
+        assert_eq!(charge.input_cost_usd_micros, 2_581);
+        assert_eq!(charge.cached_input_cost_usd_micros, 246);
+        assert_eq!(charge.output_cost_usd_micros, 87);
+        assert_eq!(charge.total_cost_usd_micros, 2_914);
+        assert_eq!(charge.charged_units, 3);
+        assert_eq!(charge.adjustment_units, 2);
+
+        // A cached count above the input count never bills more than the
+        // input tokens, all at the cached rate.
+        let clamped = calculate_managed_ai_usage_charge(
+            &config,
+            ManagedAiTokenUsage {
+                input_tokens: 1_000,
+                cached_input_tokens: 5_000,
+                output_tokens: 0,
+            },
+        );
+        assert_eq!(clamped.input_cost_usd_micros, 0);
+        assert_eq!(clamped.cached_input_cost_usd_micros, 10);
+        assert_eq!(clamped.total_cost_usd_micros, 10);
     }
 
     #[test]

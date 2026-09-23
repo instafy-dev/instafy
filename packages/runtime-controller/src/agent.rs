@@ -1807,6 +1807,7 @@ pub(crate) async fn agent_message(
         ));
     };
 
+    let mut deferred_credit_org_id: Option<Uuid> = None;
     // CONTROLLER EVALUATION: marked runs arbitrate their own participation.
     // A decline is the bare NO_RESPONSE sentinel as the run's first
     // conversational output; the controller swallows it (never persisted or
@@ -1831,7 +1832,7 @@ pub(crate) async fn agent_message(
             // managed-AI billing here; normally billed automation evaluations
             // make this helper a no-op.
             let leased_by_runtime_id: Option<Uuid> = row.get("leased_by_runtime_id");
-            apply_deferred_managed_ai_billing_on_first_visible_message(
+            deferred_credit_org_id = apply_deferred_managed_ai_billing_on_first_visible_message(
                 &state,
                 &mut transaction,
                 &project_id,
@@ -1876,6 +1877,16 @@ pub(crate) async fn agent_message(
 
     publish_conversation_message_event(&state.events, &message_row);
     crate::notifications::enqueue_message_push_notifications(state.clone(), message_row);
+    // After the message broadcast: the org project lookup must not delay it.
+    if let Some(org_id) = deferred_credit_org_id {
+        crate::credits::publish_credits_updated(
+            &state,
+            &*connection,
+            org_id,
+            crate::credits::CREDITS_UPDATED_LEDGER,
+        )
+        .await;
+    }
     if let Err((status, Json(api_error))) =
         crate::multi_agent_plan::maybe_execute_multi_agent_plan_message(
             &state,
@@ -2099,6 +2110,8 @@ async fn record_agent_evaluation_decline(
 /// burn pays for its managed-AI prompt the moment the agent visibly speaks.
 /// The burn is idempotent on the same reserve key dispatch would have used,
 /// so completion-time usage reconciliation keeps working unchanged.
+/// Returns the org id when this call wrote the burn's ledger row, so the
+/// caller can publish `credits.updated` once its transaction commits.
 #[allow(clippy::too_many_arguments)]
 async fn apply_deferred_managed_ai_billing_on_first_visible_message(
     state: &AppState,
@@ -2109,13 +2122,13 @@ async fn apply_deferred_managed_ai_billing_on_first_visible_message(
     run_id: Option<Uuid>,
     prompt_id: Option<Uuid>,
     leased_runtime_id: Option<Uuid>,
-) -> Result<(), (StatusCode, Json<ApiError>)> {
+) -> Result<Option<Uuid>, (StatusCode, Json<ApiError>)> {
     // Only ambient skill-mode evaluations are eligible for deferred managed
     // billing. Scheduled automations reuse the authenticated evaluation
     // protocol for NO_RESPONSE, but remain normally billed/BYOC runs even if
     // untrusted automation metadata contains a forged deferral flag.
     if !crate::group_participation::job_payload_marks_skill_mode_ambient_evaluation(job_payload) {
-        return Ok(());
+        return Ok(None);
     }
     let job_metadata = job_payload.get("metadata").and_then(JsonValue::as_object);
     let billing_deferred = job_metadata
@@ -2127,15 +2140,15 @@ async fn apply_deferred_managed_ai_billing_on_first_visible_message(
         .and_then(JsonValue::as_bool)
         .unwrap_or(false);
     if !billing_deferred || already_marked_used {
-        return Ok(());
+        return Ok(None);
     }
     let Some(prompt_uuid) = prompt_id else {
-        return Ok(());
+        return Ok(None);
     };
 
     let project = load_project_record(transaction, project_id).await?;
     let Some(org_id) = project.org_id else {
-        return Ok(());
+        return Ok(None);
     };
 
     let mut burn_metadata = json!({
@@ -2183,7 +2196,7 @@ async fn apply_deferred_managed_ai_billing_on_first_visible_message(
             }
         }
     };
-    savepoint_result.map_err(|error| {
+    let burned = savepoint_result.map_err(|error| {
         internal_error(format!(
             "failed to finalize deferred managed AI burn savepoint: {error}"
         ))
@@ -2220,7 +2233,7 @@ async fn apply_deferred_managed_ai_billing_on_first_visible_message(
                 "failed to mark deferred managed AI usage on job: {error}"
             ))
         })?;
-    Ok(())
+    Ok((burned && crate::credits::credit_ledger_row_written(&burn_metadata)).then_some(org_id))
 }
 
 /// Whether a failed completion's error text shows the request died at the
@@ -2248,7 +2261,9 @@ fn managed_ai_failure_never_reached_upstream(error_message: Option<&str>) -> boo
 /// prompt reserve burned at dispatch and the daily prompt slot that goes with
 /// it. Give both back, once, when nothing shows the model was ever called:
 /// no usage in the artifacts, no visible assistant message, no tool updates,
-/// and an error that the proxy rejected the request outright.
+/// and an error that the proxy rejected the request outright. Returns the
+/// org id when this call wrote the refund, for a post-commit
+/// `credits.updated`.
 #[allow(clippy::too_many_arguments)]
 async fn refund_managed_ai_reserve_on_failed_completion(
     transaction: &mut tokio_postgres::Transaction<'_>,
@@ -2260,7 +2275,7 @@ async fn refund_managed_ai_reserve_on_failed_completion(
     leased_runtime_id: Option<Uuid>,
     error_message: Option<&str>,
     artifacts_value: &JsonValue,
-) -> Result<(), (StatusCode, Json<ApiError>)> {
+) -> Result<Option<Uuid>, (StatusCode, Json<ApiError>)> {
     const REFUND_REASON: &str = "proxy_auth_rejected";
 
     let managed_ai_used = job_payload
@@ -2270,20 +2285,20 @@ async fn refund_managed_ai_reserve_on_failed_completion(
         .and_then(JsonValue::as_bool)
         .unwrap_or(false);
     if !managed_ai_used || !managed_ai_failure_never_reached_upstream(error_message) {
-        return Ok(());
+        return Ok(None);
     }
     let Some(prompt_uuid) = prompt_id else {
-        return Ok(());
+        return Ok(None);
     };
     if extract_turn_usage_from_artifacts(artifacts_value).is_some()
         || run_has_visible_assistant_message(transaction, project_id, run_id).await?
         || count_job_tool_update_messages(transaction, project_id, job_id).await? > 0
     {
-        return Ok(());
+        return Ok(None);
     }
     let project = load_project_record(transaction, project_id).await?;
     let Some(org_id) = project.org_id else {
-        return Ok(());
+        return Ok(None);
     };
 
     // The refund runs inside a savepoint: a ledger failure must never block
@@ -2330,7 +2345,7 @@ async fn refund_managed_ai_reserve_on_failed_completion(
         })?
     };
     let refund = match outcome {
-        ManagedAiRefundOutcome::NotRefundable => return Ok(()),
+        ManagedAiRefundOutcome::NotRefundable => return Ok(None),
         ManagedAiRefundOutcome::AlreadyRefunded(existing) => {
             // The sink that wrote the refund also released the prompt slot
             // and left the trace on the run; a dedupe changes nothing.
@@ -2341,7 +2356,7 @@ async fn refund_managed_ai_reserve_on_failed_completion(
                 ledger_id = %existing.ledger_id,
                 "managed AI prompt reserve was already refunded; nothing to apply"
             );
-            return Ok(());
+            return Ok(None);
         }
         ManagedAiRefundOutcome::Applied(refund) => refund,
     };
@@ -2385,7 +2400,7 @@ async fn refund_managed_ai_reserve_on_failed_completion(
             );
         }
     }
-    Ok(())
+    Ok(Some(org_id))
 }
 
 #[instrument(skip(state, headers, payload))]
@@ -2644,8 +2659,11 @@ pub(crate) async fn agent_complete(
         }
     }
 
+    // Set when this completion wrote a ledger row (refund or usage
+    // reconciliation), for a credits.updated after the commit below.
+    let mut completion_credit_org_id: Option<Uuid> = None;
     if outcome_lower == "failed" {
-        refund_managed_ai_reserve_on_failed_completion(
+        completion_credit_org_id = refund_managed_ai_reserve_on_failed_completion(
             &mut transaction,
             &project_id,
             &job_uuid,
@@ -2785,6 +2803,11 @@ pub(crate) async fn agent_complete(
                     .await
                     {
                         Ok(charge) => {
+                            // A zero adjustment only merges metadata into the
+                            // reserve row, and a replayed one writes nothing.
+                            if charge.ledger_row_written {
+                                completion_credit_org_id = Some(org_id);
+                            }
                             if let Some(run_uuid) = run_id {
                                 let reserve_key = format!("managed-ai-prompt:{prompt_uuid}");
                                 let adjustment_key = format!("managed-ai-adjustment:{prompt_uuid}");
@@ -3079,6 +3102,17 @@ pub(crate) async fn agent_complete(
                 "run": run_payload,
             }),
         );
+    }
+
+    // Last: the org project lookup must not delay the completion's events.
+    if let Some(org_id) = completion_credit_org_id {
+        crate::credits::publish_credits_updated(
+            &state,
+            &*connection,
+            org_id,
+            crate::credits::CREDITS_UPDATED_LEDGER,
+        )
+        .await;
     }
 
     Ok(Json(AgentCompleteResponseBody { ok: true }))

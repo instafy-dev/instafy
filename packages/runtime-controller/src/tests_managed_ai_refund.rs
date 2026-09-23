@@ -28,6 +28,7 @@ pub(crate) struct ReservedManagedAiPrompt {
     pub(crate) config: AppConfig,
     pub(crate) state: AppState,
     pub(crate) owner_user_id: Uuid,
+    pub(crate) other_user_id: Uuid,
     pub(crate) org_id: Uuid,
     pub(crate) project_id: Uuid,
     pub(crate) job_id: Uuid,
@@ -242,6 +243,7 @@ pub(crate) async fn seed_reserved_managed_ai_prompt(
         config,
         state,
         owner_user_id,
+        other_user_id,
         org_id,
         project_id,
         job_id,
@@ -250,6 +252,24 @@ pub(crate) async fn seed_reserved_managed_ai_prompt(
         burn_amount,
         reserved_balance,
     }))
+}
+
+impl ReservedManagedAiPrompt {
+    /// Deletes the org, which cascades to its project and everything the
+    /// fixture created under it, then both users.
+    pub(crate) async fn cleanup(&self) -> anyhow::Result<()> {
+        let connection = self.pool.get().await?;
+        connection
+            .execute("delete from organizations where id = $1", &[&self.org_id])
+            .await?;
+        connection
+            .execute(
+                "delete from auth.users where id = any($1)",
+                &[&vec![self.owner_user_id, self.other_user_id]],
+            )
+            .await?;
+        Ok(())
+    }
 }
 
 pub(crate) async fn credit_balance(pool: &PgPool, org_id: &Uuid) -> anyhow::Result<i32> {
@@ -372,10 +392,11 @@ fn mint_agent_complete_token(config: &AppConfig, project_id: &Uuid) -> anyhow::R
     Ok(minted.token)
 }
 
-async fn post_agent_complete(
+/// Leases the fixture's job and builds its `/agent/complete` request.
+async fn agent_complete_request(
     fixture: &ReservedManagedAiPrompt,
     body: serde_json::Value,
-) -> anyhow::Result<StatusCode> {
+) -> anyhow::Result<Request<Body>> {
     {
         let connection = fixture.pool.get().await?;
         connection
@@ -386,16 +407,22 @@ async fn post_agent_complete(
             .await?;
     }
     let token = mint_agent_complete_token(&fixture.config, &fixture.project_id)?;
+    Ok(Request::builder()
+        .method("POST")
+        .uri("/agent/complete")
+        .header(axum::http::header::CONTENT_TYPE, "application/json")
+        .header(axum::http::header::AUTHORIZATION, format!("Bearer {token}"))
+        .body(Body::from(body.to_string()))?)
+}
+
+async fn post_agent_complete(
+    fixture: &ReservedManagedAiPrompt,
+    body: serde_json::Value,
+) -> anyhow::Result<StatusCode> {
+    let request = agent_complete_request(fixture, body).await?;
     let response = agent::router()
         .with_state(fixture.state.clone())
-        .oneshot(
-            Request::builder()
-                .method("POST")
-                .uri("/agent/complete")
-                .header(axum::http::header::CONTENT_TYPE, "application/json")
-                .header(axum::http::header::AUTHORIZATION, format!("Bearer {token}"))
-                .body(Body::from(body.to_string()))?,
-        )
+        .oneshot(request)
         .await?;
     Ok(response.status())
 }
@@ -408,6 +435,8 @@ async fn managed_ai_prompt_refunds_when_completion_fails_before_upstream() -> an
         eprintln!("skipping managed AI refund test: TEST_DATABASE_URL not set");
         return Ok(());
     };
+    let _watch = fixture.state.events.watch_project(fixture.project_id);
+    let mut credit_events = fixture.state.events.subscribe();
 
     let status = post_agent_complete(
         &fixture,
@@ -420,6 +449,11 @@ async fn managed_ai_prompt_refunds_when_completion_fails_before_upstream() -> an
     )
     .await?;
     assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        crate::tests::queued_credit_signals(&mut credit_events, fixture.project_id),
+        1,
+        "the committed refund is signalled"
+    );
 
     let refund_key = format!("managed-ai-refund:{}", fixture.prompt_id);
     let reserve_key = format!("managed-ai-prompt:{}", fixture.prompt_id);
@@ -491,7 +525,7 @@ async fn managed_ai_prompt_refunds_when_completion_fails_before_upstream() -> an
         run_metadata["managedAiCredit"]["refund"]["delta"],
         json!(fixture.burn_amount)
     );
-    Ok(())
+    fixture.cleanup().await
 }
 
 #[tokio::test]
@@ -501,6 +535,9 @@ async fn managed_ai_prompt_keeps_charge_when_failure_may_have_reached_upstream(
         label: &'static str,
         error_message: &'static str,
         artifacts: serde_json::Value,
+        /// Only a ledger row signals: neither a kept charge nor a
+        /// reconciliation whose usage matches the reserve writes one.
+        credit_signals: usize,
     }
     let cases = [
         Case {
@@ -523,12 +560,16 @@ async fn managed_ai_prompt_keeps_charge_when_failure_may_have_reached_upstream(
                     ]
                 }
             ]),
+            // 1,500 tokens cost exactly the one-credit reserve: the zero
+            // adjustment only merges metadata into the reserve row.
+            credit_signals: 0,
         },
         Case {
             // An upstream error is not proof the model was never called.
             label: "upstream-error",
             error_message: "unexpected status 500 Internal Server Error",
             artifacts: json!([]),
+            credit_signals: 0,
         },
     ];
 
@@ -537,6 +578,8 @@ async fn managed_ai_prompt_keeps_charge_when_failure_may_have_reached_upstream(
             eprintln!("skipping managed AI keep-charge test: TEST_DATABASE_URL not set");
             return Ok(());
         };
+        let _watch = fixture.state.events.watch_project(fixture.project_id);
+        let mut credit_events = fixture.state.events.subscribe();
 
         let status = post_agent_complete(
             &fixture,
@@ -549,6 +592,12 @@ async fn managed_ai_prompt_keeps_charge_when_failure_may_have_reached_upstream(
         )
         .await?;
         assert_eq!(status, StatusCode::OK, "{}", case.label);
+        assert_eq!(
+            crate::tests::queued_credit_signals(&mut credit_events, fixture.project_id),
+            case.credit_signals,
+            "{}",
+            case.label
+        );
 
         let rows = ledger_rows(&fixture.pool, &fixture.project_id).await?;
         assert!(
@@ -590,8 +639,73 @@ async fn managed_ai_prompt_keeps_charge_when_failure_may_have_reached_upstream(
         );
         let (run_status, _) = run_row(&fixture.pool, &fixture.run_id).await?;
         assert_eq!(run_status, "failed", "{}", case.label);
+        fixture.cleanup().await?;
     }
     Ok(())
+}
+
+/// A completion whose usage exceeds the reserve writes an adjustment row and
+/// signals credits.updated only once that row has committed, after the
+/// completion's own events.
+#[tokio::test]
+async fn managed_ai_usage_adjustment_signals_credits_after_the_completion_commits(
+) -> anyhow::Result<()> {
+    use crate::tests::controller_event_fanout_tests::{send_probed, PublishProbe};
+
+    let Some(fixture) = seed_reserved_managed_ai_prompt("adjustment-signal").await? else {
+        eprintln!("skipping managed AI adjustment signal test: TEST_DATABASE_URL not set");
+        return Ok(());
+    };
+    let _watch = fixture.state.events.watch_project(fixture.project_id);
+    // 3,000 output tokens cost two credits against the one-credit reserve.
+    let request = agent_complete_request(
+        &fixture,
+        json!({
+            "job_id": fixture.job_id,
+            "outcome": "failed",
+            "error_message": PROXY_401_ERROR,
+            "artifacts": [
+                {
+                    "kind": "codex/run-log",
+                    "events": [
+                        {
+                            "type": "turn.completed",
+                            "usage": {
+                                "input_tokens": 0,
+                                "cached_input_tokens": 0,
+                                "output_tokens": 3000
+                            }
+                        }
+                    ]
+                }
+            ],
+        }),
+    )
+    .await?;
+    let (response, adjustments_at_publish) = send_probed(
+        &agent::router().with_state(fixture.state.clone()),
+        request,
+        PublishProbe {
+            events: fixture.state.events.subscribe(),
+            kind: crate::credits::CREDITS_UPDATED_EVENT,
+            project_id: fixture.project_id,
+            count_sql: "select count(*) from org_credit_ledger
+                        where project_id = $1
+                          and idempotency_key = 'managed-ai-adjustment:' || $2::uuid::text",
+            params: vec![fixture.project_id, fixture.prompt_id],
+        },
+    )
+    .await?;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        adjustments_at_publish, 1,
+        "published before the adjustment committed"
+    );
+    assert_eq!(
+        credit_balance(&fixture.pool, &fixture.org_id).await?,
+        fixture.reserved_balance - 1
+    );
+    fixture.cleanup().await
 }
 
 #[tokio::test]

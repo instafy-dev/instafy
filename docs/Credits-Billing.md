@@ -8,12 +8,14 @@ The important product rule is that Instafy keeps one shared team balance and one
 
 The current controller still stores that balance as integer billing units. The Credits panel can now render those units directly or approximate them in USD using `BILLING_UNITS_PER_USD`, which keeps the accounting integer-safe while making the UI easier to reason about.
 
-The default managed-AI model is `gpt-5.6-luna` (label `GPT-5.6 Luna`, 1.05M context), served by OpenAI. The controller pins `CODEX_MODEL_PROVIDER=openai` for managed turns (`secrets.rs`), so the model users see is the model that runs. Managed turns are paid by the operator out of the shared team balance, which is why the cheaper Luna tier is the default there. Bring-your-own ChatGPT logins and OpenAI API keys are paid by the user and keep `gpt-5.6-sol` as their default; that default, and the stale-model floor, are separate from the managed tier and did not move.
+The default managed-AI model is `gpt-6-luna` (label `GPT-6 Luna`), served by OpenAI. The controller pins `CODEX_MODEL_PROVIDER=openai` for managed turns (`secrets.rs`), so the model users see is the model that runs. Managed turns are paid by the operator out of the shared team balance, which is why the cheaper Luna tier is the default there. Bring-your-own ChatGPT logins and OpenAI API keys are paid by the user and keep `gpt-5.6-sol` as their default; that default, and the stale-model floor, are separate from the managed tier and did not move.
 
-The pricing envs define the rates users are actually charged. The defaults match the public `gpt-5.6-luna` API list prices verified on September 17, 2026:
-- input: `$0.20 / 1M` (`MANAGED_AI_INPUT_USD_MICROS_PER_1K=200`)
-- cached input: `$0.02 / 1M` (`MANAGED_AI_CACHED_INPUT_USD_MICROS_PER_1K=20`)
-- output: `$1.20 / 1M` (`MANAGED_AI_OUTPUT_USD_MICROS_PER_1K=1200`)
+The pricing envs define the rates users are actually charged. The defaults match the public `gpt-6-luna` standard-tier API list prices verified on September 22, 2026:
+- input: `$0.10 / 1M` (`MANAGED_AI_INPUT_USD_MICROS_PER_1K=100`)
+- cached input: `$0.01 / 1M` (`MANAGED_AI_CACHED_INPUT_USD_MICROS_PER_1K=10`)
+- output: `$0.50 / 1M` (`MANAGED_AI_OUTPUT_USD_MICROS_PER_1K=500`)
+
+The previous managed default, `gpt-5.6-luna`, listed at `$0.20 / $0.02 cached / $1.20 per 1M`, so the same turn now costs users roughly half the credits.
 
 For comparison, `gpt-5.6-sol` lists at `$5 / $0.50 cached / $30 per 1M`. If you set `MANAGED_AI_MODEL_ID=gpt-5.6-sol` (or any other model), set the three pricing envs to that model's rates in the same change; the defaults only make sense for Luna.
 
@@ -27,9 +29,11 @@ If you point the managed path at a different provider/model, update the pricing 
 The plan catalog is stored in Postgres (`billing_plans`) and seeded via `supabase/migrations/20260000000022_billing_plans.sql`. Controllers read this table to resolve `planId`, daily credit limits, and default platform limits.
 
 ### Platform Limits (today)
-- **starter**: 3 active tunnels (default), 5 active Instafy Cloud runtimes
-- **pro**: 10 active tunnels (default), 20 active Instafy Cloud runtimes
-- **scale**: 25 active tunnels, 50 active Instafy Cloud runtimes
+- **starter**: 3 active tunnels (default), 1 active Instafy Cloud runtime
+- **pro**: 10 active tunnels (default), 3 active Instafy Cloud runtimes
+- **scale**: 25 active tunnels, 8 active Instafy Cloud runtimes
+
+The runtime limits come from `supabase/migrations/20260000000045_fundable_runtime_concurrency.sql`. When a space is refused by the limit, the controller hands it an idle runtime from another space in the same team; see `RUNTIME_LIMIT_RECLAIM_IDLE_SECONDS` in the controller README.
 
 Limits are overrideable per team through a protected server-side administration path. Never expose
 service-role credentials to the browser.
@@ -69,11 +73,11 @@ Managed Instafy AI can run without a user-provided provider key and burn the sha
 - Set `MANAGED_AI_LABEL` to the user-facing product name
 - Set `MANAGED_AI_CREDIT_BURN_AMOUNT` to the reserve debit taken before a prompt runs
 - Set `MANAGED_AI_DAILY_PROMPT_LIMIT` if you want a daily starter cap
-- Set `MANAGED_AI_MODEL_ID` to the upstream model id used for managed turns (default `gpt-5.6-luna`)
-- Set `MANAGED_AI_MODEL_LABEL` to the managed model name shown in the UI (default `GPT-5.6 Luna`)
-- Set `MANAGED_AI_INPUT_USD_MICROS_PER_1K` (default `200`, that is `$0.20 / 1M`)
-- Set `MANAGED_AI_CACHED_INPUT_USD_MICROS_PER_1K` (default `20`, that is `$0.02 / 1M`)
-- Set `MANAGED_AI_OUTPUT_USD_MICROS_PER_1K` (default `1200`, that is `$1.20 / 1M`)
+- Set `MANAGED_AI_MODEL_ID` to the upstream model id used for managed turns (default `gpt-6-luna`)
+- Set `MANAGED_AI_MODEL_LABEL` to the managed model name shown in the UI (default `GPT-6 Luna`)
+- Set `MANAGED_AI_INPUT_USD_MICROS_PER_1K` (default `100`, that is `$0.10 / 1M`)
+- Set `MANAGED_AI_CACHED_INPUT_USD_MICROS_PER_1K` (default `10`, that is `$0.01 / 1M`)
+- Set `MANAGED_AI_OUTPUT_USD_MICROS_PER_1K` (default `500`, that is `$0.50 / 1M`)
 - Set `BILLING_UNITS_PER_USD` if you want the UI to expose USD equivalents for the shared balance
 
 Managed AI still runs through the proxy, and the proxy that matters is the one the runtime calls:
@@ -100,7 +104,7 @@ credential path belongs in a Vite environment or browser bundle. `MANAGED_AI_STA
 makes the controller fail closed when its own proxy can serve neither path; it does not probe
 per-runtime sidecars.
 
-The controller now reserves units at prompt dispatch and then reconciles the final charge after completion from actual input/cached/output token usage. The shared ledger keeps both the usage metadata and any follow-up adjustment row when the final charge differs from the reserve.
+The controller now reserves units at prompt dispatch and then reconciles the final charge after completion from actual input/cached/output token usage. Cached tokens are a subset of the reported input tokens, so only the uncached remainder is billed at the input rate and the cached prefix is billed once at the cached rate. The shared ledger keeps both the usage metadata and any follow-up adjustment row when the final charge differs from the reserve.
 
 Starter guidance with the current defaults:
 - 200 units/day is the whole shared free budget
