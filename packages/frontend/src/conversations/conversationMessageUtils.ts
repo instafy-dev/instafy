@@ -822,7 +822,21 @@ export function mergeAndSortMessages(messages: ChatMessage[]): ChatMessage[] {
               indexes[key].remove(removedKeys[key], sameContentIndex);
             }
             entries[sameContentIndex] = null;
-            store(mergeDuplicateMessage(existing, message));
+            const merged = mergeDuplicateMessage(existing, message);
+            if (existingNoisy && !incomingNoisy) {
+              // The selected answer owns its presentation, including absent fields.
+              // Rehydrating the losing status/hidden markers can hide the final reply.
+              merged.messageType = message.messageType ?? null;
+              if (merged.metadata) {
+                for (const key of ["messageType", "message_type", "kind", "details", "presentation"]) {
+                  delete merged.metadata[key];
+                  if (message.metadata && Object.prototype.hasOwnProperty.call(message.metadata, key)) {
+                    merged.metadata[key] = message.metadata[key];
+                  }
+                }
+              }
+            }
+            store(merged);
           }
           return;
         }

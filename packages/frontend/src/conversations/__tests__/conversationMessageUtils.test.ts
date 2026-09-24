@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import type { ChatMessage } from "../../screens/studio/types";
+import { shouldDisplayChatMessage } from "../../screens/studio/components/chatMessagePresentation";
 import {
   extractWorkspaceCommitRangeFromMetadata,
   mapControllerMessageToChat,
@@ -177,6 +178,63 @@ describe("mergeAndSortMessages", () => {
       outcome: "failed",
       messageType: "error",
     });
+  });
+
+  it("keeps a final answer visible when replacing an identical status update", () => {
+    const messageType = "status";
+    const progress = createMessage({
+      id: "11111111-1111-1111-1111-111111111111",
+      content: "11",
+      timestamp: 1,
+      messageType,
+      metadata: {
+        jobId: "job-1", source: "agent", kind: "update", outcome: "in_progress",
+        messageType, message_type: messageType,
+        presentation: { hidden: true },
+        details: { kind: "agent_message", messageType, presentation: { hidden: true } },
+        agent: { displayName: "Octo" },
+      },
+    });
+    const answer = createMessage({
+      id: "22222222-2222-2222-2222-222222222222",
+      content: progress.content,
+      timestamp: 2,
+      metadata: { jobId: "job-1", source: "agent", outcome: "succeeded" },
+    });
+
+    const merged = mergeAndSortMessages([progress, answer]);
+
+    expect(merged).toHaveLength(1);
+    expect(merged[0]?.id).toBe(answer.id);
+    expect(merged[0]?.messageType).toBeNull();
+    expect(merged[0]?.metadata).toEqual({ ...answer.metadata, agent: { displayName: "Octo" } });
+    expect(shouldDisplayChatMessage(merged[0]!)).toBe(true);
+    // An older update arriving again cannot hide the accepted final answer.
+    expect(mergeAndSortMessages([...merged, progress])).toEqual(merged);
+    expect(mergeAndSortMessages([...merged, { ...progress, timestamp: 3 }])).toEqual(merged);
+  });
+
+  it.each([
+    { presentation: { hidden: true } },
+    { details: { presentation: { hidden: true } } },
+  ])("preserves a selected final answer's explicit visibility metadata: %j", (visibility) => {
+    const progress = createMessage({
+      id: "11111111-1111-1111-1111-111111111111",
+      content: "Internal answer", timestamp: 1, messageType: "status",
+      metadata: { jobId: "job-1", messageType: "status", kind: "update" },
+    });
+    const answer = createMessage({
+      id: "22222222-2222-2222-2222-222222222222",
+      content: progress.content, timestamp: 2,
+      metadata: { jobId: "job-1", outcome: "succeeded", ...visibility },
+    });
+
+    const merged = mergeAndSortMessages([progress, answer]);
+
+    expect(merged).toHaveLength(1);
+    expect(merged[0]?.messageType).toBeNull();
+    expect(merged[0]?.metadata).toEqual(answer.metadata);
+    expect(shouldDisplayChatMessage(merged[0]!)).toBe(false);
   });
 
   it("shows a terminal goal update after the same run's assistant answer", () => {
