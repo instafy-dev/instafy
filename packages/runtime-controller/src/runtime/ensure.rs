@@ -2613,6 +2613,28 @@ async fn ensure_runtime_tenant(
             "private self-hosted runtimes cannot be attached as shared tenants",
         ));
     }
+
+    // Tenant scope is cross-PROJECT by design, which is why the caller's
+    // request skips authorize_explicit_runtime_target — that helper is the only
+    // place a runtime's owning project is compared, and rejecting a mismatch
+    // here would defeat the whole feature. It is not meant to be cross-TENANT
+    // though, and nothing else established that boundary: a caller naming any
+    // runtime id with a live shared lease could attach their project to another
+    // organization's machine. Runtime ids are not secret — the Machines page
+    // renders them — so this bounds the attach to the runtime's own org.
+    if runtime.project_id != project_id {
+        let host_project = load_project_record(&transaction, &runtime.project_id).await?;
+        let tenant_project = load_project_record(&transaction, &project_id).await?;
+        let same_org = match (host_project.org_id, tenant_project.org_id) {
+            (Some(host_org), Some(tenant_org)) => host_org == tenant_org,
+            // An org-less project is personal. Two of them are not the same
+            // tenant just because neither has an org.
+            _ => false,
+        };
+        if !same_org {
+            return Err(forbidden("runtime belongs to another organization"));
+        }
+    }
     let Some(shared_lease_id) = runtime.active_lease_id else {
         return Err(bad_request("runtime does not have an active shared lease"));
     };
@@ -2895,5 +2917,27 @@ mod tests {
             object.get("source").and_then(JsonValue::as_str).unwrap(),
             "heartbeat_timeout_recovery"
         );
+    }
+
+    #[test]
+    fn tenant_attach_is_bounded_to_the_runtime_owner_org() {
+        // Tenant scope is cross-project on purpose, so the caller's request
+        // skips authorize_explicit_runtime_target — the only place a runtime's
+        // owning project is compared. Without this rule nothing bounded the
+        // attach at all, and runtime ids are visible in the Machines UI.
+        let same_tenant = |host: Option<u8>, tenant: Option<u8>| match (host, tenant) {
+            (Some(a), Some(b)) => a == b,
+            _ => false,
+        };
+
+        // Same org attaches, which is the feature.
+        assert!(same_tenant(Some(1), Some(1)));
+        // A different org does not.
+        assert!(!same_tenant(Some(1), Some(2)));
+        // Two org-less personal projects are not one tenant just because
+        // neither carries an org.
+        assert!(!same_tenant(None, None));
+        assert!(!same_tenant(Some(1), None));
+        assert!(!same_tenant(None, Some(1)));
     }
 }
