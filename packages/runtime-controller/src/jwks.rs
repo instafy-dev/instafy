@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::convert::Infallible;
 use std::fmt;
 use std::sync::Arc;
 use std::time::Duration;
@@ -9,6 +10,7 @@ use jsonwebtoken::jwk::{AlgorithmParameters, JwkSet, KeyAlgorithm};
 use jsonwebtoken::{Algorithm, DecodingKey};
 use reqwest::Client;
 use tokio::sync::{watch, Notify, RwLock};
+use tokio::task::{JoinHandle, JoinSet};
 use tokio::time::Instant;
 use url::{Host, Url};
 
@@ -23,6 +25,11 @@ pub const AUTH_REFRESH_WAIT: Duration = Duration::from_secs(2);
 
 /// Stands in for "never" when a configured interval overflows an [`Instant`].
 const FAR_FUTURE: Duration = Duration::from_secs(365 * 24 * 60 * 60);
+
+/// How long the supervisor waits before restarting a [`JwksRefresher`] that
+/// panicked, doubling with each panic in a row up to [`MAX_RESTART_BACKOFF`].
+const RESTART_BACKOFF: Duration = Duration::from_secs(1);
+const MAX_RESTART_BACKOFF: Duration = Duration::from_secs(60);
 
 const USER_AGENT: &str = "instafy-runtime-controller";
 
@@ -354,8 +361,9 @@ struct CacheShared {
 
 #[derive(Clone, Copy, Debug)]
 struct RefresherState {
-    /// A refresher task serves this cache. Without one nobody would answer a
-    /// signal, so the auth path does not wait.
+    /// A refresher task serves this cache. False once it has stopped, and
+    /// while its supervisor waits to restart one that panicked: nobody would
+    /// answer a signal then, so the auth path does not wait.
     running: bool,
     /// Fetches the refresher has finished, successful or not. Bumped only
     /// after a fetched key set has replaced the cached one.
@@ -397,6 +405,7 @@ impl SupabaseJwksCache {
         // Generation before keys, while the refresher replaces the keys before
         // it bumps the generation: the keys read here are never older than the
         // generation says, so a fetch that lands in between is not missed.
+        // Tests pin both orders.
         let generation = self.shared.refresher.borrow().finished;
         let key_set = self.shared.key_set.read().await.clone();
         JwksSnapshot {
@@ -482,11 +491,21 @@ impl JwksRefreshSchedule {
 /// and its client. It fetches once when spawned, then on the periodic
 /// schedule, and when a request signals through the [`SupabaseJwksCache`],
 /// no sooner than the on-demand interval after its previous fetch began.
+///
+/// A supervisor restarts the task if it panics, with the same URL, client
+/// and schedule, after a delay of [`RESTART_BACKOFF`] doubling up to
+/// [`MAX_RESTART_BACKOFF`]. The restarted task fetches at once, as at
+/// startup, so one that panics on every fetch fetches at most once per
+/// backoff.
 pub struct JwksRefresher {
     url: SupabaseJwksUrl,
     client: Client,
     cache: SupabaseJwksCache,
     schedule: JwksRefreshSchedule,
+    restart_backoff: RestartBackoff,
+    /// Fetch cycles still to panic, for tests that prove the supervisor.
+    #[cfg(test)]
+    injected_panics: Arc<std::sync::atomic::AtomicUsize>,
 }
 
 impl JwksRefresher {
@@ -506,28 +525,87 @@ impl JwksRefresher {
             client,
             cache,
             schedule,
+            restart_backoff: RestartBackoff::new(RESTART_BACKOFF, MAX_RESTART_BACKOFF),
+            #[cfg(test)]
+            injected_panics: Arc::default(),
         })
     }
 
-    /// Start serving the cache. Spawn one refresher per cache.
-    pub fn spawn(self) -> tokio::task::JoinHandle<()> {
+    /// Restart delays short enough for a test to wait out. The auth tests,
+    /// built with the binary, use this and the next.
+    #[cfg(test)]
+    #[allow(dead_code)]
+    pub(crate) fn with_restart_backoff(mut self, initial: Duration, max: Duration) -> Self {
+        self.restart_backoff = RestartBackoff::new(initial, max);
+        self
+    }
+
+    /// Panic in as many fetch cycles as `panics` holds when they start.
+    #[cfg(test)]
+    #[allow(dead_code)]
+    pub(crate) fn with_injected_panics(
+        mut self,
+        panics: Arc<std::sync::atomic::AtomicUsize>,
+    ) -> Self {
+        self.injected_panics = panics;
+        self
+    }
+
+    /// Start serving the cache: the refresher, and the supervisor that
+    /// restarts it if it panics. Spawn one per cache. The handle is the
+    /// supervisor's; aborting it stops the refresher too.
+    pub fn spawn(self) -> JoinHandle<()> {
+        let refresher = Arc::new(self);
+        // The set aborts the refresher when the supervisor drops it, even if
+        // the supervisor is aborted before its first poll.
+        let mut serving = JoinSet::new();
+        refresher.start(&mut serving, "startup");
+        tokio::spawn(refresher.supervise(serving))
+    }
+
+    fn start(self: &Arc<Self>, serving: &mut JoinSet<Infallible>, reason: &'static str) {
         let auth_wait = self.schedule.auth_wait;
         self.cache.shared.refresher.send_modify(|state| {
             state.running = true;
             state.auth_wait = auth_wait;
         });
-        // Owned by the task, so however it ends, even aborted before its
-        // first poll, requests stop waiting for it.
+        // Owned by the task, so however it ends, by a panic or an abort even
+        // before its first poll, requests stop waiting for it.
         let running = RefresherRunning(self.cache.clone());
-        tokio::spawn(async move {
+        let refresher = Arc::clone(self);
+        serving.spawn(async move {
             let _running = running;
-            self.run().await
-        })
+            refresher.run(reason).await
+        });
     }
 
-    async fn run(self) {
+    /// Restart the refresher whenever it panics. The refresher never returns,
+    /// and is cancelled only with this supervisor or as the runtime shuts
+    /// down, which ends supervision too.
+    async fn supervise(self: Arc<Self>, mut serving: JoinSet<Infallible>) {
+        let mut backoff = self.restart_backoff;
+        let mut started = Instant::now();
+        loop {
+            match serving.join_next().await {
+                Some(Ok(never)) => match never {},
+                Some(Err(error)) if error.is_panic() => {}
+                // Cancelled: the runtime is shutting down.
+                _ => return,
+            }
+            let delay = backoff.after_panic(started.elapsed());
+            // A fixed message: the panic payload stays out of the log.
+            tracing::error!(
+                restart_in_ms = u64::try_from(delay.as_millis()).unwrap_or(u64::MAX),
+                "Supabase JWKS refresher panicked; restarting it"
+            );
+            tokio::time::sleep(delay).await;
+            self.start(&mut serving, "restart");
+            started = Instant::now();
+        }
+    }
+
+    async fn run(self: Arc<Self>, mut reason: &'static str) -> Infallible {
         let shared = &self.cache.shared;
-        let mut reason = "startup";
         loop {
             // Every signal so far is answered by this fetch.
             let _ = shared.wanted.notified().now_or_never();
@@ -546,6 +624,7 @@ impl JwksRefresher {
                     tracing::warn!(%error, reason, "failed to refresh Supabase JWKS");
                 }
             }
+            // Counted only after the keys are in place: see `snapshot`.
             shared.refresher.send_modify(|state| {
                 state.fetching = false;
                 state.finished += 1;
@@ -564,6 +643,19 @@ impl JwksRefresher {
     }
 
     async fn fetch(&self) -> Result<SupabaseJwks> {
+        #[cfg(test)]
+        if self
+            .injected_panics
+            .fetch_update(
+                std::sync::atomic::Ordering::SeqCst,
+                std::sync::atomic::Ordering::SeqCst,
+                |left| left.checked_sub(1),
+            )
+            .is_ok()
+        {
+            panic!("injected JWKS fetch panic");
+        }
+
         let response = self
             .client
             .get(self.url.as_url().clone())
@@ -597,6 +689,37 @@ impl Drop for RefresherRunning {
             state.running = false;
             state.fetching = false;
         });
+    }
+}
+
+/// The delays before restarting a refresher that panicked: `initial`,
+/// doubling with each panic in a row up to `max`. A refresher that ran for
+/// `max` before it panicked starts the sequence over.
+#[derive(Clone, Copy, Debug)]
+struct RestartBackoff {
+    initial: Duration,
+    max: Duration,
+    next: Duration,
+}
+
+impl RestartBackoff {
+    fn new(initial: Duration, max: Duration) -> Self {
+        Self {
+            initial,
+            max,
+            next: initial,
+        }
+    }
+
+    /// The delay before restarting a refresher that panicked after running
+    /// for `lived`.
+    fn after_panic(&mut self, lived: Duration) -> Duration {
+        if lived >= self.max {
+            self.next = self.initial;
+        }
+        let delay = self.next;
+        self.next = delay.saturating_mul(2).min(self.max);
+        delay
     }
 }
 
@@ -938,6 +1061,142 @@ mod tests {
             elapsed >= Duration::from_secs(10) && elapsed < Duration::from_secs(11),
             "timed out after {elapsed:?}"
         );
+        server.abort();
+    }
+
+    #[test]
+    fn restart_backoff_doubles_to_a_minute_and_starts_over_after_a_long_run() {
+        let mut backoff = RestartBackoff::new(RESTART_BACKOFF, MAX_RESTART_BACKOFF);
+        let delays: Vec<u64> = (0..8)
+            .map(|_| backoff.after_panic(Duration::ZERO).as_secs())
+            .collect();
+        assert_eq!(delays, [1, 2, 4, 8, 16, 32, 60, 60]);
+        // Panics in a row keep the longest delay.
+        assert_eq!(
+            backoff.after_panic(Duration::from_secs(59)),
+            Duration::from_secs(60)
+        );
+        // A refresher that ran for a minute before it panicked starts over.
+        assert_eq!(
+            backoff.after_panic(Duration::from_secs(60)),
+            Duration::from_secs(1)
+        );
+        assert_eq!(backoff.after_panic(Duration::ZERO), Duration::from_secs(2));
+    }
+
+    /// An ES256 key set with the key id `next`, told apart from the HS256
+    /// key sets these tests start from by its algorithm. Its public key is
+    /// the P-256 base point: valid, and no test signs with it.
+    fn next_key_set() -> serde_json::Value {
+        serde_json::json!({ "keys": [{
+            "kty": "EC",
+            "crv": "P-256",
+            "alg": "ES256",
+            "use": "sig",
+            "kid": "next",
+            "x": "axfR8uEsQkf4vOblY6RA8ncDfYEt6zOg9KE5RdiYwpY",
+            "y": "T-NC4v4af5uO5-tKfA-eFivOM1drMV7Oy7ZAaDe_UfU",
+        }]})
+    }
+
+    async fn eventually(what: &str, done: impl Fn() -> bool) {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !done() {
+            assert!(Instant::now() < deadline, "{what} did not happen in time");
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    }
+
+    /// A snapshot reads the generation before the keys, so one that overlaps
+    /// a fetch landing reports the generation from before that fetch, with
+    /// keys at least as new. Read the other way round, it can pair the keys
+    /// from before the fetch with the generation after it: the request would
+    /// wait for a fetch it has already seen, instead of looking at the keys
+    /// that fetch brought.
+    #[tokio::test]
+    async fn a_snapshot_reads_the_generation_before_the_keys() {
+        let cache = SupabaseJwksCache::new(SupabaseJwks::from_hmac_secret("inert-before"));
+        // The refresher, replacing the key set.
+        let mut landing = cache.shared.key_set.write().await;
+        let mut snapshot = Box::pin(cache.snapshot());
+        assert!(
+            (&mut snapshot).now_or_never().is_none(),
+            "the snapshot must wait for the key set being replaced"
+        );
+        *landing = SupabaseJwks::from_jwk_set(
+            serde_json::from_value(next_key_set()).expect("test key set"),
+        )
+        .expect("usable test key set");
+        drop(landing);
+        cache
+            .shared
+            .refresher
+            .send_modify(|state| state.finished += 1);
+
+        let snapshot = snapshot.await;
+        assert_eq!(snapshot.key_set.algorithm(), Algorithm::ES256, "new keys");
+        assert_eq!(
+            snapshot.generation, 0,
+            "the generation was read after the keys"
+        );
+    }
+
+    /// The refresher installs a fetched key set before it counts the fetch,
+    /// so a request woken by that count finds the keys the fetch brought.
+    #[tokio::test]
+    async fn the_refresher_installs_keys_before_counting_the_fetch() {
+        use axum::routing::get;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let served = Arc::new(AtomicUsize::new(0));
+        let app = axum::Router::new().route(
+            SUPABASE_JWKS_PATH,
+            get({
+                let served = served.clone();
+                move || async move {
+                    served.fetch_add(1, Ordering::SeqCst);
+                    axum::Json(next_key_set())
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind jwks test server");
+        let address = listener.local_addr().expect("jwks test server address");
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app)
+                .await
+                .expect("serve jwks test server")
+        });
+        let refresher = test_refresher(SupabaseJwksUrl::for_test(&format!(
+            "http://127.0.0.1:{}",
+            address.port()
+        )));
+        let cache = refresher.cache.clone();
+
+        // A request still reading the cached key set holds off its
+        // replacement while the startup fetch arrives.
+        let reading = cache.shared.key_set.read().await;
+        let refresher = refresher.spawn();
+        eventually("the startup fetch", || served.load(Ordering::SeqCst) == 1).await;
+        // Time to read the response and reach the key set.
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        assert_eq!(
+            cache.shared.refresher.borrow().finished,
+            0,
+            "the refresher counted a fetch whose keys it had not installed"
+        );
+
+        drop(reading);
+        eventually("the fetch being counted", || {
+            cache.shared.refresher.borrow().finished == 1
+        })
+        .await;
+        let snapshot = cache.snapshot().await;
+        assert_eq!(snapshot.generation, 1);
+        assert_eq!(snapshot.key_set.algorithm(), Algorithm::ES256);
+
+        refresher.abort();
         server.abort();
     }
 

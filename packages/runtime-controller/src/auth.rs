@@ -1096,12 +1096,25 @@ mod tests {
         initial: jwks::SupabaseJwks,
         schedule: jwks::JwksRefreshSchedule,
     ) -> tokio::task::JoinHandle<()> {
+        spawn_refresher_with(config, url, initial, schedule, |refresher| refresher)
+    }
+
+    /// [`spawn_refresher`], with test settings applied to the refresher.
+    fn spawn_refresher_with(
+        config: &mut AppConfig,
+        url: jwks::SupabaseJwksUrl,
+        initial: jwks::SupabaseJwks,
+        schedule: jwks::JwksRefreshSchedule,
+        adjust: impl FnOnce(jwks::JwksRefresher) -> jwks::JwksRefresher,
+    ) -> tokio::task::JoinHandle<()> {
         config.supabase_jwks = jwks::SupabaseJwksCache::new(initial);
         config.supabase_jwks_url = url.clone();
         config.supabase_jwks_refresh_enabled = true;
-        jwks::JwksRefresher::new(url, config.supabase_jwks.clone(), schedule)
-            .expect("build the JWKS refresher")
-            .spawn()
+        adjust(
+            jwks::JwksRefresher::new(url, config.supabase_jwks.clone(), schedule)
+                .expect("build the JWKS refresher"),
+        )
+        .spawn()
     }
 
     async fn wait_for_generation(cache: &jwks::SupabaseJwksCache, generation: u64) {
@@ -1464,6 +1477,173 @@ mod tests {
         }
 
         refresher.abort();
+        server.abort();
+    }
+
+    /// Captures what the thread's default subscriber writes.
+    #[derive(Clone, Default)]
+    struct CapturedLogs(Arc<Mutex<Vec<u8>>>);
+
+    impl CapturedLogs {
+        fn contents(&self) -> String {
+            String::from_utf8_lossy(&self.0.lock().unwrap()).into_owned()
+        }
+    }
+
+    impl std::io::Write for CapturedLogs {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// A refresher that panics mid-fetch is logged and restarted with the
+    /// URL and client it was built with. The request whose fetch panicked is
+    /// answered at once rather than after the full auth wait, the restarted
+    /// refresher fetches, and it answers the next request that asks for a
+    /// rotated-in key.
+    #[tokio::test]
+    async fn the_refresher_restarts_after_a_panic_and_answers_later_requests() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        const INTERVAL: StdDuration = StdDuration::from_millis(200);
+        const BACKOFF: StdDuration = StdDuration::from_millis(300);
+        let logs = CapturedLogs::default();
+        // The test's tasks all run on this thread.
+        let _subscriber = tracing::subscriber::set_default(
+            tracing_subscriber::fmt()
+                .with_writer({
+                    let logs = logs.clone();
+                    move || logs.clone()
+                })
+                .with_ansi(false)
+                .finish(),
+        );
+        let current = TestEcKey::generate("current");
+        let next = TestEcKey::generate("next");
+        let third = TestEcKey::generate("third");
+        let endpoint = RotatingJwks::default();
+        endpoint.publish(&[&current]);
+        let (url, server) = spawn_rotating_jwks_server(endpoint.clone()).await;
+        let mut config = base_app_config();
+        config.supabase_service_role_key = Some("different-service-token".to_string());
+        let panics = Arc::new(AtomicUsize::new(0));
+        let refresher = spawn_refresher_with(
+            &mut config,
+            url,
+            key_set(&[&current]),
+            jwks::JwksRefreshSchedule {
+                periodic: StdDuration::from_secs(3600),
+                on_demand_interval: INTERVAL,
+                auth_wait: StdDuration::from_secs(2),
+            },
+            |refresher| {
+                refresher
+                    .with_restart_backoff(BACKOFF, StdDuration::from_secs(1))
+                    .with_injected_panics(panics.clone())
+            },
+        );
+        wait_for_generation(&config.supabase_jwks, 1).await;
+
+        // The fetch the next request asks for panics.
+        panics.store(1, Ordering::SeqCst);
+        endpoint.publish(&[&current, &next]);
+        let asked = std::time::Instant::now();
+        let (status, _) =
+            authenticate_request(&config, &header_with_token(&next.mint_with_kid("next")))
+                .await
+                .expect_err("the fetch this request asked for panicked");
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        let waited = asked.elapsed();
+        assert!(
+            waited < StdDuration::from_secs(1),
+            "the request waited {waited:?} for a refresher that had panicked"
+        );
+        assert_eq!(panics.load(Ordering::SeqCst), 0, "no fetch cycle panicked");
+        assert_eq!(endpoint.fetches().len(), 1);
+
+        // Restarted after the backoff, it fetches the rotated key set.
+        wait_for_generation(&config.supabase_jwks, 2).await;
+        assert_eq!(endpoint.fetches().len(), 2);
+        let user_id = Uuid::new_v4();
+        let context = authenticate_request(&config, &header_with_token(&next.mint(user_id)))
+            .await
+            .expect("the restarted refresher fetched the rotated-in key");
+        assert_eq!(context.user_id, Some(user_id));
+
+        // And it still answers a request that asks for a key rotated in later.
+        endpoint.publish(&[&current, &next, &third]);
+        let user_id = Uuid::new_v4();
+        let context = authenticate_request(&config, &header_with_token(&third.mint(user_id)))
+            .await
+            .expect("the restarted refresher fetched on demand");
+        assert_eq!(context.user_id, Some(user_id));
+        assert_eq!(endpoint.fetches().len(), 3);
+
+        let output = logs.contents();
+        let restarts: Vec<&str> = output
+            .lines()
+            .filter(|line| line.contains("Supabase JWKS refresher panicked; restarting it"))
+            .collect();
+        assert_eq!(restarts.len(), 1, "{output}");
+        assert!(restarts[0].contains("ERROR"), "{output}");
+        assert!(
+            !output.contains("injected JWKS fetch panic"),
+            "the panic payload reached the log: {output}"
+        );
+
+        refresher.abort();
+        server.abort();
+    }
+
+    /// Once the refresher has stopped, nothing would answer a signal, so a
+    /// request with an unknown key id is refused at once instead of waiting
+    /// out the auth wait.
+    #[tokio::test]
+    async fn requests_do_not_wait_for_a_stopped_refresher() {
+        let current = TestEcKey::generate("current");
+        let stray = TestEcKey::generate("stray");
+        let endpoint = RotatingJwks::default();
+        endpoint.publish(&[&current]);
+        let (url, server) = spawn_rotating_jwks_server(endpoint.clone()).await;
+        let mut config = base_app_config();
+        config.supabase_service_role_key = Some("different-service-token".to_string());
+        // A short on-demand interval, so a running refresher could fetch
+        // within the auth wait and a request would wait for it.
+        let refresher = spawn_refresher(
+            &mut config,
+            url,
+            key_set(&[&current]),
+            jwks::JwksRefreshSchedule {
+                periodic: StdDuration::from_secs(3600),
+                on_demand_interval: StdDuration::from_millis(100),
+                auth_wait: StdDuration::from_secs(2),
+            },
+        );
+        wait_for_generation(&config.supabase_jwks, 1).await;
+
+        refresher.abort();
+        assert!(refresher
+            .await
+            .expect_err("the refresher was aborted")
+            .is_cancelled());
+        let asked = std::time::Instant::now();
+        let (status, _) =
+            authenticate_request(&config, &header_with_token(&stray.mint_with_kid("stray")))
+                .await
+                .expect_err("a key nobody published never verifies");
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        let waited = asked.elapsed();
+        assert!(
+            waited < StdDuration::from_secs(1),
+            "the request waited {waited:?} for a refresher that had stopped"
+        );
+        assert_eq!(endpoint.fetches().len(), 1);
+
         server.abort();
     }
 

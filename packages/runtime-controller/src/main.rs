@@ -366,7 +366,8 @@ async fn main() -> anyhow::Result<()> {
 
     // The only JWKS fetches after startup. The refresher takes the validated
     // URL here, from the startup configuration, and owns it: requests signal
-    // it through the cache and never fetch themselves.
+    // it through the cache and never fetch themselves. Its own supervisor
+    // restarts it if it panics, so the handle is not kept.
     if config.supabase_jwks_refresh_enabled {
         jwks::JwksRefresher::new(
             config.supabase_jwks_url.clone(),
