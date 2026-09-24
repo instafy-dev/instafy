@@ -19,7 +19,7 @@ fn managed_config(key_id: &str) -> AppConfig {
     let mut config = build_app_config(test_origin_private_key(), test_origin_public_key(), key_id);
     // No encryption key on purpose: the managed lease must answer before the
     // BYOC path, which would otherwise fail here with a 500.
-    config.credential_encryption_key = None;
+    config.credential_keys = None;
     config
 }
 

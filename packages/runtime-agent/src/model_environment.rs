@@ -30,6 +30,7 @@ pub(crate) const INTERNAL_CREDENTIAL_ENV_KEYS: &[&str] = &[
     "PROXY_SIGNING_SECRET",
     "CONTROLLER_BROWSER_TURN_SHARED_SECRET",
     "CREDENTIAL_ENCRYPTION_KEY",
+    "CREDENTIAL_ENCRYPTION_PREVIOUS_KEYS",
     "PROGRESS_CALLBACK_SECRET",
     "SUPABASE_JWT_SECRET",
     "USER_TOKEN_SECRET",
@@ -218,6 +219,20 @@ mod tests {
                     .any(|line| line.starts_with(&format!("{key}="))),
                 "persistent helper inherited internal credential {key}"
             );
+        }
+    }
+
+    #[test]
+    fn controller_credential_keys_are_internal_credentials() {
+        // Every key that opens stored secrets, including the decrypt-only
+        // keys kept during a rotation, stays out of runtime children.
+        for key in [
+            "CREDENTIAL_ENCRYPTION_KEY",
+            "CREDENTIAL_ENCRYPTION_PREVIOUS_KEYS",
+            "credential_encryption_previous_keys",
+        ] {
+            assert!(is_internal_credential_env_key(key), "{key}");
+            assert!(is_model_child_excluded_env_key(key), "{key}");
         }
     }
 
