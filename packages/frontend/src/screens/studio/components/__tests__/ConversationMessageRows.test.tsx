@@ -847,6 +847,85 @@ describe("ConversationMessageRows", () => {
     expect(container.querySelector('[data-testid="agent-thread-terminal-status"]')).toBeNull();
   });
 
+  it.each([
+    {
+      label: "hides the matching command owner beside a visible author",
+      actor: "octo",
+      continuation: false,
+      expectedOwner: null,
+    },
+    {
+      label: "keeps a different command actor beside the visible author",
+      actor: "reviewer",
+      continuation: false,
+      expectedOwner: "@reviewer",
+    },
+    {
+      label: "keeps the command owner when the repeated author header is hidden",
+      actor: "octo",
+      continuation: true,
+      expectedOwner: "@octo",
+    },
+  ])("$label", async ({ actor, continuation, expectedOwner }) => {
+    const now = Date.now();
+    const message = createMessage({
+      id: "live-command-thread",
+      timestamp: now,
+      messageType: "agent_job_thread",
+      metadata: {
+        messageType: "agent_job_thread",
+        jobId: "live-command-job",
+        agent: { handle: "octo" },
+        threadMessages: [
+          createMessage({
+            id: "command-reasoning",
+            content: "Checking the test suite.",
+            timestamp: now - 1,
+            messageType: "reasoning",
+            metadata: { agent: { handle: "octo" } },
+          }),
+          createMessage({
+            id: "live-command",
+            content: "Running command...",
+            timestamp: now,
+            messageType: "command_execution",
+            metadata: {
+              messageType: "command_execution",
+              agent: { handle: actor },
+              details: { command: "pnpm test", status: "running" },
+            },
+          }),
+        ],
+      },
+    });
+    const previousMessage = createMessage({
+      id: "previous-author-message",
+      content: "I will run the tests.",
+      timestamp: now - 2,
+      metadata: { agent: { handle: "octo" } },
+    });
+
+    await renderSpeakerBoundaryMessages(continuation ? [previousMessage, message] : [message]);
+
+    const rows = container.querySelectorAll('[data-testid="chat-message-row"]');
+    const commandRow = rows[rows.length - 1];
+    expect(commandRow).toBeDefined();
+    // The live command must render in every case, including the negative badge assertion.
+    expect(commandRow.textContent).toContain("Running tests…");
+    const speaker = commandRow.querySelector('[data-testid="chat-speaker-inline"]');
+    if (continuation) {
+      expect(speaker).toBeNull();
+    } else {
+      expect(speaker?.textContent).toContain("octo");
+    }
+    const owner = commandRow.querySelector('[data-testid="agent-thread-command-owner"]');
+    if (expectedOwner === null) {
+      expect(owner).toBeNull();
+    } else {
+      expect(owner?.textContent).toBe(expectedOwner);
+    }
+  });
+
   it("animates only the active job thread speaker avatar", async () => {
     const historicalThread = createMessage({
       id: "historical-thread",

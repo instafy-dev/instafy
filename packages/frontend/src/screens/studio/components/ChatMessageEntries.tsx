@@ -370,6 +370,8 @@ function AgentJobThreadPreviewEntry({
   onMessageContextMenu,
   showHeaderAvatar = true,
   showHeaderIdentity = true,
+  visibleAuthorHandle = null,
+  visibleAuthorVisibility = "all",
   hideThreadSpine = false,
   runStatusShownInEntryHeader = false,
 }: {
@@ -379,6 +381,8 @@ function AgentJobThreadPreviewEntry({
   onMessageContextMenu?: (event: MouseEvent<HTMLDivElement>, messageId: string) => void;
   showHeaderAvatar?: boolean;
   showHeaderIdentity?: boolean;
+  visibleAuthorHandle?: string | null;
+  visibleAuthorVisibility?: "all" | "narrow";
   hideThreadSpine?: boolean;
   runStatusShownInEntryHeader?: boolean;
 }) {
@@ -419,6 +423,8 @@ function AgentJobThreadPreviewEntry({
       ChatFileChangeList={ChatFileChangeList}
       onMessageContextMenu={onMessageContextMenu}
       showHeaderIdentity={showHeaderIdentity}
+      visibleAuthorHandle={visibleAuthorHandle}
+      visibleAuthorVisibility={visibleAuthorVisibility}
       runStatusShownInEntryHeader={runStatusShownInEntryHeader}
     />
   );
@@ -564,6 +570,8 @@ export type AssistantMessageEntryProps = {
   defaultPlanExpanded?: boolean;
   showAgentIdentityAvatar?: boolean;
   showAgentThreadHeaderIdentity?: boolean;
+  visibleAuthorHandle?: string | null;
+  visibleAuthorVisibility?: "all" | "narrow";
   onRequestActions?: (messageId: string, anchorRect: DOMRect | null) => void;
   onRequestActionsAtPoint?: (messageId: string, clientX: number, clientY: number) => void;
   onMessageContextMenu?: (event: MouseEvent<HTMLDivElement>, messageId: string) => void;
@@ -589,6 +597,8 @@ export function AssistantMessageEntry({
   defaultPlanExpanded,
   showAgentIdentityAvatar = true,
   showAgentThreadHeaderIdentity = true,
+  visibleAuthorHandle = null,
+  visibleAuthorVisibility = "all",
   onRequestActions,
   onRequestActionsAtPoint,
   onMessageContextMenu,
@@ -797,6 +807,8 @@ export function AssistantMessageEntry({
         onMessageContextMenu={onMessageContextMenu}
         showHeaderAvatar={showAgentIdentityAvatar}
         showHeaderIdentity={showAgentThreadHeaderIdentity}
+        visibleAuthorHandle={visibleAuthorHandle}
+        visibleAuthorVisibility={visibleAuthorVisibility}
         hideThreadSpine={useOuterWorkflowSpine}
         runStatusShownInEntryHeader={runStatusShownInEntryHeader}
       />

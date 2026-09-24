@@ -450,6 +450,8 @@ export function ConversationMessageRows({
               showNotch={showNotch}
               showAgentIdentityAvatar={showAssistantIdentityAvatar}
               showAgentThreadHeaderIdentity={false}
+              visibleAuthorHandle={showInlineNarrowSpeakerIdentity ? assistantHandleForMessage : null}
+              visibleAuthorVisibility={usesAssistantAvatarRail ? "narrow" : "all"}
               runStatusShownInEntryHeader={threadTerminalStatusMarker !== null}
               defaultPlanExpanded={firstPlanMessageId !== null && message.id === firstPlanMessageId}
               onRequestActions={onRequestActions}

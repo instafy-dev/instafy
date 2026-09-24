@@ -88,6 +88,8 @@ The verified selected agent owns its entire lifecycle presentation; this is norm
 
 Ambient runs are silent-until-speaking: the lifecycle presentation above begins only when the turn was direct (`@octo`, reply to Octo, **Ask Octo**) or once the run has started streaming visible content.
 
+Command status shows an agent handle when needed to identify who is acting. It omits a duplicate handle when the same agent is already named by the current row's visible header, and keeps it for a different actor or a row without a visible author. When a workflow's author header appears only on mobile, the matching command handle remains visible on desktop.
+
 Normal provisioning must not create a standalone controller-style **Runtime** pseudo-message between the human turn and Octo's avatar. Do not show both a runtime warning and a separate **Starting…** row for the same state. A queued request that will continue automatically must not tell the user to “try again,” because resubmission can create duplicate work.
 
 A terminal failure may offer actions such as **Try again** or **Open Runtime & AI**, but its ownership must remain visually attached to the verified selected agent. A custom-agent failure must never be labeled Octo, and a legacy controller notice without verified agent metadata remains neutral. Controller notices are reserved provenance: human-authored record-only messages cannot claim controller runtime/cancellation metadata or custom-agent ownership, including through nested metadata. Electron, browser, Android, and iPhone clients must render the same lifecycle in the same transcript order.
