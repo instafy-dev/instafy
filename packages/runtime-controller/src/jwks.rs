@@ -1,17 +1,28 @@
 use std::collections::HashMap;
 use std::fmt;
 use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::{anyhow, bail, Context, Result};
+use futures_util::FutureExt;
 use jsonwebtoken::jwk::{AlgorithmParameters, JwkSet, KeyAlgorithm};
 use jsonwebtoken::{Algorithm, DecodingKey};
 use reqwest::Client;
+use tokio::sync::{watch, Notify, RwLock};
+use tokio::time::Instant;
 use url::{Host, Url};
 
 /// Upper bound on every JWKS fetch. The blocking one at startup runs on a
-/// thread the config builder joins, and the refreshes run on the auth retry
-/// path and the periodic refresher; reqwest applies no default timeout.
-const FETCH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+/// thread the config builder joins, and the refresher's run on its own task;
+/// reqwest applies no default timeout.
+const FETCH_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// How long an auth retry waits for the refresher to finish a fetch before it
+/// answers with the key set the cache already holds.
+pub const AUTH_REFRESH_WAIT: Duration = Duration::from_secs(2);
+
+/// Stands in for "never" when a configured interval overflows an [`Instant`].
+const FAR_FUTURE: Duration = Duration::from_secs(365 * 24 * 60 * 60);
 
 const USER_AGENT: &str = "instafy-runtime-controller";
 
@@ -214,37 +225,6 @@ impl SupabaseJwks {
         Self::from_jwk_set(set)
     }
 
-    /// Fetch the key set on refresh. It uses its own client, bounded like the
-    /// startup fetch and never following redirects, rather than a shared one.
-    pub async fn load_async(jwks_url: &SupabaseJwksUrl) -> Result<Self> {
-        let response = Client::builder()
-            .timeout(FETCH_TIMEOUT)
-            .redirect(reqwest::redirect::Policy::none())
-            .user_agent(USER_AGENT)
-            .build()
-            .context("failed to construct HTTP client for JWKS fetch")?
-            .get(jwks_url.as_url().clone())
-            .send()
-            .await
-            .with_context(|| format!("failed to fetch Supabase JWKS from {}", jwks_url))?;
-
-        let status = response.status();
-        if !status.is_success() {
-            bail!(
-                "failed to fetch Supabase JWKS: status={} url={}",
-                status,
-                jwks_url
-            );
-        }
-
-        let set: JwkSet = response
-            .json()
-            .await
-            .context("failed to parse Supabase JWKS response")?;
-
-        Self::from_jwk_set(set)
-    }
-
     pub fn from_jwk_set(set: JwkSet) -> Result<Self> {
         if set.keys.is_empty() {
             bail!("Supabase JWKS response did not contain any keys");
@@ -349,6 +329,279 @@ impl SupabaseJwks {
             default_key: Some(key),
         }
     }
+}
+
+/// The Supabase key set the auth path verifies access tokens against.
+///
+/// Requests never fetch keys. When a token names a key the cache does not
+/// hold, the auth path signals the [`JwksRefresher`], which alone holds the
+/// JWKS URL, and waits briefly for its fetch. Signals coalesce, and the
+/// refresher fetches on demand at most once per configured interval, so
+/// however many requests carry unknown key ids, the controller downloads only
+/// the configured key set, and only at a rate the operator chose at startup.
+#[derive(Clone)]
+pub struct SupabaseJwksCache {
+    shared: Arc<CacheShared>,
+}
+
+struct CacheShared {
+    key_set: RwLock<SupabaseJwks>,
+    refresher: watch::Sender<RefresherState>,
+    /// Requests that found no usable key. A single stored permit, so any
+    /// number of signals before the refresher looks amounts to one.
+    wanted: Notify,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct RefresherState {
+    /// A refresher task serves this cache. Without one nobody would answer a
+    /// signal, so the auth path does not wait.
+    running: bool,
+    /// Fetches the refresher has finished, successful or not. Bumped only
+    /// after a fetched key set has replaced the cached one.
+    finished: u64,
+    fetching: bool,
+    /// The earliest a fetch that a signal asks for can start.
+    on_demand_from: Option<Instant>,
+    /// How long the auth path waits for a fetch it asked for.
+    auth_wait: Duration,
+}
+
+/// The cached key set and the number of refresher fetches that had finished
+/// when it was read, which [`SupabaseJwksCache::wait_for_refresh`] compares
+/// against.
+pub struct JwksSnapshot {
+    pub key_set: SupabaseJwks,
+    pub generation: u64,
+}
+
+impl SupabaseJwksCache {
+    pub fn new(key_set: SupabaseJwks) -> Self {
+        let (refresher, _) = watch::channel(RefresherState {
+            running: false,
+            finished: 0,
+            fetching: false,
+            on_demand_from: None,
+            auth_wait: AUTH_REFRESH_WAIT,
+        });
+        Self {
+            shared: Arc::new(CacheShared {
+                key_set: RwLock::new(key_set),
+                refresher,
+                wanted: Notify::new(),
+            }),
+        }
+    }
+
+    pub async fn snapshot(&self) -> JwksSnapshot {
+        // Generation before keys, while the refresher replaces the keys before
+        // it bumps the generation: the keys read here are never older than the
+        // generation says, so a fetch that lands in between is not missed.
+        let generation = self.shared.refresher.borrow().finished;
+        let key_set = self.shared.key_set.read().await.clone();
+        JwksSnapshot {
+            key_set,
+            generation,
+        }
+    }
+
+    /// Ask the refresher for a fresh key set after a snapshot of `generation`
+    /// had no key for a token, and wait, at most the refresher's auth wait,
+    /// for a fetch to finish. True when one has finished since that snapshot,
+    /// so the caller should look again. This never fetches.
+    pub async fn wait_for_refresh(&self, generation: u64) -> bool {
+        let mut refresher = self.shared.refresher.subscribe();
+        let state = *refresher.borrow_and_update();
+        if !state.running {
+            return false;
+        }
+        if state.finished != generation {
+            // A fetch finished after the snapshot was taken.
+            return true;
+        }
+        self.shared.wanted.notify_one();
+        let deadline = Instant::now() + state.auth_wait;
+        if !state.fetching && state.on_demand_from.is_some_and(|from| from > deadline) {
+            // The refresher is between fetches and may not start another in
+            // time. The signal stands: it fetches when its interval allows,
+            // and later requests see the result.
+            return false;
+        }
+        let refreshed = match tokio::time::timeout_at(
+            deadline,
+            refresher.wait_for(|state| state.finished != generation || !state.running),
+        )
+        .await
+        {
+            Ok(Ok(state)) => state.finished != generation,
+            _ => false,
+        };
+        refreshed
+    }
+
+    async fn replace(&self, key_set: SupabaseJwks) {
+        *self.shared.key_set.write().await = key_set;
+    }
+}
+
+impl fmt::Debug for SupabaseJwksCache {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let state = *self.shared.refresher.borrow();
+        f.debug_struct("SupabaseJwksCache")
+            .field("refresher_running", &state.running)
+            .field("refreshes", &state.finished)
+            .finish_non_exhaustive()
+    }
+}
+
+/// How often the [`JwksRefresher`] fetches. Set once, from the startup
+/// configuration; nothing a request carries changes it.
+#[derive(Clone, Copy, Debug)]
+pub struct JwksRefreshSchedule {
+    /// Between routine fetches (`SUPABASE_JWKS_REFRESH_SECONDS`).
+    pub periodic: Duration,
+    /// Minimum time from the start of one fetch to the start of a fetch a
+    /// request asks for (`SUPABASE_JWKS_ON_DEMAND_INTERVAL_SECONDS`).
+    pub on_demand_interval: Duration,
+    /// How long a request waits for the fetch it asked for.
+    pub auth_wait: Duration,
+}
+
+impl JwksRefreshSchedule {
+    pub fn new(periodic: Duration, on_demand_interval: Duration) -> Self {
+        Self {
+            periodic,
+            on_demand_interval,
+            auth_wait: AUTH_REFRESH_WAIT,
+        }
+    }
+}
+
+/// The only code that fetches the key set after startup: one task, built at
+/// startup from the validated URL in the configuration, that owns that URL
+/// and its client. It fetches once when spawned, then on the periodic
+/// schedule, and when a request signals through the [`SupabaseJwksCache`],
+/// no sooner than the on-demand interval after its previous fetch began.
+pub struct JwksRefresher {
+    url: SupabaseJwksUrl,
+    client: Client,
+    cache: SupabaseJwksCache,
+    schedule: JwksRefreshSchedule,
+}
+
+impl JwksRefresher {
+    pub fn new(
+        url: SupabaseJwksUrl,
+        cache: SupabaseJwksCache,
+        schedule: JwksRefreshSchedule,
+    ) -> Result<Self> {
+        let client = Client::builder()
+            .timeout(FETCH_TIMEOUT)
+            .redirect(reqwest::redirect::Policy::none())
+            .user_agent(USER_AGENT)
+            .build()
+            .context("failed to construct HTTP client for JWKS refresh")?;
+        Ok(Self {
+            url,
+            client,
+            cache,
+            schedule,
+        })
+    }
+
+    /// Start serving the cache. Spawn one refresher per cache.
+    pub fn spawn(self) -> tokio::task::JoinHandle<()> {
+        let auth_wait = self.schedule.auth_wait;
+        self.cache.shared.refresher.send_modify(|state| {
+            state.running = true;
+            state.auth_wait = auth_wait;
+        });
+        // Owned by the task, so however it ends, even aborted before its
+        // first poll, requests stop waiting for it.
+        let running = RefresherRunning(self.cache.clone());
+        tokio::spawn(async move {
+            let _running = running;
+            self.run().await
+        })
+    }
+
+    async fn run(self) {
+        let shared = &self.cache.shared;
+        let mut reason = "startup";
+        loop {
+            // Every signal so far is answered by this fetch.
+            let _ = shared.wanted.notified().now_or_never();
+            let started = Instant::now();
+            let on_demand_from = later(started, self.schedule.on_demand_interval);
+            shared.refresher.send_modify(|state| {
+                state.fetching = true;
+                state.on_demand_from = Some(on_demand_from);
+            });
+            match self.fetch().await {
+                Ok(key_set) => {
+                    self.cache.replace(key_set).await;
+                    tracing::debug!(reason, "Supabase JWKS refreshed");
+                }
+                Err(error) => {
+                    tracing::warn!(%error, reason, "failed to refresh Supabase JWKS");
+                }
+            }
+            shared.refresher.send_modify(|state| {
+                state.fetching = false;
+                state.finished += 1;
+            });
+
+            let periodic_at = later(Instant::now(), self.schedule.periodic);
+            tokio::select! {
+                () = tokio::time::sleep_until(periodic_at) => reason = "periodic",
+                () = shared.wanted.notified() => {
+                    // Signals until the fetch starts ride on this one.
+                    tokio::time::sleep_until(on_demand_from.min(periodic_at)).await;
+                    reason = "unknown key id";
+                }
+            }
+        }
+    }
+
+    async fn fetch(&self) -> Result<SupabaseJwks> {
+        let response = self
+            .client
+            .get(self.url.as_url().clone())
+            .send()
+            .await
+            .with_context(|| format!("failed to fetch Supabase JWKS from {}", self.url))?;
+
+        let status = response.status();
+        if !status.is_success() {
+            bail!(
+                "failed to fetch Supabase JWKS: status={} url={}",
+                status,
+                self.url
+            );
+        }
+
+        let set: JwkSet = response
+            .json()
+            .await
+            .context("failed to parse Supabase JWKS response")?;
+
+        SupabaseJwks::from_jwk_set(set)
+    }
+}
+
+struct RefresherRunning(SupabaseJwksCache);
+
+impl Drop for RefresherRunning {
+    fn drop(&mut self) {
+        self.0.shared.refresher.send_modify(|state| {
+            state.running = false;
+            state.fetching = false;
+        });
+    }
+}
+
+fn later(from: Instant, by: Duration) -> Instant {
+    from.checked_add(by).unwrap_or_else(|| from + FAR_FUTURE)
 }
 
 #[cfg(test)]
@@ -569,16 +822,33 @@ mod tests {
         }
     }
 
-    /// A redirect would send the fetch to a URL that was never validated.
-    #[tokio::test]
-    async fn refreshes_do_not_follow_redirects() {
+    /// A JWKS endpoint that redirects to another path on the same server,
+    /// which counts the requests that follow the redirect.
+    async fn spawn_redirecting_jwks_server() -> (
+        SupabaseJwksUrl,
+        Arc<std::sync::atomic::AtomicUsize>,
+        tokio::task::JoinHandle<()>,
+    ) {
         use axum::response::Redirect;
         use axum::routing::get;
+        use std::sync::atomic::{AtomicUsize, Ordering};
 
-        let app = axum::Router::new().route(
-            SUPABASE_JWKS_PATH,
-            get(|| async { Redirect::temporary("https://example.test/jwks.json") }),
-        );
+        let followed = Arc::new(AtomicUsize::new(0));
+        let app = axum::Router::new()
+            .route(
+                SUPABASE_JWKS_PATH,
+                get(|| async { Redirect::temporary("/elsewhere/jwks.json") }),
+            )
+            .route(
+                "/elsewhere/jwks.json",
+                get({
+                    let followed = followed.clone();
+                    move || async move {
+                        followed.fetch_add(1, Ordering::SeqCst);
+                        axum::Json(serde_json::json!({ "keys": [] }))
+                    }
+                }),
+            );
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
             .expect("bind redirect test server");
@@ -589,11 +859,85 @@ mod tests {
                 .expect("serve redirect test server")
         });
         let url = SupabaseJwksUrl::for_test(&format!("http://127.0.0.1:{}", address.port()));
-        let error = SupabaseJwks::load_async(&url)
+        (url, followed, server)
+    }
+
+    fn test_refresher(url: SupabaseJwksUrl) -> JwksRefresher {
+        JwksRefresher::new(
+            url,
+            SupabaseJwksCache::new(SupabaseJwks::from_hmac_secret("inert-refresher-test")),
+            JwksRefreshSchedule::new(Duration::from_secs(300), Duration::from_secs(30)),
+        )
+        .expect("build the refresher")
+    }
+
+    /// A redirect would send the fetch to a URL that was never validated.
+    #[tokio::test]
+    async fn refreshes_do_not_follow_redirects() {
+        let (url, followed, server) = spawn_redirecting_jwks_server().await;
+        let error = test_refresher(url)
+            .fetch()
             .await
             .expect_err("a redirect is not a key set")
             .to_string();
         assert!(error.contains("status=307"), "{error}");
+        assert_eq!(followed.load(std::sync::atomic::Ordering::SeqCst), 0);
+        server.abort();
+    }
+
+    /// The blocking startup load uses its own client, so it needs its own
+    /// proof that it stops at the redirect.
+    #[tokio::test]
+    async fn the_startup_load_does_not_follow_redirects() {
+        let (url, followed, server) = spawn_redirecting_jwks_server().await;
+        let error = tokio::task::spawn_blocking(move || SupabaseJwks::load(&url))
+            .await
+            .expect("join the blocking startup load")
+            .expect_err("a redirect is not a key set")
+            .to_string();
+        assert!(error.contains("status=307"), "{error}");
+        assert_eq!(followed.load(std::sync::atomic::Ordering::SeqCst), 0);
+        server.abort();
+    }
+
+    /// The refresher's client gives up after ten seconds. The clock is
+    /// paused, so the runtime jumps straight to the client's deadline while
+    /// the server holds the connection open without answering; the virtual
+    /// time that passes is the timeout.
+    #[tokio::test(start_paused = true)]
+    async fn refreshes_time_out_after_ten_seconds() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind silent test server");
+        let address = listener.local_addr().expect("silent test server address");
+        let server = tokio::spawn(async move {
+            let mut held = Vec::new();
+            loop {
+                let (stream, _) = listener.accept().await.expect("accept");
+                held.push(stream);
+            }
+        });
+        let refresher = test_refresher(SupabaseJwksUrl::for_test(&format!(
+            "http://127.0.0.1:{}",
+            address.port()
+        )));
+        let started = Instant::now();
+        let error = tokio::time::timeout(Duration::from_secs(60), refresher.fetch())
+            .await
+            .expect("the refresh must time out on its own, well before a minute")
+            .expect_err("nothing answered");
+        let elapsed = started.elapsed();
+        assert!(
+            error
+                .chain()
+                .filter_map(|cause| cause.downcast_ref::<reqwest::Error>())
+                .any(reqwest::Error::is_timeout),
+            "{error:#}"
+        );
+        assert!(
+            elapsed >= Duration::from_secs(10) && elapsed < Duration::from_secs(11),
+            "timed out after {elapsed:?}"
+        );
         server.abort();
     }
 

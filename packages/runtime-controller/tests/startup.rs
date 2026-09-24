@@ -557,3 +557,64 @@ fn startup_fetches_a_jwks_url_on_the_project_host() {
     assert_normal_error(&result, "failed to parse DATABASE_URL");
     jwks.assert_hits(1);
 }
+
+#[test]
+fn startup_reads_the_jwks_other_host_opt_in_from_the_environment() {
+    // The key set may come from another host only when the operator opts in
+    // through SUPABASE_JWKS_URL_ALLOW_OTHER_HOST. Another port on the same
+    // address counts as another host.
+    let project = MockServer::start();
+    let project_requests = project.mock(|_when, then| {
+        then.status(500);
+    });
+    let other = MockServer::start();
+    let other_jwks = jwks_fixture(&other);
+    let run = |opt_in: Option<&str>| {
+        run_controller(&project, |command| {
+            command
+                .env("SERVICE_RUNTIME_USER_ID", SERVICE_ID)
+                .env("SUPABASE_JWKS_URL", other.url(JWKS_PATH));
+            if let Some(value) = opt_in {
+                command.env("SUPABASE_JWKS_URL_ALLOW_OTHER_HOST", value);
+            }
+        })
+    };
+    for refused in [None, Some("0"), Some("off"), Some("")] {
+        let result = run(refused);
+        assert_normal_error(
+            &result,
+            "SUPABASE_JWKS_URL must be on the host and port of the Supabase project URL",
+        );
+    }
+    other_jwks.assert_hits(0);
+    for (runs, accepted) in ["1", " Yes "].into_iter().enumerate() {
+        let result = run(Some(accepted));
+        // Configuration completed: startup got as far as the database.
+        assert_normal_error(&result, "failed to parse DATABASE_URL");
+        other_jwks.assert_hits(runs + 1);
+    }
+    project_requests.assert_hits(0);
+}
+
+#[test]
+fn startup_jwks_load_does_not_follow_redirects() {
+    // A redirect would take the key set from a URL that was never validated.
+    let server = MockServer::start();
+    let redirect = server.mock(|when, then| {
+        when.method(GET).path(JWKS_PATH);
+        then.status(307)
+            .header("location", server.url("/elsewhere/jwks.json"));
+    });
+    let target = server.mock(|when, then| {
+        when.path("/elsewhere/jwks.json");
+        then.status(200).json_body(json!({ "keys": [] }));
+    });
+    let result = run_controller(&server, |command| {
+        command.env("SERVICE_RUNTIME_USER_ID", SERVICE_ID);
+    });
+    // The documented HS256 fallback takes over, as for any failed load.
+    assert_normal_error(&result, "failed to parse DATABASE_URL");
+    assert!(result.output.contains("status=307"));
+    redirect.assert_hits(1);
+    target.assert_hits(0);
+}

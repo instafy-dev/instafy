@@ -15,7 +15,6 @@ use bb8::Pool;
 use bb8_postgres::PostgresConnectionManager;
 use rand::distributions::Alphanumeric;
 use rand::Rng;
-use tokio::sync::RwLock;
 use tokio_postgres_rustls::MakeRustlsConnect;
 use tracing::{info, warn};
 
@@ -68,6 +67,17 @@ fn database_pool_size_from_values(
         .and_then(|raw| raw.trim().parse::<u32>().ok())
         .filter(|value| *value > 0)
         .unwrap_or(if dev_mode_hint { 12 } else { 4 })
+}
+
+/// `SUPABASE_JWKS_ON_DEMAND_INTERVAL_SECONDS`: how soon after a JWKS fetch a
+/// request with an unknown key id may cause another. Anything under the floor
+/// means the default: the interval is what keeps such requests from turning
+/// into a stream of outbound fetches.
+fn jwks_on_demand_interval_seconds(configured: Option<&str>) -> u64 {
+    configured
+        .and_then(|raw| raw.trim().parse::<u64>().ok())
+        .filter(|value| *value >= 5)
+        .unwrap_or(30)
 }
 
 #[derive(Clone)]
@@ -460,9 +470,14 @@ pub struct AppConfig {
     pub redis_namespace: Option<String>,
     pub redis_events_channel: Option<String>,
     pub _supabase_project_url: String,
+    /// Read once at startup, where the JWKS refresher takes its own copy.
+    /// Requests never fetch from it: see [`jwks::SupabaseJwksCache`].
     pub supabase_jwks_url: jwks::SupabaseJwksUrl,
-    pub supabase_jwks: std::sync::Arc<RwLock<jwks::SupabaseJwks>>,
+    pub supabase_jwks: jwks::SupabaseJwksCache,
     pub supabase_jwks_refresh_seconds: u64,
+    /// Floor between a JWKS fetch and one a request with an unknown key id
+    /// asks for.
+    pub supabase_jwks_on_demand_interval_seconds: u64,
     pub supabase_jwks_refresh_enabled: bool,
     pub controller_internal_token: Option<String>,
     pub proxy_credential_lease_token: Option<String>,
@@ -820,9 +835,10 @@ impl AppConfig {
                     );
                     // Refresh stays ENABLED. Returning false here latched the
                     // process into HS256 for its whole lifetime: both recovery
-                    // paths (the periodic refresher in main.rs and the
-                    // retry-on-auth-failure in auth.rs) are gated on this flag
-                    // and nothing ever set it back. A transient fetch failure
+                    // paths (the refresher's periodic fetch and the fetch an
+                    // unknown key id asks it for) exist only when this flag
+                    // spawns the refresher in main.rs, and nothing ever set it
+                    // back. A transient fetch failure
                     // at boot therefore became permanent, and stayed invisible
                     // until the project rotated to asymmetric signing keys --
                     // at which point every token failed and the outage was
@@ -857,6 +873,11 @@ impl AppConfig {
             .and_then(|raw| raw.parse::<u64>().ok())
             .filter(|value| *value >= 30)
             .unwrap_or(300);
+        let supabase_jwks_on_demand_interval_seconds = jwks_on_demand_interval_seconds(
+            std::env::var("SUPABASE_JWKS_ON_DEMAND_INTERVAL_SECONDS")
+                .ok()
+                .as_deref(),
+        );
         let controller_internal_token = std::env::var("CONTROLLER_INTERNAL_TOKEN")
             .ok()
             .map(|value| value.trim().to_string())
@@ -1281,8 +1302,9 @@ impl AppConfig {
             redis_events_channel,
             _supabase_project_url: supabase_project_url,
             supabase_jwks_url,
-            supabase_jwks: std::sync::Arc::new(RwLock::new(supabase_jwks)),
+            supabase_jwks: jwks::SupabaseJwksCache::new(supabase_jwks),
             supabase_jwks_refresh_seconds,
+            supabase_jwks_on_demand_interval_seconds,
             supabase_jwks_refresh_enabled,
             controller_internal_token,
             proxy_credential_lease_token,
@@ -1477,7 +1499,7 @@ impl StripeConfig {
 #[cfg(test)]
 mod tests {
     use super::{
-        database_pool_size_from_values, normalize_public_app_url,
+        database_pool_size_from_values, jwks_on_demand_interval_seconds, normalize_public_app_url,
         parse_browser_profile_persist_project_ids, published_development_key_warning,
         resolve_credential_encryption_key, resolve_credential_key_ring, resolve_user_token_secret,
         CredentialEncryptionKey, DEV_USER_TOKEN_SECRET,
@@ -1719,8 +1741,8 @@ mod tests {
             !source.contains(&latched),
             "the HS256 fallback must keep JWKS refresh enabled: disabling it latches the \
              process into HS256 for its entire lifetime, because both recovery paths \
-             (main.rs periodic refresher, auth.rs retry-on-auth-failure) are gated on that \
-             flag and nothing ever sets it back"
+             (the refresher's periodic fetch and the on-demand fetch for an unknown key id) \
+             exist only when that flag spawns the refresher, and nothing ever sets it back"
         );
         assert_eq!(
             source.matches(&healing).count(),
@@ -1745,6 +1767,21 @@ mod tests {
         // and forms a valid rustls client configuration at startup rather
         // than on the first pooled connection.
         let _connector = super::database_tls();
+    }
+
+    #[test]
+    fn jwks_on_demand_interval_keeps_its_floor() {
+        assert_eq!(jwks_on_demand_interval_seconds(None), 30);
+        assert_eq!(jwks_on_demand_interval_seconds(Some(" 45 ")), 45);
+        assert_eq!(jwks_on_demand_interval_seconds(Some("5")), 5);
+        // Below the floor, or unreadable, is the default, never "no limit".
+        for configured in ["0", "4", "-1", "", "soon"] {
+            assert_eq!(
+                jwks_on_demand_interval_seconds(Some(configured)),
+                30,
+                "{configured:?}"
+            );
+        }
     }
 
     #[test]

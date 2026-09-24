@@ -11,7 +11,7 @@ use jsonwebtoken::{decode, decode_header, encode, Algorithm, EncodingKey, Header
 use runtime_contracts::ProxyEnvelopePayload;
 use serde::{Deserialize, Serialize};
 use subtle::ConstantTimeEq;
-use tracing::{info, warn};
+use tracing::info;
 use uuid::Uuid;
 
 #[cfg(test)]
@@ -126,28 +126,6 @@ fn decode_scoped_access_token(
     }
 }
 
-async fn refresh_supabase_jwks_on_auth_retry(config: &AppConfig) -> bool {
-    if !config.supabase_jwks_refresh_enabled {
-        return false;
-    }
-
-    match crate::jwks::SupabaseJwks::load_async(&config.supabase_jwks_url).await {
-        Ok(next) => {
-            let mut guard = config.supabase_jwks.write().await;
-            *guard = next;
-            true
-        }
-        Err(error) => {
-            warn!(
-                %error,
-                jwks_url = %config.supabase_jwks_url,
-                "failed to refresh Supabase JWKS during auth retry"
-            );
-            false
-        }
-    }
-}
-
 pub(crate) async fn authenticate_request(
     config: &AppConfig,
     headers: &HeaderMap,
@@ -219,11 +197,16 @@ pub(crate) async fn authenticate_request(
         Algorithm::ES256 | Algorithm::RS256 | Algorithm::HS256
     );
     let mut attempted_supabase_decode = false;
+    // A token the cached key set cannot verify, such as one signed with a key
+    // Supabase has just rotated in, gets one more look once the JWKS
+    // refresher has fetched. The request only signals and waits for it,
+    // briefly: it never fetches, so unknown key ids cannot multiply fetches.
     let mut refreshed_supabase_jwks = false;
 
     if token_may_be_supabase {
         loop {
-            let jwks_snapshot = config.supabase_jwks.read().await.clone();
+            let snapshot = config.supabase_jwks.snapshot().await;
+            let jwks_snapshot = snapshot.key_set;
             let key = jwks_snapshot.decoding_key(header.kid.as_deref());
 
             let mut validation = Validation::new(jwks_snapshot.algorithm());
@@ -273,7 +256,10 @@ pub(crate) async fn authenticate_request(
                         }
                         _ => {
                             if !refreshed_supabase_jwks
-                                && refresh_supabase_jwks_on_auth_retry(config).await
+                                && config
+                                    .supabase_jwks
+                                    .wait_for_refresh(snapshot.generation)
+                                    .await
                             {
                                 refreshed_supabase_jwks = true;
                                 continue;
@@ -281,7 +267,11 @@ pub(crate) async fn authenticate_request(
                         }
                     },
                 }
-            } else if !refreshed_supabase_jwks && refresh_supabase_jwks_on_auth_retry(config).await
+            } else if !refreshed_supabase_jwks
+                && config
+                    .supabase_jwks
+                    .wait_for_refresh(snapshot.generation)
+                    .await
             {
                 refreshed_supabase_jwks = true;
                 continue;
@@ -641,14 +631,17 @@ mod tests {
     use axum::http::HeaderMap;
     use axum::routing::get;
     use axum::{Json, Router};
-    use base64::{engine::general_purpose::STANDARD, Engine as _};
+    use base64::{
+        engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD},
+        Engine as _,
+    };
     use jsonwebtoken::{decode, Algorithm, DecodingKey, Validation};
     use ring::rand::SystemRandom;
     use ring::signature::{Ed25519KeyPair, KeyPair};
     use serde::Serialize;
     use serde_json::json;
-    use std::sync::{Arc, OnceLock};
-    use tokio::sync::RwLock;
+    use std::sync::{Arc, Mutex, OnceLock};
+    use std::time::Duration as StdDuration;
     use uuid::Uuid;
 
     const TEST_SUPABASE_SECRET: &str = "test-secret";
@@ -712,10 +705,11 @@ mod tests {
             redis_events_channel: None,
             _supabase_project_url: "https://example.supabase.co".to_string(),
             supabase_jwks_url: jwks::SupabaseJwksUrl::for_test("https://example.supabase.co"),
-            supabase_jwks: Arc::new(RwLock::new(jwks::SupabaseJwks::from_hmac_secret(
+            supabase_jwks: jwks::SupabaseJwksCache::new(jwks::SupabaseJwks::from_hmac_secret(
                 TEST_SUPABASE_SECRET,
-            ))),
+            )),
             supabase_jwks_refresh_seconds: 300,
+            supabase_jwks_on_demand_interval_seconds: 30,
             supabase_jwks_refresh_enabled: true,
             controller_internal_token: None,
             proxy_credential_lease_token: None,
@@ -967,6 +961,160 @@ mod tests {
         (format!("http://127.0.0.1:{}", address.port()), handle)
     }
 
+    /// A P-256 signing key generated for one test and published as an ES256
+    /// JWK, as Supabase publishes its asymmetric signing keys.
+    struct TestEcKey {
+        kid: String,
+        pkcs8: Vec<u8>,
+        jwk: serde_json::Value,
+    }
+
+    impl TestEcKey {
+        fn generate(kid: &str) -> Self {
+            use ring::signature::{EcdsaKeyPair, ECDSA_P256_SHA256_FIXED_SIGNING};
+
+            let rng = SystemRandom::new();
+            let pkcs8 = EcdsaKeyPair::generate_pkcs8(&ECDSA_P256_SHA256_FIXED_SIGNING, &rng)
+                .expect("generate test EC key");
+            let key_pair =
+                EcdsaKeyPair::from_pkcs8(&ECDSA_P256_SHA256_FIXED_SIGNING, pkcs8.as_ref(), &rng)
+                    .expect("parse test EC key");
+            // An uncompressed point: 0x04, then the X and Y coordinates.
+            let point = key_pair.public_key().as_ref();
+            let jwk = json!({
+                "kty": "EC",
+                "crv": "P-256",
+                "alg": "ES256",
+                "use": "sig",
+                "kid": kid,
+                "x": URL_SAFE_NO_PAD.encode(&point[1..33]),
+                "y": URL_SAFE_NO_PAD.encode(&point[33..65]),
+            });
+            Self {
+                kid: kid.to_string(),
+                pkcs8: pkcs8.as_ref().to_vec(),
+                jwk,
+            }
+        }
+
+        fn mint(&self, user_id: Uuid) -> String {
+            self.mint_as(&self.kid, user_id)
+        }
+
+        fn mint_with_kid(&self, kid: &str) -> String {
+            self.mint_as(kid, Uuid::new_v4())
+        }
+
+        fn mint_as(&self, kid: &str, user_id: Uuid) -> String {
+            #[derive(Serialize)]
+            struct Claims {
+                sub: String,
+                role: &'static str,
+                aud: &'static str,
+                exp: i64,
+            }
+            let mut header = Header::new(Algorithm::ES256);
+            header.kid = Some(kid.to_string());
+            encode(
+                &header,
+                &Claims {
+                    sub: user_id.to_string(),
+                    role: "authenticated",
+                    aud: "authenticated",
+                    exp: (Utc::now() + ChronoDuration::minutes(5)).timestamp(),
+                },
+                &EncodingKey::from_ec_der(&self.pkcs8),
+            )
+            .expect("sign ES256 test token")
+        }
+    }
+
+    fn key_set(keys: &[&TestEcKey]) -> jwks::SupabaseJwks {
+        let keys: Vec<_> = keys.iter().map(|key| key.jwk.clone()).collect();
+        jwks::SupabaseJwks::from_jwk_set(
+            serde_json::from_value(json!({ "keys": keys })).expect("test key set"),
+        )
+        .expect("usable test key set")
+    }
+
+    /// A Supabase JWKS endpoint whose keys a test rotates, recording when
+    /// each fetch arrives.
+    #[derive(Clone, Default)]
+    struct RotatingJwks {
+        keys: Arc<Mutex<Vec<serde_json::Value>>>,
+        fetches: Arc<Mutex<Vec<std::time::Instant>>>,
+    }
+
+    impl RotatingJwks {
+        fn publish(&self, keys: &[&TestEcKey]) {
+            *self.keys.lock().unwrap() = keys.iter().map(|key| key.jwk.clone()).collect();
+        }
+
+        fn fetches(&self) -> Vec<std::time::Instant> {
+            self.fetches.lock().unwrap().clone()
+        }
+    }
+
+    async fn spawn_rotating_jwks_server(
+        endpoint: RotatingJwks,
+    ) -> (jwks::SupabaseJwksUrl, tokio::task::JoinHandle<()>) {
+        let app = Router::new().route(
+            jwks::SUPABASE_JWKS_PATH,
+            get(move || {
+                let endpoint = endpoint.clone();
+                async move {
+                    endpoint
+                        .fetches
+                        .lock()
+                        .unwrap()
+                        .push(std::time::Instant::now());
+                    let keys = endpoint.keys.lock().unwrap().clone();
+                    Json(json!({ "keys": keys }))
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind rotating jwks test server");
+        let address = listener
+            .local_addr()
+            .expect("rotating jwks test server address");
+        let handle = tokio::spawn(async move {
+            axum::serve(listener, app)
+                .await
+                .expect("serve rotating jwks test server");
+        });
+        let url = jwks::SupabaseJwksUrl::for_test(&format!("http://127.0.0.1:{}", address.port()));
+        (url, handle)
+    }
+
+    /// Serve `config` from a cache holding `initial`, as the startup load
+    /// leaves it, with a refresher fetching from `url` as main.rs starts it.
+    fn spawn_refresher(
+        config: &mut AppConfig,
+        url: jwks::SupabaseJwksUrl,
+        initial: jwks::SupabaseJwks,
+        schedule: jwks::JwksRefreshSchedule,
+    ) -> tokio::task::JoinHandle<()> {
+        config.supabase_jwks = jwks::SupabaseJwksCache::new(initial);
+        config.supabase_jwks_url = url.clone();
+        config.supabase_jwks_refresh_enabled = true;
+        jwks::JwksRefresher::new(url, config.supabase_jwks.clone(), schedule)
+            .expect("build the JWKS refresher")
+            .spawn()
+    }
+
+    async fn wait_for_generation(cache: &jwks::SupabaseJwksCache, generation: u64) {
+        let deadline = std::time::Instant::now() + StdDuration::from_secs(5);
+        while cache.snapshot().await.generation < generation {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the JWKS refresher did not finish fetch {generation} in time"
+            );
+            tokio::time::sleep(StdDuration::from_millis(5)).await;
+        }
+    }
+
     #[tokio::test]
     async fn authenticate_request_allows_missing_token() {
         let config = base_app_config();
@@ -1075,11 +1223,13 @@ mod tests {
         let (supabase_project_url, server) = spawn_test_jwks_server().await;
         let mut config = base_app_config();
         config.supabase_service_role_key = Some("different-service-token".to_string());
-        config.supabase_jwks_url = jwks::SupabaseJwksUrl::for_test(&supabase_project_url);
-        config.supabase_jwks = Arc::new(RwLock::new(jwks::SupabaseJwks::from_hmac_secret(
-            "stale-secret",
-        )));
-        config.supabase_jwks_refresh_enabled = true;
+        // The HS256 fallback a failed startup load leaves behind.
+        let refresher = spawn_refresher(
+            &mut config,
+            jwks::SupabaseJwksUrl::for_test(&supabase_project_url),
+            jwks::SupabaseJwks::from_hmac_secret("stale-secret"),
+            jwks::JwksRefreshSchedule::new(StdDuration::from_secs(300), StdDuration::from_secs(30)),
+        );
 
         let user_id = Uuid::new_v4();
         let token = mint_rs256_access_token(
@@ -1097,6 +1247,223 @@ mod tests {
         assert_eq!(context.user_id, Some(user_id));
         assert!(!context.is_service_role);
 
+        refresher.abort();
+        server.abort();
+    }
+
+    /// However many requests name keys the cache does not hold, the JWKS
+    /// endpoint sees at most one fetch per on-demand interval, and every
+    /// request is still answered.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn unknown_key_ids_cannot_multiply_jwks_fetches() {
+        const INTERVAL: StdDuration = StdDuration::from_millis(300);
+        const WAVE: usize = 100;
+        let current = TestEcKey::generate("current");
+        let stray = TestEcKey::generate("stray");
+        let endpoint = RotatingJwks::default();
+        endpoint.publish(&[&current]);
+        let (url, server) = spawn_rotating_jwks_server(endpoint.clone()).await;
+        let mut config = base_app_config();
+        config.supabase_service_role_key = Some("different-service-token".to_string());
+        let refresher = spawn_refresher(
+            &mut config,
+            url,
+            key_set(&[&current]),
+            jwks::JwksRefreshSchedule {
+                periodic: StdDuration::from_secs(3600),
+                on_demand_interval: INTERVAL,
+                auth_wait: StdDuration::from_secs(2),
+            },
+        );
+        wait_for_generation(&config.supabase_jwks, 1).await;
+        assert_eq!(endpoint.fetches().len(), 1, "the startup fetch");
+
+        let config = Arc::new(config);
+        let flood_started = std::time::Instant::now();
+        let mut requests = 0;
+        while flood_started.elapsed() < StdDuration::from_secs(1) {
+            let wave: Vec<_> = (0..WAVE)
+                .map(|index| {
+                    let config = config.clone();
+                    // Every request a key id nobody published.
+                    let token = stray.mint_with_kid(&format!("stray-{requests}-{index}"));
+                    tokio::spawn(async move {
+                        authenticate_request(&config, &header_with_token(&token)).await
+                    })
+                })
+                .collect();
+            for request in wave {
+                let (status, _) = request
+                    .await
+                    .expect("join request")
+                    .expect_err("a key nobody published never verifies");
+                assert_eq!(status, StatusCode::UNAUTHORIZED);
+            }
+            requests += WAVE;
+        }
+        // Let a fetch the last wave asked for land before counting.
+        tokio::time::sleep(INTERVAL * 2).await;
+
+        let fetches = endpoint.fetches();
+        assert!(
+            fetches.len() >= 2,
+            "the unknown key ids never reached the refresher"
+        );
+        for pair in fetches.windows(2) {
+            let gap = pair[1] - pair[0];
+            assert!(
+                gap >= INTERVAL * 8 / 10,
+                "two JWKS fetches {gap:?} apart, inside one {INTERVAL:?} interval"
+            );
+        }
+        let windows = flood_started.elapsed().as_millis() / INTERVAL.as_millis() + 1;
+        assert!(
+            (fetches.len() as u128) <= 1 + windows,
+            "{} fetches for {requests} requests over {windows} intervals",
+            fetches.len()
+        );
+        assert!(
+            requests >= 2 * WAVE,
+            "the flood sent only {requests} requests"
+        );
+
+        refresher.abort();
+        server.abort();
+    }
+
+    /// The first request signed with a key Supabase has just published asks
+    /// the refresher for it, waits for the fetch, and is accepted.
+    #[tokio::test]
+    async fn a_rotated_in_key_is_fetched_for_the_request_that_needs_it() {
+        let current = TestEcKey::generate("current");
+        let next = TestEcKey::generate("next");
+        let endpoint = RotatingJwks::default();
+        endpoint.publish(&[&current]);
+        let (url, server) = spawn_rotating_jwks_server(endpoint.clone()).await;
+        let mut config = base_app_config();
+        config.supabase_service_role_key = Some("different-service-token".to_string());
+        let refresher = spawn_refresher(
+            &mut config,
+            url,
+            key_set(&[&current]),
+            jwks::JwksRefreshSchedule {
+                periodic: StdDuration::from_secs(3600),
+                on_demand_interval: StdDuration::from_millis(300),
+                auth_wait: StdDuration::from_secs(2),
+            },
+        );
+        wait_for_generation(&config.supabase_jwks, 1).await;
+
+        endpoint.publish(&[&current, &next]);
+        let user_id = Uuid::new_v4();
+        let context = authenticate_request(&config, &header_with_token(&next.mint(user_id)))
+            .await
+            .expect("the rotated-in key verifies once fetched");
+        assert_eq!(context.user_id, Some(user_id));
+        assert_eq!(endpoint.fetches().len(), 2, "one fetch for the new key");
+
+        // Both keys verify from the cache now, without another fetch.
+        for key in [&current, &next] {
+            let user_id = Uuid::new_v4();
+            let context = authenticate_request(&config, &header_with_token(&key.mint(user_id)))
+                .await
+                .expect("a published key verifies");
+            assert_eq!(context.user_id, Some(user_id));
+        }
+        assert_eq!(endpoint.fetches().len(), 2);
+
+        refresher.abort();
+        server.abort();
+    }
+
+    /// A key rotated in just after a fetch is refused, without waiting, until
+    /// the on-demand interval allows the fetch its requests asked for; that
+    /// fetch then happens without another request having to ask.
+    #[tokio::test]
+    async fn a_rotation_inside_the_interval_is_picked_up_when_it_ends() {
+        const INTERVAL: StdDuration = StdDuration::from_millis(800);
+        let current = TestEcKey::generate("current");
+        let next = TestEcKey::generate("next");
+        let endpoint = RotatingJwks::default();
+        endpoint.publish(&[&current]);
+        let (url, server) = spawn_rotating_jwks_server(endpoint.clone()).await;
+        let mut config = base_app_config();
+        config.supabase_service_role_key = Some("different-service-token".to_string());
+        let refresher = spawn_refresher(
+            &mut config,
+            url,
+            key_set(&[&current]),
+            jwks::JwksRefreshSchedule {
+                periodic: StdDuration::from_secs(3600),
+                on_demand_interval: INTERVAL,
+                auth_wait: StdDuration::from_millis(100),
+            },
+        );
+        wait_for_generation(&config.supabase_jwks, 1).await;
+        let interval_started = std::time::Instant::now();
+
+        endpoint.publish(&[&current, &next]);
+        let token = next.mint(Uuid::new_v4());
+        for _ in 0..50 {
+            let (status, _) = authenticate_request(&config, &header_with_token(&token))
+                .await
+                .expect_err("not fetched yet");
+            assert_eq!(status, StatusCode::UNAUTHORIZED);
+        }
+        assert!(
+            interval_started.elapsed() < INTERVAL / 2,
+            "refused requests waited for a fetch the interval does not allow yet"
+        );
+        assert_eq!(endpoint.fetches().len(), 1, "no fetch inside the interval");
+
+        wait_for_generation(&config.supabase_jwks, 2).await;
+        assert!(interval_started.elapsed() >= INTERVAL * 8 / 10);
+        let user_id = Uuid::new_v4();
+        let context = authenticate_request(&config, &header_with_token(&next.mint(user_id)))
+            .await
+            .expect("the key the refused requests asked for arrived");
+        assert_eq!(context.user_id, Some(user_id));
+        assert_eq!(endpoint.fetches().len(), 2);
+
+        refresher.abort();
+        server.abort();
+    }
+
+    /// With no request asking, the refresher still fetches on its schedule,
+    /// and a retired key leaves the cache.
+    #[tokio::test]
+    async fn the_refresher_still_fetches_periodically() {
+        const PERIOD: StdDuration = StdDuration::from_millis(150);
+        let current = TestEcKey::generate("current");
+        let next = TestEcKey::generate("next");
+        let endpoint = RotatingJwks::default();
+        endpoint.publish(&[&current]);
+        let (url, server) = spawn_rotating_jwks_server(endpoint.clone()).await;
+        let mut config = base_app_config();
+        let refresher = spawn_refresher(
+            &mut config,
+            url,
+            key_set(&[&current]),
+            jwks::JwksRefreshSchedule {
+                periodic: PERIOD,
+                on_demand_interval: StdDuration::from_secs(3600),
+                auth_wait: StdDuration::from_secs(2),
+            },
+        );
+        wait_for_generation(&config.supabase_jwks, 1).await;
+        endpoint.publish(&[&next]);
+
+        wait_for_generation(&config.supabase_jwks, 3).await;
+        let snapshot = config.supabase_jwks.snapshot().await;
+        assert!(snapshot.key_set.decoding_key(Some("next")).is_some());
+        assert!(snapshot.key_set.decoding_key(Some("current")).is_none());
+        let fetches = endpoint.fetches();
+        assert!(fetches.len() >= 3);
+        for pair in fetches.windows(2) {
+            assert!(pair[1] - pair[0] >= PERIOD * 8 / 10);
+        }
+
+        refresher.abort();
         server.abort();
     }
 
