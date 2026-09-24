@@ -135,4 +135,27 @@ describe("workspace picker responsive navigation", () => {
     expect(location.key).toBe(baseKey);
     expect(location.search).toBe("?projectId=fixture-space");
   });
+
+  it.each(["history", "files", "sourceControl"])("keeps the %s destination through repeated sidebar toggles", async (panel) => {
+    const search = `?projectId=fixture-space&conversationId=retained-chat&workspaceTab=${panel}`;
+    await act(async () => navigate(`/studio${search}`, { replace: true }));
+    wide = false;
+    await render();
+    const baseKey = location.key;
+    const baseIndex = window.history.state.idx;
+
+    for (let cycle = 0; cycle < 3; cycle += 1) {
+      await act(async () => chrome.toggleSidebar());
+      expect(chrome.mobileSidebarOpen).toBe(true);
+      expect(chrome.leftDrawer).toBe(panel);
+      expect(location.search).toBe(search);
+      expect(window.history.state.idx).toBe(baseIndex + 1);
+      await move(chrome.toggleSidebar);
+      expect(chrome.mobileSidebarOpen).toBe(false);
+      expect(chrome.leftDrawer).toBe(panel);
+      expect(location.search).toBe(search);
+      expect(location.key).toBe(baseKey);
+      expect(window.history.state.idx).toBe(baseIndex);
+    }
+  });
 });

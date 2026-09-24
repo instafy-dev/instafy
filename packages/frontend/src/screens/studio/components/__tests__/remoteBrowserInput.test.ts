@@ -25,6 +25,67 @@ afterEach(() => {
 });
 
 describe("attachRemoteBrowserInput", () => {
+  it("batches high-refresh touch scrolling without losing displacement or exceeding the input budget", () => {
+    vi.useFakeTimers();
+    const element = document.createElement("div");
+    element.getBoundingClientRect = () =>
+      ({ left: 0, top: 0, width: 500, height: 500 }) as DOMRect;
+    const send = vi.fn();
+    const binding = attachRemoteBrowserInput(element, {
+      getViewport: () => ({ width: 1, height: 1, dpr: 1, deviceWidth: 1, deviceHeight: 1 }),
+      send,
+    });
+    element.dispatchEvent(touchPointerEvent("pointerdown", {
+      pointerId: 1, clientX: 100, clientY: 300,
+    }));
+    for (let i = 1; i <= 240; i++) {
+      element.dispatchEvent(touchPointerEvent("pointermove", {
+        pointerId: 1, clientX: 100, clientY: 300 - i,
+      }));
+      vi.advanceTimersByTime(4);
+    }
+    element.dispatchEvent(touchPointerEvent("pointerup", {
+      pointerId: 1, clientX: 100, clientY: 60,
+    }));
+    const messages = send.mock.calls.map(([message]) => message);
+    expect(messages.length).toBeGreaterThan(0);
+    expect(messages.length).toBeLessThanOrEqual(65);
+    expect(messages.every(message => message.type === "wheel")).toBe(true);
+    expect(messages.reduce((sum, message) => sum + message.deltaY, 0)).toBe(240);
+    binding.dispose();
+  });
+
+  it("flushes accumulated wheel movement before a click and discards it after revocation or disposal", () => {
+    vi.useFakeTimers();
+    const element = document.createElement("div");
+    element.getBoundingClientRect = () =>
+      ({ left: 0, top: 0, width: 500, height: 500 }) as DOMRect;
+    let active = true;
+    const send = vi.fn();
+    const binding = attachRemoteBrowserInput(element, {
+      enabled: () => active,
+      getViewport: () => ({ width: 1, height: 1, dpr: 1, deviceWidth: 1, deviceHeight: 1 }),
+      send,
+    });
+    const wheel = () => element.dispatchEvent(new WheelEvent("wheel", {
+      clientX: 100, clientY: 100, deltaY: 10,
+    }));
+    wheel();
+    wheel();
+    element.dispatchEvent(new MouseEvent("pointerdown", { clientX: 100, clientY: 100, button: 0 }));
+    expect(send.mock.calls.map(([message]) => message.type)).toEqual(["wheel", "mouse"]);
+    expect(send.mock.calls[0][0].deltaY).toBe(20);
+    wheel();
+    active = false;
+    vi.advanceTimersByTime(100);
+    expect(send).toHaveBeenCalledTimes(2);
+    active = true;
+    wheel();
+    binding.dispose();
+    vi.advanceTimersByTime(100);
+    expect(send).toHaveBeenCalledTimes(2);
+  });
+
   it.each(["insertText", "insertReplacementText"])(
     "forwards bounded %s without allowing insertion into a retained local editor selection",
     (inputType) => {

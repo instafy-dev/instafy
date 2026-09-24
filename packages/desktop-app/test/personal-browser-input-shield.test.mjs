@@ -132,3 +132,26 @@ test("native Personal Browser shield sits above the page and blocks human input 
   assert.equal(createdView.webContents.closeCount, 1);
   assert.equal(owner.children.includes(createdView), false);
 });
+
+test("granting control under a menu defers native shield attachment without unlocking the page", () => {
+  const owner = new FakeOwner();
+  const contents = new FakeWebContents();
+  let view;
+  const shield = new PersonalBrowserInputShield({
+    createView: () => (view = new FakeView()),
+    onEmergencyEscape() {},
+  });
+  const bounds = { x: 10, y: 20, width: 600, height: 400 };
+  shield.attach(owner, contents);
+  shield.sync(true, false, bounds);
+  assert.equal(view, undefined, "a menu must not lose focus to a new native view");
+  assert.equal(inputEvent(contents, {}).prevented, true);
+  shield.sync(true, true, bounds);
+  assert.equal(view.visible, true);
+  assert.equal(view.webContents.focusCount, 1);
+  shield.sync(true, false, bounds);
+  assert.equal(view.visible, false);
+  assert.equal(view.webContents.focusCount, 1);
+  assert.equal(contents.focusCount, 0);
+  shield.destroy();
+});

@@ -83,4 +83,14 @@ describe("Studio sidebar native and keyboard Back integration", () => {
     await act(async () => { window.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape" })); });
     await wait(() => expect(chrome.mobileSidebarNavigation.view).toBe("sidebar"));
   });
+
+  it.each(["history", "files", "sourceControl"] as const)("Escape dismisses navigation without closing the underlying %s view", async (panel) => {
+    await act(async () => chrome.setLeftDrawer(panel));
+    await act(async () => chrome.toggleSidebar());
+    expect(chrome.mobileSidebarOpen).toBe(true);
+    await act(async () => { window.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape" })); });
+    await wait(() => expect(chrome.mobileSidebarOpen).toBe(false));
+    expect(chrome.leftDrawer).toBe(panel);
+    expect(window.history.state.key).toBe("base");
+  });
 });

@@ -111,4 +111,19 @@ describe("remote browser surface geometry", () => {
     expect(canvas.hasAttribute("data-remote-content-height")).toBe(false);
     expect(remoteBrowserContentRect(canvas)).toMatchObject({ top: 50, height: 300 });
   });
+
+  it("maps shared-tab image input using intrinsic pixels and excludes letterbox gutters", () => {
+    const image = document.createElement("img");
+    Object.defineProperties(image, {
+      naturalWidth: { value: 1600 },
+      naturalHeight: { value: 900 },
+    });
+    image.style.objectFit = "contain";
+    image.getBoundingClientRect = () =>
+      ({ left: 10, top: 20, width: 400, height: 400 }) as DOMRect;
+    expect(remoteBrowserContentRect(image)).toMatchObject({ left: 10, top: 107.5, width: 400, height: 225 });
+    expect(normalizedRemoteBrowserPoint(image, 210, 220)).toEqual({ x: 0.5, y: 0.5 });
+    expect(normalizedRemoteBrowserPoint(image, 210, 50)).toBeNull();
+  });
+
 });

@@ -1,0 +1,58 @@
+/* The whole column stays tappable; interaction feedback follows its compact
+   icon-and-label group instead of painting a second, full-width surface. */
+.mobile-bottom-dock .mobile-bottom-dock-button {
+  background: transparent;
+  box-shadow: none;
+  outline: none;
+}
+
+.mobile-bottom-dock-content {
+  transition: background-color 150ms ease-out;
+}
+
+.mobile-bottom-dock-button[data-hovered] .mobile-bottom-dock-content {
+  background: var(--color-slate-100);
+}
+
+.mobile-bottom-dock-button[data-pressed] .mobile-bottom-dock-content {
+  background: var(--color-slate-200);
+}
+
+.mobile-bottom-dock-button[aria-current="page"] .mobile-bottom-dock-content {
+  background: var(--color-primary-100);
+}
+
+.mobile-bottom-dock-button[aria-current="page"][data-pressed] .mobile-bottom-dock-content {
+  background: var(--color-primary-200);
+}
+
+.mobile-bottom-dock-button:is(:focus-visible, [data-focus-visible]) .mobile-bottom-dock-content {
+  outline: 2px solid var(--color-primary-600);
+  outline-offset: 2px;
+}
+
+.dark .mobile-bottom-dock-button[data-hovered] .mobile-bottom-dock-content {
+  background: var(--color-studio-dark-control-hover);
+}
+
+.dark .mobile-bottom-dock-button[data-pressed] .mobile-bottom-dock-content {
+  background: var(--color-studio-dark-active);
+}
+
+.dark .mobile-bottom-dock-button[aria-current="page"] .mobile-bottom-dock-content {
+  background: color-mix(in srgb, var(--color-primary-500) 20%, transparent);
+}
+
+.dark .mobile-bottom-dock-button[aria-current="page"][data-pressed] .mobile-bottom-dock-content {
+  background: color-mix(in srgb, var(--color-primary-500) 30%, transparent);
+}
+
+.dark .mobile-bottom-dock-button:is(:focus-visible, [data-focus-visible]) .mobile-bottom-dock-content {
+  outline-color: var(--color-primary-400);
+}
+
+@media (forced-colors: active) {
+  .mobile-bottom-dock .mobile-bottom-dock-button:is(:focus-visible, [data-focus-visible]) .mobile-bottom-dock-content {
+    outline-color: Highlight;
+  }
+}

@@ -35,6 +35,7 @@ These docs reflect the current product scope: a chat-first filesystem workspace 
 - Browser profiles, cookie sharing, and clearing scope: `docs/Browser-Profiles.md`
 - Shared Browser origin scopes and transport boundary: `docs/Shared-Browser-Authorization.md`
 - Personal Browser desktop architecture and security boundary: `docs/Personal-Browser.md`
+- Local tab sharing, human control and independent Explore: `docs/Local-Browser-Sharing.md`
 - Private self-hosted ownership and future Team runtime boundary: `docs/Self-Hosted-Runtime-Security.md`
 - Space bootstrap template (seeded into new workspaces): `packages/runtime-agent/assets/instafy/INSTAFY.md`
 
