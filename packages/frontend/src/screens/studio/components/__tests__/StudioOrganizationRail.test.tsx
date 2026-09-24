@@ -120,8 +120,8 @@ describe("StudioOrganizationRail", () => {
   it("keeps desktop window-button clearance on the permanent rail", async () => {
     await render({ titleBarFree: true });
     const nav = container.querySelector<HTMLElement>('[data-testid="sidebar-organization-rail"]')!;
-    expect(nav.style.paddingTop).toBe("48px");
-    expect(nav.querySelector<HTMLElement>("[data-rail-surface]")?.style.top).toBe("48px");
+    expect(nav.style.paddingTop).toBe("var(--studio-context-height, 48px)");
+    expect(nav.querySelector<HTMLElement>("[data-rail-surface]")?.style.top).toBe("var(--studio-context-height, 48px)");
     await render({ titleBarFree: false });
     expect(nav.querySelector("[data-rail-surface]")).toBeNull();
     expect(nav.className).toContain("pt-[var(--instafy-safe-area-inset-top)]");

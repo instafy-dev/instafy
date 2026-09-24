@@ -72,8 +72,6 @@ describe("StudioSidebarAccountSection update indicator", () => {
           onUpdateEntryPointerDown={vi.fn()}
           clearUpdateLongPress={vi.fn()}
           onOpenSupport={input.onOpenSupport ?? vi.fn()}
-          onOpenDiagnostics={vi.fn()}
-          hasAppLogErrors={false}
           updateDialogOpen={false}
           onUpdateDialogOpenChange={vi.fn()}
           updateMetadata={null}
@@ -235,12 +233,11 @@ describe("StudioSidebarAccountSection update indicator", () => {
     expect(onOpenProfileSettings).toHaveBeenCalledOnce();
   });
 
-  it("keeps diagnostics in a closed secondary disclosure", async () => {
+  it("keeps developer tools out of the account menu", async () => {
     await renderAccount({ showLabels: true, updatePresentation: presentation("neutral"), profileMenuOpen: true });
-    const details = document.body.querySelector("details");
-    expect(details?.open).toBe(false);
-    expect(details?.querySelector("summary")?.textContent).toBe("Advanced");
-    expect(details?.querySelector('[data-testid="profile-diagnostics-button"]')).not.toBeNull();
+    expect(document.body.querySelector("details")).toBeNull();
+    expect(document.body.querySelector('[data-testid="profile-diagnostics-button"]')).toBeNull();
+    expect(document.body.querySelector('[data-testid="profile-settings-button"]')).not.toBeNull();
   });
 
   it("opens the compact avatar sheet without navigating, and restores focus when closed", async () => {

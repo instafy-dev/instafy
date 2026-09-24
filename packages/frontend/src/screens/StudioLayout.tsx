@@ -45,6 +45,7 @@ import {
   useParticipantsDrawerOpen,
 } from "./studio/components/chatParticipantsStore";
 import { useStudioSearch, type StudioSearchRequest } from "./studio/components/useStudioSearch";
+import { StudioDesktopHeader } from "./studio/components/StudioDesktopHeader";
 import { StudioSearchContext } from "./studio/components/StudioSearchContext";
 import { StudioSearchReturnProvider } from "./studio/components/StudioSearchReturnContext";
 import { StudioMobileContextHeader } from "./studio/components/StudioMobileContextHeader";
@@ -86,6 +87,7 @@ import {
 } from "./studio/StudioLazyPanels";
 import { HomePanel } from "./studio/components/HomePanel";
 import { useStudioBugReportController } from "./studio/components/useStudioBugReportController";
+import { StudioDiagnostics } from "./studio/components/StudioDiagnostics";
 import { Status } from "../status/Status";
 import type { SettingsTab, StudioNavItem, StudioPanel } from "./studio/types";
 import { useAuth } from "../providers/AuthProvider";
@@ -139,7 +141,7 @@ import { useAutoDesktopSpeechTunnel } from "../desktop/voiceTunnel/useAutoDeskto
 import { useStudioLayoutChromeState } from "./useStudioLayoutChromeState";
 import { useStudioLayoutWorkspaceRouting } from "./useStudioLayoutWorkspaceRouting";
 import { useStudioGitStatusBadge } from "./useStudioGitStatusBadge";
-import { canRememberTeamWorkspace, resolveTeamNavigationScope, usesGlobalNavigationContext } from "./studio/teamNavigation";
+import { canRememberTeamWorkspace, resolveStudioSearchContext, resolveTeamNavigationScope, usesGlobalNavigationContext } from "./studio/teamNavigation";
 import { readCachedControllerOrgs } from "./studio/components/sidebarOrgSnapshot";
 import { StudioPanelPerformance } from "../telemetry/StudioPanelPerformance";
 
@@ -454,7 +456,11 @@ function StudioLayoutInner() {
     handleHideBuildLogs
   } = useBuildLogs();
   const notificationCenter = useNotificationCenter({ userId: currentUserId, accessToken: auth.session?.access_token ?? null, navigate });
+  const [diagnosticsOpen, setDiagnosticsOpen] = useState(false);
+  const openDiagnostics = useCallback(() => setDiagnosticsOpen(true), []);
+  useEffect(() => { setDiagnosticsOpen(false); }, [currentUserId]);
   const bugReportController = useStudioBugReportController({
+    onOpenDiagnostics: openDiagnostics,
     legacyResolutionToasts: false,
     currentUserId,
     activeProjectId,
@@ -1957,12 +1963,15 @@ function StudioLayoutInner() {
 
   const [desktopContextTarget, setDesktopContextTarget] = useState<HTMLDivElement | null>(null);
   const [mobileContextTarget, setMobileContextTarget] = useState<HTMLDivElement | null>(null);
+  const desktopSearchTriggerRef = useRef<HTMLButtonElement | null>(null);
   const mobileSearchTriggerRef = useRef<HTMLButtonElement | null>(null);
   const overlaySearchTriggerRef = useRef<HTMLButtonElement | null>(null);
   const globalNavigationContext = usesGlobalNavigationContext(navigationScope.page, activeProjectId);
-  const searchOrg = globalNavigationContext ? null : { id: navigationScope.orgKey, name: activeTeamName };
-  const searchSpace = !globalNavigationContext && activeProjectId && activeProjectOrgKey === navigationScope.orgKey && !projectAccessBlocked
-    ? { id: activeProjectId, name: activeProjectName } : null;
+  const { org: searchOrg, space: searchSpace } = resolveStudioSearchContext(
+    { id: navigationScope.orgKey, name: activeTeamName },
+    activeProjectSummary ? { id: activeProjectSummary.id, orgId: activeProjectSummary.orgId, name: activeProjectName } : null,
+    projectAccessBlocked,
+  );
   const searchNavigation = useStudioSearchNavigation({
     viewerUserId: currentUserId, location, activeProjectId,
     projectReady: projectReadyForWorkspace, projectAccessBlocked, conversationsProjectKey,
@@ -1987,7 +1996,7 @@ function StudioLayoutInner() {
     hasMoreMessages: searchData.hasMoreMessages, loadingMoreMessages: searchData.loadingMoreMessages,
     onLoadMoreMessages: searchData.loadMoreMessages, messagePageCount: searchData.messagePageCount,
     restoreSession: searchHistory.restoredSession, onBeforeResultActivate: searchHistory.remember, onDismiss: searchHistory.dismiss,
-    fullPage: true, persistentControl: isLargeScreen, returnFocusRef: showMobileLeftDrawerOverlay ? overlaySearchTriggerRef : mobileSearchTriggerRef,
+    fullPage: true, returnFocusRef: isLargeScreen ? desktopSearchTriggerRef : showMobileLeftDrawerOverlay ? overlaySearchTriggerRef : mobileSearchTriggerRef,
     onRequestChange: request => setSearchRequest({ ...request, key: searchKey }),
     onOpen: () => { if (!isLargeScreen) runAfterSidebarClose(() => {}); },
   });
@@ -2070,6 +2079,7 @@ function StudioLayoutInner() {
             onOpenProfileSettings: handleOpenProfileSettings,
             onOpenBugReport: bugReportController.onOpenBugReport,
             onOpenBugReportInbox: bugReportController.onOpenBugReportInbox,
+            onOpenDiagnostics: openDiagnostics,
             supportUnreadCount: bugReportController.supportUnreadCount,
             topbarLocationOverride,
             shakeToReportEnabled: bugReportController.shakeToReportEnabled,
@@ -2080,13 +2090,21 @@ function StudioLayoutInner() {
             shakeToReportDetail: bugReportController.shakeToReportDetail,
           }}
         >
-          {isLargeScreen ? <header className="studio-context-header" aria-label="Working context"><div ref={setDesktopContextTarget} className="studio-context-slot" /></header> : null}
+          {isLargeScreen ? <StudioDesktopHeader contextRef={setDesktopContextTarget} searchTriggerRef={desktopSearchTriggerRef}
+            searchOpen={search.open} onSearch={search.openSearch}>
+            <StudioTopBar newChatInSidebar inlineDesktop />
+          </StudioDesktopHeader> : null}
           {isLargeScreen ? (
               <StudioSidebar
                 navigationPresentation="path"
                 navigationHeaderExternal
+                compactContextHeader={!search.open}
                 navigationHeaderPortalTarget={desktopContextTarget}
-                renderNavigationHeader={context => search.renderControl(false, <StudioSearchContext scope={search.scope} context={context} onBroaden={search.changeScope} />)}
+                renderNavigationHeader={context => search.open
+                  ? search.renderControl(false, <StudioSearchContext scope={search.scope} context={context} onBroaden={search.changeScope} />)
+                  : <div className="studio-desktop-context" role="group" aria-label="Team and space">
+                    {context.team}<span className="studio-desktop-context-separator" aria-hidden="true">/</span>{context.space}
+                  </div>}
                 onNavigationHeaderAction={() => search.closeSearch(false)}
                 items={sidebarItems}
                 moreItems={sidebarMoreItems}
@@ -2179,11 +2197,11 @@ function StudioLayoutInner() {
             inert={search.open || showMobileLeftDrawerOverlay || undefined}
           >
             {!isLargeScreen ? mobileContextHeader() : null}
-            {isLargeScreen || navigationScope.page === "workspace" ? <StudioTopBar newChatInSidebar={isLargeScreen} contextHeaderAbove mobileNavigation={mobileTopbarNavigation} /> : <div className={`flex min-h-14 shrink-0 items-center gap-2 border-b border-slate-200/70 bg-slate-50 px-1 py-1 ${DARK_RAIL_SURFACE_CLASS}`}>
+            {!isLargeScreen ? navigationScope.page === "workspace" ? <StudioTopBar contextHeaderAbove mobileNavigation={mobileTopbarNavigation} /> : <div className={`flex min-h-14 shrink-0 items-center gap-2 border-b border-slate-200/70 bg-slate-50 px-1 py-1 ${DARK_RAIL_SURFACE_CLASS}`}>
               <IconButton variant="ghost" aria-label="Open navigation" data-testid="topbar-sidebar-toggle" onPress={handleToggleSidebar} className="!min-h-12 !min-w-12"><SidebarExpand className="h-[18px] w-[18px]" aria-hidden="true" /></IconButton>
               <MobileStudioHistoryControls history={mobileHistory} />
               <span className="min-w-0 flex-1 truncate text-sm text-slate-500 dark:text-slate-400">{navigationScope.page === "account" ? "Your settings" : topbarLocationOverride?.title ?? (contextHomeActive ? "Home" : activeTeamName)}</span>
-            </div>}
+            </div> : null}
             <ProjectAccessRecoveryBanner />
             {/* relative: the participants drawer overlays the right edge of the
                 workspace content rather than pushing it, so it never competes
@@ -2228,7 +2246,7 @@ function StudioLayoutInner() {
           {!search.open && !isLargeScreen && (mobileSidebarOpen || routeOwnedMobileWorkspaceDrawer) ? (
             <StudioMobileSidebarOverlay onClose={() => handleMobileSidebarOpenChange(false)}>
               <div className="flex h-full min-h-0 flex-col">
-              <div className="studio-context-mobile-picker" inert={mobileSidebarNavigation.view !== "sidebar" || undefined} aria-hidden={mobileSidebarNavigation.view !== "sidebar" || undefined}>
+              <div className="studio-mobile-context-header studio-context-mobile-picker" inert={mobileSidebarNavigation.view !== "sidebar" || undefined} aria-hidden={mobileSidebarNavigation.view !== "sidebar" || undefined}>
                 <IconButton variant="ghost" onPress={handleOpenHome} aria-label="Home — all teams" aria-current={contextHomeActive ? "page" : undefined} className="relative !min-h-12 !min-w-11 shrink-0">
                   <OctoMark className="h-6 w-6 text-brand-ink dark:text-brand-paper" />
                   <AttentionBadge count={homeAttentionCount} aria-hidden className="absolute right-0 top-0" />
@@ -2349,6 +2367,7 @@ function StudioLayoutInner() {
             </div>
           ) : null}
           {bugReportController.dialogs}
+          <StudioDiagnostics key={currentUserId} isOpen={diagnosticsOpen} onOpenChange={setDiagnosticsOpen} />
         </WorkspaceControlsProvider>
       </div>
       <ProjectLauncher

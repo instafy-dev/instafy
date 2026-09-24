@@ -3,9 +3,10 @@ import { act, useState } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ThemeProvider } from "../../../../theme/ThemeProvider";
+import { PersonalAppearanceSettings } from "../PersonalAppearanceSettings";
 import { PersonalPreferencesSettings } from "../PersonalPreferencesSettings";
 
-describe("Personal preferences", () => {
+describe("Personal appearance and preferences", () => {
   let root: Root;
   let container: HTMLDivElement;
   let systemDark: boolean;
@@ -15,6 +16,7 @@ describe("Personal preferences", () => {
   function Harness() {
     const [autosave, setAutosave] = useState(true);
     return <ThemeProvider>
+      <PersonalAppearanceSettings />
       <PersonalPreferencesSettings gitAutoSyncAfterApply={autosave} onGitAutoSyncChange={enabled => {
         autoSaveChanged(enabled);
         setAutosave(enabled);
@@ -87,6 +89,8 @@ describe("Personal preferences", () => {
     expect(autoSaveChanged).toHaveBeenCalledExactlyOnceWith(false);
     expect(checkbox.checked).toBe(false);
     expect(themeButton("system").getAttribute("aria-pressed")).toBe("true");
+    expect(container.querySelector('[data-testid="personal-preferences-settings"] [role="group"]')).toBeNull();
+    expect(container.querySelector('[data-testid="personal-appearance-settings"] input[type="checkbox"]')).toBeNull();
     expect(container.textContent).toContain("Auto-save assistant file changes");
     expect(container.textContent).toContain("If auto-save fails");
   });

@@ -163,7 +163,7 @@ describe("StudioRecentSpaces", () => {
     expect(onBrowseAll).toHaveBeenCalledTimes(1);
   });
 
-  it("keeps the current identity above an inline grid without adding a Spaces heading", async () => {
+  it("keeps the current identity above an inline list without adding a Spaces heading", async () => {
     const triggerRef = createRef<HTMLButtonElement>();
     await render({ triggerRef });
     const trigger = container.querySelector('[data-testid="sidebar-space-button"]');
@@ -181,7 +181,7 @@ describe("StudioRecentSpaces", () => {
     expect(document.querySelector('[role="dialog"]')).toBeNull();
   });
 
-  it("toggles the inline grid without navigating or opening a popover", async () => {
+  it("toggles the inline list without navigating or opening a popover", async () => {
     const onExpandedChange = vi.fn();
     const onSelectSpace = vi.fn();
     const onBrowseAll = vi.fn();
@@ -200,7 +200,7 @@ describe("StudioRecentSpaces", () => {
     expect(document.querySelector('[role="dialog"]')).toBeNull();
   });
 
-  it("opens the same grid beside the compact current-space icon without toggling inline state", async () => {
+  it("opens the same list beside the compact current-space icon without toggling inline state", async () => {
     const onExpandedChange = vi.fn();
     const onSelectSpace = vi.fn();
     const onBrowseAll = vi.fn();
@@ -238,7 +238,7 @@ describe("StudioRecentSpaces", () => {
     expect(container.querySelector('[data-testid="sidebar-recent-space-recent"]')?.textContent).toBe("WWebsite");
   });
 
-  it("shows unread-chat badges on the current trigger and space icons with exact accessible counts", async () => {
+  it("shows unread-chat badges on the current trigger and space rows with exact accessible counts", async () => {
     await render({ attentionCounts: { current: 12, recent: 1 } });
     const current = container.querySelector('[data-testid="sidebar-recent-space-current"]');
     expect(current?.getAttribute("aria-label")).toBe("Website, Current, 12 unread updates");

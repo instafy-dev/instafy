@@ -4,13 +4,26 @@ Settings pages use `SettingsShell` so their navigation follows the available con
 including when Studio has another panel open.
 
 - Wide pages show a category list beside the form.
-- Compact pages with up to three flat categories show visible tabs. Personal settings,
-  Credits and Skills use this pattern.
+- Compact pages with up to three flat categories show visible tabs. Credits and Skills use
+  this pattern.
 - Larger or nested category sets use one anchored picker. A parent with children opens the
   next level inside that same picker. Back returns to the parent list; selecting a destination
   closes the picker and changes the route. Browsing categories does not add history entries.
 - Escape and native Back return one level, then dismiss the picker. Keyboard focus returns
   to its trigger on dismissal and follows the selected category when the layout changes.
+- When the compact picker already names the content section, keep the matching heading
+  for screen readers without repeating it visually. Descriptions, actions and other section
+  headings remain visible. Wide category lists and compact tabs retain content headings.
+
+Your settings has Profile, Appearance, Notifications, Preferences and Advanced categories.
+Appearance owns the device's System/Light/Dark theme; Preferences owns assistant file-saving
+behavior. Theme changes apply immediately. Team and space colors remain in their scoped
+identity settings. On mobile the five categories use the shared anchored picker.
+
+Advanced keeps Developer tools collapsed until opened. Its diagnostics action and Support's
+diagnostics action open the same Studio-owned dialog for logs, build information, runtime
+connections and layout overrides. No developer-mode preference is required. The account menu
+keeps Your settings, Support, install/update actions when relevant and Sign out.
 
 Utility pages such as Settings, Credits, AI and Machines share one temporary workspace tab.
 Browsing a different utility replaces that preview; settings categories reuse the same Settings
@@ -37,6 +50,32 @@ A kept utility tab remembers its last settings section within the current space.
 Forward still follow Router history and restore each visit's scroll position; the tab strip does
 not introduce another history stack. Utility/file previews and retained form drafts are session
 state, while chat-tab restoration continues to use its existing persistence.
+
+On desktop, `StudioDesktopHeader` keeps the team avatar, space picker, Search icon and
+workspace tabs on one 52px row (64px for coarse pointers). Search sits immediately after the
+space picker within the context column. Tabs overflow horizontally rather
+than wrapping or compressing their titles. New chat stays in the sidebar, and the profile
+menu stays in the organization rail. The header's left column shares the expanded navigation
+width, including at narrow desktop sizes, so tabs never extend over that sidebar. Keep the
+column when navigation collapses to preserve usable pickers; subtract native window-control
+insets within it rather than shifting the tabs. Mobile retains its context and navigation rows.
+The desktop space selector fits its icon, name and chevron with 8px horizontal padding.
+Unused column width stays outside its hover surface; long names truncate within the column.
+The mobile workspace and navigation drawer share header padding and breadcrumb spacing, so
+opening navigation keeps Home, team and space identities at the same leading positions.
+
+The space picker uses the same compact list on desktop, mobile and inline navigation. Each row
+has a small identity icon, a name, an optional unread count and a trailing current-space checkmark.
+Recent spaces stay alphabetically ordered; **Browse all spaces** remains below the list.
+
+Search expands into the same header when activated, temporarily hiding the tabs and revealing
+the existing scope chips and full-page results. It starts in the team and accessible space shown
+in the header, including on Home and personal settings. A retained space from another team is
+excluded. Remove the space chip to search the team, then the team chip to search all teams.
+Cmd/Ctrl+K opens or refocuses it; Escape returns
+focus to Search. The shortcut yields to modal dialogs and already-handled editor shortcuts.
+The header clears Electron's window controls once; interactive descendants are excluded from
+the window drag region.
 
 The desktop working-context header owns one continuous divider across the navigation,
 open drawers and workspace. Keep it in both themes and across panel and search changes.
@@ -258,7 +297,7 @@ but the editor uses the native file picker rather than an image-URL field.
 
 Docked side panels use `DrawerHeader frame="rail"`: a 48px row with 16px horizontal
 insets and a 16px semibold title. Keep path details and filters below that row so the
-heading stays aligned with the workspace tab rail. Loading fallbacks use the same frame.
+heading starts immediately below the shared desktop header. Loading fallbacks use the same frame.
 Files keeps New file visible and groups New folder, Refresh and Collapse all under More;
 the path has its own row. Desktop layout follows Studio's 900px breakpoint; touch targets
 grow independently for coarse pointers. Navigation selection uses a flat fill with a

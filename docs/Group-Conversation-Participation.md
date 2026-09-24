@@ -27,6 +27,13 @@ The sentinel is only honored as the agent's first and only conversational output
 
 **Billing is free-until-spoken.** For ambient evaluations, managed-AI prompt counting and credit burn are deferred until the first visible assistant message lands, so a declined turn debits nothing. The deferral applies to managed-AI evaluation jobs; a custom agent evaluating on its own connected credential (BYOC) has no flat platform burn to defer — its upstream usage is inherently the user's own. Direct addresses and single-human conversations bill exactly as before.
 
+Usage, reasoning, routing, tool, plan and error telemetry, plus explicitly hidden progress,
+do not count as speaking or create reply activity. A real answer delivered only in the
+completion summary starts the same deferred charge before usage reconciliation; streaming
+and completion reserve once. A later real answer supersedes a recorded decline on both
+the job and run, including for BYOC. The controller restores the original dispatch marker,
+so a scheduled automation cannot acquire ambient deferred billing by resuming after silence.
+
 **Presence is silent-until-speaking.** No thinking/typing indicator and no agent-owned activity row appears for a run that may end in a swallowed `NO_RESPONSE` — for any viewer, including the sender. Full lifecycle presentation begins when the turn was direct or once the run starts streaming visible content.
 
 Historic conversations may still carry classifier-era `groupParticipation` decisions (including controller-enforced `silent` markers) recorded before the pre-dispatch classifier was removed. The controller keeps reading those markers so idempotent retries of historic messages continue to resolve as the human-only result they originally produced; the skill treats them as conversation history, not instructions.

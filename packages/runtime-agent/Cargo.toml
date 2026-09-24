@@ -27,6 +27,7 @@ codex-models-manager = { path = "../../codex/codex-rs/models-manager" }
 codex-protocol = { path = "../../codex/codex-rs/protocol" }
 codex-process-hardening = { path = "../../codex/codex-rs/process-hardening" }
 codex-rmcp-client = { path = "../../codex/codex-rs/rmcp-client" }
+codex-shell-command = { path = "../../codex/codex-rs/shell-command" }
 codex-utils-absolute-path = { path = "../../codex/codex-rs/utils/absolute-path" }
 codex-utils-path-uri = { path = "../../codex/codex-rs/utils/path-uri" }
 parking_lot = "0.12"

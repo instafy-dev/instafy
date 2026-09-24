@@ -49,6 +49,7 @@ For an isolated non-production Supabase project only:
 
 ## Runtime Notes
 - Do not background `pnpm dev:controller`; use `pnpm controller:up` and `pnpm controller:down`.
+- `pnpm controller:up` keeps a generated session signing secret in `tmp/user-token-secret` and a credential key in `tmp/credential-encryption-key.b64`, so local sessions are never signed with the published development value. A bare `pnpm dev:controller` needs exported `USER_TOKEN_SECRET` and `CREDENTIAL_ENCRYPTION_KEY`, or `DEV_MODE=1` on a machine nobody else can reach, because `DEV_MODE` signs sessions with that published development value.
 - For desktop runtimes, set `PROXY_BASE_URL=http://127.0.0.1:8789`.
 - Local proxy startup defaults to controller-backed `remote_dynamic` BYOC. It does not copy `~/.codex/auth.json` into the proxy; connect that login through the Studio/Desktop credential onboarding flow so it is encrypted and scoped to the signed-in user.
 - Legacy static proxy auth is only for isolated debugging and requires an explicit opt-in: `RUNTIME_PROXY_STATIC_AUTH=1 pnpm stack:up`. This mode may use `OPENAI_API_KEY` or mirror `~/.codex/auth.json` into `tmp/proxy-codex/`; do not use it for multi-user validation.

@@ -25,7 +25,6 @@ use crate::agent::{
 };
 use crate::auth::{authenticate_request, require_user_session};
 use crate::config::PgPool;
-use crate::secrets::{decrypt_secret_payload, encrypt_secret_payload};
 use crate::{
     bad_request, ensure_project_access, ensure_project_write_access, forbidden, internal_error,
     load_project_record, not_found, unauthorized, ApiError, AppState,
@@ -607,12 +606,13 @@ async fn put_browser_profile(
     // Otherwise an older runtime can still overwrite a version-aware writer.
     let expected_version = required_browser_profile_version(query.version)?;
 
-    let key = state
+    let keys = state
         .config
-        .credential_encryption_key
+        .credential_keys
         .as_ref()
         .ok_or_else(|| internal_error("credential encryption key missing"))?;
-    let (nonce_b64, ciphertext_b64) = encrypt_secret_payload(key, &body)
+    let (nonce_b64, ciphertext_b64) = keys
+        .seal(&body)
         .map_err(|error| internal_error(format!("failed to encrypt browser profile: {error}")))?;
     let plaintext_bytes = body.len() as i64;
 
@@ -725,16 +725,17 @@ async fn get_browser_profile(
         return Ok(response);
     };
 
-    let key = state
+    let keys = state
         .config
-        .credential_encryption_key
+        .credential_keys
         .as_ref()
         .ok_or_else(|| internal_error("credential encryption key missing"))?;
 
     let version: i64 = row.get("version");
     let nonce_b64: String = row.get("nonce_b64");
     let ciphertext_b64: String = row.get("ciphertext_b64");
-    let plaintext = decrypt_secret_payload(key, &nonce_b64, &ciphertext_b64)
+    let plaintext = keys
+        .open(&nonce_b64, &ciphertext_b64)
         .map_err(|error| internal_error(format!("failed to decrypt browser profile: {error}")))?;
 
     Response::builder()

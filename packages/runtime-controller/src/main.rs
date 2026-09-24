@@ -27,6 +27,8 @@ mod bug_reports;
 mod config;
 mod connection_limit;
 mod conversations;
+mod credential_keys;
+mod credential_rotation;
 mod credentials;
 mod credits;
 mod desktop_updates;
@@ -188,6 +190,7 @@ async fn main() -> anyhow::Result<()> {
         has_service_role_key = config.supabase_service_role_key.is_some(),
         has_service_runtime_user_id = config.service_runtime_user_id.is_some(),
         jwks_refresh_seconds = config.supabase_jwks_refresh_seconds,
+        jwks_on_demand_interval_seconds = config.supabase_jwks_on_demand_interval_seconds,
         auto_create_projects = config.auto_create_projects,
         redis_event_bus = config.redis_url.is_some(),
         redis_namespace = config.redis_namespace.as_deref(),
@@ -362,26 +365,20 @@ async fn main() -> anyhow::Result<()> {
         }
     });
 
+    // The only JWKS fetches after startup. The refresher takes the validated
+    // URL here, from the startup configuration, and owns it: requests signal
+    // it through the cache and never fetch themselves. Its own supervisor
+    // restarts it if it panics, so the handle is not kept.
     if config.supabase_jwks_refresh_enabled {
-        let jwks_handle = config.supabase_jwks.clone();
-        let jwks_url = config.supabase_jwks_url.clone();
-        let refresh_seconds = config.supabase_jwks_refresh_seconds;
-        let http = state.http_client.clone();
-        tokio::spawn(async move {
-            loop {
-                match jwks::SupabaseJwks::load_async(&http, &jwks_url).await {
-                    Ok(next) => {
-                        let mut guard = jwks_handle.write().await;
-                        *guard = next;
-                        tracing::debug!("Supabase JWKS refreshed");
-                    }
-                    Err(error) => {
-                        tracing::warn!(%error, "failed to refresh Supabase JWKS");
-                    }
-                }
-                tokio::time::sleep(Duration::from_secs(refresh_seconds)).await;
-            }
-        });
+        jwks::JwksRefresher::new(
+            config.supabase_jwks_url.clone(),
+            config.supabase_jwks.clone(),
+            jwks::JwksRefreshSchedule::new(
+                Duration::from_secs(config.supabase_jwks_refresh_seconds),
+                Duration::from_secs(config.supabase_jwks_on_demand_interval_seconds),
+            ),
+        )?
+        .spawn();
     }
 
     let cors = CorsLayer::permissive();
@@ -458,6 +455,7 @@ async fn main() -> anyhow::Result<()> {
         .merge(speech_proxy::router())
         .merge(credits::router())
         .merge(credentials::router())
+        .merge(credential_rotation::router())
         .merge(secrets::router())
         .merge(browser_profile::router())
         .merge(skills_discovery::router())

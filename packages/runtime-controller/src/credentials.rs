@@ -1,8 +1,6 @@
 use std::str::FromStr;
 use std::time::Duration;
 
-use aes_gcm::aead::{Aead, AeadCore, KeyInit, OsRng};
-use aes_gcm::{Aes256Gcm, Nonce};
 use axum::extract::{Path as AxumPath, Query, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::routing::{delete, get, post};
@@ -22,7 +20,7 @@ use crate::ai_agents;
 use crate::auth::{
     authenticate_request, bearer_token, issue_proxy_envelope, require_user_session, RequestContext,
 };
-use crate::config::CredentialEncryptionKey;
+use crate::credential_keys::CredentialKeyRing;
 use crate::model_defaults::{default_chatgpt_model_id, default_model_for_provider};
 use crate::{bad_request, internal_error, not_found, unauthorized, ApiError, AppState};
 
@@ -221,9 +219,9 @@ pub(crate) async fn insert_user_credential(
     label: Option<String>,
     make_default: Option<bool>,
 ) -> Result<CreatedCredential, (StatusCode, Json<ApiError>)> {
-    let key = state
+    let keys = state
         .config
-        .credential_encryption_key
+        .credential_keys
         .as_ref()
         .ok_or_else(|| internal_error("CREDENTIAL_ENCRYPTION_KEY is not configured"))?;
 
@@ -234,7 +232,7 @@ pub(crate) async fn insert_user_credential(
     let plaintext = serde_json::to_vec(&JsonValue::Object(auth_object.clone()))
         .map_err(|error| internal_error(format!("failed to encode authJson: {error}")))?;
 
-    let (nonce_b64, ciphertext_b64) = encrypt_secret_payload(key, &plaintext).map_err(|error| {
+    let (nonce_b64, ciphertext_b64) = keys.seal(&plaintext).map_err(|error| {
         internal_error(format!("failed to encrypt credential payload: {error}"))
     })?;
 
@@ -1974,9 +1972,9 @@ async fn get_internal_credential(
         return managed_ai_internal_credential(&state.config).map(Json);
     }
 
-    let key = state
+    let keys = state
         .config
-        .credential_encryption_key
+        .credential_keys
         .as_ref()
         .ok_or_else(|| internal_error("CREDENTIAL_ENCRYPTION_KEY is not configured"))?;
 
@@ -2028,7 +2026,7 @@ async fn get_internal_credential(
     let ciphertext_b64: String = row.get("ciphertext_b64");
     let metadata: JsonValue = row.get::<_, PgJson<JsonValue>>("metadata").0;
 
-    let mut parsed = decode_authoritative_credential_payload(key, &nonce_b64, &ciphertext_b64)?;
+    let mut parsed = decode_authoritative_credential_payload(keys, &nonce_b64, &ciphertext_b64)?;
 
     // Pick the refresher by the credential's kind, not by the shape of its
     // payload. maybe_refresh_codex_oauth_access_token keys only off
@@ -2049,7 +2047,7 @@ async fn get_internal_credential(
             ))
         })?;
         let (updated_nonce_b64, updated_ciphertext_b64) =
-            encrypt_secret_payload(key, &updated_plaintext).map_err(|error| {
+            keys.seal(&updated_plaintext).map_err(|error| {
                 internal_error(format!(
                     "failed to encrypt refreshed credential payload: {error}"
                 ))
@@ -2691,43 +2689,12 @@ fn augment_metadata_with_provider(
     JsonValue::Object(map)
 }
 
-fn encrypt_secret_payload(
-    key: &CredentialEncryptionKey,
-    plaintext: &[u8],
-) -> anyhow::Result<(String, String)> {
-    let cipher = Aes256Gcm::new_from_slice(key.as_bytes())?;
-    let nonce_bytes = Aes256Gcm::generate_nonce(&mut OsRng);
-    let ciphertext = cipher
-        .encrypt(&nonce_bytes, plaintext)
-        .map_err(|error| anyhow::anyhow!("failed to encrypt credential payload: {error:?}"))?;
-    Ok((
-        BASE64.encode(nonce_bytes.as_slice()),
-        BASE64.encode(ciphertext),
-    ))
-}
-
-fn decrypt_secret_payload(
-    key: &CredentialEncryptionKey,
-    nonce_b64: &str,
-    ciphertext_b64: &str,
-) -> anyhow::Result<Vec<u8>> {
-    let cipher = Aes256Gcm::new_from_slice(key.as_bytes())?;
-    let nonce_raw = BASE64.decode(nonce_b64.trim().as_bytes())?;
-    anyhow::ensure!(nonce_raw.len() == 12, "invalid nonce length");
-    let nonce = Nonce::from_slice(&nonce_raw);
-    let ciphertext = BASE64.decode(ciphertext_b64.trim().as_bytes())?;
-    let plaintext = cipher
-        .decrypt(nonce, ciphertext.as_ref())
-        .map_err(|error| anyhow::anyhow!("failed to decrypt credential payload: {error:?}"))?;
-    Ok(plaintext)
-}
-
 fn decode_authoritative_credential_payload(
-    key: &CredentialEncryptionKey,
+    keys: &CredentialKeyRing,
     nonce_b64: &str,
     ciphertext_b64: &str,
 ) -> Result<JsonValue, (StatusCode, Json<ApiError>)> {
-    let plaintext = decrypt_secret_payload(key, nonce_b64, ciphertext_b64).map_err(|error| {
+    let plaintext = keys.open(nonce_b64, ciphertext_b64).map_err(|error| {
         internal_error(format!("failed to decrypt credential payload: {error}"))
     })?;
     serde_json::from_slice(&plaintext)
@@ -3021,11 +2988,10 @@ mod codex_refresh_tests {
 #[cfg(test)]
 mod credential_lease_contract_tests {
     use super::{
-        decode_authoritative_credential_payload, encrypt_secret_payload,
-        is_managed_ai_credential_id, managed_ai_internal_credential,
-        materialize_internal_credential, require_proxy_credential_lease_token,
-        CREDENTIAL_KIND_CODEX_AUTH_JSON, CREDENTIAL_KIND_OPENAI_API_KEY,
-        INTERNAL_CREDENTIAL_LEASE_SECONDS,
+        decode_authoritative_credential_payload, is_managed_ai_credential_id,
+        managed_ai_internal_credential, materialize_internal_credential,
+        require_proxy_credential_lease_token, CREDENTIAL_KIND_CODEX_AUTH_JSON,
+        CREDENTIAL_KIND_OPENAI_API_KEY, INTERNAL_CREDENTIAL_LEASE_SECONDS,
     };
     use axum::http::{HeaderMap, HeaderValue, StatusCode};
     use axum::Json;
@@ -3122,9 +3088,9 @@ mod credential_lease_contract_tests {
     #[test]
     fn delegated_lease_decodes_only_the_encrypted_record() {
         let config = build_app_config("", "", "");
-        let key = config
-            .credential_encryption_key
-            .unwrap_or_else(|| crate::config::CredentialEncryptionKey::for_test("record-a"));
+        let keys = config
+            .credential_keys
+            .unwrap_or_else(|| crate::config::CredentialEncryptionKey::for_test("record-a").into());
         let record = json!({
             "tokens": {
                 "access_token": "record-a-access",
@@ -3132,11 +3098,10 @@ mod credential_lease_contract_tests {
             }
         });
         let encoded = serde_json::to_vec(&record).expect("record should encode");
-        let (nonce, ciphertext) =
-            encrypt_secret_payload(&key, &encoded).expect("record should encrypt");
+        let (nonce, ciphertext) = keys.seal(&encoded).expect("record should encrypt");
 
         assert_eq!(
-            decode_authoritative_credential_payload(&key, &nonce, &ciphertext)
+            decode_authoritative_credential_payload(&keys, &nonce, &ciphertext)
                 .expect("stored record should decode"),
             record,
         );

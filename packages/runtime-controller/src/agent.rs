@@ -1771,7 +1771,7 @@ pub(crate) async fn agent_message(
     let mut session_id: Option<Uuid> = row.get("session_id");
     let mut prompt_id: Option<Uuid> = row.get("prompt_id");
     let run_id: Option<Uuid> = row.get("run_id");
-    let job_payload: JsonValue = row.get::<_, PgJson<JsonValue>>("payload").0;
+    let mut job_payload: JsonValue = row.get::<_, PgJson<JsonValue>>("payload").0;
     let lease_metrics = build_agent_lease_metrics(
         &job_payload,
         row.get("created_at"),
@@ -1807,6 +1807,17 @@ pub(crate) async fn agent_message(
         ));
     };
 
+    // Judge the same presentation metadata that clients and the activity feed
+    // receive: runtime presentation hints are wrapped under details.
+    let metadata_value = attach_lease_metrics_to_metadata(
+        merge_runtime_preference_from_job_payload(
+            build_agent_update_metadata(&job_uuid, message_type.as_deref(), metadata),
+            &job_payload,
+        ),
+        Some(&lease_metrics),
+    );
+    let metadata_value = sanitize_json_for_postgres(metadata_value);
+
     let mut deferred_credit_org_id: Option<Uuid> = None;
     // CONTROLLER EVALUATION: marked runs arbitrate their own participation.
     // A decline is the bare NO_RESPONSE sentinel as the run's first
@@ -1815,8 +1826,9 @@ pub(crate) async fn agent_message(
     // as a normal success. A NO_RESPONSE on a non-evaluation run, or after
     // the run already streamed a visible assistant message, is persisted
     // verbatim — a direct answer is never silently eaten.
-    if crate::group_participation::job_payload_marks_agent_evaluation(&job_payload)
-        && agent_message_can_drive_evaluation(message_type.as_deref(), metadata.as_ref())
+    if (crate::group_participation::job_payload_marks_agent_evaluation(&job_payload)
+        || crate::group_participation::job_payload_marks_agent_declined(&job_payload))
+        && agent_message_can_drive_evaluation(message_type.as_deref(), Some(&metadata_value))
     {
         if crate::group_participation::is_group_participation_decline_sentinel(content_trimmed) {
             if !run_has_visible_assistant_message(&transaction, &project_id, run_id).await? {
@@ -1828,6 +1840,14 @@ pub(crate) async fn agent_message(
                 return Ok(Json(AgentMessageResponseBody { ok: true }));
             }
         } else {
+            restore_agent_evaluation_after_decline(
+                &transaction,
+                &project_id,
+                &job_uuid,
+                run_id,
+                &mut job_payload,
+            )
+            .await?;
             // The agent chose to speak. Ambient evaluations land deferred
             // managed-AI billing here; normally billed automation evaluations
             // make this helper a no-op.
@@ -1846,15 +1866,6 @@ pub(crate) async fn agent_message(
         }
     }
 
-    // Retain runtime preference metadata on streamed agent updates.
-    let metadata_value = attach_lease_metrics_to_metadata(
-        merge_runtime_preference_from_job_payload(
-            build_agent_update_metadata(&job_uuid, message_type.as_deref(), metadata),
-            &job_payload,
-        ),
-        Some(&lease_metrics),
-    );
-    let metadata_value = sanitize_json_for_postgres(metadata_value);
     let message_row = record_agent_conversation_message(
         &transaction,
         &project_id,
@@ -1887,6 +1898,11 @@ pub(crate) async fn agent_message(
         )
         .await;
     }
+    // A spread plan may launch extra runtimes, which waits on the provider
+    // and takes its own pool connections. Holding this one across that would
+    // pin a slot for every provider round trip and can starve the launch of
+    // the connections it needs on a small pool.
+    drop(connection);
     if let Err((status, Json(api_error))) =
         crate::multi_agent_plan::maybe_execute_multi_agent_plan_message(
             &state,
@@ -1912,12 +1928,18 @@ pub(crate) async fn agent_message(
 
 /// Message types that stream tool/status telemetry rather than the agent
 /// conversationally speaking; they never count as the run's visible answer.
-const NON_CONVERSATIONAL_AGENT_MESSAGE_TYPES: [&str; 5] = [
+const NON_CONVERSATIONAL_AGENT_MESSAGE_TYPES: [&str; 11] = [
     "command_execution",
     "mcp_tool_call",
     "web_search",
     "file_change",
     "status",
+    "token_usage",
+    "reasoning",
+    "learn_router",
+    "todo_list",
+    "browser_decision",
+    "error",
 ];
 
 fn agent_message_type_is_conversational(message_type: Option<&str>) -> bool {
@@ -1936,6 +1958,13 @@ fn agent_message_can_drive_evaluation(
     message_type: Option<&str>,
     metadata: Option<&JsonValue>,
 ) -> bool {
+    if metadata.is_some_and(|value| {
+        ["/presentation/hidden", "/details/presentation/hidden"]
+            .iter()
+            .any(|path| value.pointer(path).and_then(JsonValue::as_bool) == Some(true))
+    }) {
+        return false;
+    }
     if agent_message_type_is_conversational(message_type) {
         return true;
     }
@@ -1946,8 +1975,7 @@ fn agent_message_can_drive_evaluation(
     // before it can be persisted or notified.
     message_type.is_some_and(|kind| kind.trim().eq_ignore_ascii_case("status"))
         && metadata
-            .and_then(JsonValue::as_object)
-            .and_then(|map| map.get("kind"))
+            .and_then(|value| value.pointer("/details/kind").or_else(|| value.get("kind")))
             .and_then(JsonValue::as_str)
             .is_some_and(|kind| kind.eq_ignore_ascii_case("agent_message"))
 }
@@ -2023,11 +2051,14 @@ pub(crate) async fn run_has_visible_assistant_message(
                    and role = 'assistant'
                    and created_by is null
                    and nullif(btrim(content), '') is not null
+                   and metadata #> '{presentation,hidden}' is distinct from 'true'::jsonb
+                   and metadata #> '{details,presentation,hidden}' is distinct from 'true'::jsonb
                    and (
                        lower(coalesce(metadata #>> '{messageType}', metadata #>> '{message_type}', ''))
                            not in ('command_execution', 'mcp_tool_call', 'web_search', 'file_change',
                                    'status', 'runtime_alert', 'run_cancellation', 'runtime_switch',
-                                   'agent_job_thread', 'token_usage', 'reasoning')
+                                   'agent_job_thread', 'token_usage', 'reasoning',
+                                   'learn_router', 'todo_list', 'browser_decision', 'error')
                        or (
                            lower(coalesce(metadata #>> '{messageType}', metadata #>> '{message_type}', '')) = 'status'
                            and lower(coalesce(metadata #>> '{details,kind}', '')) = 'agent_message'
@@ -2103,6 +2134,73 @@ async fn record_agent_evaluation_decline(
                 ))
             })?;
     }
+    Ok(())
+}
+
+/// A later real answer supersedes a recorded decline. Recover the original
+/// controller marker from the persisted prompt, not caller-supplied job flags:
+/// an automation must retain its own reason and never become ambient billing.
+async fn restore_agent_evaluation_after_decline(
+    transaction: &tokio_postgres::Transaction<'_>,
+    project_id: &Uuid,
+    job_id: &Uuid,
+    run_id: Option<Uuid>,
+    job_payload: &mut JsonValue,
+) -> Result<(), (StatusCode, Json<ApiError>)> {
+    if !crate::group_participation::job_payload_marks_agent_declined(job_payload) {
+        return Ok(());
+    }
+    let original = transaction
+        .query_opt(
+            "select p.metadata from prompts p
+             join agent_jobs j on j.prompt_id = p.id and j.project_id = p.project_id
+             where j.id = $1 and j.project_id = $2",
+            &[job_id, project_id],
+        )
+        .await
+        .map_err(|error| internal_error(format!("failed to load original participation: {error}")))?
+        .and_then(|row| row.get::<_, Option<PgJson<JsonValue>>>("metadata"))
+        .map(|value| value.0);
+    let Some(original) =
+        original.filter(crate::group_participation::metadata_marks_agent_evaluation)
+    else {
+        // A legacy job without authenticated dispatch provenance must not gain
+        // deferred billing merely because it carries a decline-like marker.
+        return Ok(());
+    };
+    let evaluation = &original["groupParticipation"];
+    let declined = &job_payload["metadata"]["groupParticipation"];
+    transaction
+        .execute(
+            "update agent_jobs
+             set payload = jsonb_set(payload, '{metadata,groupParticipation}', $3::jsonb)
+             where id = $1 and project_id = $2
+               and payload #> '{metadata,groupParticipation}' = $4::jsonb",
+            &[job_id, project_id, &PgJson(evaluation), &PgJson(declined)],
+        )
+        .await
+        .map_err(|error| internal_error(format!("failed to restore job participation: {error}")))?;
+    if let Some(run_uuid) = run_id {
+        transaction
+            .execute(
+                "update runs
+                 set metadata = jsonb_set(metadata, '{groupParticipation}', $3::jsonb),
+                     updated_at = now()
+                 where id = $1 and project_id = $2
+                   and metadata -> 'groupParticipation' = $4::jsonb",
+                &[
+                    &run_uuid,
+                    project_id,
+                    &PgJson(evaluation),
+                    &PgJson(declined),
+                ],
+            )
+            .await
+            .map_err(|error| {
+                internal_error(format!("failed to restore run participation: {error}"))
+            })?;
+    }
+    job_payload["metadata"]["groupParticipation"] = evaluation.clone();
     Ok(())
 }
 
@@ -2589,7 +2687,7 @@ pub(crate) async fn agent_complete(
     let run_id: Option<Uuid> = row.get("run_id");
     let job_row_conversation_id: Option<Uuid> = row.get("conversation_id");
     let leased_runtime_id: Option<Uuid> = row.get("leased_by_runtime_id");
-    let job_payload: JsonValue = row.get::<_, PgJson<JsonValue>>("payload").0;
+    let mut job_payload: JsonValue = row.get::<_, PgJson<JsonValue>>("payload").0;
     let lease_metrics = build_agent_lease_metrics(
         &job_payload,
         row.get("created_at"),
@@ -2675,6 +2773,52 @@ pub(crate) async fn agent_complete(
             &artifacts_value,
         )
         .await?;
+    }
+
+    // Embedded agents may deliver their first real answer only at completion.
+    // Establish deferred billing before usage reconciliation, and clear a prior
+    // decline for managed and BYOC jobs alike. Generated status/error text and
+    // the decline sentinel do not establish that the agent spoke.
+    if run_conversation_id.is_some()
+        && outcome_lower == "succeeded"
+        && error_message.is_none()
+        && (crate::group_participation::job_payload_marks_agent_evaluation(&job_payload)
+            || crate::group_participation::job_payload_marks_agent_declined(&job_payload))
+        && summary.as_deref().is_some_and(|content| {
+            !content.trim().is_empty()
+                && !crate::group_participation::is_group_participation_decline_sentinel(content)
+        })
+    {
+        restore_agent_evaluation_after_decline(
+            &transaction,
+            &project_id,
+            &job_uuid,
+            run_id,
+            &mut job_payload,
+        )
+        .await?;
+        completion_credit_org_id = apply_deferred_managed_ai_billing_on_first_visible_message(
+            &state,
+            &mut transaction,
+            &project_id,
+            &job_uuid,
+            &job_payload,
+            run_id,
+            run_prompt_id.or(job_prompt_id),
+            leased_runtime_id,
+        )
+        .await?;
+        job_payload = transaction
+            .query_one(
+                "select payload from agent_jobs where id = $1 and project_id = $2",
+                &[&job_uuid, &project_id],
+            )
+            .await
+            .map_err(|error| {
+                internal_error(format!("failed to reload completion billing: {error}"))
+            })?
+            .get::<_, PgJson<JsonValue>>("payload")
+            .0;
     }
 
     // A run that ended with "nothing to report" (the explicit decline an
@@ -4955,6 +5099,74 @@ mod tests {
             select_completion_message_content("succeeded", Some("NO_RESPONSE"), Some("   "), true,),
             None
         );
+    }
+
+    #[test]
+    fn participation_visibility_matches_delivered_metadata_and_activity() {
+        for kind in NON_CONVERSATIONAL_AGENT_MESSAGE_TYPES {
+            for kind in [kind.to_string(), format!(" {} ", kind.to_uppercase())] {
+                let delivered = build_agent_update_metadata(&Uuid::nil(), Some(&kind), None);
+                assert!(!agent_message_can_drive_evaluation(
+                    Some(&kind),
+                    Some(&delivered)
+                ));
+                assert!(!crate::activity::is_visible_reply(
+                    "assistant",
+                    None,
+                    "progress",
+                    &delivered
+                ));
+            }
+        }
+        for kind in [
+            None,
+            Some("assistant"),
+            Some("secret_request"),
+            Some("multi_agent_plan"),
+            Some("action_request"),
+            Some("goal_update"),
+            Some("integration_request"),
+        ] {
+            let delivered = build_agent_update_metadata(&Uuid::nil(), kind, None);
+            assert!(agent_message_can_drive_evaluation(kind, Some(&delivered)));
+            assert!(crate::activity::is_visible_reply(
+                "assistant",
+                None,
+                "answer",
+                &delivered
+            ));
+        }
+        for kind in ["goal_update", "status"] {
+            for hidden in [json!(true), json!(false), json!("true"), JsonValue::Null] {
+                let delivered = build_agent_update_metadata(
+                    &Uuid::nil(),
+                    Some(kind),
+                    Some(json!({
+                        "kind": "agent_message", "presentation": {"hidden": hidden}
+                    })),
+                );
+                assert_eq!(delivered["details"]["presentation"]["hidden"], hidden);
+                assert_eq!(
+                    agent_message_can_drive_evaluation(Some(kind), Some(&delivered)),
+                    hidden != json!(true)
+                );
+                assert_eq!(
+                    crate::activity::is_visible_reply("assistant", None, "answer", &delivered),
+                    hidden != json!(true)
+                );
+            }
+        }
+        let top_level_hidden = json!({"presentation":{"hidden":true}});
+        assert!(!agent_message_can_drive_evaluation(
+            None,
+            Some(&top_level_hidden)
+        ));
+        assert!(!crate::activity::is_visible_reply(
+            "assistant",
+            None,
+            "answer",
+            &top_level_hidden
+        ));
     }
 
     #[test]

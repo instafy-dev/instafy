@@ -38,6 +38,7 @@ export interface WorkspaceControlsContextValue {
   onOpenProfileSettings?: () => void;
   onOpenBugReport?: () => void;
   onOpenBugReportInbox?: () => void;
+  onOpenDiagnostics?: () => void;
   supportUnreadCount?: number;
   topbarLocationOverride?: {
     title: string;
@@ -80,6 +81,7 @@ const defaultWorkspaceControls: WorkspaceControlsContextValue = {
   onOpenProfileSettings: undefined,
   onOpenBugReport: undefined,
   onOpenBugReportInbox: undefined,
+  onOpenDiagnostics: undefined,
   supportUnreadCount: 0,
   topbarLocationOverride: null,
   shakeToReportEnabled: false,

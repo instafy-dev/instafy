@@ -5,6 +5,7 @@ import { createRoot, type Root } from "react-dom/client";
 import { MemoryRouter, useLocation, useNavigate } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, it, vi, type Mock } from "vitest";
 import { SettingsShell, type SettingsCategory } from "../SettingsShell";
+import { SettingsSection } from "../SettingsSection";
 import { useSettingsRoute } from "../../settingsRoute";
 
 const { nativeBack } = vi.hoisted(() => ({ nativeBack: vi.fn() }));
@@ -40,7 +41,7 @@ describe("SettingsShell available-pane navigation", () => {
     disconnect: Mock;
   }> = [];
 
-  function Harness({ initialCategory = "people", personal = false }: { initialCategory?: string; personal?: boolean }) {
+  function Harness({ initialCategory = "people", personal = false, sectionHeading = false }: { initialCategory?: string; personal?: boolean; sectionHeading?: boolean }) {
     const [category, setCategory] = useState(initialCategory);
     const [childCategory, setChildCategory] = useState("speech");
     return (
@@ -65,6 +66,13 @@ describe("SettingsShell available-pane navigation", () => {
           setChildCategory(next);
         }}
       >
+        {sectionHeading ? <>
+          <SettingsSection title={personal ? "Preferences" : category === "voice" ? "Speech provider" : "People"}
+            description="Keep this helper text." actions={<button>Save section</button>} data-testid="current-section">
+            <input aria-label="Section field" />
+          </SettingsSection>
+          <SettingsSection title="Other options" data-testid="other-section"><p>Other settings</p></SettingsSection>
+        </> : null}
         <p data-testid="active-content">{category === "voice" ? `${category}:${childCategory}` : category}</p>
         <input aria-label="Example setting" data-testid="settings-field" />
       </SettingsShell>
@@ -181,6 +189,38 @@ describe("SettingsShell available-pane navigation", () => {
     expect(get("settings-category-nav-picker")).toBeNull();
     expect(get("settings-category-overview")?.getAttribute("aria-current")).toBe("page");
     expect(get("settings-category-people")?.hasAttribute("aria-current")).toBe(false);
+  });
+
+  it("visually suppresses only the matching picker heading and restores it beside a wide category list", async () => {
+    await act(async () => root.render(<Harness sectionHeading />));
+    const heading = () => get("current-section")!.querySelector("h3")!;
+    expect(heading().classList.contains("sr-only")).toBe(false);
+    await resizePane(390);
+    expect(get("settings-category-nav-picker")?.textContent).toContain("People");
+    expect(heading().classList.contains("sr-only")).toBe(true);
+    expect(heading().hasAttribute("aria-hidden")).toBe(false);
+    expect(get("current-section")?.textContent).toContain("Keep this helper text.");
+    expect(get("current-section")?.querySelector("button")?.textContent).toBe("Save section");
+    expect(get("other-section")?.querySelector("h3")?.classList.contains("sr-only")).toBe(false);
+    await resizePane(1080);
+    expect(heading().classList.contains("sr-only")).toBe(false);
+  });
+
+  it("matches a nested picker's selected leaf on mobile", async () => {
+    paneWidth = 390;
+    viewportWidth = 390;
+    await act(async () => root.render(<Harness initialCategory="voice" sectionHeading />));
+    expect(get("settings-category-nav-picker")?.textContent).toContain("Speech provider");
+    expect(get("current-section")?.querySelector("h3")?.classList.contains("sr-only")).toBe(true);
+    expect(get("other-section")?.querySelector("h3")?.classList.contains("sr-only")).toBe(false);
+  });
+
+  it("retains content headings below compact tabs", async () => {
+    paneWidth = 390;
+    viewportWidth = 390;
+    await act(async () => root.render(<Harness initialCategory="preferences" personal sectionHeading />));
+    expect(get("settings-category-nav-tabs")).not.toBeNull();
+    expect(get("current-section")?.querySelector("h3")?.classList.contains("sr-only")).toBe(false);
   });
 
   it("shows all three personal categories on a phone and selects the existing account route", async () => {

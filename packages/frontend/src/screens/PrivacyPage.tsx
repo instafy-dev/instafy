@@ -4,7 +4,7 @@ import { Text } from "../components/Text";
 import { TextLink } from "../components/TextLink";
 import { applyPageMeta } from "../utils/seo";
 
-const LAST_UPDATED = "March 23, 2026";
+const LAST_UPDATED = "September 23, 2026";
 const CONTACT_EMAIL = "contact@instafy.dev";
 
 export function PrivacyPage() {
@@ -49,7 +49,7 @@ export function PrivacyPage() {
             </Text>
             <ul className="space-y-2 pl-6 text-slate-700 dark:text-slate-200">
               {[
-                "Account information (for example, email address, authentication provider, and basic profile details).",
+                "Account information (for example, email address, name, profile picture, and the sign-in method you use: Google, GitHub, or email and password).",
                 "Workspace and project content (for example, file names/paths, edits, prompts, messages, and artifacts you choose to store in the Service).",
                 "Usage and device information (for example, IP address, browser type, device identifiers, logs, and operational telemetry needed to operate and secure the Service).",
                 "Release and update telemetry for our desktop/mobile apps (for example, app version, release channel, platform, architecture, device identifiers, and update/download success or failure events reported by the client).",
@@ -72,7 +72,59 @@ export function PrivacyPage() {
 
           <section className="space-y-4">
             <Heading level={2} variant="title" className="tracking-tight">
-              2. Cookies and local storage
+              2. Information from Google sign-in
+            </Heading>
+            <Text variant="bodyLg" tone="secondary" className="max-w-prose">
+              If you sign in with Google, Google shares your name, email address, and profile picture with
+              Instafy. This is the only Google user data we request. We do not ask for access to your Gmail,
+              Google Drive, contacts, calendar, or any other Google data.
+            </Text>
+            <ul className="space-y-2 pl-6 text-slate-700 dark:text-slate-200">
+              {[
+                "We use it to create your account, sign you in, keep your account secure, and show your name and picture in the Service (for example, to members of organizations you join).",
+                "We store it with our authentication and database provider, Supabase, for as long as your account exists.",
+                "We do not sell it or use it for advertising, and we share it only as described in “How we share information” below.",
+              ].map((item) => (
+                <li key={item} className="list-disc">
+                  <Text variant="body" tone="secondary">
+                    {item}
+                  </Text>
+                </li>
+              ))}
+            </ul>
+            <Text variant="bodyLg" tone="secondary" className="max-w-prose">
+              You can remove Instafy’s access at any time from your{" "}
+              <a
+                className="font-semibold underline decoration-slate-300 underline-offset-4 transition hover:decoration-slate-500 dark:decoration-slate-700"
+                href="https://myaccount.google.com/permissions"
+                target="_blank"
+                rel="noreferrer"
+              >
+                Google Account permissions
+              </a>
+              . To delete your account and this data, email{" "}
+              <a
+                className="font-semibold underline decoration-slate-300 underline-offset-4 transition hover:decoration-slate-500 dark:decoration-slate-700"
+                href={`mailto:${CONTACT_EMAIL}`}
+              >
+                {CONTACT_EMAIL}
+              </a>
+              . Instafy’s use and transfer of information received from Google APIs will adhere to the{" "}
+              <a
+                className="font-semibold underline decoration-slate-300 underline-offset-4 transition hover:decoration-slate-500 dark:decoration-slate-700"
+                href="https://developers.google.com/terms/api-services-user-data-policy"
+                target="_blank"
+                rel="noreferrer"
+              >
+                Google API Services User Data Policy
+              </a>
+              , including the Limited Use requirements.
+            </Text>
+          </section>
+
+          <section className="space-y-4">
+            <Heading level={2} variant="title" className="tracking-tight">
+              3. Cookies and local storage
             </Heading>
             <Text variant="bodyLg" tone="secondary" className="max-w-prose">
               We use cookies and local storage to keep you signed in, remember preferences, and support
@@ -83,7 +135,7 @@ export function PrivacyPage() {
 
           <section className="space-y-4">
             <Heading level={2} variant="title" className="tracking-tight">
-              3. How we use information
+              4. How we use information
             </Heading>
             <Text variant="bodyLg" tone="secondary" className="max-w-prose">
               We use information to:
@@ -108,7 +160,7 @@ export function PrivacyPage() {
 
           <section className="space-y-4">
             <Heading level={2} variant="title" className="tracking-tight">
-              4. How we share information
+              5. How we share information
             </Heading>
             <Text variant="bodyLg" tone="secondary" className="max-w-prose">
               We may share information with:
@@ -135,7 +187,7 @@ export function PrivacyPage() {
 
           <section className="space-y-4">
             <Heading level={2} variant="title" className="tracking-tight">
-              5. Data retention
+              6. Data retention
             </Heading>
             <Text variant="bodyLg" tone="secondary" className="max-w-prose">
               We retain information for as long as needed to provide the Service, comply with legal
@@ -147,7 +199,7 @@ export function PrivacyPage() {
 
           <section className="space-y-4">
             <Heading level={2} variant="title" className="tracking-tight">
-              6. Security
+              7. Security
             </Heading>
             <Text variant="bodyLg" tone="secondary" className="max-w-prose">
               We use reasonable administrative, technical, and organizational safeguards designed to protect
@@ -157,7 +209,7 @@ export function PrivacyPage() {
 
           <section className="space-y-4">
             <Heading level={2} variant="title" className="tracking-tight">
-              7. Your choices and rights
+              8. Your choices and rights
             </Heading>
             <Text variant="bodyLg" tone="secondary" className="max-w-prose">
               Depending on where you live, you may have rights to access, correct, delete, or object to
@@ -174,7 +226,7 @@ export function PrivacyPage() {
 
           <section className="space-y-4">
             <Heading level={2} variant="title" className="tracking-tight">
-              8. Children’s privacy
+              9. Children’s privacy
             </Heading>
             <Text variant="bodyLg" tone="secondary" className="max-w-prose">
               The Service is not directed to children, and we do not knowingly collect personal information
@@ -184,7 +236,7 @@ export function PrivacyPage() {
 
           <section className="space-y-4">
             <Heading level={2} variant="title" className="tracking-tight">
-              9. Changes to this policy
+              10. Changes to this policy
             </Heading>
             <Text variant="bodyLg" tone="secondary" className="max-w-prose">
               We may update this Privacy Policy from time to time. We’ll update the “Last updated” date
@@ -194,7 +246,7 @@ export function PrivacyPage() {
 
           <section className="space-y-4">
             <Heading level={2} variant="title" className="tracking-tight">
-              10. Contact
+              11. Contact
             </Heading>
             <Text variant="bodyLg" tone="secondary" className="max-w-prose">
               Questions about privacy? Email{" "}

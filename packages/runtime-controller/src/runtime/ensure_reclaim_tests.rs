@@ -9,6 +9,7 @@ use tokio::sync::Mutex;
 struct ReclaimFixture {
     pool: crate::config::PgPool,
     state: AppState,
+    org_id: Uuid,
     waiting_project_id: Uuid,
     blocker_project_id: Uuid,
     blocker_runtime_id: Uuid,
@@ -202,6 +203,7 @@ async fn setup_at_hosted_runtime_limit(
     Ok(Some(ReclaimFixture {
         pool,
         state,
+        org_id,
         waiting_project_id,
         blocker_project_id,
         blocker_runtime_id,
@@ -343,4 +345,160 @@ async fn hosted_slot_reclaim_can_be_switched_off() -> anyhow::Result<()> {
 
     fixture.cleanup().await?;
     result
+}
+
+/// A tunnel broker that accepts a revoke and never answers it. It records
+/// when the revoke starts and when the caller abandons it (drops the call).
+struct SilentRevokeBroker {
+    reached: Arc<tokio::sync::Notify>,
+    abandoned: Arc<std::sync::atomic::AtomicBool>,
+}
+
+#[async_trait::async_trait]
+impl crate::tunnels::TunnelBroker for SilentRevokeBroker {
+    fn provider_kind(&self) -> crate::tunnels::TunnelProvider {
+        crate::tunnels::TunnelProvider::SelfHosted
+    }
+
+    async fn request_tunnel(
+        &self,
+        _ctx: crate::tunnels::TunnelRequestContext,
+    ) -> anyhow::Result<crate::tunnels::TunnelAssignment> {
+        anyhow::bail!("the reclaim test never requests a tunnel")
+    }
+
+    async fn revoke_tunnel(
+        &self,
+        _tunnel_id: &str,
+        _metadata: Option<&JsonValue>,
+    ) -> anyhow::Result<()> {
+        struct MarkAbandoned(Arc<std::sync::atomic::AtomicBool>);
+        impl Drop for MarkAbandoned {
+            fn drop(&mut self) {
+                self.0.store(true, std::sync::atomic::Ordering::SeqCst);
+            }
+        }
+
+        let _abandoned = MarkAbandoned(self.abandoned.clone());
+        self.reached.notify_one();
+        std::future::pending::<()>().await;
+        Ok(())
+    }
+}
+
+/// The reclaim runs while the waiting launch holds the provider launch
+/// admission, which serializes every provider launch in this process. A tunnel
+/// broker that never answers the stopped blocker's revoke must therefore cost
+/// that launch at most `RECLAIM_TUNNEL_REVOKE_TIMEOUT`, not wedge admission
+/// for good. The broker really hangs; only the bound itself is fast-forwarded.
+#[tokio::test]
+async fn silent_tunnel_broker_cannot_hold_launch_admission_during_reclaim() -> anyhow::Result<()> {
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    use tokio::sync::Notify;
+
+    let Some(fixture) =
+        setup_at_hosted_runtime_limit("hosted-reclaim-silent-broker", 120, 3_600).await?
+    else {
+        return Ok(());
+    };
+    let cleanup = crate::tests::SharedDbFixture {
+        organizations: vec![fixture.org_id],
+        projects: vec![fixture.waiting_project_id, fixture.blocker_project_id],
+    };
+
+    crate::tests::with_shared_db_fixture(cleanup, async {
+        let tunnel_id = format!("reclaim-silent-broker-{}", Uuid::new_v4());
+        fixture
+            .pool
+            .get()
+            .await?
+            .execute(
+                "insert into runtime_tunnel_grants
+                    (project_id, runtime_id, provider, tunnel_id, hostname, url, status, expires_at)
+                 values ($1, $2, 'self_hosted', $3, 'reclaim.example.test',
+                         'https://reclaim.example.test', 'active', now() + interval '10 minutes')",
+                &[
+                    &fixture.blocker_project_id,
+                    &fixture.blocker_runtime_id,
+                    &tunnel_id,
+                ],
+            )
+            .await?;
+
+        let reached = Arc::new(Notify::new());
+        let abandoned = Arc::new(AtomicBool::new(false));
+        let mut state = fixture.state.clone();
+        state.tunnel_broker = Some(Arc::new(SilentRevokeBroker {
+            reached: reached.clone(),
+            abandoned: abandoned.clone(),
+        }));
+
+        let launch = crate::tests::spawn_aborting({
+            let waiting_project_id = fixture.waiting_project_id;
+            let provider_id = fixture.provider_id.clone();
+            async move {
+                ensure_runtime_launch(
+                    &state,
+                    waiting_project_id,
+                    None,
+                    provider_id,
+                    600,
+                    Some("Waiting space runtime".to_string()),
+                    None,
+                    RuntimeLeaseScope::Exclusive,
+                    OriginEnsureOptions::new(None, None, None),
+                )
+                .await
+            }
+        });
+        tokio::time::timeout(Duration::from_secs(10), reached.notified())
+            .await
+            .expect("the reclaim never asked the tunnel broker to revoke the blocker's grant");
+        assert!(
+            !launch.is_finished(),
+            "the launch should still be waiting on the reclaim's tunnel revoke"
+        );
+        assert_eq!(fixture.blocker_status().await?, "stopped");
+
+        // Fast-forward only the bound. The clock resumes before the launch
+        // returns to the database, whose pool timers must see real time.
+        tokio::time::pause();
+        tokio::time::advance(RECLAIM_TUNNEL_REVOKE_TIMEOUT).await;
+        tokio::time::resume();
+
+        let response = tokio::time::timeout(Duration::from_secs(10), launch)
+            .await
+            .expect("the launch stayed stuck behind the silent tunnel broker")?
+            .map_err(|(status, body)| {
+                anyhow::anyhow!("waiting space was refused ({status}): {}", body.0.message)
+            })?;
+        assert_eq!(response.provider, fixture.provider_id);
+        assert!(
+            abandoned.load(Ordering::SeqCst),
+            "the reclaim should have abandoned the unanswered revoke"
+        );
+        let grant_status: String = fixture
+            .pool
+            .get()
+            .await?
+            .query_one(
+                "select status from runtime_tunnel_grants where tunnel_id = $1",
+                &[&tunnel_id],
+            )
+            .await?
+            .get("status");
+        assert_eq!(
+            grant_status, "active",
+            "an abandoned revoke leaves the local grant to expire"
+        );
+        let events = fixture.provider_events.lock().await.clone();
+        assert_eq!(
+            events,
+            vec!["release", "launch"],
+            "the waiting space launches only after the blocker was released"
+        );
+        Ok(())
+    })
+    .await
 }
