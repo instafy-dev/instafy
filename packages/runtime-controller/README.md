@@ -429,6 +429,41 @@ database and never uses an existing Supabase account:
 cargo test --locked --manifest-path packages/runtime-controller/Cargo.toml --test startup
 ```
 
+The protected-main service-image publisher also tests the **published Linux amd64
+image by immutable digest**. A small standard-library Go fixture covers existing
+service-user lookup, missing-user creation, and explicit UUID bypass inside the
+image. It supplements the seven Rust startup tests above; it does not replace
+them or prove a healthy database lifecycle. All three cases must reach the
+expected database-URL parse error without a Tokio panic or credential logging.
+
+To repeat that packaging check locally, download the `production-image-controller`
+artifact (`controller.json`) for an exact successful publisher run and pull its
+immutable image using your own registry access if needed. Build the fixture and
+run it against that locally available image:
+
+```bash
+(cd scripts/controller-startup-smoke && CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
+  go build -trimpath -o /tmp/controller-startup-smoke .)
+node scripts/controller-image-smoke.mjs controller.json <full-core-commit> \
+  /tmp/controller-startup-smoke /tmp/controller-startup-result.json
+```
+
+The runner requires Node.js 20+, Go 1.24+ to build the fixture, and a local Docker
+daemon with Linux amd64 execution support. Set `DOCKER_HOST` to the local Unix
+socket when not using Docker's default socket; remote Docker hosts are rejected.
+It never loads env files, logs into a registry, or implicitly pulls an image.
+Missing dependencies, mismatched image metadata, omitted cases and startup
+failures are errors, not skips. Only the static fixture is mounted read-only;
+the container has no external network, no credentials, a read-only filesystem,
+private temporary storage, a non-root user and bounded resources. The runner
+removes only its own container and temporary Docker configuration.
+
+CI retains a fixed-field `controller-startup-smoke` receipt bound to the core
+commit, image digest, image ID and fixture checksum. Failure prevents the
+controller image record from being uploaded and the service manifest from being
+sealed; images already pushed are not deleted. This adds no deployment action,
+approval or private rollout policy.
+
 ### Running the controller
 
 1. Ensure Postgres + Supabase stack are running locally with the expected schema (see `packages/runtime-controller/migrations/`).
