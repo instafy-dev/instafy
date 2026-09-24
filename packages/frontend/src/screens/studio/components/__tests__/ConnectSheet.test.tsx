@@ -846,6 +846,8 @@ describe("ConnectSheet", () => {
       const submit = query<HTMLButtonElement>('[data-testid="connect-confirm-submit"]');
       expect(submit?.getAttribute("aria-disabled")).toBe("true");
       expect(submit?.disabled).toBe(false);
+      // The shared Button draws the pending spinner; the sheet adds none.
+      expect(submit?.querySelectorAll(".animate-spin")).toHaveLength(1);
       await act(async () => submit?.click());
       expect(s.onConnect).not.toHaveBeenCalled();
 
