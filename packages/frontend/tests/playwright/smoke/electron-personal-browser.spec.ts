@@ -125,6 +125,10 @@ function fixtureHandler(request: import("node:http").IncomingMessage, response: 
       <button id="fixture-submit" type="submit" form="fixture-details">Continue</button>
       <button id="fixture-normalized" type="unknown" form="fixture-details">Continue</button>
       <input id="fixture-notes" form="fixture-details" aria-label="Notes">
+      <form id="order-details">
+        <button id="fixture-order">Place order</button>
+        <input id="fixture-order-notes" aria-label="Delivery note">
+      </form>
       </body></html>`);
     return;
   }
@@ -375,19 +379,22 @@ test.describe("Electron Personal Browser", () => {
         formOwnerIdentity: descriptor.formOwnerIdentity,
         formActionText: descriptor.formActionText,
         activationNeedsConfirmation: security.personalBrowserActivationRequiresConfirmation(descriptor, "routine"),
+        askActivationNeedsConfirmation: security.personalBrowserActivationRequiresConfirmation(descriptor, "ask"),
         enterNeedsConfirmation: security.personalBrowserKeyRequiresConfirmation("Enter", descriptor),
+        routineEnterNeedsConfirmation: security.personalBrowserKeyRequiresConfirmation("Enter", descriptor, "routine"),
       }));
     }, {
       url: targetUrl,
       pageBridgePath: path.join(DESKTOP_APP_DIR, "dist", "personalBrowserPageBridge.js"),
       securityPath: path.join(DESKTOP_APP_DIR, "dist", "personalBrowserSecurity.js"),
     });
-    expect(formSemantics).toHaveLength(7);
+    expect(formSemantics).toHaveLength(9);
     const associatedOwner = formSemantics.find(row => row.id === "fixture-default")?.formOwnerIdentity;
     expect(associatedOwner).toBeTruthy();
     for (const id of ["fixture-default", "fixture-submit", "fixture-normalized"]) {
       expect(formSemantics.find(row => row.id === id)).toMatchObject({
-        type: "submit", formOwnerIdentity: associatedOwner, formActionText: "Continue", activationNeedsConfirmation: true,
+        type: "submit", formOwnerIdentity: associatedOwner, formActionText: "Continue",
+        activationNeedsConfirmation: false, askActivationNeedsConfirmation: true,
       });
     }
     for (const id of ["fixture-button", "fixture-reset"]) {
@@ -399,7 +406,16 @@ test.describe("Electron Personal Browser", () => {
       formOwnerIdentity: "", formActionText: "", activationNeedsConfirmation: false,
     });
     expect(formSemantics.find(row => row.id === "fixture-notes")).toMatchObject({
-      formOwnerIdentity: associatedOwner, enterNeedsConfirmation: true,
+      formOwnerIdentity: associatedOwner, enterNeedsConfirmation: true, routineEnterNeedsConfirmation: false,
+    });
+    // Routine consent covers ordinary form submissions, while consequential
+    // actions still require confirmation through both click and Enter.
+    expect(formSemantics.find(row => row.id === "fixture-order")).toMatchObject({
+      type: "submit", formActionText: "Place order", activationNeedsConfirmation: true,
+      askActivationNeedsConfirmation: true, routineEnterNeedsConfirmation: true,
+    });
+    expect(formSemantics.find(row => row.id === "fixture-order-notes")).toMatchObject({
+      formActionText: "Place order", enterNeedsConfirmation: true, routineEnterNeedsConfirmation: true,
     });
 
     const firstView = await electronApp!.evaluate(async ({ webContents }, url) => {
