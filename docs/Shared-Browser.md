@@ -8,7 +8,7 @@ Shared Browser is the project-scoped, web/mobile-compatible browser identity. Co
 
 ## Runtime eligibility
 
-Shared Browser is an Instafy Cloud collaboration surface, not a way to expose a contributor's self-hosted runtime. Studio accepts only the exact canonical managed `instafy-cloud` route. The controller independently enforces the same rule before origin view/control grants, browser-only job creation, durable browser-profile GET/PUT, profile reset, and privileged provider authentication. An ordinary or custom self-hosted runtime remains private to its immutable controller-attested owner even when its project is shared; a cloud-looking provider label or prefix cannot create managed-cloud authority. Personal Browser is never shareable.
+Shared Browser is an Instafy Cloud collaboration surface, not a way to expose a contributor's self-hosted runtime. Studio accepts only the exact canonical managed `instafy-cloud` route. The controller independently enforces the same rule before origin view/control grants, browser-only job creation, durable browser-profile GET/PUT, profile reset, and privileged provider authentication. An ordinary or custom self-hosted runtime remains private to its immutable controller-attested owner even when its project is shared; a cloud-looking provider label or prefix cannot create managed-cloud authority. The Personal Browser runtime and stored profile remain private; owners can separately share an individual tab through [Local browser sharing](Local-Browser-Sharing.md).
 
 The managed browser image is also a controller/provider decision. Studio asks
 for the harmless `runtimeFlavor: "webdev"`; it never sends an image reference
