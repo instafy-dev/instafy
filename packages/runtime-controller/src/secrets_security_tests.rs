@@ -110,7 +110,8 @@ async fn agent_secrets_only_releases_to_current_runtime_owning_live_job() -> any
 
     let result: anyhow::Result<()> = async {
         super::ensure_secret_tables(&pool).await?;
-        let (nonce, ciphertext) = super::encrypt_secret_payload(&key, b"private-secret-marker")?;
+        let (nonce, ciphertext) = crate::credential_keys::CredentialKeyRing::from(key.clone())
+            .seal(b"private-secret-marker")?;
         {
             let connection = pool.get().await?;
             for id in [project_id, other_project_id] {
@@ -154,7 +155,7 @@ async fn agent_secrets_only_releases_to_current_runtime_owning_live_job() -> any
         for strict_mode in [false, true] {
             let mut config = test_config();
             config.strict_mode = strict_mode;
-            config.credential_encryption_key = Some(key.clone());
+            config.credential_keys = Some(key.clone().into());
             let issue = |id: Uuid, token_generation: Option<Uuid>| {
                 crate::auth::issue_agent_token(&config, &project_id, &id, None, token_generation)
                     .map(|minted| minted.token)

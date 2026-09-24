@@ -102,9 +102,9 @@ async fn shared_profile_browser_runtime_lifecycle_e2e() -> anyhow::Result<()> {
         "disposable-browser-profile-e2e",
     );
     config.browser_profile_persist_project_ids.push(project_id);
-    config.credential_encryption_key = Some(crate::config::CredentialEncryptionKey::for_test(
-        "disposable-browser-profile-e2e",
-    ));
+    config.credential_keys = Some(
+        crate::config::CredentialEncryptionKey::for_test("disposable-browser-profile-e2e").into(),
+    );
     let runtimes = runtime_ids
         .iter()
         .zip(&lease_ids)
@@ -161,12 +161,12 @@ async fn shared_profile_browser_runtime_lifecycle_e2e() -> anyhow::Result<()> {
                         let nonce: String = row.get(0);
                         let ciphertext: String = row.get(1);
                         anyhow::ensure!(STANDARD.decode(&nonce)?.len() == 12, "AES-GCM nonce must be stored");
-                        let key = crate::config::CredentialEncryptionKey::for_test("disposable-browser-profile-e2e");
-                        let plaintext = crate::secrets::decrypt_secret_payload(&key, &nonce, &ciphertext)?;
+                        let keys = crate::credential_keys::CredentialKeyRing::from(crate::config::CredentialEncryptionKey::for_test("disposable-browser-profile-e2e"));
+                        let plaintext = keys.open(&nonce, &ciphertext)?;
                         let mut encrypted = STANDARD.decode(ciphertext)?;
                         anyhow::ensure!(plaintext.starts_with(b"PK") && encrypted != plaintext && encrypted.len() > 16, "database must contain an encrypted ZIP archive");
                         encrypted[0] ^= 1;
-                        anyhow::ensure!(crate::secrets::decrypt_secret_payload(&key, &nonce, &STANDARD.encode(encrypted)).is_err(), "tampered ciphertext must fail authentication");
+                        anyhow::ensure!(keys.open(&nonce, &STANDARD.encode(encrypted)).is_err(), "tampered ciphertext must fail authentication");
                     }
                     "release" => {
                         connection.execute("update runtimes set status = 'stopped', active_lease_id = null where project_id = $1", &[&project_id]).await?;

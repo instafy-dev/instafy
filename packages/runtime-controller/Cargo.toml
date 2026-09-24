@@ -36,6 +36,8 @@ chrono-tz = "0.10"
 subtle = "2"
 tokio-stream = { version = "0.1", features = ["sync"] }
 reqwest = { version = "0.11", features = ["json", "blocking", "multipart", "stream"] }
+# The same `url` reqwest re-exports; named directly for `url::Host`.
+url = "2"
 urlencoding = "2"
 tokio-util = { version = "0.7", features = ["io"] }
 base64 = "0.21"
@@ -60,3 +62,5 @@ unicode-normalization = "0.1"
 tempfile = "3"
 tower = "0.5"
 httpmock = "0.7"
+# Paused-clock tests prove the minute-scale provider deadlines without waiting.
+tokio = { version = "1", features = ["test-util"] }

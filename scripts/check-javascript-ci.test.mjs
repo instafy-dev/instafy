@@ -1,4 +1,5 @@
 import { withoutManualCiRouting } from "./lib/manualCiRoutingTestBaseline.mjs";
+import { ADDED_BUILD_CONTRACT_TESTS, addedBuildContractTestLine, withoutAddedBuildContractTests } from "./lib/buildContractTestsBaseline.mjs";
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import fs from 'node:fs';
@@ -7,7 +8,9 @@ import test from 'node:test';
 import vm from 'node:vm';
 
 const root = path.resolve(import.meta.dirname, '..');
-const source = withoutManualCiRouting('build.yml', fs.readFileSync(path.join(root, '.github/workflows/build.yml'), 'utf8'));
+const buildWorkflow = withoutManualCiRouting('build.yml', fs.readFileSync(path.join(root, '.github/workflows/build.yml'), 'utf8'));
+// The reviewed inventory below predates these contract tests; they are checked separately.
+const source = withoutAddedBuildContractTests(buildWorkflow);
 const aggregateIf = "    if: ${{ always() && !(github.repository == 'instafy-dev/instafy' && github.event_name == 'push' && github.ref == 'refs/heads/main' && github.ref_protected == true && cancelled()) }}";
 const lanes = [
   { key: 'javascript-contracts', label: 'public-js-contracts', name: 'JavaScript contracts and migrations' },
@@ -296,6 +299,21 @@ test('all original migration and contract checks remain together including the r
   }
   assert.match(text, /supabase-postgres-image-\$\{\{ runner\.os \}\}-\$\{\{ runner\.arch \}\}-/u);
   assert.ok(text.indexOf('Ensure Supabase Postgres image') < text.indexOf('Apply public migrations to an empty database'));
+});
+
+test('contract tests added after the reviewed inventory run once, in the hosted contracts step', () => {
+  const contracts = buildWorkflow.slice(buildWorkflow.indexOf('\n  javascript-contracts:\n') + 1).split(/\n  [\w-]+:\n/u)[0];
+  const marker = '      - name: Test public migration and self-host contracts\n';
+  const start = contracts.indexOf(marker);
+  assert.ok(start >= 0);
+  const end = contracts.indexOf('\n      - name: ', start + marker.length);
+  const contractStep = contracts.slice(start, end < 0 ? contracts.length : end);
+  assert.match(contractStep, /^        run: \|\n          node --test \\\n/mu);
+  for (const file of ADDED_BUILD_CONTRACT_TESTS) {
+    assert.equal(buildWorkflow.split(file).length - 1, 1, file);
+    assert.equal(contractStep.split(addedBuildContractTestLine(file)).length - 1, 1, file);
+    assert.ok(fs.existsSync(path.join(root, file)), file);
+  }
 });
 
 test('the complete pre-split command inventory and working directories are unchanged', () => {

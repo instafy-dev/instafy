@@ -1,4 +1,5 @@
 use std::fmt::Debug;
+use std::time::Duration;
 
 use axum::http::StatusCode;
 use axum::Json;
@@ -11,6 +12,18 @@ use crate::{bad_request, forbidden, internal_error, ApiError, AppState};
 
 const BROWSER_PROFILE_PERSIST_ENV: &str = "INSTAFY_BROWSER_PROFILE_PERSIST";
 const BROWSER_PROFILE_SNAPSHOT_SECS_ENV: &str = "INSTAFY_BROWSER_PROFILE_SNAPSHOT_SECS";
+
+/// Upper bound for a fenced provider release (stop, remove, sweeps, reclaim).
+/// The provider serializes ensure/release per runtime in detached tasks, so a
+/// release can legitimately queue behind a slow provider-side ensure, and a
+/// controller-side timeout never cancels the release itself. Timing out leaves
+/// the generation quarantined as `cleanup_pending`, which every stop path and
+/// the launch-timeout sweep already treat as retryable. Without a bound, one
+/// unresponsive provider stalled the whole sequential idle sweep forever.
+pub(super) const RUNTIME_PROVIDER_RELEASE_TIMEOUT: Duration = Duration::from_secs(180);
+/// The OOM post-mortem is best-effort and read-only; a slow answer is simply
+/// "unknown" and must not delay the heartbeat-timeout stop behind it.
+pub(super) const RUNTIME_PROVIDER_INSPECT_TIMEOUT: Duration = Duration::from_secs(15);
 
 pub(super) fn apply_git_remote_env(
     config: &crate::config::AppConfig,
@@ -358,7 +371,35 @@ fn provider_call_status_is_final_success(status: reqwest::StatusCode) -> bool {
     )
 }
 
+/// Call one runtime provider endpoint with an explicit overall deadline.
+///
+/// The deadline covers every auth-fallback attempt and the response body, and
+/// is required so no provider call can wait forever. Callers must not hold a
+/// pooled database connection or open transaction across this call unless a
+/// deliberate, capacity-bounded fence requires it (see the ensure launch
+/// guard); a slow provider otherwise pins pool capacity for its full duration.
 pub(super) async fn call_provider_endpoint<T: serde::Serialize + Debug>(
+    state: &AppState,
+    provider: &crate::config::RuntimeProviderConfig,
+    path: &str,
+    body: &T,
+    timeout: Duration,
+) -> anyhow::Result<Option<String>> {
+    match tokio::time::timeout(
+        timeout,
+        call_provider_endpoint_unbounded(state, provider, path, body),
+    )
+    .await
+    {
+        Ok(result) => result,
+        Err(_) => anyhow::bail!(
+            "runtime provider call to {} timed out after {timeout:?}",
+            path.trim()
+        ),
+    }
+}
+
+async fn call_provider_endpoint_unbounded<T: serde::Serialize + Debug>(
     state: &AppState,
     provider: &crate::config::RuntimeProviderConfig,
     path: &str,
@@ -527,7 +568,7 @@ pub(super) fn authorize_provider_config_for_project(
 mod tests {
     use super::{
         apply_browser_profile_persistence_env, apply_controller_turn_credentials,
-        merge_provider_metadata, provider_call_status_is_final_success,
+        call_provider_endpoint, merge_provider_metadata, provider_call_status_is_final_success,
         resolve_provider_auth_tokens,
     };
     use crate::browser_turn::BrowserTurnRestConfig;
@@ -551,6 +592,75 @@ mod tests {
         assert!(!provider_call_status_is_final_success(
             reqwest::StatusCode::PARTIAL_CONTENT
         ));
+    }
+
+    #[tokio::test]
+    async fn provider_call_deadline_bounds_an_unresponsive_provider() -> anyhow::Result<()> {
+        use std::time::{Duration, Instant};
+
+        // Accepts the request and never answers, like a wedged allocator.
+        let app = axum::Router::new().route(
+            "/runtime/release",
+            axum::routing::post(|| async {
+                std::future::pending::<()>().await;
+                axum::http::StatusCode::NO_CONTENT
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+        let address = listener.local_addr()?;
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app)
+                .await
+                .expect("serve unresponsive provider");
+        });
+
+        // The call never touches the database; an unconnected pool suffices.
+        let manager = bb8_postgres::PostgresConnectionManager::new_from_stringlike(
+            "postgres://postgres:postgres@127.0.0.1:1/postgres",
+            crate::config::database_tls(),
+        )?;
+        let pool = bb8::Pool::builder().max_size(1).build_unchecked(manager);
+        let state = crate::tests::build_test_state(
+            pool,
+            crate::tests::build_app_config(
+                crate::tests::test_origin_private_key(),
+                crate::tests::test_origin_public_key(),
+                "provider-call-deadline",
+            ),
+        );
+        let provider = crate::config::RuntimeProviderConfig {
+            id: "provider_call_deadline_test".to_string(),
+            display_name: "Unresponsive provider".to_string(),
+            kind: "test".to_string(),
+            owner_org_id: None,
+            allowed_org_ids: vec![],
+            endpoint: Some(format!("http://{address}")),
+            auth_token: None,
+            metadata: None,
+        };
+
+        let started = Instant::now();
+        let error = tokio::time::timeout(
+            Duration::from_secs(5),
+            call_provider_endpoint(
+                &state,
+                &provider,
+                "/runtime/release",
+                &json!({ "project_id": Uuid::new_v4(), "runtime_id": Uuid::new_v4() }),
+                Duration::from_millis(200),
+            ),
+        )
+        .await
+        .expect("the provider call must honour its own deadline")
+        .expect_err("an unresponsive provider must fail the call");
+
+        assert!(
+            error.to_string().contains("/runtime/release timed out"),
+            "unexpected error: {error}"
+        );
+        assert!(started.elapsed() < Duration::from_secs(5));
+        server.abort();
+        Ok(())
     }
 
     fn test_turn_config() -> BrowserTurnRestConfig {

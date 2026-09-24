@@ -2,13 +2,10 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
-use aes_gcm::aead::{Aead, AeadCore, KeyInit, OsRng};
-use aes_gcm::{Aes256Gcm, Nonce};
 use axum::extract::{Path as AxumPath, State};
 use axum::http::{HeaderMap, StatusCode as HttpStatusCode};
 use axum::routing::{delete, get, post};
 use axum::{Json, Router};
-use base64::engine::general_purpose::STANDARD as BASE64;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD as BASE64URL;
 use base64::Engine;
 use chrono::{DateTime, Utc};
@@ -22,7 +19,8 @@ use tokio_postgres::{error::SqlState, GenericClient, Row};
 use uuid::Uuid;
 
 use crate::auth::{authenticate_request, require_user_session};
-use crate::config::{CredentialEncryptionKey, PgPool};
+use crate::config::PgPool;
+use crate::credential_keys::CredentialKeyRing;
 use crate::credentials;
 use crate::{bad_request, internal_error, not_found, ApiError, AppState};
 
@@ -1053,17 +1051,13 @@ async fn complete_github_device_auth_session(
     access_token: &str,
     scope: Option<&str>,
 ) -> Result<GithubDeviceAuthCompletionOutcome, (HttpStatusCode, Json<ApiError>)> {
-    let key = state
-        .config
-        .credential_encryption_key
-        .as_ref()
-        .ok_or_else(|| {
-            github_device_auth_service_unavailable(GITHUB_DEVICE_AUTH_STORAGE_UNAVAILABLE_MESSAGE)
-        })?;
+    let keys = state.config.credential_keys.as_ref().ok_or_else(|| {
+        github_device_auth_service_unavailable(GITHUB_DEVICE_AUTH_STORAGE_UNAVAILABLE_MESSAGE)
+    })?;
     let completed_at = Utc::now();
     let assertion_expires_at = github_device_auth_assertion_expires_at(completed_at);
     let prepared = prepare_oauth_token(
-        key,
+        keys,
         access_token,
         scope,
         Some((session_id, assertion_expires_at)),
@@ -1292,7 +1286,7 @@ async fn start_device_auth(
             }))
         }
         "github" => {
-            if state.config.credential_encryption_key.is_none() {
+            if state.config.credential_keys.is_none() {
                 return Err(github_device_auth_service_unavailable(
                     GITHUB_DEVICE_AUTH_STORAGE_UNAVAILABLE_MESSAGE,
                 ));
@@ -2237,12 +2231,12 @@ async fn poll_github_device_auth(state: AppState, session_id: Uuid) {
 }
 
 fn decrypt_oauth_access_token_payload(
-    key: &CredentialEncryptionKey,
+    keys: &CredentialKeyRing,
     nonce_b64: &str,
     ciphertext_b64: &str,
     expected_device_auth_session_id: Option<Uuid>,
 ) -> Result<Option<String>, (HttpStatusCode, Json<ApiError>)> {
-    let plaintext = decrypt_secret_payload(key, nonce_b64, ciphertext_b64).map_err(|error| {
+    let plaintext = keys.open(nonce_b64, ciphertext_b64).map_err(|error| {
         internal_error(format!("failed to decrypt oauth token payload: {error}"))
     })?;
     let parsed: JsonValue = serde_json::from_slice(&plaintext).map_err(|error| {
@@ -2286,7 +2280,7 @@ async fn load_user_oauth_access_token_for_session(
         return Ok(None);
     }
 
-    let Some(key) = state.config.credential_encryption_key.as_ref() else {
+    let Some(keys) = state.config.credential_keys.as_ref() else {
         return Ok(None);
     };
 
@@ -2313,7 +2307,7 @@ async fn load_user_oauth_access_token_for_session(
     let nonce_b64: String = row.get("nonce_b64");
     let ciphertext_b64: String = row.get("ciphertext_b64");
     let access_token = decrypt_oauth_access_token_payload(
-        key,
+        keys,
         &nonce_b64,
         &ciphertext_b64,
         expected_device_auth_session_id,
@@ -2367,15 +2361,11 @@ pub(crate) async fn resolve_github_device_auth_session(
             {
                 return Ok(GithubDeviceAuthSessionResolution::NotFoundOrExpired);
             }
-            let key = state
-                .config
-                .credential_encryption_key
-                .as_ref()
-                .ok_or_else(|| {
-                    github_device_auth_service_unavailable(
-                        GITHUB_DEVICE_AUTH_STORAGE_UNAVAILABLE_MESSAGE,
-                    )
-                })?;
+            let keys = state.config.credential_keys.as_ref().ok_or_else(|| {
+                github_device_auth_service_unavailable(
+                    GITHUB_DEVICE_AUTH_STORAGE_UNAVAILABLE_MESSAGE,
+                )
+            })?;
             let nonce_b64 = record.token_nonce_b64.ok_or_else(|| {
                 internal_error("GitHub device auth session is missing its encrypted token")
             })?;
@@ -2383,7 +2373,7 @@ pub(crate) async fn resolve_github_device_auth_session(
                 internal_error("GitHub device auth session is missing its encrypted token")
             })?;
             let access_token = decrypt_oauth_access_token_payload(
-                key,
+                keys,
                 &nonce_b64,
                 &ciphertext_b64,
                 Some(session_id),
@@ -2413,7 +2403,7 @@ pub(crate) async fn load_user_github_access_token(
 }
 
 fn prepare_oauth_token(
-    key: &CredentialEncryptionKey,
+    keys: &CredentialKeyRing,
     access_token: &str,
     scope: Option<&str>,
     source_session: Option<(Uuid, DateTime<Utc>)>,
@@ -2436,7 +2426,7 @@ fn prepare_oauth_token(
     let plaintext = serde_json::to_vec(&payload).map_err(|error| {
         internal_error(format!("failed to encode oauth token payload: {error}"))
     })?;
-    let (nonce_b64, ciphertext_b64) = encrypt_secret_payload(key, &plaintext).map_err(|error| {
+    let (nonce_b64, ciphertext_b64) = keys.seal(&plaintext).map_err(|error| {
         internal_error(format!("failed to encrypt oauth token payload: {error}"))
     })?;
 
@@ -2491,37 +2481,6 @@ async fn ensure_user_oauth_tokens_storage_ready(
         return Err(oauth_token_storage_unavailable());
     }
     Ok(())
-}
-
-fn encrypt_secret_payload(
-    key: &CredentialEncryptionKey,
-    plaintext: &[u8],
-) -> anyhow::Result<(String, String)> {
-    let cipher = Aes256Gcm::new_from_slice(key.as_bytes())?;
-    let nonce_bytes = Aes256Gcm::generate_nonce(&mut OsRng);
-    let ciphertext = cipher
-        .encrypt(&nonce_bytes, plaintext)
-        .map_err(|error| anyhow::anyhow!("failed to encrypt oauth payload: {error:?}"))?;
-    Ok((
-        BASE64.encode(nonce_bytes.as_slice()),
-        BASE64.encode(ciphertext),
-    ))
-}
-
-fn decrypt_secret_payload(
-    key: &CredentialEncryptionKey,
-    nonce_b64: &str,
-    ciphertext_b64: &str,
-) -> anyhow::Result<Vec<u8>> {
-    let cipher = Aes256Gcm::new_from_slice(key.as_bytes())?;
-    let nonce_raw = BASE64.decode(nonce_b64.trim().as_bytes())?;
-    anyhow::ensure!(nonce_raw.len() == 12, "invalid nonce length");
-    let nonce = Nonce::from_slice(&nonce_raw);
-    let ciphertext = BASE64.decode(ciphertext_b64.trim().as_bytes())?;
-    let plaintext = cipher
-        .decrypt(nonce, ciphertext.as_ref())
-        .map_err(|error| anyhow::anyhow!("failed to decrypt oauth payload: {error:?}"))?;
-    Ok(plaintext)
 }
 
 async fn poll_codex_token(
