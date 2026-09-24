@@ -89,7 +89,11 @@ Stop everything with `pnpm runtime:down`, which tears down the controller stack.
   outside `DEV_MODE`. When upgrading a controller that ran without them, provision both on the
   release you already run by following
   [the controller upgrade steps](../packages/runtime-controller/README.md#upgrading-a-controller-without-explicit-secrets),
-  then roll out the new release, so stored credentials stay readable.
+  then roll out the new release, so stored credentials stay readable. To replace
+  `CREDENTIAL_ENCRYPTION_KEY` later, follow
+  [the controller key rotation steps](../packages/runtime-controller/README.md#rotating-the-credential-encryption-key);
+  the old key stays decrypt-only in `CREDENTIAL_ENCRYPTION_PREVIOUS_KEYS` until every stored secret
+  is re-encrypted.
   `PROXY_CREDENTIAL_LEASE_TOKEN` is a controller-to-proxy credential only; never place it in a
   runtime/agent environment.
 - Keep runtimes ephemeral (evaporate anytime); canonical workspace state lives in git-canonical (or local-canonical for opt-out users).

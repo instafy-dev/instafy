@@ -1,13 +1,9 @@
 use std::str::FromStr;
 
-use aes_gcm::aead::{Aead, AeadCore, KeyInit, OsRng};
-use aes_gcm::{Aes256Gcm, Nonce};
 use axum::extract::{Path as AxumPath, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::routing::{get, patch, post};
 use axum::{Json, Router};
-use base64::engine::general_purpose::STANDARD as BASE64;
-use base64::Engine;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map as JsonMap, Value as JsonValue};
@@ -22,7 +18,7 @@ use crate::agent::{
     ensure_agent_token_matches_runtime_lease, extract_agent_token, verify_agent_token_with_scopes,
 };
 use crate::auth::authenticate_request;
-use crate::config::{CredentialEncryptionKey, PgPool};
+use crate::config::PgPool;
 use crate::model_defaults::{resolve_agent_model_for_provider, DEFAULT_MANAGED_AI_PROVIDER_ID};
 use crate::projects::load_project_record;
 use crate::{
@@ -176,37 +172,6 @@ fn normalize_secret_value(value: &str) -> Result<String, (StatusCode, Json<ApiEr
     Ok(trimmed.to_string())
 }
 
-pub(crate) fn encrypt_secret_payload(
-    key: &CredentialEncryptionKey,
-    plaintext: &[u8],
-) -> anyhow::Result<(String, String)> {
-    let cipher = Aes256Gcm::new_from_slice(key.as_bytes())?;
-    let nonce_bytes = Aes256Gcm::generate_nonce(&mut OsRng);
-    let ciphertext = cipher
-        .encrypt(&nonce_bytes, plaintext)
-        .map_err(|error| anyhow::anyhow!("failed to encrypt secret payload: {error:?}"))?;
-    Ok((
-        BASE64.encode(nonce_bytes.as_slice()),
-        BASE64.encode(ciphertext),
-    ))
-}
-
-pub(crate) fn decrypt_secret_payload(
-    key: &CredentialEncryptionKey,
-    nonce_b64: &str,
-    ciphertext_b64: &str,
-) -> anyhow::Result<Vec<u8>> {
-    let cipher = Aes256Gcm::new_from_slice(key.as_bytes())?;
-    let nonce_raw = BASE64.decode(nonce_b64.trim().as_bytes())?;
-    anyhow::ensure!(nonce_raw.len() == 12, "invalid nonce length");
-    let nonce = Nonce::from_slice(&nonce_raw);
-    let ciphertext = BASE64.decode(ciphertext_b64.trim().as_bytes())?;
-    let plaintext = cipher
-        .decrypt(nonce, ciphertext.as_ref())
-        .map_err(|error| anyhow::anyhow!("failed to decrypt secret payload: {error:?}"))?;
-    Ok(plaintext)
-}
-
 async fn ensure_project_secrets_table(pool: &PgPool) -> anyhow::Result<()> {
     let connection = pool.get().await?;
     connection
@@ -282,7 +247,7 @@ async fn ensure_project_secret_handle_grants_table(pool: &PgPool) -> anyhow::Res
     Ok(())
 }
 
-async fn ensure_secret_tables(pool: &PgPool) -> anyhow::Result<()> {
+pub(crate) async fn ensure_secret_tables(pool: &PgPool) -> anyhow::Result<()> {
     ensure_project_secrets_table(pool).await?;
     ensure_project_secret_grants_table(pool).await?;
     ensure_project_secret_handle_grants_table(pool).await?;
@@ -528,13 +493,14 @@ async fn create_project_secret(
     let description = normalize_optional_description(body.description)?;
     let value = normalize_secret_value(&body.value)?;
 
-    let key = state
+    let keys = state
         .config
-        .credential_encryption_key
+        .credential_keys
         .as_ref()
         .ok_or_else(|| internal_error("credential encryption key missing"))?;
 
-    let (nonce_b64, ciphertext_b64) = encrypt_secret_payload(key, value.as_bytes())
+    let (nonce_b64, ciphertext_b64) = keys
+        .seal(value.as_bytes())
         .map_err(|error| internal_error(format!("failed to encrypt secret: {error}")))?;
 
     let mut connection = state
@@ -744,15 +710,16 @@ async fn update_project_secret(
         .map(normalize_secret_value)
         .transpose()?;
 
-    let key = state
+    let keys = state
         .config
-        .credential_encryption_key
+        .credential_keys
         .as_ref()
         .ok_or_else(|| internal_error("credential encryption key missing"))?;
 
     let (nonce_b64, ciphertext_b64) = match value.as_deref() {
         Some(value) => {
-            let (nonce, cipher) = encrypt_secret_payload(key, value.as_bytes())
+            let (nonce, cipher) = keys
+                .seal(value.as_bytes())
                 .map_err(|error| internal_error(format!("failed to encrypt secret: {error}")))?;
             (Some(nonce), Some(cipher))
         }
@@ -1263,9 +1230,9 @@ async fn agent_secrets(
     let job_id = Uuid::from_str(body.job_id.trim())
         .map_err(|_| bad_request("jobId must be a valid UUID"))?;
 
-    let key = state
+    let keys = state
         .config
-        .credential_encryption_key
+        .credential_keys
         .as_ref()
         .ok_or_else(|| internal_error("credential encryption key missing"))?;
 
@@ -1410,10 +1377,9 @@ async fn agent_secrets(
             let description: Option<String> = row.get("description");
             let nonce_b64: String = row.get("nonce_b64");
             let ciphertext_b64: String = row.get("ciphertext_b64");
-            let plaintext =
-                decrypt_secret_payload(key, &nonce_b64, &ciphertext_b64).map_err(|error| {
-                    internal_error(format!("failed to decrypt secret payload: {error}"))
-                })?;
+            let plaintext = keys.open(&nonce_b64, &ciphertext_b64).map_err(|error| {
+                internal_error(format!("failed to decrypt secret payload: {error}"))
+            })?;
             let value = String::from_utf8(plaintext)
                 .map_err(|_| internal_error("secret payload must be utf-8"))?;
             env.insert(name.clone(), JsonValue::String(value));
@@ -1465,10 +1431,9 @@ async fn agent_secrets(
             let description: Option<String> = row.get("description");
             let nonce_b64: String = row.get("nonce_b64");
             let ciphertext_b64: String = row.get("ciphertext_b64");
-            let plaintext =
-                decrypt_secret_payload(key, &nonce_b64, &ciphertext_b64).map_err(|error| {
-                    internal_error(format!("failed to decrypt secret payload: {error}"))
-                })?;
+            let plaintext = keys.open(&nonce_b64, &ciphertext_b64).map_err(|error| {
+                internal_error(format!("failed to decrypt secret payload: {error}"))
+            })?;
             let value = String::from_utf8(plaintext)
                 .map_err(|_| internal_error("secret payload must be utf-8"))?;
             env.insert(name.clone(), JsonValue::String(value));

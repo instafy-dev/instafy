@@ -417,7 +417,9 @@ fn startup_refuses_the_signing_fallback_when_dev_mode_is_not_enabled() {
 fn startup_warns_while_stored_credentials_use_the_published_derived_key() {
     // Controllers that ran without either variable encrypted credentials under
     // a key anyone can derive. It stays accepted so those rows remain readable
-    // until they are re-encrypted, but every boot says so.
+    // until they are re-encrypted, but every boot says so. The controller
+    // recognises that key by its one-way id; only this test derives the key,
+    // because configuring it is the one way to see the operator's warning.
     use sha2::{Digest, Sha256};
     let published = Sha256::new()
         .chain_update(b"instafy:credential-encryption-key:v1:")
@@ -435,4 +437,184 @@ fn startup_warns_while_stored_credentials_use_the_published_derived_key() {
         .output
         .contains("CREDENTIAL_ENCRYPTION_KEY is the key derived from the published development"));
     jwks.assert_hits(1);
+}
+
+#[test]
+fn startup_refuses_invalid_previous_credential_keys_before_network_io() {
+    // A decrypt-only key that does not parse, or a "previous" key that is
+    // still the primary, is a rotation that would silently not happen.
+    let server = MockServer::start();
+    let requests = server.mock(|_when, then| {
+        then.status(500);
+    });
+    let valid = BASE64.encode([0x5au8; 32]);
+    let short = BASE64.encode([0x5bu8; 16]);
+    for (configured, diagnostic) in [
+        (
+            format!("{valid},{short}"),
+            "CREDENTIAL_ENCRYPTION_PREVIOUS_KEYS entry 2 must be a base64-encoded 32-byte key",
+        ),
+        (
+            "not*a*key".to_string(),
+            "CREDENTIAL_ENCRYPTION_PREVIOUS_KEYS entry 1 must be a base64-encoded 32-byte key",
+        ),
+        (
+            CREDENTIAL_ENCRYPTION_KEY.to_string(),
+            "previous credential encryption key 1 is the primary key",
+        ),
+        (
+            format!("{valid},{valid}"),
+            "previous credential encryption keys 1 and 2 are the same key",
+        ),
+    ] {
+        let result = run_controller(&server, |command| {
+            command.env("CREDENTIAL_ENCRYPTION_PREVIOUS_KEYS", &configured);
+        });
+        assert_normal_error(&result, diagnostic);
+        assert!(!result.output.contains(&valid));
+        assert!(!result.output.contains(&short));
+        assert!(!result.output.contains("not*a*key"));
+    }
+    requests.assert_hits(0);
+}
+
+#[test]
+fn startup_accepts_previous_credential_keys_without_echoing_them() {
+    // The rotation state: a fresh primary key and retired keys kept for
+    // decryption until the re-encryption pass has moved every row. Random
+    // keys, generated here: neither is the published development key.
+    let server = MockServer::start();
+    let jwks = jwks_fixture(&server);
+    let retired = BASE64.encode(rand::random::<[u8; 32]>());
+    let older = BASE64.encode(rand::random::<[u8; 32]>());
+    let result = run_controller(&server, |command| {
+        command.env("SERVICE_RUNTIME_USER_ID", SERVICE_ID).env(
+            "CREDENTIAL_ENCRYPTION_PREVIOUS_KEYS",
+            format!(" {retired} , {older} ,"),
+        );
+    });
+    // Configuration completed: startup got as far as the database.
+    assert_normal_error(&result, "failed to parse DATABASE_URL");
+    assert!(result
+        .output
+        .contains("credential encryption previous keys configured for decryption only"));
+    assert!(!result.output.contains("derived from the published"));
+    assert!(!result.output.contains(&retired));
+    assert!(!result.output.contains(&older));
+    jwks.assert_hits(1);
+}
+
+#[test]
+fn startup_refuses_an_unvalidated_jwks_url_before_network_io() {
+    // The JWKS decides which access tokens are accepted: it must come from
+    // the Supabase project's own https endpoint (or loopback in development).
+    let server = MockServer::start();
+    let requests = server.mock(|_when, then| {
+        then.status(500);
+    });
+    let secret = "inert-jwks-url-credential";
+    let project_port = server.port();
+    for (configured, diagnostic) in [
+        (
+            "https://169.254.169.254/auth/v1/.well-known/jwks.json".to_string(),
+            "SUPABASE_JWKS_URL must be on the host and port of the Supabase project URL",
+        ),
+        (
+            "http://jwks.example.test/auth/v1/.well-known/jwks.json".to_string(),
+            "SUPABASE_JWKS_URL must use https",
+        ),
+        (
+            format!("http://127.0.0.1:{project_port}/auth/v1/other.json"),
+            "SUPABASE_JWKS_URL must be the Supabase JWKS endpoint",
+        ),
+        (
+            format!("http://user:{secret}@127.0.0.1:{project_port}{JWKS_PATH}"),
+            "SUPABASE_JWKS_URL must not contain credentials",
+        ),
+        (
+            format!("http://127.0.0.1:{project_port}{JWKS_PATH}?apikey={secret}"),
+            "SUPABASE_JWKS_URL must not have a query string or fragment",
+        ),
+    ] {
+        let result = run_controller(&server, |command| {
+            command.env("SUPABASE_JWKS_URL", &configured);
+        });
+        assert_normal_error(&result, diagnostic);
+        assert!(!result.output.contains(secret));
+    }
+    requests.assert_hits(0);
+}
+
+#[test]
+fn startup_fetches_a_jwks_url_on_the_project_host() {
+    let server = MockServer::start();
+    let jwks = jwks_fixture(&server);
+    let result = run_controller(&server, |command| {
+        command
+            .env("SERVICE_RUNTIME_USER_ID", SERVICE_ID)
+            .env("SUPABASE_JWKS_URL", server.url(JWKS_PATH));
+    });
+    assert_normal_error(&result, "failed to parse DATABASE_URL");
+    jwks.assert_hits(1);
+}
+
+#[test]
+fn startup_reads_the_jwks_other_host_opt_in_from_the_environment() {
+    // The key set may come from another host only when the operator opts in
+    // through SUPABASE_JWKS_URL_ALLOW_OTHER_HOST. Another port on the same
+    // address counts as another host.
+    let project = MockServer::start();
+    let project_requests = project.mock(|_when, then| {
+        then.status(500);
+    });
+    let other = MockServer::start();
+    let other_jwks = jwks_fixture(&other);
+    let run = |opt_in: Option<&str>| {
+        run_controller(&project, |command| {
+            command
+                .env("SERVICE_RUNTIME_USER_ID", SERVICE_ID)
+                .env("SUPABASE_JWKS_URL", other.url(JWKS_PATH));
+            if let Some(value) = opt_in {
+                command.env("SUPABASE_JWKS_URL_ALLOW_OTHER_HOST", value);
+            }
+        })
+    };
+    for refused in [None, Some("0"), Some("off"), Some("")] {
+        let result = run(refused);
+        assert_normal_error(
+            &result,
+            "SUPABASE_JWKS_URL must be on the host and port of the Supabase project URL",
+        );
+    }
+    other_jwks.assert_hits(0);
+    for (runs, accepted) in ["1", " Yes "].into_iter().enumerate() {
+        let result = run(Some(accepted));
+        // Configuration completed: startup got as far as the database.
+        assert_normal_error(&result, "failed to parse DATABASE_URL");
+        other_jwks.assert_hits(runs + 1);
+    }
+    project_requests.assert_hits(0);
+}
+
+#[test]
+fn startup_jwks_load_does_not_follow_redirects() {
+    // A redirect would take the key set from a URL that was never validated.
+    let server = MockServer::start();
+    let redirect = server.mock(|when, then| {
+        when.method(GET).path(JWKS_PATH);
+        then.status(307)
+            .header("location", server.url("/elsewhere/jwks.json"));
+    });
+    let target = server.mock(|when, then| {
+        when.path("/elsewhere/jwks.json");
+        then.status(200).json_body(json!({ "keys": [] }));
+    });
+    let result = run_controller(&server, |command| {
+        command.env("SERVICE_RUNTIME_USER_ID", SERVICE_ID);
+    });
+    // The documented HS256 fallback takes over, as for any failed load.
+    assert_normal_error(&result, "failed to parse DATABASE_URL");
+    assert!(result.output.contains("status=307"));
+    redirect.assert_hits(1);
+    target.assert_hits(0);
 }

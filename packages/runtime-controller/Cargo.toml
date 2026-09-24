@@ -36,6 +36,8 @@ chrono-tz = "0.10"
 subtle = "2"
 tokio-stream = { version = "0.1", features = ["sync"] }
 reqwest = { version = "0.11", features = ["json", "blocking", "multipart", "stream"] }
+# The same `url` reqwest re-exports; named directly for `url::Host`.
+url = "2"
 urlencoding = "2"
 tokio-util = { version = "0.7", features = ["io"] }
 base64 = "0.21"

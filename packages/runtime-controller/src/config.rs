@@ -15,10 +15,10 @@ use bb8::Pool;
 use bb8_postgres::PostgresConnectionManager;
 use rand::distributions::Alphanumeric;
 use rand::Rng;
-use tokio::sync::RwLock;
 use tokio_postgres_rustls::MakeRustlsConnect;
 use tracing::{info, warn};
 
+use crate::credential_keys::{CredentialKeyRing, CredentialKeySlot};
 use crate::jwks;
 use crate::model_defaults::{
     default_managed_ai_model_id, default_managed_ai_model_label,
@@ -69,6 +69,17 @@ fn database_pool_size_from_values(
         .unwrap_or(if dev_mode_hint { 12 } else { 4 })
 }
 
+/// `SUPABASE_JWKS_ON_DEMAND_INTERVAL_SECONDS`: how soon after a JWKS fetch a
+/// request with an unknown key id may cause another. Anything under the floor
+/// means the default: the interval is what keeps such requests from turning
+/// into a stream of outbound fetches.
+fn jwks_on_demand_interval_seconds(configured: Option<&str>) -> u64 {
+    configured
+        .and_then(|raw| raw.trim().parse::<u64>().ok())
+        .filter(|value| *value >= 5)
+        .unwrap_or(30)
+}
+
 #[derive(Clone)]
 pub struct CredentialEncryptionKey([u8; 32]);
 
@@ -77,14 +88,17 @@ impl CredentialEncryptionKey {
         &self.0
     }
 
+    /// The DEV_MODE fallback. The key is the digest itself: never a buffer
+    /// filled with a constant and overwritten, which static analysis rightly
+    /// cannot tell apart from a hard-coded key.
     fn derive_from_user_token_secret(user_token_secret: &str) -> Self {
-        let mut hasher = Sha256::new();
-        hasher.update(b"instafy:credential-encryption-key:v1:");
-        hasher.update(user_token_secret.as_bytes());
-        let digest = hasher.finalize();
-        let mut key = [0u8; 32];
-        key.copy_from_slice(&digest);
-        Self(key)
+        Self(
+            Sha256::new()
+                .chain_update(b"instafy:credential-encryption-key:v1:")
+                .chain_update(user_token_secret.as_bytes())
+                .finalize()
+                .into(),
+        )
     }
 
     #[cfg(test)]
@@ -93,15 +107,19 @@ impl CredentialEncryptionKey {
         Self::derive_from_user_token_secret(seed)
     }
 
-    fn from_base64(raw: &str) -> anyhow::Result<Self> {
-        let decoded = BASE64.decode(raw.trim().as_bytes())?;
-        anyhow::ensure!(
-            decoded.len() == 32,
-            "CREDENTIAL_ENCRYPTION_KEY must decode to 32 bytes"
-        );
-        let mut key = [0u8; 32];
-        key.copy_from_slice(&decoded);
-        Ok(Self(key))
+    /// A fresh random key, for tests that must not depend on any fixed key.
+    #[cfg(test)]
+    #[allow(dead_code)]
+    pub(crate) fn random_for_test() -> Self {
+        Self(rand::random())
+    }
+
+    /// Decode a configured key. The error never carries decoder detail, which
+    /// would quote a byte and its offset from the value.
+    fn from_base64(raw: &str) -> Option<Self> {
+        let decoded = BASE64.decode(raw.trim().as_bytes()).ok()?;
+        let key: [u8; 32] = decoded.try_into().ok()?;
+        Some(Self(key))
     }
 }
 
@@ -175,7 +193,9 @@ fn resolve_credential_encryption_key(
     user_token_secret: &str,
 ) -> anyhow::Result<CredentialEncryptionKey> {
     match configured.map(str::trim).filter(|value| !value.is_empty()) {
-        Some(raw) => CredentialEncryptionKey::from_base64(raw),
+        Some(raw) => CredentialEncryptionKey::from_base64(raw).ok_or_else(|| {
+            anyhow::anyhow!("CREDENTIAL_ENCRYPTION_KEY must be a base64-encoded 32-byte key")
+        }),
         None if dev_mode => Ok(CredentialEncryptionKey::derive_from_user_token_secret(
             user_token_secret,
         )),
@@ -188,15 +208,67 @@ fn resolve_credential_encryption_key(
     }
 }
 
-/// Whether this is the key earlier releases derived from the published
-/// development USER_TOKEN_SECRET. Anyone can compute it, so the encrypted rows
-/// are readable by anyone who can read them at all: a service-role key, a
-/// database role, a backup or any other SQL read path. It is still accepted,
-/// because refusing it would strand those rows until they are re-encrypted,
-/// but the controller warns on every boot while it is in use.
-fn is_published_credential_encryption_key(key: &CredentialEncryptionKey) -> bool {
-    key.as_bytes()
-        == CredentialEncryptionKey::derive_from_user_token_secret(DEV_USER_TOKEN_SECRET).as_bytes()
+/// The warning to log on every boot while the key earlier releases derived
+/// from the published development USER_TOKEN_SECRET is configured, given
+/// where the ring holds it (see
+/// [`CredentialKeyRing::published_development_key_slot`], which recognises it
+/// by its one-way id; the controller does not know the key itself).
+///
+/// Anyone can compute that key, so rows under it are readable by anyone who
+/// can read them at all: a service-role key, a database role, a backup or any
+/// other SQL read path. It is still accepted, because refusing it would strand
+/// those rows until they are re-encrypted. As the primary key it is expected
+/// under DEV_MODE, which derives it when nothing else is configured.
+fn published_development_key_warning(
+    slot: Option<CredentialKeySlot>,
+    dev_mode: bool,
+) -> Option<&'static str> {
+    match slot? {
+        CredentialKeySlot::Primary if dev_mode => None,
+        CredentialKeySlot::Primary => Some(
+            "CREDENTIAL_ENCRYPTION_KEY is the key derived from the published development \
+             USER_TOKEN_SECRET. Anyone who can read the encrypted rows, through any \
+             service-role or SQL read path, can decrypt them; re-encrypt them under a \
+             freshly generated key: set it as CREDENTIAL_ENCRYPTION_KEY, move this one to \
+             CREDENTIAL_ENCRYPTION_PREVIOUS_KEYS and run the credential re-encryption",
+        ),
+        CredentialKeySlot::Previous(_) => Some(
+            "CREDENTIAL_ENCRYPTION_PREVIOUS_KEYS lists the key derived from the published \
+             development USER_TOKEN_SECRET. Rows under it stay readable to anyone who can \
+             read them until the credential re-encryption moves them to the primary key; \
+             remove it once the census reports none under it",
+        ),
+    }
+}
+
+/// Build the key ring from the primary key and
+/// `CREDENTIAL_ENCRYPTION_PREVIOUS_KEYS`: comma-separated base64 32-byte keys
+/// that only decrypt, so rows sealed before a rotation stay readable until the
+/// re-encryption pass moves them to the primary key. Empty entries are ignored;
+/// every other entry must be a valid, distinct key that is not the primary.
+/// Messages name entries by position and never include a value.
+fn resolve_credential_key_ring(
+    primary: CredentialEncryptionKey,
+    configured_previous: Option<&str>,
+) -> anyhow::Result<CredentialKeyRing> {
+    let previous = configured_previous
+        .unwrap_or_default()
+        .split(',')
+        .map(str::trim)
+        .filter(|entry| !entry.is_empty())
+        .enumerate()
+        .map(|(index, entry)| {
+            CredentialEncryptionKey::from_base64(entry).ok_or_else(|| {
+                anyhow::anyhow!(
+                    "CREDENTIAL_ENCRYPTION_PREVIOUS_KEYS entry {} must be a base64-encoded \
+                     32-byte key",
+                    index + 1
+                )
+            })
+        })
+        .collect::<anyhow::Result<Vec<_>>>()?;
+    CredentialKeyRing::new(primary, previous)
+        .map_err(|error| anyhow::anyhow!("CREDENTIAL_ENCRYPTION_PREVIOUS_KEYS: {error}"))
 }
 
 pub(crate) const DEFAULT_SERVICE_RUNTIME_USER_EMAIL: &str = "service-runtime@instafy.dev";
@@ -398,9 +470,14 @@ pub struct AppConfig {
     pub redis_namespace: Option<String>,
     pub redis_events_channel: Option<String>,
     pub _supabase_project_url: String,
-    pub supabase_jwks_url: String,
-    pub supabase_jwks: std::sync::Arc<RwLock<jwks::SupabaseJwks>>,
+    /// Read once at startup, where the JWKS refresher takes its own copy.
+    /// Requests never fetch from it: see [`jwks::SupabaseJwksCache`].
+    pub supabase_jwks_url: jwks::SupabaseJwksUrl,
+    pub supabase_jwks: jwks::SupabaseJwksCache,
     pub supabase_jwks_refresh_seconds: u64,
+    /// Floor between a JWKS fetch and one a request with an unknown key id
+    /// asks for.
+    pub supabase_jwks_on_demand_interval_seconds: u64,
     pub supabase_jwks_refresh_enabled: bool,
     pub controller_internal_token: Option<String>,
     pub proxy_credential_lease_token: Option<String>,
@@ -422,7 +499,9 @@ pub struct AppConfig {
     pub proxy_signing_secret: Option<String>,
     pub proxy_base_url: Option<String>,
     pub proxy_token_ttl_seconds: i64,
-    pub credential_encryption_key: Option<CredentialEncryptionKey>,
+    /// Seals stored secrets under `CREDENTIAL_ENCRYPTION_KEY` and also opens
+    /// rows under `CREDENTIAL_ENCRYPTION_PREVIOUS_KEYS`. `None` only in tests.
+    pub credential_keys: Option<CredentialKeyRing>,
     /// Projects explicitly permitted to persist the shared hosted-browser
     /// profile. Empty by default: durable shared logins are a privacy-sensitive
     /// capability and must never be enabled from client-supplied metadata.
@@ -654,13 +733,23 @@ impl AppConfig {
             std::env::var("CREDENTIAL_ENCRYPTION_KEY").ok().as_deref(),
             &user_token_secret,
         )?;
-        if !dev_mode && is_published_credential_encryption_key(&credential_encryption_key) {
-            warn!(
-                "CREDENTIAL_ENCRYPTION_KEY is the key derived from the published development \
-                 USER_TOKEN_SECRET. Anyone who can read the encrypted rows, through any \
-                 service-role or SQL read path, can decrypt them; re-encrypt them under a \
-                 freshly generated key"
+        let credential_keys = resolve_credential_key_ring(
+            credential_encryption_key,
+            std::env::var("CREDENTIAL_ENCRYPTION_PREVIOUS_KEYS")
+                .ok()
+                .as_deref(),
+        )?;
+        if !credential_keys.previous().is_empty() {
+            info!(
+                previous_keys = credential_keys.previous().len(),
+                "credential encryption previous keys configured for decryption only"
             );
+        }
+        if let Some(warning) = published_development_key_warning(
+            credential_keys.published_development_key_slot(),
+            dev_mode,
+        ) {
+            warn!("{warning}");
         }
 
         let port = std::env::var("PORT")
@@ -711,11 +800,19 @@ impl AppConfig {
             .trim()
             .trim_end_matches('/')
             .to_string();
-        let supabase_jwks_url = std::env::var("SUPABASE_JWKS_URL")
-            .ok()
-            .map(|raw| raw.trim().to_string())
-            .filter(|value| !value.is_empty())
-            .unwrap_or_else(|| format!("{}/auth/v1/.well-known/jwks.json", supabase_project_url));
+        // Every JWKS fetch, at startup and on refresh, goes to this validated
+        // URL: the key set it serves decides which access tokens are accepted.
+        let supabase_jwks_url = jwks::SupabaseJwksUrl::resolve(
+            &supabase_project_url,
+            std::env::var("SUPABASE_JWKS_URL").ok().as_deref(),
+            jwks::JwksUrlPolicy {
+                dev_mode,
+                allow_other_host: std::env::var("SUPABASE_JWKS_URL_ALLOW_OTHER_HOST")
+                    .ok()
+                    .map(|value| value.trim().to_lowercase())
+                    .is_some_and(|value| matches!(value.as_str(), "1" | "true" | "yes" | "on")),
+            },
+        )?;
         let shared_hmac_secret = std::env::var("SUPABASE_JWT_SECRET")
             .or_else(|_| std::env::var("JWT_SECRET"))
             .ok()
@@ -738,9 +835,10 @@ impl AppConfig {
                     );
                     // Refresh stays ENABLED. Returning false here latched the
                     // process into HS256 for its whole lifetime: both recovery
-                    // paths (the periodic refresher in main.rs and the
-                    // retry-on-auth-failure in auth.rs) are gated on this flag
-                    // and nothing ever set it back. A transient fetch failure
+                    // paths (the refresher's periodic fetch and the fetch an
+                    // unknown key id asks it for) exist only when this flag
+                    // spawns the refresher in main.rs, and nothing ever set it
+                    // back. A transient fetch failure
                     // at boot therefore became permanent, and stayed invisible
                     // until the project rotated to asymmetric signing keys --
                     // at which point every token failed and the outage was
@@ -775,6 +873,11 @@ impl AppConfig {
             .and_then(|raw| raw.parse::<u64>().ok())
             .filter(|value| *value >= 30)
             .unwrap_or(300);
+        let supabase_jwks_on_demand_interval_seconds = jwks_on_demand_interval_seconds(
+            std::env::var("SUPABASE_JWKS_ON_DEMAND_INTERVAL_SECONDS")
+                .ok()
+                .as_deref(),
+        );
         let controller_internal_token = std::env::var("CONTROLLER_INTERNAL_TOKEN")
             .ok()
             .map(|value| value.trim().to_string())
@@ -1199,8 +1302,9 @@ impl AppConfig {
             redis_events_channel,
             _supabase_project_url: supabase_project_url,
             supabase_jwks_url,
-            supabase_jwks: std::sync::Arc::new(RwLock::new(supabase_jwks)),
+            supabase_jwks: jwks::SupabaseJwksCache::new(supabase_jwks),
             supabase_jwks_refresh_seconds,
+            supabase_jwks_on_demand_interval_seconds,
             supabase_jwks_refresh_enabled,
             controller_internal_token,
             proxy_credential_lease_token,
@@ -1218,7 +1322,7 @@ impl AppConfig {
             proxy_signing_secret,
             proxy_base_url,
             proxy_token_ttl_seconds,
-            credential_encryption_key: Some(credential_encryption_key),
+            credential_keys: Some(credential_keys),
             browser_profile_persist_project_ids,
             browser_profile_snapshot_secs,
             progress_callback_secret,
@@ -1395,10 +1499,14 @@ impl StripeConfig {
 #[cfg(test)]
 mod tests {
     use super::{
-        database_pool_size_from_values, is_published_credential_encryption_key,
-        normalize_public_app_url, parse_browser_profile_persist_project_ids,
-        resolve_credential_encryption_key, resolve_user_token_secret, CredentialEncryptionKey,
-        DEV_USER_TOKEN_SECRET,
+        database_pool_size_from_values, jwks_on_demand_interval_seconds, normalize_public_app_url,
+        parse_browser_profile_persist_project_ids, published_development_key_warning,
+        resolve_credential_encryption_key, resolve_credential_key_ring, resolve_user_token_secret,
+        CredentialEncryptionKey, DEV_USER_TOKEN_SECRET,
+    };
+    use crate::credential_keys::{
+        credential_key_id, CredentialKeySlot, MAX_PREVIOUS_CREDENTIAL_KEYS,
+        PUBLISHED_DEVELOPMENT_KEY_ID,
     };
     use base64::Engine;
     use uuid::Uuid;
@@ -1499,13 +1607,119 @@ mod tests {
     }
 
     #[test]
-    fn the_key_derived_from_the_published_signing_secret_is_recognised() {
-        assert!(is_published_credential_encryption_key(
-            &CredentialEncryptionKey::for_test(DEV_USER_TOKEN_SECRET)
-        ));
-        assert!(!is_published_credential_encryption_key(
-            &CredentialEncryptionKey::for_test(STRONG_SECRET)
-        ));
+    fn the_published_development_key_id_names_the_dev_mode_fallback_key() {
+        // The only unit test that holds the published development key: the
+        // DEV_MODE fallback derives it when nothing is configured, and only
+        // its one-way id is compared. Nothing here re-implements the
+        // derivation or seals and opens with it.
+        let fallback = resolve_credential_encryption_key(true, None, DEV_USER_TOKEN_SECRET)
+            .expect("DEV_MODE derives the fallback key");
+        assert_eq!(credential_key_id(&fallback), PUBLISHED_DEVELOPMENT_KEY_ID);
+        let strong = resolve_credential_encryption_key(true, None, STRONG_SECRET)
+            .expect("DEV_MODE derives the fallback key");
+        assert_ne!(credential_key_id(&strong), PUBLISHED_DEVELOPMENT_KEY_ID);
+    }
+
+    #[test]
+    fn the_published_development_key_warns_wherever_it_is_configured() {
+        let primary = published_development_key_warning(Some(CredentialKeySlot::Primary), false)
+            .expect("the published key as the primary warns outside DEV_MODE");
+        assert!(primary.starts_with("CREDENTIAL_ENCRYPTION_KEY is the key derived"));
+        // DEV_MODE derives it as the primary when nothing else is configured.
+        assert_eq!(
+            published_development_key_warning(Some(CredentialKeySlot::Primary), true),
+            None
+        );
+        for dev_mode in [false, true] {
+            let previous =
+                published_development_key_warning(Some(CredentialKeySlot::Previous(2)), dev_mode)
+                    .expect("the published key as a previous key always warns");
+            assert!(previous.starts_with("CREDENTIAL_ENCRYPTION_PREVIOUS_KEYS lists the key"));
+            assert_eq!(published_development_key_warning(None, dev_mode), None);
+        }
+    }
+
+    fn encoded(bytes: [u8; 32]) -> String {
+        base64::engine::general_purpose::STANDARD.encode(bytes)
+    }
+
+    #[test]
+    fn previous_credential_keys_are_optional_and_decrypt_only() {
+        let primary = CredentialEncryptionKey::for_test("primary");
+        for configured in [None, Some(""), Some(" , ,\n")] {
+            let ring = resolve_credential_key_ring(primary.clone(), configured)
+                .expect("no previous keys is the normal configuration");
+            assert!(ring.previous().is_empty());
+            assert_eq!(ring.primary().as_bytes(), primary.as_bytes());
+        }
+
+        let legacy = CredentialEncryptionKey::random_for_test();
+        let configured = format!(" {} ,{},", encoded([9u8; 32]), encoded(*legacy.as_bytes()));
+        let ring = resolve_credential_key_ring(primary.clone(), Some(&configured))
+            .expect("two valid previous keys");
+        assert_eq!(ring.primary().as_bytes(), primary.as_bytes());
+        assert_eq!(ring.previous().len(), 2);
+        assert_eq!(ring.previous()[0].as_bytes(), &[9u8; 32]);
+        assert_eq!(ring.previous()[1].as_bytes(), legacy.as_bytes());
+        assert_eq!(
+            ring.slot_of_key_id(&credential_key_id(&legacy)),
+            Some(CredentialKeySlot::Previous(1))
+        );
+    }
+
+    #[test]
+    fn previous_credential_keys_are_validated_without_echoing_values() {
+        let primary = CredentialEncryptionKey::for_test("primary");
+        let valid = encoded([3u8; 32]);
+        let short = base64::engine::general_purpose::STANDARD.encode([4u8; 16]);
+        let long = base64::engine::general_purpose::STANDARD.encode([5u8; 33]);
+        let not_base64 = "not*a*key*at*all";
+        for (configured, expected) in [
+            (
+                format!("{valid},{short}"),
+                "entry 2 must be a base64-encoded 32-byte key",
+            ),
+            (long.clone(), "entry 1 must be a base64-encoded 32-byte key"),
+            (
+                not_base64.to_string(),
+                "entry 1 must be a base64-encoded 32-byte key",
+            ),
+            (
+                encoded(*primary.as_bytes()),
+                "previous credential encryption key 1 is the primary key",
+            ),
+            (format!("{valid},{valid}"), "keys 1 and 2 are the same key"),
+        ] {
+            let error = resolve_credential_key_ring(primary.clone(), Some(&configured))
+                .expect_err("invalid previous keys must refuse startup")
+                .to_string();
+            assert!(
+                error.starts_with("CREDENTIAL_ENCRYPTION_PREVIOUS_KEYS"),
+                "{error}"
+            );
+            assert!(error.contains(expected), "{error}");
+            for value in [valid.as_str(), short.as_str(), long.as_str(), not_base64] {
+                assert!(!error.contains(value), "error echoed a configured value");
+            }
+            assert!(!error.contains(&encoded(*primary.as_bytes())));
+        }
+
+        let too_many = (0..=MAX_PREVIOUS_CREDENTIAL_KEYS as u8)
+            .map(|index| encoded([index + 10; 32]))
+            .collect::<Vec<_>>()
+            .join(",");
+        assert!(resolve_credential_key_ring(primary, Some(&too_many)).is_err());
+    }
+
+    #[test]
+    fn a_malformed_primary_key_is_refused_without_decoder_detail() {
+        let error = resolve_credential_encryption_key(false, Some("abc*def"), STRONG_SECRET)
+            .expect_err("malformed key")
+            .to_string();
+        assert_eq!(
+            error,
+            "CREDENTIAL_ENCRYPTION_KEY must be a base64-encoded 32-byte key"
+        );
     }
 
     /// The HS256 fallback must never disable JWKS refresh.
@@ -1527,8 +1741,8 @@ mod tests {
             !source.contains(&latched),
             "the HS256 fallback must keep JWKS refresh enabled: disabling it latches the \
              process into HS256 for its entire lifetime, because both recovery paths \
-             (main.rs periodic refresher, auth.rs retry-on-auth-failure) are gated on that \
-             flag and nothing ever sets it back"
+             (the refresher's periodic fetch and the on-demand fetch for an unknown key id) \
+             exist only when that flag spawns the refresher, and nothing ever sets it back"
         );
         assert_eq!(
             source.matches(&healing).count(),
@@ -1553,6 +1767,21 @@ mod tests {
         // and forms a valid rustls client configuration at startup rather
         // than on the first pooled connection.
         let _connector = super::database_tls();
+    }
+
+    #[test]
+    fn jwks_on_demand_interval_keeps_its_floor() {
+        assert_eq!(jwks_on_demand_interval_seconds(None), 30);
+        assert_eq!(jwks_on_demand_interval_seconds(Some(" 45 ")), 45);
+        assert_eq!(jwks_on_demand_interval_seconds(Some("5")), 5);
+        // Below the floor, or unreadable, is the default, never "no limit".
+        for configured in ["0", "4", "-1", "", "soon"] {
+            assert_eq!(
+                jwks_on_demand_interval_seconds(Some(configured)),
+                30,
+                "{configured:?}"
+            );
+        }
     }
 
     #[test]

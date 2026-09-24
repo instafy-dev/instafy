@@ -201,11 +201,12 @@ pub(crate) fn build_app_config(private_key: &str, public_key: &str, key_id: &str
         redis_namespace: None,
         redis_events_channel: None,
         _supabase_project_url: "".to_string(),
-        supabase_jwks_url: "".to_string(),
-        supabase_jwks: Arc::new(tokio::sync::RwLock::new(SupabaseJwks::from_hmac_secret(
+        supabase_jwks_url: crate::jwks::SupabaseJwksUrl::for_test("https://supabase.invalid"),
+        supabase_jwks: crate::jwks::SupabaseJwksCache::new(SupabaseJwks::from_hmac_secret(
             "secret",
-        ))),
+        )),
         supabase_jwks_refresh_seconds: 300,
+        supabase_jwks_on_demand_interval_seconds: 30,
         supabase_jwks_refresh_enabled: false,
         controller_internal_token: Some("internal".to_string()),
         proxy_credential_lease_token: Some("credential-lease".to_string()),
@@ -219,7 +220,7 @@ pub(crate) fn build_app_config(private_key: &str, public_key: &str, key_id: &str
         proxy_signing_secret: None,
         proxy_base_url: None,
         proxy_token_ttl_seconds: 1800,
-        credential_encryption_key: None,
+        credential_keys: None,
         browser_profile_persist_project_ids: vec![],
         browser_profile_snapshot_secs: 30,
         progress_callback_secret: None,
@@ -1343,9 +1344,10 @@ async fn active_managed_cloud_runtime_can_put_and_get_browser_profile() -> anyho
         "managed-cloud-browser-profile-boundary",
     );
     config.browser_profile_persist_project_ids.push(project_id);
-    config.credential_encryption_key = Some(crate::config::CredentialEncryptionKey::for_test(
-        "managed-cloud-browser-profile-test-key",
-    ));
+    config.credential_keys = Some(
+        crate::config::CredentialEncryptionKey::for_test("managed-cloud-browser-profile-test-key")
+            .into(),
+    );
     let agent_token = crate::auth::issue_agent_token_for_runtime(
         &config,
         &project_id,
@@ -28945,9 +28947,10 @@ async fn credential_lease_refuses_revoked_credentials_even_with_a_default() -> a
         test_origin_public_key(),
         "revoked-credential-lease-test",
     );
-    config.credential_encryption_key = Some(crate::config::CredentialEncryptionKey::for_test(
-        "revoked-credential-lease-test-key",
-    ));
+    config.credential_keys = Some(
+        crate::config::CredentialEncryptionKey::for_test("revoked-credential-lease-test-key")
+            .into(),
+    );
     let state = build_test_state(pool.clone(), config);
 
     // Revoking a credential is the user's stop lever: the lease must 404 even
