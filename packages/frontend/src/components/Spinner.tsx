@@ -1,6 +1,6 @@
 import type { HTMLAttributes } from "react";
 
-export type SpinnerTone = "slate" | "primary" | "secondary" | "rose";
+export type SpinnerTone = "slate" | "primary" | "secondary" | "rose" | "current";
 export type SpinnerSize = "xs" | "sm" | "md";
 
 export interface SpinnerProps extends Omit<HTMLAttributes<HTMLSpanElement>, "children"> {
@@ -19,6 +19,9 @@ const TONE_CLASSES: Record<SpinnerTone, string> = {
   primary: "border-primary-200 border-t-primary-500 dark:border-primary-500/30 dark:border-t-primary-400",
   secondary: "border-secondary-200 border-t-secondary-500 dark:border-secondary-500/30 dark:border-t-secondary-300",
   rose: "border-rose-200 border-t-rose-500 dark:border-rose-500/30 dark:border-t-rose-300",
+  // Follows the surrounding text colour, so a spinner inside any Button
+  // variant or badge matches its label without a per-variant tone.
+  current: "border-current/25 border-t-current",
 };
 
 export function Spinner({ tone = "slate", size = "sm", className, ...props }: SpinnerProps) {

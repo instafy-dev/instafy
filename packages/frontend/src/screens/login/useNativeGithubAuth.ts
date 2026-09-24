@@ -36,7 +36,7 @@ export const OAUTH_REDIRECT_TARGET_KEY = "instafy.login.oauthRedirectTarget";
 // click meant.
 export type LoginOAuthProvider = "github" | "google";
 
-const OAUTH_PROVIDER_LABELS: Record<LoginOAuthProvider, string> = {
+export const OAUTH_PROVIDER_LABELS: Record<LoginOAuthProvider, string> = {
   github: "GitHub",
   google: "Google",
 };
@@ -56,22 +56,24 @@ export function oauthLoginQueryParams(anonKey: string | null | undefined): Recor
 interface UseNativeGithubAuthOptions {
   redirectTarget: string;
   setError: (value: string | null) => void;
-  setMessage: (value: string | null) => void;
-  setSubmitting: (value: boolean) => void;
+  /** The provider whose button shows the pending spinner, or null. */
+  setPendingProvider: (value: LoginOAuthProvider | null) => void;
+  /** The provider the desktop shell handed off to the system browser, or null. */
+  setAwaitingBrowser: (value: LoginOAuthProvider | null) => void;
 }
 
 /**
- * All GitHub OAuth plumbing for the login screen — web redirect flow plus the
+ * All GitHub OAuth plumbing for the login screen: web redirect flow plus the
  * Capacitor native flow (custom tabs, deep-link callback handling, resume
  * timeouts, telemetry). Owns no UI: status surfaces through the setters the
- * page passes in, so the page's error/message/submitting state stays shared
- * with the email/OTP flows.
+ * page passes in (pending provider, desktop browser wait, error), so the page
+ * keeps one pending control shared with the email/OTP flows.
  */
 export function useNativeGithubAuth({
   redirectTarget,
   setError,
-  setMessage,
-  setSubmitting,
+  setPendingProvider,
+  setAwaitingBrowser,
 }: UseNativeGithubAuthOptions) {
   const nativeAuthBrowserListenerRef = useRef<{ remove: () => Promise<void> | void } | null>(null);
   const nativeAuthBrowserFinishedTimeoutRef = useRef<number | null>(null);
@@ -134,9 +136,9 @@ export function useNativeGithubAuth({
       clearPendingNativeAuthAttempt();
       clearNativeAuthLaunchState();
       writeNativeAuthError(nextMessage);
-      setMessage(null);
+      setAwaitingBrowser(null);
       setError(nextMessage);
-      setSubmitting(false);
+      setPendingProvider(null);
       postGithubAuthTelemetry(kind, "warning", nextMessage, pendingAttempt, metadata);
     },
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -159,9 +161,9 @@ export function useNativeGithubAuth({
       clearPendingNativeAuthAttempt();
       clearNativeAuthLaunchState();
       writeNativeAuthError(null);
-      setMessage(null);
+      setAwaitingBrowser(null);
       setError(null);
-      setSubmitting(false);
+      setPendingProvider(null);
     },
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [],
@@ -238,9 +240,9 @@ export function useNativeGithubAuth({
       clearNativeAuthCallbackAttemptId();
       clearPendingNativeAuthAttempt();
       clearNativeAuthLaunchState();
-      setMessage(null);
+      setAwaitingBrowser(null);
       setError(message);
-      setSubmitting(false);
+      setPendingProvider(null);
     };
 
     const handleSuccess = () => {
@@ -251,9 +253,9 @@ export function useNativeGithubAuth({
       clearNativeAuthCallbackAttemptId();
       clearPendingNativeAuthAttempt();
       clearNativeAuthLaunchState();
-      setMessage(null);
+      setAwaitingBrowser(null);
       setError(null);
-      setSubmitting(false);
+      setPendingProvider(null);
     };
 
     window.addEventListener(NATIVE_AUTH_ERROR_EVENT, handleError);
@@ -535,6 +537,19 @@ export function useNativeGithubAuth({
     };
   }, [completePendingGithubLoginAttempt, failPendingGithubLoginAttempt]);
 
+  // A web sign-in keeps its button pending until the page unloads. Coming back
+  // with the browser's Back button can restore that page from the back/forward
+  // cache, spinner and all, so release the pending control when that happens.
+  useEffect(() => {
+    const handlePageShow = (event: PageTransitionEvent) => {
+      if (event.persisted) {
+        setPendingProvider(null);
+      }
+    };
+    window.addEventListener("pageshow", handlePageShow);
+    return () => window.removeEventListener("pageshow", handlePageShow);
+  }, [setPendingProvider]);
+
   const handleOAuthLogin = useCallback(async (provider: LoginOAuthProvider) => {
     const providerLabel = OAUTH_PROVIDER_LABELS[provider];
     if (typeof window === "undefined") {
@@ -546,8 +561,8 @@ export function useNativeGithubAuth({
     }
     resetNativeAuthState();
     setError(null);
-    setMessage(null);
-    setSubmitting(true);
+    setAwaitingBrowser(null);
+    setPendingProvider(provider);
     let nativeAttempt: PendingNativeAuthAttempt | null = null;
     try {
       const redirectTo = resolveSupabaseRedirectTo("/login");
@@ -593,7 +608,7 @@ export function useNativeGithubAuth({
           // ignore browsers that do not support browserFinished
         }
         await Browser.open({ url });
-        setSubmitting(false);
+        setPendingProvider(null);
         return;
       }
 
@@ -616,8 +631,8 @@ export function useNativeGithubAuth({
           throw new Error(`Unable to start ${providerLabel} login.`);
         }
         await openDesktopExternalUrl(url);
-        setMessage(`Finish signing in with ${providerLabel} in your browser…`);
-        setSubmitting(false);
+        setAwaitingBrowser(provider);
+        setPendingProvider(null);
         return;
       }
 
@@ -628,7 +643,6 @@ export function useNativeGithubAuth({
       if (result.error) {
         throw result.error;
       }
-      setMessage(`Redirecting to ${providerLabel}…`);
     } catch (err) {
       const details = err instanceof Error ? err.message : `Unable to continue with ${providerLabel}.`;
       if (nativeAttempt) {
@@ -638,7 +652,7 @@ export function useNativeGithubAuth({
         postGithubAuthTelemetry(`auth.login.${provider}.start_failed`, "error", details, nativeAttempt);
       }
       setError(details);
-      setSubmitting(false);
+      setPendingProvider(null);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [redirectTarget, resetNativeAuthState]);

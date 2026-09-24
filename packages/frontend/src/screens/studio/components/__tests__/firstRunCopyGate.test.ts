@@ -53,6 +53,14 @@ const GATED_FILES = [
   resolve(frontend, "tests/playwright/component/chat-getting-started-card.spec.ts"),
   resolve(frontend, "tests/playwright/smoke/chat-onboarding.spec.ts"),
   resolve(frontend, "tests/playwright/smoke/skills-import.spec.ts"),
+  // Sign-in is the step before first run, and its pending states share the
+  // Button primitive with the Connect sheet.
+  resolve(frontend, "src/components/Button.tsx"),
+  resolve(frontend, "src/screens/LoginPage.tsx"),
+  resolve(frontend, "src/screens/login/useNativeGithubAuth.ts"),
+  resolve(frontend, "src/components/__tests__/Button.test.tsx"),
+  resolve(frontend, "src/screens/__tests__/LoginPagePendingState.test.tsx"),
+  resolve(frontend, "src/screens/login/__tests__/useNativeGithubAuthPending.test.tsx"),
   resolve(repo, "docs/Product.md"),
 ];
 
