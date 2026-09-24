@@ -560,6 +560,11 @@ export function StudioTopBar({ mobileNavigation, newChatInSidebar = false, conte
             <MobileStudioNavigationHeader
               key={JSON.stringify([currentUserId, activeProjectId, mobileNavigation.visitKey])}
               {...mobileNavigation}
+              historyInMenu={showTouchBottomDock && !topbarLocationOverride && (
+                activeWorkspaceTab?.kind === "conversation" ||
+                activeWorkspaceTab?.kind === "jobThread" ||
+                (activeWorkspaceTab?.kind === "panel" && activeWorkspaceTab.panel === "chat")
+              )}
               onOpenPicker={onToggleSidebar ?? mobileNavigation.onOpenPicker}
               title={topbarLocationTitle}
               titleIcon={topbarLocationOverride ? topbarLocationOverride.icon : activeWorkspaceTab?.icon}

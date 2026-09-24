@@ -193,10 +193,13 @@ still requires verification on a phone, even when the simulated-event test passe
 ## iOS release boundary
 
 Studio's compact layouts keep Back and Forward together in the header, including
-Home, account settings and search results. Unavailable directions are dimmed and
+Home, account settings and search results. Touch conversations put that pair in the header's
+More menu and use an icon-only **Back to chats** destination in the existing composer row.
+This destination opens the current space's full chat list without sending or clearing the draft.
+Unavailable history directions are dimmed and
 disabled; the pair is hidden when neither direction nor a saved search is available.
 Both use the same React Router history as the browser and Electron renderer.
-Direct entries reach chats through the sidebar, without a changing history shortcut.
+Direct conversation entries reach Chats through that same fixed composer destination.
 Choosing a new destination after Back clears the forward branch, as in browser history.
 Do not confuse these controls with navigation
 inside the separate Shared/Personal browser. No native WKWebView swipe-navigation setting is
@@ -206,8 +209,22 @@ When no registered surface remains, Capacitor's normal Back behavior is restored
 must separately verify keyboard dismissal, drill-in dismissal and underlying route navigation.
 
 Only Home, Chats history and Spaces overviews have a bottom destination bar; conversations,
-job threads, editors and settings details do not, even with the keyboard closed. The compact
-navigation drawer opens from the fixed sidebar button at the far left of the header;
+job threads, editors and settings details do not, even with the keyboard closed. The touch
+composer's Chats control remains in its writing row with the keyboard open; no second row is added.
+When the software keyboard leaves a touch conversation less than 240px of visible height,
+the org/space header yields so the conversation header and composer do not overlap. It returns
+when the keyboard closes or the viewport has enough room again.
+
+The native iPhone shell hides the system Previous/Next/Done keyboard accessory row
+throughout the app, including chat, search, login, profile, organization/space settings
+and agent editors. Tapping non-interactive content outside a field dismisses the keyboard
+without clearing the draft. Fields, labels and action buttons retain their existing
+focus behavior, and scrolling does not dismiss editing. Hardware Tab navigation and
+each field's Return/Enter behavior are unchanged. This uses the Capacitor Keyboard
+plugin with native viewport resizing and requires an updated native binary. Older
+shells and Safari keep their system behavior; Android's keyboard policy is unchanged.
+
+The compact navigation drawer opens from the fixed sidebar button at the far left of the header;
 the current tab's icon and title are separate from that control. An overview's bar
 yields to a resized software keyboard.
 The viewport observer does not install a native keyboard listener or alter resize/accessory policy.

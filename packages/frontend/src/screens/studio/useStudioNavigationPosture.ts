@@ -39,12 +39,12 @@ export function useStudioNavigationPosture() {
   const isLargeScreen = useStudioDesktopLayout();
   const touchLikeInput = useTouchLikeInput();
 
-  // Both compact postures use the same header. Mouse windows also retain the
-  // composer shortcut; touch keeps navigation out of the composer.
-  const showComposerNavigationButton = !isLargeScreen && !touchLikeInput;
+  // Compact touch chats return to the Chats overview from the composer.
+  // Fine-pointer windows retain their existing navigation drawer shortcut.
+  const showComposerNavigationButton = !isLargeScreen;
   const showTouchBottomDock = touchLikeInput && !isLargeScreen;
   // This is layout eligibility, not dock visibility: only overview surfaces
-  // render it. Conversations use their header and keep the composer unchanged.
+  // render it. Conversations use the existing single-row composer instead.
   const showComposerHomeButton = false;
   const showTopbarHomeButton = false;
 

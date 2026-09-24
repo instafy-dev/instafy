@@ -4,6 +4,7 @@ import type { MobileOverviewSection } from "../useStudioNavigationPosture";
 
 import { HomeIcon } from "../../../components/AppIcons";
 import { Button } from "../../../components/Button";
+import "./MobileBottomDock.css";
 
 interface MobileBottomDockProps {
   activeSlot: MobileOverviewSection;
@@ -35,7 +36,7 @@ export function MobileBottomDock({
     <nav
       aria-label="Studio navigation"
       data-testid="mobile-bottom-dock"
-      className="w-full shrink-0 border-t border-slate-200/70 bg-white/95 px-3 pt-1 backdrop-blur-md max-[375px]:px-2 dark:border-[color:var(--color-studio-dark-panel-border)] dark:bg-[var(--color-studio-dark-panel)]"
+      className="mobile-bottom-dock w-full shrink-0 border-t border-slate-200/70 bg-white/95 px-3 pt-1 backdrop-blur-md max-[375px]:px-2 dark:border-[color:var(--color-studio-dark-panel-border)] dark:bg-[var(--color-studio-dark-panel)]"
       style={{ paddingBottom: "max(var(--instafy-safe-area-inset-bottom), 0.25rem)" }}
     >
       <div className="flex w-full items-center gap-1">
@@ -49,25 +50,33 @@ export function MobileBottomDock({
             aria-current={item.active ? "page" : undefined}
             data-testid={`mobile-bottom-dock-${item.id}`}
             className={[
-              "relative h-12 min-h-12 min-w-12 flex-1 basis-0 flex-col gap-0.5 px-0 focus-visible:ring-offset-0",
+              "mobile-bottom-dock-button relative h-12 min-h-12 min-w-12 flex-1 basis-0 px-0",
               item.active
-                ? "bg-slate-100 text-slate-950 dark:bg-[var(--color-studio-dark-active)] dark:text-slate-50"
+                ? "aria-[current=page]:text-primary-700 dark:aria-[current=page]:text-primary-300"
                 : "text-slate-500 dark:text-slate-400",
             ].join(" ")}
             onPress={item.onPress}
           >
-            <span className="relative flex h-5 w-5 items-center justify-center [&>svg]:h-5 [&>svg]:w-5" aria-hidden="true">
-              {item.icon}
-              {item.id === "home" && homeAttentionCount > 0 ? (
-                <span
-                  data-testid="mobile-bottom-dock-home-badge"
-                  className="absolute -right-2.5 -top-1 flex h-4 min-w-4 items-center justify-center rounded-full bg-primary-600 px-1 text-3xs font-semibold leading-none text-white dark:bg-primary-500"
-                >
-                  {homeAttentionCount > 9 ? "9+" : homeAttentionCount}
-                </span>
-              ) : null}
+            <span
+              className="mobile-bottom-dock-content flex h-11 min-w-16 flex-col items-center justify-center gap-0.5 rounded-2xl px-2"
+              data-testid={item.active ? "mobile-bottom-dock-active-indicator" : undefined}
+            >
+              <span
+                className="relative flex h-5 w-5 items-center justify-center [&>svg]:h-5 [&>svg]:w-5"
+                aria-hidden="true"
+              >
+                {item.icon}
+                {item.id === "home" && homeAttentionCount > 0 ? (
+                  <span
+                    data-testid="mobile-bottom-dock-home-badge"
+                    className="absolute -right-2 -top-1 flex h-4 min-w-4 items-center justify-center rounded-full bg-primary-600 px-1 text-3xs font-semibold leading-none text-white dark:bg-primary-500"
+                  >
+                    {homeAttentionCount > 9 ? "9+" : homeAttentionCount}
+                  </span>
+                ) : null}
+              </span>
+              <span className={`text-3xs leading-3 ${item.active ? "font-semibold" : "font-normal"}`}>{item.label}</span>
             </span>
-            <span className="text-3xs leading-3">{item.label}</span>
           </Button>
         ))}
       </div>

@@ -2,10 +2,25 @@ import { describe, expect, it } from "vitest";
 import {
   buildStudioViewportStyle,
   resolveStudioViewportHeightPx,
+  shouldHideContextWhileTyping,
   shouldResetStudioDocumentScroll,
 } from "../studioViewport";
 
 describe("studioViewport", () => {
+  it("makes room for the composer on a landscape phone with its software keyboard open", () => {
+    expect(shouldHideContextWhileTyping({ isTouchConversation: true, keyboardOpen: true, viewportHeightPx: 143 })).toBe(true);
+  });
+
+  it.each([
+    { isTouchConversation: true, keyboardOpen: false, viewportHeightPx: 143 },
+    { isTouchConversation: true, keyboardOpen: true, viewportHeightPx: 413 },
+    { isTouchConversation: false, keyboardOpen: true, viewportHeightPx: 143 },
+    { isTouchConversation: true, keyboardOpen: true, viewportHeightPx: null },
+    { isTouchConversation: true, keyboardOpen: true, viewportHeightPx: Number.NaN },
+  ])("retains context outside the cramped touch-conversation case: %j", (state) => {
+    expect(shouldHideContextWhileTyping(state)).toBe(false);
+  });
+
   it("rounds valid viewport heights", () => {
     expect(resolveStudioViewportHeightPx(449.1428527832031)).toBe(449);
   });

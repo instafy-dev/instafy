@@ -109,7 +109,7 @@ export function StudioMobileSidebarOverlay({
       isOpen
       onOpenChange={(open) => { if (!open) onClose(); }}
       isDismissable
-      className="fixed inset-0 z-50 bg-slate-900/30 backdrop-blur-sm"
+      className="fixed inset-0 z-[70] bg-slate-900/30 backdrop-blur-sm"
       data-testid="mobile-sidebar-overlay"
     >
       <Modal
