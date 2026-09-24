@@ -16,7 +16,7 @@ async function mountPersonalControls(page: Page) {
     const h = React.createElement;
     window.__bounds = [];
     window.__controlCalls = [];
-    window.instafyDesktop = { personalBrowserSetBounds: async (bounds) => { window.__bounds.push(bounds); } };
+    window.instafyDesktop = { personalBrowserSetBounds: async (bounds) => { window.__bounds.push(bounds); return {}; } };
     function Fixture() {
       const [native, setNative] = React.useState({ agentControlEnabled: false, humanControlReady: true, approvalMode: "ask" });
       const [agentError, setAgentError] = React.useState(null);
@@ -72,7 +72,9 @@ for (const width of [360, 900]) {
     const errors: string[] = [];
     page.on("pageerror", (error) => errors.push(error.message));
     await mountPersonalControls(page);
+    await page.getByRole("button", { name: "Browser settings", exact: true }).click();
     await page.getByTestId("personal-browser-routine-approval").check();
+    await page.keyboard.press("Escape");
     await page.getByRole("button", { name: "Resume agent control", exact: true }).click();
     await expect.poll(() => page.evaluate(() => (window as { __lastApprovalMode?: string }).__lastApprovalMode)).toBe("routine");
     await page.getByTestId("browser-human-input-takeover").click();
@@ -87,7 +89,7 @@ for (const width of [360, 900]) {
     await page.evaluate(() => (window as unknown as { __confirmNativeDrain: () => void }).__confirmNativeDrain());
     await expect(page.getByTestId("browser-human-input-continue")).toBeEnabled();
     await expect(page.getByRole("button", { name: "Resume agent control", exact: true })).toHaveCount(0);
-    await expect(page.getByText("When ready, use Done, continue to resume and send the next turn.")).toBeVisible();
+    await expect(page.getByTestId("browser-human-input-continue")).toHaveText("Done, continue");
     const screenshotPath = testInfo.outputPath(`personal-takeover-expanded-${width}px.png`);
     await page.screenshot({ animations: "disabled", path: screenshotPath });
     await testInfo.attach(`Expanded Personal takeover at ${width}px`, { contentType: "image/png", path: screenshotPath });

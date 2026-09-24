@@ -33,6 +33,9 @@ function fixture(choose = async () => ({ response: 1 })) {
         return choose(options);
       } },
     },
+    "./browserTabCapture": require(path.join(packageRoot, "dist/browserTabCapture.js")),
+    "./browserTabInput": require(path.join(packageRoot, "dist/browserTabInput.js")),
+    "./browserTabExplorePage": { createBrowserTabExplorePage() { throw new Error("Unexpected native Explore page"); } },
     "./personalBrowserSecurity": security,
     "./personalBrowserPageBridge": { clearPersonalBrowserHumanInput: async () => {} },
     "./personalBrowserHumanInput": {},
@@ -114,4 +117,55 @@ test("Personal routine mode cannot be changed in place or approved for another o
   resolve({ response: 1 });
   await assert.rejects(pending, /session changed/);
   assert.equal(changed.host.getStatus().approvalMode, "ask");
+});
+
+
+test("browser tools occlusion preserves sharing and viewport, but leaving the browser ends capture", async () => {
+  const { host } = fixture();
+  const visibility = [], dimensions = [];
+  host.ownerWindow.webContents = { focus() {} };
+  host.view.setVisible = value => visibility.push(value);
+  host.view.setBounds = value => dimensions.push(value);
+  host.view.webContents.capturePage = async () => ({ getSize: () => ({width:400,height:300}), toJPEG: () => new Uint8Array([1,2,3]) });
+  const bounds = {x:10,y:20,width:400,height:300,visible:true};
+  host.setBounds(bounds);
+  const {captureId} = host.startTabShare("owner-fixture");
+  host.setBounds({...bounds,occluded:true});
+  assert.equal(visibility.at(-1),false);
+  assert.deepEqual([...await host.captureSharedTab("owner-fixture",captureId)],[1,2,3]);
+  host.setBounds({...bounds,occluded:false});
+  assert.equal(visibility.at(-1),true);
+  assert.ok(dimensions.every(value => value.width===400 && value.height===300));
+  host.setBounds({...bounds,visible:false});
+  await assert.rejects(host.captureSharedTab("owner-fixture",captureId), /sharing ended/);
+  host.stopTabShare("owner-fixture",captureId);
+});
+
+
+test("menu previews are bounded to the current owner and discarded after closing or rebinding", async () => {
+  const {host} = fixture();
+  host.currentOccluded = true;
+  const image = {getSize:()=>({width:400,height:300}),toJPEG:()=>Buffer.from([1,2,3])};
+  host.view.webContents.capturePage = async () => image;
+  assert.equal(await host.captureOverlayPreview("owner-fixture"),"data:image/jpeg;base64,AQID");
+  assert.equal(await host.captureOverlayPreview("another-owner"),undefined);
+  host.view.webContents.capturePage = async () => ({...image,toJPEG:()=>Buffer.alloc(1024*1024+1)});
+  assert.equal(await host.captureOverlayPreview("owner-fixture"),undefined,"oversized previews are discarded");
+  let resized;
+  host.view.webContents.capturePage = async () => ({getSize:()=>({width:3200,height:2400}),resize:value=>{resized=value;return image}});
+  assert.equal(await host.captureOverlayPreview("owner-fixture"),"data:image/jpeg;base64,AQID");
+  assert.equal(resized.width,1600);
+  assert.equal(resized.height,1200);
+  let resolve;
+  host.view.webContents.capturePage = () => new Promise(done=>{resolve=done});
+  const pending = host.captureOverlayPreview("owner-fixture");
+  assert.equal(await host.captureOverlayPreview("owner-fixture"),undefined,"only one preview may be pending");
+  host.currentOwnerId = "another-owner";
+  resolve(image);
+  assert.equal(await pending,undefined);
+  host.currentOwnerId = "owner-fixture";
+  const closed = host.captureOverlayPreview("owner-fixture");
+  host.currentOccluded = false;
+  resolve(image);
+  assert.equal(await closed,undefined);
 });

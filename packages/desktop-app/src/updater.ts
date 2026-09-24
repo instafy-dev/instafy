@@ -1,4 +1,5 @@
-import { BrowserWindow, app, dialog } from "electron";
+import { getStudioWindow, getStudioWindows } from "./desktopWindows";
+import { type BrowserWindow, app, dialog } from "electron";
 import { autoUpdater } from "electron-updater";
 import { desktopLog } from "./logging";
 import { settleDesktopUpdaterDownload } from "./desktopUpdaterDownload";
@@ -92,7 +93,7 @@ function buildDesktopUpdaterStatus(): DesktopUpdaterStatus {
 }
 
 function getFocusedWindow(): BrowserWindow | null {
-  return BrowserWindow.getFocusedWindow() ?? BrowserWindow.getAllWindows().at(0) ?? null;
+  return getStudioWindow();
 }
 
 async function runDesktopUpdateCheck(options: { suppressPrompts?: boolean; throttleMs?: number } = {}) {
@@ -224,7 +225,7 @@ export function performDesktopUpdaterInstallAfterQuitApproved(): boolean {
 }
 
 function setWindowDownloadIndicator(value: number) {
-  for (const window of BrowserWindow.getAllWindows()) {
+  for (const window of getStudioWindows()) {
     window.setProgressBar(value);
   }
 }

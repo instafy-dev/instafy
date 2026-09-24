@@ -4,17 +4,27 @@
 
 Personal Browser is the desktop-only browser identity for one Instafy user on one device. It renders a native Chromium surface inside the Electron app, keeps that user's browser state locally, and gives an explicitly resumed local agent a narrow, confirmed control channel. It complements rather than replaces the remote Shared Browser.
 
+Browser and sharing tools use floating dialogs. The renderer reports an optional
+`occluded` bounds flag while those dialogs cover the native surface. Main hides
+the WebContentsView and its input shield without changing the page's dimensions
+or logical visibility. On the transition into occlusion, the existing bounds IPC
+can return a bounded page preview to the same owner renderer. It rechecks owner
+and native-page identity after capture; late, oversized and failed previews are
+discarded. The renderer keeps the image only while the menu is open. Sharing remains scoped to the same active owner/page;
+switching away still invalidates it. This presentation flag grants no new input,
+account or agent authority.
+
 For the user-facing profile choices, cross-project/device login continuity, and
 the exact scope of Clear Data, see [Browser profiles](Browser-Profiles.md).
 
-Personal Browser is permanently non-shareable. Project membership, Shared Browser presence, workspace leases, runtime preference, reconnect logic, and provider fallback never grant another user discovery, pixels, input, or job authority over this device-local runtime. The controller attests its immutable owner, Electron binds it to the current signed-in profile, and a Personal task fails closed if that exact runtime disappears. A future Team runtime would be a separate enrollment and consent product; Personal Browser will not be upgraded into one. See [Self-Hosted-Runtime-Security.md](./Self-Hosted-Runtime-Security.md).
+The Personal Browser runtime remains private to its controller-attested owner. Project membership, workspace leases, runtime preference and reconnect logic never grant another user runtime discovery, agent control, shell or job authority. The owner can separately choose **Share tab** to relay one local tab to selected space members, then explicitly approve human control or an independent Explore page. This does not share the runtime or export its browser profile. See [Local browser sharing](Local-Browser-Sharing.md) and [Self-hosted runtime security](Self-Hosted-Runtime-Security.md).
 
 ## Product model
 
 | Surface | Renderer and location | Browser identity | Intended availability |
 | --- | --- | --- | --- |
-| **Personal on this device** | Electron `WebContentsView` using Electron's bundled Chromium, on the user's computer | Persistent local profile derived from the signed-in Instafy user | Desktop app |
-| **Shared with your team** | Headed Chromium in the project cloud runtime, rendered through WebRTC, CDP screencast, or HiDPI RFB | Per-project profile that may be shared by project members | Web, mobile, and desktop; remote persistence has its own default-off policy |
+| **This device (Personal Browser)** | Electron `WebContentsView` using Electron's bundled Chromium, on the user's computer | Persistent local profile derived from the signed-in Instafy user | Desktop app |
+| **Workspace (Shared Browser)** | Headed Chromium in the project cloud runtime, rendered through WebRTC, CDP screencast, or HiDPI RFB | Per-project profile that may be shared by project members | Web, mobile, and desktop; remote persistence has its own default-off policy |
 | **Google Chrome integration** | The user's separately installed Chrome | Existing Chrome tabs, profile, extensions, and Chrome Sync state | Not implemented; a future extension bridge would be required |
 
 Personal Browser does **not** embed or take over the installed Google Chrome application. A `WebContentsView` is a native Chromium renderer inside Electron, but it has a separate profile. It does not inherit Chrome tabs, cookies, saved passwords, extensions, or Chrome Sync. Trying to reuse the default Chrome profile would cross a much broader security boundary and is not part of this product.
@@ -52,7 +62,7 @@ flowchart LR
     RPC --> HOST
 ```
 
-The Studio renderer selects **Personal on this device**, opens the Electron browser host, and starts a desktop runtime. The controller assigns a fresh UUID in the signed runtime token, and Personal Browser sends then carry `browserTransport: "desktop-personal"` with that exact returned runtime ID. The controller validates that the runtime is self-hosted, recent and dispatchable, carries a controller-attested Personal Browser capability, and is owned by the authenticated user who submitted the request. Ownership is immutable for that runtime ID, and an existing ordinary runtime cannot be converted into a Personal runtime. Final-target validation runs even if a caller omits the transport label; leasing is bound to the signed token runtime ID even when controller strict mode is off. Agent bindings, runtime-spread metadata, reconnect recovery, cleanup sweeps, and hosted-runtime selection cannot retarget a Personal Browser job.
+The Studio renderer selects **This device (Personal Browser)**, opens the Electron browser host, and starts a desktop runtime. The controller assigns a fresh UUID in the signed runtime token, and Personal Browser sends then carry `browserTransport: "desktop-personal"` with that exact returned runtime ID. The controller validates that the runtime is self-hosted, recent and dispatchable, carries a controller-attested Personal Browser capability, and is owned by the authenticated user who submitted the request. Ownership is immutable for that runtime ID, and an existing ordinary runtime cannot be converted into a Personal runtime. Final-target validation runs even if a caller omits the transport label; leasing is bound to the signed token runtime ID even when controller strict mode is off. Agent bindings, runtime-spread metadata, reconnect recovery, cleanup sweeps, and hosted-runtime selection cannot retarget a Personal Browser job.
 
 If the exact desktop runtime is unavailable before enqueue, the send fails closed. Dispatch holds a database lock through enqueue so a concurrent stop cannot strand a newly queued job. If it disconnects after enqueue, including an idempotent or dev-offline stop path, the controller fails the Personal Browser job and run with an explicit disconnect error while preserving the target runtime ID. It must never drift to the Shared Browser or another runtime. The runtime-agent independently rejects Personal Browser metadata when its complete project-matched local capability is absent, and a Personal-capable runtime rejects every ordinary job before heartbeat, secrets, or execution.
 
@@ -88,7 +98,7 @@ This means:
 - each project still needs its own live control capability and per-origin approval before its agent can read or act on a page;
 - **Clear personal browser data** pauses agent control, navigates to `about:blank`, and clears storage, cache, and HTTP authentication state.
 
-The partition is user-scoped, not project-scoped: a login can therefore follow that user between projects on the same device. It is never team-shared, and every project must still receive an explicit session origin approval before its agent can use the logged-in page.
+The partition is user-scoped, not project-scoped: a login can therefore follow that user between projects on the same device. The stored profile is never exported to teammates, and every project must still receive an explicit session origin approval before its agent can use the logged-in page. Explicitly approved human tab control and Explore use that same logged-in account on this device; share only with people you trust to use it.
 
 This is normal local Electron/Chromium profile storage. Do not describe it as zero-knowledge storage or as importing Chrome's protected profile. Page text returned by a snapshot, and task-relevant content derived from it, can still be sent to the configured AI provider during an agent turn even though cookies remain local.
 
@@ -101,7 +111,7 @@ Personal Browser is gated at several layers.
 - The desktop feature is enabled by default. `INSTAFY_DESKTOP_PERSONAL_BROWSER=0` (or `false`, `no`, or `off`) is an emergency installation-level kill switch.
 - Opening the browser does not authorize the agent. `agentControlEnabled` starts false, and the local runtime does not start until the user resumes control.
 - The user must explicitly choose **Resume** before agent work can start.
-- While control is resumed, Electron places a transparent native `WebContentsView` input shield above the Personal page. Pointer, wheel, drag, context-menu, and keyboard input cannot race agent mutations, and the browser bar's human navigation controls are disabled in both Studio and Electron main. The shield shows **Agent control · Esc to pause**; Escape synchronously revokes the broker and then suspends the Personal runtime. Pause removes the shield and returns focus to the page only after already-dispatched native operations settle.
+- While control is resumed, Electron places a transparent native `WebContentsView` input shield above the Personal page. Pointer, wheel, drag, context-menu, and keyboard input cannot race agent mutations, and the browser bar's human navigation controls are disabled in both Studio and Electron main. The shield shows **Browser controlled · Esc to take back**; Escape synchronously revokes the broker and then suspends the Personal runtime. Pause removes the shield and returns focus to the page only after already-dispatched native operations settle.
 - Pause synchronously revokes the broker binding before waiting on navigation or runtime shutdown, then stops the Personal Browser runtime and invalidates in-flight work. Resume creates a fresh broker token; every restarted/started Personal runtime receives a fresh runtime ID. A request that races revocation fails with `401 stale_token`; a paused but still-current operation is rejected with `423 agent_control_paused`.
 - Closing the Personal Browser, changing project/account/renderer identity, clearing its binding, or stopping the app invalidates the live capability.
 - The frontend owner lease is also conversation-scoped. Changing conversations
@@ -281,7 +291,7 @@ pnpm dev:desktop
 Manual smoke sequence:
 
 1. Sign in to Instafy and open a project in the Electron app.
-2. Open the Browser subtab and select **Personal on this device**.
+2. Open the Browser subtab and select **This device (Personal Browser)**.
 3. Navigate manually to a test site and, if needed, sign in manually.
 4. Choose **Resume**; confirm the site origin when the agent first requests it.
 5. Send a browser task and verify the controller targets the exact Personal Browser runtime ID.

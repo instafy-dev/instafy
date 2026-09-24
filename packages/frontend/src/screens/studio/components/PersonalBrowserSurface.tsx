@@ -17,9 +17,11 @@ import {
   Play,
   Refresh,
   Trash,
+  MoreHoriz,
 } from "iconoir-react";
 import { Button, IconButton } from "../../../components/Button";
 import { StudioDialogModal } from "../../../components/aria/StudioModal";
+import { BrowserToolsOverlayContext, BrowserToolsPopover } from "./BrowserToolsPopover";
 import { BrowserExpandButton } from "./BrowserExpandButton";
 import { BrowserHumanInputStatus } from "./BrowserHumanInputControls";
 import { useBrowserHumanInput } from "./useBrowserHumanInput";
@@ -73,7 +75,7 @@ export function BrowserTransportSelector({
     >
       <button
         aria-describedby={personalDescriptionId}
-        aria-label="Personal — you, this device"
+        aria-label="This device"
         aria-pressed={mode === "personal"}
         className={optionClassName("personal")}
         data-testid="browser-transport-personal"
@@ -84,29 +86,29 @@ export function BrowserTransportSelector({
             ? "Checking this device…"
             : !personalAvailable
               ? "Personal Browser is available in the Instafy desktop app."
-              : "Personal — your logins across projects on this device; never shared with project members"
+              : "This device — logins stay here; you choose who can view the tab"
         }
         type="button"
       >
         <Computer className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
-        {compact ? null : <span>Personal · you</span>}
+        {compact ? null : <span>This device</span>}
       </button>
       <button
         aria-describedby={sharedDescriptionId}
-        aria-label="Shared — this project"
+        aria-label="Workspace browser"
         aria-pressed={mode === "shared"}
         className={optionClassName("shared")}
         data-testid="browser-transport-shared"
         onClick={() => onModeChange("shared")}
-        title="Shared — this project's remote browser and logins, visible to project members on their devices"
+        title="Workspace browser — project members can see and reuse logins"
         type="button"
       >
         <Globe className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
-        {compact ? null : <span>Shared · project</span>}
+        {compact ? null : <span>Workspace</span>}
       </button>
       <span className="sr-only" id={personalDescriptionId}>
-        Your logins and site data stay on this device and follow you across projects.
-        They are not copied to Shared Browser or your other devices.
+        Your logins and site data stay on this device and follow you across projects. They are
+        not copied to Shared Browser or your other devices. Share tab lets you choose who can watch.
       </span>
       <span className="sr-only" id={sharedDescriptionId}>
         Project members see the same remote browser and logged-in pages. Members
@@ -141,6 +143,9 @@ function personalBrowserStatus(model: PersonalBrowserModel): {
       detail: model.agentError,
     };
   }
+  if (model.status.tabControlActive) {
+    return { state: "paused", detail: "Agent control is paused while a participant controls this tab." };
+  }
   if (!model.status.agentControlEnabled && model.status.humanControlReady === false) {
     return { state: "starting", detail: "Waiting for agent operations to stop…" };
   }
@@ -166,6 +171,7 @@ export function PersonalBrowserSurface({
   transportSelector,
   humanInputIdentityKey,
   onContinueAfterHumanInput,
+  sharingControls,
 }: {
   active: boolean;
   compactChrome?: boolean;
@@ -173,6 +179,7 @@ export function PersonalBrowserSurface({
   transportSelector: ReactNode;
   humanInputIdentityKey?: string;
   onContinueAfterHumanInput?: (message: string, approvalMode: "ask" | "routine") => Promise<boolean>;
+  sharingControls?: ReactNode;
 }) {
   const viewportRef = useRef<HTMLDivElement | null>(null);
   const lastValidBoundsRef = useRef<InstafyDesktopPersonalBrowserBounds>({
@@ -183,6 +190,15 @@ export function PersonalBrowserSurface({
   });
   const addressInputRef = useRef<HTMLInputElement | null>(null);
   const [address, setAddress] = useState("");
+  const [overlayPreview, setOverlayPreview] = useState<string | null>(null);
+  const [overlayCount, setOverlayCount] = useState(0);
+  const overlayCountRef = useRef(overlayCount);
+  overlayCountRef.current = overlayCount;
+  const reportBoundsRef = useRef<(() => void) | null>(null);
+  const registerOverlay = useCallback(() => {
+    setOverlayCount(count => count + 1);
+    return () => setOverlayCount(count => count - 1);
+  }, []);
   const [fullscreen, setFullscreen] = useState(false);
   const expanded = active && fullscreen;
   const [selectedApprovalMode, setSelectedApprovalMode] = useState<"ask" | "routine">("ask");
@@ -220,6 +236,7 @@ export function PersonalBrowserSurface({
       return undefined;
     }
 
+    let disposed = false;
     let frame: number | null = null;
     const report = () => {
       if (frame !== null) {
@@ -249,11 +266,15 @@ export function PersonalBrowserSurface({
         void bridge.personalBrowserSetBounds?.({
           ...lastValidBoundsRef.current,
           visible: visible && width > 0 && height > 0,
+          occluded: overlayCountRef.current > 0,
           ownerId,
+        }).then(result => {
+          if (!disposed && overlayCountRef.current > 0 && result.previewDataUrl) setOverlayPreview(result.previewDataUrl);
         }).catch(() => undefined);
       });
     };
 
+    reportBoundsRef.current = report;
     report();
     const observer = typeof ResizeObserver === "undefined" ? null : new ResizeObserver(report);
     observer?.observe(viewport);
@@ -262,6 +283,8 @@ export function PersonalBrowserSurface({
     window.visualViewport?.addEventListener("resize", report);
     window.visualViewport?.addEventListener("scroll", report);
     return () => {
+      disposed = true;
+      reportBoundsRef.current = null;
       if (frame !== null) {
         window.cancelAnimationFrame(frame);
       }
@@ -278,10 +301,16 @@ export function PersonalBrowserSurface({
     };
   }, [expanded, ownerId, visible]);
 
+  useLayoutEffect(() => {
+    if (overlayCount === 0) setOverlayPreview(null);
+    reportBoundsRef.current?.();
+  }, [overlayCount]);
+  useLayoutEffect(() => { setOverlayPreview(null); }, [ownerId]);
+
   const handleNavigate = useCallback(
     (event: FormEvent<HTMLFormElement>) => {
       event.preventDefault();
-      if (model.status?.agentControlEnabled) {
+      if (model.status?.agentControlEnabled || model.status?.tabControlActive) {
         return;
       }
       void model.navigate(address);
@@ -300,7 +329,7 @@ export function PersonalBrowserSurface({
   }, [model]);
 
   const browserStatus = personalBrowserStatus(model);
-  const humanInputLocked = model.status?.agentControlEnabled === true || model.status?.humanControlReady === false;
+  const humanInputLocked = model.status?.agentControlEnabled === true || model.status?.humanControlReady === false || model.status?.tabControlActive === true;
   const personalHumanInputRequest = model.status?.humanInputRequest;
   const ownsNativeStatus = Boolean(ownerId) && model.status?.ownerId === ownerId;
   const humanInputOptions = {
@@ -342,6 +371,7 @@ export function PersonalBrowserSurface({
   );
 
   const content = (
+    <BrowserToolsOverlayContext.Provider value={registerOverlay}>
     <div
       className={active ? "flex h-full min-h-0 flex-1 flex-col" : "hidden"}
       data-testid="personal-browser-surface"
@@ -411,7 +441,9 @@ export function PersonalBrowserSurface({
               model.clearNavigationError();
             }}
             placeholder={
-              humanInputLocked
+              model.status?.tabControlActive
+                ? "Take back control to navigate"
+                : humanInputLocked
                 ? "Pause agent control to navigate"
                 : ready
                 ? "Enter an address"
@@ -462,7 +494,7 @@ export function PersonalBrowserSurface({
           ) : model.status?.agentControlEnabled || (ready && !humanInputState.active) ? (
             <IconButton
               aria-label={model.status?.agentControlEnabled ? "Pause agent control" : "Resume agent control"}
-              isDisabled={!model.status?.agentControlEnabled && model.status?.humanControlReady === false}
+              isDisabled={!model.status?.agentControlEnabled && (model.status?.humanControlReady === false || model.status?.tabControlActive)}
               className="max-[540px]:h-10 max-[540px]:w-10"
               onPress={() => void model.setAgentControlEnabled(
                 !model.status?.agentControlEnabled,
@@ -480,14 +512,37 @@ export function PersonalBrowserSurface({
               )}
             </IconButton>
           ) : null}
-          <IconButton
+          <BrowserToolsPopover label="Browser settings" trigger={<IconButton aria-label="Browser settings" variant="ghost" radius="full" size="sm"><MoreHoriz className="h-4 w-4" aria-hidden="true" /></IconButton>}>
+            {routineApprovalAvailable ? (
+              <div className="flex shrink-0 flex-wrap items-center gap-x-3 gap-y-1 border-b border-slate-200 px-3 py-2 text-xs dark:border-slate-800" data-browser-session-safe-zone="true">
+                <label className="flex min-h-8 cursor-pointer items-center gap-2">
+                  <input
+                    checked={humanInputLocked ? model.status?.approvalMode === "routine" : selectedApprovalMode === "routine"}
+                    className="h-4 w-4"
+                    data-testid="personal-browser-routine-approval"
+                    disabled={humanInputLocked}
+                    onChange={(event) => setSelectedApprovalMode(event.target.checked ? "routine" : "ask")}
+                    type="checkbox"
+                  />
+                  Always allow routine browsing until paused
+                </label>
+                <span className="text-slate-500 dark:text-slate-400">
+                  {humanInputState.active
+                    ? "When ready, use Done, continue to resume and send the next turn."
+                    : humanInputLocked
+                    ? "Take over to change approvals."
+                    : "Choose before Resume. High-impact actions still ask; secrets stay manual."}
+                </span>
+              </div>
+            ) : null}
+          <Button
             aria-label={
               model.clearDataState === "clearing"
                 ? "Clearing personal browser data"
                 : "Clear personal browser data"
             }
             isDisabled={!ready || model.clearDataState === "clearing"}
-            className="max-[540px]:h-10 max-[540px]:w-10"
+            className="w-full justify-start"
             onPress={handleClearData}
             radius="full"
             size="sm"
@@ -499,7 +554,10 @@ export function PersonalBrowserSurface({
             ) : (
               <Trash className="h-3.5 w-3.5" aria-hidden="true" />
             )}
-          </IconButton>
+            Clear personal browser data
+          </Button>
+          </BrowserToolsPopover>
+          {sharingControls}
           <BrowserExpandButton
             expanded={expanded}
             onPress={() => setFullscreen((value) => !value)}
@@ -520,28 +578,6 @@ export function PersonalBrowserSurface({
         }
         testId="personal-browser-chrome"
       />
-      {routineApprovalAvailable ? (
-        <div className="flex shrink-0 flex-wrap items-center gap-x-3 gap-y-1 border-b border-slate-200 px-3 py-2 text-xs dark:border-slate-800" data-browser-session-safe-zone="true">
-          <label className="flex min-h-8 cursor-pointer items-center gap-2">
-            <input
-              checked={humanInputLocked ? model.status?.approvalMode === "routine" : selectedApprovalMode === "routine"}
-              className="h-4 w-4"
-              data-testid="personal-browser-routine-approval"
-              disabled={humanInputLocked}
-              onChange={(event) => setSelectedApprovalMode(event.target.checked ? "routine" : "ask")}
-              type="checkbox"
-            />
-            Always allow routine browsing until paused
-          </label>
-          <span className="text-slate-500 dark:text-slate-400">
-            {humanInputState.active
-              ? "When ready, use Done, continue to resume and send the next turn."
-              : humanInputLocked
-              ? "Take over to change approvals."
-              : "Choose before Resume. High-impact actions still ask; secrets stay manual."}
-          </span>
-        </div>
-      ) : null}
       {ready && humanInputIdentityKey && onContinueAfterHumanInput ? (
         <BrowserHumanInputStatus {...humanInputOptions} state={humanInputState} />
       ) : null}
@@ -551,6 +587,7 @@ export function PersonalBrowserSurface({
         className="relative min-h-0 flex-1 overflow-hidden bg-slate-100 dark:bg-slate-950"
         data-testid="personal-browser-viewport"
       >
+        {overlayCount > 0 && overlayPreview ? <img alt="" aria-hidden src={overlayPreview} className="pointer-events-none absolute inset-0 h-full w-full object-fill" data-testid="personal-browser-overlay-preview" /> : null}
         {!ready ? (
           <div className="absolute inset-0 flex items-center justify-center p-6 text-center">
             <div className="max-w-sm text-sm text-slate-500 dark:text-slate-400">
@@ -578,6 +615,7 @@ export function PersonalBrowserSurface({
         ) : null}
       </div>
     </div>
+    </BrowserToolsOverlayContext.Provider>
   );
 
   if (expanded) {

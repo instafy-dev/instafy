@@ -1,0 +1,409 @@
+# Sharing a local browser tab
+
+Status: Electron supports native WebRTC video with JPEG compatibility. Physical
+Android Chrome has exercised video over Wi-Fi/TURN alongside a desktop viewer,
+including independent scrolling, keyboard input, rotation, reconnect and revocation.
+Physical iOS has exercised video over Wi-Fi/TURN, independent touch input,
+keyboard input, rotation, control handoff, native background/foreground, reconnect
+and revocation. OS-enforced suspension, cellular/WAN performance and
+multi-controller routing remain open.
+
+The browser's location and its audience are separate choices. The browser location
+selector says **This device** and **Workspace**. This device uses Personal Browser
+on the owner's Electron device and starts private. Workspace uses the shared
+workspace browser and its existing team session/account semantics. **Share tab…** opens an audience
+picker, defaulting to **Selected people**. Choose existing members and select
+**Start sharing**, or explicitly choose **Everyone with space access**. People in
+the chosen audience select **View shared tab** under **Tabs shared with you** in
+the conversation. The owner's address bar contains **Sharing**, a pending-request
+count, and **Stop**. Sharing opens audience management and control/Explore
+requests in a popover; neither requests nor active participants add page rows.
+Each audience member appears once, with their current activity and actions.
+**End browsing** closes that person’s independent pages while keeping them in the
+audience; **Remove** ends all of their access to this share.
+**Take back** stays in the toolbar while a participant controls the source.
+Stop returns the tab to private browsing. AI approval preferences and Clear Data
+are in **Browser settings**. No browser runtime is allocated for this viewing session.
+
+Viewers have one 56px toolbar: **Following / Browsing**, Back when exploring,
+a mobile keyboard button when input is available, options, and close. The mode
+picker explains shared-account behavior before requesting Explore. Options hold
+zoom, Expand/Minimize, Reload, Request control and Pan view. **Release** remains
+visible while controlling the source. Touch controls keep 44px targets.
+
+The compact layout was exercised in Electron, a constrained Chrome window and
+a physical iPhone 13 mini. In the same portrait phone viewport, persistent
+controls fell from 190px to 56px and the Explore page grew from 375×538 to
+375×672 CSS pixels (about 25% more content height), receiving 750×1344 video.
+Independent scrolling, keyboard input, draft isolation, shared saves, control
+handoff, Release, Take back and Stop passed. An 18-second phone motion sample
+decoded 29.98 fps with no dropped frames or freeze-counter increases; this is a
+short Wi-Fi/TURN check, not WAN or sustained-performance qualification.
+
+Electron shows a temporary page preview beneath its tools popover because DOM
+overlays cannot paint above a native WebContentsView. The preview stays on the
+owner’s device, is bounded to 1600×1200 pixels and one MiB of JPEG, and is cleared
+when the menu closes or browser ownership changes. This is tracked as
+`occluded` separately from browser visibility: the source viewport, sharing and
+input leases stay unchanged. Closing the popover restores the native surface;
+leaving the browser still invalidates sharing as before.
+Approving control keeps focus in the menu: Escape dismisses it without revoking
+the grant. Once the native page is focused, Escape retains its take-back behavior.
+
+The picker includes direct space members and people with inherited organization
+access. Selected-person shares are hidden from other members, and knowing a share
+ID does not grant access. The owner can remove a person from either audience mode;
+all of that person's viewer connections close, and they cannot rejoin that share.
+Their space membership stays unchanged. To add people or readmit someone, stop
+and start a new share with a new audience. It does not send invitations or grant
+new project membership. People join as viewers; the owner can explicitly grant
+one viewer connection control of the selected tab. Account cookies, profile files, agent
+authority, shell and machine access are never granted to viewers. Pixels can
+contain information from the owner's logged-in page. An approved controller can
+act through that page's signed-in account. Other existing tabs are not selected. Independent Explore requires a separate
+owner approval because it opens another page using this browser session.
+
+## Human control handoff
+
+The viewer selects **Request control** from options. The owner opens **Sharing**,
+sees the participant's name, and chooses **Allow control** or **Decline**.
+The grant belongs to that exact connection; another window using the same account
+does not inherit it. The viewer can click, type, use standard editing/navigation
+keys and scroll the page. **Release** returns to viewing.
+
+While a viewer controls the tab, the native input shield blocks competing local
+page input. **Take back** in the owner toolbar or **Escape** in the native
+page revokes local input immediately, before waiting for the network. Controller
+state then catches up through the publisher's one-second heartbeat. Agent control
+must be paused before granting a viewer, and cannot resume until human control
+ends. Stop, removal and disconnect also revoke the grant.
+
+The Desktop process enforces a four-second lease, renewed only for the existing
+grant. A late heartbeat cannot restore a locally revoked grant. Both the controller
+and Desktop recheck queued input against the active grant. This first input lane
+supports atomic left clicks, bounded wheel/text messages and an allowlist of
+editing keys. Dragging, right-click menus, arbitrary shortcuts, host clipboard and
+file dialogs are not part of this lane. Older Desktop bridges continue to share
+view-only until updated.
+
+## Independent Explore
+
+A viewer opens **Following** and selects **Browse independently**. The owner
+approves **Allow browsing** in **Sharing**. This creates a separate sandboxed page on the owner's
+Electron device, initially at the source URL. Its responsive layout follows the
+participant's available viewer area and pixel density. Expand and Minimize resize
+that separate page without resizing the source. Scroll, focus, input, navigation,
+Back and Reload apply to the approved participant's page only. Follow continues
+to display the source's shared layout and scroll position.
+
+The new page uses the owner's existing cookies and persistent browser storage;
+credentials and profile files never leave that device. It is **not** an independent
+login or an isolated website account. Saved changes use the owner's account and
+may appear in the source page when the website updates its state. Unsaved forms,
+page memory, scroll and navigation remain separate. Websites that require an
+in-memory login or prevent concurrent sessions may behave differently. Approval
+permits normal web navigation in this session, not just reading the initial page.
+The approval row explicitly explains the shared-account behavior.
+
+This behaves like multiple tabs in one browser profile, not a collaborative
+transaction layer. A cart stored in cookies or server-side account state can be
+shared, but a site's page memory, sessionStorage, cart initialization and
+concurrent-write behavior still matter. Pages may need navigation or Reload to
+show another person's changes. Shared locale or currency settings can also affect
+other pages. Instafy does not merge carts, resolve conflicting edits, or guarantee
+that simultaneous actions survive on every website.
+
+A September 23, 2026 manual test used an Electron owner and two distinct Instafy
+participants at a real guest storefront (Pimoroni), with 390px and 1280px viewer
+widths. They navigated and scrolled separate product pages. Initial additions from
+two fresh guest pages left only one item in the eventual shared cart; the cause
+of that initial lost addition was not instrumented. After that cart existed,
+another addition produced both products, and all three pages showed the same
+items after navigation or Reload. A quantity edit likewise appeared after Reload.
+The site also exposed stale cart badges and locale/currency displays. Test items
+were removed and the cart was empty before cleanup; checkout was never opened.
+This verifies independent layouts and shared-session changes, not universal
+conflict-free shopping.
+
+**Follow owner again** in the **Browsing** picker destroys the participant's separate renderer and rejoins the
+canonical stream without reconnecting the viewer socket. **End browsing** in Sharing lets the
+owner do the same. Removal, disconnect, Stop sharing and source closure retire the
+view and fence queued input and late frames. A new request requires new approval;
+late heartbeats cannot recreate a closed renderer. The exact connection owns the
+view, including when another window uses the same participant account.
+
+A connection interrupted by background suspension or network loss clears its
+pixels and input authority immediately. **Reconnect** checks the current audience
+and opens a fresh authenticated viewer connection. It returns to Follow;
+control and Explore need new approval, and an ended or removed share cannot
+reconnect. Unsaved state in a retired Explore page is lost. A connection failure
+alone does not permanently hide an otherwise available share.
+
+At most four Explore pages coexist per share. Each has a four-second native lease
+and a thirty-minute maximum lifetime. Requested CSS viewports are bounded to
+240–1920 by 160–1440; requested DPR is 1–3, reduced when necessary to keep captures
+within 1.92 million pixels. Native capture also limits density to the owner's
+available backing surface; higher requests never upscale an image. The JPEG
+fallback is limited to one MiB and five captures per second per view. Private frames are delivered only to their assigned
+connection. Controller snapshots cannot create a native view without a local
+owner approval. No generic JavaScript, host shortcut or debugger API is exposed.
+Older Desktop bridges remain compatible and do not advertise Explore.
+
+Each Explore view has its own pending capture; a navigating or stalled page cannot
+delay captures for other participants. Follow and Explore suppress byte-identical
+JPEGs between two-second image heartbeats. Changed images enter the publisher's
+latest-frame queue on the next capture. This reduces static-page
+bandwidth without reducing the requested image resolution or raising the capture rate.
+It does not remove the cost of capturing a static page.
+
+Current clients negotiate `frameFlowVersion=1` when opening the socket. The relay
+acknowledges each uploaded image, and viewers acknowledge after image decoding.
+Each connection permits one unacknowledged image. The publisher retains only the
+latest waiting image for each view, serving those views in turn; the relay retains
+only the latest image while a viewer is busy. A slow connection therefore lowers
+the update frequency instead of accumulating a replay of old frames. Input and
+revocation messages do not wait for image acknowledgement. An acknowledgement
+missing for five seconds ends the affected connection. Older clients/controllers
+keep their existing protocol; both ends must support this negotiation for the
+bounded image delivery behavior.
+
+The first native implementation stalled while navigating hidden pages. Explore
+now uses Electron's capture lease, drops up to three transient missing-surface
+frames and bounds capture waits. The Desktop shell explicitly tracks Studio
+windows so authentication callbacks, credential refresh, updates and activation
+cannot select a hidden Explore renderer.
+
+## Native video and receiver quality
+
+Current Desktop and viewers negotiate `videoVersion=1` on the existing authorized
+socket. Main captures the approved tab into an isolated, bundled Chromium worker;
+JPEG encoding and WebSocket image delivery are bypassed once that exact viewer
+has decoded video. Older peers and unsuccessful negotiations keep the JPEG path.
+A source still supplies JPEGs while any of its viewers needs them. Failed video
+connections fall back and retry with fresh signaling; changing Follow/Explore
+closes the old peer and clears its pixels.
+
+The default is up to **30 fps**, with a 4 Mbit/s sender ceiling and a detail content
+hint. Unchanged pages can emit very few frames. Each viewer requests resolution
+from its available area and DPR, capped by the actual capture and the pixel limit.
+Changing receiver resolution does not change the Follow page's layout. Explore
+continues to resize its independent page. Expansion/rotation reacquires capture
+without replacing the peer; it releases the old capture first so Chromium cannot
+retain the smaller source's pixel limit. At negotiation, the worker queries the
+browser's WebRTC encoding capabilities for the capture size and requested frame
+rate. It prefers codecs reported as supported and power-efficient, with H.264
+breaking ties, while retaining every advertised fallback. Missing, rejected or
+one-second stalled queries preserve the previous H.264 preference. This uses
+browser capabilities rather than device names or fixed codec profiles. Actual
+hardware encoding still depends on the platform and dimensions; inspect
+`encoderImplementation` and `powerEfficientEncoder` instead of assuming it.
+
+Native qualification can request 60 fps with an 8 Mbit/s ceiling. It is not the
+shipping default: short local samples on an M1 Max reached approximately 27–30 fps
+at 30 and 46–60 fps at 60, with higher CPU cost and inconsistent 60 fps latency.
+These samples include source, encoder and receiver and do not establish phone,
+WAN or large-group performance. Encoding scales with viewer count; capture is
+shared between viewers of the same source. No SFU or simulcast service is added.
+
+A later local qualification on the same M1 Max sustained approximately 30 fps
+for eight Follow viewers, alternating 640 × 400 and 1280 × 800 streams from one
+capture. All reported hardware encoding and no dropped frames or freezes during
+the eight-second measurement. Combined source/encoder/receiver CPU reached
+176% of one core and encoded payload reached 1.77 MB/s. This short, local result
+does not establish sustained host-only cost or performance over the Internet.
+The native smoke checks the eight-peer bound, shared capture and removal without
+interrupting remaining viewers.
+
+Receiver buffer tuning remains unchanged. A local comparison of the browser's
+default with `jitterBufferTarget = 0`, using two reversed-order runs per size/rate
+and 24 input-to-decoded-frame samples per condition, found no consistent latency
+improvement. The newer run reached approximately 60 fps locally, but consumed
+more CPU than 30 fps. It does not resolve physical phone or network qualification.
+
+Local UDP TURN tests also injected 3% ChannelData loss per proxy leg and
+25–45 ms variable delay. The stream stayed connected and recovered when the
+impairment ended, but scrolling froze repeatedly during loss; average fps alone
+hid that interruption. An experimental balanced degradation policy did not
+establish a reliable improvement and is not shipped. Loss resilience remains a
+qualification and tuning gap, alongside real WAN and network-change testing.
+
+A physical Android Wi-Fi/TCP TURN check received 720 × 914 video for a
+360 × 457 portrait Explore page, while a desktop viewer independently received
+780 × 1372. During an eight-second continuous swipe, steady one-second samples
+decoded approximately 24–27 fps with no drops or freeze-counter increases during
+motion. Freeze counters increased when the page became static, so measurements
+must separate active scrolling from content-driven frame suppression. This is a
+short functional check, not sustained phone or WAN latency qualification.
+
+High-refresh touch events are accumulated over 16 ms before sending scroll
+displacement through the shared input handler. This avoids exceeding the
+controller's message budget during normal swipes. A twelve-swipe phone check
+stayed connected after batching; the prior build disconnected. Keyboard and
+landscape resizing worked, although the smaller/landscape streams temporarily
+used software H.264 encoding. Returning to portrait restored hardware encoding.
+
+A physical iPhone 13 mini check received 750 × 1076 video for a 375 × 538
+portrait Explore page, then 1424 × 494 for a 712 × 247 landscape page. A desktop
+viewer kept its own 390 × 686 layout and scroll. Native touch scrolling,
+navigation/Back, keyboard input, saved-state propagation, control/take-back and
+Stop passed; reconnecting to the stopped share was denied. Unsaved owner text
+remained separate. The phone negotiated constrained-baseline H.264 and the sender
+reported software OpenH264, while the desktop stream used hardware VideoToolbox.
+A subsequent physical run with the capability-based preference negotiated HEVC
+on that iPhone and reported hardware VideoToolbox encoding at both portrait and
+landscape dimensions. The desktop viewer independently retained hardware H.264.
+Two eighteen-second continuous-motion samples in a fresh fixture, before and
+after reconnecting, decoded approximately 30 fps with no dropped frames or
+freeze-counter increases. Two earlier samples averaged approximately 29–30 fps
+with no dropped frames but recorded 2 and 12 freezes, totaling 0.623 and 3.013
+seconds. Those results are retained: the later successful samples do not establish
+consistent latency, battery consumption or sustained WAN quality. Hardware
+encoding is confirmed; the phone did not expose its decoder implementation.
+
+Native keyboard input, saved-state propagation while preserving the owner's
+draft, independent scrolling, rotation and Stop passed again. The runner then
+switched to its own app and asserted that Instafy was backgrounded for more than
+30 seconds, with the WebKit inspector detached. Desktop scrolling continued.
+Closing only the phone's test signaling connections retired its private renderer
+and video peer. Returning to Instafy showed no stale pixels; Reconnect restored
+Follow, and a new Explore request required new approval. The desktop retained
+its view and scroll. Reconnect after Stop remained denied. This qualifies native
+background/foreground transitions plus a controlled connection interruption;
+it does not prove OS-enforced suspension, Wi-Fi/cellular handover or Internet
+outage recovery.
+
+The first interruption fixture closed only the proxy's downstream socket and
+left the controller-facing socket open, retaining an old private view. The
+corrected fixture closes both ends and verified teardown. Detection of a silently
+half-open connection remains a separate qualification gap; the corrected result
+does not establish a timeout for that case. Both fixture runs reused one approved
+XCTest runner without restarting it.
+
+Signaling carries only a connection's own peer to that viewer. The controller
+chooses its Follow/Explore source, enforces the existing audience and derives
+short-lived TURN credentials using the existing `CONTROLLER_BROWSER_TURN_*`
+configuration and `CONTROLLER_BROWSER_WEBRTC_PROJECT_IDS` allowlist. Configured,
+allowed projects use relay-only ICE; configured but unlisted projects keep JPEG.
+With no TURN configuration, direct connectivity is attempted and JPEG remains
+the remote-connectivity fallback. Media does not traverse the controller socket;
+input, approvals and revocation continue to use it. No data channel, audio,
+camera/microphone permission or screen picker is introduced.
+
+Main owns a four-second video lease renewed through the authorized publisher.
+Stop, removal, source retirement and loss of authority destroy the corresponding
+native peer. A lease can renew an existing peer but cannot recreate one. Pending
+negotiations expire, repeated starts are bounded, and established streams retain
+their transport while the share remains authorized. Reconnects mint fresh TURN
+credentials. This uses the existing process-local sharing registry and does not
+solve cross-controller routing.
+
+## Viewing on a narrow screen
+
+The viewer offers **Expand**, **Fit to view**, and local zoom at 100%, 150% and
+200%. Expand opens a fullscreen dialog; Minimize or Escape returns to the
+conversation without reconnecting. Zoomed views scroll locally to pan the
+received image. While viewing, they do not send clicks or scrolling to the host.
+While controlling, input goes to the shared page; **Pan view** temporarily switches
+back to local inspection. Neither Follow nor canonical control changes the source viewport or requests
+a different page layout. Approved Explore uses its own responsive page. New frames retain the viewer's pan.
+Stop and removal clear both docked and fullscreen pixels.
+
+Control groups wrap into the available width. On short viewports, such as a
+landscape phone, explanatory text is hidden to leave more room for the page;
+the status and action buttons remain visible.
+
+The streamed image disables native image selection, callouts and dragging so
+iOS image gestures do not cancel repeated shared-page swipes. Follow-mode zoom
+and local panning remain available.
+
+The expanded viewer follows the device's visible viewport when the software
+keyboard opens. It reserves space for the remote input bar and temporarily hides
+zoom controls and explanatory text, keeping navigation and release controls
+available. An Explore page resizes with that available area; Follow continues to
+fit the owner's original layout.
+
+Fitting a desktop article into a phone-width view makes text very small. Zoom
+makes details readable but requires sideways panning through desktop lines. This
+is useful for watching/inspecting. Approved Explore provides the separate responsive
+layout and independent page scrolling described above.
+
+## Implementation and limits
+
+- Electron captures only its current owner-bound Personal Browser WebContents.
+  Capture is explicit and supports HTTP(S) pages. Each completion rechecks the
+  exact owner, project, selected contents and capture generation. Stop, close,
+  account re-attestation, release, or replacement invalidates pending captures.
+- A separate controller registry owns the sharing session. Creation requires a
+  human user session and space write access; joining requires current space read
+  access plus inclusion in the session audience. Only the creator can publish,
+  stop, inspect the viewer list or remove viewers. Private runtime authorization is
+  unchanged. Scoped runtime/agent credentials cannot join these routes.
+- Native video is preferred when both peers support it. The JPEG compatibility
+  transport relays bounded images over authenticated WebSockets: at most five
+  captures per second, 1600 × 1200 Follow pixels and one MiB per image. The relay
+  retains only the latest image and closes stalled consumers. Both transports
+  preserve the explicit control grants and bounded input lane described above.
+- Session tokens are sent in the initial socket message, never the URL. Space
+  access and token validity are rechecked every ten seconds, with a five-second
+  authorization timeout. Explicit Stop and publisher disconnect retire the whole
+  session and its viewer sockets. Explicit person removal signals their sockets
+  directly and prevents fresh connections, without waiting for the membership
+  polling interval. Only the owner receives audience names and connection status.
+  Up to 32 people can be selected; a session retains at most 256 removals. Viewer
+  capacity is eight concurrent connections; registry capacity is
+  eight sessions per space, one per owner and 64 per controller process.
+- A session lasts at most one hour and expires after twenty seconds without a
+  publisher frame or video heartbeat. Closing or hiding the host browser ends the publisher. The
+  computer must remain online. Reconnection requires a new explicit share.
+- Registry state is process-local and ephemeral. A controller restart ends every
+  share. A replicated deployment needs shared session routing/revocation before
+  this can be treated as a generally available multi-controller feature.
+
+## Next increments
+
+1. Complete physical iOS suspension/resume and successful reconnect testing,
+   then qualify capability-based codec selection and measure sustained motion.
+   Preserve the existing Android and iOS interaction checks with active networking;
+   USB forwarding without an active phone network is not a WebRTC sign-off.
+2. Measure real LAN/WAN input-to-photon latency, text quality, CPU, battery and
+   bandwidth under loss, network changes and multiple simultaneous participants.
+   Tune 60 fps and codec selection from these results before exposing quality modes.
+3. Add shared session routing/revocation for replicated controllers. Integrate
+   browser sharing with generic human/agent handover, then add authorized capture
+   and input adapters for supported desktop applications. Separate native-app
+   layouts still require separate app views/sessions; video alone cannot supply them.
+
+## Verification
+
+Run the frontend unit tests and Desktop tests, then controller tests filtered to
+`browser_shares`. The explicit native smoke test requires a graphical Electron
+host:
+
+```bash
+pnpm --filter @instafy/frontend test:unit
+pnpm --filter @instafy/desktop-app test
+cargo test --manifest-path packages/runtime-controller/Cargo.toml browser_shares
+pnpm --filter @instafy/desktop-app smoke:browser:explore
+pnpm --filter @instafy/desktop-app smoke:browser:video
+```
+
+The Explore smoke uses disposable profiles and a loopback fixture. It covers
+independent CSS and capture resolutions, shared cookies, native click navigation
+during capture, Back, Reload, resizing and teardown. It does not qualify phone interaction or
+end-to-end network latency. Those checks require an owner in Electron and a
+separately authenticated participant on the actual device.
+
+The video smoke uses the real native permission boundary, eight simultaneous
+viewers sharing a capture, the peer limit, removal preserving other streams,
+distinct receiver resolutions, hardware statistics, navigation, rotation,
+expansion from an initially small capture, revocation and native lease expiry.
+It must run explicitly on a graphical host; a missing device or graphical
+environment is not a passing result.
+
+For the iOS regression check, expand Explore and swipe repeatedly in both
+directions, including after opening/closing the keyboard and rotating the phone.
+The participant must keep scrolling while the owner's scroll stays fixed. Test
+both software-keyboard taps and rapid printable key sequences with mixed case,
+spaces and accented characters; the saved text must match exactly. Finally,
+return to Follow, grant control, revoke it, and stop sharing to verify that input
+and pixels disappear at their respective boundaries.

@@ -82,7 +82,7 @@ pub(crate) enum ProjectRole {
 }
 
 impl ProjectRole {
-    fn from_membership_role(role: &str) -> Option<Self> {
+    pub(crate) fn from_membership_role(role: &str) -> Option<Self> {
         match role.trim().to_ascii_lowercase().as_str() {
             "viewer" => Some(Self::Viewer),
             "builder" => Some(Self::Builder),

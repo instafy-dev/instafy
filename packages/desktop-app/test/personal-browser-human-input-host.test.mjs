@@ -41,6 +41,9 @@ async function fixture(highlight = async () => true, options = {}) {
   const module = { exports: {} };
   const dependencies = {
     electron: { WebContentsView: class {}, dialog: { showMessageBox: async () => ({ response: 1 }) } },
+    "./browserTabCapture": require(path.join(packageRoot, "dist/browserTabCapture.js")),
+    "./browserTabInput": require(path.join(packageRoot, "dist/browserTabInput.js")),
+    "./browserTabExplorePage": { createBrowserTabExplorePage() { throw new Error("Unexpected native Explore page"); } },
     "./personalBrowserSecurity": security,
     "./personalBrowserPageBridge": {
       ...pageBridge,
@@ -192,4 +195,33 @@ test("Personal release and same-profile reclaim preserve the page but never inhe
   host.humanInputRequest = { ...priorRequest, handoffId: "new-owner-request" };
   host.release("owner-fixture");
   assert.equal(host.getStatus().humanInputRequest.handoffId, "new-owner-request", "a stale release cannot clear a newer owner's guidance");
+});
+
+
+test("shared tab control waits for paused agent operations and blocks Resume until takeover ends", async () => {
+  let finishScroll;
+  const { host, shieldStates } = await fixture(async () => true, { scroll: () => new Promise((resolve) => { finishScroll = resolve; }) });
+  host.currentVisible = true;
+  const { captureId } = host.startTabShare("owner-fixture");
+  const grantId = "11111111-1111-4111-8111-111111111111";
+  const scrolling = host.handleControlOperation("scroll", { y: 100 });
+  await waitForStart(() => Boolean(finishScroll));
+  host.pauseAgentControl();
+  assert.throws(() => host.controlSharedTab("owner-fixture", captureId, grantId), /Pause agent control/);
+  assert.equal(host.getStatus().humanControlReady, false);
+  finishScroll({ x: 0, y: 100 });
+  await assert.rejects(scrolling, /control was rotated/);
+  host.controlSharedTab("owner-fixture", captureId, grantId);
+  try {
+    assert.equal(host.getStatus().tabControlActive, true);
+    assert.equal(host.getStatus().humanControlReady, false);
+    assert.equal(shieldStates.at(-1), true);
+    await assert.rejects(host.prepareAgentControl(), /Take back/);
+  } finally {
+    host.stopTabShare("owner-fixture", captureId);
+  }
+  assert.equal(host.getStatus().humanControlReady, true);
+  assert.equal(shieldStates.at(-1), false);
+  host.enablePreparedAgentControl(await host.prepareAgentControl());
+  assert.equal(host.getStatus().agentControlEnabled, true);
 });

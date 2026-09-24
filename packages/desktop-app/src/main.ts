@@ -1,4 +1,5 @@
 import { resolveDesktopNotificationClickTargetUrl, resolveDesktopNotificationBody } from "./deepLinks";
+import { registerStudioWindow, getStudioWindow, getStudioWindows } from "./desktopWindows";
 import { BrowserWindow, Menu, Notification, app, dialog, ipcMain, net, shell } from "electron";
 import { randomUUID } from "node:crypto";
 import fs from "node:fs";
@@ -559,7 +560,7 @@ function focusMainWindow(mainWindow: BrowserWindow) {
 }
 
 function openUrlInMainWindow(targetUrl: string) {
-  const existingWindow = BrowserWindow.getAllWindows().at(0);
+  const existingWindow = getStudioWindow();
   if (!existingWindow) {
     createMainWindow(targetUrl);
     return;
@@ -577,7 +578,7 @@ function handleDesktopDeepLink(rawUrl: string | null | undefined): boolean {
     // slot on mount, so a callback that arrives before it is listening -- or
     // with no window at all -- still completes the sign-in.
     pendingDesktopAuthCallbackUrl = rawUrl;
-    const window = BrowserWindow.getAllWindows().at(0) ?? null;
+    const window = getStudioWindow() ?? null;
     if (window) {
       window.webContents.send("instafy:authCallback", rawUrl);
       focusMainWindow(window);
@@ -631,6 +632,7 @@ function createMainWindow(initialUrl?: string) {
       sandbox: true
     }
   });
+  registerStudioWindow(mainWindow);
   const mainWebContentsId = mainWindow.webContents.id;
   studioRendererGenerations.set(mainWebContentsId, { generation: 0, acceptsIpc: false });
   personalBrowserHost?.attachWindow(mainWindow);
@@ -831,7 +833,7 @@ async function refreshDesktopRuntimeControllerAccess(
   if (runtime.controllerCredentialProvenance.kind !== "ambient") {
     return;
   }
-  const window = BrowserWindow.getAllWindows().find((candidate) => !candidate.isDestroyed());
+  const window = getStudioWindow();
   if (!window) {
     return;
   }
@@ -1027,7 +1029,7 @@ async function waitForDesktopRuntimeJobsToFinish(
 async function showDesktopQuitMessageBox(
   options: Electron.MessageBoxOptions,
 ): Promise<Electron.MessageBoxReturnValue> {
-  const window = BrowserWindow.getFocusedWindow() ?? BrowserWindow.getAllWindows().at(0);
+  const window = getStudioWindow();
   return window ? dialog.showMessageBox(window, options) : dialog.showMessageBox(options);
 }
 
@@ -1334,7 +1336,7 @@ function requestCoordinatedDesktopQuit(options: { installUpdate: boolean }): Pro
       })
       .then((approved) => {
         if (!approved) {
-          const existingWindow = BrowserWindow.getAllWindows().at(0);
+          const existingWindow = getStudioWindow();
           if (existingWindow) {
             focusMainWindow(existingWindow);
           } else if (app.isReady()) {
@@ -1727,7 +1729,7 @@ if (!allowMultipleInstances) {
       if (deepLinkArg && handleDesktopDeepLink(deepLinkArg)) {
         return;
       }
-      const existingWindow = BrowserWindow.getAllWindows().at(0);
+      const existingWindow = getStudioWindow();
       if (!existingWindow) {
         return;
       }
@@ -1753,13 +1755,13 @@ app.on("window-all-closed", () => {
 });
 
 app.on("activate", () => {
-  if (BrowserWindow.getAllWindows().length === 0) {
+  if (!getStudioWindow()) {
     createMainWindow();
   }
 });
 
 function broadcastPersonalBrowserStatus(status: PersonalBrowserStatus) {
-  for (const window of BrowserWindow.getAllWindows()) {
+  for (const window of getStudioWindows()) {
     if (!window.isDestroyed()) {
       window.webContents.send("instafy:personalBrowserStatus", status);
     }
@@ -1859,6 +1861,7 @@ app.whenReady().then(() => {
     // before it starts so an auth change cannot leave the previous user's
     // partition controllable while a replacement open is queued.
     if (currentStatus.projectId && currentStatus.ownerId) {
+      personalBrowserHost.revokeTabShare();
       personalBrowserHost.pauseAgentControl();
     }
     return serializePersonalBrowserMutation(async () => {
@@ -1963,7 +1966,11 @@ app.whenReady().then(() => {
     if (!personalBrowserHost.isOwnedBy(ownerId)) {
       return personalBrowserHost.getStatus();
     }
-    return personalBrowserHost.setBounds(payload);
+    const wasOccluded = personalBrowserHost.occluded;
+    const status = personalBrowserHost.setBounds(payload);
+    const previewDataUrl = !wasOccluded && personalBrowserHost.occluded
+      ? await personalBrowserHost.captureOverlayPreview(ownerId) : undefined;
+    return { ...status, ...(previewDataUrl ? { previewDataUrl } : {}) };
   });
 
   ipcMain.handle("instafy:personalBrowserRelease", async (event, payload) => {
@@ -1999,6 +2006,75 @@ app.whenReady().then(() => {
     }
     return personalBrowserHost.show(payload?.visible);
   });
+
+  for (const operation of ["open", "answer", "sync", "viewport", "close", "stats"] as const) {
+    ipcMain.handle(`instafy:browserTabVideo:${operation}`, async (event, payload) => {
+      assertAllowedCaller(event);
+      const lease=captureStudioRendererGeneration(event);
+      assertStudioRendererGenerationCurrent(lease);
+      const ownerId=requirePersonalBrowserOwnerId(payload?.ownerId);
+      if (!personalBrowserHost || typeof payload?.captureId!=="string") throw new Error("Tab sharing ended.");
+      const value=await personalBrowserHost.videoSharedTab(ownerId,payload.captureId,operation,payload.value);
+      assertStudioRendererGenerationCurrent(lease);
+      return value;
+    });
+  }
+  ipcMain.handle("instafy:browserTabShareStart", async (event, payload) => {
+    assertAllowedCaller(event);
+    assertStudioRendererGenerationCurrent(captureStudioRendererGeneration(event));
+    const ownerId = requirePersonalBrowserOwnerId(payload?.ownerId);
+    if (!personalBrowserHost) throw new Error("Browser unavailable.");
+    return personalBrowserHost.startTabShare(ownerId);
+  });
+  ipcMain.handle("instafy:browserTabShareFrame", async (event, payload) => {
+    assertAllowedCaller(event);
+    const lease = captureStudioRendererGeneration(event);
+    assertStudioRendererGenerationCurrent(lease);
+    const ownerId = requirePersonalBrowserOwnerId(payload?.ownerId);
+    if (!personalBrowserHost || typeof payload?.captureId !== "string") throw new Error("Tab sharing ended.");
+    const bytes = await personalBrowserHost.captureSharedTab(ownerId, payload.captureId);
+    assertStudioRendererGenerationCurrent(lease);
+    return bytes;
+  });
+  ipcMain.handle("instafy:browserTabShareStop", async (event, payload) => {
+    assertAllowedCaller(event);
+    assertStudioRendererGenerationCurrent(captureStudioRendererGeneration(event));
+    const ownerId = requirePersonalBrowserOwnerId(payload?.ownerId);
+    if (typeof payload?.captureId !== "string") throw new Error("Tab sharing ended.");
+    personalBrowserHost?.stopTabShare(ownerId, payload.captureId);
+  });
+
+  for (const operation of ["Control", "Renew", "Input"] as const) {
+    ipcMain.handle(`instafy:browserTabShare${operation}`, async (event, payload) => {
+      assertAllowedCaller(event);
+      assertStudioRendererGenerationCurrent(captureStudioRendererGeneration(event));
+      const ownerId = requirePersonalBrowserOwnerId(payload?.ownerId);
+      if (!personalBrowserHost || typeof payload?.captureId !== "string" || (typeof payload?.grantId !== "string" && !(operation === "Control" && payload?.grantId === null))) throw new Error("Tab control ended.");
+      if (operation === "Control") return personalBrowserHost.controlSharedTab(ownerId,payload.captureId,payload.grantId);
+      if (operation === "Renew") return personalBrowserHost.renewSharedTabControl(ownerId,payload.captureId,payload.grantId);
+      return personalBrowserHost.inputSharedTab(ownerId,payload.captureId,payload.grantId,payload.input);
+    });
+  }
+
+  ipcMain.handle("instafy:browserTabExploreOpen", (event, payload) => {
+    assertAllowedCaller(event);
+    assertStudioRendererGenerationCurrent(captureStudioRendererGeneration(event));
+    const ownerId = requirePersonalBrowserOwnerId(payload?.ownerId);
+    if (!personalBrowserHost || typeof payload?.captureId !== "string") throw new Error("Tab sharing ended.");
+    return personalBrowserHost.openTabExplore(ownerId, payload.captureId, payload.viewport);
+  });
+  for (const operation of ["renew", "frame", "resize", "input", "navigate", "close"] as const) {
+    ipcMain.handle(`instafy:browserTabExplore:${operation}`, async (event, payload) => {
+      assertAllowedCaller(event);
+      const lease = captureStudioRendererGeneration(event);
+      assertStudioRendererGenerationCurrent(lease);
+      const ownerId = requirePersonalBrowserOwnerId(payload?.ownerId);
+      if (!personalBrowserHost || typeof payload?.captureId !== "string" || typeof payload?.viewId !== "string") throw new Error("Explore ended.");
+      const result = await personalBrowserHost.operateTabExplore(ownerId, payload.captureId, payload.viewId, operation, payload.value);
+      assertStudioRendererGenerationCurrent(lease);
+      return result;
+    });
+  }
 
   ipcMain.handle("instafy:personalBrowserNavigate", async (event, payload) => {
     assertAllowedCaller(event);
@@ -2187,11 +2263,11 @@ app.whenReady().then(() => {
       const session = await resolveVisibleSupabaseSession(event);
       if (!target || !session?.userId || session.userId !== payload?.accountId ||
         typeof payload.eventId !== "string" || !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(payload.eventId)) return false;
-      if (BrowserWindow.getAllWindows().some((window) => window.isFocused())) return false;
+      if (getStudioWindows().some((window) => window.isFocused())) return false;
       const notification = new Notification({ title: "Instafy", body: resolveDesktopNotificationBody(payload.body) });
       notification.on("click", () => {
         void (async () => {
-          const window = BrowserWindow.getAllWindows().at(0);
+          const window = getStudioWindow();
           if (window) {
             const visible = await window.webContents.executeJavaScript(READ_VISIBLE_SUPABASE_SESSION_SCRIPT);
             if (visible?.userId && visible.userId !== payload.accountId) return;

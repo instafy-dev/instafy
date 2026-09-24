@@ -60,6 +60,7 @@ export type PersonalBrowserStatus = {
   canGoBack: boolean;
   canGoForward: boolean;
   agentControlEnabled: boolean;
+  sharing?: boolean;
   ownerId?: string;
   projectId?: string;
   runtimeId?: string;
@@ -394,14 +395,15 @@ contextBridge.exposeInMainWorld("instafyDesktop", {
     return (await ipcRenderer.invoke("instafy:personalBrowserRelease", options)) as PersonalBrowserStatus;
   },
   personalBrowserSetBounds: async (options: {
+    occluded?: boolean;
     x: number;
     y: number;
     width: number;
     height: number;
     visible?: boolean;
     ownerId: string;
-  }): Promise<PersonalBrowserStatus> => {
-    return (await ipcRenderer.invoke("instafy:personalBrowserSetBounds", options)) as PersonalBrowserStatus;
+  }): Promise<PersonalBrowserStatus & { previewDataUrl?: string }> => {
+    return (await ipcRenderer.invoke("instafy:personalBrowserSetBounds", options)) as PersonalBrowserStatus & { previewDataUrl?: string };
   },
   personalBrowserShow: async (options: {
     visible: boolean;
@@ -415,6 +417,26 @@ contextBridge.exposeInMainWorld("instafyDesktop", {
   }): Promise<PersonalBrowserStatus> => {
     return (await ipcRenderer.invoke("instafy:personalBrowserNavigate", options)) as PersonalBrowserStatus;
   },
+  browserTabVideo: (options: {ownerId:string;captureId:string;operation:"open"|"answer"|"sync"|"viewport"|"close"|"stats";value:unknown}): Promise<unknown> => {
+    if (!["open","answer","sync","viewport","close","stats"].includes(options.operation)) throw new Error("Invalid video operation.");
+    return ipcRenderer.invoke(`instafy:browserTabVideo:${options.operation}`,options);
+  },
+  browserTabExploreOpen: (options: { ownerId: string; captureId: string; viewport: { width: number; height: number; dpr: number } }): Promise<{ viewId: string }> => ipcRenderer.invoke("instafy:browserTabExploreOpen", options),
+  browserTabExploreRenew: (options: { ownerId: string; captureId: string; viewId: string }): Promise<boolean> => ipcRenderer.invoke("instafy:browserTabExplore:renew", options),
+  browserTabExploreFrame: (options: { ownerId: string; captureId: string; viewId: string }): Promise<Uint8Array | null> => ipcRenderer.invoke("instafy:browserTabExplore:frame", options),
+  browserTabExploreResize: (options: { ownerId: string; captureId: string; viewId: string; value: { width: number; height: number; dpr: number } }): Promise<void> => ipcRenderer.invoke("instafy:browserTabExplore:resize", options),
+  browserTabExploreInput: (options: { ownerId: string; captureId: string; viewId: string; value: unknown }): Promise<void> => ipcRenderer.invoke("instafy:browserTabExplore:input", options),
+  browserTabExploreNavigate: (options: { ownerId: string; captureId: string; viewId: string; value: "back" | "forward" | "reload" }): Promise<void> => ipcRenderer.invoke("instafy:browserTabExplore:navigate", options),
+  browserTabExploreClose: (options: { ownerId: string; captureId: string; viewId: string }): Promise<void> => ipcRenderer.invoke("instafy:browserTabExplore:close", options),
+  browserTabShareControl: (options: { ownerId: string; captureId: string; grantId: string | null }): Promise<void> => ipcRenderer.invoke("instafy:browserTabShareControl",options),
+  browserTabShareRenew: (options: { ownerId: string; captureId: string; grantId: string }): Promise<boolean> => ipcRenderer.invoke("instafy:browserTabShareRenew",options),
+  browserTabShareInput: (options: { ownerId: string; captureId: string; grantId: string; input: unknown }): Promise<void> => ipcRenderer.invoke("instafy:browserTabShareInput",options),
+  browserTabShareStart: (options: { ownerId: string }): Promise<{ captureId: string }> =>
+    ipcRenderer.invoke("instafy:browserTabShareStart", options),
+  browserTabShareFrame: (options: { ownerId: string; captureId: string }): Promise<Uint8Array> =>
+    ipcRenderer.invoke("instafy:browserTabShareFrame", options),
+  browserTabShareStop: (options: { ownerId: string; captureId: string }): Promise<void> =>
+    ipcRenderer.invoke("instafy:browserTabShareStop", options),
   personalBrowserGoBack: async (options: { ownerId: string }): Promise<PersonalBrowserStatus> => {
     return (await ipcRenderer.invoke("instafy:personalBrowserGoBack", options)) as PersonalBrowserStatus;
   },

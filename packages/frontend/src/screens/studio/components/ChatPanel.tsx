@@ -337,6 +337,7 @@ import {
 import { LazyBrowserSessionModal } from "./LazyBrowserSessionModal";
 import type { SharedBrowserChromeProps } from "./SharedBrowserChrome";
 import { resolveSharedBrowserViewerKind } from "./sharedBrowserViewer";
+import { LocalBrowserSharing, LocalBrowserTabPublisher } from "./LocalBrowserSharing";
 import { ChatBrowserSubtabs, type ChatBrowserSubtab } from "./ChatBrowserSubtabs";
 import {
   BrowserTransportSelector,
@@ -5620,6 +5621,15 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
                 active={browserTransport === "personal" && browserSubtab === "browser"}
                 compactChrome={compactBrowserBar}
                 model={personalBrowser}
+                sharingControls={activeProjectId && currentUserId ? (
+                  <LocalBrowserTabPublisher
+                    key={`${activeProjectId}:${currentUserId}`}
+                    projectId={activeProjectId}
+                    userId={currentUserId}
+                    ownerId={personalBrowser.ownerId}
+                    canShare={browserSubtab === "browser" && browserTransport === "personal" && personalBrowser.status?.state === "ready" && typeof window.instafyDesktop?.browserTabShareStart === "function"}
+                  />
+                ) : null}
                 humanInputIdentityKey={browserHandoff.identityKey}
                 onContinueAfterHumanInput={browserHandoff.continuePersonal}
                 transportSelector={browserTransport === "personal" ? browserTransportSelector : null}
@@ -5682,6 +5692,13 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
         className={browserSubtab === "chat" ? "flex min-h-0 flex-1 flex-col" : "hidden"}
       >
       <ChatMessageContextToolbar />
+      {activeProjectId && currentUserId ? (
+        <LocalBrowserSharing
+          key={`${activeProjectId}:${currentUserId}`}
+          projectId={activeProjectId}
+          userId={currentUserId}
+        />
+      ) : null}
       <ChatScrollSnapshotBoundary identity={chatScrollMutationIdentity} messages={messages} capture={recordScrollPosition}>
       <ChatTranscriptViewport
         ariaLabel={conversationLabel}

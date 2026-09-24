@@ -32,7 +32,7 @@ const SHIELD_HTML = `<!doctype html>
       }
     </style>
   </head>
-  <body><div class="status">Agent control · Esc to pause</div></body>
+  <body><div class="status">Browser controlled · Esc to take back</div></body>
 </html>`;
 
 const SHIELD_URL = `data:text/html;charset=utf-8,${encodeURIComponent(SHIELD_HTML)}`;
@@ -49,6 +49,14 @@ export class PersonalBrowserInputShield {
   private protectedContents: WebContents | null = null;
   private shieldView: WebContentsView | null = null;
   private active = false;
+  private injectedInputDepth = 0;
+  async withInjectedInput<T>(operation: () => Promise<T>): Promise<T> {
+    this.injectedInputDepth++;
+    try { return await operation(); } finally { this.injectedInputDepth--; }
+  }
+  private readonly handleProtectedInput = (event: ElectronEvent, input: Input) => {
+    if (!this.injectedInputDepth) this.handleBeforeInput(event,input);
+  };
   private visible = false;
   private bounds: Rectangle = { x: 0, y: 0, width: 1, height: 1 };
   private emergencyEscapeQueued = false;
@@ -60,9 +68,9 @@ export class PersonalBrowserInputShield {
 
   attach(owner: View, protectedContents: WebContents) {
     if (this.protectedContents !== protectedContents) {
-      this.protectedContents?.removeListener("before-input-event", this.handleBeforeInput);
+      this.protectedContents?.removeListener("before-input-event", this.handleProtectedInput);
       this.protectedContents = protectedContents;
-      protectedContents.on("before-input-event", this.handleBeforeInput);
+      protectedContents.on("before-input-event", this.handleProtectedInput);
     }
     if (this.owner !== owner) {
       if (this.owner && this.shieldView) {
@@ -83,7 +91,7 @@ export class PersonalBrowserInputShield {
   destroy() {
     this.active = false;
     this.visible = false;
-    this.protectedContents?.removeListener("before-input-event", this.handleBeforeInput);
+    this.protectedContents?.removeListener("before-input-event", this.handleProtectedInput);
     this.protectedContents = null;
     const view = this.shieldView;
     this.shieldView = null;
@@ -146,6 +154,13 @@ export class PersonalBrowserInputShield {
       if (this.visible && this.protectedContents && !this.protectedContents.isDestroyed()) {
         this.protectedContents.focus();
       }
+      return;
+    }
+    // Attaching even a hidden native view can steal focus from a DOM menu.
+    // Keep keyboard interception active, but defer mounting the shield until
+    // the protected page is visible again.
+    if (!this.visible) {
+      this.shieldView?.setVisible(false);
       return;
     }
     const view = this.ensureView();
