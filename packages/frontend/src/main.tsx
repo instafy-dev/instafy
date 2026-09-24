@@ -13,6 +13,7 @@ import { ThemeProvider } from "./theme/ThemeProvider";
 import { installDesktopUpdateBootstrap } from "./desktop/updates/bootstrap";
 import { installNativeOtaBootstrap } from "./mobile/ota/bootstrap";
 import { installNativeDeepLinkBootstrap } from "./native/nativeDeepLinks";
+import { installNativeKeyboardAccessory } from "./native/nativeKeyboardAccessory";
 import { installStudioPerformanceNavigation } from "./telemetry/studioPerformanceNavigation";
 // Installs the visibility and idle gate into React Query's focusManager before
 // any query mounts, so interval queries pause while nobody is looking.
@@ -79,6 +80,8 @@ installServiceWorkerPushDebugListener();
 installDesktopUpdateBootstrap();
 void installNativeOtaBootstrap();
 installNativeDeepLinkBootstrap(router);
+const disposeNativeKeyboardAccessory = installNativeKeyboardAccessory();
+if (import.meta.hot) import.meta.hot.dispose(disposeNativeKeyboardAccessory);
 const disposePerformanceNavigation = installStudioPerformanceNavigation(router);
 if (import.meta.hot) import.meta.hot.dispose(disposePerformanceNavigation);
 

@@ -60,7 +60,6 @@ import "./studio/StudioContextLayout.css";
 import { StudioSidebar } from "./studio/components/StudioSidebar";
 import { StudioMobileSidebarOverlay } from "./studio/components/StudioMobileSidebarOverlay";
 import { StudioTopBar } from "./studio/components/StudioTopBar";
-import { useSidebarToggleFocus } from "./studio/useSidebarToggleFocus";
 import { MobileBottomDock } from "./studio/components/MobileBottomDock";
 import { ProjectLauncher } from "./studio/components/ProjectLauncher";
 import { ChatPanel } from "./studio/components/ChatPanel";
@@ -133,7 +132,7 @@ import {
 } from "./studio/components/githubImport";
 import { applyPageMeta } from "../utils/seo";
 import { isPersonalOrgName } from "../org/orgNaming";
-import { buildStudioViewportStyle } from "./studioViewport";
+import { buildStudioViewportStyle, shouldHideContextWhileTyping } from "./studioViewport";
 import { useStudioViewportState } from "./useStudioViewportState";
 import { writePendingProjectSwitch } from "./pendingProjectSwitch";
 import { controllerBaseUrl } from "../services/runtimeController/core";
@@ -800,6 +799,7 @@ function StudioLayoutInner() {
     setMobileGitReviewSheet,
     setMobileSidebarOpen,
     setSidebarCollapsed,
+    toggleSidebar: handleToggleSidebar,
     sidebarCollapsed,
     sourceControlOpenRequest,
     setSourceControlOpenRequest,
@@ -1256,21 +1256,6 @@ function StudioLayoutInner() {
     return () => window.removeEventListener("keydown", handleKeyDown);
   }, [isLargeScreen, mobileGitReviewSheet, setMobileGitReviewSheet]);
 
-  const prepareSidebarToggleFocus = useSidebarToggleFocus(isLargeScreen, sidebarCollapsed);
-  const handleToggleSidebar = useCallback(() => {
-    if (isLargeScreen) {
-      prepareSidebarToggleFocus();
-      setSidebarCollapsed((previous) => !previous);
-      return;
-    }
-    setMobileSidebarOpen((previous) => {
-      if (!previous) {
-        setLeftDrawer(null);
-      }
-      return !previous;
-    });
-  }, [isLargeScreen, prepareSidebarToggleFocus, setLeftDrawer, setMobileSidebarOpen, setSidebarCollapsed]);
-
   const handleOpenConversationHistory = useCallback(() => {
     navigateToDestination({ kind: "panel", panel: "chat", workspaceTab: "history" });
   }, [navigateToDestination]);
@@ -1336,6 +1321,10 @@ function StudioLayoutInner() {
   }, [consumeUrlNavigation, handleOpenTeam, mobileHistory, navigationScope.orgKey]);
 
   const handleOpenChatNavigation = useCallback(() => {
+    if (showTouchBottomDock) {
+      navigateToDestination({ kind: "panel", panel: "chat", workspaceTab: "history" });
+      return;
+    }
     if (isLargeScreen) {
       setSidebarCollapsed(false);
       return;
@@ -1345,7 +1334,7 @@ function StudioLayoutInner() {
       setLeftDrawer(null);
     }
     setMobileSidebarOpen(true);
-  }, [isLargeScreen, leftDrawer, requestHistoryPush, setLeftDrawer, setMobileSidebarOpen, setSidebarCollapsed]);
+  }, [isLargeScreen, leftDrawer, navigateToDestination, requestHistoryPush, setLeftDrawer, setMobileSidebarOpen, setSidebarCollapsed, showTouchBottomDock]);
 
   const handleSelectRecentConversation = useCallback((conversationId: string) => {
     if (!activeProjectId) return;
@@ -1923,10 +1912,17 @@ function StudioLayoutInner() {
     />
   ) : null;
   const mobileTopbarNavigation = !isLargeScreen ? {
-    visitKey: location.key,
+    // Opening navigation adds history entries within the same page visit.
+    // Keep its trigger mounted so the modal can restore keyboard focus on close.
+    visitKey: getStudioVisitKey(location),
     history: mobileHistory,
     onOpenPicker: handleToggleSidebar,
   } : undefined;
+  const hideMobileContextWhileTyping = shouldHideContextWhileTyping({
+    isTouchConversation: showTouchBottomDock && isChatSurfaceVisible && !showMobileLeftDrawerOverlay,
+    keyboardOpen,
+    viewportHeightPx,
+  });
   if (!isChatSurfaceVisible || projectAccessBlocked) {
     workspaceContent = (
       <StudioPanelPerformance
@@ -2196,7 +2192,7 @@ function StudioLayoutInner() {
             aria-hidden={search.open || showMobileLeftDrawerOverlay || undefined}
             inert={search.open || showMobileLeftDrawerOverlay || undefined}
           >
-            {!isLargeScreen ? mobileContextHeader() : null}
+            {!isLargeScreen && !hideMobileContextWhileTyping ? mobileContextHeader() : null}
             {!isLargeScreen ? navigationScope.page === "workspace" ? <StudioTopBar contextHeaderAbove mobileNavigation={mobileTopbarNavigation} /> : <div className={`flex min-h-14 shrink-0 items-center gap-2 border-b border-slate-200/70 bg-slate-50 px-1 py-1 ${DARK_RAIL_SURFACE_CLASS}`}>
               <IconButton variant="ghost" aria-label="Open navigation" data-testid="topbar-sidebar-toggle" onPress={handleToggleSidebar} className="!min-h-12 !min-w-12"><SidebarExpand className="h-[18px] w-[18px]" aria-hidden="true" /></IconButton>
               <MobileStudioHistoryControls history={mobileHistory} />
@@ -2295,8 +2291,8 @@ function StudioLayoutInner() {
               className="fixed inset-0 z-[60] flex h-full flex-col bg-white dark:bg-[var(--color-studio-dark-panel)]"
               data-testid="mobile-left-drawer-overlay"
               hidden={search.open}
-              inert={search.open || undefined}
-              aria-hidden={search.open || undefined}
+              inert={search.open || mobileSidebarOpen || undefined}
+              aria-hidden={search.open || mobileSidebarOpen || undefined}
               style={{
                 ...viewportHeightStyle,
                 paddingBottom: showMobileBottomDock || keyboardOpen ? "0px" : "var(--instafy-safe-area-inset-bottom)",

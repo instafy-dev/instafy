@@ -42,4 +42,16 @@ describe("MobileBottomDock", () => {
     expect(container.querySelector('[data-testid="mobile-bottom-dock-home-badge"]')?.textContent).toBe("9+");
     expect(container.querySelector('[aria-current="page"]')?.getAttribute("aria-label")).toBe("Open home");
   });
+
+  it("moves the visible selection indicator with the current destination", async () => {
+    for (const activeSlot of ["home", "chat", "projects"] as const) {
+      await render({ activeSlot });
+      const selected = container.querySelectorAll('[aria-current="page"]');
+      expect(selected).toHaveLength(1);
+      expect(selected[0].getAttribute("data-testid")).toBe(`mobile-bottom-dock-${activeSlot}`);
+      const indicators = container.querySelectorAll('[data-testid="mobile-bottom-dock-active-indicator"]');
+      expect(indicators).toHaveLength(1);
+      expect(selected[0].contains(indicators[0])).toBe(true);
+    }
+  });
 });

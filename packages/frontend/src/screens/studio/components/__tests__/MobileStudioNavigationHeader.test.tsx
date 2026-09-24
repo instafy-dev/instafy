@@ -66,6 +66,22 @@ describe("MobileStudioNavigationHeader", () => {
     expect(query("mobile-history-controls")).toBeNull();
   });
 
+  it("keeps chat history in More and dismisses the menu when a history direction is chosen", async () => {
+    props.historyInMenu = true;
+    props.history = { ...props.history, canGoBack: true, canGoForward: true };
+    await render();
+    expect(query("mobile-history-controls")).toBeNull();
+    await click("mobile-header-more");
+    expect(query("mobile-header-actions")?.contains(query("mobile-history-controls"))).toBe(true);
+    await click("mobile-header-back");
+    expect(props.history.goBack).toHaveBeenCalledOnce();
+    expect(query("mobile-header-more")?.getAttribute("aria-expanded")).toBe("false");
+    await click("mobile-header-more");
+    await click("mobile-header-forward");
+    expect(props.history.goForward).toHaveBeenCalledOnce();
+    expect(query("mobile-header-more")?.getAttribute("aria-expanded")).toBe("false");
+  });
+
   it("keeps the sidebar control first and separate from the current location", async () => {
     props.titleIcon = <svg data-testid="chat-icon" />;
     await render();

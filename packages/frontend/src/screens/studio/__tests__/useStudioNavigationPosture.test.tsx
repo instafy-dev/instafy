@@ -50,9 +50,9 @@ describe("useStudioNavigationPosture", () => {
   });
 
   it.each([
-    { label: "phone", viewportWidth: 390, touchInput: true, composerNavigation: false },
+    { label: "phone", viewportWidth: 390, touchInput: true, composerNavigation: true },
     { label: "narrow mouse browser", viewportWidth: 390, touchInput: false, composerNavigation: true },
-    { label: "narrow tablet", viewportWidth: 820, touchInput: true, composerNavigation: false },
+    { label: "narrow tablet", viewportWidth: 820, touchInput: true, composerNavigation: true },
     { label: "narrow desktop window", viewportWidth: 899, touchInput: false, composerNavigation: true },
     { label: "desktop breakpoint", viewportWidth: 900, touchInput: false, composerNavigation: false },
     { label: "wide touch screen", viewportWidth: 1280, touchInput: true, composerNavigation: false },

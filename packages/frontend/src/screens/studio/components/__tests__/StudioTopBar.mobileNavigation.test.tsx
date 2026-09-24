@@ -1,9 +1,13 @@
 // @vitest-environment jsdom
 import { act, type ReactNode } from "react";
 import { createRoot, type Root } from "react-dom/client";
+import { BrowserRouter, useLocation } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { StudioTopBar, type StudioTopBarProps } from "../StudioTopBar";
 import { StudioSearchReturnProvider } from "../StudioSearchReturnContext";
+import { StudioMobileSidebarOverlay } from "../StudioMobileSidebarOverlay";
+import { useMobileSidebarHistory } from "../../../useMobileSidebarHistory";
+import { getStudioVisitKey } from "../../../../navigation/studioVisit";
 
 const mocks = vi.hoisted(() => ({
   controls: vi.fn(), projects: vi.fn(), conversations: vi.fn(), tabs: vi.fn(), auth: vi.fn(), posture: vi.fn(),
@@ -57,11 +61,15 @@ describe("StudioTopBar mobile navigation integration", () => {
     expect(query(testId)).not.toBeNull(); await act(async () => query(testId)!.click());
   }
 
-  it.each([true, false])("shares Results and Back with a consistent history pair (touch=%s)", async touch => {
+  it.each([true, false])("keeps search return and history available from the appropriate chat surface (touch=%s)", async touch => {
     mocks.posture.mockReturnValue({ isLargeScreen: false, showTouchBottomDock: touch });
     props.mobileNavigation!.history.canGoBack = true;
     originToken = "owned-search";
     await render();
+    if (touch) {
+      expect(query("mobile-history-controls")).toBeNull();
+      await click("mobile-header-more");
+    }
     expect(query("mobile-header-results")?.textContent).toBe("Results");
     expect(query("mobile-header-forward")?.disabled).toBe(true);
     expect(query("mobile-header-back")).toBeNull();
@@ -74,6 +82,7 @@ describe("StudioTopBar mobile navigation integration", () => {
     originToken = null;
     await render();
     expect(query("mobile-header-results")).toBeNull();
+    if (touch) await click("mobile-header-more");
     await click("mobile-header-back");
     expect(props.mobileNavigation!.history.goBack).toHaveBeenCalledOnce();
 
@@ -116,6 +125,7 @@ describe("StudioTopBar mobile navigation integration", () => {
     await click(pickerId);
     expect(mocks.controls().onToggleSidebar).toHaveBeenCalledOnce();
 
+    if (touch) await click("mobile-header-more");
     await click("mobile-header-back");
     expect(props.mobileNavigation!.history.goBack).toHaveBeenCalledOnce();
     expect(query("studio-mobile-history-bar")).toBeNull();
@@ -252,7 +262,7 @@ describe("StudioTopBar mobile navigation integration", () => {
 
   it("keeps chronological Back distinct from opening a parent conversation", async () => {
     props.mobileNavigation!.history.canGoBack = true;
-    await render(); await click("mobile-header-back");
+    await render(); await click("mobile-header-more"); await click("mobile-header-back");
     expect(props.mobileNavigation!.history.goBack).toHaveBeenCalledTimes(1);
     expect(mocks.tabs().openConversationTab).not.toHaveBeenCalled();
     await click("mobile-header-more"); await click("topbar-parent-conversation-button");
@@ -271,6 +281,46 @@ describe("StudioTopBar mobile navigation integration", () => {
     await click("mobile-header-more");
     mocks.projects.mockReturnValue({ ...mocks.projects(), activeProjectId: "space-b" });
     await render(); expect(query("mobile-header-more")?.getAttribute("aria-expanded")).toBe("false");
+  });
+
+  it.each(["Escape", "close"])("restores focus to the same header trigger after sidebar %s", async (dismissal) => {
+    window.history.replaceState({ idx: 0, key: "chats-visit", usr: null }, "", "/studio?workspaceTab=history");
+    const controls = mocks.controls();
+    function RoutedDrawer() {
+      const location = useLocation();
+      const sidebar = useMobileSidebarHistory({ enabled: true, scopeKey: "user-a:space-a" });
+      const toggle = () => sidebar.setMobileSidebarOpen((open) => !open);
+      mocks.controls.mockReturnValue({ ...controls, sidebarOpen: sidebar.mobileSidebarOpen, onToggleSidebar: toggle });
+      return <>
+        <StudioTopBar mobileNavigation={{ ...props.mobileNavigation!, visitKey: getStudioVisitKey(location), onOpenPicker: toggle }} />
+        {sidebar.mobileSidebarOpen ? <StudioMobileSidebarOverlay onClose={() => sidebar.setMobileSidebarOpen(false)}>
+          <button onClick={() => sidebar.setMobileSidebarOpen(false)} data-testid="close-drawer">Close navigation</button>
+        </StudioMobileSidebarOverlay> : null}
+      </>;
+    }
+    await act(async () => root.render(<BrowserRouter><RoutedDrawer /></BrowserRouter>));
+    const trigger = query("mobile-header-picker")!;
+    for (let cycle = 0; cycle < 2; cycle += 1) {
+      await act(async () => { trigger.focus(); trigger.click(); });
+      await act(async () => new Promise<void>((resolve) => requestAnimationFrame(() => resolve())));
+      expect(query("mobile-header-picker")).toBe(trigger);
+      expect(document.querySelector('[role="dialog"]')?.contains(document.activeElement)).toBe(true);
+      expect(window.location.search).toBe("?workspaceTab=history");
+      await act(async () => {
+        if (dismissal === "Escape") {
+          document.activeElement?.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+        } else {
+          query("close-drawer")!.click();
+        }
+      });
+      await vi.waitFor(async () => {
+        await act(async () => new Promise<void>((resolve) => requestAnimationFrame(() => resolve())));
+        expect(query("mobile-sidebar-overlay")).toBeNull();
+        expect(document.activeElement).toBe(trigger);
+      });
+      expect(window.location.search).toBe("?workspaceTab=history");
+      expect(window.history.state.key).toBe("chats-visit");
+    }
   });
 
   it("keeps public creation, the existing private picker and parent navigation behind More", async () => {

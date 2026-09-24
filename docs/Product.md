@@ -263,13 +263,18 @@ Spaces) only on those overview screens, in both mobile web and native apps. Chat
 full history overview, not the compact picker. Conversations (including empty chats and job
 threads), editors and settings details have no bottom navigation row. The full history overview
 owns its destination bar rather than covering a second one underneath it.
+The current destination has one compact rounded accent surface around its icon and label.
+Hover and keyboard focus follow the compact icon-and-label group while the full column stays
+tappable. Keyboard focus uses a clear outline, separate from the filled selection indicator.
 
-Inside a working area, the touch header provides Back and a current title/space with a navigation
-icon that opens the shared left drawer. Home, team and account pages retain their global
-Home/team/profile controls. At a direct working-area entry with no known previous visit, it offers an explicitly
-labeled Chats destination instead of a misleading Back action. Secondary actions, including
-sidebar/settings access, new chat and notifications, are in the working header menu.
-Forward is also available in that menu. Global touch pages offer Back and Forward in a compact
+In a touch conversation, the composer's leading chevron opens the full Chats overview in the
+current space. Its accessible name and tooltip are **Back to chats**; it is a fixed destination,
+not chronological Back, and it never sends or clears the draft. It stays in the single writing
+row while the keyboard is open. The header keeps the title and shared navigation drawer control;
+chronological Back, Forward and return to search results remain in its More menu. Other compact
+working areas retain their header history controls. Home, team and account pages retain their
+global Home/team/profile controls. Secondary actions, including settings access and new chat,
+remain in the working header menu. Global touch pages offer Back and Forward in a compact
 history menu beside the profile action. Opening either menu leaves the forward route intact;
 opening navigation itself creates a drawer visit.
 Ordinary desktop web keeps its browser controls. App controls do not leave the app from its
@@ -279,6 +284,8 @@ session. The separate Personal/Shared browser has its own page history.
 The mobile drawer keeps team selection and space navigation in one surface. Search does not
 autofocus or summon the keyboard on opening; its results stay scrollable when the keyboard is
 visible. Back from a drill-in returns one level, and Close returns to the underlying visit.
+Opening or dismissing navigation preserves the current Chats, Files or Changes view;
+Escape dismisses only the topmost layer and returns focus to the navigation trigger.
 The global team button opens its picker directly as one drawer visit, so Back returns to the
 global page. Opening that picker from inside space navigation adds a drill-in instead.
 Selecting a destination first collapses the owned drawer history and then pushes the destination
@@ -321,7 +328,7 @@ A desktop workspace-picker URL remains the same visit when the window becomes na
 mobile presentation does not add a sidebar-history entry. Dismissal returns to the known prior
 app visit, or removes only the picker from a direct-entry URL. Ordinary mobile sidebar drill-ins
 still use their own one-level Back behavior. Compact fine-pointer windows retain their existing
-composer navigation control; touch layouts use the focused header instead.
+composer navigation drawer control; touch conversations use the fixed Chats destination instead.
 
 The sidebar's **Chats** section starts expanded and shows up to three recently visited active
 conversations in the current space. Selecting a row opens a preview or focuses its existing tab;
@@ -337,7 +344,8 @@ the search and returns to active chats. Per-chat actions, including closing an o
 live in its More menu.
 
 In fine-pointer windows below 900px, the composer's lower-left menu opens the navigation drawer
-with Chats expanded. Touch layouts open the same drawer from the header. Selecting
+with Chats expanded. Touch layouts open the full Chats overview from the composer and the
+navigation drawer from the header. Selecting
 a chat closes navigation, making chat switching two taps. On wider layouts, the expanded
 sidebar offers direct selection; a collapsed sidebar opens the same list in a popover. Home
 remains in the sidebar, and the top menu remains available when the composer is hidden while
@@ -465,6 +473,12 @@ dropped, because their press ends at **Connect**, which sends.
 The composer uses one compact, rounded writing row on phones and wider screens. It grows
 with the draft, then scrolls within the editor. Image upload and other message tools live
 in the `+` menu.
+
+On compact touch layouts, an icon-only **Back to chats** control sits at the left of the editor,
+with `+` and the primary microphone/send action at the right. The surface has 28px corners and
+14px side insets, increasing up to 18px when a bottom safe area is present; it retains the
+existing keyboard-aware bottom safe area. The editor stays
+mounted as its draft and primary action change, and longer drafts still grow upward normally.
 
 **Connect a tool** in the composer `+` menu, next to **Import GitHub repo**, lists the
 featured tools that can be selected today (GitHub and Notion, until the Slack and Discord

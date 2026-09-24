@@ -6085,6 +6085,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
         voiceStatusMessage={voiceStatusMessage}
         providerTriggerNoticeProps={providerTriggerNoticeProps}
         showComposerNavigationButton={showComposerNavigationButton && Boolean(onOpenChatNavigation)}
+        composerNavigationDestination={touchLikeInput ? "chats" : "drawer"}
         onOpenNavigation={() => onOpenChatNavigation?.()}
         homeAttentionCount={homeAttentionCount}
         homeAttentionBadge={homeAttentionBadge}

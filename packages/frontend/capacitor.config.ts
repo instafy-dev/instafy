@@ -70,6 +70,8 @@ const config: CapacitorConfig = {
         }
       : undefined,
   plugins: {
+    // Keep Studio's viewport measurements aligned with the native keyboard.
+    Keyboard: { resize: "native", autoBackdropColor: "dom" },
     // Foreground alerts are presented once by the durable notification center.
     PushNotifications: { presentationOptions: [] },
     StatusBar: {

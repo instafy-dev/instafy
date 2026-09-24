@@ -1870,19 +1870,15 @@ final class AppUITests: XCTestCase {
     addTreeAttachment(app, name: "Portrait keyboard accessibility tree")
     chatInput.typeText(String(repeating: XCUIKeyboardKey.delete.rawValue, count: keyboardMarker.count))
 
-    guard let keyboardDone = waitForAnyElement(
-      [keyboard.buttons["Done"], app.buttons["Done"]],
-      timeout: 5,
-    ) else {
-      XCTFail("Expected the native keyboard toolbar to expose its Done control.")
-      return
-    }
-    XCTAssertTrue(tapElement(keyboardDone), "Expected the native keyboard Done control to dismiss editing.")
+    XCTAssertFalse(app.toolbars.buttons["Done"].exists, "Chat does not show the form keyboard toolbar.")
+    let conversationRegion = app.otherElements.matching(NSPredicate(format: "label == %@", "Chat")).firstMatch
+    XCTAssertTrue(conversationRegion.exists, "Expected the conversation area to dismiss editing.")
+    conversationRegion.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.1)).tap()
     let keyboardDismissDeadline = Date().addingTimeInterval(5)
     while keyboard.exists && Date() < keyboardDismissDeadline {
       RunLoop.current.run(until: Date().addingTimeInterval(0.2))
     }
-    XCTAssertFalse(keyboard.exists, "Expected the native keyboard to dismiss after tapping Done.")
+    XCTAssertFalse(keyboard.exists, "Expected a conversation tap to dismiss the keyboard.")
 
     guard let sidebarToggle = waitForAnyElement(buttonCandidates(app, label: "Toggle sidebar"), timeout: 5) else {
       XCTFail("Expected the top bar sidebar control after dismissing the keyboard.")
@@ -2697,8 +2693,8 @@ final class AppUITests: XCTestCase {
     }
 
     if keyboard.exists {
-      if let keyboardDone = waitForAnyElement([keyboard.buttons["Done"], app.buttons["Done"]], timeout: 5) {
-        XCTAssertTrue(tapElement(keyboardDone), "Expected Done to dismiss the iPhone keyboard.")
+      if let replyMessage = replyElements.first {
+        XCTAssertTrue(tapElement(replyMessage), "Expected a message tap to dismiss the iPhone keyboard.")
       }
       let keyboardDismissDeadline = Date().addingTimeInterval(5)
       while keyboard.exists && Date() < keyboardDismissDeadline {

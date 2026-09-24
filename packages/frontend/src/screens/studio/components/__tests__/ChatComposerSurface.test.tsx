@@ -707,6 +707,41 @@ describe("ChatComposerSurface", () => {
     expect(container.querySelector('[data-testid="chat-input"]')).toBe(editor);
   });
 
+  it("keeps an icon-only Chats destination in the writing row through keyboard and draft changes", async () => {
+    const onOpenNavigation = vi.fn();
+    const onSubmit = vi.fn((event: { preventDefault: () => void }) => event.preventDefault());
+    const renderMobile = (value: string, nativeKeyboardOpen: boolean) => renderLayout({
+      showComposerNavigationButton: true,
+      composerNavigationDestination: "chats",
+      compactBrowserViewport: true,
+      nativeKeyboardOpen,
+      onOpenNavigation,
+      onSubmit,
+      homeAttentionCount: 2,
+      homeAttentionBadge: "2",
+      chatInputProps: { value } as never,
+    });
+    await act(async () => renderMobile("", false));
+    const navigation = layoutNodes().navigation as HTMLButtonElement;
+    const editor = container.querySelector('[data-testid="chat-input"]');
+    expect(navigation.getAttribute("aria-label")).toBe("Back to chats");
+    expect(navigation.getAttribute("title")).toBe("Back to chats");
+    expect(navigation.hasAttribute("aria-haspopup")).toBe(false);
+    expect(navigation.textContent).toBe("");
+    expect(container.querySelector('[data-testid="chat-composer-navigation-badge"]')).toBeNull();
+    expect(layoutNodes().leading?.firstElementChild).toBe(navigation);
+    expect(layoutNodes().trailing?.contains(layoutNodes().menu)).toBe(true);
+
+    await act(async () => renderMobile("Keep this draft", true));
+    expect(layoutNodes().navigation).toBe(navigation);
+    expect(container.querySelector('[data-testid="chat-input"]')).toBe(editor);
+    expect(layoutNodes().textRow?.contains(navigation)).toBe(true);
+    expect(layoutNodes().textRow?.contains(layoutNodes().send)).toBe(true);
+    await act(async () => navigation.click());
+    expect(onOpenNavigation).toHaveBeenCalledOnce();
+    expect(onSubmit).not.toHaveBeenCalled();
+  });
+
   it("omits composer navigation when the wide sidebar owns switching", async () => {
     await act(async () => renderLayout({ showComposerNavigationButton: false }));
     expect(layoutNodes().navigation).toBeNull();
