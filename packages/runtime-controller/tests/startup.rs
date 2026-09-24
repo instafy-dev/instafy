@@ -417,29 +417,26 @@ fn startup_refuses_the_signing_fallback_when_dev_mode_is_not_enabled() {
 fn startup_warns_while_stored_credentials_use_the_published_derived_key() {
     // Controllers that ran without either variable encrypted credentials under
     // a key anyone can derive. It stays accepted so those rows remain readable
-    // until they are re-encrypted, but every boot says so.
+    // until they are re-encrypted, but every boot says so. The controller
+    // recognises that key by its one-way id; only this test derives the key,
+    // because configuring it is the one way to see the operator's warning.
+    use sha2::{Digest, Sha256};
+    let published = Sha256::new()
+        .chain_update(b"instafy:credential-encryption-key:v1:")
+        .chain_update(b"dev-user-token-secret")
+        .finalize();
     let server = MockServer::start();
     let jwks = jwks_fixture(&server);
     let result = run_controller(&server, |command| {
         command
             .env("SERVICE_RUNTIME_USER_ID", SERVICE_ID)
-            .env("CREDENTIAL_ENCRYPTION_KEY", published_credential_key_b64());
+            .env("CREDENTIAL_ENCRYPTION_KEY", BASE64.encode(published));
     });
     assert_normal_error(&result, "failed to parse DATABASE_URL");
     assert!(result
         .output
         .contains("CREDENTIAL_ENCRYPTION_KEY is the key derived from the published development"));
     jwks.assert_hits(1);
-}
-
-fn published_credential_key_b64() -> String {
-    use sha2::{Digest, Sha256};
-    BASE64.encode(
-        Sha256::new()
-            .chain_update(b"instafy:credential-encryption-key:v1:")
-            .chain_update(b"dev-user-token-secret")
-            .finalize(),
-    )
 }
 
 #[test]
@@ -482,28 +479,81 @@ fn startup_refuses_invalid_previous_credential_keys_before_network_io() {
 }
 
 #[test]
-fn startup_accepts_previous_credential_keys_and_warns_while_the_published_key_is_listed() {
-    // The rotation state: a fresh primary key, the published derived key kept
-    // for decryption until the re-encryption pass has moved every row.
+fn startup_accepts_previous_credential_keys_without_echoing_them() {
+    // The rotation state: a fresh primary key and retired keys kept for
+    // decryption until the re-encryption pass has moved every row. Random
+    // keys, generated here: neither is the published development key.
     let server = MockServer::start();
     let jwks = jwks_fixture(&server);
-    let published = published_credential_key_b64();
-    let retired = BASE64.encode([0x6cu8; 32]);
+    let retired = BASE64.encode(rand::random::<[u8; 32]>());
+    let older = BASE64.encode(rand::random::<[u8; 32]>());
     let result = run_controller(&server, |command| {
         command.env("SERVICE_RUNTIME_USER_ID", SERVICE_ID).env(
             "CREDENTIAL_ENCRYPTION_PREVIOUS_KEYS",
-            format!(" {retired} , {published} ,"),
+            format!(" {retired} , {older} ,"),
         );
     });
     // Configuration completed: startup got as far as the database.
     assert_normal_error(&result, "failed to parse DATABASE_URL");
     assert!(result
         .output
-        .contains("CREDENTIAL_ENCRYPTION_PREVIOUS_KEYS lists the key derived from the published"));
-    assert!(!result
-        .output
-        .contains("CREDENTIAL_ENCRYPTION_KEY is the key derived from the published development"));
+        .contains("credential encryption previous keys configured for decryption only"));
+    assert!(!result.output.contains("derived from the published"));
     assert!(!result.output.contains(&retired));
-    assert!(!result.output.contains(&published));
+    assert!(!result.output.contains(&older));
+    jwks.assert_hits(1);
+}
+
+#[test]
+fn startup_refuses_an_unvalidated_jwks_url_before_network_io() {
+    // The JWKS decides which access tokens are accepted: it must come from
+    // the Supabase project's own https endpoint (or loopback in development).
+    let server = MockServer::start();
+    let requests = server.mock(|_when, then| {
+        then.status(500);
+    });
+    let secret = "inert-jwks-url-credential";
+    let project_port = server.port();
+    for (configured, diagnostic) in [
+        (
+            "https://169.254.169.254/auth/v1/.well-known/jwks.json".to_string(),
+            "SUPABASE_JWKS_URL must be on the host and port of the Supabase project URL",
+        ),
+        (
+            "http://jwks.example.test/auth/v1/.well-known/jwks.json".to_string(),
+            "SUPABASE_JWKS_URL must use https",
+        ),
+        (
+            format!("http://127.0.0.1:{project_port}/auth/v1/other.json"),
+            "SUPABASE_JWKS_URL must be the Supabase JWKS endpoint",
+        ),
+        (
+            format!("http://user:{secret}@127.0.0.1:{project_port}{JWKS_PATH}"),
+            "SUPABASE_JWKS_URL must not contain credentials",
+        ),
+        (
+            format!("http://127.0.0.1:{project_port}{JWKS_PATH}?apikey={secret}"),
+            "SUPABASE_JWKS_URL must not have a query string or fragment",
+        ),
+    ] {
+        let result = run_controller(&server, |command| {
+            command.env("SUPABASE_JWKS_URL", &configured);
+        });
+        assert_normal_error(&result, diagnostic);
+        assert!(!result.output.contains(secret));
+    }
+    requests.assert_hits(0);
+}
+
+#[test]
+fn startup_fetches_a_jwks_url_on_the_project_host() {
+    let server = MockServer::start();
+    let jwks = jwks_fixture(&server);
+    let result = run_controller(&server, |command| {
+        command
+            .env("SERVICE_RUNTIME_USER_ID", SERVICE_ID)
+            .env("SUPABASE_JWKS_URL", server.url(JWKS_PATH));
+    });
+    assert_normal_error(&result, "failed to parse DATABASE_URL");
     jwks.assert_hits(1);
 }

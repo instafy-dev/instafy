@@ -131,9 +131,7 @@ async fn refresh_supabase_jwks_on_auth_retry(config: &AppConfig) -> bool {
         return false;
     }
 
-    match crate::jwks::SupabaseJwks::load_async(&reqwest::Client::new(), &config.supabase_jwks_url)
-        .await
-    {
+    match crate::jwks::SupabaseJwks::load_async(&config.supabase_jwks_url).await {
         Ok(next) => {
             let mut guard = config.supabase_jwks.write().await;
             *guard = next;
@@ -713,8 +711,7 @@ mod tests {
             redis_namespace: None,
             redis_events_channel: None,
             _supabase_project_url: "https://example.supabase.co".to_string(),
-            supabase_jwks_url: "https://example.supabase.co/auth/v1/.well-known/jwks.json"
-                .to_string(),
+            supabase_jwks_url: jwks::SupabaseJwksUrl::for_test("https://example.supabase.co"),
             supabase_jwks: Arc::new(RwLock::new(jwks::SupabaseJwks::from_hmac_secret(
                 TEST_SUPABASE_SECRET,
             ))),
@@ -939,7 +936,7 @@ mod tests {
 
     async fn spawn_test_jwks_server() -> (String, tokio::task::JoinHandle<()>) {
         let app = Router::new().route(
-            "/.well-known/jwks.json",
+            jwks::SUPABASE_JWKS_PATH,
             get(|| async move {
                 Json(json!({
                     "keys": [
@@ -966,7 +963,8 @@ mod tests {
                 .expect("serve jwks test server");
         });
 
-        (format!("http://{address}/.well-known/jwks.json"), handle)
+        // Bound to 127.0.0.1 above; spelled out so the URL is visibly loopback.
+        (format!("http://127.0.0.1:{}", address.port()), handle)
     }
 
     #[tokio::test]
@@ -1074,10 +1072,10 @@ mod tests {
 
     #[tokio::test]
     async fn authenticate_request_refreshes_stale_supabase_jwks() {
-        let (jwks_url, server) = spawn_test_jwks_server().await;
+        let (supabase_project_url, server) = spawn_test_jwks_server().await;
         let mut config = base_app_config();
         config.supabase_service_role_key = Some("different-service-token".to_string());
-        config.supabase_jwks_url = jwks_url;
+        config.supabase_jwks_url = jwks::SupabaseJwksUrl::for_test(&supabase_project_url);
         config.supabase_jwks = Arc::new(RwLock::new(jwks::SupabaseJwks::from_hmac_secret(
             "stale-secret",
         )));

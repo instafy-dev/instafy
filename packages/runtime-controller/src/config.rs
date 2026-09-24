@@ -19,7 +19,7 @@ use tokio::sync::RwLock;
 use tokio_postgres_rustls::MakeRustlsConnect;
 use tracing::{info, warn};
 
-use crate::credential_keys::CredentialKeyRing;
+use crate::credential_keys::{CredentialKeyRing, CredentialKeySlot};
 use crate::jwks;
 use crate::model_defaults::{
     default_managed_ai_model_id, default_managed_ai_model_label,
@@ -78,20 +78,30 @@ impl CredentialEncryptionKey {
         &self.0
     }
 
+    /// The DEV_MODE fallback. The key is the digest itself: never a buffer
+    /// filled with a constant and overwritten, which static analysis rightly
+    /// cannot tell apart from a hard-coded key.
     fn derive_from_user_token_secret(user_token_secret: &str) -> Self {
-        let mut hasher = Sha256::new();
-        hasher.update(b"instafy:credential-encryption-key:v1:");
-        hasher.update(user_token_secret.as_bytes());
-        let digest = hasher.finalize();
-        let mut key = [0u8; 32];
-        key.copy_from_slice(&digest);
-        Self(key)
+        Self(
+            Sha256::new()
+                .chain_update(b"instafy:credential-encryption-key:v1:")
+                .chain_update(user_token_secret.as_bytes())
+                .finalize()
+                .into(),
+        )
     }
 
     #[cfg(test)]
     #[allow(dead_code)]
     pub(crate) fn for_test(seed: &str) -> Self {
         Self::derive_from_user_token_secret(seed)
+    }
+
+    /// A fresh random key, for tests that must not depend on any fixed key.
+    #[cfg(test)]
+    #[allow(dead_code)]
+    pub(crate) fn random_for_test() -> Self {
+        Self(rand::random())
     }
 
     /// Decode a configured key. The error never carries decoder detail, which
@@ -188,21 +198,37 @@ fn resolve_credential_encryption_key(
     }
 }
 
-/// Whether this is the key earlier releases derived from the published
-/// development USER_TOKEN_SECRET. Anyone can compute it, so the encrypted rows
-/// are readable by anyone who can read them at all: a service-role key, a
-/// database role, a backup or any other SQL read path. It is still accepted,
-/// because refusing it would strand those rows until they are re-encrypted,
-/// but the controller warns on every boot while it is in use.
-fn is_published_credential_encryption_key(key: &CredentialEncryptionKey) -> bool {
-    key.as_bytes() == published_credential_encryption_key().as_bytes()
-}
-
-/// The key earlier releases derived from the published development
-/// USER_TOKEN_SECRET. The credential census checks rows against it even when
-/// it is not configured, so an operator can prove none remain under it.
-pub(crate) fn published_credential_encryption_key() -> CredentialEncryptionKey {
-    CredentialEncryptionKey::derive_from_user_token_secret(DEV_USER_TOKEN_SECRET)
+/// The warning to log on every boot while the key earlier releases derived
+/// from the published development USER_TOKEN_SECRET is configured, given
+/// where the ring holds it (see
+/// [`CredentialKeyRing::published_development_key_slot`], which recognises it
+/// by its one-way id; the controller does not know the key itself).
+///
+/// Anyone can compute that key, so rows under it are readable by anyone who
+/// can read them at all: a service-role key, a database role, a backup or any
+/// other SQL read path. It is still accepted, because refusing it would strand
+/// those rows until they are re-encrypted. As the primary key it is expected
+/// under DEV_MODE, which derives it when nothing else is configured.
+fn published_development_key_warning(
+    slot: Option<CredentialKeySlot>,
+    dev_mode: bool,
+) -> Option<&'static str> {
+    match slot? {
+        CredentialKeySlot::Primary if dev_mode => None,
+        CredentialKeySlot::Primary => Some(
+            "CREDENTIAL_ENCRYPTION_KEY is the key derived from the published development \
+             USER_TOKEN_SECRET. Anyone who can read the encrypted rows, through any \
+             service-role or SQL read path, can decrypt them; re-encrypt them under a \
+             freshly generated key: set it as CREDENTIAL_ENCRYPTION_KEY, move this one to \
+             CREDENTIAL_ENCRYPTION_PREVIOUS_KEYS and run the credential re-encryption",
+        ),
+        CredentialKeySlot::Previous(_) => Some(
+            "CREDENTIAL_ENCRYPTION_PREVIOUS_KEYS lists the key derived from the published \
+             development USER_TOKEN_SECRET. Rows under it stay readable to anyone who can \
+             read them until the credential re-encryption moves them to the primary key; \
+             remove it once the census reports none under it",
+        ),
+    }
 }
 
 /// Build the key ring from the primary key and
@@ -434,7 +460,7 @@ pub struct AppConfig {
     pub redis_namespace: Option<String>,
     pub redis_events_channel: Option<String>,
     pub _supabase_project_url: String,
-    pub supabase_jwks_url: String,
+    pub supabase_jwks_url: jwks::SupabaseJwksUrl,
     pub supabase_jwks: std::sync::Arc<RwLock<jwks::SupabaseJwks>>,
     pub supabase_jwks_refresh_seconds: u64,
     pub supabase_jwks_refresh_enabled: bool,
@@ -692,15 +718,6 @@ impl AppConfig {
             std::env::var("CREDENTIAL_ENCRYPTION_KEY").ok().as_deref(),
             &user_token_secret,
         )?;
-        if !dev_mode && is_published_credential_encryption_key(&credential_encryption_key) {
-            warn!(
-                "CREDENTIAL_ENCRYPTION_KEY is the key derived from the published development \
-                 USER_TOKEN_SECRET. Anyone who can read the encrypted rows, through any \
-                 service-role or SQL read path, can decrypt them; re-encrypt them under a \
-                 freshly generated key: set it as CREDENTIAL_ENCRYPTION_KEY, move this one to \
-                 CREDENTIAL_ENCRYPTION_PREVIOUS_KEYS and run the credential re-encryption"
-            );
-        }
         let credential_keys = resolve_credential_key_ring(
             credential_encryption_key,
             std::env::var("CREDENTIAL_ENCRYPTION_PREVIOUS_KEYS")
@@ -708,22 +725,16 @@ impl AppConfig {
                 .as_deref(),
         )?;
         if !credential_keys.previous().is_empty() {
-            let published_previous = credential_keys
-                .previous()
-                .iter()
-                .any(is_published_credential_encryption_key);
             info!(
                 previous_keys = credential_keys.previous().len(),
                 "credential encryption previous keys configured for decryption only"
             );
-            if published_previous {
-                warn!(
-                    "CREDENTIAL_ENCRYPTION_PREVIOUS_KEYS lists the key derived from the published \
-                     development USER_TOKEN_SECRET. Rows under it stay readable to anyone who can \
-                     read them until the credential re-encryption moves them to the primary key; \
-                     remove it once the census reports none under it"
-                );
-            }
+        }
+        if let Some(warning) = published_development_key_warning(
+            credential_keys.published_development_key_slot(),
+            dev_mode,
+        ) {
+            warn!("{warning}");
         }
 
         let port = std::env::var("PORT")
@@ -774,11 +785,19 @@ impl AppConfig {
             .trim()
             .trim_end_matches('/')
             .to_string();
-        let supabase_jwks_url = std::env::var("SUPABASE_JWKS_URL")
-            .ok()
-            .map(|raw| raw.trim().to_string())
-            .filter(|value| !value.is_empty())
-            .unwrap_or_else(|| format!("{}/auth/v1/.well-known/jwks.json", supabase_project_url));
+        // Every JWKS fetch, at startup and on refresh, goes to this validated
+        // URL: the key set it serves decides which access tokens are accepted.
+        let supabase_jwks_url = jwks::SupabaseJwksUrl::resolve(
+            &supabase_project_url,
+            std::env::var("SUPABASE_JWKS_URL").ok().as_deref(),
+            jwks::JwksUrlPolicy {
+                dev_mode,
+                allow_other_host: std::env::var("SUPABASE_JWKS_URL_ALLOW_OTHER_HOST")
+                    .ok()
+                    .map(|value| value.trim().to_lowercase())
+                    .is_some_and(|value| matches!(value.as_str(), "1" | "true" | "yes" | "on")),
+            },
+        )?;
         let shared_hmac_secret = std::env::var("SUPABASE_JWT_SECRET")
             .or_else(|_| std::env::var("JWT_SECRET"))
             .ok()
@@ -1458,13 +1477,15 @@ impl StripeConfig {
 #[cfg(test)]
 mod tests {
     use super::{
-        database_pool_size_from_values, is_published_credential_encryption_key,
-        normalize_public_app_url, parse_browser_profile_persist_project_ids,
-        published_credential_encryption_key, resolve_credential_encryption_key,
-        resolve_credential_key_ring, resolve_user_token_secret, CredentialEncryptionKey,
-        DEV_USER_TOKEN_SECRET,
+        database_pool_size_from_values, normalize_public_app_url,
+        parse_browser_profile_persist_project_ids, published_development_key_warning,
+        resolve_credential_encryption_key, resolve_credential_key_ring, resolve_user_token_secret,
+        CredentialEncryptionKey, DEV_USER_TOKEN_SECRET,
     };
-    use crate::credential_keys::MAX_PREVIOUS_CREDENTIAL_KEYS;
+    use crate::credential_keys::{
+        credential_key_id, CredentialKeySlot, MAX_PREVIOUS_CREDENTIAL_KEYS,
+        PUBLISHED_DEVELOPMENT_KEY_ID,
+    };
     use base64::Engine;
     use uuid::Uuid;
 
@@ -1564,13 +1585,36 @@ mod tests {
     }
 
     #[test]
-    fn the_key_derived_from_the_published_signing_secret_is_recognised() {
-        assert!(is_published_credential_encryption_key(
-            &CredentialEncryptionKey::for_test(DEV_USER_TOKEN_SECRET)
-        ));
-        assert!(!is_published_credential_encryption_key(
-            &CredentialEncryptionKey::for_test(STRONG_SECRET)
-        ));
+    fn the_published_development_key_id_names_the_dev_mode_fallback_key() {
+        // The only unit test that holds the published development key: the
+        // DEV_MODE fallback derives it when nothing is configured, and only
+        // its one-way id is compared. Nothing here re-implements the
+        // derivation or seals and opens with it.
+        let fallback = resolve_credential_encryption_key(true, None, DEV_USER_TOKEN_SECRET)
+            .expect("DEV_MODE derives the fallback key");
+        assert_eq!(credential_key_id(&fallback), PUBLISHED_DEVELOPMENT_KEY_ID);
+        let strong = resolve_credential_encryption_key(true, None, STRONG_SECRET)
+            .expect("DEV_MODE derives the fallback key");
+        assert_ne!(credential_key_id(&strong), PUBLISHED_DEVELOPMENT_KEY_ID);
+    }
+
+    #[test]
+    fn the_published_development_key_warns_wherever_it_is_configured() {
+        let primary = published_development_key_warning(Some(CredentialKeySlot::Primary), false)
+            .expect("the published key as the primary warns outside DEV_MODE");
+        assert!(primary.starts_with("CREDENTIAL_ENCRYPTION_KEY is the key derived"));
+        // DEV_MODE derives it as the primary when nothing else is configured.
+        assert_eq!(
+            published_development_key_warning(Some(CredentialKeySlot::Primary), true),
+            None
+        );
+        for dev_mode in [false, true] {
+            let previous =
+                published_development_key_warning(Some(CredentialKeySlot::Previous(2)), dev_mode)
+                    .expect("the published key as a previous key always warns");
+            assert!(previous.starts_with("CREDENTIAL_ENCRYPTION_PREVIOUS_KEYS lists the key"));
+            assert_eq!(published_development_key_warning(None, dev_mode), None);
+        }
     }
 
     fn encoded(bytes: [u8; 32]) -> String {
@@ -1587,18 +1631,18 @@ mod tests {
             assert_eq!(ring.primary().as_bytes(), primary.as_bytes());
         }
 
-        let published = published_credential_encryption_key();
-        let configured = format!(
-            " {} ,{},",
-            encoded([9u8; 32]),
-            encoded(*published.as_bytes())
-        );
+        let legacy = CredentialEncryptionKey::random_for_test();
+        let configured = format!(" {} ,{},", encoded([9u8; 32]), encoded(*legacy.as_bytes()));
         let ring = resolve_credential_key_ring(primary.clone(), Some(&configured))
             .expect("two valid previous keys");
         assert_eq!(ring.primary().as_bytes(), primary.as_bytes());
         assert_eq!(ring.previous().len(), 2);
         assert_eq!(ring.previous()[0].as_bytes(), &[9u8; 32]);
-        assert!(is_published_credential_encryption_key(&ring.previous()[1]));
+        assert_eq!(ring.previous()[1].as_bytes(), legacy.as_bytes());
+        assert_eq!(
+            ring.slot_of_key_id(&credential_key_id(&legacy)),
+            Some(CredentialKeySlot::Previous(1))
+        );
     }
 
     #[test]

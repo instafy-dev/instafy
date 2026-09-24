@@ -21,6 +21,23 @@ use crate::config::CredentialEncryptionKey;
 /// each of them in turn, and a rotation should retire a key, not collect them.
 pub const MAX_PREVIOUS_CREDENTIAL_KEYS: usize = 8;
 
+/// The [`credential_key_id`] of the key earlier releases derived from the
+/// development `USER_TOKEN_SECRET` published in this repository.
+///
+/// This is a one-way digest, not key material. The controller does not know
+/// that key and never decrypts with it unless an operator configures it; the
+/// id only lets startup and the credential census recognise it when it is
+/// configured, as the primary key or in `CREDENTIAL_ENCRYPTION_PREVIOUS_KEYS`.
+/// It was computed offline:
+///
+/// ```sh
+/// printf '%s' 'instafy:credential-encryption-key:v1:dev-user-token-secret' \
+///   | openssl dgst -sha256 -binary \
+///   | { printf '%s' 'instafy:credential-encryption-key-id:v1:'; cat; } \
+///   | openssl dgst -sha256 | awk '{ print substr($NF, 1, 12) }'
+/// ```
+pub const PUBLISHED_DEVELOPMENT_KEY_ID: &str = "f986c240abce";
+
 const NONCE_BYTES: usize = 12;
 
 #[derive(Clone)]
@@ -79,6 +96,23 @@ impl CredentialKeyRing {
 
     pub fn previous(&self) -> &[CredentialEncryptionKey] {
         &self.previous
+    }
+
+    /// The configured key whose [`credential_key_id`] is `key_id`, if any.
+    pub fn slot_of_key_id(&self, key_id: &str) -> Option<CredentialKeySlot> {
+        if credential_key_id(&self.primary) == key_id {
+            return Some(CredentialKeySlot::Primary);
+        }
+        self.previous
+            .iter()
+            .position(|key| credential_key_id(key) == key_id)
+            .map(CredentialKeySlot::Previous)
+    }
+
+    /// Where the key derived from the published development secret sits in
+    /// this ring, if it is configured at all.
+    pub fn published_development_key_slot(&self) -> Option<CredentialKeySlot> {
+        self.slot_of_key_id(PUBLISHED_DEVELOPMENT_KEY_ID)
     }
 
     /// Encrypt under the primary key. Returns `(nonce_b64, ciphertext_b64)`.
@@ -141,15 +175,6 @@ pub fn credential_key_id(key: &CredentialEncryptionKey) -> String {
     hex::encode(&digest[..6])
 }
 
-/// Whether `key` opens this stored value. Used by the census to recognise rows
-/// under a key that is not configured, such as the published development key.
-pub fn opens_with(key: &CredentialEncryptionKey, nonce_b64: &str, ciphertext_b64: &str) -> bool {
-    decode_sealed(nonce_b64, ciphertext_b64)
-        .ok()
-        .and_then(|(nonce, ciphertext)| open_with(key, &nonce, &ciphertext))
-        .is_some()
-}
-
 fn seal_with(key: &CredentialEncryptionKey, plaintext: &[u8]) -> anyhow::Result<(String, String)> {
     let cipher = Aes256Gcm::new_from_slice(key.as_bytes())?;
     let nonce = Aes256Gcm::generate_nonce(&mut OsRng);
@@ -185,7 +210,9 @@ fn open_with(
 
 #[cfg(test)]
 mod tests {
-    use super::{credential_key_id, opens_with, CredentialKeyRing, CredentialKeySlot};
+    use super::{
+        credential_key_id, CredentialKeyRing, CredentialKeySlot, PUBLISHED_DEVELOPMENT_KEY_ID,
+    };
     use crate::config::CredentialEncryptionKey;
     use base64::engine::general_purpose::STANDARD as BASE64;
     use base64::Engine;
@@ -240,8 +267,9 @@ mod tests {
         assert!(CredentialKeyRing::from(key("sealer"))
             .open(&nonce, &BASE64.encode(tampered))
             .is_err());
-        assert!(opens_with(&key("sealer"), &nonce, &ciphertext));
-        assert!(!opens_with(&key("wrong-primary"), &nonce, &ciphertext));
+        assert!(CredentialKeyRing::from(key("sealer"))
+            .open(&nonce, &ciphertext)
+            .is_ok());
     }
 
     #[test]
@@ -300,5 +328,43 @@ mod tests {
             ),
             "CredentialKeyRing { primary: \"<redacted>\", previous_keys: 1 }"
         );
+    }
+
+    /// Pins the id derivation to a checked-in digest, so the published
+    /// development key id (a constant computed offline the same way) cannot
+    /// silently stop matching. The expected value is the first 12 hex digits of
+    /// SHA-256("instafy:credential-encryption-key-id:v1:" || key) for the
+    /// test-only key derived from the seed below; it is not a key.
+    #[test]
+    fn key_ids_match_the_checked_in_digest() {
+        assert_eq!(
+            credential_key_id(&key("credential-key-id-test-vector")),
+            "7bf62185616c"
+        );
+        assert_eq!(PUBLISHED_DEVELOPMENT_KEY_ID.len(), 12);
+        assert!(PUBLISHED_DEVELOPMENT_KEY_ID
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)));
+    }
+
+    #[test]
+    fn configured_keys_are_found_by_id_only() {
+        let (primary, legacy, other) = (key("primary"), key("legacy"), key("other"));
+        let ring =
+            CredentialKeyRing::new(primary.clone(), vec![other, legacy.clone()]).expect("ring");
+        assert_eq!(
+            ring.slot_of_key_id(&credential_key_id(&primary)),
+            Some(CredentialKeySlot::Primary)
+        );
+        assert_eq!(
+            ring.slot_of_key_id(&credential_key_id(&legacy)),
+            Some(CredentialKeySlot::Previous(1))
+        );
+        assert_eq!(
+            ring.slot_of_key_id(&credential_key_id(&key("absent"))),
+            None
+        );
+        // None of these test keys is the published development key.
+        assert_eq!(ring.published_development_key_slot(), None);
     }
 }

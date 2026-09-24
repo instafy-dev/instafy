@@ -3,9 +3,9 @@
 //! Every key here is derived from a fresh UUID, so only rows these tests seal
 //! open under them: rows other suites leave in the shared tables count as
 //! undecryptable and are never written. Counts for these keys are therefore
-//! exact even while other tests run. The one exception is the published
-//! development key, which the census test only reads, and measures against a
-//! baseline because other rows may be sealed under it.
+//! exact even while other tests run. No test here derives or uses the key
+//! from the published development secret: a random legacy key stands in for
+//! it wherever the census has to recognise it.
 
 use axum::body::{to_bytes, Body};
 use axum::http::{Request, StatusCode};
@@ -19,10 +19,8 @@ use tower::ServiceExt;
 use uuid::Uuid;
 
 use super::{RowKey, RowOutcome, SealedTable, SEALED_TABLES};
-use crate::config::{
-    published_credential_encryption_key, AppConfig, CredentialEncryptionKey, PgPool,
-};
-use crate::credential_keys::{CredentialKeyRing, CredentialKeySlot};
+use crate::config::{AppConfig, CredentialEncryptionKey, PgPool};
+use crate::credential_keys::{credential_key_id, CredentialKeyRing, CredentialKeySlot};
 use crate::device_auth::{
     load_user_oauth_access_token, resolve_github_device_auth_session,
     GithubDeviceAuthSessionResolution,
@@ -181,6 +179,12 @@ async fn wait_until_blocked_by<T>(
     }
 }
 
+/// Serialises fixture schema setup in this test binary. `ensure_secret_tables`
+/// runs multi-statement DDL without an advisory lock, so two fixtures seeding
+/// at once can deadlock on the same relation.
+static SCHEMA_SETUP: std::sync::LazyLock<tokio::sync::Mutex<()>> =
+    std::sync::LazyLock::new(Default::default);
+
 /// One sealed row in each table under `old`, a second credential already
 /// under `new`, and a third under a key no ring in these tests holds.
 struct Fixture {
@@ -248,8 +252,11 @@ impl Fixture {
         foreign: &CredentialEncryptionKey,
     ) -> anyhow::Result<()> {
         ensure_test_user(pool, &self.user_id).await?;
-        crate::secrets::ensure_secret_tables(pool).await?;
-        crate::browser_profile::ensure_browser_profiles_table(pool).await?;
+        {
+            let _schema = SCHEMA_SETUP.lock().await;
+            crate::secrets::ensure_secret_tables(pool).await?;
+            crate::browser_profile::ensure_browser_profiles_table(pool).await?;
+        }
         let old = CredentialKeyRing::from(old.clone());
         let new = CredentialKeyRing::from(new.clone());
         let foreign = CredentialKeyRing::from(foreign.clone());
@@ -511,6 +518,11 @@ async fn rotation_keeps_old_rows_readable_then_moves_every_table_to_the_primary(
         );
         assert_eq!(census["previousKeys"][0]["entry"], 1);
         assert_eq!(census["previousKeys"][0]["publishedDevelopmentKey"], false);
+        // The published development key is not configured, so not counted.
+        assert_eq!(
+            census["totals"]["underPublishedDevelopmentKey"],
+            Value::Null
+        );
         assert_eq!(
             census["primaryKey"]["keyId"],
             crate::credential_keys::credential_key_id(&new)
@@ -851,115 +863,112 @@ async fn a_refresh_committed_while_the_pass_waits_on_the_row_lock_survives() -> 
     result.unwrap_or_else(|panic| std::panic::resume_unwind(panic))
 }
 
-/// `underPublishedDevelopmentKey` counts rows under the key derived from the
-/// published development USER_TOKEN_SECRET wherever that key sits: listed as
-/// a previous key, not configured at all, or still the primary. Other suites
-/// and local development may leave rows under it in the shared tables, so
-/// the test compares each census with one taken before its rows existed.
+/// `underPublishedDevelopmentKey` counts the rows the published development
+/// key opens while that key is configured, recognised by its id alone, and is
+/// null otherwise. The test never uses the published key: `census_flagging`,
+/// which the route calls with the published key's id, is given the id of a
+/// random legacy key instead. Every key is random, so each count that names a
+/// key is exact even with other suites' rows in the shared tables.
 #[tokio::test]
-async fn the_census_counts_rows_under_the_published_development_key_wherever_it_is_configured(
+async fn the_census_counts_rows_under_the_flagged_key_only_while_it_is_configured(
 ) -> anyhow::Result<()> {
-    let pool = require_origin_test_pool("credential census of the published key").await?;
-    let published = published_credential_encryption_key();
+    let pool = require_origin_test_pool("credential census of a flagged legacy key").await?;
+    let legacy = random_key("census-legacy");
     let new = random_key("census-new");
     let foreign = random_key("census-foreign");
+    let legacy_id = credential_key_id(&legacy);
     let fixture = Fixture::new();
-    // Fixture::seed puts five rows (one per table) under `published`, one
-    // credential under `new` and one under `foreign`.
-    let configurations = [
+    // Fixture::seed puts five rows (one per table) under `legacy`, one
+    // credential under `new` and one under `foreign`: seven in all.
+    let configurations: [(&str, CredentialKeyRing, u64, Vec<u64>, Option<u64>); 3] = [
         (
             "configured as a previous key",
-            CredentialKeyRing::new(new.clone(), vec![published.clone()])?,
-            json!({ "rows": 7, "primary": 1, "previous": [5], "undecryptable": 1 }),
+            CredentialKeyRing::new(new.clone(), vec![legacy.clone()])?,
+            1,
+            vec![5],
+            Some(5),
         ),
         (
             "not configured",
             CredentialKeyRing::from(new.clone()),
-            json!({ "rows": 7, "primary": 1, "previous": [], "undecryptable": 6 }),
+            1,
+            vec![],
+            None,
         ),
         (
             "configured as the primary key",
-            CredentialKeyRing::from(published.clone()),
-            json!({ "rows": 7, "primary": 5, "previous": [], "undecryptable": 2 }),
+            CredentialKeyRing::from(legacy.clone()),
+            5,
+            vec![],
+            Some(5),
         ),
     ];
-    let census = |ring: &CredentialKeyRing| {
-        let routes = app(state_with(&pool, ring.clone()));
-        async move {
-            call_json(
-                &routes,
+
+    // Assertions panic; catch the unwind so the fixture is removed either way.
+    let result: Result<anyhow::Result<()>, _> = AssertUnwindSafe(async {
+        fixture.seed(&pool, &legacy, &new, &foreign).await?;
+        for (label, ring, primary, previous, under) in &configurations {
+            let census =
+                serde_json::to_value(super::census_flagging(&pool, ring, 500, &legacy_id).await?)?;
+            let totals = &census["totals"];
+            assert_eq!(totals["primary"], *primary, "{label}: {census}");
+            assert_eq!(totals["previous"], json!(previous), "{label}: {census}");
+            assert_eq!(
+                totals["underPublishedDevelopmentKey"],
+                json!(under),
+                "{label}: {census}"
+            );
+            // Rows no configured key opens, the unflagged ones included, are
+            // only counted: never decrypted with a key the ring does not hold.
+            let opened = primary + previous.iter().sum::<u64>();
+            assert!(
+                totals["undecryptable"].as_u64() >= Some(7 - opened),
+                "{label}: {census}"
+            );
+            for (index, sealed) in SEALED_TABLES.iter().enumerate() {
+                let counts = &census["tables"][index];
+                assert_eq!(counts["table"], sealed.name);
+                assert_eq!(
+                    counts["underPublishedDevelopmentKey"],
+                    json!(under.map(|_| 1)),
+                    "{label}: {}: {census}",
+                    sealed.name
+                );
+            }
+            assert_eq!(
+                census["primaryKey"]["publishedDevelopmentKey"],
+                ring.slot_of_key_id(&legacy_id) == Some(CredentialKeySlot::Primary),
+                "{label}"
+            );
+            assert_eq!(
+                census["previousKeys"][0]["publishedDevelopmentKey"].as_bool(),
+                (!ring.previous().is_empty()).then_some(true),
+                "{label}"
+            );
+            assert_no_secret_material(&census.to_string(), &fixture, &[&legacy, &new, &foreign]);
+
+            // The route flags the real published development key, which no
+            // ring here holds: same counts, and the field is null.
+            let report = call_json(
+                &app(state_with(&pool, ring.clone())),
                 "GET",
                 "/operator/credential-encryption/census?batchSize=500",
                 Some(SERVICE_ROLE),
             )
-            .await
-        }
-    };
-    let count = |report: &Value, pointer: &str| -> i64 {
-        report
-            .pointer(pointer)
-            .and_then(Value::as_i64)
-            .unwrap_or_else(|| panic!("census has no count at {pointer}: {report}"))
-    };
-
-    // Assertions panic; catch the unwind so the fixture is removed either way.
-    let result: Result<anyhow::Result<()>, _> = AssertUnwindSafe(async {
-        crate::secrets::ensure_secret_tables(&pool).await?;
-        crate::browser_profile::ensure_browser_profiles_table(&pool).await?;
-        let mut baselines = Vec::new();
-        for (_, ring, _) in &configurations {
-            baselines.push(census(ring).await?);
-        }
-        fixture.seed(&pool, &published, &new, &foreign).await?;
-
-        for ((label, ring, expected), before) in configurations.iter().zip(&baselines) {
-            let after = census(ring).await?;
-            let delta = |pointer: &str| count(&after, pointer) - count(before, pointer);
+            .await?;
+            assert_eq!(report["totals"]["primary"], *primary, "{label}: {report}");
+            assert_eq!(report["totals"]["previous"], json!(previous), "{label}");
             assert_eq!(
-                delta("/totals/underPublishedDevelopmentKey"),
-                5,
-                "{label}: {after}"
-            );
-            for field in ["rows", "primary", "undecryptable"] {
-                assert_eq!(
-                    delta(&format!("/totals/{field}")),
-                    expected[field].as_i64().unwrap(),
-                    "{label}: totals.{field}: {after}"
-                );
-            }
-            let previous = expected["previous"].as_array().unwrap();
-            assert_eq!(
-                after["totals"]["previous"].as_array().map(Vec::len),
-                Some(previous.len()),
-                "{label}"
-            );
-            for (index, expected) in previous.iter().enumerate() {
-                assert_eq!(
-                    delta(&format!("/totals/previous/{index}")),
-                    expected.as_i64().unwrap(),
-                    "{label}: totals.previous[{index}]: {after}"
-                );
-            }
-            for (index, sealed) in SEALED_TABLES.iter().enumerate() {
-                assert_eq!(after["tables"][index]["table"], sealed.name);
-                assert_eq!(
-                    delta(&format!("/tables/{index}/underPublishedDevelopmentKey")),
-                    1,
-                    "{label}: {}: {after}",
-                    sealed.name
-                );
-            }
-            let published_primary = ring.primary().as_bytes() == published.as_bytes();
-            assert_eq!(
-                after["primaryKey"]["publishedDevelopmentKey"], published_primary,
-                "{label}"
+                report["totals"]["underPublishedDevelopmentKey"],
+                Value::Null,
+                "{label}: {report}"
             );
             assert_eq!(
-                after["previousKeys"][0]["publishedDevelopmentKey"].as_bool(),
-                (!ring.previous().is_empty()).then_some(true),
-                "{label}"
+                report["tables"][0]["underPublishedDevelopmentKey"],
+                Value::Null
             );
-            assert_no_secret_material(&after.to_string(), &fixture, &[&published, &new, &foreign]);
+            assert_eq!(report["primaryKey"]["publishedDevelopmentKey"], false);
+            assert_no_secret_material(&report.to_string(), &fixture, &[&legacy, &new, &foreign]);
         }
         Ok(())
     })

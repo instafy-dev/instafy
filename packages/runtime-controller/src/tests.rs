@@ -201,7 +201,7 @@ pub(crate) fn build_app_config(private_key: &str, public_key: &str, key_id: &str
         redis_namespace: None,
         redis_events_channel: None,
         _supabase_project_url: "".to_string(),
-        supabase_jwks_url: "".to_string(),
+        supabase_jwks_url: crate::jwks::SupabaseJwksUrl::for_test("https://supabase.invalid"),
         supabase_jwks: Arc::new(tokio::sync::RwLock::new(SupabaseJwks::from_hmac_secret(
             "secret",
         ))),

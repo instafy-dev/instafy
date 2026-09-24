@@ -367,10 +367,9 @@ async fn main() -> anyhow::Result<()> {
         let jwks_handle = config.supabase_jwks.clone();
         let jwks_url = config.supabase_jwks_url.clone();
         let refresh_seconds = config.supabase_jwks_refresh_seconds;
-        let http = state.http_client.clone();
         tokio::spawn(async move {
             loop {
-                match jwks::SupabaseJwks::load_async(&http, &jwks_url).await {
+                match jwks::SupabaseJwks::load_async(&jwks_url).await {
                     Ok(next) => {
                         let mut guard = jwks_handle.write().await;
                         *guard = next;

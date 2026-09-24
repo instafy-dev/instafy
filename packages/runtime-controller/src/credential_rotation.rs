@@ -5,10 +5,12 @@
 //! primary key. Two service-role-only operator routes finish a rotation:
 //!
 //! - `GET /operator/credential-encryption/census` reads every stored secret
-//!   and counts which configured key opens it. It writes nothing. It also
-//!   counts rows under the key derived from the published development
-//!   `USER_TOKEN_SECRET` even when that key is not configured, so an operator
-//!   can prove none remain before removing it.
+//!   and counts which configured key opens it. It writes nothing. While the
+//!   key derived from the published development `USER_TOKEN_SECRET` is
+//!   configured, it also reports how many rows that key opens. The controller
+//!   recognises that key by its one-way id only and never decrypts with a key
+//!   that is not configured, so once it is removed its rows count as
+//!   undecryptable.
 //! - `POST /operator/credential-encryption/reencrypt` rewrites every row that
 //!   only a previous key opens under the primary key. Rows are listed in
 //!   primary-key order a page at a time and rewritten one per transaction,
@@ -29,8 +31,10 @@ use tokio_postgres::GenericClient;
 use uuid::Uuid;
 
 use crate::auth::authenticate_request;
-use crate::config::{published_credential_encryption_key, CredentialEncryptionKey, PgPool};
-use crate::credential_keys::{credential_key_id, opens_with, CredentialKeyRing, CredentialKeySlot};
+use crate::config::{CredentialEncryptionKey, PgPool};
+use crate::credential_keys::{
+    credential_key_id, CredentialKeyRing, CredentialKeySlot, PUBLISHED_DEVELOPMENT_KEY_ID,
+};
 use crate::errors::service_unavailable;
 use crate::{bad_request, forbidden, internal_error, unauthorized, ApiError, AppState};
 
@@ -232,12 +236,18 @@ pub(crate) struct KeyDescriptor {
     published_development_key: bool,
 }
 
-fn describe_keys(keys: &CredentialKeyRing) -> (KeyDescriptor, Vec<KeyDescriptor>) {
-    let published = published_credential_encryption_key();
-    let describe = |entry: Option<usize>, key: &CredentialEncryptionKey| KeyDescriptor {
-        entry,
-        key_id: credential_key_id(key),
-        published_development_key: key.as_bytes() == published.as_bytes(),
+/// `published_key_id` is [`PUBLISHED_DEVELOPMENT_KEY_ID`] outside tests.
+fn describe_keys(
+    keys: &CredentialKeyRing,
+    published_key_id: &str,
+) -> (KeyDescriptor, Vec<KeyDescriptor>) {
+    let describe = |entry: Option<usize>, key: &CredentialEncryptionKey| {
+        let key_id = credential_key_id(key);
+        KeyDescriptor {
+            entry,
+            published_development_key: key_id == published_key_id,
+            key_id,
+        }
     };
     (
         describe(None, keys.primary()),
@@ -258,16 +268,20 @@ pub(crate) struct CensusCounts {
     pub(crate) previous: Vec<u64>,
     /// Rows no configured key opens. The census never writes them.
     pub(crate) undecryptable: u64,
-    /// Rows under the key derived from the published development
-    /// USER_TOKEN_SECRET, whether or not it is configured. Overlaps the
-    /// counts above: it is the number to drive to zero before removing it.
-    pub(crate) under_published_development_key: u64,
+    /// Rows the key derived from the published development USER_TOKEN_SECRET
+    /// opens, while that key is configured as the primary or a previous key;
+    /// null when it is not configured. It overlaps the counts above and is the
+    /// number to drive to zero before removing that key. The controller never
+    /// decrypts with a key it is not configured with, so after the key is
+    /// removed any rows still under it count as undecryptable instead.
+    pub(crate) under_published_development_key: Option<u64>,
 }
 
 impl CensusCounts {
-    fn new(previous_keys: usize) -> Self {
+    fn new(previous_keys: usize, published_key_configured: bool) -> Self {
         Self {
             previous: vec![0; previous_keys],
+            under_published_development_key: published_key_configured.then_some(0),
             ..Self::default()
         }
     }
@@ -279,7 +293,12 @@ impl CensusCounts {
             *total += count;
         }
         self.undecryptable += other.undecryptable;
-        self.under_published_development_key += other.under_published_development_key;
+        if let (Some(total), Some(count)) = (
+            self.under_published_development_key.as_mut(),
+            other.under_published_development_key,
+        ) {
+            *total += count;
+        }
     }
 }
 
@@ -309,14 +328,27 @@ pub(crate) async fn run_census(
     keys: &CredentialKeyRing,
     batch_size: i64,
 ) -> anyhow::Result<CredentialCensus> {
-    let published = published_credential_encryption_key();
-    let published_slot = slot_of(keys, &published);
-    let (primary_key, previous_keys) = describe_keys(keys);
-    let mut totals = CensusCounts::new(keys.previous().len());
+    census_flagging(pool, keys, batch_size, PUBLISHED_DEVELOPMENT_KEY_ID).await
+}
+
+/// [`run_census`], reporting the configured key whose id is
+/// `published_key_id` as the published development key. Production passes
+/// [`PUBLISHED_DEVELOPMENT_KEY_ID`]; tests pass the id of a random key, so
+/// they never need the published key itself.
+async fn census_flagging(
+    pool: &PgPool,
+    keys: &CredentialKeyRing,
+    batch_size: i64,
+    published_key_id: &str,
+) -> anyhow::Result<CredentialCensus> {
+    let published_slot = keys.slot_of_key_id(published_key_id);
+    let (primary_key, previous_keys) = describe_keys(keys, published_key_id);
+    let new_counts = || CensusCounts::new(keys.previous().len(), published_slot.is_some());
+    let mut totals = new_counts();
     let mut tables = Vec::with_capacity(SEALED_TABLES.len());
 
     for table in SEALED_TABLES {
-        let mut counts = CensusCounts::new(keys.previous().len());
+        let mut counts = new_counts();
         let present = table.is_present(&*pool.get().await?).await?;
         let mut cursor: Option<RowKey> = None;
         while present {
@@ -338,13 +370,12 @@ pub(crate) async fn run_census(
                     Ok(CredentialKeySlot::Previous(index)) => counts.previous[index] += 1,
                     Err(_) => counts.undecryptable += 1,
                 }
-                let under_published = match (&opened, published_slot) {
-                    (Ok(slot), Some(published_slot)) => *slot == published_slot,
-                    (Err(_), None) => opens_with(&published, &nonce, &ciphertext),
-                    _ => false,
-                };
-                if under_published {
-                    counts.under_published_development_key += 1;
+                if let (Some(count), Ok(slot)) =
+                    (counts.under_published_development_key.as_mut(), &opened)
+                {
+                    if Some(*slot) == published_slot {
+                        *count += 1;
+                    }
                 }
             }
             if page.len() < batch_size as usize {
@@ -366,16 +397,6 @@ pub(crate) async fn run_census(
         tables,
         totals,
     })
-}
-
-fn slot_of(keys: &CredentialKeyRing, key: &CredentialEncryptionKey) -> Option<CredentialKeySlot> {
-    if keys.primary().as_bytes() == key.as_bytes() {
-        return Some(CredentialKeySlot::Primary);
-    }
-    keys.previous()
-        .iter()
-        .position(|previous| previous.as_bytes() == key.as_bytes())
-        .map(CredentialKeySlot::Previous)
 }
 
 #[derive(Debug, Default, Serialize)]
@@ -441,7 +462,7 @@ pub(crate) async fn run_reencryption(
     batch_size: i64,
     max_rows: Option<u64>,
 ) -> anyhow::Result<CredentialReencryption> {
-    let (primary_key, previous_keys) = describe_keys(keys);
+    let (primary_key, previous_keys) = describe_keys(keys, PUBLISHED_DEVELOPMENT_KEY_ID);
     let seal = |plaintext: &[u8]| keys.seal(plaintext);
     let mut totals = ReencryptionCounts::default();
     let mut tables = Vec::with_capacity(SEALED_TABLES.len());
@@ -622,7 +643,7 @@ async fn census(
         primary = census.totals.primary,
         previous = ?census.totals.previous,
         undecryptable = census.totals.undecryptable,
-        under_published_development_key = census.totals.under_published_development_key,
+        under_published_development_key = ?census.totals.under_published_development_key,
         "credential encryption census finished"
     );
     Ok(Json(census))

@@ -254,12 +254,13 @@ Key environment variables (see `AppConfig::from_env` for defaults):
 - Tunnels:
   - `TUNNEL_BROKER_BASE_URL`, `TUNNEL_BROKER_TOKEN` — self-hosted tunnel broker (Hetzner/PDNS). When `TUNNEL_BROKER_HOOK_SECRET` is set, credits are burned via the broker ACL hook and the controller skips the pre-burn for self-hosted tunnels.
   - `TUNNEL_BROKER_HOOK_SECRET` — shared bearer secret for broker callbacks (`/tunnel-broker/hooks/acl` and `/tunnel-broker/hooks/events`).
-- `SUPABASE_JWKS_URL` — optional override for JWKS discovery (defaults to `<SUPABASE_PROJECT_URL>/auth/v1/.well-known/jwks.json`).
+- `SUPABASE_JWKS_URL` — optional override for JWKS discovery (defaults to `<SUPABASE_PROJECT_URL>/auth/v1/.well-known/jwks.json`). The key set it serves decides which Supabase access tokens the controller accepts, so the URL, configured or derived, is validated at startup and the controller refuses to start when it fails: it must use `https` (plain `http` only to `localhost` or a loopback address, under `DEV_MODE` or with a loopback Supabase project URL, as the local Supabase CLI serves), must be `/auth/v1/.well-known/jwks.json` under the project URL, must not carry credentials, a query string or a fragment, and must be on the project URL's host and port. JWKS fetches never follow redirects and time out after 10 seconds. Error messages name the rule, never the configured value.
+- `SUPABASE_JWKS_URL_ALLOW_OTHER_HOST` — set to `1` (or `true`, `yes`, `on`) only when your deployment serves the same Supabase Auth under a host other than the project URL's, such as the project domain behind a custom domain, or an internal gateway. It relaxes the host and port rule alone; the scheme and path rules still apply. An `http` JWKS URL on a non-loopback host, such as `http://kong:8000` on a private network, is refused either way: put TLS in front of it, or run the controller against a loopback address.
 - `SUPABASE_JWKS_REFRESH_SECONDS` — interval for refreshing the JWKS cache (defaults to 300 seconds; minimum 30).
 - `CONTROLLER_INTERNAL_TOKEN` — internal bearer token required for privileged automation.
 - `USER_TOKEN_SECRET` — HS256 key that signs the controller session tokens issued by `POST /auth/session`. Any token that verifies against it is accepted as a session for the user it names, so outside `DEV_MODE` (enabled only by `1`, `true`, `yes` or `on`, in any case) the controller refuses to start when it is unset, shorter than 32 bytes, or the development value published in this repository. Generate it with `openssl rand -hex 32`. The controller checks a session token's signature, audience and expiry, not when it was issued, so a token signed with a leaked value can carry any expiry: replacing the secret is what invalidates it, not waiting out `USER_TOKEN_TTL_SECONDS`. With `CREDENTIAL_ENCRYPTION_KEY` set, rotating it only signs every user out.
 - `CREDENTIAL_ENCRYPTION_KEY` — base64-encoded 32-byte key that encrypts the stored secrets in `user_credentials`, `project_secrets`, `user_oauth_tokens`, `project_browser_profiles` and `github_device_auth_sessions`. Required outside `DEV_MODE`. Generate it with `openssl rand -base64 32` and keep it in your secret store. Replacing it outright makes those rows unreadable; change it by following [Rotating the credential encryption key](#rotating-the-credential-encryption-key). Before upgrading a controller that ran without it, see [Upgrading a controller without explicit secrets](#upgrading-a-controller-without-explicit-secrets).
-- `CREDENTIAL_ENCRYPTION_PREVIOUS_KEYS` — optional, comma-separated base64-encoded 32-byte keys the controller only decrypts with, so rows sealed under an earlier `CREDENTIAL_ENCRYPTION_KEY` stay readable during a rotation. New values are always encrypted with `CREDENTIAL_ENCRYPTION_KEY`. The controller refuses to start when an entry is malformed, repeated or equal to `CREDENTIAL_ENCRYPTION_KEY`, or when more than 8 are listed, and warns on every start while one of them is the key derived from the published development value. It is a secret like the primary key: keep it out of runtime and agent environments.
+- `CREDENTIAL_ENCRYPTION_PREVIOUS_KEYS` — optional, comma-separated base64-encoded 32-byte keys the controller only decrypts with, so rows sealed under an earlier `CREDENTIAL_ENCRYPTION_KEY` stay readable during a rotation. New values are always encrypted with `CREDENTIAL_ENCRYPTION_KEY`. The controller refuses to start when an entry is malformed, repeated or equal to `CREDENTIAL_ENCRYPTION_KEY`, or when more than 8 are listed, and warns on every start while one of them is the key derived from the published development value. The controller recognises that key by its one-way key id only; it does not know the key and never decrypts with it unless it is configured here or as `CREDENTIAL_ENCRYPTION_KEY`. It is a secret like the primary key: keep it out of runtime and agent environments.
 - `AGENT_LOGIN_KEY` — shared secret agents use to mint scoped tokens via `/agent/login`.
 - `WORKSPACE_ROOT` — runtime/controller root directory containing per-project workspaces. In local-canonical desktop mode, the source-of-truth folder can live outside this hosted layout. In git-canonical hosted mode, this root holds the materialized working copies.
 - `PROXY_BASE_URL`/`PROXY_SIGNING_SECRET` — optional AI proxy envelope support.
@@ -332,8 +333,9 @@ If the key was derived from the published value, anyone who can read the encrypt
 decrypt them, through a service-role key, a database role, a backup or any other SQL read path.
 Pinning the key keeps them readable to the controller but does not protect them: re-encrypt them
 under a freshly generated key by [rotating the credential encryption key](#rotating-the-credential-encryption-key),
-or revoke those credentials and have their owners reconnect them. The rotation census counts rows
-under the published key whether or not it is still configured, which is how you prove none remain.
+or revoke those credentials and have their owners reconnect them. While the published key is
+configured, as `CREDENTIAL_ENCRYPTION_KEY` or in `CREDENTIAL_ENCRYPTION_PREVIOUS_KEYS`, the rotation
+census counts the rows it opens, which is how you prove none remain before removing it.
 
 ### Rotating the credential encryption key
 
@@ -366,8 +368,12 @@ derived from the published development value.
    For each table and in `totals` it reports `rows`, how many the primary key opens (`primary`),
    how many each previous key opens (`previous`, in `CREDENTIAL_ENCRYPTION_PREVIOUS_KEYS` order),
    how many no configured key opens (`undecryptable`), and `underPublishedDevelopmentKey`: rows
-   under the key derived from the published development value, counted whether or not that key is
-   configured. Keys appear only as one-way `keyId`s.
+   the key derived from the published development value opens, while that key is configured as the
+   primary or a previous key. It is `null` when that key is not configured: the controller
+   recognises the key by its one-way id only and never decrypts with a key it is not configured
+   with, so rows still under it after it is removed count as `undecryptable`. Each key in
+   `primaryKey` and `previousKeys` appears only as a one-way `keyId`, with
+   `publishedDevelopmentKey: true` on the published one.
 4. Re-encrypt:
 
    ```bash
@@ -387,7 +393,8 @@ derived from the published development value.
    off, rows already rewritten stay rewritten, so pass `maxRows` and repeat. Neither route logs or
    returns secret values or keys.
 5. Take the census again. Continue only when every count in `totals.previous` is `0` and, if the old
-   key was the published development key, `totals.underPublishedDevelopmentKey` is `0`. A non-zero
+   key was the published development key, `totals.underPublishedDevelopmentKey` is `0` (it is only
+   reported while that key is still listed, so check it before step 6). A non-zero
    `undecryptable` means rows under a key that is not configured at all: the pass leaves them
    alone, and removing a previous key cannot make them readable. Find their key first.
 6. Deploy without the old key in `CREDENTIAL_ENCRYPTION_PREVIOUS_KEYS` and take one more census:
