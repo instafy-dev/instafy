@@ -20,6 +20,7 @@ const auth = vi.hoisted(() => ({
 vi.mock("../../providers/AuthProvider", () => ({ useAuth: () => auth }));
 vi.mock("../login/useNativeGithubAuth", () => ({
   OAUTH_REDIRECT_TARGET_KEY: "instafy.oauth.redirectTarget",
+  OAUTH_PROVIDER_LABELS: { github: "GitHub", google: "Google" },
   useNativeGithubAuth: () => ({
     handleGithubLogin: vi.fn(),
     handleGoogleLogin: vi.fn(),
@@ -105,5 +106,7 @@ describe("LoginPage entry handoff", () => {
     expect(container.textContent).toContain("Reset your password");
     expect(container.querySelector('[data-testid="studio-destination"]')).toBeNull();
     expect(container.querySelector('[role="status"]')).toBeNull();
+    // The heading and description already say what to do; no notice repeats it.
+    expect(container.querySelector('[data-testid="login-message"]')).toBeNull();
   });
 });

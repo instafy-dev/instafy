@@ -3,7 +3,6 @@ import { NavArrowLeft } from "iconoir-react";
 import { Badge } from "../../../components/Badge";
 import { Button, IconButton } from "../../../components/Button";
 import { Input } from "../../../components/Input";
-import { Spinner } from "../../../components/Spinner";
 import { Text } from "../../../components/Text";
 import { StudioDialogHeader } from "../../../components/aria/StudioDialogLayout";
 import { StudioDialogModal } from "../../../components/aria/StudioModal";
@@ -452,7 +451,6 @@ function ConfirmStage({
               isPending={pending}
               data-testid="connect-confirm-submit"
             >
-              {pending ? <Spinner tone="primary" size="sm" aria-hidden="true" /> : null}
               Connect
             </Button>
           )}

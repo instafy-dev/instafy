@@ -1,16 +1,18 @@
-import { forwardRef, useCallback, type ForwardedRef } from "react";
+import { forwardRef, useCallback, type ForwardedRef, type ReactNode } from "react";
 import {
   Button as AriaButton,
+  ProgressBar,
   composeRenderProps,
   type ButtonProps as AriaButtonProps
 } from "react-aria-components";
+import { Spinner, type SpinnerSize } from "./Spinner";
 
 type ButtonVariant = "primary" | "secondary" | "outline" | "ghost" | "danger";
 type ButtonSize = "xs" | "sm" | "md" | "lg" | "icon";
 type ButtonRadius = "none" | "md" | "lg" | "xl" | "2xl" | "full";
 
 const BASE =
-  "inline-flex items-center justify-center gap-2 font-medium touch-manipulation [-webkit-tap-highlight-color:transparent] transition-[color,background-color,border-color,box-shadow,transform] duration-150 ease-out focus:outline-none focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary-500/40 focus-visible:ring-offset-2 focus-visible:ring-offset-white dark:focus-visible:ring-offset-[var(--color-studio-dark-canvas)] data-[pressed]:translate-y-px data-[pressed]:scale-[0.98] data-[disabled]:pointer-events-none data-[disabled]:opacity-60 disabled:pointer-events-none disabled:opacity-60";
+  "inline-flex items-center justify-center gap-2 font-medium touch-manipulation [-webkit-tap-highlight-color:transparent] transition-[color,background-color,border-color,box-shadow,transform] duration-150 ease-out focus:outline-none focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary-500/40 focus-visible:ring-offset-2 focus-visible:ring-offset-white dark:focus-visible:ring-offset-[var(--color-studio-dark-canvas)] data-[pressed]:translate-y-px data-[pressed]:scale-[0.98] data-[disabled]:pointer-events-none data-[disabled]:opacity-60 disabled:pointer-events-none disabled:opacity-60 data-[pending]:pointer-events-none";
 
 const VARIANT_CLASSES: Record<ButtonVariant, string> = {
   primary:
@@ -45,7 +47,31 @@ const RADIUS_CLASSES: Record<ButtonRadius, string> = {
   full: "rounded-full"
 };
 
+// The pending glyph takes the leading icon's place at the icon's size. A button
+// without an icon keeps its label in place (and in its accessible name) but
+// fades it out under a centred spinner. Either way nothing moves or resizes
+// when a press starts waiting.
+const PENDING_SPINNER_SIZE: Record<ButtonSize, SpinnerSize> = {
+  xs: "xs",
+  sm: "md",
+  md: "md",
+  lg: "md",
+  icon: "md"
+};
+
+/**
+ * `isPending` belongs on the pressed control only. React Aria keeps a pending
+ * button focusable, ignores presses and sets aria-disabled; the spinner below
+ * replaces `icon` (or the whole content of an icon button). Do not combine it
+ * with `isDisabled` on the same control: native `disabled` drops focus.
+ *
+ * A pending submit button stops being the form's default button, so a form
+ * with a single text field submits again on Enter. Guard the submit handler
+ * against re-entry rather than relying on the button.
+ */
 export type ButtonProps = Omit<AriaButtonProps, "className"> & {
+  /** Leading glyph, replaced by the pending spinner while `isPending`. */
+  icon?: ReactNode;
   variant?: ButtonVariant;
   size?: ButtonSize;
   radius?: ButtonRadius;
@@ -70,6 +96,8 @@ export const Button = forwardRef<HTMLButtonElement, ButtonProps>(function Button
     fullWidth = false,
     className,
     title,
+    icon,
+    children,
     ...props
   },
   ref
@@ -107,7 +135,42 @@ export const Button = forwardRef<HTMLButtonElement, ButtonProps>(function Button
           .filter(Boolean)
           .join(" ")
       )}
-    />
+    >
+      {composeRenderProps(children, (content, { isPending }) => {
+        // React Aria's pattern: a labelled ProgressBar inside the pending
+        // button, so the name announced when the press starts reads
+        // "Loading" and not just the unchanged label.
+        const pendingGlyph = (className?: string) => (
+          <ProgressBar
+            aria-label="Loading"
+            isIndeterminate
+            className={["inline-flex shrink-0", className].filter(Boolean).join(" ")}
+          >
+            <Spinner tone="current" size={PENDING_SPINNER_SIZE[size]} aria-hidden="true" />
+          </ProgressBar>
+        );
+        if (size === "icon") {
+          return isPending ? pendingGlyph() : content;
+        }
+        if (isPending && !icon) {
+          return (
+            <span className="relative inline-flex items-center justify-center">
+              <span className="inline-flex items-center gap-2 opacity-0">{content}</span>
+              {pendingGlyph("absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2")}
+            </span>
+          );
+        }
+        const glyph = isPending ? pendingGlyph() : icon;
+        return glyph ? (
+          <>
+            {glyph}
+            {content}
+          </>
+        ) : (
+          content
+        );
+      })}
+    </AriaButton>
   );
 });
 
@@ -120,7 +183,7 @@ const ICON_SIZES = {
   lg: "h-10 w-10 text-lg pointer-coarse:min-h-11 pointer-coarse:min-w-11"
 };
 
-export type IconButtonProps = Omit<ButtonProps, "size"> & {
+export type IconButtonProps = Omit<ButtonProps, "size" | "icon"> & {
   size?: keyof typeof ICON_SIZES;
 };
 

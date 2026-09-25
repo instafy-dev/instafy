@@ -40,6 +40,8 @@ export type InlineNoticeProps = {
   title?: string | null;
   children: ReactNode;
   className?: string;
+  /** Announce the notice: "status" for outcomes, "alert" for errors. */
+  role?: "status" | "alert";
   "data-testid"?: string;
 };
 
@@ -48,6 +50,7 @@ export function InlineNotice({
   title = null,
   children,
   className,
+  role,
   "data-testid": dataTestId,
 }: InlineNoticeProps) {
   const Icon = tone === "success" ? CheckCircle : tone === "info" ? InfoCircle : WarningTriangle;
@@ -61,6 +64,7 @@ export function InlineNotice({
       ]
         .filter(Boolean)
         .join(" ")}
+      role={role}
       data-testid={dataTestId}
     >
       <Icon className={["mt-0.5 h-4 w-4 shrink-0", ICON_TONE_CLASSES[tone]].join(" ")} aria-hidden="true" />

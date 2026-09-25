@@ -1,4 +1,4 @@
-import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
+import { FormEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Capacitor } from "@capacitor/core";
 import { useLocation, useNavigate } from "react-router-dom";
 import { Eye, EyeClosed, NavArrowLeft, Xmark } from "iconoir-react";
@@ -8,6 +8,9 @@ import { GitHubIcon } from "../components/IntegrationIcons";
 import { Input } from "../components/Input";
 import { OctoMark } from "../components/OctoMark";
 import { EntryLoadingScreen } from "../components/EntryLoadingScreen";
+import { InlineNotice } from "../components/InlineNotice";
+import { LoadingStatus } from "../components/LoadingStatus";
+import { Spinner } from "../components/Spinner";
 import { Text } from "../components/Text";
 import { TextLink } from "../components/TextLink";
 import { ToggleIconButton } from "../components/ToggleIconButton";
@@ -15,7 +18,12 @@ import { hasSupabaseConfig } from "../lib/supabaseClient";
 import { showBackToLanding as computeShowBackToLanding } from "../lib/desktopShell";
 import { AppVersionLabel } from "../components/AppVersionLabel";
 import { useAuth } from "../providers/AuthProvider";
-import { OAUTH_REDIRECT_TARGET_KEY, useNativeGithubAuth } from "./login/useNativeGithubAuth";
+import {
+  OAUTH_PROVIDER_LABELS,
+  OAUTH_REDIRECT_TARGET_KEY,
+  useNativeGithubAuth,
+  type LoginOAuthProvider,
+} from "./login/useNativeGithubAuth";
 import { GoogleIcon } from "../components/IntegrationIcons";
 import {
   deriveRememberedAccountProviderFromUser,
@@ -30,6 +38,10 @@ import { applyPageMeta } from "../utils/seo";
 import { TentacleBackdrop } from "./landing/LandingTentacleScene";
 
 type LoginStep = "chooseAccount" | "email" | "password" | "otp" | "recovery";
+
+// The one control whose press is in flight. It shows the Button's pending
+// spinner; every other control on the page is disabled until it settles.
+type PendingControl = LoginOAuthProvider | "submit" | "forgot" | "startOtp" | "resend" | "guest";
 
 const REMEMBERED_ACCOUNTS_KEY = "instafy.rememberedAccounts";
 
@@ -181,8 +193,18 @@ export function LoginPage() {
   const [passwordVisible, setPasswordVisible] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [submitting, setSubmitting] = useState(false);
-  const [guestSubmitting, setGuestSubmitting] = useState(false);
+  const [pendingControl, setPendingControlState] = useState<PendingControl | null>(null);
+  // Mirrors pendingControl synchronously. A pending submit button is no longer
+  // the form's default button, so Enter in a single-field form submits again,
+  // possibly before React has re-rendered; the submit handlers check this.
+  const pendingControlRef = useRef<PendingControl | null>(null);
+  const setPendingControl = useCallback((control: PendingControl | null) => {
+    pendingControlRef.current = control;
+    setPendingControlState(control);
+  }, []);
+  const [awaitingBrowser, setAwaitingBrowser] = useState<LoginOAuthProvider | null>(null);
+  const submitting = pendingControl !== null;
+  const isBlocked = (control: PendingControl) => pendingControl !== null && pendingControl !== control;
 
   const emailRef = useRef<HTMLInputElement | null>(null);
   const passwordRef = useRef<HTMLInputElement | null>(null);
@@ -191,8 +213,8 @@ export function LoginPage() {
   const { handleGithubLogin, handleGoogleLogin, resetNativeAuthState } = useNativeGithubAuth({
     redirectTarget,
     setError,
-    setMessage,
-    setSubmitting,
+    setPendingProvider: setPendingControl,
+    setAwaitingBrowser,
   });
 
   const allowGuestSignIn = import.meta.env.DEV && !import.meta.env.PROD;
@@ -290,7 +312,6 @@ export function LoginPage() {
   useEffect(() => {
     if (recoveryMode) {
       setStep("recovery");
-      setMessage("Set a new password for your account.");
       setError(null);
       return;
     }
@@ -326,13 +347,14 @@ export function LoginPage() {
     resetNativeAuthState();
     setError(null);
     setMessage(null);
-    setSubmitting(false);
+    setAwaitingBrowser(null);
+    setPendingControl(null);
   };
 
 
   const handleGuestSignIn = async () => {
     clearTransientState();
-    setGuestSubmitting(true);
+    setPendingControl("guest");
     try {
       await signInAnonymously();
       navigate(redirectTarget, { replace: true });
@@ -340,7 +362,7 @@ export function LoginPage() {
       const details = err instanceof Error ? err.message : "Unable to sign in as guest.";
       setError(details);
     } finally {
-      setGuestSubmitting(false);
+      setPendingControl(null);
     }
   };
 
@@ -369,6 +391,9 @@ export function LoginPage() {
 
   const handlePasswordContinue = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
+    if (pendingControlRef.current !== null) {
+      return;
+    }
     const nextEmail = normalizeEmail(email);
     if (!nextEmail) {
       setError("Enter your email address.");
@@ -380,7 +405,7 @@ export function LoginPage() {
     }
 
     clearTransientState();
-    setSubmitting(true);
+    setPendingControl("submit");
     try {
       await signInWithPassword(nextEmail, password);
       setRememberedAccounts((current) => {
@@ -393,7 +418,7 @@ export function LoginPage() {
       const details = err instanceof Error ? err.message : "Unable to sign in.";
       setError(details);
     } finally {
-      setSubmitting(false);
+      setPendingControl(null);
     }
   };
 
@@ -405,7 +430,7 @@ export function LoginPage() {
     }
     clearTransientState();
     setAccountChooserDismissed(true);
-    setSubmitting(true);
+    setPendingControl("startOtp");
     try {
       await sendEmailOtp(nextEmail);
       setEmail(nextEmail);
@@ -415,12 +440,15 @@ export function LoginPage() {
       const details = err instanceof Error ? err.message : "Unable to send a sign-in code.";
       setError(details);
     } finally {
-      setSubmitting(false);
+      setPendingControl(null);
     }
   };
 
   const handleVerifyOtp = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
+    if (pendingControlRef.current !== null) {
+      return;
+    }
     const nextEmail = normalizeEmail(email);
     if (!nextEmail) {
       setError("Enter your email address.");
@@ -433,7 +461,7 @@ export function LoginPage() {
     }
 
     clearTransientState();
-    setSubmitting(true);
+    setPendingControl("submit");
     try {
       await verifyEmailOtp(nextEmail, token);
       setRememberedAccounts((current) => {
@@ -446,7 +474,7 @@ export function LoginPage() {
       const details = err instanceof Error ? err.message : "Unable to verify code.";
       setError(details);
     } finally {
-      setSubmitting(false);
+      setPendingControl(null);
     }
   };
 
@@ -456,7 +484,7 @@ export function LoginPage() {
       return;
     }
     clearTransientState();
-    setSubmitting(true);
+    setPendingControl("resend");
     try {
       await sendEmailOtp(nextEmail);
       setOtpCode("");
@@ -465,7 +493,7 @@ export function LoginPage() {
       const details = err instanceof Error ? err.message : "Unable to resend code.";
       setError(details);
     } finally {
-      setSubmitting(false);
+      setPendingControl(null);
     }
   };
 
@@ -476,7 +504,7 @@ export function LoginPage() {
       return;
     }
     clearTransientState();
-    setSubmitting(true);
+    setPendingControl("forgot");
     try {
       await sendPasswordResetEmail(nextEmail);
       setMessage(`Password reset email sent to ${nextEmail}. Open the link to set a new password.`);
@@ -484,12 +512,15 @@ export function LoginPage() {
       const details = err instanceof Error ? err.message : "Unable to send reset email.";
       setError(details);
     } finally {
-      setSubmitting(false);
+      setPendingControl(null);
     }
   };
 
   const handleRecoveryUpdate = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
+    if (pendingControlRef.current !== null) {
+      return;
+    }
     if (!password) {
       setError("Enter a new password.");
       return;
@@ -507,7 +538,7 @@ export function LoginPage() {
       return;
     }
     clearTransientState();
-    setSubmitting(true);
+    setPendingControl("submit");
     try {
       await updatePassword(password);
       setPassword("");
@@ -517,7 +548,7 @@ export function LoginPage() {
       const details = err instanceof Error ? err.message : "Unable to update password.";
       setError(details);
     } finally {
-      setSubmitting(false);
+      setPendingControl(null);
     }
   };
 
@@ -581,6 +612,16 @@ export function LoginPage() {
     handleUseAnotherAccount();
   };
 
+  // The desktop shell hands sign-in to the system browser, and that wait has
+  // no end the app can see. It is the only pending state that needs words; it
+  // sits under the controls that started it, and pressing a provider again is
+  // the retry.
+  const browserHandoff = awaitingBrowser ? (
+    <LoadingStatus className="w-full justify-center" data-testid="login-browser-handoff">
+      {`Waiting for ${OAUTH_PROVIDER_LABELS[awaitingBrowser]} in your browser…`}
+    </LoadingStatus>
+  ) : null;
+
   const renderForm = () => {
     if (step === "chooseAccount") {
       return (
@@ -589,6 +630,11 @@ export function LoginPage() {
             {rememberedAccounts.map((account) => {
               const initials = buildInitials(account.displayName);
               const isGithubAccount = account.provider === "github";
+              // The chip is a plain button (it wraps an avatar and two lines),
+              // so it mirrors the shared Button's pending contract by hand:
+              // presses are ignored while anything is in flight, and only the
+              // chip that started the sign-in swaps its badge for the spinner.
+              const chipPending = pendingControl === account.provider && email === account.email;
               const avatarClasses =
                 "flex h-12 w-12 items-center justify-center rounded-full bg-primary-600 text-sm font-bold text-white";
 
@@ -599,8 +645,15 @@ export function LoginPage() {
                 >
                   <button
                     type="button"
-                    onClick={() => handleSelectAccount(account)}
-                    className="flex min-w-0 flex-1 items-center gap-3 text-left outline-none focus-visible:ring-2 focus-visible:ring-primary-400/40 focus-visible:ring-offset-2 focus-visible:ring-offset-white dark:focus-visible:ring-offset-slate-950"
+                    onClick={() => {
+                      if (pendingControlRef.current === null) {
+                        handleSelectAccount(account);
+                      }
+                    }}
+                    aria-disabled={submitting || undefined}
+                    data-pending={chipPending || undefined}
+                    data-disabled={(submitting && !chipPending) || undefined}
+                    className="flex min-w-0 flex-1 items-center gap-3 text-left outline-none focus-visible:ring-2 focus-visible:ring-primary-400/40 focus-visible:ring-offset-2 focus-visible:ring-offset-white data-[disabled]:opacity-60 dark:focus-visible:ring-offset-slate-950"
                     aria-label={
                       account.provider === "github"
                         ? `Continue with GitHub as ${account.email}`
@@ -615,11 +668,19 @@ export function LoginPage() {
                       </div>
                       {isGithubAccount ? (
                         <span className="absolute -bottom-0.5 -right-0.5 inline-flex h-5 w-5 items-center justify-center rounded-full border border-white bg-slate-900 text-white shadow-sm dark:border-slate-950 dark:bg-white dark:text-slate-900">
-                          <GitHubIcon className="h-3 w-3" />
+                          {chipPending ? (
+                            <Spinner size="xs" tone="current" aria-hidden="true" />
+                          ) : (
+                            <GitHubIcon className="h-3 w-3" />
+                          )}
                         </span>
                       ) : account.provider === "google" ? (
-                        <span className="absolute -bottom-0.5 -right-0.5 inline-flex h-5 w-5 items-center justify-center rounded-full border border-slate-200 bg-white shadow-sm dark:border-slate-950">
-                          <GoogleIcon className="h-3 w-3" />
+                        <span className="absolute -bottom-0.5 -right-0.5 inline-flex h-5 w-5 items-center justify-center rounded-full border border-slate-200 bg-white text-slate-700 shadow-sm dark:border-slate-950">
+                          {chipPending ? (
+                            <Spinner size="xs" tone="current" aria-hidden="true" />
+                          ) : (
+                            <GoogleIcon className="h-3 w-3" />
+                          )}
                         </span>
                       ) : null}
                     </div>
@@ -647,6 +708,7 @@ export function LoginPage() {
                     radius="full"
                     size="sm"
                     onPress={() => handleRemoveAccount(account.email)}
+                    isDisabled={submitting}
                     className="text-slate-500 hover:text-slate-900 dark:text-slate-400 dark:hover:text-slate-50"
                   >
                     <Xmark className="h-4 w-4" aria-hidden="true" />
@@ -654,6 +716,7 @@ export function LoginPage() {
                 </div>
               );
             })}
+            {browserHandoff}
           </div>
 
           <OrDivider />
@@ -693,7 +756,7 @@ export function LoginPage() {
             </Text>
             <div className="mt-2 flex items-center gap-2 rounded-full border border-slate-200 bg-white px-4 py-3 text-sm dark:border-slate-800 dark:bg-slate-950/40">
               <div className="min-w-0 flex-1 truncate font-medium text-slate-900 dark:text-slate-50">
-                {normalizedEmail || "—"}
+                {normalizedEmail}
               </div>
               <Button
                 onPress={handleEditEmail}
@@ -745,7 +808,8 @@ export function LoginPage() {
               <div className="mt-3">
                 <Button
                   onPress={handleForgotPassword}
-                  isDisabled={submitting}
+                  isPending={pendingControl === "forgot"}
+                  isDisabled={isBlocked("forgot")}
                   variant="ghost"
                   size="xs"
                   radius="full"
@@ -762,9 +826,10 @@ export function LoginPage() {
               size="lg"
               radius="full"
               className="w-full justify-center px-6 py-3 text-sm font-semibold"
-              isDisabled={submitting || normalizedEmail.length === 0 || password.length === 0}
+              isPending={pendingControl === "submit"}
+              isDisabled={isBlocked("submit") || normalizedEmail.length === 0 || password.length === 0}
             >
-              {submitting ? "Working…" : "Continue"}
+              Continue
             </Button>
           </form>
 
@@ -777,12 +842,13 @@ export function LoginPage() {
               size="lg"
               fullWidth
               onPress={handleStartOtp}
-              isDisabled={submitting || normalizedEmail.length === 0}
+              isPending={pendingControl === "startOtp"}
+              isDisabled={isBlocked("startOtp") || normalizedEmail.length === 0}
             >
               Email me a code instead
             </Button>
             <Text variant="caption" tone="muted" className="block text-center">
-              No password yet? Get a sign-in code by email — it works whether or not you
+              No password yet? Get a sign-in code by email. It works whether or not you
               already have an account.
             </Text>
           </div>
@@ -819,15 +885,17 @@ export function LoginPage() {
               size="lg"
               radius="full"
               className="w-full justify-center px-6 py-3 text-sm font-semibold"
-              isDisabled={submitting || otpCode.trim().length === 0}
+              isPending={pendingControl === "submit"}
+              isDisabled={isBlocked("submit") || otpCode.trim().length === 0}
             >
-              {submitting ? "Verifying…" : "Continue"}
+              Continue
             </Button>
           </form>
 
           <Button
             onPress={handleResendOtp}
-            isDisabled={submitting}
+            isPending={pendingControl === "resend"}
+            isDisabled={isBlocked("resend")}
             variant="ghost"
             size="sm"
             radius="full"
@@ -918,9 +986,10 @@ export function LoginPage() {
               size="lg"
               radius="full"
               className="w-full justify-center px-6 py-3 text-sm font-semibold"
-              isDisabled={submitting || password.length === 0 || passwordConfirm.length === 0}
+              isPending={pendingControl === "submit"}
+              isDisabled={isBlocked("submit") || password.length === 0 || passwordConfirm.length === 0}
             >
-              {submitting ? "Working…" : "Update password"}
+              Update password
             </Button>
           </form>
         </div>
@@ -972,13 +1041,12 @@ export function LoginPage() {
             radius="full"
             size="sm"
             fullWidth
+            icon={<GitHubIcon className="h-4 w-4" />}
             onPress={handleGithubLogin}
-            isDisabled={submitting || !hasSupabaseConfig || isExtensionEmbed}
+            isPending={pendingControl === "github"}
+            isDisabled={isBlocked("github") || !hasSupabaseConfig || isExtensionEmbed}
           >
-            <span className="inline-flex items-center gap-2">
-              <GitHubIcon className="h-4 w-4" />
-              <span>Continue with GitHub</span>
-            </span>
+            Continue with GitHub
           </Button>
           {GOOGLE_AUTH_ENABLED ? (
             <Button
@@ -986,15 +1054,15 @@ export function LoginPage() {
               radius="full"
               size="sm"
               fullWidth
+              icon={<GoogleIcon className="h-4 w-4" />}
               onPress={handleGoogleLogin}
-              isDisabled={submitting || !hasSupabaseConfig || isExtensionEmbed}
+              isPending={pendingControl === "google"}
+              isDisabled={isBlocked("google") || !hasSupabaseConfig || isExtensionEmbed}
             >
-              <span className="inline-flex items-center gap-2">
-                <GoogleIcon className="h-4 w-4" />
-                <span>Continue with Google</span>
-              </span>
+              Continue with Google
             </Button>
           ) : null}
+          {browserHandoff}
         </div>
       </div>
     );
@@ -1097,13 +1165,14 @@ export function LoginPage() {
                 {allowGuestSignIn ? (
                   <Button
                     onPress={handleGuestSignIn}
-                    isDisabled={guestSubmitting}
+                    isPending={pendingControl === "guest"}
+                    isDisabled={isBlocked("guest")}
                     variant="ghost"
                     size="sm"
                     radius="full"
                     className={`${theme.button.secondary} justify-center`}
                   >
-                    {guestSubmitting ? "Signing in…" : "Continue as guest"}
+                    Continue as guest
                   </Button>
                 ) : null}
               </div>
@@ -1113,14 +1182,14 @@ export function LoginPage() {
               {renderBody()}
 
               {message ? (
-                <div data-testid="login-message" className={`mt-6 ${theme.alert.success}`}>
+                <InlineNotice tone="success" role="status" className="mt-6" data-testid="login-message">
                   {message}
-                </div>
+                </InlineNotice>
               ) : null}
               {error ? (
-                <div data-testid="login-error" className={`mt-6 ${theme.alert.error}`}>
+                <InlineNotice tone="danger" role="alert" className="mt-6" data-testid="login-error">
                   {error}
-                </div>
+                </InlineNotice>
               ) : null}
 
               {!recoveryMode ? (
