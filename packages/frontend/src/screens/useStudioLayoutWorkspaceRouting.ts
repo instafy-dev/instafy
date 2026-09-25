@@ -922,6 +922,17 @@ export function useStudioLayoutWorkspaceRouting({
       jobId: activeWorkspaceTabJobId,
       reviewTabId: activeWorkspaceReviewTabId,
     });
+    // While the tab owner waits for real history, the active conversation is
+    // an in-memory placeholder. Fetched history can replace it with a separate
+    // conversation, and a placeholder id already in the URL then reads as a
+    // deep link that the passive check above never replaces. So on every
+    // write, passive or explicit, keep what the URL names for this space
+    // (which may be a real deep link) and never add the placeholder. The
+    // rerun when history is ready writes the real ids.
+    const routeConversationValue = (key: "conversationId" | "conversationControllerId" | "jobId") => {
+      if (conversationTabsReady) return projectScopedRouteValues[key];
+      return urlProjectId === resolvedProjectId ? params.get(key) : null;
+    };
     // A message target belongs only to this explicit conversation visit. Keep
     // it through canonical hydration, but clear it for ordinary tab selection.
     const preserveMessageTarget = pendingNavigationMode !== "push" && activePanel === "chat" &&
@@ -933,10 +944,10 @@ export function useStudioLayoutWorkspaceRouting({
     if (!preserveMessageTarget) changed = syncParam("messageId", null) || changed;
     changed = clearStaleSharedBrowserResumeTarget(params, resolvedProjectId) || changed;
     changed = syncParam("projectId", resolvedProjectId) || changed;
-    changed = syncParam("conversationId", projectScopedRouteValues.conversationId) || changed;
-    changed = syncParam("jobId", projectScopedRouteValues.jobId) || changed;
+    changed = syncParam("conversationId", routeConversationValue("conversationId")) || changed;
+    changed = syncParam("jobId", routeConversationValue("jobId")) || changed;
     changed =
-      syncParam("conversationControllerId", projectScopedRouteValues.conversationControllerId) || changed;
+      syncParam("conversationControllerId", routeConversationValue("conversationControllerId")) || changed;
     changed = syncParam("workspaceTab", leftDrawer) || changed;
     changed = syncParam("reviewTab", projectScopedRouteValues.reviewTabId) || changed;
     changed = syncParam("panel", activePanel === "chat" ? null : activePanel) || changed;
