@@ -72,6 +72,7 @@ use crate::shared_browser::{
 const DEFAULT_CODEX_MODEL: &str = "gpt-5.6-sol";
 const DEFAULT_CODEX_RUN_TIMEOUT_SECONDS: u64 = 600;
 const DEFAULT_CODEX_MAX_RUN_RETRIES: usize = 1;
+const PROXY_STREAM_MAX_RETRIES: u64 = 1;
 const DEFAULT_CODEX_RETRY_BASE_DELAY_MS: u64 = 1500;
 const DEFAULT_CODEX_CANCEL_SHUTDOWN_TIMEOUT_SECONDS: u64 = 5;
 const SHARED_BROWSER_CONFIRMED_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(8);
@@ -612,6 +613,15 @@ pub struct CodexRunOutput {
     pub provider_conversation_state: Option<JsonValue>,
 }
 
+/// A failed turn keeps the protocol classification as well as its diagnostic message.
+/// Callers must not turn an exhausted provider operation into a fresh model run.
+#[derive(Debug, thiserror::Error)]
+#[error("{message}")]
+pub struct CodexExecutionError {
+    pub message: String,
+    pub codex_error_info: Option<CodexErrorInfo>,
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct CodexRunOptions {
     pub disable_shell_tool: bool,
@@ -740,7 +750,13 @@ impl CodexClient {
         options: CodexRunOptions,
     ) -> Result<CodexRunOutput> {
         let run_timeout = resolve_codex_run_timeout();
-        let max_retries = resolve_codex_max_run_retries();
+        let max_retries = if uses_bounded_proxy_retries(&options) {
+            // Codex recovers within the same session, preserving completed tool receipts.
+            // Replaying execute_inner would reset that budget and could repeat side effects.
+            0
+        } else {
+            resolve_codex_max_run_retries()
+        };
         let retry_base_delay = resolve_codex_retry_base_delay();
 
         let mut attempt: usize = 0;
@@ -1162,7 +1178,8 @@ impl CodexClient {
                 .context("failed to load fallback Codex configuration after missing home")?;
         }
 
-        apply_runtime_proxy_model_provider_overrides(&mut config);
+        let bounded_proxy_retries = uses_bounded_proxy_retries(&options);
+        apply_runtime_proxy_model_provider_overrides(&mut config, bounded_proxy_retries);
         scope_runtime_model_shell_environment(&mut config.permissions.shell_environment_policy);
         install_browser_mcp_servers(
             &mut config,
@@ -1553,6 +1570,7 @@ impl CodexClient {
         let mut last_agent_message_event: Option<String> = None;
         let mut non_commentary_agent_message_seen = false;
         let mut error_message: Option<String> = None;
+        let mut error_info: Option<CodexErrorInfo> = None;
         let mut last_stream_error: Option<String> = None;
         let mut fatal_stream_error: Option<String> = None;
         let mut shutdown_requested = false;
@@ -1616,6 +1634,7 @@ impl CodexClient {
                 EventMsg::TurnComplete(turn) => {
                     if let Some(error) = &turn.error {
                         error_message.get_or_insert(error.message.clone());
+                        error_info = error.codex_error_info.clone();
                     }
                     let msg = &turn.last_agent_message;
                     if let Some(text) = msg.clone() {
@@ -1664,6 +1683,7 @@ impl CodexClient {
                 }
                 EventMsg::Error(err) => {
                     error_message.get_or_insert(err.message.clone());
+                    error_info = err.codex_error_info.clone();
                     if !options.shared_browser && !shutdown_requested {
                         conversation
                             .submit(Op::Shutdown)
@@ -1677,6 +1697,27 @@ impl CodexClient {
                 }
                 EventMsg::StreamError(err) => {
                     last_stream_error = Some(err.message.clone());
+
+                    if bounded_proxy_retries {
+                        // Codex owns the per-sampling-step retry count. Do not count all
+                        // recovered errors across a long turn against a second global limit.
+                        // Its UnexpectedStatus recovery also includes terminal HTTP 4xx;
+                        // interrupt those before the scheduled retry using the typed status.
+                        if codex_error_http_status(err.codex_error_info.as_ref())
+                            .is_some_and(is_terminal_proxy_http_status)
+                        {
+                            error_info = err.codex_error_info.clone();
+                            fatal_stream_error = Some(
+                                err.additional_details.clone().unwrap_or_else(|| err.message.clone()),
+                            );
+                            conversation
+                                .submit(Op::Shutdown)
+                                .await
+                                .context("failed to request Codex shutdown after terminal proxy error")?;
+                            break;
+                        }
+                        continue;
+                    }
 
                     let stream_status_code =
                         err.codex_error_info.as_ref().and_then(|info| match info {
@@ -1767,7 +1808,10 @@ impl CodexClient {
                 None
             }
         }) {
-            return Err(anyhow!(message));
+            return Err(CodexExecutionError {
+                message,
+                codex_error_info: error_info,
+            }.into());
         }
 
         let final_json = derive_final_json(
@@ -2424,7 +2468,30 @@ fn parse_json_stream(input: &str) -> Result<JsonValue> {
     JsonValue::deserialize(&mut deserializer).context("invalid JSON")
 }
 
-fn apply_runtime_proxy_model_provider_overrides(config: &mut Config) {
+fn uses_bounded_proxy_retries(options: &CodexRunOptions) -> bool {
+    optional_env("OPENAI_BASE_URL").is_some()
+        && !options.expect_browser_session
+        && !options.personal_browser
+        && !options.shared_browser
+}
+
+fn is_terminal_proxy_http_status(status: u16) -> bool {
+    (400..500).contains(&status) && !matches!(status, 408 | 429)
+}
+
+fn codex_error_http_status(info: Option<&CodexErrorInfo>) -> Option<u16> {
+    match info? {
+        CodexErrorInfo::HttpConnectionFailed { http_status_code }
+        | CodexErrorInfo::ResponseStreamConnectionFailed { http_status_code }
+        | CodexErrorInfo::ResponseStreamDisconnected { http_status_code }
+        | CodexErrorInfo::ResponseTooManyFailedAttempts { http_status_code } => *http_status_code,
+        CodexErrorInfo::Unauthorized => Some(401),
+        CodexErrorInfo::BadRequest => Some(400),
+        _ => None,
+    }
+}
+
+fn apply_runtime_proxy_model_provider_overrides(config: &mut Config, bounded_retries: bool) {
     let Some(openai_base_url) = optional_env("OPENAI_BASE_URL")
         .map(|value| value.trim().trim_end_matches('/').to_string())
         .filter(|value| !value.is_empty())
@@ -2436,9 +2503,17 @@ fn apply_runtime_proxy_model_provider_overrides(config: &mut Config) {
     // The local proxy currently exposes HTTP/SSE Responses endpoints, not the new
     // Responses websocket transport. Keep runtime automation on the proxy.
     config.model_provider.supports_websockets = false;
+    if bounded_retries {
+        config.model_provider.request_max_retries = Some(0);
+        config.model_provider.stream_max_retries = Some(PROXY_STREAM_MAX_RETRIES);
+    }
     if let Some(provider) = config.model_providers.get_mut(&config.model_provider_id) {
         provider.base_url = Some(openai_base_url.clone());
         provider.supports_websockets = false;
+        if bounded_retries {
+            provider.request_max_retries = Some(0);
+            provider.stream_max_retries = Some(PROXY_STREAM_MAX_RETRIES);
+        }
     }
 
     if let Some(chatgpt_base_url) = runtime_chatgpt_base_url_from_env() {
@@ -3106,6 +3181,12 @@ struct CodexEventStreamAdapter {
 
 impl CodexEventStreamAdapter {
     fn collect(&mut self, event: &Event) -> Vec<JsonValue> {
+        if let Some(kind) = unprojected_tool_activity_kind(&event.msg) {
+            // Observation only: retain no tool arguments, output, paths or identifiers.
+            // Consumers can distinguish a tool-free result from work whose detailed
+            // lifecycle does not otherwise have a runtime message projection.
+            return vec![json!({ "type": "tool.activity", "kind": kind })];
+        }
         match &event.msg {
             EventMsg::AgentMessage(message) => {
                 let Some(text) = trimmed_text(&message.message) else {
@@ -3456,6 +3537,75 @@ impl CodexEventStreamAdapter {
                 "text": text,
             }
         }))
+    }
+}
+
+fn unprojected_tool_activity_kind(event: &EventMsg) -> Option<&'static str> {
+    match event {
+        EventMsg::WebSearchBegin(_) | EventMsg::WebSearchEnd(_) => Some("web_search"),
+        EventMsg::ImageGenerationBegin(_) | EventMsg::ImageGenerationEnd(_) => {
+            Some("image_generation")
+        }
+        EventMsg::ViewImageToolCall(_) => Some("view_image"),
+        EventMsg::DynamicToolCallRequest(_) | EventMsg::DynamicToolCallResponse(_) => {
+            Some("dynamic_tool_call")
+        }
+        EventMsg::PlanUpdate(_) => Some("plan"),
+        EventMsg::TerminalInteraction(_) => Some("terminal_interaction"),
+        EventMsg::ExecApprovalRequest(_) => Some("command_execution"),
+        EventMsg::ApplyPatchApprovalRequest(_) | EventMsg::PatchApplyUpdated(_) => {
+            Some("file_change")
+        }
+        EventMsg::RequestPermissions(_) => Some("permission_request"),
+        EventMsg::RequestUserInput(_) => Some("user_input"),
+        EventMsg::ElicitationRequest(_) => Some("mcp_elicitation"),
+        EventMsg::CollabAgentSpawnBegin(_)
+        | EventMsg::CollabAgentSpawnEnd(_)
+        | EventMsg::CollabAgentInteractionBegin(_)
+        | EventMsg::CollabAgentInteractionEnd(_)
+        | EventMsg::CollabWaitingBegin(_)
+        | EventMsg::CollabWaitingEnd(_)
+        | EventMsg::CollabCloseBegin(_)
+        | EventMsg::CollabCloseEnd(_)
+        | EventMsg::CollabResumeBegin(_)
+        | EventMsg::CollabResumeEnd(_)
+        | EventMsg::SubAgentActivity(_) => Some("collaboration"),
+        EventMsg::ItemStarted(item) => turn_item_tool_activity_kind(&item.item),
+        EventMsg::ItemCompleted(item) => turn_item_tool_activity_kind(&item.item),
+        EventMsg::RawResponseItem(raw) => match &raw.item {
+            ResponseItem::LocalShellCall { .. } => Some("command_execution"),
+            ResponseItem::FunctionCall { .. } | ResponseItem::FunctionCallOutput { .. } => {
+                Some("function_call")
+            }
+            ResponseItem::CustomToolCall { .. } | ResponseItem::CustomToolCallOutput { .. } => {
+                Some("custom_tool_call")
+            }
+            ResponseItem::ToolSearchCall { .. } | ResponseItem::ToolSearchOutput { .. } => {
+                Some("tool_search")
+            }
+            ResponseItem::WebSearchCall { .. } => Some("web_search"),
+            ResponseItem::ImageGenerationCall { .. } => Some("image_generation"),
+            ResponseItem::AgentMessage { .. } => Some("collaboration"),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+fn turn_item_tool_activity_kind(item: &TurnItem) -> Option<&'static str> {
+    match item {
+        TurnItem::Plan(_) => Some("plan"),
+        TurnItem::CommandExecution(_) => Some("command_execution"),
+        TurnItem::DynamicToolCall(_) => Some("dynamic_tool_call"),
+        TurnItem::CollabAgentToolCall(_) | TurnItem::SubAgentActivity(_) => Some("collaboration"),
+        TurnItem::WebSearch(_) => Some("web_search"),
+        TurnItem::ImageView(_) => Some("view_image"),
+        TurnItem::ImageGeneration(_) => Some("image_generation"),
+        TurnItem::Extension(_) => Some("extension"),
+        TurnItem::EnteredReviewMode(_) | TurnItem::ExitedReviewMode(_) => Some("review"),
+        TurnItem::FileChange(_) => Some("file_change"),
+        TurnItem::McpToolCall(_) => Some("mcp_tool_call"),
+        _ => None,
     }
 }
 
@@ -5009,6 +5159,55 @@ mod tests {
     }
 
     #[test]
+    fn ordinary_proxy_retry_policy_preserves_browser_lanes() {
+        let _env_lock = env_lock();
+        let previous = std::env::var_os("OPENAI_BASE_URL");
+        unsafe { std::env::set_var("OPENAI_BASE_URL", "http://127.0.0.1:8789/v1") };
+        assert!(uses_bounded_proxy_retries(&CodexRunOptions::default()));
+        for options in [
+            CodexRunOptions {
+                expect_browser_session: true,
+                ..Default::default()
+            },
+            CodexRunOptions {
+                personal_browser: true,
+                ..Default::default()
+            },
+            CodexRunOptions {
+                shared_browser: true,
+                ..Default::default()
+            },
+        ] {
+            assert!(!uses_bounded_proxy_retries(&options));
+        }
+        unsafe { std::env::remove_var("OPENAI_BASE_URL") };
+        assert!(!uses_bounded_proxy_retries(&CodexRunOptions::default()));
+        if let Some(previous) = previous {
+            unsafe { std::env::set_var("OPENAI_BASE_URL", previous) };
+        }
+    }
+
+    #[test]
+    fn proxy_terminal_status_uses_protocol_classification() {
+        for status in [400, 401, 402, 403, 404, 422, 424] {
+            let info = CodexErrorInfo::ResponseStreamDisconnected {
+                http_status_code: Some(status),
+            };
+            assert!(
+                codex_error_http_status(Some(&info)).is_some_and(is_terminal_proxy_http_status)
+            );
+        }
+        for status in [408, 429, 500, 502, 503, 504] {
+            assert!(!is_terminal_proxy_http_status(status));
+        }
+        assert_eq!(
+            codex_error_http_status(Some(&CodexErrorInfo::Unauthorized)),
+            Some(401)
+        );
+        assert_eq!(codex_error_http_status(None), None);
+    }
+
+    #[test]
     fn stream_auth_errors_still_fail_fast() {
         assert!(should_terminate_codex_stream(Some(401), 0, 5));
         assert!(should_terminate_codex_stream(Some(403), 0, 5));
@@ -5417,6 +5616,198 @@ required = true
 
         let unrelated = adapter.collect(&event("untrusted_server"));
         assert!(unrelated[0]["item"].get("terminalConsent").is_none());
+    }
+
+    #[test]
+    fn codex_event_stream_records_content_free_tool_activity() {
+        let cases = [
+            (
+                json!({"type": "web_search_begin", "call_id": "private-call"}),
+                "web_search",
+            ),
+            (
+                json!({
+                    "type": "image_generation_end", "call_id": "private-call",
+                    "status": "failed", "revised_prompt": "private prompt",
+                    "result": "private output", "saved_path": "/tmp/private.png"
+                }),
+                "image_generation",
+            ),
+            (
+                json!({
+                    "type": "view_image_tool_call", "call_id": "private-call",
+                    "path": "file:///tmp/private.png"
+                }),
+                "view_image",
+            ),
+            (
+                json!({
+                    "type": "dynamic_tool_call_request", "callId": "private-call",
+                    "turnId": "private-turn", "tool": "private-tool",
+                    "arguments": {"private": "argument"}
+                }),
+                "dynamic_tool_call",
+            ),
+            (
+                json!({
+                    "type": "dynamic_tool_call_response", "call_id": "private-call",
+                    "turn_id": "private-turn", "tool": "private-tool",
+                    "arguments": {"private": "argument"}, "content_items": [],
+                    "success": false, "error": "private failure",
+                    "duration": {"secs": 0, "nanos": 0}
+                }),
+                "dynamic_tool_call",
+            ),
+            (
+                json!({
+                    "type": "plan_update", "explanation": "private plan",
+                    "plan": [{"step": "private step", "status": "in_progress"}]
+                }),
+                "plan",
+            ),
+            (
+                json!({
+                    "type": "terminal_interaction", "call_id": "private-call",
+                    "process_id": "private-process", "stdin": "private input"
+                }),
+                "terminal_interaction",
+            ),
+            (
+                json!({
+                    "type": "request_user_input", "call_id": "private-call",
+                    "questions": []
+                }),
+                "user_input",
+            ),
+        ];
+        let mut adapter = CodexEventStreamAdapter::default();
+        for (value, kind) in cases {
+            let event = Event {
+                id: "private-event".into(),
+                msg: serde_json::from_value(value).expect("valid tool lifecycle fixture"),
+            };
+            assert_eq!(
+                adapter.collect(&event),
+                vec![json!({"type": "tool.activity", "kind": kind})],
+                "tool activity must not contain identifiers, arguments, paths or output"
+            );
+        }
+    }
+
+    #[test]
+    fn codex_event_stream_records_raw_tool_items_without_contents() {
+        let cases = [
+            (
+                json!({"type": "function_call", "name": "private-tool", "arguments": "private", "call_id": "private-call"}),
+                "function_call",
+            ),
+            (
+                json!({"type": "function_call_output", "call_id": "private-call", "output": "private output"}),
+                "function_call",
+            ),
+            (
+                json!({"type": "custom_tool_call", "name": "private-tool", "input": "private", "call_id": "private-call"}),
+                "custom_tool_call",
+            ),
+            (
+                json!({"type": "custom_tool_call_output", "call_id": "private-call", "output": "private output"}),
+                "custom_tool_call",
+            ),
+            (
+                json!({"type": "tool_search_call", "execution": "client", "arguments": {"private": true}}),
+                "tool_search",
+            ),
+            (
+                json!({"type": "tool_search_output", "status": "completed", "execution": "client", "tools": [{"private": true}]}),
+                "tool_search",
+            ),
+            (
+                json!({"type": "web_search_call", "status": "completed"}),
+                "web_search",
+            ),
+            (
+                json!({"type": "image_generation_call", "status": "failed", "result": "private output", "revised_prompt": "private prompt"}),
+                "image_generation",
+            ),
+            (
+                json!({"type": "agent_message", "author": "private-author", "recipient": "private-recipient", "content": []}),
+                "collaboration",
+            ),
+        ];
+        let mut adapter = CodexEventStreamAdapter::default();
+        for (value, kind) in cases {
+            let event = Event {
+                id: "private-event".into(),
+                msg: EventMsg::RawResponseItem(RawResponseItemEvent {
+                    item: serde_json::from_value(value).expect("valid raw tool fixture"),
+                }),
+            };
+            assert_eq!(
+                adapter.collect(&event),
+                vec![json!({"type": "tool.activity", "kind": kind})]
+            );
+        }
+        for value in [
+            json!({"type": "reasoning", "summary": [], "encrypted_content": "private"}),
+            json!({"type": "compaction", "encrypted_content": "private"}),
+            json!({"type": "additional_tools", "role": "developer", "tools": []}),
+        ] {
+            let event = Event {
+                id: "private-event".into(),
+                msg: EventMsg::RawResponseItem(RawResponseItemEvent {
+                    item: serde_json::from_value(value).expect("valid non-tool fixture"),
+                }),
+            };
+            assert!(adapter.collect(&event).is_empty());
+        }
+    }
+
+    #[test]
+    fn codex_event_stream_records_started_and_completed_tool_turn_items() {
+        let mut adapter = CodexEventStreamAdapter::default();
+        for (item, kind) in [
+            (
+                json!({"type": "Plan", "id": "private-item", "text": "private plan"}),
+                "plan",
+            ),
+            (
+                json!({"type": "Extension", "kind": "clock.sleep", "id": "private-item", "durationMs": 1}),
+                "extension",
+            ),
+            (
+                json!({"type": "DynamicToolCall", "id": "private-item", "tool": "private-tool", "arguments": {"private": true}, "status": "failed", "error": "private error"}),
+                "dynamic_tool_call",
+            ),
+        ] {
+            for event_type in ["item_started", "item_completed"] {
+                let msg = serde_json::from_value(json!({
+                    "type": event_type, "thread_id": ThreadId::new(),
+                    "turn_id": "private-turn", "item": item, "started_at_ms": 0
+                }))
+                .expect("valid tool item lifecycle fixture");
+                assert_eq!(
+                    adapter.collect(&Event {
+                        id: "private-event".into(),
+                        msg
+                    }),
+                    vec![json!({"type": "tool.activity", "kind": kind})]
+                );
+            }
+        }
+        let msg = serde_json::from_value(json!({
+            "type": "item_completed", "thread_id": ThreadId::new(),
+            "turn_id": "private-turn",
+            "item": {"type": "Reasoning", "id": "private-item", "summary_text": ["private reasoning"]}
+        }))
+        .expect("valid reasoning fixture");
+        assert!(
+            adapter
+                .collect(&Event {
+                    id: "private-event".into(),
+                    msg
+                })
+                .is_empty()
+        );
     }
 
     #[test]

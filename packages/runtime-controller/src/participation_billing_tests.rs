@@ -1,5 +1,139 @@
 use super::*;
 
+#[tokio::test]
+async fn ambient_runtime_failure_stays_out_of_chat_while_direct_and_automation_remain_actionable(
+) -> anyhow::Result<()> {
+    let pool = require_origin_test_pool("ambient runtime failure visibility").await?;
+    let owner_user_id = Uuid::new_v4();
+    let other_user_id = Uuid::new_v4();
+    let org_id = Uuid::new_v4();
+    let project_id = Uuid::new_v4();
+    ensure_test_user(&pool, &owner_user_id).await?;
+    ensure_test_user(&pool, &other_user_id).await?;
+    let result = with_shared_db_fixture(
+        SharedDbFixture {
+            organizations: vec![org_id],
+            projects: vec![project_id],
+        },
+        async {
+            seed_group_participation_project(
+                &pool,
+                &org_id,
+                &project_id,
+                &owner_user_id,
+                &other_user_id,
+                "ambient-runtime-failure",
+            )
+            .await?;
+            pool.get().await?.execute(
+                "insert into org_credit_ledger (org_id, project_id, delta, reason, metadata)
+                 values ($1, $2, 20, 'test_seed', '{}'::jsonb)",
+                &[&org_id, &project_id],
+            ).await?;
+            // The configured provider deliberately has no endpoint. Dispatch
+            // must preserve this real, terminal startup failure diagnostically
+            // without requiring a provider process or model call.
+            let config = build_app_config(
+                test_origin_private_key(),
+                test_origin_public_key(),
+                "ambient-runtime-failure",
+            );
+            assert!(config.runtime_providers.iter().all(|provider| provider.endpoint.is_none()));
+            let state = build_test_state(pool.clone(), config);
+
+            for mode in ["ambient", "direct", "automation"] {
+                let conversation_id = Uuid::new_v4();
+                let mut request = ambient_group_dispatch_request(&project_id, &conversation_id)?;
+                if mode == "direct" {
+                    // Direct and automation dispatch require usable AI access
+                    // before queuing. Use the established inert BYOC fixture;
+                    // the preceding ambient case stays managed and deferred.
+                    // No runtime or provider is started to consume this key.
+                    pool.get().await?.execute(
+                        "insert into user_credentials (
+                             id, user_id, kind, label, nonce_b64, ciphertext_b64, metadata, is_default
+                         ) values ($1, $2, 'openai_api_key', 'Runtime notice regression',
+                             'test-nonce', 'test-ciphertext', '{}'::jsonb, true)",
+                        &[&Uuid::new_v4(), &owner_user_id],
+                    ).await?;
+                    request.prompt_text = "@octo, report the workspace status.".to_string();
+                    request.metadata["agentSelection"]["mentions"] = json!(["octo"]);
+                } else if mode == "automation" {
+                    let connection = pool.get().await?;
+                    connection.execute(
+                        "insert into conversations (id, project_id, created_by, metadata, visibility, thread_kind)
+                         values ($1, $2, $3, '{}'::jsonb, 'private', 'automation')",
+                        &[&conversation_id, &project_id, &owner_user_id],
+                    ).await?;
+                    connection.execute(
+                        "insert into conversation_participants (conversation_id, user_id, role, added_by)
+                         values ($1, $2, 'owner', $2)",
+                        &[&conversation_id, &owner_user_id],
+                    ).await?;
+                    request.thread_kind = Some("automation".to_string());
+                    request.conversation_metadata = Some(json!({"visibility":"private"}));
+                    request.allow_silent_automation_decline = true;
+                }
+                let mut events = state.events.subscribe();
+                let response = dispatch::process_dispatch_prompt(
+                    &state,
+                    &RequestContext {
+                        user_id: Some(owner_user_id),
+                        is_service_role: false,
+                        scoped_claims: None,
+                    },
+                    request,
+                )
+                .await
+                .map_err(|error| controller_error(&format!("dispatch unavailable runtime ({mode})"), error))?;
+                let run_id = response.run_id.expect("queued run");
+                let connection = pool.get().await?;
+                let metadata = connection.query_one(
+                    "select metadata from runs where id = $1", &[&run_id],
+                ).await?.get::<_, PgJson<serde_json::Value>>("metadata").0;
+                assert_eq!(
+                    crate::group_participation::metadata_marks_skill_mode_ambient_evaluation(&metadata),
+                    mode == "ambient",
+                );
+                assert_eq!(metadata["aiAccessMode"], if mode == "ambient" { "managed" } else { "byoc" }, "{mode}");
+                assert_eq!(metadata["runtimeAlert"]["reconnect"]["status"], "failed", "{mode}: {metadata}");
+                assert!(metadata["runtimeAlert"]["message"].as_str().unwrap().contains("Open Machines"));
+                let assistant_rows = connection.query(
+                    "select content, metadata from conversation_messages
+                     where conversation_id = $1 and role = 'assistant'", &[&conversation_id],
+                ).await?;
+                assert_eq!(assistant_rows.len(), usize::from(mode != "ambient"), "{mode}");
+                if let Some(row) = assistant_rows.first() {
+                    assert!(row.get::<_, String>("content").contains("Open Machines"));
+                    assert_eq!(row.get::<_, PgJson<serde_json::Value>>("metadata").0["kind"], "runtime_alert");
+                }
+                let mut runtime_event_seen = false;
+                let mut assistant_events = 0;
+                while let Ok(event) = events.try_recv() {
+                    if event.run_id != Some(run_id) {
+                        continue;
+                    }
+                    runtime_event_seen |= event.kind == "runtime.unavailable";
+                    if event.kind == "conversation.message_created" && event.data["role"] == "assistant" {
+                        assistant_events += 1;
+                        assert_eq!(event.data["metadata"]["kind"], "runtime_alert");
+                    }
+                }
+                assert!(runtime_event_seen, "{mode}: operational runtime event must survive");
+                assert_eq!(assistant_events, usize::from(mode != "ambient"), "{mode}");
+            }
+            Ok(())
+        },
+    )
+    .await;
+    let owner_cleanup = cleanup_test_user(&pool, &owner_user_id).await;
+    let other_cleanup = cleanup_test_user(&pool, &other_user_id).await;
+    result?;
+    owner_cleanup?;
+    other_cleanup?;
+    Ok(())
+}
+
 async fn assert_ambient_telemetry_billing(
     variant: &str,
     streamed_messages: &[&str],

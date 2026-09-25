@@ -37,27 +37,22 @@ function extractProxyDiagnosticText(content: string): string | null {
     return null;
   }
 
-  if (/unexpected status\s+\d{3}/i.test(trimmed)) {
-    return trimmed;
-  }
-
   const jsonStart = trimmed.indexOf("{");
-  if (jsonStart < 0) {
-    return null;
+  if (jsonStart >= 0) {
+    try {
+      const parsed = JSON.parse(trimmed.slice(jsonStart)) as unknown;
+      const root = asRecord(parsed);
+      const error = asRecord(root?.error);
+      const message = typeof error?.message === "string" ? error.message.trim() : "";
+      if (/unexpected status\s+\d{3}/i.test(message)) {
+        return message;
+      }
+    } catch {
+      // A plain diagnostic can contain a JSON body followed by a request URL.
+    }
   }
 
-  try {
-    const parsed = JSON.parse(trimmed.slice(jsonStart)) as unknown;
-    const root = asRecord(parsed);
-    const error = asRecord(root?.error);
-    const message = typeof error?.message === "string" ? error.message.trim() : "";
-    if (!message || !/unexpected status\s+\d{3}/i.test(message)) {
-      return null;
-    }
-    return message;
-  } catch {
-    return null;
-  }
+  return /unexpected status\s+\d{3}/i.test(trimmed) ? trimmed : null;
 }
 
 function extractFirstJsonObject(text: string): string | null {
@@ -181,6 +176,15 @@ function formatDurationSeconds(seconds: number): string {
 
 function isExpiredCredentialProxyErrorInfo(info: ProxyUpstreamErrorInfo): boolean {
   const upstreamCode = info.upstreamCode?.trim().toLowerCase() ?? "";
+  // Safe proxy envelopes replace raw provider token details. Match their typed
+  // contract, not a generic 401/424 or a provider's similarly named error.
+  if (
+    info.upstreamType === "upstream_error" &&
+    ((info.proxyStatus === 401 && upstreamCode === "upstream_authentication_error") ||
+      (info.proxyStatus === 424 && upstreamCode === "upstream_credential_refresh_failed"))
+  ) {
+    return true;
+  }
   if (
     upstreamCode === "token_expired" ||
     upstreamCode === "refresh_token_reused" ||

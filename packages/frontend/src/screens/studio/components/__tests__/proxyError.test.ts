@@ -52,7 +52,58 @@ const CONTROLLER_CREDENTIAL_REFRESH_TOKEN_REUSED_ERROR = `unexpected status 401 
 
 const CONTROLLER_CREDENTIAL_SESSION_ENDED_ERROR = `unexpected status 502 Bad Gateway: upstream request failed (credential_source=claim, requested_model=gpt-5.4): controller forced credential refresh failed: controller credential fetch failed: controller credentials returned 500 Internal Server Error: {"message":"Codex OAuth refresh failed: Your session has ended. Please log in again."}, url: http://proxy:8789/v1/responses`;
 
+function safeProxyError(status: number, code: string, message: string, type = "upstream_error") {
+  return `unexpected status ${status}: ${JSON.stringify({ error: { type, code, message } })}, url: http://proxy:8789/v1/responses`;
+}
+
 describe("proxyError", () => {
+  it.each([
+    [401, "upstream_authentication_error", "The upstream provider rejected authentication."],
+    [424, "upstream_credential_refresh_failed", "Upstream credentials could not be refreshed."],
+  ] as const)("retains reconnect guidance for safe credential error %s", (status, code, message) => {
+    const diagnostic = safeProxyError(status, code, message);
+    for (const content of [diagnostic, JSON.stringify({ error: { message: diagnostic } })]) {
+      expect(parseProxyUpstreamError(content)?.upstreamCode).toBe(code);
+      expect(isExpiredCredentialProxyError(content)).toBe(true);
+      const guidance = resolveProxyUpstreamErrorGuidance(content);
+      expect(guidance?.summary).toBe(
+        "AI credentials need reconnecting. Reconnect AI credentials, then retry the message.",
+      );
+      expect(guidance?.actionKind).toBe("open_ai_settings");
+      expect(guidance?.actionLabel).toBe("Open AI settings");
+      expect(guidance?.summary).not.toContain("ChatGPT");
+    }
+  });
+
+  it.each([
+    [424, "upstream_configuration_error"],
+    [402, "upstream_insufficient_quota"],
+    [403, "upstream_access_denied"],
+    [429, "upstream_rate_limit"],
+    [502, "upstream_transport_error"],
+    [503, "upstream_http_error"],
+    [504, "upstream_timeout"],
+    [502, "upstream_authentication_error"],
+    [502, "upstream_credential_refresh_failed"],
+  ] as const)("does not reconnect for %s %s", (status, code) => {
+    const diagnostic = safeProxyError(status, code, "Safe failure message.");
+    expect(isExpiredCredentialProxyError(diagnostic)).toBe(false);
+    expect(resolveProxyUpstreamErrorGuidance(diagnostic)?.actionLabel).not.toBe("Open AI settings");
+  });
+
+  it("requires the proxy envelope type for safe credential codes", () => {
+    const diagnostic = safeProxyError(401, "upstream_authentication_error", "Request failed.", "other_error");
+    expect(isExpiredCredentialProxyError(diagnostic)).toBe(false);
+    expect(isExpiredCredentialProxyError("upstream_credential_refresh_failed")).toBe(false);
+  });
+
+  it("keeps safe quota failures separate from reconnectable credentials", () => {
+    const diagnostic = safeProxyError(402, "upstream_insufficient_quota", "The upstream provider has no available quota.");
+    const guidance = resolveProxyUpstreamErrorGuidance(diagnostic);
+    expect(guidance?.detail).toContain("separate from Instafy workspace credits");
+    expect(guidance?.actionLabel).toBe("Manage AI");
+  });
+
   it("detects expired credential proxy responses", () => {
     expect(isExpiredCredentialProxyError(TOKEN_EXPIRED_ERROR)).toBe(true);
     expect(formatProxyUpstreamErrorSummary(TOKEN_EXPIRED_ERROR)).toContain(
