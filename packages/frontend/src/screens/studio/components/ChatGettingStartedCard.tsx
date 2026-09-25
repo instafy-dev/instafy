@@ -101,9 +101,6 @@ interface ChatGettingStartedCardProps {
   onImportGithub: () => void;
 }
 
-function formatCreditsEach(amount: number): string {
-  return amount === 1 ? "1 credit each" : `${amount} credits each`;
-}
 
 // The collapsed row's buttons: text-only ghost pills at caption size, 44 px on
 // coarse pointers through the Button size.
@@ -212,7 +209,7 @@ export function ChatGettingStartedCard({
           managedAiOffer && managedAiOffer.dailyPromptLimit > 0
             ? `${managedAiOffer.dailyPromptLimit} prompts a day`
             : "no daily cap"
-        }, ${formatCreditsEach(managedAiOffer?.creditBurnAmount ?? 1)}`
+        }, credits charged by usage`
       : selectedAi === "connected"
         ? connectedAiLabel
           ? `Using ${connectedAiLabel}`

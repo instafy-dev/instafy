@@ -18,7 +18,7 @@ import { useRouteOwnedWorkspaceDrawer } from "./useRouteOwnedWorkspaceDrawer";
 import { ChatLines, Clock, Coins, Cpu, Cube, GitBranch, Globe, Group, Lock, Page, Puzzle, Search, SidebarExpand, User, Xmark } from "iconoir-react";
 import { ResizablePanels } from "../components/ResizablePanels";
 import { fetchCreditPolicy } from "../credits/creditService";
-import { clearIdlePaused, markIdlePaused } from "../runtime/idlePauseRegistry";
+import { clearIdlePaused, clearRestoredAwaitingIntent, markIdlePaused } from "../runtime/idlePauseRegistry";
 import { useGatedInterval } from "../runtime/pollingGate";
 import { setRuntimeSizePreference } from "../runtime/runtimeSizePreference";
 import { isHostedRuntime, runtimeEntryIsReady } from "../runtime/utils/runtimeEntry";
@@ -1040,6 +1040,23 @@ function StudioLayoutInner() {
       );
     };
   }, [activeProjectId, openPanelTab, showStatus]);
+
+  // Intent in a space startup reopened from memory: focus reaching its
+  // composer. Clicks in the navigation (choosing another space, the team
+  // menu) do not count, or leaving would start the machine being left.
+  useEffect(() => {
+    if (typeof window === "undefined" || !activeProjectId) {
+      return;
+    }
+    const onFocus = (event: FocusEvent) => {
+      const target = event.target;
+      if (target instanceof Element && target.closest("#studio-chat-input")) {
+        clearRestoredAwaitingIntent(activeProjectId);
+      }
+    };
+    window.addEventListener("focusin", onFocus);
+    return () => window.removeEventListener("focusin", onFocus);
+  }, [activeProjectId]);
 
   // A genuine interaction wakes an idle-paused machine: clearing the pause
   // lets the normal auto-ensure path relaunch it.
