@@ -307,10 +307,11 @@ mod tests {
     #[tokio::test]
     async fn malformed_request_configuration_is_terminal() {
         let error = reqwest::Client::new()
-            .post("http://[invalid")
+            .post("https://[invalid")
             .send()
             .await
             .unwrap_err();
+        assert!(error.is_builder());
         let classified = classify(&error.into());
         assert_eq!(classified.status, StatusCode::FAILED_DEPENDENCY);
         assert!(!classified.retryable);
