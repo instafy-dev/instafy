@@ -419,7 +419,9 @@ export function InlineSecretsForm({
                   aria-label={draft.visible ? "Hide value" : "Show value"}
                   onPress={() => toggleDraftVisible(secret.name)}
                   isDisabled={!projectId || saving}
-                  className="absolute right-2 top-1/2 -translate-y-1/2"
+                  // Centred with auto margins, not a translate: the Button presses
+                  // in with a translate that would replace -50% and drop the eye.
+                  className="absolute inset-y-0 right-2 my-auto"
                 >
                   {draft.visible ? (
                     <EyeClosed className="h-4 w-4" aria-hidden="true" />

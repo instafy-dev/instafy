@@ -795,7 +795,9 @@ export function LoginPage() {
                   aria-label={passwordVisible ? "Hide password" : "Show password"}
                   size="sm"
                   radius="full"
-                  className="absolute right-2 top-1/2 -translate-y-1/2"
+                  // Centred with auto margins, not a translate: the Button presses
+                  // in with a translate that would replace -50% and drop the eye.
+                  className="absolute inset-y-0 right-2 my-auto"
                 >
                   {passwordVisible ? (
                     <EyeClosed className="h-4 w-4" aria-hidden="true" />
@@ -949,7 +951,9 @@ export function LoginPage() {
                   aria-label={passwordVisible ? "Hide password" : "Show password"}
                   size="sm"
                   radius="full"
-                  className="absolute right-2 top-1/2 -translate-y-1/2"
+                  // Centred with auto margins, not a translate: the Button presses
+                  // in with a translate that would replace -50% and drop the eye.
+                  className="absolute inset-y-0 right-2 my-auto"
                 >
                   {passwordVisible ? (
                     <EyeClosed className="h-4 w-4" aria-hidden="true" />
