@@ -19,6 +19,15 @@ export const MANUAL_STOP_CHANGED_EVENT = "instafy:manual-stop-changed";
 
 const paused = new Set<string>();
 const manualStops = new Set<string>();
+/**
+ * Spaces that startup reopened from memory rather than the person choosing
+ * them. On a plan with one hosted machine, starting that machine at sign-in
+ * took the only slot before the person had done anything there, and the
+ * space they actually went on to use then waited behind it. The hold lifts on
+ * the first intent in that space (the composer, a send, an explicit Start),
+ * and nothing else about auto-start changes.
+ */
+const restoredAwaitingIntent = new Set<string>();
 
 function dispatchProjectEvent(eventName: string, projectId: string) {
   if (typeof window !== "undefined") {
@@ -62,7 +71,26 @@ export function isManualStopHeld(projectId: string | null | undefined): boolean 
   return Boolean(projectId && manualStops.has(projectId));
 }
 
+export function markRestoredAwaitingIntent(projectId: string | null | undefined) {
+  if (projectId) {
+    restoredAwaitingIntent.add(projectId);
+  }
+}
+
+export function clearRestoredAwaitingIntent(projectId: string | null | undefined) {
+  if (!projectId || !restoredAwaitingIntent.delete(projectId)) {
+    return;
+  }
+  // Same re-evaluation signal as an idle pause lifting: the auto-start
+  // effects listen for it and run again.
+  dispatchProjectEvent(IDLE_PAUSE_CLEARED_EVENT, projectId);
+}
+
+export function isRestoredAwaitingIntent(projectId: string | null | undefined): boolean {
+  return Boolean(projectId && restoredAwaitingIntent.has(projectId));
+}
+
 /** True when any deliberate hold says the machine must not be relaunched. */
 export function isAutoEnsureHeld(projectId: string | null | undefined): boolean {
-  return isIdlePaused(projectId) || isManualStopHeld(projectId);
+  return isIdlePaused(projectId) || isManualStopHeld(projectId) || isRestoredAwaitingIntent(projectId);
 }

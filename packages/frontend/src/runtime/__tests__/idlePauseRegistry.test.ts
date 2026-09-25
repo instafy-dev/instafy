@@ -82,3 +82,37 @@ describe("idlePauseRegistry manual stop hold", () => {
     }
   });
 });
+
+describe("idlePauseRegistry restored-space hold", () => {
+  afterEach(async () => {
+    const { clearRestoredAwaitingIntent } = await import("../idlePauseRegistry");
+    clearRestoredAwaitingIntent("project-a");
+    clearIdlePaused("project-a");
+  });
+
+  it("holds a space startup reopened until intent lifts it, and signals the lift", async () => {
+    const { clearRestoredAwaitingIntent, isRestoredAwaitingIntent, markRestoredAwaitingIntent } =
+      await import("../idlePauseRegistry");
+    const lifted = vi.fn();
+    window.addEventListener(IDLE_PAUSE_CLEARED_EVENT, lifted);
+
+    markRestoredAwaitingIntent("project-a");
+    expect(isRestoredAwaitingIntent("project-a")).toBe(true);
+    expect(isAutoEnsureHeld("project-a")).toBe(true);
+    expect(isRestoredAwaitingIntent("project-b")).toBe(false);
+
+    // A pointer wake clears idle pauses only; choosing another space from the
+    // navigation must not start the machine being left.
+    clearIdlePaused("project-a");
+    expect(isRestoredAwaitingIntent("project-a")).toBe(true);
+
+    clearRestoredAwaitingIntent("project-a");
+    expect(isRestoredAwaitingIntent("project-a")).toBe(false);
+    expect(isAutoEnsureHeld("project-a")).toBe(false);
+    expect(lifted).toHaveBeenCalledTimes(1);
+
+    clearRestoredAwaitingIntent("project-a");
+    expect(lifted).toHaveBeenCalledTimes(1);
+    window.removeEventListener(IDLE_PAUSE_CLEARED_EVENT, lifted);
+  });
+});
