@@ -70,6 +70,16 @@ updated when the human running the workflow explicitly requests it.
 
 Proxy routing (burn/refund) still relies on the shared runtime proxy. Set the proxy variables documented in `docs/Architecture.md` to steer Codex traffic through it.
 
+Ordinary proxy-backed turns use one retry owner: Codex may recover a failed sampling step
+once in the same session (at most two requests to the proxy for that step). Nested HTTP retries and
+whole-run restarts are disabled, preserving completed tool receipts. Terminal upstream
+4xx errors stop immediately, except transient 408/429 responses. A routing preflight execution
+failure fails the job instead of starting another main-agent request; a successful but
+unrecognized routing decision still falls back to the direct route. `CODEX_MAX_RUN_RETRIES`
+and the runtime's legacy `CODEX_MAX_STREAM_RETRIES` observer do not expand this proxy budget.
+The bound applies per failed sampling step, not to the total requests in a successful tool
+conversation. Browser execution retains its existing retry and shutdown policy.
+
 See `TODO.md` for upcoming work: streaming progress, implementing plan/approval, and tying into credit accounting.
 
 ## Routing evidence

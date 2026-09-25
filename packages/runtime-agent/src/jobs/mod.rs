@@ -2628,6 +2628,235 @@ fn record_prompt_section_metric(
     );
 }
 
+/// Worker lanes and lead checkpoints have already been assigned work. Even if
+/// parent metadata is retained, they do not own the ambient participation choice.
+fn main_owns_ambient_participation(job: &LeaseJob) -> bool {
+    if is_multi_agent_worker_job(job) || is_multi_agent_lead_continuation_job(job) {
+        return false;
+    }
+    let marker = &job.payload["metadata"]["groupParticipation"];
+    marker["decision"].as_str() == Some("agent_evaluation")
+        && marker["reason"].as_str() == Some("skill_mode_ambient")
+        && marker["enforcedBy"].as_str() == Some("runtime-controller")
+}
+
+fn initial_main_requires_tool_call(
+    job: &LeaseJob,
+    evidence_requires_tool: bool,
+    explicit_tool_execution: bool,
+) -> bool {
+    evidence_requires_tool && (explicit_tool_execution || !main_owns_ambient_participation(job))
+}
+
+fn should_run_routing_pre_observation_before_main(
+    job: &LeaseJob,
+    command_execution_required: bool,
+    explicit_personal_browser_execution: bool,
+    explicit_shared_browser_execution: bool,
+) -> bool {
+    !explicit_personal_browser_execution
+        && command_execution_required
+        && (explicit_shared_browser_execution || !main_owns_ambient_participation(job))
+}
+
+// Match runtime-controller's first-only sentinel grammar. Natural-language
+// refusals, lowercase tokens and tokens embedded in prose remain visible speech.
+fn participation_decline_sentinel(content: &str) -> bool {
+    let trimmed = content.trim();
+    if trimmed == "NO_RESPONSE" {
+        return true;
+    }
+    if let Some(rest) = trimmed.strip_prefix("```") {
+        let rest = rest.strip_suffix("```").unwrap_or(rest).trim();
+        if rest == "NO_RESPONSE" {
+            return true;
+        }
+        if let Some((language, remainder)) = rest.split_once('\n') {
+            return !language.trim().is_empty()
+                && language
+                    .trim()
+                    .chars()
+                    .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_'))
+                && remainder.trim() == "NO_RESPONSE";
+        }
+        return false;
+    }
+    trimmed.trim_matches('`').trim() == "NO_RESPONSE"
+}
+
+fn clean_decline_final_json(value: &JsonValue) -> bool {
+    let Some(object) = value.as_object() else {
+        return false;
+    };
+    object.keys().all(|key| {
+        matches!(
+            key.as_str(),
+            "summary" | "files" | "actions" | "suggestions" | "code"
+        )
+    }) && object
+        .get("summary")
+        .and_then(JsonValue::as_str)
+        .is_some_and(participation_decline_sentinel)
+        && ["files", "actions", "suggestions"].iter().all(|key| {
+            object
+                .get(*key)
+                .is_none_or(|value| value.is_null() || value.as_array().is_some_and(Vec::is_empty))
+        })
+        && object.get("code").is_none_or(|value| {
+            value.is_null() || value.as_str().is_some_and(|text| text.trim().is_empty())
+        })
+}
+
+fn clean_decline_message_text(text: &str) -> bool {
+    participation_decline_sentinel(text)
+        || serde_json::from_str::<JsonValue>(text)
+            .ok()
+            .as_ref()
+            .is_some_and(clean_decline_final_json)
+}
+
+/// A narrow exemption from missing-work recovery, evaluated before parsers can
+/// drop malformed proposed actions/files. A later sentinel never erases prior
+/// speech or work, including unsuccessful tools and host pre-observation.
+fn clean_ambient_participation_decline(
+    job: &LeaseJob,
+    final_json: &JsonValue,
+    events: &[JsonValue],
+    messages: &[JobMessage],
+    prior_host_work: bool,
+    explicit_tool_execution: bool,
+) -> bool {
+    if explicit_tool_execution
+        || !main_owns_ambient_participation(job)
+        || prior_host_work
+        || !clean_decline_final_json(final_json)
+    {
+        return false;
+    }
+    let completed_decline_ids: HashSet<&str> = events
+        .iter()
+        .filter_map(|event| {
+            (event["type"] == "item.completed"
+                && event["item"]["type"] == "agent_message"
+                && event["item"]["text"]
+                    .as_str()
+                    .is_some_and(clean_decline_message_text))
+            .then(|| event["item"]["id"].as_str())
+            .flatten()
+        })
+        .collect();
+    let clean_events = events.iter().all(|event| match event["type"].as_str() {
+        Some("turn.completed") => true,
+        Some("item.started" | "item.updated" | "item.completed") => {
+            match event["item"]["type"].as_str() {
+                Some("reasoning") => true,
+                Some("agent_message") if event["type"] == "item.completed" => event["item"]["text"]
+                    .as_str()
+                    .is_some_and(clean_decline_message_text),
+                Some("agent_message") => event["item"]["id"]
+                    .as_str()
+                    .is_some_and(|id| completed_decline_ids.contains(id)),
+                // This also rejects content-free activity receipts for tools that
+                // do not produce ordinary command/MCP/file-change message rows.
+                _ => false,
+            }
+        }
+        _ => false,
+    });
+    let clean_messages = messages
+        .iter()
+        .all(|message| match message.message_type.as_deref() {
+            Some("reasoning" | "token_usage") => true,
+            Some("status") => {
+                message
+                    .metadata
+                    .as_ref()
+                    .and_then(|metadata| {
+                        metadata
+                            .pointer("/details/kind")
+                            .or_else(|| metadata.get("kind"))
+                    })
+                    .and_then(JsonValue::as_str)
+                    == Some("agent_message")
+                    && participation_decline_sentinel(&message.content)
+            }
+            _ => false,
+        });
+    clean_events && clean_messages
+}
+
+/// Participation is required turn context, not optional workspace memory. Keep
+/// it in compact/routed prompts and recovery turns without loading unrelated
+/// project memory or relying on a restored thread to hold the current policy.
+fn ensure_ambient_participation_context(
+    job: &LeaseJob,
+    prompt: &mut String,
+    section_metrics: &mut JsonMap<String, JsonValue>,
+) {
+    if !main_owns_ambient_participation(job) {
+        return;
+    }
+    let policy = learn::group_participation_policy().trim();
+    if !prompt.contains(policy) {
+        append_prompt_section(
+            prompt,
+            section_metrics,
+            "groupParticipationPolicy",
+            &format!(
+                "\nPinned ambient participation policy (already loaded):\n```markdown\n{policy}\n```\n"
+            ),
+        );
+    }
+
+    let history = job.payload.get("conversation_history");
+    let context = conversation_context::build_routing_conversation_context(history);
+    if context.metrics["totalTurns"].as_u64().unwrap_or(0) > 0 {
+        // Compare rendered sections, not raw content substrings: a short prior
+        // turn such as NO_RESPONSE can also occur in the policy/latest request.
+        let ordinary = build_prompt_conversation_context(history, None);
+        let ordinary_section = format!("\n{}:\n{}", ordinary.section_label, ordinary.section_text);
+        let section = format!(
+            "\nConversation evidence for the ambient participation decision:\n{}\n",
+            context.section_text
+        );
+        // Old turns may be intentionally omitted by the normal history budget.
+        // Do not append the same bounded view again at the execution boundary.
+        if !prompt.contains(&ordinary_section) && !prompt.contains(&section) {
+            append_prompt_section(
+                prompt,
+                section_metrics,
+                "groupParticipationConversation",
+                &section,
+            );
+            section_metrics["groupParticipationConversation"]["history"] = context.metrics;
+        }
+    }
+}
+
+fn ensure_ambient_participation_prompt_context(
+    job: &LeaseJob,
+    prompt: &mut String,
+    prompt_context: &mut JsonValue,
+) {
+    let mut sections = JsonMap::new();
+    ensure_ambient_participation_context(job, prompt, &mut sections);
+    if sections.is_empty() {
+        return;
+    }
+    if !prompt_context.is_object() {
+        *prompt_context = json!({});
+    }
+    let existing = prompt_context
+        .as_object_mut()
+        .expect("prompt context object")
+        .entry("promptSections")
+        .or_insert_with(|| json!({}));
+    if let Some(existing) = existing.as_object_mut() {
+        existing.extend(sections);
+    }
+    enrich_prompt_context_metrics(prompt_context, prompt);
+}
+
 fn prompt_metric_bool(metrics: &JsonValue, key: &str) -> bool {
     metrics
         .as_object()
@@ -5116,12 +5345,11 @@ impl JobProcessor {
                     preflight
                 }
                 Err(error) => {
-                    warn!(
-                        job_id = %job.id,
-                        error = %error,
-                        "agent routing preflight failed; continuing direct"
-                    );
-                    None
+                    // A failed provider operation has already used its recovery budget.
+                    // Starting main here would silently buy another budget from the same
+                    // unavailable provider. Successful but unrecognized decisions above
+                    // still use the direct route.
+                    return Err(error.context("agent routing preflight failed"));
                 }
             }
         } else {
@@ -5223,18 +5451,27 @@ impl JobProcessor {
             active_turn_input,
         };
 
-        let routing_pre_observation =
-            if !explicit_personal_browser_execution && runtime_expectations.command_execution {
-                run_agent_routing_pre_observation(&workspace_dir, job).await
-            } else {
-                None
-            };
+        let routing_pre_observation = if should_run_routing_pre_observation_before_main(
+            job,
+            runtime_expectations.command_execution,
+            explicit_personal_browser_execution,
+            explicit_shared_browser_execution,
+        ) {
+            run_agent_routing_pre_observation(&workspace_dir, job).await
+        } else {
+            None
+        };
         let pre_observed_evidence =
             routing_evidence_progress(routing_pre_observation.as_ref(), &[]);
-        codex_run_options.require_first_tool_call = !evidence_requirements
-            .fulfilled(pre_observed_evidence)
-            || explicit_shared_browser_execution
-            || explicit_personal_browser_execution;
+        codex_run_options.require_first_tool_call = initial_main_requires_tool_call(
+            job,
+            !evidence_requirements.fulfilled(pre_observed_evidence)
+                || explicit_shared_browser_execution
+                || explicit_personal_browser_execution,
+            explicit_personal_browser_execution
+                || explicit_shared_browser_execution
+                || expects_generic_mcp_tool_execution,
+        );
 
         let (mut prompt, loaded_learned_blocks, mut prompt_context) =
             if expects_generic_mcp_tool_execution {
@@ -5256,6 +5493,8 @@ impl JobProcessor {
                     routing_pre_observation.as_ref(),
                 )?
             };
+
+        ensure_ambient_participation_prompt_context(job, &mut prompt, &mut prompt_context);
 
         if expects_generic_mcp_tool_execution
             && let Some(observation) = routing_pre_observation.as_ref()
@@ -5473,6 +5712,16 @@ impl JobProcessor {
 
         drop(codex_guard);
         let mut outcome = extract_codex_outcome(&output.final_json)?;
+        let clean_ambient_decline = clean_ambient_participation_decline(
+            job,
+            &output.final_json,
+            &output.events,
+            &interim_messages,
+            routing_pre_observation.is_some() || skills_kickoff.is_some(),
+            explicit_personal_browser_execution
+                || explicit_shared_browser_execution
+                || expects_generic_mcp_tool_execution,
+        );
         suppress_multi_agent_plan_actions_for_worker(job, &mut outcome);
         let mut codex_fallback_summary_kind =
             classify_internal_codex_fallback_summary(&outcome.summary);
@@ -5678,14 +5927,15 @@ impl JobProcessor {
             && outcome.files.is_empty()
             && !workspace_file_changes_satisfied_by_patch_apply;
 
-        let recovery_retry_required = reported_file_changes_missing
-            || workspace_file_changes_missing
-            || codex_fallback_summary_kind.is_some()
-            || transient_upstream_summary_failure
-            || command_execution_missing
-            || generic_mcp_tool_execution_missing
-            || personal_browser_execution_missing
-            || shared_browser_execution_missing;
+        let recovery_retry_required = !clean_ambient_decline
+            && (reported_file_changes_missing
+                || workspace_file_changes_missing
+                || codex_fallback_summary_kind.is_some()
+                || transient_upstream_summary_failure
+                || command_execution_missing
+                || generic_mcp_tool_execution_missing
+                || personal_browser_execution_missing
+                || shared_browser_execution_missing);
         if should_retry_codex_once(
             first_shared_browser_terminal_consent_failure,
             recovery_retry_required,
@@ -5762,7 +6012,7 @@ impl JobProcessor {
                     observed_command_execution,
                     output_provider_conversation_state.as_ref(),
                 );
-            let retry_prompt = if personal_browser_execution_missing {
+            let mut retry_prompt = if personal_browser_execution_missing {
                 format!(
                     "{prompt}\n\nIMPORTANT PERSONAL BROWSER RETRY REQUIREMENT:\n\
                     - Your previous response did not execute the dedicated Personal Browser tools.\n\
@@ -5885,6 +6135,11 @@ impl JobProcessor {
                 }
             }
             let mut retry_prompt_context = prompt_context.clone();
+            ensure_ambient_participation_prompt_context(
+                job,
+                &mut retry_prompt,
+                &mut retry_prompt_context,
+            );
             enrich_prompt_context_metrics(&mut retry_prompt_context, &retry_prompt);
             update_prompt_context_require_first_tool_call(
                 &mut retry_prompt_context,
@@ -6249,9 +6504,15 @@ impl JobProcessor {
                     job_id = %job_id,
                     "running final Codex JSON finalization pass after missing-final retry"
                 );
-                let finalization_prompt = codex_missing_final_json_finalization_prompt(
+                let mut finalization_prompt = codex_missing_final_json_finalization_prompt(
                     prompt_text,
                     &retry_outcome.summary,
+                );
+                let mut finalization_prompt_context = retry_prompt_context.clone();
+                ensure_ambient_participation_prompt_context(
+                    job,
+                    &mut finalization_prompt,
+                    &mut finalization_prompt_context,
                 );
                 let mut finalization_options = codex_run_options.clone();
                 finalization_options.require_first_tool_call = false;
@@ -7593,6 +7854,7 @@ Avoid creating dependency caches or stores in the canonical workspace root when 
             );
         }
 
+        ensure_ambient_participation_context(job, &mut prompt, &mut prompt_section_metrics);
         enrich_prompt_context_metrics(&mut conversation_context.metrics, &prompt);
         if let Some(metrics) = conversation_context.metrics.as_object_mut() {
             metrics.insert(
@@ -16507,6 +16769,494 @@ mod tests {
                 &browser_job,
                 "Open example.com and report the title."
             ));
+        }
+    }
+
+    fn ambient_participation_test_job() -> LeaseJob {
+        test_lease_job(
+            Some("feature"),
+            json!({
+                "conversation_history": [{
+                    "role":"user", "content":"Earlier supplied conversation fact.",
+                    "createdAt":"2026-01-01T12:00:00Z"
+                }],
+                "metadata": {"groupParticipation": {
+                    "decision":"agent_evaluation", "reason":"skill_mode_ambient",
+                    "enforcedBy":"runtime-controller"
+                }}
+            }),
+        )
+    }
+
+    #[test]
+    fn ambient_participation_policy_and_history_survive_compact_main_prompt_routes() {
+        let tmp = tempdir().expect("temp dir");
+        learn::ensure_project_memory_scaffold(tmp.path());
+        fs::write(
+            tmp.path().join("INSTAFY.md"),
+            "Unrelated workspace memory canary.",
+        )
+        .expect("write workspace memory");
+        let processor = test_job_processor(tmp.path());
+        let project_id = Uuid::new_v4();
+        let provider_state =
+            json!({"defaultThreadId":"restored-thread", "historyReplayRequired":false});
+        for mode in [
+            "normal",
+            "memory_omitted",
+            "write",
+            "cross_chat",
+            "planning",
+            "restored",
+        ] {
+            let job = ambient_participation_test_job();
+            let mut route = test_agent_routing_preflight(
+                match mode {
+                    "cross_chat" => AgentRoutingPreflightRoute::CrossChatLookup,
+                    "planning" => AgentRoutingPreflightRoute::MultiAgentCandidate,
+                    _ => AgentRoutingPreflightRoute::Direct,
+                },
+                mode == "cross_chat",
+                false,
+            );
+            route.requires_workspace_file_changes = mode == "write";
+            let job = job_with_agent_routing_preflight(&job, &route);
+            let original_payload = job.payload.clone();
+            let (prompt, _, metrics) = processor
+                .build_prompt_with_text(
+                    &project_id,
+                    &job,
+                    tmp.path(),
+                    "Latest contribution to evaluate.",
+                    mode != "memory_omitted",
+                    (mode == "restored").then_some(&provider_state),
+                    &[],
+                    None,
+                    None,
+                )
+                .expect("actual main prompt builder");
+            assert_eq!(
+                prompt
+                    .matches(learn::group_participation_policy().trim())
+                    .count(),
+                1,
+                "{mode}"
+            );
+            assert_eq!(
+                prompt
+                    .matches("Earlier supplied conversation fact.")
+                    .count(),
+                1,
+                "{mode}"
+            );
+            assert!(
+                prompt.contains("Latest contribution to evaluate."),
+                "{mode}"
+            );
+            assert_eq!(
+                job.payload, original_payload,
+                "prompt construction grants no permissions"
+            );
+            if mode == "normal" {
+                assert!(prompt.contains("Unrelated workspace memory canary."));
+                assert!(
+                    metrics["promptSections"]
+                        .get("groupParticipationPolicy")
+                        .is_none()
+                );
+            } else {
+                assert!(
+                    !prompt.contains("Unrelated workspace memory canary."),
+                    "{mode}"
+                );
+                assert!(
+                    metrics["promptSections"]["groupParticipationPolicy"]["chars"]
+                        .as_u64()
+                        .unwrap()
+                        > 0,
+                    "{mode}"
+                );
+            }
+            match mode {
+                "write" => assert!(prompt.contains("Direct workspace-change response contract")),
+                "cross_chat" => {
+                    assert!(prompt.contains("Cross-chat context recovery response contract"))
+                }
+                "planning" => assert!(prompt.contains("Multi-agent planning response contract")),
+                "restored" => assert_eq!(metrics["promptMode"], "stateful_compact"),
+                _ => {}
+            }
+        }
+    }
+
+    #[test]
+    fn ambient_participation_history_preserves_roles_when_content_overlaps_policy_or_latest_turn() {
+        let mut job = ambient_participation_test_job();
+        job.payload["conversation_history"] = json!([
+            {"role":"user", "content":"NO_RESPONSE"},
+            {"role":"assistant", "content":"Same latest text."}
+        ]);
+        let expected = conversation_context::build_routing_conversation_context(
+            job.payload.get("conversation_history"),
+        );
+        let mut prompt = format!(
+            "{}\nLatest request: Same latest text.",
+            learn::group_participation_policy()
+        );
+        let mut metrics = json!({});
+        ensure_ambient_participation_prompt_context(&job, &mut prompt, &mut metrics);
+        assert!(prompt.contains(&expected.section_text));
+        assert_eq!(
+            metrics["promptSections"]["groupParticipationConversation"]["history"]["includedTurns"],
+            2
+        );
+        let first = prompt.clone();
+        ensure_ambient_participation_prompt_context(&job, &mut prompt, &mut metrics);
+        assert_eq!(prompt, first);
+    }
+
+    fn clean_decline_test_events(final_json: &JsonValue) -> Vec<JsonValue> {
+        vec![
+            json!({"type":"item.completed", "item":{"id":"reason", "type":"reasoning", "text":"Considering participation."}}),
+            json!({"type":"item.updated", "item":{"id":"final", "type":"agent_message", "text":"{\"summary\":"}}),
+            json!({"type":"item.completed", "item":{"id":"final", "type":"agent_message", "text":final_json.to_string()}}),
+            json!({"type":"turn.completed", "usage":{"input_tokens":10,"output_tokens":2}}),
+        ]
+    }
+
+    #[test]
+    fn ambient_participation_defers_host_observation_without_changing_browser_or_direct_paths() {
+        let ambient = ambient_participation_test_job();
+        let direct = test_lease_job(Some("feature"), json!({}));
+        assert!(!should_run_routing_pre_observation_before_main(
+            &ambient, true, false, false
+        ));
+        assert!(should_run_routing_pre_observation_before_main(
+            &direct, true, false, false
+        ));
+        assert!(!should_run_routing_pre_observation_before_main(
+            &direct, false, false, false
+        ));
+        for job in [&ambient, &direct] {
+            assert!(should_run_routing_pre_observation_before_main(
+                job, true, false, true
+            ));
+            assert!(!should_run_routing_pre_observation_before_main(
+                job, true, true, false
+            ));
+        }
+    }
+
+    #[test]
+    fn ambient_participation_decline_cannot_bypass_explicit_tool_lanes() {
+        let job = ambient_participation_test_job();
+        let raw = json!({"summary":"NO_RESPONSE", "files":[], "actions":[]});
+        let events = clean_decline_test_events(&raw);
+        assert!(initial_main_requires_tool_call(&job, true, true));
+        assert!(!initial_main_requires_tool_call(&job, false, true));
+        assert!(!clean_ambient_participation_decline(
+            &job,
+            &raw,
+            &events,
+            &extract_codex_messages(&events),
+            false,
+            true,
+        ));
+    }
+
+    #[test]
+    fn ambient_participation_clean_decline_permits_initial_tool_free_choice_only() {
+        let original = ambient_participation_test_job();
+        let mut preflight =
+            test_agent_routing_preflight(AgentRoutingPreflightRoute::CrossChatLookup, true, true);
+        preflight.requires_workspace_file_changes = true;
+        let job = job_with_agent_routing_preflight(&original, &preflight);
+        let requirements =
+            routing_evidence_requirements(&job, runtime_job_expectations(&job.payload));
+        assert!(requirements.requires_any());
+        assert!(!initial_main_requires_tool_call(&job, true, false));
+        for sentinel in [
+            "NO_RESPONSE",
+            " `NO_RESPONSE` ",
+            "```text\nNO_RESPONSE\n```",
+        ] {
+            let raw =
+                json!({"summary":sentinel,"files":[],"actions":[],"suggestions":[],"code":""});
+            let events = clean_decline_test_events(&raw);
+            let messages = extract_codex_messages(&events);
+            assert!(clean_ambient_participation_decline(
+                &job, &raw, &events, &messages, false, false
+            ));
+        }
+        let answer = json!({"summary":"A substantive answer.","files":[],"actions":[]});
+        let events = clean_decline_test_events(&answer);
+        assert!(!clean_ambient_participation_decline(
+            &job,
+            &answer,
+            &events,
+            &extract_codex_messages(&events),
+            false,
+            false
+        ));
+        assert!(workspace_file_changes_still_required(
+            true,
+            &extract_codex_outcome(&answer).unwrap()
+        ));
+        assert!(!requirements.fulfilled(Default::default()));
+        let recovery = routing_recovery::plan(requirements, Default::default(), Default::default())
+            .expect("answer still needs evidence recovery");
+        assert!(
+            recovery
+                .options(&CodexRunOptions::default())
+                .require_first_tool_call
+        );
+    }
+
+    #[test]
+    fn ambient_participation_clean_decline_rejects_raw_proposals_even_if_parsers_drop_them() {
+        let job = ambient_participation_test_job();
+        for extra in [
+            json!({"files":[{"invalid":"file"}]}),
+            json!({"actions":[{"type":"unknown_action"}]}),
+            json!({"files":"malformed"}),
+            json!({"suggestions":["Visible follow-up"]}),
+            json!({"code":"nonempty snippet"}),
+            json!({"unexpected":"future action"}),
+            json!({"summary":"{\"summary\":\"NO_RESPONSE\",\"actions\":[{\"type\":\"unknown_action\"}]}"}),
+        ] {
+            let mut raw = json!({"summary":"NO_RESPONSE","files":[],"actions":[]});
+            raw.as_object_mut()
+                .unwrap()
+                .extend(extra.as_object().unwrap().clone());
+            let events = clean_decline_test_events(&raw);
+            assert!(
+                !clean_ambient_participation_decline(
+                    &job,
+                    &raw,
+                    &events,
+                    &extract_codex_messages(&events),
+                    false,
+                    false
+                ),
+                "{raw}"
+            );
+        }
+        assert!(clean_decline_final_json(
+            &json!({"summary":"NO_RESPONSE","files":null,"actions":null})
+        ));
+        for text in [
+            "no_response",
+            "NO_RESPONSE!",
+            "I will not answer: NO_RESPONSE",
+        ] {
+            assert!(!clean_decline_final_json(&json!({"summary":text})));
+        }
+    }
+
+    #[test]
+    fn ambient_participation_clean_decline_never_hides_prior_speech_or_work() {
+        let job = ambient_participation_test_job();
+        let raw = json!({"summary":"NO_RESPONSE","files":[],"actions":[]});
+        let ordinary_events = clean_decline_test_events(&raw);
+        for activity in [
+            json!({"type":"item.completed", "item":{"id":"earlier", "type":"agent_message", "phase":"commentary", "text":"I will investigate."}}),
+            json!({"type":"item.completed", "item":{"id":"earlier", "type":"agent_message", "text":"{\"summary\":\"A prior answer\",\"files\":[]}"}}),
+            json!({"type":"item.started", "item":{"type":"command_execution","command":"pwd"}}),
+            json!({"type":"item.completed", "item":{"type":"mcp_tool_call","status":"failed"}}),
+            json!({"type":"item.completed", "item":{"type":"file_change","status":"failed"}}),
+            json!({"type":"tool.activity","kind":"collab"}),
+            json!({"type":"error","message":"provider failure"}),
+            json!({"type":"item.updated", "item":{"id":"uncompleted", "type":"agent_message", "text":"An unfinished answer"}}),
+        ] {
+            let mut events = vec![activity.clone()];
+            events.extend(ordinary_events.clone());
+            assert!(
+                !clean_ambient_participation_decline(
+                    &job,
+                    &raw,
+                    &events,
+                    &extract_codex_messages(&events),
+                    false,
+                    false
+                ),
+                "{activity}"
+            );
+        }
+        assert!(!clean_ambient_participation_decline(
+            &job,
+            &raw,
+            &ordinary_events,
+            &extract_codex_messages(&ordinary_events),
+            true,
+            false
+        ));
+        let prior_message = JobMessage {
+            content: "Earlier speech".into(),
+            message_type: Some("status".into()),
+            metadata: Some(json!({"kind":"agent_message"})),
+        };
+        assert!(!clean_ambient_participation_decline(
+            &job,
+            &raw,
+            &ordinary_events,
+            &[prior_message],
+            false,
+            false
+        ));
+    }
+
+    #[test]
+    fn ambient_participation_clean_decline_cannot_waive_assigned_or_direct_requirements() {
+        let raw = json!({"summary":"NO_RESPONSE","files":[],"actions":[]});
+        let events = clean_decline_test_events(&raw);
+        for role in ["direct", "worker", "lead_continuation"] {
+            let mut job = ambient_participation_test_job();
+            if role == "direct" {
+                job.payload["metadata"] = json!({});
+            } else {
+                job.payload["metadata"]["multiAgentPlan"] = json!({"role":role});
+            }
+            assert!(initial_main_requires_tool_call(&job, true, false), "{role}");
+            assert!(
+                !clean_ambient_participation_decline(
+                    &job,
+                    &raw,
+                    &events,
+                    &extract_codex_messages(&events),
+                    false,
+                    false
+                ),
+                "{role}"
+            );
+        }
+    }
+
+    #[test]
+    fn ambient_participation_bounded_history_is_not_repeated_at_execution_boundary() {
+        let mut job = ambient_participation_test_job();
+        job.payload["conversation_history"] = json!((0..60).map(|index| json!({
+            "role":"user", "content":format!("Turn {index}: {}", "bounded evidence ".repeat(200))
+        })).collect::<Vec<_>>());
+        let mut prompt = String::from("Compact main request.");
+        let mut metrics = json!({});
+        ensure_ambient_participation_prompt_context(&job, &mut prompt, &mut metrics);
+        let history = &metrics["promptSections"]["groupParticipationConversation"]["history"];
+        assert!(history["omittedTurns"].as_u64().unwrap() > 0);
+        let first_prompt = prompt.clone();
+        let first_metrics = metrics.clone();
+        ensure_ambient_participation_prompt_context(&job, &mut prompt, &mut metrics);
+        assert_eq!(prompt, first_prompt);
+        assert_eq!(metrics, first_metrics);
+        assert_eq!(
+            prompt
+                .matches(learn::group_participation_policy().trim())
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn ambient_participation_delivery_does_not_reopen_assigned_or_direct_turns() {
+        let tmp = tempdir().expect("temp dir");
+        let processor = test_job_processor(tmp.path());
+        let project_id = Uuid::new_v4();
+        for mode in [
+            "direct",
+            "untrusted_marker",
+            "automation",
+            "already_decided",
+            "worker",
+            "lead_continuation",
+        ] {
+            let mut job = ambient_participation_test_job();
+            match mode {
+                "direct" => job.payload["metadata"] = json!({}),
+                "untrusted_marker" => {
+                    job.payload["metadata"]["groupParticipation"]["enforcedBy"] = json!("client")
+                }
+                "automation" => {
+                    job.payload["metadata"]["groupParticipation"]["reason"] =
+                        json!("automation_nothing_to_report")
+                }
+                "already_decided" => {
+                    job.payload["metadata"]["groupParticipation"]["decision"] = json!("respond")
+                }
+                role => {
+                    job.payload["metadata"]["multiAgentPlan"] =
+                        json!({"role":role, "groupId":"assigned-group"})
+                }
+            }
+            assert!(!main_owns_ambient_participation(&job), "{mode}");
+            let (prompt, _, metrics) = processor
+                .build_prompt_with_text(
+                    &project_id,
+                    &job,
+                    tmp.path(),
+                    "Complete the assigned task.",
+                    false,
+                    None,
+                    &[],
+                    None,
+                    None,
+                )
+                .expect("actual main prompt builder");
+            assert!(
+                !prompt.contains(learn::group_participation_policy().trim()),
+                "{mode}"
+            );
+            assert!(
+                metrics["promptSections"]
+                    .get("groupParticipationPolicy")
+                    .is_none(),
+                "{mode}"
+            );
+            if mode == "worker" {
+                assert!(prompt.contains("Scoped worker response contract"));
+            }
+            if mode == "lead_continuation" {
+                assert!(prompt.contains("Lead checkpoint response contract"));
+            }
+        }
+    }
+
+    #[test]
+    fn ambient_participation_context_survives_mcp_and_compact_recovery_builders_without_duplicates()
+    {
+        let tmp = tempdir().expect("temp dir");
+        let job = ambient_participation_test_job();
+        let latest = "Latest contribution to evaluate.";
+        let prompts = [
+            JobProcessor::build_mcp_task_prompt_text(latest).expect("MCP prompt"),
+            codex_missing_final_recovery_prompt(latest, tmp.path(), &[], false),
+            codex_missing_final_team_planning_recovery_prompt(latest, tmp.path(), false),
+            codex_missing_final_json_finalization_prompt(latest, "A partial summary."),
+        ];
+        for mut prompt in prompts {
+            let mut context = JsonValue::Null;
+            ensure_ambient_participation_prompt_context(&job, &mut prompt, &mut context);
+            let once = prompt.clone();
+            ensure_ambient_participation_prompt_context(&job, &mut prompt, &mut context);
+            assert_eq!(prompt, once);
+            assert_eq!(
+                prompt
+                    .matches(learn::group_participation_policy().trim())
+                    .count(),
+                1
+            );
+            assert_eq!(
+                prompt
+                    .matches("Earlier supplied conversation fact.")
+                    .count(),
+                1
+            );
+            assert!(prompt.contains(latest));
+            assert!(
+                context["promptSections"]["groupParticipationPolicy"]["chars"]
+                    .as_u64()
+                    .unwrap()
+                    > 0
+            );
+            assert!(context["estimatedPromptTokens"].as_u64().unwrap() > 0);
         }
     }
 
