@@ -222,8 +222,7 @@ test("keeps compact browser identity, control, and tabs usable at 360px", async 
       chromeFits: chromeElement ? chromeElement.scrollWidth <= chromeElement.clientWidth : false,
       documentWidth: document.documentElement.scrollWidth,
       reload: bounds("shared-browser-reload"),
-      transportPersonal: bounds("browser-transport-personal"),
-      transportShared: bounds("browser-transport-shared"),
+      locationMenu: bounds("browser-location-menu"),
     };
   });
 
@@ -234,8 +233,7 @@ test("keeps compact browser identity, control, and tabs usable at 360px", async 
     geometry.action,
     geometry.browserTab,
     geometry.reload,
-    geometry.transportPersonal,
-    geometry.transportShared,
+    geometry.locationMenu,
   ]) {
     expect(target).not.toBeNull();
     expect(target!.height).toBeGreaterThanOrEqual(40);

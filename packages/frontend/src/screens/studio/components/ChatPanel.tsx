@@ -6035,7 +6035,6 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
         }}
         composerOverlayRef={composerOverlayRef}
         composerAutoHidden={composerAutoHidden}
-        browserModeActive={browserModeActive}
         compactBrowserViewport={compactBrowserViewport}
         onSubmit={handleSubmit}
         queueSurfaceProps={{

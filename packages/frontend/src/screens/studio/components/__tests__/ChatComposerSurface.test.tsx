@@ -748,12 +748,11 @@ describe("ChatComposerSurface", () => {
     expect(layoutNodes().leading?.firstElementChild).toBe(layoutNodes().menu);
   });
 
-  it("condenses the idle composer in Browser mode and expands it when a draft appears", async () => {
+  it("keeps the same composer geometry and control positions when a draft appears", async () => {
     const renderSurface = (value: string) =>
       root.render(
         <ChatComposerSurface
           {...createProps({
-            browserModeActive: true,
             chatInputProps: {
               ...createProps().chatInputProps,
               value,
@@ -763,9 +762,12 @@ describe("ChatComposerSurface", () => {
       );
 
     await act(async () => renderSurface(""));
-    expect(container.querySelector('[data-browser-composer-condensed="true"]')).not.toBeNull();
+    expect(container.querySelector('[data-browser-composer-condensed="true"]')).toBeNull();
+    expect(container.querySelector("form")?.className).toContain(CHAT_COMPOSER_COLUMN_CLASS_NAME);
+    const menuNode = layoutNodes().menu;
+    expect(layoutNodes().textRow?.contains(menuNode)).toBe(true);
     expect(container.querySelector('[data-testid="chat-input"]')?.getAttribute("data-compact")).toBe(
-      "true",
+      "false",
     );
     expect(layoutNodes().image).toBeNull();
     expect(layoutNodes().menu?.getAttribute("data-upload-image")).toBe("true");
@@ -781,6 +783,8 @@ describe("ChatComposerSurface", () => {
       "false",
     );
     expect(container.querySelector('[data-testid="chat-input"]')).toBe(inputNode);
+    expect(layoutNodes().menu).toBe(menuNode);
+    expect(layoutNodes().textRow?.contains(menuNode)).toBe(true);
   });
 
   it("shows only the microphone while keeping the action announcement mounted at rest", async () => {
