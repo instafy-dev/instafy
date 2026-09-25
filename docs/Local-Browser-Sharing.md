@@ -40,6 +40,19 @@ handoff, Release, Take back and Stop passed. An 18-second phone motion sample
 decoded 29.98 fps with no dropped frames or freeze-counter increases; this is a
 short Wi-Fi/TURN check, not WAN or sustained-performance qualification.
 
+A September 25, 2026 acceptance run used built Electron and a separate Chrome
+participant at 390×844, 844×390 and 1280×800. Expanded Explore received matching
+390×788, 844×334 and 1280×744 video while the owner's page stayed 952×582. Scrolling
+and unsaved drafts stayed independent; a disposable site's cookie-backed cart
+and saved note appeared in both pages. Normal Chat opened the native shop, added
+one item, and continued after human takeover without repeating that addition.
+After restarting Electron with the same profile, the AI reopened the shop and
+verified both cart items were preserved. This establishes cookie/session
+continuity, not restoration of unsaved page state. Take back, Release and Stop
+also passed. A stale "Stopping AI" label during participant control was removed;
+the pending AI continuation remains available once control returns. These desktop
+checks do not qualify mobile keyboards, touch physics, OS suspension or WAN latency.
+
 Electron shows a temporary page preview beneath its tools popover because DOM
 overlays cannot paint above a native WebContentsView. The preview stays on the
 owner’s device, is bounded to 1600×1200 pixels and one MiB of JPEG, and is cleared

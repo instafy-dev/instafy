@@ -482,7 +482,7 @@ export function PersonalBrowserSurface({
         }
         actions={
           <>
-          {humanInputAvailable ? <BrowserHumanInputStatus {...humanInputOptions} state={humanInputState} /> : null}
+          {humanInputAvailable && !model.status?.tabControlActive ? <BrowserHumanInputStatus {...humanInputOptions} state={humanInputState} /> : null}
           {ready && !model.status?.agentControlEnabled && model.agentPhase === "unavailable" && !humanInputState.active ? (
             <IconButton
               aria-label="Retry agent control"
@@ -531,7 +531,9 @@ export function PersonalBrowserSurface({
                   Allow routine browsing without asking each time
                 </label>
                 <span className="text-slate-500 dark:text-slate-400">
-                  {humanInputState.active
+                  {model.status?.tabControlActive
+                    ? "Take back control before continuing the AI task."
+                    : humanInputState.active
                     ? "When ready, choose Let AI continue in the browser toolbar."
                     : humanInputLocked
                     ? "Take over to change approvals."
