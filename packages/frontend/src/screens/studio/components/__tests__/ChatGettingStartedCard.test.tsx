@@ -450,7 +450,8 @@ describe("ChatGettingStartedCard", () => {
     // The free lane states its allowance at the point of decision, then the
     // switch, joined by a middle dot (never an em-dash).
     const status = container.querySelector<HTMLElement>('[data-testid="onboarding-ai-status"]');
-    expect(status?.textContent).toBe("Using free Instafy AI: 20 prompts a day, 1 credit each·Change AI");
+    // The reserve is not the price: a turn is charged by usage after it runs.
+    expect(status?.textContent).toBe("Using free Instafy AI: 20 prompts a day, credits charged by usage·Change AI");
     expect(container.textContent).not.toContain("Using your connected AI");
     expect(container.textContent).not.toContain(EM_DASH);
     const changeButton = container.querySelector<HTMLButtonElement>(

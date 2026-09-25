@@ -1,5 +1,5 @@
 import type { ChatMessage } from "../types";
-import { isRecoverableRuntimeStartAlert } from "./runtimeAlertPresentation";
+import { isRecoverableRuntimeStartAlert, isRuntimeLimitWaitAlert } from "./runtimeAlertPresentation";
 
 export type ControllerConversationNoticeKind = "runtime_alert" | "run_cancellation";
 
@@ -62,6 +62,9 @@ function resolveRuntimeAlertContent(
 
   switch (reason) {
     case "runtime_not_ready":
+      if (isRuntimeLimitWaitAlert(details)) {
+        return "Waiting for a free cloud runtime. This team’s one runtime is busy in another space; stop it in Machines and this request will send.";
+      }
       return isRecoverableRuntimeStartAlert(details, legacyContent)
         ? "Starting the workspace. Your queued request will continue automatically."
         : "Workspace startup failed. Open Machines to reconnect Instafy Cloud.";
@@ -244,6 +247,9 @@ export function resolveControllerConversationNoticeLabel(message: ChatMessage): 
   const details = extractMessageDetails(metadata);
   if (normalizeString(details?.["reason"] ?? metadata?.["reason"]) === "automation_launch_failed") {
     return "Scheduled run couldn't start";
+  }
+  if (isRuntimeLimitWaitAlert(details)) {
+    return "Waiting for a runtime";
   }
   return isRecoverableRuntimeStartAlert(details, message.content)
     ? "Workspace starting"

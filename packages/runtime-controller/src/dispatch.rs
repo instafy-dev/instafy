@@ -2203,10 +2203,14 @@ pub(crate) async fn process_dispatch_prompt(
                             error = %api_error.message,
                             "dispatch prompt failed to reconnect unavailable runtime"
                         );
+                        // The code lets the studio tell a start that failed
+                        // from one the team's machine limit refused, which
+                        // is a wait, not a failure.
                         reconnect_metadata = Some(json!({
                             "status": "failed",
                             "runtimeId": record.id.to_string(),
                             "error": api_error.message,
+                            "code": api_error.code,
                         }));
                     }
                 }
