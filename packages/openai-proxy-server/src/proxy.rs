@@ -27,6 +27,7 @@ use crate::client::{
 use crate::controller_client::ControllerCreditsError;
 use crate::controller_integration::{ControllerIntegration, CreditBurn as ControllerCreditBurn};
 use crate::proxy_auth::ProxyClaims;
+use crate::upstream_error::{self, UpstreamFailure};
 
 const MAX_PROXY_REQUEST_BYTES: usize = 25 * 1024 * 1024;
 const PUBLIC_PROXY_LANE_HEADER: &str = "x-instafy-proxy-lane";
@@ -803,23 +804,7 @@ struct RemoteCompletionOptions<'a> {
 }
 
 fn error_indicates_chatgpt_token_refreshable(error: &anyhow::Error) -> bool {
-    // Provider error payload matching only. Do not infer tool or auth behavior from user prompts.
-    let details = format!("{error:#}");
-    response_indicates_chatgpt_token_expired(StatusCode::UNAUTHORIZED, &details)
-}
-
-fn upstream_error_status(message: &str) -> StatusCode {
-    // Provider/controller error payload matching only. Do not infer runtime behavior from
-    // user-facing prompt text here; stale user credentials are not proxy infrastructure outages.
-    let lowered = message.to_ascii_lowercase();
-    if lowered.contains("controller credential lease renewal failed")
-        || lowered.contains("controller forced credential refresh failed")
-        || lowered.contains("codex oauth refresh failed")
-        || response_indicates_chatgpt_token_expired(StatusCode::UNAUTHORIZED, message)
-    {
-        return StatusCode::FAILED_DEPENDENCY;
-    }
-    StatusCode::BAD_GATEWAY
+    upstream_error::refreshable_auth(error)
 }
 
 fn build_remote_completion_client(
@@ -905,9 +890,9 @@ async fn complete_with_optional_controller_refresh(
             let refreshed = controller
                 .renew_credential_lease_after_rejection(credential_id)
                 .await
-                .context("controller credential lease renewal failed")?
+                .context(UpstreamFailure::CredentialRefresh)?
                 .into_material()
-                .context("controller returned an unusable credential lease")?;
+                .context(UpstreamFailure::CredentialRefresh)?;
             let (mut retry_client, retry_model, retry_endpoint) =
                 build_remote_completion_client(refreshed, options)?;
 
@@ -1368,9 +1353,10 @@ async fn send_speech_request_with_retry(
 
     let mut response = send_speech_request(http, credentials, request_url, payload)
         .await
-        .map_err(AppError::internal)?;
+        .map_err(AppError::upstream)?;
 
     if response.status() == StatusCode::UNAUTHORIZED && credentials.is_chatgpt() {
+        let response_headers = response.headers().clone();
         let body = response
             .text()
             .await
@@ -1381,28 +1367,27 @@ async fn send_speech_request_with_retry(
         {
             response = send_speech_request(http, credentials, request_url, payload)
                 .await
-                .map_err(AppError::internal)?;
+                .map_err(AppError::upstream)?;
         } else {
-            return Err(AppError::unauthorized(anyhow!(
-                "backend responded with {} for {}: {}",
+            return Err(AppError::upstream(UpstreamFailure::http_body(
                 StatusCode::UNAUTHORIZED,
-                request_url,
-                body
+                &response_headers,
+                &body,
             )));
         }
     }
 
     if !response.status().is_success() {
         let status = response.status();
+        let response_headers = response.headers().clone();
         let text = response
             .text()
             .await
             .unwrap_or_else(|_| "<empty>".to_string());
-        return Err(AppError::upstream(anyhow!(
-            "backend responded with {} for {}: {}",
+        return Err(AppError::upstream(UpstreamFailure::http_body(
             status,
-            request_url,
-            text
+            &response_headers,
+            &text,
         )));
     }
 
@@ -1446,9 +1431,10 @@ async fn send_transcription_request_with_retry(
     let mut response =
         send_transcription_request(http, credentials, request_url, content_type, body.clone())
             .await
-            .map_err(AppError::internal)?;
+            .map_err(AppError::upstream)?;
 
     if response.status() == StatusCode::UNAUTHORIZED && credentials.is_chatgpt() {
+        let response_headers = response.headers().clone();
         let body_text = response
             .text()
             .await
@@ -1460,28 +1446,27 @@ async fn send_transcription_request_with_retry(
             response =
                 send_transcription_request(http, credentials, request_url, content_type, body)
                     .await
-                    .map_err(AppError::internal)?;
+                    .map_err(AppError::upstream)?;
         } else {
-            return Err(AppError::unauthorized(anyhow!(
-                "backend responded with {} for {}: {}",
+            return Err(AppError::upstream(UpstreamFailure::http_body(
                 StatusCode::UNAUTHORIZED,
-                request_url,
-                body_text
+                &response_headers,
+                &body_text,
             )));
         }
     }
 
     if !response.status().is_success() {
         let status = response.status();
+        let response_headers = response.headers().clone();
         let text = response
             .text()
             .await
             .unwrap_or_else(|_| "<empty>".to_string());
-        return Err(AppError::upstream(anyhow!(
-            "backend responded with {} for {}: {}",
+        return Err(AppError::upstream(UpstreamFailure::http_body(
             status,
-            request_url,
-            text
+            &response_headers,
+            &text,
         )));
     }
 
@@ -1498,13 +1483,16 @@ async fn renew_rejected_chatgpt_credentials(
         let renewed = controller
             .renew_credential_lease_after_rejection(credential_id)
             .await
-            .map_err(AppError::internal)?
+            .context(UpstreamFailure::CredentialRefresh)
+            .map_err(AppError::upstream)?
             .into_material()
-            .map_err(AppError::internal)?;
+            .context(UpstreamFailure::CredentialRefresh)
+            .map_err(AppError::upstream)?;
         if !renewed.is_chatgpt() {
-            return Err(AppError::internal(anyhow!(
-                "controller changed credential kind during lease renewal"
-            )));
+            return Err(AppError::upstream(
+                anyhow!("controller changed credential kind during lease renewal")
+                    .context(UpstreamFailure::CredentialRefresh),
+            ));
         }
         *credentials = renewed;
         return Ok(true);
@@ -1513,7 +1501,8 @@ async fn renew_rejected_chatgpt_credentials(
     credentials
         .refresh_chatgpt_access_token(http)
         .await
-        .map_err(AppError::internal)
+        .context(UpstreamFailure::CredentialRefresh)
+        .map_err(AppError::upstream)
 }
 
 async fn send_transcription_request(
@@ -1594,11 +1583,10 @@ async fn create_speech(
     };
 
     let request_url = speech_endpoint_for_credentials(&credentials)?;
-    let endpoint_for_error = format_endpoint_for_error(&request_url);
     let http = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(120))
         .build()
-        .map_err(AppError::internal)?;
+        .map_err(AppError::upstream)?;
 
     let upstream = send_speech_request_with_retry(
         &http,
@@ -1608,13 +1596,7 @@ async fn create_speech(
         state.controller.as_ref(),
         controller_credential_id,
     )
-    .await
-    .map_err(|error| {
-        AppError::upstream(anyhow!(
-            "upstream speech request failed (endpoint={endpoint_for_error}): {}",
-            error.message
-        ))
-    })?;
+    .await?;
 
     let status = upstream.status();
     let content_type = upstream
@@ -1623,7 +1605,7 @@ async fn create_speech(
         .and_then(|value| value.to_str().ok())
         .map(|value| value.to_string())
         .unwrap_or_else(|| "application/octet-stream".to_string());
-    let body = upstream.bytes().await.map_err(AppError::internal)?;
+    let body = upstream.bytes().await.map_err(AppError::upstream)?;
 
     Response::builder()
         .status(status)
@@ -1684,7 +1666,6 @@ async fn create_transcription(
     };
 
     let request_url = transcription_endpoint_for_credentials(&credentials)?;
-    let endpoint_for_error = format_endpoint_for_error(&request_url);
     let request_content_type = headers
         .get(axum::http::header::CONTENT_TYPE)
         .and_then(|value| value.to_str().ok())
@@ -1692,7 +1673,7 @@ async fn create_transcription(
     let http = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(120))
         .build()
-        .map_err(AppError::internal)?;
+        .map_err(AppError::upstream)?;
 
     let upstream = send_transcription_request_with_retry(
         &http,
@@ -1703,13 +1684,7 @@ async fn create_transcription(
         state.controller.as_ref(),
         controller_credential_id,
     )
-    .await
-    .map_err(|error| {
-        AppError::upstream(anyhow!(
-            "upstream transcription request failed (endpoint={endpoint_for_error}): {}",
-            error.message
-        ))
-    })?;
+    .await?;
 
     let status = upstream.status();
     let content_type = upstream
@@ -1718,7 +1693,7 @@ async fn create_transcription(
         .and_then(|value| value.to_str().ok())
         .map(|value| value.to_string())
         .unwrap_or_else(|| "application/json".to_string());
-    let body = upstream.bytes().await.map_err(AppError::internal)?;
+    let body = upstream.bytes().await.map_err(AppError::upstream)?;
 
     Response::builder()
         .status(status)
@@ -1947,6 +1922,7 @@ struct AppError {
     status: StatusCode,
     error_type: &'static str,
     message: String,
+    upstream: Option<upstream_error::ErrorResponse>,
 }
 
 impl AppError {
@@ -1956,6 +1932,7 @@ impl AppError {
             status: StatusCode::BAD_REQUEST,
             error_type: "invalid_request_error",
             message: err.to_string(),
+            upstream: None,
         }
     }
 
@@ -1965,6 +1942,7 @@ impl AppError {
             status: StatusCode::INTERNAL_SERVER_ERROR,
             error_type: "internal_server_error",
             message: err.to_string(),
+            upstream: None,
         }
     }
 
@@ -1974,24 +1952,18 @@ impl AppError {
             status: StatusCode::UNAUTHORIZED,
             error_type: "invalid_authentication",
             message: err.to_string(),
+            upstream: None,
         }
     }
 
     fn upstream(err: impl Into<anyhow::Error>) -> Self {
         let err = err.into();
-        let message = format!("{err:#}");
-        let message = if message.len() > 4000 {
-            let mut truncated = message;
-            truncated.truncate(4000);
-            truncated.push_str("… (truncated)");
-            truncated
-        } else {
-            message
-        };
+        let classified = upstream_error::classify(&err);
         Self {
-            status: upstream_error_status(&message),
+            status: classified.status,
             error_type: "upstream_error",
-            message,
+            message: classified.message.to_string(),
+            upstream: Some(classified),
         }
     }
 
@@ -2001,19 +1973,28 @@ impl AppError {
             status: StatusCode::PAYMENT_REQUIRED,
             error_type: "insufficient_credits",
             message: err.to_string(),
+            upstream: None,
         }
     }
 }
 
 impl IntoResponse for AppError {
     fn into_response(self) -> axum::response::Response {
-        let body = Json(json!({
-            "error": {
+        let mut error = json!({
                 "message": self.message,
                 "type": self.error_type,
-            }
-        }));
-        (self.status, body).into_response()
+        });
+        if let Some(upstream) = &self.upstream {
+            error["code"] = json!(upstream.code);
+            error["retryable"] = json!(upstream.retryable);
+        }
+        let mut response = (self.status, Json(json!({"error": error}))).into_response();
+        if let Some(value) = self.upstream.and_then(|upstream| upstream.retry_after) {
+            response
+                .headers_mut()
+                .insert(axum::http::header::RETRY_AFTER, value);
+        }
+        response
     }
 }
 
@@ -2549,6 +2530,9 @@ async fn shutdown_signal() {
 }
 
 #[cfg(test)]
+mod audio_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::json;
@@ -2844,17 +2828,18 @@ mod tests {
 
     #[test]
     fn upstream_error_marks_controller_credential_lease_renewal_failure_terminal() {
-        let error = AppError::upstream(anyhow!(
-            "upstream request failed (credential_source=claim, requested_model=gpt-5.4): controller credential lease renewal failed: controller credential lease failed: controller credentials returned 500 Internal Server Error: {{\"message\":\"credential renewal failed\"}}"
-        ));
+        let error = AppError::upstream(
+            anyhow!("private controller failure detail")
+                .context(UpstreamFailure::CredentialRefresh),
+        );
 
         assert_eq!(error.status, StatusCode::FAILED_DEPENDENCY);
         assert_eq!(error.error_type, "upstream_error");
-        assert!(
-            error
-                .message
-                .contains("controller credential lease renewal failed")
+        assert_eq!(
+            error.upstream.unwrap().code,
+            "upstream_credential_refresh_failed"
         );
+        assert!(!error.message.contains("private controller failure detail"));
     }
 
     /// A controller-signed token with the given `run_id` and `credential_id`

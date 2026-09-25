@@ -44,7 +44,7 @@ The selected mode is recorded in the runtime prompt-context artifact as `finalOu
 
 ## Routing Preflight Contract
 
-Multi-human conversation participation is an earlier boundary than the routing described here. The group-participation skill first decides whether Octo should `respond`, `claim`, `correct`, or remain `silent` for the human turn. A `silent` decision records the human message without creating an agent job or starting a runtime. Only after Octo has been selected to participate does the runtime perform the multi-agent and recovered-context preflight below. See `docs/Group-Conversation-Participation.md`.
+Ambient multi-human turns dispatch an evaluation job to each active agent. The main agent applies the pinned group-participation skill to the latest turn and supplied history, then answers, claims, corrects, or declines with `NO_RESPONSE`. Runtime preparation and the routing preflight below may already have run before a decline; silence does not imply zero runtime or provider work. The controller suppresses the decline and defers ambient managed-AI user billing until visible speech. There is no shipped conversation-only early participation gate. See `docs/Group-Conversation-Participation.md`.
 
 Multi-agent dispatch and recovered-context routing are now skill/model-authored decisions, not frontend or runtime natural-language keyword rules.
 

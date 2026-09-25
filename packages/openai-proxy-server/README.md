@@ -111,6 +111,26 @@ Standalone local mode may read and refresh the operator's own `auth.json`. In
 controller-integrated mode, the controller is the only refresh-token authority: the proxy gets a
 short-lived access/API-key lease and never receives the stored refresh token.
 
+### Upstream failures and retries
+
+Responses, Chat Completions, speech and transcription preserve upstream HTTP error statuses. A rejected request or
+credential (400/401/403) is terminal; rate limits (429), timeouts (504), and temporary upstream
+failures (5xx) remain retryable. Recognized `insufficient_quota` codes in an HTTP 429 body or a
+failed Responses stream return terminal 402. Failed credential renewal and invalid request or
+redirect configuration return terminal 424. Unknown transport errors, including opaque TLS
+handshake failures, return retryable 502 because they may be temporary.
+
+Upstream error envelopes retain `error.type: "upstream_error"` and a safe `error.message`, and
+add a stable `error.code` and boolean `error.retryable`. Raw provider messages, response bodies,
+credentials, and endpoint URLs are not echoed. Valid `Retry-After` seconds or HTTP dates are
+forwarded for 429 and 503; other header values are discarded.
+
+The proxy does not replay ordinary failed model requests. It retains one credential renewal
+and one resend after an eligible ChatGPT 401. Controller mode performs that renewal through
+the controller lease interface; standalone mode uses its local refresh authority. Calling
+runtimes own bounded transient retries. Invalid successful responses are retryable 502 failures;
+they do not change credential state.
+
 ## Tests & formatting
 
 Run the standard checks before committing changes:
@@ -121,6 +141,16 @@ cargo test
 ```
 
 The backend smoke test will automatically skip if credentials are missing or the backend rejects the request (e.g., rate limits).
+
+For deterministic failure and retry validation without provider access or local auth files:
+
+```bash
+cargo test --lib --test proxy_upstream_failures
+```
+
+This suite uses inert credentials and loopback HTTP mocks, covering terminal and transient
+statuses, recovery, one-shot refresh, malformed responses, safe diagnostics, and typed transport
+classification. It does not demonstrate live-provider availability or certificate repair.
 
 ## Next steps
 

@@ -6,3 +6,4 @@ pub mod controller_integration;
 pub mod credential_lease;
 pub mod proxy;
 pub mod proxy_auth;
+mod upstream_error;

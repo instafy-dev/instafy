@@ -8,6 +8,7 @@ use serde_json::{Map as JsonMap, Value, json};
 use uuid::Uuid;
 
 use crate::auth::{Credentials, response_indicates_chatgpt_token_expired};
+use crate::upstream_error::UpstreamFailure;
 
 const APPLY_PATCH_GRAMMAR: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
@@ -365,7 +366,8 @@ impl CodexClient {
 
         if self.credentials.is_chatgpt() {
             let body = read_chatgpt_stream(response).await?;
-            let mut completion = parse_completion(body)?;
+            let mut completion =
+                parse_completion(body).context(UpstreamFailure::InvalidResponse)?;
             completion.rate_limits = rate_limits;
             return Ok(completion);
         }
@@ -375,14 +377,18 @@ impl CodexClient {
             .await
             .context("failed to decode JSON response")?;
         let mut completion = match upstream_wire_api {
-            UpstreamWireApi::Responses => parse_completion(body)?,
+            UpstreamWireApi::Responses => {
+                parse_completion(body).context(UpstreamFailure::InvalidResponse)?
+            }
             UpstreamWireApi::ChatCompletions => {
-                let adapted = chat_completions_to_responses(body)?;
-                parse_completion(adapted)?
+                let adapted = chat_completions_to_responses(body)
+                    .context(UpstreamFailure::InvalidResponse)?;
+                parse_completion(adapted).context(UpstreamFailure::InvalidResponse)?
             }
             UpstreamWireApi::GeminiCodeAssist => {
-                let adapted = gemini_code_assist_to_responses(body, &self.model)?;
-                parse_completion(adapted)?
+                let adapted = gemini_code_assist_to_responses(body, &self.model)
+                    .context(UpstreamFailure::InvalidResponse)?;
+                parse_completion(adapted).context(UpstreamFailure::InvalidResponse)?
             }
         };
         completion.rate_limits = rate_limits;
@@ -404,6 +410,7 @@ impl CodexClient {
             .await?;
 
         if response.status() == StatusCode::UNAUTHORIZED && self.credentials.is_chatgpt() {
+            let response_headers = response.headers().clone();
             let body = response
                 .text()
                 .await
@@ -413,33 +420,29 @@ impl CodexClient {
                     .credentials
                     .refresh_chatgpt_access_token(&self.http)
                     .await
-                    .context("failed to refresh ChatGPT access token")?
+                    .context(UpstreamFailure::CredentialRefresh)?
             {
                 response = self
                     .send_upstream_request(request_url, headers, payload)
                     .await?;
             } else {
-                bail!(
-                    "backend responded with {} for {}: {}",
+                return Err(UpstreamFailure::http_body(
                     StatusCode::UNAUTHORIZED,
-                    request_url,
-                    body
-                );
+                    &response_headers,
+                    &body,
+                )
+                .into());
             }
         }
 
         if !response.status().is_success() {
             let status = response.status();
+            let response_headers = response.headers().clone();
             let text = response
                 .text()
                 .await
                 .unwrap_or_else(|_| "<empty>".to_string());
-            bail!(
-                "backend responded with {} for {}: {}",
-                status,
-                request_url,
-                text
-            );
+            return Err(UpstreamFailure::http_body(status, &response_headers, &text).into());
         }
 
         Ok(response)
@@ -1257,12 +1260,11 @@ fn process_chatgpt_stream_event(
             let code = error
                 .and_then(|err| err.get("code"))
                 .and_then(Value::as_str);
-            match code {
-                Some(code) => {
-                    bail!("backend stream reported error: {} (code={})", message, code)
-                }
-                None => bail!("backend stream reported error: {}", message),
+            return Err(UpstreamFailure::Stream {
+                code: code.map(str::to_string),
+                message: message.to_string(),
             }
+            .into());
         }
         "response.output_text.delta" => {
             if let Some(delta) = event.get("delta").and_then(Value::as_str) {

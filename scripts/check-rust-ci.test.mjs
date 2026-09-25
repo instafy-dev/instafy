@@ -186,12 +186,13 @@ test('only self-hosted Rust children install the fixed missing native packages w
   for(const item of aggregates)assert.doesNotMatch(job(item.key),/apt-get|Install scoped Rust native prerequisites/u);
 });
 
-test('the full original five check and six test commands and working directories are hash-bound', () => {
-  // Exact normalized command order + working-directory from build.yml at f20002b.
+test('the full reviewed five check and six test commands and working directories are hash-bound', () => {
+  // Exact normalized command order + working-directory from build.yml at f20002b,
+  // plus the reviewed runtime-agent proxy_retry_budget integration-test selector.
   // Commands are literal steps, not a matrix/shell fragment that can drop a crate.
   for (const [list, stepName, hash, expectedCount] of [
     [checks, 'Check public Rust package', '555d7092d19a4cc330abb80fa5dc6c1a8785b916a0119adcc2fdfc2741e678ff', 5],
-    [suites, 'Run database-free Rust test suite', '6ad118442a26d37edb764ab17c0098c40f9c199e8f4963fcdcb8e94faccc65aa', 6],
+    [suites, 'Run database-free Rust test suite', 'dde0ee198d42d9ba7806a6f62aead78e4f6f96d1b8350bb8c27fbce89947add6', 6],
   ]) {
     const inventory = list.flatMap(item => {
       const part = step(item.key, stepName);
@@ -212,7 +213,7 @@ test('the full original five check and six test commands and working directories
   }
   assert.equal(children.reduce((sum, item) => sum + (job(item.key).match(/^          cargo (?:check|test) /gmu) ?? []).length, 0), 11);
   const agent = step('rust-test-agent', 'Run database-free Rust test suite');
-  assert.match(agent, /--no-run\n          cargo test .* --lib --test controller_client -- --test-threads=1/u);
+  assert.match(agent, /--no-run\n          cargo test .* --lib --test controller_client --test proxy_retry_budget -- --test-threads=1/u);
 });
 
 test('test children preserve unfiltered frozen Node20 installation and host-only disk cleanup', () => {
@@ -246,7 +247,7 @@ test('actual runtime-agent Bash defaults only unset flags on self-hosted Linux a
   assert.equal(script.split(expression).length, 2);
   const commands = [
     ['test', '--manifest-path', 'packages/runtime-agent/Cargo.toml', '--no-run'],
-    ['test', '--manifest-path', 'packages/runtime-agent/Cargo.toml', '--lib', '--test', 'controller_client', '--', '--test-threads=1'],
+    ['test', '--manifest-path', 'packages/runtime-agent/Cargo.toml', '--lib', '--test', 'controller_client', '--test', 'proxy_retry_budget', '--', '--test-threads=1'],
   ];
   const fixture = `cargo() { printf 'CALL\\0%s\\0%s\\0' "\${RUSTFLAGS+x}" "\${RUSTFLAGS-}"; printf '%s\\0' "$@"; return "\${CARGO_FIXTURE_STATUS:-0}"; }\n`;
   for (const environment of ['self-hosted', 'github-hosted', '', 'unknown']) for (const os of ['Linux', 'macOS', 'Windows', '']) {
@@ -314,10 +315,11 @@ test('the restore-only mitigation preserves every other byte of the reviewed Bui
     normalized = normalized.replace(restore + '\n', '').replace(hosted,
       hosted.replace("        if: runner.environment == 'github-hosted'\n", ''));
   }
-  // Full build.yml at the reviewed combined source 2ef4dde: includes all original
-  // functional commands, aggregate guards, routing, permissions and other jobs.
+  // Full build.yml at the reviewed combined source 2ef4dde, plus only the reviewed
+  // proxy_retry_budget selector: retains all functional commands, aggregate guards,
+  // routing, permissions and other jobs.
   assert.equal(createHash('sha256').update(normalized).digest('hex'),
-    'cfbf699d139a325d9d2add3add71ec8d3db4d4ca737925bc3963871706d7fa4a');
+    '797d337e031b930e12f8c2fd48e26c98db724ca5e6e10d950ef0c53fe546e4b1');
 });
 
 test('actual inline runner qualification rejects wrong native identity, ambient private env and missing compilers', () => {
