@@ -16,7 +16,11 @@ import {
   shouldDisplayChatMessage,
 } from "./chatMessagePresentation";
 import { getMessageType } from "./chatMessageMetadata";
-import { isCompactionStatusText, normalizeAssistantStatusText } from "./assistantStatusHeuristics";
+import {
+  isCompactionStatusText,
+  normalizeAssistantStatusText,
+  resolveAssistantStatusHeadline,
+} from "./assistantStatusHeuristics";
 import {
   isThreadPreviewUnresolved,
   resolveCompactRailStatusText,
@@ -660,7 +664,9 @@ export function useAgentJobThreadPreviewState({
       if (type !== "status" && type !== "reasoning") {
         continue;
       }
-      const normalized = normalizeAssistantStatusText(candidate.content);
+      // Only the headline goes in the one-line status row. A reasoning summary
+      // body stays behind "Agent thinking" instead of leaking in here.
+      const normalized = resolveAssistantStatusHeadline(candidate.content);
       if (!normalized) {
         continue;
       }

@@ -169,7 +169,7 @@ import {
 } from "./assistantMessageGrouping";
 import {
   isCompactionStatusText,
-  normalizeAssistantStatusText,
+  resolveAssistantStatusHeadline,
 } from "./assistantStatusHeuristics";
 import {
   readWorkspaceFileStaleNotice,
@@ -6389,7 +6389,9 @@ function resolveTypingIndicatorState(
     if (type !== "reasoning" && type !== "status") {
       continue;
     }
-    const normalized = normalizeAssistantStatusText(message.content);
+    // Only the headline goes in the one-line status row. A reasoning summary
+    // body stays behind "Agent thinking" instead of leaking in here.
+    const normalized = resolveAssistantStatusHeadline(message.content);
     if (!normalized) {
       continue;
     }
