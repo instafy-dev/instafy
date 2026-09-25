@@ -2601,6 +2601,30 @@ impl ClientTimezoneGuard {
     }
 }
 
+/// How to answer a credential the provider turned down. The full Studio
+/// contract, the compact reminder of a restored thread and the cross-chat
+/// recovery contract all carry this block. A rejected value usually surfaces
+/// on a follow-up turn, and follow-up turns get the compact or cross-chat
+/// prompt, so a rule kept only in the full contract would be missing exactly
+/// when the person comes back and says they replaced the values.
+///
+/// The re-ask is its own sentence, scoped to a rejected value, because not
+/// every 401/403 is one. A permission error on one resource after a token was
+/// issued is a role or scope gap, and asking again for correct values would
+/// loop the person through the same cards without naming the real fix.
+///
+/// Only `type` and `name` come before "optional" in the action shape. The
+/// model fills a field it reads as required, and a guessed `skill` slug turns
+/// off the declaration lookup the card text relies on.
+///
+/// It is terse because the compact reminder has a token budget. The full
+/// contract adds the longer guidance on what counts as a rejection and how to
+/// word the reply, and the strict output schema spells out the field types.
+const SECRET_REJECTION_CONTRACT: &str = "\
+- On a 401/403 or auth error, include the fitting `actions`.\n\
+- When the service or the skill's check rejects a value the space already holds (not a permission error on one resource), emit `request_secret` again for every value that rejection could be about, even if the person says they already replaced them in Secrets.\n\
+- `request_secret`: { type, name, optional valueLabel, description, whereToGet, skill, sensitive, agentHandles }\n";
+
 fn append_prompt_section(
     prompt: &mut String,
     section_metrics: &mut JsonMap<String, JsonValue>,
@@ -7519,18 +7543,22 @@ Avoid creating dependency caches or stores in the canonical workspace root when 
                 &mut prompt,
                 &mut prompt_section_metrics,
                 "responseContract",
-                "\nResponse contract reminder:\n\
+                &[
+                    "\nResponse contract reminder:\n\
                 - Return one JSON object only: { \"summary\": string, \"files\": [], optional \"suggestions\": [], optional \"actions\": [] }.\n\
                 - Put the natural-language answer in `summary`; do not wrap the JSON in Markdown.\n\
                 - Populate `files` only for real workspace changes.\n\
-                - Use `actions` for required secrets, integrations, location, goal creation/status updates, or skill-authored multi-agent coordination.\n\
-                - A request to create/start a goal also starts goal execution. Do not only acknowledge goal creation or suggest starting later.\n\
+                - Use `actions` for required secrets, integrations, location, goal creation/status updates, or skill-authored multi-agent coordination.\n",
+                    SECRET_REJECTION_CONTRACT,
+                    "- A request to create/start a goal also starts goal execution. Do not only acknowledge goal creation or suggest starting later.\n\
                 - For a newly requested goal that can be fully satisfied in this turn, satisfy it in `summary` and emit one completed `goal_update`; do not leave simple finite goals active.\n\
                 - If a newly requested goal explicitly requires separate assistant turns, do the next useful step in `summary` and emit `goal_update` with status `active`; do not block just because this response is one final JSON object.\n\
                 - For a newly requested goal, do not block only because evidence has not been gathered yet. If safe read-only tools or project context can materially advance the goal, use them before deciding status.\n\
                 - Block a newly requested goal only when required evidence, permissions, runtime access, or user input cannot be obtained with the available safe tools. Explain the concrete blocker in `summary` and emit one blocked `goal_update`.\n\
                 - When the latest request explicitly asks for team/parallel/sibling-agent/split investigation with lead synthesis, follow the pinned collaboration skill and emit `multi_agent_plan` before substantive inspection or edits unless the task is clearly trivial.\n\
                 - If task success depends on current workspace/runtime state, use tools before answering and report concrete observations. For command execution, call the available runtime command tool (`exec_command` or `shell`); if neither is callable, return that concrete blocker in `summary`. Do not treat missing command tools as a blocker for file-only create/edit/delete requests when you can return inline `files[]` content.\n",
+                ]
+                .concat(),
             );
             append_prompt_section(
                 &mut prompt,
@@ -7551,15 +7579,19 @@ Avoid creating dependency caches or stores in the canonical workspace root when 
                 &mut prompt,
                 &mut prompt_section_metrics,
                 "responseContract",
-                "\nCross-chat context recovery response contract:\n\
-                - Return exactly one JSON object: { \"summary\": string, \"files\": [], optional \"suggestions\": [] }. Do not wrap JSON in Markdown.\n\
+                &[
+                    "\nCross-chat context recovery response contract:\n\
+                - Return exactly one JSON object: { \"summary\": string, \"files\": [], optional \"suggestions\": [], optional \"actions\": [] }. Do not wrap JSON in Markdown.\n\
                 - Put the user-facing answer in `summary`; keep it concise and cite the recovered conversation/thread, focused agent/lane, or context card when available.\n\
                 - If relevant context cards are already included, answer from them only when they are sufficient. Otherwise run the bounded Instafy CLI lookup described above before the final response.\n\
                 - Do not create a `multi_agent_plan` for a narrow recovery question. Do not edit files.\n\
                 - If the active conversation already contains a recent matching team/workstream/lead answer, treat that as stronger evidence than older context cards or broader conversation search results. If multiple current runs match, say which one you used or ask one clarification.\n\
                 - Do not answer from raw runtime/session logs or `.codex-runtime*` artifacts unless the user explicitly asked to inspect runtime debug logs.\n\
-                - If lookup is empty or ambiguous, state exactly what was searched and ask one short clarification.\n\
-                - Always finish with the required final JSON response.\n",
+                - If lookup is empty or ambiguous, state exactly what was searched and ask one short clarification.\n",
+                    SECRET_REJECTION_CONTRACT,
+                    "- Always finish with the required final JSON response.\n",
+                ]
+                .concat(),
             );
             append_prompt_section(
                 &mut prompt,
@@ -7660,15 +7692,16 @@ Avoid creating dependency caches or stores in the canonical workspace root when 
             - Do not call controller APIs with curl/wget; use `instafy history` / `instafy api get` so auth works consistently and the command is logged.\n\
             - If you propose next steps, include up to three concise strings in `suggestions` (e.g. module ideas, integrations, deployment follow-ups). Each suggestion should be a short user message that can be sent as-is when clicked. Omit the field if you have nothing meaningful to suggest.\n\
             - For integration workflows, do a capability preflight before claiming success. If auth or permissions are missing/unclear, emit `request_integration` and/or `request_secret` first.\n\
-            - For integration requests (for example \"connect <provider>\"), if runtime/tool capability is unclear, do a skills preflight: check installed skills first, and if no clear match exists, use skill discovery/import before concluding unsupported.\n\
-            - If a command/API fails with auth or permission errors (401/403/not authorized/missing token), include `actions` in the same response so the UI can guide onboarding.\n\
+            - For integration requests (for example \"connect <provider>\"), if runtime/tool capability is unclear, do a skills preflight: check installed skills first, and if no clear match exists, use skill discovery/import before concluding unsupported.\n",
+        );
+            prompt.push_str(SECRET_REJECTION_CONTRACT);
+            prompt.push_str(
+            "- The skill's own check rejects a held value when its token request answers 401 or its status says the credential is wrong. When the provider's answer does not say which value it rejected, ask again for all of them, so the person gets the fields back in the chat instead of a detour to settings. Say in one sentence that the provider did not accept the values, quote the provider's own reason when it gives one, and give the skill's copy hints for those values.\n\
             - Missing secret/env UX: emit the relevant `request_secret`/`request_integration` action immediately, then ask one short follow-up question: whether the user already has the credential and whether they want help finding/creating it.\n\
             - For auth/integration tasks, check which values the space already has before requesting a new secret. The inventory is already in your environment as `INSTAFY_PROJECT_SECRET_INVENTORY`; read that rather than shelling out for it, and never run a command to list secrets during first-run skill setup. When the person says they saved a value, the environment is the answer to what is present, not the wording of their message: check it, or run the skill's status check, before saying any value is still missing.\n\
             - A conversation that began with a skill setup (`/skills import ... --start` or `/skills start`) stays that setup until the skill's \"## Getting started\" is done. On every later turn, including the one a saved card continues, first pick the setup up at its next unanswered step, re-reading that SKILL.md if you need to (confirm what it asks you to confirm, write the files it names, offer its schedule), and only then take up anything new. While the setup lasts, write to the person in plain sentences: no \"please\", no em dashes, no exclamation marks, no jokes.\n\
-            - When the skill's own check rejects a value the space already holds (a 401 from its token request, or its status saying the credential is wrong), emit `request_secret` again for every value the rejection could be about, all of them when the provider's answer does not say which, so the person gets the fields back in the chat instead of a detour to settings. Say in one sentence that the provider did not accept the values, quote the provider's own reason when it gives one, and give the skill's copy hints for those values.\n\
             - Context you recovered from earlier turns, other conversations or context cards is for you: never say that you recovered it, where from, or any conversation, job, thread or context-card id.\n\
               - Use `actions` to request interactive UI help when needed (e.g. secrets/integrations). Supported actions:\n\
-              - { type: 'request_secret', name: string, optional valueLabel: string, optional description: string, optional whereToGet: string, optional skill: string, optional sensitive: boolean, optional agentHandles: string[] }\n\
               - { type: 'request_integration', provider: string, optional description: string, optional requiredScopes: string[], optional capabilities: string[], optional authMethods: string[], optional suggestedSecretNames: string[], optional suggestedSecrets: { name: string, optional description: string }[], optional agentHandles: string[] }\n\
               - { type: 'request_location', optional precision: 'approximate' | 'precise', optional description: string }\n\
               - { type: 'request_browser', task: string, optional browserLocation: 'auto' | 'device' | 'workspace' }\n\
@@ -7698,7 +7731,7 @@ Avoid creating dependency caches or stores in the canonical workspace root when 
               - Broad or cross-chat coordination should search compact context cards and prior conversations first. Save/update compact cards for durable work focus and open questions; do not invent a separate first-class topic-focus object.\n\
               - Same agent handle does not imply global memory in a new chat. Recover cross-chat context explicitly with context cards and `instafy conversation search/show --include-threads` before relying on old thread knowledge.\n\
               - If you emit `request_integration`, your `summary` must actively close the gap with: (1) what is blocked, (2) the exact next UI step using the action card in this message, and (3) the exact retry phrase the user should send.\n\
-              - If you emit `request_secret`, keep `summary` short: what is blocked, and that the value goes in the card on this message. Do not write a retry phrase or any instruction to reply: the card saves the value and continues the run itself. Do not name the environment variable in `summary`; call the value what the provider calls it on screen. Assume the person has never made an API token and has never seen the provider's developer screens. Teaching them is not `summary`'s job: carry the skill's own \"## Getting started\" walkthrough in the conversation beside the card, a step or two at a time, waiting for each answer, and naming the screens the skill declares. Emit `request_secret` for a value once; while its card is unanswered, carry on in words and do not emit it again. Write to the person in plain sentences: no \"please\", no em dashes, no exclamation marks.\n\
+              - If you emit `request_secret`, keep `summary` short: what is blocked, and that the value goes in the card on this message. Do not write a retry phrase or any instruction to reply: the card saves the value and continues the run itself. Do not name the environment variable in `summary`; call the value what the provider calls it on screen. Assume the person has never made an API token and has never seen the provider's developer screens. Teaching them is not `summary`'s job: carry the skill's own \"## Getting started\" walkthrough in the conversation beside the card, a step or two at a time, waiting for each answer, and naming the screens the skill declares. While a value's card is unanswered, carry on in words and do not emit `request_secret` for it again; a value the service or the skill's check rejected is a new ask, not a repeat. Write to the person in plain sentences: no \"please\", no em dashes, no exclamation marks.\n\
               - Addresses come only from the skill. If the skill declares an address, use that exact one and no other. If it declares none, name the screen in words and ask the person what they see. Never write a host or a link you did not read in the skill, and never offer two candidate addresses: a guessed address is a link the person will trust because it is yours.\n\
               - If you emit `request_location`, keep `summary` focused on why location is needed and whether approximate or precise location is enough. Do not mention action cards, UI steps, or retry phrases for location; the app handles that.\n\
             - Use `request_location` when the user wants nearby/current-location recommendations or routes and they have not already provided a place/city. Prefer `approximate` unless exact turn-by-turn or meter-level precision is clearly necessary.\n\
@@ -17260,6 +17293,26 @@ mod tests {
         }
     }
 
+    /// A rejected credential is usually reported on a follow-up turn, so every
+    /// Studio JSON contract has to carry the re-ask rule, not only the full one.
+    fn assert_prompt_carries_secret_rejection_contract(prompt: &str) {
+        assert!(prompt.contains("On a 401/403 or auth error, include the fitting `actions`.\n"));
+        // The re-ask is scoped to a rejected value. A permission error on one
+        // resource is a gap to report, so it must not read as a reason to ask
+        // for correct values again.
+        assert!(prompt.contains(
+            "When the service or the skill's check rejects a value the space already holds (not a permission error on one resource), emit `request_secret` again for every value that rejection could be about"
+        ));
+        assert!(!prompt.contains("include `actions`. Emit `request_secret` again"));
+        assert!(prompt.contains("even if the person says they already replaced them in Secrets."));
+        // Only `type` and `name` are required; a `skill` slug the model has to
+        // guess would turn off the declaration lookup.
+        assert!(prompt.contains(
+            "`request_secret`: { type, name, optional valueLabel, description, whereToGet, skill, sensitive, agentHandles }"
+        ));
+        assert!(!prompt.contains("{ type, name, skill,"));
+    }
+
     #[test]
     fn restored_provider_thread_uses_compact_studio_prompt() {
         let tmp = tempdir().expect("temp dir");
@@ -17318,6 +17371,7 @@ mod tests {
         assert!(prompt.contains("Same agent handle does not imply global memory"));
         assert!(prompt.contains("instafy conversation search/show --include-threads"));
         assert!(prompt.contains("Hardware/IO context card facts are not proof"));
+        assert_prompt_carries_secret_rejection_contract(&prompt);
         assert!(prompt.contains("Latest user request:\nContinue one step. Stay read-only."));
         assert!(prompt.contains("Conversation state:"));
         assert!(!prompt.contains("Please follow these constraints"));
@@ -17343,10 +17397,19 @@ mod tests {
         assert!(sections.contains_key("studioRuntimeInvariants"));
         assert!(sections.contains_key("conversationContext"));
         assert!(!sections.contains_key("assistantCapabilityContext"));
+        // The prompt names the workspace, and the test's workspace is a temp
+        // dir whose length follows TMPDIR. Measure without it so the budget
+        // checks the prompt text and not the machine running the test.
+        let workspace_path = tmp.path().to_string_lossy();
+        let prompt_text = prompt.replace(workspace_path.as_ref(), "");
+        let prompt_tokens = estimate_prompt_token_count(&prompt_text);
+        // The budget was 1,350 with the path included. The secret-rejection
+        // block added about 100 tokens, because follow-up turns are where a
+        // rejected value gets reported. Raise it again only on purpose.
         assert!(
-            estimate_prompt_token_count(&prompt) < 1_350,
-            "compact restored prompt was unexpectedly large: {} chars",
-            prompt.len()
+            prompt_tokens < 1_425,
+            "compact restored prompt was unexpectedly large: {prompt_tokens} estimated tokens, {} chars without the workspace path",
+            prompt_text.len()
         );
     }
 
@@ -20499,6 +20562,18 @@ mod tests {
         assert!(prompt.contains("`actions` must include `goal_update` with status `blocked`"));
         assert!(prompt.contains("MUST actually perform the filesystem changes"));
         assert!(!prompt.contains("continuing an existing provider thread"));
+        assert_prompt_carries_secret_rejection_contract(&prompt);
+        // The full prompt names what the skill's check rejecting a value looks
+        // like, without widening the re-ask to every 401/403.
+        assert!(prompt.contains(
+            "The skill's own check rejects a held value when its token request answers 401 or its status says the credential is wrong."
+        ));
+        assert!(!prompt.contains("is a rejection too"));
+        assert!(prompt.contains("quote the provider's own reason when it gives one"));
+        assert!(prompt.contains(
+            "a value the service or the skill's check rejected is a new ask, not a repeat"
+        ));
+        assert!(!prompt.contains("Emit `request_secret` for a value once"));
 
         let metric_map = metrics.as_object().expect("metrics object");
         assert_eq!(
@@ -21122,6 +21197,10 @@ mod tests {
         );
         assert!(prompt.contains("Do not substitute shell searches over raw runtime/session"));
         assert!(prompt.contains("Do not answer from raw runtime/session logs"));
+        assert!(prompt.contains(
+            "{ \"summary\": string, \"files\": [], optional \"suggestions\": [], optional \"actions\": [] }. Do not wrap JSON in Markdown."
+        ));
+        assert_prompt_carries_secret_rejection_contract(&prompt);
         let sections = metrics
             .get("promptSections")
             .and_then(JsonValue::as_object)
