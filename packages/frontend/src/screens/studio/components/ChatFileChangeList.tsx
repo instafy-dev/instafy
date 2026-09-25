@@ -1,3 +1,4 @@
+import { useConversationFileOpener } from "../../../workspace/ConversationFileContext";
 import { useCallback, useEffect, useId, useMemo, useState } from "react";
 import { Eye, NavArrowRight, OpenNewWindow, Undo } from "iconoir-react";
 import { IconButton } from "../../../components/Button";
@@ -531,6 +532,7 @@ export function ChatFileChangeList({
     return { added: totalAdded, removed: totalRemoved };
   }, [pendingPaths, statsByPath]);
 
+  const openConversationFile = useConversationFileOpener();
   const handleNavigate = useCallback(
     (path: string, range?: ChatMessageFileLineRange | null) => {
       if (typeof window === "undefined") {
@@ -555,6 +557,10 @@ export function ChatFileChangeList({
         detail.line = range.from;
         detail.range = { from: range.from, to: range.to };
       }
+      if (openConversationFile) {
+        openConversationFile(detail);
+        return;
+      }
       const runtimeWindow = window as typeof window & {
         __INSTAFY_PENDING_OPEN_WORKSPACE_FILE__?: typeof detail | null;
       };
@@ -563,7 +569,7 @@ export function ChatFileChangeList({
       openPanelTab("code");
       window.dispatchEvent(new CustomEvent("instafy:open-workspace-file", { detail }));
     },
-    [openPanelTab, projectId, requestUrlPush],
+    [openConversationFile, openPanelTab, projectId, requestUrlPush],
   );
 
   const handleOpenDiff = useCallback(

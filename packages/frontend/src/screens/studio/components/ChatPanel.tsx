@@ -338,7 +338,11 @@ import { LazyBrowserSessionModal } from "./LazyBrowserSessionModal";
 import type { SharedBrowserChromeProps } from "./SharedBrowserChrome";
 import { resolveSharedBrowserViewerKind } from "./sharedBrowserViewer";
 import { LocalBrowserSharing, LocalBrowserTabPublisher } from "./LocalBrowserSharing";
-import { ChatBrowserSubtabs, type ChatBrowserSubtab } from "./ChatBrowserSubtabs";
+import { ConversationSurfaceLayout, type ConversationSurface } from "../../../workspace/ConversationSurfaceLayout";
+import { ConversationFileContext } from "../../../workspace/ConversationFileContext";
+import { openConversationFile, selectConversationView } from "../../../workspace/conversationSurfaces";
+import type { OpenWorkspaceFileEventDetail } from "./useFilesPanelViewerState";
+import { FilesPanel } from "../StudioLazyPanels";
 import {
   BrowserTransportSelector,
   PersonalBrowserSurface,
@@ -691,12 +695,44 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     refreshRuntimeStatuses,
     setSessionRuntimeOverride,
   });
-  // Which conversation subtab is visible: chat messages or the docked browser.
-  // Kept as its own state (not derived from browserSessionOpen) so switching
-  // back to Chat does NOT close/unmount the browser; it keeps the live remote
-  // connection mounted, avoiding a reconnect on every switch.
-  const [browserSubtab, setBrowserSubtab] = useState<ChatBrowserSubtab>("chat");
-  useEffect(() => { if (messageTargetActive) setBrowserSubtab("chat"); }, [messageTargetActive, location.key]);
+  const { conversationSurfaces } = useWorkspaceTabs();
+  const surfaceScope = currentUserId && activeProjectId && activeConversationId
+    ? JSON.stringify([currentUserId, activeProjectId, activeConversationId]) : null;
+  const { read: readSurfaces, update: updateSurfaces } = conversationSurfaces;
+  const surfaces = readSurfaces(surfaceScope);
+  const selectSurface = useCallback((id: string) => {
+    updateSurfaces(surfaceScope, state => selectConversationView(state, id));
+  }, [surfaceScope, updateSurfaces]);
+  const setBrowserSubtab = selectSurface;
+  const browserSubtab = surfaces.activeId;
+  const [surfaceWidth, setSurfaceWidth] = useState(0);
+  const hasBrowserView = browserSessionOpen || hasHiddenBrowserSession;
+  const hasResources = hasBrowserView || surfaces.files.length > 0;
+  const resourceId = surfaces.resourceId === "browser" && !hasBrowserView
+    ? surfaces.files[0]?.id ?? "browser" : surfaces.resourceId;
+  const activeSurfaceId = surfaces.activeId === "browser" && !hasBrowserView ? "chat" : surfaces.activeId;
+  const wideSurfaces = surfaceWidth >= 1024;
+  const splitSurfaces = wideSurfaces && surfaces.split && hasResources;
+  const browserVisible = hasBrowserView && resourceId === "browser" && (splitSurfaces || activeSurfaceId === "browser");
+  const chatVisible = splitSurfaces || activeSurfaceId === "chat" || !hasResources;
+  const [fileOpenRequest, setFileOpenRequest] = useState<OpenWorkspaceFileEventDetail | null>(null);
+  const openSurfaceFile = useCallback((detail: OpenWorkspaceFileEventDetail) => {
+    if (detail.projectId && detail.projectId !== activeProjectId) return;
+    const path = detail.path.trim();
+    if (!path) return;
+    updateSurfaces(surfaceScope, state => openConversationFile(state, {
+      id: `file:${path}`, path,
+      line: detail.line ?? undefined, markdownView: detail.markdownView,
+    }));
+    setFileOpenRequest({ ...detail, path, projectId: activeProjectId });
+  }, [activeProjectId, surfaceScope, updateSurfaces]);
+  const selectedFile = surfaces.files.find(file => file.id === resourceId);
+  const fileRequest = useMemo(() => selectedFile ? (
+    fileOpenRequest?.path === selectedFile.path ? fileOpenRequest : {
+      path: selectedFile.path, projectId: activeProjectId, line: selectedFile.line, markdownView: selectedFile.markdownView,
+    }
+  ) : null, [activeProjectId, fileOpenRequest, selectedFile]);
+  useEffect(() => { if (messageTargetActive) selectSurface("chat"); }, [messageTargetActive, location.key, selectSurface]);
   const [sharedBrowserApprovalPending, setSharedBrowserApprovalPending] = useState(false);
   const [browserTransport, setBrowserTransport] = useState<BrowserTransport>("shared");
   const browserTransportScopeKey = currentUserId && activeProjectId && activeConversationId
@@ -707,32 +743,23 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
   const sharedBrowserActivationScopeRef = useRef<string | null>(null);
   const browserPanelId = useId();
   const chatPanelId = useId();
-  const browserPrevOpenRef = useRef(false);
-  useLayoutEffect(() => {
-    if (browserSessionOpen && !browserPrevOpenRef.current) {
-      setBrowserSubtab("browser");
-    } else if (!browserSessionOpen) {
-      setBrowserSubtab("chat");
-    }
-    browserPrevOpenRef.current = browserSessionOpen;
-  }, [browserSessionOpen]);
   useLayoutEffect(() => {
     if (browserSessionOpen && browserSessionExpandRequestToken > 0) {
       setBrowserSubtab("browser");
     }
-  }, [browserSessionExpandRequestToken, browserSessionOpen]);
+  }, [browserSessionExpandRequestToken, browserSessionOpen, setBrowserSubtab]);
   const handleBrowserSubtabChange = useCallback(
-    (tab: ChatBrowserSubtab) => {
+    (tab: string) => {
       setBrowserSubtab(tab);
       if (tab === "browser" && !browserSessionOpen) {
         handleToggleBrowserSession();
       }
     },
-    [browserSessionOpen, handleToggleBrowserSession],
+    [browserSessionOpen, handleToggleBrowserSession, setBrowserSubtab],
   );
   const handleBackToChat = useCallback(() => {
     setBrowserSubtab("chat");
-  }, []);
+  }, [setBrowserSubtab]);
   const { onOpenProjectSettings, onOpenChatNavigation, homeAttentionCount = 0 } = useWorkspaceControls();
   const activeConversationEntry = useMemo(() => {
     if (!activeConversationId) {
@@ -756,6 +783,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
       if (width < 1 || height < 1) {
         return;
       }
+      setSurfaceWidth(width);
       setBrowserPanelSize((current) =>
         current && current.width === width && current.height === height
           ? current
@@ -780,12 +808,12 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     return () => observer.disconnect();
   }, [jobThread]);
   const compactBrowserBar = shouldUseCompactBrowserChrome({
-    containerWidth: browserPanelSize?.width ?? null,
+    containerWidth: browserPanelSize ? (splitSurfaces ? browserPanelSize.width * surfaces.ratio : browserPanelSize.width) : null,
     compactViewport: compactBrowserViewport,
   });
   const compactSharedBrowserViewport =
     browserPanelSize !== null
-      ? browserPanelSize.width < ADAPTIVE_SHARED_BROWSER_WIDTH_PX
+      ? (splitSurfaces ? browserPanelSize.width * surfaces.ratio : browserPanelSize.width) < ADAPTIVE_SHARED_BROWSER_WIDTH_PX
       : compactBrowserViewport;
   const homeAttentionBadge = homeAttentionCount > 9 ? "9+" : homeAttentionCount.toString();
   const pinChatMessagesToBottom = !messageTargetActive && shouldPinChatMessagesToBottom({
@@ -892,7 +920,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     active:
       browserTransportPreferenceResolved &&
       browserSessionOpen &&
-      browserSubtab === "browser" &&
+      browserVisible &&
       browserTransport === "personal",
     profileUserId: currentUserId,
     projectId: activeProjectId ?? null,
@@ -1804,7 +1832,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     resolvedBrowserRuntimeId,
     showStatus,
   });
-  const browserModeActive = browserSessionOpen && browserSubtab === "browser";
+  const browserModeActive = browserSessionOpen && browserVisible;
   const showBrowserSessionPageStripForComposer =
     shouldShowBrowserSessionPageStripInComposer({
       browserModeActive,
@@ -1956,7 +1984,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
   useChatNewerHistoryPaging({
     visitKey: scrollSnapshotKey,
     routeKey: location.key,
-    enabled: messageTargetActive && browserSubtab === "chat",
+    enabled: messageTargetActive && chatVisible,
     hasNewer: messageContext.hasNewer,
     loading: messageContext.loading,
     error: messageContext.error,
@@ -1970,7 +1998,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     visitKey: scrollSnapshotKey,
     routeKey: location.key,
     currentUserId,
-    enabled: Boolean(chatScrollHistoryVisit) && browserSubtab === "chat" && !jobThread,
+    enabled: Boolean(chatScrollHistoryVisit) && chatVisible && !jobThread,
     hasResolvedHistory: hasResolvedRecentHistory,
     arrivalMessages: latestArrivalMessages,
     messageTargetActive,
@@ -1990,7 +2018,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     currentUserId,
     conversationId: activeConversationControllerId,
     rootRef: scrollContainerRef,
-    enabled: browserSubtab === "chat" && !jobThread,
+    enabled: chatVisible && !jobThread,
   });
 
   const activeConversation = useMemo(
@@ -5593,124 +5621,27 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     />
   );
 
-  return (
-    <RunFailureRetryProvider value={runFailureRetryContextValue}>
-    <ChatRuntimeActivityContext.Provider value={chatRuntimeActivityValue}>
-    <div
-      ref={rootRef}
-      className="relative flex h-full min-h-0 flex-col overflow-hidden"
-      data-testid="chat-panel-root"
-    >
-      {browserSessionOpen || hasHiddenBrowserSession ? (
-        <ChatBrowserSubtabs
-          activeTab={browserSubtab}
-          browserAttention={sharedBrowserApprovalPending}
-          browserPanelId={browserPanelId}
-          chatPanelId={chatPanelId}
-          onTabChange={handleBrowserSubtabChange}
-        />
-      ) : null}
-      {browserSessionOpen || hasHiddenBrowserSession ? (
-        <div
-          id={browserPanelId}
-          aria-label="Browser"
-          role="tabpanel"
-          hidden={browserSubtab !== "browser"}
-          className={browserSubtab === "browser" ? "flex min-h-0 flex-1 flex-col" : "hidden"}
-          style={
-            !showBrowserSessionPageStripForComposer && browserModalBottomInset
-              ? { marginBottom: browserModalBottomInset }
-              : undefined
-          }
-        >
-          {browserSessionOpen ? (
-            <>
-              {browserTransport === "shared" && !sharedBrowserActivated ? (
-                <div
-                  aria-busy={!personalBrowser.checked}
-                  className="flex items-center border-b border-slate-200 bg-white px-2 py-0.5 dark:border-slate-800 dark:bg-slate-950 sm:px-3"
-                  data-browser-session-safe-zone="true"
-                >
-                  {browserTransportSelector}
-                </div>
-              ) : null}
-              <PersonalBrowserSurface
-                active={browserTransport === "personal" && browserSubtab === "browser"}
-                agentWorking={activeConversationRuns.some((run) =>
-                  run.metadata?.browserTransport === "desktop-personal" &&
-                  (run.status === "in_progress" || run.status === "queued"))}
-                compactChrome={compactBrowserBar}
-                model={personalBrowser}
-                sharingControls={activeProjectId && currentUserId ? (
-                  <LocalBrowserTabPublisher
-                    key={`${activeProjectId}:${currentUserId}`}
-                    projectId={activeProjectId}
-                    userId={currentUserId}
-                    ownerId={personalBrowser.ownerId}
-                    takeoverRequestId={personalBrowser.status?.ownerId === personalBrowser.ownerId && personalBrowser.status?.tabControlActive ? personalBrowser.status.takeoverRequestId : undefined}
-                    canShare={browserSubtab === "browser" && browserTransport === "personal" && personalBrowser.status?.state === "ready" && typeof window.instafyDesktop?.browserTabShareStart === "function"}
-                  />
-                ) : null}
-                humanInputIdentityKey={browserHandoff.identityKey}
-                onContinueAfterHumanInput={browserHandoff.continuePersonal}
-                transportSelector={browserTransport === "personal" ? browserTransportSelector : null}
-              />
-              {sharedBrowserActivated ? (
-                <div className={browserTransport === "shared" ? "flex min-h-0 flex-1 flex-col" : "hidden"}>
-                  <LazyBrowserSessionModal
-                    isOpen={browserSessionOpen}
-                    onOpenChange={handleBrowserSessionOpenChange}
-                    projectId={activeProjectId ?? null}
-                    browserSessionId={sharedBrowserSurfaceSessionId}
-                    preferRuntimeId={preferredBrowserRuntimeId}
-                    resumeRuntimeId={requestedSharedBrowserRuntimeId ?? exactBrowserRuntimeId}
-                    expandRequestToken={browserSessionExpandRequestToken}
-                    presentation="docked"
-                    fillContainer
-                    onBackToChat={handleBackToChat}
-                    onApprovalPendingChange={setSharedBrowserApprovalPending}
-                    toolbarLeading={browserTransport === "shared" ? browserTransportSelector : null}
-                    transportActive={
-                      browserTransport === "shared" && browserSubtab === "browser"
-                    }
-                    canControlBrowser={canWriteProject}
-                    canClearBrowserData={canWriteProject}
-                    controlOwner={sharedBrowserControlOwner}
-                    currentUserId={currentUserId}
-                    humanInputIdentityKey={browserHandoff.identityKey}
-                    humanInputRunIds={browserHumanInputRunIds}
-                    activeBrowserRunId={browserHandoff.sharedJob?.runId ?? null}
-                    onTakeOverAgent={browserHandoff.sharedJob ? browserHandoff.takeOverShared : null}
-                    onContinueAfterHumanInput={browserHandoff.continueShared}
-                    sharedBrowserChrome={sharedBrowserChrome}
-                    sharedBrowserViewerKind={sharedBrowserViewerKind}
-                    sharedBrowserCapabilitiesResolved={sharedBrowserCapabilitiesResolved}
-                    sharedBrowserCapabilitiesAvailable={Boolean(sharedBrowserCapabilities)}
-                    sharedBrowserRoutineApprovalAvailable={
-                      sharedBrowserCapabilities?.approvalModes?.includes("routine") === true
-                    }
-                    sharedBrowserAvailableViewerKinds={
-                      sharedBrowserCapabilities?.viewerKinds
-                    }
-                    sharedBrowserRfbCapabilities={sharedBrowserCapabilities?.rfb ?? null}
-                    sharedBrowserWebRtcCapabilities={
-                      sharedBrowserCapabilities?.webrtc ?? null
-                    }
-                    onRuntimeIdResolved={handleSharedBrowserRuntimeResolved}
-                    onStatus={showStatus}
-                  />
-                </div>
-              ) : null}
-            </>
-          ) : null}
-        </div>
-      ) : null}
+  const resourceTabs: ConversationSurface[] = [
+    ...(hasBrowserView ? [{
+      id: "browser", label: "Browser", panelId: browserPanelId,
+      attention: sharedBrowserApprovalPending ? <span className="rounded-full bg-amber-100 px-1.5 py-0.5 text-[10px] text-amber-800 dark:bg-amber-400/15 dark:text-amber-200" data-testid="shared-browser-approval-attention">Approve</span> : undefined,
+    }] : []),
+    ...surfaces.files.map(file => ({
+      id: file.id, label: file.path.split("/").pop() ?? file.path, panelId: `${chatPanelId}-file`,
+      onClose: () => updateSurfaces(surfaceScope, state => {
+        const files = state.files.filter(item => item.id !== file.id);
+        const nextId = files[0]?.id ?? (hasBrowserView ? "browser" : "chat");
+        return { ...state, files, activeId: state.activeId === file.id ? nextId : state.activeId, resourceId: state.resourceId === file.id ? nextId : state.resourceId };
+      }),
+    })),
+  ];
+  const chatSurface = (
       <div
         id={chatPanelId}
         aria-label="Chat"
-        role={browserSessionOpen || hasHiddenBrowserSession ? "tabpanel" : undefined}
-        hidden={browserSubtab !== "chat"}
-        className={browserSubtab === "chat" ? "flex min-h-0 flex-1 flex-col" : "hidden"}
+        role={hasResources ? "tabpanel" : undefined}
+        hidden={!chatVisible}
+        className={chatVisible ? "flex h-full min-h-0 flex-col" : "hidden"}
       >
       <ChatMessageContextToolbar />
       {activeProjectId && currentUserId ? (
@@ -5963,6 +5894,130 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
       </ChatTranscriptViewport>
       </ChatScrollSnapshotBoundary>
       </div>
+  );
+  const resourceContent = <>
+      {browserSessionOpen || hasHiddenBrowserSession ? (
+        <div
+          id={browserPanelId}
+          aria-label="Browser"
+          role="tabpanel"
+          hidden={!browserVisible}
+          className={browserVisible ? "flex h-full min-h-0 flex-col" : "hidden"}
+          style={
+            !splitSurfaces && !showBrowserSessionPageStripForComposer && browserModalBottomInset
+              ? { height: `calc(100% - ${browserModalBottomInset})` }
+              : undefined
+          }
+        >
+          {browserSessionOpen ? (
+            <>
+              {browserTransport === "shared" && !sharedBrowserActivated ? (
+                <div
+                  aria-busy={!personalBrowser.checked}
+                  className="flex items-center border-b border-slate-200 bg-white px-2 py-0.5 dark:border-slate-800 dark:bg-slate-950 sm:px-3"
+                  data-browser-session-safe-zone="true"
+                >
+                  {browserTransportSelector}
+                </div>
+              ) : null}
+              <PersonalBrowserSurface
+                active={browserTransport === "personal" && browserVisible}
+                agentWorking={activeConversationRuns.some((run) =>
+                  run.metadata?.browserTransport === "desktop-personal" &&
+                  (run.status === "in_progress" || run.status === "queued"))}
+                compactChrome={compactBrowserBar}
+                model={personalBrowser}
+                sharingControls={activeProjectId && currentUserId ? (
+                  <LocalBrowserTabPublisher
+                    key={`${activeProjectId}:${currentUserId}`}
+                    projectId={activeProjectId}
+                    userId={currentUserId}
+                    ownerId={personalBrowser.ownerId}
+                    takeoverRequestId={personalBrowser.status?.ownerId === personalBrowser.ownerId && personalBrowser.status?.tabControlActive ? personalBrowser.status.takeoverRequestId : undefined}
+                    canShare={browserTransport === "personal" && personalBrowser.status?.state === "ready" && typeof window.instafyDesktop?.browserTabShareStart === "function"}
+                  />
+                ) : null}
+                humanInputIdentityKey={browserHandoff.identityKey}
+                onContinueAfterHumanInput={browserHandoff.continuePersonal}
+                transportSelector={browserTransport === "personal" ? browserTransportSelector : null}
+              />
+              {sharedBrowserActivated ? (
+                <div className={browserTransport === "shared" ? "flex min-h-0 flex-1 flex-col" : "hidden"}>
+                  <LazyBrowserSessionModal
+                    isOpen={browserSessionOpen}
+                    onOpenChange={handleBrowserSessionOpenChange}
+                    projectId={activeProjectId ?? null}
+                    browserSessionId={sharedBrowserSurfaceSessionId}
+                    preferRuntimeId={preferredBrowserRuntimeId}
+                    resumeRuntimeId={requestedSharedBrowserRuntimeId ?? exactBrowserRuntimeId}
+                    expandRequestToken={browserSessionExpandRequestToken}
+                    presentation="docked"
+                    fillContainer
+                    onBackToChat={handleBackToChat}
+                    onApprovalPendingChange={setSharedBrowserApprovalPending}
+                    toolbarLeading={browserTransport === "shared" ? browserTransportSelector : null}
+                    transportActive={
+                      browserTransport === "shared" && browserVisible
+                    }
+                    canControlBrowser={canWriteProject}
+                    canClearBrowserData={canWriteProject}
+                    controlOwner={sharedBrowserControlOwner}
+                    currentUserId={currentUserId}
+                    humanInputIdentityKey={browserHandoff.identityKey}
+                    humanInputRunIds={browserHumanInputRunIds}
+                    activeBrowserRunId={browserHandoff.sharedJob?.runId ?? null}
+                    onTakeOverAgent={browserHandoff.sharedJob ? browserHandoff.takeOverShared : null}
+                    onContinueAfterHumanInput={browserHandoff.continueShared}
+                    sharedBrowserChrome={sharedBrowserChrome}
+                    sharedBrowserViewerKind={sharedBrowserViewerKind}
+                    sharedBrowserCapabilitiesResolved={sharedBrowserCapabilitiesResolved}
+                    sharedBrowserCapabilitiesAvailable={Boolean(sharedBrowserCapabilities)}
+                    sharedBrowserRoutineApprovalAvailable={
+                      sharedBrowserCapabilities?.approvalModes?.includes("routine") === true
+                    }
+                    sharedBrowserAvailableViewerKinds={
+                      sharedBrowserCapabilities?.viewerKinds
+                    }
+                    sharedBrowserRfbCapabilities={sharedBrowserCapabilities?.rfb ?? null}
+                    sharedBrowserWebRtcCapabilities={
+                      sharedBrowserCapabilities?.webrtc ?? null
+                    }
+                    onRuntimeIdResolved={handleSharedBrowserRuntimeResolved}
+                    onStatus={showStatus}
+                  />
+                </div>
+              ) : null}
+            </>
+          ) : null}
+        </div>
+      ) : null}
+    {surfaces.files.length > 0 ? (
+      <div id={`${chatPanelId}-file`} role="tabpanel" aria-label={selectedFile?.path ?? "File"} hidden={!selectedFile} className={selectedFile ? "h-full min-h-0" : "hidden"} style={!splitSurfaces ? { paddingBottom: composerOverlayHeight } : undefined}>
+        <FilesPanel previewOwnerId={`conversation:${surfaceScope}`} showExplorer={false} mobileView="viewer" embeddedOpenRequest={fileRequest} />
+      </div>
+    ) : null}
+  </>;
+
+  return (
+    <RunFailureRetryProvider value={runFailureRetryContextValue}>
+    <ConversationFileContext.Provider value={openSurfaceFile}>
+    <ChatRuntimeActivityContext.Provider value={chatRuntimeActivityValue}>
+    <div
+      ref={rootRef}
+      className="relative flex h-full min-h-0 flex-col overflow-hidden"
+      data-testid="chat-panel-root"
+    >
+      <ConversationSurfaceLayout
+        chatPanelId={chatPanelId}
+        activeId={activeSurfaceId} resourceId={resourceId}
+        split={splitSurfaces} wide={wideSurfaces} ratio={surfaces.ratio}
+        onSelect={handleBrowserSubtabChange}
+        onSplitChange={split => updateSurfaces(surfaceScope, state => ({ ...state, split }))}
+        onRatioChange={ratio => updateSurfaces(surfaceScope, state => ({ ...state, ratio }))}
+        resources={resourceTabs}
+        chat={chatSurface}
+        content={resourceContent}
+      />
 
       <ChatMessageMenuOverlay
         messageMenu={messageMenu}
@@ -6001,6 +6056,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
       <CredentialsConnectModal {...gettingStartedConnectModalProps} />
 
       <ChatComposerSurface
+        overlayWidth={splitSurfaces ? `${(1 - surfaces.ratio) * 100}%` : undefined}
         aboveComposer={hasNewMessages ? <ChatNewMessagesButton onPress={jumpToNewMessages} /> : null}
         mutationDisabled={projectWriteDisabled}
         silenceHintProps={
@@ -6264,6 +6320,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
       ) : null}
         </div>
     </ChatRuntimeActivityContext.Provider>
+    </ConversationFileContext.Provider>
     </RunFailureRetryProvider>
       );
   }

@@ -62,11 +62,15 @@ import { type DirectoryEntries, useFilesPanelWorkspaceTree } from "./useFilesPan
 import type { FilesPanelMobileView } from "../../studioFilesMobileView";
 import { getStudioWorkspaceOwnerKey, type StudioDirectoryListingListener } from "../useStudioKnownFiles";
 
+const ignoreEmbeddedNavigation = () => {};
+
 const runtimeControllerEnabled = controllerClient.core.enabled;
 
 type FilesPanelRenderMode = "workspace" | "portal";
 
 interface FilesPanelProps {
+  /** A conversation owns selection; suppress global file-tab navigation. */
+  embeddedOpenRequest?: OpenWorkspaceFileEventDetail | null;
   initialRootPath?: string;
   tabsSlot?: ReactNode | null;
   renderMode?: FilesPanelRenderMode;
@@ -438,6 +442,7 @@ function formatTimestamp(timestamp: string | null | undefined): string {
 }
 
 export function FilesPanel({
+  embeddedOpenRequest,
   initialRootPath,
   tabsSlot = null,
   renderMode = "workspace",
@@ -894,7 +899,7 @@ export function FilesPanel({
     if (!activeProjectId) {
       return;
     }
-    if (hasBootstrappedWorkspaceRef.current) {
+    if (hasBootstrappedWorkspaceRef.current || embeddedOpenRequest !== undefined) {
       return;
     }
     const activeFileId = workspace.activeFileId;
@@ -918,7 +923,7 @@ export function FilesPanel({
       { resetHistory: true, setInitial: true }
     );
     hasBootstrappedWorkspaceRef.current = true;
-  }, [activeProjectId, replaceWorkspace, workspace]);
+  }, [activeProjectId, embeddedOpenRequest, replaceWorkspace, workspace]);
 
 
   const handleEditorWillMount = useCallback((monaco: Monaco | null) => {
@@ -1063,7 +1068,7 @@ export function FilesPanel({
     openFileFromEvent,
   } = useFilesPanelViewerState({
     workspaceOwnerKey,
-    acceptExternalOpenEvents: renderMode !== "portal",
+    acceptExternalOpenEvents: embeddedOpenRequest === undefined && renderMode !== "portal",
     activeFile,
     activeProjectId,
     directoryEntriesRef,
@@ -1079,10 +1084,10 @@ export function FilesPanel({
     normalizePath,
     normalizedRootPath,
     onOpenWorkspaceFileEvent: handleOpenWorkspaceFileEvent,
-    openFileTab,
+    openFileTab: embeddedOpenRequest === undefined ? openFileTab : ignoreEmbeddedNavigation,
     previewOwnerId,
     queueMarkdownHeadingJump,
-    requestUrlPush,
+    requestUrlPush: embeddedOpenRequest === undefined ? requestUrlPush : ignoreEmbeddedNavigation,
     setActiveFile,
     setExpandedDirectories,
     setMarkdownView,
@@ -1094,6 +1099,15 @@ export function FilesPanel({
     workspaceFiles: workspace.files,
     activeFilePathRef,
   });
+
+  const embeddedOpenRef = useRef(openFileFromEvent);
+  embeddedOpenRef.current = openFileFromEvent;
+  useEffect(() => {
+    if (!embeddedOpenRequest) return;
+    const abort = new AbortController();
+    void embeddedOpenRef.current({ ...embeddedOpenRequest, preserveDraft: true, signal: abort.signal });
+    return () => abort.abort();
+  }, [embeddedOpenRequest, effectiveRuntimeId, workspaceOwnerKey]);
 
   useEffect(() => {
     viewerStateBridgeRef.current = viewerState;
@@ -2032,7 +2046,7 @@ export function FilesPanel({
       const title = titleCandidate.trim().length > 0 ? extractBaseName(titleCandidate) : "Select a file";
       const subtitle = rawPath.trim().length > 0 ? extractDisplayPath(rawPath) : null;
       const mobileViewerBackTarget =
-        !isLargeScreen && mobileView === "viewer"
+        embeddedOpenRequest === undefined && !isLargeScreen && mobileView === "viewer"
           ? fileViewerReturnTarget === "assistant"
             ? "assistant"
             : showExplorerInline
@@ -2064,7 +2078,7 @@ export function FilesPanel({
                   <NavArrowLeft className="h-4 w-4" aria-hidden="true" />
                 </IconButton>
               ) : null}
-              {isLargeScreen && activePath && fileViewerReturnTarget === "assistant" ? (
+              {embeddedOpenRequest === undefined && isLargeScreen && activePath && fileViewerReturnTarget === "assistant" ? (
                 <Button
                   onPress={handleOpenChat}
                   variant="ghost"
@@ -2176,6 +2190,7 @@ export function FilesPanel({
     [
       activeFile,
       activePath,
+      embeddedOpenRequest,
       fileViewerReturnTarget,
       handleOpenChat,
       handleMobileViewerBack,

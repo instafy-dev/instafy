@@ -70,6 +70,7 @@ import { useTouchSendModePicker } from "./useTouchSendModePicker";
 import type { TouchSendModePickerOutcome } from "./touchSendModePicker";
 
 type ChatComposerSurfaceProps = {
+  overlayWidth?: string;
   browserDockProps: ComponentProps<typeof ChatBrowserDock>;
   composerOverlayRef: RefObject<HTMLDivElement | null>;
   composerAutoHidden: boolean;
@@ -206,6 +207,7 @@ export const COMPOSER_SEND_REST_CLASS = "[&_svg]:text-slate-400 dark:[&_svg]:tex
 export const COMPOSER_EDITOR_WRAPPER_CLASS = `flex ${CHAT_INPUT_CONTROL_HEIGHT_CLASS} min-w-0 flex-1 flex-col justify-center`;
 
 export function ChatComposerSurface({
+  overlayWidth,
   browserDockProps,
   composerOverlayRef,
   composerAutoHidden,
@@ -975,13 +977,12 @@ export function ChatComposerSurface({
         }`}
         data-testid="chat-composer-overlay"
         data-browser-session-safe-zone="true"
-        style={
-          composerAutoHidden && compactBrowserViewport
-            ? {
-                transform: "translateY(calc(100% - max(var(--instafy-safe-area-inset-bottom), 0.75rem)))",
-              }
-            : undefined
-        }
+        style={{
+          width: overlayWidth,
+          ...(composerAutoHidden && compactBrowserViewport ? {
+            transform: "translateY(calc(100% - max(var(--instafy-safe-area-inset-bottom), 0.75rem)))",
+          } : {}),
+        }}
       >
         {aboveComposer ? <div className="pointer-events-none absolute inset-x-0 bottom-full flex justify-center pb-2">
           {aboveComposer}
