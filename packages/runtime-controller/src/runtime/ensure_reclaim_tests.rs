@@ -55,6 +55,10 @@ impl ReclaimFixture {
                 &[&vec![self.waiting_project_id, self.blocker_project_id]],
             )
             .await?;
+        // The organization too, or every run leaves an empty one behind.
+        connection
+            .execute("delete from organizations where id = $1", &[&self.org_id])
+            .await?;
         Ok(())
     }
 }
@@ -73,7 +77,28 @@ async fn setup_at_hosted_runtime_limit(
         );
         return Ok(None);
     };
+    setup_at_hosted_runtime_limit_on(pool, test_name, reclaim_idle_seconds, idle_for_seconds)
+        .await
+        .map(Some)
+}
 
+/// [`setup_at_hosted_runtime_limit`] for a test that must fail, not skip,
+/// without a database.
+async fn require_setup_at_hosted_runtime_limit(
+    test_name: &'static str,
+    reclaim_idle_seconds: i64,
+    idle_for_seconds: i64,
+) -> anyhow::Result<ReclaimFixture> {
+    let pool = crate::tests::require_origin_test_pool(test_name).await?;
+    setup_at_hosted_runtime_limit_on(pool, test_name, reclaim_idle_seconds, idle_for_seconds).await
+}
+
+async fn setup_at_hosted_runtime_limit_on(
+    pool: crate::config::PgPool,
+    test_name: &'static str,
+    reclaim_idle_seconds: i64,
+    idle_for_seconds: i64,
+) -> anyhow::Result<ReclaimFixture> {
     let provider_events: Arc<Mutex<Vec<&'static str>>> = Arc::new(Mutex::new(Vec::new()));
     let provider_app = axum::Router::new()
         .route(
@@ -200,7 +225,7 @@ async fn setup_at_hosted_runtime_limit(
     config.runtime_limit_reclaim_idle_seconds = reclaim_idle_seconds;
     let state = crate::tests::build_test_state(pool.clone(), config);
 
-    Ok(Some(ReclaimFixture {
+    Ok(ReclaimFixture {
         pool,
         state,
         org_id,
@@ -210,7 +235,7 @@ async fn setup_at_hosted_runtime_limit(
         provider_id: provider_id.to_string(),
         provider_events,
         _provider_handle: provider_handle,
-    }))
+    })
 }
 
 fn limit_refusal_code(error: &(StatusCode, Json<ApiError>)) -> Option<String> {
@@ -498,6 +523,95 @@ async fn silent_tunnel_broker_cannot_hold_launch_admission_during_reclaim() -> a
             vec!["release", "launch"],
             "the waiting space launches only after the blocker was released"
         );
+        Ok(())
+    })
+    .await
+}
+
+/// Work that lands on the blocker between the idleness check and the stop is
+/// requeued. That space now waits on the limit like any other: the stop tells
+/// its studio the work is its own (so it may ask again), and the limit-wait
+/// sweep is told to start it once a runtime is free.
+#[tokio::test]
+async fn reclaim_that_requeues_work_leaves_the_reclaimed_space_waiting() -> anyhow::Result<()> {
+    // Never a silent pass: this proves the reclaimed space keeps its work.
+    let fixture =
+        require_setup_at_hosted_runtime_limit("hosted-reclaim-requeued-work", 120, 3_600).await?;
+    let cleanup = crate::tests::SharedDbFixture {
+        organizations: vec![fixture.org_id],
+        projects: vec![fixture.waiting_project_id, fixture.blocker_project_id],
+    };
+
+    crate::tests::with_shared_db_fixture(cleanup, async {
+        let job_id = Uuid::new_v4();
+        fixture
+            .pool
+            .get()
+            .await?
+            .execute(
+                "insert into agent_jobs (id, project_id, status, payload, target_runtime_id)
+                 values ($1, $2, 'queued', '{}'::jsonb, $3)",
+                &[
+                    &job_id,
+                    &fixture.blocker_project_id,
+                    &fixture.blocker_runtime_id,
+                ],
+            )
+            .await?;
+        let _watch = fixture
+            .state
+            .events
+            .watch_project(fixture.blocker_project_id);
+        let mut events = fixture.state.events.subscribe();
+
+        let reclaimed = reclaim_idle_hosted_runtime_blocker(
+            &fixture.state,
+            &ActiveHostedRuntimeBlocker {
+                runtime_id: fixture.blocker_runtime_id,
+                project_id: fixture.blocker_project_id,
+                project_name: None,
+                display_name: None,
+            },
+        )
+        .await;
+        assert!(reclaimed, "the idle blocker should have been stopped");
+        assert_eq!(fixture.blocker_status().await?, "stopped");
+
+        let mut stopped = None;
+        while let Ok(event) = events.try_recv() {
+            if event.kind == "runtime.stopped"
+                && event.project_id == Some(fixture.blocker_project_id)
+            {
+                stopped = Some(event);
+            }
+        }
+        let stopped = stopped.ok_or_else(|| anyhow::anyhow!("no runtime.stopped published"))?;
+        assert_eq!(
+            stopped.data["reason"],
+            json!(RUNTIME_LIMIT_RECLAIM_STOP_REASON)
+        );
+        assert_eq!(stopped.data["queuedJobCount"], json!(1));
+
+        let connection = fixture.pool.get().await?;
+        let job_status: String = connection
+            .query_one("select status from agent_jobs where id = $1", &[&job_id])
+            .await?
+            .get("status");
+        assert_eq!(job_status, "queued");
+        let wait = connection
+            .query_opt(
+                "select request_source, ensure_request from hosted_runtime_limit_waits
+                 where project_id = $1",
+                &[&fixture.blocker_project_id],
+            )
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("the reclaimed space should be waiting"))?;
+        assert_eq!(wait.get::<_, String>("request_source"), "server");
+        let request = wait
+            .get::<_, tokio_postgres::types::Json<JsonValue>>("ensure_request")
+            .0;
+        assert_eq!(request["runtimeId"], json!(fixture.blocker_runtime_id));
+        assert_eq!(request["provider"], json!(fixture.provider_id));
         Ok(())
     })
     .await

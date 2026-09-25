@@ -307,6 +307,9 @@ async fn main() -> anyhow::Result<()> {
     automations::spawn_automation_scheduler(state.clone());
     notification_platform::spawn_worker(state.clone());
     send_queue::spawn_send_queue_recovery_sweep(state.clone());
+    // Retries hosted launches the organization runtime limit refused while
+    // work is queued behind it; see runtime/limit_waits.rs.
+    runtime::spawn_hosted_runtime_limit_wait_sweep(state.clone());
 
     let idle_state = state.clone();
     tokio::spawn(async move {

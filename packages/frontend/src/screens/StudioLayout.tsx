@@ -18,6 +18,7 @@ import { useRouteOwnedWorkspaceDrawer } from "./useRouteOwnedWorkspaceDrawer";
 import { ChatLines, Clock, Coins, Cpu, Cube, GitBranch, Globe, Group, Lock, Page, Puzzle, Search, SidebarExpand, User, Xmark } from "iconoir-react";
 import { fetchCreditPolicy } from "../credits/creditService";
 import { clearIdlePaused, clearRestoredAwaitingIntent, markIdlePaused } from "../runtime/idlePauseRegistry";
+import { isRuntimeLimitReclaimStopReason } from "../runtime/unexpectedHostedRuntimeRecovery";
 import { useGatedInterval } from "../runtime/pollingGate";
 import { setRuntimeSizePreference } from "../runtime/runtimeSizePreference";
 import { isHostedRuntime, runtimeEntryIsReady } from "../runtime/utils/runtimeEntry";
@@ -955,7 +956,13 @@ function StudioLayoutInner() {
         custom.detail?.data && typeof custom.detail.data.reason === "string"
           ? custom.detail.data.reason.trim().toLowerCase()
           : "";
-      if (reason !== "idle" && reason !== "credits_exhausted" && reason !== "oom_killed") {
+      const reclaimed = isRuntimeLimitReclaimStopReason(reason);
+      if (
+        reason !== "idle" &&
+        reason !== "credits_exhausted" &&
+        reason !== "oom_killed" &&
+        !reclaimed
+      ) {
         return;
       }
       const runtimeId =
@@ -967,7 +974,16 @@ function StudioLayoutInner() {
         return;
       }
       runtimeStopNoticeRef.current = noticeKey;
-      if (reason === "idle") {
+      if (reclaimed) {
+        // Whether to hold this machine is the recovery listener's call (it
+        // knows about this tab's queued work); this only explains the stop.
+        showStatus(
+          "This space's cloud runtime was paused so another space in your team could use it. Your files are kept, and it starts again when you continue and a runtime is free.",
+          "info",
+          8000,
+          { id: "runtime-paused-reclaimed", forceVisible: true },
+        );
+      } else if (reason === "idle") {
         markIdlePaused(projectId);
         showStatus(
           "Hosted machine paused after inactivity. Your files and caches are kept — it wakes when you continue.",

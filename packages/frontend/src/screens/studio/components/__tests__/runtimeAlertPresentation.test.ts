@@ -148,6 +148,22 @@ describe("resolveAgentWaitingActivityCopy runtime slot wall", () => {
     expect(copy.label).not.toContain("starting its workspace");
   });
 
+  it("promises the send with the controller's give-up bound", () => {
+    const copy = resolveAgentWaitingActivityCopy({
+      displayNames: ["Octo"],
+      workspaceStarting: false,
+      queued: true,
+      runtimeLimit: {
+        limitReached: true,
+        blockerProjectLabel: "My other app",
+        blockerRuntimeLabel: null,
+      },
+    });
+    expect(copy.label).toContain("sends once a runtime is free");
+    expect(copy.label).toContain("waits up to 30 minutes");
+    expect(copy.ariaLabel).toBe(copy.label);
+  });
+
   it("falls back to a generic location when the blocker is unnamed", () => {
     const copy = resolveAgentWaitingActivityCopy({
       displayNames: ["Octo"],
