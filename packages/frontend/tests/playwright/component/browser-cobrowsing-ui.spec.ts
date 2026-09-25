@@ -20,10 +20,11 @@ async function mountPersonalControls(page: Page) {
     function Fixture() {
       const [native, setNative] = React.useState({ agentControlEnabled: false, humanControlReady: true, approvalMode: "ask" });
       const [agentError, setAgentError] = React.useState(null);
+      const [preferredApprovalMode, setPreferredApprovalMode] = React.useState("routine");
       window.__confirmNativeDrain = () => setNative((value) => ({ ...value, humanControlReady: true }));
       const status = { supported:true, enabled:true, state:"ready", visible:true, url:"https://fixture.example.test/form", canGoBack:false, canGoForward:false, ownerId:"owner-1", projectId:"project-1", approvalModes:["ask","routine"], ...native };
       const model = {
-        agentError, agentPhase:agentError ? "unavailable" : native.agentControlEnabled ? "ready" : "idle", available:true, checked:true,
+        preferredApprovalMode, setPreferredApprovalMode, agentError, agentPhase:agentError ? "unavailable" : native.agentControlEnabled ? "ready" : "idle", available:true, checked:true,
         clearDataError:null, clearDataState:"idle", clearNavigationError:()=>{}, clearData:async()=>null,
         close:async()=>{ throw new Error("Expansion must not close the browser"); }, goBack:async()=>null,
         goForward:async()=>null, navigate:async()=>null, navigationError:null, ownerId:"owner-1", reload:async()=>null,
@@ -44,7 +45,7 @@ async function mountPersonalControls(page: Page) {
             window.__continuationAttempts = (window.__continuationAttempts ?? 0) + 1;
             if (window.__failNextContinuation) {
               window.__failNextContinuation = false;
-              setAgentError("Fixture continuation failed; try Done again");
+              setAgentError("Fixture continuation failed; try Let AI continue again");
               return false;
             }
             window.__continuation = message;
@@ -73,10 +74,12 @@ for (const width of [360, 900]) {
     page.on("pageerror", (error) => errors.push(error.message));
     await mountPersonalControls(page);
     await page.getByRole("button", { name: "Browser settings", exact: true }).click();
-    await page.getByTestId("personal-browser-routine-approval").check();
+    await expect(page.getByTestId("personal-browser-routine-approval")).toBeChecked();
     await page.keyboard.press("Escape");
     await page.getByRole("button", { name: "Resume agent control", exact: true }).click();
     await expect.poll(() => page.evaluate(() => (window as { __lastApprovalMode?: string }).__lastApprovalMode)).toBe("routine");
+    await page.getByTestId("browser-human-input-request").click();
+    await expect(page.getByRole("dialog", { name: "Take over browser", exact: true })).toBeVisible();
     await page.getByTestId("browser-human-input-takeover").click();
     await expect(page.getByTestId("browser-human-input-controls")).toContainText("Waiting for agent control to stop");
     await expect(page.getByTestId("browser-human-input-continue")).toHaveCount(0);
@@ -89,7 +92,7 @@ for (const width of [360, 900]) {
     await page.evaluate(() => (window as unknown as { __confirmNativeDrain: () => void }).__confirmNativeDrain());
     await expect(page.getByTestId("browser-human-input-continue")).toBeEnabled();
     await expect(page.getByRole("button", { name: "Resume agent control", exact: true })).toHaveCount(0);
-    await expect(page.getByTestId("browser-human-input-continue")).toHaveText("Done, continue");
+    await expect(page.getByTestId("browser-human-input-continue")).toHaveText("Let AI continue");
     const screenshotPath = testInfo.outputPath(`personal-takeover-expanded-${width}px.png`);
     await page.screenshot({ animations: "disabled", path: screenshotPath });
     await testInfo.attach(`Expanded Personal takeover at ${width}px`, { contentType: "image/png", path: screenshotPath });
@@ -107,7 +110,7 @@ for (const width of [360, 900]) {
     await page.getByTestId("browser-human-input-continue").click();
     await expect.poll(() => page.evaluate(() => (window as { __continuation?: string }).__continuation)).toContain("Take a fresh snapshot");
     expect(await page.evaluate(() => (window as { __continuationAttempts?: number }).__continuationAttempts)).toBe(2);
-    await expect(page.getByRole("button", { name: "Pause agent control", exact: true })).toBeVisible();
+    await expect(page.getByTestId("browser-human-input-request")).toBeVisible();
     expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(width);
     expect(errors).toEqual([]);
   });

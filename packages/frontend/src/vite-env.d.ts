@@ -339,6 +339,7 @@ type InstafyDesktopPersonalBrowserStatus = {
   approvalModes?: Array<"ask" | "routine">;
   humanInputRequest?: import("./screens/studio/components/useBrowserHumanInput").BrowserHumanInputRequest;
   humanControlReady?: boolean;
+  takeoverRequestId?: string;
   sharing?: boolean;
   tabControlActive?: boolean;
   ownerId?: string;
@@ -354,6 +355,7 @@ type InstafyDesktopPersonalBrowserBounds = {
   height: number;
   visible?: boolean;
   occluded?: boolean;
+  agentWorking?: boolean;
   ownerId?: string;
 };
 

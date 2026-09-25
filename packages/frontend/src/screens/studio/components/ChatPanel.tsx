@@ -344,18 +344,21 @@ import {
   PersonalBrowserSurface,
 } from "./PersonalBrowserSurface";
 import {
-  resolveDefaultBrowserTransport,
   type BrowserTransport,
   usePersonalBrowserBridge,
 } from "./usePersonalBrowserBridge";
 import {
   readBrowserTransportPreference,
+  readBrowserSessionTransport,
+  resolveBrowserTransportSelection,
+  writeBrowserSessionTransport,
   writeBrowserTransportPreference,
 } from "./browserTransportPreference";
 import { CHAT_TRANSCRIPT_HEADER_INSET_PX, ChatSpeakerStickyOverlay, ChatTranscriptViewport } from "./ChatTranscriptViewport";
 import { resolveSharedBrowserControlOwner } from "./sharedBrowserControlOwner";
 import { useSharedBrowserApprovalTransport } from "./useSharedBrowserApprovalTransport";
 import { useChatBrowserHandoff } from "./useChatBrowserHandoff";
+import { useChatBrowserRequest } from "./useChatBrowserRequest";
 import { sharedBrowserConversationRunIds } from "./browserHandoffRouting";
 
 const { enabled: runtimeControllerEnabled } = controllerClient.core;
@@ -696,11 +699,12 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
   useEffect(() => { if (messageTargetActive) setBrowserSubtab("chat"); }, [messageTargetActive, location.key]);
   const [sharedBrowserApprovalPending, setSharedBrowserApprovalPending] = useState(false);
   const [browserTransport, setBrowserTransport] = useState<BrowserTransport>("shared");
-  const [browserTransportPreferenceResolved, setBrowserTransportPreferenceResolved] =
-    useState(false);
+  const browserTransportScopeKey = currentUserId && activeProjectId && activeConversationId
+    ? JSON.stringify([currentUserId, activeProjectId, activeConversationId]) : null;
+  const [browserTransportPreferenceScope, setBrowserTransportPreferenceScope] = useState<string | null>(null);
+  const browserTransportPreferenceResolved = Boolean(browserTransportScopeKey && browserTransportPreferenceScope === browserTransportScopeKey);
   const [sharedBrowserActivated, setSharedBrowserActivated] = useState(false);
   const sharedBrowserActivationScopeRef = useRef<string | null>(null);
-  const browserTransportInitializedUserRef = useRef<string | null>(null);
   const browserPanelId = useId();
   const chatPanelId = useId();
   const browserPrevOpenRef = useRef(false);
@@ -886,6 +890,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
   );
   const personalBrowser = usePersonalBrowserBridge({
     active:
+      browserTransportPreferenceResolved &&
       browserSessionOpen &&
       browserSubtab === "browser" &&
       browserTransport === "personal",
@@ -894,55 +899,44 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     conversationBindingKey: activeConversationId ?? null,
   });
   useEffect(() => {
-    browserTransportInitializedUserRef.current = null;
-    setBrowserTransportPreferenceResolved(false);
-    setSharedBrowserActivated(false);
-  }, [currentUserId]);
-  useEffect(() => {
     if (
       !personalBrowser.checked ||
       !currentUserId ||
       !activeProjectId ||
-      browserTransportInitializedUserRef.current === currentUserId
+      !activeConversationId ||
+      !browserSessionStateHydrated ||
+      browserTransportPreferenceResolved
     ) {
       return;
     }
-    browserTransportInitializedUserRef.current = currentUserId;
-    const storedTransport = readBrowserTransportPreference(currentUserId);
-    const nextTransport =
-      storedTransport === "shared" ||
-      (storedTransport === "personal" && personalBrowser.available)
-        ? storedTransport
-        : resolveDefaultBrowserTransport({
-            checked: personalBrowser.checked,
-            supported: personalBrowser.status?.supported ?? false,
-            enabled: personalBrowser.status?.enabled ?? false,
-          });
+    const nextTransport = resolveBrowserTransportSelection({
+      resume: readBrowserSessionTransport(currentUserId, activeProjectId, activeConversationId)
+        ?? (exactBrowserRuntimeId ? "shared" : null),
+      preference: readBrowserTransportPreference(currentUserId),
+      personalAvailable: personalBrowser.available,
+    });
     setBrowserTransport(nextTransport);
-    setBrowserTransportPreferenceResolved(true);
+    setBrowserTransportPreferenceScope(browserTransportScopeKey);
     setSharedBrowserActivated(browserSessionOpen && nextTransport === "shared");
   }, [
     activeProjectId,
+    activeConversationId,
+    browserTransportScopeKey,
+    browserTransportPreferenceResolved,
+    browserSessionStateHydrated,
+    exactBrowserRuntimeId,
     currentUserId,
     personalBrowser.available,
     personalBrowser.checked,
-    personalBrowser.status?.enabled,
-    personalBrowser.status?.supported,
     browserSessionOpen,
   ]);
   useEffect(() => {
-    if (
-      browserTransport === "personal" &&
-      personalBrowser.checked &&
-      !personalBrowser.available
-    ) {
-      setBrowserTransport("shared");
-      setBrowserTransportPreferenceResolved(true);
-      setSharedBrowserActivated(browserSessionOpen);
+    if (browserTransportPreferenceResolved && browserSessionOpen && currentUserId && activeProjectId && activeConversationId) {
+      writeBrowserSessionTransport(currentUserId, activeProjectId, activeConversationId, browserTransport);
     }
-  }, [browserSessionOpen, browserTransport, personalBrowser.available, personalBrowser.checked]);
+  }, [browserTransportPreferenceResolved, browserSessionOpen, currentUserId, activeProjectId, activeConversationId, browserTransport]);
   const handleBrowserTransportChange = useCallback((transport: BrowserTransport) => {
-    setBrowserTransportPreferenceResolved(true);
+    setBrowserTransportPreferenceScope(browserTransportScopeKey);
     if (transport === "shared") {
       setSharedBrowserActivated(true);
     }
@@ -950,15 +944,15 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     if (currentUserId) {
       writeBrowserTransportPreference(currentUserId, transport);
     }
-  }, [currentUserId]);
+  }, [currentUserId, browserTransportScopeKey]);
   const revealSharedBrowserApproval = useCallback(() => {
     // Approval requests belong to the mounted Shared Browser. Reveal that
     // surface without stealing focus from Chat or overwriting the user's saved
     // Personal Browser preference; Personal remains mounted for the next switch.
-    setBrowserTransportPreferenceResolved(true);
+    setBrowserTransportPreferenceScope(browserTransportScopeKey);
     setSharedBrowserActivated(true);
     setBrowserTransport("shared");
-  }, []);
+  }, [browserTransportScopeKey]);
   const resumeSharedBrowser = useCallback((runtimeId: string) => {
     revealSharedBrowserApproval();
     resumeBrowserSession(runtimeId);
@@ -4403,6 +4397,29 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     agentHandle: typingAgentHandle,
     onSubmit,
   });
+  useChatBrowserRequest({
+    identity: JSON.stringify([currentUserId, activeProjectId, activeConversationId]),
+    messages,
+    canWrite: canWriteProject,
+    ready: browserTransportPreferenceResolved && browserSessionStateHydrated,
+    transport: browserTransport,
+    open: browserSessionOpen,
+    busy: isAssistantTyping,
+    personalAvailable: personalBrowser.available,
+    personalReady: personalBrowser.status?.state === "ready",
+    sharedReady: Boolean(resolvedBrowserRuntimeId && browserHandoffPage),
+    activate: (transport) => {
+      // This request selects a session, not a new device-wide preference.
+      setBrowserTransport(transport);
+      if (transport === "shared") setSharedBrowserActivated(true);
+      openBrowserSession(transport === "shared" ? resolvedBrowserRuntimeId : null);
+      setBrowserSubtab("browser");
+    },
+    continueTask: (transport, message) => transport === "personal"
+      ? browserHandoff.startPersonal(message)
+      : browserHandoff.continueShared(message),
+    onError: (message) => showStatus(message, "error", 6000),
+  });
 
   const handleStashDraft = useCallback(async (): Promise<boolean> => {
     if (!ensureProjectWriteAccess()) {
@@ -5619,6 +5636,9 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
               ) : null}
               <PersonalBrowserSurface
                 active={browserTransport === "personal" && browserSubtab === "browser"}
+                agentWorking={activeConversationRuns.some((run) =>
+                  run.metadata?.browserTransport === "desktop-personal" &&
+                  (run.status === "in_progress" || run.status === "queued"))}
                 compactChrome={compactBrowserBar}
                 model={personalBrowser}
                 sharingControls={activeProjectId && currentUserId ? (
@@ -5627,6 +5647,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
                     projectId={activeProjectId}
                     userId={currentUserId}
                     ownerId={personalBrowser.ownerId}
+                    takeoverRequestId={personalBrowser.status?.ownerId === personalBrowser.ownerId && personalBrowser.status?.tabControlActive ? personalBrowser.status.takeoverRequestId : undefined}
                     canShare={browserSubtab === "browser" && browserTransport === "personal" && personalBrowser.status?.state === "ready" && typeof window.instafyDesktop?.browserTabShareStart === "function"}
                   />
                 ) : null}

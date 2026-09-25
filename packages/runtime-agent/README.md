@@ -52,7 +52,8 @@ updated when the human running the workflow explicitly requests it.
 - `CODEX_DISABLED` — set to `1`/`true` to disable Codex automation (useful for smoke tests that stub job execution).
 - `CODEX_MODEL`, `CODEX_MODEL_PROVIDER` — optional overrides for the model slug or provider id used by Codex.
 - `CODEX_RUNTIME_REASONING_EFFORT` — explicit reasoning effort for runtime runs (`none`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max`, or `ultra`; choose a value supported by the selected model and proxy). A valid setting takes precedence over job heuristics, including feature jobs and retries. When unset or invalid, the runtime retains the job's effort selection or defaults to `low`. A controller-supplied `CODEX_AGENT_REASONING_EFFORT` override remains authoritative.
-- `CODEX_PROFILE` — optional profile from `~/.codex/config.toml` used when loading configuration.
+- `CODEX_PROFILE` — optional profile from the runtime home's `config.toml` used when loading configuration.
+- Runtime configuration is loaded from `CODEX_HOME` when explicitly configured, otherwise from the workspace's `.codex` directory. Desktop jobs do not implicitly load the computer owner's Codex configuration, plugins, or MCP connections. Configure runtime integrations in that runtime home.
 - `CODEX_SANDBOX_MODE` — choose `read-only`, `workspace-write` (default), or `danger-full-access` when overriding the sandbox.
 - `CODEX_LINUX_SANDBOX_EXE` — optional path to the hardened sandbox binary (mirrors the CLI flag).
 - `CODEX_BASE_INSTRUCTIONS` — inline override for Codex base instructions.
@@ -100,6 +101,7 @@ Useful env toggles:
 	- `LIVE_BROWSER_SIM_PROMPT='...'` — exact user prompt to simulate.
 	- `LIVE_BROWSER_SIM_EXPECT_PLAYWRIGHT_CLI=1` — assert at least one Playwright CLI command execution was emitted.
 	- `LIVE_BROWSER_SIM_EXPECT_PROVIDER='playwright-browser-session-direct'` — assert selected provider path.
+- `LIVE_BROWSER_SIM_EXPECT_HANDOFF=1` — require one `request_browser` card when running without an interactive browser attached (use `LIVE_BROWSER_SIM_RUNTIME_FLAVOR=base`). Use `LIVE_BROWSER_SIM_EXPECT_LOCATION=device|workspace` when testing an explicit location choice; otherwise it expects `auto`. This checks a real model's capability handoff, not browser execution or the Studio button.
 - `CODEX_DEBUG_REQUEST_TOOLS=1` — print the exact tool names sent to the model.
 - `CODEX_DEBUG_MCP_PREFLIGHT=1` / `CODEX_DEBUG_BROWSER_EVENTS=1` — log MCP startup + browser turn events.
 

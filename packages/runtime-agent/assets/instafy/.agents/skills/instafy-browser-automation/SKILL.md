@@ -26,7 +26,43 @@ For interactive Personal or Shared Browser work, default to `page` first. Do not
 
 ## When to use this skill
 
-Use this skill when the task requires opening, reading, clicking through, or verifying something in a browser. Follow only the browser tool exposed for the current turn. If none is exposed, report that the runtime has no browser capability instead of guessing a transport.
+Use this skill when the task requires opening, reading, clicking through, or verifying something in a browser. Follow the browser tools exposed for the current turn. When interactive tools are absent, use the Studio handoff below.
+
+## Open or resume from Chat
+
+If the task needs a visible, interactive browser and neither Personal nor Shared
+Browser tools are exposed, emit a `request_browser` action:
+
+```json
+{ "type": "request_browser", "task": "The user's concrete browsing task and relevant continuation context", "browserLocation": "auto" }
+```
+
+Studio opens the conversation's browser and continues the task on its exact
+runtime when the user selects **Open browser and continue**. Paused native
+control resumes in Ask mode; active control keeps its current settings. Existing
+site/action approval still applies.
+Do not claim the website was opened before a browser tool returns observations.
+
+Use `auto` unless the user explicitly distinguishes this physical device from
+the remote Workspace. Browser ownership does not specify execution location.
+Studio knows device availability and saved sessions that may be absent from your
+context; let it choose those defaults. Use `device` or `workspace` only for that
+explicit location choice. An unavailable chosen browser is a blocker, not
+permission to change profiles.
+No website-specific routing or keyword matching is needed.
+
+For a continuation, recover the relevant task from conversation context. Include
+the site or useful entry route, what was already done, and what remains. Preserve
+the intended account/session; inspect the live page before repeating actions.
+Cookies and persisted website data belong to the browser profile. Do not copy
+them, secret field values, or page snapshots into a task or learned memory.
+If multiple previous activities fit, clarify which one matters. Do not guess
+that an expired login, cart or unsaved form is still intact.
+
+Once interactive tools are exposed, use them directly. A paused/revoked browser
+or a rejected action must not produce another browser request to bypass the
+existing control boundary. Read-only public verification may still use
+`instafy_local_browser.observe` without an interactive handoff.
 
 ## Shared Browser command (only when Shared Browser is exposed)
 

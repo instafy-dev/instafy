@@ -23,6 +23,37 @@ for OAuth. It imports neither their profiles nor their cookies. Opening the
 Shared Browser does not copy Personal logins into it, and the fresh observer
 cannot import either profile.
 
+## Opening and continuing a browser task from Chat
+
+When an interactive browser is not attached to a Chat turn, the bundled browser
+skill can return an **Open browser and continue** card. Selecting it opens the
+conversation's browser and sends the task to that exact browser once it is ready.
+This is a user-selected handoff; displaying an old message never runs it again.
+Paused native control uses the existing Resume flow with the Browser settings
+approval choice (routine browsing by default on supported Desktop hosts); already active
+control keeps its settings. A pending manual step must be finished with **Let AI continue** before another task can start.
+
+Studio first reuses the browser location saved for this conversation on this
+device. For a new conversation, it uses the user's explicit location preference,
+otherwise **This device** in supported Desktop builds and **Workspace** on web
+or mobile. An explicit request for either location overrides that selection for
+the conversation without changing the user's default. An unavailable saved
+Personal Browser does not silently become a different Workspace profile.
+
+Browser location and the exact Workspace runtime binding are stored locally per
+Instafy user, project and conversation, so closing the Studio tab does not erase
+them. A live tab keeps its own runtime selection. The controller still checks
+access and availability; an expired runtime cannot be restored from an identifier.
+This record is not synced across devices. Use the existing resume link for a
+Workspace session on another device.
+
+The skill carries task-relevant context, such as the site and work already done,
+into the browser turn and inspects current state before continuing. This does
+not save page snapshots or export cookies. A native app restart preserves the
+profile, but not the open page or unsaved form contents; the agent may need to
+navigate back using the conversation context. Site-specific carts and login
+expiry still follow the site's behavior.
+
 ## What survives a change?
 
 - **Personal, another project on the same device:** the same user's profile is
@@ -56,17 +87,20 @@ Both interactive modes have an **Expand** control, including compact layouts.
 It fills the app viewport; it does not create a different browser, profile or
 OS window. Collapse returns to the docked browser with the same page.
 
-**Always allow routine browsing** is an early, explicit choice: at the first
-Shared site prompt for that turn, or before Personal Resume until paused.
-It avoids repeated routine site/action prompts without changing cookie sharing.
+Shared offers **Always allow routine browsing** at the first site prompt for that
+turn. Personal Browser defaults to **Allow routine browsing without asking each
+time** in Browser settings and confirms that choice once when control starts.
+Uncheck it before Resume for stricter Ask mode. Routine browsing covers ordinary
+navigation, search, clicks and non-sensitive forms without repeated site/action
+prompts; it does not change cookie sharing.
 Recognized high-impact actions still ask and secret entry remains manual; a
 website can attach unexpected side effects to an otherwise ordinary control.
 See each mode's policy for scope and revocation.
 
-**Take over → fill highlighted fields → Done, continue** is a sequential handoff.
+**Take over → fill highlighted fields → Let AI continue** is a sequential handoff.
 The browser must confirm that agent operations have stopped before manual input
-is enabled. Done sends a fixed continuation, not entered values, and starts a
-fresh browser turn on that page. Shared page contents are still visible to
+is enabled. **Let AI continue** sends a fixed message without entered values and
+starts a fresh browser turn on that page. Shared page contents are still visible to
 project members; expansion and manual input do not make a Shared page private.
 
 ## Clearing data

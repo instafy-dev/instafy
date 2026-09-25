@@ -43,21 +43,21 @@ test("routine browsing is an explicit mode and cannot disable consequential or s
   for (const target of [
     { tag: "button", type: "button", ariaLabel: "Delete account" },
     { tag: "a", text: "Continue", href: "https://example.test/purchase" },
-    { tag: "input", type: "submit" },
-    { tag: "button", type: "submit", formActionText: "this form" },
-    { tag: "button", formActionText: "Search" },
+    { tag: "input", type: "submit", formActionText: "Place order" },
+    { tag: "button", type: "submit", formActionText: "Delete account" },
   ]) {
     assert.equal(personalBrowserActivationRequiresConfirmation(target, "routine"), true);
+    assert.equal(personalBrowserKeyRequiresConfirmation("Enter", target, "routine"), true);
   }
-  assert.equal(personalBrowserKeyRequiresConfirmation("Enter", { tag: "input", type: "text" }, "routine"), true);
-  assert.equal(personalBrowserKeyRequiresConfirmation(" ", ordinary, "routine"), true);
+  assert.equal(personalBrowserKeyRequiresConfirmation("Enter", { tag: "input", type: "text" }, "routine"), false);
+  assert.equal(personalBrowserKeyRequiresConfirmation(" ", ordinary, "routine"), false);
   assert.equal(personalBrowserKeyRequiresConfirmation("Tab", ordinary, "routine"), false);
   assert.equal(isSensitivePersonalBrowserEditable({ type: "password" }), true);
   assert.equal(isSensitivePersonalBrowserEditable({ autocomplete: "one-time-code" }), true);
   assert.equal(isSensitivePersonalBrowserEditable({ autocomplete: "cc-number" }), true);
 });
 
-test("routine submission confirmation uses native semantics rather than form wording", () => {
+test("a routine session grant covers ordinary search and form submissions", () => {
   for (const descriptor of [
     { tag: "button", type: "submit", formOwnerIdentity: "form-owner" },
     { tag: "button", type: "submit", formOwnerIdentity: "form-owner", formActionText: "" },
@@ -65,8 +65,11 @@ test("routine submission confirmation uses native semantics rather than form wor
     { tag: "button", type: "submit" },
     { tag: "button" },
     { tag: "input", type: "image", formOwnerIdentity: "form-owner" },
+    { tag: "button", type: "submit", formActionText: "Search" },
   ]) {
-    assert.equal(personalBrowserActivationRequiresConfirmation(descriptor, "routine"), true);
+    assert.equal(personalBrowserActivationRequiresConfirmation(descriptor, "routine"), false);
+    assert.equal(personalBrowserKeyRequiresConfirmation("Enter", descriptor, "routine"), false);
+    assert.equal(personalBrowserActivationRequiresConfirmation(descriptor, "ask"), true);
   }
   for (const descriptor of [
     { tag: "button", type: "button", formOwnerIdentity: "form-owner", formActionText: "Details" },

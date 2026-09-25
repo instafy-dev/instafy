@@ -34,6 +34,7 @@ import { useExpandedBrowserViewport } from "./useExpandedBrowserViewport";
 import { BrowserCursorOverlay } from "./BrowserCursorOverlay";
 import { BrowserExpandButton } from "./BrowserExpandButton";
 import { BrowserHumanInputStatus } from "./BrowserHumanInputControls";
+import { RemoteControlSurface } from "./RemoteControlSurface";
 import { useBrowserHumanInput } from "./useBrowserHumanInput";
 import { browserPageOrigin, selectSharedBrowserHumanInput } from "./browserHandoffRouting";
 import { ActionTicker } from "./ActionTicker";
@@ -99,6 +100,7 @@ import {
   applySharedBrowserRfbHumanInput,
   HUMAN_SHARED_BROWSER_CONTROL_OWNER,
   sharedBrowserHumanInputEnabled,
+  remoteSharedBrowserController,
   type SharedBrowserControlOwner,
 } from "./sharedBrowserControlOwner";
 
@@ -514,6 +516,7 @@ export function BrowserSessionModal({
       : controlOwner.kind === "agent"
         ? controlOwner
         : null;
+  const remoteController = remoteSharedBrowserController(collaboration.client, effectiveAgentControlOwner);
   const humanInputEnabled =
     canControlBrowser &&
     collaborationSelfOwnsControl(collaboration.client) &&
@@ -2499,6 +2502,8 @@ export function BrowserSessionModal({
     </div>
   ) : null;
 
+  const humanInputControls = !shouldCollapseDocked && humanInputIdentityKey
+    ? <BrowserHumanInputStatus {...browserHumanInputOptions} state={browserHumanInputState} /> : null;
   const panelContent = renderCollapsedConnectedIntoShelf ? (
     <div aria-hidden="true" className="pointer-events-none h-px w-px overflow-hidden opacity-0">
       <div ref={setContainerElement} className="h-full w-full overflow-hidden" />
@@ -2539,6 +2544,7 @@ export function BrowserSessionModal({
             )}
           </div>
           <div className="flex flex-none items-center gap-1">
+            {humanInputControls}
             <SharedBrowserDataClearAction
               canClear={canClearBrowserData}
               onClearSettled={handleBrowserDataClearSettled}
@@ -2574,6 +2580,7 @@ export function BrowserSessionModal({
           interactionEnabled={humanInputEnabled}
           toolbarActions={
             <>
+              {humanInputControls}
               <SharedBrowserCollaborationControls
                 client={collaboration.client}
                 compact={sharedBrowserChrome.compact ?? false}
@@ -2637,9 +2644,6 @@ export function BrowserSessionModal({
       >
         {sessionChooserOpen ? <SharedBrowserProfileStatus projectId={projectId} runtimeId={selectedSessionRuntimeId} currentUserId={currentUserId} active /> : null}
       </SharedBrowserSessionControl> : null}
-      {!shouldCollapseDocked && humanInputIdentityKey ? (
-        <BrowserHumanInputStatus {...browserHumanInputOptions} state={browserHumanInputState} />
-      ) : null}
       <div
         key="shared-browser-viewport"
         data-testid="browser-session-viewport"
@@ -2761,12 +2765,14 @@ export function BrowserSessionModal({
           </div>
           {!shouldCollapseDocked && displayStatus === "connected" ? (
             <>
-              {effectiveAgentControlOwner ? (
+              {remoteController && transportActive ? (
                 <div
-                  aria-hidden="true"
-                  className="absolute inset-0 z-10 cursor-not-allowed"
-                  data-testid="shared-browser-agent-control-overlay"
-                />
+                  className="pointer-events-none absolute inset-0 z-10"
+                  data-testid={remoteController.kind === "agent" ? "shared-browser-agent-control-overlay" : "shared-browser-participant-control-overlay"}
+                >
+                  <RemoteControlSurface controller={remoteController.displayName} working={!browserHumanInputState.active}
+                    onTakeOver={browserHumanInputOptions.canTakeOver ? browserHumanInputState.requestTakeOver : undefined} />
+                </div>
               ) : null}
               <BrowserCursorOverlay
                 containerRef={containerRef}

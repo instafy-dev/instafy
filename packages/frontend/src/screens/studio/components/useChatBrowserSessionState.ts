@@ -44,7 +44,8 @@ export function useChatBrowserSessionState({
   const browserSessionStateLoadedKeyRef = useRef<string | null>(null);
   const browserSessionStateScopeKeyRef = useRef<string | null>(null);
   const browserSessionStateDirtyRef = useRef(false);
-  const [browserSessionStateHydrated, setBrowserSessionStateHydrated] = useState(false);
+  const [hydratedStorageKey, setHydratedStorageKey] = useState<string | null>(null);
+  const browserSessionStateHydrated = Boolean(browserSessionStateStorageKey && hydratedStorageKey === browserSessionStateStorageKey);
 
   useLayoutEffect(() => {
     if (browserSessionStateScopeKeyRef.current === browserSessionStateStorageKey) {
@@ -56,7 +57,7 @@ export function useChatBrowserSessionState({
     setBrowserSessionRuntimeId(null);
     setExactBrowserRuntimeId(null);
     setBrowserSessionOpen(false);
-    setBrowserSessionStateHydrated(false);
+    setHydratedStorageKey(null);
   }, [browserSessionStateStorageKey]);
 
   useEffect(() => {
@@ -68,21 +69,28 @@ export function useChatBrowserSessionState({
       setBrowserSessionRuntimeId(null);
       setExactBrowserRuntimeId(null);
       setBrowserSessionOpen(false);
-      setBrowserSessionStateHydrated(false);
+      setHydratedStorageKey(null);
       return;
     }
     if (browserSessionStateLoadedKeyRef.current === browserSessionStateStorageKey) {
-      setBrowserSessionStateHydrated(true);
+      setHydratedStorageKey(browserSessionStateStorageKey);
       return;
     }
     browserSessionStateLoadedKeyRef.current = browserSessionStateStorageKey;
     try {
-      const raw = window.sessionStorage.getItem(browserSessionStateStorageKey);
+      // Keep a live tab's selection, but recover the last known binding after
+      // the tab/app has closed. These are identifiers only, never cookies or URL
+      // snapshots. The controller still verifies availability and access.
+      let raw: string | null = null;
+      for (const storage of ["sessionStorage", "localStorage"] as const) {
+        try { raw = window[storage].getItem(browserSessionStateStorageKey); } catch { /* Try the other store. */ }
+        if (raw !== null) break;
+      }
       if (!raw) {
         setBrowserSessionRuntimeId(null);
         setExactBrowserRuntimeId(null);
         setBrowserSessionOpen(false);
-        setBrowserSessionStateHydrated(true);
+        setHydratedStorageKey(browserSessionStateStorageKey);
         return;
       }
       const parsed = JSON.parse(raw) as {
@@ -98,12 +106,12 @@ export function useChatBrowserSessionState({
       setBrowserSessionRuntimeId(runtimeId);
       setExactBrowserRuntimeId(parsed.exactRuntimeId === runtimeId ? runtimeId : null);
       setBrowserSessionOpen(open || Boolean(runtimeId));
-      setBrowserSessionStateHydrated(true);
+      setHydratedStorageKey(browserSessionStateStorageKey);
     } catch {
       setBrowserSessionRuntimeId(null);
       setExactBrowserRuntimeId(null);
       setBrowserSessionOpen(false);
-      setBrowserSessionStateHydrated(true);
+      setHydratedStorageKey(browserSessionStateStorageKey);
     }
   }, [browserSessionStateStorageKey]);
 
@@ -116,17 +124,13 @@ export function useChatBrowserSessionState({
     ) {
       return;
     }
-    try {
-      window.sessionStorage.setItem(
-        browserSessionStateStorageKey,
-        JSON.stringify({
-          open: browserSessionOpen,
-          runtimeId: browserSessionRuntimeId,
-          exactRuntimeId: exactBrowserRuntimeId,
-        }),
-      );
-    } catch {
-      // ignore session storage write failures
+    const value = JSON.stringify({
+      open: browserSessionOpen,
+      runtimeId: browserSessionRuntimeId,
+      exactRuntimeId: exactBrowserRuntimeId,
+    });
+    for (const storage of ["sessionStorage", "localStorage"] as const) {
+      try { window[storage].setItem(browserSessionStateStorageKey, value); } catch { /* Storage may be unavailable. */ }
     }
   }, [browserSessionOpen, browserSessionRuntimeId, exactBrowserRuntimeId, browserSessionStateHydrated, browserSessionStateStorageKey]);
 

@@ -23,7 +23,7 @@ beforeEach(() => {
   vi.stubGlobal("URL", Object.assign(URL, { createObjectURL: vi.fn(() => "blob:frame"), revokeObjectURL: vi.fn() }));
 });
 afterEach(async () => { await act(async () => root.unmount()); container.remove(); vi.clearAllMocks(); vi.unstubAllGlobals(); vi.useRealTimers(); });
-const render = (canShare: boolean, userId = "viewer") => act(async () => root.render(<><LocalBrowserTabPublisher projectId="project" userId={userId} ownerId="binding" canShare={canShare} /><LocalBrowserSharing projectId="project" userId={userId} /></>));
+const render = (canShare: boolean, userId = "viewer", takeoverRequestId?: string) => act(async () => root.render(<><LocalBrowserTabPublisher projectId="project" userId={userId} ownerId="binding" canShare={canShare} takeoverRequestId={takeoverRequestId} /><LocalBrowserSharing projectId="project" userId={userId} /></>));
 const click = (id: string) => act(async () => (document.querySelector(`[data-testid=${id}]`) as HTMLElement).click());
 
 it("defaults to selected people and never captures until a nonempty audience is confirmed", async () => {
@@ -177,4 +177,45 @@ it("uses one audience fetch for People and control/Explore labels, and stops pol
   await click("local-browser-share-stop");
   await act(async () => vi.advanceTimersByTimeAsync(3000));
   expect(viewers).toHaveBeenCalledTimes(pollsBeforeStop);
+});
+
+
+it("uses the participant handback flow for native clicks, preserving control on cancel and clearing stale dialogs", async () => {
+  const revoke = vi.fn().mockResolvedValue(undefined);
+  vi.mocked(publishLocalBrowserTab).mockImplementation(async (_p, _o, signal, ended, audience) => {
+    signal.addEventListener("abort", () => ended());
+    return {...share, audience:audience.audience, mode:"view", control:{revoke,grant:vi.fn(),deny:vi.fn()}};
+  });
+  await render(true, "owner"); await click("local-browser-share-start");
+  await act(async () => vi.advanceTimersByTimeAsync(200));
+  await act(async () => document.querySelector<HTMLInputElement>('input[type="checkbox"]')!.click());
+  await click("local-browser-share-confirm");
+  const publishState = vi.mocked(publishLocalBrowserTab).mock.calls[0][5]!;
+  const state = {type:"controlState" as const,available:true,connectionId:"owner",requested:false,
+    grant:{id:"grant",connectionId:"alice-tab",userId:"alice"}};
+  await act(async () => publishState(state));
+  expect(document.querySelector('[data-testid="local-browser-share-people"]')?.textContent).toContain("Alice controls");
+  const dialog = () => document.querySelector('[role="dialog"][aria-label="Take back control"]');
+  const press = (text: string) => act(async () => Array.from(dialog()!.querySelectorAll('button')).find(button => button.textContent === text)!.click());
+  await render(true, "owner", "request-1");
+  expect(dialog()?.textContent).toContain("They can keep watching");
+  expect(dialog()?.textContent).not.toContain("AI");
+  await press("Keep watching");
+  expect(dialog()).toBeNull(); expect(revoke).not.toHaveBeenCalled();
+  await render(true, "owner", "request-1");
+  expect(dialog()).toBeNull();
+  await render(true, "owner", "request-2");
+  revoke.mockRejectedValueOnce(new Error("offline"));
+  await press("Take back");
+  expect(dialog()?.textContent).toContain("Could not take back control");
+  await press("Take back");
+  expect(revoke).toHaveBeenCalledTimes(2); expect(dialog()).toBeNull();
+  await render(true, "owner", "request-3");
+  expect(dialog()).not.toBeNull();
+  await act(async () => publishState({...state,grant:null}));
+  expect(dialog()).toBeNull();
+  await act(async () => publishState({...state,grant:{...state.grant,id:"new-grant"}}));
+  expect(dialog()).toBeNull(); // An old native click must not reopen for a new controller.
+  await render(true, "owner", "request-4");
+  expect(dialog()).not.toBeNull();
 });

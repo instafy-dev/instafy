@@ -155,5 +155,36 @@ export function useChatBrowserHandoff(options: Options) {
     }
   }, [assertCurrent]);
 
-  return { identityKey, sharedJob, takeOverShared, continueShared, continuePersonal };
+  const startPersonal = useCallback(async (message: string) => {
+    const captured = latest.current;
+    const epoch = generation.current;
+    assertCurrent(captured, epoch);
+    if (captured.transport !== "personal") return false;
+    if (captured.personal.status?.humanInputRequest) {
+      throw new Error("Finish the current manual step and choose Let AI continue before starting another browser task.");
+    }
+    const runtimeOverride = captured.personal.runtimeOverride;
+    if (!runtimeOverride) {
+      return continuePersonal(message, captured.personal.status?.approvalModes?.includes("routine")
+        ? captured.personal.preferredApprovalMode : "ask");
+    }
+    await captured.onSubmit(captured.conversationId, message, {
+      agentHandles: [captured.agentHandle],
+      imageFiles: [],
+      editorState: null,
+      expectedLaneIdle: true,
+      requireDispatch: true,
+      assertDispatchCurrent: () => {
+        assertCurrent(captured, epoch);
+        if (latest.current.personal.runtimeOverride?.runtimeId !== runtimeOverride.runtimeId) {
+          throw new Error("Browser control changed before the task was sent.");
+        }
+      },
+      runtimeOverride,
+      metadata: withPersonalBrowserRuntimeExpectations({ browserTransport: "desktop-personal" }),
+    });
+    return true;
+  }, [assertCurrent, continuePersonal]);
+
+  return { identityKey, sharedJob, takeOverShared, continueShared, continuePersonal, startPersonal };
 }

@@ -43,7 +43,7 @@ Use these mappings unless a project-specific skill overrides them.
 
 - **Interactive browsing / guided clicks / consent / login / MFA / checkout**
   - Use `instafy-browser-automation`.
-  - This requires an exposed Personal or Shared Browser tool; do not assume a headed browser exists.
+  - Use the exposed Personal or Shared Browser tools. If neither is exposed, follow the skill's `request_browser` handoff so Studio can open or resume the appropriate browser.
 
 - **Public page text / element counts / computed CSS / screenshot verification**
   - Use `instafy-browser-automation`.

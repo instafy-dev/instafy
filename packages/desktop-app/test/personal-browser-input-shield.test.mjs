@@ -15,6 +15,9 @@ class FakeWebContents extends EventEmitter {
   focusCount = 0;
   closeCount = 0;
   loadedUrl = "";
+  scripts = [];
+
+  async executeJavaScript(source) { this.scripts.push(source); }
 
   setWindowOpenHandler(handler) {
     this.windowOpenHandler = handler;
@@ -153,5 +156,44 @@ test("granting control under a menu defers native shield attachment without unlo
   assert.equal(view.visible, false);
   assert.equal(view.webContents.focusCount, 1);
   assert.equal(contents.focusCount, 0);
+  shield.destroy();
+});
+
+test("surface clicks request confirmation, animation does not steal focus, and hidden surfaces stay quiet", async () => {
+  const owner = new FakeOwner();
+  let view, requests = 0, escapes = 0;
+  const shield = new PersonalBrowserInputShield({
+    createView: () => (view = new FakeView()),
+    onEmergencyEscape: () => escapes++,
+    onTakeOverRequest: () => requests++,
+  });
+  const bounds = { x: 0, y: 0, width: 900, height: 600 };
+  shield.attach(owner, new FakeWebContents());
+  shield.sync(true, true, bounds, true);
+  await Promise.resolve();
+  assert.match(view.webContents.scripts.at(-1), /working = "true"/);
+  assert.match(decodeURIComponent(view.webContents.loadedUrl), /prefers-reduced-motion/);
+  let prevented = false;
+  const event = { preventDefault: () => { prevented = true; } };
+  view.webContents.emit("before-mouse-event", event, { type: "mouseUp", button: "left" });
+  assert.equal(prevented, true);
+  assert.equal(requests, 1);
+  assert.equal(escapes, 0, "a click requests a popup; it does not revoke control");
+  assert.equal(view.visible, true);
+  shield.sync(true, true, bounds, false);
+  assert.match(view.webContents.scripts.at(-1), /working = "false"/);
+  assert.equal(view.webContents.focusCount, 1, "decorative activity updates must not steal composer focus");
+  shield.sync(true, true, bounds, false, "participant");
+  assert.match(view.webContents.scripts.at(-1), /Another participant has control/);
+  assert.doesNotMatch(view.webContents.scripts.at(-1), /AI/);
+  assert.equal(view.webContents.focusCount, 1, "controller identity changes must not steal focus");
+  shield.sync(false, true, bounds);
+  shield.sync(true, true, bounds);
+  assert.equal(view.webContents.focusCount, 2, "resuming control restores shield focus");
+  inputEvent(view.webContents, { key: "Enter" });
+  assert.equal(requests, 2, "keyboard activation also requests the popup");
+  shield.sync(true, false, bounds, true);
+  view.webContents.emit("before-mouse-event", event, { type: "mouseUp", button: "left" });
+  assert.equal(requests, 2);
   shield.destroy();
 });

@@ -8,7 +8,7 @@ Shared Browser is the project-scoped, web/mobile-compatible browser identity. Co
 
 ## Runtime eligibility
 
-Shared Browser is an Instafy Cloud collaboration surface, not a way to expose a contributor's self-hosted runtime. Studio accepts only the exact canonical managed `instafy-cloud` route. The controller independently enforces the same rule before origin view/control grants, browser-only job creation, durable browser-profile GET/PUT, profile reset, and privileged provider authentication. An ordinary or custom self-hosted runtime remains private to its immutable controller-attested owner even when its project is shared; a cloud-looking provider label or prefix cannot create managed-cloud authority. Personal Browser is never shareable.
+Shared Browser is an Instafy Cloud collaboration surface, not a way to expose a contributor's self-hosted runtime. Studio accepts only the exact canonical managed `instafy-cloud` route. The controller independently enforces the same rule before origin view/control grants, browser-only job creation, durable browser-profile GET/PUT, profile reset, and privileged provider authentication. An ordinary or custom self-hosted runtime remains private to its immutable controller-attested owner even when its project is shared; a cloud-looking provider label or prefix cannot create managed-cloud authority. The Personal Browser runtime and stored profile remain private; owners can separately share an individual tab through [Local browser sharing](Local-Browser-Sharing.md).
 
 The managed browser image is also a controller/provider decision. Studio asks
 for the harmless `runtimeFlavor: "webdev"`; it never sends an image reference
@@ -346,7 +346,18 @@ control also keeps a 44px minimum touch target on coarse-pointer devices.
 
 ### Manual input handoff
 
-The browser bar exposes **Take over** for a manual step. Agent-requested handoff
+While another participant controls the view (human or AI), a faint glow flows
+slowly around the outer 20 pixels of the page. Soft, overlapping pools of light
+drift at different speeds, with a brief bloom when the controller changes.
+The existing toolbar identifies
+the controller. Your own control and independent browsing have no glow. The
+center stays clear on light and dark pages independently of the Studio theme.
+The cue is presentation only; it does not grant input or block local viewer pan
+and zoom. Human control still uses the existing request/grant/release actions.
+For AI control, clicking the page or toolbar control icon opens a **Take over** dialog.
+Canceling leaves control unchanged; confirming starts the existing handoff.
+**Let AI continue** then appears in the existing toolbar. Reduced-motion
+preferences use a static edge glow. Agent-requested handoff
 uses `request_human_input` with one to eight indices from a fresh snapshot. The
 trusted helper highlights those exact editable elements with fixed amber outlines
 and emits bounded, page/initiator-bound guidance through the existing action feed.
@@ -357,11 +368,11 @@ fresh agent snapshot; a replacement element does not inherit a stale highlight.
 The tool latches later agent observation and action for that turn. It does not
 remove the agent-control marker: manual input remains locked until the existing
 confirmed-shutdown path restores the human driver. A canceled controller run alone
-is not release proof. **Done, continue** explicitly starts a new turn on the same
+is not release proof. **Let AI continue** explicitly starts a new turn on the same
 runtime/page with a fresh observation. It sends only a fixed continuation message,
 never the user's entered values. Account, conversation, runtime or page changes
 invalidate the continuation. Manual navigation drops stale field guidance but
-keeps the manual-step controls, so login redirects can finish before Done starts
+keeps the manual-step controls, so login redirects can finish before continuation starts
 a fresh turn. A target change during asynchronous continuation aborts it; no
 hidden or stale completion may send it automatically.
 

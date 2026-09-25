@@ -71,6 +71,7 @@ export type PersonalBrowserStatus = {
   agentControlEnabled: boolean;
   /** Revoked capability AND every already-dispatched host operation settled. */
   humanControlReady: boolean;
+  takeoverRequestId?: string;
   humanInputRequest?: PersonalBrowserHumanInputRequest;
   approvalMode: PersonalBrowserApprovalMode;
   approvalModes: PersonalBrowserApprovalMode[];
@@ -207,6 +208,7 @@ export class PersonalBrowserHost {
   private readonly logger: NonNullable<PersonalBrowserHostOptions["logger"]>;
   private readonly controlServer: PersonalBrowserControlServer;
   private readonly inputShield: PersonalBrowserInputShield;
+  private takeoverRequestId: string | undefined;
   private ownerWindow: BrowserWindow | null = null;
   private view: WebContentsView | null = null;
   private humanInputRequest: PersonalBrowserHumanInputRequest | null = null;
@@ -250,7 +252,7 @@ export class PersonalBrowserHost {
           createExplore: viewport => createBrowserTabExplorePage(contents.session, contents.getURL(), viewport),
           dispatchInput: (input, current) => this.inputShield.withInjectedInput(() => dispatchBrowserTabInput(contents,this.fitBoundsToOwner(this.currentBounds),input,current)),
         } : null;
-  }, () => { this.syncInputShield(); this.emitStatus(); });
+  }, () => { this.takeoverRequestId = undefined; this.syncInputShield(); this.emitStatus(); });
 
   startTabShare(ownerId: string) {
     const result = this.tabCapture.start(ownerId);
@@ -303,6 +305,11 @@ export class PersonalBrowserHost {
           },
         }),
       onEmergencyEscape: () => this.emergencyPauseAgentControl(),
+      onTakeOverRequest: () => {
+        if (!(this.agentControlEnabled || this.tabCapture.controlActive) || !this.currentOwnerId || !this.currentVisible || this.currentOccluded) return;
+        this.takeoverRequestId = randomUUID();
+        this.emitStatus();
+      },
     });
   }
 
@@ -348,6 +355,7 @@ export class PersonalBrowserHost {
       ...(title ? { title } : {}),
       ...navigation,
       agentControlEnabled: this.agentControlEnabled,
+      ...(this.takeoverRequestId ? { takeoverRequestId: this.takeoverRequestId } : {}),
       humanControlReady: this.currentState === "ready" && contents !== null && !this.agentControlEnabled && this.activeControlOperations === 0 && !this.tabCapture.controlActive,
       ...(this.humanInputRequest ? { humanInputRequest: this.humanInputRequest } : {}),
       approvalMode: this.approvalMode,
@@ -589,7 +597,7 @@ export class PersonalBrowserHost {
         type: "warning",
         title: "Allow routine browsing for this session?",
         message: "Always allow routine browsing in this project while agent control is resumed?",
-        detail: "The agent may read sites, navigate, click ordinary controls and fill non-sensitive fields without asking each time. Recognized consequential actions and form submissions still ask; password, verification-code and payment fields remain blocked. Websites can attach unexpected side effects to ordinary controls. Pause or Escape ends this permission.",
+        detail: "The agent may navigate, search, click ordinary controls, and fill or submit non-sensitive forms without asking each time. Recognized consequential actions still ask; passwords, verification codes and payment details stay manual. Pause or Escape ends this permission.",
         buttons: ["Cancel", "Allow routine browsing"],
         defaultId: 0,
         cancelId: 0,
@@ -949,7 +957,10 @@ export class PersonalBrowserHost {
   }
 
   private setAgentControlState(enabled: boolean) {
-    if (!enabled) this.approvalMode = "ask";
+    if (!enabled) {
+      this.approvalMode = "ask";
+      this.takeoverRequestId = undefined;
+    }
     this.agentControlEnabled = enabled;
     this.updateHumanControlDrain();
     this.syncInputShield();
@@ -979,6 +990,8 @@ export class PersonalBrowserHost {
       this.agentControlEnabled || this.activeControlOperations > 0 || this.tabCapture.controlActive,
       this.currentVisible && !this.currentOccluded,
       this.fitBoundsToOwner(this.currentBounds),
+      this.tabCapture.controlActive || (this.agentControlEnabled && this.currentBounds.agentWorking === true),
+      this.tabCapture.controlActive ? "participant" : "agent",
     );
     // Adding the native shield for a new grant must not steal menu keyboard focus.
     if (this.currentOccluded && this.ownerWindow && !this.ownerWindow.isDestroyed()) {
@@ -1620,7 +1633,10 @@ export class PersonalBrowserHost {
           compareSecurity: false,
         });
         this.assertNonSensitiveActivation(submitTarget.descriptor);
-        if (!(await this.confirmAgentActivation(submitTarget.descriptor, { formSubmission: true }))) {
+        const submissionNeedsConfirmation = this.approvalMode === "ask" ||
+          personalBrowserKeyRequiresConfirmation("Enter", submitTarget.descriptor, this.approvalMode);
+        if (submissionNeedsConfirmation &&
+          !(await this.confirmAgentActivation(submitTarget.descriptor, { formSubmission: true }))) {
           throw new PersonalBrowserControlError(403, "form_submission_denied", "The user denied form submission.");
         }
         this.assertControlEpoch(operationEpoch);

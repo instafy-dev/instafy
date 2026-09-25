@@ -119,6 +119,7 @@ export function usePersonalBrowserBridge({
 }) {
   const [checked, setChecked] = useState(false);
   const [status, setStatus] = useState<InstafyDesktopPersonalBrowserStatus | null>(null);
+  const [preferredApprovalMode, setPreferredApprovalMode] = useState<"ask" | "routine">("routine");
   const [runtimeStartState, setRuntimeStartState] = useState<
     "idle" | "starting" | "succeeded" | "failed"
   >("idle");
@@ -717,8 +718,9 @@ export function usePersonalBrowserBridge({
     if (!paused) {
       return null;
     }
-    return setAgentControlEnabled(true);
-  }, [setAgentControlEnabled]);
+    return setAgentControlEnabled(true,
+      paused.approvalModes?.includes("routine") ? preferredApprovalMode : undefined);
+  }, [preferredApprovalMode, setAgentControlEnabled]);
   const clearData = useCallback(
     async () => {
       const bridge = browserBridge();
@@ -792,6 +794,8 @@ export function usePersonalBrowserBridge({
   }, [agentPhase, identityScope, runtimeId, status?.agentControlEnabled, status?.ownerId, status?.state]);
 
   return {
+    preferredApprovalMode,
+    setPreferredApprovalMode,
     agentError,
     agentPhase,
     available,

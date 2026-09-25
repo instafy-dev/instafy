@@ -1,4 +1,5 @@
 import type { RunRecord } from "../../../types";
+import type { SharedBrowserCollaborationClientState } from "./sharedBrowserCollaboration";
 
 export type SharedBrowserControlOwner =
   | { kind: "human" }
@@ -9,6 +10,20 @@ type SharedBrowserControlRun = Pick<RunRecord, "metadata" | "status">;
 export const HUMAN_SHARED_BROWSER_CONTROL_OWNER: SharedBrowserControlOwner = {
   kind: "human",
 };
+
+/** Presentation only: never use this to decide input authority. */
+export function remoteSharedBrowserController(
+  client: SharedBrowserCollaborationClientState,
+  agentOwner: Extract<SharedBrowserControlOwner, { kind: "agent" }> | null,
+): { kind: "human" | "agent"; displayName: string } | null {
+  if (agentOwner) return agentOwner;
+  const owner = client.state?.controlOwner;
+  if (client.connectionStatus !== "connected" || !client.participantId ||
+      owner?.kind !== "human" || owner.participantId === client.participantId) return null;
+  return { kind: "human", displayName: client.state?.participants.find(
+    participant => participant.id === owner.participantId,
+  )?.displayName || "Another participant" };
+}
 
 function normalizedMetadataString(
   metadata: Record<string, unknown>,

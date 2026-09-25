@@ -167,6 +167,7 @@ function personalBrowserStatus(model: PersonalBrowserModel): {
 export function PersonalBrowserSurface({
   active,
   compactChrome = false,
+  agentWorking = false,
   model,
   transportSelector,
   humanInputIdentityKey,
@@ -175,6 +176,7 @@ export function PersonalBrowserSurface({
 }: {
   active: boolean;
   compactChrome?: boolean;
+  agentWorking?: boolean;
   model: PersonalBrowserModel;
   transportSelector: ReactNode;
   humanInputIdentityKey?: string;
@@ -194,6 +196,8 @@ export function PersonalBrowserSurface({
   const [overlayCount, setOverlayCount] = useState(0);
   const overlayCountRef = useRef(overlayCount);
   overlayCountRef.current = overlayCount;
+  const agentWorkingRef = useRef(agentWorking);
+  agentWorkingRef.current = agentWorking;
   const reportBoundsRef = useRef<(() => void) | null>(null);
   const registerOverlay = useCallback(() => {
     setOverlayCount(count => count + 1);
@@ -201,17 +205,13 @@ export function PersonalBrowserSurface({
   }, []);
   const [fullscreen, setFullscreen] = useState(false);
   const expanded = active && fullscreen;
-  const [selectedApprovalMode, setSelectedApprovalMode] = useState<"ask" | "routine">("ask");
+  const selectedApprovalMode = model.preferredApprovalMode;
   const [dismissedClearDataFeedbackKey, setDismissedClearDataFeedbackKey] =
     useState<string | null>(null);
   const ready = model.status?.state === "ready";
   const visible = active && model.available && ready;
   const ownerId = model.ownerId;
   const routineApprovalAvailable = model.status?.approvalModes?.includes("routine") === true;
-
-  useEffect(() => {
-    setSelectedApprovalMode("ask");
-  }, [ownerId]);
 
   useEffect(() => {
     if (!active) setFullscreen(false);
@@ -267,6 +267,7 @@ export function PersonalBrowserSurface({
           ...lastValidBoundsRef.current,
           visible: visible && width > 0 && height > 0,
           occluded: overlayCountRef.current > 0,
+          agentWorking: agentWorkingRef.current,
           ownerId,
         }).then(result => {
           if (!disposed && overlayCountRef.current > 0 && result.previewDataUrl) setOverlayPreview(result.previewDataUrl);
@@ -304,7 +305,7 @@ export function PersonalBrowserSurface({
   useLayoutEffect(() => {
     if (overlayCount === 0) setOverlayPreview(null);
     reportBoundsRef.current?.();
-  }, [overlayCount]);
+  }, [overlayCount, agentWorking]);
   useLayoutEffect(() => { setOverlayPreview(null); }, [ownerId]);
 
   const handleNavigate = useCallback(
@@ -338,6 +339,7 @@ export function PersonalBrowserSurface({
     canTakeOver: active && ownsNativeStatus && model.status?.agentControlEnabled === true && typeof model.status?.humanControlReady === "boolean",
     humanControlConfirmed: ownsNativeStatus && ready && model.status?.humanControlReady === true,
     canContinue: active && ownsNativeStatus && Boolean(onContinueAfterHumanInput),
+    takeoverRequestId: ownsNativeStatus ? model.status?.takeoverRequestId : undefined,
     onTakeOver: async () => {
       const status = await model.setAgentControlEnabled(false);
       return status?.agentControlEnabled === false;
@@ -347,6 +349,7 @@ export function PersonalBrowserSurface({
       : false,
   };
   const humanInputState = useBrowserHumanInput(humanInputOptions);
+  const humanInputAvailable = ready && Boolean(humanInputIdentityKey && onContinueAfterHumanInput);
   const clearDataMessage =
     model.clearDataState === "clearing"
       ? "Clearing Personal Browser data…"
@@ -479,6 +482,7 @@ export function PersonalBrowserSurface({
         }
         actions={
           <>
+          {humanInputAvailable ? <BrowserHumanInputStatus {...humanInputOptions} state={humanInputState} /> : null}
           {ready && !model.status?.agentControlEnabled && model.agentPhase === "unavailable" && !humanInputState.active ? (
             <IconButton
               aria-label="Retry agent control"
@@ -491,7 +495,7 @@ export function PersonalBrowserSurface({
             >
               <Refresh className="h-3.5 w-3.5" aria-hidden="true" />
             </IconButton>
-          ) : model.status?.agentControlEnabled || (ready && !humanInputState.active) ? (
+          ) : (model.status?.agentControlEnabled && (!humanInputAvailable || humanInputState.active)) || (ready && !model.status?.agentControlEnabled && !humanInputState.active) ? (
             <IconButton
               aria-label={model.status?.agentControlEnabled ? "Pause agent control" : "Resume agent control"}
               isDisabled={!model.status?.agentControlEnabled && (model.status?.humanControlReady === false || model.status?.tabControlActive)}
@@ -521,14 +525,14 @@ export function PersonalBrowserSurface({
                     className="h-4 w-4"
                     data-testid="personal-browser-routine-approval"
                     disabled={humanInputLocked}
-                    onChange={(event) => setSelectedApprovalMode(event.target.checked ? "routine" : "ask")}
+                    onChange={(event) => model.setPreferredApprovalMode(event.target.checked ? "routine" : "ask")}
                     type="checkbox"
                   />
-                  Always allow routine browsing until paused
+                  Allow routine browsing without asking each time
                 </label>
                 <span className="text-slate-500 dark:text-slate-400">
                   {humanInputState.active
-                    ? "When ready, use Done, continue to resume and send the next turn."
+                    ? "When ready, choose Let AI continue in the browser toolbar."
                     : humanInputLocked
                     ? "Take over to change approvals."
                     : "Choose before Resume. High-impact actions still ask; secrets stay manual."}
@@ -578,9 +582,6 @@ export function PersonalBrowserSurface({
         }
         testId="personal-browser-chrome"
       />
-      {ready && humanInputIdentityKey && onContinueAfterHumanInput ? (
-        <BrowserHumanInputStatus {...humanInputOptions} state={humanInputState} />
-      ) : null}
       <div
         ref={viewportRef}
         aria-label="Personal browser content"
