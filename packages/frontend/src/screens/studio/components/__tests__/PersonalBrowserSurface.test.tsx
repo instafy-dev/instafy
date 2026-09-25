@@ -601,6 +601,38 @@ describe("PersonalBrowserSurface", () => {
     expect(document.querySelector<HTMLButtonElement>('[aria-label="Resume agent control"]')?.disabled).toBe(true);
   });
 
+  it("preserves a manual step across participant control without showing a stale AI transition", async () => {
+    const model = createModel();
+    model.status = { ...model.status!, humanControlReady: false, approvalModes: ["ask", "routine"] };
+    model.setAgentControlEnabled = vi.fn(async () => ({ ...model.status!, agentControlEnabled: false, humanControlReady: true }));
+    const onContinue = vi.fn(async () => true);
+    const render = async () => act(async () => root.render(
+      <PersonalBrowserSurface active model={model} transportSelector={null} humanInputIdentityKey="conversation-a" onContinueAfterHumanInput={onContinue} />,
+    ));
+    await render();
+    await act(async () => document.querySelector<HTMLButtonElement>('[data-testid="browser-human-input-request"]')!.click());
+    await act(async () => document.querySelector<HTMLButtonElement>('[data-testid="browser-human-input-takeover"]')!.click());
+    model.status = { ...model.status!, agentControlEnabled: false, humanControlReady: true };
+    await render();
+    expect(container.textContent).toContain("Let AI continue");
+
+    model.status = { ...model.status!, humanControlReady: false, tabControlActive: true };
+    await render();
+    expect(container.textContent).not.toContain("Let AI continue");
+    expect(container.textContent).not.toContain("Stopping AI");
+    expect(container.textContent).not.toContain("Waiting for agent control to stop");
+    await act(async () => document.querySelector<HTMLButtonElement>('[aria-label="Browser settings"]')!.click());
+    expect(document.body.textContent).toContain("Take back control before continuing the AI task.");
+    await act(async () => document.querySelector<HTMLButtonElement>('[aria-label="Browser settings"]')!.click());
+    expect(onContinue).not.toHaveBeenCalled();
+
+    model.status = { ...model.status!, humanControlReady: true, tabControlActive: false };
+    await render();
+    expect(container.textContent).toContain("Let AI continue");
+    await act(async () => document.querySelector<HTMLButtonElement>('[data-testid="browser-human-input-continue"]')!.click());
+    expect(onContinue).toHaveBeenCalledExactlyOnceWith(expect.stringContaining("Take a fresh snapshot"), "routine");
+  });
+
   it.each(["routine", "ask"] as const)("makes continuation the only resume route after takeover with %s selected", async (approvalMode) => {
     const model = createModel();
     model.preferredApprovalMode = approvalMode;

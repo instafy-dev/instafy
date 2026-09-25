@@ -72,6 +72,12 @@ describe("BrowserHumanInputControls", () => {
     await render(); expect(props.onContinue).not.toHaveBeenCalled();
     await click("browser-human-input-continue"); await click("browser-human-input-continue");
     expect(props.onContinue).toHaveBeenCalledTimes(1);
+    props.humanControlConfirmed = false; await render();
+    expect(container.textContent).toContain("Continuing…");
+    expect(container.textContent).not.toContain("Stopping AI");
+    expect(container.textContent).not.toContain("Waiting for agent control to stop");
+    expect(container.querySelector('[data-testid="browser-human-input-continue"]')).toBeNull();
+    props.humanControlConfirmed = true; await render();
     await act(async () => finish(false));
     expect(container.textContent).toContain("was not sent");
     expect(container.textContent).toContain("Let AI continue");
