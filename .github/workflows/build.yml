@@ -1734,7 +1734,7 @@ jobs:
             export RUSTFLAGS='-C link-arg=-fuse-ld=lld'
           fi
           cargo test --manifest-path packages/runtime-agent/Cargo.toml --no-run
-          cargo test --manifest-path packages/runtime-agent/Cargo.toml --lib --test controller_client -- --test-threads=1
+          cargo test --manifest-path packages/runtime-agent/Cargo.toml --lib --test controller_client --test proxy_retry_budget -- --test-threads=1
 
   rust-test-proxy:
     name: Rust test OpenAI proxy

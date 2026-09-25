@@ -8,8 +8,15 @@ import {
   useState,
   type ReactNode,
 } from "react";
-import { useLocation } from "react-router-dom";
+import {
+  UNSAFE_DataRouterContext,
+  useLocation,
+  useNavigate,
+  type Location,
+  type NavigateFunction,
+} from "react-router-dom";
 import { hasSupabaseConfig } from "../lib/supabaseClient";
+import { getStudioVisitKey } from "../navigation/studioVisit";
 import { controllerClient } from "../sdk/instafy";
 import { markRestoredAwaitingIntent } from "../runtime/idlePauseRegistry";
 import { useWorkspaceStore } from "../store";
@@ -146,46 +153,66 @@ function writeStoredProjectId(projectId: string | null | undefined) {
   }
 }
 
+/**
+ * Names the resolved space in the URL and reports whether that changed it.
+ * The write goes through the router, not window.history: the studio's URL
+ * writer and the chat's scroll restore read the routed location and hold
+ * still while it disagrees with the address bar, which left the chat at its
+ * oldest message after sign-in until the first click that navigated.
+ *
+ * `location` is the router's live entry, which can be ahead of the rendered
+ * one: navigate() and Back move the router at once but reach React in a
+ * transition. A navigation that has left this page, or that names another
+ * space, is newer than this lookup, so it keeps the URL; a new space gets a
+ * lookup of its own once it renders.
+ */
 function syncProjectIdQueryParam(
+  navigate: NavigateFunction,
+  location: Location,
+  renderedPathname: string,
   projectId: string | null | undefined,
   options?: { clearConversation?: boolean }
-) {
-  if (!projectId || !isUUID(projectId)) {
-    return;
+): boolean {
+  if (!projectId || !isUUID(projectId) || location.pathname !== renderedPathname) {
+    return false;
   }
-  try {
-    if (typeof window === "undefined") {
-      return;
-    }
-    const url = new URL(window.location.href);
-    let changed = false;
-    if (url.searchParams.get("projectId") !== projectId) {
-      url.searchParams.set("projectId", projectId);
+  const params = new URLSearchParams(location.search);
+  const namedProjectId = params.get("projectId")?.trim() ?? "";
+  if (namedProjectId !== projectId && isUUID(namedProjectId)) {
+    return false;
+  }
+  let changed = false;
+  if (params.get("projectId") !== projectId) {
+    params.set("projectId", projectId);
+    changed = true;
+  }
+  if (options?.clearConversation) {
+    if (params.has("conversationId")) {
+      params.delete("conversationId");
       changed = true;
     }
-    if (options?.clearConversation) {
-      if (url.searchParams.has("conversationId")) {
-        url.searchParams.delete("conversationId");
-        changed = true;
-      }
-      if (url.searchParams.has("conversationControllerId")) {
-        url.searchParams.delete("conversationControllerId");
-        changed = true;
-      }
-      if (url.searchParams.has("panel")) {
-        url.searchParams.delete("panel");
-        changed = true;
-      }
+    if (params.has("conversationControllerId")) {
+      params.delete("conversationControllerId");
+      changed = true;
     }
-    if (!changed) {
-      return;
+    if (params.has("panel")) {
+      params.delete("panel");
+      changed = true;
     }
-    const search = url.searchParams.toString();
-    const next = `${url.pathname}${search ? `?${search}` : ""}${url.hash}`;
-    window.history.replaceState(window.history.state, document.title, next);
-  } catch {
-    // ignore navigation failures (e.g., malformed URLs)
   }
+  if (!changed) {
+    return false;
+  }
+  const search = params.toString();
+  // A canonical replacement keeps the visit it belongs to, as the studio's
+  // other URL replacements do, so chat scroll history still recognises it.
+  const state = location.state && typeof location.state === "object" && !Array.isArray(location.state)
+    ? location.state : {};
+  void navigate(
+    { pathname: location.pathname, search: search ? `?${search}` : "", hash: location.hash },
+    { replace: true, state: { ...state, instafyVisitKey: getStudioVisitKey(location) } },
+  );
+  return true;
 }
 
 export function ProjectAccessProvider({ children }: { children: ReactNode }) {
@@ -205,6 +232,10 @@ export function ProjectAccessProvider({ children }: { children: ReactNode }) {
   } = useProjectState();
   const { user } = useAuth();
   const location = useLocation();
+  const navigate = useNavigate();
+  // The data router holds the live location. Outside one (a plain
+  // MemoryRouter in tests) the rendered location is the best available.
+  const dataRouter = useContext(UNSAFE_DataRouterContext)?.router ?? null;
   const [projectInitialized, setProjectInitialized] = useState(false);
   const [projectAccessPending, setProjectAccessPending] = useState(false);
   const [projectAccessBlocked, setProjectAccessBlocked] = useState(false);
@@ -226,6 +257,15 @@ export function ProjectAccessProvider({ children }: { children: ReactNode }) {
   const projectCapabilitiesRef = useRef(projectCapabilities);
   const projectAccessPendingRef = useRef(projectAccessPending);
   const lastUrlProjectIdRef = useRef<string | null>(null);
+  // The projectId this provider wrote into the URL itself, until the router
+  // reports it back or another lookup starts.
+  const writtenUrlProjectIdRef = useRef<string | null>(null);
+  // The bootstrap lookup finishes after an await, so it writes the URL from
+  // the router as it is then rather than as its effect started. None of these
+  // is an effect dependency: a re-run would abort the lookup.
+  const locationRef = useRef(location);
+  const navigateRef = useRef(navigate);
+  const dataRouterRef = useRef(dataRouter);
   const lastResolvedProjectIdRef = useRef<string | null>(null);
   const blockedProjectIdRef = useRef<string | null>(null);
   const projectSummaryRetryBackoffRef = useRef<{ projectId: string; until: number } | null>(null);
@@ -241,6 +281,12 @@ export function ProjectAccessProvider({ children }: { children: ReactNode }) {
   useEffect(() => {
     projectCapabilitiesRef.current = projectCapabilities;
   }, [projectCapabilities]);
+
+  useEffect(() => {
+    locationRef.current = location;
+    navigateRef.current = navigate;
+    dataRouterRef.current = dataRouter;
+  }, [dataRouter, location, navigate]);
 
   useEffect(() => {
     // The account-reset effect below clears old workspace state. Do not copy
@@ -274,6 +320,7 @@ export function ProjectAccessProvider({ children }: { children: ReactNode }) {
       storedProjectIdRef.current = null;
       lastResolvedProjectIdRef.current = null;
       lastUrlProjectIdRef.current = null;
+      writtenUrlProjectIdRef.current = null;
       activeRequestRef.current = null;
       projectSummaryRetryBackoffRef.current = null;
       writeStoredProjectId(null);
@@ -332,6 +379,19 @@ export function ProjectAccessProvider({ children }: { children: ReactNode }) {
     if (
       projectInitialized &&
       !projectAccessPendingRef.current &&
+      urlProjectId !== null &&
+      urlProjectId === writtenUrlProjectIdRef.current
+    ) {
+      // The router publishes this provider's own projectId write in a
+      // transition, a render after startup settled on the URL without it. It
+      // names the space just resolved, not a new choice: looking it up again
+      // would flip access back to pending and abort the conversation list.
+      lastUrlProjectIdRef.current = urlProjectId;
+      writtenUrlProjectIdRef.current = null;
+    }
+    if (
+      projectInitialized &&
+      !projectAccessPendingRef.current &&
       urlProjectId === lastUrlProjectIdRef.current
     ) {
       return;
@@ -351,6 +411,10 @@ export function ProjectAccessProvider({ children }: { children: ReactNode }) {
       return;
     }
 
+    // A new lookup supersedes a write the router has not reported back: that
+    // write was overtaken, and trusting it later would skip a real visit to
+    // its space.
+    writtenUrlProjectIdRef.current = null;
     if (urlProjectId) {
       setProjectCapabilities((current) =>
         current?.projectId === urlProjectId ? current : null,
@@ -627,9 +691,17 @@ export function ProjectAccessProvider({ children }: { children: ReactNode }) {
         lastUrlProjectIdRef.current = urlProjectId;
         storedProjectIdRef.current = targetProjectId;
         writeStoredProjectId(targetProjectId);
-        syncProjectIdQueryParam(targetProjectId, {
-          clearConversation: createdBecauseMissing || Boolean(mintedProject && !urlProjectId),
-        });
+        if (
+          syncProjectIdQueryParam(
+            navigateRef.current,
+            dataRouterRef.current?.state.location ?? locationRef.current,
+            locationRef.current.pathname,
+            targetProjectId,
+            { clearConversation: createdBecauseMissing || Boolean(mintedProject && !urlProjectId) },
+          )
+        ) {
+          writtenUrlProjectIdRef.current = targetProjectId;
+        }
         if (typeof window !== "undefined") {
           const runtimeWindow = window as typeof window & {
             __INSTAFY_ACTIVE_PROJECT_ID__?: string | null;

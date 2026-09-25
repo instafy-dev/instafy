@@ -1,5 +1,5 @@
 import type { ReactNode } from "react";
-import { CheckCircle, Pause, Xmark } from "iconoir-react";
+import { Pause, Play, Xmark } from "iconoir-react";
 import { Spinner } from "../../../components/Spinner";
 
 export type BrowserChromeState = "ready" | "starting" | "paused" | "unavailable";
@@ -16,19 +16,49 @@ export function BrowserStatusPill({
   detail,
   testId,
   compact = false,
+  resume,
 }: {
   state: BrowserChromeState;
   detail?: string | null;
   testId?: string;
   compact?: boolean;
+  resume?: { onPress: () => void; disabled?: boolean };
 }) {
   const label = browserChromeStateLabel[state];
+  if (state === "ready") {
+    return (
+      <span
+        className="sr-only"
+        role="status"
+        aria-live="polite"
+        aria-label={detail ? `${label}: ${detail}` : label}
+        data-testid={testId}
+      >
+        {label}
+      </span>
+    );
+  }
   const toneClassName =
-    state === "ready"
-      ? "border-emerald-500/30 bg-emerald-500/10 text-emerald-700 dark:text-emerald-300"
-      : state === "unavailable"
-        ? "border-rose-500/30 bg-rose-500/10 text-rose-700 dark:text-rose-300"
-        : "border-slate-300/80 bg-slate-100/80 text-slate-600 dark:border-slate-700 dark:bg-slate-900/70 dark:text-slate-300";
+    state === "unavailable"
+      ? "border-rose-500/30 bg-rose-500/10 text-rose-700 dark:text-rose-300"
+      : "border-slate-300/80 bg-slate-100/80 text-slate-600 dark:border-slate-700 dark:bg-slate-900/70 dark:text-slate-300";
+
+  if (state === "paused" && resume) {
+    return (
+      <button
+        type="button"
+        aria-label="Resume agent control"
+        className={`inline-flex h-8 shrink-0 touch-manipulation items-center justify-center gap-1 rounded-full border px-2 text-xxs font-medium transition enabled:hover:bg-slate-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary-500 disabled:cursor-not-allowed disabled:opacity-50 max-[540px]:min-h-10 pointer-coarse:min-h-11 dark:enabled:hover:bg-slate-800 ${toneClassName}`}
+        data-testid={testId}
+        disabled={resume.disabled}
+        onClick={resume.onPress}
+        title={`${detail ?? label} Resume agent control.`}
+      >
+        <Play className="h-3.5 w-3.5" aria-hidden="true" />
+        <span>Resume</span>
+      </button>
+    );
+  }
 
   return (
     <span
@@ -39,7 +69,6 @@ export function BrowserStatusPill({
       role="status"
       title={detail ?? label}
     >
-      {state === "ready" ? <CheckCircle className="h-3.5 w-3.5" aria-hidden="true" /> : null}
       {state === "starting" ? <Spinner aria-hidden="true" tone="slate" size="xs" /> : null}
       {state === "paused" ? <Pause className="h-3.5 w-3.5" aria-hidden="true" /> : null}
       {state === "unavailable" ? (
@@ -122,7 +151,7 @@ export function BrowserChromeShell({
         <div
           className={`flex min-h-8 items-center gap-2 border-b px-3 py-1 text-xs ${
             feedbackTone === "error"
-              ? "border-rose-200 bg-rose-50 text-rose-700 dark:border-rose-900/60 dark:bg-rose-950/30 dark:text-rose-300"
+            ? "border-rose-200 bg-rose-50 text-rose-700 dark:border-rose-900/60 dark:bg-rose-950/30 dark:text-rose-300"
               : "border-emerald-200 bg-emerald-50 text-emerald-700 dark:border-emerald-900/60 dark:bg-emerald-950/30 dark:text-emerald-300"
           }`}
           data-testid={feedbackTestId}

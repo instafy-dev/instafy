@@ -17,6 +17,7 @@ const mocks = vi.hoisted(() => ({
   recordProjectOpened: vi.fn(),
   useAuth: vi.fn(),
   listProjects: vi.fn(),
+  navigate: vi.fn(),
   // Mutable per test: the startup path under test is the one with nothing
   // remembered, so a test can empty the active project and the URL.
   activeProjectId: "11111111-1111-4111-8111-111111111111",
@@ -69,6 +70,9 @@ vi.mock("react-router-dom", async (importOriginal) => {
       state: null,
       key: "test",
     }),
+    // No router is mounted here; the routed write is covered by
+    // ProjectAccessProvider.router.test.tsx.
+    useNavigate: () => mocks.navigate,
   };
 });
 

@@ -89,6 +89,7 @@ export async function openSharedBrowser(
   await page.evaluate(() => {
     window.dispatchEvent(new CustomEvent("instafy:browser-open", { detail: {} }));
   });
+  await page.getByTestId("browser-location-menu").click();
   const sharedButton = page.getByTestId("browser-transport-shared");
   await expect(sharedButton).toBeVisible({ timeout: 30_000 });
   await sharedButton.click();

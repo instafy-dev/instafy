@@ -1,3 +1,4 @@
+import { useConversationFileOpener } from "../../../workspace/ConversationFileContext";
 import {
   memo,
   useCallback,
@@ -1406,6 +1407,7 @@ const MessageContentBody = memo(function MessageContentBody({
     openPanelTab("ai", { activate: true });
   }, [openPanelTab, requestUrlPush, upstreamGuidance?.actionKind]);
 
+  const openConversationFile = useConversationFileOpener();
   const handleWorkspaceFileClick = useCallback(
     (reference: WorkspaceFileReferenceDescriptor) => {
       if (typeof window === "undefined") {
@@ -1428,6 +1430,10 @@ const MessageContentBody = memo(function MessageContentBody({
       if (typeof reference.line === "number" && reference.line > 0) {
         detail.line = reference.line;
       }
+      if (openConversationFile) {
+        openConversationFile(detail);
+        return;
+      }
       const runtimeWindow = window as typeof window & {
         __INSTAFY_PENDING_OPEN_WORKSPACE_FILE__?: typeof detail | null;
       };
@@ -1436,7 +1442,7 @@ const MessageContentBody = memo(function MessageContentBody({
       openPanelTab("code");
       window.dispatchEvent(new CustomEvent("instafy:open-workspace-file", { detail }));
     },
-    [openPanelTab, projectId, requestUrlPush],
+    [openConversationFile, openPanelTab, projectId, requestUrlPush],
   );
 
   const handleConversationReferenceClick = useCallback(

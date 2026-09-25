@@ -24,7 +24,7 @@ describe("conversation roster placement", () => {
 
   it("renders the roster inside the chat panel, above the message scroll container", () => {
     const chatPanelWrapper = chatPanel.indexOf(
-      'className={browserSubtab === "chat" ? "flex min-h-0 flex-1 flex-col" : "hidden"}',
+      'className={chatVisible ? "flex h-full min-h-0 flex-col" : "hidden"}',
     );
     const rosterRow = chatPanel.indexOf('data-testid="chat-conversation-roster-row"');
     // The chat panel's scroll container is composed by ChatTranscriptViewport

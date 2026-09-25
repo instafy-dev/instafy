@@ -19,6 +19,8 @@ runtime-contracts = { path = "../runtime-contracts" }
 prost-types = "0.13"
 prost = "0.13"
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
+httpdate = "1"
 
 [dev-dependencies]
 serial_test = "2"
+native-tls = "0.2"

@@ -44,6 +44,7 @@ describe("routing with the real tab owner's history readiness", () => {
   let container: HTMLDivElement;
   let updateScope: (update: (scope: Scope) => Scope) => void;
   let navigateTo: ReturnType<typeof useNavigate>;
+  let openFilesExplorer: () => void;
   let strictMode: boolean;
   const placeholder = () => ({ ...createInitialConversation({ localId: "new-space-placeholder" }), createdAt: 1 });
   const oldChat = () => ({ ...createInitialConversation({ localId: "old-chat", controllerId: REMOTE }), createdAt: 1 });
@@ -52,6 +53,8 @@ describe("routing with the real tab owner's history readiness", () => {
     const tabs = useWorkspaceTabs(), state = useFixtureState(), location = useLocation(), navigate = useNavigate();
     navigateTo = navigate;
     const [drawer, setDrawer] = useState<LeftDrawerPanel | null>(null);
+    // Mirrors StudioLayout's Files explorer: an explicit push, then the drawer.
+    openFilesExplorer = () => { tabs.requestUrlNavigation("push"); setDrawer("files"); };
     const tab = tabs.activeTab;
     useStudioLayoutWorkspaceRouting({
       activeConversationControllerId: state.conversations.find(c => c.localId === state.selected)?.controllerId ?? null,
@@ -144,6 +147,47 @@ describe("routing with the real tab owner's history readiness", () => {
       expect(new URLSearchParams(window.location.search).get("conversationControllerId")).toBe(NEW_REMOTE);
       expect(visit()).toEqual(before);
     }
+  });
+
+  it.each([
+    { name: "passive hydration", suffix: "&panel=secrets", push: false },
+    { name: "an explicit push", suffix: "&panel=secrets", push: true },
+    { name: "an explicit push over a deep link", suffix: "&panel=secrets&conversationId=fetched-chat", push: true },
+  ])("never writes the placeholder into an independent panel's URL before history replaces it ($name)", async ({ suffix, push }) => {
+    const settle = () => act(async () => { await new Promise(resolve => setTimeout(resolve, 60)); });
+    await enterPendingSpace(suffix);
+    await settle();
+    expect(read("routing-error")).toBeUndefined();
+    expect(read("ready")).toBe("false");
+    expect(read("tab")).toBe("secrets");
+    expect(window.location.search).toBe(`?projectId=${B}${suffix}`);
+    if (push) {
+      const beforePush = visit();
+      await act(async () => openFilesExplorer());
+      await settle();
+      expect(read("routing-error")).toBeUndefined();
+      expect(read("ready")).toBe("false");
+      expect(read("drawer")).toBe("files");
+      // The pushed visit keeps what the URL named and never gains the placeholder.
+      expect(window.location.search).toBe(`?projectId=${B}${suffix}&workspaceTab=files`);
+      expect(visit().length).toBe(beforePush.length + 1);
+    }
+    const before = visit();
+    // Fetched history arrives as its own conversation: the owner selects it
+    // and closes the placeholder instead of binding the placeholder to it.
+    await act(async () => updateScope(scope => ({ ...scope, resolved: true, selected: "fetched-chat",
+      conversations: [{ ...createInitialConversation({ localId: "fetched-chat", controllerId: NEW_REMOTE }), createdAt: 2 }],
+    })));
+    await settle();
+    expect(read("routing-error")).toBeUndefined();
+    expect(read("ready")).toBe("true");
+    expect(read("tab")).toBe("secrets");
+    const params = new URLSearchParams(window.location.search);
+    expect(params.get("panel")).toBe("secrets");
+    expect(params.get("workspaceTab")).toBe(push ? "files" : null);
+    expect(params.get("conversationId")).toBe("fetched-chat");
+    expect(params.get("conversationControllerId")).toBe(NEW_REMOTE);
+    expect(visit()).toEqual(before);
   });
 
   it("uses the owner's existing usable-local-draft predicate, not a remote-fetch-only gate", async () => {

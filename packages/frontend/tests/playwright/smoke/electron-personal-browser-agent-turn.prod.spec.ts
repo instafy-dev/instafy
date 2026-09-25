@@ -699,6 +699,7 @@ test.describe("Packaged Electron Personal Browser real agent turn", () => {
     await focusLastConversationTab(page);
     await page.getByTestId("composer-action-menu-trigger").click();
     await page.getByTestId("composer-action-menu-open-browser").click();
+    await page.getByTestId("browser-location-menu").click();
     const personalButton = page.getByTestId("browser-transport-personal");
     await expect(personalButton).toBeEnabled({ timeout: 30_000 });
     await personalButton.click();

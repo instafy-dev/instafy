@@ -241,7 +241,9 @@ function SecretModal({
               aria-label={valueVisible ? "Hide value" : "Show value"}
               onPress={onToggleValueVisible}
               isDisabled={pending}
-              className="absolute right-2 top-1/2 -translate-y-1/2"
+              // Centred with auto margins, not a translate: the Button presses
+              // in with a translate that would replace -50% and drop the eye.
+              className="absolute inset-y-0 right-2 my-auto"
               data-testid="project-secret-toggle-value"
             >
               {valueVisible ? (

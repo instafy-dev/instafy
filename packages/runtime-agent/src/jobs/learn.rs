@@ -129,6 +129,12 @@ const GROUP_PARTICIPATION_TEMPLATE: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/assets/instafy/.agents/skills/instafy-group-participation/SKILL.md"
 ));
+/// This controller-owned workflow must remain available when the main prompt
+/// deliberately omits ordinary workspace memory.
+pub(super) fn group_participation_policy() -> &'static str {
+    GROUP_PARTICIPATION_TEMPLATE
+}
+
 const CONVERSATION_HISTORY_TEMPLATE: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/assets/instafy/.agents/skills/instafy-conversation-history/SKILL.md"
@@ -1549,6 +1555,39 @@ mod tests {
         ));
         assert!(refreshed.contains("Do not add an artificial waiting period"));
         assert!(refreshed.contains("do not call tools"));
+    }
+
+    #[test]
+    fn group_participation_policy_is_delivered_in_full_after_scaffold_refresh() {
+        let tmp = tempdir().expect("temp dir");
+        let path = tmp.path().join(GROUP_PARTICIPATION_RELATIVE_PATH);
+        let question = "What follows from the rule already supplied in this conversation?";
+
+        ensure_project_memory_scaffold(tmp.path());
+        let snapshot = super::super::format_project_memory_snapshot(tmp.path(), question)
+            .expect("ordinary main-turn memory snapshot");
+        assert_eq!(
+            snapshot
+                .text
+                .matches(GROUP_PARTICIPATION_TEMPLATE.trim())
+                .count(),
+            1
+        );
+
+        // Existing workspaces must receive the same complete pinned policy as new ones,
+        // rather than retaining an obsolete decision procedure or only its index entry.
+        fs::write(&path, "obsolete participation policy").expect("write old policy");
+        ensure_project_memory_scaffold(tmp.path());
+        let refreshed = super::super::format_project_memory_snapshot(tmp.path(), question)
+            .expect("refreshed main-turn memory snapshot");
+        assert_eq!(
+            refreshed
+                .text
+                .matches(GROUP_PARTICIPATION_TEMPLATE.trim())
+                .count(),
+            1
+        );
+        assert!(!refreshed.text.contains("obsolete participation policy"));
     }
 
     #[test]

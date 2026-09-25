@@ -11,6 +11,10 @@ type ButtonVariant = "primary" | "secondary" | "outline" | "ghost" | "danger";
 type ButtonSize = "xs" | "sm" | "md" | "lg" | "icon";
 type ButtonRadius = "none" | "md" | "lg" | "xl" | "2xl" | "full";
 
+// The press nudge is a translate. Tailwind v4 translate utilities share one
+// --tw-translate-x/--tw-translate-y pair, so it replaces any translate a caller
+// sets: centre a button with `inset-y-0 my-auto` or a flex wrapper, never with
+// `top-1/2 -translate-y-1/2` (guarded by __tests__/buttonPressTranslate.test.ts).
 const BASE =
   "inline-flex items-center justify-center gap-2 font-medium touch-manipulation [-webkit-tap-highlight-color:transparent] transition-[color,background-color,border-color,box-shadow,transform] duration-150 ease-out focus:outline-none focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary-500/40 focus-visible:ring-offset-2 focus-visible:ring-offset-white dark:focus-visible:ring-offset-[var(--color-studio-dark-canvas)] data-[pressed]:translate-y-px data-[pressed]:scale-[0.98] data-[disabled]:pointer-events-none data-[disabled]:opacity-60 disabled:pointer-events-none disabled:opacity-60 data-[pending]:pointer-events-none";
 

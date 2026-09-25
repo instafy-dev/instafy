@@ -12,7 +12,7 @@ async function mountCompactBrowserChrome(page: Page): Promise<void> {
     import ReactDomClientNS from "${deps.reactDomClient}";
     import { BrowserStatusPill } from "/src/screens/studio/components/BrowserChromeShell.tsx";
     import { BrowserExpandButton } from "/src/screens/studio/components/BrowserExpandButton.tsx";
-    import { ChatBrowserSubtabs } from "/src/screens/studio/components/ChatBrowserSubtabs.tsx";
+    import { ConversationSurfaceTabs } from "/src/workspace/ConversationSurfaceLayout.tsx";
     import { BrowserTransportSelector } from "/src/screens/studio/components/PersonalBrowserSurface.tsx";
     import { RemoteBrowserMobileKeyboard } from "/src/screens/studio/components/RemoteBrowserMobileKeyboard.tsx";
     import { SharedBrowserChrome } from "/src/screens/studio/components/SharedBrowserChrome.tsx";
@@ -77,12 +77,12 @@ async function mountCompactBrowserChrome(page: Page): Promise<void> {
         onTakeControl: () => {},
       });
       return h("main", { style: { width: "100vw", overflow: "hidden" } },
-        h(ChatBrowserSubtabs, {
-          activeTab: "browser",
-          browserAttention: true,
-          browserPanelId: "browser-panel",
+        h(ConversationSurfaceTabs, {
+          activeId: "browser",
+          resourceId: "browser", split: false, wide: false, ratio: .55, onSplitChange: () => {},
+          resources: [{ id: "browser", label: "Browser", panelId: "browser-panel", attention: h("span", {"data-testid":"shared-browser-approval-attention"}, "Approve") }],
           chatPanelId: "chat-panel",
-          onTabChange: () => {},
+          onSelect: () => {},
         }),
         h(SharedBrowserChrome, {
           compact,
@@ -222,8 +222,7 @@ test("keeps compact browser identity, control, and tabs usable at 360px", async 
       chromeFits: chromeElement ? chromeElement.scrollWidth <= chromeElement.clientWidth : false,
       documentWidth: document.documentElement.scrollWidth,
       reload: bounds("shared-browser-reload"),
-      transportPersonal: bounds("browser-transport-personal"),
-      transportShared: bounds("browser-transport-shared"),
+      locationMenu: bounds("browser-location-menu"),
     };
   });
 
@@ -234,8 +233,7 @@ test("keeps compact browser identity, control, and tabs usable at 360px", async 
     geometry.action,
     geometry.browserTab,
     geometry.reload,
-    geometry.transportPersonal,
-    geometry.transportShared,
+    geometry.locationMenu,
   ]) {
     expect(target).not.toBeNull();
     expect(target!.height).toBeGreaterThanOrEqual(40);

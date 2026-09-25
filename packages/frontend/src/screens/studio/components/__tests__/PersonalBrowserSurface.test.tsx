@@ -174,10 +174,8 @@ describe("PersonalBrowserSurface", () => {
       occluded: false, agentWorking: false,
       ownerId: "owner-1",
     });
-    expect(container.textContent).toContain("This device");
-    expect(
-      document.querySelector('[data-testid="browser-transport-personal"]')?.textContent,
-    ).toBe("This device");
+    expect(document.querySelector('[data-testid="browser-location-menu"]')?.getAttribute("aria-label")).toBe("Browser location: This device");
+    expect(document.querySelector('[data-testid="browser-transport-personal"]')).toBeNull();
     expect(container.textContent).toContain("Ready");
     const chrome = document.querySelector('[data-testid="personal-browser-chrome"]')!;
     const sharing = document.querySelector('[data-testid="sharing-controls"]')!;
@@ -218,6 +216,7 @@ describe("PersonalBrowserSurface", () => {
         />,
       );
     });
+    await act(async () => document.querySelector<HTMLButtonElement>('[data-testid="browser-location-menu"]')!.click());
     const personal = document.querySelector<HTMLButtonElement>(
       '[data-testid="browser-transport-personal"]',
     );
@@ -235,6 +234,7 @@ describe("PersonalBrowserSurface", () => {
     ).toContain("Project members see the same remote browser");
     await act(async () => shared?.click());
     expect(onModeChange).toHaveBeenCalledWith("shared");
+    expect(document.querySelector('[role="dialog"][aria-label="Browser location"]')).toBeNull();
   });
 
   it("expands compact Personal browsing without closing or pausing its native page", async () => {
@@ -260,6 +260,10 @@ describe("PersonalBrowserSurface", () => {
     await act(async () => root.render(
       <PersonalBrowserSurface active model={model} transportSelector={null} />,
     ));
+    const resume = document.querySelector<HTMLButtonElement>('[data-testid="personal-browser-agent-status"]');
+    expect(resume?.tagName).toBe("BUTTON");
+    expect(resume?.textContent).toBe("Resume");
+    expect(document.querySelectorAll('[aria-label="Resume agent control"]')).toHaveLength(1);
     await act(async () => document.querySelector<HTMLButtonElement>('[aria-label="Browser settings"]')!.click());
     const checkbox = document.querySelector<HTMLInputElement>('[data-testid="personal-browser-routine-approval"]');
     expect(checkbox?.checked).toBe(true);
@@ -278,7 +282,7 @@ describe("PersonalBrowserSurface", () => {
     expect(document.querySelector('[data-testid="personal-browser-routine-approval"]')).toBeNull();
   });
 
-  it("keeps profile ownership accessible when compact controls hide their text", async () => {
+  it("keeps location and profile ownership accessible in the compact menu", async () => {
     await act(async () => {
       root.render(
         <BrowserTransportSelector
@@ -290,12 +294,14 @@ describe("PersonalBrowserSurface", () => {
         />,
       );
     });
+    expect(document.querySelector('[data-testid="browser-location-menu"]')?.getAttribute("aria-label")).toBe("Browser location: This device");
+    await act(async () => document.querySelector<HTMLButtonElement>('[data-testid="browser-location-menu"]')!.click());
     expect(document.querySelector('[role="group"]')?.getAttribute("aria-label"))
-      .toBe("Browser profile");
+      .toBe("Browser location");
     const personal = document.querySelector<HTMLButtonElement>('[data-testid="browser-transport-personal"]')!;
     const shared = document.querySelector<HTMLButtonElement>('[data-testid="browser-transport-shared"]')!;
-    expect(personal.textContent).toBe("");
-    expect(shared.textContent).toBe("");
+    expect(personal.textContent).toBe("This device");
+    expect(shared.textContent).toBe("Workspace");
     expect(personal.getAttribute("aria-label")).toBe("This device");
     expect(personal.getAttribute("aria-pressed")).toBe("true");
     expect(shared.getAttribute("aria-label")).toBe("Workspace browser");
@@ -597,7 +603,7 @@ describe("PersonalBrowserSurface", () => {
     await act(async () => root.render(<PersonalBrowserSurface active model={model} transportSelector={null} />));
     const status = document.querySelector('[data-testid="personal-browser-agent-status"]');
     expect(status?.getAttribute("title")).toContain("participant controls this tab");
-    expect(status?.textContent).toBe("Paused");
+    expect(status?.textContent).toBe("Resume");
     expect(document.querySelector<HTMLButtonElement>('[aria-label="Resume agent control"]')?.disabled).toBe(true);
   });
 

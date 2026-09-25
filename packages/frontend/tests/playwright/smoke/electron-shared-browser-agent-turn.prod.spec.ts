@@ -795,6 +795,7 @@ test.describe("Electron Shared Browser real agent turn", () => {
       await expect(page.getByTestId("composer-action-menu")).toBeVisible();
       await page.getByTestId("composer-action-menu-open-browser").click();
 
+      await page.getByTestId("browser-location-menu").click();
       const sharedButton = page.getByTestId("browser-transport-shared");
       await expect(sharedButton).toBeVisible({ timeout: 30_000 });
       await sharedButton.click();

@@ -34,6 +34,8 @@ const IDLE_VIEWER_STATE: ViewerState = {
 };
 
 export interface OpenWorkspaceFileEventDetail {
+  /** Switching a conversation view must not replace an unsaved editor draft. */
+  preserveDraft?: boolean;
   /** In-process callers may cancel an accepted open after navigation changes. */
   signal?: AbortSignal;
   handoffId?: string | null;
@@ -451,7 +453,7 @@ export function useFilesPanelViewerState({
   );
 
   const openTextFile = useCallback(
-    async (entry: ControllerWorkspaceEntry, options?: { forceFetch?: boolean; request?: FileOpenRequest }) => {
+    async (entry: ControllerWorkspaceEntry, options?: { forceFetch?: boolean; preserveDraft?: boolean; request?: FileOpenRequest }) => {
       const request = options?.request ?? beginOpenRequest();
       if (!activeProjectId || !request.isCurrent()) {
         return;
@@ -525,6 +527,11 @@ export function useFilesPanelViewerState({
               generated: textContent ?? "",
               modified: textContent ?? "",
             };
+            const draft = current.files.find(file => file.id === entry.path);
+            if (options?.preserveDraft && draft && draft.modified !== draft.generated) {
+              nextFile.generated = draft.generated;
+              nextFile.modified = draft.modified;
+            }
             return {
               ...current,
               files: [...filtered, nextFile],
@@ -858,7 +865,7 @@ export function useFilesPanelViewerState({
         if (isImageEntry(entry)) {
           await openImageFile(entry, request);
         } else if (isLikelyTextEntry(entry)) {
-          await openTextFile(entry, { forceFetch: true, request });
+          await openTextFile(entry, { forceFetch: true, preserveDraft: detail.preserveDraft, request });
           if (!request.isCurrent()) return;
           if (wantsMarkdownPreview && isMarkdownWorkspacePath(normalizedPath)) {
             setMarkdownView("preview");

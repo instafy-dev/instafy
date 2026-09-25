@@ -11,6 +11,7 @@ import {
 import {
   Computer,
   Globe,
+  NavArrowDown,
   NavArrowLeft,
   NavArrowRight,
   Pause,
@@ -51,71 +52,36 @@ export function BrowserTransportSelector({
   onModeChange: (mode: BrowserTransport) => void;
   personalAvailable: boolean;
 }) {
+  const [open, setOpen] = useState(false);
   const descriptionId = useId();
-  const personalDescriptionId = `${descriptionId}-personal`;
-  const sharedDescriptionId = `${descriptionId}-shared`;
-  const optionClassName = (option: BrowserTransport) =>
-    [
-      "inline-flex h-7 touch-manipulation items-center rounded-md text-xs font-medium transition max-[540px]:h-10 pointer-coarse:min-h-11",
-      compact ? "gap-0 px-1.5" : "gap-1.5 px-2",
-      "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary-500/50",
-      mode === option
-        ? "bg-white text-slate-900 shadow-sm dark:bg-slate-950 dark:text-slate-100"
-        : "text-slate-500 hover:text-slate-800 disabled:cursor-not-allowed disabled:opacity-45 dark:text-slate-400 dark:hover:text-slate-100",
-    ].join(" ");
-
-  return (
-    <div
-      aria-label="Browser profile"
-      className="inline-flex shrink-0 rounded-lg bg-slate-100/80 p-0.5 dark:bg-slate-800/60"
-      data-browser-session-safe-zone="true"
-      data-compact={compact ? "true" : "false"}
-      data-testid="browser-transport-selector"
-      role="group"
-    >
-      <button
-        aria-describedby={personalDescriptionId}
-        aria-label="This device"
-        aria-pressed={mode === "personal"}
-        className={optionClassName("personal")}
-        data-testid="browser-transport-personal"
-        disabled={!checked || !personalAvailable}
-        onClick={() => onModeChange("personal")}
-        title={
-          !checked
-            ? "Checking this device…"
-            : !personalAvailable
-              ? "Personal Browser is available in the Instafy desktop app."
-              : "This device — logins stay here; you choose who can view the tab"
-        }
-        type="button"
-      >
-        <Computer className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
-        {compact ? null : <span>This device</span>}
-      </button>
-      <button
-        aria-describedby={sharedDescriptionId}
-        aria-label="Workspace browser"
-        aria-pressed={mode === "shared"}
-        className={optionClassName("shared")}
-        data-testid="browser-transport-shared"
-        onClick={() => onModeChange("shared")}
-        title="Workspace browser — project members can see and reuse logins"
-        type="button"
-      >
-        <Globe className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
-        {compact ? null : <span>Workspace</span>}
-      </button>
-      <span className="sr-only" id={personalDescriptionId}>
-        Your logins and site data stay on this device and follow you across projects. They are
-        not copied to Shared Browser or your other devices. Share tab lets you choose who can watch.
-      </span>
-      <span className="sr-only" id={sharedDescriptionId}>
-        Project members see the same remote browser and logged-in pages. Members
-        with control can use those logins. Your Personal Browser logins are not copied here.
-      </span>
-    </div>
-  );
+  const choose = (next: BrowserTransport) => { setOpen(false); onModeChange(next); };
+  const location = mode === "personal" ? "This device" : "Workspace";
+  return <div data-browser-session-safe-zone="true" data-testid="browser-transport-selector" data-compact={compact ? "true" : "false"}>
+    <BrowserToolsPopover placement="bottom start" label="Browser location" isOpen={open} onOpenChange={setOpen} trigger={
+      <Button variant="ghost" size="sm" className="max-[540px]:h-10 pointer-coarse:min-h-11" aria-label={`Browser location: ${location}`} data-testid="browser-location-menu" title={`Runs on ${location.toLowerCase()}`}>
+        {mode === "personal" ? <Computer className="h-3.5 w-3.5" aria-hidden="true" /> : <Globe className="h-3.5 w-3.5" aria-hidden="true" />}
+        <NavArrowDown className="h-3 w-3" aria-hidden="true" />
+      </Button>
+    }>
+      <p className="font-medium">Run browser on</p>
+      <div className="space-y-2" role="group" aria-label="Browser location">
+        <Button variant="ghost" className="w-full justify-start" aria-label="This device" aria-pressed={mode === "personal"}
+          aria-describedby={`${descriptionId}-personal`} data-testid="browser-transport-personal"
+          isDisabled={!checked || !personalAvailable} onPress={() => choose("personal")}>
+          <Computer className="h-4 w-4" aria-hidden="true" />This device
+        </Button>
+        <p id={`${descriptionId}-personal`} className="text-xs text-slate-500 dark:text-slate-400">
+          {!checked ? "Checking this device… " : !personalAvailable ? "Available in the Instafy desktop app. " : ""}
+          Your logins stay on this device and follow you across projects. They are not copied to Shared Browser or your other devices.
+        </p>
+        <Button variant="ghost" className="w-full justify-start" aria-label="Workspace browser" aria-pressed={mode === "shared"}
+          aria-describedby={`${descriptionId}-shared`} data-testid="browser-transport-shared" onPress={() => choose("shared")}>
+          <Globe className="h-4 w-4" aria-hidden="true" />Workspace
+        </Button>
+        <p id={`${descriptionId}-shared`} className="text-xs text-slate-500 dark:text-slate-400">Project members see the same remote browser and logged-in pages. Your personal logins are not copied here.</p>
+      </div>
+    </BrowserToolsPopover>
+  </div>;
 }
 
 function personalBrowserStatus(model: PersonalBrowserModel): {
@@ -350,6 +316,8 @@ export function PersonalBrowserSurface({
   };
   const humanInputState = useBrowserHumanInput(humanInputOptions);
   const humanInputAvailable = ready && Boolean(humanInputIdentityKey && onContinueAfterHumanInput);
+  const resumeFromStatus = ready && browserStatus.state === "paused" &&
+    !model.status?.agentControlEnabled && model.agentPhase !== "unavailable" && !humanInputState.active;
   const clearDataMessage =
     model.clearDataState === "clearing"
       ? "Clearing Personal Browser data…"
@@ -478,6 +446,10 @@ export function PersonalBrowserSurface({
             detail={browserStatus.detail}
             state={browserStatus.state}
             testId="personal-browser-agent-status"
+            resume={resumeFromStatus ? {
+              disabled: model.status?.humanControlReady === false || model.status?.tabControlActive,
+              onPress: () => void model.setAgentControlEnabled(true, routineApprovalAvailable ? selectedApprovalMode : undefined),
+            } : undefined}
           />
         }
         actions={
@@ -495,7 +467,7 @@ export function PersonalBrowserSurface({
             >
               <Refresh className="h-3.5 w-3.5" aria-hidden="true" />
             </IconButton>
-          ) : (model.status?.agentControlEnabled && (!humanInputAvailable || humanInputState.active)) || (ready && !model.status?.agentControlEnabled && !humanInputState.active) ? (
+          ) : !resumeFromStatus && ((model.status?.agentControlEnabled && (!humanInputAvailable || humanInputState.active)) || (ready && !model.status?.agentControlEnabled && !humanInputState.active)) ? (
             <IconButton
               aria-label={model.status?.agentControlEnabled ? "Pause agent control" : "Resume agent control"}
               isDisabled={!model.status?.agentControlEnabled && (model.status?.humanControlReady === false || model.status?.tabControlActive)}

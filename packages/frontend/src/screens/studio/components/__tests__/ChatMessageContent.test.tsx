@@ -1,3 +1,4 @@
+import { ConversationFileContext } from "../../../../workspace/ConversationFileContext";
 // @vitest-environment jsdom
 
 import { act } from "react";
@@ -424,6 +425,17 @@ describe("ChatMessageContent", () => {
     expect(refs).toHaveLength(1);
     expect(refs[0]?.textContent?.trim()).toBe("Referenced thread");
     expect(container.querySelector('[data-testid="chat-message-file-reference-inline"]')).not.toBeNull();
+  });
+
+  it("opens a chat file reference in its conversation pane without global navigation", async () => {
+    const open = vi.fn();
+    await act(async () => {
+      root.render(<ConversationFileContext.Provider value={open}><MessageContent content="Inspect `notes.md:4`." projectId="project-1" /></ConversationFileContext.Provider>);
+    });
+    await act(async () => container.querySelector<HTMLButtonElement>('[data-testid="chat-message-file-reference-inline"]')?.click());
+    expect(open).toHaveBeenCalledWith({ path: "notes.md", line: 4, projectId: "project-1", returnTarget: "assistant" });
+    expect(openPanelTab).not.toHaveBeenCalled();
+    expect(requestUrlPush).not.toHaveBeenCalled();
   });
 
   it("renders inline code without leaking markdown backticks", async () => {

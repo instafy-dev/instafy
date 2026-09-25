@@ -113,6 +113,23 @@ describe("useChatCredentialGate cache seeding across spaces", () => {
     await act(async () => root.render(<Harness options={options} />));
   }
 
+  it.each([
+    [401, "upstream_authentication_error", "assistant", true],
+    [424, "upstream_credential_refresh_failed", "assistant", true],
+    [424, "upstream_configuration_error", "assistant", false],
+    [401, "upstream_authentication_error", "user", false],
+  ] as const)("opens credential setup only for assistant credential failures: %s %s %s", async (status, code, role, opens) => {
+    resolvedRequirements();
+    const diagnostic = `unexpected status ${status}: ${JSON.stringify({
+      error: { type: "upstream_error", code, message: "Safe proxy failure." },
+    })}`;
+    const options = baseOptions({
+      messages: [{ id: "safe-proxy-error", role, content: diagnostic, timestamp: Date.now() }],
+    });
+    await act(async () => root.render(<Harness options={options} />));
+    expect(captured?.aiOnboardingOpen).toBe(opens);
+  });
+
   it("opens a new space on the same user's resolved answer instead of a cold check", async () => {
     resolvedRequirements();
     await act(async () => root.render(<Harness options={baseOptions()} />));

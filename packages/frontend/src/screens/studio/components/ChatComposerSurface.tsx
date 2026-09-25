@@ -70,11 +70,11 @@ import { useTouchSendModePicker } from "./useTouchSendModePicker";
 import type { TouchSendModePickerOutcome } from "./touchSendModePicker";
 
 type ChatComposerSurfaceProps = {
+  overlayWidth?: string;
   browserDockProps: ComponentProps<typeof ChatBrowserDock>;
   composerOverlayRef: RefObject<HTMLDivElement | null>;
   composerAutoHidden: boolean;
   aboveComposer?: ReactNode;
-  browserModeActive?: boolean;
   compactBrowserViewport: boolean;
   onSubmit: FormEventHandler<HTMLFormElement>;
   queueSurfaceProps: ComponentProps<typeof ChatSendQueueSurface>;
@@ -207,11 +207,11 @@ export const COMPOSER_SEND_REST_CLASS = "[&_svg]:text-slate-400 dark:[&_svg]:tex
 export const COMPOSER_EDITOR_WRAPPER_CLASS = `flex ${CHAT_INPUT_CONTROL_HEIGHT_CLASS} min-w-0 flex-1 flex-col justify-center`;
 
 export function ChatComposerSurface({
+  overlayWidth,
   browserDockProps,
   composerOverlayRef,
   composerAutoHidden,
   aboveComposer,
-  browserModeActive = false,
   compactBrowserViewport,
   onSubmit,
   queueSurfaceProps,
@@ -450,19 +450,8 @@ export function ChatComposerSurface({
   const showGoalStatusWarningIcon =
     goalHealthTone === "blocked" || goalHealthTone === "warning";
   const showGoalHelpAction = goalHealthTone === "blocked";
-  const browserComposerCondensed =
-    browserModeActive &&
-    chatInputProps.value.trim().length === 0 &&
-    imageAttachments.length === 0 &&
-    !showActiveGoal &&
-    !showVoiceActiveStrip &&
-    !providerTriggerNoticeProps &&
-    queueSurfaceProps.totalQueuedCount === 0 &&
-    !queueSurfaceProps.editingQueuedItem &&
-    !stashTrayProps?.stashes.length;
-  // Keep Lexical in the same tree position while its primary action changes.
-  // The editor grows line by line, capped per viewport in chatInputGrowth.ts.
-  const composerInlineControlsInTextRow = !browserComposerCondensed && !showVoiceActiveStrip;
+  // Chat and Browser keep the editor and controls in the same positions.
+  const composerInlineControlsInTextRow = !showVoiceActiveStrip;
   const mobileChatsNavigation = showComposerNavigationButton && composerNavigationDestination === "chats";
   const foldSuggestionIntoMenu = showMobileGhostSuggestionAcceptButton;
   const imageUploadDisabled = mutationDisabled || sendingAttachment || onboardingInputLocked;
@@ -988,13 +977,12 @@ export function ChatComposerSurface({
         }`}
         data-testid="chat-composer-overlay"
         data-browser-session-safe-zone="true"
-        style={
-          composerAutoHidden && compactBrowserViewport
-            ? {
-                transform: "translateY(calc(100% - max(var(--instafy-safe-area-inset-bottom), 0.75rem)))",
-              }
-            : undefined
-        }
+        style={{
+          width: overlayWidth,
+          ...(composerAutoHidden && compactBrowserViewport ? {
+            transform: "translateY(calc(100% - max(var(--instafy-safe-area-inset-bottom), 0.75rem)))",
+          } : {}),
+        }}
       >
         {aboveComposer ? <div className="pointer-events-none absolute inset-x-0 bottom-full flex justify-center pb-2">
           {aboveComposer}
@@ -1004,8 +992,6 @@ export function ChatComposerSurface({
           className={
             mobileChatsNavigation
               ? `pointer-events-auto ${CHAT_COMPOSER_COLUMN_CLASS_NAME} px-3.5`
-              : browserModeActive || compactBrowserViewport
-              ? "pointer-events-auto px-2"
               : `pointer-events-auto ${CHAT_COMPOSER_COLUMN_CLASS_NAME} px-3 sm:px-4`
           }
           style={{
@@ -1323,13 +1309,8 @@ export function ChatComposerSurface({
               // The composer keeps the raised-control background but borrows the
               // panel border tier: raised-control (13%) is meant for small
               // controls, and reads too hard along a full-width composer edge.
-              className={(mobileChatsNavigation ? "rounded-[1.75rem] " : "") + (
-                browserComposerCondensed
-                  ? `grid grid-cols-[minmax(0,1fr)_auto] items-center overflow-hidden border-slate-200/70 bg-slate-50 p-1.5 ${DARK_RAISED_CONTROL_BG_CLASS} ${DARK_PANEL_BORDER_CLASS}`
-                  : `flex flex-col overflow-hidden border-slate-200/70 bg-slate-50 p-1.5 ${DARK_RAISED_CONTROL_BG_CLASS} ${DARK_PANEL_BORDER_CLASS}`
-              )}
+              className={`${mobileChatsNavigation ? "rounded-[1.75rem] " : ""}flex flex-col overflow-hidden border-slate-200/70 bg-slate-50 p-1.5 ${DARK_RAISED_CONTROL_BG_CLASS} ${DARK_PANEL_BORDER_CLASS}`}
               data-testid="chat-composer-surface"
-              data-browser-composer-condensed={browserComposerCondensed ? "true" : undefined}
             >
               <span
                 role="status"
@@ -1347,11 +1328,7 @@ export function ChatComposerSurface({
               {/* The editor stays mounted while the primary slot switches from
                   mic to Send. Controls stay bottom-aligned as the text grows. */}
               <div
-                className={
-                  browserComposerCondensed
-                    ? "relative pb-0"
-                    : `relative flex items-end ${mobileChatsNavigation ? "gap-1" : "gap-2"}`
-                }
+                className={`relative flex items-end ${mobileChatsNavigation ? "gap-1" : "gap-2"}`}
                 data-testid="chat-composer-text-row"
                 onDragOver={onDragOver}
                 onDrop={onDrop}
@@ -1375,7 +1352,7 @@ export function ChatComposerSurface({
                   <ChatInput
                     ref={chatInputRef}
                     {...chatInputProps}
-                    compact={browserComposerCondensed}
+                    compact={false}
                     compactViewport={compactBrowserViewport}
                     readOnly={mutationDisabled || accessChecking}
                     onReadOnlyKeyDown={handleReadOnlyKeyDown}
@@ -1455,22 +1432,7 @@ export function ChatComposerSurface({
                 </div>
               ) : null}
               {providerTriggerNoticeProps ? <ProviderTriggerNotice {...providerTriggerNoticeProps} /> : null}
-              {browserComposerCondensed ? (
-                <div className="m-0 p-0 pl-2">
-                  <div className="space-y-2">
-                    <div className="flex items-center justify-between gap-1.5 sm:gap-2 min-h-10 flex-nowrap">
-                      <div className="flex min-w-0 items-stretch gap-1.5 sm:gap-2 flex-nowrap">
-                        {navigationButtonNode}
-                      </div>
-                      <div className="flex flex-none items-stretch justify-end gap-1.5 sm:gap-2 flex-nowrap">
-                        {actionMenuNode}
-                        {voiceStripNode}
-                        {renderSendButton()}
-                      </div>
-                    </div>
-                  </div>
-                </div>
-              ) : showVoiceActiveStrip ? (
+              {showVoiceActiveStrip ? (
                 <div className="pt-1.5">
                   <div className="space-y-2">
                     <div

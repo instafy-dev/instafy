@@ -1,3 +1,4 @@
+import { Lock } from "iconoir-react";
 import type { LocalExploreState } from "../../../services/runtimeController/localTabExplore";
 import { LocalTabControlRequests } from "./LocalTabControlRequests";
 import type { LocalTabControlState } from "../../../services/runtimeController/localTabControl";
@@ -55,7 +56,8 @@ function ShareAudiencePicker({ projectId, onShare, onCancel }: { projectId: stri
   </section>;
 }
 
-function ShareParticipants({ projectId, share, controlState, exploreState }: {
+function ShareParticipants({ projectId, share, controlState, exploreState, onStop }: {
+  onStop: () => void;
   projectId: string;
   share: LocalTabPublication;
   controlState: LocalTabControlState | null;
@@ -128,6 +130,7 @@ function ShareParticipants({ projectId, share, controlState, exploreState }: {
       <p className="text-slate-500">Removed people cannot rejoin this share. Their space membership stays unchanged.</p>
       {error ? <p role="alert" className="text-rose-600">{error}</p> : null}
       </section>
+      <Button data-testid="local-browser-share-stop" title="Stop sharing this tab" size="sm" variant="secondary" onPress={onStop}>Make private</Button>
   </BrowserToolsPopover>;
 }
 
@@ -187,12 +190,12 @@ export function LocalBrowserTabPublisher({ projectId, userId, ownerId, canShare,
   if (!canShare && !sharing && !error) return null;
   return <div className="flex shrink-0 items-center gap-1 text-xs" data-testid="local-browser-sharing" aria-label="This tab's audience" data-browser-session-safe-zone="true">
     {sharing ? <>
-      {activeShare ? <ShareParticipants key={activeShare.id} projectId={projectId} share={activeShare} controlState={controlState} exploreState={exploreState} /> : <span role="status">Sharing…</span>}
+      {activeShare ? <ShareParticipants key={activeShare.id} projectId={projectId} share={activeShare} controlState={controlState} exploreState={exploreState} onStop={() => publisher.current?.abort()} /> : <span role="status">Sharing…</span>}
       {activeShare?.control && controlState?.grant ? <Button size="sm" data-testid="local-tab-take-back" aria-label="Take back control" onPress={() => void activeShare.control!.revoke().catch(() => setError("Could not take back control. Try again or stop sharing."))}>Take back</Button> : null}
       {activeShare?.control ? <ParticipantTakeBack key={activeShare.id} requestId={takeoverRequestId} controlId={canShare ? controlState?.grant?.id ?? null : null} revoke={activeShare.control.revoke} /> : null}
-      <Button data-testid="local-browser-share-stop" aria-label="Stop sharing" size="sm" variant="secondary" onPress={() => publisher.current?.abort()}>Stop</Button>
+      {!activeShare ? <Button size="sm" variant="ghost" onPress={() => publisher.current?.abort()}>Cancel</Button> : null}
     </> : canShare ? <BrowserToolsPopover label="Share this tab" isOpen={choosing} onOpenChange={setChoosing} trigger={
-      <Button data-testid="local-browser-share-start" size="sm" variant="ghost" title="Only you can see this tab">Share tab…</Button>
+      <Button data-testid="local-browser-share-start" size="sm" variant="ghost" aria-label="Private tab — change who can view" title="Only you can see this tab"><Lock className="h-3.5 w-3.5" aria-hidden="true" />Private</Button>
     }>
       <ShareAudiencePicker projectId={projectId} onShare={start} onCancel={() => setChoosing(false)} />
     </BrowserToolsPopover> : null}

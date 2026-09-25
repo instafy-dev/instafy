@@ -156,7 +156,7 @@ test("Personal routine mode cannot be changed in place or approved for another o
 });
 
 
-test("browser tools occlusion preserves sharing and viewport, but leaving the browser ends capture", async () => {
+test("browser tools occlusion and hiding a pane preserve an explicit share and viewport", async () => {
   const { host } = fixture();
   const visibility = [], dimensions = [];
   host.ownerWindow.webContents = { focus() {} };
@@ -173,7 +173,7 @@ test("browser tools occlusion preserves sharing and viewport, but leaving the br
   assert.equal(visibility.at(-1),true);
   assert.ok(dimensions.every(value => value.width===400 && value.height===300));
   host.setBounds({...bounds,visible:false});
-  await assert.rejects(host.captureSharedTab("owner-fixture",captureId), /sharing ended/);
+  assert.deepEqual([...await host.captureSharedTab("owner-fixture",captureId)],[1,2,3]);
   host.stopTabShare("owner-fixture",captureId);
 });
 
@@ -204,4 +204,20 @@ test("menu previews are bounded to the current owner and discarded after closing
   host.currentOccluded = false;
   resolve(image);
   assert.equal(await closed,undefined);
+});
+
+test("an explicit tab share survives hiding its pane but not owner or project replacement", async () => {
+  const { host } = fixture();
+  host.currentVisible = true;
+  host.view.webContents.capturePage = async () => ({ getSize: () => ({ width: 800, height: 600 }), toJPEG: () => new Uint8Array([1, 2]) });
+  const { captureId } = host.startTabShare("owner-fixture");
+  host.currentVisible = false;
+  assert.deepEqual(await host.tabCapture.frame("owner-fixture", captureId), new Uint8Array([1, 2]));
+  assert.throws(() => host.startTabShare("owner-fixture"), /Open your browser/);
+  host.currentProjectId = "another-project";
+  await assert.rejects(host.tabCapture.frame("owner-fixture", captureId), /sharing ended/);
+  host.currentProjectId = "project-fixture";
+  host.currentOwnerId = null;
+  await assert.rejects(host.tabCapture.frame("owner-fixture", captureId), /sharing ended/);
+  host.tabCapture.stop();
 });

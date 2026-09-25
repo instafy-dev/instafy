@@ -16,7 +16,6 @@ import { getStudioVisitKey } from "../navigation/studioVisit";
 import { useStudioHistory } from "../navigation/useStudioHistory";
 import { useRouteOwnedWorkspaceDrawer } from "./useRouteOwnedWorkspaceDrawer";
 import { ChatLines, Clock, Coins, Cpu, Cube, GitBranch, Globe, Group, Lock, Page, Puzzle, Search, SidebarExpand, User, Xmark } from "iconoir-react";
-import { ResizablePanels } from "../components/ResizablePanels";
 import { fetchCreditPolicy } from "../credits/creditService";
 import { clearIdlePaused, clearRestoredAwaitingIntent, markIdlePaused } from "../runtime/idlePauseRegistry";
 import { isRuntimeLimitReclaimStopReason } from "../runtime/unexpectedHostedRuntimeRecovery";
@@ -114,9 +113,7 @@ import { useConversations } from "../conversations/ConversationsProvider";
 import { isUUID } from "../utils/uuid";
 import { writeClipboardText } from "../runtime/runtimeMenuShared";
 import { INSTAFY_CLI_URL } from "../config/externalLinks";
-import { SidePaneProvider, useSidePane } from "../workspace/SidePaneProvider";
 import { resolveMobileOverviewSection, resolveWorkspaceEmptyState, useStudioNavigationPosture } from "./studio/useStudioNavigationPosture";
-import { SidePaneTabs } from "../workspace/SidePaneTabs";
 import { WorkspaceTabsProvider, useWorkspaceTabs } from "../workspace/WorkspaceTabsProvider";
 import type { WorkspaceGitReviewSource } from "../workspace/gitReviewTypes";
 import { ConversationHistoryTab } from "../workspace/ConversationHistoryTab";
@@ -184,9 +181,7 @@ export function StudioLayout() {
       <StudioDraftNavigationGuard>
         <StudioStartupGate>
           <WorkspaceTabsProvider locationSearch={location.search} onRestorePanelDestination={restorePanelDestination}>
-            <SidePaneProvider>
               <StudioLayoutInner />
-            </SidePaneProvider>
           </WorkspaceTabsProvider>
         </StudioStartupGate>
       </StudioDraftNavigationGuard>
@@ -233,18 +228,6 @@ function StudioLayoutInner() {
     setIsProjectLauncherOpen,
   } = useWorkspaceUi();
   const [projectLauncherPreferredOrgId, setProjectLauncherPreferredOrgId] = useState<string | null>(null);
-  const {
-    tabs: sideTabs,
-    activeTab: activeSideTab,
-    activeTabId,
-    sideVisible,
-    ratio: sideRatio,
-    setRatio: setSideRatio,
-    closeTab: closeSideTab,
-    focusTab: focusSideTab,
-    moveTab: moveSideTab,
-    clearTabs
-  } = useSidePane();
   const {
     tabs: workspaceTabs,
     conversationTabsReady,
@@ -1380,10 +1363,9 @@ function StudioLayoutInner() {
       setIsProjectLauncherOpen(false);
     }
     resetTabs();
-    clearTabs();
     setLeftDrawer(null);
 
-  }, [clearTabs, resetTabs, setIsProjectLauncherOpen, setLeftDrawer]);
+  }, [resetTabs, setIsProjectLauncherOpen, setLeftDrawer]);
 
   const handleOpenProjectPicker = useCallback(() => {
     navigateToDestination({ kind: "panel", panel: "projects" });
@@ -1657,12 +1639,6 @@ function StudioLayoutInner() {
   }, [authLoading, navigate, user]);
 
 
-  const handleSideTabReorder = useCallback(
-    (tabId: string, targetIndex: number) => {
-      moveSideTab(tabId, targetIndex);
-    },
-    [moveSideTab]
-  );
   const handleSignOut = useCallback(async () => {
     try {
       await signOut?.();
@@ -1726,33 +1702,12 @@ function StudioLayoutInner() {
     setLeftDrawer("files");
   }, [isLargeScreen, leftDrawer, requestHistoryPush, setLeftDrawer]);
   const projectAccessBlocked = controllerProjectMissing;
-  const effectiveSideVisible = projectAccessBlocked ? false : sideVisible;
-  const scrollPaddingClass = isLargeScreen && effectiveSideVisible ? "pr-6" : "pr-0";
   const sidebarActivePanel =
     leftDrawer === "files"
       ? "code"
       : leftDrawer === "sourceControl"
         ? "sourceControl"
         : activePanel;
-  const sidePaneNode = effectiveSideVisible ? (
-    <Surface tone="default" radius="2xl" shadow="sm" className="flex h-full flex-col">
-      <SidePaneTabs
-        tabs={sideTabs}
-        activeTabId={activeTabId}
-        onSelect={focusSideTab}
-        onClose={closeSideTab}
-        onReorder={handleSideTabReorder}
-        className="border-b border-slate-200/70 dark:border-[color:var(--color-studio-dark-divider)]"
-      />
-      <div className="flex-1 overflow-hidden">
-        {activeSideTab?.content ?? (
-          <div className="flex h-full items-center justify-center text-sm text-slate-500 dark:text-slate-400">
-            Select a tab to get started.
-          </div>
-        )}
-      </div>
-    </Surface>
-  ) : null;
   const shouldShowFilesWorkspace =
     !projectAccessBlocked &&
     (activeWorkspaceTab?.kind === "file" ||
@@ -1791,7 +1746,7 @@ function StudioLayoutInner() {
   let workspaceContentIsLazy = false;
   if (projectAccessBlocked) {
     const scroller = (
-      <div className={`flex-1 overflow-y-auto ${scrollPaddingClass}`}>
+      <div className="flex-1 overflow-y-auto">
         <ProjectPickerPanel
           onCreateProject={handleCreateBlankProject}
           searchTerm={projectPickerSearchTerm}
@@ -1884,7 +1839,7 @@ function StudioLayoutInner() {
       );
     } else if (activeWorkspaceTab.panel === "projects") {
       const scroller = (
-        <StudioPanelScrollContainer identity={panelScrollIdentity} ready={panelScrollReady} className={`flex-1 overflow-y-auto ${scrollPaddingClass}`}>
+        <StudioPanelScrollContainer identity={panelScrollIdentity} ready={panelScrollReady} className="flex-1 overflow-y-auto">
           <ProjectPickerPanel
             onCreateProject={handleCreateBlankProject}
             searchTerm={projectPickerSearchTerm}
@@ -1900,7 +1855,7 @@ function StudioLayoutInner() {
     } else {
       workspaceContentIsLazy = activeWorkspaceTab.panel !== "home";
       const scroller = (
-        <StudioPanelScrollContainer identity={panelScrollIdentity} ready={panelScrollReady} className={`flex-1 overflow-y-auto ${scrollPaddingClass}`} data-testid="studio-panel-scroll">
+        <StudioPanelScrollContainer identity={panelScrollIdentity} ready={panelScrollReady} className="flex-1 overflow-y-auto" data-testid="studio-panel-scroll">
           {activeWorkspaceTab.panel === "home" ? (
             <HomePanel inboxItems={homeAttentionInboxItems} refreshInbox={refreshHomeAttentionCount} notifications={notificationCenter} supportReports={bugReportController.supportUnreadReports} supportLoading={bugReportController.supportNotificationsLoading} supportError={bugReportController.supportNotificationsError} refreshSupport={() => bugReportController.refreshSupportNotifications(false)} onOpenSupport={bugReportController.onOpenBugReportInbox} />
           ) : activeWorkspaceTab.panel === "team" ? (
@@ -1972,14 +1927,14 @@ function StudioLayoutInner() {
     );
   }
   const workspaceSurface = shouldShowFilesWorkspace ? (
-    <div className="flex h-full min-w-0 flex-col overflow-hidden bg-white text-slate-700 shadow-sm dark:bg-[var(--color-studio-dark-panel)] dark:text-slate-200">
+    <div className="flex h-full min-h-0 min-w-0 flex-1 flex-col overflow-hidden bg-white text-slate-700 shadow-sm dark:bg-[var(--color-studio-dark-panel)] dark:text-slate-200">
       <div key={activeProjectId ?? "files-workspace"} className="min-h-0 flex-1">
         {workspaceContent}
       </div>
       {!showMobileLeftDrawerOverlay ? mobileOverviewDock : null}
     </div>
   ) : (
-    <div className="flex h-full min-w-0 flex-col overflow-hidden bg-white text-slate-700 shadow-sm dark:bg-[var(--color-studio-dark-panel)] dark:text-slate-200">
+    <div className="flex h-full min-h-0 min-w-0 flex-1 flex-col overflow-hidden bg-white text-slate-700 shadow-sm dark:bg-[var(--color-studio-dark-panel)] dark:text-slate-200">
       {workspaceTabsElement}
       <div className="flex-1 overflow-hidden">
         <div key={activeWorkspaceTab?.id ?? "empty"} className="h-full">
@@ -2243,19 +2198,7 @@ function StudioLayoutInner() {
                     : "flex flex-1 min-h-0 min-w-0 flex-col gap-3 overflow-hidden"
                 }
               >
-                <ResizablePanels
-                  className="flex-1 min-w-0"
-                  sideVisible={isLargeScreen && effectiveSideVisible}
-                  ratio={sideRatio}
-                  onRatioChange={setSideRatio}
-                  minRatio={activeSideTab?.minRatio}
-                  maxRatio={activeSideTab?.maxRatio}
-                  main={workspaceSurface}
-                  side={sidePaneNode ?? <div className="h-full" />}
-                />
-                {!isLargeScreen && sidePaneNode ? (
-                  <div className="flex-none">{sidePaneNode}</div>
-                ) : null}
+                {workspaceSurface}
               </div>
               {isChatSurfaceVisible && participantsDrawerOpen ? (
                 <ParticipantsDrawer
