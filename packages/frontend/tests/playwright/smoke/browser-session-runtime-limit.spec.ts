@@ -1042,11 +1042,7 @@ test.describe.serial("Browser session runtime limit guidance", () => {
     await expect(page.getByRole("dialog", { name: "Browser session" })).toHaveCount(0);
     await expect(page.getByRole("region", { name: "Browser session" })).toBeVisible();
     await expect(browserTab).toHaveAttribute("aria-selected", "true");
-    await expect(page.getByTestId("browser-transport-shared")).toBeVisible();
-    await expect(page.getByTestId("browser-transport-shared")).toHaveAttribute(
-      "aria-pressed",
-      "true",
-    );
+    await expect(page.getByTestId("browser-location-menu")).toHaveAccessibleName("Browser location: Workspace");
     await expect(page.getByTestId("browser-identity-badge")).toHaveCount(0);
     expect(
       await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth + 1),

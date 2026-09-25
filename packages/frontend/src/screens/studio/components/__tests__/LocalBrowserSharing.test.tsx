@@ -174,6 +174,8 @@ it("uses one audience fetch for People and control/Explore labels, and stops pol
   await act(async () => document.activeElement!.dispatchEvent(new KeyboardEvent("keydown", {key:"Escape",bubbles:true,cancelable:true})));
   expect(document.querySelector('[role="dialog"][aria-label="Sharing settings"]')).toBeNull();
   const pollsBeforeStop = viewers.mock.calls.length;
+  expect(container.querySelector('[data-testid="local-browser-share-stop"]')).toBeNull();
+  await click("local-browser-share-people");
   await click("local-browser-share-stop");
   await act(async () => vi.advanceTimersByTimeAsync(3000));
   expect(viewers).toHaveBeenCalledTimes(pollsBeforeStop);

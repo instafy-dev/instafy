@@ -9,21 +9,25 @@ and revocation. OS-enforced suspension, cellular/WAN performance and
 multi-controller routing remain open.
 
 The browser's location and its audience are separate choices. The browser location
-selector says **This device** and **Workspace**. This device uses Personal Browser
+menu offers **This device** and **Workspace**. This device uses Personal Browser
 on the owner's Electron device and starts private. Workspace uses the shared
-workspace browser and its existing team session/account semantics. **Share tab…** opens an audience
-picker, defaulting to **Selected people**. Choose existing members and select
+workspace browser and its existing team session/account semantics. The **Private**
+control, marked with a lock, opens an audience picker, defaulting to **Selected people**. Choose existing members and select
 **Start sharing**, or explicitly choose **Everyone with space access**. People in
 the chosen audience select **View shared tab** under **Tabs shared with you** in
-the conversation. The owner's address bar contains **Sharing**, a pending-request
-count, and **Stop**. Sharing opens audience management and control/Explore
-requests in a popover; neither requests nor active participants add page rows.
+the conversation. The owner's address bar contains **Sharing**, with a request
+count when needed. Sharing opens audience management, **Make private**, and
+control/Explore requests in a popover; neither requests nor active participants add page rows.
 Each audience member appears once, with their current activity and actions.
 **End browsing** closes that person’s independent pages while keeping them in the
 audience; **Remove** ends all of their access to this share.
 **Take back** stays in the toolbar while a participant controls the source.
-Stop returns the tab to private browsing. AI approval preferences and Clear Data
-are in **Browser settings**. No browser runtime is allocated for this viewing session.
+Make private ends the share without clearing cookies or website logins.
+AI approval preferences and Clear Data are in **Browser settings**. No browser runtime is allocated for this viewing session.
+
+Chat and Browser use the same composer layout and width. Browser chrome keeps
+normal readiness accessible to screen readers without a visible **Ready** badge;
+paused, connecting and error states remain visible.
 
 Viewers have one 56px toolbar: **Following / Browsing**, Back when exploring,
 a mobile keyboard button when input is available, options, and close. The mode
