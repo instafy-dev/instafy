@@ -268,10 +268,12 @@ export function AiCredentialsStatusBubble({
         return "Try again. Your AI connections are unchanged.";
       default:
         if (intent === "connect" && managedAi?.available && connectedCredentials.length === 0) {
+          // The amount is a reserve taken when the prompt is sent; the turn is
+          // priced by usage after it runs (a GPT-6 Luna turn is often 3).
           const burnLabel =
             managedAi.creditBurnAmount === 1
-              ? "Each prompt burns 1 credit."
-              : `Each prompt burns ${managedAi.creditBurnAmount} credits.`;
+              ? "Each prompt holds 1 credit up front and is charged by usage."
+              : `Each prompt holds ${managedAi.creditBurnAmount} credits up front and is charged by usage.`;
           const quotaLabel =
             typeof managedAi.remainingPrompts === "number"
               ? ` ${managedAi.remainingPrompts} managed prompts left today.`

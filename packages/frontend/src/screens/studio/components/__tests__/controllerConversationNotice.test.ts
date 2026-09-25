@@ -103,6 +103,40 @@ describe("controllerConversationNotice", () => {
     );
   });
 
+  it("calls a reconnect the machine limit refused a wait, not a failed start", () => {
+    // Seen on production: the chat said "Workspace startup failed" beside a
+    // live line saying the team's one runtime was busy in another space.
+    const withCode = makeMessage({
+      metadata: {
+        source: "controller",
+        kind: "runtime_alert",
+        details: {
+          reason: "runtime_not_ready",
+          reconnect: { status: "failed", code: "runtime_limit_reached", error: "Instafy Cloud runtime limit reached (1/1)." },
+        },
+      },
+    });
+    // Stored before the controller carried the code: the text names the limit.
+    const textOnly = makeMessage({
+      metadata: {
+        source: "controller",
+        kind: "runtime_alert",
+        details: {
+          reason: "runtime_not_ready",
+          reconnect: { status: "failed", error: "Instafy Cloud runtime limit reached (1/1)." },
+        },
+      },
+    });
+    for (const message of [withCode, textOnly]) {
+      expect(resolveControllerConversationNoticeContent(message)).toBe(
+        "Waiting for a free cloud runtime. This team’s one runtime is busy in another space; stop it in Machines and this request will send.",
+      );
+      expect(resolveControllerConversationNoticeLabel(message)).toBe("Waiting for a runtime");
+      // Stopping the blocker is the fix, so the card keeps its button.
+      expect(resolveControllerConversationNoticeAction(message)).toEqual({ label: "Open Machines", kind: "open_machines" });
+    }
+  });
+
   it("renders unavailable runtimes as Octo-owned actionable notices", () => {
     const message = makeMessage({
       metadata: {
