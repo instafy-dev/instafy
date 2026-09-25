@@ -1,7 +1,10 @@
-import { useEffect, useRef, type Dispatch, type MutableRefObject } from "react";
+import { useEffect, useMemo, useRef, type Dispatch, type MutableRefObject } from "react";
 import { controllerClient } from "../../sdk/instafy";
 import type { RuntimeAction, RuntimeStoreState } from "../runtimeStore";
-import type { HostedRuntimeLifecycleEventKind } from "../unexpectedHostedRuntimeRecovery";
+import {
+  hasPendingRunInProject,
+  type HostedRuntimeLifecycleEventKind,
+} from "../unexpectedHostedRuntimeRecovery";
 import type { HostedRuntimeLimitErrorDetails } from "../hostedRuntimeLimitError";
 import { useHostedRuntimeProjectEffects } from "./useHostedRuntimeProjectEffects";
 import { useHostedRuntimeRecoveryEffects } from "./useHostedRuntimeRecoveryEffects";
@@ -102,6 +105,11 @@ export function useHostedRuntimePolicy({
     lastReadyHostedRuntimeRef.current = selection.latestReadyHostedRuntime;
   }, [selection.latestReadyHostedRuntime]);
 
+  const hasPendingProjectWork = useMemo(
+    () => hasPendingRunInProject(state.runs, activeProjectId),
+    [activeProjectId, state.runs],
+  );
+
   useHostedRuntimeRecoveryEffects({
     activeProjectId,
     projectInitialized,
@@ -117,6 +125,7 @@ export function useHostedRuntimePolicy({
     hostedRuntimeEnsuring,
     hasHostedRuntimeInProgress,
     hasLocalRuntime: selection.hasLocalRuntime,
+    hasPendingProjectWork,
     disableAutoRuntimeEnsure: selection.disableAutoRuntimeEnsure,
     resolvedPreferredRuntimeId: selection.resolvedPreferredRuntimeId,
     ensureHostedRuntime,
