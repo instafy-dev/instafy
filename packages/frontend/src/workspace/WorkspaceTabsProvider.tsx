@@ -1,4 +1,5 @@
 import type { StudioNavigationOptions } from "../navigation/studioNavigation";
+import { useConversationSurfacesOwner } from "./conversationSurfaces";
 import { readWorkspacePanelDestination, type WorkspacePanelDestination } from "./workspacePanelDestination";
 import { useStudioDraftSnapshot } from "./StudioDrafts";
 import { useStudioGuardedNavigation } from "../navigation/StudioDraftNavigationGuard";
@@ -47,6 +48,7 @@ import {
 } from "./workspaceTabPersistence";
 
 interface WorkspaceTabsContextValue {
+  conversationSurfaces: ReturnType<typeof useConversationSurfacesOwner>;
   tabs: WorkspaceTabState[];
   activeTab: WorkspaceTabState | null;
   activeTabId: string | null;
@@ -110,6 +112,7 @@ export function WorkspaceTabsProvider({ children, locationSearch, onRestorePanel
   locationSearch?: string;
   onRestorePanelDestination?: (destination: WorkspacePanelDestination, options?: StudioNavigationOptions) => void;
 }) {
+  const conversationSurfaces = useConversationSurfacesOwner();
   const { activePanel, setActivePanel } = useWorkspaceUi();
   const draftSnapshot = useStudioDraftSnapshot();
   const guardNavigation = useStudioGuardedNavigation();
@@ -872,6 +875,7 @@ export function WorkspaceTabsProvider({ children, locationSearch, onRestorePanel
 
   const value = useMemo<WorkspaceTabsContextValue>(
     () => ({
+      conversationSurfaces,
       tabs,
       activeTab,
       activeTabId,
@@ -890,6 +894,7 @@ export function WorkspaceTabsProvider({ children, locationSearch, onRestorePanel
       ...guardedActions
     }),
     [
+      conversationSurfaces,
       activeTab,
       activeTabId,
       conversationTabsReady,

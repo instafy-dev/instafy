@@ -139,9 +139,11 @@ function receiver() {
 }
 it("local-network viewers can negotiate without secure-context randomUUID", () => {
   vi.useFakeTimers();
-  vi.stubGlobal("crypto", {});
+  const getRandomValues = vi.fn(crypto.getRandomValues.bind(crypto));
+  vi.stubGlobal("crypto", { getRandomValues });
   const f = receiver();
-  expect(f.requested).toMatch(/^[0-9a-f-]{36}$/i);
+  expect(getRandomValues).toHaveBeenCalledOnce();
+  expect(f.requested).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i);
   f.video.dispose();
 });
 it("video decode enables streaming, viewport updates preserve the peer, and changing view clears its pixels", async () => {

@@ -316,6 +316,8 @@ export function PersonalBrowserSurface({
   };
   const humanInputState = useBrowserHumanInput(humanInputOptions);
   const humanInputAvailable = ready && Boolean(humanInputIdentityKey && onContinueAfterHumanInput);
+  const resumeFromStatus = ready && browserStatus.state === "paused" &&
+    !model.status?.agentControlEnabled && model.agentPhase !== "unavailable" && !humanInputState.active;
   const clearDataMessage =
     model.clearDataState === "clearing"
       ? "Clearing Personal Browser data…"
@@ -444,6 +446,10 @@ export function PersonalBrowserSurface({
             detail={browserStatus.detail}
             state={browserStatus.state}
             testId="personal-browser-agent-status"
+            resume={resumeFromStatus ? {
+              disabled: model.status?.humanControlReady === false || model.status?.tabControlActive,
+              onPress: () => void model.setAgentControlEnabled(true, routineApprovalAvailable ? selectedApprovalMode : undefined),
+            } : undefined}
           />
         }
         actions={
@@ -461,7 +467,7 @@ export function PersonalBrowserSurface({
             >
               <Refresh className="h-3.5 w-3.5" aria-hidden="true" />
             </IconButton>
-          ) : (model.status?.agentControlEnabled && (!humanInputAvailable || humanInputState.active)) || (ready && !model.status?.agentControlEnabled && !humanInputState.active) ? (
+          ) : !resumeFromStatus && ((model.status?.agentControlEnabled && (!humanInputAvailable || humanInputState.active)) || (ready && !model.status?.agentControlEnabled && !humanInputState.active)) ? (
             <IconButton
               aria-label={model.status?.agentControlEnabled ? "Pause agent control" : "Resume agent control"}
               isDisabled={!model.status?.agentControlEnabled && (model.status?.humanControlReady === false || model.status?.tabControlActive)}

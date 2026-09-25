@@ -246,7 +246,7 @@ test("the expanded browser UI inventory has a bounded suite budget without relax
   assert.match(config, /^\s+forbidOnly: true,$/m);
   assert.match(config, /^\s+testMatch: REQUIRED_BROWSER_UI_SPECS,$/m);
   assert.match(config, /required-browser-reporter\.mjs", \{ lane: "browser-ui" \}/);
-  assert.equal(REQUIRED_BROWSER_LANES["browser-ui"].minimumTests, 39);
+  assert.equal(REQUIRED_BROWSER_LANES["browser-ui"].minimumTests, 40);
   const workflow = read(".github/workflows/browser-e2e.yml");
   const job = workflow.split("\n  browser-ui:\n")[1].split("\n  shared-profile:\n")[0];
   assert.match(job, /\|\| 'ubuntu-24\.04' }}/);

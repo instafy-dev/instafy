@@ -253,6 +253,35 @@ pages are trimmed. If that message is no longer loaded, the view starts at the o
 message, where earlier history can be requested. Conversations left at the bottom keep following
 new messages.
 
+## Conversation views
+
+Workspace tabs select conversations. Within a conversation, Browser and workspace files opened
+from messages share a resource pane. With at least 1024 CSS pixels available to the conversation,
+Chat and its existing composer stay alongside that pane. A keyboard-accessible divider adjusts
+the width; **Show one view** switches back to tabs. Narrow layouts use the same views as tabs,
+without remounting the browser or composer on a resize.
+
+The workspace tab owner remembers each conversation's selected resource, open file references,
+layout preference and divider width for this Studio tab, scoped by account and project. Closing
+a file view removes the view reference, not the file. Unsaved editor changes remain in the
+existing workspace draft store when switching resources or conversations. These view preferences
+do not store copies of files, pages, cookies or browser credentials.
+
+Resource tabs use the workspace tab icon, dirty marker and close control, with a quieter
+underline to distinguish them from the outer workspace tabs. Reopening a file keeps its place;
+closing the selected file selects the next neighbor, then the previous one. Closing a background
+file keeps the current selection. Arrow keys, Home and End select views; Delete closes a focused
+file view and restores focus to the selected view. Duplicate filenames include their parent path,
+and overflow arrows reveal additional views. Divider movement previews live, saving the width
+when the drag ends; keyboard adjustments save immediately.
+
+An explicitly shared native browser tab keeps sharing when its resource pane is hidden. A new
+share still starts from the visible browser; stopping it, releasing its owner, switching account
+or project, and losing access retain the existing revocation rules. Switching conversations
+releases native ownership: the Desktop host still supports one owner browser, so this layout does
+not create multiple independent native browser sessions. Shared browser runtimes retain their
+existing session identities. Agent jobs retain their original conversation and runtime bindings.
+
 ## Navigation and reading positions
 
 Studio uses the browser/React Router history in every shell. Back and Forward retrace visits;
