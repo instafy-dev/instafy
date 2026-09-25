@@ -130,7 +130,7 @@ function ShareParticipants({ projectId, share, controlState, exploreState, onSto
       <p className="text-slate-500">Removed people cannot rejoin this share. Their space membership stays unchanged.</p>
       {error ? <p role="alert" className="text-rose-600">{error}</p> : null}
       </section>
-      <Button data-testid="local-browser-share-stop" aria-label="Stop sharing" size="sm" variant="secondary" onPress={onStop}>Make private</Button>
+      <Button data-testid="local-browser-share-stop" title="Stop sharing this tab" size="sm" variant="secondary" onPress={onStop}>Make private</Button>
   </BrowserToolsPopover>;
 }
 
