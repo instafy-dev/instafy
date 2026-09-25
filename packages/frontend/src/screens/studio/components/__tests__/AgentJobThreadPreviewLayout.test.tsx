@@ -11,8 +11,20 @@ import {
   type AgentJobThreadPreviewLayoutProps,
 } from "../AgentJobThreadPreviewLayout";
 import { RunFailureRetryProvider } from "../RunFailureNotice";
+import { useAgentJobThreadPreviewState } from "../useAgentJobThreadPreviewState";
 
 const JOB_ID = "0d4c9c1e-49af-4b1d-9a63-5b8f6f4f2f10";
+
+// The live-state hook reads conversations and runs from providers. The layout
+// tests render without them, so these stubs only feed the hook-driven harness.
+vi.mock("../../../../conversations/ConversationsProvider", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../../../../conversations/ConversationsProvider")>()),
+  useConversations: () => ({ activeConversation: null, conversations: [] }),
+}));
+
+vi.mock("../../../../runtime/useRuntime", () => ({
+  useRuntime: () => ({ runs: {} }),
+}));
 
 vi.mock("../../../../services/runtimeController/jobs", () => ({
   cancelAgentJob: vi.fn(() =>
@@ -64,6 +76,24 @@ const CONTROLLER_CREDENTIAL_REFRESH_TOKEN_REUSED_ERROR = `unexpected status 401 
 
 const CONTROLLER_CREDENTIAL_REFRESH_INVALID_ERROR =
   'unexpected status 401 Unauthorized: controller credential fetch failed: controller credentials returned 500 Internal Server Error: {"message":"Codex OAuth refresh failed: Could not validate your refresh token. Please try signing in again."}, url: http://proxy:8789/v1/responses';
+
+// Renders the layout from the live-state hook, the way ChatMessageEntries does,
+// so a test sees the status label the hook derives from thread messages.
+function LiveAgentJobThreadPreview({ message }: { message: ChatMessage }) {
+  const previewState = useAgentJobThreadPreviewState({ message, projectId: "project-1" });
+  if (!previewState) {
+    return null;
+  }
+  return (
+    <AgentJobThreadPreviewLayout
+      {...previewState}
+      branchThreads={[]}
+      onOpenBranchThread={() => {}}
+      MessageContent={MessageContent}
+      ChatFileChangeList={ChatFileChangeList}
+    />
+  );
+}
 
 function createProps(
   overrides: Partial<AgentJobThreadPreviewLayoutProps> = {},
@@ -156,6 +186,37 @@ describe("AgentJobThreadPreviewLayout", () => {
     });
     container.remove();
     delete (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT;
+  });
+
+  it("shows only the reasoning summary heading as the live running status", async () => {
+    const baseMessage = createMessage();
+    const message = createMessage({
+      metadata: {
+        ...baseMessage.metadata,
+        threadMessages: [
+          {
+            id: "octo-reasoning",
+            role: "assistant",
+            authorId: null,
+            content:
+              "**Clarifying whitespace handling**\n\nThe user seems to mean whitespace generally, not just tabs.",
+            timestamp: Date.now(),
+            files: null,
+            messageType: "reasoning",
+            metadata: { messageType: "reasoning", status: "in_progress" },
+          },
+        ],
+      },
+    });
+
+    await act(async () => {
+      root.render(<LiveAgentJobThreadPreview message={message} />);
+    });
+
+    const runningStatus = container.querySelector('[aria-live="polite"][data-sweep-text]');
+    expect(runningStatus?.textContent).toBe("Clarifying whitespace handling");
+    expect(runningStatus?.getAttribute("data-sweep-text")).toBe("Clarifying whitespace handling");
+    expect(container.textContent).not.toContain("The user seems");
   });
 
   it("renders owner identity without the prompt or scope summary chip", async () => {
