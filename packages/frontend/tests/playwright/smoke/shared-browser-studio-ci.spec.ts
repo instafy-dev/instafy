@@ -169,6 +169,7 @@ async function openSharedBrowser(page: Page) {
   await expect(page.getByTestId("chat-input")).toBeVisible({ timeout: 90_000 });
   await page.getByTestId("composer-action-menu-trigger").click();
   await page.getByTestId("composer-action-menu-open-browser").click();
+  await page.getByTestId("browser-location-menu").click();
   await page.getByTestId("browser-transport-shared").click();
   await expectBrowserReady(page);
 }

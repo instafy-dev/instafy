@@ -93,6 +93,7 @@ describe("BrowserChromeShell", () => {
     });
     const status = container.querySelector('[role="status"]');
     expect(status?.textContent).toContain(label);
+    expect(status?.className.includes("sr-only")).toBe(state === "ready");
     expect(status?.getAttribute("aria-label")).toBe(`${label}: Transport-specific detail.`);
   });
 });

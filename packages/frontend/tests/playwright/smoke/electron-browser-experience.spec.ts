@@ -309,6 +309,7 @@ test.describe("Electron browser experience", () => {
         window.dispatchEvent(new CustomEvent("instafy:browser-open", { detail: {} }));
       });
 
+      await page.getByTestId("browser-location-menu").click();
       const sharedButton = page.getByTestId("browser-transport-shared");
       await expect(sharedButton).toBeVisible({ timeout: 30_000 });
       await sharedButton.click();
@@ -363,6 +364,7 @@ test.describe("Electron browser experience", () => {
       ).toBeLessThanOrEqual(2);
       await captureDesktop("electron-shared-browser.png");
 
+      await page.getByTestId("browser-location-menu").click();
       const personalButton = page.getByTestId("browser-transport-personal");
       await expect(personalButton).toBeEnabled({ timeout: 30_000 });
       await personalButton.click();
