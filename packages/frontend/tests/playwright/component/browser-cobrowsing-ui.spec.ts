@@ -73,10 +73,17 @@ for (const width of [360, 900]) {
     const errors: string[] = [];
     page.on("pageerror", (error) => errors.push(error.message));
     await mountPersonalControls(page);
+    const resume = page.getByRole("button", { name: "Resume agent control", exact: true });
+    await expect(resume).toHaveCount(1);
+    await expect(resume).toHaveAttribute("data-testid", "personal-browser-agent-status");
+    await expect(resume).toHaveText("Resume");
+    await resume.focus();
+    expect((await resume.boundingBox())!.height).toBeGreaterThanOrEqual(width <= 540 ? 40 : 32);
     await page.getByRole("button", { name: "Browser settings", exact: true }).click();
     await expect(page.getByTestId("personal-browser-routine-approval")).toBeChecked();
     await page.keyboard.press("Escape");
-    await page.getByRole("button", { name: "Resume agent control", exact: true }).click();
+    await resume.focus();
+    await resume.press("Enter");
     await expect.poll(() => page.evaluate(() => (window as { __lastApprovalMode?: string }).__lastApprovalMode)).toBe("routine");
     await page.getByTestId("browser-human-input-request").click();
     await expect(page.getByRole("dialog", { name: "Take over browser", exact: true })).toBeVisible();

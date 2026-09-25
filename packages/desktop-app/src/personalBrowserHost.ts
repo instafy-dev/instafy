@@ -236,7 +236,9 @@ export class PersonalBrowserHost {
   private releaseCloseTimer: ReturnType<typeof setTimeout> | null = null;
   private readonly tabCapture = new BrowserTabCapture(() => {
     const contents = this.getWebContents();
-    return contents && this.currentOwnerId && this.currentProjectId && this.currentVisible
+    // An explicit share belongs to the live owner, not the currently visible pane.
+    // Owner/project release still invalidates every frame and control operation.
+    return contents && this.currentOwnerId && this.currentProjectId
       ? { contents, ownerId: this.currentOwnerId, projectId: this.currentProjectId,
           canControl: !this.agentControlEnabled && this.activeControlOperations === 0,
           videoSource: {
@@ -255,6 +257,7 @@ export class PersonalBrowserHost {
   }, () => { this.takeoverRequestId = undefined; this.syncInputShield(); this.emitStatus(); });
 
   startTabShare(ownerId: string) {
+    if (!this.currentVisible) throw new Error("Open your browser before sharing this tab.");
     const result = this.tabCapture.start(ownerId);
     this.emitStatus();
     return result;

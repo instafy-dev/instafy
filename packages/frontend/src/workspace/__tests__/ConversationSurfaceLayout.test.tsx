@@ -3,9 +3,9 @@
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { ChatBrowserSubtabs } from "../ChatBrowserSubtabs";
+import { ConversationSurfaceTabs } from "../ConversationSurfaceLayout";
 
-describe("ChatBrowserSubtabs", () => {
+describe("ConversationSurfaceTabs", () => {
   let container: HTMLDivElement;
   let root: Root;
 
@@ -26,11 +26,12 @@ describe("ChatBrowserSubtabs", () => {
     const onTabChange = vi.fn();
     await act(async () => {
       root.render(
-        <ChatBrowserSubtabs
-          activeTab="browser"
-          browserPanelId="browser-panel"
+        <ConversationSurfaceTabs
+          activeId="browser"
+          resourceId="browser" split={false} wide={false} ratio={.55} onSplitChange={() => {}}
+          resources={[{ id: "browser", label: "Browser", panelId: "browser-panel" }]}
           chatPanelId="chat-panel"
-          onTabChange={onTabChange}
+          onSelect={onTabChange}
         />,
       );
     });
@@ -51,11 +52,12 @@ describe("ChatBrowserSubtabs", () => {
     const onTabChange = vi.fn();
     await act(async () => {
       root.render(
-        <ChatBrowserSubtabs
-          activeTab="chat"
-          browserPanelId="browser-panel"
+        <ConversationSurfaceTabs
+          activeId="chat"
+          resourceId="browser" split={false} wide={false} ratio={.55} onSplitChange={() => {}}
+          resources={[{ id: "browser", label: "Browser", panelId: "browser-panel" }]}
           chatPanelId="chat-panel"
-          onTabChange={onTabChange}
+          onSelect={onTabChange}
         />,
       );
     });
@@ -70,12 +72,12 @@ describe("ChatBrowserSubtabs", () => {
   it("keeps a pending approval visible while Chat is selected", async () => {
     await act(async () => {
       root.render(
-        <ChatBrowserSubtabs
-          activeTab="chat"
-          browserAttention
-          browserPanelId="browser-panel"
+        <ConversationSurfaceTabs
+          activeId="chat"
+          resourceId="browser" split={false} wide={false} ratio={.55} onSplitChange={() => {}}
+          resources={[{ id: "browser", label: "Browser", panelId: "browser-panel", attention: <span data-testid="shared-browser-approval-attention">Approve</span> }]}
           chatPanelId="chat-panel"
-          onTabChange={vi.fn()}
+          onSelect={vi.fn()}
         />,
       );
     });

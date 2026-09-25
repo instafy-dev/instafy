@@ -15,7 +15,7 @@ export const REQUIRED_BROWSER_LANES = Object.freeze({
     ],
   },
   "browser-ui": {
-    minimumTests: 39,
+    minimumTests: 40,
     files: [
       "browser-chrome-mobile-layout.spec.ts",
       "browser-cobrowsing-ui.spec.ts",
@@ -25,6 +25,7 @@ export const REQUIRED_BROWSER_LANES = Object.freeze({
       "shared-browser-focused-editable.spec.ts",
       "shared-browser-sessions-responsive.spec.ts",
       "browser-live-proof.spec.ts",
+      "conversation-surfaces.spec.ts",
       "mobile-sidebar-safe-area.spec.ts",
       "mobile-sidebar-keyboard.spec.ts",
       "mobile-thumb-navigation.spec.ts",
@@ -33,6 +34,7 @@ export const REQUIRED_BROWSER_LANES = Object.freeze({
       "studio-history-controls.spec.ts",
     ],
     titles: [
+      "conversation views preserve mounted resources, drafts and split size across narrow layouts",
       "expanded Shared docked respects web safe areas",
       "expanded Shared docked respects macOS safe areas",
       "expanded Shared docked respects mobile safe areas",

@@ -365,6 +365,9 @@ The guidance contains generic labels, not field values or page text. Highlights
 follow the actual elements through scrolling/reflow and are removed by the next
 fresh agent snapshot; a replacement element does not inherit a stale highlight.
 
+Outside a manual handoff, paused native agent control uses one **Resume** button
+in the toolbar. It remains disabled while another participant controls the tab.
+
 The tool latches later agent observation and action for that turn. It does not
 remove the agent-control marker: manual input remains locked until the existing
 confirmed-shutdown path restores the human driver. A canceled controller run alone

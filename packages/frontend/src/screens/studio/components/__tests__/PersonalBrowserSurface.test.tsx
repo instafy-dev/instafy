@@ -260,6 +260,10 @@ describe("PersonalBrowserSurface", () => {
     await act(async () => root.render(
       <PersonalBrowserSurface active model={model} transportSelector={null} />,
     ));
+    const resume = document.querySelector<HTMLButtonElement>('[data-testid="personal-browser-agent-status"]');
+    expect(resume?.tagName).toBe("BUTTON");
+    expect(resume?.textContent).toBe("Resume");
+    expect(document.querySelectorAll('[aria-label="Resume agent control"]')).toHaveLength(1);
     await act(async () => document.querySelector<HTMLButtonElement>('[aria-label="Browser settings"]')!.click());
     const checkbox = document.querySelector<HTMLInputElement>('[data-testid="personal-browser-routine-approval"]');
     expect(checkbox?.checked).toBe(true);
@@ -599,7 +603,7 @@ describe("PersonalBrowserSurface", () => {
     await act(async () => root.render(<PersonalBrowserSurface active model={model} transportSelector={null} />));
     const status = document.querySelector('[data-testid="personal-browser-agent-status"]');
     expect(status?.getAttribute("title")).toContain("participant controls this tab");
-    expect(status?.textContent).toBe("Paused");
+    expect(status?.textContent).toBe("Resume");
     expect(document.querySelector<HTMLButtonElement>('[aria-label="Resume agent control"]')?.disabled).toBe(true);
   });
 

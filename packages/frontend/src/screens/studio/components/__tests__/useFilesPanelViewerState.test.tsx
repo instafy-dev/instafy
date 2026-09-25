@@ -234,6 +234,19 @@ describe("useFilesPanelViewerState request ownership", () => {
     expect(options.openFileTab).not.toHaveBeenCalled();
   });
 
+  it("preserves edits made while a conversation file view is reopening", async () => {
+    await render();
+    await act(async () => current.openTextFile(entry("README.md")));
+    const read = deferred<typeof textResult>();
+    vi.mocked(controllerClient.workspace.files.read).mockReturnValue(read.promise);
+    const { pending } = await start({ path: "README.md", preserveDraft: true });
+    workspace = { ...workspace, files: workspace.files.map(file => ({ ...file, modified: "unsaved notes" })) };
+    await act(async () => { read.resolve({ ...textResult, contentText: "new disk content" }); await pending; });
+    expect(workspace.files[0].modified).toBe("unsaved notes");
+    expect(workspace.files[0].generated).toBe("loaded file");
+    expect(current.viewerState.mode).toBe("text");
+  });
+
   it("ignores wrong-project and already-aborted handoffs", async () => {
     const abort = new AbortController();
     abort.abort();

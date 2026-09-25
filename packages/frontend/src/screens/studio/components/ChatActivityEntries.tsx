@@ -1,3 +1,4 @@
+import { useConversationFileOpener } from "../../../workspace/ConversationFileContext";
 import { type ComponentType, type ReactNode, useCallback, useId, useMemo, useState } from "react";
 import { Globe, MediaImage, NavArrowRight, Xmark } from "iconoir-react";
 import { Badge } from "../../../components/Badge";
@@ -291,6 +292,7 @@ export function StatusActivityEntry({
   );
   const canPromoteArtifact = Boolean(projectId && resolvedArtifact);
 
+  const openConversationFile = useConversationFileOpener();
   const openWorkspaceFile = useCallback(
     (path: string) => {
       if (typeof window === "undefined") {
@@ -304,6 +306,10 @@ export function StatusActivityEntry({
         markdownView: "preview" as const,
         preferPreview: true,
       };
+      if (openConversationFile) {
+        openConversationFile(detail);
+        return;
+      }
       const runtimeWindow = window as typeof window & {
         __INSTAFY_PENDING_OPEN_WORKSPACE_FILE__?: typeof detail | null;
       };
@@ -312,7 +318,7 @@ export function StatusActivityEntry({
       openPanelTab("code");
       window.dispatchEvent(new CustomEvent("instafy:open-workspace-file", { detail }));
     },
-    [openPanelTab, projectId, requestUrlPush],
+    [openConversationFile, openPanelTab, projectId, requestUrlPush],
   );
 
   const handlePromoteArtifact = useCallback(async () => {
