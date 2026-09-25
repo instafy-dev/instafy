@@ -216,7 +216,9 @@ function readMessageRunId(message: ChatMessage): string | null {
 
 function resolveAssistantMessageType(message: ChatMessage): string {
   const metadata = readRecord(message.metadata);
-  const raw = message.messageType ?? metadata?.messageType ?? metadata?.message_type;
+  // Controller conversation notices use `kind` on the wire, without a
+  // messageType. They must not count as the evaluated agent beginning to speak.
+  const raw = message.messageType ?? metadata?.messageType ?? metadata?.message_type ?? metadata?.kind;
   return typeof raw === "string" ? raw.trim().toLowerCase() : "";
 }
 

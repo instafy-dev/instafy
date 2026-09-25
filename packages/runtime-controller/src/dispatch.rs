@@ -2331,7 +2331,11 @@ pub(crate) async fn process_dispatch_prompt(
             primary_job_id,
             payload,
         );
-        if persist_runtime_alert_message {
+        // Ambient evaluations have not chosen to speak. Keep startup failures
+        // on the run and runtime event above, without creating a conversation
+        // message or notification on the agent's behalf. Direct requests and
+        // scheduled automations retain their actionable startup notices.
+        if persist_runtime_alert_message && !skill_mode_ambient_evaluation {
             if let Some(conversation_id) = request.conversation_id {
                 let controller_message_metadata = build_runtime_alert_conversation_metadata(
                     runtime_alert_metadata,

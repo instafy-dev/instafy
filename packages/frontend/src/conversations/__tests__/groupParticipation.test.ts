@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { mapControllerMessageToChat } from "../conversationMessageUtils";
 import {
   buildGroupParticipationMetadata,
   buildUnavailableGroupParticipationMetadata,
@@ -385,6 +386,64 @@ describe("agent evaluation presence suppression", () => {
       }),
     ).toBe(false);
   });
+
+  it.each(["runtime_alert", "run_cancellation"])(
+    "keeps a controller %s wire notice from activating ambient presence",
+    (kind) => {
+      const notice = mapControllerMessageToChat({
+        id: "controller-notice",
+        conversationId: "conversation-1",
+        projectId: "project-1",
+        sessionId: null,
+        createdBy: null,
+        promptId: "prompt-1",
+        runId,
+        role: "assistant",
+        content: "Workspace startup failed. Open Machines to reconnect Instafy Cloud.",
+        metadata: {
+          source: "controller",
+          kind,
+          agent: { handle: "octo", displayName: "Octo" },
+        },
+        createdAt: "2026-01-01T00:00:00Z",
+      });
+
+      expect(hasVisibleAssistantMessageForRun([notice], runId)).toBe(false);
+      expect(shouldSuppressAgentEvaluationRunPresence({
+        runId,
+        runMetadata: AGENT_EVALUATION_RUN_METADATA,
+        messages: [notice],
+      })).toBe(true);
+      expect(shouldSuppressAgentEvaluationRunPresence({
+        runId,
+        pendingAgentEvaluationRunIds: new Set([runId]),
+        messages: [notice],
+      })).toBe(true);
+      expect(shouldSuppressAgentEvaluationRunPresence({
+        runId,
+        runMetadata: { agentSelection: { mentions: ["octo"] } },
+        messages: [notice],
+      })).toBe(false);
+      expect(resolveGroupParticipationReplyTargets(
+        { replyContext: { messageId: notice.id } },
+        [notice],
+        "octo",
+      )).toEqual({ replyToOcto: false, replyToHuman: false });
+
+      const answer = {
+        id: "actual-answer",
+        role: "assistant" as const,
+        content: "Here is the answer.",
+        timestamp: 2,
+        metadata: { runId, source: "agent" },
+      };
+      expect(shouldSuppressAgentEvaluationRunPresence({
+        runId,
+        runMetadata: AGENT_EVALUATION_RUN_METADATA,
+        messages: [notice, answer],
+      })).toBe(false);
+    },
+  );
 
   it("caps the local mark set by evicting the oldest run id", () => {
     const marks = new Set<string>();

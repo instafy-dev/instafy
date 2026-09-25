@@ -38,6 +38,8 @@ so a scheduled automation cannot acquire ambient deferred billing by resuming af
 
 **Presence is silent-until-speaking.** No thinking/typing indicator and no agent-owned activity row appears for a run that may end in a swallowed `NO_RESPONSE` — for any viewer, including the sender. Full lifecycle presentation begins when the turn was direct or once the run starts streaming visible content.
 
+An ambient dispatch's runtime startup failure stays in the run diagnostics and controller events; it does not create a conversation notice or activate assistant presence. Direct requests retain their actionable startup notices. A controller notice is never evidence that an evaluated agent has started speaking.
+
 Historic conversations may still carry classifier-era `groupParticipation` decisions (including controller-enforced `silent` markers) recorded before the pre-dispatch classifier was removed. The controller keeps reading those markers so idempotent retries of historic messages continue to resolve as the human-only result they originally produced; the skill treats them as conversation history, not instructions.
 
 ## The deterministic controller gate
