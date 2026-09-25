@@ -367,70 +367,44 @@ async fn refund_managed_ai_reserve_for_expired_job(
     Ok(None)
 }
 
-/// Jobs requeued by a runtime stop expire if nothing resumes them promptly.
-/// Without this, a job killed by credit exhaustion re-runs from scratch
-/// whenever a runtime next appears — even days later — duplicating side
-/// effects and burning fresh credits unprompted.
-pub(crate) async fn expire_stale_requeued_jobs(state: &AppState) -> AnyResult<()> {
-    let mut connection = state
-        .pool
-        .get()
-        .await
-        .context("failed to acquire connection for requeued job expiry")?;
-    let mut transaction = connection
-        .transaction()
-        .await
-        .context("failed to start requeued job expiry transaction")?;
+/// What settling a batch of expired jobs left to publish once its transaction
+/// commits.
+pub(super) struct SettledExpiredJobs {
+    pub(super) job_input_state_updates: Vec<crate::send_intents::JobInputStateUpdate>,
+    pub(super) refunded_org_ids: std::collections::BTreeSet<Uuid>,
+}
 
-    // Only expire jobs with no live runtime to run them: a stamped job merely
-    // waiting behind a busy, healthy runtime will be leased normally.
-    let rows = transaction
-        .query(
-            "update agent_jobs
-             set status = 'failed',
-                 outcome = 'expired',
-                 error_message = 'This run was interrupted when its runtime stopped and was not resumed within 15 minutes. Send it again if you still need it.',
-                 completed_at = now(),
-                 active_input_ready_runtime_id = null,
-                 active_input_ready_expires_at = null,
-                 active_input_ready_turn_id = null,
-                 updated_at = now()
-             where status = 'queued'
-               and payload ? 'requeuedAt'
-               and (payload ->> 'requeuedAt')::timestamptz
-                   < now() - interval '1 second' * $1
-               and not exists (
-                 select 1 from runtimes r
-                 where r.project_id = agent_jobs.project_id
-                   and r.status not in ('stopped', 'offline', 'removed')
-               )
-             returning id, project_id, run_id, conversation_id, payload, error_message,
-                       lease_attempts",
-            &[&(REQUEUED_JOB_EXPIRY_SECONDS as f64)],
-        )
-        .await
-        .context("failed to expire stale requeued jobs")?;
-
+/// Finish jobs a sweep has just moved from `queued` to `failed` without a
+/// runtime ever running them: reject their unacknowledged inputs, fail their
+/// runs (without this a run stays "in_progress" forever and Home lists it as
+/// live work), and give back a managed-AI reserve no model ever used.
+///
+/// `rows` must carry `id, project_id, run_id, conversation_id, payload,
+/// error_message, lease_attempts` from the failing `update ... returning`, and
+/// this must run in that update's transaction. `kind` only labels errors.
+pub(super) async fn settle_expired_queued_jobs(
+    transaction: &mut tokio_postgres::Transaction<'_>,
+    rows: &[tokio_postgres::Row],
+    kind: &str,
+) -> AnyResult<SettledExpiredJobs> {
     let mut job_input_state_updates = Vec::new();
     let mut refunded_org_ids = std::collections::BTreeSet::new();
-    for row in &rows {
+    for row in rows {
         let job_id: Uuid = row.get("id");
         let updates = crate::send_intents::reject_unacknowledged_inputs_for_job(
-            &transaction,
+            transaction,
             &job_id,
-            "requeued agent job expired before input acknowledgement",
+            &format!("{kind} agent job expired before input acknowledgement"),
         )
         .await
         .map_err(|(status, Json(error))| {
             anyhow::anyhow!(
-                "failed to reject inputs for expired requeued job ({status}): {}",
+                "failed to reject inputs for expired {kind} job ({status}): {}",
                 error.message
             )
         })?;
         job_input_state_updates.extend(updates);
 
-        // The job is dead, so its run is too: without this the run stays
-        // "in_progress" forever and Home would list it as live work.
         let run_id: Option<Uuid> = row.get("run_id");
         let project_id: Uuid = row.get("project_id");
         let payload = row
@@ -451,9 +425,9 @@ pub(crate) async fn expire_stale_requeued_jobs(state: &AppState) -> AnyResult<()
                     &[&run_id, &error_message],
                 )
                 .await
-                .context("failed to fail run for expired requeued job")?;
+                .with_context(|| format!("failed to fail run for expired {kind} job"))?;
             crate::activity::record_run_completed(
-                &transaction,
+                &*transaction,
                 &project_id,
                 &run_id,
                 conversation_id,
@@ -466,12 +440,12 @@ pub(crate) async fn expire_stale_requeued_jobs(state: &AppState) -> AnyResult<()
             .await;
         }
 
-        // No runtime picked the job up again. If none ever had it, a
-        // managed-AI prompt it carried never reached a model: give the credit
-        // and daily slot back.
+        // No runtime picked the job up. If none ever had it, a managed-AI
+        // prompt it carried never reached a model: give the credit and daily
+        // slot back.
         let lease_attempts: i32 = row.get("lease_attempts");
         if let Some(org_id) = refund_managed_ai_reserve_for_expired_job(
-            &mut transaction,
+            transaction,
             &project_id,
             &job_id,
             run_id,
@@ -483,14 +457,94 @@ pub(crate) async fn expire_stale_requeued_jobs(state: &AppState) -> AnyResult<()
             refunded_org_ids.insert(org_id);
         }
     }
+    Ok(SettledExpiredJobs {
+        job_input_state_updates,
+        refunded_org_ids,
+    })
+}
+
+/// Jobs requeued by a runtime stop expire if nothing resumes them promptly.
+/// Without this, a job killed by credit exhaustion re-runs from scratch
+/// whenever a runtime next appears — even days later — duplicating side
+/// effects and burning fresh credits unprompted.
+pub(crate) async fn expire_stale_requeued_jobs(state: &AppState) -> AnyResult<()> {
+    let mut connection = state
+        .pool
+        .get()
+        .await
+        .context("failed to acquire connection for requeued job expiry")?;
+    let mut transaction = connection
+        .transaction()
+        .await
+        .context("failed to start requeued job expiry transaction")?;
+
+    // Work a space's limit wait covers (unpinned, or pinned to a hosted
+    // runtime of the space) is the limit-wait sweep's to settle
+    // (runtime/limit_waits.rs): it retries the launch and gives up after its
+    // own, longer window with the reason that applies. That includes work an
+    // idle-slot reclaim requeued, which would otherwise fail here after 15
+    // minutes as "interrupted". Work in the same space pinned to a desktop or
+    // another machine is never retried or given up on by the wait, so it
+    // still expires here. The table ships in a migration that may land after
+    // this controller.
+    let limit_waits_migrated: bool = transaction
+        .query_one(
+            "select to_regclass('public.hosted_runtime_limit_waits') is not null as migrated",
+            &[],
+        )
+        .await
+        .context("failed to look up the runtime limit wait table")?
+        .get("migrated");
+    let skip_work_waiting_on_the_limit = if limit_waits_migrated {
+        format!(
+            "and not {}",
+            super::limit_waits::limit_wait_covers_job("agent_jobs")
+        )
+    } else {
+        String::new()
+    };
+
+    // Only expire jobs with no live runtime to run them: a stamped job merely
+    // waiting behind a busy, healthy runtime will be leased normally.
+    let rows = transaction
+        .query(
+            &format!(
+                "update agent_jobs
+                 set status = 'failed',
+                     outcome = 'expired',
+                     error_message = 'This run was interrupted when its runtime stopped and was not resumed within 15 minutes. Send it again if you still need it.',
+                     completed_at = now(),
+                     active_input_ready_runtime_id = null,
+                     active_input_ready_expires_at = null,
+                     active_input_ready_turn_id = null,
+                     updated_at = now()
+                 where status = 'queued'
+                   and payload ? 'requeuedAt'
+                   and (payload ->> 'requeuedAt')::timestamptz
+                       < now() - interval '1 second' * $1
+                   and not exists (
+                     select 1 from runtimes r
+                     where r.project_id = agent_jobs.project_id
+                       and r.status not in ('stopped', 'offline', 'removed')
+                   )
+                   {skip_work_waiting_on_the_limit}
+                 returning id, project_id, run_id, conversation_id, payload, error_message,
+                           lease_attempts"
+            ),
+            &[&(REQUEUED_JOB_EXPIRY_SECONDS as f64)],
+        )
+        .await
+        .context("failed to expire stale requeued jobs")?;
+
+    let settled = settle_expired_queued_jobs(&mut transaction, &rows, "requeued").await?;
 
     transaction
         .commit()
         .await
         .context("failed to commit requeued job expiry")?;
-    crate::send_intents::publish_job_input_state_updates(state, &job_input_state_updates);
+    crate::send_intents::publish_job_input_state_updates(state, &settled.job_input_state_updates);
     drop(connection);
-    publish_credits_updated_for_orgs(state, refunded_org_ids).await;
+    publish_credits_updated_for_orgs(state, settled.refunded_org_ids).await;
 
     for row in rows {
         let job_id: Uuid = row.get("id");
@@ -518,7 +572,7 @@ pub(super) fn notify_runtime_stopped(
     notify_runtime_stopped_with_extra(state, project_id, runtime_id, reason, source, json!({}));
 }
 
-fn notify_runtime_stopped_with_extra(
+pub(super) fn notify_runtime_stopped_with_extra(
     state: &AppState,
     project_id: Uuid,
     runtime_id: Uuid,
@@ -1005,7 +1059,7 @@ pub(crate) async fn sweep_hosted_runtime_credit_usage(state: &AppState) -> AnyRe
 }
 
 /// One `credits.updated` per org after a sweep's writes have committed.
-async fn publish_credits_updated_for_orgs(
+pub(super) async fn publish_credits_updated_for_orgs(
     state: &AppState,
     org_ids: std::collections::BTreeSet<Uuid>,
 ) {

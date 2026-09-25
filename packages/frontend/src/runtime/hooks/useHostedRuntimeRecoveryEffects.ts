@@ -1,4 +1,4 @@
-import { useEffect, useState, type MutableRefObject } from "react";
+import { useEffect, useRef, useState, type MutableRefObject } from "react";
 import type { ControllerRuntimeStatusEntry } from "../../sdk/instafy";
 import {
   IDLE_PAUSE_CLEARED_EVENT,
@@ -6,12 +6,14 @@ import {
   isIdlePaused,
   isManualStopHeld,
   isRestoredAwaitingIntent,
+  markIdlePaused,
 } from "../idlePauseRegistry";
 import {
   BROWSER_RUNTIME_CLAIM_CHANGED_EVENT,
   isBrowserRuntimeClaimActive,
 } from "../browserRuntimeClaimRegistry";
 import {
+  isRuntimeLimitReclaimStopReason,
   shouldAttemptUnexpectedHostedRuntimeRecovery,
   shouldTrackHostedRuntimeLifecycleEvent,
   UNEXPECTED_HOSTED_RUNTIME_RECOVERY_WINDOW_MS,
@@ -41,6 +43,8 @@ interface UseHostedRuntimeRecoveryEffectsArgs {
   hostedRuntimeEnsuring: boolean;
   hasHostedRuntimeInProgress: boolean;
   hasLocalRuntime: boolean;
+  /** A queued message or open turn of this client in the active space. */
+  hasPendingProjectWork?: boolean;
   disableAutoRuntimeEnsure: boolean;
   resolvedPreferredRuntimeId: string | null;
   ensureHostedRuntime: (options?: EnsureHostedRuntimeOptions) => Promise<boolean>;
@@ -75,6 +79,7 @@ export function useHostedRuntimeRecoveryEffects({
   hostedRuntimeEnsuring,
   hasHostedRuntimeInProgress,
   hasLocalRuntime,
+  hasPendingProjectWork = false,
   disableAutoRuntimeEnsure,
   resolvedPreferredRuntimeId,
   ensureHostedRuntime,
@@ -85,6 +90,12 @@ export function useHostedRuntimeRecoveryEffects({
   pendingHostedRuntimeRecoveryRef,
   latestReadyHostedRuntimeRef,
 }: UseHostedRuntimeRecoveryEffectsArgs) {
+  // Read by the lifecycle listener at event time, without re-subscribing it
+  // whenever a run changes.
+  const hasPendingProjectWorkRef = useRef(hasPendingProjectWork);
+  useEffect(() => {
+    hasPendingProjectWorkRef.current = hasPendingProjectWork;
+  }, [hasPendingProjectWork]);
   const [browserRuntimeClaimEpoch, setBrowserRuntimeClaimEpoch] = useState(0);
   useEffect(() => {
     if (typeof window === "undefined") {
@@ -130,9 +141,27 @@ export function useHostedRuntimeRecoveryEffects({
         custom.detail?.data && typeof custom.detail.data.reason === "string"
           ? custom.detail.data.reason
           : null;
-      if (!shouldTrackHostedRuntimeLifecycleEvent({ kind, projectId, reason })) {
+      const reclaimStop =
+        kind === "runtime.stopped" && isRuntimeLimitReclaimStopReason(reason);
+      const queuedJobCount =
+        custom.detail?.data && typeof custom.detail.data.queuedJobCount === "number"
+          ? custom.detail.data.queuedJobCount
+          : 0;
+      // Work the controller says is queued in the stopped space (typically
+      // what the stop requeued) counts as this space's own, even before this
+      // client has heard about the run.
+      const hasPendingWork = hasPendingProjectWorkRef.current || queuedJobCount > 0;
+      if (!shouldTrackHostedRuntimeLifecycleEvent({ kind, projectId, reason, hasPendingWork })) {
         if (pendingHostedRuntimeRecoveryRef.current?.projectId === projectId) {
           pendingHostedRuntimeRecoveryRef.current = null;
+        }
+        if (reclaimStop) {
+          // The machine was idle and another space in the team needed the
+          // slot. Hold every auto-ensure path the way an idle pause does, so
+          // this tab does not take the slot straight back; the user's next
+          // interaction (or send) wakes it as usual.
+          markIdlePaused(projectId);
+          debugLog("hosted-runtime:reclaimed-for-waiting-space", { projectId });
         }
         return;
       }
@@ -157,7 +186,7 @@ export function useHostedRuntimeRecoveryEffects({
         handleRuntimeLifecycleEvent as EventListener,
       );
     };
-  }, [activeProjectId, latestReadyHostedRuntimeRef, pendingHostedRuntimeRecoveryRef]);
+  }, [activeProjectId, debugLog, latestReadyHostedRuntimeRef, pendingHostedRuntimeRecoveryRef]);
 
   useEffect(() => {
     if (pendingHostedPollTimerRef.current) {
@@ -397,7 +426,9 @@ export function useHostedRuntimeRecoveryEffects({
   ]);
 
   useEffect(() => {
-    if (isRestoredAwaitingIntent(activeProjectId)) {
+    // A paused machine (idle, or handed to a space waiting on the team's
+    // runtime limit) stays paused even when it is the preferred runtime.
+    if (isIdlePaused(activeProjectId) || isRestoredAwaitingIntent(activeProjectId)) {
       return;
     }
     if (

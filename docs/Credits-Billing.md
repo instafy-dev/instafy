@@ -33,7 +33,7 @@ The plan catalog is stored in Postgres (`billing_plans`) and seeded via `supabas
 - **pro**: 10 active tunnels (default), 3 active Instafy Cloud runtimes
 - **scale**: 25 active tunnels, 8 active Instafy Cloud runtimes
 
-The runtime limits come from `supabase/migrations/20260000000045_fundable_runtime_concurrency.sql`. When a space is refused by the limit, the controller hands it an idle runtime from another space in the same team; see `RUNTIME_LIMIT_RECLAIM_IDLE_SECONDS` in the controller README.
+The runtime limits come from `supabase/migrations/20260000000045_fundable_runtime_concurrency.sql`. When a space is refused by the limit, the controller hands it an idle runtime from another space in the same team; see `RUNTIME_LIMIT_RECLAIM_IDLE_SECONDS` in the controller README. A message queued behind the limit is retried in the background and sends once a runtime is free; after 30 minutes on the limit it fails with a reason and its managed-AI reserve is refunded (see [Runtime Machines](Runtime-Machines.md#waiting-on-the-runtime-limit)).
 
 Limits are overrideable per team through a protected server-side administration path. Never expose
 service-role credentials to the browser.

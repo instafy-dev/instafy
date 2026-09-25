@@ -1,3 +1,5 @@
+import type { RunRecord } from "../types";
+
 export const UNEXPECTED_HOSTED_RUNTIME_RECOVERY_WINDOW_MS = 20_000;
 
 const MANUAL_RUNTIME_STOP_REASONS = new Set([
@@ -14,12 +16,52 @@ const MANUAL_RUNTIME_STOP_REASONS = new Set([
   "oom_killed",
 ]);
 
+// The controller stopped this space's idle machine because another space in
+// the organization was waiting for the hosted runtime slot. Relaunching it
+// straight away would take the slot back from the space it was handed to, so
+// the client waits for its user (or its own queued work) instead. The second
+// spelling is what controllers before the reason was renamed publish.
+const RUNTIME_LIMIT_RECLAIM_STOP_REASONS = new Set([
+  "runtime_limit_reclaim",
+  "idle_runtime_limit_reclaim",
+]);
+
 export type HostedRuntimeLifecycleEventKind = "origin.expired" | "runtime.stopped";
 
 export interface HostedRuntimeLifecycleEventDetail {
   kind: HostedRuntimeLifecycleEventKind;
   projectId: string | null;
   reason?: string | null;
+  /**
+   * Whether this client has work of its own in the stopped space: a queued
+   * message or a turn in flight (including jobs the stop requeued). Only a
+   * reclaim stop consults it.
+   */
+  hasPendingWork?: boolean;
+}
+
+export function isRuntimeLimitReclaimStopReason(reason: string | null | undefined): boolean {
+  return RUNTIME_LIMIT_RECLAIM_STOP_REASONS.has(reason?.trim().toLowerCase() ?? "");
+}
+
+const PENDING_RUN_STATUSES = new Set<RunRecord["status"]>([
+  "queued",
+  "in_progress",
+  "awaiting_approval",
+]);
+
+/** A queued message or a turn still open in `projectId`, as this client knows it. */
+export function hasPendingRunInProject(
+  runs: Record<string, RunRecord> | null | undefined,
+  projectId: string | null | undefined,
+): boolean {
+  const normalizedProjectId = projectId?.trim() ?? "";
+  if (!normalizedProjectId || !runs) {
+    return false;
+  }
+  return Object.values(runs).some(
+    (run) => run?.projectId === normalizedProjectId && PENDING_RUN_STATUSES.has(run.status),
+  );
 }
 
 export interface ResolveHostedRuntimeRecoveryInput {
@@ -46,6 +88,9 @@ export function shouldTrackHostedRuntimeLifecycleEvent(
     return true;
   }
   const normalizedReason = detail.reason?.trim().toLowerCase() ?? "";
+  if (isRuntimeLimitReclaimStopReason(normalizedReason)) {
+    return detail.hasPendingWork === true;
+  }
   return !MANUAL_RUNTIME_STOP_REASONS.has(normalizedReason);
 }
 
