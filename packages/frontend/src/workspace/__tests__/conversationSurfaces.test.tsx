@@ -2,7 +2,7 @@
 import { act } from "react";
 import { createRoot } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { DEFAULT_CONVERSATION_SURFACES, openConversationFile, readConversationSurfaces, selectConversationView, useConversationSurfacesOwner } from "../conversationSurfaces";
+import { DEFAULT_CONVERSATION_SURFACES, closeConversationFile, conversationFileLabel, openConversationFile, readConversationSurfaces, selectConversationView, useConversationSurfacesOwner } from "../conversationSurfaces";
 
 describe("conversation surface ownership", () => {
   beforeEach(() => { sessionStorage.clear(); });
@@ -14,6 +14,27 @@ describe("conversation surface ownership", () => {
     const chat = selectConversationView(open, "chat");
     expect(chat.resourceId).toBe(file.id);
     expect(openConversationFile(chat, { ...file, line: 9 }).files).toEqual([{ ...file, line: 9 }]);
+  });
+
+  it("keeps open-file order and selects an adjacent file when closing", () => {
+    const files = ["a.md", "b.md", "c.md"].map(path => ({ id: `file:${path}`, path }));
+    let state = files.reduce(openConversationFile, DEFAULT_CONVERSATION_SURFACES);
+    state = openConversationFile(state, { ...files[1], line: 12 });
+    expect(state.files.map(file => file.id)).toEqual(files.map(file => file.id));
+    const closed = closeConversationFile(state, files[1].id, true);
+    expect(closed.resourceId).toBe(files[2].id);
+    expect(closeConversationFile(closed, files[2].id, true).resourceId).toBe(files[0].id);
+    const last = openConversationFile(DEFAULT_CONVERSATION_SURFACES, files[0]);
+    expect(closeConversationFile(last, files[0].id, true).activeId).toBe("browser");
+    expect(closeConversationFile(last, files[0].id, false).activeId).toBe("chat");
+    expect(closeConversationFile(selectConversationView(state, "chat"), files[0].id, true).activeId).toBe("chat");
+  });
+
+  it("distinguishes duplicate filenames without changing their identities", () => {
+    const files = ["notes.md", "drafts/notes.md"].map(path => ({ id: `file:${path}`, path }));
+    expect(conversationFileLabel(files[0], files)).toBe("notes.md · .");
+    expect(conversationFileLabel(files[1], files)).toBe("notes.md · drafts");
+    expect(conversationFileLabel(files[1], [files[1]])).toBe("notes.md");
   });
 
   it("restores references and preferences, dropping unknown content and invalid selection", () => {

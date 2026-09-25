@@ -12,7 +12,7 @@ async function mountCompactBrowserChrome(page: Page): Promise<void> {
     import ReactDomClientNS from "${deps.reactDomClient}";
     import { BrowserStatusPill } from "/src/screens/studio/components/BrowserChromeShell.tsx";
     import { BrowserExpandButton } from "/src/screens/studio/components/BrowserExpandButton.tsx";
-    import { ChatBrowserSubtabs } from "/src/screens/studio/components/ChatBrowserSubtabs.tsx";
+    import { ConversationSurfaceTabs } from "/src/workspace/ConversationSurfaceLayout.tsx";
     import { BrowserTransportSelector } from "/src/screens/studio/components/PersonalBrowserSurface.tsx";
     import { RemoteBrowserMobileKeyboard } from "/src/screens/studio/components/RemoteBrowserMobileKeyboard.tsx";
     import { SharedBrowserChrome } from "/src/screens/studio/components/SharedBrowserChrome.tsx";
@@ -77,12 +77,12 @@ async function mountCompactBrowserChrome(page: Page): Promise<void> {
         onTakeControl: () => {},
       });
       return h("main", { style: { width: "100vw", overflow: "hidden" } },
-        h(ChatBrowserSubtabs, {
-          activeTab: "browser",
-          browserAttention: true,
-          browserPanelId: "browser-panel",
+        h(ConversationSurfaceTabs, {
+          activeId: "browser",
+          resourceId: "browser", split: false, wide: false, ratio: .55, onSplitChange: () => {},
+          resources: [{ id: "browser", label: "Browser", panelId: "browser-panel", attention: h("span", {"data-testid":"shared-browser-approval-attention"}, "Approve") }],
           chatPanelId: "chat-panel",
-          onTabChange: () => {},
+          onSelect: () => {},
         }),
         h(SharedBrowserChrome, {
           compact,

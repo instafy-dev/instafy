@@ -16,12 +16,13 @@ import {
 } from "@dnd-kit/sortable";
 import { CSS } from "@dnd-kit/utilities";
 import { desktopTitleBarFree } from "../lib/desktopShell";
-import { NavArrowLeft, NavArrowRight, Pin, Trash, Xmark } from "iconoir-react";
+import { NavArrowLeft, NavArrowRight, Pin, Trash } from "iconoir-react";
 import { useEffect, useMemo, useCallback, useRef, useState, type KeyboardEvent, type MouseEvent, type PointerEvent, type ReactNode } from "react";
 import { createPortal } from "react-dom";
 import { IconButton } from "../components/Button";
 import { Surface } from "../components/Surface";
 import { StudioMenu, StudioMenuItem, StudioMenuSeparator } from "../components/aria/StudioMenu";
+import { TabLabel, TabCloseButton, TAB_FOCUS_CLASS } from "../components/tabs/TabPresentation";
 import { HorizontalTabStrip } from "../components/tabs/HorizontalTabStrip";
 import { useConversations, type ConversationLifecycleStatus } from "../conversations/ConversationsProvider";
 import { controllerClient } from "../sdk/instafy";
@@ -975,7 +976,7 @@ function WorkspaceSortableTab({
       <div
         ref={setActivatorNodeRef}
         className={[
-          "group outline-none focus:outline-none focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-black/10 focus-visible:ring-offset-0 dark:focus-visible:ring-white/12",
+          `group ${TAB_FOCUS_CLASS}`,
           tabBaseClassName,
           isActive ? activeClassName : inactiveClassName,
           startEdgeClassName,
@@ -1010,12 +1011,7 @@ function WorkspaceSortableTab({
           data-preview={preview || undefined}
           aria-current={isActive ? "page" : undefined}
         >
-          {icon ? (
-            <span aria-hidden="true" className="shrink-0">
-              {icon}
-            </span>
-          ) : null}
-          <span className={`min-w-0 flex-1 truncate ${preview ? "italic" : ""}`}>{title}</span>
+          <TabLabel label={title} icon={icon} dirty={dirty} preview={preview}>
           {badge ? (
             <span
               className={[
@@ -1027,24 +1023,10 @@ function WorkspaceSortableTab({
               {badge}
             </span>
           ) : null}
-          {dirty ? <span className="text-xs text-rose-400">●</span> : null}
+          </TabLabel>
         </div>
         {closable && !isRenaming ? (
-          <IconButton
-            type="button"
-            aria-label={`Close ${title}`}
-            onPointerDown={(event) => event.stopPropagation()}
-            onClick={(event) => {
-              event.stopPropagation();
-              handleClose();
-            }}
-            variant="ghost"
-            size="xs"
-            radius="full"
-            className={`${closeButtonTone} focus-visible:ring-offset-0`}
-          >
-            <Xmark className="h-3.5 w-3.5" aria-hidden="true" />
-          </IconButton>
+          <TabCloseButton label={`Close ${title}`} onClose={handleClose} className={closeButtonTone} />
         ) : null}
       </div>
     

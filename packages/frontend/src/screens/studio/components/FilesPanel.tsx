@@ -2092,7 +2092,7 @@ export function FilesPanel({
                   Assistant
                 </Button>
               ) : null}
-              <Heading level={3} variant="subtitle" className="truncate">
+              <Heading level={3} variant="subtitle" className={embeddedOpenRequest === undefined ? "truncate" : "sr-only"}>
                 {title}
               </Heading>
               {projectWriteDisabled ? (
@@ -2106,7 +2106,7 @@ export function FilesPanel({
                 </Badge>
               ) : null}
             </div>
-            {subtitle ? (
+            {subtitle && embeddedOpenRequest === undefined ? (
               <Text variant="caption" tone="muted" className="truncate">
                 {subtitle}
               </Text>

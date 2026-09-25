@@ -55,7 +55,9 @@ export function useConversationSurfacesOwner() {
   }, []);
   const update = useCallback((scope: string | null, change: (state: ConversationSurfaces) => ConversationSurfaces) => {
     if (!scope) return;
-    const next = change(read(scope));
+    const current = read(scope);
+    const next = change(current);
+    if (next === current) return;
     states.current.set(scope, next);
     try { sessionStorage.setItem(storageKey(scope), JSON.stringify(next)); } catch { /* session-only fallback */ }
     setRevision(value => value + 1);
@@ -64,12 +66,34 @@ export function useConversationSurfacesOwner() {
 }
 
 export function selectConversationView(state: ConversationSurfaces, id: string): ConversationSurfaces {
+  if (state.activeId === id) return state;
   return { ...state, activeId: id, resourceId: id === "chat" ? state.resourceId : id };
 }
 
 export function openConversationFile(state: ConversationSurfaces, file: ConversationFileView): ConversationSurfaces {
   return {
     ...selectConversationView(state, file.id),
-    files: [...state.files.filter(item => item.id !== file.id), file].slice(-30),
+    files: state.files.some(item => item.id === file.id)
+      ? state.files.map(item => item.id === file.id ? file : item)
+      : [...state.files, file].slice(-30),
   };
+}
+
+/** A view closes independently of its file/draft. Select the next neighbor, then the previous. */
+export function closeConversationFile(state: ConversationSurfaces, id: string, hasBrowser: boolean): ConversationSurfaces {
+  const index = state.files.findIndex(file => file.id === id);
+  if (index < 0) return state;
+  const files = state.files.filter(file => file.id !== id);
+  const nextId = files[Math.min(index, files.length - 1)]?.id ?? (hasBrowser ? "browser" : "chat");
+  return {
+    ...state, files,
+    activeId: state.activeId === id ? nextId : state.activeId,
+    resourceId: state.resourceId === id ? nextId : state.resourceId,
+  };
+}
+
+export function conversationFileLabel(file: ConversationFileView, files: ConversationFileView[]): string {
+  const name = file.path.split("/").pop() ?? file.path;
+  const duplicate = files.some(other => other.id !== file.id && other.path.split("/").pop() === name);
+  return duplicate ? `${name} · ${file.path.slice(0, -name.length).replace(/\/$/, "") || "."}` : name;
 }

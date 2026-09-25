@@ -147,7 +147,7 @@ async function mountApprovalTransportLifecycle(
     import "/src/styles/tailwind.css";
     import ReactNS from "${deps.react}";
     import ReactDomClientNS from "${deps.reactDomClient}";
-    import { ChatBrowserSubtabs } from "/src/screens/studio/components/ChatBrowserSubtabs.tsx";
+    import { ConversationSurfaceTabs } from "/src/workspace/ConversationSurfaceLayout.tsx";
     import { SharedBrowserApprovalPrompt } from "/src/screens/studio/components/SharedBrowserApprovalPrompt.tsx";
     import { useSharedBrowserApprovalTransport } from "/src/screens/studio/components/useSharedBrowserApprovalTransport.ts";
     const React = ReactNS.default ?? ReactNS;
@@ -172,12 +172,12 @@ async function mountApprovalTransportLifecycle(
         revealSharedBrowser,
       });
       return h("main", { className: "relative flex h-dvh w-screen flex-col overflow-hidden" },
-        h(ChatBrowserSubtabs, {
-          activeTab: tab,
-          browserAttention: true,
-          browserPanelId: "browser-panel",
+        h(ConversationSurfaceTabs, {
+          activeId: tab,
+          resourceId: "browser", split: false, wide: false, ratio: .55, onSplitChange: () => {},
+          resources: [{ id: "browser", label: "Browser", panelId: "browser-panel", attention: h("span", {"data-testid":"shared-browser-approval-attention"}, "Approve") }],
           chatPanelId: "chat-panel",
-          onTabChange: setTab,
+          onSelect: setTab,
         }),
         h("section", {
           id: "chat-panel",

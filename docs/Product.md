@@ -267,6 +267,14 @@ a file view removes the view reference, not the file. Unsaved editor changes rem
 existing workspace draft store when switching resources or conversations. These view preferences
 do not store copies of files, pages, cookies or browser credentials.
 
+Resource tabs use the workspace tab icon, dirty marker and close control, with a quieter
+underline to distinguish them from the outer workspace tabs. Reopening a file keeps its place;
+closing the selected file selects the next neighbor, then the previous one. Closing a background
+file keeps the current selection. Arrow keys, Home and End select views; Delete closes a focused
+file view and restores focus to the selected view. Duplicate filenames include their parent path,
+and overflow arrows reveal additional views. Divider movement previews live, saving the width
+when the drag ends; keyboard adjustments save immediately.
+
 An explicitly shared native browser tab keeps sharing when its resource pane is hidden. A new
 share still starts from the visible browser; stopping it, releasing its owner, switching account
 or project, and losing access retain the existing revocation rules. Switching conversations

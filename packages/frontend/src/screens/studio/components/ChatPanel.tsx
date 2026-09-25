@@ -11,6 +11,8 @@ import {
   useId,
   type JSX,
 } from "react";
+import { Globe, Page } from "iconoir-react";
+import { useWorkspaceStore } from "../../../store";
 import { useLocation, useNavigate } from "react-router-dom";
 import { useQueryClient } from "@tanstack/react-query";
 import type { RealtimeChannel } from "@supabase/supabase-js";
@@ -340,7 +342,7 @@ import { resolveSharedBrowserViewerKind } from "./sharedBrowserViewer";
 import { LocalBrowserSharing, LocalBrowserTabPublisher } from "./LocalBrowserSharing";
 import { ConversationSurfaceLayout, type ConversationSurface } from "../../../workspace/ConversationSurfaceLayout";
 import { ConversationFileContext } from "../../../workspace/ConversationFileContext";
-import { openConversationFile, selectConversationView } from "../../../workspace/conversationSurfaces";
+import { closeConversationFile, conversationFileLabel, openConversationFile, selectConversationView } from "../../../workspace/conversationSurfaces";
 import type { OpenWorkspaceFileEventDetail } from "./useFilesPanelViewerState";
 import { FilesPanel } from "../StudioLazyPanels";
 import {
@@ -700,6 +702,12 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     ? JSON.stringify([currentUserId, activeProjectId, activeConversationId]) : null;
   const { read: readSurfaces, update: updateSurfaces } = conversationSurfaces;
   const surfaces = readSurfaces(surfaceScope);
+  const dirtyFilePaths = useWorkspaceStore(store => store.state.code.files
+    .filter(file => file.modified !== file.generated).map(file => file.path).join("\0"));
+  const dirtyFiles = useMemo(() => new Set(dirtyFilePaths.split("\0")), [dirtyFilePaths]);
+  const previewSurfaceRatio = useCallback((ratio: number) => {
+    rootRef.current?.style.setProperty("--conversation-resource-ratio", String(ratio));
+  }, []);
   const selectSurface = useCallback((id: string) => {
     updateSurfaces(surfaceScope, state => selectConversationView(state, id));
   }, [surfaceScope, updateSurfaces]);
@@ -5623,22 +5631,20 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
 
   const resourceTabs: ConversationSurface[] = [
     ...(hasBrowserView ? [{
-      id: "browser", label: "Browser", panelId: browserPanelId,
+      id: "browser", label: "Browser", panelId: browserPanelId, icon: <Globe className="h-3.5 w-3.5" />,
       attention: sharedBrowserApprovalPending ? <span className="rounded-full bg-amber-100 px-1.5 py-0.5 text-[10px] text-amber-800 dark:bg-amber-400/15 dark:text-amber-200" data-testid="shared-browser-approval-attention">Approve</span> : undefined,
     }] : []),
     ...surfaces.files.map(file => ({
-      id: file.id, label: file.path.split("/").pop() ?? file.path, panelId: `${chatPanelId}-file`,
-      onClose: () => updateSurfaces(surfaceScope, state => {
-        const files = state.files.filter(item => item.id !== file.id);
-        const nextId = files[0]?.id ?? (hasBrowserView ? "browser" : "chat");
-        return { ...state, files, activeId: state.activeId === file.id ? nextId : state.activeId, resourceId: state.resourceId === file.id ? nextId : state.resourceId };
-      }),
+      id: file.id, label: conversationFileLabel(file, surfaces.files), title: file.path,
+      panelId: `${chatPanelId}-file`, icon: <Page className="h-3.5 w-3.5" />, dirty: dirtyFiles.has(file.path),
+      onClose: () => updateSurfaces(surfaceScope, state => closeConversationFile(state, file.id, hasBrowserView)),
     })),
   ];
   const chatSurface = (
       <div
         id={chatPanelId}
         aria-label="Chat"
+        tabIndex={-1}
         role={hasResources ? "tabpanel" : undefined}
         hidden={!chatVisible}
         className={chatVisible ? "flex h-full min-h-0 flex-col" : "hidden"}
@@ -6014,6 +6020,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
         onSelect={handleBrowserSubtabChange}
         onSplitChange={split => updateSurfaces(surfaceScope, state => ({ ...state, split }))}
         onRatioChange={ratio => updateSurfaces(surfaceScope, state => ({ ...state, ratio }))}
+        onRatioPreview={previewSurfaceRatio}
         resources={resourceTabs}
         chat={chatSurface}
         content={resourceContent}
@@ -6056,7 +6063,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
       <CredentialsConnectModal {...gettingStartedConnectModalProps} />
 
       <ChatComposerSurface
-        overlayWidth={splitSurfaces ? `${(1 - surfaces.ratio) * 100}%` : undefined}
+        overlayWidth={splitSurfaces ? `calc((1 - var(--conversation-resource-ratio, ${surfaces.ratio})) * 100%)` : undefined}
         aboveComposer={hasNewMessages ? <ChatNewMessagesButton onPress={jumpToNewMessages} /> : null}
         mutationDisabled={projectWriteDisabled}
         silenceHintProps={
