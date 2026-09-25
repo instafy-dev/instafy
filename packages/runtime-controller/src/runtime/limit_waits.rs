@@ -19,6 +19,20 @@
 //! Replicas coordinate through the table: a sweep claims due rows with
 //! `for update skip locked` and a claim lease (`claimed_until`), so a space is
 //! retried by at most one controller at a time and an abandoned claim expires.
+//! The lease's expiry doubles as the claim's token: every later claim of a row
+//! carries a strictly later expiry (it can only be taken once the previous one
+//! has passed), so a controller whose claim lapsed mid-attempt cannot release,
+//! finish or back off the claim another controller has taken since. Two
+//! replicas retrying different spaces of one organization at once cannot both
+//! take its last hosted slot either: the ensure's organization-limit check and
+//! lease insert run under a per-organization advisory lock (see `ensure.rs`).
+//!
+//! Bound per controller and tick: at most `batch_size` spaces, each handled
+//! once. Spaces holding a job past the give-up window are claimed before plain
+//! retries, so a give-up never waits behind slow launches of other spaces, and
+//! within a tick an organization's second space comes after every other
+//! organization's first. A retry is one ensure, bounded by the provider launch
+//! and release deadlines, so a tick ends in at most `batch_size` of those.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
@@ -26,6 +40,7 @@ use std::time::Duration;
 use anyhow::{Context, Result as AnyResult};
 use axum::http::StatusCode;
 use axum::Json;
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value as JsonValue};
 use tokio::time::MissedTickBehavior;
@@ -46,16 +61,14 @@ const SWEEP_INTERVAL: Duration = Duration::from_secs(10);
 const MAX_RECORDED_REQUEST_BYTES: usize = 16 * 1024;
 const MAX_RECORDED_ERROR_CHARS: usize = 500;
 
-/// Hosted providers, matching the organization limit's own filter.
-const HOSTED_PROVIDER_PREDICATE: &str = "(t.provider = 'instafy_cloud'
-       or t.provider like 'instafy\\_cloud\\_%'
-       or t.provider = 'instafy-cloud'
-       or t.provider like 'instafy-cloud-%')";
-
 /// The message a job gets when it waited out the whole window on the limit.
 pub(super) const LIMIT_WAIT_EXPIRED_MESSAGE: &str = "This message didn't start: every cloud runtime in this team stayed busy for 30 minutes. Stop a runtime you aren't using, then send it again.";
 /// The message when the last retry failed for a reason other than the limit.
 pub(super) const LIMIT_WAIT_EXPIRED_OTHER_MESSAGE: &str = "This message didn't start: no cloud runtime could be started for this space within 30 minutes. Send it again to retry.";
+/// The message when a retry was refused for a reason waiting cannot fix and
+/// the refusal carried no message of its own (or the recorded request could
+/// not be replayed at all).
+pub(super) const LIMIT_WAIT_REFUSED_FALLBACK_MESSAGE: &str = "This message didn't start: a cloud runtime could not be started for this space. Send it again to retry.";
 
 /// Tuning for the retry sweep. Production uses [`LimitWaitPolicy::default`];
 /// tests pass their own to control batch size and timing.
@@ -172,7 +185,8 @@ pub(crate) fn is_runtime_limit_refusal(error: &(StatusCode, Json<ApiError>)) -> 
 /// launch that is still settling (409), throttling, and server-side trouble,
 /// including platform capacity (503). Anything else (credits, access, a
 /// deleted space, a provider this controller no longer offers) is not
-/// something waiting fixes.
+/// something waiting fixes, so the waiting work fails with that refusal's
+/// own message instead of sitting queued behind a wait that has ended.
 fn refusal_is_worth_retrying(status: StatusCode) -> bool {
     status == StatusCode::CONFLICT
         || status == StatusCode::TOO_MANY_REQUESTS
@@ -278,27 +292,101 @@ pub(super) async fn record_hosted_runtime_limit_refusal(
     }
 }
 
-/// Whether the space `project` (an SQL expression) already has a machine that
-/// serves, or is about to serve, its queued work: a generation holding an
-/// unreleased lease, or a registered machine that is heartbeating. A
-/// `requested` row with no lease, which dispatch leaves behind for a refused
-/// space, is not one, and neither is a generation quarantined after a failed
-/// provider release (`cleanup_pending`): it holds a slot but runs nothing.
-fn live_runtime_exists(project: &str) -> String {
+/// Whether the runtime alias `r` is a hosted provider's, matching the
+/// organization limit's own filter.
+fn hosted_provider(r: &str) -> String {
+    format!(
+        "({r}.provider = 'instafy_cloud'
+          or {r}.provider like 'instafy\\_cloud\\_%'
+          or {r}.provider = 'instafy-cloud'
+          or {r}.provider like 'instafy-cloud-%')"
+    )
+}
+
+/// Whether the runtime `r`, joined to its active lease as `rl`, is up or about
+/// to be: a generation holding an unreleased lease, or a registered machine
+/// that is heartbeating. A `requested` row with no lease, which dispatch
+/// leaves behind for a refused space, is not, and neither is a generation
+/// quarantined after a failed provider release (`cleanup_pending`): it holds
+/// a slot but runs nothing.
+fn runtime_is_live(r: &str, rl: &str) -> String {
+    format!(
+        "{r}.status not in ('stopped', 'offline', 'removed')
+         and (
+           ({rl}.id is not null
+              and {rl}.released_at is null
+              and {rl}.status not in ('failed', 'cleanup_pending'))
+           or {r}.last_seen_at > now() - interval '90 seconds'
+         )"
+    )
+}
+
+/// Whether the runtime `r` is a private machine (a desktop, a personal
+/// browser) that does not lease unpinned work of the job `j`'s user. The same
+/// rule `lease_next_agent_job` applies when that machine asks for work.
+fn runtime_is_private_to_another_user(r: &str, j: &str) -> String {
+    format!(
+        "coalesce(
+           (lower(replace(replace(btrim({r}.provider), '-', '_'), ' ', '_')) = 'self_hosted'
+            or {r}.capabilities ? '_instafySelfHostedAccess'
+            or {r}.capabilities ? '_instafy_self_hosted_access'
+            or {r}.capabilities ? 'personalBrowser'
+            or {r}.capabilities ? 'personal_browser')
+           and coalesce(
+             {r}.capabilities #>> '{{_instafySelfHostedAccess,ownerUserId}}',
+             {r}.capabilities #>> '{{_instafy_self_hosted_access,owner_user_id}}',
+             {r}.capabilities #>> '{{personalBrowser,ownerUserId}}',
+             {r}.capabilities #>> '{{personal_browser,owner_user_id}}'
+           ) is distinct from {j}.payload #>> '{{user_id}}',
+           false
+         )"
+    )
+}
+
+/// Whether a live runtime could run the waiting job `j` now: a hosted runtime
+/// of its space (what the wait asked for), the machine the job is pinned to,
+/// or, for unpinned work, a machine in the space that leases unpinned work for
+/// the job's user. Any other heartbeating machine (a desktop that never
+/// leases work pinned to the hosted runtime, or one that only runs its owner's
+/// work) leaves the job waiting on the limit.
+///
+/// A runtime preference held in one controller's memory can also keep a
+/// machine from leasing unpinned work; the database cannot see it, so such a
+/// machine still counts here.
+fn job_has_live_runner(j: &str) -> String {
     format!(
         "exists (
            select 1
-           from runtimes r
-           left join runtime_leases rl on rl.id = r.active_lease_id
-           where r.project_id = {project}
-             and r.status not in ('stopped', 'offline', 'removed')
+           from runtimes lr
+           left join runtime_leases lrl on lrl.id = lr.active_lease_id
+           where lr.project_id = {j}.project_id
+             and {live}
              and (
-               (rl.id is not null
-                  and rl.released_at is null
-                  and rl.status not in ('failed', 'cleanup_pending'))
-               or r.last_seen_at > now() - interval '90 seconds'
+               {hosted}
+               or lr.id = {j}.target_runtime_id
+               or ({j}.target_runtime_id is null and not {private})
              )
-         )"
+         )",
+        live = runtime_is_live("lr", "lrl"),
+        hosted = hosted_provider("lr"),
+        private = runtime_is_private_to_another_user("lr", j),
+    )
+}
+
+/// Whether the space `project` (an SQL expression) has a live hosted runtime,
+/// which is what its wait asked for.
+fn hosted_runtime_is_live_in(project: &str) -> String {
+    format!(
+        "exists (
+           select 1
+           from runtimes lr
+           left join runtime_leases lrl on lrl.id = lr.active_lease_id
+           where lr.project_id = {project}
+             and {hosted}
+             and {live}
+         )",
+        hosted = hosted_provider("lr"),
+        live = runtime_is_live("lr", "lrl"),
     )
 }
 
@@ -316,9 +404,20 @@ fn waiting_job_predicate(alias: &str, project: &str) -> String {
              select 1 from runtimes t
              where t.id = {alias}.target_runtime_id
                and t.project_id = {alias}.project_id
-               and {HOSTED_PROVIDER_PREDICATE}
+               and {hosted}
            )
-         )"
+         )",
+        hosted = hosted_provider("t"),
+    )
+}
+
+/// Waiting work (see [`waiting_job_predicate`]) that no live runtime could
+/// run: what the retry, the give-up and the claim are for.
+fn unserved_job_predicate(alias: &str, project: &str) -> String {
+    format!(
+        "{} and not {}",
+        waiting_job_predicate(alias, project),
+        job_has_live_runner(alias)
     )
 }
 
@@ -361,10 +460,14 @@ pub(super) async fn count_waiting_jobs(state: &AppState, project_id: &Uuid) -> A
 #[derive(Debug)]
 struct ClaimedWait {
     project_id: Uuid,
+    org_id: Option<Uuid>,
     ensure_request: JsonValue,
     attempts: i32,
     retry_due: bool,
     last_error_code: Option<String>,
+    /// The claim lease's expiry, which is also the claim's token: release,
+    /// finish and backoff only touch the row while it still carries it.
+    claim_token: DateTime<Utc>,
 }
 
 /// What one sweep tick did, for logs and tests.
@@ -373,7 +476,10 @@ pub(crate) struct LimitWaitSweepReport {
     pub(crate) claimed: usize,
     pub(crate) attempted: usize,
     pub(crate) launched: usize,
+    /// Jobs failed because they waited out the give-up window.
     pub(crate) expired_jobs: usize,
+    /// Jobs failed because a retry was refused for a reason waiting cannot fix.
+    pub(crate) refused_jobs: usize,
     pub(crate) finished_waits: usize,
 }
 
@@ -399,7 +505,8 @@ pub(crate) fn spawn_hosted_runtime_limit_wait_sweep(state: AppState) {
 /// spaces with waiting work that are due for a retry or hold a job past the
 /// give-up age. Spaces are claimed one at a time, right before they are
 /// handled, so a claim's lease covers one ensure however slow the rest of the
-/// batch is, and a space is handled at most once per tick.
+/// batch is, and a space is handled at most once per tick. Give-ups are
+/// claimed first, and organizations take turns (see the module comment).
 pub(crate) async fn sweep_hosted_runtime_limit_waits(
     state: &AppState,
     policy: &LimitWaitPolicy,
@@ -420,8 +527,9 @@ pub(crate) async fn sweep_hosted_runtime_limit_waits(
     report.finished_waits += pruned;
 
     let mut handled: Vec<Uuid> = Vec::new();
+    let mut handled_orgs: Vec<Uuid> = Vec::new();
     while (handled.len() as i64) < policy.batch_size {
-        let Some(claim) = claim_due_waits(state, policy, 1, &handled)
+        let Some(claim) = claim_due_waits(state, policy, 1, &handled, &handled_orgs)
             .await?
             .into_iter()
             .next()
@@ -429,21 +537,29 @@ pub(crate) async fn sweep_hosted_runtime_limit_waits(
             break;
         };
         let project_id = claim.project_id;
+        let claim_token = claim.claim_token;
         handled.push(project_id);
+        if let Some(org_id) = claim.org_id {
+            if !handled_orgs.contains(&org_id) {
+                handled_orgs.push(org_id);
+            }
+        }
         report.claimed += 1;
         if let Err(error) = process_claimed_wait(state, policy, claim, &mut report).await {
             warn!(%project_id, ?error, "failed to process a hosted runtime limit wait");
             // Leave the space for a later tick rather than for the claim TTL.
-            let _ = release_claim(state, project_id).await;
+            let _ = release_claim(state, project_id, claim_token).await;
         }
     }
     Ok(report)
 }
 
-/// A wait is over once the space has a live machine (the user's own ensure, a
-/// freed slot, a desktop), or once it has had no waiting work and no refusal
-/// for the whole give-up window. A refusal can land a moment before dispatch
-/// queues the job it was for, so an empty wait is not dropped straight away.
+/// A wait is over once the space has a live hosted runtime (the user's own
+/// ensure, a freed slot), once every waiting job has a live machine that would
+/// run it (a desktop of the job's user taking unpinned work), or once it has
+/// had no waiting work and no refusal for the whole give-up window. A refusal
+/// can land a moment before dispatch queues the job it was for, so an empty
+/// wait is not dropped straight away.
 async fn prune_finished_waits(state: &AppState, policy: &LimitWaitPolicy) -> AnyResult<usize> {
     let connection = state
         .pool
@@ -456,15 +572,20 @@ async fn prune_finished_waits(state: &AppState, policy: &LimitWaitPolicy) -> Any
                 "delete from hosted_runtime_limit_waits w
                  where (w.claimed_until is null or w.claimed_until < now())
                    and (
-                     {}
+                     {hosted_live}
                      or (
-                       {}
-                       and not exists (select 1 from agent_jobs j where {})
+                       exists (select 1 from agent_jobs j where {waiting})
+                       and not exists (select 1 from agent_jobs j where {unserved})
+                     )
+                     or (
+                       {quiet}
+                       and not exists (select 1 from agent_jobs j where {waiting})
                      )
                    )",
-                live_runtime_exists("w.project_id"),
-                wait_is_quiet("$1"),
-                waiting_job_predicate("j", "w.project_id"),
+                hosted_live = hosted_runtime_is_live_in("w.project_id"),
+                waiting = waiting_job_predicate("j", "w.project_id"),
+                unserved = unserved_job_predicate("j", "w.project_id"),
+                quiet = wait_is_quiet("$1"),
             ),
             &[&policy.give_up_after.as_secs_f64()],
         )
@@ -473,17 +594,22 @@ async fn prune_finished_waits(state: &AppState, policy: &LimitWaitPolicy) -> Any
 }
 
 /// Claim up to `limit` waits for this controller, skipping the spaces in
-/// `exclude` (those this tick already handled). Only spaces with work a hosted
-/// machine would run are candidates, so waits recorded for spaces nobody sent
-/// anything in never crowd out the ones that matter. The claim is the
-/// cross-replica single flight: `skip locked` keeps two controllers from
-/// claiming the same row at once, and `claimed_until` keeps the row away from
-/// every other controller until this one releases it or the lease expires.
+/// `exclude` (those this tick already handled). Only spaces with work no live
+/// runtime would run are candidates, so waits recorded for spaces nobody sent
+/// anything in never crowd out the ones that matter. Spaces holding a job past
+/// the give-up window come first, then spaces of organizations not in
+/// `handled_orgs`, then the longest-due.
+///
+/// The claim is the cross-replica single flight: `skip locked` keeps two
+/// controllers from claiming the same row at once, and `claimed_until` keeps
+/// the row away from every other controller until this one releases it or the
+/// lease expires.
 async fn claim_due_waits(
     state: &AppState,
     policy: &LimitWaitPolicy,
     limit: i64,
     exclude: &[Uuid],
+    handled_orgs: &[Uuid],
 ) -> AnyResult<Vec<ClaimedWait>> {
     let connection = state
         .pool
@@ -494,20 +620,30 @@ async fn claim_due_waits(
         .query(
             &format!(
                 "with candidates as (
-                   select w.project_id
+                   select w.project_id,
+                          p.org_id,
+                          exists (
+                            select 1 from agent_jobs j
+                            where {unserved}
+                              and {since} < now() - $2::double precision * interval '1 second'
+                          ) as give_up_due
                    from hosted_runtime_limit_waits w
+                   left join projects p on p.id = w.project_id
                    where (w.claimed_until is null or w.claimed_until < now())
                      and w.project_id <> all($4::uuid[])
-                     and exists (select 1 from agent_jobs j where {waiting})
+                     and exists (select 1 from agent_jobs j where {unserved})
                      and (
                        w.next_attempt_at <= now()
                        or exists (
                          select 1 from agent_jobs j
-                         where {waiting}
+                         where {unserved}
                            and {since} < now() - $2::double precision * interval '1 second'
                        )
                      )
-                   order by w.next_attempt_at asc, w.first_refused_at asc
+                   order by give_up_due desc,
+                            coalesce(p.org_id = any($5::uuid[]), false) asc,
+                            w.next_attempt_at asc,
+                            w.first_refused_at asc
                    limit $1
                    for update of w skip locked
                  )
@@ -516,9 +652,10 @@ async fn claim_due_waits(
                      updated_at = now()
                  from candidates c
                  where w.project_id = c.project_id
-                 returning w.project_id, w.ensure_request, w.attempts,
-                           w.next_attempt_at <= now() as retry_due, w.last_error_code",
-                waiting = waiting_job_predicate("j", "w.project_id"),
+                 returning w.project_id, c.org_id, w.ensure_request, w.attempts,
+                           w.next_attempt_at <= now() as retry_due, w.last_error_code,
+                           w.claimed_until",
+                unserved = unserved_job_predicate("j", "w.project_id"),
                 since = waiting_on_limit_since("j", "w.first_refused_at"),
             ),
             &[
@@ -526,6 +663,7 @@ async fn claim_due_waits(
                 &policy.give_up_after.as_secs_f64(),
                 &policy.claim_ttl.as_secs_f64(),
                 &exclude,
+                &handled_orgs,
             ],
         )
         .await
@@ -534,10 +672,12 @@ async fn claim_due_waits(
         .into_iter()
         .map(|row| ClaimedWait {
             project_id: row.get("project_id"),
+            org_id: row.get("org_id"),
             ensure_request: row.get::<_, PgJson<JsonValue>>("ensure_request").0,
             attempts: row.get("attempts"),
             retry_due: row.get("retry_due"),
             last_error_code: row.get("last_error_code"),
+            claim_token: row.get("claimed_until"),
         })
         .collect())
 }
@@ -549,9 +689,10 @@ async fn process_claimed_wait(
     report: &mut LimitWaitSweepReport,
 ) -> AnyResult<()> {
     let project_id = claim.project_id;
-    report.expired_jobs += expire_jobs_waiting_too_long(state, policy, &claim).await?;
+    report.expired_jobs +=
+        fail_waiting_jobs(state, policy, &claim, WaitingJobsFailure::GaveUp).await?;
 
-    let (has_live_runtime, waiting_jobs) = {
+    let (hosted_live, has_waiting_jobs, unserved_jobs) = {
         let connection = state
             .pool
             .get()
@@ -560,33 +701,35 @@ async fn process_claimed_wait(
         let row = connection
             .query_one(
                 &format!(
-                    "select {} as has_live_runtime,
-                            (select count(*) from agent_jobs j
-                             where {}) as waiting_jobs",
-                    live_runtime_exists("$1"),
-                    waiting_job_predicate("j", "$1")
+                    "select {} as hosted_live,
+                            exists (select 1 from agent_jobs j where {}) as has_waiting_jobs,
+                            (select count(*) from agent_jobs j where {}) as unserved_jobs",
+                    hosted_runtime_is_live_in("$1"),
+                    waiting_job_predicate("j", "$1"),
+                    unserved_job_predicate("j", "$1"),
                 ),
                 &[&project_id],
             )
             .await
             .context("failed to inspect a hosted runtime limit wait")?;
         (
-            row.get::<_, bool>("has_live_runtime"),
-            row.get::<_, i64>("waiting_jobs"),
+            row.get::<_, bool>("hosted_live"),
+            row.get::<_, bool>("has_waiting_jobs"),
+            row.get::<_, i64>("unserved_jobs"),
         )
     };
 
-    if has_live_runtime {
-        // A machine exists now (the user's own ensure, a freed slot, a
-        // desktop): the wait is over.
-        finish_wait(state, project_id).await?;
+    if hosted_live || (has_waiting_jobs && unserved_jobs == 0) {
+        // A machine that runs this work exists now (the user's own ensure, a
+        // freed slot, a desktop of the job's user): the wait is over.
+        finish_wait(state, project_id, claim.claim_token).await?;
         report.finished_waits += 1;
         return Ok(());
     }
     // Nothing left to start (the give-up just failed it, or a machine took
     // it), or not due yet: leave the wait to the prune and later ticks.
-    if waiting_jobs == 0 || !claim.retry_due {
-        release_claim(state, project_id).await?;
+    if unserved_jobs == 0 || !claim.retry_due {
+        release_claim(state, project_id, claim.claim_token).await?;
         return Ok(());
     }
 
@@ -594,8 +737,19 @@ async fn process_claimed_wait(
     {
         Ok(request) => request,
         Err(error) => {
-            warn!(%project_id, %error, "unreadable hosted runtime limit wait; dropping it");
-            finish_wait(state, project_id).await?;
+            // Nothing can replay it, so nothing will start this work: say so
+            // in the conversation rather than leave it queued forever.
+            warn!(%project_id, %error, "unreadable hosted runtime limit wait; failing its work");
+            report.refused_jobs += fail_waiting_jobs(
+                state,
+                policy,
+                &claim,
+                WaitingJobsFailure::Refused {
+                    message: LIMIT_WAIT_REFUSED_FALLBACK_MESSAGE,
+                },
+            )
+            .await?;
+            finish_wait(state, project_id, claim.claim_token).await?;
             report.finished_waits += 1;
             return Ok(());
         }
@@ -609,10 +763,10 @@ async fn process_claimed_wait(
                 runtime_id = %response.runtime_id,
                 lease_id = %response.lease_id,
                 attempts = claim.attempts + 1,
-                waiting_jobs,
+                unserved_jobs,
                 "started a hosted runtime for work queued behind the runtime limit"
             );
-            finish_wait(state, project_id).await?;
+            finish_wait(state, project_id, claim.claim_token).await?;
             report.launched += 1;
             report.finished_waits += 1;
             // Open studios of that space refresh their runtime list now
@@ -637,13 +791,28 @@ async fn process_claimed_wait(
             let (status, Json(api_error)) = &error;
             let limit = is_runtime_limit_refusal(&error);
             if !limit && !refusal_is_worth_retrying(*status) {
+                // Waiting cannot fix this (credits, access, a deleted space,
+                // a provider this controller no longer offers). The studio
+                // promised the message would send or fail within the window,
+                // so fail it now with the refusal's own reason, exactly as
+                // the give-up does, instead of dropping the wait and leaving
+                // the work queued with its reserve held.
                 info!(
                     %project_id,
                     status = status.as_u16(),
+                    code = ?api_error.code,
                     error = %api_error.message,
                     "hosted runtime limit wait ended: the launch was refused for another reason"
                 );
-                finish_wait(state, project_id).await?;
+                let message = refusal_message(&api_error.message);
+                report.refused_jobs += fail_waiting_jobs(
+                    state,
+                    policy,
+                    &claim,
+                    WaitingJobsFailure::Refused { message: &message },
+                )
+                .await?;
+                finish_wait(state, project_id, claim.claim_token).await?;
                 report.finished_waits += 1;
                 return Ok(());
             }
@@ -680,13 +849,14 @@ async fn process_claimed_wait(
                          last_error = $5,
                          claimed_until = null,
                          updated_at = now()
-                     where project_id = $1",
+                     where project_id = $1 and claimed_until = $6",
                     &[
                         &project_id,
                         &delay.as_secs_f64(),
                         &limit,
                         &error_code,
                         &error_message,
+                        &claim.claim_token,
                     ],
                 )
                 .await
@@ -696,7 +866,27 @@ async fn process_claimed_wait(
     Ok(())
 }
 
-async fn release_claim(state: &AppState, project_id: Uuid) -> AnyResult<()> {
+/// The conversation reason for a refusal waiting cannot fix: the refusal's own
+/// message (the ensure's user-facing text), bounded, or a plain fallback.
+fn refusal_message(message: &str) -> String {
+    let message: String = message
+        .trim()
+        .chars()
+        .take(MAX_RECORDED_ERROR_CHARS)
+        .collect();
+    if message.is_empty() {
+        LIMIT_WAIT_REFUSED_FALLBACK_MESSAGE.to_string()
+    } else {
+        message
+    }
+}
+
+/// Clear this controller's claim, if it still holds it.
+async fn release_claim(
+    state: &AppState,
+    project_id: Uuid,
+    claim_token: DateTime<Utc>,
+) -> AnyResult<()> {
     state
         .pool
         .get()
@@ -705,60 +895,89 @@ async fn release_claim(state: &AppState, project_id: Uuid) -> AnyResult<()> {
         .execute(
             "update hosted_runtime_limit_waits
              set claimed_until = null, updated_at = now()
-             where project_id = $1",
-            &[&project_id],
+             where project_id = $1 and claimed_until = $2",
+            &[&project_id, &claim_token],
         )
         .await
         .context("failed to release a hosted runtime limit wait")?;
     Ok(())
 }
 
-async fn finish_wait(state: &AppState, project_id: Uuid) -> AnyResult<()> {
+/// End the wait this controller has claimed. A claim that lapsed and was
+/// taken by another controller is left to that controller.
+async fn finish_wait(
+    state: &AppState,
+    project_id: Uuid,
+    claim_token: DateTime<Utc>,
+) -> AnyResult<()> {
     state
         .pool
         .get()
         .await
         .context("failed to acquire connection to finish a hosted runtime limit wait")?
         .execute(
-            "delete from hosted_runtime_limit_waits where project_id = $1",
-            &[&project_id],
+            "delete from hosted_runtime_limit_waits
+             where project_id = $1 and claimed_until = $2",
+            &[&project_id, &claim_token],
         )
         .await
         .context("failed to finish a hosted runtime limit wait")?;
     Ok(())
 }
 
-/// Fail the space's jobs that have waited on the limit for the whole give-up
-/// window, with a reason the person can act on, instead of letting them wait
-/// forever. Their
-/// runs fail, an unused managed-AI reserve is refunded, the conversation gets
-/// a failure message with a "Try again", and open studios hear about it.
-async fn expire_jobs_waiting_too_long(
+/// Why the sweep fails a space's waiting jobs.
+enum WaitingJobsFailure<'a> {
+    /// The jobs that waited the whole give-up window on the limit.
+    GaveUp,
+    /// Every job still waiting, because the replayed launch was refused for a
+    /// reason waiting cannot fix; `message` is that refusal's own reason.
+    Refused { message: &'a str },
+}
+
+/// Fail waiting jobs no live runtime could run, with a reason the person can
+/// act on, instead of letting them wait forever: those past the give-up
+/// window, or all of them when the launch was refused for good. Their runs
+/// fail, an unused managed-AI reserve is refunded, the conversation gets a
+/// failure message with a "Try again", and open studios hear about it. A job
+/// a live machine would run (one that appeared while this space was claimed)
+/// is left alone.
+async fn fail_waiting_jobs(
     state: &AppState,
     policy: &LimitWaitPolicy,
     claim: &ClaimedWait,
+    failure: WaitingJobsFailure<'_>,
 ) -> AnyResult<usize> {
     let project_id = claim.project_id;
-    let message = match claim.last_error_code.as_deref() {
-        None | Some(RUNTIME_LIMIT_REACHED_CODE) => LIMIT_WAIT_EXPIRED_MESSAGE,
-        Some(_) => LIMIT_WAIT_EXPIRED_OTHER_MESSAGE,
+    let (message, kind, outcome, overdue_after): (&str, &str, &str, Option<f64>) = match failure {
+        WaitingJobsFailure::GaveUp => (
+            match claim.last_error_code.as_deref() {
+                None | Some(RUNTIME_LIMIT_REACHED_CODE) => LIMIT_WAIT_EXPIRED_MESSAGE,
+                Some(_) => LIMIT_WAIT_EXPIRED_OTHER_MESSAGE,
+            },
+            "runtime_limit_wait_expired",
+            "expired",
+            Some(policy.give_up_after.as_secs_f64()),
+        ),
+        WaitingJobsFailure::Refused { message } => {
+            (message, "runtime_limit_wait_refused", "failed", None)
+        }
     };
 
     let mut connection = state
         .pool
         .get()
         .await
-        .context("failed to acquire connection to expire jobs behind the runtime limit")?;
+        .context("failed to acquire connection to fail jobs behind the runtime limit")?;
     let mut transaction = connection
         .transaction()
         .await
-        .context("failed to start the runtime limit wait expiry")?;
+        .context("failed to start failing jobs behind the runtime limit")?;
     let rows = transaction
         .query(
             &format!(
                 "update agent_jobs j
                  set status = 'failed',
-                     outcome = 'expired',
+                     outcome = $4,
                      error_message = $3,
                      completed_at = now(),
                      active_input_ready_runtime_id = null,
@@ -766,11 +985,11 @@ async fn expire_jobs_waiting_too_long(
                      active_input_ready_turn_id = null,
                      updated_at = now()
                  where {}
-                   and {} < now() - $2::double precision * interval '1 second'
-                   and not {}
+                   and ($2::double precision is null
+                        or {} < now() - $2::double precision * interval '1 second')
                  returning j.id, j.project_id, j.run_id, j.conversation_id, j.session_id,
                            j.prompt_id, j.payload, j.error_message, j.lease_attempts",
-                waiting_job_predicate("j", "$1"),
+                unserved_job_predicate("j", "$1"),
                 // This controller holds the wait's claim, so the row is there;
                 // were it gone, nothing would count as overdue.
                 waiting_on_limit_since(
@@ -778,17 +997,16 @@ async fn expire_jobs_waiting_too_long(
                     "coalesce((select w.first_refused_at from hosted_runtime_limit_waits w
                                where w.project_id = $1), now())"
                 ),
-                live_runtime_exists("$1"),
             ),
-            &[&project_id, &policy.give_up_after.as_secs_f64(), &message],
+            &[&project_id, &overdue_after, &message, &outcome],
         )
         .await
-        .context("failed to expire jobs waiting on the runtime limit")?;
+        .context("failed to fail jobs waiting on the runtime limit")?;
     if rows.is_empty() {
         transaction
             .rollback()
             .await
-            .context("failed to close the empty runtime limit wait expiry")?;
+            .context("failed to close an empty runtime limit wait failure")?;
         return Ok(0);
     }
 
@@ -805,7 +1023,7 @@ async fn expire_jobs_waiting_too_long(
         let payload = row.get::<_, PgJson<JsonValue>>("payload").0;
         let metadata = json!({
             "source": "controller",
-            "kind": "runtime_limit_wait_expired",
+            "kind": kind,
             "outcome": "failed",
             "messageType": "error",
             "jobId": job_id,
@@ -826,7 +1044,7 @@ async fn expire_jobs_waiting_too_long(
         .await
         .map_err(|(status, Json(error))| {
             anyhow::anyhow!(
-                "failed to record the runtime limit expiry message ({status}): {}",
+                "failed to record the runtime limit wait failure message ({status}): {}",
                 error.message
             )
         })?;
@@ -836,7 +1054,7 @@ async fn expire_jobs_waiting_too_long(
     transaction
         .commit()
         .await
-        .context("failed to commit the runtime limit wait expiry")?;
+        .context("failed to commit failing jobs behind the runtime limit")?;
     drop(connection);
 
     crate::send_intents::publish_job_input_state_updates(state, &settled.job_input_state_updates);
@@ -857,10 +1075,20 @@ async fn expire_jobs_waiting_too_long(
         info!(
             %job_id,
             %project_id,
-            "failed a job that waited too long on the hosted runtime limit"
+            kind,
+            "failed a job waiting on the hosted runtime limit"
         );
         if let Some(run_id) = run_id {
-            publish_expired_run(state, project_id, run_id, job_id, conversation_id, message).await;
+            publish_failed_run(
+                state,
+                project_id,
+                run_id,
+                job_id,
+                conversation_id,
+                outcome,
+                message,
+            )
+            .await;
         }
         if let Some(conversation_id) = conversation_id {
             conversations.insert(conversation_id);
@@ -873,12 +1101,13 @@ async fn expire_jobs_waiting_too_long(
     Ok(rows.len())
 }
 
-async fn publish_expired_run(
+async fn publish_failed_run(
     state: &AppState,
     project_id: Uuid,
     run_id: Uuid,
     job_id: Uuid,
     conversation_id: Option<Uuid>,
+    outcome: &str,
     message: &str,
 ) {
     let snapshot = match state.pool.get().await {
@@ -905,7 +1134,7 @@ async fn publish_expired_run(
         Some(run_id),
         Some(job_id),
         json!({
-            "outcome": "expired",
+            "outcome": outcome,
             "finalStatus": "failed",
             "runStatus": "failed",
             "errorMessage": message,

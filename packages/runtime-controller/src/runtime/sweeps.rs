@@ -478,30 +478,56 @@ pub(crate) async fn expire_stale_requeued_jobs(state: &AppState) -> AnyResult<()
         .await
         .context("failed to start requeued job expiry transaction")?;
 
+    // A space waiting on its organization's hosted runtime limit is the
+    // limit-wait sweep's to settle (runtime/limit_waits.rs): it retries the
+    // launch and gives up after its own, longer window with the reason that
+    // applies. That includes work an idle-slot reclaim requeued, which would
+    // otherwise fail here after 15 minutes as "interrupted". The table ships
+    // in a migration that may land after this controller.
+    let limit_waits_migrated: bool = transaction
+        .query_one(
+            "select to_regclass('public.hosted_runtime_limit_waits') is not null as migrated",
+            &[],
+        )
+        .await
+        .context("failed to look up the runtime limit wait table")?
+        .get("migrated");
+    let skip_spaces_waiting_on_the_limit = if limit_waits_migrated {
+        "and not exists (
+           select 1 from hosted_runtime_limit_waits w
+           where w.project_id = agent_jobs.project_id
+         )"
+    } else {
+        ""
+    };
+
     // Only expire jobs with no live runtime to run them: a stamped job merely
     // waiting behind a busy, healthy runtime will be leased normally.
     let rows = transaction
         .query(
-            "update agent_jobs
-             set status = 'failed',
-                 outcome = 'expired',
-                 error_message = 'This run was interrupted when its runtime stopped and was not resumed within 15 minutes. Send it again if you still need it.',
-                 completed_at = now(),
-                 active_input_ready_runtime_id = null,
-                 active_input_ready_expires_at = null,
-                 active_input_ready_turn_id = null,
-                 updated_at = now()
-             where status = 'queued'
-               and payload ? 'requeuedAt'
-               and (payload ->> 'requeuedAt')::timestamptz
-                   < now() - interval '1 second' * $1
-               and not exists (
-                 select 1 from runtimes r
-                 where r.project_id = agent_jobs.project_id
-                   and r.status not in ('stopped', 'offline', 'removed')
-               )
-             returning id, project_id, run_id, conversation_id, payload, error_message,
-                       lease_attempts",
+            &format!(
+                "update agent_jobs
+                 set status = 'failed',
+                     outcome = 'expired',
+                     error_message = 'This run was interrupted when its runtime stopped and was not resumed within 15 minutes. Send it again if you still need it.',
+                     completed_at = now(),
+                     active_input_ready_runtime_id = null,
+                     active_input_ready_expires_at = null,
+                     active_input_ready_turn_id = null,
+                     updated_at = now()
+                 where status = 'queued'
+                   and payload ? 'requeuedAt'
+                   and (payload ->> 'requeuedAt')::timestamptz
+                       < now() - interval '1 second' * $1
+                   and not exists (
+                     select 1 from runtimes r
+                     where r.project_id = agent_jobs.project_id
+                       and r.status not in ('stopped', 'offline', 'removed')
+                   )
+                   {skip_spaces_waiting_on_the_limit}
+                 returning id, project_id, run_id, conversation_id, payload, error_message,
+                           lease_attempts"
+            ),
             &[&(REQUEUED_JOB_EXPIRY_SECONDS as f64)],
         )
         .await

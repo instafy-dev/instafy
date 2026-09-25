@@ -76,7 +76,9 @@ Sweep stops publish `runtime.stopped` with a `reason`:
 Jobs requeued by any stop are stamped (`payload.requeuedAt`) and expire after
 15 minutes **only if the project has no live runtime** — an interrupted run
 must not replay days later, but a queued job behind a busy machine is fine.
-The stamp is cleared when a job is leased.
+The stamp is cleared when a job is leased. A space that is waiting on the
+runtime limit (below) is left to that wait's own 30-minute give-up, including
+work an idle-slot reclaim requeued.
 
 ## Waiting on the runtime limit
 
@@ -95,33 +97,56 @@ for them (`runtime/limit_waits.rs`):
 - A sweep on every controller (every 10 s) replays the refused request through
   the ordinary ensure path for spaces that still have queued agent work a
   hosted machine would run (unpinned, or pinned to the space's own hosted
-  runtime) and no live runtime. The organization limit, the credit precheck
-  and the reclaim apply unchanged, so it never launches a machine a user's
-  own ensure could not.
+  runtime) and no live runtime that would run it (see the last point). The
+  organization limit, the credit precheck and the reclaim apply unchanged, so
+  it never launches a machine a user's own ensure could not.
 - Retries back off per space: 30 s after the refusal, then 60 s, 120 s,
   240 s and every 5 minutes. At most 5 spaces are handled per tick per
-  controller, each at most once.
+  controller, each at most once, and each retry is one ensure bounded by the
+  provider call deadlines below. Spaces holding a job past the give-up window
+  are claimed before plain retries, so a give-up never waits behind slow
+  launches, and within a tick an organization's next space goes after every
+  other organization's first.
 - Replicas share the table: a sweep claims one due row at a time, right
   before handling it, with `for update skip locked` and a 20-minute claim
   lease, so a space is retried by one controller at a time and a claim
-  abandoned by a dead controller expires.
+  abandoned by a dead controller expires. The lease's expiry is also the
+  claim's token: releasing, finishing or backing off a wait only applies
+  while the row still carries it, so a controller whose claim lapsed cannot
+  undo the claim another controller took since.
+- The organization limit itself is one decision at a time: an ensure takes a
+  per-organization advisory lock (`pg_advisory_xact_lock`) around counting
+  the organization's active hosted runtimes and inserting its lease, so two
+  replicas launching for two spaces at once cannot both take the last slot.
+  The lock lasts only for that database transaction; it is released before a
+  reclaim stops another machine and is never held across a provider call.
 - A launch refused for a reason waiting cannot fix (credits, access, a deleted
-  space, a provider this controller no longer offers) ends the wait and leaves
-  the job as it was. Conflicts, throttling and 5xx keep backing off.
+  space, a provider this controller no longer offers) ends the wait and fails
+  the waiting work at once with that refusal's own message, through the same
+  path as the give-up below (failed run, conversation message, refund of an
+  unused managed-AI reserve). Conflicts, throttling and 5xx keep backing off.
 - Work that has waited on the limit for 30 minutes fails with a reason in
   the conversation ("every cloud runtime in this team stayed busy for 30
-  minutes...") and a Try again, its run fails, and an unused managed-AI
-  reserve is refunded, so a message that never ran costs nothing. The clock
+  minutes...") and a Try again, its run fails, and the managed-AI reserve of
+  a job no runtime ever leased is refunded, so a message that never ran costs
+  nothing (a job that was leased may have called the model, so its charge
+  stands, as for any expired requeued job). The clock
   starts when the job was queued (or requeued by a stop), or when the space
   began waiting, whichever is later: a job that sat behind its own busy
   machine gets the full window once it is refused a new one. The studio's
   waiting copy promises this bound. Queued follow-ups in that conversation
   are then dispatched as after any finished turn.
-- The wait ends when the space has a live runtime: an unreleased lease or a
-  recent heartbeat. The `requested` row dispatch leaves behind does not
-  count, and neither does a generation quarantined as `cleanup_pending`. A
-  wait with no queued work is dropped once it has been quiet (no refusal and
-  no retry) for 30 minutes; a refusal after that starts a new wait.
+- The wait ends when a live runtime (an unreleased lease or a recent
+  heartbeat) would run the waiting work: a hosted runtime of the space, the
+  machine a job is pinned to, or, for unpinned work, a machine that leases
+  unpinned work for that job's user. A heartbeating desktop that never takes
+  work pinned to the hosted runtime, or only takes its owner's work, does not
+  end it, and the give-up still applies to that work. The `requested` row
+  dispatch leaves behind does not count, and neither does a generation
+  quarantined as `cleanup_pending`. A runtime preference held in one
+  controller's memory is invisible to the sweep. A wait with no queued work is
+  dropped once it has been quiet (no refusal and no retry) for 30 minutes; a
+  refusal after that starts a new wait.
 
 The table ships in migration `20260924120000_hosted_runtime_limit_waits.sql`.
 A controller running before it is applied logs one warning and does not

@@ -222,6 +222,28 @@ describe("resolveRunFailurePresentation", () => {
     expect(isAutoRetryEligibleFailureKind(presentation?.kind)).toBe(false);
   });
 
+  it("shows a launch refusal that ended the runtime-limit wait in full, with a manual retry only", () => {
+    // Recorded by runtime/limit_waits.rs when a background retry was refused
+    // for a reason waiting cannot fix: the refusal's own message.
+    const reason =
+      "This team is out of credits for today, so a hosted machine can't start. Credits refill daily at 00:00 UTC — or upgrade the plan, or connect your own machine (free, no limits).";
+    const presentation = resolveRunFailurePresentation({
+      metadata: {
+        source: "controller",
+        kind: "runtime_limit_wait_refused",
+        outcome: "failed",
+        messageType: "error",
+        jobId: "job-1",
+        runId: "run-1",
+        errorMessage: reason,
+      },
+      content: reason,
+    });
+    expect(presentation?.kind).toBe("generic");
+    expect(presentation?.friendlyText).toBe(reason);
+    expect(isAutoRetryEligibleFailureKind(presentation?.kind)).toBe(false);
+  });
+
   it("keeps the inline generic reason to the first line and bounds its length", () => {
     const longFirstLine = `Boot failed: ${"x".repeat(400)}`;
     const presentation = resolveRunFailurePresentation({

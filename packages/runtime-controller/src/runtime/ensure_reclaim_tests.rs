@@ -77,7 +77,28 @@ async fn setup_at_hosted_runtime_limit(
         );
         return Ok(None);
     };
+    setup_at_hosted_runtime_limit_on(pool, test_name, reclaim_idle_seconds, idle_for_seconds)
+        .await
+        .map(Some)
+}
 
+/// [`setup_at_hosted_runtime_limit`] for a test that must fail, not skip,
+/// without a database.
+async fn require_setup_at_hosted_runtime_limit(
+    test_name: &'static str,
+    reclaim_idle_seconds: i64,
+    idle_for_seconds: i64,
+) -> anyhow::Result<ReclaimFixture> {
+    let pool = crate::tests::require_origin_test_pool(test_name).await?;
+    setup_at_hosted_runtime_limit_on(pool, test_name, reclaim_idle_seconds, idle_for_seconds).await
+}
+
+async fn setup_at_hosted_runtime_limit_on(
+    pool: crate::config::PgPool,
+    test_name: &'static str,
+    reclaim_idle_seconds: i64,
+    idle_for_seconds: i64,
+) -> anyhow::Result<ReclaimFixture> {
     let provider_events: Arc<Mutex<Vec<&'static str>>> = Arc::new(Mutex::new(Vec::new()));
     let provider_app = axum::Router::new()
         .route(
@@ -204,7 +225,7 @@ async fn setup_at_hosted_runtime_limit(
     config.runtime_limit_reclaim_idle_seconds = reclaim_idle_seconds;
     let state = crate::tests::build_test_state(pool.clone(), config);
 
-    Ok(Some(ReclaimFixture {
+    Ok(ReclaimFixture {
         pool,
         state,
         org_id,
@@ -214,7 +235,7 @@ async fn setup_at_hosted_runtime_limit(
         provider_id: provider_id.to_string(),
         provider_events,
         _provider_handle: provider_handle,
-    }))
+    })
 }
 
 fn limit_refusal_code(error: &(StatusCode, Json<ApiError>)) -> Option<String> {
@@ -513,11 +534,9 @@ async fn silent_tunnel_broker_cannot_hold_launch_admission_during_reclaim() -> a
 /// sweep is told to start it once a runtime is free.
 #[tokio::test]
 async fn reclaim_that_requeues_work_leaves_the_reclaimed_space_waiting() -> anyhow::Result<()> {
-    let Some(fixture) =
-        setup_at_hosted_runtime_limit("hosted-reclaim-requeued-work", 120, 3_600).await?
-    else {
-        return Ok(());
-    };
+    // Never a silent pass: this proves the reclaimed space keeps its work.
+    let fixture =
+        require_setup_at_hosted_runtime_limit("hosted-reclaim-requeued-work", 120, 3_600).await?;
     let cleanup = crate::tests::SharedDbFixture {
         organizations: vec![fixture.org_id],
         projects: vec![fixture.waiting_project_id, fixture.blocker_project_id],

@@ -722,7 +722,7 @@ async fn a_space_claimed_by_another_controller_is_not_retried_twice() -> anyhow:
             fixture.make_due(*project_id).await?;
         }
         // Replica A has claimed every due space and is still working on them.
-        let claimed_by_a = claim_due_waits(&fixture.state, &policy(), 3, &[]).await?;
+        let claimed_by_a = claim_due_waits(&fixture.state, &policy(), 3, &[], &[]).await?;
         assert_eq!(claimed_by_a.len(), 3);
 
         // Replica B, on its own pool, must leave them alone.
@@ -920,7 +920,8 @@ async fn only_work_a_hosted_machine_would_run_keeps_a_space_waiting() -> anyhow:
 }
 
 #[tokio::test]
-async fn a_launch_refused_for_another_reason_ends_the_wait() -> anyhow::Result<()> {
+async fn a_launch_refused_for_another_reason_fails_the_waiting_work_with_that_reason(
+) -> anyhow::Result<()> {
     let fixture = setup("limit-wait-other-refusal", 1, 10).await?;
     crate::tests::with_shared_db_fixture(fixture.shared_db_fixture(), async {
         let waiting = fixture.waiting();
@@ -941,10 +942,134 @@ async fn a_launch_refused_for_another_reason_ends_the_wait() -> anyhow::Result<(
         fixture.make_due(waiting).await?;
 
         let report = sweep_hosted_runtime_limit_waits(&fixture.state, &policy()).await?;
-        assert_eq!(report.attempted, 1, "{report:?}");
+        assert_eq!(
+            (report.attempted, report.refused_jobs, report.launched),
+            (1, 1, 0),
+            "{report:?}"
+        );
         assert!(fixture.wait_row(waiting).await?.is_none());
-        // Waiting could not fix it; the job is left as it was, not failed.
-        assert_eq!(fixture.job_state(job_id).await?.0, "queued");
+        // Waiting could not fix it, so the job fails now with the refusal's
+        // own reason instead of staying queued behind a wait that is over.
+        let (status, outcome, error_message) = fixture.job_state(job_id).await?;
+        assert_eq!(status, "failed");
+        assert_eq!(outcome.as_deref(), Some("failed"));
+        let error_message = error_message.unwrap_or_default();
+        assert!(
+            error_message.contains("instafy_cloud_gone"),
+            "the refusal's own message: {error_message}"
+        );
+        Ok(())
+    })
+    .await
+}
+
+/// A credits refusal is final for the retry: the work fails at once with the
+/// credits reason, through the same path as the give-up (run, conversation,
+/// run.completed), instead of staying queued with its reserve held while the
+/// studio promises it will send.
+#[tokio::test]
+async fn a_credits_refusal_fails_the_waiting_work_with_the_credits_reason() -> anyhow::Result<()> {
+    let fixture = setup("limit-wait-credits-refusal", 1, 10).await?;
+    crate::tests::with_shared_db_fixture(fixture.shared_db_fixture(), async {
+        let waiting = fixture.waiting();
+        fixture.refuse(waiting).await?;
+        let (job_id, run_id, conversation_id) = fixture.queue_conversation_job(waiting).await?;
+        let young_job_id = fixture.queue_job(waiting).await?;
+
+        // The slot frees up, but the team has run out of credits since.
+        let connection = fixture.pool.get().await?;
+        connection
+            .execute(
+                "update runtime_leases set released_at = now(), status = 'released'
+                 where id = $1",
+                &[&fixture.blocker_lease_id],
+            )
+            .await?;
+        connection
+            .execute(
+                "update runtimes set status = 'stopped', active_lease_id = null where id = $1",
+                &[&fixture.blocker_runtime_id],
+            )
+            .await?;
+        connection
+            .execute(
+                "insert into org_credit_balances (org_id, balance, credit_limit)
+                 values ($1, 0, 0)
+                 on conflict (org_id) do update set balance = 0, credit_limit = 0",
+                &[&fixture.org_id],
+            )
+            .await?;
+        drop(connection);
+        fixture.make_due(waiting).await?;
+
+        // More than the team's whole daily allowance, so even today's refill
+        // could not pay for the machine.
+        let mut config = fixture.state.config.clone();
+        config.hosted_runtime_credit_burn_amount = 100_000;
+        let state = crate::tests::build_test_state(fixture.pool.clone(), config);
+        let _watch = state.events.watch_project(waiting);
+        let mut events = state.events.subscribe();
+
+        let report = sweep_hosted_runtime_limit_waits(&state, &policy()).await?;
+        assert_eq!(
+            (report.attempted, report.launched, report.refused_jobs),
+            (1, 0, 2),
+            "{report:?}"
+        );
+        assert!(fixture.provider_events().await.is_empty());
+        assert!(
+            fixture.wait_row(waiting).await?.is_none(),
+            "a refusal waiting cannot fix ends the wait"
+        );
+
+        for job in [job_id, young_job_id] {
+            let (status, outcome, error_message) = fixture.job_state(job).await?;
+            assert_eq!(status, "failed");
+            assert_eq!(outcome.as_deref(), Some("failed"));
+            let error_message = error_message.unwrap_or_default();
+            assert!(
+                error_message.starts_with("This team is out of credits"),
+                "the credits refusal's own reason: {error_message}"
+            );
+        }
+        let (_, _, reason) = fixture.job_state(job_id).await?;
+        let reason = reason.unwrap_or_default();
+
+        let connection = fixture.pool.get().await?;
+        let run = connection
+            .query_one(
+                "select status, last_message from runs where id = $1",
+                &[&run_id],
+            )
+            .await?;
+        assert_eq!(run.get::<_, String>("status"), "failed");
+        assert_eq!(
+            run.get::<_, Option<String>>("last_message").as_deref(),
+            Some(reason.as_str())
+        );
+        let message = connection
+            .query_one(
+                "select role, content, metadata from conversation_messages
+                 where conversation_id = $1",
+                &[&conversation_id],
+            )
+            .await?;
+        assert_eq!(message.get::<_, String>("role"), "assistant");
+        assert_eq!(message.get::<_, String>("content"), reason);
+        let metadata = message.get::<_, PgJson<JsonValue>>("metadata").0;
+        assert_eq!(metadata["kind"], json!("runtime_limit_wait_refused"));
+        assert_eq!(metadata["outcome"], json!("failed"));
+        assert_eq!(metadata["jobId"], json!(job_id));
+        drop(connection);
+
+        let events = drain_events(&mut events);
+        let completed = events
+            .iter()
+            .find(|event| event.kind == "run.completed" && event.run_id == Some(run_id))
+            .ok_or_else(|| anyhow::anyhow!("no run.completed for the refused run: {events:?}"))?;
+        assert_eq!(completed.data["runStatus"], json!("failed"));
+        assert_eq!(completed.data["outcome"], json!("failed"));
+        assert_eq!(completed.data["errorMessage"], json!(reason));
         Ok(())
     })
     .await
@@ -1220,6 +1345,830 @@ async fn a_retry_holds_no_pool_connection_while_the_provider_launches() -> anyho
             .expect("the retry did not finish after the provider answered")??;
         assert_eq!((report.attempted, report.launched), (1, 1), "{report:?}");
         assert!(fixture.has_launched_runtime(waiting).await?);
+        Ok(())
+    })
+    .await
+}
+
+/// A private connection outside every pool, for a test that plays another
+/// replica holding a lock mid-transaction. Dropping the client rolls back.
+async fn raw_client() -> anyhow::Result<(tokio_postgres::Client, tokio::task::JoinHandle<()>)> {
+    let url = std::env::var("TEST_DATABASE_URL")
+        .context("this test requires TEST_DATABASE_URL; run it through `pnpm test:controller`")?;
+    let (client, connection) = tokio_postgres::connect(&url, tokio_postgres::NoTls).await?;
+    let driver = tokio::spawn(async move {
+        let _ = connection.await;
+    });
+    Ok((client, driver))
+}
+
+async fn hosted_runtime_id(pool: &crate::config::PgPool, project_id: Uuid) -> anyhow::Result<Uuid> {
+    Ok(pool
+        .get()
+        .await?
+        .query_one(
+            "select id from runtimes where project_id = $1 and provider = $2",
+            &[&project_id, &PROVIDER_ID],
+        )
+        .await?
+        .get("id"))
+}
+
+/// A heartbeating desktop in the space, private to `owner`.
+async fn add_heartbeating_desktop(
+    pool: &crate::config::PgPool,
+    project_id: Uuid,
+    owner: Uuid,
+) -> anyhow::Result<Uuid> {
+    let runtime_id = Uuid::new_v4();
+    pool.get()
+        .await?
+        .execute(
+            "insert into runtimes
+                (id, project_id, provider, status, idle_ttl_seconds, last_seen_at, capabilities)
+             values ($1, $2, 'self_hosted', 'ready', 600, now(), $3)",
+            &[
+                &runtime_id,
+                &project_id,
+                &json!({
+                    "_instafySelfHostedAccess": {
+                        "mode": "private",
+                        "ownerUserId": owner.to_string(),
+                    }
+                }),
+            ],
+        )
+        .await?;
+    Ok(runtime_id)
+}
+
+/// A desktop (or any machine) that is up does not end a wait for work it
+/// would never run: a job pinned to the space's hosted runtime, or unpinned
+/// work of another user. The retry and the give-up go on for those. Work the
+/// desktop does run (unpinned, its owner's) ends the wait.
+#[tokio::test]
+async fn a_heartbeating_desktop_only_ends_a_wait_for_work_it_would_run() -> anyhow::Result<()> {
+    let fixture = setup("limit-wait-desktop", 3, 10).await?;
+    crate::tests::with_shared_db_fixture(fixture.shared_db_fixture(), async {
+        let pinned_to_hosted = fixture.waiting_project_ids[0];
+        let another_users_work = fixture.waiting_project_ids[1];
+        let owners_work = fixture.waiting_project_ids[2];
+        let owner = Uuid::new_v4();
+        let someone_else = Uuid::new_v4();
+
+        for project_id in &fixture.waiting_project_ids {
+            fixture.refuse(*project_id).await?;
+            add_heartbeating_desktop(&fixture.pool, *project_id, owner).await?;
+        }
+        let connection = fixture.pool.get().await?;
+        let pinned_job = Uuid::new_v4();
+        connection
+            .execute(
+                "insert into agent_jobs (id, project_id, status, payload, target_runtime_id)
+                 values ($1, $2, 'queued', jsonb_build_object('user_id', $3::text), $4)",
+                &[
+                    &pinned_job,
+                    &pinned_to_hosted,
+                    &owner.to_string(),
+                    &hosted_runtime_id(&fixture.pool, pinned_to_hosted).await?,
+                ],
+            )
+            .await?;
+        let others_job = Uuid::new_v4();
+        let owners_job = Uuid::new_v4();
+        for (job_id, project_id, user_id) in [
+            (others_job, another_users_work, someone_else),
+            (owners_job, owners_work, owner),
+        ] {
+            connection
+                .execute(
+                    "insert into agent_jobs (id, project_id, status, payload)
+                     values ($1, $2, 'queued', jsonb_build_object('user_id', $3::text))",
+                    &[&job_id, &project_id, &user_id.to_string()],
+                )
+                .await?;
+        }
+        drop(connection);
+        for project_id in &fixture.waiting_project_ids {
+            fixture.make_due(*project_id).await?;
+        }
+
+        let report = sweep_hosted_runtime_limit_waits(&fixture.state, &policy()).await?;
+        assert_eq!(report.attempted, 2, "{report:?}");
+        for project_id in [pinned_to_hosted, another_users_work] {
+            let wait = fixture
+                .wait_row(project_id)
+                .await?
+                .ok_or_else(|| anyhow::anyhow!("a desktop must not end this wait"))?;
+            assert_eq!(wait.attempts, 1, "{wait:?}");
+        }
+        assert!(
+            fixture.wait_row(owners_work).await?.is_none(),
+            "the owner's desktop takes the owner's unpinned work"
+        );
+
+        // Past the window, the give-up does not count the desktop either.
+        let connection = fixture.pool.get().await?;
+        connection
+            .execute(
+                "update agent_jobs set created_at = now() - interval '31 minutes'
+                 where id = any($1)",
+                &[&vec![pinned_job, others_job, owners_job]],
+            )
+            .await?;
+        connection
+            .execute(
+                "update hosted_runtime_limit_waits
+                 set first_refused_at = now() - interval '31 minutes'
+                 where project_id = any($1)",
+                &[&fixture.waiting_project_ids],
+            )
+            .await?;
+        drop(connection);
+        let report = sweep_hosted_runtime_limit_waits(&fixture.state, &policy()).await?;
+        assert_eq!(report.expired_jobs, 2, "{report:?}");
+        assert_eq!(fixture.job_state(pinned_job).await?.0, "failed");
+        assert_eq!(fixture.job_state(others_job).await?.0, "failed");
+        assert_eq!(
+            fixture.job_state(owners_job).await?.0,
+            "queued",
+            "work a live desktop runs is not given up on"
+        );
+        Ok(())
+    })
+    .await
+}
+
+/// Work an idle-slot reclaim requeued waits on the limit like any other: the
+/// older 15-minute requeued-job expiry leaves it to the limit wait, whose
+/// give-up fails it after its own window and refunds the reserve of a job that
+/// never ran.
+#[tokio::test]
+async fn requeued_work_in_a_waiting_space_is_given_up_by_the_limit_wait_and_refunded(
+) -> anyhow::Result<()> {
+    use crate::tests_managed_ai_refund::{
+        credit_balance, ledger_rows, seed_reserved_managed_ai_prompt,
+    };
+    use futures_util::FutureExt;
+
+    let fixture = seed_reserved_managed_ai_prompt("limit-wait-requeued-expiry")
+        .await?
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "limit-wait-requeued-expiry requires TEST_DATABASE_URL; run it through `pnpm test:controller`"
+            )
+        })?;
+    let body = async {
+        let connection = fixture.pool.get().await?;
+        // The reclaim stopped the space's machine and requeued the job 20
+        // minutes ago; the space has waited on the limit since.
+        connection
+            .execute(
+                "update runtimes set status = 'stopped' where project_id = $1",
+                &[&fixture.project_id],
+            )
+            .await?;
+        connection
+            .execute(
+                "update agent_jobs
+                 set payload = payload || jsonb_build_object(
+                       'requeuedAt', (now() - interval '20 minutes')::text,
+                       'requeuedReason', 'runtime_limit_reclaim')
+                 where id = $1",
+                &[&fixture.job_id],
+            )
+            .await?;
+        connection
+            .execute(
+                "insert into hosted_runtime_limit_waits
+                    (project_id, ensure_request, first_refused_at, last_refused_at,
+                     next_attempt_at, last_error_code)
+                 values ($1, '{}'::jsonb, now() - interval '20 minutes', now(),
+                         now() + interval '1 hour', 'runtime_limit_reached')",
+                &[&fixture.project_id],
+            )
+            .await?;
+        drop(connection);
+
+        crate::runtime::sweeps::expire_stale_requeued_jobs(&fixture.state).await?;
+        let job_status: String = fixture
+            .pool
+            .get()
+            .await?
+            .query_one(
+                "select status from agent_jobs where id = $1",
+                &[&fixture.job_id],
+            )
+            .await?
+            .get("status");
+        assert_eq!(
+            job_status, "queued",
+            "the requeued-job expiry leaves a space waiting on the limit alone"
+        );
+
+        let connection = fixture.pool.get().await?;
+        connection
+            .execute(
+                "update agent_jobs
+                 set payload = payload || jsonb_build_object(
+                       'requeuedAt', (now() - interval '31 minutes')::text)
+                 where id = $1",
+                &[&fixture.job_id],
+            )
+            .await?;
+        connection
+            .execute(
+                "update hosted_runtime_limit_waits
+                 set first_refused_at = now() - interval '31 minutes'
+                 where project_id = $1",
+                &[&fixture.project_id],
+            )
+            .await?;
+        drop(connection);
+        let report = sweep_hosted_runtime_limit_waits(&fixture.state, &policy()).await?;
+        assert_eq!(report.expired_jobs, 1, "{report:?}");
+        let row = fixture
+            .pool
+            .get()
+            .await?
+            .query_one(
+                "select status, error_message from agent_jobs where id = $1",
+                &[&fixture.job_id],
+            )
+            .await?;
+        assert_eq!(row.get::<_, String>("status"), "failed");
+        assert_eq!(
+            row.get::<_, Option<String>>("error_message").as_deref(),
+            Some(LIMIT_WAIT_EXPIRED_MESSAGE)
+        );
+        let refund_key = format!("managed-ai-refund:{}", fixture.prompt_id);
+        let refunds = ledger_rows(&fixture.pool, &fixture.project_id)
+            .await?
+            .into_iter()
+            .filter(|(reason, delta, key)| {
+                reason == "managed_ai_refund"
+                    && *delta == fixture.burn_amount
+                    && key.as_deref() == Some(refund_key.as_str())
+            })
+            .count();
+        assert_eq!(refunds, 1, "a job that never ran gets its reserve back");
+        assert_eq!(
+            credit_balance(&fixture.pool, &fixture.org_id).await?,
+            fixture.reserved_balance + fixture.burn_amount
+        );
+        Ok(())
+    };
+    let outcome = std::panic::AssertUnwindSafe(body).catch_unwind().await;
+    let cleanup = fixture.cleanup().await;
+    match outcome {
+        Ok(result) => result.and(cleanup),
+        Err(panic) => std::panic::resume_unwind(panic),
+    }
+}
+
+/// Two replicas launching for two spaces of one organization at once must not
+/// both take its last hosted slot. Replica A has counted a free slot and
+/// inserted its lease but not committed; replica B's ensure has to wait for
+/// that decision and then sees the slot taken.
+#[tokio::test]
+async fn the_organization_limit_admits_one_launch_at_a_time_across_replicas() -> anyhow::Result<()>
+{
+    let fixture = setup("limit-wait-admission-lock", 2, 10).await?;
+    crate::tests::with_shared_db_fixture(fixture.shared_db_fixture(), async {
+        let (first, second) = (
+            fixture.waiting_project_ids[0],
+            fixture.waiting_project_ids[1],
+        );
+        // The blocker's machine is gone: one slot is free.
+        let connection = fixture.pool.get().await?;
+        connection
+            .execute(
+                "update runtime_leases set released_at = now(), status = 'released'
+                 where id = $1",
+                &[&fixture.blocker_lease_id],
+            )
+            .await?;
+        connection
+            .execute(
+                "update runtimes set status = 'stopped', active_lease_id = null where id = $1",
+                &[&fixture.blocker_runtime_id],
+            )
+            .await?;
+        drop(connection);
+
+        let first_runtime = hosted_runtime_id(&fixture.pool, first).await?;
+        let (replica_a, _driver) = raw_client().await?;
+        replica_a.batch_execute("begin").await?;
+        replica_a
+            .query_one(
+                "select pg_advisory_xact_lock(hashtextextended($1, 0))",
+                &[&crate::runtime::ensure::hosted_runtime_admission_lock_key(
+                    &fixture.org_id,
+                )],
+            )
+            .await?;
+        let lease_id = Uuid::new_v4();
+        replica_a
+            .execute(
+                "insert into runtime_leases (id, project_id, runtime_id, status, launched_at)
+                 values ($1, $2, $3, 'active', now())",
+                &[&lease_id, &first, &first_runtime],
+            )
+            .await?;
+        replica_a
+            .execute(
+                "update runtimes set status = 'ready', active_lease_id = $2 where id = $1",
+                &[&first_runtime, &lease_id],
+            )
+            .await?;
+
+        let replica_b = crate::tests::spawn_aborting({
+            let state = fixture.state.clone();
+            async move {
+                ensure_runtime_launch_recording_limit_wait(
+                    &state,
+                    LimitWaitSource::User,
+                    second,
+                    None,
+                    PROVIDER_ID.to_string(),
+                    600,
+                    Some(HOSTED_DISPLAY_NAME.to_string()),
+                    None,
+                    RuntimeLeaseScope::Exclusive,
+                    OriginEnsureOptions::new(None, None, None),
+                )
+                .await
+            }
+        });
+        tokio::time::sleep(Duration::from_millis(1_500)).await;
+        assert!(
+            !replica_b.is_finished(),
+            "replica B decided on the organization limit while replica A's admission was open"
+        );
+
+        replica_a.batch_execute("commit").await?;
+        let result = tokio::time::timeout(Duration::from_secs(20), replica_b)
+            .await
+            .expect("replica B never finished after replica A committed")?;
+        let error = result
+            .err()
+            .ok_or_else(|| anyhow::anyhow!("replica B launched past the organization limit"))?;
+        assert!(
+            is_runtime_limit_refusal(&error),
+            "expected runtime_limit_reached, got {} {:?}",
+            error.0,
+            error.1 .0.code
+        );
+        assert!(fixture.provider_events().await.is_empty());
+        assert!(!fixture.has_launched_runtime(second).await?);
+        Ok(())
+    })
+    .await
+}
+
+/// A row another replica is in the middle of claiming is skipped, not
+/// waited on: the claim takes every other due space at once.
+#[tokio::test]
+async fn a_claim_skips_a_row_another_replica_is_claiming() -> anyhow::Result<()> {
+    let fixture = setup("limit-wait-skip-locked", 8, 10).await?;
+    crate::tests::with_shared_db_fixture(fixture.shared_db_fixture(), async {
+        for project_id in &fixture.waiting_project_ids {
+            fixture.refuse(*project_id).await?;
+            fixture.queue_job(*project_id).await?;
+            fixture.make_due(*project_id).await?;
+        }
+        let (other_replica, _driver) = raw_client().await?;
+        other_replica.batch_execute("begin").await?;
+        other_replica
+            .query_one(
+                "select project_id from hosted_runtime_limit_waits
+                 where project_id = $1 for update",
+                &[&fixture.waiting_project_ids[0]],
+            )
+            .await?;
+        let claimed = tokio::time::timeout(
+            Duration::from_secs(5),
+            claim_due_waits(&fixture.state, &policy(), 8, &[], &[]),
+        )
+        .await
+        .expect("a claim waited on a row another replica was claiming")?;
+        let claimed: std::collections::BTreeSet<Uuid> =
+            claimed.iter().map(|claim| claim.project_id).collect();
+        assert_eq!(claimed.len(), 7);
+        assert!(!claimed.contains(&fixture.waiting_project_ids[0]));
+        other_replica.batch_execute("rollback").await?;
+        Ok(())
+    })
+    .await
+}
+
+/// Several replicas claiming at the same moment, each on its own pool, never
+/// share a space: every due wait goes to exactly one of them.
+#[tokio::test]
+async fn concurrent_claims_from_several_replicas_never_share_a_space() -> anyhow::Result<()> {
+    const REPLICAS: usize = 4;
+    const ROUNDS: usize = 12;
+    let fixture = setup("limit-wait-concurrent-claims", 8, 10).await?;
+    crate::tests::with_shared_db_fixture(fixture.shared_db_fixture(), async {
+        for project_id in &fixture.waiting_project_ids {
+            fixture.refuse(*project_id).await?;
+            fixture.queue_job(*project_id).await?;
+            fixture.make_due(*project_id).await?;
+        }
+        let expected: std::collections::BTreeSet<Uuid> =
+            fixture.waiting_project_ids.iter().copied().collect();
+
+        let mut replicas = Vec::new();
+        for index in 0..REPLICAS {
+            replicas.push(crate::tests::build_test_state(
+                crate::tests::require_origin_test_pool(&format!("limit-wait-replica-{index}"))
+                    .await?,
+                fixture.state.config.clone(),
+            ));
+        }
+        for round in 0..ROUNDS {
+            fixture
+                .pool
+                .get()
+                .await?
+                .execute(
+                    "update hosted_runtime_limit_waits set claimed_until = null
+                     where project_id = any($1)",
+                    &[&fixture.waiting_project_ids],
+                )
+                .await?;
+            let barrier = Arc::new(tokio::sync::Barrier::new(REPLICAS));
+            let mut tasks = Vec::new();
+            for replica in &replicas {
+                let replica = replica.clone();
+                let barrier = barrier.clone();
+                tasks.push(crate::tests::spawn_aborting(async move {
+                    barrier.wait().await;
+                    claim_due_waits(&replica, &policy(), 8, &[], &[]).await
+                }));
+            }
+            let mut all = Vec::new();
+            for task in tasks {
+                all.extend(task.await??.into_iter().map(|claim| claim.project_id));
+            }
+            let unique: std::collections::BTreeSet<Uuid> = all.iter().copied().collect();
+            assert_eq!(
+                unique.len(),
+                all.len(),
+                "round {round}: a space was claimed by two replicas: {all:?}"
+            );
+            assert_eq!(
+                unique, expected,
+                "round {round}: every due space is claimed once"
+            );
+        }
+        Ok(())
+    })
+    .await
+}
+
+/// The give-up and a launch can race: a machine for the space lands after the
+/// sweep claimed it for the give-up. Work that machine now runs is not failed.
+#[tokio::test]
+async fn a_give_up_leaves_work_a_launch_just_took_over() -> anyhow::Result<()> {
+    let fixture = setup("limit-wait-give-up-race", 1, 10).await?;
+    crate::tests::with_shared_db_fixture(fixture.shared_db_fixture(), async {
+        let waiting = fixture.waiting();
+        fixture.refuse(waiting).await?;
+        let job_id = fixture.queue_job(waiting).await?;
+        let connection = fixture.pool.get().await?;
+        connection
+            .execute(
+                "update agent_jobs set created_at = now() - interval '31 minutes' where id = $1",
+                &[&job_id],
+            )
+            .await?;
+        connection
+            .execute(
+                "update hosted_runtime_limit_waits
+                 set first_refused_at = now() - interval '31 minutes'
+                 where project_id = $1",
+                &[&waiting],
+            )
+            .await?;
+        drop(connection);
+
+        let claim = claim_due_waits(&fixture.state, &policy(), 1, &[], &[])
+            .await?
+            .into_iter()
+            .next()
+            .ok_or_else(|| anyhow::anyhow!("the overdue space should be claimed"))?;
+
+        // The user's own ensure got a machine for the space in the meantime.
+        let runtime_id = hosted_runtime_id(&fixture.pool, waiting).await?;
+        let lease_id = Uuid::new_v4();
+        let connection = fixture.pool.get().await?;
+        connection
+            .execute(
+                "insert into runtime_leases (id, project_id, runtime_id, status)
+                 values ($1, $2, $3, 'launching')",
+                &[&lease_id, &waiting, &runtime_id],
+            )
+            .await?;
+        connection
+            .execute(
+                "update runtimes set active_lease_id = $2 where id = $1",
+                &[&runtime_id, &lease_id],
+            )
+            .await?;
+        drop(connection);
+
+        let mut report = LimitWaitSweepReport::default();
+        process_claimed_wait(&fixture.state, &policy(), claim, &mut report).await?;
+        assert_eq!(
+            (report.expired_jobs, report.attempted, report.finished_waits),
+            (0, 0, 1),
+            "{report:?}"
+        );
+        assert_eq!(fixture.job_state(job_id).await?.0, "queued");
+        assert!(fixture.wait_row(waiting).await?.is_none());
+        Ok(())
+    })
+    .await
+}
+
+/// A tick that gives up on a space's only job must not then launch a machine
+/// for it, even when a retry was due: with nothing left to run, a launch (and
+/// the reclaim of someone else's idle machine it would bring) is waste.
+#[tokio::test]
+async fn a_give_up_and_a_due_retry_in_one_tick_launch_nothing() -> anyhow::Result<()> {
+    let fixture = setup("limit-wait-give-up-and-retry", 1, 10).await?;
+    crate::tests::with_shared_db_fixture(fixture.shared_db_fixture(), async {
+        let waiting = fixture.waiting();
+        fixture.refuse(waiting).await?;
+        let job_id = fixture.queue_job(waiting).await?;
+        // The blocker's owner has walked away since, so any ensure now would
+        // reclaim it.
+        fixture.set_blocker_idle_for(3_600).await?;
+        let connection = fixture.pool.get().await?;
+        connection
+            .execute(
+                "update agent_jobs set created_at = now() - interval '31 minutes' where id = $1",
+                &[&job_id],
+            )
+            .await?;
+        connection
+            .execute(
+                "update hosted_runtime_limit_waits
+                 set first_refused_at = now() - interval '31 minutes'
+                 where project_id = $1",
+                &[&waiting],
+            )
+            .await?;
+        drop(connection);
+        fixture.make_due(waiting).await?;
+
+        let report = sweep_hosted_runtime_limit_waits(&fixture.state, &policy()).await?;
+        assert_eq!(
+            (report.claimed, report.expired_jobs, report.attempted),
+            (1, 1, 0),
+            "{report:?}"
+        );
+        assert_eq!(fixture.job_state(job_id).await?.0, "failed");
+        assert_eq!(fixture.blocker_status().await?, "ready");
+        assert!(fixture.provider_events().await.is_empty());
+        assert!(!fixture.has_launched_runtime(waiting).await?);
+        Ok(())
+    })
+    .await
+}
+
+/// The studio's own ensure, over HTTP with a user session, is recorded as the
+/// user's request, so a later server-initiated refusal never replaces it.
+#[tokio::test]
+async fn a_user_session_ensure_over_http_records_the_users_request() -> anyhow::Result<()> {
+    use axum::body::{to_bytes, Body};
+    use axum::http::Request;
+    use futures_util::FutureExt;
+    use tower::ServiceExt;
+
+    let fixture = setup("limit-wait-http-user", 1, 10).await?;
+    let user_id = Uuid::new_v4();
+    crate::tests::ensure_test_user(&fixture.pool, &user_id).await?;
+    let body = crate::tests::with_shared_db_fixture(fixture.shared_db_fixture(), async {
+        let waiting = fixture.waiting();
+        fixture
+            .pool
+            .get()
+            .await?
+            .execute(
+                "insert into org_memberships (org_id, user_id, role) values ($1, $2, 'owner')",
+                &[&fixture.org_id, &user_id],
+            )
+            .await?;
+        let token = crate::auth::issue_controller_token(&fixture.state.config, &user_id)
+            .map_err(|(status, Json(error))| anyhow::anyhow!("{status}: {}", error.message))?
+            .token;
+        let app = crate::runtime::router().with_state(fixture.state.clone());
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/runtime/ensure")
+                    .header("authorization", format!("Bearer {token}"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        json!({
+                            "project_id": waiting.to_string(),
+                            "provider": PROVIDER_ID,
+                            "displayName": HOSTED_DISPLAY_NAME,
+                            "metadata": { "source": "studio", "sizeId": "boost" },
+                            "scope": "exclusive",
+                            "originMode": "hosted",
+                            "originProtocols": ["http"],
+                        })
+                        .to_string(),
+                    ))?,
+            )
+            .await?;
+        let status = response.status();
+        let body: JsonValue =
+            serde_json::from_slice(&to_bytes(response.into_body(), usize::MAX).await?)?;
+        assert_eq!(status, StatusCode::PAYMENT_REQUIRED, "{body}");
+        assert_eq!(body["code"], json!(RUNTIME_LIMIT_REACHED_CODE), "{body}");
+
+        let wait = fixture
+            .wait_row(waiting)
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("the refusal should have recorded a wait"))?;
+        assert_eq!(wait.request_source, "user");
+        assert_eq!(wait.ensure_request["metadata"]["sizeId"], json!("boost"));
+        Ok(())
+    });
+    let outcome = std::panic::AssertUnwindSafe(body).catch_unwind().await;
+    let cleanup = async {
+        fixture
+            .pool
+            .get()
+            .await?
+            .execute("delete from auth.users where id = $1", &[&user_id])
+            .await?;
+        anyhow::Ok(())
+    }
+    .await;
+    match outcome {
+        Ok(result) => result.and(cleanup),
+        Err(panic) => std::panic::resume_unwind(panic),
+    }
+}
+
+/// Spaces holding a job past the give-up window are claimed before plain
+/// retries, and within a tick an organization that was just served goes after
+/// the others, however early its next space is due.
+#[tokio::test]
+async fn give_ups_come_first_and_organizations_take_turns() -> anyhow::Result<()> {
+    let fixture = setup("limit-wait-fairness", 3, 10).await?;
+    let other_org = Uuid::new_v4();
+    let other_space = Uuid::new_v4();
+    let mut cleanup = fixture.shared_db_fixture();
+    cleanup.organizations.push(other_org);
+    cleanup.projects.push(other_space);
+    crate::tests::with_shared_db_fixture(cleanup, async {
+        let connection = fixture.pool.get().await?;
+        connection
+            .execute(
+                "insert into organizations (id, slug, name) values ($1, $2, 'Limit wait other')",
+                &[&other_org, &format!("limit-wait-other-{other_org}")],
+            )
+            .await?;
+        connection
+            .execute(
+                "insert into projects (id, org_id, project_type, status)
+                 values ($1, $2, 'customer', 'active')",
+                &[&other_space, &other_org],
+            )
+            .await?;
+        drop(connection);
+        let [early, later, overdue] = [
+            fixture.waiting_project_ids[0],
+            fixture.waiting_project_ids[1],
+            fixture.waiting_project_ids[2],
+        ];
+        for project_id in [early, later, overdue] {
+            fixture.refuse(project_id).await?;
+        }
+        let overdue_job = fixture.queue_job(overdue).await?;
+        for project_id in [early, later, other_space] {
+            fixture.queue_job(project_id).await?;
+        }
+        let connection = fixture.pool.get().await?;
+        connection
+            .execute(
+                "insert into hosted_runtime_limit_waits
+                    (project_id, ensure_request, first_refused_at, last_refused_at,
+                     next_attempt_at, last_error_code)
+                 values ($1, '{}'::jsonb, now(), now(), now() - interval '1 minute',
+                         'runtime_limit_reached')",
+                &[&other_space],
+            )
+            .await?;
+        // `early` and `later` are due long before the other organization's
+        // space; `overdue` is not due for a retry at all, but its job has
+        // waited out the window.
+        connection
+            .execute(
+                "update hosted_runtime_limit_waits
+                 set next_attempt_at = now() - interval '10 minutes'
+                 where project_id = any($1)",
+                &[&vec![early, later]],
+            )
+            .await?;
+        connection
+            .execute(
+                "update agent_jobs set created_at = now() - interval '31 minutes' where id = $1",
+                &[&overdue_job],
+            )
+            .await?;
+        connection
+            .execute(
+                "update hosted_runtime_limit_waits
+                 set first_refused_at = now() - interval '31 minutes',
+                     next_attempt_at = now() + interval '1 hour'
+                 where project_id = $1",
+                &[&overdue],
+            )
+            .await?;
+        drop(connection);
+
+        let order = [
+            claim_due_waits(&fixture.state, &policy(), 1, &[], &[]).await?,
+            claim_due_waits(&fixture.state, &policy(), 1, &[overdue], &[fixture.org_id]).await?,
+        ];
+        let order: Vec<Uuid> = order
+            .iter()
+            .map(|claims| claims.first().map(|claim| claim.project_id))
+            .collect::<Option<_>>()
+            .ok_or_else(|| anyhow::anyhow!("every pick should claim a space"))?;
+        assert_eq!(
+            order,
+            vec![overdue, other_space],
+            "the give-up first, then the organization not yet served"
+        );
+        Ok(())
+    })
+    .await
+}
+
+/// A controller whose claim lapsed mid-attempt cannot release, back off or
+/// finish the claim another controller has taken since.
+#[tokio::test]
+async fn a_lapsed_claim_cannot_touch_the_claim_that_replaced_it() -> anyhow::Result<()> {
+    let fixture = setup("limit-wait-claim-token", 1, 10).await?;
+    crate::tests::with_shared_db_fixture(fixture.shared_db_fixture(), async {
+        let waiting = fixture.waiting();
+        fixture.refuse(waiting).await?;
+        fixture.queue_job(waiting).await?;
+        fixture.make_due(waiting).await?;
+
+        let lapsed = claim_due_waits(&fixture.state, &policy(), 1, &[], &[])
+            .await?
+            .into_iter()
+            .next()
+            .ok_or_else(|| anyhow::anyhow!("the due space should be claimed"))?;
+        fixture
+            .pool
+            .get()
+            .await?
+            .execute(
+                "update hosted_runtime_limit_waits
+                 set claimed_until = claimed_until - interval '1 hour'
+                 where project_id = $1",
+                &[&waiting],
+            )
+            .await?;
+        let lapsed_token: DateTime<Utc> = fixture
+            .pool
+            .get()
+            .await?
+            .query_one(
+                "select claimed_until from hosted_runtime_limit_waits where project_id = $1",
+                &[&waiting],
+            )
+            .await?
+            .get("claimed_until");
+        let current = claim_due_waits(&fixture.state, &policy(), 1, &[], &[])
+            .await?
+            .into_iter()
+            .next()
+            .ok_or_else(|| anyhow::anyhow!("a lapsed claim is claimable again"))?;
+        assert!(current.claim_token > lapsed_token);
+        drop(lapsed);
+
+        release_claim(&fixture.state, waiting, lapsed_token).await?;
+        finish_wait(&fixture.state, waiting, lapsed_token).await?;
+        let wait = fixture
+            .wait_row(waiting)
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("a lapsed claim finished the current one"))?;
+        assert!(wait.claimed, "a lapsed claim released the current one");
+
+        release_claim(&fixture.state, waiting, current.claim_token).await?;
+        assert!(!fixture.wait_row(waiting).await?.expect("kept").claimed);
         Ok(())
     })
     .await

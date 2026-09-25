@@ -574,6 +574,32 @@ struct HostedRuntimeLimitDetails {
     blocker_project_label: Option<String>,
 }
 
+/// Advisory-lock key serializing an organization's hosted runtime admission
+/// (the limit count and the lease insert that follows it) across replicas.
+pub(super) fn hosted_runtime_admission_lock_key(org_id: &Uuid) -> String {
+    format!("hosted-runtime-admission:{org_id}")
+}
+
+/// Hold the organization's hosted runtime admission until `transaction` ends.
+/// Callers must not wait on anything but the database while it is held.
+async fn lock_hosted_runtime_admission(
+    transaction: &Transaction<'_>,
+    org_id: &Uuid,
+) -> Result<(), (StatusCode, Json<ApiError>)> {
+    transaction
+        .query_one(
+            "select pg_advisory_xact_lock(hashtextextended($1, 0))",
+            &[&hosted_runtime_admission_lock_key(org_id)],
+        )
+        .await
+        .map_err(|error| {
+            internal_error(format!(
+                "failed to serialize the organization's hosted runtime admission: {error}"
+            ))
+        })?;
+    Ok(())
+}
+
 /// Whether a new hosted runtime should be refused on platform capacity.
 /// `cap <= 0` disables the gate. `active < 0` signals a failed count and fails
 /// OPEN (never blocks), so a transient DB error can't lock everyone out.
@@ -2122,6 +2148,16 @@ async fn ensure_runtime_launch_inner(
             let org_id = project
                 .org_id
                 .ok_or_else(|| internal_error("project missing organization"))?;
+
+            // The count below and the lease insert after it must be one
+            // decision per organization. Row locks cannot give that (the
+            // competing launch is another space's new row), so two replicas
+            // launching for two spaces at once, which the limit-wait sweep
+            // makes routine, would both see a free slot. The lock is
+            // transaction-scoped: it ends at the commit below, or at the
+            // rollback before a reclaim's provider stop, so it only ever
+            // covers database work.
+            lock_hosted_runtime_admission(&transaction, &org_id).await?;
 
             let limits = org_limits::resolve_org_resource_limits(&transaction, &org_id).await?;
             let max_active_hosted_runtimes = limits.max_active_hosted_runtimes;
