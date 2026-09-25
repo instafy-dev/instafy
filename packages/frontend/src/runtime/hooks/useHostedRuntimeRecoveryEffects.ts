@@ -5,6 +5,7 @@ import {
   MANUAL_STOP_CHANGED_EVENT,
   isIdlePaused,
   isManualStopHeld,
+  isRestoredAwaitingIntent,
 } from "../idlePauseRegistry";
 import {
   BROWSER_RUNTIME_CLAIM_CHANGED_EVENT,
@@ -286,7 +287,8 @@ export function useHostedRuntimeRecoveryEffects({
   useEffect(() => {
     // A machine paused for inactivity must stay paused until the user comes
     // back — auto-ensure would otherwise undo every idle stop within seconds.
-    if (isIdlePaused(activeProjectId)) {
+    // A space startup reopened from memory waits for intent the same way.
+    if (isIdlePaused(activeProjectId) || isRestoredAwaitingIntent(activeProjectId)) {
       return;
     }
     if (
@@ -340,7 +342,7 @@ export function useHostedRuntimeRecoveryEffects({
   }, [autoEnsureHostedRef, readyRuntimeCount, runtimeReady]);
 
   useEffect(() => {
-    if (isIdlePaused(activeProjectId)) {
+    if (isIdlePaused(activeProjectId) || isRestoredAwaitingIntent(activeProjectId)) {
       return;
     }
     if (
@@ -381,6 +383,7 @@ export function useHostedRuntimeRecoveryEffects({
     hasHostedRuntimeInProgress,
     hasLocalRuntime,
     hostedRuntimeEnsuring,
+    idlePauseEpoch,
     manualStopEpoch,
     manualStopHeld,
     projectAccessResolved,
@@ -394,6 +397,9 @@ export function useHostedRuntimeRecoveryEffects({
   ]);
 
   useEffect(() => {
+    if (isRestoredAwaitingIntent(activeProjectId)) {
+      return;
+    }
     if (
       !shouldAutoEnsurePreferredHostedRuntime({
         disableAutoRuntimeEnsure: suppressAutoRuntimeEnsure,
@@ -430,6 +436,7 @@ export function useHostedRuntimeRecoveryEffects({
     ensureHostedRuntime,
     hasHostedRuntimeInProgress,
     hostedRuntimeEnsuring,
+    idlePauseEpoch,
     manualStopEpoch,
     manualStopHeld,
     preferredRuntimeEntry,

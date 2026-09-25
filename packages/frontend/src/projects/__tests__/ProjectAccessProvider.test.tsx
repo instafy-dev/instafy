@@ -80,6 +80,7 @@ import {
   ProjectAccessProvider,
   useProjectAccess,
 } from "../ProjectAccessProvider";
+import { clearRestoredAwaitingIntent, isRestoredAwaitingIntent } from "../../runtime/idlePauseRegistry";
 import { ProjectAccessRecoveryBanner, StudioStartupGate } from "../../screens/StudioStartup";
 
 function AccessProbe() {
@@ -147,6 +148,9 @@ describe("ProjectAccessProvider capability refresh", () => {
   afterEach(async () => {
     await act(async () => root.unmount());
     container.remove();
+    for (const id of ["11111111-1111-4111-8111-111111111111", "22222222-2222-4222-8222-222222222222", "33333333-3333-4333-8333-333333333333"]) {
+      clearRestoredAwaitingIntent(id);
+    }
     window.localStorage.clear();
     window.sessionStorage.clear();
     vi.useRealTimers();
@@ -177,6 +181,8 @@ describe("ProjectAccessProvider capability refresh", () => {
 
     await act(async () => lookup.resolve(summaryFor("viewer")));
     expect(mocks.recordProjectOpened).toHaveBeenCalledWith(PROJECT_ID, undefined, "user@example.test");
+    // Opened from the URL: a choice, so no hold on its machine.
+    expect(isRestoredAwaitingIntent(PROJECT_ID)).toBe(false);
     expect(probe?.getAttribute("data-initialized")).toBe("true");
     expect(probe?.getAttribute("data-pending")).toBe("false");
     expect(probe?.getAttribute("data-role")).toBe("viewer");
@@ -575,6 +581,9 @@ describe("ProjectAccessProvider startup with nothing remembered", () => {
   afterEach(async () => {
     await act(async () => root.unmount());
     container.remove();
+    for (const id of ["11111111-1111-4111-8111-111111111111", "22222222-2222-4222-8222-222222222222", "33333333-3333-4333-8333-333333333333"]) {
+      clearRestoredAwaitingIntent(id);
+    }
     window.localStorage.clear();
     vi.restoreAllMocks();
     delete (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT;
@@ -593,6 +602,9 @@ describe("ProjectAccessProvider startup with nothing remembered", () => {
     expect(mocks.createControllerProject).not.toHaveBeenCalled();
     expect(mocks.createProject).toHaveBeenCalledWith(expect.objectContaining({ projectId: EXISTING_ID }));
     expect(mocks.getSummaryResult).toHaveBeenCalledWith(EXISTING_ID, expect.anything());
+    // Reopened from the list, not chosen: its machine waits for intent, so
+    // on a one-machine plan it does not take the slot at sign-in.
+    expect(isRestoredAwaitingIntent(EXISTING_ID)).toBe(true);
     expect(window.localStorage.getItem("instafy.lastProjectId")).toBe(EXISTING_ID);
     expect(container.querySelector('[data-testid="access-probe"]')?.getAttribute("data-initialized")).toBe("true");
   });
@@ -642,6 +654,8 @@ describe("ProjectAccessProvider startup with nothing remembered", () => {
     expect(mocks.createControllerProject).toHaveBeenCalledTimes(1);
     expect(mocks.createControllerProject).toHaveBeenCalledWith({ projectType: "customer" });
     expect(mocks.createProject).toHaveBeenCalledWith(expect.objectContaining({ projectId: MINTED_ID }));
+    // A space just made for a new account starts its machine as before.
+    expect(isRestoredAwaitingIntent(MINTED_ID)).toBe(false);
   });
 
   it("says so and offers a retry when no space could be made, then makes one on retry", async () => {
