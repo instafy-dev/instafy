@@ -478,12 +478,15 @@ pub(crate) async fn expire_stale_requeued_jobs(state: &AppState) -> AnyResult<()
         .await
         .context("failed to start requeued job expiry transaction")?;
 
-    // A space waiting on its organization's hosted runtime limit is the
-    // limit-wait sweep's to settle (runtime/limit_waits.rs): it retries the
-    // launch and gives up after its own, longer window with the reason that
-    // applies. That includes work an idle-slot reclaim requeued, which would
-    // otherwise fail here after 15 minutes as "interrupted". The table ships
-    // in a migration that may land after this controller.
+    // Work a space's limit wait covers (unpinned, or pinned to a hosted
+    // runtime of the space) is the limit-wait sweep's to settle
+    // (runtime/limit_waits.rs): it retries the launch and gives up after its
+    // own, longer window with the reason that applies. That includes work an
+    // idle-slot reclaim requeued, which would otherwise fail here after 15
+    // minutes as "interrupted". Work in the same space pinned to a desktop or
+    // another machine is never retried or given up on by the wait, so it
+    // still expires here. The table ships in a migration that may land after
+    // this controller.
     let limit_waits_migrated: bool = transaction
         .query_one(
             "select to_regclass('public.hosted_runtime_limit_waits') is not null as migrated",
@@ -492,13 +495,13 @@ pub(crate) async fn expire_stale_requeued_jobs(state: &AppState) -> AnyResult<()
         .await
         .context("failed to look up the runtime limit wait table")?
         .get("migrated");
-    let skip_spaces_waiting_on_the_limit = if limit_waits_migrated {
-        "and not exists (
-           select 1 from hosted_runtime_limit_waits w
-           where w.project_id = agent_jobs.project_id
-         )"
+    let skip_work_waiting_on_the_limit = if limit_waits_migrated {
+        format!(
+            "and not {}",
+            super::limit_waits::limit_wait_covers_job("agent_jobs")
+        )
     } else {
-        ""
+        String::new()
     };
 
     // Only expire jobs with no live runtime to run them: a stamped job merely
@@ -524,7 +527,7 @@ pub(crate) async fn expire_stale_requeued_jobs(state: &AppState) -> AnyResult<()
                      where r.project_id = agent_jobs.project_id
                        and r.status not in ('stopped', 'offline', 'removed')
                    )
-                   {skip_spaces_waiting_on_the_limit}
+                   {skip_work_waiting_on_the_limit}
                  returning id, project_id, run_id, conversation_id, payload, error_message,
                            lease_attempts"
             ),

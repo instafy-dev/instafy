@@ -66,9 +66,16 @@ pub(super) const LIMIT_WAIT_EXPIRED_MESSAGE: &str = "This message didn't start: 
 /// The message when the last retry failed for a reason other than the limit.
 pub(super) const LIMIT_WAIT_EXPIRED_OTHER_MESSAGE: &str = "This message didn't start: no cloud runtime could be started for this space within 30 minutes. Send it again to retry.";
 /// The message when a retry was refused for a reason waiting cannot fix and
-/// the refusal carried no message of its own (or the recorded request could
-/// not be replayed at all).
+/// the refusal's own text is not written for the person who sent the work
+/// (see [`refusal_message`]), or when the recorded request could not be
+/// replayed at all.
 pub(super) const LIMIT_WAIT_REFUSED_FALLBACK_MESSAGE: &str = "This message didn't start: a cloud runtime could not be started for this space. Send it again to retry.";
+/// Refusal codes whose message is written for the person who sent the work:
+/// the studio shows exactly these verbatim when its own ensure is refused
+/// (`useHostedRuntimeEnsure`). Any other refusal's text is operator detail
+/// ("project not found", "provider '...' is not configured on this
+/// controller") and stays in the controller log.
+const USER_FACING_REFUSAL_CODES: &[&str] = &["insufficient_credits", "platform_at_capacity"];
 
 /// Tuning for the retry sweep. Production uses [`LimitWaitPolicy::default`];
 /// tests pass their own to control batch size and timing.
@@ -185,8 +192,9 @@ pub(crate) fn is_runtime_limit_refusal(error: &(StatusCode, Json<ApiError>)) -> 
 /// launch that is still settling (409), throttling, and server-side trouble,
 /// including platform capacity (503). Anything else (credits, access, a
 /// deleted space, a provider this controller no longer offers) is not
-/// something waiting fixes, so the waiting work fails with that refusal's
-/// own message instead of sitting queued behind a wait that has ended.
+/// something waiting fixes, so the waiting work fails at once, with the reason
+/// [`refusal_message`] picks, instead of sitting queued behind a wait that has
+/// ended.
 fn refusal_is_worth_retrying(status: StatusCode) -> bool {
     status == StatusCode::CONFLICT
         || status == StatusCode::TOO_MANY_REQUESTS
@@ -408,6 +416,23 @@ fn waiting_job_predicate(alias: &str, project: &str) -> String {
            )
          )",
         hosted = hosted_provider("t"),
+    )
+}
+
+/// Whether the queued job `alias` is work its space's limit wait covers: the
+/// space has a wait and the job is work a hosted machine there would run
+/// ([`waiting_job_predicate`]). The requeued-job expiry
+/// (`sweeps::expire_stale_requeued_jobs`) leaves exactly these to the wait's
+/// own give-up. Work pinned to a desktop or another machine is never retried
+/// or given up on here, so it keeps that 15-minute expiry.
+pub(super) fn limit_wait_covers_job(alias: &str) -> String {
+    format!(
+        "(exists (
+            select 1 from hosted_runtime_limit_waits w
+            where w.project_id = {alias}.project_id
+          )
+          and {waiting})",
+        waiting = waiting_job_predicate(alias, &format!("{alias}.project_id")),
     )
 }
 
@@ -794,9 +819,9 @@ async fn process_claimed_wait(
                 // Waiting cannot fix this (credits, access, a deleted space,
                 // a provider this controller no longer offers). The studio
                 // promised the message would send or fail within the window,
-                // so fail it now with the refusal's own reason, exactly as
-                // the give-up does, instead of dropping the wait and leaving
-                // the work queued with its reserve held.
+                // so fail it now, exactly as the give-up does, instead of
+                // dropping the wait and leaving the work queued with its
+                // reserve held. The raw refusal is in the log line above.
                 info!(
                     %project_id,
                     status = status.as_u16(),
@@ -804,7 +829,7 @@ async fn process_claimed_wait(
                     error = %api_error.message,
                     "hosted runtime limit wait ended: the launch was refused for another reason"
                 );
-                let message = refusal_message(&api_error.message);
+                let message = refusal_message(api_error);
                 report.refused_jobs += fail_waiting_jobs(
                     state,
                     policy,
@@ -867,17 +892,24 @@ async fn process_claimed_wait(
 }
 
 /// The conversation reason for a refusal waiting cannot fix: the refusal's own
-/// message (the ensure's user-facing text), bounded, or a plain fallback.
-fn refusal_message(message: &str) -> String {
-    let message: String = message
+/// message, bounded, when its code marks it as written for the person who sent
+/// the work (out of credits); otherwise a plain fallback. Everyone in the
+/// conversation reads this, so internal text never reaches it.
+fn refusal_message(error: &ApiError) -> String {
+    let user_facing = error
+        .code
+        .as_deref()
+        .is_some_and(|code| USER_FACING_REFUSAL_CODES.contains(&code));
+    let message: String = error
+        .message
         .trim()
         .chars()
         .take(MAX_RECORDED_ERROR_CHARS)
         .collect();
-    if message.is_empty() {
-        LIMIT_WAIT_REFUSED_FALLBACK_MESSAGE.to_string()
-    } else {
+    if user_facing && !message.is_empty() {
         message
+    } else {
+        LIMIT_WAIT_REFUSED_FALLBACK_MESSAGE.to_string()
     }
 }
 
@@ -930,7 +962,8 @@ enum WaitingJobsFailure<'a> {
     /// The jobs that waited the whole give-up window on the limit.
     GaveUp,
     /// Every job still waiting, because the replayed launch was refused for a
-    /// reason waiting cannot fix; `message` is that refusal's own reason.
+    /// reason waiting cannot fix (or could not be replayed); `message` is the
+    /// reason [`refusal_message`] picked.
     Refused { message: &'a str },
 }
 
@@ -1180,6 +1213,41 @@ mod policy_tests {
         );
         assert!(is_runtime_limit_refusal(&limit));
         assert!(!is_runtime_limit_refusal(&credits));
+    }
+
+    #[test]
+    fn only_a_user_facing_refusal_reaches_the_conversation_verbatim() {
+        let credits_text =
+            "This team is out of credits for today, so a hosted machine can't start.";
+        let credits = ApiError::with_details(credits_text, "insufficient_credits", json!({}));
+        assert_eq!(refusal_message(&credits), credits_text);
+        let capacity =
+            ApiError::with_details("Instafy is at capacity.", "platform_at_capacity", json!({}));
+        assert_eq!(refusal_message(&capacity), "Instafy is at capacity.");
+
+        // Internal text, with or without a code, stays in the log.
+        for internal in [
+            ApiError::new("project not found"),
+            ApiError::new("provider 'instafy_cloud_gone' is not configured on this controller"),
+            ApiError::with_details("forbidden", "automation_access_denied", json!({})),
+            ApiError::with_details("   ", "insufficient_credits", json!({})),
+        ] {
+            assert_eq!(
+                refusal_message(&internal),
+                LIMIT_WAIT_REFUSED_FALLBACK_MESSAGE,
+                "{internal:?}"
+            );
+        }
+
+        let long = ApiError::with_details(
+            "x".repeat(MAX_RECORDED_ERROR_CHARS * 2),
+            "insufficient_credits",
+            json!({}),
+        );
+        assert_eq!(
+            refusal_message(&long).chars().count(),
+            MAX_RECORDED_ERROR_CHARS
+        );
     }
 
     #[test]

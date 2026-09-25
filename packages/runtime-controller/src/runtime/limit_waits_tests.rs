@@ -919,14 +919,18 @@ async fn only_work_a_hosted_machine_would_run_keeps_a_space_waiting() -> anyhow:
     .await
 }
 
+/// A refusal whose text is operator detail (here "provider '...' is not
+/// configured on this controller") ends the wait and fails the work at once,
+/// but the conversation, which everyone in the space reads, gets the plain
+/// reason rather than that text.
 #[tokio::test]
-async fn a_launch_refused_for_another_reason_fails_the_waiting_work_with_that_reason(
+async fn a_launch_refused_for_another_reason_fails_the_waiting_work_with_a_plain_reason(
 ) -> anyhow::Result<()> {
     let fixture = setup("limit-wait-other-refusal", 1, 10).await?;
     crate::tests::with_shared_db_fixture(fixture.shared_db_fixture(), async {
         let waiting = fixture.waiting();
         fixture.refuse(waiting).await?;
-        let job_id = fixture.queue_job(waiting).await?;
+        let (job_id, run_id, conversation_id) = fixture.queue_conversation_job(waiting).await?;
         // The provider was removed from this controller since the refusal.
         fixture
             .pool
@@ -948,15 +952,134 @@ async fn a_launch_refused_for_another_reason_fails_the_waiting_work_with_that_re
             "{report:?}"
         );
         assert!(fixture.wait_row(waiting).await?.is_none());
-        // Waiting could not fix it, so the job fails now with the refusal's
-        // own reason instead of staying queued behind a wait that is over.
+        // Waiting could not fix it, so the job fails now instead of staying
+        // queued behind a wait that is over.
         let (status, outcome, error_message) = fixture.job_state(job_id).await?;
         assert_eq!(status, "failed");
         assert_eq!(outcome.as_deref(), Some("failed"));
-        let error_message = error_message.unwrap_or_default();
+        assert_eq!(
+            error_message.as_deref(),
+            Some(LIMIT_WAIT_REFUSED_FALLBACK_MESSAGE)
+        );
+        let connection = fixture.pool.get().await?;
+        let run = connection
+            .query_one(
+                "select status, last_message from runs where id = $1",
+                &[&run_id],
+            )
+            .await?;
+        assert_eq!(run.get::<_, String>("status"), "failed");
+        assert_eq!(
+            run.get::<_, Option<String>>("last_message").as_deref(),
+            Some(LIMIT_WAIT_REFUSED_FALLBACK_MESSAGE)
+        );
+        let message = connection
+            .query_one(
+                "select content, metadata from conversation_messages
+                 where conversation_id = $1",
+                &[&conversation_id],
+            )
+            .await?;
+        assert_eq!(
+            message.get::<_, String>("content"),
+            LIMIT_WAIT_REFUSED_FALLBACK_MESSAGE
+        );
+        let metadata = message.get::<_, PgJson<JsonValue>>("metadata").0;
+        assert_eq!(metadata["kind"], json!("runtime_limit_wait_refused"));
         assert!(
-            error_message.contains("instafy_cloud_gone"),
-            "the refusal's own message: {error_message}"
+            !metadata.to_string().contains("instafy_cloud_gone"),
+            "internal refusal text reached the conversation: {metadata}"
+        );
+        Ok(())
+    })
+    .await
+}
+
+/// A recorded request nothing can replay (damaged, or written by a controller
+/// this one cannot read) must not leave its work queued with nothing left to
+/// start it: the work fails at once with the plain reason, through the
+/// give-up's path, and the wait ends.
+#[tokio::test]
+async fn an_unreadable_recorded_request_fails_the_waiting_work_with_a_plain_reason(
+) -> anyhow::Result<()> {
+    let fixture = setup("limit-wait-unreadable-request", 1, 10).await?;
+    crate::tests::with_shared_db_fixture(fixture.shared_db_fixture(), async {
+        let waiting = fixture.waiting();
+        fixture.refuse(waiting).await?;
+        let (job_id, run_id, conversation_id) = fixture.queue_conversation_job(waiting).await?;
+        fixture
+            .pool
+            .get()
+            .await?
+            .execute(
+                "update hosted_runtime_limit_waits set ensure_request = '{}'::jsonb
+                 where project_id = $1",
+                &[&waiting],
+            )
+            .await?;
+        fixture.make_due(waiting).await?;
+        let _watch = fixture.state.events.watch_project(waiting);
+        let mut events = fixture.state.events.subscribe();
+
+        let report = sweep_hosted_runtime_limit_waits(&fixture.state, &policy()).await?;
+        assert_eq!(
+            (
+                report.claimed,
+                report.attempted,
+                report.refused_jobs,
+                report.finished_waits
+            ),
+            (1, 0, 1, 1),
+            "{report:?}"
+        );
+        assert!(fixture.provider_events().await.is_empty());
+        assert!(
+            fixture.wait_row(waiting).await?.is_none(),
+            "a wait nothing can replay ends"
+        );
+
+        let (status, outcome, error_message) = fixture.job_state(job_id).await?;
+        assert_eq!(
+            status, "failed",
+            "the unreplayable wait's work stayed queued"
+        );
+        assert_eq!(outcome.as_deref(), Some("failed"));
+        assert_eq!(
+            error_message.as_deref(),
+            Some(LIMIT_WAIT_REFUSED_FALLBACK_MESSAGE)
+        );
+        let connection = fixture.pool.get().await?;
+        let run = connection
+            .query_one("select status from runs where id = $1", &[&run_id])
+            .await?;
+        assert_eq!(run.get::<_, String>("status"), "failed");
+        let message = connection
+            .query_one(
+                "select role, content, metadata from conversation_messages
+                 where conversation_id = $1",
+                &[&conversation_id],
+            )
+            .await?;
+        assert_eq!(message.get::<_, String>("role"), "assistant");
+        assert_eq!(
+            message.get::<_, String>("content"),
+            LIMIT_WAIT_REFUSED_FALLBACK_MESSAGE
+        );
+        let metadata = message.get::<_, PgJson<JsonValue>>("metadata").0;
+        assert_eq!(metadata["kind"], json!("runtime_limit_wait_refused"));
+        assert_eq!(metadata["outcome"], json!("failed"));
+        assert_eq!(metadata["jobId"], json!(job_id));
+        drop(connection);
+
+        let events = drain_events(&mut events);
+        let completed = events
+            .iter()
+            .find(|event| event.kind == "run.completed" && event.run_id == Some(run_id))
+            .ok_or_else(|| anyhow::anyhow!("no run.completed for the failed run: {events:?}"))?;
+        assert_eq!(completed.data["runStatus"], json!("failed"));
+        assert_eq!(
+            completed.data["errorMessage"],
+            json!(LIMIT_WAIT_REFUSED_FALLBACK_MESSAGE)
         );
         Ok(())
     })
@@ -1626,6 +1749,79 @@ async fn requeued_work_in_a_waiting_space_is_given_up_by_the_limit_wait_and_refu
     }
 }
 
+/// The requeued-job expiry leaves to a space's limit wait only the work that
+/// wait covers. Requeued work pinned to the space's desktop, which the wait
+/// never retries or gives up on, still expires after 15 minutes while the
+/// space waits on the limit for its hosted work.
+#[tokio::test]
+async fn requeued_work_the_limit_wait_does_not_cover_still_expires() -> anyhow::Result<()> {
+    let fixture = setup("limit-wait-requeued-pinned-elsewhere", 1, 10).await?;
+    crate::tests::with_shared_db_fixture(fixture.shared_db_fixture(), async {
+        let waiting = fixture.waiting();
+        fixture.refuse(waiting).await?;
+        let hosted_runtime = hosted_runtime_id(&fixture.pool, waiting).await?;
+        let desktop_runtime = Uuid::new_v4();
+        let connection = fixture.pool.get().await?;
+        // Every machine of the space is down: the hosted one was reclaimed
+        // and the desktop is offline.
+        connection
+            .execute(
+                "update runtimes set status = 'stopped' where project_id = $1",
+                &[&waiting],
+            )
+            .await?;
+        connection
+            .execute(
+                "insert into runtimes (id, project_id, provider, status, idle_ttl_seconds)
+                 values ($1, $2, 'self_hosted', 'offline', 600)",
+                &[&desktop_runtime, &waiting],
+            )
+            .await?;
+        let (unpinned, pinned_to_hosted, pinned_to_desktop) =
+            (Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4());
+        for (job_id, target) in [
+            (unpinned, None),
+            (pinned_to_hosted, Some(hosted_runtime)),
+            (pinned_to_desktop, Some(desktop_runtime)),
+        ] {
+            connection
+                .execute(
+                    "insert into agent_jobs (id, project_id, status, payload, target_runtime_id)
+                     values ($1, $2, 'queued',
+                             jsonb_build_object(
+                               'requeuedAt', (now() - interval '20 minutes')::text,
+                               'requeuedReason', 'runtime_limit_reclaim'),
+                             $3)",
+                    &[&job_id, &waiting, &target],
+                )
+                .await?;
+        }
+        drop(connection);
+
+        crate::runtime::sweeps::expire_stale_requeued_jobs(&fixture.state).await?;
+        let (status, outcome, error_message) = fixture.job_state(pinned_to_desktop).await?;
+        assert_eq!(
+            status, "failed",
+            "work the limit wait never settles must not wait on it"
+        );
+        assert_eq!(outcome.as_deref(), Some("expired"));
+        let error_message = error_message.unwrap_or_default();
+        assert!(
+            error_message.starts_with("This run was interrupted"),
+            "{error_message}"
+        );
+        for job_id in [unpinned, pinned_to_hosted] {
+            assert_eq!(
+                fixture.job_state(job_id).await?.0,
+                "queued",
+                "work the limit wait covers is left to its give-up"
+            );
+        }
+        Ok(())
+    })
+    .await
+}
+
 /// Two replicas launching for two spaces of one organization at once must not
 /// both take its last hosted slot. Replica A has counted a free slot and
 /// inserted its lease but not committed; replica B's ensure has to wait for
@@ -1721,6 +1917,130 @@ async fn the_organization_limit_admits_one_launch_at_a_time_across_replicas() ->
         );
         assert!(fixture.provider_events().await.is_empty());
         assert!(!fixture.has_launched_runtime(second).await?);
+        Ok(())
+    })
+    .await
+}
+
+/// Whether another connection could take `org_id`'s admission lock now.
+async fn admission_lock_is_free(org_id: Uuid) -> anyhow::Result<bool> {
+    let (client, driver) = raw_client().await?;
+    client.batch_execute("begin").await?;
+    let free: bool = client
+        .query_one(
+            "select pg_try_advisory_xact_lock(hashtextextended($1, 0)) as free",
+            &[&crate::runtime::ensure::hosted_runtime_admission_lock_key(
+                &org_id,
+            )],
+        )
+        .await?
+        .get("free");
+    client.batch_execute("rollback").await?;
+    drop(client);
+    driver.abort();
+    Ok(free)
+}
+
+/// The organization's admission lock covers database work only. While the
+/// provider stops the machine a reclaim takes the slot from, and while it
+/// launches the waiting space's machine, any other replica can take it: held
+/// across either call, one slow provider would stall every launch in the
+/// organization.
+#[tokio::test]
+async fn the_admission_lock_is_free_while_the_provider_releases_and_launches() -> anyhow::Result<()>
+{
+    use tokio::sync::Notify;
+
+    // The blocker has been idle for an hour, so the ensure reclaims its slot.
+    let fixture = setup("limit-wait-admission-lock-scope", 1, 3_600).await?;
+    crate::tests::with_shared_db_fixture(fixture.shared_db_fixture(), async {
+        let waiting = fixture.waiting();
+        let (entered_tx, mut entered_rx) = tokio::sync::mpsc::unbounded_channel::<&'static str>();
+        let release_gate = Arc::new(Notify::new());
+        let launch_gate = Arc::new(Notify::new());
+        let provider_app = axum::Router::new()
+            .route(
+                "/runtime/ensure",
+                axum::routing::post({
+                    let entered = entered_tx.clone();
+                    let gate = launch_gate.clone();
+                    move || {
+                        let entered = entered.clone();
+                        let gate = gate.clone();
+                        async move {
+                            let _ = entered.send("launch");
+                            gate.notified().await;
+                            Json(json!({ "message": "runtime ensured" }))
+                        }
+                    }
+                }),
+            )
+            .route(
+                "/runtime/release",
+                axum::routing::post({
+                    let entered = entered_tx.clone();
+                    let gate = release_gate.clone();
+                    move || {
+                        let entered = entered.clone();
+                        let gate = gate.clone();
+                        async move {
+                            let _ = entered.send("release");
+                            gate.notified().await;
+                            StatusCode::NO_CONTENT
+                        }
+                    }
+                }),
+            );
+        let provider_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+        let provider_address = provider_listener.local_addr()?;
+        let _provider_server = crate::tests::spawn_aborting(async move {
+            axum::serve(provider_listener, provider_app)
+                .await
+                .expect("serve gated limit wait provider");
+        });
+        let mut config = fixture.state.config.clone();
+        for provider in &mut config.runtime_providers {
+            provider.endpoint = Some(format!("http://{provider_address}"));
+        }
+        let state = crate::tests::build_test_state(fixture.pool.clone(), config);
+        assert!(admission_lock_is_free(fixture.org_id).await?);
+
+        let ensure = crate::tests::spawn_aborting({
+            let state = state.clone();
+            async move {
+                ensure_runtime_launch_recording_limit_wait(
+                    &state,
+                    LimitWaitSource::User,
+                    waiting,
+                    None,
+                    PROVIDER_ID.to_string(),
+                    600,
+                    Some(HOSTED_DISPLAY_NAME.to_string()),
+                    None,
+                    RuntimeLeaseScope::Exclusive,
+                    OriginEnsureOptions::new(None, None, None),
+                )
+                .await
+            }
+        });
+        for (call, gate) in [("release", &release_gate), ("launch", &launch_gate)] {
+            let entered = tokio::time::timeout(Duration::from_secs(20), entered_rx.recv())
+                .await
+                .map_err(|_| anyhow::anyhow!("the ensure never reached the provider {call}"))?;
+            assert_eq!(entered, Some(call));
+            assert!(
+                admission_lock_is_free(fixture.org_id).await?,
+                "the admission lock was held across the provider {call}"
+            );
+            gate.notify_one();
+        }
+        tokio::time::timeout(Duration::from_secs(20), ensure)
+            .await
+            .map_err(|_| anyhow::anyhow!("the ensure never finished after the provider answered"))??
+            .map_err(|(status, Json(error))| anyhow::anyhow!("{status}: {}", error.message))?;
+        assert_eq!(fixture.blocker_status().await?, "stopped");
+        assert!(fixture.has_launched_runtime(waiting).await?);
+        assert!(admission_lock_is_free(fixture.org_id).await?);
         Ok(())
     })
     .await
@@ -2125,7 +2445,7 @@ async fn a_lapsed_claim_cannot_touch_the_claim_that_replaced_it() -> anyhow::Res
         fixture.queue_job(waiting).await?;
         fixture.make_due(waiting).await?;
 
-        let lapsed = claim_due_waits(&fixture.state, &policy(), 1, &[], &[])
+        let mut lapsed = claim_due_waits(&fixture.state, &policy(), 1, &[], &[])
             .await?
             .into_iter()
             .next()
@@ -2157,7 +2477,43 @@ async fn a_lapsed_claim_cannot_touch_the_claim_that_replaced_it() -> anyhow::Res
             .next()
             .ok_or_else(|| anyhow::anyhow!("a lapsed claim is claimable again"))?;
         assert!(current.claim_token > lapsed_token);
-        drop(lapsed);
+
+        // The lapsed controller's retry now finishes: refused on the limit
+        // (the blocker is busy), it backs off. Moving the row's lease back an
+        // hour stood in for an hour passing, so its token is the moved one.
+        // The backoff must leave the current claim's row alone.
+        lapsed.claim_token = lapsed_token;
+        let mut report = LimitWaitSweepReport::default();
+        process_claimed_wait(&fixture.state, &policy(), lapsed, &mut report).await?;
+        assert_eq!((report.attempted, report.launched), (1, 0), "{report:?}");
+        assert!(fixture.provider_events().await.is_empty());
+        let wait = fixture
+            .wait_row(waiting)
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("a lapsed claim's backoff dropped the wait"))?;
+        assert_eq!(
+            wait.attempts, 0,
+            "a lapsed claim backed off the current one: {wait:?}"
+        );
+        assert!(
+            wait.next_attempt_in <= 0.0,
+            "a lapsed claim moved the current claim's next attempt: {wait:?}"
+        );
+        let claimed_until: Option<DateTime<Utc>> = fixture
+            .pool
+            .get()
+            .await?
+            .query_one(
+                "select claimed_until from hosted_runtime_limit_waits where project_id = $1",
+                &[&waiting],
+            )
+            .await?
+            .get("claimed_until");
+        assert_eq!(
+            claimed_until,
+            Some(current.claim_token),
+            "a lapsed claim's backoff cleared the current claim"
+        );
 
         release_claim(&fixture.state, waiting, lapsed_token).await?;
         finish_wait(&fixture.state, waiting, lapsed_token).await?;

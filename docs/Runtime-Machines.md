@@ -76,9 +76,12 @@ Sweep stops publish `runtime.stopped` with a `reason`:
 Jobs requeued by any stop are stamped (`payload.requeuedAt`) and expire after
 15 minutes **only if the project has no live runtime** — an interrupted run
 must not replay days later, but a queued job behind a busy machine is fine.
-The stamp is cleared when a job is leased. A space that is waiting on the
-runtime limit (below) is left to that wait's own 30-minute give-up, including
-work an idle-slot reclaim requeued.
+The stamp is cleared when a job is leased. In a space that is waiting on the
+runtime limit (below), the work that wait covers (unpinned, or pinned to the
+space's own hosted runtime) is left to its own 30-minute give-up, including
+work an idle-slot reclaim requeued. Work in that space pinned to a desktop or
+another machine is never retried or given up on by the wait, so it keeps this
+15-minute expiry.
 
 ## Waiting on the runtime limit
 
@@ -122,9 +125,14 @@ for them (`runtime/limit_waits.rs`):
   reclaim stops another machine and is never held across a provider call.
 - A launch refused for a reason waiting cannot fix (credits, access, a deleted
   space, a provider this controller no longer offers) ends the wait and fails
-  the waiting work at once with that refusal's own message, through the same
-  path as the give-up below (failed run, conversation message, refund of an
-  unused managed-AI reserve). Conflicts, throttling and 5xx keep backing off.
+  the waiting work at once, through the same path as the give-up below
+  (failed run, conversation message, refund of an unused managed-AI reserve).
+  The conversation gets the refusal's own message only when it is one the
+  studio already shows people (out of credits); any other refusal's text is
+  operator detail, so it gets a plain "a cloud runtime could not be started
+  for this space" reason and the refusal goes to the controller log. A
+  recorded request that cannot be replayed at all fails its work the same
+  way. Conflicts, throttling and 5xx keep backing off.
 - Work that has waited on the limit for 30 minutes fails with a reason in
   the conversation ("every cloud runtime in this team stayed busy for 30
   minutes...") and a Try again, its run fails, and the managed-AI reserve of
