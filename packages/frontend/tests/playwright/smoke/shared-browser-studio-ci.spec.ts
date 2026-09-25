@@ -169,8 +169,14 @@ async function openSharedBrowser(page: Page) {
   await expect(page.getByTestId("chat-input")).toBeVisible({ timeout: 90_000 });
   await page.getByTestId("composer-action-menu-trigger").click();
   await page.getByTestId("composer-action-menu-open-browser").click();
-  await page.getByTestId("browser-location-menu").click();
-  await page.getByTestId("browser-transport-shared").click();
+  const location = page.getByTestId("browser-location-menu");
+  await expect(location).toBeVisible();
+  // Web already opens Workspace. Its chrome moves when the runtime attaches,
+  // so only open the location picker when a transport change is needed.
+  if (await location.getAttribute("aria-label") !== "Browser location: Workspace") {
+    await location.click();
+    await page.getByTestId("browser-transport-shared").click();
+  }
   await expectBrowserReady(page);
 }
 
