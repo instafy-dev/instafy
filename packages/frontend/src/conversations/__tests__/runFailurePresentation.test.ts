@@ -199,6 +199,29 @@ describe("resolveRunFailurePresentation", () => {
     ).toBeNull();
   });
 
+  it("shows the controller's runtime-limit give-up reason in full, with a manual retry only", () => {
+    // Recorded by runtime/limit_waits.rs when a message waited out the
+    // 30-minute window behind the team's hosted runtime limit.
+    const reason =
+      "This message didn't start: every cloud runtime in this team stayed busy for 30 minutes. Stop a runtime you aren't using, then send it again.";
+    const presentation = resolveRunFailurePresentation({
+      metadata: {
+        source: "controller",
+        kind: "runtime_limit_wait_expired",
+        outcome: "failed",
+        messageType: "error",
+        jobId: "job-1",
+        runId: "run-1",
+        errorMessage: reason,
+      },
+      content: reason,
+    });
+    expect(presentation?.kind).toBe("generic");
+    expect(presentation?.friendlyText).toBe(reason);
+    // Retrying on its own would only queue behind the same limit again.
+    expect(isAutoRetryEligibleFailureKind(presentation?.kind)).toBe(false);
+  });
+
   it("keeps the inline generic reason to the first line and bounds its length", () => {
     const longFirstLine = `Boot failed: ${"x".repeat(400)}`;
     const presentation = resolveRunFailurePresentation({

@@ -122,13 +122,16 @@ export function resolveAgentWaitingActivityCopy(input: {
   // The runtime slot wall must out-rank every generic waiting phrase: a
   // message queued behind runtime_limit_reached will not send until the
   // blocking runtime stops, and "starting its workspace…" reads as progress
-  // where there is none.
+  // where there is none. The controller keeps retrying the launch and takes
+  // over the blocking runtime once it has been idle for a couple of minutes;
+  // after 30 minutes it gives up and fails the message with a reason
+  // (runtime/limit_waits.rs), which is the bound this copy promises.
   if (input.runtimeLimit?.limitReached && (input.workspaceStarting || input.queued)) {
     const blocker =
       input.runtimeLimit.blockerProjectLabel ??
       input.runtimeLimit.blockerRuntimeLabel;
     const where = blocker ? `"${blocker}"` : "another project";
-    const label = `Your cloud runtime is busy in ${where}. Stop it there or wait for it to go idle — this message will send once a runtime is free.`;
+    const label = `Your cloud runtime is busy in ${where}. Stop it there or let it go idle, and this message sends once a runtime is free. It waits up to 30 minutes.`;
     return { label, ariaLabel: label };
   }
 

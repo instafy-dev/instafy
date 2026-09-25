@@ -32,6 +32,10 @@ use super::db::{
     RuntimeDetails, RuntimeLeaseDetails, RuntimeRecord,
 };
 use super::lease::{parse_lease_scope, RuntimeLeaseScope};
+use super::limit_waits::{
+    is_runtime_limit_refusal, record_hosted_runtime_limit_refusal, LimitWaitEnsureRequest,
+    LimitWaitSource,
+};
 use super::provider::{
     apply_browser_profile_persistence_policy, apply_controller_turn_credentials,
     apply_git_remote_env, authorize_provider_config_for_project, authorize_provider_for_project,
@@ -60,6 +64,9 @@ const RUNTIME_PROVIDER_COMPENSATING_RELEASE_TIMEOUT: Duration = Duration::from_s
 // revoke that follows must be too. Giving up has the same effect as a broker
 // error: the stopped runtime's local grants stay active until they expire.
 const RECLAIM_TUNNEL_REVOKE_TIMEOUT: Duration = Duration::from_secs(15);
+/// Stop reason and source of an idle-slot reclaim, recorded on the stop event
+/// and published on `runtime.stopped`.
+pub(super) const RUNTIME_LIMIT_RECLAIM_STOP_REASON: &str = "runtime_limit_reclaim";
 
 #[cfg(test)]
 #[derive(Clone)]
@@ -127,14 +134,14 @@ pub(crate) struct RuntimeEnsureOriginInfo {
 }
 
 #[derive(Clone, Debug)]
-struct OriginEnsureOptions {
+pub(super) struct OriginEnsureOptions {
     mode: Option<String>,
     protocols: Vec<String>,
     metadata: Option<JsonValue>,
 }
 
 impl OriginEnsureOptions {
-    fn new(
+    pub(super) fn new(
         mode: Option<String>,
         protocols: Option<Vec<String>>,
         metadata: Option<JsonValue>,
@@ -796,8 +803,12 @@ async fn reclaim_idle_hosted_runtime_blocker(
     blocker: &ActiveHostedRuntimeBlocker,
 ) -> bool {
     let stop_options = StopOptions {
-        source: "runtime_limit_reclaim",
-        reason: Some("idle_runtime_limit_reclaim".to_string()),
+        source: RUNTIME_LIMIT_RECLAIM_STOP_REASON,
+        // The reason the reclaimed space's clients see on `runtime.stopped`.
+        // They must not treat it as an unexpected loss and relaunch at once:
+        // that would take the slot straight back from the space it was
+        // handed to (see unexpectedHostedRuntimeRecovery.ts).
+        reason: Some(RUNTIME_LIMIT_RECLAIM_STOP_REASON.to_string()),
         // The predicate above proved idleness a moment ago; this re-proves the
         // narrow part of it under the runtime row lock, which is the race that
         // matters. `require_idle_timeout` stays off because it measures the
@@ -861,29 +872,74 @@ async fn reclaim_idle_hosted_runtime_blocker(
                      its remaining grants stay active until they expire"
                 ),
             }
+            // Work can land on the blocker between the idleness check and the
+            // stop; the stop requeues it. (The stop's own outcome cannot say
+            // so: a provider-managed stop requeues in its quarantine phase and
+            // reports only the finalization.) Count what is queued there now.
+            let queued_job_count =
+                match super::limit_waits::count_waiting_jobs(state, &runtime.project_id).await {
+                    Ok(count) => count,
+                    Err(error) => {
+                        warn!(
+                            runtime_id = %runtime.id,
+                            project_id = %runtime.project_id,
+                            ?error,
+                            "could not count work left queued in a reclaimed space"
+                        );
+                        0
+                    }
+                };
             // The space that lost its machine is told, so its studio stops
-            // showing a runtime that no longer exists.
-            super::sweeps::notify_runtime_stopped(
+            // showing a runtime that no longer exists. `queuedJobCount` tells
+            // its clients whether work of theirs is waiting there, the one
+            // case in which they should ask for a machine again right away.
+            super::sweeps::notify_runtime_stopped_with_extra(
                 state,
                 runtime.project_id,
                 runtime.id,
                 &stop_reason_label,
-                "runtime_limit_reclaim",
+                RUNTIME_LIMIT_RECLAIM_STOP_REASON,
+                json!({ "queuedJobCount": queued_job_count }),
             );
-            // A job slipped in between the predicate and the stop and was
-            // requeued. Deliberately NOT re-ensured here, unlike the idle
-            // sweep: requesting a machine for this space again would either
-            // consume the slot the waiting space is about to take, or bounce
-            // off the same limit. The job stays queued and starts as soon as
-            // a runtime is free, which is the behaviour the limit implies.
-            if !stopped.outcome.requeued_jobs.is_empty() {
+            // Deliberately NOT re-ensured here, unlike the idle sweep:
+            // requesting a machine for this space again would either consume
+            // the slot the waiting space is about to take, or bounce off the
+            // same limit. The space now waits on the limit like any other, so
+            // the limit-wait sweep starts its work as soon as a runtime is
+            // free, which is the behaviour the limit implies.
+            if queued_job_count > 0 {
                 info!(
                     runtime_id = %runtime.id,
                     project_id = %runtime.project_id,
-                    requeued_job_count = stopped.outcome.requeued_jobs.len(),
+                    queued_job_count,
                     "reclaimed a hosted runtime that had just been given work; \
-                     the requeued jobs wait for a free runtime"
+                     the work waits for a free runtime"
                 );
+                let metadata = load_runtime_requeue_metadata(state, runtime)
+                    .await
+                    .ok()
+                    .flatten();
+                let wait_request = LimitWaitEnsureRequest {
+                    provider: runtime.provider.clone(),
+                    runtime_id: Some(runtime.id),
+                    idle_ttl_seconds: coerce_idle_ttl(Some(runtime.idle_ttl_seconds.max(0) as u32)),
+                    display_name: runtime.display_name.clone(),
+                    metadata: Some(build_requeued_runtime_metadata(
+                        metadata.as_ref(),
+                        runtime.id,
+                        RUNTIME_LIMIT_RECLAIM_STOP_REASON,
+                    )),
+                    scope: Some(RuntimeLeaseScope::Exclusive.as_str().to_string()),
+                    origin_mode: None,
+                    origin_protocols: Vec::new(),
+                };
+                record_hosted_runtime_limit_refusal(
+                    state,
+                    runtime.project_id,
+                    &wait_request,
+                    LimitWaitSource::Server,
+                )
+                .await;
             }
             true
         }
@@ -1076,10 +1132,16 @@ pub(crate) async fn runtime_ensure(
         payload.origin_metadata.clone(),
     );
 
+    let wait_source = if auth.user_id.is_some() {
+        LimitWaitSource::User
+    } else {
+        LimitWaitSource::Server
+    };
     let response = match scope {
         RuntimeLeaseScope::Exclusive => {
-            ensure_runtime_launch(
+            ensure_runtime_launch_recording_limit_wait(
                 &state,
+                wait_source,
                 project_id,
                 runtime_id,
                 runtime_provider.clone(),
@@ -1099,8 +1161,9 @@ pub(crate) async fn runtime_ensure(
                     "private self-hosted runtimes cannot use shared leases",
                 ));
             }
-            ensure_runtime_launch(
+            ensure_runtime_launch_recording_limit_wait(
                 &state,
+                wait_source,
                 project_id,
                 runtime_id,
                 runtime_provider.clone(),
@@ -1236,8 +1299,14 @@ async fn request_runtime_inner(
     let origin_mode = None;
 
     let origin_options = OriginEnsureOptions::new(origin_mode, None, body.origin_metadata.clone());
-    let runtime_response = ensure_runtime_launch(
+    let wait_source = if auth.user_id.is_some() {
+        LimitWaitSource::User
+    } else {
+        LimitWaitSource::Server
+    };
+    let runtime_response = ensure_runtime_launch_recording_limit_wait(
         state,
+        wait_source,
         project_id,
         runtime_id,
         runtime_provider.clone(),
@@ -1296,8 +1365,9 @@ pub(super) async fn ensure_runtime_for_requeued_jobs(
     let existing_metadata = load_runtime_requeue_metadata(state, runtime).await?;
     let metadata = build_requeued_runtime_metadata(existing_metadata.as_ref(), runtime.id, source);
 
-    ensure_runtime_launch(
+    ensure_runtime_launch_recording_limit_wait(
         state,
+        LimitWaitSource::Server,
         runtime.project_id,
         Some(runtime.id),
         runtime.provider.clone(),
@@ -1336,8 +1406,9 @@ pub(crate) async fn ensure_runtime_for_dispatch_reconnect(
         .await?;
     }
 
-    ensure_runtime_launch(
+    ensure_runtime_launch_recording_limit_wait(
         state,
+        LimitWaitSource::Server,
         runtime.project_id,
         Some(runtime.id),
         runtime.provider.clone(),
@@ -1441,8 +1512,9 @@ pub(crate) async fn ensure_runtime_for_automation(
         .map(|value| value.to_string())
         .unwrap_or_else(|| state.provider_registry.default_provider_id());
 
-    ensure_runtime_launch(
+    ensure_runtime_launch_recording_limit_wait(
         state,
+        LimitWaitSource::Server,
         project_id,
         runtime_id,
         provider,
@@ -1494,6 +1566,81 @@ fn normalize_runtime_size_metadata(
     map.insert("env".to_string(), JsonValue::Object(env));
 
     (Some(JsonValue::Object(map)), size)
+}
+
+/// [`ensure_runtime_launch`] for a request that must not be forgotten when the
+/// organization's hosted runtime limit refuses it: the refusal is recorded so
+/// the limit-wait sweep can replay this exact request once work is queued in
+/// the space and a slot may be free (see `limit_waits.rs`).
+#[allow(clippy::too_many_arguments)]
+pub(super) async fn ensure_runtime_launch_recording_limit_wait(
+    state: &AppState,
+    wait_source: LimitWaitSource,
+    project_id: Uuid,
+    runtime_id: Option<Uuid>,
+    provider: String,
+    idle_ttl_seconds: u32,
+    display_name: Option<String>,
+    metadata: Option<JsonValue>,
+    scope: RuntimeLeaseScope,
+    origin_options: OriginEnsureOptions,
+) -> Result<RuntimeEnsureResponse, (StatusCode, Json<ApiError>)> {
+    let wait_request = LimitWaitEnsureRequest {
+        provider: provider.clone(),
+        runtime_id,
+        idle_ttl_seconds,
+        display_name: display_name.clone(),
+        metadata: metadata.clone(),
+        scope: Some(scope.as_str().to_string()),
+        origin_mode: origin_options.mode.clone(),
+        origin_protocols: origin_options.protocols.clone(),
+    };
+    let result = ensure_runtime_launch(
+        state,
+        project_id,
+        runtime_id,
+        provider,
+        idle_ttl_seconds,
+        display_name,
+        metadata,
+        scope,
+        origin_options,
+    )
+    .await;
+    if let Err(error) = &result {
+        if is_runtime_limit_refusal(error) {
+            record_hosted_runtime_limit_refusal(state, project_id, &wait_request, wait_source)
+                .await;
+        }
+    }
+    result
+}
+
+/// Replay a recorded refused ensure for the limit-wait sweep. Deliberately the
+/// ordinary launch path: the organization limit, the credit precheck and the
+/// idle-slot reclaim decide exactly as they would for the user's own request.
+/// Not recorded again; the sweep keeps its own bookkeeping.
+pub(super) async fn ensure_runtime_for_limit_wait(
+    state: &AppState,
+    project_id: Uuid,
+    request: &LimitWaitEnsureRequest,
+) -> Result<RuntimeEnsureResponse, (StatusCode, Json<ApiError>)> {
+    ensure_runtime_launch(
+        state,
+        project_id,
+        request.runtime_id,
+        request.provider.clone(),
+        coerce_idle_ttl(Some(request.idle_ttl_seconds)),
+        request.display_name.clone(),
+        request.metadata.clone(),
+        request.lease_scope(),
+        OriginEnsureOptions::new(
+            request.origin_mode.clone(),
+            Some(request.origin_protocols.clone()),
+            None,
+        ),
+    )
+    .await
 }
 
 async fn ensure_runtime_launch(

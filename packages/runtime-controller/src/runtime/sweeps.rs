@@ -367,6 +367,102 @@ async fn refund_managed_ai_reserve_for_expired_job(
     Ok(None)
 }
 
+/// What settling a batch of expired jobs left to publish once its transaction
+/// commits.
+pub(super) struct SettledExpiredJobs {
+    pub(super) job_input_state_updates: Vec<crate::send_intents::JobInputStateUpdate>,
+    pub(super) refunded_org_ids: std::collections::BTreeSet<Uuid>,
+}
+
+/// Finish jobs a sweep has just moved from `queued` to `failed` without a
+/// runtime ever running them: reject their unacknowledged inputs, fail their
+/// runs (without this a run stays "in_progress" forever and Home lists it as
+/// live work), and give back a managed-AI reserve no model ever used.
+///
+/// `rows` must carry `id, project_id, run_id, conversation_id, payload,
+/// error_message, lease_attempts` from the failing `update ... returning`, and
+/// this must run in that update's transaction. `kind` only labels errors.
+pub(super) async fn settle_expired_queued_jobs(
+    transaction: &mut tokio_postgres::Transaction<'_>,
+    rows: &[tokio_postgres::Row],
+    kind: &str,
+) -> AnyResult<SettledExpiredJobs> {
+    let mut job_input_state_updates = Vec::new();
+    let mut refunded_org_ids = std::collections::BTreeSet::new();
+    for row in rows {
+        let job_id: Uuid = row.get("id");
+        let updates = crate::send_intents::reject_unacknowledged_inputs_for_job(
+            transaction,
+            &job_id,
+            &format!("{kind} agent job expired before input acknowledgement"),
+        )
+        .await
+        .map_err(|(status, Json(error))| {
+            anyhow::anyhow!(
+                "failed to reject inputs for expired {kind} job ({status}): {}",
+                error.message
+            )
+        })?;
+        job_input_state_updates.extend(updates);
+
+        let run_id: Option<Uuid> = row.get("run_id");
+        let project_id: Uuid = row.get("project_id");
+        let payload = row
+            .get::<_, tokio_postgres::types::Json<serde_json::Value>>("payload")
+            .0;
+        if let Some(run_id) = run_id {
+            let conversation_id: Option<Uuid> = row.get("conversation_id");
+            let error_message: Option<String> = row.get("error_message");
+            transaction
+                .execute(
+                    "update runs
+                     set status = 'failed',
+                         progress_stage = null,
+                         last_message = coalesce($2, last_message),
+                         updated_at = now()
+                     where id = $1
+                       and status not in ('success', 'failed', 'canceled')",
+                    &[&run_id, &error_message],
+                )
+                .await
+                .with_context(|| format!("failed to fail run for expired {kind} job"))?;
+            crate::activity::record_run_completed(
+                &*transaction,
+                &project_id,
+                &run_id,
+                conversation_id,
+                None,
+                &payload,
+                false,
+                None,
+                error_message.as_deref(),
+            )
+            .await;
+        }
+
+        // No runtime picked the job up. If none ever had it, a managed-AI
+        // prompt it carried never reached a model: give the credit and daily
+        // slot back.
+        let lease_attempts: i32 = row.get("lease_attempts");
+        if let Some(org_id) = refund_managed_ai_reserve_for_expired_job(
+            transaction,
+            &project_id,
+            &job_id,
+            run_id,
+            lease_attempts,
+            &payload,
+        )
+        .await?
+        {
+            refunded_org_ids.insert(org_id);
+        }
+    }
+    Ok(SettledExpiredJobs {
+        job_input_state_updates,
+        refunded_org_ids,
+    })
+}
+
 /// Jobs requeued by a runtime stop expire if nothing resumes them promptly.
 /// Without this, a job killed by credit exhaustion re-runs from scratch
 /// whenever a runtime next appears — even days later — duplicating side
@@ -411,86 +507,15 @@ pub(crate) async fn expire_stale_requeued_jobs(state: &AppState) -> AnyResult<()
         .await
         .context("failed to expire stale requeued jobs")?;
 
-    let mut job_input_state_updates = Vec::new();
-    let mut refunded_org_ids = std::collections::BTreeSet::new();
-    for row in &rows {
-        let job_id: Uuid = row.get("id");
-        let updates = crate::send_intents::reject_unacknowledged_inputs_for_job(
-            &transaction,
-            &job_id,
-            "requeued agent job expired before input acknowledgement",
-        )
-        .await
-        .map_err(|(status, Json(error))| {
-            anyhow::anyhow!(
-                "failed to reject inputs for expired requeued job ({status}): {}",
-                error.message
-            )
-        })?;
-        job_input_state_updates.extend(updates);
-
-        // The job is dead, so its run is too: without this the run stays
-        // "in_progress" forever and Home would list it as live work.
-        let run_id: Option<Uuid> = row.get("run_id");
-        let project_id: Uuid = row.get("project_id");
-        let payload = row
-            .get::<_, tokio_postgres::types::Json<serde_json::Value>>("payload")
-            .0;
-        if let Some(run_id) = run_id {
-            let conversation_id: Option<Uuid> = row.get("conversation_id");
-            let error_message: Option<String> = row.get("error_message");
-            transaction
-                .execute(
-                    "update runs
-                     set status = 'failed',
-                         progress_stage = null,
-                         last_message = coalesce($2, last_message),
-                         updated_at = now()
-                     where id = $1
-                       and status not in ('success', 'failed', 'canceled')",
-                    &[&run_id, &error_message],
-                )
-                .await
-                .context("failed to fail run for expired requeued job")?;
-            crate::activity::record_run_completed(
-                &transaction,
-                &project_id,
-                &run_id,
-                conversation_id,
-                None,
-                &payload,
-                false,
-                None,
-                error_message.as_deref(),
-            )
-            .await;
-        }
-
-        // No runtime picked the job up again. If none ever had it, a
-        // managed-AI prompt it carried never reached a model: give the credit
-        // and daily slot back.
-        let lease_attempts: i32 = row.get("lease_attempts");
-        if let Some(org_id) = refund_managed_ai_reserve_for_expired_job(
-            &mut transaction,
-            &project_id,
-            &job_id,
-            run_id,
-            lease_attempts,
-            &payload,
-        )
-        .await?
-        {
-            refunded_org_ids.insert(org_id);
-        }
-    }
+    let settled = settle_expired_queued_jobs(&mut transaction, &rows, "requeued").await?;
 
     transaction
         .commit()
         .await
         .context("failed to commit requeued job expiry")?;
-    crate::send_intents::publish_job_input_state_updates(state, &job_input_state_updates);
+    crate::send_intents::publish_job_input_state_updates(state, &settled.job_input_state_updates);
     drop(connection);
-    publish_credits_updated_for_orgs(state, refunded_org_ids).await;
+    publish_credits_updated_for_orgs(state, settled.refunded_org_ids).await;
 
     for row in rows {
         let job_id: Uuid = row.get("id");
@@ -518,7 +543,7 @@ pub(super) fn notify_runtime_stopped(
     notify_runtime_stopped_with_extra(state, project_id, runtime_id, reason, source, json!({}));
 }
 
-fn notify_runtime_stopped_with_extra(
+pub(super) fn notify_runtime_stopped_with_extra(
     state: &AppState,
     project_id: Uuid,
     runtime_id: Uuid,
@@ -1005,7 +1030,7 @@ pub(crate) async fn sweep_hosted_runtime_credit_usage(state: &AppState) -> AnyRe
 }
 
 /// One `credits.updated` per org after a sweep's writes have committed.
-async fn publish_credits_updated_for_orgs(
+pub(super) async fn publish_credits_updated_for_orgs(
     state: &AppState,
     org_ids: std::collections::BTreeSet<Uuid>,
 ) {

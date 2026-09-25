@@ -2,7 +2,7 @@
 
 How hosted runtimes are sized, paused, billed, and attributed. Code:
 `packages/runtime-controller/src/runtime/` (sizes.rs, sweeps.rs, ensure.rs,
-stop.rs, provider.rs),
+limit_waits.rs, stop.rs, provider.rs),
 `packages/runtime-provider-core/src/allocator/docker.rs`,
 `docker/docker-compose.runtime.provider.yml`.
 
@@ -62,11 +62,70 @@ Sweep stops publish `runtime.stopped` with a `reason`:
   the size preference) or your-own-machine, escalating when the project has
   ≥2 OOM stops in 7 days (`runtime_events` query).
 - `heartbeat_timeout` — genuine agent death; auto-recovery unchanged.
+- `runtime_limit_reclaim` — the machine was idle and another space in the
+  organization was waiting for the hosted runtime slot (see "Waiting on the
+  runtime limit" below). The event carries `queuedJobCount`, the work left
+  queued in that space (work that landed between the idleness check and the
+  stop is requeued); such a space then waits on the limit itself. A studio
+  open on the reclaimed space does not relaunch it unless it has work of its
+  own there (a queued or running turn, or `queuedJobCount > 0`); otherwise it
+  holds the machine like an idle pause until the next interaction.
+  Controllers before this reason was introduced published
+  `idle_runtime_limit_reclaim`; the frontend accepts both.
 
 Jobs requeued by any stop are stamped (`payload.requeuedAt`) and expire after
 15 minutes **only if the project has no live runtime** — an interrupted run
 must not replay days later, but a queued job behind a busy machine is fine.
 The stamp is cleared when a job is leased.
+
+## Waiting on the runtime limit
+
+When every hosted runtime an organization may run is in use, an ensure for
+another space is refused with 402 `runtime_limit_reached`. If the machine
+holding the slot has been idle for `RUNTIME_LIMIT_RECLAIM_IDLE_SECONDS`
+(default 120, 0 disables), the ensure stops it and launches the waiting space
+instead (reason `runtime_limit_reclaim`). That reclaim only runs inside an
+ensure, and clients ask again only on interaction, so the controller retries
+for them (`runtime/limit_waits.rs`):
+
+- Every limit refusal of a real ensure (the studio's, the dispatch reconnect,
+  requeue recovery, automations) is recorded in `hosted_runtime_limit_waits`,
+  one row per space, with the refused request. A user's own request (which
+  carries the machine size) is never replaced by a server-initiated one.
+- A sweep on every controller (every 10 s) replays the refused request through
+  the ordinary ensure path for spaces that still have queued agent work a
+  hosted machine would run (unpinned, or pinned to the space's own hosted
+  runtime) and no live runtime. The organization limit, the credit precheck
+  and the reclaim apply unchanged, so it never launches a machine a user's
+  own ensure could not.
+- Retries back off per space: 30 s after the refusal, then 60 s, 120 s,
+  240 s and every 5 minutes. At most 5 spaces are handled per tick per
+  controller, each at most once.
+- Replicas share the table: a sweep claims one due row at a time, right
+  before handling it, with `for update skip locked` and a 20-minute claim
+  lease, so a space is retried by one controller at a time and a claim
+  abandoned by a dead controller expires.
+- A launch refused for a reason waiting cannot fix (credits, access, a deleted
+  space, a provider this controller no longer offers) ends the wait and leaves
+  the job as it was. Conflicts, throttling and 5xx keep backing off.
+- Work that has waited on the limit for 30 minutes fails with a reason in
+  the conversation ("every cloud runtime in this team stayed busy for 30
+  minutes...") and a Try again, its run fails, and an unused managed-AI
+  reserve is refunded, so a message that never ran costs nothing. The clock
+  starts when the job was queued (or requeued by a stop), or when the space
+  began waiting, whichever is later: a job that sat behind its own busy
+  machine gets the full window once it is refused a new one. The studio's
+  waiting copy promises this bound. Queued follow-ups in that conversation
+  are then dispatched as after any finished turn.
+- The wait ends when the space has a live runtime: an unreleased lease or a
+  recent heartbeat. The `requested` row dispatch leaves behind does not
+  count, and neither does a generation quarantined as `cleanup_pending`. A
+  wait with no queued work is dropped once it has been quiet (no refusal and
+  no retry) for 30 minutes; a refusal after that starts a new wait.
+
+The table ships in migration `20260924120000_hosted_runtime_limit_waits.sql`.
+A controller running before it is applied logs one warning and does not
+retry; nothing else changes.
 
 ## Provider call deadlines
 
