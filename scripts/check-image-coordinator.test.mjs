@@ -205,6 +205,13 @@ test("a skipped Build completion never joins the shared group, so it cannot canc
     assert.equal(evaluate(groupExpression, { run_id: "9", event_name, event: {} }), "continuous-production-images", event_name);
   }
 });
+test("the group isolates exactly the Build completions the job guard skips", () => {
+  // The two lists are separate text; if a condition is ever added to the guard
+  // only, a completion failing just that condition would rejoin the shared group.
+  const conditions = (expression) => [...expression.matchAll(/github\.event\.workflow_run\.[\w.]+ == '[^']*'/gu)].map(([match]) => match);
+  assert.deepEqual(conditions(groupExpression), conditions(jobGuard));
+  assert.equal(conditions(jobGuard).length, 6);
+});
 test("a Build read that errors or reports an unknown status never opens publication", () => {
   for (const response of [{ error: true }, { ...workflowRun(77, "build.yml"), status: "unknown" }]) {
     const result = run(steps.ci, { [buildRunPath]: response }, { BUILD_RUN_ID: "77" });
