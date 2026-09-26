@@ -78,7 +78,12 @@ test("protected main reconciles exact image publication without occupying a wait
   assert.match(source, /github\.repository == 'instafy-dev\/instafy'/u);
   assert.match(source, /github\.ref == 'refs\/heads\/main'/u);
   assert.match(source, /REQUESTED_COMMIT" != "\$GITHUB_SHA"/u);
-  assert.match(source, /actions\/workflows\/build\.yml\/runs\?event=push&head_sha=/u);
+  // Build is read by head_sha or, for a Build completion, by its own run ID:
+  // GitHub's event-filtered listings are intermittently served stale.
+  assert.match(source, /actions\/workflows\/build\.yml\/runs\?head_sha=/u);
+  assert.match(source, /actions\/runs\/\$\{build_run_id\}/u);
+  assert.doesNotMatch(source, /event=push|event=workflow_dispatch/u);
+  assert.match(source, /\n  workflow_run:\n    workflows: \[Public Build\]\n    types: \[completed\]\n    branches: \[main\]\n/u);
   assert.match(source, /X-GitHub-Api-Version: 2026-03-10/u);
   assert.match(source, /\.workflow_run_id/u);
   assert.match(source, /\.event == "workflow_dispatch"/u);
@@ -114,7 +119,22 @@ test("protected main reconciles exact image publication without occupying a wait
   assert.match(source, /Report fresh immutable manifests/u);
   assert.match(source, /\\"update_channel_tags\\":false/u);
   assert.doesNotMatch(source, /\bsecrets\./u);
-  assert.doesNotMatch(source, /^\s+pull_request_target:|^\s+workflow_run:/mu);
+  assert.doesNotMatch(source, /^\s+pull_request_target:/mu);
+  // The one privileged trigger the owner allowed here (2026-09-26): completion
+  // of this repository's own protected-main push Build, so publication starts
+  // without a manual dispatch. It runs this file from main with actions: write,
+  // so the job guard below must stay exact: never a fork, a pull request, or
+  // another workflow, and nothing from the triggering run is checked out.
+  assert.equal(source.match(/^\s+workflow_run:/gmu)?.length, 1);
+  for (const clause of [
+    "github.event.workflow_run.event == 'push'",
+    "github.event.workflow_run.conclusion == 'success'",
+    "github.event.workflow_run.head_branch == 'main'",
+    "github.event.workflow_run.path == '.github/workflows/build.yml'",
+    "github.event.workflow_run.repository.full_name == 'instafy-dev/instafy'",
+    "github.event.workflow_run.head_repository.full_name == 'instafy-dev/instafy'",
+  ]) assert.ok(source.includes(clause), clause);
+  assert.doesNotMatch(source, /actions\/checkout|actions\/download-artifact|workflow_run\.(?:display_title|head_commit)/u);
   assert.equal(
     [...source.matchAll(/publish-production-services\.yml/gu)].length,
     2,

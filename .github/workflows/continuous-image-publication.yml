@@ -3,12 +3,18 @@ name: Publish images after protected main
 # The latest protected-main commit gets both immutable image manifests after
 # its exact CI succeeds. If main advances, older queued runs yield to the newer
 # cumulative source. Each pass reconciles once without waiting for Build or
-# child publishers; the six-hour schedule reconciles deferred work. A successful
-# coordinator is not publication proof: consumers require sealed child manifests.
+# child publishers. The push run usually finds Build still running and defers;
+# the completion of that exact push Build then starts a pass that publishes, and
+# the six-hour schedule reconciles anything left. A successful coordinator is
+# not publication proof: consumers require sealed child manifests.
 on:
   push:
     branches:
       - main
+  workflow_run:
+    workflows: [Public Build]
+    types: [completed]
+    branches: [main]
   schedule:
     - cron: "17 */6 * * *"
   workflow_dispatch:
@@ -22,16 +28,39 @@ permissions:
   contents: read
   actions: write
 
+# A Build completion that does not qualify is skipped by the job guard, but a
+# workflow-level group would still admit it, and GitHub keeps one pending run
+# per group: a stream of fork or failed Build completions could cancel the real
+# pending pass. Such runs get a group of their own.
 concurrency:
-  group: continuous-production-images
+  group: >-
+    ${{ github.event_name == 'workflow_run' && !(
+          github.event.workflow_run.event == 'push' &&
+          github.event.workflow_run.conclusion == 'success' &&
+          github.event.workflow_run.head_branch == 'main' &&
+          github.event.workflow_run.path == '.github/workflows/build.yml' &&
+          github.event.workflow_run.repository.full_name == 'instafy-dev/instafy' &&
+          github.event.workflow_run.head_repository.full_name == 'instafy-dev/instafy')
+        && format('continuous-production-images-ignored-{0}', github.run_id)
+        || 'continuous-production-images' }}
   cancel-in-progress: false
 
 jobs:
   publish:
     name: Publish exact protected-main images after CI
+    # A Build completion runs with this repository's token, so only the exact
+    # successful protected-main push Build of this repository may start a pass;
+    # a fork or pull-request Build never does.
     if: >-
       github.repository == 'instafy-dev/instafy' &&
-      github.ref == 'refs/heads/main'
+      github.ref == 'refs/heads/main' &&
+      (github.event_name != 'workflow_run' || (
+        github.event.workflow_run.event == 'push' &&
+        github.event.workflow_run.conclusion == 'success' &&
+        github.event.workflow_run.head_branch == 'main' &&
+        github.event.workflow_run.path == '.github/workflows/build.yml' &&
+        github.event.workflow_run.repository.full_name == 'instafy-dev/instafy' &&
+        github.event.workflow_run.head_repository.full_name == 'instafy-dev/instafy'))
     runs-on: >-
       ${{ vars.CI_PUBLIC_CONTROL_SELF_HOSTED == 'true'
           && github.repository == 'instafy-dev/instafy'
@@ -118,12 +147,19 @@ jobs:
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
-          REQUESTED_COMMIT: ${{ github.event_name == 'workflow_dispatch' && inputs.commit_sha || github.sha }}
+          REQUESTED_COMMIT: ${{ github.event_name == 'workflow_dispatch' && inputs.commit_sha || github.event_name == 'workflow_run' && github.event.workflow_run.head_sha || github.sha }}
         run: |
           set -euo pipefail
           if [[ ! "$REQUESTED_COMMIT" =~ ^[0-9a-f]{40}$ ]]; then
             echo "::error::The release source must be a full lowercase commit SHA."
             exit 1
+          fi
+          # A Build completion names the commit it built; if main moved on
+          # meanwhile, the newer commit's own Build completion owns publication.
+          if [[ "$GITHUB_EVENT_NAME" == "workflow_run" && "$REQUESTED_COMMIT" != "$GITHUB_SHA" ]]; then
+            echo "Protected main advanced past ${REQUESTED_COMMIT}; the newer commit's Build owns publication."
+            echo "current=false" >> "$GITHUB_OUTPUT"
+            exit 0
           fi
           if [[ "$REQUESTED_COMMIT" != "$GITHUB_SHA" ]]; then
             echo "::error::The release source must equal the workflow's protected-main commit."
@@ -150,11 +186,31 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           RELEASE_COMMIT: ${{ steps.source.outputs.commit_sha }}
+          BUILD_RUN_ID: ${{ github.event_name == 'workflow_run' && github.event.workflow_run.id || '' }}
         run: |
           set -euo pipefail
-          runs="$(gh api \
-            -H 'X-GitHub-Api-Version: 2026-03-10' \
-            "repos/${GITHUB_REPOSITORY}/actions/workflows/build.yml/runs?event=push&head_sha=${RELEASE_COMMIT}&per_page=100")"
+          # GitHub's event-filtered run listings are intermittently served from a
+          # stale index, so none is used here. A Build completion is checked by
+          # reading its own run; other passes list the commit's runs and keep only
+          # the exact protected-main push Builds.
+          build_run_id="${BUILD_RUN_ID:-}"
+          if [[ -n "$build_run_id" ]]; then
+            [[ "$build_run_id" =~ ^[1-9][0-9]*$ ]]
+            runs="$(gh api \
+              -H 'X-GitHub-Api-Version: 2026-03-10' \
+              "repos/${GITHUB_REPOSITORY}/actions/runs/${build_run_id}" |
+              jq -c '{total_count: 1, workflow_runs: [.]}')"
+          else
+            runs="$(gh api \
+              -H 'X-GitHub-Api-Version: 2026-03-10' \
+              "repos/${GITHUB_REPOSITORY}/actions/workflows/build.yml/runs?head_sha=${RELEASE_COMMIT}&per_page=100")"
+            jq -e '
+              (.total_count | type) == "number" and
+              .total_count == (.workflow_runs | length) and .total_count <= 100
+            ' <<<"$runs" >/dev/null
+            runs="$(jq -c '{workflow_runs: [.workflow_runs[] | select(.event == "push")]}
+              | .total_count = (.workflow_runs | length)' <<<"$runs")"
+          fi
           jq -e --arg sha "$RELEASE_COMMIT" '
             (.total_count | type) == "number" and
             .total_count == (.workflow_runs | length) and .total_count <= 100 and
@@ -220,7 +276,6 @@ jobs:
               -H 'Accept: application/vnd.github+json' \
               -H 'X-GitHub-Api-Version: 2026-03-10' \
               "repos/${GITHUB_REPOSITORY}/actions/workflows/${workflow}/runs" \
-              -f event=workflow_dispatch \
               -f head_sha="$RELEASE_COMMIT" \
               -f per_page=100)" || return 2
             jq -e --arg sha "$RELEASE_COMMIT" --arg path ".github/workflows/${workflow}" '

@@ -16,7 +16,7 @@ const jobs = [
     baseline: "cc6e1f9c78e8ce69b7d34a816d785c71c20febc1c7b7fbc92b95c440a6c78670" },
   { file: "continuous-image-publication.yml", key: "publish", label: "public-image-coordinator", name: "Publish exact protected-main images after CI", minutes: 5,
     tools: ["bash", "gh", "jq", "date"],
-    baseline: "3838d5ccfed0f56540dd42251203a5472845aa8abe234e8122b8c2587d7abe6d" },
+    baseline: "befcf70020089626509f4ad54e291f84881a53cb5b44c6b8447e13506e6411ec" },
   { file: "npm-release.yml", key: "pack", label: "public-npm-pack", name: "Test and pack exact npm artifacts", minutes: 25,
     tools: ["bash", "git", "curl", "tar", "sha256sum", "unzip"],
     baseline: "cc6e1f9c78e8ce69b7d34a816d785c71c20febc1c7b7fbc92b95c440a6c78670" },
