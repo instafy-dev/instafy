@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { ConversationState } from "../../conversations/conversationState";
 import {
   extractConversationLocalIdFromMetadata,
@@ -27,6 +27,7 @@ export interface StudioSearchRecordsOptions {
   enabled: boolean;
   query?: string;
   restoreMessagePages?: number;
+  restoreSpacePages?: number;
   scope: StudioSearchScope;
   /** Personal spaces use the same "personal" key as the navigation rail. */
   orgId: string | null;
@@ -46,11 +47,11 @@ interface SearchSnapshot {
   conversations: Record<string, ControllerProjectConversation[]>;
   loading: boolean;
   error: string | null;
-  limitedSpaces: boolean;
+  remainingSpaces: number;
 }
 
 function emptySnapshot(key: string, loading: boolean): SearchSnapshot {
-  return { key, projects: [], conversations: {}, loading, error: null, limitedSpaces: false };
+  return { key, projects: [], conversations: {}, loading, error: null, remainingSpaces: 0 };
 }
 
 function chatActivityTimestamp(chat: ControllerProjectConversation): number {
@@ -63,14 +64,17 @@ function chatActivityTimestamp(chat: ControllerProjectConversation): number {
 
 /** Search does not open origins or start runtimes: files are already-known paths only. */
 export function useStudioSearchRecords({
-  viewerUserId, enabled, query = "", restoreMessagePages, scope, orgId, spaceId, projects, knownFiles, activeConversations, onActivate,
+  viewerUserId, enabled, query = "", restoreMessagePages, restoreSpacePages, scope, orgId, spaceId, projects, knownFiles, activeConversations, onActivate,
 }: StudioSearchRecordsOptions) {
   const [revision, setRevision] = useState(0);
   const retry = useCallback(() => setRevision((value) => value + 1), []);
   const scopeReady = scope === "all" || Boolean(orgId && (scope === "org" || spaceId));
   const canSearch = enabled && Boolean(viewerUserId) && scopeReady;
   const key = JSON.stringify([canSearch, viewerUserId, scope, orgId, spaceId, revision]);
+  const [coverage, setCoverage] = useState({ key, pages: 1 });
+  const spacePageCount = Math.max(coverage.key === key ? coverage.pages : 1, restoreSpacePages ?? 1);
   const [snapshot, setSnapshot] = useState(() => emptySnapshot(key, canSearch));
+  const pageCache = useRef<SearchSnapshot | null>(null);
   const messages = useStudioMessageSearch({ viewerUserId, enabled: canSearch, query, scope, orgId, spaceId, revision, restoreMessagePages });
 
   useEffect(() => {
@@ -90,12 +94,18 @@ export function useStudioSearchRecords({
 
   useEffect(() => {
     const abort = new AbortController();
-    let current = emptySnapshot(key, canSearch);
+    // Only a same-scope "more" keeps prior pages. Access refresh, account
+    // changes and closing search all change the key and discard the cache.
+    let current = pageCache.current?.key === key
+      ? { ...pageCache.current, loading: canSearch, error: null }
+      : emptySnapshot(key, canSearch);
+    pageCache.current = current;
     setSnapshot(current);
     if (!canSearch) return () => abort.abort();
     const update = (patch: Partial<SearchSnapshot>) => {
       if (abort.signal.aborted) return;
       current = { ...current, ...patch };
+      pageCache.current = current;
       setSnapshot(current);
     };
     const load = async () => {
@@ -117,13 +127,15 @@ export function useStudioSearchRecords({
         if (scope === "org") return (project.orgId ?? "personal") === orgId;
         return true;
       }).sort((left, right) => (left.projectName ?? "").localeCompare(right.projectName ?? "") || left.projectId.localeCompare(right.projectId));
-      const selected = accessible.slice(0, SPACE_LIMIT);
-      update({ projects: selected, limitedSpaces: accessible.length > SPACE_LIMIT });
+      const selected = accessible.slice(0, SPACE_LIMIT * spacePageCount);
+      const conversations = Object.fromEntries(selected.filter(project => current.conversations[project.projectId]).map(project => [project.projectId, current.conversations[project.projectId]]));
+      update({ projects: selected, conversations, remainingSpaces: Math.max(0, accessible.length - selected.length) });
+      const unread = selected.filter(project => !Object.hasOwn(conversations, project.projectId));
       let next = 0;
       let failures = 0;
       const worker = async () => {
-        while (!abort.signal.aborted && next < selected.length) {
-          const project = selected[next++];
+        while (!abort.signal.aborted && next < unread.length) {
+          const project = unread[next++];
           try {
             const rows = await controllerClient.conversations.listForProject({ projectId: project.projectId, limit: CHAT_LIMIT, signal: abort.signal });
             if (abort.signal.aborted) return;
@@ -141,12 +153,12 @@ export function useStudioSearchRecords({
           }
         }
       };
-      await Promise.all(Array.from({ length: Math.min(CONCURRENT_READS, selected.length) }, worker));
+      await Promise.all(Array.from({ length: Math.min(CONCURRENT_READS, unread.length) }, worker));
       update({ loading: false, error: failures ? `Couldn’t load chats in ${failures === 1 ? "one space" : `${failures} spaces`}. Retry search.` : null });
     };
     void load().catch(() => update({ loading: false, error: "Unable to load accessible spaces. Retry search." }));
     return () => abort.abort();
-  }, [canSearch, key, orgId, scope, spaceId]);
+  }, [canSearch, key, orgId, scope, spaceId, spacePageCount]);
 
   // Account, scope, access refresh and close must hide the old index before effects run.
   const current = snapshot.key === key && canSearch ? snapshot : emptySnapshot(key, canSearch);
@@ -233,7 +245,7 @@ export function useStudioSearchRecords({
     let chatIndex = 0;
     return output.map((record) => record.group === "Chats" ? chats[chatIndex++] : record);
   }, [activeConversations, canSearch, current.conversations, current.projects, knownFiles, messages.matches, onActivate, projects, query, viewerUserId]);
-  const notice = `Message search matches text in accessible conversations; use at least 2 characters. Also searches recent chat titles (up to ${CHAT_LIMIT} per space), opened file names, files already listed in the current space and settings. Unloaded folders and file contents are not included.${current.limitedSpaces ? ` Chat titles and file names cover the first ${SPACE_LIMIT} spaces alphabetically; message search covers the selected scope.` : ""}`;
-  return { records, loading: current.loading || messages.loading, error: [current.error, messages.error].filter(Boolean).join(" ") || null, notice, retry,
+  const notice = `Message search matches text in accessible conversations; use at least 2 characters. Also searches recent chat titles (up to ${CHAT_LIMIT} per space), opened file names, files already listed in the current space and settings. Unloaded folders and file contents are not included.${current.remainingSpaces ? ` ${current.remainingSpaces} more spaces are available below; message search already covers the selected scope.` : ""}`;
+  return { spacePageCount, remainingSpaces: current.remainingSpaces, loadMoreSpaces: () => setCoverage({ key, pages: spacePageCount + 1 }), records, loading: current.loading || messages.loading, error: [current.error, messages.error].filter(Boolean).join(" ") || null, notice, retry,
     hasMoreMessages: messages.hasMore, loadMoreMessages: messages.loadMore, loadingMoreMessages: messages.loadingMore, messagePageCount: messages.pageCount };
 }

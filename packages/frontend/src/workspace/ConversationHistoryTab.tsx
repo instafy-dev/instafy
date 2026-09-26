@@ -1,5 +1,8 @@
-import { useEffect, useMemo, useRef, useState } from "react";
-import { Check, Filter, Lock, MoreHoriz, Pin, Plus, Trash, Xmark } from "iconoir-react";
+import { useStudioListScrollIdentity, useStudioListState } from "../navigation/StudioListNavigation";
+import { StudioPanelScrollContainer } from "../navigation/StudioPanelScrollContainer";
+import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { flushSync } from "react-dom";
+import { Check, Filter, Lock, MoreHoriz, Pin, Plus, Search, Trash, Xmark } from "iconoir-react";
 import { MenuTrigger } from "react-aria-components";
 import { IconButton } from "../components/Button";
 import { EntityRow } from "../components/EntityRow";
@@ -27,11 +30,13 @@ import { DrawerHeader } from "../components/DrawerHeader";
 import { SearchInput } from "../components/SearchInput";
 
 export interface ConversationHistoryTabProps {
+  renderMobileHeader?: (header: { title: string; actions: ReactNode }) => ReactNode;
   onRequestClose?: () => void;
   onStartNewConversation?: () => void;
 }
 
 export function ConversationHistoryTab({
+  renderMobileHeader,
   onRequestClose,
   onStartNewConversation,
 }: ConversationHistoryTabProps = {}) {
@@ -46,10 +51,33 @@ export function ConversationHistoryTab({
   const { showStatus } = useStatus();
   const isLargeScreen = useStudioDesktopLayout();
   const compactDrawer = isLargeScreen;
-  const [query, setQuery] = useState("");
-  const [filter, setFilter] = useState<ConversationLifecycleStatus>("active");
+  const scrollIdentity = useStudioListScrollIdentity("chats");
+  const [query, setQuery] = useStudioListState("chat-query", "", !isLargeScreen);
+  const [filter, setFilter] = useStudioListState<ConversationLifecycleStatus>("chat-filter", "active", !isLargeScreen);
   const [filterMenuOpen, setFilterMenuOpen] = useState(false);
-  const [expanded, setExpanded] = useState<Record<string, boolean>>({});
+  const [mobileSearchOpen, setMobileSearchOpen] = useState(false);
+  const searchInputRef = useRef<HTMLInputElement | null>(null);
+  const searchToggleRef = useRef<HTMLButtonElement | null>(null);
+  // A restored query must never filter the list behind a collapsed control.
+  const showSearch = isLargeScreen || mobileSearchOpen || query.length > 0;
+  const searchToggleLabel = showSearch
+    ? query.length > 0 ? "Clear and close name filter" : "Close name filter"
+    : "Filter chats by name";
+  const closeMobileSearch = () => {
+    setQuery("");
+    setMobileSearchOpen(false);
+    searchToggleRef.current?.focus();
+  };
+  const toggleMobileSearch = () => {
+    if (showSearch) {
+      closeMobileSearch();
+      return;
+    }
+    // Mount and focus during the tap so native keyboards can open immediately.
+    flushSync(() => setMobileSearchOpen(true));
+    searchInputRef.current?.focus({ preventScroll: true });
+  };
+  const [expanded, setExpanded] = useStudioListState<Record<string, boolean>>("chat-expanded", {}, !isLargeScreen);
   // Inline rename is only reachable through the row's "…" menu: the edit state
   // borrows the real Input look (border + focus ring) so it reads as editable,
   // while plain selection stays a fill around the complete row — see #139.
@@ -269,7 +297,7 @@ export function ConversationHistoryTab({
 
   const filterOptions = useMemo(
     () => [
-      { value: "active" as const, label: "Active", count: counts.active, title: "All chats" },
+      { value: "active" as const, label: "Active", count: counts.active, title: "Chats" },
       { value: "archived" as const, label: "Archived", count: counts.archived, title: "Archived chats" },
       { value: "hidden" as const, label: "Hidden", count: counts.hidden, title: "Hidden chats" },
       { value: "deleted" as const, label: "Trash", count: counts.deleted, title: "Trash" },
@@ -398,120 +426,157 @@ export function ConversationHistoryTab({
     void commitRename();
   };
 
+  const statusFilterControl = (
+    <MenuTrigger isOpen={filterMenuOpen} onOpenChange={setFilterMenuOpen}>
+      <IconButton
+        variant="ghost"
+        size={compactDrawer ? "sm" : "lg"}
+        radius="lg"
+        aria-label={`Filter chats: ${selectedFilter.label}`}
+        title={`Filter chats: ${selectedFilter.label}`}
+        data-testid="conversation-history-filter"
+        className={`${DRAWER_ICON_BUTTON_TONE_CLASS} ${isLargeScreen ? "" : "!h-11 !w-11"}`}
+      >
+        <span className="relative h-4 w-4">
+          <Filter className="h-4 w-4" aria-hidden="true" />
+          {hasStatusFilter ? (
+            <span
+              aria-hidden="true"
+              data-testid="conversation-history-filter-indicator"
+              className="absolute -right-1 -top-1 h-1.5 w-1.5 rounded-full bg-primary-500"
+            />
+          ) : null}
+        </span>
+      </IconButton>
+      <StudioPopover placement="bottom end" offset={6} className="w-48 p-1">
+        <StudioMenu
+          aria-label="Chat status"
+          selectionMode="single"
+          selectedKeys={new Set([filter])}
+          onAction={(key) => {
+            const selected = filterOptions.find((option) => option.value === key);
+            if (selected) {
+              setFilter(selected.value);
+            }
+            setFilterMenuOpen(false);
+          }}
+        >
+          {filterOptions.map((option) => (
+            <StudioMenuItem
+              key={option.value}
+              id={option.value}
+              textValue={`${option.label} (${option.count})`}
+              className="pointer-coarse:min-h-11"
+            >
+              <MenuItemContent end={option.value === filter ? <Check aria-hidden="true" /> : undefined}>
+                {option.label} ({option.count})
+              </MenuItemContent>
+            </StudioMenuItem>
+          ))}
+        </StudioMenu>
+      </StudioPopover>
+    </MenuTrigger>
+  );
+
+  const headerActions = (
+    <>
+      {!isLargeScreen ? <>
+        <IconButton
+          ref={searchToggleRef}
+          variant={showSearch ? "secondary" : "ghost"}
+          size="lg"
+          radius="full"
+          aria-label={searchToggleLabel}
+          title={searchToggleLabel}
+          aria-expanded={showSearch}
+          aria-controls={showSearch ? "conversation-history-search" : undefined}
+          onPress={toggleMobileSearch}
+          data-testid="conversation-history-search-toggle"
+          className={`${DRAWER_ICON_BUTTON_TONE_CLASS} !h-11 !w-11`}
+        >
+          <Search className="h-4 w-4" aria-hidden="true" />
+        </IconButton>
+        {statusFilterControl}
+      </> : null}
+      {onStartNewConversation ? (
+        <IconButton
+          variant="ghost"
+          size={compactDrawer ? "sm" : "lg"}
+          radius="full"
+          aria-label="New chat"
+          title="New chat"
+          onPress={() => {
+            setFilter("active");
+            setQuery("");
+            setMobileSearchOpen(false);
+            onStartNewConversation();
+            if (!isLargeScreen) {
+              onRequestClose?.();
+            }
+          }}
+          data-testid="conversation-history-new-chat"
+          className={`${DRAWER_ICON_BUTTON_TONE_CLASS} ${isLargeScreen ? "" : "!h-11 !w-11"}`}
+        >
+          <Plus className="h-4 w-4" aria-hidden="true" />
+        </IconButton>
+      ) : null}
+      {isLargeScreen && onRequestClose ? (
+        <IconButton
+          variant="ghost"
+          size={compactDrawer ? "sm" : "lg"}
+          radius="full"
+          aria-label="Close chat history"
+          title="Close chat history"
+          onPress={onRequestClose}
+          data-testid="conversation-history-close"
+          className={DRAWER_ICON_BUTTON_TONE_CLASS}
+        >
+          <Xmark className="h-4 w-4" aria-hidden="true" />
+        </IconButton>
+      ) : null}
+    </>
+  );
+  const mobileTitle = filter === "active" ? "Chats" : selectedFilter.label;
+  const mobileHeader = !isLargeScreen && renderMobileHeader
+    ? renderMobileHeader({ title: mobileTitle, actions: headerActions })
+    : null;
+
   return (
     <div className="flex h-full min-h-0 min-w-0 flex-col" data-testid="conversation-history-panel">
-      <div className={`shrink-0 border-b border-slate-200/70 pb-3 ${DARK_DIVIDER_BORDER_CLASS}`}>
-        <DrawerHeader
-          title={selectedFilter.title}
+      <div className={`shrink-0 ${!mobileHeader || showSearch ? `border-b border-slate-200/70 ${DARK_DIVIDER_BORDER_CLASS}` : ""} ${showSearch ? "pb-3" : ""}`}>
+        {mobileHeader ?? <DrawerHeader
+          title={isLargeScreen ? selectedFilter.title : mobileTitle}
           titleAs="h2"
           frame="rail"
-          actions={
-            <>
-              {onStartNewConversation ? (
-                <IconButton
-                  variant="ghost"
-                  size={compactDrawer ? "sm" : "lg"}
-                  radius="full"
-                  aria-label="New chat"
-                  title="New chat"
-                  onPress={() => {
-                    setFilter("active");
-                    setQuery("");
-                    onStartNewConversation();
-                    if (!isLargeScreen) {
-                      onRequestClose?.();
-                    }
-                  }}
-                  data-testid="conversation-history-new-chat"
-                  className={DRAWER_ICON_BUTTON_TONE_CLASS}
-                >
-                  <Plus className="h-4 w-4" aria-hidden="true" />
-                </IconButton>
-              ) : null}
-              {onRequestClose ? (
-                <IconButton
-                  variant="ghost"
-                  size={compactDrawer ? "sm" : "lg"}
-                  radius="full"
-                  aria-label="Close chat history"
-                  title="Close chat history"
-                  onPress={onRequestClose}
-                  data-testid="conversation-history-close"
-                  className={DRAWER_ICON_BUTTON_TONE_CLASS}
-                >
-                  <Xmark className="h-4 w-4" aria-hidden="true" />
-                </IconButton>
-              ) : null}
-            </>
-          }
-        />
-        <div className="relative mx-4">
+          actions={headerActions}
+        />}
+        {showSearch ? <div className="relative mx-4">
           <SearchInput
+            ref={searchInputRef}
             id="conversation-history-search"
             label="Filter chats by name"
             value={query}
             onChange={(event) => setQuery(event.target.value)}
+            onKeyDown={(event) => {
+              if (!isLargeScreen && event.key === "Escape") {
+                event.preventDefault();
+                event.stopPropagation();
+                closeMobileSearch();
+              }
+            }}
             placeholder="Filter by name"
             size="md"
             radius="xl"
-            className={`pr-12 pointer-coarse:min-h-12 ${compactDrawer ? "min-h-10" : "min-h-12"}`}
+            className={`pointer-coarse:min-h-12 ${compactDrawer ? "pr-12 min-h-10" : "min-h-12"}`}
             data-testid="conversation-history-search"
           />
-          <div className="absolute right-1 top-1/2 -translate-y-1/2">
-            <MenuTrigger isOpen={filterMenuOpen} onOpenChange={setFilterMenuOpen}>
-              <IconButton
-                variant="ghost"
-                size={compactDrawer ? "sm" : "lg"}
-                radius="lg"
-                aria-label={`Filter chats: ${selectedFilter.label}`}
-                title={`Filter chats: ${selectedFilter.label}`}
-                data-testid="conversation-history-filter"
-                className={DRAWER_ICON_BUTTON_TONE_CLASS}
-              >
-                <span className="relative h-4 w-4">
-                  <Filter className="h-4 w-4" aria-hidden="true" />
-                  {hasStatusFilter ? (
-                    <span
-                      aria-hidden="true"
-                      data-testid="conversation-history-filter-indicator"
-                      className="absolute -right-1 -top-1 h-1.5 w-1.5 rounded-full bg-primary-500"
-                    />
-                  ) : null}
-                </span>
-              </IconButton>
-              <StudioPopover placement="bottom end" offset={6} className="w-48 p-1">
-                <StudioMenu
-                  aria-label="Chat status"
-                  selectionMode="single"
-                  selectedKeys={new Set([filter])}
-                  onAction={(key) => {
-                    const selected = filterOptions.find((option) => option.value === key);
-                    if (selected) {
-                      setFilter(selected.value);
-                    }
-                    setFilterMenuOpen(false);
-                  }}
-                >
-                  {filterOptions.map((option) => (
-                    <StudioMenuItem
-                      key={option.value}
-                      id={option.value}
-                      textValue={`${option.label} (${option.count})`}
-                      className="pointer-coarse:min-h-11"
-                    >
-                      <MenuItemContent end={option.value === filter ? <Check aria-hidden="true" /> : undefined}>
-                        {option.label} ({option.count})
-                      </MenuItemContent>
-                    </StudioMenuItem>
-                  ))}
-                </StudioMenu>
-              </StudioPopover>
-            </MenuTrigger>
-          </div>
-        </div>
+          {isLargeScreen ? <div className="absolute right-1 top-1/2 -translate-y-1/2">
+            {statusFilterControl}
+          </div> : null}
+        </div> : null}
       </div>
 
-      <div className="min-h-0 flex-1 overflow-y-auto px-3 py-3">
+      <StudioPanelScrollContainer identity={!isLargeScreen && scrollIdentity ? JSON.stringify([scrollIdentity, query, filter]) : null} ready={!historyPending} className="min-h-0 flex-1 overflow-y-auto px-3 py-3">
         {historyPending ? (
           <div
             className="flex h-full items-center justify-center px-4 py-10"
@@ -739,7 +804,7 @@ export function ConversationHistoryTab({
             })}
           </div>
         )}
-      </div>
+      </StudioPanelScrollContainer>
     </div>
   );
 }

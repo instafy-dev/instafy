@@ -92,6 +92,10 @@ New chat stays available for the active accessible space when another tab, inclu
 Settings, is selected. It is unavailable on Home or when no space in the selected team is active.
 Existing saved collapse preferences are preserved.
 
+Desktop drawer headings such as Chats, Files and Changes use the shared 14px
+medium navigation typography, matching the sidebar labels and workspace tabs.
+Their 48px header frame supplies structure without promoting them to page titles.
+
 Narrow layouts keep Home, the team/space path, Search and the signed-in profile in the context
 header. Home remains available from a workspace, and team/space controls remain available on
 Home. Workspace history, tab selection and secondary actions remain in the working header
@@ -101,6 +105,12 @@ row. Expanded drawers show secondary destinations directly when their measured h
 it. On shorter screens, remaining destinations use an ellipsis-labelled More entry. Directories
 and overflow remain drill-ins with Back, without stacking navigation drawers. Opening navigation does not
 change the page behind it. Team overview/settings do not replace a space's remembered work.
+
+On narrow layouts the working header owns the page title. Home and management pages omit
+the repeated title in their content; sections, team filters, scope labels and page actions
+remain visible. Files and Changes retain their action toolbar without another copy of the
+title. Desktop panels and standalone panels keep their own headings. The mobile header
+provides a semantic page heading for assistive technology.
 
 Navigation uses a solid warm off-white surface in light mode and the dark rail
 surface in dark mode. The drawer and its team/space directory or More view keep

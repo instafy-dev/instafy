@@ -102,6 +102,7 @@ type ChatComposerSurfaceProps = {
   providerTriggerNoticeProps: ComponentProps<typeof ProviderTriggerNotice> | null;
   showComposerNavigationButton: boolean;
   composerNavigationDestination?: "drawer" | "chats";
+  composerNavigationLabel?: string;
   onOpenNavigation: () => void;
   homeAttentionCount: number;
   homeAttentionBadge: string;
@@ -239,6 +240,7 @@ export function ChatComposerSurface({
   providerTriggerNoticeProps,
   showComposerNavigationButton,
   composerNavigationDestination = "drawer",
+  composerNavigationLabel = "Back to chats",
   onOpenNavigation,
   homeAttentionCount,
   homeAttentionBadge,
@@ -869,8 +871,8 @@ export function ChatComposerSurface({
       variant="ghost"
       size="md"
       radius="xl"
-      aria-label={mobileChatsNavigation ? "Back to chats" : "Open navigation and recent chats"}
-      title={mobileChatsNavigation ? "Back to chats" : "Open navigation and recent chats"}
+      aria-label={mobileChatsNavigation ? composerNavigationLabel : "Open navigation and recent chats"}
+      title={mobileChatsNavigation ? composerNavigationLabel : "Open navigation and recent chats"}
       aria-haspopup={mobileChatsNavigation ? undefined : "dialog"}
       data-testid="chat-composer-navigation-button"
       className={composerGhostActionClass}

@@ -768,7 +768,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
   const handleBackToChat = useCallback(() => {
     setBrowserSubtab("chat");
   }, [setBrowserSubtab]);
-  const { onOpenProjectSettings, onOpenChatNavigation, homeAttentionCount = 0 } = useWorkspaceControls();
+  const { onOpenProjectSettings, onOpenChatNavigation, chatNavigationLabel, homeAttentionCount = 0 } = useWorkspaceControls();
   const activeConversationEntry = useMemo(() => {
     if (!activeConversationId) {
       return null;
@@ -6169,6 +6169,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
         providerTriggerNoticeProps={providerTriggerNoticeProps}
         showComposerNavigationButton={showComposerNavigationButton && Boolean(onOpenChatNavigation)}
         composerNavigationDestination={touchLikeInput ? "chats" : "drawer"}
+        composerNavigationLabel={chatNavigationLabel}
         onOpenNavigation={() => onOpenChatNavigation?.()}
         homeAttentionCount={homeAttentionCount}
         homeAttentionBadge={homeAttentionBadge}

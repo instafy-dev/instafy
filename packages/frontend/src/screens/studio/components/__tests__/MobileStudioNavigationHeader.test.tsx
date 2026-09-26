@@ -93,6 +93,7 @@ describe("MobileStudioNavigationHeader", () => {
     expect(picker.getAttribute("aria-haspopup")).toBe("dialog");
     expect(picker.getAttribute("aria-expanded")).toBe("false");
     expect(query("mobile-header-title")?.textContent).toBe(props.title);
+    expect(query("mobile-header-title")?.tagName).toBe("H1");
     expect(query("mobile-header-space")?.textContent).toBe(props.spaceName);
     expect(query("mobile-header-title")?.classList.contains("truncate")).toBe(true);
     expect(query("mobile-header-space")?.classList.contains("truncate")).toBe(true);

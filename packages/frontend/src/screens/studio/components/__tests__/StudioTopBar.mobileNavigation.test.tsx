@@ -112,6 +112,25 @@ describe("StudioTopBar mobile navigation integration", () => {
     expect(query("studio-mobile-history-bar")).toBeNull();
   });
 
+  it.each([true, false])("uses page tools and a single title with history in More (touch=%s)", async touch => {
+    mocks.posture.mockReturnValue({ isLargeScreen: false, showTouchBottomDock: touch });
+    mocks.controls.mockReturnValue({ ...mocks.controls(), topbarLocationOverride: { title: "Chats", icon: <svg data-testid="chats-icon" /> } });
+    props.contextHeaderAbove = true;
+    props.mobileNavigation!.history.canGoBack = true;
+    props.mobilePageHeader = { title: "Archived chats", actions: <button data-testid="page-search">Search</button> };
+    await render();
+    expect(query("mobile-header-title")?.textContent).toBe("Archived chats");
+    expect(query("mobile-header-location-icon")).toBeNull();
+    expect(query("mobile-header-space")).toBeNull();
+    expect(query("mobile-header-primary-actions")?.contains(query("page-search"))).toBe(true);
+    expect(query("mobile-history-controls")).toBeNull();
+    await click("mobile-header-more");
+    expect(query("mobile-header-actions")?.contains(query("mobile-history-controls"))).toBe(true);
+    await click("mobile-header-back");
+    expect(props.mobileNavigation!.history.goBack).toHaveBeenCalledOnce();
+    expect(query("mobile-header-actions")).toBeNull();
+  });
+
   it.each([true, false])("omits the repeated space label beneath a context header while preserving navigation (touch=%s)", async touch => {
     props.contextHeaderAbove = true;
     props.mobileNavigation!.history.canGoBack = true;

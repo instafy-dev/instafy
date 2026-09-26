@@ -1,5 +1,6 @@
+import { useId, useState } from "react";
 import { SpaceIdentity } from "../../../components/SpaceIdentity";
-import { Check, Plus, Search, Settings } from "iconoir-react";
+import { Check, Group, Plus, Search, Settings } from "iconoir-react";
 import { Button, IconButton } from "../../../components/Button";
 import { MenuItemContent } from "../../../components/MenuItemContent";
 import { SearchInput } from "../../../components/SearchInput";
@@ -60,6 +61,7 @@ type StudioSidebarWorkspaceSwitcherProps = {
   onRetryProjects?: () => void;
   onWorkspaceOrgChange: (orgKey: string) => void;
   onOpenOrgSettings?: () => void;
+  onOpenOrgOverview?: () => void;
   onCreateOrg?: () => void;
   canSearchSpaces: boolean;
   showProjectSearch: boolean;
@@ -94,6 +96,7 @@ export function StudioSidebarWorkspaceSwitcher({
   onRetryProjects,
   onWorkspaceOrgChange,
   onOpenOrgSettings,
+  onOpenOrgOverview,
   onCreateOrg,
   canSearchSpaces,
   showProjectSearch,
@@ -109,6 +112,9 @@ export function StudioSidebarWorkspaceSwitcher({
   projectAttentionCounts = {},
   orgAttentionCounts = {},
 }: StudioSidebarWorkspaceSwitcherProps) {
+  const [teamQuery, setTeamQuery] = useState("");
+  const teamSearchId = useId();
+  const visibleTeams = orgOptions.filter(org => `${org.name} ${org.slug ?? ""}`.toLocaleLowerCase().includes(teamQuery.trim().toLocaleLowerCase()));
   useStudioPerformanceContent({
     projectId: null,
     organizationId: pendingOrgKey === "personal" ? null : pendingOrgKey,
@@ -234,6 +240,7 @@ export function StudioSidebarWorkspaceSwitcher({
         headerClassName="pr-0"
         actions={
           <div className="flex items-center gap-1">
+            {onOpenOrgOverview ? <IconButton variant="ghost" size="sm" radius="full" aria-label="Team overview" data-testid="sidebar-org-overview-button" onPress={onOpenOrgOverview} className={WORKSPACE_SWITCHER_ACTION_BUTTON_CLASS}><Group className={WORKSPACE_SWITCHER_ACTION_ICON_CLASS} aria-hidden="true" /></IconButton> : null}
             <IconButton
               variant="ghost"
               size="sm"
@@ -265,7 +272,9 @@ export function StudioSidebarWorkspaceSwitcher({
         }
       >
         <div className="mt-2 space-y-1" data-testid="sidebar-org-selector">
-          {orgOptions.map(renderTeamRow)}
+          {orgOptions.length > 5 ? <SearchInput id={teamSearchId} inputTestId="sidebar-team-search" label="Find a team" placeholder="Find a team" value={teamQuery} onChange={event => setTeamQuery(event.target.value)} /> : null}
+          {visibleTeams.map(renderTeamRow)}
+          {!visibleTeams.length ? <Text variant="caption">No matching teams.</Text> : null}
         </div>
       </SidebarMenuSection> : null}
 

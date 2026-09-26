@@ -119,7 +119,6 @@ describe("StudioSidebar navigation ownership", () => {
   }
   async function openTeamPicker() {
     await click("sidebar-team-menu-trigger");
-    await click("sidebar-team-menu-switch");
     expect(document.querySelector('[data-testid="sidebar-team-menu"]')).toBeNull();
   }
   async function settle(assertion: () => void) {

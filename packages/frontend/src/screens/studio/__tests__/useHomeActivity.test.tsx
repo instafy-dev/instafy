@@ -33,12 +33,12 @@ describe("useHomeActivity", () => {
   let container: HTMLDivElement;
   let current: ReturnType<typeof useHomeActivity>;
 
-  function Harness({ userId, shouldMarkSeen }: { userId: string | null; shouldMarkSeen: boolean }) {
-    current = useHomeActivity(userId, 2, shouldMarkSeen);
+  function Harness({ userId, shouldMarkSeen, restorePages }: { userId: string | null; shouldMarkSeen: boolean; restorePages: number }) {
+    current = useHomeActivity(userId, 2, shouldMarkSeen, restorePages);
     return <div>{current.activityItems.map((entry) => entry.id).join(",")}</div>;
   }
-  const render = async (userId: string | null = "user-a", shouldMarkSeen = true) => {
-    await act(async () => root.render(<Harness userId={userId} shouldMarkSeen={shouldMarkSeen} />));
+  const render = async (userId: string | null = "user-a", shouldMarkSeen = true, restorePages = 1) => {
+    await act(async () => root.render(<Harness userId={userId} shouldMarkSeen={shouldMarkSeen} restorePages={restorePages} />));
   };
   const tick = async () => { await act(async () => { await vi.advanceTimersByTimeAsync(20_000); }); };
   const loadMore = async () => {
@@ -75,6 +75,20 @@ describe("useHomeActivity", () => {
     expect(list).toHaveBeenLastCalledWith({ before: "11", limit: 2 });
     expect(current.activityItems.filter((entry) => entry.org?.id === "other-team")).toHaveLength(1);
     expect(current.activityHasMore).toBe(false);
+  });
+
+  it("re-reads saved Home pages with current permissions instead of restoring cached rows", async () => {
+    list.mockResolvedValueOnce(page(["20"], { hasMore: true, nextBefore: "20" }));
+    list.mockResolvedValueOnce(page(["18"], { hasMore: true, nextBefore: "18" }));
+    list.mockResolvedValueOnce(page(["16"]));
+    await render("user-a", true, 3);
+    expect(list.mock.calls.map(([params]) => params)).toEqual([{ limit: 4 }, { before: "20", limit: 2 }, { before: "18", limit: 2 }]);
+    expect(current.activityPages).toBe(3);
+    expect(current.activityItems.map(entry => entry.id)).toEqual(["20", "18", "16"]);
+    list.mockResolvedValueOnce(page(["9"]));
+    await render("user-b", true, 3);
+    expect(current.activityItems.map(entry => entry.id)).toEqual(["9"]);
+    expect(current.activityPages).toBe(1);
   });
 
   it("guards repeated pagination clicks and retains a failed page for retry", async () => {

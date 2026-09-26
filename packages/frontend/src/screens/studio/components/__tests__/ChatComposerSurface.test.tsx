@@ -742,6 +742,15 @@ describe("ChatComposerSurface", () => {
     expect(onSubmit).not.toHaveBeenCalled();
   });
 
+  it.each(["Back to Home", "Back to results"])("names the actual return destination %s without adding visible text", async label => {
+    await act(async () => renderLayout({ showComposerNavigationButton: true, composerNavigationDestination: "chats", composerNavigationLabel: label }));
+    const button = layoutNodes().navigation!;
+    expect(button.getAttribute("aria-label")).toBe(label);
+    expect(button.getAttribute("title")).toBe(label);
+    expect(button.textContent).toBe("");
+    expect(layoutNodes().leading?.firstElementChild).toBe(button);
+  });
+
   it("omits composer navigation when the wide sidebar owns switching", async () => {
     await act(async () => renderLayout({ showComposerNavigationButton: false }));
     expect(layoutNodes().navigation).toBeNull();

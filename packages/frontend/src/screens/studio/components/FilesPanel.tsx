@@ -9,6 +9,7 @@ import { Button, IconButton } from "../../../components/Button";
 import { Card } from "../../../components/Card";
 import { DRAWER_ICON_BUTTON_TONE_CLASS, LIST_ROW_SURFACE_BASE, LIST_ROW_FOCUS_RING, listRowSurfaceToneClassName } from "../../../components/listRowStyles";
 import { DrawerHeader } from "../../../components/DrawerHeader";
+import { usePageTitleInNavigation } from "../../../components/PageTitleContext";
 import { Heading } from "../../../components/Heading";
 import { MarkdownPreview } from "../../../components/MarkdownPreview";
 import { type MarkdownOutlineItem } from "../../../components/markdownOutline";
@@ -471,6 +472,7 @@ export function FilesPanel({
   const { openFileTab, openPanelTab, requestUrlPush } = useWorkspaceTabs();
   const isLargeScreen = useStudioDesktopLayout();
   const touchExplorer = useTouchLikeInput() && !isLargeScreen;
+  const titleInNavigation = usePageTitleInNavigation("Files");
   const { resolvedTheme } = useTheme();
   const [rootPath, setRootPath] = useState<string>(() => normalizePath(initialRootPath ?? ""));
   const [fileViewerReturnTarget, setFileViewerReturnTarget] = useState<"assistant" | null>(null);
@@ -1627,6 +1629,8 @@ export function FilesPanel({
     >
       <DrawerHeader
         title="Files"
+        pageTitle
+        subtitle={touchExplorer && titleInNavigation ? fileExplorerSubtitle : undefined}
         frame="rail"
         className="-mx-4"
         actions={
@@ -1693,7 +1697,7 @@ export function FilesPanel({
           </>
         }
       />
-      {touchExplorer ? (
+      {touchExplorer && !titleInNavigation ? (
         <Text variant="caption" tone="muted" className="mb-2 truncate">{fileExplorerSubtitle}</Text>
       ) : null}
       {showBreadcrumbs ? (

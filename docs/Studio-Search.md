@@ -1,6 +1,9 @@
 # Studio search
 
-The header search field searches within the selected space. Removing the space
+The header search field searches within the selected space when opened from a
+chat. On Home, it follows the Home filter: **All teams** starts across all
+organizations, and a selected team starts within that team, without a space
+restriction. The retained chat breadcrumb does not limit Home search. Removing the space
 chip broadens the query to its organization; removing the organization chip
 searches all accessible organizations and Personal spaces. Backspace removes
 the last scope chip when the query is empty.
@@ -19,12 +22,30 @@ their latest message time, falling back to the chat's update or creation time.
 Files, settings and actions keep their navigation order; there is no relevance
 ranking yet.
 
-The **All chats** drawer is for browsing and managing chats in the current space.
+The **Chats** drawer is for browsing and managing chats in the current space.
+The team/space breadcrumb supplies the scope on every screen size.
 Its **Filter by name** field filters the loaded chat titles, retaining thread
 context; it does not search message contents. The status menu switches between
 Active, Archived, Hidden and Trash. This filter stays separate from the header
 search so the list can be narrowed without leaving it. Use the header search to
 find words inside messages or search across spaces.
+
+On mobile, one **Chats** navigation header contains the search icon, status filter
+and New chat action, with no repeated page heading below it. Selecting Archived, Hidden or Trash
+updates that same heading. General Back/Forward controls remain available in
+**More** to leave room for the page actions. Opening search focuses an inline
+field below the header. Closing the name filter
+clears the query; Escape does the same and returns focus to the search icon.
+Returning from a chat restores an active name filter visibly without focusing
+the field or reopening the keyboard. The mobile Chats page has no drawer Close
+button; use navigation Back, the bottom destinations or a chat row. Desktop keeps
+the persistent filter field and drawer Close button.
+
+Chat-title discovery reads up to 200 recent titles per space, initially covering
+40 accessible spaces. **Search more spaces** reads the next group of spaces;
+already loaded spaces are retained until scope, account or access changes.
+The remaining-space count makes this partial coverage explicit. Message search
+already covers the complete selected scope and has its own result pagination.
 
 Each message result shows its chat, organization/space, role, date and a plain-text
 excerpt with highlighted matches. Selecting it opens a contiguous history window
@@ -46,6 +67,25 @@ used on Home, account settings and the search results screen.
 Tab switching and other secondary actions are available in **More**. Drawer dismissal and parent conversation navigation
 remain separate actions. Org and space transitions preserve the last resolved
 history controls while the route catches up, without accepting stale actions.
+
+On touch layouts the icon-only arrow in the composer returns directly to the
+originating Home, Chats or search-results visit. A direct chat entry falls back
+to that space's Chats list. Its accessible name describes the destination.
+This does not replace general history Back/Forward in More, or change the
+single-row composer. Home's team filter, expanded unread lane, loaded activity
+page count and visible-row count belong to the originating visit; Chats retains
+its name/status filters. Their scroll positions are restored on return. Saved
+list coordinates contain no fetched content, are isolated to the account, and
+are cleared on reload; returning refetches authorized content.
+
+The mobile team avatar opens the team list directly. Current-team and unread
+indicators remain in the list, with team overview and settings beside its
+heading. Accounts with more than five teams can search the list by name or slug.
+Home's compact **Recent chats** shortcuts follow chats opened during the
+current Studio session, across teams, with team/space labels. They resolve
+against freshly loaded Home activity, so deleted or inaccessible cached names
+are not resurrected; older chats outside that activity remain discoverable via
+Chats and search. The shortcuts follow Home's selected team filter.
 
 Scrolling down near the end of a historical message window automatically loads
 the next page while preserving the reading position. Search-result reveals and

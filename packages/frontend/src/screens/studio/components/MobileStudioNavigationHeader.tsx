@@ -13,6 +13,7 @@ export interface MobileStudioNavigationHeaderProps {
   historyInMenu?: boolean;
   title: string;
   titleIcon?: ReactNode;
+  primaryActions?: ReactNode;
   spaceName: string;
   showSpaceName?: boolean;
   onOpenPicker: () => void;
@@ -30,11 +31,12 @@ const TOUCH_TARGET = "!min-h-12 !min-w-12";
 /** Compact navigation uses the history owner supplied by Studio, never a second
  * history stack. Secondary actions keep the existing shared popover controls. */
 export function MobileStudioNavigationHeader({
-  history, historyInMenu = false, title, titleIcon, spaceName, showSpaceName = true, onOpenPicker,
+  history, historyInMenu = false, title, titleIcon, primaryActions, spaceName, showSpaceName = true, onOpenPicker,
   sidebarOpen = false, onOpenSettings,
   onNewChat, onNewPrivateChat, parentConversation, tabsAction, onMoreOpenChange,
 }: MobileStudioNavigationHeaderProps) {
   const [moreOpen, setMoreOpen] = useState(false);
+  const historyInOverflow = historyInMenu || Boolean(primaryActions);
   const changeMoreOpen = (open: boolean) => {
     setMoreOpen(open);
     onMoreOpenChange?.(open);
@@ -61,14 +63,15 @@ export function MobileStudioNavigationHeader({
           ? <SidebarCollapse className="h-[18px] w-[18px]" aria-hidden="true" />
           : <SidebarExpand className="h-[18px] w-[18px]" aria-hidden="true" />}
       </Button>
-      {!historyInMenu ? <MobileStudioHistoryControls history={history} /> : null}
+      {!historyInOverflow ? <MobileStudioHistoryControls history={history} /> : null}
       <div className="flex min-w-0 flex-1 items-center gap-2 px-1" data-testid="mobile-header-location">
         {titleIcon ? <span className="shrink-0 text-slate-500 dark:text-slate-400 [&_svg]:h-[18px] [&_svg]:w-[18px]" aria-hidden="true" data-testid="mobile-header-location-icon">{titleIcon}</span> : null}
-        <span className="min-w-0 flex-1">
-          <span className="block truncate text-sm font-semibold" data-testid="mobile-header-title">{title}</span>
+        <div className="min-w-0 flex-1">
+          <h1 className="block truncate text-sm font-semibold" data-testid="mobile-header-title">{title}</h1>
           {showSpaceName ? <span className="block truncate text-xs font-normal text-slate-600 dark:text-slate-400" data-testid="mobile-header-space">{spaceName}</span> : null}
-        </span>
+        </div>
       </div>
+      {primaryActions ? <div className="flex shrink-0 items-center" data-testid="mobile-header-primary-actions">{primaryActions}</div> : null}
       <DialogTrigger isOpen={moreOpen} onOpenChange={changeMoreOpen}>
         <IconButton
           variant="ghost"
@@ -81,7 +84,7 @@ export function MobileStudioNavigationHeader({
         </IconButton>
         <StudioDialogPopover placement="bottom end" offset={4} className="w-72 max-w-[calc(100vw-1.5rem)] p-2" data-testid="mobile-header-actions">
           <div className="flex flex-col gap-1">
-            {historyInMenu ? <MobileStudioHistoryControls history={history} onNavigate={() => changeMoreOpen(false)} /> : null}
+            {historyInOverflow ? <MobileStudioHistoryControls history={history} onNavigate={() => changeMoreOpen(false)} /> : null}
             {onNewChat ? <EntityRow title="Public chat" surface="interactive" pressable className={TOUCH_TARGET}
               start={<ChatLines className="h-5 w-5" aria-hidden="true" />} onPress={() => actAndClose(onNewChat)} data-testid="chat-new-chat-public" /> : null}
             {onNewPrivateChat ? <EntityRow title="Private chat" surface="interactive" pressable className={TOUCH_TARGET}

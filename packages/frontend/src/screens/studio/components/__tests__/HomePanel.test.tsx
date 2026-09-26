@@ -10,9 +10,11 @@ import type { ActivityItem } from "../../../../services/runtimeController/activi
 import type { ProductNotification } from "../../../../notifications/notificationContract";
 import type { HomeNotifications } from "../../../../notifications/useNotificationCenter";
 import { HomePanel } from "../HomePanel";
+import { PageTitleInNavigationContext } from "../../../../components/PageTitleContext";
 
 const mocks = vi.hoisted(() => ({
   activity: {
+    activityPages: 1,
     activityItems: [] as ActivityItem[],
     activityLoading: false,
     activityLoadingMore: false,
@@ -24,6 +26,7 @@ const mocks = vi.hoisted(() => ({
   },
   conversations: [] as ConversationState[],
   userId: "viewer",
+  recentChatKeys: [] as string[],
   accessToken: "viewer-token",
   activeProjectId: "project-personal",
   projects: [] as Array<{ id: string; name: string; orgId: string | null; orgName: string }>,
@@ -40,6 +43,10 @@ const mocks = vi.hoisted(() => ({
 }));
 
 vi.mock("../../useHomeActivity", () => ({ useHomeActivity: () => mocks.activity }));
+vi.mock("../../../../navigation/StudioListNavigation", async (original) => ({
+  ...await original<typeof import("../../../../navigation/StudioListNavigation")>(),
+  useStudioRecentChatKeys: () => mocks.recentChatKeys,
+}));
 vi.mock("../../useStudioDesktopLayout", () => ({ useStudioDesktopLayout: () => false }));
 vi.mock("react-router-dom", async (importOriginal) => ({
   ...await importOriginal<typeof import("react-router-dom")>(),
@@ -174,12 +181,40 @@ describe("HomePanel activity states", () => {
     mocks.acknowledgeInbox.mockImplementation(async ({ notificationIds = [] }: { notificationIds?: string[] }) => ({ success: true, inboxAcknowledged: true, acknowledgedNotificationIds: notificationIds }));
     mocks.conversations = [];
     mocks.userId = "viewer";
+    mocks.recentChatKeys = [];
     mocks.accessToken = "viewer-token";
     mocks.activeProjectId = "project-personal";
     mocks.projects = [{ id: "project-personal", name: "My space", orgId: null, orgName: "Personal" }];
     container = document.createElement("div");
     document.body.appendChild(container);
     root = createRoot(container);
+  });
+
+  it("offers distinct cross-team recent chats and opens their canonical destination", async () => {
+    mocks.recentChatKeys = [JSON.stringify(["project-personal", "conversation-recent"]), JSON.stringify(["other-space", "other-chat"])];
+    mocks.activity.activityItems = [activityItem(), activityItem({
+      id: "19", project: { id: "other-space", name: "Design space" },
+      org: { id: "team-design", name: "Design review" },
+      conversation: { id: "other-chat", title: "Recent work", visibility: "public", threadKind: null },
+    })];
+    await render();
+    const recent = query("home-recent-chats")!;
+    expect(recent.textContent).toContain("Personal · My space");
+    expect(recent.textContent).toContain("Design review · Design space");
+    expect(recent.querySelectorAll("button")).toHaveLength(2);
+    await act(async () => (recent.querySelectorAll("button")[1] as HTMLButtonElement).click());
+    expect(mocks.navigate).toHaveBeenLastCalledWith(expect.objectContaining({ search: expect.stringContaining("projectId=other-space") }), expect.anything());
+    expect(mocks.navigate.mock.lastCall?.[0].search).toContain("conversationControllerId=other-chat");
+    await act(async () => (query("home-team-chip-team-design") as HTMLButtonElement).click());
+    expect(query("home-recent-chats")?.textContent).not.toContain("My space");
+  });
+
+  it("does not recreate a removed team's filter from cached space metadata", async () => {
+    mocks.projects.push({ id: "old-space", orgId: "removed-team", orgName: "Former team", name: "Old space" });
+    mocks.activity.activityItems = [activityItem()];
+    await render();
+    expect(query("home-team-chip-removed-team")).toBeNull();
+    expect(query("home-team-chip-team-design")).not.toBeNull();
   });
 
   afterEach(async () => {
@@ -189,9 +224,26 @@ describe("HomePanel activity states", () => {
     delete (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT;
   });
 
-  async function render(props: ComponentProps<typeof HomePanel> = {}) {
-    await act(async () => root.render(<BrowserRouter><HomePanel {...props} /></BrowserRouter>));
+  async function render(props: ComponentProps<typeof HomePanel> = {}, titleInNavigation = false) {
+    await act(async () => root.render(<BrowserRouter><PageTitleInNavigationContext.Provider value={titleInNavigation ? "Home" : null}>
+      <HomePanel {...props} />
+    </PageTitleInNavigationContext.Provider></BrowserRouter>));
   }
+
+  it("removes the repeated mobile Home row but keeps feed sections and team filters", async () => {
+    mocks.organizations.mockResolvedValue([]);
+    mocks.activity.activityItems = [activityItem()];
+    await render({}, true);
+    expect(query("home-panel")?.querySelector("header")).toBeNull();
+    expect(container.textContent).toContain("Recent activity");
+    await render({}, false);
+    expect(query("home-panel")?.querySelector("header")?.textContent).toBe("Home");
+
+    mocks.activity.activityItems.push(activityItem({ id: "other", project: { id: "other-space", name: "Design" }, org: { id: "team-design", name: "Design review" } }));
+    await render({}, true);
+    expect(query("home-team-filters")).not.toBeNull();
+    expect(query("home-team-filters")?.textContent).toContain("All teams");
+  });
 
   function query<T extends HTMLElement = HTMLElement>(testId: string): T | null {
     return container.querySelector<T>(`[data-testid="${testId}"]`);
