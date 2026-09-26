@@ -4,6 +4,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
+import vm from "node:vm";
 
 const source = fs.readFileSync(new URL("../.github/workflows/continuous-image-publication.yml", import.meta.url), "utf8");
 const sha = "a".repeat(40);
@@ -155,6 +156,60 @@ test("a Build completion for a commit main has moved past yields without error",
   const manual = run(steps.source, {}, {
     GITHUB_EVENT_NAME: "workflow_dispatch", REQUESTED_COMMIT: sha, GITHUB_SHA: "b".repeat(40) });
   assert.notEqual(manual.status, 0);
+});
+// Evaluates a workflow expression the way Actions does for these operators:
+// literal string comparisons are case-insensitive. No general evaluator is
+// claimed; the expressions under test use only ==, !=, &&, ||, ! and format().
+function evaluate(expression, github) {
+  const equal = (a, b) => typeof a === "string" && typeof b === "string" ? a.toLowerCase() === b.toLowerCase() : a === b;
+  const js = expression.trim().replace(/^\$\{\{\s*|\s*\}\}$/gu, "")
+    .replace(/(github\.[\w.]+) (==|!=) ('[^']*')/gu, (_, left, op, right) => `${op === "!=" ? "!" : ""}actionsEqual(${left}, ${right})`);
+  assert.doesNotMatch(js, /[!=]=/u);
+  return vm.runInNewContext(js, { github, actionsEqual: equal,
+    format: (template, ...values) => template.replace(/\{(\d+)\}/gu, (_, index) => String(values[index])) }, { timeout: 1000 });
+}
+function folded(block) { return block.split("\n").map((line) => line.trim()).join(" "); }
+const jobGuard = folded(source.slice(source.indexOf("    if: >-\n") + 11, source.indexOf("    runs-on:")));
+const groupExpression = folded(source.slice(source.indexOf("  group: >-\n") + 12, source.indexOf("  cancel-in-progress: false")));
+const qualifying = { event: "push", conclusion: "success", head_branch: "main", path: ".github/workflows/build.yml",
+  repository: { full_name: "instafy-dev/instafy" }, head_repository: { full_name: "instafy-dev/instafy" } };
+const completion = (changes = {}) => ({ repository: "instafy-dev/instafy", ref: "refs/heads/main", run_id: "9",
+  event_name: "workflow_run", event: { workflow_run: { ...qualifying, ...changes } } });
+const disqualified = {
+  "fork pull request from a branch named main": { event: "pull_request", head_repository: { full_name: "attacker/instafy" } },
+  "same-repository pull request Build": { event: "pull_request" },
+  "failed Build": { conclusion: "failure" },
+  "cancelled Build": { conclusion: "cancelled" },
+  "manually dispatched Build": { event: "workflow_dispatch" },
+  "Build of another branch": { head_branch: "release" },
+  "another workflow": { path: ".github/workflows/other.yml" },
+  "foreign head repository": { head_repository: { full_name: "attacker/instafy" } },
+  "foreign repository": { repository: { full_name: "attacker/instafy" } },
+};
+test("the job guard admits only the exact successful protected-main push Build, evaluated", () => {
+  assert.equal(evaluate(jobGuard, completion()), true);
+  for (const [label, changes] of Object.entries(disqualified)) {
+    assert.equal(evaluate(jobGuard, completion(changes)), false, label);
+  }
+  for (const event_name of ["push", "schedule", "workflow_dispatch"]) {
+    assert.equal(evaluate(jobGuard, { repository: "instafy-dev/instafy", ref: "refs/heads/main", event_name, event: {} }), true, event_name);
+  }
+  assert.equal(evaluate(jobGuard, { ...completion(), ref: "refs/heads/other" }), false);
+});
+test("a skipped Build completion never joins the shared group, so it cannot cancel a pending pass", () => {
+  assert.equal(evaluate(groupExpression, completion()), "continuous-production-images");
+  for (const [label, changes] of Object.entries(disqualified)) {
+    assert.equal(evaluate(groupExpression, completion(changes)), "continuous-production-images-ignored-9", label);
+  }
+  for (const event_name of ["push", "schedule", "workflow_dispatch"]) {
+    assert.equal(evaluate(groupExpression, { run_id: "9", event_name, event: {} }), "continuous-production-images", event_name);
+  }
+});
+test("a Build read that errors or reports an unknown status never opens publication", () => {
+  for (const response of [{ error: true }, { ...workflowRun(77, "build.yml"), status: "unknown" }]) {
+    const result = run(steps.ci, { [buildRunPath]: response }, { BUILD_RUN_ID: "77" });
+    assert.notEqual(result.status, 0); assert.equal(result.output, "");
+  }
 });
 test("only the exact successful protected-main push Build of this repository can start a pass", () => {
   const trigger = source.slice(source.indexOf("on:\n"), source.indexOf("\npermissions:"));

@@ -191,7 +191,7 @@ test("only self-hosted image cache exports are bounded and optional, without ret
 
 test("removing only the finite routing, builder, cache and scanner-host delta reconstructs every original workflow byte", () => {
   const pins = ["bf62fdc525afaa581c15984a6aa1f5c93376b3df7809fd33ce846230a82bf7a5",
-    "4e9a90476ec106fa63f9e3fbaa7324102bb4513e27d3aca59ecf18142d321e16", "c5584cf3c352c4188666235a80825ccd87e73ea33c08083d23ca7ee8f2847c4c"];
+    "4e9a90476ec106fa63f9e3fbaa7324102bb4513e27d3aca59ecf18142d321e16", "65bd984c0ce8b4fa7f9b7c4ce7cdc59b4bc46661bd14145b4f5f4585f4bce831"];
   for (const [index, file] of files.entries()) assert.equal(createHash("sha256").update(withoutImageBuildRouting(file, read(file))).digest("hex"), pins[index]);
   const enrolled = fs.readFileSync(path.join(root, "scripts/check-public-release-workflows.test.mjs"), "utf8");
   assert.match(enrolled, /import "\.\/check-image-build-routing\.test\.mjs";/u);
