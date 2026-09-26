@@ -164,19 +164,19 @@ describe("StudioMobileContextHeader", () => {
     expect(props.onSwitchTeam).not.toHaveBeenCalled();
   });
 
-  it("keeps team actions in the anchored menu and hides settings when unavailable", async () => {
+  it("opens the team chooser directly, including when settings are unavailable", async () => {
     await render();
     await click("sidebar-team-menu-trigger");
-    await click("sidebar-team-menu-overview");
-    expect(props.onTeam).toHaveBeenCalledOnce();
-    await click("sidebar-team-menu-trigger");
-    await click("sidebar-team-menu-settings");
-    expect(props.onSettings).toHaveBeenCalledOnce();
+    expect(props.onSwitchTeam).toHaveBeenCalledOnce();
+    expect(button("sidebar-team-menu-trigger").getAttribute("aria-label")).toContain("Choose team:");
+    expect(document.querySelector('[data-testid="sidebar-team-menu-overview"]')).toBeNull();
+    expect(props.onTeam).not.toHaveBeenCalled();
+    expect(props.onSettings).not.toHaveBeenCalled();
     await render({ ...props, onSettings: undefined });
     await click("sidebar-team-menu-trigger");
     expect(document.querySelector('[data-testid="sidebar-team-menu-settings"]')).toBeNull();
-    await click("sidebar-team-menu-switch");
-    expect(props.onSwitchTeam).toHaveBeenCalledOnce();
+    expect(document.querySelector('[data-testid="sidebar-team-menu-switch"]')).toBeNull();
+    expect(props.onSwitchTeam).toHaveBeenCalledTimes(2);
   });
 
   it("uses the signed-in profile and changes initials when the account profile changes", async () => {

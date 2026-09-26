@@ -105,7 +105,8 @@ describe("StudioSidebar organization navigation", () => {
   };
   const chooseTeamAction = async (action: "overview" | "settings" | "switch") => {
     await click("sidebar-team-menu-trigger");
-    await click(`sidebar-team-menu-${action}`);
+    if (fixture.desktop) await click(`sidebar-team-menu-${action}`);
+    else if (action !== "switch") await click(`sidebar-org-${action}-button`);
     expect(document.querySelector('[data-testid="sidebar-team-menu"]')).toBeNull();
   };
   it("routes rail context actions to the clicked team without switching its space first", async () => {
@@ -491,7 +492,7 @@ describe("StudioSidebar organization navigation", () => {
     expect(container.querySelector('[data-testid="sidebar-space-button"]')).toBeNull();
     const trigger = headerPortal.querySelector<HTMLButtonElement>('[data-testid="sidebar-team-menu-trigger"]')!;
     expect(trigger.textContent).toBe("A");
-    expect(trigger.getAttribute("aria-label")).toBe("Team menu: Alpha");
+    expect(trigger.getAttribute("aria-label")).toBe(fixture.desktop ? "Team menu: Alpha" : "Choose team: Alpha");
     await chooseTeamAction("switch");
     expect(navigation.openView).toHaveBeenCalledExactlyOnceWith("workspace");
     navigation.view = "workspace";
@@ -534,16 +535,19 @@ describe("StudioSidebar organization navigation", () => {
     await render({ navigationPresentation: "path", mobileOverlay: !desktop });
     const trigger = container.querySelector<HTMLButtonElement>('[data-testid="sidebar-team-menu-trigger"]')!;
     expect(trigger.textContent).toBe("A");
-    expect(trigger.getAttribute("aria-label")).toBe("Team menu: Alpha");
-    expect(trigger.title).toBe("Team menu: Alpha");
+    expect(trigger.getAttribute("aria-label")).toBe(fixture.desktop ? "Team menu: Alpha" : "Choose team: Alpha");
+    expect(trigger.title).toBe(desktop ? "Team menu: Alpha" : "Choose team: Alpha");
     await click("sidebar-team-menu-trigger");
-    const menu = document.querySelector('[role="menu"][aria-label="Team actions: Alpha"]')!;
-    expect(menu).not.toBeNull();
-    expect(menu.closest('[data-testid="sidebar-team-menu"]')?.textContent).toContain("Alpha");
-    expect(menu.querySelector('[data-testid="sidebar-team-menu-switch"]')?.textContent).toBe("Switch team");
-    expect(menu.querySelector('[data-testid="sidebar-team-menu-overview"]')?.textContent).toBe("Team overview");
-    expect(menu.querySelector('[data-testid="sidebar-team-menu-settings"]')?.textContent).toBe("Team settings");
-    await click("sidebar-team-menu-settings");
+    if (desktop) {
+      const menu = document.querySelector('[role="menu"][aria-label="Team actions: Alpha"]')!;
+      expect(menu).not.toBeNull();
+      expect(menu.closest('[data-testid="sidebar-team-menu"]')?.textContent).toContain("Alpha");
+      expect(menu.querySelector('[data-testid="sidebar-team-menu-switch"]')?.textContent).toBe("Switch team");
+      await click("sidebar-team-menu-settings");
+    } else {
+      expect(document.querySelector('[data-testid="sidebar-org-selector"]')?.textContent).toContain("Alpha");
+      await click("sidebar-org-settings-button");
+    }
     expect(fixture.onSettings).toHaveBeenCalledExactlyOnceWith("org-a");
     expect(onRequestClose.mock.invocationCallOrder[0]).toBeLessThan(fixture.onSettings.mock.invocationCallOrder[0]);
     expect(document.querySelector('[data-testid="sidebar-team-menu"]')).toBeNull();
@@ -556,7 +560,7 @@ describe("StudioSidebar organization navigation", () => {
     const avatar = trigger.querySelector("img")!;
     expect(avatar.getAttribute("src")).toBe("https://assets.example.test/alpha.png");
     expect(avatar.getAttribute("alt")).toBe("");
-    expect(trigger.getAttribute("aria-label")).toBe("Team menu: Alpha");
+    expect(trigger.getAttribute("aria-label")).toBe(fixture.desktop ? "Team menu: Alpha" : "Choose team: Alpha");
     await render({ navigationPresentation: "path", selectedOrgKey: "org-b", activePanel: "team" });
     const emptyTeamTrigger = container.querySelector<HTMLButtonElement>('[data-testid="sidebar-team-menu-trigger"]')!;
     expect(emptyTeamTrigger.querySelector("img")).toBeNull();
@@ -837,10 +841,7 @@ describe("StudioSidebar organization navigation", () => {
     const trigger = container.querySelector<HTMLButtonElement>('[data-testid="sidebar-team-menu-trigger"]')!;
     const search = window.location.search;
     await click("sidebar-team-menu-trigger");
-    expect(navigation.openView).not.toHaveBeenCalled();
     expect(onOpenTeam).not.toHaveBeenCalled();
-    expect(document.querySelector('[data-testid="sidebar-team-menu-switch"]')).not.toBeNull();
-    await click("sidebar-team-menu-switch");
     expect(document.querySelector('[data-testid="sidebar-team-menu"]')).toBeNull();
     expect(navigation.openView).toHaveBeenCalledExactlyOnceWith("workspace");
     expect(onRequestClose).not.toHaveBeenCalled();
@@ -1031,9 +1032,9 @@ describe("StudioSidebar organization navigation", () => {
     expect(container.querySelector('[data-testid="sidebar-nav-chat"]')).toBeNull();
     expect(container.querySelector('[data-testid="sidebar-recent-space-space-a"]')).toBeNull();
     await click("sidebar-team-menu-trigger");
-    expect(document.querySelector('[data-testid="sidebar-team-menu-switch"]')).not.toBeNull();
-    expect(Boolean(document.querySelector('[data-testid="sidebar-team-menu-settings"]'))).toBe(selectedOrgKey !== "personal");
-    await click("sidebar-team-menu-overview");
+    expect(document.querySelector('[data-testid="sidebar-org-selector"]')).not.toBeNull();
+    expect(document.querySelector<HTMLButtonElement>('[data-testid="sidebar-org-settings-button"]')?.disabled).toBe(selectedOrgKey === "personal");
+    await click("sidebar-org-overview-button");
     expect(onOpenTeam).toHaveBeenCalledExactlyOnceWith(selectedOrgKey);
     expect(onRequestClose.mock.invocationCallOrder[0]).toBeLessThan(onOpenTeam.mock.invocationCallOrder[0]);
   });

@@ -1185,6 +1185,7 @@ export function SourceControlDrawer({
       <DrawerHeader
         frame="rail"
         title="Changes"
+        pageTitle
         icon={<GitBranch className="h-4 w-4 text-slate-400 dark:text-slate-500" aria-hidden="true" />}
         actions={
           <>

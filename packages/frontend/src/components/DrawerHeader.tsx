@@ -1,10 +1,13 @@
 import type { ElementType, ReactNode } from "react";
 import { Text } from "./Text";
+import { usePageTitleInNavigation } from "./PageTitleContext";
 
 export interface DrawerHeaderProps {
   title: ReactNode;
   subtitle?: ReactNode;
   titleAs?: ElementType;
+  /** Opt in only when this drawer is the named page in the enclosing navigation. */
+  pageTitle?: boolean;
   icon?: ReactNode;
   actions?: ReactNode;
   density?: "compact" | "touch";
@@ -21,6 +24,7 @@ export function DrawerHeader({
   title,
   subtitle,
   titleAs = "p",
+  pageTitle = false,
   icon,
   actions,
   density = "compact",
@@ -31,11 +35,14 @@ export function DrawerHeader({
   subtitleClassName,
   actionsClassName,
 }: DrawerHeaderProps) {
+  const titleInNavigation = usePageTitleInNavigation(title);
+  const hideTitle = pageTitle && titleInNavigation;
   const railFrame = frame === "rail";
   const touchDensity = !railFrame && density === "touch";
+  if (hideTitle && !subtitle && !actions) return null;
   return (
-    <div className={["flex min-w-0 items-center justify-between gap-3", railFrame && "h-12 shrink-0 px-4", className].filter(Boolean).join(" ")}>
-      <div
+    <div className={["flex min-w-0 items-center gap-3", hideTitle && !subtitle ? "justify-end" : "justify-between", railFrame && "h-12 shrink-0 px-4", className].filter(Boolean).join(" ")}>
+      {!hideTitle || subtitle ? <div
         className={[
           "flex min-w-0 items-center",
           touchDensity ? "gap-3" : "gap-2",
@@ -44,28 +51,28 @@ export function DrawerHeader({
           .filter(Boolean)
           .join(" ")}
       >
-        {icon ? <div className="shrink-0">{icon}</div> : null}
+        {icon && !hideTitle ? <div className="shrink-0">{icon}</div> : null}
         <div className="min-w-0">
-          <Text
+          {!hideTitle ? <Text
             as={titleAs}
             variant={touchDensity ? "title" : "bodyStrong"}
             tone="primary"
-            className={["min-w-0 truncate", railFrame && "!text-base !font-semibold", titleClassName].filter(Boolean).join(" ")}
+            className={["min-w-0 truncate", railFrame && "max-[899px]:!text-base max-[899px]:!font-semibold", titleClassName].filter(Boolean).join(" ")}
           >
             {title}
-          </Text>
+          </Text> : null}
           {subtitle ? (
             <Text
               as="p"
               variant={touchDensity ? "body" : "caption"}
               tone="muted"
-              className={["mt-0.5 min-w-0 truncate", subtitleClassName].filter(Boolean).join(" ")}
+              className={[!hideTitle && "mt-0.5", "min-w-0 truncate", subtitleClassName].filter(Boolean).join(" ")}
             >
               {subtitle}
             </Text>
           ) : null}
         </div>
-      </div>
+      </div> : null}
       {actions ? (
         <div
           className={[

@@ -1101,6 +1101,7 @@ export function StudioSidebar({
       projectsRefreshing={mergedProjectsRefreshing}
       onRetryProjects={retryWorkspaceProjects}
       onWorkspaceOrgChange={handleWorkspaceOrgChange}
+      onOpenOrgOverview={() => openTeamOverview(workspaceOrgKey === "all" ? activeOrgKey : workspaceOrgKey)}
       onCreateOrg={
         runtimeControllerEnabled
           ? () => {

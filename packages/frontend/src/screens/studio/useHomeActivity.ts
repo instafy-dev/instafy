@@ -42,6 +42,7 @@ interface ActivityState {
   activityLoadingMore: boolean;
   activityHasMore: boolean;
   activityError: string | null;
+  activityPages: number;
   serverLastSeenEventId: string | null;
 }
 
@@ -53,12 +54,13 @@ function initialState(viewerUserId: string | null): ActivityState {
     activityLoadingMore: false,
     activityHasMore: false,
     activityError: null,
+    activityPages: 0,
     serverLastSeenEventId: null,
   };
 }
 
 /** One Home visit's ledger and previous-visit cut, isolated to the signed-in user. */
-export function useHomeActivity(viewerUserId: string | null, pageSize = 24, markSeen = true) {
+export function useHomeActivity(viewerUserId: string | null, pageSize = 24, markSeen = true, restorePages = 1) {
   const [state, setState] = useState(() => initialState(viewerUserId));
   const actionsRef = useRef<{
     viewerUserId: string;
@@ -128,6 +130,7 @@ export function useHomeActivity(viewerUserId: string | null, pageSize = 24, mark
         nextBefore = result.nextBefore ?? null;
         update({
           activityItems: mergeActivity([], result.items ?? []),
+          activityPages: 1,
           activityHasMore: result.hasMore === true && nextBefore !== null,
           // Freeze this visit's divider even when polling advances the server marker.
           serverLastSeenEventId: result.lastSeenEventId ?? null,
@@ -161,7 +164,7 @@ export function useHomeActivity(viewerUserId: string | null, pageSize = 24, mark
         }
         nextBefore = result.nextBefore ?? null;
         mergePage(result);
-        update({ activityHasMore: result.hasMore === true && nextBefore !== null && nextBefore !== before });
+        update({ activityHasMore: result.hasMore === true && nextBefore !== null && nextBefore !== before, activityPages: snapshot.activityPages + 1 });
         clearError("more");
         return true;
       } catch (error) {
@@ -224,14 +227,21 @@ export function useHomeActivity(viewerUserId: string | null, pageSize = 24, mark
       loadMore,
       retry: () => failedRequest === "more" ? loadMore() : poll(),
     };
-    void loadFirstPage();
+    // Re-read the same number of authorized pages when returning to a Home
+    // visit. Retain coordinates, never cached activity or credentials.
+    void (async () => {
+      if (!(await loadFirstPage())) return;
+      while (!cancelled && snapshot.activityPages < restorePages && snapshot.activityHasMore) {
+        if (!(await loadMore())) break;
+      }
+    })();
     const timer = window.setInterval(() => { void poll(); }, ACTIVITY_POLL_MS);
     return () => {
       cancelled = true;
       actionsRef.current = null;
       window.clearInterval(timer);
     };
-  }, [markSeen, pageSize, viewerUserId]);
+  }, [markSeen, pageSize, restorePages, viewerUserId]);
 
   const loadMoreActivity = useCallback(() => {
     const actions = actionsRef.current;

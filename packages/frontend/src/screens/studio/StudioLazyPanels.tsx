@@ -16,7 +16,7 @@ function PanelFallback({ children, title, onClose, tabs }: {
     <div className="flex h-full min-h-0 flex-col">
       {tabs}
       {onClose ? (
-        <DrawerHeader title={title} frame="rail" actions={
+        <DrawerHeader title={title} pageTitle={title === "Files" || title === "Changes"} frame="rail" actions={
           <IconButton variant="ghost" size="sm" radius="full" aria-label={`Close ${title.toLowerCase()}`} onPress={onClose}>
             <Xmark className="h-4 w-4" />
           </IconButton>

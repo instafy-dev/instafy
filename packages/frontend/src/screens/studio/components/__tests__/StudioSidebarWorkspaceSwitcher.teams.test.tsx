@@ -79,6 +79,23 @@ describe("StudioSidebarWorkspaceSwitcher team rows", () => {
     );
   });
 
+  it("filters many teams by name or slug and keeps the selected team and its actions explicit", async () => {
+    const select = vi.fn();
+    const overview = vi.fn();
+    await render(root, { orgOptions: [...teams, ...Array.from({ length: 4 }, (_, index) => ({ key: `extra-${index}`, name: `Team ${index}`, label: `Team ${index}`, slug: `group-${index}`, count: 1 }))], onWorkspaceOrgChange: select, onOpenOrgOverview: overview });
+    const input = container.querySelector<HTMLInputElement>('[data-testid="sidebar-team-search"]')!;
+    expect(input.getAttribute("aria-label")).toBe("Find a team");
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!.call(input, "GROUP-2");
+      input.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    expect(container.querySelectorAll('[data-testid^="sidebar-org-chip-"]')).toHaveLength(1);
+    await act(async () => (container.querySelector('[data-testid="sidebar-org-chip-extra-2"]') as HTMLButtonElement).click());
+    expect(select).toHaveBeenCalledWith("extra-2");
+    await act(async () => (container.querySelector('[data-testid="sidebar-org-overview-button"]') as HTMLButtonElement).click());
+    expect(overview).toHaveBeenCalledOnce();
+  });
+
   it("switches teams from a row and rolls attention up onto the all-teams row", async () => {
     const onWorkspaceOrgChange = vi.fn();
     await render(root, {

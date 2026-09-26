@@ -1,5 +1,5 @@
 import { isWorkspacePreviewTab } from "../../../workspace/workspacePreviewTabs";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
 import { desktopTitleBarFree } from "../../../lib/desktopShell";
 import { DialogTrigger } from "react-aria-components";
 import {
@@ -63,6 +63,7 @@ export interface StudioTopBarProps {
   newChatInSidebar?: boolean;
   contextHeaderAbove?: boolean;
   inlineDesktop?: boolean;
+  mobilePageHeader?: { title: string; actions: ReactNode };
   mobileNavigation?: {
     history: StudioHistory;
     visitKey: string;
@@ -70,7 +71,7 @@ export interface StudioTopBarProps {
   };
 }
 
-export function StudioTopBar({ mobileNavigation, newChatInSidebar = false, contextHeaderAbove = false, inlineDesktop = false }: StudioTopBarProps = {}) {
+export function StudioTopBar({ mobileNavigation, mobilePageHeader, newChatInSidebar = false, contextHeaderAbove = false, inlineDesktop = false }: StudioTopBarProps = {}) {
   const {
     activeProjectName,
     onStartNewConversation,
@@ -566,8 +567,9 @@ export function StudioTopBar({ mobileNavigation, newChatInSidebar = false, conte
                 (activeWorkspaceTab?.kind === "panel" && activeWorkspaceTab.panel === "chat")
               )}
               onOpenPicker={onToggleSidebar ?? mobileNavigation.onOpenPicker}
-              title={topbarLocationTitle}
-              titleIcon={topbarLocationOverride ? topbarLocationOverride.icon : activeWorkspaceTab?.icon}
+              title={mobilePageHeader?.title ?? topbarLocationTitle}
+              titleIcon={mobilePageHeader ? undefined : topbarLocationOverride ? topbarLocationOverride.icon : activeWorkspaceTab?.icon}
+              primaryActions={mobilePageHeader?.actions}
               spaceName={resolvedProjectName}
               showSpaceName={!contextHeaderAbove}
               sidebarOpen={sidebarOpen}

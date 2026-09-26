@@ -22,6 +22,7 @@ export interface WorkspaceControlsContextValue {
   sidebarOpen?: boolean;
   onToggleSidebar?: () => void;
   onOpenChatNavigation?: () => void;
+  chatNavigationLabel?: string;
   onStartNewProject?: (preferredOrgId?: string | null) => void;
   onStartNewConversation?: () => void;
   onStartPrivateConversation?: (target: PrivateChatTarget) => void;

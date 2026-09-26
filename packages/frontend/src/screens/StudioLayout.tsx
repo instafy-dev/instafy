@@ -1,3 +1,4 @@
+import { DEFAULT_HOME_LIST_STATE, StudioListNavigationProvider, useStudioListNavigation } from "../navigation/StudioListNavigation";
 import { StudioDraftsProvider, StudioDraftPanel } from "../workspace/StudioDrafts";
 import { StudioDraftNavigationGuard } from "../navigation/StudioDraftNavigationGuard";
 import { buildHomeFeed } from "./studio/homeFeed";
@@ -26,6 +27,7 @@ import { Button, IconButton } from "../components/Button";
 import { ProjectAccessRecoveryBanner, StudioStartupGate } from "./StudioStartup";
 import { Badge } from "../components/Badge";
 import { Heading } from "../components/Heading";
+import { PageTitleInNavigationContext } from "../components/PageTitleContext";
 import { Surface } from "../components/Surface";
 import { Text } from "../components/Text";
 import { DARK_RAIL_SURFACE_CLASS } from "../theme/darkSurfaces";
@@ -279,13 +281,15 @@ function StudioLayoutInner() {
   );
   const orgSettingsTitle = isPersonalOrgName(activeProjectSummary?.orgName) ? "Personal settings" : "Team settings";
   const currentUserId = user?.id ?? null;
+  const listNavigation = useStudioListNavigation(currentUserId);
+  const homeListState = listNavigation.getState("home", DEFAULT_HOME_LIST_STATE);
   const knownWorkspaceFiles = useStudioKnownFiles(currentUserId,
     projectReadyForWorkspace && !controllerProjectMissing ? activeProjectId : null,
     getStudioWorkspaceOwnerKey({ effectiveRuntimeId, localWorkspace, desktopOrigin }));
   const activeProjectOrgKey = activeProjectSummary?.orgId ?? "personal";
   const navigationScope = resolveTeamNavigationScope(location.search, activeProjectOrgKey);
   const searchRoute = new URLSearchParams(location.search);
-  const searchKey = JSON.stringify([currentUserId, getStudioVisitKey(location), navigationScope.orgKey, activeProjectId, navigationScope.page,
+  const searchKey = JSON.stringify([currentUserId, getStudioVisitKey(location), navigationScope.orgKey, activeProjectId, navigationScope.page, navigationScope.page === "home" ? homeListState.teamFilter : null,
     ...["conversationId", "conversationControllerId", "jobId", "panel", "settingsTab", "settingsOrgId", "settingsCategory"].map(key => searchRoute.get(key))]);
   const searchHidesWorkspace = searchRequest?.key === searchKey && searchRequest.open;
   const searchHistory = useStudioSearchHistory(currentUserId, getStudioVisitKey(location), searchKey,
@@ -1338,6 +1342,8 @@ function StudioLayoutInner() {
 
   const handleOpenChatNavigation = useCallback(() => {
     if (showTouchBottomDock) {
+      if (searchHistory.originToken) { runStudioNavigation(searchHistory.returnToResults); return; }
+      if (listNavigation.returnLabel) { runStudioNavigation(listNavigation.returnToList); return; }
       navigateToDestination({ kind: "panel", panel: "chat", workspaceTab: "history" });
       return;
     }
@@ -1350,7 +1356,7 @@ function StudioLayoutInner() {
       setLeftDrawer(null);
     }
     setMobileSidebarOpen(true);
-  }, [isLargeScreen, leftDrawer, navigateToDestination, requestHistoryPush, setLeftDrawer, setMobileSidebarOpen, setSidebarCollapsed, showTouchBottomDock]);
+  }, [isLargeScreen, leftDrawer, listNavigation, navigateToDestination, requestHistoryPush, runStudioNavigation, searchHistory, setLeftDrawer, setMobileSidebarOpen, setSidebarCollapsed, showTouchBottomDock]);
 
   const handleSelectRecentConversation = useCallback((conversationId: string) => {
     if (!activeProjectId) return;
@@ -1951,11 +1957,18 @@ function StudioLayoutInner() {
   const mobileSearchTriggerRef = useRef<HTMLButtonElement | null>(null);
   const overlaySearchTriggerRef = useRef<HTMLButtonElement | null>(null);
   const globalNavigationContext = usesGlobalNavigationContext(navigationScope.page, activeProjectId);
-  const { org: searchOrg, space: searchSpace } = resolveStudioSearchContext(
+  const workspaceSearchContext = resolveStudioSearchContext(
     { id: navigationScope.orgKey, name: activeTeamName },
     activeProjectSummary ? { id: activeProjectSummary.id, orgId: activeProjectSummary.orgId, name: activeProjectName } : null,
     projectAccessBlocked,
   );
+  const homeSearchTeam = homeListState.teamFilter === "all" ? null : {
+    id: homeListState.teamFilter,
+    name: homeListState.teamFilter === "personal" ? "Personal"
+      : readCachedControllerOrgs(user?.email).find(org => org.id === homeListState.teamFilter)?.name ?? "Team",
+  };
+  const { org: searchOrg, space: searchSpace } = navigationScope.page === "home"
+    ? { org: homeSearchTeam, space: null } : workspaceSearchContext;
   const searchNavigation = useStudioSearchNavigation({
     viewerUserId: currentUserId, location, activeProjectId,
     projectReady: projectReadyForWorkspace, projectAccessBlocked, conversationsProjectKey,
@@ -1966,6 +1979,7 @@ function StudioLayoutInner() {
     enabled: searchRequest?.key === searchKey && searchRequest.open,
     query: searchRequest?.key === searchKey ? searchRequest.query : '',
     restoreMessagePages: searchRequest?.key === searchKey ? searchRequest.restoreMessagePages : undefined,
+    restoreSpacePages: searchRequest?.key === searchKey ? searchRequest.restoreSpacePages : undefined,
     scope: searchRequest?.key === searchKey ? searchRequest.scope : searchSpace ? "space" : searchOrg ? "org" : "all",
     orgId: searchOrg?.id ?? null,
     spaceId: searchSpace?.id ?? null,
@@ -1977,6 +1991,7 @@ function StudioLayoutInner() {
   const search = useStudioSearch({
     scopeKey: searchKey, org: searchOrg, space: searchSpace, records: searchData.records,
     loading: searchData.loading, error: searchData.error, onRetry: searchData.retry, notice: searchData.notice,
+    remainingSpaces: searchData.remainingSpaces, onLoadMoreSpaces: searchData.loadMoreSpaces, spacePageCount: searchData.spacePageCount,
     hasMoreMessages: searchData.hasMoreMessages, loadingMoreMessages: searchData.loadingMoreMessages,
     onLoadMoreMessages: searchData.loadMoreMessages, messagePageCount: searchData.messagePageCount,
     restoreSession: searchHistory.restoredSession, onBeforeResultActivate: searchHistory.remember, onDismiss: searchHistory.dismiss,
@@ -1987,6 +2002,9 @@ function StudioLayoutInner() {
   closeSearchForNavigation.current = () => { search.closeSearch(false); searchNavigation.cancelPending(); };
   useNativeBackButtonAction(search.open, () => search.closeSearch(), 200);
   const contextHomeActive = navigationScope.page === "home";
+  const mobilePageTitle = topbarLocationOverride?.title ?? (navigationScope.page === "workspace"
+    ? activeWorkspaceTab?.title ?? "Space"
+    : navigationScope.page === "account" ? "Your settings" : contextHomeActive ? "Home" : activeTeamName);
   const mobileContextHeader = (overlay = false) => <StudioMobileContextHeader
     teamName={activeTeamName} teamAvatarUrl={activeTeamAvatarUrl} accentColor={selectedTeamMetadata?.accentColor} teamId={navigationScope.orgKey}
     projects={projectList} activeProjectId={activeProjectId} attentionCounts={homeAttentionByProject}
@@ -2005,6 +2023,8 @@ function StudioLayoutInner() {
 
   return (
     <StudioNavigationProvider value={runStudioNavigation}>
+    <PageTitleInNavigationContext.Provider value={isLargeScreen ? null : mobilePageTitle}>
+    <StudioListNavigationProvider value={listNavigation}>
     <StudioSearchReturnProvider value={{ originToken: searchHistory.originToken, returnToResults: () => runStudioNavigation(searchHistory.returnToResults) }}>
     <ControllerNoticeActionsProvider value={controllerNoticeActionsValue}>
       {shouldRenderFilesExplorerPortal ? (
@@ -2053,6 +2073,7 @@ function StudioLayoutInner() {
             onNavigateBack: handleNavigateBack,
             onToggleSidebar: handleToggleSidebar,
             onOpenChatNavigation: handleOpenChatNavigation,
+            chatNavigationLabel: searchHistory.originToken ? "Back to results" : listNavigation.returnLabel ?? "Back to chats",
             onStartNewProject: handleNewProject,
             onStartNewConversation: createFreshConversation,
             onStartPrivateConversation: handleCreatePrivateConversation,
@@ -2184,7 +2205,7 @@ function StudioLayoutInner() {
             {!isLargeScreen ? navigationScope.page === "workspace" ? <StudioTopBar contextHeaderAbove mobileNavigation={mobileTopbarNavigation} /> : <div className={`flex min-h-14 shrink-0 items-center gap-2 border-b border-slate-200/70 bg-slate-50 px-1 py-1 ${DARK_RAIL_SURFACE_CLASS}`}>
               <IconButton variant="ghost" aria-label="Open navigation" data-testid="topbar-sidebar-toggle" onPress={handleToggleSidebar} className="!min-h-12 !min-w-12"><SidebarExpand className="h-[18px] w-[18px]" aria-hidden="true" /></IconButton>
               <MobileStudioHistoryControls history={mobileHistory} />
-              <span className="min-w-0 flex-1 truncate text-sm text-slate-500 dark:text-slate-400">{navigationScope.page === "account" ? "Your settings" : topbarLocationOverride?.title ?? (contextHomeActive ? "Home" : activeTeamName)}</span>
+              <h1 className="min-w-0 flex-1 truncate text-sm font-semibold text-slate-700 dark:text-slate-200">{mobilePageTitle}</h1>
             </div> : null}
             <ProjectAccessRecoveryBanner />
             {/* relative: the participants drawer overlays the right edge of the
@@ -2277,10 +2298,11 @@ function StudioLayoutInner() {
               }}
             >
               {mobileContextHeader(true)}
-              <StudioTopBar contextHeaderAbove mobileNavigation={mobileTopbarNavigation} />
+              {leftDrawer !== "history" ? <StudioTopBar contextHeaderAbove mobileNavigation={mobileTopbarNavigation} /> : null}
               <div className="flex-1 min-h-0 overflow-hidden">
                   {leftDrawer === "history" ? (
                     <ConversationHistoryTab
+                      renderMobileHeader={(header) => <StudioTopBar contextHeaderAbove mobileNavigation={mobileTopbarNavigation} mobilePageHeader={header} />}
                       onStartNewConversation={createFreshConversation}
                       onRequestClose={() => {
                         requestHistoryPush();
@@ -2364,6 +2386,8 @@ function StudioLayoutInner() {
       <DesktopRuntimeHelpDialog />
     </ControllerNoticeActionsProvider>
     </StudioSearchReturnProvider>
+    </StudioListNavigationProvider>
+    </PageTitleInNavigationContext.Provider>
     </StudioNavigationProvider>
   );
 }

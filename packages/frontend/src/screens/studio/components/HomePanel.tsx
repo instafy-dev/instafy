@@ -1,3 +1,4 @@
+import { DEFAULT_HOME_LIST_STATE, useStudioListState, useStudioRecentChatKeys } from "../../../navigation/StudioListNavigation";
 import { Fragment, useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { useNavigate } from "react-router-dom";
 import type { HomeNotifications } from "../../../notifications/useNotificationCenter";
@@ -8,6 +9,7 @@ import { AttentionBadge } from "../../../components/AttentionBadge";
 import { Button, IconButton } from "../../../components/Button";
 import { FeedRow } from "../../../components/FeedRow";
 import { Heading } from "../../../components/Heading";
+import { usePageTitleInNavigation } from "../../../components/PageTitleContext";
 import { Spinner } from "../../../components/Spinner";
 import { Text } from "../../../components/Text";
 import { useConversations } from "../../../conversations/ConversationsProvider";
@@ -32,6 +34,7 @@ import {
 import { getHomeNotificationTarget } from "../homeNotifications";
 import type { HomeSupportReport } from "../homeSupportReports";
 import { useHomeActivity } from "../useHomeActivity";
+import { homeRecentChats } from "../homeRecentChats";
 import { useWorkspaceControls } from "../workspaceControls";
 import { CHAT_COLUMN_CLASS_NAME } from "./ChatColumn";
 import { ChatMessageAvatar } from "./ChatMessageAvatar";
@@ -226,6 +229,7 @@ interface HomePanelProps {
 }
 
 export function HomePanel({ inboxItems: sharedInboxItems = [], refreshInbox, notifications, supportReports, supportLoading = false, supportError, refreshSupport, onOpenSupport }: HomePanelProps = {}) {
+  const titleInNavigation = usePageTitleInNavigation();
   const { projectList, activeProjectId } = useProjects();
   const {
     conversations,
@@ -245,14 +249,12 @@ export function HomePanel({ inboxItems: sharedInboxItems = [], refreshInbox, not
   const navigate = useNavigate();
   const conversationsRef = useRef(conversations);
   conversationsRef.current = conversations;
-  const [teamFilter, setTeamFilter] = useState(HOME_TEAM_FILTER_ALL);
-  const [needsExpanded, setNeedsExpanded] = useState(false);
-  const [recentLimit, setRecentLimit] = useState(RECENT_LIMIT);
-  useEffect(() => {
-    // A new filter is a new page: fold both lanes again.
-    setNeedsExpanded(false);
-    setRecentLimit(RECENT_LIMIT);
-  }, [teamFilter]);
+  const [homeState, setHomeState] = useStudioListState("home", DEFAULT_HOME_LIST_STATE);
+  const { teamFilter, needsExpanded, recentLimit } = homeState;
+  const setTeamFilter = (teamFilter: string) => setHomeState(previous => ({ ...previous, teamFilter, needsExpanded: false, recentLimit: RECENT_LIMIT }));
+  const setNeedsExpanded = (needsExpanded: boolean) => setHomeState(previous => ({ ...previous, needsExpanded }));
+  const setRecentLimit = useCallback((update: (limit: number) => number) => setHomeState(previous => ({ ...previous, recentLimit: update(previous.recentLimit) })), [setHomeState]);
+  const restoreActivityPages = useRef(homeState.activityPages).current;
 
   const {
     activityItems,
@@ -260,22 +262,32 @@ export function HomePanel({ inboxItems: sharedInboxItems = [], refreshInbox, not
     activityLoadingMore,
     activityHasMore,
     activityError,
+    activityPages,
     serverLastSeenEventId,
     loadMoreActivity,
     retryActivity,
-  } = useHomeActivity(viewerUserId, RECENT_LIMIT);
+  } = useHomeActivity(viewerUserId, RECENT_LIMIT, true, restoreActivityPages);
+  useEffect(() => {
+    if (activityPages > homeState.activityPages) setHomeState(previous => ({ ...previous, activityPages }));
+  }, [activityPages, homeState.activityPages, setHomeState]);
 
   // Membership, not spaces, decides which teams get a chip: a team you just
   // joined (or created) has no space yet but still belongs on Home.
-  const [organizations, setOrganizations] = useState<HomeFeedOrganizationRef[]>([]);
+  const [membership, setMembership] = useState<{ userId: string; organizations: HomeFeedOrganizationRef[] } | null>(null);
+  const organizations = useMemo(() => membership?.userId === viewerUserId ? membership.organizations : [], [membership, viewerUserId]);
+  const membershipsReady = membership !== null && membership.userId === viewerUserId;
+  const homeProjects = useMemo(() => membershipsReady
+    ? projectList.filter(project => !project.orgId || organizations.some(org => org.id === project.orgId))
+    : projectList, [membershipsReady, organizations, projectList]);
   const [orgsEpoch, setOrgsEpoch] = useState(0);
   useEffect(() => {
     let cancelled = false;
+    if (!viewerUserId) return;
     controllerClient.organizations
       .list()
       .then((orgs) => {
         if (!cancelled) {
-          setOrganizations(orgs.map((org) => ({ id: org.id, name: org.name, slug: org.slug ?? null })));
+          setMembership({ userId: viewerUserId, organizations: orgs.map((org) => ({ id: org.id, name: org.name, slug: org.slug ?? null })) });
         }
       })
       .catch(() => {
@@ -284,7 +296,7 @@ export function HomePanel({ inboxItems: sharedInboxItems = [], refreshInbox, not
     return () => {
       cancelled = true;
     };
-  }, [orgsEpoch, userEmail]);
+  }, [orgsEpoch, userEmail, viewerUserId]);
   useEffect(() => {
     if (typeof window === "undefined") {
       return;
@@ -324,15 +336,24 @@ export function HomePanel({ inboxItems: sharedInboxItems = [], refreshInbox, not
         supportReports,
         serverLastSeenEventId,
         organizations,
-        projects: projectList,
+        projects: homeProjects,
         activeProject: currentProject,
         conversations,
         teamFilter,
         lastSeenAt: null,
       }),
-    [activityItems, conversations, currentProject, notifications?.page.items, organizations, projectList, serverLastSeenEventId, teamFilter, visibleAttentionEntries, supportReports],
+    [activityItems, conversations, currentProject, notifications?.page.items, organizations, homeProjects, serverLastSeenEventId, teamFilter, visibleAttentionEntries, supportReports],
   );
   const activityTotal = useMemo(() => feed.activity.reduce((count, day) => count + day.events.length, 0), [feed.activity]);
+  useEffect(() => {
+    // Keep search and the displayed filter in agreement after membership or
+    // Personal-team resolution changes. Fresh activity can also supply a team.
+    if (membershipsReady && !activityLoading && teamFilter !== feed.teamFilter) {
+      setHomeState(previous => ({ ...previous, teamFilter: feed.teamFilter }));
+    }
+  }, [activityLoading, feed.teamFilter, membershipsReady, setHomeState, teamFilter]);
+  const recentChatKeys = useStudioRecentChatKeys();
+  const recentChats = useMemo(() => homeRecentChats([...feed.needs, ...feed.activity.flatMap(day => day.events)], recentChatKeys), [feed, recentChatKeys]);
   const activityEvents = useMemo(
     () => feed.activity.flatMap((day) => day.events).slice(0, recentLimit),
     [feed.activity, recentLimit],
@@ -523,7 +544,7 @@ export function HomePanel({ inboxItems: sharedInboxItems = [], refreshInbox, not
   const moreHistory = activityHasMore || Boolean(notifications?.page.nextCursor);
   const lanesEmpty = feed.needs.length === 0 && activityEvents.length === 0 && !feedLoading;
   const filteredTeamHasSpaces =
-    filteredTeam !== null && projectList.some((project) => teamKeyForOrgId(project.orgId) === filteredTeam.key);
+    filteredTeam !== null && homeProjects.some((project) => teamKeyForOrgId(project.orgId) === filteredTeam.key);
   const canShowMoreRecent = activityTotal > recentLimit || moreHistory;
   const handleShowMoreRecent = useCallback(() => {
     if (activityTotal > recentLimit) {
@@ -535,7 +556,7 @@ export function HomePanel({ inboxItems: sharedInboxItems = [], refreshInbox, not
       activityHasMore ? loadMoreActivity() : Promise.resolve(false),
       notifications?.page.nextCursor ? notifications.loadMore().then(() => true) : Promise.resolve(false),
     ]).then(results => { if (results.some(Boolean)) setRecentLimit(limit => limit + RECENT_LIMIT); });
-  }, [activityHasMore, activityLoadingMore, activityTotal, loadMoreActivity, notifications, recentLimit]);
+  }, [activityHasMore, activityLoadingMore, activityTotal, loadMoreActivity, notifications, recentLimit, setRecentLimit]);
 
   const renderRow = (event: HomeFeedEvent, options: { divider: boolean }) => {
     const when = formatRelativeTimestamp(event.at);
@@ -620,7 +641,7 @@ export function HomePanel({ inboxItems: sharedInboxItems = [], refreshInbox, not
           <span>{notifications.error}</span>
           <Button variant="ghost" size="sm" onPress={() => void notifications.refresh()} isDisabled={notifications.loading}>Retry notifications</Button>
         </div> : null}
-        <header className="flex items-center justify-between gap-2">
+        {showTeamChips || !titleInNavigation ? <header className="flex items-center justify-between gap-2">
           {showTeamChips ? (
             <div
               role="group"
@@ -632,7 +653,7 @@ export function HomePanel({ inboxItems: sharedInboxItems = [], refreshInbox, not
               className="no-scrollbar -my-1 -ml-3 flex min-w-0 flex-1 items-center gap-1.5 overflow-x-auto py-1 pl-3 @min-[40rem]/home:ml-0 @min-[40rem]/home:flex-wrap @min-[40rem]/home:overflow-visible @min-[40rem]/home:pl-0"
             >
               <TeamChip
-                label="All"
+                label="All teams"
                 count={0}
                 selected={feed.teamFilter === HOME_TEAM_FILTER_ALL}
                 onPress={() => setTeamFilter(HOME_TEAM_FILTER_ALL)}
@@ -654,7 +675,7 @@ export function HomePanel({ inboxItems: sharedInboxItems = [], refreshInbox, not
               Home
             </Heading>
           )}
-        </header>
+        </header> : null}
 
         {activityError ? (
           <div role="alert" className={`flex flex-wrap items-center gap-2 ${LANE_INSET_CLASS}`}>
@@ -746,6 +767,22 @@ export function HomePanel({ inboxItems: sharedInboxItems = [], refreshInbox, not
                     testId="home-attention-show-all"
                   />
                 ) : null}
+              </section>
+            ) : null}
+
+            {recentChats.length > 0 ? (
+              <section data-testid="home-recent-chats">
+                <LaneHeader label="Recent chats" />
+                {recentChats.map((event, index) => (
+                  <div key={event.key} className={[ROW_HOVER_CLASS, index > 0 ? ROW_DIVIDER_CLASS : ""].join(" ")}>
+                    <FeedRow title={event.title} subtitle={`${event.team.name} · ${event.project.name}`}
+                      icon={<ChatLines className="h-4 w-4" aria-hidden="true" />} iconClassName={ROW_ICON_CLASS}
+                      trailingAction={event.lane === "needs" ? <Text variant="caption" tone="accent">Unread</Text> : undefined}
+                      density="compact" surface="plain" verticalAlign="center"
+                      className="min-h-14 !rounded-none !bg-transparent"
+                      onPress={() => openEvent(event)} data-testid={`home-chat-${event.key}`} />
+                  </div>
+                ))}
               </section>
             ) : null}
 
