@@ -1,5 +1,18 @@
 # @instafy/cli
 
+## 0.2.3
+
+### Patch Changes
+
+- 7e3b932: Add customer commands for reading paginated support case timelines and posting idempotent follow-up replies.
+- 82caf54: Remove `CREDENTIAL_ENCRYPTION_PREVIOUS_KEYS`, the controller's decrypt-only credential keys during a key rotation, from the environment of runtime child processes, as `CREDENTIAL_ENCRYPTION_KEY` already is.
+- 1fc904c: Add `conversation grep` to search persisted conversation messages with scope filters, newest-first pagination, and JSON output. Add `conversation context` to retrieve surrounding messages for a search match.
+- 3c43559: Rebuild the published bundle with tsup 8. The emitted JavaScript is formatted
+  differently because tsup's esbuild moves from 0.19 to 0.27, and `node:` prefixes
+  are now kept in the output, which the config states explicitly rather than
+  inheriting. No CLI behaviour changes; the test suite and the packed file list
+  are unchanged.
+
 ## 0.2.2
 
 ### Patch Changes
