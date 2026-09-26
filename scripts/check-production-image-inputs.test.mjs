@@ -53,10 +53,16 @@ function resolveBuildArguments(reference, defaults, relativePath) {
   return resolved;
 }
 
+// External image references only: a FROM naming a stage defined earlier in the
+// same Dockerfile builds on that stage and pulls nothing.
 function dockerfileFromReferences(source) {
-  return [...source.matchAll(/^FROM(?: --platform=\S+)? (\S+)/gmu)].map(
-    (match) => match[1],
-  );
+  const stages = new Set();
+  const references = [];
+  for (const match of source.matchAll(/^FROM(?: --platform=\S+)? (\S+)(?: AS (\S+))?/gmu)) {
+    if (!stages.has(match[1])) references.push(match[1]);
+    if (match[2]) stages.add(match[2]);
+  }
+  return references;
 }
 
 function dockerfileStage(source, stageName) {
