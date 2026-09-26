@@ -9,10 +9,12 @@ const source = fs.readFileSync(new URL("../.github/workflows/continuous-image-pu
 const sha = "a".repeat(40);
 const repo = "instafy-dev/instafy";
 const prefix = `repos/${repo}/actions/`;
-const ciPath = `${prefix}workflows/build.yml/runs?event=push&head_sha=${sha}&per_page=100`;
+const ciPath = `${prefix}workflows/build.yml/runs?head_sha=${sha}&per_page=100`;
+const buildRunPath = `${prefix}runs/77`;
 const servicePath = `${prefix}workflows/publish-production-services.yml/runs`;
 const runtimePath = `${prefix}workflows/publish-runtime-agent.yml/runs`;
 const steps = {
+  source: "Authorize the exact current protected-main commit",
   ci: "Inspect exact protected-main CI without waiting",
   manifests: "Reconcile exact publishers and manifest freshness",
   dispatch: "Dispatch missing immutable image publishers without waiting",
@@ -108,13 +110,74 @@ test("only completed successful exact Build opens publication", () => {
   passed(mixed); assert.equal(mixed.output, "ready=false\n");
 });
 for (const change of [{ conclusion: "failure" }, { conclusion: "cancelled" }, { conclusion: "skipped" },
-  { head_sha: "b".repeat(40) }, { event: "pull_request" },
+  { head_sha: "b".repeat(40) },
   { head_branch: "other" }, { path: ".github/workflows/other.yml" }, { repository: { full_name: "other/repo" } }, { status: "unknown" }]) {
   test(`Build refuses ${JSON.stringify(change)}`, () => {
     const result = run(steps.ci, { [ciPath]: inventory({ ...workflowRun(1, "build.yml"), ...change }) });
     assert.notEqual(result.status, 0); assert.equal(result.output, "");
   });
 }
+test("the Build listing never uses the stale event-filtered index and ignores non-push Builds", () => {
+  const result = run(steps.ci, { [ciPath]: inventory(workflowRun(1, "build.yml")) });
+  passed(result);
+  assert.equal(result.calls.length, 1);
+  assert.doesNotMatch(result.calls[0].endpoint, /event=/u);
+  for (const event of ["pull_request", "workflow_dispatch"]) {
+    const ignored = run(steps.ci, { [ciPath]: inventory({ ...workflowRun(1, "build.yml"), event }) });
+    passed(ignored); assert.equal(ignored.output, "ready=false\n");
+    const mixed = run(steps.ci, { [ciPath]: inventory({ ...workflowRun(1, "build.yml"), event }, workflowRun(2, "build.yml")) });
+    passed(mixed); assert.equal(mixed.output, "ready=true\n");
+  }
+});
+test("a Build completion is decided by reading that exact Build run, not a listing", () => {
+  const env = { BUILD_RUN_ID: "77" };
+  const ok = run(steps.ci, { [buildRunPath]: { ...workflowRun(77, "build.yml") } }, env);
+  passed(ok); assert.equal(ok.output, "ready=true\n");
+  assert.deepEqual(ok.calls.map(({ endpoint }) => endpoint), [buildRunPath]);
+  const stale = run(steps.ci, { [buildRunPath]: workflowRun(77, "build.yml", "in_progress") }, env);
+  passed(stale); assert.equal(stale.output, "ready=false\n"); assert.match(stale.summary, /deferred/u);
+  for (const change of [{ conclusion: "failure" }, { head_sha: "b".repeat(40) }, { event: "pull_request" },
+    { head_branch: "other" }, { path: ".github/workflows/other.yml" }, { repository: { full_name: "other/repo" } }]) {
+    const refused = run(steps.ci, { [buildRunPath]: { ...workflowRun(77, "build.yml"), ...change } }, env);
+    assert.notEqual(refused.status, 0, JSON.stringify(change)); assert.equal(refused.output, "");
+  }
+  for (const id of ["0", "12a", "-1"]) {
+    assert.notEqual(run(steps.ci, { [buildRunPath]: workflowRun(77, "build.yml") }, { BUILD_RUN_ID: id }).status, 0);
+  }
+});
+test("a Build completion for a commit main has moved past yields without error", () => {
+  const moved = run(steps.source, {}, {
+    GITHUB_EVENT_NAME: "workflow_run", REQUESTED_COMMIT: sha, GITHUB_SHA: "b".repeat(40) });
+  passed(moved); assert.equal(moved.output, "current=false\n"); assert.equal(moved.calls.length, 0);
+  const current = run(steps.source, { [`repos/${repo}/commits/main`]: sha }, {
+    GITHUB_EVENT_NAME: "workflow_run", REQUESTED_COMMIT: sha, GITHUB_SHA: sha });
+  passed(current); assert.equal(current.output, `current=true\ncommit_sha=${sha}\n`);
+  const manual = run(steps.source, {}, {
+    GITHUB_EVENT_NAME: "workflow_dispatch", REQUESTED_COMMIT: sha, GITHUB_SHA: "b".repeat(40) });
+  assert.notEqual(manual.status, 0);
+});
+test("only the exact successful protected-main push Build of this repository can start a pass", () => {
+  const trigger = source.slice(source.indexOf("on:\n"), source.indexOf("\npermissions:"));
+  assert.match(trigger, /  workflow_run:\n    workflows: \[Public Build\]\n    types: \[completed\]\n    branches: \[main\]\n/u);
+  const guard = source.slice(source.indexOf("    if: >-\n"), source.indexOf("    runs-on:"));
+  for (const clause of [
+    "github.repository == 'instafy-dev/instafy'",
+    "github.ref == 'refs/heads/main'",
+    "github.event_name != 'workflow_run' || (",
+    "github.event.workflow_run.event == 'push'",
+    "github.event.workflow_run.conclusion == 'success'",
+    "github.event.workflow_run.head_branch == 'main'",
+    "github.event.workflow_run.path == '.github/workflows/build.yml'",
+    "github.event.workflow_run.repository.full_name == 'instafy-dev/instafy'",
+    "github.event.workflow_run.head_repository.full_name == 'instafy-dev/instafy'",
+  ]) assert.ok(guard.includes(clause), clause);
+  // A Build completion never selects a self-hosted runner or gains inputs.
+  const runsOn = source.slice(source.indexOf("    runs-on:"), source.indexOf("    timeout-minutes:"));
+  assert.doesNotMatch(runsOn, /workflow_run/u);
+  assert.match(source, /REQUESTED_COMMIT: \$\{\{ github\.event_name == 'workflow_dispatch' && inputs\.commit_sha \|\| github\.event_name == 'workflow_run' && github\.event\.workflow_run\.head_sha \|\| github\.sha \}\}/u);
+  assert.match(source, /BUILD_RUN_ID: \$\{\{ github\.event_name == 'workflow_run' && github\.event\.workflow_run\.id \|\| '' \}\}/u);
+  assert.doesNotMatch(source, /event=workflow_dispatch|event=push/u);
+});
 test("Build API failure or incomplete inventory cannot dispatch", () => {
   for (const value of [{ error: true }, { total_count: 101, workflow_runs: [] }, { total_count: 1, workflow_runs: [] }]) {
     assert.notEqual(run(steps.ci, { [ciPath]: value }).status, 0);

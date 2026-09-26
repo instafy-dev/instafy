@@ -123,9 +123,12 @@ around this.
 
 The protected-main image workflow in `.github/workflows/continuous-image-publication.yml`
 dispatches immutable service and runtime image publishers only after the exact public-main commit
-passes Public Build. Each five-minute reconciliation checks once and releases its worker; pending
-Build or publisher work is deferred to the next six-hour scheduled pass (or an explicit exact-main
-dispatch). A successful coordinator is not publication proof: consumers still require successful
+passes Public Build. Each five-minute reconciliation checks once and releases its worker. The push
+pass usually finds Build still running and defers; the completion of that exact protected-main push
+Build (a guarded `workflow_run`, the only privileged trigger allowed there) starts the pass that
+publishes, and the six-hour schedule or an explicit exact-main dispatch reconciles anything left.
+Run lookups never use GitHub's event-filtered listings, which are intermittently served stale.
+A successful coordinator is not publication proof: consumers still require successful
 child publishers and their sealed exact-commit manifests. Fresh manifests must retain at least
 14 days of their 90-day retention. A sealed publication with a stale or missing manifest fails
 closed rather than attempting to overwrite an immutable release. Mutable tags are not release
