@@ -1841,6 +1841,9 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     showStatus,
   });
   const browserModeActive = browserSessionOpen && browserVisible;
+  // The split-view composer belongs to Chat. A visible resource must not
+  // silently restrict every workspace task to browser tools.
+  const browserComposerActive = browserModeActive && !splitSurfaces;
   const showBrowserSessionPageStripForComposer =
     shouldShowBrowserSessionPageStripInComposer({
       browserModeActive,
@@ -3718,9 +3721,9 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
           hasImageAttachments: imageAttachments.length > 0,
           fallbackSuggestion: softPrefillSuggestion,
           personalBrowserActive:
-            browserTransport === "personal" && browserSessionOpen,
+            browserTransport === "personal" && browserComposerActive,
           sharedBrowserModeActive:
-            browserTransport === "shared" && browserModeActive,
+            browserTransport === "shared" && browserComposerActive,
           pendingNewBrowser: pendingBrowserLaunchMode === "new_page",
           sharedBrowserPageTargetAvailable:
             browserTransport === "shared" &&
@@ -3736,7 +3739,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
       activeConversationEntry?.ownerAgent?.handle,
       activeConversationEntry?.threadKind,
       assistantEnabled,
-      browserModeActive,
+      browserComposerActive,
       browserSessionOpen,
       browserTransport,
       conversationHumanPeerContext.hasHumanPeer,
@@ -4383,7 +4386,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     performSubmit,
     personalBrowserActive:
       browserTransport === "personal" &&
-      browserSessionOpen,
+      browserComposerActive,
     personalBrowserAgentControlEnabled: personalBrowser.status?.agentControlEnabled ?? false,
     personalBrowserAgentError: personalBrowser.agentError,
     personalBrowserAgentPhase: personalBrowser.agentPhase,
@@ -4401,7 +4404,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     scrollToBottom,
     sendingAttachment,
     sharedBrowserActive:
-      browserTransport === "shared" && browserModeActive,
+      browserTransport === "shared" && browserComposerActive,
     sharedBrowserRuntimeId: resolvedBrowserRuntimeId,
     showCredentialsGate: showChatCredentialsGate,
     showStatus,
@@ -4504,9 +4507,9 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
       (preferredBrowserPage ? toBrowserSessionPageTarget(preferredBrowserPage) : null);
     const browserLaunchMode = restoredEnvelope?.browserLaunchMode ?? pendingBrowserLaunchMode;
     const runtimeOverride = restoredEnvelope?.runtimeOverride ??
-      (browserTransport === "personal" && personalBrowser.runtimeOverride?.runtimeId
+      (browserComposerActive && browserTransport === "personal" && personalBrowser.runtimeOverride?.runtimeId
         ? personalBrowser.runtimeOverride
-        : browserTransport === "shared" && browserModeActive && resolvedBrowserRuntimeId
+        : browserTransport === "shared" && browserComposerActive && resolvedBrowserRuntimeId
           ? {
               runtimeId: resolvedBrowserRuntimeId,
               runtimeDisplayName: null,
@@ -4548,7 +4551,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
   }, [
     activeConversationEntry?.controllerId,
     activeConversationId,
-    browserModeActive,
+    browserComposerActive,
     browserTransport,
     clearInputEditor,
     createServerMessageStash,
@@ -5978,6 +5981,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
                     sharedBrowserViewerKind={sharedBrowserViewerKind}
                     sharedBrowserCapabilitiesResolved={sharedBrowserCapabilitiesResolved}
                     sharedBrowserCapabilitiesAvailable={Boolean(sharedBrowserCapabilities)}
+                    sharedBrowserCapabilitiesUnsupported={sharedBrowserCapabilitiesUnsupported}
                     sharedBrowserRoutineApprovalAvailable={
                       sharedBrowserCapabilities?.approvalModes?.includes("routine") === true
                     }

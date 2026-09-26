@@ -136,6 +136,15 @@ describe("production Shared modal resume selection", () => {
     await act(async () => document.querySelector<HTMLButtonElement>('[data-testid="shared-browser-sessions-toggle"]')!.click());
     expect(document.body.textContent).toContain(secondId);
   });
+  it.each([false, true])("distinguishes a failed capability lookup from an incompatible response (%s)", async (unsupported) => {
+    mocks.fetchStatus.mockResolvedValue({ runtimes: [entry(firstId)] });
+    await act(async () => root.render(<BrowserSessionModal isOpen onOpenChange={noop} projectId={projectId}
+      currentUserId="user-1" preferRuntimeId={null} resumeRuntimeId={firstId} presentation="docked" canControlBrowser
+      sharedBrowserViewerKind={null} sharedBrowserCapabilitiesResolved sharedBrowserCapabilitiesAvailable={false}
+      sharedBrowserCapabilitiesUnsupported={unsupported} />));
+    expect(container.textContent).toContain(unsupported ? "requires a newer version" : "Unable to connect to this browser session");
+    if (!unsupported) expect(container.textContent).not.toContain("requires a newer version");
+  });
   it("does not allocate or silently join when the requested session is missing", async () => {
     mocks.fetchStatus.mockResolvedValue({ runtimes: [entry(firstId)] });
     await render(secondId);

@@ -39,6 +39,14 @@ There is no Team runtime mode. Adding one later requires host-local consent, sep
 
 ## Resume on another device
 
+On wide screens, the Chat composer remains a workspace conversation while a browser
+or file is open beside it. Showing a browser does not restrict ordinary file and coding
+requests to browser tools. In a single Browser view, a browser task needs a live page;
+if no page is available, the composer keeps the message instead of submitting an invalid browser job.
+Unsent text drafts survive same-tab reloads in session storage, scoped to the account and
+space. They are not sent to other participants or restored on another device; attachments
+and file contents are not included.
+
 **Browser options** (the toolbar's three-dot button) opens sessions, a **Copy resume link**
 action and browser-data controls. The raw resume link, runtime identity and login-recovery
 status are under **Session details**; no extra session row is shown while browsing. The link contains

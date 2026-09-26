@@ -427,6 +427,7 @@ export function BrowserSessionModal({
   sharedBrowserViewerKind = "rfb",
   sharedBrowserCapabilitiesResolved = true,
   sharedBrowserCapabilitiesAvailable = true,
+  sharedBrowserCapabilitiesUnsupported = false,
   sharedBrowserAvailableViewerKinds = DEFAULT_SHARED_BROWSER_VIEWER_KINDS,
   sharedBrowserRoutineApprovalAvailable = false,
   humanInputIdentityKey,
@@ -465,6 +466,7 @@ export function BrowserSessionModal({
   sharedBrowserViewerKind?: SupportedSharedBrowserViewerKind | null;
   sharedBrowserCapabilitiesResolved?: boolean;
   sharedBrowserCapabilitiesAvailable?: boolean;
+  sharedBrowserCapabilitiesUnsupported?: boolean;
   sharedBrowserAvailableViewerKinds?: SupportedSharedBrowserViewerKind[];
   sharedBrowserRoutineApprovalAvailable?: boolean;
   humanInputIdentityKey?: string;
@@ -1735,7 +1737,9 @@ export function BrowserSessionModal({
     setStatus("error");
     setError(
       !sharedBrowserCapabilitiesAvailable
-        ? "This Shared Browser viewer requires a newer version of Instafy."
+        ? sharedBrowserCapabilitiesUnsupported
+          ? "This Shared Browser viewer requires a newer version of Instafy."
+          : "Unable to connect to this browser session. Retry when the machine is ready."
         : canControlBrowser
           ? "This runtime's RFB renderer is available only to the current controller. Request control to view and interact with it."
           : "This Shared Browser runtime does not provide a safe view-only renderer.",
@@ -1748,6 +1752,7 @@ export function BrowserSessionModal({
     isOpen,
     sharedBrowserCapabilitiesAvailable,
     sharedBrowserCapabilitiesResolved,
+    sharedBrowserCapabilitiesUnsupported,
   ]);
 
   useEffect(() => {
