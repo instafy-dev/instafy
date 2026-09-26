@@ -469,6 +469,43 @@ test("cargo-chef installation is version-locked", () => {
   }
 });
 
+test("runtime Rust dependencies compile into a layer the publisher's layer cache keeps", () => {
+  const source = read("docker/runtime/Dockerfile");
+  const instructions = (stage) =>
+    dockerfileStage(source, stage).split(/(?<!\\)\n/u).filter((line) => line.trim());
+  const deps = instructions("builder-deps");
+  const builder = instructions("builder");
+  const targetMount = /--mount=type=cache,target=\/src\/packages\/runtime-agent\/target(\S*)/gu;
+
+  // Exported layer caches never include cache mounts, so the cook must write
+  // target/ into its own layer.
+  const cook = deps.filter((line) => line.includes("cargo chef cook"));
+  assert.equal(cook.length, 1);
+  assert.match(cook[0], /^RUN /u);
+  assert.match(cook[0], /--profile \$\{BUILD_PROFILE\} --recipe-path \/src\/recipe\.json --locked$/u);
+  assert.equal([...deps.join("\n").matchAll(targetMount)].length, 0);
+
+  // The application build starts from the cooked layer, and its only target
+  // mount is seeded from that layer rather than starting empty.
+  assert.equal(builder[0], "FROM builder-deps AS builder");
+  const build = builder.filter((line) => line.includes("cargo build"));
+  assert.equal(build.length, 1);
+  assert.deepEqual(
+    [...builder.join("\n").matchAll(targetMount)].map((match) => match[1]),
+    [",from=builder-deps,source=/src/packages/runtime-agent/target"],
+  );
+  assert.ok(build[0].includes("--mount=type=cache,target=/src/packages/runtime-agent/target,from=builder-deps,"));
+
+  // One GitHub Actions cache per image and architecture cell, never a registry
+  // cache that would need a login before the pre-push scan.
+  const workflow = read(".github/workflows/publish-runtime-agent.yml");
+  const scope = "scope=publish-runtime-agent-${{ matrix.flavor }}-${{ matrix.architecture }}";
+  assert.ok(workflow.includes(`          cache-from: type=gha,${scope}\n`));
+  assert.ok(workflow.includes(`          cache-to: type=gha,${scope},mode=max`));
+  assert.equal([...workflow.matchAll(/^\s+cache-(?:from|to):/gmu)].length, 2);
+  assert.doesNotMatch(workflow, /type=registry/u);
+});
+
 test("runtime publication scans each native architecture before registry login", () => {
   const source = read(".github/workflows/publish-runtime-agent.yml");
   const cleanup = source.indexOf(
