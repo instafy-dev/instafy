@@ -3,6 +3,7 @@
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import type { ConversationState } from "../../../../conversations/conversationState";
 import type { ChatMessage } from "../../types";
 import { ConversationMessageRows } from "../ConversationMessageRows";
 import { RunFailureRetryProvider } from "../RunFailureNotice";
@@ -19,10 +20,25 @@ const workspaceTabsMocks = vi.hoisted(() => ({
   requestUrlPush: vi.fn(),
 }));
 
+// A thread preview card reads its linked thread from this list.
+const conversationsMocks = vi.hoisted(() => ({
+  conversations: [] as Array<Partial<ConversationState>>,
+}));
+
 vi.mock("../../../../conversations/ConversationsProvider", () => ({
   useConversations: () => ({
     activeConversation: null,
-    conversations: [],
+    conversations: conversationsMocks.conversations,
+  }),
+}));
+
+vi.mock("../../../../projects/useProject", () => ({
+  useProject: () => ({ activeProjectId: "project-1" }),
+}));
+
+vi.mock("../../../../runtime/useRuntimeMenu", () => ({
+  useRuntimeMenuOptions: () => ({
+    runtime: { effectiveRuntimeId: null, preferredRuntimeId: null },
   }),
 }));
 
@@ -104,6 +120,7 @@ describe("ConversationMessageRows", () => {
     workspaceTabsMocks.openConversationTab.mockReset();
     workspaceTabsMocks.openJobThreadTab.mockReset();
     workspaceTabsMocks.requestUrlPush.mockReset();
+    conversationsMocks.conversations = [];
     container = document.createElement("div");
     document.body.appendChild(container);
     root = createRoot(container);
@@ -167,6 +184,60 @@ describe("ConversationMessageRows", () => {
     expect(document.activeElement).toBe(row);
     expect(row.getAttribute("data-chat-message-target")).toBeNull();
     expect(row.getAttribute("aria-label")).toBe("Search result");
+  });
+
+  it("leaves reasoning and status parts out of a thread card's fallback preview", async () => {
+    const command = createMessage({
+      id: "thread-command",
+      content: "pnpm vitest run src/whitespace.test.ts",
+      messageType: "command_execution",
+      metadata: { messageType: "command_execution" },
+    });
+    const reasoning = createMessage({
+      id: "thread-reasoning",
+      content: "**Clarifying whitespace handling**\n\nThe user seems to mean whitespace generally, not just tabs.",
+      messageType: "reasoning",
+      metadata: { messageType: "reasoning" },
+    });
+    const status = createMessage({
+      id: "thread-status",
+      content: "Retrying: upstream timeout",
+      messageType: "status",
+      metadata: { messageType: "status" },
+    });
+    const thread = (messages: ChatMessage[]): Partial<ConversationState> => ({
+      localId: "thread-local",
+      controllerId: "thread-controller",
+      parentConversationId: null,
+      title: "Whitespace fix",
+      messages,
+      pendingRunIds: [],
+    });
+    const threadCard = () =>
+      createMessage({
+        id: "conversation-thread-preview:thread-local",
+        messageType: "conversation_thread",
+        metadata: { messageType: "conversation_thread", threadLocalId: "thread-local" },
+      });
+    const previewText = () =>
+      container.querySelector('[data-testid="conversation-thread-preview"]')?.textContent ?? "";
+
+    // No reply or user text qualifies, so the card falls back to the newest
+    // activity. That is the command, not the status or reasoning after it.
+    conversationsMocks.conversations = [thread([command, status, reasoning])];
+    await renderSpeakerBoundaryMessages([threadCard()]);
+    expect(previewText()).toContain("pnpm vitest run src/whitespace.test.ts");
+    expect(previewText()).not.toContain("**");
+    expect(previewText()).not.toContain("Clarifying whitespace handling");
+    expect(previewText()).not.toContain("The user seems");
+    expect(previewText()).not.toContain("Retrying");
+
+    // With only a reasoning part, the card reads as empty, as the expanded
+    // thread does, instead of showing the model's deliberation.
+    conversationsMocks.conversations = [thread([reasoning])];
+    await renderSpeakerBoundaryMessages([threadCard()]);
+    expect(previewText()).toContain("No messages yet.");
+    expect(previewText()).not.toContain("The user seems");
   });
 
   async function renderWithNoticeActions(

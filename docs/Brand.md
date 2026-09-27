@@ -84,8 +84,8 @@ native/store artwork, headers, login forms, and inactive or historical
 transcript avatars remain static. The current live-run speaker avatar and the
 thinking row may animate. Custom agent avatars are never given Octo's motion.
 The motion must disappear under `prefers-reduced-motion: reduce`, and compact
-chat layouts use the same animated mark beside the thinking status because the
-avatar gutter is intentionally hidden on phones.
+chat layouts show the same animated avatar, white coin included, beside the
+thinking status because the avatar gutter is intentionally hidden on phones.
 
 Full-screen route and authentication loading may reuse the canonical swimming
 cycle while the requested route or session restoration is pending. Show a single

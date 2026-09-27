@@ -3,7 +3,32 @@
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { ChatMessageAvatar } from "../ChatMessageAvatar";
 import { ChatTypingRows } from "../ChatTypingRows";
+
+function classTokens(element: Element): string[] {
+  return (element.getAttribute("class") ?? "").split(/\s+/).filter(Boolean);
+}
+
+// jsdom cannot resolve Tailwind's dark: variants, so the white coin is read
+// from the classes: the mark is inked brand-ink on a bg-white surface inside
+// the face, and nothing between the mark and that face swaps either color
+// for dark mode (docs/Brand.md keeps the Octo coin white in both themes).
+function expectWhiteOctoCoin(face: Element | null) {
+  expect(face).toBeInstanceOf(Element);
+  const mark = face!.querySelector(".octo-mark");
+  expect(mark).not.toBeNull();
+  const ink = mark!.closest('[class~="text-brand-ink"]');
+  const coin = mark!.closest('[class~="bg-white"]');
+  expect(ink && face!.contains(ink)).toBe(true);
+  expect(coin && face!.contains(coin)).toBe(true);
+  for (let node: Element | null = mark; node && node !== face!.parentElement; node = node.parentElement) {
+    expect(classTokens(node).filter((token) => token.startsWith("dark:text-"))).toEqual([]);
+  }
+  for (let node: Element | null = mark; node && node !== coin!.parentElement; node = node.parentElement) {
+    expect(classTokens(node).filter((token) => token.startsWith("dark:bg-"))).toEqual([]);
+  }
+}
 
 describe("ChatTypingRows", () => {
   let container: HTMLDivElement;
@@ -275,6 +300,83 @@ describe("ChatTypingRows", () => {
     });
 
     expect(container.querySelector('[data-testid="assistant-thinking-octo-compact"]')).toBeNull();
+  });
+
+  it("draws the phone-only thinking Octo as the same white coin as its chat face", async () => {
+    // Below sm the avatar gutter is hidden and this indicator is the row's
+    // only face. It used to be the bare reverse logo mark, so in dark mode a
+    // white glyph with no coin stood where the reply header then showed the
+    // white Octo coin.
+    await act(async () => {
+      root.render(
+        <ChatTypingRows
+          peerTypingLabel={null}
+          isAssistantTyping
+          isAssistantTypingCoveredByJobThreadPreview={false}
+          typingAgents={[]}
+          hasMultipleTypingAgents={false}
+          typingAgentHandle="octo"
+          typingAgentAvatarSeed="octo"
+          typingIndicatorState={{ phase: "thinking", label: "Thinking…" }}
+          typingStatusLabel="Thinking…"
+          typingStatusAriaLabel="Octo is thinking"
+          isThinkingLabelExpanded={false}
+          onToggleThinkingLabel={() => undefined}
+          latestDisplayedMessageId="message-1"
+          renderAssistantAvatar={(_metadata, identity, options) => (
+            <ChatMessageAvatar
+              kind="assistant"
+              agent={identity}
+              motion={options?.motion}
+              scrollReactive={options?.scrollReactive}
+            />
+          )}
+        />,
+      );
+    });
+
+    const compact = container.querySelector('[data-testid="assistant-thinking-octo-compact"]');
+    const gutter = container.querySelector('[data-testid="chat-avatar-assistant"]');
+    expectWhiteOctoCoin(compact);
+    expectWhiteOctoCoin(gutter);
+    const compactMark = compact?.querySelector(".octo-mark");
+    // The same coin surface as the gutter face, not a lookalike.
+    expect(compactMark?.parentElement?.getAttribute("class")).toBe(
+      gutter?.querySelector(".octo-mark")?.parentElement?.getAttribute("class"),
+    );
+    expect(compact?.closest(".sm\\:hidden")).not.toBeNull();
+    expect(compactMark?.getAttribute("data-octo-motion")).toBe("thinking");
+    expect(compactMark?.getAttribute("data-octo-scroll-reactive")).toBe("true");
+    // The gutter keeps the only chat-avatar-assistant selector on the row.
+    expect(container.querySelectorAll('[data-testid="chat-avatar-assistant"]')).toHaveLength(1);
+  });
+
+  it("gives the thinking Octo of a multi-agent row the same white coin", async () => {
+    await act(async () => {
+      root.render(
+        <ChatTypingRows
+          peerTypingLabel={null}
+          isAssistantTyping
+          isAssistantTypingCoveredByJobThreadPreview={false}
+          typingAgents={[
+            { handle: "reviewer", avatarSeed: "reviewer", displayName: "Reviewer", isThinking: true },
+            { handle: "octo", avatarSeed: "octo", displayName: "Octo", isThinking: true },
+          ]}
+          hasMultipleTypingAgents
+          typingAgentHandle="reviewer"
+          typingAgentAvatarSeed="reviewer"
+          typingIndicatorState={{ phase: "thinking", label: null }}
+          typingStatusLabel="Thinking…"
+          typingStatusAriaLabel="Reviewer and Octo are thinking"
+          isThinkingLabelExpanded={false}
+          onToggleThinkingLabel={() => undefined}
+          latestDisplayedMessageId="message-1"
+          renderAssistantAvatar={() => <span data-testid="assistant-avatar" />}
+        />,
+      );
+    });
+
+    expectWhiteOctoCoin(container.querySelector('[data-testid="assistant-thinking-octo-compact"]'));
   });
 
   it("keeps workspace startup visibly owned by the assistant avatar", async () => {

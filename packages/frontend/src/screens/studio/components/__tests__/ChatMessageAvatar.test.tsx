@@ -41,6 +41,28 @@ describe("ChatMessageAvatar", () => {
     );
   });
 
+  it("keeps the Octo coin white in both themes under any row's test id", async () => {
+    await act(async () => {
+      root.render(
+        <ChatMessageAvatar
+          kind="assistant"
+          agent={{ handle: "octo", avatarSeed: "octo" }}
+          size="xs"
+          testId="assistant-thinking-octo-compact"
+        />,
+      );
+    });
+
+    expect(container.querySelector('[data-testid="chat-avatar-assistant"]')).toBeNull();
+    const face = container.querySelector('[data-testid="assistant-thinking-octo-compact"]');
+    const mark = face?.querySelector(".octo-mark");
+    const coinTokens = (mark?.parentElement?.getAttribute("class") ?? "").split(/\s+/);
+    const markTokens = (mark?.getAttribute("class") ?? "").split(/\s+/);
+    expect(coinTokens).toContain("bg-white");
+    expect(markTokens).toContain("text-brand-ink");
+    expect([...coinTokens, ...markTokens].filter((token) => token.startsWith("dark:"))).toEqual([]);
+  });
+
   it("never applies Octo motion to a custom image avatar", async () => {
     await act(async () => {
       root.render(
