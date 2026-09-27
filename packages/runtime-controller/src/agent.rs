@@ -43,6 +43,10 @@ use crate::tokens::{
 use crate::workspace;
 
 const AGENT_CONVERSATION_HISTORY_LIMIT: i64 = 80;
+/// How many of a conversation's latest skill setup openers a job carries. A
+/// person rarely sends more than one or two, so a few is enough to keep a
+/// setup that began before a mistyped retry.
+const AGENT_SKILL_SETUP_OPENER_LIMIT: i64 = 5;
 
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct TokenContext {
@@ -3925,6 +3929,21 @@ pub(crate) async fn lease_next_agent_job(
             );
             payload = JsonValue::Object(map);
         }
+
+        let skill_setup_openers = load_skill_setup_openers_for_agent(
+            transaction,
+            &conversation_uuid,
+            AGENT_SKILL_SETUP_OPENER_LIMIT,
+        )
+        .await?;
+        if !skill_setup_openers.is_empty() {
+            if let JsonValue::Object(ref mut map) = payload {
+                map.insert(
+                    "skill_setup_openers".to_string(),
+                    JsonValue::Array(skill_setup_openers),
+                );
+            }
+        }
     }
 
     // NOTE: Response-shape guidance is enforced by the runtime agent prompt scaffold.
@@ -4050,6 +4069,69 @@ async fn load_conversation_history_for_agent(
 
     entries.reverse();
     Ok(entries)
+}
+
+/// The conversation's latest dispatched `/skills start` and `/skills import`
+/// messages, newest first, each with the provider of the first reply its run
+/// completed with.
+///
+/// The history above is the newest rows of the conversation, and every tool
+/// call, reasoning step and usage report of a turn is a row of its own. The
+/// message that opened a skill setup therefore leaves that window within a
+/// turn or two, while the setup it opened still has questions to ask. The
+/// runtime reads these to keep the setup going. It parses the text itself and
+/// uses the reply provider to skip an opener its skills lane answered without
+/// the model, so this query only narrows the rows down. The `like` repeats
+/// part of the pattern so a long conversation can be narrowed through the
+/// trigram content index before the regex runs.
+pub(crate) async fn load_skill_setup_openers_for_agent(
+    transaction: &tokio_postgres::Transaction<'_>,
+    conversation_id: &Uuid,
+    limit: i64,
+) -> Result<Vec<JsonValue>, (StatusCode, Json<ApiError>)> {
+    let rows = transaction
+        .query(
+            r"select opener.content,
+                    (select reply.metadata->>'provider'
+                       from conversation_messages reply
+                      where reply.conversation_id = opener.conversation_id
+                        and reply.prompt_id = opener.prompt_id
+                        and reply.role = 'assistant'
+                        and reply.metadata->>'provider' is not null
+                      order by reply.created_at asc
+                      limit 1) as reply_provider
+               from conversation_messages opener
+              where opener.conversation_id = $1
+                and opener.role = 'user'
+                and opener.prompt_id is not null
+                and lower(opener.content) like '%/skill%'
+                and opener.content ~* '^\s*/skills?\s*(start|import)'
+              order by opener.created_at desc
+              limit $2",
+            &[conversation_id, &limit.clamp(1, 20)],
+        )
+        .await
+        .map_err(|error| internal_error(format!("failed to load skill setup openers: {error}")))?;
+
+    Ok(rows
+        .into_iter()
+        .map(|row| {
+            let content: String = row.get("content");
+            let reply_provider: Option<String> = row.get("reply_provider");
+            // The command is its first line; anything after it is context the
+            // runtime does not read here, so it stays out of the payload.
+            let command = content.trim().lines().next().unwrap_or_default();
+            let mut entry = JsonMap::new();
+            entry.insert(
+                "content".to_string(),
+                JsonValue::String(command.to_string()),
+            );
+            if let Some(provider) = reply_provider {
+                entry.insert("replyProvider".to_string(), JsonValue::String(provider));
+            }
+            JsonValue::Object(entry)
+        })
+        .collect())
 }
 
 fn should_include_message_in_agent_history(

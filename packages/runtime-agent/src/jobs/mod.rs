@@ -2625,6 +2625,92 @@ const SECRET_REJECTION_CONTRACT: &str = "\
 - When the service or the skill's check rejects a value the space already holds (not a permission error on one resource), emit `request_secret` again for every value that rejection could be about, even if the person says they already replaced them in Secrets.\n\
 - `request_secret`: { type, name, optional valueLabel, description, whereToGet, skill, sensitive, agentHandles }\n";
 
+/// Keeps a skill setup going on follow-up turns. The full Studio contract
+/// states this rule, but only the first turn of a thread gets that contract.
+/// Later turns get the compact reminder of a restored thread, the direct
+/// workspace-change contract when the preflight sees a file to write, or the
+/// cross-chat contract. Without this section, saving the file a setup asks
+/// for reads as the whole task, and the setup stops before its next question.
+///
+/// It is its own section, added only when the conversation began with a
+/// setup, so ordinary conversations keep their compact budgets. It is terse
+/// because it rides on those compact prompts. It has its own heading and sits
+/// with the lane's contract, ahead of the latest request, so it cannot read as
+/// words the person typed.
+const SKILL_SETUP_CONTINUATION: &str = "\nSkill setup rule:\n- This conversation stays a skill setup until the skill's \"## Getting started\" is done. A saved file or a passed check is a step, not the end: in this same reply, ask its next unanswered question or offer its schedule, then take up anything new. Plain sentences: no \"please\", no em dashes, no exclamation marks, no jokes.\n";
+
+/// True when a person in this conversation opened a skill setup with
+/// `/skills import ... --start` or `/skills start <name>` and the setup began.
+///
+/// The history the controller sends is its most recent rows, and every tool
+/// call and reasoning step of a turn is a row, so the opener leaves that
+/// window within a turn or two. The controller therefore also sends the
+/// conversation's latest openers as `skill_setup_openers`, each with the
+/// provider of its first reply, and either source is enough.
+fn conversation_began_with_skill_setup(job: &LeaseJob) -> bool {
+    history_began_with_skill_setup(job.payload.get("conversation_history"))
+        || controller_reported_skill_setup(job.payload.get("skill_setup_openers"))
+}
+
+fn is_skill_setup_opener(text: &str) -> bool {
+    match skills::parse_skills_request(text) {
+        Some(skills::SkillsRequest::Start { .. }) => true,
+        Some(skills::SkillsRequest::Import(request)) => request.start,
+        _ => false,
+    }
+}
+
+/// An opener the skills lane answered by itself never reached the model: the
+/// skill name was unknown, the import failed or no AI was connected. Nothing
+/// was set up, so the opener does not count. An opener with no reply yet is
+/// the kickoff turn itself, which only reaches the prompt builder once the
+/// lane has resolved the skill.
+fn history_began_with_skill_setup(history: Option<&JsonValue>) -> bool {
+    let Some(entries) = history.and_then(JsonValue::as_array) else {
+        return false;
+    };
+    let mut pending_opener = false;
+    for entry in entries {
+        let role = entry
+            .get("role")
+            .and_then(JsonValue::as_str)
+            .unwrap_or("assistant");
+        if role.eq_ignore_ascii_case("user") {
+            if pending_opener {
+                return true;
+            }
+            pending_opener = entry
+                .get("content")
+                .and_then(JsonValue::as_str)
+                .is_some_and(is_skill_setup_opener);
+        } else if pending_opener
+            && entry
+                .get("metadata")
+                .and_then(|metadata| metadata.get("provider"))
+                .and_then(JsonValue::as_str)
+                == Some(skills::SKILLS_LANE_PROVIDER)
+        {
+            pending_opener = false;
+        }
+    }
+    pending_opener
+}
+
+fn controller_reported_skill_setup(openers: Option<&JsonValue>) -> bool {
+    openers
+        .and_then(JsonValue::as_array)
+        .is_some_and(|openers| {
+            openers.iter().any(|opener| {
+                opener
+                    .get("content")
+                    .and_then(JsonValue::as_str)
+                    .is_some_and(is_skill_setup_opener)
+                    && opener.get("replyProvider").and_then(JsonValue::as_str)
+                        != Some(skills::SKILLS_LANE_PROVIDER)
+            })
+        })
+}
+
 fn append_prompt_section(
     prompt: &mut String,
     section_metrics: &mut JsonMap<String, JsonValue>,
@@ -7484,6 +7570,9 @@ Avoid creating dependency caches or stores in the canonical workspace root when 
             );
         }
 
+        // The full contract below states the setup rule in its longer form, so
+        // the terse section added after this lane chain must not repeat it there.
+        let mut full_contract_carries_skill_setup = false;
         if lead_continuation_checkpoint {
             append_prompt_section(
                 &mut prompt,
@@ -7677,6 +7766,7 @@ Avoid creating dependency caches or stores in the canonical workspace root when 
                 - Keep the parent chat lead-centric. Worker evidence should attach to compact workstream refs unless the user asks to inspect it or a lane fails.\n",
             );
         } else {
+            full_contract_carries_skill_setup = true;
             let response_contract_start = prompt.len();
             prompt.push_str(
             "\nPlease follow these constraints:\n\
@@ -7778,6 +7868,22 @@ Avoid creating dependency caches or stores in the canonical workspace root when 
                 &mut prompt_section_metrics,
                 "responseContract",
                 &prompt[response_contract_start..],
+            );
+        }
+
+        // Workers, lead checkpoints and planning turns act on work already
+        // handed to them, so they do not carry the setup on to its next step.
+        if !multi_agent_worker
+            && !lead_continuation_checkpoint
+            && !multi_agent_planning_turn
+            && !full_contract_carries_skill_setup
+            && conversation_began_with_skill_setup(job)
+        {
+            append_prompt_section(
+                &mut prompt,
+                &mut prompt_section_metrics,
+                "skillSetupContinuation",
+                SKILL_SETUP_CONTINUATION,
             );
         }
 
@@ -16922,6 +17028,308 @@ mod tests {
         }
     }
 
+    const SKILL_SETUP_TEST_OPENER: &str =
+        "/skills import https://github.com/instafy-dev/skills/tree/main/packs/bookkeeping --start";
+    const SKILL_SETUP_TEST_QUESTION: &str = "FreeFinance lists one Mandant: Example GmbH (ID 41951). Is that the one this workspace keeps books for?";
+
+    fn skill_setup_history_job(history: JsonValue) -> LeaseJob {
+        test_lease_job(Some("feature"), json!({ "conversation_history": history }))
+    }
+
+    /// The opener and the model's first question, as the controller sends them
+    /// while the opener is still inside its history window.
+    fn skill_setup_test_job(opener: &str) -> LeaseJob {
+        skill_setup_history_job(json!([
+            {"role": "user", "content": opener},
+            {
+                "role": "assistant",
+                "content": SKILL_SETUP_TEST_QUESTION,
+                "metadata": {"source": "agent", "provider": "codex-embedded"}
+            }
+        ]))
+    }
+
+    /// A later turn whose history window no longer holds the opener. Only the
+    /// controller's `skill_setup_openers` still carries it.
+    fn skill_setup_outside_window_job(openers: JsonValue) -> LeaseJob {
+        test_lease_job(
+            Some("feature"),
+            json!({
+                "conversation_history": [
+                    {
+                        "role": "assistant",
+                        "content": SKILL_SETUP_TEST_QUESTION,
+                        "metadata": {"source": "agent", "provider": "codex-embedded"}
+                    }
+                ],
+                "skill_setup_openers": openers
+            }),
+        )
+    }
+
+    #[test]
+    fn conversation_began_with_skill_setup_detects_start_openers() {
+        assert!(conversation_began_with_skill_setup(&skill_setup_test_job(
+            SKILL_SETUP_TEST_OPENER
+        )));
+        assert!(conversation_began_with_skill_setup(&skill_setup_test_job(
+            "/skills start freefinance"
+        )));
+        for opener in [
+            "/skills import https://github.com/instafy-dev/skills/tree/main/packs/bookkeeping",
+            "/skills list",
+            "/skills start",
+            "Please inspect the imported repo.",
+        ] {
+            assert!(
+                !conversation_began_with_skill_setup(&skill_setup_test_job(opener)),
+                "{opener}"
+            );
+        }
+        // The kickoff turn itself has no reply yet. The prompt builder only
+        // sees it once the skills lane has resolved the skill.
+        assert!(conversation_began_with_skill_setup(
+            &skill_setup_history_job(json!([
+                {"role": "user", "content": "/skills start freefinance"}
+            ]))
+        ));
+        // Only the person opens a setup. An assistant turn that quotes the
+        // command does not make the conversation one.
+        let quoted = skill_setup_history_job(json!([
+            {"role": "user", "content": "How do I set up FreeFinance?"},
+            {"role": "assistant", "content": "/skills start freefinance"}
+        ]));
+        assert!(!conversation_began_with_skill_setup(&quoted));
+        assert!(!conversation_began_with_skill_setup(&test_lease_job(
+            Some("feature"),
+            json!({})
+        )));
+    }
+
+    #[test]
+    fn conversation_began_with_skill_setup_ignores_openers_the_skills_lane_answered() {
+        // A mistyped name, a failed import and a kickoff with no AI connected
+        // are all answered by the skills lane itself. No setup began, so a
+        // later unrelated request must not be told to carry one on.
+        for (opener, reply) in [
+            (
+                "/skills start freefinace",
+                "Unknown skill `freefinace`. Installed: freefinance.",
+            ),
+            (
+                SKILL_SETUP_TEST_OPENER,
+                "Skill import failed: GitHub returned 404 Not Found",
+            ),
+            (
+                "/skills start freefinance",
+                "Skills are installed. Connect an AI, then send `/skills start freefinance`.",
+            ),
+        ] {
+            let job = skill_setup_history_job(json!([
+                {"role": "user", "content": opener},
+                {
+                    "role": "assistant",
+                    "content": reply,
+                    "metadata": {"source": "agent", "provider": skills::SKILLS_LANE_PROVIDER}
+                },
+                {"role": "user", "content": "Write a README for this repo."}
+            ]));
+            assert!(!conversation_began_with_skill_setup(&job), "{opener}");
+        }
+
+        // A retry that reaches the model is a setup, even after a failed try.
+        let retried = skill_setup_history_job(json!([
+            {"role": "user", "content": "/skills start freefinace"},
+            {
+                "role": "assistant",
+                "content": "Unknown skill `freefinace`. Installed: freefinance.",
+                "metadata": {"source": "agent", "provider": skills::SKILLS_LANE_PROVIDER}
+            },
+            {"role": "user", "content": "/skills start freefinance"},
+            {
+                "role": "assistant",
+                "content": SKILL_SETUP_TEST_QUESTION,
+                "metadata": {"source": "agent", "provider": "codex-embedded"}
+            },
+            {"role": "user", "content": "yes"}
+        ]));
+        assert!(conversation_began_with_skill_setup(&retried));
+    }
+
+    #[test]
+    fn conversation_began_with_skill_setup_reads_openers_outside_the_history_window() {
+        assert!(conversation_began_with_skill_setup(
+            &skill_setup_outside_window_job(json!([
+                {"content": SKILL_SETUP_TEST_OPENER, "replyProvider": "codex-embedded"}
+            ]))
+        ));
+        // The controller has not seen a reply yet.
+        assert!(conversation_began_with_skill_setup(
+            &skill_setup_outside_window_job(json!([
+                {"content": "/skills start freefinance"}
+            ]))
+        ));
+        // A failed opener outside the window does not count, but an earlier
+        // one that reached the model still does.
+        assert!(!conversation_began_with_skill_setup(
+            &skill_setup_outside_window_job(json!([
+                {"content": "/skills start freefinace", "replyProvider": skills::SKILLS_LANE_PROVIDER}
+            ]))
+        ));
+        assert!(conversation_began_with_skill_setup(
+            &skill_setup_outside_window_job(json!([
+                {"content": "/skills start freefinace", "replyProvider": skills::SKILLS_LANE_PROVIDER},
+                {"content": SKILL_SETUP_TEST_OPENER, "replyProvider": "codex-embedded"}
+            ]))
+        ));
+        // The runtime parses the text itself, whatever the controller matched.
+        assert!(!conversation_began_with_skill_setup(
+            &skill_setup_outside_window_job(json!([
+                {"content": "/skills import https://github.com/instafy-dev/skills", "replyProvider": "skills"},
+                {"content": "/skills list"}
+            ]))
+        ));
+        assert!(!conversation_began_with_skill_setup(
+            &skill_setup_outside_window_job(json!([]))
+        ));
+    }
+
+    #[test]
+    fn skill_setup_continuation_survives_every_main_prompt_lane() {
+        let tmp = tempdir().expect("temp dir");
+        let processor = test_job_processor(tmp.path());
+        let project_id = Uuid::new_v4();
+        let provider_state =
+            json!({"defaultThreadId":"restored-thread", "historyReplayRequired":false});
+        let terse_rule = "A saved file or a passed check is a step, not the end";
+        let full_rule = "stays that setup until the skill's \"## Getting started\" is done";
+        // "history": the opener is still in the controller's history window.
+        // "outside_window": only the controller's `skill_setup_openers` has it.
+        // "none": the conversation did not begin with a setup.
+        for source in ["history", "outside_window", "none"] {
+            let base_job = match source {
+                "history" => skill_setup_test_job(SKILL_SETUP_TEST_OPENER),
+                "outside_window" => skill_setup_outside_window_job(json!([
+                    {"content": SKILL_SETUP_TEST_OPENER, "replyProvider": "codex-embedded"}
+                ])),
+                _ => skill_setup_test_job("Please inspect the imported repo."),
+            };
+            for mode in ["write", "restored", "cross_chat", "full", "planning"] {
+                let mut route = test_agent_routing_preflight(
+                    match mode {
+                        "cross_chat" => AgentRoutingPreflightRoute::CrossChatLookup,
+                        "planning" => AgentRoutingPreflightRoute::MultiAgentCandidate,
+                        _ => AgentRoutingPreflightRoute::Direct,
+                    },
+                    mode == "cross_chat",
+                    false,
+                );
+                // A "yes" to saving the Mandant is what the preflight reads as
+                // a file write, which moves the turn into the direct-write lane.
+                route.requires_workspace_file_changes = mode == "write";
+                let job = job_with_agent_routing_preflight(&base_job, &route);
+                let (prompt, _, metrics) = processor
+                    .build_prompt_with_text(
+                        &project_id,
+                        &job,
+                        tmp.path(),
+                        "yes",
+                        true,
+                        (mode == "restored").then_some(&provider_state),
+                        &[],
+                        None,
+                        None,
+                    )
+                    .expect("actual main prompt builder");
+                let label = format!("{mode} source={source}");
+                let sections = &metrics["promptSections"];
+                match mode {
+                    "write" => {
+                        assert!(
+                            prompt.contains("Direct workspace-change response contract"),
+                            "{label}"
+                        );
+                        assert!(
+                            sections["responseContract"]["estimatedTokens"]
+                                .as_u64()
+                                .unwrap()
+                                < 260,
+                            "{label}"
+                        );
+                    }
+                    "restored" => {
+                        assert_eq!(metrics["promptMode"], "stateful_compact", "{label}");
+                        assert!(prompt.contains("Response contract reminder"), "{label}");
+                    }
+                    "cross_chat" => assert!(
+                        prompt.contains("Cross-chat context recovery response contract"),
+                        "{label}"
+                    ),
+                    "full" => assert!(
+                        prompt.contains("Please follow these constraints"),
+                        "{label}"
+                    ),
+                    "planning" => assert!(
+                        prompt.contains("Multi-agent planning response contract"),
+                        "{label}"
+                    ),
+                    _ => unreachable!(),
+                }
+
+                // Every follow-up lane of a setup carries the terse rule once,
+                // whether the opener is still in the history window or not.
+                // Conversations that are not setups, and planning turns, pay
+                // nothing for it.
+                let expect_terse =
+                    source != "none" && matches!(mode, "write" | "restored" | "cross_chat");
+                assert_eq!(
+                    prompt.matches(terse_rule).count(),
+                    usize::from(expect_terse),
+                    "{label}"
+                );
+                assert_eq!(
+                    sections.get("skillSetupContinuation").is_some(),
+                    expect_terse,
+                    "{label}"
+                );
+                if expect_terse {
+                    assert!(
+                        prompt.contains("in this same reply, ask its next unanswered question or offer its schedule"),
+                        "{label}"
+                    );
+                    assert!(
+                        prompt.contains(
+                            "no \"please\", no em dashes, no exclamation marks, no jokes"
+                        ),
+                        "{label}"
+                    );
+                    assert!(
+                        sections["skillSetupContinuation"]["estimatedTokens"]
+                            .as_u64()
+                            .unwrap()
+                            <= 90,
+                        "{label}"
+                    );
+                    // The rule is the runtime's, not the person's. It has its
+                    // own heading and comes before the conversation and the
+                    // latest request, so a request that supplies exact file
+                    // contents cannot run on into it.
+                    let rule_at = prompt.find("\nSkill setup rule:\n- ").expect(&label);
+                    let latest_at = prompt.find("\n\nLatest user request:\n").expect(&label);
+                    assert!(rule_at < latest_at, "{label}");
+                    assert!(prompt.ends_with("Latest user request:\nyes"), "{label}");
+                }
+                // The full contract states the rule in its longer form, and
+                // the terse section must not repeat it there.
+                assert_eq!(
+                    prompt.matches(full_rule).count(),
+                    usize::from(mode == "full"),
+                    "{label}"
+                );
+            }
+        }
+    }
+
     #[test]
     fn ambient_participation_history_preserves_roles_when_content_overlaps_policy_or_latest_turn() {
         let mut job = ambient_participation_test_job();
@@ -17397,6 +17805,10 @@ mod tests {
         assert!(sections.contains_key("studioRuntimeInvariants"));
         assert!(sections.contains_key("conversationContext"));
         assert!(!sections.contains_key("assistantCapabilityContext"));
+        // This conversation did not begin with a skill setup, so the setup
+        // rule stays out and the budget below does not have to hold it.
+        assert!(!sections.contains_key("skillSetupContinuation"));
+        assert!(!prompt.contains("A saved file or a passed check is a step"));
         // The prompt names the workspace, and the test's workspace is a temp
         // dir whose length follows TMPDIR. Measure without it so the budget
         // checks the prompt text and not the machine running the test.
