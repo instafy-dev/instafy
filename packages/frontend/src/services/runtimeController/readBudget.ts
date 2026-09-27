@@ -1,3 +1,6 @@
+/** How long one controller read may take, including credentials and bodies. */
+export const CONTROLLER_READ_BUDGET_MS = 10_000;
+
 /** A deadline for an entire controller read, including credentials and bodies. */
 export function createControllerReadBudget(callerSignal?: AbortSignal) {
   callerSignal?.throwIfAborted();
@@ -6,7 +9,7 @@ export function createControllerReadBudget(callerSignal?: AbortSignal) {
   callerSignal?.addEventListener("abort", forwardAbort, { once: true });
   const timer = setTimeout(() => {
     controller.abort(new DOMException("Controller read timed out.", "TimeoutError"));
-  }, 10_000);
+  }, CONTROLLER_READ_BUDGET_MS);
 
   async function wait<T>(start: () => Promise<T>): Promise<T> {
     controller.signal.throwIfAborted();
