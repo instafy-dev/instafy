@@ -1,5 +1,6 @@
 import type { ReactNode } from "react";
 import { Pause, Play, Xmark } from "iconoir-react";
+import { Button, IconButton } from "../../../components/Button";
 import { Spinner } from "../../../components/Spinner";
 
 export type BrowserChromeState = "ready" | "starting" | "paused" | "unavailable";
@@ -45,18 +46,21 @@ export function BrowserStatusPill({
 
   if (state === "paused" && resume) {
     return (
-      <button
+      <Button
         type="button"
         aria-label="Resume agent control"
-        className={`inline-flex h-8 shrink-0 touch-manipulation items-center justify-center gap-1 rounded-full border px-2 text-xxs font-medium transition enabled:hover:bg-slate-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary-500 disabled:cursor-not-allowed disabled:opacity-50 max-[540px]:min-h-10 pointer-coarse:min-h-11 dark:enabled:hover:bg-slate-800 ${toneClassName}`}
+        variant="secondary"
+        radius="full"
+        size="xs"
+        className="h-8 shrink-0 max-[540px]:min-h-10"
         data-testid={testId}
-        disabled={resume.disabled}
-        onClick={resume.onPress}
+        isDisabled={resume.disabled}
+        onPress={resume.onPress}
         title={`${detail ?? label} Resume agent control.`}
       >
         <Play className="h-3.5 w-3.5" aria-hidden="true" />
         <span>Resume</span>
-      </button>
+      </Button>
     );
   }
 
@@ -160,15 +164,18 @@ export function BrowserChromeShell({
         >
           <span className="min-w-0 flex-1 break-words">{feedback}</span>
           {onDismissFeedback ? (
-            <button
+            <IconButton
               aria-label="Dismiss browser message"
-              className="inline-flex h-6 w-6 shrink-0 touch-manipulation items-center justify-center rounded-full text-current/70 transition hover:bg-black/5 hover:text-current focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-current/30 max-[540px]:h-10 max-[540px]:w-10 pointer-coarse:min-h-11 pointer-coarse:min-w-11 dark:hover:bg-white/10"
-              onClick={onDismissFeedback}
+              size="xs"
+              radius="full"
+              variant="ghost"
+              className="shrink-0 max-[540px]:h-10 max-[540px]:w-10"
+              onPress={onDismissFeedback}
               title="Dismiss"
               type="button"
             >
               <Xmark className="h-3.5 w-3.5" aria-hidden="true" />
-            </button>
+            </IconButton>
           ) : null}
         </div>
       ) : null}

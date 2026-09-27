@@ -1021,6 +1021,7 @@ export function BrowserSessionModal({
     ],
   );
   const handleBrowserDataClearStart = useCallback(() => {
+    setSessionChooserOpen(false);
     browserDataClearInFlightRef.current = true;
     browserConnectionGenerationRef.current += 1;
     setBrowserDataClearInFlight(true);
@@ -2502,6 +2503,34 @@ export function BrowserSessionModal({
     </div>
   ) : null;
 
+  const sessionControls = !shouldCollapseDocked && projectId ? (
+    <SharedBrowserSessionControl
+      runtimeId={selectedSessionRuntimeId ?? chosenRuntimeId ?? resumeRuntimeId}
+      resumeUrl={sessionResumeUrl}
+      open={sessionChooserOpen}
+      busy={sessionChoices.scope === selectionScope && sessionChoices.loading}
+      candidates={sessionChoices.scope === selectionScope ? sessionChoices.candidates : []}
+      error={sessionChoices.scope === selectionScope ? sessionChoices.error : null}
+      selectionRequired={status === "selecting"}
+      canStart={canControlBrowser}
+      onOpenChange={(open) => { setSessionChooserOpen(open); if (open) void refreshSessionChoices(); }}
+      onChoose={chooseSession}
+      onStart={startNewSession}
+      onRefresh={() => { void refreshSessionChoices(); setConnectAttempt((value) => value + 1); }}
+      footer={canClearBrowserData ? <div className="mt-1 border-t border-slate-200 pt-1 dark:border-slate-700/50">
+        <SharedBrowserDataClearAction
+          canClear={canClearBrowserData && !browserDataClearInFlight}
+          onClearSettled={handleBrowserDataClearSettled}
+          onClearStart={handleBrowserDataClearStart}
+          projectId={projectId}
+          showStatus={onStatus}
+        />
+      </div> : null}
+    >
+      {sessionChooserOpen ? <SharedBrowserProfileStatus projectId={projectId} runtimeId={selectedSessionRuntimeId} currentUserId={currentUserId} active /> : null}
+    </SharedBrowserSessionControl>
+  ) : null;
+
   const humanInputControls = !shouldCollapseDocked && humanInputIdentityKey
     ? <BrowserHumanInputStatus {...browserHumanInputOptions} state={browserHumanInputState} /> : null;
   const panelContent = renderCollapsedConnectedIntoShelf ? (
@@ -2545,13 +2574,7 @@ export function BrowserSessionModal({
           </div>
           <div className="flex flex-none items-center gap-1">
             {humanInputControls}
-            <SharedBrowserDataClearAction
-              canClear={canClearBrowserData}
-              onClearSettled={handleBrowserDataClearSettled}
-              onClearStart={handleBrowserDataClearStart}
-              projectId={projectId}
-              showStatus={onStatus}
-            />
+            {sessionControls}
             {!forceViewportFullscreenDocked ? (
               <BrowserExpandButton
                 expanded={fullscreen}
@@ -2598,13 +2621,7 @@ export function BrowserSessionModal({
                   collaboration.takeControl();
                 }}
               />
-              <SharedBrowserDataClearAction
-                canClear={canClearBrowserData}
-                onClearSettled={handleBrowserDataClearSettled}
-                onClearStart={handleBrowserDataClearStart}
-                projectId={projectId}
-                showStatus={onStatus}
-              />
+              {sessionControls}
               {!forceViewportFullscreenDocked ? (
                 <BrowserExpandButton
                   expanded={fullscreen}
@@ -2628,22 +2645,6 @@ export function BrowserSessionModal({
           Routine browsing allowed for this turn · Take over or stop the turn to revoke.
         </div>
       ) : null}
-      {!shouldCollapseDocked && projectId ? <SharedBrowserSessionControl
-        runtimeId={selectedSessionRuntimeId ?? chosenRuntimeId ?? resumeRuntimeId}
-        resumeUrl={sessionResumeUrl}
-        open={sessionChooserOpen}
-        busy={sessionChoices.scope === selectionScope && sessionChoices.loading}
-        candidates={sessionChoices.scope === selectionScope ? sessionChoices.candidates : []}
-        error={sessionChoices.scope === selectionScope ? sessionChoices.error : null}
-        selectionRequired={status === "selecting"}
-        canStart={canControlBrowser}
-        onOpenChange={(open) => { setSessionChooserOpen(open); if (open) void refreshSessionChoices(); }}
-        onChoose={chooseSession}
-        onStart={startNewSession}
-        onRefresh={() => { void refreshSessionChoices(); setConnectAttempt((value) => value + 1); }}
-      >
-        {sessionChooserOpen ? <SharedBrowserProfileStatus projectId={projectId} runtimeId={selectedSessionRuntimeId} currentUserId={currentUserId} active /> : null}
-      </SharedBrowserSessionControl> : null}
       <div
         key="shared-browser-viewport"
         data-testid="browser-session-viewport"

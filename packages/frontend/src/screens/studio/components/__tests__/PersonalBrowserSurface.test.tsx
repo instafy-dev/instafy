@@ -242,6 +242,9 @@ describe("PersonalBrowserSurface", () => {
     await act(async () => root.render(
       <PersonalBrowserSurface active compactChrome model={model} transportSelector={null} />,
     ));
+    expect(container.querySelector('[aria-label="Back"]')).toBeNull();
+    expect(container.querySelector('[aria-label="Forward"]')).toBeNull();
+    expect(container.querySelector('[aria-label="Reload"]')).not.toBeNull();
     const toggle = document.querySelector<HTMLButtonElement>('[data-testid="personal-browser-fullscreen-toggle"]');
     expect(toggle?.getAttribute("aria-label")).toBe("Expand browser");
     await act(async () => toggle?.click());
