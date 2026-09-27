@@ -107,6 +107,8 @@ for (const layout of [
     const scroller = panel.locator("[data-studio-popover-content]");
     await expect(panel).toBeVisible();
     const link = page.getByRole("textbox", { name: "Shared Browser resume link", exact: true });
+    await expect(link).not.toBeVisible();
+    await page.getByText("Session details", { exact: true }).tap();
     await expect(link).toBeVisible();
     const value = await link.inputValue();
     const locator = new URL(value);

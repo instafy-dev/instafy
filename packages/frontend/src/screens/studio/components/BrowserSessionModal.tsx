@@ -2517,9 +2517,7 @@ export function BrowserSessionModal({
       onChoose={chooseSession}
       onStart={startNewSession}
       onRefresh={() => { void refreshSessionChoices(); setConnectAttempt((value) => value + 1); }}
-    >
-      {sessionChooserOpen ? <SharedBrowserProfileStatus projectId={projectId} runtimeId={selectedSessionRuntimeId} currentUserId={currentUserId} active /> : null}
-      {canClearBrowserData ? <div className="border-t border-slate-200 pt-2 dark:border-slate-800">
+      footer={canClearBrowserData ? <div className="mt-1 border-t border-slate-200 pt-1 dark:border-slate-700/50">
         <SharedBrowserDataClearAction
           canClear={canClearBrowserData && !browserDataClearInFlight}
           onClearSettled={handleBrowserDataClearSettled}
@@ -2528,6 +2526,8 @@ export function BrowserSessionModal({
           showStatus={onStatus}
         />
       </div> : null}
+    >
+      {sessionChooserOpen ? <SharedBrowserProfileStatus projectId={projectId} runtimeId={selectedSessionRuntimeId} currentUserId={currentUserId} active /> : null}
     </SharedBrowserSessionControl>
   ) : null;
 

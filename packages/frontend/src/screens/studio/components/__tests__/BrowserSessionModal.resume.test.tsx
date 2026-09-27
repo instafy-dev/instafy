@@ -4,13 +4,14 @@ import { createRoot, type Root } from "react-dom/client";
 import { MemoryRouter, useLocation, useNavigate } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-const mocks = vi.hoisted(() => ({ fetchStatus: vi.fn(), ensure: vi.fn(), requestAccessToken: vi.fn(), clearForProject: vi.fn() }));
+const mocks = vi.hoisted(() => ({ fetchStatus: vi.fn(), ensure: vi.fn(), requestAccessToken: vi.fn(), clearForProject: vi.fn(), writeClipboardText: vi.fn() }));
 vi.mock("../../../../sdk/instafy", () => ({ controllerClient: {
   core: { enabled: true, baseUrl: "" },
   runtimes: { fetchStatus: mocks.fetchStatus, ensure: mocks.ensure },
   browserProfiles: { clearForProject: mocks.clearForProject },
   workspace: { origin: { requestAccessToken: mocks.requestAccessToken } },
 } }));
+vi.mock("../../../../runtime/runtimeMenuShared", () => ({ writeClipboardText: mocks.writeClipboardText }));
 vi.mock("../SharedBrowserProfileStatus", () => ({ SharedBrowserProfileStatus: () => null }));
 import { BrowserSessionModal } from "../BrowserSessionModal";
 import { useChatBrowserSessionState } from "../useChatBrowserSessionState";
@@ -59,6 +60,7 @@ describe("production Shared modal resume selection", () => {
   beforeEach(() => {
     (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
     container = document.createElement("div"); document.body.append(container); root = createRoot(container);
+    mocks.writeClipboardText.mockReset().mockResolvedValue(undefined);
     mocks.clearForProject.mockReset(); mocks.fetchStatus.mockReset(); mocks.ensure.mockReset(); mocks.requestAccessToken.mockReset(); onResolved.mockReset();
     window.sessionStorage.clear();
     vi.stubGlobal("CSS", { escape: (value: string) => value });
@@ -93,6 +95,20 @@ describe("production Shared modal resume selection", () => {
     await finishFocusRestoration();
     expect(document.activeElement).toBe(trigger);
     expect(trigger.getAttribute("aria-expanded")).toBe("false");
+  });
+  it("reveals and focuses the resume link when clipboard copying fails", async () => {
+    mocks.fetchStatus.mockResolvedValue({ runtimes: [entry(firstId)] });
+    mocks.writeClipboardText.mockRejectedValue(new Error("Clipboard unavailable"));
+    await render(firstId);
+    await act(async () => document.querySelector<HTMLButtonElement>('[data-testid="shared-browser-sessions-toggle"]')!.click());
+    const link = document.querySelector<HTMLInputElement>('[aria-label="Shared Browser resume link"]')!;
+    expect(link.closest("details")?.open).toBe(false);
+    await act(async () => Array.from(document.querySelectorAll<HTMLButtonElement>("button")).find(button => button.textContent === "Copy resume link")!.click());
+    expect(link.closest("details")?.open).toBe(true);
+    expect(document.activeElement).toBe(link);
+    expect(link.selectionStart).toBe(0);
+    expect(link.selectionEnd).toBe(link.value.length);
+    expect(document.body.textContent).toContain("Could not copy.");
   });
   it("closes options for a confirmed reset and prevents duplicate resets after reopening", async () => {
     mocks.fetchStatus.mockResolvedValue({ runtimes: [entry(firstId)] });
@@ -159,7 +175,7 @@ describe("production Shared modal resume selection", () => {
     mocks.fetchStatus.mockResolvedValue({ runtimes: [entry(secondId)] });
     await act(async () => document.querySelector<HTMLButtonElement>('[data-testid="shared-browser-sessions-toggle"]')!.click());
     for (let attempt = 0; attempt < 7; attempt += 1) {
-      await act(async () => Array.from(document.querySelectorAll<HTMLButtonElement>("button")).find((button) => button.textContent === "Refresh sessions")!.click());
+      await act(async () => Array.from(document.querySelectorAll<HTMLButtonElement>("button")).find((button) => button.getAttribute("aria-label") === "Refresh sessions")!.click());
     }
     expect(onResolved).toHaveBeenCalledTimes(1);
     expect(mocks.ensure).not.toHaveBeenCalled();
