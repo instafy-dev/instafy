@@ -541,8 +541,11 @@ source that contains a `SKILL.md` into `.agents/skills/`, reports what it wrote 
 message, and then continues the same turn by following each skill's `## Getting started`
 section: questions are asked in chat, secrets are requested by name through the secrets card
 and never pasted into the conversation, dependencies are installed inside the skill folder,
-and schedules are created through the normal automation flow. `/skills start <name>` runs
-that section again for one installed skill, and `/skills` is listed in the typed `/` menu
+and schedules are created through the normal automation flow. Every later turn in that chat,
+including one that only saves a file the setup asked for, picks the setup up at its next
+question until the section is done. An opener the runtime answered without the model, such as
+an unknown skill name, a failed import or a chat with no AI connected, starts no setup.
+`/skills start <name>` runs that section again for one installed skill, and `/skills` is listed in the typed `/` menu
 and in **Commands**. The product list is a fixed, first-party list built into Studio, and
 **Import** and **Install** in Settings > Skills send the same line into the current chat
 without leaving Settings. Skills are files distributed as public repos and URLs; a skill's
