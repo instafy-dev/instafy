@@ -63,6 +63,11 @@ an account switch does not inherit another account's saved session choice.
 ## One browser shell, three pixel transports
 
 The Studio always owns the address bar, Go/history controls, status, errors, action ticker, and AI cursor. The runtime owns the page and profile.
+Personal and Shared Browser use one `BrowserAddressField` and the common Instafy
+`Input`, `Button`, `IconButton` and `Checkbox` primitives for their address, actions
+and settings. Navigation state, permissions and control ownership stay in each
+browser controller; the shared components supply consistent themes, keyboard focus
+and touch targets.
 
 ```text
 Studio Shared Browser shell

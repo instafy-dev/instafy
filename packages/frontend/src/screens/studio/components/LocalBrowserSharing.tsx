@@ -8,6 +8,7 @@ import { StudioDialogModal } from "../../../components/aria/StudioModal";
 import { SharedLocalTabViewer } from "./SharedLocalTabViewer";
 import { Checkbox } from "../../../components/Checkbox";
 import { Select } from "../../../components/Select";
+import { Input } from "../../../components/Input";
 import { Button } from "../../../components/Button";
 import { browserShareClient, publishLocalBrowserTab, type BrowserShare, type LocalTabPublication, type BrowserShareAudience, type BrowserSharePerson, type BrowserShareViewer } from "../../../services/runtimeController/browserShares";
 
@@ -42,7 +43,7 @@ function ShareAudiencePicker({ projectId, onShare, onCancel }: { projectId: stri
       <option value="selected">Selected people</option><option value="space">Everyone with space access</option>
     </Select>
     {audience === "selected" ? <>
-      <input aria-label="Find people with space access" value={query} onChange={event => setQuery(event.target.value)} maxLength={200} placeholder="Find people…" className="w-full rounded border border-slate-300 bg-transparent p-2 text-sm dark:border-slate-700" />
+      <Input size="sm" aria-label="Find people with space access" value={query} onChange={event => setQuery(event.target.value)} maxLength={200} placeholder="Find people…" />
       {selected.length ? <div className="flex max-h-24 flex-wrap gap-1 overflow-y-auto">{selected.map(person => <Button key={person.userId} size="sm" variant="ghost" aria-label={`Deselect ${personLabel(person)}`} onPress={() => toggle(person, false)}>{personLabel(person)} ×</Button>)}</div> : null}
       <div className="max-h-40 space-y-2 overflow-y-auto">
         {loading ? <p role="status" className="text-xs">Loading people…</p> : people.map(person => <Checkbox key={person.userId} label={personLabel(person)} description={person.fullName ? person.email : undefined} isSelected={selected.some(p => p.userId === person.userId)} isDisabled={selected.length >= 32 && !selected.some(p => p.userId === person.userId)} onChange={checked => toggle(person, checked)} />)}

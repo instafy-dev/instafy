@@ -1,3 +1,4 @@
+import { Button } from "../../../components/Button";
 import type { SharedBrowserControlOwner } from "./sharedBrowserControlOwner";
 import {
   collaborationSelfOwnsControl,
@@ -180,18 +181,21 @@ export function SharedBrowserCollaborationControls({
         <span className={`${compact ? "max-w-20" : "max-w-28"} truncate`}>{statusLabel}</span>
       </span>
       {action ? (
-        <button
+        <Button
           aria-label={action.label}
-          className={`inline-flex max-w-28 shrink-0 touch-manipulation items-center overflow-hidden text-ellipsis whitespace-nowrap rounded-full border border-primary-500/30 bg-primary-500/10 px-2 text-xxs font-semibold text-primary-700 transition hover:bg-primary-500/15 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary-500/40 disabled:cursor-default disabled:opacity-60 dark:text-primary-300 ${compact ? "h-10" : "h-7 pointer-coarse:min-h-11"}`}
+          size="xs"
+          variant="secondary"
+          radius="full"
+          className={`max-w-28 shrink-0 ${compact ? "min-h-10" : "min-h-7"}`}
           data-action={action.kind}
           data-testid="shared-browser-collaboration-control-action"
-          disabled={action.disabled}
-          onClick={action.run}
+          isDisabled={action.disabled}
+          onPress={action.run}
           title={action.label}
           type="button"
         >
-          {compact ? action.compactLabel : action.label}
-        </button>
+          <span className="truncate">{compact ? action.compactLabel : action.label}</span>
+        </Button>
       ) : null}
     </div>
   );

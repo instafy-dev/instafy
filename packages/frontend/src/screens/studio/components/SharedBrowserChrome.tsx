@@ -11,6 +11,7 @@ import { NavArrowLeft, NavArrowRight, Refresh } from "iconoir-react";
 import { IconButton } from "../../../components/Button";
 import type { BrowserSessionPage } from "./browserSessionPages";
 import { normalizeBrowserAddress } from "./browserAddress";
+import { BrowserAddressField } from "./BrowserAddressField";
 import { BrowserChromeShell } from "./BrowserChromeShell";
 import {
   HUMAN_SHARED_BROWSER_CONTROL_OWNER,
@@ -225,60 +226,37 @@ export function SharedBrowserChrome({
                 ))}
               </select>
             ) : null}
-            <form
-              className="relative min-w-0 flex-1"
-              data-testid="shared-browser-address-form"
-              onSubmit={handleSubmit}
-            >
-        <label className="sr-only" htmlFor={`${errorId}-address`}>
-          Address
-        </label>
-        <input
-          ref={addressInputRef}
-          aria-describedby={displayedError ? `${errorId}-error` : undefined}
-          aria-invalid={displayedError ? true : undefined}
-          aria-label="Address"
-          autoCapitalize="none"
-          autoComplete="off"
-          className="h-8 w-full min-w-0 rounded-full border border-slate-200 bg-white pl-3 pr-9 text-xs text-slate-800 shadow-inner outline-none transition focus:border-primary-400 focus:ring-2 focus:ring-primary-500/20 aria-invalid:border-rose-400 aria-invalid:focus:border-rose-500 aria-invalid:focus:ring-rose-500/20 max-[540px]:h-10 max-[540px]:pr-11 pointer-coarse:h-11 pointer-coarse:pr-12 dark:border-[color:var(--color-studio-dark-raised-control-border)] dark:bg-slate-950 dark:text-slate-100"
-          data-testid="shared-browser-address"
-          disabled={controlsDisabled || !controls.navigate}
-          id={`${errorId}-address`}
-          onBlur={(event) => {
-            const nextFocus = event.relatedTarget;
-            if (
-              nextFocus instanceof HTMLElement &&
-              event.currentTarget.form?.contains(nextFocus)
-            ) {
-              return;
-            }
-            const submittedAddress = submittedAddressRef.current;
-            submittedAddressRef.current = null;
-            setAddressDraft(submittedAddress ?? activePage?.url ?? "");
-          }}
-          onChange={(event) => {
-            setAddressDraft(event.target.value);
-            setAddressError(null);
-            if (error) {
-              onClearError();
-            }
-          }}
-          placeholder={resolved ? "Enter an address" : "Connecting to Shared Browser…"}
-          spellCheck={false}
-          type="text"
-          value={addressDraft}
-        />
-        <button
-          aria-label="Go"
-          className="absolute right-0 top-1/2 inline-flex h-6 w-6 -translate-y-1/2 touch-manipulation items-center justify-center rounded-full text-slate-500 transition hover:bg-slate-200/70 hover:text-slate-900 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary-500/50 disabled:cursor-not-allowed disabled:opacity-40 max-[540px]:h-10 max-[540px]:w-10 pointer-coarse:min-h-11 pointer-coarse:min-w-11 dark:text-slate-400 dark:hover:bg-[var(--color-studio-dark-control-hover)] dark:hover:text-slate-50"
-          data-testid="shared-browser-go"
-          disabled={controlsDisabled || !controls.navigate}
-          title="Go"
-          type="submit"
-        >
-          <NavArrowRight aria-hidden="true" className="h-3.5 w-3.5" />
-        </button>
-            </form>
+            <div className="min-w-0 flex-1">
+              <BrowserAddressField
+                ref={addressInputRef}
+                testIdPrefix="shared-browser"
+                errorId={displayedError ? `${errorId}-error` : undefined}
+                invalid={Boolean(displayedError)}
+                disabled={controlsDisabled || !controls.navigate}
+                value={addressDraft}
+                placeholder={resolved ? "Enter an address" : "Connecting to Shared Browser…"}
+                onSubmit={handleSubmit}
+                onBlur={(event) => {
+                  const nextFocus = event.relatedTarget;
+                  if (
+                    nextFocus instanceof HTMLElement &&
+                    event.currentTarget.form?.contains(nextFocus)
+                  ) {
+                    return;
+                  }
+                  const submittedAddress = submittedAddressRef.current;
+                  submittedAddressRef.current = null;
+                  setAddressDraft(submittedAddress ?? activePage?.url ?? "");
+                }}
+                onChange={(event) => {
+                  setAddressDraft(event.target.value);
+                  setAddressError(null);
+                  if (error) {
+                    onClearError();
+                  }
+                }}
+              />
+            </div>
           </div>
         }
         status={toolbarStatus}

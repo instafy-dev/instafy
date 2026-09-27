@@ -2,6 +2,7 @@ import { useLayoutEffect, useRef, useState, type ReactNode } from "react";
 import { Dialog, DialogTrigger } from "react-aria-components";
 import { Check, Link, MoreHoriz, Plus, Refresh, Xmark } from "iconoir-react";
 import { Button, IconButton } from "../../../components/Button";
+import { Input } from "../../../components/Input";
 import { StudioPopover } from "../../../components/aria/StudioPopover";
 import { addFloatingSurfaceViewportChangeListener, readStudioSafeAreaInsets } from "../../../utils/floatingSurfacePosition";
 import { writeClipboardText } from "../../../runtime/runtimeMenuShared";
@@ -98,7 +99,7 @@ export function SharedBrowserSessionControl({ runtimeId, resumeUrl, open, busy, 
             <div className="space-y-2 px-2.5 py-2 text-xs">
               <p>Members of this space can use the resume link to join and request control.</p>
               {runtimeId ? <p className="break-all" data-testid="shared-browser-current-runtime">Current session: {runtimeId}</p> : null}
-              {resumeUrl ? <input aria-label="Shared Browser resume link" className="w-full min-w-0 rounded border border-slate-300 bg-transparent px-2 py-1 text-base pointer-coarse:min-h-11 dark:border-slate-700 sm:text-xs"
+              {resumeUrl ? <Input size="xs" radius="md" aria-label="Shared Browser resume link"
                 readOnly value={resumeUrl} onFocus={(event) => event.currentTarget.select()} /> : null}
               {children}
             </div>
