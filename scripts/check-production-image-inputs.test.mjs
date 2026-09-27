@@ -53,10 +53,16 @@ function resolveBuildArguments(reference, defaults, relativePath) {
   return resolved;
 }
 
+// External image references only: a FROM naming a stage defined earlier in the
+// same Dockerfile builds on that stage and pulls nothing.
 function dockerfileFromReferences(source) {
-  return [...source.matchAll(/^FROM(?: --platform=\S+)? (\S+)/gmu)].map(
-    (match) => match[1],
-  );
+  const stages = new Set();
+  const references = [];
+  for (const match of source.matchAll(/^FROM(?: --platform=\S+)? (\S+)(?: AS (\S+))?/gmu)) {
+    if (!stages.has(match[1])) references.push(match[1]);
+    if (match[2]) stages.add(match[2]);
+  }
+  return references;
 }
 
 function dockerfileStage(source, stageName) {
@@ -461,6 +467,53 @@ test("cargo-chef installation is version-locked", () => {
     ];
     assert.equal(installs.length, 1, `${relativePath} must pin its cargo-chef install`);
   }
+});
+
+test("runtime Rust dependencies compile into a layer the publisher's layer cache keeps", () => {
+  const source = read("docker/runtime/Dockerfile");
+  const instructions = (stage) =>
+    dockerfileStage(source, stage).split(/(?<!\\)\n/u).filter((line) => line.trim());
+  const deps = instructions("builder-deps");
+  const builder = instructions("builder");
+  const targetMount = /--mount=type=cache,target=\/src\/packages\/runtime-agent\/target(\S*)/gu;
+
+  // Exported layer caches never include cache mounts, so the cook must write
+  // target/ into its own layer.
+  const cook = deps.filter((line) => line.includes("cargo chef cook"));
+  assert.equal(cook.length, 1);
+  assert.match(cook[0], /^RUN /u);
+  assert.match(cook[0], /--profile \$\{BUILD_PROFILE\} --recipe-path \/src\/recipe\.json --locked$/u);
+  assert.equal([...deps.join("\n").matchAll(targetMount)].length, 0);
+
+  // The application build starts from the cooked layer, and its only target
+  // mount is seeded from that layer rather than starting empty.
+  assert.equal(builder[0], "FROM builder-deps AS builder");
+  // The path crates reach the builder only through builder-deps, with the
+  // content and mtimes they were cooked from. Copying a fresh checkout over
+  // them makes every file newer than the cook, and cargo recompiles codex-rs.
+  for (const path of ["packages/runtime-contracts", "packages/openai-proxy-server", "packages/origin-http-server", "codex", "proto"]) {
+    assert.ok(deps.includes(`COPY --from=chef /src/${path} /src/${path}`), path);
+  }
+  assert.deepEqual(
+    builder.filter((line) => /^(?:COPY|ADD) /u.test(line)),
+    ["COPY packages/runtime-agent/ packages/runtime-agent/"],
+  );
+  const build = builder.filter((line) => line.includes("cargo build"));
+  assert.equal(build.length, 1);
+  assert.deepEqual(
+    [...builder.join("\n").matchAll(targetMount)].map((match) => match[1]),
+    [",from=builder-deps,source=/src/packages/runtime-agent/target"],
+  );
+  assert.ok(build[0].includes("--mount=type=cache,target=/src/packages/runtime-agent/target,from=builder-deps,"));
+
+  // One GitHub Actions cache per image and architecture cell, never a registry
+  // cache that would need a login before the pre-push scan.
+  const workflow = read(".github/workflows/publish-runtime-agent.yml");
+  const scope = "scope=publish-runtime-agent-${{ matrix.flavor }}-${{ matrix.architecture }}";
+  assert.ok(workflow.includes(`          cache-from: type=gha,${scope}\n`));
+  assert.ok(workflow.includes(`          cache-to: type=gha,${scope},mode=max`));
+  assert.equal([...workflow.matchAll(/^\s+cache-(?:from|to):/gmu)].length, 2);
+  assert.doesNotMatch(workflow, /type=registry/u);
 });
 
 test("runtime publication scans each native architecture before registry login", () => {
