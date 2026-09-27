@@ -10,7 +10,7 @@ import {
 } from "./core";
 export { deriveGithubImportTargetPath } from "./githubImportPath";
 import { logControllerRequestError } from "./logging";
-import { createControllerReadBudget } from "./readBudget";
+import { CONTROLLER_READ_BUDGET_MS, createControllerReadBudget } from "./readBudget";
 import { PERSONAL_ORG_LABEL } from "../../org/orgNaming";
 
 export interface ControllerProjectCreateParams {
@@ -633,11 +633,22 @@ export interface ControllerProjectSummaryResult {
   unauthorized: boolean;
 }
 
+// The Studio shows the same "Couldn't check access" banner for every
+// unavailable result, so each one logs its own reason. Reasons never include
+// the token or response text, because controller error bodies can carry
+// internal details.
+function warnProjectSummaryUnavailable(reason: string): void {
+  console.warn("[runtime-controller] getControllerProjectSummary error:", reason);
+}
+
 export async function getControllerProjectSummaryResult(
   projectId: string,
   options: { signal?: AbortSignal } = {},
 ): Promise<ControllerProjectSummaryResult> {
   if (!runtimeControllerEnabled) {
+    // Access callers do not check this flag, so an unset or rejected
+    // controller URL would otherwise show the retry banner with no cause.
+    warnProjectSummaryUnavailable("controller URL not configured");
     return { summary: null, notFound: false, forbidden: false, unauthorized: false };
   }
   const normalizedProjectId = normalizeUuidParam(projectId);
@@ -645,12 +656,18 @@ export async function getControllerProjectSummaryResult(
     return { summary: null, notFound: false, forbidden: false, unauthorized: false };
   }
   const budget = createControllerReadBudget(options.signal);
+  // The budget covers credentials, headers and body, so a failure names the
+  // step it interrupted.
+  let step: "waiting for credentials" | "waiting for the response" | "reading the response body" =
+    "waiting for credentials";
   try {
     const requestContext = await budget.wait(() => resolveControllerRequestContext(null));
     const accessToken = requestContext.accessToken;
     if (!accessToken) {
+      warnProjectSummaryUnavailable("no access token");
       return { summary: null, notFound: false, forbidden: false, unauthorized: false };
     }
+    step = "waiting for the response";
     const response = await budget.wait(() => fetch(
       `${requestContext.baseUrl}/projects/${encodeURIComponent(normalizedProjectId)}`,
       {
@@ -678,17 +695,28 @@ export async function getControllerProjectSummaryResult(
       return { summary: null, notFound: false, forbidden: false, unauthorized: true };
     }
     if (!response.ok) {
-      const message = await budget.wait(() => readControllerError(
-        response,
-        "get project failed",
-        requestContext,
-      ));
-      throw new Error(message);
+      // Only the status is logged, so there is no reason to wait for a body
+      // that may stall until the budget runs out.
+      void response.body?.cancel().catch(() => undefined);
+      warnProjectSummaryUnavailable(`HTTP ${response.status}`);
+      return { summary: null, notFound: false, forbidden: false, unauthorized: false };
     }
-    const body = (await budget.wait(() => response.json().catch(() => null))) as
-      | ControllerProjectSummary
-      | null;
+    step = "reading the response body";
+    // Read text and parse it separately so that a stream that fails midway
+    // reaches the catch below as a network error, and only a parse failure
+    // counts as a malformed body.
+    const text = await budget.wait(() => response.text());
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(text);
+    } catch {
+      warnProjectSummaryUnavailable(`malformed body: not JSON (HTTP ${response.status})`);
+      return { summary: null, notFound: false, forbidden: false, unauthorized: false };
+    }
+    const body =
+      parsed !== null && typeof parsed === "object" ? (parsed as ControllerProjectSummary) : null;
     if (!body || typeof body.projectId !== "string" || !body.projectId.trim()) {
+      warnProjectSummaryUnavailable(`malformed body: no projectId (HTTP ${response.status})`);
       return { summary: null, notFound: false, forbidden: false, unauthorized: false };
     }
     return {
@@ -706,8 +734,17 @@ export async function getControllerProjectSummaryResult(
     };
   } catch (error) {
     options.signal?.throwIfAborted();
-    const message = error instanceof Error ? error.message : String(error);
-    console.warn("[runtime-controller] getControllerProjectSummary error:", message);
+    // A caller abort was rethrown above, so an aborted budget is its timeout.
+    // Otherwise only the error name is logged: fetch errors can echo request
+    // details such as header values.
+    const errorName = error instanceof Error ? error.name : typeof error;
+    warnProjectSummaryUnavailable(
+      budget.signal.aborted
+        ? `timed out after ${CONTROLLER_READ_BUDGET_MS} ms ${step}`
+        : step === "waiting for credentials"
+          ? `failed ${step} (${errorName})`
+          : `network error ${step} (${errorName})`,
+    );
     return { summary: null, notFound: false, forbidden: false, unauthorized: false };
   } finally {
     budget.dispose();

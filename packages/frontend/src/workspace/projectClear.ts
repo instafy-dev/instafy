@@ -1,4 +1,45 @@
+import { getAppRouter } from "../navigation/appRouterBridge";
+import { getStudioVisitKey } from "../navigation/studioVisit";
 import { useWorkspaceStore } from "../store";
+
+const PROJECT_URL_PARAMS = ["projectId", "conversationId", "conversationControllerId"];
+
+/**
+ * A bare history.replaceState never reaches the router, so its location would
+ * keep the old space. The studio's URL writer and the chat's scroll restore
+ * hold still while the router disagrees with the address bar, the project
+ * bootstrap reads the router and would look the old space up again for a new
+ * account, and the next navigation built from the router would bring the
+ * params back. The address bar is rewritten first, so a navigation the draft
+ * guard blocks still leaves it as clean as before.
+ */
+function removeProjectParamsFromRouter() {
+  const router = getAppRouter();
+  if (!router) {
+    return;
+  }
+  const location = router.state.location;
+  const params = new URLSearchParams(location.search);
+  let changed = false;
+  for (const key of PROJECT_URL_PARAMS) {
+    if (params.has(key)) {
+      params.delete(key);
+      changed = true;
+    }
+  }
+  if (!changed) {
+    return;
+  }
+  const search = params.toString();
+  // A canonical replacement keeps the visit it belongs to, as the studio's
+  // other URL replacements do, just as the raw write kept history.state.
+  const state = location.state && typeof location.state === "object" && !Array.isArray(location.state)
+    ? location.state : {};
+  void router.navigate(
+    { pathname: location.pathname, search: search ? `?${search}` : "", hash: location.hash },
+    { replace: true, state: { ...state, instafyVisitKey: getStudioVisitKey(location) } },
+  );
+}
 
 export function clearProjectState(options?: { resetWorkspace?: boolean }) {
   try {
@@ -44,5 +85,10 @@ export function clearProjectState(options?: { resetWorkspace?: boolean }) {
     }
   } catch {
     // ignore storage failures
+  }
+  try {
+    removeProjectParamsFromRouter();
+  } catch {
+    // ignore router failures
   }
 }

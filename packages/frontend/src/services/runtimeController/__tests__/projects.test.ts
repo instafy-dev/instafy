@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const resolveControllerRequestContextMock = vi.hoisted(() => vi.fn());
 const readControllerErrorMock = vi.hoisted(() => vi.fn());
+const controllerMockState = vi.hoisted(() => ({ enabled: true }));
 
 vi.mock("../core", () => ({
   controllerBaseUrl: "http://controller.test",
@@ -26,7 +27,9 @@ vi.mock("../core", () => ({
   }),
   readControllerError: readControllerErrorMock,
   resolveControllerRequestContext: resolveControllerRequestContextMock,
-  runtimeControllerEnabled: true,
+  get runtimeControllerEnabled() {
+    return controllerMockState.enabled;
+  },
 }));
 
 vi.mock("../logging", () => ({
@@ -73,6 +76,7 @@ describe("space identity updates", () => {
 });
 
 function resetControllerMocks() {
+  controllerMockState.enabled = true;
   resolveControllerRequestContextMock.mockReset();
   resolveControllerRequestContextMock.mockResolvedValue(defaultRequestContext);
   readControllerErrorMock.mockReset();
@@ -137,7 +141,12 @@ describe("bounded project discovery reads", () => {
       }
       const fetchMock = vi.fn().mockImplementation(() => stage === "headers"
         ? new Promise(() => undefined)
-        : Promise.resolve({ ok: true, status: 200, json: () => new Promise(() => undefined) }));
+        : Promise.resolve({
+          ok: true,
+          status: 200,
+          json: () => new Promise(() => undefined),
+          text: () => new Promise(() => undefined),
+        }));
       vi.stubGlobal("fetch", fetchMock);
       const request = read();
       await vi.advanceTimersByTimeAsync(10_000);
@@ -168,6 +177,156 @@ describe("bounded project discovery reads", () => {
     await expect(request).resolves.toEqual({ ...summaryUnavailable, unauthorized: true });
     expect(readControllerErrorMock).toHaveBeenCalledOnce();
     expect(vi.getTimerCount()).toBe(0);
+  });
+});
+
+describe("project access failure reasons", () => {
+  const unavailable = { summary: null, notFound: false, forbidden: false, unauthorized: false };
+  let warn: ReturnType<typeof vi.spyOn>;
+
+  beforeEach(() => {
+    resetControllerMocks();
+    warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+  });
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.useRealTimers();
+    vi.restoreAllMocks();
+  });
+
+  function expectOneReason(reason: string) {
+    expect(warn.mock.calls).toEqual([
+      ["[runtime-controller] getControllerProjectSummary error:", reason],
+    ]);
+    const logged = JSON.stringify(warn.mock.calls);
+    expect(logged).not.toContain(defaultRequestContext.accessToken);
+    expect(logged).not.toContain("postgres://");
+  }
+
+  it("names the HTTP status of an unavailable controller without logging its body", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(
+      JSON.stringify({ message: "postgres://admin:secret@db failed" }),
+      { status: 503 },
+    )));
+
+    await expect(getControllerProjectSummaryResult("project-1")).resolves.toEqual(unavailable);
+    expectOneReason("HTTP 503");
+    expect(readControllerErrorMock).not.toHaveBeenCalled();
+  });
+
+  it("does not wait for a stalled error body before reporting the status", async () => {
+    vi.useFakeTimers();
+    const cancelBody = vi.fn();
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(
+      new Response(new ReadableStream({ cancel: cancelBody }), { status: 502 }),
+    ));
+
+    const request = getControllerProjectSummaryResult("project-1");
+    await vi.advanceTimersByTimeAsync(0);
+    expectOneReason("HTTP 502");
+    await expect(request).resolves.toEqual(unavailable);
+    expect(cancelBody).toHaveBeenCalledOnce();
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("names the budget and the step a timeout interrupted", async () => {
+    vi.useFakeTimers();
+    vi.stubGlobal("fetch", vi.fn((_url: string, options: RequestInit) => {
+      const signal = options.signal as AbortSignal;
+      return new Promise<Response>((_resolve, reject) => {
+        signal.addEventListener("abort", () => reject(signal.reason), { once: true });
+      });
+    }));
+
+    const request = getControllerProjectSummaryResult("project-1");
+    await vi.advanceTimersByTimeAsync(10_000);
+
+    await expect(request).resolves.toEqual(unavailable);
+    expectOneReason("timed out after 10000 ms waiting for the response");
+  });
+
+  it.each([
+    { body: "<html>Bad gateway</html>", reason: "malformed body: not JSON (HTTP 200)" },
+    { body: "", reason: "malformed body: not JSON (HTTP 200)" },
+    { body: JSON.stringify({ projectName: "No id" }), reason: "malformed body: no projectId (HTTP 200)" },
+    { body: "null", reason: "malformed body: no projectId (HTTP 200)" },
+  ])("names a malformed body without logging it: $reason", async ({ body, reason }) => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(body, { status: 200 })));
+
+    await expect(getControllerProjectSummaryResult("project-1")).resolves.toEqual(unavailable);
+    expectOneReason(reason);
+  });
+
+  it("names a network error by its type only", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockRejectedValue(new TypeError(`Invalid header value "Bearer ${defaultRequestContext.accessToken}"`)),
+    );
+
+    await expect(getControllerProjectSummaryResult("project-1")).resolves.toEqual(unavailable);
+    expectOneReason("network error waiting for the response (TypeError)");
+  });
+
+  it("names a body that fails midway as a network error, not a malformed body", async () => {
+    const partialBody = new ReadableStream<Uint8Array>({
+      start(stream) {
+        stream.enqueue(new TextEncoder().encode('{"projectId":"p'));
+        stream.error(new TypeError(`network error for Bearer ${defaultRequestContext.accessToken}`));
+      },
+    });
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(partialBody, { status: 200 })));
+
+    await expect(getControllerProjectSummaryResult("project-1")).resolves.toEqual(unavailable);
+    expectOneReason("network error reading the response body (TypeError)");
+  });
+
+  it("names a stalled body by the step the timeout interrupted", async () => {
+    vi.useFakeTimers();
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(new ReadableStream(), { status: 200 })));
+
+    const request = getControllerProjectSummaryResult("project-1");
+    await vi.advanceTimersByTimeAsync(10_000);
+
+    await expect(request).resolves.toEqual(unavailable);
+    expectOneReason("timed out after 10000 ms reading the response body");
+  });
+
+  it("names an unconfigured controller instead of failing silently", async () => {
+    controllerMockState.enabled = false;
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(getControllerProjectSummaryResult("project-1")).resolves.toEqual(unavailable);
+    expectOneReason("controller URL not configured");
+    expect(resolveControllerRequestContextMock).not.toHaveBeenCalled();
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("names a missing access token without sending a request", async () => {
+    resolveControllerRequestContextMock.mockResolvedValue({ ...defaultRequestContext, accessToken: null });
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(getControllerProjectSummaryResult("project-1")).resolves.toEqual(unavailable);
+    expectOneReason("no access token");
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("stays silent when the caller cancels", async () => {
+    const caller = new AbortController();
+    vi.stubGlobal("fetch", vi.fn((_url: string, options: RequestInit) => {
+      const signal = options.signal as AbortSignal;
+      return new Promise<Response>((_resolve, reject) => {
+        signal.addEventListener("abort", () => reject(signal.reason), { once: true });
+      });
+    }));
+
+    const request = getControllerProjectSummaryResult("project-1", { signal: caller.signal });
+    const rejected = expect(request).rejects.toMatchObject({ name: "AbortError" });
+    await Promise.resolve();
+    caller.abort();
+    await rejected;
+    expect(warn).not.toHaveBeenCalled();
   });
 });
 
