@@ -173,6 +173,9 @@ for (const layout of [
     await page.getByRole("button", { name: `Resume Shared session ${lastRuntime}`, exact: true }).tap();
     await expect(toggle).toHaveAttribute("aria-expanded", "false");
     await toggle.tap();
+    // A fresh menu keeps secondary details collapsed, including after changing sessions.
+    await expect(link).not.toBeVisible();
+    await page.getByText("Session details", { exact: true }).tap();
     await expect(link).toHaveValue(new RegExp(lastRuntime));
     await expect(profile).toContainText("Not confirmed as a save from this session.");
     await page.getByRole("button", { name: "Refresh sessions", exact: true }).tap();
