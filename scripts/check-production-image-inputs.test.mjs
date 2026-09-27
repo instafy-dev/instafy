@@ -488,6 +488,16 @@ test("runtime Rust dependencies compile into a layer the publisher's layer cache
   // The application build starts from the cooked layer, and its only target
   // mount is seeded from that layer rather than starting empty.
   assert.equal(builder[0], "FROM builder-deps AS builder");
+  // The path crates reach the builder only through builder-deps, with the
+  // content and mtimes they were cooked from. Copying a fresh checkout over
+  // them makes every file newer than the cook, and cargo recompiles codex-rs.
+  for (const path of ["packages/runtime-contracts", "packages/openai-proxy-server", "packages/origin-http-server", "codex", "proto"]) {
+    assert.ok(deps.includes(`COPY --from=chef /src/${path} /src/${path}`), path);
+  }
+  assert.deepEqual(
+    builder.filter((line) => /^(?:COPY|ADD) /u.test(line)),
+    ["COPY packages/runtime-agent/ packages/runtime-agent/"],
+  );
   const build = builder.filter((line) => line.includes("cargo build"));
   assert.equal(build.length, 1);
   assert.deepEqual(
