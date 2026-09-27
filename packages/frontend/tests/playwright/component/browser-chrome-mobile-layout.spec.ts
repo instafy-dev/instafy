@@ -15,6 +15,7 @@ async function mountCompactBrowserChrome(page: Page): Promise<void> {
     import { ConversationSurfaceTabs } from "/src/workspace/ConversationSurfaceLayout.tsx";
     import { BrowserTransportSelector } from "/src/screens/studio/components/PersonalBrowserSurface.tsx";
     import { RemoteBrowserMobileKeyboard } from "/src/screens/studio/components/RemoteBrowserMobileKeyboard.tsx";
+    import { SharedBrowserSessionControl } from "/src/screens/studio/components/SharedBrowserSessionControl.tsx";
     import { SharedBrowserChrome } from "/src/screens/studio/components/SharedBrowserChrome.tsx";
     import { SharedBrowserCollaborationControls } from "/src/screens/studio/components/SharedBrowserCollaborationControls.tsx";
     import { shouldUseCompactBrowserChrome } from "/src/screens/studio/components/browserSessionLayout.ts";
@@ -46,6 +47,7 @@ async function mountCompactBrowserChrome(page: Page): Promise<void> {
 
     function Fixture() {
       const [agentControls, setAgentControls] = React.useState(false);
+      const [optionsOpen, setOptionsOpen] = React.useState(false);
       const [expanded, setExpanded] = React.useState(false);
       const [keyboardHeight, setKeyboardHeight] = React.useState(0);
       const compact = shouldUseCompactBrowserChrome({
@@ -103,7 +105,10 @@ async function mountCompactBrowserChrome(page: Page): Promise<void> {
             state: "ready",
             testId: "browser-session-status",
           }),
-          toolbarActions: h(React.Fragment, null, collaboration, h(BrowserExpandButton, { expanded, onPress: () => setExpanded(!expanded) })),
+          toolbarActions: h(React.Fragment, null, collaboration, h(SharedBrowserSessionControl, {
+            runtimeId: "fixture-runtime", resumeUrl: null, open: optionsOpen, onOpenChange: setOptionsOpen,
+            busy: false, candidates: [], error: null, canStart: false, onChoose: () => {}, onStart: () => {}, onRefresh: () => {},
+          }), h(BrowserExpandButton, { expanded, onPress: () => setExpanded(!expanded) })),
           interactionEnabled: false,
         }),
         h("div", { "data-testid": "keyboard-layout-stage", style: { position: "relative", height: 240 } },
@@ -223,6 +228,7 @@ test("keeps compact browser identity, control, and tabs usable at 360px", async 
       documentWidth: document.documentElement.scrollWidth,
       reload: bounds("shared-browser-reload"),
       locationMenu: bounds("browser-location-menu"),
+      options: bounds("shared-browser-sessions-toggle"),
     };
   });
 
@@ -234,6 +240,7 @@ test("keeps compact browser identity, control, and tabs usable at 360px", async 
     geometry.browserTab,
     geometry.reload,
     geometry.locationMenu,
+    geometry.options,
   ]) {
     expect(target).not.toBeNull();
     expect(target!.height).toBeGreaterThanOrEqual(40);

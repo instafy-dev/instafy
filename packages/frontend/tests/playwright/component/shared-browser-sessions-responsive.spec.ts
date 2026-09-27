@@ -103,7 +103,8 @@ for (const layout of [
     await expect(toggle).toHaveAttribute("aria-expanded", "false");
     await toggle.tap();
     await expect(toggle).toHaveAttribute("aria-expanded", "true");
-    const panel = page.getByRole("region", { name: "Shared sessions and resume", exact: true });
+    const panel = page.getByTestId("shared-browser-session-control");
+    const scroller = panel.locator("[data-studio-popover-content]");
     await expect(panel).toBeVisible();
     const link = page.getByRole("textbox", { name: "Shared Browser resume link", exact: true });
     await expect(link).toBeVisible();
@@ -117,7 +118,7 @@ for (const layout of [
     // Check the emulated input capability again after the modal transition;
     // a lost coarse-pointer emulation must not look like a product sizing bug.
     expect(await page.evaluate(() => matchMedia("(pointer: coarse)").matches), "touch capability after expansion").toBe(true);
-    const controlSizes = await page.getByTestId("shared-browser-session-control").locator("button,input").evaluateAll((controls) => controls.map((control) => {
+    const controlSizes = await page.getByRole("region", { name: "Shared sessions and resume", exact: true }).locator("button,input").evaluateAll((controls) => controls.map((control) => {
       const rect = control.getBoundingClientRect();
       return { name: control.getAttribute("aria-label") ?? control.textContent, width: rect.width, height: rect.height,
         minHeight: getComputedStyle(control).minHeight };
@@ -147,7 +148,7 @@ for (const layout of [
       expect(bounds!.y).toBeGreaterThanOrEqual(layout.top);
       expect(bounds!.y + bounds!.height).toBeLessThanOrEqual(layout.height - layout.bottom);
     };
-    await panel.evaluate((element) => { element.scrollTop = 0; });
+    await scroller.evaluate((element) => { element.scrollTop = 0; });
     await assertContained();
     const topScreenshot = testInfo.outputPath(`shared-sessions-${layout.width}x${layout.height}-links.png`);
     await page.screenshot({ path: topScreenshot, animations: "disabled" });
@@ -157,7 +158,7 @@ for (const layout of [
     await expect(profile).toContainText("Login recovery enabled");
     await expect(profile).toContainText("Saved by this session.");
     await expect(profile).toContainText("not open tabs or unfinished forms");
-    expect(await panel.evaluate((element) => element.scrollHeight > element.clientHeight)).toBe(true);
+    expect(await scroller.evaluate((element) => element.scrollHeight > element.clientHeight)).toBe(true);
     await profile.scrollIntoViewIfNeeded();
     await expect(profile).toBeInViewport();
     await expect(profile.getByText("Changes since the last successful save may be lost.", { exact: false })).toBeInViewport();

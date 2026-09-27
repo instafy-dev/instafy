@@ -39,8 +39,10 @@ There is no Team runtime mode. Adding one later requires host-local consent, sep
 
 ## Resume on another device
 
-**Sessions & resume** shows the current runtime identity and a **Copy resume link**
-action. The link contains only the space and runtime UUIDs; it grants no access
+**Browser options** (the toolbar's three-dot button) opens sessions, a **Copy resume link**
+action, login-recovery status and browser-data controls. The current runtime identity is
+under **Session details**; no extra session row is shown while browsing. The link contains
+only the space and runtime UUIDs; it grants no access
 and transfers no cookies, webpage URL, field values or browser-control token.
 Open it while signed in on another device to request that exact live Shared
 session. The new device is a separate participant and must acquire input control

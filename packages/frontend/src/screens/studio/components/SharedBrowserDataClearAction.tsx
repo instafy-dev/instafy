@@ -1,6 +1,6 @@
 import { useCallback, useRef, useState } from "react";
 import { Refresh, Trash } from "iconoir-react";
-import { IconButton } from "../../../components/Button";
+import { Button } from "../../../components/Button";
 import { controllerClient } from "../../../sdk/instafy";
 import type { StatusIntent } from "../../../status/useStatus";
 
@@ -85,13 +85,12 @@ export function SharedBrowserDataClearAction({
     ? "Clearing shared browser data"
     : "Clear shared browser data";
   return (
-    <IconButton
+    <Button
       aria-label={label}
-      className="max-[540px]:h-10 max-[540px]:w-10"
+      className="w-full justify-start gap-2"
       data-testid="shared-browser-clear-data"
       isDisabled={clearing}
       onPress={() => void handleClear()}
-      radius="full"
       size="sm"
       title={label}
       variant="ghost"
@@ -101,6 +100,7 @@ export function SharedBrowserDataClearAction({
       ) : (
         <Trash className="h-3.5 w-3.5" aria-hidden="true" />
       )}
-    </IconButton>
+      {label}
+    </Button>
   );
 }
