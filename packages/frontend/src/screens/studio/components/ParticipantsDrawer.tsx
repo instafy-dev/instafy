@@ -8,6 +8,7 @@ import {
   MenuTrigger,
 } from "react-aria-components";
 import { AgentProfilePopoverCard } from "./AssistantAvatarPopover";
+import { AgentAvatar } from "../../../components/AgentAvatar";
 import { Button, IconButton } from "../../../components/Button";
 import { DrawerHeader } from "../../../components/DrawerHeader";
 import { DRAWER_ICON_BUTTON_TONE_CLASS } from "../../../components/listRowStyles";
@@ -18,10 +19,6 @@ import {
   StudioMenuItem,
 } from "../../../components/aria/StudioMenu";
 import { StudioPopover } from "../../../components/aria/StudioPopover";
-import {
-  resolveAgentAvatarGradient,
-  resolveAgentAvatarText,
-} from "../../../utils/agentAvatar";
 import {
   modelOptionsForProvider,
   normalizeAiProviderId,
@@ -52,21 +49,6 @@ import { formatReset, windowLabel } from "./subscriptionUsageFormat";
  * one box, and becomes per-machine group headers only when real topology
  * exists (several machines / native / dedicated).
  */
-
-function AgentAvatar({ agent }: { agent: ParticipantAgent }) {
-  return (
-    <span
-      aria-hidden="true"
-      className="inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-full text-3xs font-semibold text-white ring-1 ring-black/5 dark:ring-white/10"
-      style={{ backgroundImage: resolveAgentAvatarGradient(agent.avatarSeed) }}
-    >
-      {resolveAgentAvatarText({
-        handle: agent.handle,
-        displayName: agent.displayName,
-      })}
-    </span>
-  );
-}
 
 // A plain-language credential type from its kind. Unlike the model name (which
 // says nothing about the auth backend), this tells you *whose quota* pays for
@@ -823,7 +805,17 @@ export function ParticipantsDrawer({
                             data-testid={`participants-agent-profile-${agent.handle}`}
                             className="flex shrink-0 items-center justify-center rounded-full max-[899px]:h-11 max-[899px]:w-11 pointer-coarse:h-11 pointer-coarse:w-11 outline-none focus-visible:ring-2 focus-visible:ring-primary-500/40"
                           >
-                            <AgentAvatar agent={agent} />
+                            {/* The shared agent face, so built-in Octo keeps its
+                                coin and a custom avatar image shows here too. */}
+                            <AgentAvatar
+                              agent={{
+                                id: agent.agentId ?? undefined,
+                                handle: agent.handle,
+                                displayName: agent.displayName,
+                                avatarSeed: agent.avatarSeed,
+                              }}
+                              size="sm"
+                            />
                           </AriaButton>
                           <AgentProfilePopoverCard
                             placement="bottom start"

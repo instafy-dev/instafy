@@ -190,7 +190,14 @@ export function ConversationThreadPreviewEntry({
       if (isSlashSeedThread && firstSeedUserMessage && candidate.id === firstSeedUserMessage.id) {
         return false;
       }
-      return true;
+      // Reasoning and status parts stay out even here. A reasoning part is the
+      // model's deliberation, which stays behind "Agent thinking" and is hidden
+      // when the thread is expanded, and a status line only means something
+      // while its run is live. The card summarizes what the thread says and
+      // leaves the live state to its spinner, so a thread with nothing else
+      // gets the empty-state copy below instead.
+      const type = (getMessageType(candidate) ?? "").trim().toLowerCase();
+      return type !== "reasoning" && type !== "status";
     });
     const text = fallback?.content?.trim() ?? "";
     return text ? truncate(text, 220) : "";

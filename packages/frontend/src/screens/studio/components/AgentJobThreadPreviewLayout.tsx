@@ -50,6 +50,7 @@ import { extractMessageDetails, getMessageType } from "./chatMessageMetadata";
 import { extractAgentJobId, shouldRenderLocalCapabilityStatusAsTimeline } from "./chatMessagePresentation";
 import { RunFailureMessageBody } from "./RunFailureNotice";
 import { isCompactionStatusText } from "./assistantStatusHeuristics";
+import { normalizeAssistantHandleLabel } from "./assistantSpeakerIdentity";
 import type { AgentThreadBranchParticipant, AgentThreadBranchRow } from "./agentThreadBranchRows";
 import {
   resolveThreadCompactUpdateHistoryLabel,
@@ -184,13 +185,21 @@ function resolveProxyGuidanceContent(update: ChatMessage): string | null {
   return resolveProxyUpstreamErrorGuidance(rawContent) ? rawContent : null;
 }
 
+// A run step names its agent only when that agent is known and is not the one
+// the row already names through its avatar and speaker label. Repeating the
+// owner adds nothing, and an unknown actor cannot be named at all.
+function resolveDistinctActorHandle(actorHandle: unknown, ownerHandle: string | null): string | null {
+  const actor = normalizeAgentHandle(actorHandle);
+  return actor && ownerHandle && actor !== ownerHandle ? actor : null;
+}
+
 function resolveCompactEventLabel(
   event: ThreadCompactEvent,
   ownerBadge: string | null,
   isLive: boolean,
 ): string {
-  const actor = normalizeAgentHandle(event.actorHandle);
-  if (actor && ownerBadge && actor !== ownerBadge) {
+  const actor = resolveDistinctActorHandle(event.actorHandle, ownerBadge);
+  if (actor) {
     return `${actor} replied`;
   }
   return isLive
@@ -220,8 +229,8 @@ const COMPACT_EVENT_PILL_FOCUS_CLASS =
   "focus:outline-none focus-visible:ring-2 focus-visible:ring-primary-400 focus-visible:ring-offset-2 focus-visible:ring-offset-white dark:focus-visible:ring-primary-300/80 dark:focus-visible:ring-offset-slate-950";
 
 function renderCompactEventContent(event: ThreadCompactEvent, ownerBadge: string | null) {
-  const actor = normalizeAgentHandle(event.actorHandle);
-  if (actor && ownerBadge && actor !== ownerBadge) {
+  const actor = resolveDistinctActorHandle(event.actorHandle, ownerBadge);
+  if (actor) {
     return (
       <span
         data-testid="agent-thread-compact-actor"
@@ -531,8 +540,16 @@ export function AgentJobThreadPreviewLayout({
     })();
   }, [jobCancelPending, jobId, onCancelRun]);
   const headerIdentityVisible = showHeaderIdentity && showHeaderAvatar;
-  const ownerBadge = showHeaderIdentity ? normalizeAgentHandle(agentMetadata?.handle) : null;
-  const latestCommandOwnerBadge = normalizeAgentHandle(latestCommandAgentHandle) ?? ownerBadge;
+  const threadOwnerHandle = normalizeAgentHandle(agentMetadata?.handle);
+  const ownerBadge = showHeaderIdentity ? threadOwnerHandle : null;
+  // The avatar and speaker label name the row's agent whether or not this
+  // preview draws its own header, and they fall back to the default agent when
+  // the thread carries no owner (main-chat job threads do not). The live
+  // command chip compares against that same agent, so it only appears for a
+  // step another agent ran.
+  const rowOwnerHandle =
+    threadOwnerHandle ?? normalizeAgentHandle(normalizeAssistantHandleLabel(null));
+  const latestCommandActorBadge = resolveDistinctActorHandle(latestCommandAgentHandle, rowOwnerHandle);
   const shouldCollapseSingleCompactEvent =
     singleCompactEvent !== null &&
     visibleCompactEvents.length === 1 &&
@@ -683,13 +700,13 @@ export function AgentJobThreadPreviewLayout({
     top: showThreadPreviewHeader ? threadPreviewRailStyle.top : "0px",
   } as CSSProperties;
 
-  const commandOwnerBadgeElement = latestCommandOwnerBadge ? (
+  const commandActorBadgeElement = latestCommandActorBadge ? (
     <span
       data-testid="agent-thread-command-owner"
       className="inline-flex max-w-28 flex-none items-center rounded-full border border-slate-200/70 bg-white/70 px-1.5 py-0.5 text-xxs font-semibold leading-none text-slate-600 dark:border-slate-700/80 dark:bg-slate-900/70 dark:text-slate-300"
-      title={latestCommandOwnerBadge}
+      title={latestCommandActorBadge}
     >
-      {latestCommandOwnerBadge}
+      {latestCommandActorBadge}
     </span>
   ) : null;
   const normalizeThreadPlaceholderText = (value: string) =>
@@ -884,7 +901,7 @@ export function AgentJobThreadPreviewLayout({
             tone="muted"
             className="flex min-w-0 items-center gap-1.5 pl-1 text-xs"
           >
-            {commandOwnerBadgeElement}
+            {commandActorBadgeElement}
             <span
               className={`${shouldSweepCompactRailStatusText ? "instafy-status-sweep" : ""} min-w-0 truncate`}
               data-sweep-text={compactRailStatusText}
@@ -966,7 +983,7 @@ export function AgentJobThreadPreviewLayout({
             className="flex min-w-0 items-center gap-1.5 text-xs"
           >
             <Terminal aria-hidden="true" className="h-3.5 w-3.5 text-slate-500 dark:text-slate-300" />
-            {commandOwnerBadgeElement}
+            {commandActorBadgeElement}
             <span
               className={`${shouldAnimateThreadLiveState ? "instafy-status-sweep" : ""} min-w-0 truncate`}
               data-sweep-text={latestCommandExecution?.command ?? "Running command…"}
