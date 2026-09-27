@@ -402,16 +402,28 @@ export function useChatComposerLayoutState({
       return;
     }
 
+    // The scroller is border-box and fills its frame, so padding larger than
+    // the room it has stretches the scroller and moves its own bottom edge
+    // down. Measuring that edge fed the padding back into itself: one frame
+    // with the composer measured high grew it past 200,000px, and it then
+    // shrank a few hundred pixels per frame with the transcript blank. The
+    // frame's edge does not move with the padding, and the padding never
+    // needs to exceed the frame.
+    const frame = scrollContainer.parentElement ?? scrollContainer;
     let frameId: number | null = null;
     const syncOverlap = () => {
       frameId = null;
       const visualViewport = window.visualViewport;
-      const overlapPx = getChatScrollObstructionPaddingPx({
-        scrollContainerBottom: scrollContainer.getBoundingClientRect().bottom,
-        composerOverlayTop: overlay.getBoundingClientRect().top,
-        visualViewportHeight: visualViewport ? visualViewport.height : null,
-        visualViewportOffsetTop: visualViewport ? visualViewport.offsetTop : null,
-      });
+      const frameRect = frame.getBoundingClientRect();
+      const overlapPx = Math.min(
+        getChatScrollObstructionPaddingPx({
+          scrollContainerBottom: frameRect.bottom,
+          composerOverlayTop: overlay.getBoundingClientRect().top,
+          visualViewportHeight: visualViewport ? visualViewport.height : null,
+          visualViewportOffsetTop: visualViewport ? visualViewport.offsetTop : null,
+        }),
+        Math.max(0, Math.floor(frameRect.height)),
+      );
       setComposerScrollOverlapPaddingPx((current) => (current === overlapPx ? current : overlapPx));
     };
     const scheduleSync = () => {
@@ -430,6 +442,9 @@ export function useChatComposerLayoutState({
       typeof ResizeObserver === "undefined" ? null : new ResizeObserver(() => scheduleSync());
     observer?.observe(overlay);
     observer?.observe(scrollContainer);
+    if (frame !== scrollContainer) {
+      observer?.observe(frame);
+    }
 
     detachOverlapRef.current = () => {
       observer?.disconnect();
