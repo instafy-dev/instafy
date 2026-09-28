@@ -1,25 +1,25 @@
-# Sign-up PR review evidence
+# Sign-up and email review evidence
 
-Captured locally on 2026-09-28 using Google Chrome, local Vite at loopback port 5187,
-and the existing local Supabase stack and mail catcher. No production accounts were created.
+Local review on 2026-09-28. Product changes: `1df59b785e667448210c3c0fda07a37c688db9ef`.
 
-- Before: origin/main at b7525464, before editing LoginPage.
-- After: code-first signup changes in commit 6fb2d334fcc170edc3c63d4672952280de435ecd.
-- Desktop: 1440 x 1000. Phone: 390 x 844. Light and dark themes; reduced motion.
-- The version label comes from the dev server started at the base commit.
-- Email fixtures are synthetic. Six disposable local users across all checks were deleted.
+- `screenshots/`: original comparison from main `b7525464` to initial code-first signup `6fb2d334`.
+- `password/`: optional password setup at 1440 x 1000 and 390 x 844, light/dark, plus the retryable save error.
+- `emails/`: all six templates before/after, at 800px and 390px. These HTML previews use inert code and URL placeholders.
 
-The `email` screenshots show the state after choosing Create account and entering an email.
-The `error` screenshots show the old raw credentials error and the new account-neutral copy.
-The `code` screenshots show the new signup verification step, with no password form.
+The app captures use local Vite and Google Chrome. The original code-first check used the existing local
+Supabase stack. Password setup and delivered email checks used a dedicated temporary local Supabase
+project (`instafy-signup-review`) on ports 55321/55324. That stack has been removed without backup;
+all test users in it were disposable. The shared-stack smoke user was removed explicitly.
 
-Real browser checks passed: four signup -> delivered local email -> eight-digit code -> real
-session -> preserved destination journeys; identical mismatch copy for existing and missing
-emails; signup intent with an existing email verifies into the same account; invalid refresh
-state returns to login and password sign-in restores a real session.
+Verified locally: code-first signup; set password and fresh password login; skip and preserve the
+session/destination; validation and save retry; actual delivered confirmation and sign-in codes;
+recovery email link in a fresh browser, password update, and subsequent password login. The
+`pnpm test:auth:email` test passed against the isolated stack. No production accounts or settings
+were changed. Browser email previews do not qualify every Gmail/Outlook/native-client rendering.
 
-The remembered-account smoke spec passed. The full stale-session smoke spec could not reach
-its recovery assertions: the local controller returned HTTP 503 during organization creation.
-The isolated auth recovery check above is narrower and does not qualify that Studio smoke spec.
+Final frontend unit result: 619 files / 5,579 tests passed. TypeScript and build pass. Lint has one
+existing warning in unchanged useChatScrollOrchestration.test.tsx. Template/mount/CI-routing Node
+tests pass (17). Remembered-account smoke passes. The Studio stale-session smoke remains unverified:
+local controller organization creation returns HTTP 503 before its recovery assertions.
 
-These images are kept on a separate evidence branch so they do not enter the product diff.
+These artifacts are on a separate evidence branch and do not enter the product diff.
