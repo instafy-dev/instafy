@@ -344,6 +344,14 @@ jobs:
             --no-progress \
             "$AUDIT_IMAGE"
 
+      # A webdev image must start headed Chromium before it may be published:
+      # the Shared Browser depends on it and nothing downstream would notice.
+      - name: Prove the webdev image starts the Shared Browser
+        if: ${{ matrix.flavor == 'webdev' }}
+        env:
+          BROWSER_SMOKE_IMAGE: instafy-runtime-audit:${{ matrix.flavor }}-${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.architecture }}
+        run: bash scripts/runtime-image-browser-smoke.sh "$BROWSER_SMOKE_IMAGE"
+
       - name: Login to GHCR
         uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
         with:

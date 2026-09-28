@@ -625,3 +625,27 @@ test("the runtime entrypoint finds Playwright's Chromium in either build layout"
     }
   }
 });
+
+test("a webdev image must start the Shared Browser before it is published", () => {
+  const publish = read(".github/workflows/publish-runtime-agent.yml");
+  const scan = publish.indexOf("- name: Scan audit image");
+  const gate = publish.indexOf("- name: Prove the webdev image starts the Shared Browser");
+  const login = publish.indexOf("- name: Login to GHCR");
+  assert.ok(scan > 0 && gate > scan && login > gate, "the browser gate runs after the scan and before any registry login");
+  const step = publish.slice(gate, login);
+  assert.match(step, /if: \$\{\{ matrix\.flavor == 'webdev' \}\}/u);
+  assert.match(step, /run: bash scripts\/runtime-image-browser-smoke\.sh "\$BROWSER_SMOKE_IMAGE"/u);
+
+  const smoke = read("scripts/runtime-image-browser-smoke.sh");
+  // It boots the image's real entrypoint and swaps only the final exec.
+  assert.match(smoke, /exec \/usr\/local\/bin\/runtime-agent/u);
+  assert.match(smoke, /INSTAFY_ENABLE_BROWSER_SESSION=1/u);
+  assert.match(smoke, /\/json\/version/u);
+  assert.ok(fs.statSync(path.join(repositoryRoot, "scripts/runtime-image-browser-smoke.sh")).mode & 0o111);
+
+  const pr = read(".github/workflows/runtime-browser-smoke.yml");
+  assert.match(pr, /- docker\/runtime\/entrypoint\.sh/u);
+  assert.match(pr, /permissions:\n  contents: read/u);
+  assert.doesNotMatch(pr, /secrets\./u);
+  assert.match(pr, /runtime-image-browser-smoke\.sh "\$IMAGE" docker\/runtime\/entrypoint\.sh/u);
+});
