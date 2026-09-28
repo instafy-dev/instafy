@@ -1,0 +1,66 @@
+name: Runtime browser smoke
+
+# Runs a change to the runtime entrypoint inside the newest published webdev
+# image and requires headed Chromium to answer on its CDP port. Publication
+# runs the same check on each freshly built webdev image before pushing it
+# (publish-runtime-agent.yml); this catches entrypoint regressions at review
+# time, such as the chrome-linux64 layout that the Chromium resolver missed.
+
+on:
+  pull_request:
+    paths:
+      - docker/runtime/entrypoint.sh
+      - scripts/runtime-image-browser-smoke.sh
+      - .github/workflows/runtime-browser-smoke.yml
+
+permissions:
+  contents: read
+
+concurrency:
+  group: runtime-browser-smoke-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  smoke:
+    name: Shared Browser starts with this entrypoint
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          fetch-depth: 50
+          persist-credentials: false
+
+      - name: Find the newest published webdev image on the base branch
+        id: image
+        shell: bash
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          set -euo pipefail
+          if [[ ! "$BASE_SHA" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::The pull request base is not a full commit SHA."
+            exit 1
+          fi
+          git fetch --no-tags --depth 50 origin "$BASE_SHA"
+          for sha in $(git rev-list --first-parent --max-count 30 "$BASE_SHA"); do
+            candidate="ghcr.io/instafy-dev/instafy-runtime-agent:webdev-${sha}"
+            if docker manifest inspect "$candidate" >/dev/null 2>&1; then
+              echo "image=$candidate" >> "$GITHUB_OUTPUT"
+              echo "Using $candidate"
+              exit 0
+            fi
+          done
+          echo "::error::No published webdev image among the last 30 base-branch commits."
+          exit 1
+
+      - name: Pull the published image
+        env:
+          IMAGE: ${{ steps.image.outputs.image }}
+        run: docker pull --quiet "$IMAGE"
+
+      - name: Start the Shared Browser with this entrypoint
+        env:
+          IMAGE: ${{ steps.image.outputs.image }}
+        run: bash scripts/runtime-image-browser-smoke.sh "$IMAGE" docker/runtime/entrypoint.sh
