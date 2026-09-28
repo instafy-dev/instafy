@@ -556,11 +556,13 @@ starts from GHCR by the same digest, with ECR Public as the fallback.
   private composition job) makes one bounded GHCR pull after the local and cache
   checks, then falls back to its unchanged five-attempt ECR pull. Either pull is
   by digest, so the digest-bound cache tag is unchanged.
-- `pnpm supabase:up` pulls each image the selected profile needs (four for
-  database-only, seven for Auth-only, ten for browser-test and full) from GHCR by
-  digest, or from ECR Public by digest, and tags it with the CLI's own
+- `pnpm supabase:up` pulls each locked image the selected profile needs (four
+  for database-only, seven for Auth-only, ten for browser-test and full) from
+  GHCR by digest, or from ECR Public by digest, and tags it with the CLI's own
   `public.ecr.aws/supabase/<name>:<tag>` reference. The pinned CLI finds that
   reference locally and skips its own pull. The CLI registry is not redirected.
+  Full mode, which no CI lane uses, also starts Edge Runtime. That image is not
+  in the lock, so the CLI still pulls it from ECR Public.
   Pulls run one at a time, bounded to three minutes each and ten minutes in
   total. A pull that times out or cannot reach its registry is not retried, and
   that registry is skipped for the rest of the start, so a stalled GHCR costs
@@ -601,7 +603,10 @@ startup profile, skip tests, alter TLS, or increase runner limits.
 The separate browser-test profile validates that complete inventory too, then
 prepares all 13 images except Edge Runtime. When the
 [GHCR mirror](#supabase-ci-image-mirror) is on, it runs first, so serial
-preparation finds those references already present.
+preparation finds the ten mirrored references already present. It still pulls
+Logflare, Vector and Supavisor from ECR Public: the mirror does not copy them,
+because `config.toml` disables Analytics and the pooler and no profile starts
+them.
 
 Preparation uses an empty temporary CLI/Docker home and anonymous public-ECR
 pulls against the default local Docker daemon. Linked projects, local dotenv

@@ -158,9 +158,10 @@ function sleep(milliseconds) {
 const succeeded = (result) => Boolean(result) && !result.error && !result.signal && result.status === 0;
 
 /**
- * Before `supabase start`/`db start`, make every image the selected profile
- * will request present under the CLI's own local reference. Serial and
- * bounded; never fatal for registry trouble (the CLI's pull is the last
+ * Before `supabase start`/`db start`, make every locked image the selected
+ * profile will request present under the CLI's own local reference. Full mode
+ * also starts Edge Runtime, which is not locked and stays a CLI pull. Serial
+ * and bounded; never fatal for registry trouble (the CLI's pull is the last
  * resort), but invalid configuration fails before startup.
  */
 export function prepareSupabaseImageMirror({
