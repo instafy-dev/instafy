@@ -418,18 +418,6 @@ fn prompt_context_replayed_history(prompt_context: &JsonValue) -> bool {
             .is_some_and(|turns| turns > 0)
 }
 
-/// Whether a retry prompt carries the history the first prompt replayed. The retry reuses
-/// the first prompt's metrics, but the missing-final recoveries rebuild their prompt from the
-/// latest request alone and leave the history out. Every retry that keeps the history
-/// resends the whole first prompt ahead of its own instructions, so the prompt text decides.
-fn retry_prompt_replayed_history(
-    retry_prompt: &str,
-    prompt: &str,
-    prompt_context: &JsonValue,
-) -> bool {
-    retry_prompt.starts_with(prompt) && prompt_context_replayed_history(prompt_context)
-}
-
 /// Codex keeps `historyReplayRequired` set after a run that could not restore its thread,
 /// because that run's prompt was normally built before the loss was known and carried no
 /// history. When this run's prompt did replay the history, as it does once
@@ -469,6 +457,28 @@ fn provider_conversation_state_after_history_replay(
         );
     }
     Some(state)
+}
+
+/// The provider state a Codex run saves for the next turn. The first attempt and the retry
+/// both build it here, so the replay flag is decided in one place that tests can reach.
+/// `run_prompt` is the prompt the run sent, `prompt` is the first attempt's prompt, and
+/// `prompt_context` holds the metrics the run reports. A retry copies those metrics from the
+/// first attempt, so they still say the history was replayed after a missing-final recovery
+/// rebuilt its prompt from the latest request alone. The prompt text decides instead: every
+/// retry that keeps the history resends the whole first prompt ahead of its own
+/// instructions, and the first attempt sent that prompt itself.
+fn provider_conversation_state_to_save(
+    output: &CodexRunOutput,
+    run_prompt: &str,
+    prompt: &str,
+    prompt_context: &JsonValue,
+    browser_mode: bool,
+) -> Option<JsonValue> {
+    provider_conversation_state_after_history_replay(
+        output.provider_conversation_state.clone(),
+        run_prompt.starts_with(prompt) && prompt_context_replayed_history(prompt_context),
+        browser_mode,
+    )
 }
 
 fn broad_contextual_instruction_suppression_reason(
@@ -5865,9 +5875,11 @@ impl JobProcessor {
                 return Err(error);
             }
         };
-        let output_provider_conversation_state = provider_conversation_state_after_history_replay(
-            output.provider_conversation_state.clone(),
-            prompt_context_replayed_history(&prompt_context),
+        let output_provider_conversation_state = provider_conversation_state_to_save(
+            &output,
+            &prompt,
+            &prompt,
+            &prompt_context,
             browser_mode,
         );
 
@@ -6492,12 +6504,13 @@ impl JobProcessor {
                     .await?
             };
             drop(codex_guard);
-            let retry_provider_conversation_state =
-                provider_conversation_state_after_history_replay(
-                    retry_output.provider_conversation_state.clone(),
-                    retry_prompt_replayed_history(&retry_prompt, &prompt, &retry_prompt_context),
-                    browser_mode,
-                );
+            let retry_provider_conversation_state = provider_conversation_state_to_save(
+                &retry_output,
+                &retry_prompt,
+                &prompt,
+                &retry_prompt_context,
+                browser_mode,
+            );
 
             let retry_raw_messages = with_runtime_metadata_vec(
                 extract_codex_messages(&retry_output.events),
@@ -17598,6 +17611,16 @@ mod tests {
         }
     }
 
+    /// A Codex run that saved `state`, so tests can hand it to
+    /// `provider_conversation_state_to_save` the way the job does.
+    fn codex_run_output(state: JsonValue) -> CodexRunOutput {
+        CodexRunOutput {
+            final_json: json!({}),
+            events: Vec::new(),
+            provider_conversation_state: Some(state),
+        }
+    }
+
     /// Turn N replays the history into a fresh thread because the stored rollout is gone,
     /// and Codex still records that its restore failed. If the saved state kept asking for a
     /// replay, turn N+1 would resume the thread that already holds turn N's replay and send
@@ -17662,9 +17685,11 @@ mod tests {
         );
         assert_eq!(codex_state["historyReplayRequired"], true);
         assert_eq!(codex_state["defaultThreadRestoreFailed"], true);
-        let saved = provider_conversation_state_after_history_replay(
-            Some(codex_state.clone()),
-            prompt_context_replayed_history(&first_metrics),
+        let saved = provider_conversation_state_to_save(
+            &codex_run_output(codex_state.clone()),
+            &first_prompt,
+            &first_prompt,
+            &first_metrics,
             false,
         )
         .expect("saved state");
@@ -17756,7 +17781,6 @@ mod tests {
                     None,
                 )
                 .expect("actual main prompt builder")
-                .2
         };
         let lost_rollout = tmp
             .path()
@@ -17803,17 +17827,19 @@ mod tests {
             let (state, marked) =
                 provider_conversation_state_for_this_runtime(Some(stored), lost_browser);
             assert!(marked, "{label}");
-            let metrics = build(state.as_ref());
+            let (prompt, _, metrics) = build(state.as_ref());
             assert_eq!(metrics["promptMode"], "full", "{label}");
             let fresh_rollout = tmp.path().join(format!("{label}-fresh.jsonl"));
             fs::write(&fresh_rollout, "").expect("write fresh rollout");
-            let saved = provider_conversation_state_after_history_replay(
-                Some(crate::codex::provider_state_after_fresh_thread(
+            let saved = provider_conversation_state_to_save(
+                &codex_run_output(crate::codex::provider_state_after_fresh_thread(
                     state.as_ref(),
                     lost_browser,
                     &fresh_rollout,
                 )),
-                prompt_context_replayed_history(&metrics),
+                &prompt,
+                &prompt,
+                &metrics,
                 lost_browser,
             );
 
@@ -17821,14 +17847,16 @@ mod tests {
             let (state, marked) =
                 provider_conversation_state_for_this_runtime(saved, !lost_browser);
             assert!(!marked, "{label}");
-            let metrics = build(state.as_ref());
+            let (prompt, _, metrics) = build(state.as_ref());
             assert_eq!(metrics["promptMode"], "stateful_compact", "{label}");
-            let saved = provider_conversation_state_after_history_replay(
-                Some(crate::codex::provider_state_after_thread_resumed(
+            let saved = provider_conversation_state_to_save(
+                &codex_run_output(crate::codex::provider_state_after_thread_resumed(
                     state.as_ref().expect("state"),
                     !lost_browser,
                 )),
-                prompt_context_replayed_history(&metrics),
+                &prompt,
+                &prompt,
+                &metrics,
                 !lost_browser,
             )
             .expect("saved state");
@@ -17838,7 +17866,7 @@ mod tests {
             let (state, marked) =
                 provider_conversation_state_for_this_runtime(Some(saved), lost_browser);
             assert!(!marked, "{label}");
-            let metrics = build(state.as_ref());
+            let (_, _, metrics) = build(state.as_ref());
             assert_eq!(metrics["promptMode"], "stateful_compact", "{label}");
             assert_eq!(metrics["includedTurns"], 0, "{label}");
         }
@@ -17883,6 +17911,13 @@ mod tests {
         let (prompt, _, metrics) = build(state.as_ref());
         assert!(prompt.contains(SKILL_SETUP_TEST_QUESTION));
         assert!(prompt_context_replayed_history(&metrics));
+        // The retry could not restore the thread either and started a fresh one from its own
+        // prompt.
+        let retry_rollout = tmp.path().join("retry-thread.jsonl");
+        fs::write(&retry_rollout, "").expect("write retry rollout");
+        let codex_state =
+            crate::codex::provider_state_after_fresh_thread(state.as_ref(), false, &retry_rollout);
+        let retry_output = codex_run_output(codex_state.clone());
 
         for (label, retry_prompt) in [
             (
@@ -17907,8 +17942,18 @@ mod tests {
             ),
         ] {
             assert!(!retry_prompt.contains(SKILL_SETUP_TEST_QUESTION), "{label}");
-            assert!(
-                !retry_prompt_replayed_history(&retry_prompt, &prompt, &metrics),
+            // The fresh thread holds only the recovery prompt, so the state is kept as Codex
+            // wrote it.
+            assert_eq!(
+                provider_conversation_state_to_save(
+                    &retry_output,
+                    &retry_prompt,
+                    &prompt,
+                    &metrics,
+                    false
+                )
+                .as_ref(),
+                Some(&codex_state),
                 "{label}"
             );
         }
@@ -17935,32 +17980,133 @@ mod tests {
             ("plain_write", codex_plain_write_task_retry_prompt(&prompt)),
         ] {
             assert!(retry_prompt.contains(SKILL_SETUP_TEST_QUESTION), "{label}");
-            assert!(
-                retry_prompt_replayed_history(&retry_prompt, &prompt, &metrics),
-                "{label}"
-            );
+            let saved = provider_conversation_state_to_save(
+                &retry_output,
+                &retry_prompt,
+                &prompt,
+                &metrics,
+                false,
+            )
+            .expect("saved state");
+            assert_eq!(saved["historyReplayRequired"], false, "{label}");
         }
 
-        // The retry could not restore the thread either and started a fresh one from the
-        // recovery prompt, so the saved state is kept as Codex wrote it.
-        let retry_rollout = tmp.path().join("retry-thread.jsonl");
-        fs::write(&retry_rollout, "").expect("write retry rollout");
-        let codex_state =
-            crate::codex::provider_state_after_fresh_thread(state.as_ref(), false, &retry_rollout);
-        let recovery_prompt = codex_missing_final_recovery_prompt(request, tmp.path(), &[], false);
-        let saved = provider_conversation_state_after_history_replay(
-            Some(codex_state.clone()),
-            retry_prompt_replayed_history(&recovery_prompt, &prompt, &metrics),
+        // The next turn resumes the thread a missing-final recovery started and still gets
+        // the history.
+        let saved = provider_conversation_state_to_save(
+            &retry_output,
+            &codex_missing_final_recovery_prompt(request, tmp.path(), &[], false),
+            &prompt,
+            &metrics,
             false,
         );
-        assert_eq!(saved.as_ref(), Some(&codex_state));
-
-        // The next turn resumes that thread and still gets the history.
         let (state, _) = provider_conversation_state_for_this_runtime(saved, false);
         let (next_prompt, _, next_metrics) = build(state.as_ref());
         assert_eq!(next_metrics["promptMode"], "full");
         assert_eq!(next_metrics["includedTurns"], 2);
         assert!(next_prompt.contains(SKILL_SETUP_TEST_QUESTION));
+    }
+
+    /// The first attempt and the retry save their provider state through
+    /// `provider_conversation_state_to_save`, called here with the arguments each call site
+    /// passes. Codex asks for a replay after every run that started a fresh thread, and only a
+    /// run whose own prompt carried the history may drop that request.
+    #[test]
+    fn only_a_run_that_sent_the_history_stops_the_next_turn_replaying_it() {
+        let tmp = tempdir().expect("temp dir");
+        let processor = test_job_processor(tmp.path());
+        let project_id = Uuid::new_v4();
+        let job = skill_setup_test_job(SKILL_SETUP_TEST_OPENER);
+        let request = "What's next in the setup?";
+        let build = |state: Option<&JsonValue>| {
+            processor
+                .build_prompt_with_text(
+                    &project_id,
+                    &job,
+                    tmp.path(),
+                    request,
+                    true,
+                    state,
+                    &[],
+                    None,
+                    None,
+                )
+                .expect("actual main prompt builder")
+        };
+        let fresh_thread_output = |state: Option<&JsonValue>, name: &str| {
+            let rollout = tmp.path().join(format!("{name}.jsonl"));
+            fs::write(&rollout, "").expect("write fresh rollout");
+            let output = codex_run_output(crate::codex::provider_state_after_fresh_thread(
+                state, false, &rollout,
+            ));
+            assert_eq!(
+                output.provider_conversation_state.as_ref().expect("state")["historyReplayRequired"],
+                true
+            );
+            output
+        };
+
+        // The stored thread is lost on this runtime, so the first attempt replays the history
+        // and Codex starts a fresh thread from that prompt.
+        let (lost, marked) = provider_conversation_state_for_this_runtime(
+            Some(json!({
+                "provider": "codex-embedded",
+                "defaultThreadId": Uuid::new_v4().to_string(),
+                "defaultRolloutPath": tmp.path().join("from-the-old-runtime.jsonl").display().to_string(),
+                "historyReplayRequired": false,
+            })),
+            false,
+        );
+        assert!(marked);
+        let (prompt, _, metrics) = build(lost.as_ref());
+        assert_eq!(metrics["includedTurns"], 2);
+        let output = fresh_thread_output(lost.as_ref(), "first-attempt");
+        let first_attempt =
+            provider_conversation_state_to_save(&output, &prompt, &prompt, &metrics, false)
+                .expect("saved state");
+        assert_eq!(first_attempt["historyReplayRequired"], false);
+        assert_eq!(first_attempt["defaultThreadRestoreFailed"], false);
+
+        // A retry that resent the first prompt seeded its fresh thread with the history too.
+        let retry_output = fresh_thread_output(lost.as_ref(), "retry");
+        let resent = codex_fallback_retry_prompt(
+            &prompt,
+            CodexFallbackSummaryKind::InvalidFinalAssistantMessageJson,
+        );
+        let resent_retry =
+            provider_conversation_state_to_save(&retry_output, &resent, &prompt, &metrics, false)
+                .expect("saved state");
+        assert_eq!(resent_retry["historyReplayRequired"], false);
+
+        // A missing-final recovery rebuilt the retry prompt from the latest request alone, so
+        // its fresh thread lacks the history although the reused metrics say it was replayed.
+        let recovery = codex_missing_final_recovery_prompt(request, tmp.path(), &[], false);
+        assert_eq!(
+            provider_conversation_state_to_save(&retry_output, &recovery, &prompt, &metrics, false),
+            retry_output.provider_conversation_state
+        );
+
+        // The stored rollout is on this disk, so the prompt trusted the thread and carried no
+        // history, but Codex could not load the rollout and started an empty thread.
+        let rollout = tmp.path().join("rollout.jsonl");
+        fs::write(&rollout, "").expect("write rollout");
+        let (restorable, marked) = provider_conversation_state_for_this_runtime(
+            Some(json!({
+                "provider": "codex-embedded",
+                "defaultThreadId": Uuid::new_v4().to_string(),
+                "defaultRolloutPath": rollout.display().to_string(),
+                "historyReplayRequired": false,
+            })),
+            false,
+        );
+        assert!(!marked);
+        let (prompt, _, metrics) = build(restorable.as_ref());
+        assert_eq!(metrics["includedTurns"], 0);
+        let output = fresh_thread_output(restorable.as_ref(), "unloadable-rollout");
+        assert_eq!(
+            provider_conversation_state_to_save(&output, &prompt, &prompt, &metrics, false),
+            output.provider_conversation_state
+        );
     }
 
     #[test]

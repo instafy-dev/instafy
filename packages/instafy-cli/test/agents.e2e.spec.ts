@@ -189,6 +189,73 @@ describe("agents command", () => {
     });
   });
 
+  it("rejects an environment conversation that is not an id before saving a card", async () => {
+    const projectId = randomUUID();
+    const agentId = randomUUID();
+    const { server, captured } = startMockController((req) => ({
+      status: 200,
+      body: {
+        id: randomUUID(),
+        agentId,
+        agent: { id: agentId, handle: "octo", displayName: "Octo" },
+        scopeKind: "conversation",
+        scopeId: (req.body as { scopeId?: string }).scopeId,
+        context: (req.body as { context?: string }).context,
+        updatedAt: "2026-04-28T10:00:00.000Z",
+      },
+    }));
+
+    await once(server, "listening");
+    const address = server.address();
+    const port = typeof address === "object" && address ? address.port : 0;
+    const put = (extraArgs: string[], env: NodeJS.ProcessEnv) =>
+      execCli(
+        [
+          "agents",
+          "context",
+          "put",
+          "--agent",
+          "@octo",
+          ...extraArgs,
+          "--server-url",
+          `http://127.0.0.1:${port}`,
+          "--access-token",
+          "agent-token",
+          "The user said their uncle is named Tom.",
+        ],
+        { env: { SPACE_ID: projectId, ...env } },
+      );
+
+    try {
+      // The value becomes the card's scope, so a path, a query or a stray word would file
+      // the card where no conversation reads it.
+      for (const value of ["../../projects/x", "abc?limit=1&x=", "not-a-uuid"]) {
+        for (const [name, env] of [
+          ["INSTAFY_CONVERSATION_ID", { INSTAFY_CONVERSATION_ID: value, CONVERSATION_ID: randomUUID() }],
+          ["CONVERSATION_ID", { INSTAFY_CONVERSATION_ID: "", CONVERSATION_ID: value }],
+        ] as const) {
+          const label = `${name}=${value}`;
+          const result = await put([], env);
+
+          expect(result.code, label).toBe(1);
+          expect(result.stderr, label).toContain(`${name} is not a conversation id.`);
+          expect(captured, label).toEqual([]);
+        }
+      }
+
+      // An explicit --scope-id never reads the environment.
+      const conversationId = randomUUID();
+      const explicit = await put(["--scope-id", conversationId], {
+        INSTAFY_CONVERSATION_ID: "../../projects/x",
+      });
+      expect(explicit.code).toBe(0);
+      expect(captured).toHaveLength(1);
+      expect(captured[0].body).toMatchObject({ scopeKind: "conversation", scopeId: conversationId });
+    } finally {
+      server.close();
+    }
+  });
+
   it("shows live plan-group status per worker lane", async () => {
     const groupId = randomUUID();
     const conversationId = randomUUID();

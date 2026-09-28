@@ -82,12 +82,15 @@ Use this when you want to reuse context from an earlier chat without manually hu
 With no target, `conversation show` reads the conversation named by `INSTAFY_CONVERSATION_ID`
 (or `CONVERSATION_ID`). Runtime jobs set it, so an agent reads its own conversation with
 `instafy conversation show --include-threads --json` instead of copying the id. Without a target
-or either variable, the command fails. An explicit empty target, such as an unset shell variable,
-also fails rather than falling back to the current conversation. CLI versions before this change
-require a target, so an agent on an older CLI passes the id from its runtime context instead.
-The variable must hold a conversation UUID, here and for `instafy history messages` and
-`instafy history runs` without `--conversation`. Any other value, such as a title or a path, is
-rejected before a request is sent.
+or either variable, the command fails. An explicit empty target, such as a quoted `"$ID"` whose
+variable is empty or unset, also fails rather than falling back to the current conversation. An
+unquoted `$ID` that is empty passes no argument at all, so `instafy conversation show $ID` reads
+the current conversation. Quote a variable that should name another conversation. CLI versions
+before this change require a target, so an agent on an older CLI passes the id from its runtime
+context instead.
+The variable must hold a conversation UUID, here, for `instafy history messages` and
+`instafy history runs` without `--conversation`, and for `instafy agents context put` without
+`--scope-id`. Any other value, such as a title or a path, is rejected before a request is sent.
 
 `conversation search` inspects recent titles/previews and recent messages in at most 12
 conversations. It does not search all persisted message content. For exact evidence in older
