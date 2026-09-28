@@ -116,14 +116,22 @@ short-lived access/API-key lease and never receives the stored refresh token.
 Responses, Chat Completions, speech and transcription preserve upstream HTTP error statuses. A rejected request or
 credential (400/401/403) is terminal; rate limits (429), timeouts (504), and temporary upstream
 failures (5xx) remain retryable. Recognized `insufficient_quota` codes in an HTTP 429 body or a
-failed Responses stream return terminal 402. Failed credential renewal and invalid request or
-redirect configuration return terminal 424. Unknown transport errors, including opaque TLS
-handshake failures, return retryable 502 because they may be temporary.
+failed Responses stream return terminal 402. A ChatGPT plan limit (`usage_limit_reached` or
+`usage_not_included` in an HTTP 429 body or a failed Responses stream) stays 429 but is terminal
+and carries no `Retry-After`, because its window resets in hours. Failed credential renewal and
+invalid request or redirect configuration return terminal 424. Unknown transport errors,
+including opaque TLS handshake failures, return retryable 502 because they may be temporary.
 
 Upstream error envelopes retain `error.type: "upstream_error"` and a safe `error.message`, and
-add a stable `error.code` and boolean `error.retryable`. Raw provider messages, response bodies,
-credentials, and endpoint URLs are not echoed. Valid `Retry-After` seconds or HTTP dates are
-forwarded for 429 and 503; other header values are discarded.
+add a stable `error.code` and boolean `error.retryable`. The one exception is a plan limit,
+whose `error.type` is the provider's `usage_limit_reached` or `usage_not_included` so Codex
+reports it as a usage limit, with a positive integer `error.resets_at` (Unix seconds) when the
+provider gave one. Raw provider messages, response bodies, credentials, and endpoint URLs are
+not echoed. Valid `Retry-After` seconds or HTTP dates are forwarded for 429 and 503; other
+header values are discarded. Every retryable 429 carries a `Retry-After`: when the provider
+sends no usable one, the proxy uses the later of `x-ratelimit-reset-requests` and
+`x-ratelimit-reset-tokens` (durations such as `6s` or `1m2.5s`, rounded up to whole seconds and
+clamped to 1-30 seconds), and otherwise 2 seconds.
 
 The proxy does not replay ordinary failed model requests. It retains one credential renewal
 and one resend after an eligible ChatGPT 401. Controller mode performs that renewal through

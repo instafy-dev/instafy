@@ -1961,7 +1961,7 @@ impl AppError {
         let classified = upstream_error::classify(&err);
         Self {
             status: classified.status,
-            error_type: "upstream_error",
+            error_type: classified.error_type,
             message: classified.message.to_string(),
             upstream: Some(classified),
         }
@@ -1987,6 +1987,9 @@ impl IntoResponse for AppError {
         if let Some(upstream) = &self.upstream {
             error["code"] = json!(upstream.code);
             error["retryable"] = json!(upstream.retryable);
+            if let Some(resets_at) = upstream.resets_at {
+                error["resets_at"] = json!(resets_at);
+            }
         }
         let mut response = (self.status, Json(json!({"error": error}))).into_response();
         if let Some(value) = self.upstream.and_then(|upstream| upstream.retry_after) {

@@ -15556,6 +15556,11 @@ fn sanitize_codex_final_json(value: &JsonValue) -> JsonValue {
 fn extract_codex_messages(events: &[JsonValue]) -> Vec<JobMessage> {
     let mut results = Vec::new();
     let mut seen: HashSet<String> = HashSet::new();
+    // Counts every message pushed so far. A Cell lets the stream.retry arm read it while the
+    // closure below holds the mutable borrows of `results` and `seen`.
+    let pushed = std::cell::Cell::new(0usize);
+    let mut retry_episode = 0usize;
+    let mut pushed_at_last_retry: Option<usize> = None;
 
     let mut push_message =
         |key: String, content: String, message_type: Option<&str>, metadata: JsonValue| {
@@ -15564,6 +15569,7 @@ fn extract_codex_messages(events: &[JsonValue]) -> Vec<JobMessage> {
                 return;
             }
             if seen.insert(key) {
+                pushed.set(pushed.get() + 1);
                 results.push(JobMessage {
                     content: trimmed.to_string(),
                     message_type: message_type.map(|value| value.to_string()),
@@ -16016,6 +16022,35 @@ fn extract_codex_messages(events: &[JsonValue]) -> Vec<JobMessage> {
                             "usage": usage,
                         }),
                     );
+                }
+            }
+            "stream.retry" => {
+                // Codex is retrying, and the turn may still recover. The Studio shows a
+                // "Retrying:" status as calm progress and keeps the cause as its detail; a
+                // failure that outlasts the retries still arrives as an error.
+                if let Some(reason) = map
+                    .get("message")
+                    .and_then(JsonValue::as_str)
+                    .map(str::trim)
+                    .filter(|reason| !reason.is_empty())
+                {
+                    // The Studio headline is the latest status or reasoning line. Repeated
+                    // attempts collapse into one line while it is still the latest message,
+                    // but once anything else has been shown, a later throttle in the same
+                    // turn needs a line of its own or the headline keeps the stale step.
+                    if pushed_at_last_retry.is_some_and(|count| count != pushed.get()) {
+                        retry_episode += 1;
+                    }
+                    push_message(
+                        format!("stream_retry::{retry_episode}::{reason}"),
+                        format!("Retrying: {reason}"),
+                        Some("status"),
+                        json!({
+                            "kind": "codex_stream_retry",
+                            "event": event.clone(),
+                        }),
+                    );
+                    pushed_at_last_retry = Some(pushed.get());
                 }
             }
             "error" => {
@@ -25667,6 +25702,152 @@ mod tests {
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0].content, "Unauthorized");
         assert_eq!(messages[0].message_type.as_deref(), Some("error"));
+    }
+
+    #[test]
+    fn recovered_stream_error_is_a_retry_status_and_not_an_error() {
+        use crate::codex::CodexEventStreamAdapter;
+        use codex_protocol::protocol::{
+            AgentMessageEvent, CodexErrorInfo, Event, EventMsg, StreamErrorEvent,
+        };
+
+        let reason = "stream disconnected before completion: 429 Too Many Requests: The upstream provider rate limit was reached.";
+        let stream_error = |http_status_code| {
+            EventMsg::StreamError(StreamErrorEvent {
+                message: "Reconnecting... 1/5".to_string(),
+                codex_error_info: Some(CodexErrorInfo::ResponseStreamDisconnected {
+                    http_status_code,
+                }),
+                additional_details: Some(reason.to_string()),
+            })
+        };
+        let collect = |messages: Vec<EventMsg>| {
+            let mut adapter = CodexEventStreamAdapter::default();
+            let events = messages
+                .into_iter()
+                .flat_map(|msg| {
+                    adapter.collect(&Event {
+                        id: "turn-1".to_string(),
+                        msg,
+                    })
+                })
+                .collect::<Vec<_>>();
+            extract_codex_messages(&events)
+        };
+
+        let messages = collect(vec![
+            stream_error(None),
+            EventMsg::AgentMessage(AgentMessageEvent {
+                message: "The page is updated.".to_string(),
+                phase: None,
+                memory_citation: None,
+            }),
+        ]);
+        assert!(
+            messages
+                .iter()
+                .all(|message| message.message_type.as_deref() != Some("error")),
+            "{messages:?}"
+        );
+        let retry = messages
+            .iter()
+            .find(|message| message.content.starts_with("Retrying: "))
+            .expect("the recovered retry stays visible as progress");
+        assert_eq!(retry.content, format!("Retrying: {reason}"));
+        assert_eq!(retry.message_type.as_deref(), Some("status"));
+        assert_eq!(
+            retry
+                .metadata
+                .as_ref()
+                .and_then(|metadata| metadata.get("kind"))
+                .and_then(JsonValue::as_str),
+            Some("codex_stream_retry")
+        );
+        assert!(
+            messages
+                .iter()
+                .any(|message| message.content == "The page is updated.")
+        );
+
+        // A terminal status ends the turn at once, so it is still reported as an error.
+        let messages = collect(vec![stream_error(Some(401))]);
+        assert_eq!(messages.len(), 1, "{messages:?}");
+        assert_eq!(messages[0].content, reason);
+        assert_eq!(messages[0].message_type.as_deref(), Some("error"));
+    }
+
+    #[test]
+    fn a_later_throttle_in_the_same_turn_shows_a_new_retry_status() {
+        use crate::codex::CodexEventStreamAdapter;
+        use codex_protocol::protocol::{
+            AgentMessageEvent, AgentReasoningEvent, CodexErrorInfo, Event, EventMsg,
+            StreamErrorEvent,
+        };
+
+        let reason = "stream disconnected before completion: 429 Too Many Requests: The upstream provider rate limit was reached.";
+        let stream_error = |attempt: usize| {
+            EventMsg::StreamError(StreamErrorEvent {
+                message: format!("Reconnecting... {attempt}/5"),
+                codex_error_info: Some(CodexErrorInfo::ResponseStreamDisconnected {
+                    http_status_code: None,
+                }),
+                additional_details: Some(reason.to_string()),
+            })
+        };
+        let mut adapter = CodexEventStreamAdapter::default();
+        let events = [
+            // Step 2 is throttled twice before it recovers.
+            stream_error(1),
+            stream_error(2),
+            EventMsg::AgentReasoning(AgentReasoningEvent {
+                text: "**Opening the checkout page**".to_string(),
+            }),
+            // Step 10 is throttled again with the same cause.
+            stream_error(1),
+            EventMsg::AgentMessage(AgentMessageEvent {
+                message: "The order form is filled in.".to_string(),
+                phase: None,
+                memory_citation: None,
+            }),
+        ]
+        .into_iter()
+        .flat_map(|msg| {
+            adapter.collect(&Event {
+                id: "turn-1".to_string(),
+                msg,
+            })
+        })
+        .collect::<Vec<_>>();
+
+        let messages = extract_codex_messages(&events);
+        let contents = messages
+            .iter()
+            .map(|message| message.content.as_str())
+            .collect::<Vec<_>>();
+        let retry = format!("Retrying: {reason}");
+        assert_eq!(
+            contents,
+            vec![
+                retry.as_str(),
+                "**Opening the checkout page**",
+                retry.as_str(),
+                "The order form is filled in.",
+            ]
+        );
+
+        // Streaming sends only the messages past the ones it already sent, so a longer event
+        // list must never reorder or drop a message that a shorter one produced.
+        for end in 0..=events.len() {
+            let prefix = extract_codex_messages(&events[..end]);
+            assert_eq!(
+                prefix
+                    .iter()
+                    .map(|message| message.content.as_str())
+                    .collect::<Vec<_>>(),
+                contents[..prefix.len()],
+                "prefix of {end} events"
+            );
+        }
     }
 
     #[test]

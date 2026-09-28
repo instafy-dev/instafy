@@ -589,6 +589,12 @@ fn is_expected_provider_limit(message: &str) -> bool {
         || normalized.contains("insufficient_quota")
         || normalized.contains("rate_limit_error")
         || normalized.contains("rate limit reached")
+        // The Instafy proxy's rate-limit message, which Codex reports once its retries run out.
+        || normalized.contains("rate limit was reached")
+        // Codex's own texts for the ChatGPT plan limits the proxy passes through: an exhausted
+        // usage window, and a plan that does not include Codex at all.
+        || normalized.contains("you've hit your usage limit")
+        || normalized.contains("to use codex with your chatgpt plan")
 }
 
 fn is_reconnectable_credential_failure(message: &str) -> bool {
@@ -979,6 +985,9 @@ mod tests {
             r#"unexpected status 502 Bad Gateway: upstream request failed: backend responded with 429 Too Many Requests: {"error":{"type":"usage_limit_reached"}}"#,
             r#"backend responded with 429 Too Many Requests: {"error":{"type":"insufficient_quota"}}"#,
             r#"backend responded with 429 Too Many Requests: {"error":{"type":"rate_limit_error","message":"Rate limit reached"}}"#,
+            "stream disconnected before completion: 429 Too Many Requests: The upstream provider rate limit was reached.",
+            "You've hit your usage limit. Try again at 3:45 PM.",
+            "To use Codex with your ChatGPT plan, upgrade to Plus: https://chatgpt.com/explore/plus.",
         ] {
             assert!(build_system_issue_from_telemetry(
                 "telemetry.error",

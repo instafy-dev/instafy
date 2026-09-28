@@ -78,7 +78,12 @@ failure fails the job instead of starting another main-agent request; a successf
 unrecognized routing decision still falls back to the direct route. `CODEX_MAX_RUN_RETRIES`
 and the runtime's legacy `CODEX_MAX_STREAM_RETRIES` observer do not expand this proxy budget.
 The bound applies per failed sampling step, not to the total requests in a successful tool
-conversation. Browser execution retains its existing retry and shutdown policy.
+conversation. Browser execution retains its existing retry and shutdown policy, except that its
+`CODEX_MAX_STREAM_RETRIES` observer counts only stream errors since the last completed response,
+so a long turn that recovers from occasional rate limits is not aborted. A retryable proxy 429
+waits for its `Retry-After` and is retried inside the turn; when those retries run out, the run
+is not restarted. A retry in progress is reported as a `Retrying:` status message, and only a
+failure that ends the turn is reported as an error.
 
 See `TODO.md` for upcoming work: streaming progress, implementing plan/approval, and tying into credit accounting.
 
