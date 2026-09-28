@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import type { ChatMessage } from "../../screens/studio/types";
 import { shouldDisplayChatMessage } from "../../screens/studio/components/chatMessagePresentation";
+import { resolveThreadRunStatusFromMessages } from "../../screens/studio/components/threadPreviewHelpers";
 import {
   extractWorkspaceCommitRangeFromMetadata,
   mapControllerMessageToChat,
@@ -178,6 +179,132 @@ describe("mergeAndSortMessages", () => {
       outcome: "failed",
       messageType: "error",
     });
+  });
+
+  describe("a model error reported as both a progress update and the job failure", () => {
+    // The production pair from a run that stopped on a provider 429: the runtime
+    // streams the Codex error as a progress update, then fails the job with the
+    // same text. The controller stores both under one jobId.
+    const errorText = "exceeded retry limit, last status: 429 Too Many Requests";
+    const commandUpdate = createMessage({
+      id: "00000000-0000-0000-0000-000000000000",
+      content: "instafy conversation show --include-threads --json",
+      timestamp: 0,
+      messageType: "command_execution",
+      metadata: {
+        jobId: "job-1",
+        source: "agent",
+        kind: "update",
+        outcome: "in_progress",
+        messageType: "command_execution",
+      },
+    });
+    const progress = createMessage({
+      id: "11111111-1111-1111-1111-111111111111",
+      content: errorText,
+      timestamp: 1,
+      messageType: "error",
+      metadata: {
+        jobId: "job-1",
+        source: "agent",
+        kind: "update",
+        outcome: "in_progress",
+        messageType: "error",
+        details: { kind: "agent_error", event: { type: "error", message: errorText } },
+      },
+    });
+    const failure = createMessage({
+      id: "22222222-2222-2222-2222-222222222222",
+      content: errorText,
+      timestamp: 2,
+      messageType: "error",
+      metadata: {
+        jobId: "job-1",
+        source: "agent",
+        outcome: "failed",
+        messageType: "error",
+        errorMessage: errorText,
+      },
+    });
+
+    it("keeps only the job failure's own metadata", () => {
+      const merged = mergeAndSortMessages([progress, failure]);
+
+      expect(merged).toHaveLength(1);
+      expect(merged[0]?.id).toBe(failure.id);
+      expect(merged[0]?.messageType).toBe("error");
+      expect(merged[0]?.metadata).toEqual(failure.metadata);
+      expect(merged[0]?.metadata).not.toHaveProperty("kind");
+      expect(merged[0]?.metadata).not.toHaveProperty("details");
+      // Replaying the older update, in either order, cannot reattach its markers.
+      expect(mergeAndSortMessages([...merged, progress])).toEqual(merged);
+      expect(mergeAndSortMessages([failure, { ...progress, timestamp: 3 }])).toEqual([failure]);
+    });
+
+    it("lets the job thread resolve as a failed, finished run", () => {
+      const merged = mergeAndSortMessages([commandUpdate, progress, failure]);
+
+      expect(merged.map((message) => message.id)).toEqual([commandUpdate.id, failure.id]);
+      expect(resolveThreadRunStatusFromMessages(merged)).toEqual({
+        phase: "completed",
+        status: "failed",
+      });
+    });
+  });
+
+  it("keeps an ordinary successful run's update and final answer merge as before", () => {
+    // The common success path streams the answer as a status update first. That
+    // pair already drops the update's markers; the failure rule must not alter it.
+    const progress = createMessage({
+      id: "11111111-1111-1111-1111-111111111111",
+      content: "Saved the profile.",
+      timestamp: 1,
+      messageType: "status",
+      metadata: {
+        jobId: "job-1",
+        source: "agent",
+        kind: "update",
+        outcome: "in_progress",
+        messageType: "status",
+        details: { kind: "agent_message" },
+      },
+    });
+    const answer = createMessage({
+      id: "22222222-2222-2222-2222-222222222222",
+      content: progress.content,
+      timestamp: 2,
+      metadata: { jobId: "job-1", source: "agent", outcome: "succeeded" },
+    });
+    // Two progress updates with the same text stay last-write-wins and keep
+    // their update markers, because neither one closes the run.
+    const repeatedProgress = createMessage({
+      ...progress,
+      id: "33333333-3333-3333-3333-333333333333",
+      timestamp: 3,
+      messageType: "error",
+      metadata: { ...progress.metadata, messageType: "error" },
+    });
+    const firstProgress = createMessage({
+      ...repeatedProgress,
+      id: "44444444-4444-4444-4444-444444444444",
+      timestamp: 0,
+    });
+
+    const merged = mergeAndSortMessages([progress, answer]);
+
+    expect(merged).toHaveLength(1);
+    expect(merged[0]?.id).toBe(answer.id);
+    expect(merged[0]?.messageType).toBeNull();
+    expect(merged[0]?.metadata).toEqual(answer.metadata);
+    expect(resolveThreadRunStatusFromMessages(merged)).toEqual({
+      phase: "completed",
+      status: "succeeded",
+    });
+
+    const progressOnly = mergeAndSortMessages([firstProgress, repeatedProgress]);
+    expect(progressOnly).toHaveLength(1);
+    expect(progressOnly[0]?.id).toBe(repeatedProgress.id);
+    expect(progressOnly[0]?.metadata).toEqual(repeatedProgress.metadata);
   });
 
   it("keeps a final answer visible when replacing an identical status update", () => {
