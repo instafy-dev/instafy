@@ -1,5 +1,6 @@
 import kleur from "kleur";
 import { requestControllerApiJson } from "./api.js";
+import { conversationIdFromEnvironment } from "./conversations.js";
 import { findProjectManifest } from "./project-manifest.js";
 
 type AgentCommonOptions = {
@@ -151,9 +152,11 @@ function resolveScopeId(raw: string | undefined, scopeKind: string): string {
   }
 
   if (scopeKind === "conversation") {
-    const fromEnv =
-      trimOrNull(process.env["INSTAFY_CONVERSATION_ID"]) ??
-      trimOrNull(process.env["CONVERSATION_ID"]);
+    // The id becomes the card's scope. The controller refuses a non-UUID from a job token
+    // with a bare 403 and saves one from a user token under a scope that names no
+    // conversation, so a bad value fails here with the same error as `conversation show`
+    // and `history`.
+    const fromEnv = conversationIdFromEnvironment();
     if (fromEnv) {
       return fromEnv;
     }

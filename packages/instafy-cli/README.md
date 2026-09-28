@@ -34,7 +34,7 @@ Run Instafy spaces locally and connect them back to Instafy Studio — from any 
 - `instafy conversation search "<keywords>"` — search recent titles/previews and recent messages in at most 12 conversations. Use `grep` for persisted message content beyond those recent pages.
 - `instafy conversation grep "<text>" --json` — search authorized persisted user/assistant messages in the linked space, with snippets and exact message IDs.
 - `instafy conversation context <conversationId> <messageId> --json` — read a bounded window around an exact message, including old messages outside the latest history page.
-- `instafy conversation show "<title-or-id>"` — inspect one conversation’s messages so you can reuse earlier context in a new chat.
+- `instafy conversation show "<title-or-id>"` — inspect one conversation’s messages so you can reuse earlier context in a new chat. With no target it reads `INSTAFY_CONVERSATION_ID`, the conversation a runtime job belongs to.
 - `instafy conversation create --parent <conversationId> --thread-kind agent --title "Octo coordination"` — create a linked child thread for conversation-native agent coordination.
 - `instafy chat --conversation <threadId> "@octo ..." --no-wait` — involve another agent by posting a normal message into a normal conversation/thread. Use non-blocking posts from inside an active runtime turn.
   - Like an ordinary Studio chat, the CLI marks the turn as potentially workspace-writing. Controller and member permissions still apply, and read-only questions do not require a file change.
