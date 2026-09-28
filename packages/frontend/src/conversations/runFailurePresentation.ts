@@ -139,9 +139,12 @@ const NEEDS_AI_PATTERNS = [
 // retry happened, and the Instafy proxy labels it upstream_rate_limit. Proxy
 // errors that still read "unexpected status 429" keep their curated guidance,
 // because callers check for that before classifying the failure here.
+// A bare "429 Too Many Requests" is not enough: a throttled skill import or the
+// scoped worker proxy fail with that same phrase, and neither is the AI
+// provider.
 const PROVIDER_RATE_LIMITED_PATTERNS = [
   /exceeded retry limit, last status:\s*429\b/i,
-  /\b429 too many requests\b/i,
+  /\bbackend responded with 429\b/i,
   /\bupstream_rate_limit\b/i,
   /upstream provider rate limit was reached/i,
 ];
@@ -149,7 +152,7 @@ const PROVIDER_RATE_LIMITED_PATTERNS = [
 // A 429 that names an exhausted quota or plan limit will not clear after a
 // short wait, so it keeps its raw reason instead of the rate limit copy.
 const PROVIDER_QUOTA_EXHAUSTED_PATTERN =
-  /insufficient_quota|usage_limit_reached|usage_not_included|\bquota\b/i;
+  /insufficient_quota|quota_exceeded|usage_limit_reached|usage_not_included|\bquota\b/i;
 
 /**
  * Failure kinds that are safe to re-dispatch automatically. Both are transient:

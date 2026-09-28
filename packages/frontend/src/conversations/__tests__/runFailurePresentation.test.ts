@@ -100,6 +100,21 @@ describe("classifyRunFailureText", () => {
     ).toBeNull();
   });
 
+  it("does not blame the AI provider for a 429 from something else", () => {
+    // A throttled skill import and the scoped worker proxy fail with the same
+    // phrase, but neither is the model provider.
+    expect(
+      classifyRunFailureText(
+        "https://raw.githubusercontent.com/instafy-dev/skills/main/SKILL.md returned 429 Too Many Requests",
+      ),
+    ).toBeNull();
+    expect(
+      classifyRunFailureText(
+        "Scoped worker proxy request failed with status 429 Too Many Requests: slow down",
+      ),
+    ).toBeNull();
+  });
+
   it("does not call a 429 that names an exhausted quota or plan limit a passing rate limit", () => {
     expect(classifyRunFailureText(PROVIDER_INSUFFICIENT_QUOTA)).toBeNull();
     expect(classifyRunFailureText(PROVIDER_USAGE_LIMIT_REACHED)).toBeNull();
@@ -110,6 +125,11 @@ describe("classifyRunFailureText", () => {
     ).toBeNull();
     expect(
       classifyRunFailureText("exceeded retry limit, last status: 429 Too Many Requests (quota exceeded)"),
+    ).toBeNull();
+    expect(
+      classifyRunFailureText(
+        'exceeded retry limit, last status: 429 Too Many Requests: {"error":{"code":"quota_exceeded"}}',
+      ),
     ).toBeNull();
   });
 
