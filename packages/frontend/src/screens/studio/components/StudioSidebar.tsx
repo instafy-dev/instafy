@@ -89,6 +89,7 @@ export interface StudioSidebarProps {
   workspaceSwitcherInitialMode?: "teams-and-spaces" | "spaces";
   onWorkspaceSwitcherOpenChange: (open: boolean) => void;
   workspaceSwitcherPortalTarget: HTMLDivElement | null;
+  workspaceSwitcherHeaderPortalTarget?: HTMLElement | null;
   onRequestClose?: () => void;
   mobileOverlay?: boolean;
   selectedOrgKey?: string;
@@ -126,6 +127,7 @@ export function StudioSidebar({
   workspaceSwitcherInitialMode = "teams-and-spaces",
   onWorkspaceSwitcherOpenChange,
   workspaceSwitcherPortalTarget,
+  workspaceSwitcherHeaderPortalTarget,
   onRequestClose,
   mobileOverlay = false,
   selectedOrgKey,
@@ -167,6 +169,7 @@ export function StudioSidebar({
   const browseTriggerRef = useRef<HTMLButtonElement | null>(null);
   const spaceTriggerRef = useRef<HTMLButtonElement | null>(null);
   const moreTriggerRef = useRef<HTMLButtonElement | null>(null);
+  const [workspaceHeaderActionsTarget, setWorkspaceHeaderActionsTarget] = useState<HTMLDivElement | null>(null);
   const [workspaceSwitcherMode, setWorkspaceSwitcherMode] = useState(workspaceSwitcherInitialMode);
   const requestedSwitcherModeRef = useRef<"teams-and-spaces" | "spaces" | null>(null);
   const [localWorkspaceMobileViewOpen, setWorkspaceMobileViewOpen] = useState(false);
@@ -1090,8 +1093,11 @@ export function StudioSidebar({
   const selectedTeamRole = controllerOrgs.find((org) => org.id === activeOrgKey)?.role;
   const canCreateSelectedTeamSpace = activeOrgKey === "personal" || ["owner", "admin", "builder"].includes(selectedTeamRole ?? "");
 
+  const externalSpaceHeader = !!workspaceSwitcherHeaderPortalTarget && workspaceSwitcherMode === "spaces";
   const workspaceSwitcherSections = (
     <StudioSidebarWorkspaceSwitcher
+      spaceHeaderExternal={externalSpaceHeader}
+      spaceHeaderActionsTarget={workspaceHeaderActionsTarget}
       mode={workspaceSwitcherMode}
       orgOptions={orgOptions}
       workspaceOrgKey={workspaceOrgKey}
@@ -1167,6 +1173,8 @@ export function StudioSidebar({
         mode={workspaceSwitcherMode}
         desktop={isLargeScreen}
         portalTarget={workspaceSwitcherPortalTarget}
+        headerPortalTarget={workspaceSwitcherHeaderPortalTarget}
+        headerActionsRef={externalSpaceHeader ? setWorkspaceHeaderActionsTarget : undefined}
         triggerRef={workspaceSwitcherMode === "spaces" ? spaceTriggerRef : !desktopRail || workspaceSwitcherSourceRef.current === "team" ? workspaceTriggerRef : browseTriggerRef}
         onClose={dismissWorkspaceSwitcher}
       >

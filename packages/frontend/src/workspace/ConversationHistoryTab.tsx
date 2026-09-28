@@ -30,12 +30,14 @@ import { DrawerHeader } from "../components/DrawerHeader";
 import { SearchInput } from "../components/SearchInput";
 
 export interface ConversationHistoryTabProps {
+  headerPortalTarget?: HTMLElement | null;
   renderMobileHeader?: (header: { title: string; actions: ReactNode }) => ReactNode;
   onRequestClose?: () => void;
   onStartNewConversation?: () => void;
 }
 
 export function ConversationHistoryTab({
+  headerPortalTarget,
   renderMobileHeader,
   onRequestClose,
   onStartNewConversation,
@@ -51,30 +53,32 @@ export function ConversationHistoryTab({
   const { showStatus } = useStatus();
   const isLargeScreen = useStudioDesktopLayout();
   const compactDrawer = isLargeScreen;
+  const externalHeader = isLargeScreen && !!headerPortalTarget;
+  const collapsibleSearch = !isLargeScreen || externalHeader;
   const scrollIdentity = useStudioListScrollIdentity("chats");
   const [query, setQuery] = useStudioListState("chat-query", "", !isLargeScreen);
   const [filter, setFilter] = useStudioListState<ConversationLifecycleStatus>("chat-filter", "active", !isLargeScreen);
   const [filterMenuOpen, setFilterMenuOpen] = useState(false);
-  const [mobileSearchOpen, setMobileSearchOpen] = useState(false);
+  const [searchOpen, setSearchOpen] = useState(false);
   const searchInputRef = useRef<HTMLInputElement | null>(null);
   const searchToggleRef = useRef<HTMLButtonElement | null>(null);
   // A restored query must never filter the list behind a collapsed control.
-  const showSearch = isLargeScreen || mobileSearchOpen || query.length > 0;
+  const showSearch = !collapsibleSearch || searchOpen || query.length > 0;
   const searchToggleLabel = showSearch
     ? query.length > 0 ? "Clear and close name filter" : "Close name filter"
     : "Filter chats by name";
-  const closeMobileSearch = () => {
+  const closeSearch = () => {
     setQuery("");
-    setMobileSearchOpen(false);
+    setSearchOpen(false);
     searchToggleRef.current?.focus();
   };
-  const toggleMobileSearch = () => {
+  const toggleSearch = () => {
     if (showSearch) {
-      closeMobileSearch();
+      closeSearch();
       return;
     }
     // Mount and focus during the tap so native keyboards can open immediately.
-    flushSync(() => setMobileSearchOpen(true));
+    flushSync(() => setSearchOpen(true));
     searchInputRef.current?.focus({ preventScroll: true });
   };
   const [expanded, setExpanded] = useStudioListState<Record<string, boolean>>("chat-expanded", {}, !isLargeScreen);
@@ -480,19 +484,19 @@ export function ConversationHistoryTab({
 
   const headerActions = (
     <>
-      {!isLargeScreen ? <>
+      {collapsibleSearch ? <>
         <IconButton
           ref={searchToggleRef}
           variant={showSearch ? "secondary" : "ghost"}
-          size="lg"
+          size={compactDrawer ? "sm" : "lg"}
           radius="full"
           aria-label={searchToggleLabel}
           title={searchToggleLabel}
           aria-expanded={showSearch}
           aria-controls={showSearch ? "conversation-history-search" : undefined}
-          onPress={toggleMobileSearch}
+          onPress={toggleSearch}
           data-testid="conversation-history-search-toggle"
-          className={`${DRAWER_ICON_BUTTON_TONE_CLASS} !h-11 !w-11`}
+          className={`${DRAWER_ICON_BUTTON_TONE_CLASS} ${isLargeScreen ? "" : "!h-11 !w-11"}`}
         >
           <Search className="h-4 w-4" aria-hidden="true" />
         </IconButton>
@@ -508,7 +512,7 @@ export function ConversationHistoryTab({
           onPress={() => {
             setFilter("active");
             setQuery("");
-            setMobileSearchOpen(false);
+            setSearchOpen(false);
             onStartNewConversation();
             if (!isLargeScreen) {
               onRequestClose?.();
@@ -541,15 +545,17 @@ export function ConversationHistoryTab({
     ? renderMobileHeader({ title: mobileTitle, actions: headerActions })
     : null;
 
+  const header = mobileHeader ?? <DrawerHeader
+    portalTarget={externalHeader ? headerPortalTarget : null}
+    title={isLargeScreen ? selectedFilter.title : mobileTitle}
+    titleAs="h2" frame="rail" actions={headerActions}
+  />;
+
   return (
     <div className="flex h-full min-h-0 min-w-0 flex-col" data-testid="conversation-history-panel">
-      <div className={`shrink-0 ${!mobileHeader || showSearch ? `border-b border-slate-200/70 ${DARK_DIVIDER_BORDER_CLASS}` : ""} ${showSearch ? "pb-3" : ""}`}>
-        {mobileHeader ?? <DrawerHeader
-          title={isLargeScreen ? selectedFilter.title : mobileTitle}
-          titleAs="h2"
-          frame="rail"
-          actions={headerActions}
-        />}
+      {externalHeader ? header : null}
+      <div className={`shrink-0 ${(!externalHeader && !mobileHeader) || showSearch ? `border-b border-slate-200/70 ${DARK_DIVIDER_BORDER_CLASS}` : ""} ${showSearch ? externalHeader ? "py-3" : "pb-3" : ""}`}>
+        {!externalHeader ? header : null}
         {showSearch ? <div className="relative mx-4">
           <SearchInput
             ref={searchInputRef}
@@ -558,19 +564,19 @@ export function ConversationHistoryTab({
             value={query}
             onChange={(event) => setQuery(event.target.value)}
             onKeyDown={(event) => {
-              if (!isLargeScreen && event.key === "Escape") {
+              if (collapsibleSearch && event.key === "Escape") {
                 event.preventDefault();
                 event.stopPropagation();
-                closeMobileSearch();
+                closeSearch();
               }
             }}
             placeholder="Filter by name"
             size="md"
             radius="xl"
-            className={`pointer-coarse:min-h-12 ${compactDrawer ? "pr-12 min-h-10" : "min-h-12"}`}
+            className={`pointer-coarse:min-h-12 ${compactDrawer ? externalHeader ? "min-h-10" : "pr-12 min-h-10" : "min-h-12"}`}
             data-testid="conversation-history-search"
           />
-          {isLargeScreen ? <div className="absolute right-1 top-1/2 -translate-y-1/2">
+          {!collapsibleSearch ? <div className="absolute right-1 top-1/2 -translate-y-1/2">
             {statusFilterControl}
           </div> : null}
         </div> : null}

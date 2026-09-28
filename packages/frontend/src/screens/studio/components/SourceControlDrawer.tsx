@@ -74,9 +74,11 @@ function sanitizeScopeTestId(value: string): string {
 }
 
 export function SourceControlDrawer({
+  headerPortalTarget,
   onRequestClose,
   openRequest,
 }: {
+  headerPortalTarget?: HTMLElement | null;
   onRequestClose?: () => void;
   openRequest?: {
     key: number;
@@ -1183,6 +1185,7 @@ export function SourceControlDrawer({
   return (
     <div className="@container relative flex h-full min-h-0 flex-col" data-testid="source-control-drawer">
       <DrawerHeader
+        portalTarget={isLargeScreen ? headerPortalTarget : null}
         frame="rail"
         title="Changes"
         pageTitle

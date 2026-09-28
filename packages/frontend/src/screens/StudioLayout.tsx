@@ -1748,6 +1748,11 @@ function StudioLayoutInner() {
       : routedPanel === "team" ? navigationScope.orgKey : null,
   });
 
+  const [desktopDrawerHeaderTarget, setDesktopDrawerHeaderTarget] = useState<HTMLDivElement | null>(null);
+  const globalNavigationContext = usesGlobalNavigationContext(navigationScope.page, activeProjectId);
+  const desktopPaneHeaderTarget = isLargeScreen && !sidebarCollapsed && !globalNavigationContext
+    ? desktopDrawerHeaderTarget : null;
+
   let workspaceContent: ReactNode;
   let workspaceContentIsLazy = false;
   if (projectAccessBlocked) {
@@ -1774,6 +1779,7 @@ function StudioLayoutInner() {
         onDirectoryEntriesLoaded={knownWorkspaceFiles.recordDirectory}
         showExplorer
         explorerPortalTarget={filesExplorerPortalTarget}
+        explorerHeaderPortalTarget={leftDrawer === "files" ? desktopPaneHeaderTarget : null}
         mobileView={filesMobileView}
         onMobileViewChange={handleFilesMobileViewChange}
         onRequestOpenExplorer={handleRequestOpenFilesExplorer}
@@ -1956,7 +1962,6 @@ function StudioLayoutInner() {
   const desktopSearchTriggerRef = useRef<HTMLButtonElement | null>(null);
   const mobileSearchTriggerRef = useRef<HTMLButtonElement | null>(null);
   const overlaySearchTriggerRef = useRef<HTMLButtonElement | null>(null);
-  const globalNavigationContext = usesGlobalNavigationContext(navigationScope.page, activeProjectId);
   const workspaceSearchContext = resolveStudioSearchContext(
     { id: navigationScope.orgKey, name: activeTeamName },
     activeProjectSummary ? { id: activeProjectSummary.id, orgId: activeProjectSummary.orgId, name: activeProjectName } : null,
@@ -2034,6 +2039,7 @@ function StudioLayoutInner() {
           onDirectoryEntriesLoaded={knownWorkspaceFiles.recordDirectory}
           showExplorer
           explorerPortalTarget={filesExplorerPortalTarget}
+          explorerHeaderPortalTarget={leftDrawer === "files" ? desktopPaneHeaderTarget : null}
           mobileView={filesMobileView}
           onMobileViewChange={handleFilesMobileViewChange}
           onRequestOpenExplorer={handleRequestOpenFilesExplorer}
@@ -2096,7 +2102,9 @@ function StudioLayoutInner() {
           }}
         >
           {isLargeScreen ? <StudioDesktopHeader contextRef={setDesktopContextTarget} searchTriggerRef={desktopSearchTriggerRef}
-            searchOpen={search.open} onSearch={search.openSearch}>
+            searchOpen={search.open} onSearch={search.openSearch}
+            drawerHeaderRef={setDesktopDrawerHeaderTarget} drawerWidth={leftDrawer ? leftDrawerWidth : 0}
+            navigationCollapsed={sidebarCollapsed} navigationHidden={globalNavigationContext}>
             <StudioTopBar newChatInSidebar inlineDesktop />
           </StudioDesktopHeader> : null}
           {isLargeScreen ? (
@@ -2131,6 +2139,7 @@ function StudioLayoutInner() {
                 workspaceSwitcherOpen={leftDrawer === "workspaces"}
                 onWorkspaceSwitcherOpenChange={handleWorkspaceSwitcherOpenChange}
                 workspaceSwitcherPortalTarget={workspaceSwitcherPortalTarget}
+                workspaceSwitcherHeaderPortalTarget={leftDrawer === "workspaces" ? desktopPaneHeaderTarget : null}
                 collapsed={sidebarCollapsed}
               />
           ) : null}
@@ -2143,6 +2152,7 @@ function StudioLayoutInner() {
               <div className="flex h-full min-w-0 flex-1 flex-col border-r border-slate-200/70 bg-white dark:border-[color:var(--color-studio-dark-divider)] dark:bg-[var(--color-studio-dark-panel)]">
                 {leftDrawer === "history" ? (
                   <ConversationHistoryTab
+                    headerPortalTarget={desktopPaneHeaderTarget}
                     onStartNewConversation={createFreshConversation}
                     onRequestClose={() => {
                       requestHistoryPush();
@@ -2163,6 +2173,7 @@ function StudioLayoutInner() {
                   />
                 ) : leftDrawer === "sourceControl" ? (
                   <SourceControlDrawer
+                    headerPortalTarget={desktopPaneHeaderTarget}
                     openRequest={sourceControlOpenRequest}
                     onRequestClose={() => {
                       requestHistoryPush();

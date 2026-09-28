@@ -6,7 +6,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { StudioDesktopHeader } from "../StudioDesktopHeader";
 import { useStudioSearch } from "../useStudioSearch";
 
-function Harness() {
+function Harness({ docked = false }: { docked?: boolean }) {
+  const [drawerHeader, setDrawerHeader] = useState<HTMLDivElement | null>(null);
   const [context, setContext] = useState<HTMLDivElement | null>(null);
   const trigger = useRef<HTMLButtonElement>(null);
   const search = useStudioSearch({
@@ -14,10 +15,11 @@ function Harness() {
     space: { id: "space", name: "Space" }, records: [], returnFocusRef: trigger,
   });
   return <>
-    <StudioDesktopHeader contextRef={setContext} searchTriggerRef={trigger} searchOpen={search.open} onSearch={search.openSearch}>
+    <StudioDesktopHeader contextRef={setContext} drawerWidth={docked ? 280 : 0} drawerHeaderRef={setDrawerHeader} searchTriggerRef={trigger} searchOpen={search.open} onSearch={search.openSearch}>
       <button data-testid="workspace-tab">Conversation</button>
     </StudioDesktopHeader>
     {context ? createPortal(search.open ? search.renderControl() : <button>Choose space</button>, context) : null}
+    {docked && drawerHeader ? createPortal(<button>Filter chats</button>, drawerHeader) : null}
     {search.results}
   </>;
 }
@@ -65,6 +67,20 @@ describe("Single-row desktop search", () => {
     expect(document.activeElement).toBe(trigger());
     expect(container.querySelector('[data-testid="workspace-tab"]')).toBe(tab);
     expect(tab?.closest("[hidden]")).toBeNull();
+  });
+
+  it("hides docked pane controls while search owns the header and restores them without remounting tabs", async () => {
+    await act(async () => root.render(<Harness docked />));
+    const pane = container.querySelector('[data-testid="studio-desktop-drawer-header"]')!;
+    const tab = container.querySelector('[data-testid="workspace-tab"]');
+    expect(pane.textContent).toBe("Filter chats");
+    await act(async () => trigger().click());
+    expect(pane.hasAttribute("hidden")).toBe(true);
+    expect(pane.hasAttribute("inert")).toBe(true);
+    await key({ key: "Escape" });
+    expect(pane.hasAttribute("hidden")).toBe(false);
+    expect(pane.hasAttribute("inert")).toBe(false);
+    expect(container.querySelector('[data-testid="workspace-tab"]')).toBe(tab);
   });
 
   it.each([{ metaKey: true }, { ctrlKey: true }])("opens or refocuses search with %o + K", async modifier => {

@@ -6,17 +6,18 @@ import { DrawerHeader } from "../../components/DrawerHeader";
 import { lazyStudioPanel } from "../../workspace/lazyStudioPanel";
 import type { TeamPanelProps } from "./components/TeamPanel";
 
-function PanelFallback({ children, title, onClose, tabs }: {
+function PanelFallback({ children, title, onClose, tabs, headerPortalTarget }: {
   children: ReactNode;
   title: string;
   onClose?: (() => void) | null;
   tabs?: ReactNode;
+  headerPortalTarget?: HTMLElement | null;
 }) {
   return (
     <div className="flex h-full min-h-0 flex-col">
       {tabs}
       {onClose ? (
-        <DrawerHeader title={title} pageTitle={title === "Files" || title === "Changes"} frame="rail" actions={
+        <DrawerHeader portalTarget={headerPortalTarget} title={title} pageTitle={title === "Files" || title === "Changes"} frame="rail" actions={
           <IconButton variant="ghost" size="sm" radius="full" aria-label={`Close ${title.toLowerCase()}`} onPress={onClose}>
             <Xmark className="h-4 w-4" />
           </IconButton>
@@ -31,12 +32,12 @@ export const FilesPanel = lazyStudioPanel(
   "Files",
   async () => ({ default: (await import("./components/FilesPanel")).FilesPanel }),
   (content, props) => {
-    if (props.renderMode === "portal") {
-      return props.explorerPortalTarget
-        ? createPortal(<PanelFallback title="Files" onClose={props.onRequestCloseExplorer}>{content}</PanelFallback>, props.explorerPortalTarget)
-        : null;
-    }
-    return <PanelFallback title="Files" tabs={props.tabsSlot}>{content}</PanelFallback>;
+    const explorer = props.showExplorer !== false && props.explorerPortalTarget
+      ? createPortal(<PanelFallback title="Files" onClose={props.onRequestCloseExplorer}
+        headerPortalTarget={props.explorerHeaderPortalTarget}>{content}</PanelFallback>, props.explorerPortalTarget)
+      : null;
+    if (props.renderMode === "portal") return explorer;
+    return <><PanelFallback title="Files" tabs={props.tabsSlot}>{content}</PanelFallback>{explorer}</>;
   },
 );
 export const GitDiffView = lazyStudioPanel(
@@ -48,7 +49,7 @@ export const GitReviewView = lazyStudioPanel(
 );
 export const SourceControlDrawer = lazyStudioPanel(
   "Changes", async () => ({ default: (await import("./components/SourceControlDrawer")).SourceControlDrawer }),
-  (content, props) => <PanelFallback title="Changes" onClose={props.onRequestClose}>{content}</PanelFallback>,
+  (content, props) => <PanelFallback title="Changes" headerPortalTarget={props.headerPortalTarget} onClose={props.onRequestClose}>{content}</PanelFallback>,
 );
 export const CreditsPanel = lazyStudioPanel(
   "Credits", async () => ({ default: (await import("./components/CreditsPanel")).CreditsPanel }),

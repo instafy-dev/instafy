@@ -1,4 +1,5 @@
 import { useId, useState } from "react";
+import { createPortal } from "react-dom";
 import { SpaceIdentity } from "../../../components/SpaceIdentity";
 import { Check, Group, Plus, Search, Settings } from "iconoir-react";
 import { Button, IconButton } from "../../../components/Button";
@@ -51,6 +52,8 @@ export type SidebarWorkspaceOrgOption = {
 };
 
 type StudioSidebarWorkspaceSwitcherProps = {
+  spaceHeaderExternal?: boolean;
+  spaceHeaderActionsTarget?: HTMLElement | null;
   mode?: "teams-and-spaces" | "spaces";
   orgOptions: SidebarWorkspaceOrgOption[];
   workspaceOrgKey: string;
@@ -86,6 +89,8 @@ type StudioSidebarWorkspaceSwitcherProps = {
  * list with the active space as its first, selected row.
  */
 export function StudioSidebarWorkspaceSwitcher({
+  spaceHeaderExternal = false,
+  spaceHeaderActionsTarget,
   mode = "teams-and-spaces",
   orgOptions,
   workspaceOrgKey,
@@ -233,6 +238,50 @@ export function StudioSidebarWorkspaceSwitcher({
     </StudioMenuItem>
   );
 
+  const spaceActions = (
+    <div className="flex items-center gap-1">
+      {canSearchSpaces ? (
+        <IconButton
+          variant="ghost"
+          size="sm"
+          radius="full"
+          aria-label={showProjectSearch ? "Clear space search" : "Search spaces"}
+          data-testid="sidebar-project-search-toggle"
+          onPress={onToggleProjectSearch}
+          className={WORKSPACE_SWITCHER_ACTION_BUTTON_CLASS}
+        >
+          <Search className={WORKSPACE_SWITCHER_ACTION_ICON_CLASS} aria-hidden="true" />
+        </IconButton>
+      ) : null}
+      {onOpenProjectSettings && currentOrgProject ? (
+        <IconButton
+          variant="ghost"
+          size="sm"
+          radius="full"
+          aria-label="Current space settings"
+          data-testid="sidebar-project-settings"
+          onPress={onOpenProjectSettings}
+          className={WORKSPACE_SWITCHER_ACTION_BUTTON_CLASS}
+        >
+          <Settings className={WORKSPACE_SWITCHER_ACTION_ICON_CLASS} aria-hidden="true" />
+        </IconButton>
+      ) : null}
+      {onCreateProject ? (
+        <IconButton
+          variant="ghost"
+          size="sm"
+          radius="full"
+          aria-label="New space"
+          data-testid="sidebar-project-new"
+          onPress={onCreateProject}
+          className={WORKSPACE_SWITCHER_ACTION_BUTTON_CLASS}
+        >
+          <Plus className={WORKSPACE_SWITCHER_ACTION_ICON_CLASS} aria-hidden="true" />
+        </IconButton>
+      ) : null}
+    </div>
+  );
+
   return (
     <>
       {mode === "teams-and-spaces" ? <SidebarMenuSection
@@ -291,68 +340,23 @@ export function StudioSidebarWorkspaceSwitcher({
         </div>
       ) : null}
 
-      <SidebarMenuSection
-        className="mt-4"
-        label="Spaces"
-        headerClassName="pr-0"
-        actions={
-          <div className="flex items-center gap-1">
-            {canSearchSpaces ? (
-              <IconButton
-                variant="ghost"
-                size="sm"
-                radius="full"
-                aria-label={showProjectSearch ? "Clear space search" : "Search spaces"}
-                data-testid="sidebar-project-search-toggle"
-                onPress={onToggleProjectSearch}
-                className={WORKSPACE_SWITCHER_ACTION_BUTTON_CLASS}
-              >
-                <Search className={WORKSPACE_SWITCHER_ACTION_ICON_CLASS} aria-hidden="true" />
-              </IconButton>
-            ) : null}
-            {onOpenProjectSettings && currentOrgProject ? (
-              <IconButton
-                variant="ghost"
-                size="sm"
-                radius="full"
-                aria-label="Current space settings"
-                data-testid="sidebar-project-settings"
-                onPress={onOpenProjectSettings}
-                className={WORKSPACE_SWITCHER_ACTION_BUTTON_CLASS}
-              >
-                <Settings className={WORKSPACE_SWITCHER_ACTION_ICON_CLASS} aria-hidden="true" />
-              </IconButton>
-            ) : null}
-            {onCreateProject ? (
-              <IconButton
-                variant="ghost"
-                size="sm"
-                radius="full"
-                aria-label="New space"
-                data-testid="sidebar-project-new"
-                onPress={onCreateProject}
-                className={WORKSPACE_SWITCHER_ACTION_BUTTON_CLASS}
-              >
-                <Plus className={WORKSPACE_SWITCHER_ACTION_ICON_CLASS} aria-hidden="true" />
-              </IconButton>
-            ) : null}
-          </div>
-        }
-      >
-        {showProjectSearch && canSearchSpaces ? (
-          <div className="mt-2">
-            <SearchInput
-              id="sidebar-project-switcher-search"
-              label="Search spaces"
-              value={workspaceProjectQuery}
-              onChange={(event) => onWorkspaceProjectQueryChange(event.target.value)}
-              placeholder="Search spaces…"
-              data-testid="sidebar-project-search"
-              autoFocus={workspaceProjectSearchOpen}
-            />
-          </div>
-        ) : null}
-      </SidebarMenuSection>
+      {spaceHeaderExternal
+        ? spaceHeaderActionsTarget ? createPortal(spaceActions, spaceHeaderActionsTarget) : null
+        : <SidebarMenuSection className="mt-4" label="Spaces" headerClassName="pr-0" actions={spaceActions} />}
+
+      {showProjectSearch && canSearchSpaces ? (
+        <div className="mt-2">
+          <SearchInput
+            id="sidebar-project-switcher-search"
+            label="Search spaces"
+            value={workspaceProjectQuery}
+            onChange={(event) => onWorkspaceProjectQueryChange(event.target.value)}
+            placeholder="Search spaces…"
+            data-testid="sidebar-project-search"
+            autoFocus={workspaceProjectSearchOpen}
+          />
+        </div>
+      ) : null}
 
       {!currentOrgProject && switcherProjects.length === 0 ? (
         <Text as="p" variant="body" tone="muted" className="mt-2 px-3.5">

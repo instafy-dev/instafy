@@ -78,6 +78,7 @@ interface FilesPanelProps {
   previewOwnerId: string | null;
   showExplorer?: boolean;
   explorerPortalTarget?: HTMLDivElement | null;
+  explorerHeaderPortalTarget?: HTMLElement | null;
   mobileView?: FilesPanelMobileView;
   onMobileViewChange?: (value: FilesPanelMobileView) => void;
   onRequestOpenExplorer?: () => void;
@@ -450,6 +451,7 @@ export function FilesPanel({
   previewOwnerId,
   showExplorer = true,
   explorerPortalTarget,
+  explorerHeaderPortalTarget,
   mobileView: controlledMobileView,
   onMobileViewChange,
   onRequestOpenExplorer,
@@ -1622,19 +1624,17 @@ export function FilesPanel({
   const rootLabel = normalizedRootPath ? breadcrumbs[breadcrumbs.length - 1]?.label ?? normalizedRootPath : "Root";
   const fileExplorerSubtitle = `${rootLabel} · ${rootEntries.length} ${rootEntries.length === 1 ? "item" : "items"}`;
 
-  const treeContent = (
-    <div
-      className="flex h-full min-h-0 flex-col px-4 pb-3"
-      data-testid="files-explorer-tree"
-    >
-      <DrawerHeader
-        title="Files"
-        pageTitle
-        subtitle={touchExplorer && titleInNavigation ? fileExplorerSubtitle : undefined}
-        frame="rail"
-        className="-mx-4"
-        actions={
-          <>
+  const explorerHeader = (
+    <DrawerHeader
+      portalTarget={isLargeScreen ? explorerHeaderPortalTarget : null}
+      title="Files"
+      pageTitle
+      subtitle={touchExplorer && titleInNavigation ? fileExplorerSubtitle : undefined}
+      frame="rail"
+      className={isLargeScreen && explorerHeaderPortalTarget ? undefined : "-mx-4"}
+      actions={
+        <>
+          {runtimeControllerEnabled && activeProjectId ? <>
             {!isLargeScreen && !touchExplorer ? (
               <IconButton
                 variant={mobileSearchOpen ? "secondary" : "ghost"}
@@ -1680,23 +1680,32 @@ export function FilesPanel({
             >
               <MoreHoriz className="h-4 w-4" aria-hidden="true" />
             </IconButton>
-            {onRequestCloseExplorer ? (
-              <IconButton
-                variant="ghost"
-                size="sm"
-                radius="full"
-                aria-label="Close file explorer"
-                title="Close"
-                data-testid="files-explorer-close"
-                onPress={onRequestCloseExplorer}
-                className={`max-[899px]:h-11 max-[899px]:w-11 ${DRAWER_ICON_BUTTON_TONE_CLASS}`}
-              >
-                <Xmark className="h-4 w-4" aria-hidden="true" />
-              </IconButton>
-            ) : null}
-          </>
-        }
-      />
+          </> : null}
+          {onRequestCloseExplorer ? (
+            <IconButton
+              variant="ghost"
+              size="sm"
+              radius="full"
+              aria-label="Close file explorer"
+              title="Close"
+              data-testid="files-explorer-close"
+              onPress={onRequestCloseExplorer}
+              className={`max-[899px]:h-11 max-[899px]:w-11 ${DRAWER_ICON_BUTTON_TONE_CLASS}`}
+            >
+              <Xmark className="h-4 w-4" aria-hidden="true" />
+            </IconButton>
+          ) : null}
+        </>
+      }
+    />
+  );
+
+  const treeContent = (
+    <div
+      className="flex h-full min-h-0 flex-col px-4 pb-3"
+      data-testid="files-explorer-tree"
+    >
+      {explorerHeader}
       {touchExplorer && !titleInNavigation ? (
         <Text variant="caption" tone="muted" className="mb-2 truncate">{fileExplorerSubtitle}</Text>
       ) : null}
@@ -2426,22 +2435,7 @@ export function FilesPanel({
         shadow="none"
         className="flex h-full flex-col gap-4 p-4 text-sm text-slate-600 dark:text-slate-300"
       >
-        <div className="flex items-center justify-end">
-          {onRequestCloseExplorer ? (
-            <IconButton
-              variant="ghost"
-              size="xs"
-              radius="full"
-              aria-label="Close file explorer"
-              title="Close"
-              data-testid="files-explorer-close"
-              onPress={onRequestCloseExplorer}
-              className={`h-10 w-10 text-slate-500 hover:bg-slate-200/70 data-[hovered]:bg-slate-200/70 dark:text-slate-400 ${DARK_RAIL_HOVER_CLASS}  lg:h-6 lg:w-6`}
-            >
-              <Xmark className="h-4 w-4" aria-hidden="true" />
-            </IconButton>
-          ) : null}
-        </div>
+        {explorerHeader}
         <div className="flex flex-1 flex-col items-center justify-center gap-3 text-center">
           <Text variant="body" tone="subtle" className="max-w-[22rem]">
             Connect the runtime controller to browse space files.
@@ -2472,22 +2466,7 @@ export function FilesPanel({
         shadow="none"
         className="flex h-full flex-col gap-4 p-4 text-sm text-slate-600 dark:text-slate-300"
       >
-        <div className="flex items-center justify-end">
-          {onRequestCloseExplorer ? (
-            <IconButton
-              variant="ghost"
-              size="xs"
-              radius="full"
-              aria-label="Close file explorer"
-              title="Close"
-              data-testid="files-explorer-close"
-              onPress={onRequestCloseExplorer}
-              className={`h-10 w-10 text-slate-500 hover:bg-slate-200/70 data-[hovered]:bg-slate-200/70 dark:text-slate-400 ${DARK_RAIL_HOVER_CLASS}  lg:h-6 lg:w-6`}
-            >
-              <Xmark className="h-4 w-4" aria-hidden="true" />
-            </IconButton>
-          ) : null}
-        </div>
+        {explorerHeader}
         <div className="flex flex-1 flex-col items-center justify-center gap-3 text-center">
           <Text variant="body" tone="subtle" className="max-w-[22rem]">
             Select or create a space to view its files.

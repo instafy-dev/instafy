@@ -1,8 +1,11 @@
 import type { ElementType, ReactNode } from "react";
+import { createPortal } from "react-dom";
 import { Text } from "./Text";
 import { usePageTitleInNavigation } from "./PageTitleContext";
 
 export interface DrawerHeaderProps {
+  /** Place this header in the desktop shell while keeping its controls owned by the pane. */
+  portalTarget?: HTMLElement | null;
   title: ReactNode;
   subtitle?: ReactNode;
   titleAs?: ElementType;
@@ -21,6 +24,7 @@ export interface DrawerHeaderProps {
 }
 
 export function DrawerHeader({
+  portalTarget,
   title,
   subtitle,
   titleAs = "p",
@@ -40,7 +44,7 @@ export function DrawerHeader({
   const railFrame = frame === "rail";
   const touchDensity = !railFrame && density === "touch";
   if (hideTitle && !subtitle && !actions) return null;
-  return (
+  const header = (
     <div className={["flex min-w-0 items-center gap-3", hideTitle && !subtitle ? "justify-end" : "justify-between", railFrame && "h-12 shrink-0 px-4", className].filter(Boolean).join(" ")}>
       {!hideTitle || subtitle ? <div
         className={[
@@ -88,4 +92,5 @@ export function DrawerHeader({
       ) : null}
     </div>
   );
+  return portalTarget ? createPortal(header, portalTarget) : header;
 }

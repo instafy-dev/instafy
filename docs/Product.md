@@ -96,6 +96,15 @@ Desktop drawer headings such as Chats, Files and Changes use the shared 14px
 medium navigation typography, matching the sidebar labels and workspace tabs.
 Their 48px header frame supplies structure without promoting them to page titles.
 
+Desktop Chats, Files, Changes and the Spaces/Teams directory share the docked-pane
+header. With expanded navigation each pane's title and primary controls sit beside
+the tabs in the same top row. The tab strip starts at the workspace pane's edge,
+including after resizing the list. Chats stays open when selecting conversations;
+its name filter expands on demand. File paths and search, and version controls in
+Changes, remain inside their panes. Collapsed navigation keeps these headers inside
+the pane so the team and space pickers remain usable. Phone layouts retain their
+full-screen lists and navigation.
+
 Narrow layouts keep Home, the team/space path, Search and the signed-in profile in the context
 header. Home remains available from a workspace, and team/space controls remain available on
 Home. Workspace history, tab selection and secondary actions remain in the working header

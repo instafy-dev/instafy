@@ -60,6 +60,30 @@ describe("StudioSidebarWorkspaceSwitcher team rows", () => {
     vi.unstubAllGlobals();
   });
 
+  it("moves space actions into the docked header without repeating the section title", async () => {
+    const header = document.createElement("div");
+    document.body.append(header);
+    const search = vi.fn();
+    const create = vi.fn();
+    try {
+      await render(root, { mode: "spaces", spaceHeaderExternal: true, spaceHeaderActionsTarget: header,
+        canSearchSpaces: true, onToggleProjectSearch: search, onCreateProject: create });
+      expect(header.querySelector('[data-testid="sidebar-project-search-toggle"]')).not.toBeNull();
+      expect(container.querySelector('[data-testid="sidebar-project-search-toggle"]')).toBeNull();
+      expect(container.querySelector("section")).toBeNull();
+      await act(async () => header.querySelector<HTMLButtonElement>('[data-testid="sidebar-project-search-toggle"]')?.click());
+      await act(async () => header.querySelector<HTMLButtonElement>('[data-testid="sidebar-project-new"]')?.click());
+      expect(search).toHaveBeenCalledOnce();
+      expect(create).toHaveBeenCalledOnce();
+      await render(root, { mode: "spaces", spaceHeaderExternal: true, spaceHeaderActionsTarget: header,
+        canSearchSpaces: true, showProjectSearch: true, workspaceProjectQuery: "test" });
+      expect(container.querySelector<HTMLInputElement>("input")?.value).toBe("test");
+      expect(header.querySelector("input")).toBeNull();
+    } finally {
+      header.remove();
+    }
+  });
+
   it("lists every team by name, with the selected one marked current", async () => {
     await render(root);
 
