@@ -21,6 +21,15 @@ const MISSING_COMMAND_OBSERVATION =
   "Codex did not execute the command observation required by runtime routing, even after retry.";
 const MISSING_MCP_TOOL =
   "Codex did not execute any non-browser MCP tool calls for an MCP-requested run, even after retry.";
+// Codex's wording when the model provider answers 429. No retry actually ran.
+const PROVIDER_RATE_LIMITED = "exceeded retry limit, last status: 429 Too Many Requests";
+const PROVIDER_RATE_LIMITED_TEXT =
+  "The AI provider is limiting requests right now, so this turn stopped. Wait a little, then try again. If it keeps happening, the provider account may have reached its usage limit.";
+// 429s that name an exhausted quota or plan window. Retrying soon will not help.
+const PROVIDER_INSUFFICIENT_QUOTA =
+  'backend responded with 429 Too Many Requests: {"error":{"type":"insufficient_quota","code":"insufficient_quota"}}';
+const PROVIDER_USAGE_LIMIT_REACHED =
+  'backend responded with 429 Too Many Requests: {"error":{"type":"usage_limit_reached"}}';
 
 function createMessage(overrides: Partial<ChatMessage>): ChatMessage {
   return {
@@ -66,6 +75,68 @@ describe("classifyRunFailureText", () => {
     expect(classifyRunFailureText("proxy error: no default credential for this run")).toBe("needs_ai");
     expect(classifyRunFailureText("the run requires user credentials")).toBe("needs_ai");
     expect(classifyRunFailureText("No AI provider is connected for this project.")).toBe("needs_ai");
+  });
+
+  it("classifies a model provider rate limit", () => {
+    expect(classifyRunFailureText(PROVIDER_RATE_LIMITED)).toBe("provider_rate_limited");
+    expect(
+      classifyRunFailureText(
+        "exceeded retry limit, last status: 429 Too Many Requests, request id: req_123",
+      ),
+    ).toBe("provider_rate_limited");
+    expect(
+      classifyRunFailureText(
+        '{"error":{"message":"The upstream provider rate limit was reached.","type":"upstream_error","code":"upstream_rate_limit","retryable":true}}',
+      ),
+    ).toBe("provider_rate_limited");
+    // The proxy's answer when the exhausted window resets in hours: terminal, still a rate limit.
+    expect(
+      classifyRunFailureText(
+        '{"error":{"message":"The upstream provider rate limit was reached.","type":"upstream_error","code":"upstream_rate_limit","retryable":false}}',
+      ),
+    ).toBe("provider_rate_limited");
+    expect(
+      classifyRunFailureText(
+        'backend responded with 429 Too Many Requests: {"error":{"type":"rate_limit_error","message":"Rate limit reached"}}',
+      ),
+    ).toBe("provider_rate_limited");
+    // A retry limit on another status is not a rate limit.
+    expect(
+      classifyRunFailureText("exceeded retry limit, last status: 500 Internal Server Error"),
+    ).toBeNull();
+  });
+
+  it("does not blame the AI provider for a 429 from something else", () => {
+    // A throttled skill import and the scoped worker proxy fail with the same
+    // phrase, but neither is the model provider.
+    expect(
+      classifyRunFailureText(
+        "https://raw.githubusercontent.com/instafy-dev/skills/main/SKILL.md returned 429 Too Many Requests",
+      ),
+    ).toBeNull();
+    expect(
+      classifyRunFailureText(
+        "Scoped worker proxy request failed with status 429 Too Many Requests: slow down",
+      ),
+    ).toBeNull();
+  });
+
+  it("does not call a 429 that names an exhausted quota or plan limit a passing rate limit", () => {
+    expect(classifyRunFailureText(PROVIDER_INSUFFICIENT_QUOTA)).toBeNull();
+    expect(classifyRunFailureText(PROVIDER_USAGE_LIMIT_REACHED)).toBeNull();
+    expect(
+      classifyRunFailureText(
+        'exceeded retry limit, last status: 429 Too Many Requests: {"error":{"type":"usage_not_included"}}',
+      ),
+    ).toBeNull();
+    expect(
+      classifyRunFailureText("exceeded retry limit, last status: 429 Too Many Requests (quota exceeded)"),
+    ).toBeNull();
+    expect(
+      classifyRunFailureText(
+        'exceeded retry limit, last status: 429 Too Many Requests: {"error":{"code":"quota_exceeded"}}',
+      ),
+    ).toBeNull();
   });
 
   it("returns null for unrelated text", () => {
@@ -115,6 +186,8 @@ describe("isAutoRetryEligibleFailureKind", () => {
   it("is false for deterministic/unhelpful kinds and nullish input", () => {
     expect(isAutoRetryEligibleFailureKind("missing_verification")).toBe(false);
     expect(isAutoRetryEligibleFailureKind("needs_ai")).toBe(false);
+    // Resending at once would hit the same provider limit again.
+    expect(isAutoRetryEligibleFailureKind("provider_rate_limited")).toBe(false);
     expect(isAutoRetryEligibleFailureKind("generic")).toBe(false);
     expect(isAutoRetryEligibleFailureKind(null)).toBe(false);
     expect(isAutoRetryEligibleFailureKind(undefined)).toBe(false);
@@ -244,6 +317,42 @@ describe("resolveRunFailurePresentation", () => {
     expect(isAutoRetryEligibleFailureKind(presentation?.kind)).toBe(false);
   });
 
+  it("explains a model provider rate limit in plain words instead of the Codex text", () => {
+    // The job failure the controller stores after the provider answered 429.
+    const presentation = resolveRunFailurePresentation({
+      metadata: {
+        source: "agent",
+        outcome: "failed",
+        messageType: "error",
+        jobId: "job-1",
+        errorMessage: PROVIDER_RATE_LIMITED,
+      },
+      content: PROVIDER_RATE_LIMITED,
+      assumeFailed: true,
+    });
+    expect(presentation).toEqual({
+      kind: "provider_rate_limited",
+      friendlyText: PROVIDER_RATE_LIMITED_TEXT,
+      rawText: PROVIDER_RATE_LIMITED,
+    });
+    // The Studio cannot tell a short throttle from a spent plan window, so the
+    // copy must not promise that a retry soon will work.
+    expect(presentation?.friendlyText).not.toMatch(/in a minute/i);
+  });
+
+  it("keeps the raw quota reason for a 429 that names an exhausted quota or plan limit", () => {
+    for (const rawText of [PROVIDER_INSUFFICIENT_QUOTA, PROVIDER_USAGE_LIMIT_REACHED]) {
+      // A standalone error bubble has no quota guard of its own, so the
+      // classifier must not hide the quota type behind the rate limit copy.
+      const presentation = resolveRunFailurePresentation({
+        metadata: { source: "agent", outcome: "failed", messageType: "error", jobId: "job-1" },
+        content: rawText,
+        assumeFailed: true,
+      });
+      expect(presentation).toEqual({ kind: "generic", friendlyText: rawText, rawText });
+    }
+  });
+
   it("keeps the inline generic reason to the first line and bounds its length", () => {
     const longFirstLine = `Boot failed: ${"x".repeat(400)}`;
     const presentation = resolveRunFailurePresentation({
@@ -282,6 +391,16 @@ describe("resolveRetryingStatusPresentation", () => {
     expect(
       resolveRetryingStatusPresentation({
         metadata: { kind: "codex_retry", reason: "missing_final", attempt: 2 },
+        content: raw,
+      }),
+    ).toEqual({ displayText: RETRYING_STATUS_DISPLAY_TEXT, fullText: raw });
+  });
+
+  it("maps codex_stream_retry status metadata regardless of wording", () => {
+    const raw = "stream disconnected before completion: 429 Too Many Requests";
+    expect(
+      resolveRetryingStatusPresentation({
+        metadata: { kind: "codex_stream_retry", event: { type: "stream.retry" } },
         content: raw,
       }),
     ).toEqual({ displayText: RETRYING_STATUS_DISPLAY_TEXT, fullText: raw });

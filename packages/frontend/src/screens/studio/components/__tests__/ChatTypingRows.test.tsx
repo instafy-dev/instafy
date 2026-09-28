@@ -3,8 +3,11 @@
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { RETRYING_STATUS_DISPLAY_TEXT } from "../../../../conversations/runFailurePresentation";
+import type { ChatMessage } from "../../types";
 import { ChatMessageAvatar } from "../ChatMessageAvatar";
 import { ChatTypingRows } from "../ChatTypingRows";
+import { resolveTypingIndicatorState } from "../typingIndicatorState";
 
 function classTokens(element: Element): string[] {
   return (element.getAttribute("class") ?? "").split(/\s+/).filter(Boolean);
@@ -596,5 +599,97 @@ describe("ChatTypingRows", () => {
 
     expect(container.querySelector('[data-testid="assistant-typing-indicator"]')).toBeNull();
     expect(container.querySelector('[data-testid="assistant-avatar"]')).toBeNull();
+  });
+});
+
+describe("resolveTypingIndicatorState", () => {
+  // What the runtime agent stores while Codex waits out a rate-limited request.
+  const rawStreamRetry =
+    "Retrying: stream disconnected before completion: 429 Too Many Requests: The upstream provider rate limit was reached.";
+  const userMessage: ChatMessage = {
+    id: "user-1",
+    role: "user",
+    content: "Rename the header",
+    timestamp: 1,
+  };
+  const status = (id: string, content: string, metadata: Record<string, unknown> = {}): ChatMessage => ({
+    id,
+    role: "assistant",
+    content,
+    timestamp: 2,
+    messageType: "status",
+    metadata: { messageType: "status", ...metadata },
+  });
+
+  let container: HTMLDivElement;
+  let root: Root;
+
+  beforeEach(() => {
+    (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
+    container = document.createElement("div");
+    document.body.appendChild(container);
+    root = createRoot(container);
+  });
+
+  afterEach(async () => {
+    await act(async () => {
+      root.unmount();
+    });
+    container.remove();
+    delete (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT;
+  });
+
+  it("shows a stream retry as calm progress and keeps the stored line", async () => {
+    const retry = status("retry-1", rawStreamRetry, { kind: "codex_stream_retry" });
+    const state = resolveTypingIndicatorState([userMessage, retry]);
+    expect(state).toEqual({ phase: "thinking", label: RETRYING_STATUS_DISPLAY_TEXT });
+    expect(retry.content).toBe(rawStreamRetry);
+
+    await act(async () => {
+      root.render(
+        <ChatTypingRows
+          peerTypingLabel={null}
+          isAssistantTyping
+          isAssistantTypingCoveredByJobThreadPreview={false}
+          typingAgents={[]}
+          hasMultipleTypingAgents={false}
+          typingAgentHandle="octo"
+          typingAgentAvatarSeed="octo"
+          typingIndicatorState={state}
+          typingStatusLabel={state.label ?? "Thinking…"}
+          typingStatusAriaLabel={`Octo status: ${state.label}`}
+          isThinkingLabelExpanded={false}
+          onToggleThinkingLabel={() => undefined}
+          latestDisplayedMessageId="retry-1"
+          renderAssistantAvatar={() => <span data-testid="assistant-avatar" />}
+        />,
+      );
+    });
+
+    const indicator = container.querySelector('[data-testid="assistant-typing-indicator"]');
+    expect(indicator?.querySelector("[data-sweep-text]")?.textContent).toBe(RETRYING_STATUS_DISPLAY_TEXT);
+    expect(container.textContent).not.toContain("429");
+  });
+
+  it("recognises a stream retry by its kind when the line has no Retrying prefix", () => {
+    expect(
+      resolveTypingIndicatorState([
+        userMessage,
+        status("retry-1", "stream disconnected before completion", { kind: "codex_stream_retry" }),
+      ]),
+    ).toEqual({ phase: "thinking", label: RETRYING_STATUS_DISPLAY_TEXT });
+  });
+
+  it("keeps ordinary status headlines and ignores a retry from an earlier turn", () => {
+    expect(
+      resolveTypingIndicatorState([userMessage, status("status-1", "Running tests now.")]),
+    ).toEqual({ phase: "thinking", label: "Running tests now." });
+    const fallback = { phase: "waiting" as const, label: "Waiting for a runtime…" };
+    expect(
+      resolveTypingIndicatorState(
+        [status("retry-0", rawStreamRetry, { kind: "codex_stream_retry" }), userMessage],
+        fallback,
+      ),
+    ).toBe(fallback);
   });
 });

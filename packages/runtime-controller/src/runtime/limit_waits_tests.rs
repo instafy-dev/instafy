@@ -11,7 +11,9 @@ use std::sync::Arc;
 
 use tokio::sync::Mutex;
 
-use crate::runtime::ensure::{ensure_runtime_launch_recording_limit_wait, OriginEnsureOptions};
+use crate::runtime::ensure::{
+    ensure_runtime_launch_recording_limit_wait, OriginEnsureOptions, ReusedLeaseMetadata,
+};
 use crate::state::ControllerEvent;
 
 const PROVIDER_ID: &str = "instafy_cloud_limit_wait_test";
@@ -64,6 +66,7 @@ impl LimitWaitFixture {
                 Some(vec!["http".to_string()]),
                 None,
             ),
+            ReusedLeaseMetadata::Requested,
         )
         .await
     }
@@ -468,6 +471,7 @@ async fn a_limit_refusal_records_the_refused_request_and_a_user_request_outranks
             Some(json!({ "source": "dispatch_runtime_alert" })),
             RuntimeLeaseScope::Exclusive,
             OriginEnsureOptions::new(None, None, None),
+            ReusedLeaseMetadata::Requested,
         )
         .await;
         assert!(server_refusal.as_ref().is_err_and(is_runtime_limit_refusal));
@@ -1892,6 +1896,7 @@ async fn the_organization_limit_admits_one_launch_at_a_time_across_replicas() ->
                     None,
                     RuntimeLeaseScope::Exclusive,
                     OriginEnsureOptions::new(None, None, None),
+                    ReusedLeaseMetadata::Requested,
                 )
                 .await
             }
@@ -2019,6 +2024,7 @@ async fn the_admission_lock_is_free_while_the_provider_releases_and_launches() -
                     None,
                     RuntimeLeaseScope::Exclusive,
                     OriginEnsureOptions::new(None, None, None),
+                    ReusedLeaseMetadata::Requested,
                 )
                 .await
             }

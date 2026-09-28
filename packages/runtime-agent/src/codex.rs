@@ -33,7 +33,8 @@ use codex_protocol::models::{ContentItem, MessagePhase, ResponseItem};
 use codex_protocol::openai_models::ReasoningEffort;
 use codex_protocol::protocol::{
     AskForApproval, CodexErrorInfo, Event, EventMsg, McpServerRefreshConfig, Op, SandboxPolicy,
-    SessionSource, ThreadSettingsOverrides, TurnEnvironmentSelection, TurnEnvironmentSelections,
+    SessionSource, StreamErrorEvent, ThreadSettingsOverrides, TurnEnvironmentSelection,
+    TurnEnvironmentSelections,
 };
 use codex_protocol::user_input::UserInput;
 use codex_utils_absolute_path::AbsolutePathBuf;
@@ -1577,7 +1578,7 @@ impl CodexClient {
         let max_stream_retries = optional_env("CODEX_MAX_STREAM_RETRIES")
             .and_then(|value| value.parse::<usize>().ok())
             .unwrap_or(5usize);
-        let mut stream_error_count: usize = 0;
+        let mut stream_errors = StreamErrorBudget::default();
         let mut active_turn_input = options.active_turn_input.clone();
         let mut active_turn_input_readiness: Option<ActiveTurnInputReadinessGuard> = None;
 
@@ -1695,8 +1696,15 @@ impl CodexClient {
                     // ShutdownComplete event that some upstream failure paths never emit.
                     break;
                 }
+                EventMsg::RawResponseCompleted(_) => {
+                    // A completed response ends the sampling request, so Codex recovered from
+                    // any stream error before it. Neither the runtime's cap nor the fallback
+                    // failure text may hold on to that error for the rest of the turn.
+                    stream_errors.record_recovery();
+                    last_stream_error = None;
+                }
                 EventMsg::StreamError(err) => {
-                    last_stream_error = Some(err.message.clone());
+                    last_stream_error = Some(stream_error_reason(err).to_string());
 
                     if bounded_proxy_retries {
                         // Codex owns the per-sampling-step retry count. Do not count all
@@ -1707,9 +1715,7 @@ impl CodexClient {
                             .is_some_and(is_terminal_proxy_http_status)
                         {
                             error_info = err.codex_error_info.clone();
-                            fatal_stream_error = Some(
-                                err.additional_details.clone().unwrap_or_else(|| err.message.clone()),
-                            );
+                            fatal_stream_error = Some(stream_error_reason(err).to_string());
                             conversation
                                 .submit(Op::Shutdown)
                                 .await
@@ -1719,48 +1725,7 @@ impl CodexClient {
                         continue;
                     }
 
-                    let stream_status_code =
-                        err.codex_error_info.as_ref().and_then(|info| match info {
-                            CodexErrorInfo::ResponseStreamDisconnected { http_status_code } => {
-                                http_status_code.to_owned()
-                            }
-                            _ => None,
-                        });
-                    if fatal_stream_error.is_none()
-                        && should_terminate_codex_stream(
-                            stream_status_code,
-                            stream_error_count,
-                            max_stream_retries,
-                        )
-                    {
-                        fatal_stream_error = err
-                            .additional_details
-                            .clone()
-                            .or_else(|| Some(err.message.clone()));
-                        if !options.shared_browser && !shutdown_requested {
-                            conversation
-                                .submit(Op::Shutdown)
-                                .await
-                                .context("failed to request Codex shutdown after stream error")?;
-                            shutdown_requested = true;
-                        }
-                        break;
-                    }
-
-                    stream_error_count = stream_error_count.saturating_add(1);
-                    if fatal_stream_error.is_none()
-                        && should_terminate_codex_stream(
-                            stream_status_code,
-                            stream_error_count,
-                            max_stream_retries,
-                        )
-                    {
-                        let message = format!(
-                            "Codex stream aborted after {} retries (limit {}): {}",
-                            stream_error_count.saturating_sub(1),
-                            max_stream_retries,
-                            err.message
-                        );
+                    if let Some(message) = stream_errors.record_error(err, max_stream_retries) {
                         fatal_stream_error = Some(message);
                         if !options.shared_browser && !shutdown_requested {
                             conversation
@@ -2109,6 +2074,66 @@ fn extract_rollout_path_from_provider_state(
     }
 
     None
+}
+
+/// Whether a run on this runtime can resume the thread that a stored provider state names,
+/// using the same lookups as the restore in `execute_inner`. That restore first asks the
+/// thread manager, but the manager is built for each run, so a thread never stays in memory
+/// from one job to the next. What a later run can resume from is the rollout file, and only
+/// when it is on this runtime's disk. A runtime that restarted onto a fresh disk, or an id
+/// Codex cannot parse, makes Codex start an empty thread instead. A rollout that exists but
+/// fails to load is still only discovered by the restore itself.
+pub(crate) fn provider_thread_restorable_on_this_runtime(
+    state: Option<&JsonValue>,
+    browser_mode: bool,
+) -> bool {
+    let mode_key = thread_mode_key(browser_mode);
+    extract_thread_id_from_provider_state(state, mode_key).is_some()
+        && extract_rollout_path_from_provider_state(state, mode_key)
+            .is_some_and(|rollout_path| rollout_path.exists())
+}
+
+/// The provider state `execute_inner` saves after the stored thread could not be restored and
+/// the run started a fresh thread whose rollout is `rollout_path`. Job tests use it to carry a
+/// turn's saved state into the next turn without running Codex.
+#[cfg(test)]
+pub(crate) fn provider_state_after_fresh_thread(
+    previous: Option<&JsonValue>,
+    browser_mode: bool,
+    rollout_path: &Path,
+) -> JsonValue {
+    update_provider_conversation_state(
+        previous,
+        thread_mode_key(browser_mode),
+        &ThreadId::new(),
+        Some(rollout_path),
+        true,
+        "failed_new",
+    )
+}
+
+/// The provider state `execute_inner` saves after resuming the thread the stored state names
+/// for this mode from its rollout, with the same lookups, including the browser mode's
+/// fallback to the legacy thread keys.
+#[cfg(test)]
+pub(crate) fn provider_state_after_thread_resumed(
+    previous: &JsonValue,
+    browser_mode: bool,
+) -> JsonValue {
+    let mode_key = thread_mode_key(browser_mode);
+    let thread_id = extract_thread_id_from_provider_state(Some(previous), mode_key)
+        .expect("stored state names a thread");
+    let rollout_path = extract_rollout_path_from_provider_state(Some(previous), mode_key)
+        .expect("stored state names a rollout");
+    assert!(rollout_path.exists(), "the resumed rollout is on this disk");
+    update_provider_conversation_state(
+        Some(previous),
+        mode_key,
+        &thread_id,
+        Some(&rollout_path),
+        false,
+        "rollout",
+    )
 }
 
 fn update_provider_conversation_state(
@@ -3170,7 +3195,7 @@ struct CommandExecutionState {
 }
 
 #[derive(Debug, Default)]
-struct CodexEventStreamAdapter {
+pub(crate) struct CodexEventStreamAdapter {
     command_states: HashMap<String, CommandExecutionState>,
     patch_apply_paths: HashMap<String, Vec<String>>,
     agent_message_delta_buffers: HashMap<String, String>,
@@ -3180,7 +3205,7 @@ struct CodexEventStreamAdapter {
 }
 
 impl CodexEventStreamAdapter {
-    fn collect(&mut self, event: &Event) -> Vec<JsonValue> {
+    pub(crate) fn collect(&mut self, event: &Event) -> Vec<JsonValue> {
         if let Some(kind) = unprojected_tool_activity_kind(&event.msg) {
             // Observation only: retain no tool arguments, output, paths or identifiers.
             // Consumers can distinguish a tool-free result from work whose detailed
@@ -3450,10 +3475,24 @@ impl CodexEventStreamAdapter {
                 "type": "error",
                 "message": error.message,
             })],
-            EventMsg::StreamError(error) => vec![json!({
-                "type": "error",
-                "message": error.additional_details.as_deref().unwrap_or(&error.message),
-            })],
+            EventMsg::StreamError(error) => {
+                let reason = stream_error_reason(error);
+                // Codex sends a StreamError when it schedules a retry, and the retry usually
+                // recovers. A failure that outlasts the retries still ends the turn with an
+                // Error event or a run error, so only a status the runtime stops on at once
+                // (a terminal 4xx) is shown as an error here; the rest is retry progress.
+                if codex_error_http_status(error.codex_error_info.as_ref())
+                    .is_some_and(is_terminal_proxy_http_status)
+                {
+                    vec![json!({ "type": "error", "message": reason })]
+                } else {
+                    vec![json!({
+                        "type": "stream.retry",
+                        "message": reason,
+                        "attempt": error.message,
+                    })]
+                }
+            }
             _ => Vec::new(),
         }
     }
@@ -3816,6 +3855,10 @@ fn should_retry_codex_run(message: &str) -> bool {
         || normalized.contains("insufficient_quota")
         || normalized.contains("rate_limit_error")
         || normalized.contains("rate limit reached")
+        // Codex already retried a proxy 429 within the turn before giving up with this text.
+        // Replaying the whole turn on top of that could repeat browser side effects.
+        || normalized.contains("rate limit was reached")
+        || normalized.contains("stream disconnected before completion: 429")
         || normalized.contains("controller forced credential refresh failed")
         || normalized.contains("codex oauth refresh failed")
         || normalized.contains("session has ended")
@@ -3847,6 +3890,58 @@ fn should_terminate_codex_stream(
 ) -> bool {
     // Transport disconnects are retried by Codex itself; only auth failures bypass that budget.
     matches!(http_status_code, Some(401 | 403)) || stream_error_count > max_stream_retries
+}
+
+/// Codex reports each retry it schedules as a StreamError whose message is only the attempt
+/// counter ("Reconnecting... 2/5"). The cause, such as "stream disconnected before completion:
+/// 429 Too Many Requests: ...", is in additional_details, and anything that reports or
+/// classifies the failure needs the cause.
+fn stream_error_reason(err: &StreamErrorEvent) -> &str {
+    err.additional_details
+        .as_deref()
+        .map(str::trim)
+        .filter(|details| !details.is_empty())
+        .unwrap_or(&err.message)
+}
+
+/// The runtime's own stream-error cap for runs that keep Codex's default retries. Codex counts
+/// retries per sampling request and starts over for the next one, so only errors since the
+/// last completed response count here. Counting every error across the whole turn aborted
+/// long browser turns that were throttled once per step, although each retry succeeded.
+#[derive(Debug, Default)]
+struct StreamErrorBudget {
+    unrecovered: usize,
+}
+
+impl StreamErrorBudget {
+    fn record_recovery(&mut self) {
+        self.unrecovered = 0;
+    }
+
+    /// Returns the failure message when this error must end the turn.
+    fn record_error(
+        &mut self,
+        err: &StreamErrorEvent,
+        max_stream_retries: usize,
+    ) -> Option<String> {
+        let status = match err.codex_error_info.as_ref() {
+            Some(CodexErrorInfo::ResponseStreamDisconnected { http_status_code }) => {
+                *http_status_code
+            }
+            _ => None,
+        };
+        let reason = stream_error_reason(err);
+        if should_terminate_codex_stream(status, self.unrecovered, max_stream_retries) {
+            return Some(reason.to_string());
+        }
+        self.unrecovered = self.unrecovered.saturating_add(1);
+        should_terminate_codex_stream(status, self.unrecovered, max_stream_retries).then(|| {
+            format!(
+                "Codex stream aborted after {} retries (limit {max_stream_retries}): {reason}",
+                self.unrecovered.saturating_sub(1),
+            )
+        })
+    }
 }
 
 fn resolve_codex_home(workspace_dir: &Path) -> PathBuf {
@@ -5207,6 +5302,88 @@ mod tests {
         assert_eq!(codex_error_http_status(None), None);
     }
 
+    const PROXY_429_STREAM_DETAILS: &str = "stream disconnected before completion: 429 Too Many Requests: The upstream provider rate limit was reached.";
+
+    fn proxy_429_stream_error(attempt: usize) -> StreamErrorEvent {
+        StreamErrorEvent {
+            message: format!("Reconnecting... {attempt}/5"),
+            codex_error_info: Some(CodexErrorInfo::ResponseStreamDisconnected {
+                http_status_code: None,
+            }),
+            additional_details: Some(PROXY_429_STREAM_DETAILS.to_string()),
+        }
+    }
+
+    #[test]
+    fn recovered_stream_errors_do_not_accumulate_across_a_turn() {
+        let mut budget = StreamErrorBudget::default();
+        // A long browser turn throttled once per step: every retry recovers.
+        for _ in 0..12 {
+            assert_eq!(budget.record_error(&proxy_429_stream_error(1), 5), None);
+            budget.record_recovery();
+        }
+        // Errors within one sampling request still reach the cap, and the abort keeps the cause.
+        for attempt in 1..=5 {
+            assert_eq!(
+                budget.record_error(&proxy_429_stream_error(attempt), 5),
+                None
+            );
+        }
+        let message = budget
+            .record_error(&proxy_429_stream_error(6), 5)
+            .expect("unrecovered errors past the cap end the turn");
+        assert_eq!(
+            message,
+            format!("Codex stream aborted after 5 retries (limit 5): {PROXY_429_STREAM_DETAILS}")
+        );
+        assert!(!should_retry_codex_run(&message));
+    }
+
+    #[test]
+    fn stream_error_budget_ends_auth_failures_with_their_cause() {
+        let mut budget = StreamErrorBudget::default();
+        let unauthorized = StreamErrorEvent {
+            message: "Reconnecting... 1/5".to_string(),
+            codex_error_info: Some(CodexErrorInfo::ResponseStreamDisconnected {
+                http_status_code: Some(401),
+            }),
+            additional_details: Some("unexpected status 401 Unauthorized".to_string()),
+        };
+        assert_eq!(
+            budget.record_error(&unauthorized, 5).as_deref(),
+            Some("unexpected status 401 Unauthorized")
+        );
+    }
+
+    #[test]
+    fn stream_error_reason_prefers_the_cause_over_the_attempt_counter() {
+        assert_eq!(
+            stream_error_reason(&proxy_429_stream_error(2)),
+            PROXY_429_STREAM_DETAILS
+        );
+        for details in [None, Some("  ".to_string())] {
+            let err = StreamErrorEvent {
+                additional_details: details,
+                ..proxy_429_stream_error(2)
+            };
+            assert_eq!(stream_error_reason(&err), "Reconnecting... 2/5");
+        }
+    }
+
+    #[test]
+    fn should_retry_codex_run_does_not_replay_an_exhausted_proxy_rate_limit() {
+        // Codex retried the 429 within the turn already. A whole-turn replay on top of that can
+        // repeat browser side effects, even when the text also names a transient cause.
+        for message in [
+            PROXY_429_STREAM_DETAILS,
+            "stream disconnected before completion: 429 Too Many Requests: The AI provider is rate limiting requests.",
+            "stream disconnected before completion: 429 Too Many Requests: The upstream provider rate limit was reached. (connection reset by peer)",
+            "Codex stream aborted after 5 retries (limit 5): stream disconnected before completion: 429 Too Many Requests: upstream request timed out",
+        ] {
+            assert!(!should_retry_codex_run(message), "{message}");
+        }
+    }
+
     #[test]
     fn stream_auth_errors_still_fail_fast() {
         assert!(should_terminate_codex_stream(Some(401), 0, 5));
@@ -5426,6 +5603,45 @@ required = true
                 .expect("default rollout path should resolve");
         assert_eq!(browser, PathBuf::from("/tmp/browser-rollout.jsonl"));
         assert_eq!(default, PathBuf::from("/tmp/default-rollout.jsonl"));
+    }
+
+    #[test]
+    fn provider_thread_is_restorable_only_from_a_rollout_on_this_disk() {
+        let codex_home = tempfile::tempdir().expect("codex home tempdir");
+        let rollout = codex_home.path().join("rollout.jsonl");
+        std::fs::write(&rollout, "").expect("write rollout");
+        let missing = codex_home.path().join("from-the-old-runtime.jsonl");
+        let thread_id = ThreadId::new().to_string();
+        let state = |thread: &str, path: &Path| json!({"defaultThreadId": thread, "defaultRolloutPath": path.display().to_string()});
+
+        assert!(provider_thread_restorable_on_this_runtime(
+            Some(&state(&thread_id, &rollout)),
+            false
+        ));
+        assert!(!provider_thread_restorable_on_this_runtime(
+            Some(&state(&thread_id, &missing)),
+            false
+        ));
+        // Codex cannot parse this id, so it starts a new thread even with a rollout.
+        assert!(!provider_thread_restorable_on_this_runtime(
+            Some(&state("restored-thread", &rollout)),
+            false
+        ));
+        assert!(!provider_thread_restorable_on_this_runtime(
+            Some(&json!({"defaultThreadId": thread_id})),
+            false
+        ));
+        // A browser run resumes the browser thread, not the default one.
+        assert!(!provider_thread_restorable_on_this_runtime(
+            Some(&json!({
+                "defaultThreadId": thread_id,
+                "defaultRolloutPath": rollout.display().to_string(),
+                "browserThreadId": ThreadId::new().to_string(),
+                "browserRolloutPath": missing.display().to_string(),
+            })),
+            true
+        ));
+        assert!(!provider_thread_restorable_on_this_runtime(None, false));
     }
 
     #[test]

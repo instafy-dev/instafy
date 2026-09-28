@@ -22,7 +22,8 @@ export type ConversationSearchOptions = ConversationListOptions & {
 
 export type ConversationShowOptions = ConversationCommonOptions & {
   project?: string;
-  target: string;
+  // Undefined means no target was given, which reads the current conversation.
+  target?: string;
   limit?: number;
   includeThreads?: boolean;
   json?: boolean;
@@ -543,12 +544,57 @@ export async function searchConversations(options: ConversationSearchOptions): P
   return matches;
 }
 
+/**
+ * The conversation a runtime job belongs to, from INSTAFY_CONVERSATION_ID and then
+ * CONVERSATION_ID, or null when neither is set. The value goes straight into
+ * `/conversations/<id>/...` paths, so anything but a UUID is rejected: a path such as
+ * `../../projects/x` or a query such as `abc?limit=1&x=` would change the request, and a
+ * stray word would only come back as a bare 404. A bad first variable is an error rather
+ * than a reason to try the second, which could name a different conversation.
+ */
+export function conversationIdFromEnvironment(): string | null {
+  for (const name of ["INSTAFY_CONVERSATION_ID", "CONVERSATION_ID"]) {
+    const value = trimOrNull(process.env[name]);
+    if (value === null) {
+      continue;
+    }
+    if (!isUuid(value)) {
+      throw new Error(
+        `${name} is not a conversation id. Set it to the conversation's UUID, or unset it and name the conversation explicitly.`,
+      );
+    }
+    return value;
+  }
+  return null;
+}
+
+// Runtime jobs export the conversation they belong to, so an agent reading its own
+// conversation does not have to copy the UUID by hand. A copied id once picked up
+// digits from the project id printed next to it.
+function resolveShowTarget(rawTarget: string | undefined): string {
+  if (rawTarget !== undefined) {
+    // An empty target is usually a shell variable that should have named another
+    // conversation. Showing the current one instead would answer for the wrong chat.
+    const explicit = trimOrNull(rawTarget);
+    if (!explicit) {
+      throw new Error("Conversation target cannot be empty.");
+    }
+    return explicit;
+  }
+
+  const current = conversationIdFromEnvironment();
+  if (current) {
+    return current;
+  }
+
+  throw new Error(
+    "No conversation given. Pass an id or title, or set INSTAFY_CONVERSATION_ID.",
+  );
+}
+
 export async function showConversation(options: ConversationShowOptions): Promise<void> {
   const projectId = resolveProjectId(options.project);
-  const target = trimOrNull(options.target);
-  if (!target) {
-    throw new Error("Conversation target cannot be empty.");
-  }
+  const target = resolveShowTarget(options.target);
 
   const limit = clampLimit(options.limit, DEFAULT_MESSAGE_LIMIT);
   const conversations = await fetchProjectConversations({
@@ -561,6 +607,8 @@ export async function showConversation(options: ConversationShowOptions): Promis
   });
 
   let selected: SearchMatch | null = null;
+  // Only a UUID is looked up as an id, so an environment value, which is always one, is
+  // never treated as search text that could open a different conversation.
   if (isUuid(target)) {
     const conversation = conversations.find((entry) => entry.id === target) ?? null;
     if (conversation) {

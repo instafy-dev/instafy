@@ -14,6 +14,7 @@ export type RunFailureKind =
   | "no_workspace_changes"
   | "missing_verification"
   | "needs_ai"
+  | "provider_rate_limited"
   | "generic";
 
 export type RunFailurePresentation = {
@@ -29,6 +30,10 @@ const RUN_FAILURE_FRIENDLY_TEXT: Record<RunFailureKind, string> = {
   missing_verification: "The run ended before it could verify its work.",
   needs_ai:
     "I couldn't find a connected AI credential for this run. Connect or reconnect a provider, then try again.",
+  // The proxy reports a spent ChatGPT plan window with the same 429 text as a
+  // short throttle, so this copy cannot promise when a retry will work.
+  provider_rate_limited:
+    "The AI provider is limiting requests right now, so this turn stopped. Wait a little, then try again. If it keeps happening, the provider account may have reached its usage limit.",
   // Only used as a last-resort fallback now: an unclassified failure surfaces
   // its real reason inline (see inlineGenericFailureText) rather than this
   // uninformative sentence.
@@ -129,12 +134,34 @@ const NEEDS_AI_PATTERNS = [
   /no ai (?:credential|provider)s? (?:is )?(?:connected|configured|available)/i,
 ];
 
+// The model provider answered 429 and the run stopped. Codex reports it as
+// "exceeded retry limit, last status: 429 Too Many Requests" even though no
+// retry happened, and the Instafy proxy labels it upstream_rate_limit. Proxy
+// errors that still read "unexpected status 429" keep their curated guidance,
+// because callers check for that before classifying the failure here.
+// A bare "429 Too Many Requests" is not enough: a throttled skill import or the
+// scoped worker proxy fail with that same phrase, and neither is the AI
+// provider.
+const PROVIDER_RATE_LIMITED_PATTERNS = [
+  /exceeded retry limit, last status:\s*429\b/i,
+  /\bbackend responded with 429\b/i,
+  /\bupstream_rate_limit\b/i,
+  /upstream provider rate limit was reached/i,
+];
+
+// A 429 that names an exhausted quota or plan limit will not clear after a
+// short wait, so it keeps its raw reason instead of the rate limit copy.
+const PROVIDER_QUOTA_EXHAUSTED_PATTERN =
+  /insufficient_quota|quota_exceeded|usage_limit_reached|usage_not_included|\bquota\b/i;
+
 /**
  * Failure kinds that are safe to re-dispatch automatically. Both are transient:
  * `missing_final_message` is a provider hiccup that usually resolves on a fresh
  * attempt, and `no_workspace_changes` is a reply that dropped its file writes.
  * `missing_verification` and `generic` are excluded because retrying rarely
- * helps and/or the underlying cause is deterministic.
+ * helps and/or the underlying cause is deterministic. `provider_rate_limited`
+ * is excluded because an immediate resend adds load to a provider that is
+ * already refusing requests; the person retries after a pause instead.
  */
 export const AUTO_RETRY_ELIGIBLE_KINDS = [
   "missing_final_message",
@@ -171,6 +198,12 @@ export function classifyRunFailureText(rawText: string): Exclude<RunFailureKind,
   }
   if (NEEDS_AI_PATTERNS.some((pattern) => pattern.test(rawText))) {
     return "needs_ai";
+  }
+  if (
+    PROVIDER_RATE_LIMITED_PATTERNS.some((pattern) => pattern.test(rawText)) &&
+    !PROVIDER_QUOTA_EXHAUSTED_PATTERN.test(rawText)
+  ) {
+    return "provider_rate_limited";
   }
   return null;
 }
@@ -219,6 +252,10 @@ export type RetryingStatusPresentation = {
   fullText: string;
 };
 
+// Status kinds the runtime agent writes while Codex retries: a re-dispatched
+// run, and a recovered stream error such as a rate-limited request.
+const RETRYING_STATUS_KINDS = new Set(["codex_retry", "codex_stream_retry"]);
+
 /**
  * Map interim "Retrying: <technical reason>" status lines to a calm display
  * label. The stored message is untouched; the full original line is returned
@@ -231,7 +268,7 @@ export function resolveRetryingStatusPresentation(params: {
   const content = params.content.trim();
   const metadata = isRecord(params.metadata) ? params.metadata : null;
   const kind = normalizedStringField(metadata, "kind");
-  if (kind === "codex_retry") {
+  if (RETRYING_STATUS_KINDS.has(kind)) {
     return {
       displayText: RETRYING_STATUS_DISPLAY_TEXT,
       fullText: content || RETRYING_STATUS_DISPLAY_TEXT,

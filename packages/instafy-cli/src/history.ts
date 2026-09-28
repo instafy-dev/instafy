@@ -1,4 +1,5 @@
 import { requestControllerApi } from "./api.js";
+import { conversationIdFromEnvironment } from "./conversations.js";
 import { findProjectManifest } from "./project-manifest.js";
 
 type HistoryCommonOptions = {
@@ -42,7 +43,8 @@ function resolveConversationId(rawConversation: string | undefined): string {
     return explicit;
   }
 
-  const fromEnv = process.env["INSTAFY_CONVERSATION_ID"]?.trim() || process.env["CONVERSATION_ID"]?.trim();
+  // Only the environment is checked: an explicit --conversation is the caller's own choice.
+  const fromEnv = conversationIdFromEnvironment();
   if (fromEnv) {
     return fromEnv;
   }

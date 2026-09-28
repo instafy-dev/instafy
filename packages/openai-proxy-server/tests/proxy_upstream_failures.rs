@@ -67,13 +67,14 @@ struct Reply {
     status: StatusCode,
     body: String,
     retry_after: Option<&'static str>,
+    headers: Vec<(&'static str, &'static str)>,
 }
 impl Reply {
     fn error(status: StatusCode) -> Self {
-        Self { status, body: json!({"error":{"message":"private-token controller credential lease renewal failed token_expired"}}).to_string(), retry_after: None }
+        Self { status, body: json!({"error":{"message":"private-token controller credential lease renewal failed token_expired"}}).to_string(), retry_after: None, headers: Vec::new() }
     }
     fn success() -> Self {
-        Self { status: StatusCode::OK, body: json!({"id":"response-local", "model":"fixture-model", "status":"completed", "output":[{"type":"message", "role":"assistant", "content":[{"type":"output_text", "text":"local answer"}]}]}).to_string(), retry_after: None }
+        Self { status: StatusCode::OK, body: json!({"id":"response-local", "model":"fixture-model", "status":"completed", "output":[{"type":"message", "role":"assistant", "content":[{"type":"output_text", "text":"local answer"}]}]}).to_string(), retry_after: None, headers: Vec::new() }
     }
 }
 #[derive(Clone)]
@@ -102,6 +103,9 @@ async fn upstream(State(mock): State<Mock>, headers: HeaderMap) -> axum::respons
         response
             .headers_mut()
             .insert(header::RETRY_AFTER, value.parse().unwrap());
+    }
+    for (name, value) in reply.headers {
+        response.headers_mut().insert(name, value.parse().unwrap());
     }
     response
 }
@@ -169,9 +173,19 @@ async fn assert_error(
     retryable: bool,
     code: &str,
 ) -> Result<()> {
+    assert_error_envelope(response, status, "upstream_error", retryable, code).await?;
+    Ok(())
+}
+async fn assert_error_envelope(
+    response: reqwest::Response,
+    status: StatusCode,
+    error_type: &str,
+    retryable: bool,
+    code: &str,
+) -> Result<Value> {
     assert_eq!(response.status(), status);
     let body: Value = response.json().await?;
-    assert_eq!(body["error"]["type"], "upstream_error");
+    assert_eq!(body["error"]["type"], error_type);
     assert_eq!(body["error"]["retryable"], retryable);
     assert_eq!(body["error"]["code"], code);
     let serialized = body.to_string();
@@ -187,7 +201,7 @@ async fn assert_error(
             "provider details leaked: {body}"
         );
     }
-    Ok(())
+    Ok(body)
 }
 
 #[tokio::test]
@@ -237,6 +251,207 @@ async fn temporary_failure_preserves_retry_after_and_next_attempt_recovers() -> 
 
 #[tokio::test]
 #[serial]
+async fn rate_limit_retry_after_is_forwarded_derived_or_defaulted() -> Result<()> {
+    let _env = EnvGuard::isolated();
+    // OpenAI often answers 429 without Retry-After but with x-ratelimit-reset-* durations.
+    for (retry_after, headers, expected) in [
+        (Some("7"), vec![("x-ratelimit-reset-tokens", "6s")], "7"),
+        (None, vec![("x-ratelimit-reset-tokens", "6s")], "6"),
+        (
+            None,
+            vec![
+                ("x-ratelimit-reset-requests", "1s"),
+                ("x-ratelimit-reset-tokens", "1m2.5s"),
+            ],
+            "30",
+        ),
+        // The bucket at zero refused, whatever the other bucket's reset.
+        (
+            None,
+            vec![
+                ("x-ratelimit-remaining-requests", "12"),
+                ("x-ratelimit-remaining-tokens", "0"),
+                ("x-ratelimit-reset-requests", "20s"),
+                ("x-ratelimit-reset-tokens", "6s"),
+            ],
+            "6",
+        ),
+        (
+            None,
+            vec![
+                ("x-ratelimit-remaining-requests", "0"),
+                ("x-ratelimit-remaining-tokens", "5000"),
+                ("x-ratelimit-reset-requests", "8s"),
+                ("x-ratelimit-reset-tokens", "20s"),
+            ],
+            "8",
+        ),
+        (
+            None,
+            vec![
+                ("x-ratelimit-remaining-requests", "0"),
+                ("x-ratelimit-remaining-tokens", "0"),
+                ("x-ratelimit-reset-requests", "8s"),
+                ("x-ratelimit-reset-tokens", "20s"),
+            ],
+            "20",
+        ),
+        (
+            None,
+            vec![
+                ("x-ratelimit-reset-requests", "8s"),
+                ("x-ratelimit-reset-tokens", "20s"),
+            ],
+            "20",
+        ),
+        // With no bucket at zero, neither is trusted on its own and the later reset is used.
+        (
+            None,
+            vec![
+                ("x-ratelimit-remaining-requests", "12"),
+                ("x-ratelimit-remaining-tokens", "5000"),
+                ("x-ratelimit-reset-requests", "20s"),
+                ("x-ratelimit-reset-tokens", "6s"),
+            ],
+            "20",
+        ),
+        // A reset of up to five minutes is waited out, bounded to the longest derived delay.
+        (
+            None,
+            vec![
+                ("x-ratelimit-remaining-requests", "12"),
+                ("x-ratelimit-remaining-tokens", "0"),
+                ("x-ratelimit-reset-tokens", "5m0s"),
+            ],
+            "30",
+        ),
+        (None, vec![], "5"),
+    ] {
+        let mut failure = Reply::error(StatusCode::TOO_MANY_REQUESTS);
+        failure.retry_after = retry_after;
+        failure.headers = headers;
+        let (endpoint, mock, _upstream) = mock_server(vec![failure]).await?;
+        let (addr, _proxy) = proxy(api_credentials(endpoint)).await?;
+        let response = request(addr).await?;
+        assert_eq!(response.headers()[header::RETRY_AFTER], expected);
+        assert_error(
+            response,
+            StatusCode::TOO_MANY_REQUESTS,
+            true,
+            "upstream_rate_limit",
+        )
+        .await?;
+        assert_eq!(mock.calls.load(Ordering::SeqCst), 1);
+    }
+    // Quota exhaustion stays terminal and gets no retry hint, even when reset headers are present.
+    let mut quota = Reply::error(StatusCode::TOO_MANY_REQUESTS);
+    quota.body =
+        json!({"error":{"code":"insufficient_quota", "message":"private-token"}}).to_string();
+    quota.headers = vec![("x-ratelimit-reset-tokens", "6s")];
+    let (endpoint, mock, _upstream) = mock_server(vec![quota]).await?;
+    let (addr, _proxy) = proxy(api_credentials(endpoint)).await?;
+    let response = request(addr).await?;
+    assert!(response.headers().get(header::RETRY_AFTER).is_none());
+    assert_error(
+        response,
+        StatusCode::PAYMENT_REQUIRED,
+        false,
+        "upstream_insufficient_quota",
+    )
+    .await?;
+    assert_eq!(mock.calls.load(Ordering::SeqCst), 1);
+    Ok(())
+}
+
+#[tokio::test]
+#[serial]
+async fn rate_limit_window_longer_than_five_minutes_is_terminal() -> Result<()> {
+    let _env = EnvGuard::isolated();
+    // A bucket at zero that needs more than five minutes to refill, such as a daily limit, cannot
+    // recover within the client's retries, so the proxy withdraws the retry instead of sending
+    // the client to sleep through it.
+    for headers in [
+        vec![
+            ("x-ratelimit-remaining-requests", "0"),
+            ("x-ratelimit-remaining-tokens", "5000"),
+            ("x-ratelimit-reset-requests", "13h20m0s"),
+            ("x-ratelimit-reset-tokens", "6s"),
+        ],
+        vec![
+            ("x-ratelimit-remaining-requests", "12"),
+            ("x-ratelimit-remaining-tokens", "0"),
+            ("x-ratelimit-reset-requests", "1s"),
+            ("x-ratelimit-reset-tokens", "13h20m0s"),
+        ],
+        vec![
+            ("x-ratelimit-remaining-tokens", "0"),
+            ("x-ratelimit-reset-tokens", "5m1s"),
+        ],
+    ] {
+        let mut failure = Reply::error(StatusCode::TOO_MANY_REQUESTS);
+        failure.headers = headers;
+        let (endpoint, mock, _upstream) = mock_server(vec![failure]).await?;
+        let (addr, _proxy) = proxy(api_credentials(endpoint)).await?;
+        let response = request(addr).await?;
+        assert!(response.headers().get(header::RETRY_AFTER).is_none());
+        assert_error(
+            response,
+            StatusCode::TOO_MANY_REQUESTS,
+            false,
+            "upstream_rate_limit",
+        )
+        .await?;
+        assert_eq!(mock.calls.load(Ordering::SeqCst), 1);
+    }
+    Ok(())
+}
+
+#[tokio::test]
+#[serial]
+async fn plan_usage_limits_are_terminal_and_keep_the_provider_type() -> Result<()> {
+    let _env = EnvGuard::isolated();
+    // No wait within a turn lifts a ChatGPT plan limit, so the client must not retry it. Codex
+    // recognises these error types in a 429 body and reports the plan limit with its reset time.
+    for (field, provider_type, code) in [
+        (
+            "type",
+            "usage_limit_reached",
+            "upstream_usage_limit_reached",
+        ),
+        (
+            "code",
+            "usage_limit_reached",
+            "upstream_usage_limit_reached",
+        ),
+        ("type", "usage_not_included", "upstream_usage_not_included"),
+    ] {
+        let mut limit = Reply::error(StatusCode::TOO_MANY_REQUESTS);
+        let mut body = json!({"error":{"message":"private-token", "plan_type":"plus", "resets_at":1_900_000_000}});
+        body["error"][field] = json!(provider_type);
+        limit.body = body.to_string();
+        limit.retry_after = Some("7");
+        limit.headers = vec![("x-ratelimit-reset-tokens", "6s")];
+        let (endpoint, mock, _upstream) = mock_server(vec![limit]).await?;
+        let (addr, _proxy) = proxy(api_credentials(endpoint)).await?;
+        let response = request(addr).await?;
+        assert!(response.headers().get(header::RETRY_AFTER).is_none());
+        let body = assert_error_envelope(
+            response,
+            StatusCode::TOO_MANY_REQUESTS,
+            provider_type,
+            false,
+            code,
+        )
+        .await?;
+        assert_eq!(body["error"]["resets_at"], 1_900_000_000);
+        assert!(body["error"].get("plan_type").is_none(), "{body}");
+        assert_eq!(mock.calls.load(Ordering::SeqCst), 1);
+    }
+    Ok(())
+}
+
+#[tokio::test]
+#[serial]
 async fn malformed_success_and_connection_failure_are_retryable_gateway_errors() -> Result<()> {
     let _env = EnvGuard::isolated();
     for body in ["private-token invalid JSON", "{}"] {
@@ -244,6 +459,7 @@ async fn malformed_success_and_connection_failure_are_retryable_gateway_errors()
             status: StatusCode::OK,
             body: body.into(),
             retry_after: None,
+            headers: Vec::new(),
         }])
         .await?;
         let (addr, _proxy) = proxy(api_credentials(endpoint)).await?;
@@ -310,6 +526,12 @@ async fn structured_http_and_stream_quota_exhaustion_are_terminal() -> Result<()
             "upstream_rate_limit",
         ),
         (
+            "usage_limit_reached",
+            StatusCode::TOO_MANY_REQUESTS,
+            false,
+            "upstream_usage_limit_reached",
+        ),
+        (
             "unknown_provider_failure",
             StatusCode::BAD_GATEWAY,
             true,
@@ -324,13 +546,29 @@ async fn structured_http_and_stream_quota_exhaustion_are_terminal() -> Result<()
             status: StatusCode::OK,
             body,
             retry_after: None,
+            headers: Vec::new(),
         }])
         .await?;
         env.set("CODEX_PROXY_CHATGPT_ENDPOINT", &endpoint);
         let (addr, _proxy) = proxy(chatgpt_credentials(false)).await?;
-        assert_error(
-            request(addr).await?,
+        let response = request(addr).await?;
+        // A stream failure carries no provider headers, so a rate limit gets the default delay.
+        assert_eq!(
+            response
+                .headers()
+                .get(header::RETRY_AFTER)
+                .map(|value| value.to_str().unwrap()),
+            (code == "rate_limit_exceeded").then_some("5")
+        );
+        let error_type = if code == "usage_limit_reached" {
+            code
+        } else {
+            "upstream_error"
+        };
+        assert_error_envelope(
+            response,
             expected_status,
+            error_type,
             retryable,
             expected_code,
         )
@@ -350,6 +588,7 @@ async fn chatgpt_refresh_is_once_and_preserves_terminal_failure_or_recovery() ->
                 status: StatusCode::OK,
                 body: json!({"access_token":"inert-new-access"}).to_string(),
                 retry_after: None,
+                headers: Vec::new(),
             }
         } else {
             Reply::error(StatusCode::UNAUTHORIZED)
@@ -364,6 +603,7 @@ async fn chatgpt_refresh_is_once_and_preserves_terminal_failure_or_recovery() ->
                     status: StatusCode::OK,
                     body: include_str!("fixtures/responses_success.sse").into(),
                     retry_after: None,
+                    headers: Vec::new(),
                 }
             } else {
                 Reply::error(StatusCode::UNAUTHORIZED)

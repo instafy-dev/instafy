@@ -111,6 +111,89 @@ describe("history command", () => {
     expect(url.searchParams.get("cursor")).toBe(cursor);
   });
 
+  async function historyWithEnv(subcommand: string, extraArgs: string[], env: NodeJS.ProcessEnv) {
+    const captured: CapturedRequest[] = [];
+    const server = startMockController((req) => {
+      captured.push(req);
+      return { status: 200, body: { messages: [], runs: [], nextCursor: null, hasMore: false } };
+    });
+    await once(server, "listening");
+    try {
+      const address = server.address();
+      const port = typeof address === "object" && address ? address.port : 0;
+      const result = await execCli(
+        [
+          "history",
+          subcommand,
+          ...extraArgs,
+          "--server-url",
+          `http://127.0.0.1:${port}`,
+          "--access-token",
+          "history-token",
+        ],
+        { env },
+      );
+      return { ...result, captured };
+    } finally {
+      server.close();
+    }
+  }
+
+  it("reads the conversation from INSTAFY_CONVERSATION_ID, then CONVERSATION_ID", async () => {
+    const current = randomUUID();
+    const fallback = randomUUID();
+
+    for (const subcommand of ["messages", "runs"]) {
+      const primary = await historyWithEnv(subcommand, [], {
+        INSTAFY_CONVERSATION_ID: current,
+        CONVERSATION_ID: fallback,
+      });
+      expect(primary.code, subcommand).toBe(0);
+      expect(primary.captured.map((req) => new URL(`http://localhost${req.url}`).pathname)).toEqual([
+        `/conversations/${current}/${subcommand}`,
+      ]);
+
+      const secondary = await historyWithEnv(subcommand, [], {
+        INSTAFY_CONVERSATION_ID: "",
+        CONVERSATION_ID: fallback,
+      });
+      expect(secondary.code, subcommand).toBe(0);
+      expect(
+        secondary.captured.map((req) => new URL(`http://localhost${req.url}`).pathname),
+      ).toEqual([`/conversations/${fallback}/${subcommand}`]);
+    }
+  });
+
+  it("rejects an environment conversation that is not an id before any request", async () => {
+    // The value goes into /conversations/<id>/..., so a path or query in it would ask the
+    // controller for something else, and a stray word would only come back as a bare 404.
+    for (const subcommand of ["messages", "runs"]) {
+      for (const value of ["../../projects/x", "abc?limit=1&x=", "not-a-uuid"]) {
+        for (const [name, env] of [
+          ["INSTAFY_CONVERSATION_ID", { INSTAFY_CONVERSATION_ID: value, CONVERSATION_ID: randomUUID() }],
+          ["CONVERSATION_ID", { INSTAFY_CONVERSATION_ID: "", CONVERSATION_ID: value }],
+        ] as const) {
+          const label = `${subcommand} ${name}=${value}`;
+          const result = await historyWithEnv(subcommand, [], env);
+
+          expect(result.code, label).toBe(1);
+          expect(result.stderr, label).toContain(`${name} is not a conversation id.`);
+          expect(result.captured, label).toEqual([]);
+        }
+      }
+    }
+
+    // An explicit --conversation never reads the environment.
+    const conversationId = randomUUID();
+    const explicit = await historyWithEnv("messages", ["--conversation", conversationId], {
+      INSTAFY_CONVERSATION_ID: "../../projects/x",
+    });
+    expect(explicit.code).toBe(0);
+    expect(explicit.captured.map((req) => new URL(`http://localhost${req.url}`).pathname)).toEqual([
+      `/conversations/${conversationId}/messages`,
+    ]);
+  });
+
   it("resolves project from manifest for conversation listing", async () => {
     const projectId = randomUUID();
     const captured: CapturedRequest[] = [];

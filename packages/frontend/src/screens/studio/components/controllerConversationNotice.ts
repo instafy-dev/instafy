@@ -63,7 +63,10 @@ function resolveRuntimeAlertContent(
   switch (reason) {
     case "runtime_not_ready":
       if (isRuntimeLimitWaitAlert(details)) {
-        return "Waiting for a free cloud runtime. This team’s one runtime is busy in another space; stop it in Machines and this request will send.";
+        // Count-neutral, because plans allow different numbers of runtimes,
+        // and place-neutral, because the busy one can be in this same space.
+        // The controller stores this exact text (RUNTIME_LIMIT_WAIT_MESSAGE).
+        return "Waiting for a free cloud runtime. All of this team’s cloud runtimes are in use; stop one in Machines and this request will send.";
       }
       return isRecoverableRuntimeStartAlert(details, legacyContent)
         ? "Starting the workspace. Your queued request will continue automatically."

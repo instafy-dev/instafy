@@ -92,8 +92,7 @@ pub fn build_prompt_conversation_context(
     let turns = parse_conversation_history(history_value);
     let history_replay_required =
         provider_state_bool(provider_state, "historyReplayRequired").unwrap_or(false);
-    let stateful_thread_restored =
-        provider_thread_available(provider_state) && !history_replay_required;
+    let stateful_thread_restored = provider_state_claims_restored_thread(provider_state);
     let model_context_window = resolve_effective_model_context_window();
 
     if stateful_thread_restored {
@@ -307,6 +306,14 @@ fn build_compacted_context(
         }),
         section_text,
     }
+}
+
+/// Whether the prompt treats the provider thread as restored and skips history replay. The
+/// state only says what an earlier run left behind, so callers that can check the runtime
+/// clear this claim first when the thread cannot actually be resumed.
+pub(super) fn provider_state_claims_restored_thread(state: Option<&JsonValue>) -> bool {
+    provider_thread_available(state)
+        && !provider_state_bool(state, "historyReplayRequired").unwrap_or(false)
 }
 
 fn provider_thread_available(state: Option<&JsonValue>) -> bool {
