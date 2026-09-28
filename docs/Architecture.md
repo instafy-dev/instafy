@@ -171,9 +171,10 @@ Runtimes can be provisioned with different runtime-agent container images (for e
   that lease by the time the reconnect reuses the runtime, the new lease keeps
   its own settings. A runtime with no live lease, such as one stopped for
   idling, relaunches at the standard size. It keeps the webdev image and its
-  Shared Browser settings only when its newest lease's own launch attestation
-  proves a webdev launch; a stored or client-supplied `runtimeFlavor` does not
-  count. The settings carried are the env keys a client may request itself
+  Shared Browser settings only when the launch attestation of its newest own
+  launch proves a webdev launch; a stored or client-supplied `runtimeFlavor`
+  does not count, and neither does a tenant lease another project attached,
+  whose metadata the attaching caller wrote. The settings carried are the env keys a client may request itself
   (the browser session switch and viewer preferences such as the CDP
   screencast), which pass the request boundary again; resource limits and
   TURN credentials are injected fresh. Otherwise it relaunches with the base

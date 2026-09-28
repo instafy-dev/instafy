@@ -28214,6 +28214,176 @@ async fn dispatch_reconnect_relaunches_an_unattested_webdev_claim_with_the_base_
     .await
 }
 
+/// A tenant lease that another project attached to this runtime carries the
+/// runtime's id, but its metadata is whatever the attaching caller sent,
+/// including an attestation bound to its own id. The idle relaunch reads only
+/// the runtime's own launch generations: when the newest of those is a base
+/// launch it relaunches with the base image, and when it is an attested
+/// webdev launch it keeps that launch's settings, never the tenant's.
+#[tokio::test]
+async fn dispatch_reconnect_ignores_another_projects_tenant_lease_on_an_idle_runtime(
+) -> anyhow::Result<()> {
+    let pool = require_origin_test_pool("dispatch reconnect tenant lease test").await?;
+    let base_org_id = Uuid::new_v4();
+    let webdev_org_id = Uuid::new_v4();
+    let base_project_id = Uuid::new_v4();
+    let webdev_project_id = Uuid::new_v4();
+    let base_tenant_project_id = Uuid::new_v4();
+    let webdev_tenant_project_id = Uuid::new_v4();
+    let fixture = SharedDbFixture {
+        organizations: vec![base_org_id, webdev_org_id],
+        projects: vec![
+            base_project_id,
+            webdev_project_id,
+            base_tenant_project_id,
+            webdev_tenant_project_id,
+        ],
+    };
+
+    with_shared_db_fixture(fixture, async {
+        let label = "dispatch-reconnect-tenant-lease";
+        let provider = spawn_recording_hosted_provider().await?;
+        let mut config = dispatch_reconnect_test_config(label);
+        config.runtime_providers[0].endpoint = Some(provider.endpoint.clone());
+        let state = build_test_state(pool.clone(), config);
+
+        for (case, org_id, project_id, tenant_project_id, own_launch_is_webdev) in [
+            (
+                "base launch",
+                base_org_id,
+                base_project_id,
+                base_tenant_project_id,
+                false,
+            ),
+            (
+                "webdev launch",
+                webdev_org_id,
+                webdev_project_id,
+                webdev_tenant_project_id,
+                true,
+            ),
+        ] {
+            // Separate teams, so the first relaunch does not hold the
+            // second's runtime slot.
+            seed_dispatch_reconnect_projects(
+                &pool,
+                org_id,
+                &[project_id, tenant_project_id],
+                label,
+            )
+            .await?;
+            let runtime_id = Uuid::new_v4();
+            let own_lease_id = Uuid::new_v4();
+            let own_metadata = if own_launch_is_webdev {
+                webdev_boost_lease_metadata(own_lease_id)
+            } else {
+                json!({
+                    "source": "studio",
+                    "sizeId": "standard",
+                    "env": { "RUNTIME_CPU_LIMIT": "2", "RUNTIME_MEMORY_LIMIT": "4g" },
+                })
+            };
+            seed_idle_stopped_hosted_runtime(
+                &pool,
+                project_id,
+                runtime_id,
+                "Webdev runtime (Playwright)",
+                &[EndedRuntimeLease {
+                    id: own_lease_id,
+                    requested_seconds_ago: 7200,
+                    metadata: own_metadata,
+                }],
+            )
+            .await?;
+            // Newer than the runtime's own launch, from another project, and
+            // bound to its own id as if the controller had launched it.
+            let tenant_lease_id = Uuid::new_v4();
+            let tenant_metadata = json!({
+                "runtimeFlavor": "webdev",
+                "sizeId": "boost",
+                "env": {
+                    "INSTAFY_ENABLE_BROWSER_SESSION": "1",
+                    "INSTAFY_BROWSER_PREFERRED_VIEWER": "rfb",
+                    "INSTAFY_BROWSER_VIEWPORT_ONLY": "0",
+                },
+                "_instafyManagedRuntimeLaunch": {
+                    "version": 1,
+                    "flavor": "webdev",
+                    "generation": tenant_lease_id.to_string(),
+                },
+            });
+            pool.get()
+                .await?
+                .execute(
+                    "insert into runtime_leases
+                       (id, project_id, runtime_id, status, scope, parent_lease_id, metadata,
+                        requested_at, released_at)
+                     values ($1, $2, $3, 'released', 'tenant', $4, $5,
+                             now() - interval '10 minutes', now() - interval '5 minutes')",
+                    &[
+                        &tenant_lease_id,
+                        &tenant_project_id,
+                        &runtime_id,
+                        &own_lease_id,
+                        &PgJson(tenant_metadata),
+                    ],
+                )
+                .await?;
+
+            let dispatched =
+                dispatch_prompt_to_seeded_runtime(&pool, &state, project_id, runtime_id, None)
+                    .await?;
+            assert!(
+                dispatched.alerts.is_empty(),
+                "{case}: {:?}",
+                dispatched.alerts
+            );
+            let (successor_id, metadata) = reconnect_successor_lease(&pool, &dispatched).await?;
+            assert_eq!(metadata["sizeId"], json!("standard"), "{case}: {metadata}");
+            assert!(
+                metadata["env"]
+                    .get("INSTAFY_BROWSER_PREFERRED_VIEWER")
+                    .is_none(),
+                "{case}: the tenant's settings never carry: {metadata}"
+            );
+            if own_launch_is_webdev {
+                assert_eq!(
+                    metadata["runtimeFlavor"],
+                    json!("webdev"),
+                    "{case}: {metadata}"
+                );
+                assert_eq!(
+                    metadata["_instafyManagedRuntimeLaunch"]["generation"],
+                    json!(successor_id.to_string()),
+                    "{case}: {metadata}"
+                );
+                assert_eq!(
+                    metadata["env"]["INSTAFY_BROWSER_VIEWPORT_ONLY"],
+                    json!("1"),
+                    "{case}: the runtime's own launch settings: {metadata}"
+                );
+            } else {
+                assert!(
+                    metadata.get("runtimeFlavor").is_none(),
+                    "{case}: {metadata}"
+                );
+                assert!(
+                    metadata.get("_instafyManagedRuntimeLaunch").is_none(),
+                    "{case}: {metadata}"
+                );
+                assert!(
+                    metadata["env"]
+                        .get("INSTAFY_ENABLE_BROWSER_SESSION")
+                        .is_none(),
+                    "{case}: {metadata}"
+                );
+            }
+        }
+        Ok(())
+    })
+    .await
+}
+
 /// The reconnect reads the live lease's settings before its allocation
 /// transaction, and another start can replace that lease in between. Reuse
 /// then sees a different generation, which keeps its own settings: the first

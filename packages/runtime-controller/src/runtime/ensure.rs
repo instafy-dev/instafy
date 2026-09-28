@@ -1426,7 +1426,7 @@ pub(crate) async fn ensure_runtime_for_dispatch_reconnect(
     // its own settings and is never refused over a flavor read from this one.
     let ended_lease = match live_lease {
         Some(_) => None,
-        None => load_newest_lease_metadata(state, &runtime.id).await?,
+        None => load_newest_lease_metadata(state, runtime).await?,
     };
     let metadata = build_dispatch_reconnect_metadata(
         &runtime.provider,
@@ -1499,11 +1499,16 @@ async fn load_live_lease_metadata(
     Ok(row.map(|row| (row.get("id"), row.get("metadata"))))
 }
 
-/// The runtime's newest lease and the metadata it holds, newest by request
-/// time as the requeue path reads it.
+/// The runtime's newest own launch generation and the metadata it holds,
+/// newest by request time.
+///
+/// Only leases the launch path wrote for the runtime's own project count. A
+/// tenant lease carries the host runtime's id but another project's, and its
+/// metadata is stored as the attaching caller sent it, so an attestation in
+/// it proves nothing about how the controller launched this runtime.
 async fn load_newest_lease_metadata(
     state: &AppState,
-    runtime_id: &Uuid,
+    runtime: &RuntimeRecord,
 ) -> Result<Option<(Uuid, Option<JsonValue>)>, (StatusCode, Json<ApiError>)> {
     let conn = state
         .pool
@@ -1515,9 +1520,12 @@ async fn load_newest_lease_metadata(
             "select id, metadata
              from runtime_leases
              where runtime_id = $1
+               and project_id = $2
+               and scope <> 'tenant'
+               and parent_lease_id is null
              order by requested_at desc
              limit 1",
-            &[runtime_id],
+            &[&runtime.id, &runtime.project_id],
         )
         .await
         .map_err(|error| {
