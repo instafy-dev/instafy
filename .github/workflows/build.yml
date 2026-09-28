@@ -343,6 +343,8 @@ jobs:
             scripts/verify-changeset-pack.test.mjs \
             scripts/lib/codexMachineAuthExpiry.test.mjs \
             scripts/lib/localUserTokenSecret.test.mjs \
+            scripts/lib/supabaseImageMirror.test.mjs \
+            scripts/mirror-supabase-images.test.mjs \
             scripts/check-supabase-migrations.test.mjs \
             scripts/test-supabase-migrations-empty-db.test.mjs \
             scripts/ensure-supabase-postgres-image.test.mjs \

@@ -93,7 +93,7 @@ test("browser-test startup excludes only Edge Runtime on both initial start and 
 
 // Execute the real startup functions with inert external boundaries. Importing
 // the CLI module itself would start a developer's stack, which tests must not do.
-function stackFixture(env = {}, { failFirst = false, failRetry = false, failPreparation = false, existing = null } = {}) {
+function stackFixture(env = {}, { failFirst = false, failRetry = false, failPreparation = false, failMirror = false, existing = null } = {}) {
   const source = fs.readFileSync(new URL("../supabase-stack.mjs", import.meta.url), "utf8");
   const program = source.slice(source.indexOf("function startSupabase()"), source.indexOf("function stopSupabase()"));
   assert.match(program, /function ensureSupabase\(\)/);
@@ -110,6 +110,10 @@ function stackFixture(env = {}, { failFirst = false, failRetry = false, failPrep
     applySupabaseMigrations: () => record("migrate"),
     ensureSupabaseEmailTemplateMounts: () => record("templates"),
     readSupabaseEnv: () => { record("status"); return existing; },
+    prepareSupabaseImageMirror: (options) => {
+      record("mirror", JSON.parse(JSON.stringify(options)));
+      if (failMirror) throw Error("mirror-configuration-refused");
+    },
     prepareSupabaseSerialPull: (options) => {
       record("prepare", JSON.parse(JSON.stringify(options)));
       if (failPreparation) throw Error("preparation-refused");
@@ -134,7 +138,9 @@ test("real startup and retry use the same profile while retaining templates, mig
     const retry = buildSupabaseStartArgs(env.SUPABASE_DATABASE_ONLY, { authOnly: env.SUPABASE_AUTH_ONLY, browserTest: env.SUPABASE_BROWSER_TEST, ignoreHealthCheck: !databaseOnly });
     assert.deepEqual(h.calls.filter(([name]) => name === "cli"),
       failFirst ? [["cli", args], ["cli", ["stop"]], ["cli", retry]] : [["cli", args]]);
+    assert.deepEqual(h.calls.find(([name]) => name === "mirror"), ["mirror", { repoRoot: "/inert", databaseOnly, authOnly, browserTest }]);
     assert.deepEqual(h.calls.find(([name]) => name === "prepare"), ["prepare", { repoRoot: "/inert", databaseOnly, authOnly, browserTest }]);
+    assert.deepEqual(h.calls.slice(0, 3).map(([name]) => name), ["sync", "mirror", "prepare"]);
     assert.deepEqual(h.calls.slice(-(databaseOnly ? 4 : 5)).map(([name]) => name),
       [...(databaseOnly ? [] : ["templates"]), "tmp", "flag", "migrate", "status"]);
   }
@@ -156,7 +162,10 @@ test("invalid or conflicting profiles fail before status, migration copies or an
 test("Auth preparation or repeated startup failure cannot fall back to a full stack", () => {
   const preparation = stackFixture({ SUPABASE_AUTH_ONLY: "1" }, { failPreparation: true });
   assert.throws(() => preparation.run(), /preparation-refused/);
-  assert.deepEqual(preparation.calls.map(([name]) => name), ["sync", "prepare"]);
+  assert.deepEqual(preparation.calls.map(([name]) => name), ["sync", "mirror", "prepare"]);
+  const mirror = stackFixture({ SUPABASE_AUTH_ONLY: "1" }, { failMirror: true });
+  assert.throws(() => mirror.run(), /mirror-configuration-refused/);
+  assert.deepEqual(mirror.calls.map(([name]) => name), ["sync", "mirror"]);
   const retry = stackFixture({ SUPABASE_AUTH_ONLY: "1" }, { failFirst: true, failRetry: true });
   assert.throws(() => retry.run(), /startup-failed/);
   assert.equal(retry.calls.filter(([name]) => name === "cli").length, 3);
@@ -166,7 +175,7 @@ test("Auth preparation or repeated startup failure cannot fall back to a full st
 test("browser-test preparation and startup failures never re-enable Edge Runtime", () => {
   const preparation = stackFixture({ SUPABASE_BROWSER_TEST: "1" }, { failPreparation: true });
   assert.throws(() => preparation.run(), /preparation-refused/);
-  assert.deepEqual(preparation.calls.map(([name]) => name), ["sync", "prepare"]);
+  assert.deepEqual(preparation.calls.map(([name]) => name), ["sync", "mirror", "prepare"]);
   const retry = stackFixture({ SUPABASE_BROWSER_TEST: "1" }, { failFirst: true, failRetry: true });
   assert.throws(() => retry.run(), /startup-failed/);
   assert.deepEqual(retry.calls.filter(([name]) => name === "cli"), [
