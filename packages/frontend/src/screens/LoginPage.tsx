@@ -37,11 +37,25 @@ import { theme } from "../styles/theme";
 import { applyPageMeta } from "../utils/seo";
 import { TentacleBackdrop } from "./landing/LandingTentacleScene";
 
+type LoginIntent = "login" | "signup";
+
 type LoginStep = "chooseAccount" | "email" | "password" | "otp" | "recovery";
 
 // The one control whose press is in flight. It shows the Button's pending
 // spinner; every other control on the page is disabled until it settles.
 type PendingControl = LoginOAuthProvider | "submit" | "forgot" | "startOtp" | "resend" | "guest";
+
+const INVALID_CREDENTIALS_MESSAGE =
+  "That email and password don't match. New here, or no password yet? We'll email you a code.";
+
+function isInvalidCredentials(error: unknown): boolean {
+  if (!error || typeof error !== "object") return false;
+  if ("code" in error && typeof error.code === "string") {
+    return error.code === "invalid_credentials";
+  }
+  // Older auth servers may omit the machine-readable code.
+  return "message" in error && error.message === "Invalid login credentials";
+}
 
 const REMEMBERED_ACCOUNTS_KEY = "instafy.rememberedAccounts";
 
@@ -181,6 +195,8 @@ export function LoginPage() {
     return "/studio";
   }, [location.search]);
 
+  const [intent, setIntent] = useState<LoginIntent>("login");
+  const [invalidCredentials, setInvalidCredentials] = useState(false);
   const [step, setStep] = useState<LoginStep>("email");
   const [accountChooserDismissed, setAccountChooserDismissed] = useState(false);
   const [rememberedAccounts, setRememberedAccounts] = useState<RememberedAccount[]>(() =>
@@ -248,8 +264,8 @@ export function LoginPage() {
     if (step === "otp") {
       return "Check your inbox";
     }
-    return "Log in or sign up";
-  }, [recoveryMode, step]);
+    return intent === "signup" ? "Create your account" : "Log in to Instafy";
+  }, [intent, recoveryMode, step]);
 
   const stepDescription = useMemo((): string | null => {
     if (recoveryMode) {
@@ -266,19 +282,26 @@ export function LoginPage() {
     if (step === "password") {
       return null;
     }
+    if (intent === "signup") {
+      return "We'll email you a verification code. No password needed.";
+    }
     // Most people have no AI subscription; the managed tier is free, and that is
     // the sentence that opens the door for them. "Your projects" named something
     // they do not have yet.
     return "Start with the AI that comes with Instafy, or bring the one you already pay for.";
-  }, [normalizedEmail, recoveryMode, step]);
+  }, [intent, normalizedEmail, recoveryMode, step]);
 
   useEffect(() => {
     applyPageMeta({
-      title: recoveryMode ? "Reset Password · Instafy" : "Log In · Instafy",
+      title: recoveryMode
+        ? "Reset Password · Instafy"
+        : intent === "signup"
+          ? "Create Account · Instafy"
+          : "Log In · Instafy",
       description: "Sign in to Instafy and continue working in your project workspace.",
       image: "/og-image.png",
     });
-  }, [recoveryMode]);
+  }, [intent, recoveryMode]);
 
   useEffect(() => {
     if (!loading && user && !recoveryMode) {
@@ -341,11 +364,12 @@ export function LoginPage() {
       otpRef.current?.focus();
     }
     stepAutofocusReadyRef.current = true;
-  }, [loading, user, recoveryMode, step, shouldSkipInitialEmailAutofocus]);
+  }, [intent, loading, user, recoveryMode, step, shouldSkipInitialEmailAutofocus]);
 
   const clearTransientState = () => {
     resetNativeAuthState();
     setError(null);
+    setInvalidCredentials(false);
     setMessage(null);
     setAwaitingBrowser(null);
     setPendingControl(null);
@@ -366,8 +390,11 @@ export function LoginPage() {
     }
   };
 
-  const handleContinueFromEmail = (event: FormEvent<HTMLFormElement>) => {
+  const handleContinueFromEmail = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
+    if (pendingControlRef.current !== null) {
+      return;
+    }
     const nextEmail = normalizeEmail(email);
     if (!nextEmail) {
       setError("Enter your email address.");
@@ -378,7 +405,11 @@ export function LoginPage() {
     setEmail(nextEmail);
     setPassword("");
     setOtpCode("");
-    setStep("password");
+    if (intent === "signup") {
+      await handleStartOtp("submit");
+    } else {
+      setStep("password");
+    }
   };
 
   const handleEditEmail = () => {
@@ -415,14 +446,18 @@ export function LoginPage() {
       });
       navigate(redirectTarget, { replace: true });
     } catch (err) {
-      const details = err instanceof Error ? err.message : "Unable to sign in.";
-      setError(details);
+      const invalid = isInvalidCredentials(err);
+      setInvalidCredentials(invalid);
+      setError(invalid ? INVALID_CREDENTIALS_MESSAGE : "Unable to sign in right now. Try again.");
     } finally {
       setPendingControl(null);
     }
   };
 
-  const handleStartOtp = async () => {
+  const handleStartOtp = async (control: "submit" | "startOtp" = "startOtp") => {
+    if (pendingControlRef.current !== null) {
+      return;
+    }
     const nextEmail = normalizeEmail(email);
     if (!nextEmail) {
       setError("Enter your email address.");
@@ -430,7 +465,7 @@ export function LoginPage() {
     }
     clearTransientState();
     setAccountChooserDismissed(true);
-    setPendingControl("startOtp");
+    setPendingControl(control);
     try {
       await sendEmailOtp(nextEmail);
       setEmail(nextEmail);
@@ -572,6 +607,7 @@ export function LoginPage() {
 
   const handleSelectAccount = (account: RememberedAccount) => {
     clearTransientState();
+    setIntent("login");
     setAccountChooserDismissed(true);
     setEmail(account.email);
     setPassword("");
@@ -601,6 +637,7 @@ export function LoginPage() {
 
   const handleUseAnotherAccount = () => {
     clearTransientState();
+    setIntent("login");
     setAccountChooserDismissed(true);
     setEmail("");
     setPassword("");
@@ -610,6 +647,7 @@ export function LoginPage() {
 
   const handleCreateAccount = () => {
     handleUseAnotherAccount();
+    setIntent("signup");
   };
 
   // The desktop shell hands sign-in to the system browser, and that wait has
@@ -760,6 +798,7 @@ export function LoginPage() {
               </div>
               <Button
                 onPress={handleEditEmail}
+                isDisabled={submitting}
                 variant="ghost"
                 size="xs"
                 radius="full"
@@ -771,6 +810,11 @@ export function LoginPage() {
           </div>
 
           <form onSubmit={handlePasswordContinue} className="space-y-5">
+            {error ? (
+              <InlineNotice tone="danger" role="alert" data-testid="login-error">
+                {error}
+              </InlineNotice>
+            ) : null}
             <div>
               <Text as="label" htmlFor="password" variant="overline" tone="muted" className="sr-only">
                 Password
@@ -824,7 +868,7 @@ export function LoginPage() {
 
             <Button
               type="submit"
-              variant="primary"
+              variant={invalidCredentials ? "outline" : "primary"}
               size="lg"
               radius="full"
               className="w-full justify-center px-6 py-3 text-sm font-semibold"
@@ -839,11 +883,11 @@ export function LoginPage() {
 
           <div className="space-y-2">
             <Button
-              variant="outline"
+              variant={invalidCredentials ? "primary" : "outline"}
               radius="full"
               size="lg"
               fullWidth
-              onPress={handleStartOtp}
+              onPress={() => void handleStartOtp()}
               isPending={pendingControl === "startOtp"}
               isDisabled={isBlocked("startOtp") || normalizedEmail.length === 0}
             >
@@ -914,10 +958,10 @@ export function LoginPage() {
             radius="full"
             size="lg"
             fullWidth
-            onPress={handleContinueWithPassword}
+            onPress={intent === "signup" ? handleEditEmail : handleContinueWithPassword}
             isDisabled={submitting}
           >
-            Continue with password
+            {intent === "signup" ? "Use a different email" : "Continue with password"}
           </Button>
         </div>
       );
@@ -1031,11 +1075,22 @@ export function LoginPage() {
             size="lg"
             radius="full"
             className="w-full justify-center px-6 py-3 text-sm font-semibold"
-            isDisabled={submitting || normalizeEmail(email).length === 0}
+            isPending={pendingControl === "submit"}
+            isDisabled={isBlocked("submit") || normalizeEmail(email).length === 0}
           >
-            Continue
+            {intent === "signup" ? "Send verification code" : "Continue"}
           </Button>
         </form>
+
+        <Button
+          variant="ghost"
+          radius="full"
+          fullWidth
+          onPress={intent === "signup" ? handleUseAnotherAccount : handleCreateAccount}
+          isDisabled={submitting}
+        >
+          {intent === "signup" ? "Already have an account? Log in" : "Create account"}
+        </Button>
 
         <OrDivider />
 
@@ -1190,7 +1245,7 @@ export function LoginPage() {
                   {message}
                 </InlineNotice>
               ) : null}
-              {error ? (
+              {error && step !== "password" ? (
                 <InlineNotice tone="danger" role="alert" className="mt-6" data-testid="login-error">
                   {error}
                 </InlineNotice>

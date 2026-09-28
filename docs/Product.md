@@ -9,6 +9,13 @@ Entry links go to Studio, which checks authentication before downloading the wor
 visitors see **Open Studio**; signed-out visitors see **Get started** and are sent through login
 with their destination preserved. Opening the public homepage itself does not require signing in.
 
+Login offers separate **Create account** and password sign-in paths. Creating an account sends
+an email verification code immediately; entering it signs the user in and returns them to their
+original destination. Codes work across browsers and devices and follow the auth server's code
+length. A password mismatch offers the same account-neutral guidance for everyone, with email
+code sign-in as the primary alternative. Existing users can also use that code path. Password
+setup remains available through **Forgot password?**; sign-up does not require a password.
+
 Pending route and authentication handoffs use a neutral full-screen loading surface: one Octo
 swimming above “Getting things ready…”, without a wordmark. The canonical animation stops for
 reduced-motion preferences, and the loading surface disappears once the destination or login
