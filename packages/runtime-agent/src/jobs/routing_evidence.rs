@@ -711,7 +711,19 @@ fn lookup_leaf(argv: &[&str]) -> bool {
     matches!(
         &argv[1..],
         ["conversation", "list", ..] | ["agents", "context", "list", ..]
-    ) || matches!(&argv[1..],["conversation","search"|"show",query,..] if !query.is_empty() && !query.starts_with('-'))
+    ) || matches!(&argv[1..],["conversation","search",query,..] if !query.is_empty() && !query.starts_with('-'))
+        || matches!(&argv[1..], ["conversation", "show", args @ ..] if conversation_show_reads(args))
+}
+
+/// With or without a target, a successful `conversation show` reads one conversation.
+/// With none the CLI reads the job's own conversation from INSTAFY_CONVERSATION_ID, which
+/// is the form the prompt asks for. Older CLIs reject that form with a nonzero exit, and
+/// only a successful exit is credited. So options and their values, such as `--limit 20`,
+/// never decide the answer, while a help request or an empty target reads nothing.
+fn conversation_show_reads(args: &[&str]) -> bool {
+    !args
+        .iter()
+        .any(|word| matches!(*word, "" | "--help" | "-h"))
 }
 
 fn rejected_observation(program: &str, argv: &[&str]) -> bool {
@@ -932,13 +944,42 @@ mod tests {
             routing_evidence_progress(None, &[command(lookup, "completed", Some(0))])
                 .context_retrieval
         );
+        // Without a target, `conversation show` reads the job's own conversation.
+        // Option values are not targets, so they neither block nor fake the lookup.
+        for text in [
+            "instafy conversation show --json",
+            "instafy conversation show --include-threads --json",
+            "instafy conversation show",
+            "instafy conversation show --limit 20 --json",
+            "instafy conversation show --include-threads --limit 200 --json",
+            "instafy conversation show --limit=20 --json",
+            "instafy conversation show --space 123e4567-e89b-12d3-a456-426614174000 --json",
+            "instafy conversation show --server-url http://127.0.0.1:8788 --json",
+            "instafy conversation show --space 123e4567-e89b-12d3-a456-426614174000 record --json",
+        ] {
+            assert!(
+                routing_evidence_progress(None, &[command(text, "completed", Some(0))])
+                    .context_retrieval,
+                "{text}"
+            );
+            // A CLI too old to fill in the id exits nonzero and earns nothing.
+            assert!(
+                !routing_evidence_progress(None, &[command(text, "completed", Some(1))])
+                    .context_retrieval,
+                "{text}"
+            );
+        }
         for text in [
             "echo 'instafy conversation search missing'",
             "instafy chat --conversation a hello",
             "instafy agents context upsert --context fake",
             "instafy conversation delete a",
             "instafy conversation search --help",
-            "instafy conversation show --json",
+            "instafy conversation search --json",
+            "instafy conversation show --help",
+            "instafy conversation show --json -h",
+            "instafy conversation show --limit 20 --help",
+            "instafy conversation show record --help",
             "rg missing .codex/sessions && instafy conversation list",
         ] {
             assert!(

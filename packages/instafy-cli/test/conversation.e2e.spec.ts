@@ -304,4 +304,123 @@ describe("conversation commands", () => {
       server.close();
     }
   });
+
+  function twoConversations(): { current: MockConversation; other: MockConversation } {
+    return {
+      current: {
+        id: randomUUID(),
+        title: "Bookkeeping setup",
+        messages: [{ role: "user", content: "What's next in the setup?" }],
+      },
+      other: {
+        id: randomUUID(),
+        title: "Fruit planning",
+        messages: [{ role: "user", content: "Please summarize the fruit ideas." }],
+      },
+    };
+  }
+
+  async function showWithEnv(
+    projectId: string,
+    conversations: MockConversation[],
+    target: string[],
+    env: NodeJS.ProcessEnv,
+  ) {
+    const server = startMockController(projectId, conversations);
+    await once(server, "listening");
+    try {
+      const address = server.address();
+      const port = typeof address === "object" && address ? address.port : 0;
+      return await execCli(
+        [
+          "conversation",
+          "show",
+          ...target,
+          "--include-threads",
+          "--space",
+          projectId,
+          "--server-url",
+          `http://127.0.0.1:${port}`,
+          "--access-token",
+          "controller-token",
+          "--json",
+        ],
+        env,
+      );
+    } finally {
+      server.close();
+    }
+  }
+
+  it("shows the current conversation from INSTAFY_CONVERSATION_ID when no target is given", async () => {
+    const projectId = randomUUID();
+    const { current, other } = twoConversations();
+
+    const { code, stdout, stderr } = await showWithEnv(projectId, [other, current], [], {
+      INSTAFY_CONVERSATION_ID: current.id,
+      CONVERSATION_ID: other.id,
+    });
+
+    if (code !== 0) {
+      // eslint-disable-next-line no-console
+      console.error("stdout:", stdout, "stderr:", stderr);
+    }
+    expect(code).toBe(0);
+    const output = JSON.parse(stdout);
+    expect(output.conversation).toMatchObject({ id: current.id, title: "Bookkeeping setup" });
+    expect(output.messages.map((message: { content: string }) => message.content)).toEqual([
+      "What's next in the setup?",
+    ]);
+  });
+
+  it("falls back to CONVERSATION_ID and still lets an explicit target win", async () => {
+    const projectId = randomUUID();
+    const { current, other } = twoConversations();
+
+    const fallback = await showWithEnv(projectId, [other, current], [], {
+      INSTAFY_CONVERSATION_ID: "",
+      CONVERSATION_ID: current.id,
+    });
+    expect(fallback.code).toBe(0);
+    expect(JSON.parse(fallback.stdout).conversation.id).toBe(current.id);
+
+    const explicit = await showWithEnv(projectId, [other, current], [other.id], {
+      INSTAFY_CONVERSATION_ID: current.id,
+    });
+    expect(explicit.code).toBe(0);
+    expect(JSON.parse(explicit.stdout).conversation.id).toBe(other.id);
+  });
+
+  it("fails clearly when no target is given and no conversation is in the environment", async () => {
+    const projectId = randomUUID();
+    const { current, other } = twoConversations();
+
+    const { code, stdout, stderr } = await showWithEnv(projectId, [other, current], [], {
+      INSTAFY_CONVERSATION_ID: "",
+      CONVERSATION_ID: "",
+    });
+
+    expect(code).toBe(1);
+    expect(stdout).toBe("");
+    expect(stderr).toContain(
+      "No conversation given. Pass an id or title, or set INSTAFY_CONVERSATION_ID.",
+    );
+  });
+
+  it("rejects an explicit empty target instead of showing the current conversation", async () => {
+    const projectId = randomUUID();
+    const { current, other } = twoConversations();
+
+    // `instafy conversation show "$ID"` after a search that found nothing passes an empty
+    // word. Answering with the current conversation would pass it off as the other chat.
+    for (const target of ["", "   "]) {
+      const { code, stdout, stderr } = await showWithEnv(projectId, [other, current], [target], {
+        INSTAFY_CONVERSATION_ID: current.id,
+      });
+
+      expect(code, JSON.stringify(target)).toBe(1);
+      expect(stdout, JSON.stringify(target)).toBe("");
+      expect(stderr, JSON.stringify(target)).toContain("Conversation target cannot be empty.");
+    }
+  });
 });

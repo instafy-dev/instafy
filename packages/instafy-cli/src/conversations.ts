@@ -22,7 +22,8 @@ export type ConversationSearchOptions = ConversationListOptions & {
 
 export type ConversationShowOptions = ConversationCommonOptions & {
   project?: string;
-  target: string;
+  // Undefined means no target was given, which reads the current conversation.
+  target?: string;
   limit?: number;
   includeThreads?: boolean;
   json?: boolean;
@@ -543,12 +544,35 @@ export async function searchConversations(options: ConversationSearchOptions): P
   return matches;
 }
 
+// Runtime jobs export the conversation they belong to, so an agent reading its own
+// conversation does not have to copy the UUID by hand. A copied id once picked up
+// digits from the project id printed next to it.
+function resolveShowTarget(rawTarget: string | undefined): { target: string; fromEnv: boolean } {
+  if (rawTarget !== undefined) {
+    // An empty target is usually a shell variable that should have named another
+    // conversation. Showing the current one instead would answer for the wrong chat.
+    const explicit = trimOrNull(rawTarget);
+    if (!explicit) {
+      throw new Error("Conversation target cannot be empty.");
+    }
+    return { target: explicit, fromEnv: false };
+  }
+
+  const current =
+    trimOrNull(process.env["INSTAFY_CONVERSATION_ID"]) ??
+    trimOrNull(process.env["CONVERSATION_ID"]);
+  if (current) {
+    return { target: current, fromEnv: true };
+  }
+
+  throw new Error(
+    "No conversation given. Pass an id or title, or set INSTAFY_CONVERSATION_ID.",
+  );
+}
+
 export async function showConversation(options: ConversationShowOptions): Promise<void> {
   const projectId = resolveProjectId(options.project);
-  const target = trimOrNull(options.target);
-  if (!target) {
-    throw new Error("Conversation target cannot be empty.");
-  }
+  const { target, fromEnv } = resolveShowTarget(options.target);
 
   const limit = clampLimit(options.limit, DEFAULT_MESSAGE_LIMIT);
   const conversations = await fetchProjectConversations({
@@ -561,7 +585,9 @@ export async function showConversation(options: ConversationShowOptions): Promis
   });
 
   let selected: SearchMatch | null = null;
-  if (isUuid(target)) {
+  // An environment value is always an id. Treating it as search text could open a
+  // different conversation whose title happens to match.
+  if (fromEnv || isUuid(target)) {
     const conversation = conversations.find((entry) => entry.id === target) ?? null;
     if (conversation) {
       selected = {

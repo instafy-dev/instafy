@@ -11,7 +11,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use crate::active_turn_input::ActiveTurnInputReceiver;
 use crate::codex::{
     CodexClient, CodexFallbackSummaryKind, CodexFinalOutputSchema, CodexRunOptions, CodexRunOutput,
-    classify_internal_codex_fallback_summary,
+    classify_internal_codex_fallback_summary, provider_thread_restorable_on_this_runtime,
 };
 use crate::config::Config;
 use crate::controller::{LeaseJob, Registration};
@@ -55,7 +55,7 @@ use self::routing_evidence::{RoutingEvidenceRequirements, routing_evidence_progr
 
 use self::conversation_context::{
     build_prompt_conversation_context, enrich_prompt_context_metrics, estimate_prompt_token_count,
-    format_conversation_history, parse_conversation_history,
+    format_conversation_history, parse_conversation_history, provider_state_claims_restored_thread,
 };
 use self::workspace_change_detection::GitStatusEntry;
 
@@ -376,6 +376,35 @@ fn restored_provider_thread_available(
     provider_state_string(provider_state, thread_key)
         .or_else(|| provider_state_string(provider_state, "threadId"))
         .is_some()
+}
+
+/// The controller attaches the previous run's provider state when it enqueues a job, whichever
+/// runtime later leases it. After a restart, or on a fresh runtime, the thread that state names
+/// is often not restorable here, and Codex then quietly starts an empty thread. The prompt lane
+/// and the contextual-instruction suppression are both chosen from this state before Codex
+/// tries, so a state that still claims a restored thread would send the compact reminder to a
+/// model with no history, no workspace memory snapshot and no skills catalog. Such a state is
+/// marked for history replay so the turn gets the full lane. The second value says whether the
+/// state was marked.
+fn provider_conversation_state_for_this_runtime(
+    state: Option<JsonValue>,
+    browser_mode: bool,
+) -> (Option<JsonValue>, bool) {
+    let Some(mut state) = state else {
+        return (None, false);
+    };
+    let claims_restored_thread = provider_state_claims_restored_thread(Some(&state))
+        || restored_provider_thread_available(Some(&state), browser_mode);
+    if !claims_restored_thread
+        || provider_thread_restorable_on_this_runtime(Some(&state), browser_mode)
+    {
+        return (Some(state), false);
+    }
+    let Some(map) = state.as_object_mut() else {
+        return (Some(state), false);
+    };
+    map.insert("historyReplayRequired".to_string(), JsonValue::Bool(true));
+    (Some(state), true)
 }
 
 fn broad_contextual_instruction_suppression_reason(
@@ -5503,9 +5532,20 @@ impl JobProcessor {
                 expects_generic_mcp_tool_execution,
                 explicit_personal_browser_execution,
             ) && !job_requests_cross_chat_context_lookup(job);
-        let provider_conversation_state_for_run = persist_codex_conversation_thread
-            .then(|| job.payload.get("provider_conversation_state").cloned())
-            .flatten();
+        let (provider_conversation_state_for_run, provider_thread_not_restorable) =
+            provider_conversation_state_for_this_runtime(
+                persist_codex_conversation_thread
+                    .then(|| job.payload.get("provider_conversation_state").cloned())
+                    .flatten(),
+                browser_mode,
+            );
+        if provider_thread_not_restorable {
+            tracing::info!(
+                job_id = %job.id,
+                browser_mode,
+                "stored provider thread cannot be resumed on this runtime; replaying conversation history"
+            );
+        }
         let broad_context_suppression_reason = broad_contextual_instruction_suppression_reason(
             job,
             prompt_text,
@@ -5605,6 +5645,12 @@ impl JobProcessor {
             };
 
         ensure_ambient_participation_prompt_context(job, &mut prompt, &mut prompt_context);
+        if provider_thread_not_restorable && let Some(metrics) = prompt_context.as_object_mut() {
+            metrics.insert(
+                "historyReplayReason".to_string(),
+                json!("provider_thread_not_restorable_on_runtime"),
+            );
+        }
 
         if expects_generic_mcp_tool_execution
             && let Some(observation) = routing_pre_observation.as_ref()
@@ -7658,7 +7704,7 @@ Avoid creating dependency caches or stores in the canonical workspace root when 
                 - Compact agent context cards are soft hints/cache for prior context, current work focus, and coordination direction. Use the relevant cards included in this prompt when present; otherwise query them with `instafy agents context list --json --query \"<topic>\"` when the latest request asks for prior project, coordination, audit, host, or hardware context.\n\
                 - Agent-to-agent conversations are first-class conversations. For unknown-focus follow-ups, lookup first, answer directly when evidence is sufficient, ask one clear prior thread when durable context matters, and do not poll all agents to discover soft focus.\n\
                 - For follow-ups about lanes, workers, files, or evidence, prefer the most recent matching user-visible evidence in this active conversation. Use older same-topic context cards or prior conversation search results only if current conversation evidence is absent or clearly not the target.\n\
-                - For current-conversation evidence-only follow-ups, do not search workspace files, source trees, `.instafy`, `.codex-runtime*`, `.codex-runtime-fallback`, or runtime logs. If restored provider context is insufficient, inspect only the active conversation with `instafy conversation show <conversation-id> --include-threads --json`.\n\
+                - For current-conversation evidence-only follow-ups, do not search workspace files, source trees, `.instafy`, `.codex-runtime*`, `.codex-runtime-fallback`, or runtime logs. If restored provider context is insufficient, inspect only the active conversation with `instafy conversation show --include-threads --json`, which reads this conversation's id from the environment. Only if an older CLI reports a missing conversation argument, add the Conversation ID from Runtime context.\n\
                 - Same agent handle does not imply global memory in a new chat. Recover cross-chat context explicitly with context cards and `instafy conversation search/show --include-threads` before relying on old thread knowledge.\n\
                 - Hardware/IO context card facts are not proof. Verify on the active runtime before claiming serial, BLE, USB, or flashing access.\n\
                 - If the active runtime cannot access host-native IO, say that a Desktop/CLI runtime on the attached machine is needed.\n",
@@ -7817,7 +7863,7 @@ Avoid creating dependency caches or stores in the canonical workspace root when 
               - For `multi_agent_plan.mode = 'read_only'`, include `writeScope.readOnlyPaths` when the worker should inspect specific files/globs, and repeat those exact paths in the worker prompt. For prepared source trees, prefer concrete implementation/test/config subpaths over the top-level checkout root. If exact paths are unknown, make the worker's prompt start with bounded discovery inside a narrow scope and require it to report the actual paths inspected.\n\
               - Agent-to-agent conversations are first-class conversations. For unknown-focus follow-ups, lookup first, answer directly when evidence is sufficient, ask one clear prior thread when durable context matters, and do not poll all agents to discover soft focus.\n\
               - For follow-ups about lanes, workers, files, or evidence, prefer the most recent matching user-visible evidence in this active conversation. Use older same-topic context cards or prior conversation search results only if current conversation evidence is absent or clearly not the target.\n\
-              - For current-conversation evidence-only follow-ups, do not search workspace files, source trees, `.instafy`, `.codex-runtime*`, `.codex-runtime-fallback`, or runtime logs. If restored provider context is insufficient, inspect only the active conversation with `instafy conversation show <conversation-id> --include-threads --json`.\n\
+              - For current-conversation evidence-only follow-ups, do not search workspace files, source trees, `.instafy`, `.codex-runtime*`, `.codex-runtime-fallback`, or runtime logs. If restored provider context is insufficient, inspect only the active conversation with `instafy conversation show --include-threads --json`, which reads this conversation's id from the environment. Only if an older CLI reports a missing conversation argument, add the Conversation ID from Runtime context.\n\
               - Broad or cross-chat coordination should search compact context cards and prior conversations first. Save/update compact cards for durable work focus and open questions; do not invent a separate first-class topic-focus object.\n\
               - Same agent handle does not imply global memory in a new chat. Recover cross-chat context explicitly with context cards and `instafy conversation search/show --include-threads` before relying on old thread knowledge.\n\
               - If you emit `request_integration`, your `summary` must actively close the gap with: (1) what is blocked, (2) the exact next UI step using the action card in this message, and (3) the exact retry phrase the user should send.\n\
@@ -7854,7 +7900,7 @@ Avoid creating dependency caches or stores in the canonical workspace root when 
             - Example `files` entry: { \"path\": \"hello.txt\", \"workspacePath\": \"hello.txt\", \"change\": { \"type\": \"created\" }, \"content\": \"hello\\n\" }\n\
             - When you describe file changes, include a `change` object such as { type: 'created' | 'deleted' | 'changed', optional lines: [{ from: number, to: number }] } whenever you can do so reliably.\n\
             - When the user references another conversation (see \"Referenced conversations\"), treat it as additional context.\n\
-            - If the user asks about token usage for a previous answer, retrieve it (do not guess) via `instafy history messages --conversation <conversation-id>` (or `instafy api get` fallback) and then reply in the exact format `Token usage — input: <n>, cached: <n>, output: <n>`.\n\
+            - If the user asks about token usage for a previous answer, retrieve it (do not guess) via `instafy history messages` (it already knows this conversation; `instafy api get` is the fallback) and then reply in the exact format `Token usage — input: <n>, cached: <n>, output: <n>`.\n\
             - When the request depends on observable workspace, runtime, repo, process, or server state, use the appropriate tool calls before answering and report concrete observed output (for example: exit code, process status, line counts, tail output).\n\
             - For browser/UI tasks, execute real browser automation and report observed page output. When interactive browser tools are not exposed, follow instafy-browser-automation and emit request_browser to continue in Studio's browser. That action is a handoff, not evidence that a page was opened or a task completed.\n\
             - For nearby/location-dependent browsing requests (for example \"good coffee nearby\"), do not stop at a generic search-results page if the user asked for a recommendation. Continue until you can report at least one concrete candidate or the exact blocker.\n\
@@ -17330,6 +17376,223 @@ mod tests {
         }
     }
 
+    /// Sep 26: after a runtime restart the job still carried the previous run's
+    /// thread id and rollout path. Codex found neither on the new runtime and
+    /// started an empty thread, while the prompt took the compact lane that
+    /// assumes the thread holds the whole conversation. The agent then redid a
+    /// setup step it had already finished.
+    #[test]
+    fn provider_thread_lost_with_the_runtime_gets_the_full_lane_with_history() {
+        let tmp = tempdir().expect("temp dir");
+        fs::write(
+            tmp.path().join("INSTAFY.md"),
+            "Bookkeeping workspace memory for this space.\n",
+        )
+        .expect("write instafy");
+        let rollout = tmp.path().join("rollout.jsonl");
+        fs::write(&rollout, "").expect("write rollout");
+        let processor = test_job_processor(tmp.path());
+        let project_id = Uuid::new_v4();
+        let request = "What's next in the setup?";
+        let job = skill_setup_test_job(SKILL_SETUP_TEST_OPENER);
+        let terse_rule = "A saved file or a passed check is a step, not the end";
+        let full_rule = "stays that setup until the skill's \"## Getting started\" is done";
+
+        for (label, rollout_path, restorable) in [
+            ("lost", tmp.path().join("from-the-old-runtime.jsonl"), false),
+            ("on_this_disk", rollout.clone(), true),
+        ] {
+            let stored = json!({
+                "provider": "codex-embedded",
+                "defaultThreadId": Uuid::new_v4().to_string(),
+                "defaultRolloutPath": rollout_path.display().to_string(),
+                "historyReplayRequired": false,
+            });
+            let (state, marked) = provider_conversation_state_for_this_runtime(Some(stored), false);
+            let (prompt, _, metrics) = processor
+                .build_prompt_with_text(
+                    &project_id,
+                    &job,
+                    tmp.path(),
+                    request,
+                    true,
+                    state.as_ref(),
+                    &[],
+                    None,
+                    None,
+                )
+                .expect("actual main prompt builder");
+            let suppression = broad_contextual_instruction_suppression_reason(
+                &job,
+                request,
+                false,
+                state.as_ref(),
+                false,
+                false,
+            );
+            if restorable {
+                assert_eq!(metrics["promptMode"], "stateful_compact", "{label}");
+                assert_eq!(metrics["includedTurns"], 0, "{label}");
+                assert!(!prompt.contains(SKILL_SETUP_TEST_QUESTION), "{label}");
+                assert!(!prompt.contains("Bookkeeping workspace memory"), "{label}");
+                assert_eq!(prompt.matches(terse_rule).count(), 1, "{label}");
+                assert_eq!(
+                    suppression,
+                    Some("stateful_provider_thread_restored"),
+                    "{label}"
+                );
+            } else {
+                assert_eq!(metrics["promptMode"], "full", "{label}");
+                assert_eq!(metrics["historyReplayRequired"], true, "{label}");
+                assert_eq!(metrics["statefulThreadRestored"], false, "{label}");
+                assert_eq!(metrics["includedTurns"], 2, "{label}");
+                assert!(prompt.contains(SKILL_SETUP_TEST_OPENER), "{label}");
+                assert!(prompt.contains(SKILL_SETUP_TEST_QUESTION), "{label}");
+                assert!(
+                    prompt.contains("Bookkeeping workspace memory for this space."),
+                    "{label}"
+                );
+                assert!(
+                    !prompt.contains("The provider thread was restored successfully"),
+                    "{label}"
+                );
+                assert_eq!(prompt.matches(full_rule).count(), 1, "{label}");
+                // The skills catalog and app instructions stay in the Codex context.
+                assert_eq!(suppression, None, "{label}");
+            }
+            assert_eq!(marked, !restorable, "{label}");
+        }
+    }
+
+    #[test]
+    fn provider_state_is_marked_for_replay_only_when_it_claims_a_thread_this_runtime_lacks() {
+        let tmp = tempdir().expect("temp dir");
+        let rollout = tmp.path().join("rollout.jsonl");
+        fs::write(&rollout, "").expect("write rollout");
+        let thread_id = Uuid::new_v4().to_string();
+
+        assert_eq!(
+            provider_conversation_state_for_this_runtime(None, false),
+            (None, false)
+        );
+        for untouched in [
+            json!({"provider": "codex-embedded"}),
+            json!({"defaultThreadId": thread_id, "historyReplayRequired": true}),
+            json!({"defaultThreadId": thread_id, "defaultRolloutPath": rollout.display().to_string()}),
+        ] {
+            assert_eq!(
+                provider_conversation_state_for_this_runtime(Some(untouched.clone()), false),
+                (Some(untouched.clone()), false),
+                "{untouched}"
+            );
+        }
+        for (lost, browser_mode) in [
+            // A thread id with no rollout to resume from.
+            (json!({"defaultThreadId": thread_id}), false),
+            // An id Codex cannot parse starts a new thread even with a rollout.
+            (
+                json!({"threadId": "restored-thread", "rolloutPath": rollout.display().to_string()}),
+                false,
+            ),
+            // A browser run resumes the browser thread, whose rollout is gone.
+            (
+                json!({
+                    "defaultThreadId": thread_id,
+                    "defaultRolloutPath": rollout.display().to_string(),
+                    "browserThreadId": Uuid::new_v4().to_string(),
+                    "browserRolloutPath": tmp.path().join("gone.jsonl").display().to_string(),
+                }),
+                true,
+            ),
+        ] {
+            let (state, marked) =
+                provider_conversation_state_for_this_runtime(Some(lost.clone()), browser_mode);
+            let state = state.expect("state is kept");
+            assert!(marked, "{lost}");
+            assert_eq!(state["historyReplayRequired"], true, "{lost}");
+            // Codex still receives the ids it would have tried, unchanged.
+            for key in ["defaultThreadId", "threadId", "browserThreadId"] {
+                assert_eq!(state.get(key), lost.get(key), "{lost} {key}");
+            }
+        }
+    }
+
+    #[test]
+    fn current_conversation_lookups_never_ask_the_model_to_type_its_id() {
+        let tmp = tempdir().expect("temp dir");
+        let processor = test_job_processor(tmp.path());
+        let project_id = Uuid::new_v4();
+        let restored = json!({"defaultThreadId":"restored-thread", "historyReplayRequired":false});
+        let conversation_id = Uuid::new_v4();
+        let mut base_job = test_lease_job(Some("feature"), json!({ "metadata": {} }));
+        base_job.conversation_id = Some(conversation_id);
+        for mode in ["full", "restored", "cross_chat"] {
+            let route = test_agent_routing_preflight(
+                if mode == "cross_chat" {
+                    AgentRoutingPreflightRoute::CrossChatLookup
+                } else {
+                    AgentRoutingPreflightRoute::Direct
+                },
+                mode == "cross_chat",
+                false,
+            );
+            let job = job_with_agent_routing_preflight(&base_job, &route);
+            let (prompt, _, _) = processor
+                .build_prompt_with_text(
+                    &project_id,
+                    &job,
+                    tmp.path(),
+                    "What did we decide earlier?",
+                    true,
+                    (mode == "restored").then_some(&restored),
+                    &[],
+                    None,
+                    None,
+                )
+                .expect("actual main prompt builder");
+            // The runtime exports INSTAFY_CONVERSATION_ID to the agent's shell, and a
+            // copied UUID can pick up digits from the project id printed next to it.
+            assert!(
+                !prompt.contains("show <conversation-id> --include-threads"),
+                "{mode}"
+            );
+            assert!(
+                !prompt.contains("--conversation <conversation-id>"),
+                "{mode}"
+            );
+            if mode != "cross_chat" {
+                assert!(
+                    prompt.contains(
+                        "`instafy conversation show --include-threads --json`, which reads this conversation's id from the environment."
+                    ),
+                    "{mode}"
+                );
+                // Desktop and self-hosted runtimes run whatever `instafy` the user
+                // installed, and CLIs before the id-less form reject it. The model then
+                // needs a sanctioned way to name the conversation, from the prompt itself.
+                assert!(
+                    prompt.contains(
+                        "Only if an older CLI reports a missing conversation argument, add the Conversation ID from Runtime context."
+                    ),
+                    "{mode}"
+                );
+                assert!(
+                    prompt.contains(&format!("- Conversation ID: {conversation_id}\n")),
+                    "{mode}"
+                );
+                assert!(!prompt.contains("so do not add an id"), "{mode}");
+            }
+            if mode == "full" {
+                assert!(
+                    prompt.contains(
+                        "via `instafy history messages` (it already knows this conversation;"
+                    ),
+                    "{mode}"
+                );
+            }
+        }
+    }
+
     #[test]
     fn ambient_participation_history_preserves_roles_when_content_overlaps_policy_or_latest_turn() {
         let mut job = ambient_participation_test_job();
@@ -18082,9 +18345,8 @@ mod tests {
         );
         assert!(prompt.contains("prefer the most recent matching user-visible evidence"));
         assert!(prompt.contains("For current-conversation evidence-only follow-ups"));
-        assert!(
-            prompt.contains("instafy conversation show <conversation-id> --include-threads --json")
-        );
+        assert!(prompt.contains("instafy conversation show --include-threads --json"));
+        assert!(!prompt.contains("show <conversation-id> --include-threads"));
         let sections = metrics
             .get("promptSections")
             .and_then(JsonValue::as_object)

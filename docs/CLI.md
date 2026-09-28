@@ -79,6 +79,13 @@ instafy conversation show 123e4567-e89b-12d3-a456-426614174000
 
 Use this when you want to reuse context from an earlier chat without manually hunting through the Studio UI.
 
+With no target, `conversation show` reads the conversation named by `INSTAFY_CONVERSATION_ID`
+(or `CONVERSATION_ID`). Runtime jobs set it, so an agent reads its own conversation with
+`instafy conversation show --include-threads --json` instead of copying the id. Without a target
+or either variable, the command fails. An explicit empty target, such as an unset shell variable,
+also fails rather than falling back to the current conversation. CLI versions before this change
+require a target, so an agent on an older CLI passes the id from its runtime context instead.
+
 `conversation search` inspects recent titles/previews and recent messages in at most 12
 conversations. It does not search all persisted message content. For exact evidence in older
 messages, use `conversation grep` and then `conversation context`:

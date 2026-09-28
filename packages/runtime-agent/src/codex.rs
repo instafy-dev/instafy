@@ -2111,6 +2111,23 @@ fn extract_rollout_path_from_provider_state(
     None
 }
 
+/// Whether a run on this runtime can resume the thread that a stored provider state names,
+/// using the same lookups as the restore in `execute_inner`. That restore first asks the
+/// thread manager, but the manager is built for each run, so a thread never stays in memory
+/// from one job to the next. What a later run can resume from is the rollout file, and only
+/// when it is on this runtime's disk. A runtime that restarted onto a fresh disk, or an id
+/// Codex cannot parse, makes Codex start an empty thread instead. A rollout that exists but
+/// fails to load is still only discovered by the restore itself.
+pub(crate) fn provider_thread_restorable_on_this_runtime(
+    state: Option<&JsonValue>,
+    browser_mode: bool,
+) -> bool {
+    let mode_key = thread_mode_key(browser_mode);
+    extract_thread_id_from_provider_state(state, mode_key).is_some()
+        && extract_rollout_path_from_provider_state(state, mode_key)
+            .is_some_and(|rollout_path| rollout_path.exists())
+}
+
 fn update_provider_conversation_state(
     previous: Option<&JsonValue>,
     mode_key: &str,
@@ -5426,6 +5443,45 @@ required = true
                 .expect("default rollout path should resolve");
         assert_eq!(browser, PathBuf::from("/tmp/browser-rollout.jsonl"));
         assert_eq!(default, PathBuf::from("/tmp/default-rollout.jsonl"));
+    }
+
+    #[test]
+    fn provider_thread_is_restorable_only_from_a_rollout_on_this_disk() {
+        let codex_home = tempfile::tempdir().expect("codex home tempdir");
+        let rollout = codex_home.path().join("rollout.jsonl");
+        std::fs::write(&rollout, "").expect("write rollout");
+        let missing = codex_home.path().join("from-the-old-runtime.jsonl");
+        let thread_id = ThreadId::new().to_string();
+        let state = |thread: &str, path: &Path| json!({"defaultThreadId": thread, "defaultRolloutPath": path.display().to_string()});
+
+        assert!(provider_thread_restorable_on_this_runtime(
+            Some(&state(&thread_id, &rollout)),
+            false
+        ));
+        assert!(!provider_thread_restorable_on_this_runtime(
+            Some(&state(&thread_id, &missing)),
+            false
+        ));
+        // Codex cannot parse this id, so it starts a new thread even with a rollout.
+        assert!(!provider_thread_restorable_on_this_runtime(
+            Some(&state("restored-thread", &rollout)),
+            false
+        ));
+        assert!(!provider_thread_restorable_on_this_runtime(
+            Some(&json!({"defaultThreadId": thread_id})),
+            false
+        ));
+        // A browser run resumes the browser thread, not the default one.
+        assert!(!provider_thread_restorable_on_this_runtime(
+            Some(&json!({
+                "defaultThreadId": thread_id,
+                "defaultRolloutPath": rollout.display().to_string(),
+                "browserThreadId": ThreadId::new().to_string(),
+                "browserRolloutPath": missing.display().to_string(),
+            })),
+            true
+        ));
+        assert!(!provider_thread_restorable_on_this_runtime(None, false));
     }
 
     #[test]
