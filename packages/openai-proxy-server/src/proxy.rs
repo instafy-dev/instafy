@@ -26,6 +26,7 @@ use crate::client::{
 };
 use crate::controller_client::ControllerCreditsError;
 use crate::controller_integration::{ControllerIntegration, CreditBurn as ControllerCreditBurn};
+use crate::credential_lease::LeasedCredentials;
 use crate::proxy_auth::ProxyClaims;
 use crate::upstream_error::{self, UpstreamFailure};
 
@@ -85,6 +86,20 @@ impl ProxyCompletion {
                 response_body
             }
         }
+    }
+}
+
+/// The model one upstream request is sent as. A lease the controller pinned
+/// (the managed lane, where the operator pays) goes out as its pinned model
+/// whatever the request names: the controller sets the runtime's CODEX_MODEL
+/// to the managed model only for jobs flagged managedAiUsed, so other jobs on
+/// the platform key (skill-mode ambient evaluations, service-role dispatches,
+/// a failed secrets fetch) would otherwise ask for the runtime default.
+/// Without a pin the credential rules below apply unchanged.
+fn resolve_model_for_lease(requested_model: &str, leased: &LeasedCredentials) -> String {
+    match leased.pinned_model() {
+        Some(pinned_model) => pinned_model.to_string(),
+        None => resolve_model_for_credentials(requested_model, &leased.credentials),
     }
 }
 
@@ -808,11 +823,26 @@ fn error_indicates_chatgpt_token_refreshable(error: &anyhow::Error) -> bool {
 }
 
 fn build_remote_completion_client(
-    creds: Credentials,
+    leased: LeasedCredentials,
     options: &RemoteCompletionOptions<'_>,
 ) -> Result<(CodexClient, String, String)> {
-    let endpoint_for_error = format_endpoint_for_error(creds.endpoint());
-    let upstream_model = resolve_model_for_credentials(options.requested_model, &creds);
+    let endpoint_for_error = format_endpoint_for_error(leased.credentials.endpoint());
+    let upstream_model = resolve_model_for_lease(options.requested_model, &leased);
+    let requested_model = options.requested_model.trim();
+    if leased.pinned_model().is_some()
+        && !requested_model.is_empty()
+        && requested_model != upstream_model
+    {
+        eprintln!(
+            "[proxy] credential lease pins the model {}",
+            json!({
+                "requestedModel": requested_model,
+                "upstreamModel": upstream_model,
+                "runId": run_id_from_claims(options.claims),
+            })
+        );
+    }
+    let creds = leased.credentials;
     let instructions = build_proxy_instructions(
         options.proxy_base_instructions,
         options.claims,
@@ -862,14 +892,14 @@ fn build_remote_completion_client(
 }
 
 async fn complete_with_optional_controller_refresh(
-    creds: Credentials,
+    leased: LeasedCredentials,
     options: &RemoteCompletionOptions<'_>,
     input_items: &[Value],
     controller: Option<&ControllerIntegration>,
     credential_id: Option<&str>,
 ) -> Result<(CodexCompletion, String)> {
     let (mut client, upstream_model, endpoint_for_error) =
-        build_remote_completion_client(creds, options)?;
+        build_remote_completion_client(leased, options)?;
 
     match client.complete_with_input(input_items).await {
         Ok(response) => return Ok((response, upstream_model)),
@@ -1046,7 +1076,7 @@ async fn create_response(
                     .and_then(|lease| lease.into_material())
                     .map_err(AppError::unauthorized)?
             } else {
-                static_creds.clone()
+                LeasedCredentials::unpinned(static_creds.clone())
             };
 
             let credential_source = if credential_id.is_some() {
@@ -1223,7 +1253,7 @@ async fn create_chat_completion(
                     .and_then(|lease| lease.into_material())
                     .map_err(AppError::unauthorized)?
             } else {
-                static_creds.clone()
+                LeasedCredentials::unpinned(static_creds.clone())
             };
 
             let credential_source = if credential_id.is_some() {
@@ -1300,6 +1330,19 @@ async fn create_chat_completion(
             spawn_credential_usage_report(Some(controller), Some(credential_id), &completion);
             build_remote_chat_response(&payload, completion, upstream_model, credit_guard).await
         }
+    }
+}
+
+/// A pinned lease serves only its pinned model. Speech and transcription
+/// requests name an audio model, which the pinned model cannot stand in for,
+/// so these routes refuse the lease before any upstream request instead of
+/// spending it on a model the controller did not choose.
+fn refuse_audio_on_pinned_lease(leased: &LeasedCredentials, route: &str) -> Result<(), AppError> {
+    match leased.pinned_model() {
+        Some(pinned_model) => Err(AppError::bad_request(anyhow!(
+            "{route} is not available on this credential: it only serves model {pinned_model}"
+        ))),
+        None => Ok(()),
     }
 }
 
@@ -1487,7 +1530,8 @@ async fn renew_rejected_chatgpt_credentials(
             .map_err(AppError::upstream)?
             .into_material()
             .context(UpstreamFailure::CredentialRefresh)
-            .map_err(AppError::upstream)?;
+            .map_err(AppError::upstream)?
+            .credentials;
         if !renewed.is_chatgpt() {
             return Err(AppError::upstream(
                 anyhow!("controller changed credential kind during lease renewal")
@@ -1542,7 +1586,7 @@ async fn create_speech(
         .and_then(|claim| claim.credential_id.as_deref())
         .map(str::trim)
         .filter(|value| !value.is_empty());
-    let (mut credentials, controller_credential_id) = match &state.backend {
+    let (leased, controller_credential_id) = match &state.backend {
         ProxyBackend::RemoteStatic(static_creds) => {
             if let Some(credential_id) = claim_credential_id {
                 let Some(controller) = state.controller.as_ref() else {
@@ -1559,7 +1603,7 @@ async fn create_speech(
                     Some(credential_id),
                 )
             } else {
-                (static_creds.clone(), None)
+                (LeasedCredentials::unpinned(static_creds.clone()), None)
             }
         }
         ProxyBackend::RemoteDynamic => {
@@ -1582,6 +1626,8 @@ async fn create_speech(
         }
     };
 
+    refuse_audio_on_pinned_lease(&leased, "speech synthesis")?;
+    let mut credentials = leased.credentials;
     let request_url = speech_endpoint_for_credentials(&credentials)?;
     let http = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(120))
@@ -1625,7 +1671,7 @@ async fn create_transcription(
         .and_then(|claim| claim.credential_id.as_deref())
         .map(str::trim)
         .filter(|value| !value.is_empty());
-    let (mut credentials, controller_credential_id) = match &state.backend {
+    let (leased, controller_credential_id) = match &state.backend {
         ProxyBackend::RemoteStatic(static_creds) => {
             if let Some(credential_id) = claim_credential_id {
                 let Some(controller) = state.controller.as_ref() else {
@@ -1642,7 +1688,7 @@ async fn create_transcription(
                     Some(credential_id),
                 )
             } else {
-                (static_creds.clone(), None)
+                (LeasedCredentials::unpinned(static_creds.clone()), None)
             }
         }
         ProxyBackend::RemoteDynamic => {
@@ -1665,6 +1711,8 @@ async fn create_transcription(
         }
     };
 
+    refuse_audio_on_pinned_lease(&leased, "speech transcription")?;
+    let mut credentials = leased.credentials;
     let request_url = transcription_endpoint_for_credentials(&credentials)?;
     let request_content_type = headers
         .get(axum::http::header::CONTENT_TYPE)
@@ -2827,6 +2875,121 @@ mod tests {
             resolve_model_for_credentials("gpt-5.6-sol", &creds),
             "gpt-5.6-sol"
         );
+    }
+
+    fn api_key(endpoint: &str, default_model: Option<&str>) -> Credentials {
+        Credentials::ApiKey {
+            key: "test".to_string(),
+            endpoint: Some(endpoint.to_string()),
+            default_model: default_model.map(str::to_string),
+        }
+    }
+
+    fn chatgpt(default_model: &str) -> Credentials {
+        Credentials::ChatGpt {
+            access_token: "test".to_string(),
+            refresh_token: None,
+            account_id: None,
+            default_model: Some(default_model.to_string()),
+            auth_path: None,
+        }
+    }
+
+    /// The resolve cases above plus the managed credential's shape (an
+    /// OpenAI API key defaulting to the managed model), each with the model a
+    /// request resolves to without a pin.
+    fn resolve_cases() -> Vec<(Credentials, &'static str, &'static str)> {
+        let deepseek = api_key(
+            "https://api.deepseek.com/v1/chat/completions",
+            Some("deepseek-chat"),
+        );
+        let zai = api_key("https://api.z.ai/api/coding/paas/v4/chat/completions", None);
+        let openai_without_default = api_key("https://api.openai.com/v1/responses", None);
+        let managed = api_key("https://api.openai.com/v1/responses", Some("gpt-6-luna"));
+        vec![
+            (deepseek.clone(), "gpt-5-codex", "deepseek-chat"),
+            (deepseek.clone(), "gpt-4.5", "deepseek-chat"),
+            (deepseek.clone(), "o3-mini", "deepseek-chat"),
+            (deepseek.clone(), "deepseek-chat", "deepseek-chat"),
+            (deepseek, "glm-4.5", "deepseek-chat"),
+            (zai.clone(), "gpt-5-codex", "glm-5"),
+            (zai, "deepseek-chat", "glm-5"),
+            (chatgpt("gpt-5.5"), "glm-4.5", "gpt-5.5"),
+            (chatgpt("gpt-5.5"), "deepseek-chat", "gpt-5.5"),
+            (chatgpt("gpt-5.5"), "gemini-2.5-pro", "gpt-5.5"),
+            (chatgpt("gpt-5.5"), "gpt-5.5", "gpt-5.5"),
+            (chatgpt("gpt-5.6-sol"), "gpt-5.5", "gpt-5.5"),
+            (chatgpt("gpt-5.6-sol"), "gpt-5.6-sol", "gpt-5.6-sol"),
+            (chatgpt("gpt-5.6-sol"), "gpt-5.5-mini", "gpt-5.5-mini"),
+            (chatgpt("gpt-5.6-sol"), "", "gpt-5.6-sol"),
+            (chatgpt("gpt-5.6-sol"), "   ", "gpt-5.6-sol"),
+            (openai_without_default.clone(), "", DEFAULT_MODEL),
+            (openai_without_default, "gpt-5.6-sol", "gpt-5.6-sol"),
+            // Without a pin the managed key honours any explicit id, which is
+            // how jobs without managedAiUsed reached the runtime default.
+            (managed.clone(), "gpt-5.6-sol", "gpt-5.6-sol"),
+            (managed.clone(), "", "gpt-6-luna"),
+            (managed.clone(), "   ", "gpt-6-luna"),
+            (managed.clone(), "gpt-5-codex", "gpt-5-codex"),
+            (managed.clone(), "gpt-5.5", "gpt-5.5"),
+            (managed.clone(), "deepseek-chat", "deepseek-chat"),
+            (managed.clone(), "gemini-2.5-pro", "gemini-2.5-pro"),
+            (managed, "gpt-6-luna", "gpt-6-luna"),
+        ]
+    }
+
+    #[test]
+    fn resolve_model_for_lease_overrides_the_request_only_on_a_pinned_lease() {
+        for (credentials, requested, expected) in resolve_cases() {
+            assert_eq!(
+                resolve_model_for_credentials(requested, &credentials),
+                expected,
+                "credential rule for {requested:?}"
+            );
+            // No pin, and a blank pin, keep today's result.
+            for pinned_model in [None, Some("   ".to_string())] {
+                let leased = LeasedCredentials {
+                    credentials: credentials.clone(),
+                    pinned_model,
+                };
+                assert_eq!(
+                    resolve_model_for_lease(requested, &leased),
+                    expected,
+                    "unpinned lease for {requested:?}"
+                );
+            }
+            // Whatever the request names (the runtime default, nothing, a
+            // ChatGPT id, another provider's id) and whatever the
+            // credential's own rules pick, a pinned lease goes out as the
+            // pinned model.
+            let leased = LeasedCredentials {
+                credentials,
+                pinned_model: Some("gpt-6-luna".to_string()),
+            };
+            assert_eq!(
+                resolve_model_for_lease(requested, &leased),
+                "gpt-6-luna",
+                "pinned lease for {requested:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn audio_routes_refuse_a_pinned_lease() {
+        let pinned = LeasedCredentials {
+            credentials: api_key("https://api.openai.com/v1/responses", Some("gpt-6-luna")),
+            pinned_model: Some("gpt-6-luna".to_string()),
+        };
+        let error = refuse_audio_on_pinned_lease(&pinned, "speech synthesis")
+            .expect_err("a pinned lease serves no audio model");
+        assert_eq!(error.status, StatusCode::BAD_REQUEST);
+        assert_eq!(
+            error.message,
+            "speech synthesis is not available on this credential: it only serves model gpt-6-luna"
+        );
+
+        let unpinned = LeasedCredentials::unpinned(pinned.credentials.clone());
+        assert!(refuse_audio_on_pinned_lease(&unpinned, "speech synthesis").is_ok());
     }
 
     #[test]

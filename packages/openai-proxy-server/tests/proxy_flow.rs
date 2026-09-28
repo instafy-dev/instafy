@@ -22,6 +22,13 @@ use tokio::sync::oneshot;
 const CHAT_PROMPT: &str = "Say hello to the integration test in one short sentence.";
 const RESPONSES_FIXTURE: &str = include_str!("fixtures/responses_success.sse");
 const MANAGED_STUB_KEY: &str = "sk-managed-stub";
+/// The managed model the controller stub pins its lease to.
+const PINNED_MODEL: &str = "gpt-6-luna";
+/// The model stub's Responses path. It names the OpenAI host so the proxy
+/// treats the stub as OpenAI and honours explicit model ids as it does in
+/// production; a bare loopback endpoint reads as a BYOC provider, where
+/// OpenAI-shaped ids fall back to the credential default.
+const UPSTREAM_RESPONSES_PATH: &str = "/api.openai.com/v1/responses";
 const LEASE_BEARER: &str = "credential-lease";
 const SIGNING_SECRET: &str = "proxy-signing-test";
 /// The run a dispatch job token belongs to. Session envelopes (agent login,
@@ -175,6 +182,9 @@ struct ControllerStub {
     leases: Arc<Mutex<Vec<(String, String)>>>,
     /// `None` models a controller without MANAGED_AI_OPENAI_API_KEY.
     managed_key: Option<String>,
+    /// `pinnedModel` on the managed lease; `None` models a controller that
+    /// predates the field.
+    pinned_model: Option<String>,
     upstream_base: String,
 }
 
@@ -182,6 +192,10 @@ struct ControllerStub {
 struct UpstreamStub {
     /// Authorization headers seen by the model endpoint.
     bearers: Arc<Mutex<Vec<String>>>,
+    /// The `model` of each request the model endpoint received.
+    models: Arc<Mutex<Vec<String>>>,
+    /// Paths of the audio requests that reached the provider.
+    audio: Arc<Mutex<Vec<String>>>,
 }
 
 async fn controller_lease_stub(
@@ -207,19 +221,23 @@ async fn controller_lease_stub(
     }
     if credential_id == MANAGED_AI_CREDENTIAL_ID {
         return match stub.managed_key.as_deref() {
-            Some(key) => (
-                StatusCode::OK,
-                AxumJson(json!({
+            Some(key) => {
+                let mut lease = json!({
                     "credentialId": credential_id,
                     "kind": "openai_api_key",
                     "openaiApiKey": key,
                     "provider": "openai",
-                    "upstreamEndpoint": format!("{}/v1/responses", stub.upstream_base),
+                    "upstreamEndpoint": format!("{}{UPSTREAM_RESPONSES_PATH}", stub.upstream_base),
                     "defaultModel": "gpt-5.6-luna",
                     "leaseExpiresInSeconds": 60,
                     "renewalAuthority": "controller",
-                })),
-            ),
+                });
+                if let Some(pinned_model) = stub.pinned_model.as_deref() {
+                    lease["defaultModel"] = json!(pinned_model);
+                    lease["pinnedModel"] = json!(pinned_model);
+                }
+                (StatusCode::OK, AxumJson(lease))
+            }
             None => (
                 StatusCode::NOT_FOUND,
                 AxumJson(json!({
@@ -244,7 +262,7 @@ async fn controller_health_stub() -> impl IntoResponse {
 async fn upstream_responses_stub(
     State(stub): State<UpstreamStub>,
     headers: HeaderMap,
-    AxumJson(_payload): AxumJson<Value>,
+    AxumJson(payload): AxumJson<Value>,
 ) -> impl IntoResponse {
     let authorization = headers
         .get(header::AUTHORIZATION)
@@ -255,6 +273,13 @@ async fn upstream_responses_stub(
         .lock()
         .expect("bearer log")
         .push(authorization.clone());
+    stub.models.lock().expect("model log").push(
+        payload
+            .get("model")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string(),
+    );
     if authorization != format!("Bearer {MANAGED_STUB_KEY}") {
         return (
             StatusCode::UNAUTHORIZED,
@@ -262,6 +287,21 @@ async fn upstream_responses_stub(
         );
     }
     (StatusCode::OK, AxumJson(fixture_completed_response()))
+}
+
+async fn upstream_audio_stub(
+    State(stub): State<UpstreamStub>,
+    uri: axum::http::Uri,
+) -> impl IntoResponse {
+    stub.audio
+        .lock()
+        .expect("audio log")
+        .push(uri.path().to_string());
+    (
+        StatusCode::OK,
+        [(header::CONTENT_TYPE, "application/json")],
+        r#"{"text":"stub"}"#,
+    )
 }
 
 fn fixture_completed_response() -> Value {
@@ -320,6 +360,7 @@ async fn spawn_dynamic_proxy() -> Result<(SocketAddr, ChildGuard)> {
 /// Returns the proxy address plus the recorded lease and upstream bearer logs.
 async fn spawn_managed_stack(
     managed_key: Option<&str>,
+    pinned_model: Option<&str>,
     require_credential_claim: bool,
 ) -> Result<(
     SocketAddr,
@@ -331,7 +372,9 @@ async fn spawn_managed_stack(
     let upstream = UpstreamStub::default();
     let (upstream_addr, upstream_guard) = spawn_router(
         Router::new()
-            .route("/v1/responses", post(upstream_responses_stub))
+            .route(UPSTREAM_RESPONSES_PATH, post(upstream_responses_stub))
+            .route("/v1/audio/speech", post(upstream_audio_stub))
+            .route("/v1/audio/transcriptions", post(upstream_audio_stub))
             .with_state(upstream.clone()),
     )
     .await?;
@@ -339,6 +382,7 @@ async fn spawn_managed_stack(
     let controller = ControllerStub {
         leases: Arc::new(Mutex::new(Vec::new())),
         managed_key: managed_key.map(str::to_string),
+        pinned_model: pinned_model.map(str::to_string),
         upstream_base: format!("http://{upstream_addr}"),
     };
     let (controller_addr, controller_guard) = spawn_router(
@@ -418,14 +462,59 @@ fn proxy_token(run_id: Option<&str>, credential_id: Option<&str>) -> String {
 }
 
 async fn chat_through_proxy(addr: SocketAddr, token: &str) -> Result<(StatusCode, String)> {
-    let response = reqwest::Client::new()
-        .post(format!("http://{addr}/v1/chat/completions"))
-        .bearer_auth(token)
-        .json(&json!({
-            "model": "gpt-5.6-luna",
+    chat_through_proxy_as(addr, token, "gpt-5.6-luna").await
+}
+
+async fn chat_through_proxy_as(
+    addr: SocketAddr,
+    token: &str,
+    model: &str,
+) -> Result<(StatusCode, String)> {
+    post_through_proxy(
+        addr,
+        token,
+        "/v1/chat/completions",
+        json!({
+            "model": model,
             "stream": false,
             "messages": [{ "role": "user", "content": CHAT_PROMPT }]
-        }))
+        }),
+    )
+    .await
+}
+
+async fn responses_through_proxy(
+    addr: SocketAddr,
+    token: &str,
+    model: &str,
+) -> Result<(StatusCode, String)> {
+    post_through_proxy(
+        addr,
+        token,
+        "/v1/responses",
+        json!({
+            "model": model,
+            "stream": false,
+            "input": [{
+                "type": "message",
+                "role": "user",
+                "content": [{ "type": "input_text", "text": CHAT_PROMPT }]
+            }]
+        }),
+    )
+    .await
+}
+
+async fn post_through_proxy(
+    addr: SocketAddr,
+    token: &str,
+    path: &str,
+    body: Value,
+) -> Result<(StatusCode, String)> {
+    let response = reqwest::Client::new()
+        .post(format!("http://{addr}{path}"))
+        .bearer_auth(token)
+        .json(&body)
         .send()
         .await?;
     let status = response.status();
@@ -437,7 +526,7 @@ async fn chat_through_proxy(addr: SocketAddr, token: &str) -> Result<(StatusCode
 #[serial]
 async fn managed_lane_leases_the_platform_credential_on_a_dynamic_proxy() -> Result<()> {
     let (proxy_addr, controller, upstream, _env, _guards) =
-        spawn_managed_stack(Some(MANAGED_STUB_KEY), false).await?;
+        spawn_managed_stack(Some(MANAGED_STUB_KEY), None, false).await?;
 
     let (status, body) = chat_through_proxy(proxy_addr, &proxy_token(Some(RUN_ID), None)).await?;
     assert_eq!(status, StatusCode::OK, "managed turn must complete: {body}");
@@ -485,7 +574,7 @@ async fn session_envelope_without_a_run_id_keeps_the_byoc_rejection_on_a_dynamic
     // with the exact pre-existing rejection and never leases the platform
     // key for them.
     let (proxy_addr, controller, upstream, _env, _guards) =
-        spawn_managed_stack(Some(MANAGED_STUB_KEY), false).await?;
+        spawn_managed_stack(Some(MANAGED_STUB_KEY), None, false).await?;
 
     let (status, body) = chat_through_proxy(proxy_addr, &proxy_token(None, None)).await?;
     assert_eq!(status, StatusCode::UNAUTHORIZED, "unexpected body: {body}");
@@ -524,7 +613,7 @@ async fn session_envelope_without_a_run_id_keeps_the_byoc_rejection_on_a_dynamic
 async fn managed_lane_keeps_the_byoc_rejection_when_the_controller_has_no_managed_credential()
 -> Result<()> {
     let (proxy_addr, controller, upstream, _env, _guards) =
-        spawn_managed_stack(None, false).await?;
+        spawn_managed_stack(None, None, false).await?;
 
     let (status, body) = chat_through_proxy(proxy_addr, &proxy_token(Some(RUN_ID), None)).await?;
     assert_eq!(status, StatusCode::UNAUTHORIZED, "unexpected body: {body}");
@@ -569,7 +658,7 @@ async fn credential_claim_requirement_still_rejects_credential_less_tokens() -> 
     // The public lane (PROXY_REQUIRE_CREDENTIAL_CLAIM=1) must never reach the
     // platform key: authentication refuses the token before any lease.
     let (proxy_addr, controller, upstream, _env, _guards) =
-        spawn_managed_stack(Some(MANAGED_STUB_KEY), true).await?;
+        spawn_managed_stack(Some(MANAGED_STUB_KEY), None, true).await?;
 
     let (status, body) = chat_through_proxy(proxy_addr, &proxy_token(Some(RUN_ID), None)).await?;
     assert_eq!(status, StatusCode::UNAUTHORIZED, "unexpected body: {body}");
@@ -579,6 +668,105 @@ async fn credential_claim_requirement_still_rejects_credential_less_tokens() -> 
     );
     assert!(controller.leases.lock().expect("lease log").is_empty());
     assert!(upstream.bearers.lock().expect("bearer log").is_empty());
+
+    Ok(())
+}
+
+#[tokio::test]
+#[serial]
+async fn managed_lane_sends_every_request_as_the_pinned_model() -> Result<()> {
+    // Jobs that reach the platform key without managedAiUsed (skill-mode
+    // ambient evaluations, service-role dispatches, a failed secrets fetch)
+    // ask for the runtime default. On the pinned managed lease the proxy
+    // sends each of them as the managed model, on both model routes.
+    let token = proxy_token(Some(RUN_ID), None);
+    {
+        let (proxy_addr, controller, upstream, _env, _guards) =
+            spawn_managed_stack(Some(MANAGED_STUB_KEY), Some(PINNED_MODEL), false).await?;
+
+        for model in ["gpt-5.6-sol", "gpt-5-codex", "deepseek-chat", ""] {
+            let (status, body) = responses_through_proxy(proxy_addr, &token, model).await?;
+            assert_eq!(status, StatusCode::OK, "/v1/responses as {model:?}: {body}");
+        }
+        // The direct worker lanes call Chat Completions with CODEX_MODEL.
+        let (status, body) = chat_through_proxy_as(proxy_addr, &token, "gpt-5.6-sol").await?;
+        assert_eq!(status, StatusCode::OK, "/v1/chat/completions: {body}");
+
+        assert_eq!(
+            upstream.models.lock().expect("model log").clone(),
+            vec![PINNED_MODEL; 5],
+            "every request on the platform key goes out as the managed model"
+        );
+        assert_eq!(
+            upstream.bearers.lock().expect("bearer log").clone(),
+            vec![format!("Bearer {MANAGED_STUB_KEY}"); 5]
+        );
+        assert_eq!(controller.leases.lock().expect("lease log").len(), 1);
+    }
+
+    // A controller that predates `pinnedModel` leaves the proxy on today's
+    // rule: an explicit model id goes out verbatim.
+    {
+        let (proxy_addr, _controller, upstream, _env, _guards) =
+            spawn_managed_stack(Some(MANAGED_STUB_KEY), None, false).await?;
+        let (status, body) = responses_through_proxy(proxy_addr, &token, "gpt-5.6-sol").await?;
+        assert_eq!(status, StatusCode::OK, "/v1/responses: {body}");
+        let (status, body) = chat_through_proxy_as(proxy_addr, &token, "gpt-5.6-sol").await?;
+        assert_eq!(status, StatusCode::OK, "/v1/chat/completions: {body}");
+        assert_eq!(
+            upstream.models.lock().expect("model log").clone(),
+            vec!["gpt-5.6-sol"; 2]
+        );
+    }
+
+    Ok(())
+}
+
+#[tokio::test]
+#[serial]
+async fn managed_lane_refuses_audio_on_the_pinned_lease() -> Result<()> {
+    // Speech and transcription name an audio model the pinned model cannot
+    // stand in for, so a pinned lease sends nothing upstream on those routes.
+    let token = proxy_token(Some(RUN_ID), None);
+    let speech = json!({ "model": "gpt-4o-mini-tts", "voice": "cedar", "input": "Hello." });
+    let transcription = json!({ "model": "gpt-4o-transcribe" });
+    {
+        let (proxy_addr, _controller, upstream, _env, _guards) =
+            spawn_managed_stack(Some(MANAGED_STUB_KEY), Some(PINNED_MODEL), false).await?;
+        for (path, body) in [
+            ("/v1/audio/speech", speech.clone()),
+            ("/v1/audio/transcriptions", transcription.clone()),
+        ] {
+            let (status, body) = post_through_proxy(proxy_addr, &token, path, body).await?;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{path}: {body}");
+            assert!(
+                body.contains("only serves model gpt-6-luna"),
+                "{path}: {body}"
+            );
+            assert!(!body.contains(MANAGED_STUB_KEY), "{path}: {body}");
+        }
+        assert!(
+            upstream.audio.lock().expect("audio log").is_empty(),
+            "no audio request reaches the provider on the platform key"
+        );
+    }
+
+    // Without a pin the audio routes forward as they do today.
+    {
+        let (proxy_addr, _controller, upstream, _env, _guards) =
+            spawn_managed_stack(Some(MANAGED_STUB_KEY), None, false).await?;
+        for (path, body) in [
+            ("/v1/audio/speech", speech),
+            ("/v1/audio/transcriptions", transcription),
+        ] {
+            let (status, body) = post_through_proxy(proxy_addr, &token, path, body).await?;
+            assert_eq!(status, StatusCode::OK, "{path}: {body}");
+        }
+        assert_eq!(
+            upstream.audio.lock().expect("audio log").clone(),
+            vec!["/v1/audio/speech", "/v1/audio/transcriptions"]
+        );
+    }
 
     Ok(())
 }

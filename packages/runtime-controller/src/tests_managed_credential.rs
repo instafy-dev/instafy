@@ -65,6 +65,7 @@ async fn managed_credential_lease_route_serves_the_platform_key_under_the_lease_
             assert_eq!(lease["openaiApiKey"], json!("sk-managed-test"));
             assert_eq!(lease["provider"], json!("openai"));
             assert_eq!(lease["defaultModel"], json!("gpt-6-luna"));
+            assert_eq!(lease["pinnedModel"], json!("gpt-6-luna"));
             assert_eq!(lease["renewalAuthority"], json!("controller"));
             assert!(lease["leaseExpiresInSeconds"].as_u64().unwrap_or(0) > 0);
         }

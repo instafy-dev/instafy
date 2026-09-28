@@ -111,6 +111,23 @@ Standalone local mode may read and refresh the operator's own `auth.json`. In
 controller-integrated mode, the controller is the only refresh-token authority: the proxy gets a
 short-lived access/API-key lease and never receives the stored refresh token.
 
+### Model selection
+
+A request's `model` picks the upstream model. An absent or empty model uses the credential's
+default. An explicit id goes to OpenAI endpoints as is. On a bring-your-own provider endpoint
+(DeepSeek, z.ai, Gemini) the credential's default replaces it, and a ChatGPT login given another
+provider's id uses its default, so a mismatched id does not fail upstream.
+
+In controller-integrated mode the controller can pin a credential lease to one model with
+`pinnedModel` on the lease response. It pins the managed Instafy AI lease, which the operator
+pays for, to `MANAGED_AI_MODEL_ID`. The proxy then sends every Responses and Chat Completions
+request on that lease as the pinned model, whatever model the request names, and logs
+`credential lease pins the model` with the requested and sent ids when they differ. Speech and
+transcription requests name an audio model the pinned model cannot replace, so both routes
+answer 400 on a pinned lease without contacting the provider. Leases without `pinnedModel`
+(bring-your-own API keys, ChatGPT logins, and leases from a controller that predates the field)
+and static proxy credentials keep the rules above.
+
 ### Upstream failures and retries
 
 Responses, Chat Completions, speech and transcription preserve upstream HTTP error statuses. A rejected request or

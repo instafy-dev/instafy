@@ -13,7 +13,7 @@ use tokio::sync::Mutex;
 
 use crate::auth::Credentials;
 use crate::controller_client::{ControllerClient, CredentialResponse};
-use crate::credential_lease::{CredentialLease, CredentialLeasePurpose};
+use crate::credential_lease::{CredentialLease, CredentialLeasePurpose, LeasedCredentials};
 
 #[derive(Clone)]
 pub(crate) struct ControllerCredentialSource {
@@ -25,7 +25,7 @@ pub(crate) struct ControllerCredentialSource {
 
 #[derive(Clone)]
 struct CachedCredential {
-    credentials: Credentials,
+    credentials: LeasedCredentials,
     expires_at: Instant,
 }
 
@@ -53,7 +53,7 @@ impl ControllerCredentialSource {
         &self,
         credential_id: &str,
         purpose: CredentialLeasePurpose,
-    ) -> Result<CredentialLease<Credentials>> {
+    ) -> Result<CredentialLease<LeasedCredentials>> {
         let id = credential_id.trim();
         if id.is_empty() {
             return Err(anyhow!("credential_id is empty"));
@@ -85,7 +85,7 @@ impl ControllerCredentialSource {
         .map_err(|error| anyhow!("controller credential lease failed: {error:#}"))?;
         let lease_ttl = validate_controller_lease(&response, self.maximum_cache_ttl)?;
 
-        let credentials = map_controller_credential(response)?;
+        let credentials = map_controller_lease(response)?;
         let expires_at = Instant::now()
             .checked_add(lease_ttl)
             .ok_or_else(|| anyhow!("controller returned an invalid credential lease duration"))?;
@@ -121,6 +121,16 @@ fn validate_controller_lease(
         ));
     }
     Ok(lease_ttl)
+}
+
+/// The controller's model pin travels with the material, so a cached lease
+/// and a renewed one both carry it.
+fn map_controller_lease(response: CredentialResponse) -> Result<LeasedCredentials> {
+    let pinned_model = normalize_optional(response.pinned_model.as_deref());
+    Ok(LeasedCredentials {
+        credentials: map_controller_credential(response)?,
+        pinned_model,
+    })
 }
 
 fn map_controller_credential(response: CredentialResponse) -> Result<Credentials> {
@@ -335,7 +345,7 @@ mod tests {
         let renewed = source
             .acquire_lease("cred-123", CredentialLeasePurpose::AfterUpstreamRejection)
             .await?;
-        match renewed.into_material()? {
+        match renewed.into_material()?.credentials {
             Credentials::ChatGpt {
                 refresh_token,
                 auth_path,
@@ -477,6 +487,7 @@ mod tests {
             provider: provider.map(str::to_string),
             upstream_endpoint: Some("https://cloudcode-pa.googleapis.com".to_string()),
             default_model: Some("gemini-test".to_string()),
+            pinned_model: None,
             auth_mode: auth_mode.map(str::to_string),
             code_assist_project: Some("proj-1".to_string()),
             lease_expires_in_seconds: Some(60),
@@ -494,6 +505,38 @@ mod tests {
             map_controller_credential(api_key_response(Some("gemini"), Some("code_assist_cli")))
                 .expect("mapping should succeed");
         assert!(matches!(credentials, Credentials::GeminiCodeAssist { .. }));
+    }
+
+    #[test]
+    fn controller_model_pin_travels_with_the_lease_material() {
+        let wire = |pinned_model: Option<&str>| {
+            let mut body = json!({
+                "credentialId": "4d414e41-4745-4441-8949-4e5354414659",
+                "kind": "openai_api_key",
+                "openaiApiKey": "sk-managed",
+                "provider": "openai",
+                "upstreamEndpoint": "https://api.openai.com/v1/responses",
+                "defaultModel": "gpt-6-luna",
+                "leaseExpiresInSeconds": 60,
+                "renewalAuthority": "controller"
+            });
+            if let Some(pinned_model) = pinned_model {
+                body["pinnedModel"] = json!(pinned_model);
+            }
+            serde_json::from_value::<CredentialResponse>(body).expect("lease should parse")
+        };
+
+        let pinned = map_controller_lease(wire(Some("gpt-6-luna"))).expect("pinned lease");
+        assert_eq!(pinned.pinned_model(), Some("gpt-6-luna"));
+        assert!(matches!(pinned.credentials, Credentials::ApiKey { .. }));
+
+        // A controller that predates the field, or sends it blank, sets no
+        // pin: the lease keeps today's model rules.
+        for response in [wire(None), wire(Some("   "))] {
+            let leased = map_controller_lease(response).expect("unpinned lease");
+            assert!(leased.pinned_model.is_none());
+            assert_eq!(leased.credentials.default_model(), Some("gpt-6-luna"));
+        }
     }
 
     #[test]

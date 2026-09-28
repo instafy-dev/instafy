@@ -93,6 +93,17 @@ it:
   at `/opt/instafy/proxy-codex/auth.json` on each provider host). A sidecar without either
   refuses managed turns with `proxy token missing credential_id for BYOC request`.
 
+The controller puts `CODEX_MODEL=MANAGED_AI_MODEL_ID` in a job's runtime environment
+(`secrets.rs`) only for jobs flagged `managedAiUsed`. Other jobs that reach the platform key
+(skill-mode ambient evaluations, service-role worker and lead-continuation dispatches, jobs whose
+secrets fetch failed) ask for the runtime default, `gpt-5.6-sol`, which lists at 50 to 60 times
+Luna's rates above. The managed credential lease therefore carries `pinnedModel`, and the proxy
+sends every request on it as `MANAGED_AI_MODEL_ID`, whatever model the job asked for; speech and
+transcription are refused on it. The pin needs both a controller and a proxy that know
+`pinnedModel`. Either can be updated first: until both are, requests keep the model they ask for.
+This is separate from the key rollout order in the next paragraph. Static proxy credentials are
+not pinned.
+
 Roll the proxy out first. Setting `MANAGED_AI_OPENAI_API_KEY` is what makes the controller
 advertise managed AI and charge for managed turns, so every provider host must already run a
 proxy image built from this change (`RUNTIME_PROXY_IMAGE`) before the key goes on the
