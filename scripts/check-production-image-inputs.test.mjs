@@ -595,3 +595,33 @@ test("runtime publication scans each native architecture before registry login",
   assert.match(afterLogin, /\.\["containerimage\.descriptor"\]\.digest/u);
   assert.match(afterLogin, /\["linux\/amd64","linux\/arm64"\]/u);
 });
+
+test("the runtime entrypoint finds Playwright's Chromium in either build layout", async () => {
+  // Production Shared Browser runtimes started no Chromium: the pinned
+  // Playwright 1.61 base unpacks it to chrome-linux64/, which the entrypoint
+  // did not search, so it logged "no Chromium executable found".
+  const { execFileSync } = await import("node:child_process");
+  const os = await import("node:os");
+  const entrypoint = read("docker/runtime/entrypoint.sh");
+  const start = entrypoint.indexOf("resolve_chromium_executable_path() {");
+  const end = entrypoint.indexOf("\n}\n", start);
+  assert.ok(start >= 0 && end > start, "resolve_chromium_executable_path must exist");
+  const resolver = entrypoint.slice(start, end + 3);
+
+  for (const layout of ["chrome-linux64", "chrome-linux"]) {
+    const browsers = fs.mkdtempSync(path.join(os.tmpdir(), "instafy-playwright-"));
+    try {
+      const chrome = path.join(browsers, "chromium-1187", layout, "chrome");
+      fs.mkdirSync(path.dirname(chrome), { recursive: true });
+      fs.writeFileSync(chrome, "#!/bin/sh\n");
+      fs.chmodSync(chrome, 0o755);
+      const resolved = execFileSync("bash", ["-c", `${resolver}\nresolve_chromium_executable_path`], {
+        encoding: "utf8",
+        env: { ...process.env, PLAYWRIGHT_BROWSERS_PATH: browsers },
+      });
+      assert.equal(resolved, chrome, layout);
+    } finally {
+      fs.rmSync(browsers, { recursive: true, force: true });
+    }
+  }
+});
