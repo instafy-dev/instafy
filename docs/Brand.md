@@ -182,3 +182,17 @@ color `#0F172A`; each distinct registration must be updated separately. See
 the relevant platform's release documentation for build and upload steps.
 Private distributions should keep their signing and promotion runbooks outside
 the public core.
+
+## Authentication emails
+
+Auth emails use a single white column, left-aligned text, and Arial/Helvetica sans-serif
+throughout. Keep the sender name quiet, use one heading, and give the verification code or
+underlined action link clear spacing. Codes use the same sans-serif family as the body.
+Avoid nested cards, code panels, uppercase category labels, decorative borders, and remote
+fonts or images. Use the brand interaction blue for links and readable 16px body text.
+
+The source templates live in `supabase/supabase/templates/`. The confirmation, sign-in, and
+reauthentication emails expose the code as selectable text without a confirmation link;
+recovery, invite, and email-change messages retain their confirmation action. Do not hardcode
+token length or expiry copy, because self-hosters configure those values. Local template changes
+do not update a hosted Supabase project's dashboard configuration.

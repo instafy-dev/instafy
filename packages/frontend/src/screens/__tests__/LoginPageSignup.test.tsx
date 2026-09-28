@@ -8,7 +8,7 @@ import { LoginPage } from "../LoginPage";
 
 const auth = vi.hoisted(() => ({
   loading: false,
-  user: null,
+  user: null as { id: string; email: string; user_metadata: Record<string, unknown> } | null,
   sendEmailOtp: vi.fn(),
   verifyEmailOtp: vi.fn(),
   signInWithPassword: vi.fn(),
@@ -82,6 +82,7 @@ describe("LoginPage sign-up and password alternatives", () => {
   beforeEach(() => {
     (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
     vi.resetAllMocks();
+    auth.user = null;
     window.localStorage.clear();
     window.sessionStorage.clear();
     container = document.createElement("div");
@@ -153,8 +154,124 @@ describe("LoginPage sign-up and password alternatives", () => {
     await type("otp", code);
     await click("Continue");
     expect(auth.verifyEmailOtp).toHaveBeenCalledExactlyOnceWith("new.user@example.com", code);
+    expect(container.querySelector("h1")?.textContent).toBe("Set a password");
+    expect(container.querySelector('[data-testid="destination"]')).toBeNull();
+    await click("Skip for now");
     expect(container.querySelector('[data-testid="destination"]')?.textContent).toBe("/studio?projectId=project-1");
     expect(JSON.parse(localStorage.getItem("instafy.rememberedAccounts")!)[0].email).toBe("new.user@example.com");
+    expect(auth.updatePassword).not.toHaveBeenCalled();
+  });
+
+  const verifySignup = async () => {
+    auth.verifyEmailOtp.mockImplementation(async () => {
+      auth.user = { id: "new-user", email: "new.user@example.com", user_metadata: {} };
+    });
+    await render();
+    await enterSignupEmail();
+    await click("Send verification code");
+    await type("otp", "12345678");
+    await click("Continue");
+  };
+
+  it("holds a session published before verification resolves, then offers password setup", async () => {
+    let resolveVerify: () => void = () => {};
+    auth.verifyEmailOtp.mockImplementation(() => new Promise<void>((resolve) => { resolveVerify = resolve; }));
+    await render();
+    await enterSignupEmail();
+    await click("Send verification code");
+    await type("otp", "12345678");
+    await click("Continue");
+    auth.user = { id: "new-user", email: "new.user@example.com", user_metadata: {} };
+    await render();
+    expect(container.querySelector('[data-testid="destination"]')).toBeNull();
+    expect(container.querySelector("#otp")).not.toBeNull();
+    await act(async () => resolveVerify());
+    expect(container.querySelector("h1")?.textContent).toBe("Set a password");
+    expect(document.activeElement).toBe(container.querySelector("#password"));
+    await render();
+    expect(container.querySelector('[data-testid="destination"]')).toBeNull();
+    await click("Skip for now");
+    expect(auth.updatePassword).not.toHaveBeenCalled();
+    expect(container.querySelector('[data-testid="destination"]')?.textContent).toBe("/studio?projectId=project-1");
+  });
+
+  it("saves once, blocks skipping while pending, and then continues to the original destination", async () => {
+    let resolveUpdate: () => void = () => {};
+    auth.updatePassword.mockImplementation(() => new Promise<void>((resolve) => { resolveUpdate = resolve; }));
+    await verifySignup();
+    expect(container.textContent).not.toContain("Continue as guest");
+    expect(container.querySelector("#password")?.getAttribute("autocomplete")).toBe("new-password");
+    await type("password", "new password 1");
+    await type("passwordConfirm", "new password 1");
+    const form = (container.querySelector("#password") as HTMLInputElement).form!;
+    await act(async () => { form.requestSubmit(); form.requestSubmit(); });
+    expect(auth.updatePassword).toHaveBeenCalledExactlyOnceWith("new password 1");
+    expect(button("Save password").getAttribute("data-pending")).toBe("true");
+    expect(button("Skip for now").disabled).toBe(true);
+    expect(container.querySelector('[data-testid="destination"]')).toBeNull();
+    await act(async () => resolveUpdate());
+    expect(container.querySelector('[data-testid="destination"]')?.textContent).toBe("/studio?projectId=project-1");
+  });
+
+  it.each([
+    ["short", "short", "Use at least 8 characters."],
+    ["new password 1", "different password", "Passwords do not match."],
+  ])("validates password setup before updating (%s)", async (password, confirmation, message) => {
+    await verifySignup();
+    await type("password", password);
+    await type("passwordConfirm", confirmation);
+    await click("Save password");
+    expect(auth.updatePassword).not.toHaveBeenCalled();
+    expect(container.querySelector('[role="alert"]')?.textContent).toBe(message);
+    expect(container.querySelector('[role="alert"]')?.closest("form")).not.toBeNull();
+    expect(container.querySelector('[data-testid="destination"]')).toBeNull();
+  });
+
+  it.each(["retry", "skip"])("keeps password setup usable after a failed save: %s", async (next) => {
+    auth.updatePassword.mockRejectedValueOnce(new Error("{}"));
+    await verifySignup();
+    await type("password", "new password 1");
+    await type("passwordConfirm", "new password 1");
+    await click("Save password");
+    expect(container.querySelector('[role="alert"]')?.textContent).toBe("Unable to save password right now. Try again.");
+    expect(container.querySelector("h1")?.textContent).toBe("Set a password");
+    expect(button("Skip for now").disabled).toBe(false);
+    await click(next === "retry" ? "Save password" : "Skip for now");
+    expect(auth.updatePassword).toHaveBeenCalledTimes(next === "retry" ? 2 : 1);
+    expect(container.querySelector('[data-testid="destination"]')).not.toBeNull();
+  });
+
+  it.each([
+    ["weak_password", "Choose a stronger password."],
+    ["same_password", "Choose a different password from your current one."],
+  ])("explains the password policy error %s", async (code, message) => {
+    auth.updatePassword.mockRejectedValue({ code, message: "Server detail" });
+    await verifySignup();
+    await type("password", "new password 1");
+    await type("passwordConfirm", "new password 1");
+    await click("Save password");
+    expect(container.querySelector('[role="alert"]')?.textContent).toBe(message);
+    expect(container.querySelector('[data-testid="destination"]')).toBeNull();
+  });
+
+  it("does not update a password if the verified session has ended", async () => {
+    await verifySignup();
+    auth.user = null;
+    await render();
+    await type("password", "new password 1");
+    await type("passwordConfirm", "new password 1");
+    await click("Save password");
+    expect(auth.updatePassword).not.toHaveBeenCalled();
+    expect(container.querySelector('[role="alert"]')?.textContent).toContain("Your session ended");
+  });
+
+  it("keeps existing email-code login free of the signup password step", async () => {
+    await render();
+    await enterPassword();
+    await click("Email me a code instead");
+    await type("otp", "12345678");
+    await click("Continue");
+    expect(container.querySelector('[data-testid="destination"]')).not.toBeNull();
     expect(auth.updatePassword).not.toHaveBeenCalled();
   });
 

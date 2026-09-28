@@ -259,17 +259,10 @@ async function main() {
   const delivered = await waitForMessage({ catcherUrl, email });
   log(`Email delivered | subject: ${delivered.subject}`);
 
-  // Assert OUR custom template rendered, not the stock GoTrue body. The footer
-  // "Sent by Instafy" lives only in our HTML template files — it is NOT the
-  // config-driven subject line, and stock GoTrue never emits it — so finding it
-  // in the HTML body specifically proves the custom template loaded. (A weaker
-  // /instafy/ check would pass on a stock link-body too, since site_url and the
-  // subject both contain "instafy".)
-  if (!/Sent by Instafy/i.test(delivered.html)) {
-    fail(
-      "Delivered email HTML lacks our template footer 'Sent by Instafy' — " +
-        "the custom auth template did not render (stock/broken fallback?).",
-    );
+  // A template-owned marker proves the custom body loaded independently of
+  // its subject or visual treatment. The stock GoTrue fallback has no marker.
+  if (!/data-instafy-email="(?:confirmation|magic_link)"/.test(delivered.html)) {
+    fail("Delivered email HTML lacks the Instafy auth template marker.");
   }
 
   const token = extractOtp(delivered);

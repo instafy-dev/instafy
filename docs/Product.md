@@ -10,11 +10,14 @@ visitors see **Open Studio**; signed-out visitors see **Get started** and are se
 with their destination preserved. Opening the public homepage itself does not require signing in.
 
 Login offers separate **Create account** and password sign-in paths. Creating an account sends
-an email verification code immediately; entering it signs the user in and returns them to their
-original destination. Codes work across browsers and devices and follow the auth server's code
-length. A password mismatch offers the same account-neutral guidance for everyone, with email
+an email verification code immediately. After verification, users can set a password or choose
+**Skip for now** to keep using email codes. Both actions return to the original destination;
+password setup never requires another recovery email. Codes work across browsers and devices and
+follow the auth server's code length. A password mismatch offers the same account-neutral guidance for everyone, with email
 code sign-in as the primary alternative. Existing users can also use that code path. Password
-setup remains available through **Forgot password?**; sign-up does not require a password.
+recovery remains available through **Forgot password?**. Returning users who use **Create account**
+can also set a password after verifying their email. Reloading during the optional password step
+continues the already authenticated session without requiring a password.
 
 Pending route and authentication handoffs use a neutral full-screen loading surface: one Octo
 swimming above “Getting things ready…”, without a wordmark. The canonical animation stops for

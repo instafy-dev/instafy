@@ -39,7 +39,7 @@ import { TentacleBackdrop } from "./landing/LandingTentacleScene";
 
 type LoginIntent = "login" | "signup";
 
-type LoginStep = "chooseAccount" | "email" | "password" | "otp" | "recovery";
+type LoginStep = "chooseAccount" | "email" | "password" | "otp" | "recovery" | "setPassword";
 
 // The one control whose press is in flight. It shows the Button's pending
 // spinner; every other control on the page is disabled until it settles.
@@ -233,7 +233,11 @@ export function LoginPage() {
     setAwaitingBrowser,
   });
 
-  const allowGuestSignIn = import.meta.env.DEV && !import.meta.env.PROD;
+  // Supabase publishes the session before verifyEmailOtp resolves. Hold the
+  // normal signed-in redirect during verification as well as password setup.
+  const awaitingSignupPassword = intent === "signup" &&
+    (step === "setPassword" || (step === "otp" && pendingControl === "submit"));
+  const allowGuestSignIn = import.meta.env.DEV && !import.meta.env.PROD && step !== "setPassword";
   const normalizedEmail = normalizeEmail(email);
   const passwordType = passwordVisible ? "text" : "password";
 
@@ -255,6 +259,9 @@ export function LoginPage() {
     if (recoveryMode) {
       return "Reset your password";
     }
+    if (step === "setPassword") {
+      return "Set a password";
+    }
     if (step === "chooseAccount") {
       return "Log back in";
     }
@@ -270,6 +277,9 @@ export function LoginPage() {
   const stepDescription = useMemo((): string | null => {
     if (recoveryMode) {
       return "Choose a new password to finish signing in.";
+    }
+    if (step === "setPassword") {
+      return "Your email is verified. Add a password for next time, or skip and use email codes.";
     }
     if (step === "chooseAccount") {
       return "Choose an account to continue.";
@@ -304,7 +314,7 @@ export function LoginPage() {
   }, [intent, recoveryMode]);
 
   useEffect(() => {
-    if (!loading && user && !recoveryMode) {
+    if (!loading && user && !recoveryMode && !awaitingSignupPassword) {
       const nextEmail = user.email?.trim() || normalizedEmail;
       if (nextEmail) {
         setRememberedAccounts((current) => {
@@ -330,7 +340,7 @@ export function LoginPage() {
       }
       navigate(redirectTarget, { replace: true });
     }
-  }, [loading, user, navigate, redirectTarget, recoveryMode, normalizedEmail]);
+  }, [loading, user, navigate, redirectTarget, recoveryMode, normalizedEmail, awaitingSignupPassword]);
 
   useEffect(() => {
     if (recoveryMode) {
@@ -349,7 +359,7 @@ export function LoginPage() {
   }, [recoveryMode, rememberedAccounts.length, accountChooserDismissed, step, normalizedEmail]);
 
   useEffect(() => {
-    if (loading || (user && !recoveryMode)) {
+    if (loading || (user && !recoveryMode && !awaitingSignupPassword)) {
       return;
     }
     if (step === "email") {
@@ -357,14 +367,14 @@ export function LoginPage() {
         emailRef.current?.focus();
       }
     }
-    if (step === "password") {
+    if (step === "password" || step === "setPassword") {
       passwordRef.current?.focus();
     }
     if (step === "otp") {
       otpRef.current?.focus();
     }
     stepAutofocusReadyRef.current = true;
-  }, [intent, loading, user, recoveryMode, step, shouldSkipInitialEmailAutofocus]);
+  }, [intent, loading, user, recoveryMode, step, shouldSkipInitialEmailAutofocus, awaitingSignupPassword]);
 
   const clearTransientState = () => {
     resetNativeAuthState();
@@ -504,7 +514,14 @@ export function LoginPage() {
         writeRememberedAccounts(next);
         return next;
       });
-      navigate(redirectTarget, { replace: true });
+      if (intent === "signup") {
+        setPassword("");
+        setPasswordConfirm("");
+        setPasswordVisible(false);
+        setStep("setPassword");
+      } else {
+        navigate(redirectTarget, { replace: true });
+      }
     } catch (err) {
       const details = err instanceof Error ? err.message : "Unable to verify code.";
       setError(details);
@@ -551,9 +568,13 @@ export function LoginPage() {
     }
   };
 
-  const handleRecoveryUpdate = async (event: FormEvent<HTMLFormElement>) => {
+  const handlePasswordUpdate = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     if (pendingControlRef.current !== null) {
+      return;
+    }
+    if (step === "setPassword" && !user) {
+      setError("Your session ended. Sign in again to set a password.");
       return;
     }
     if (!password) {
@@ -580,11 +601,24 @@ export function LoginPage() {
       setPasswordConfirm("");
       navigate(redirectTarget, { replace: true });
     } catch (err) {
-      const details = err instanceof Error ? err.message : "Unable to update password.";
-      setError(details);
+      const code = err && typeof err === "object" && "code" in err ? err.code : null;
+      setError(
+        code === "weak_password"
+          ? "Choose a stronger password."
+          : code === "same_password"
+            ? "Choose a different password from your current one."
+            : "Unable to save password right now. Try again.",
+      );
     } finally {
       setPendingControl(null);
     }
+  };
+
+  const handleSkipPassword = () => {
+    if (pendingControlRef.current !== null) return;
+    setPassword("");
+    setPasswordConfirm("");
+    navigate(redirectTarget, { replace: true });
   };
 
   const touchRememberedAccount = (account: RememberedAccount) => {
@@ -967,10 +1001,15 @@ export function LoginPage() {
       );
     }
 
-    if (step === "recovery") {
+    if (step === "recovery" || step === "setPassword") {
       return (
         <div className="mt-8">
-          <form onSubmit={handleRecoveryUpdate} className="space-y-5">
+          <form onSubmit={handlePasswordUpdate} className="space-y-5">
+            {error ? (
+              <InlineNotice tone="danger" role="alert" data-testid="login-error">
+                {error}
+              </InlineNotice>
+            ) : null}
             <div>
               <Text as="label" htmlFor="password" variant="overline" tone="muted">
                 New password
@@ -1037,9 +1076,21 @@ export function LoginPage() {
               isPending={pendingControl === "submit"}
               isDisabled={isBlocked("submit") || password.length === 0 || passwordConfirm.length === 0}
             >
-              Update password
+              {step === "setPassword" ? "Save password" : "Update password"}
             </Button>
           </form>
+          {step === "setPassword" ? (
+            <Button
+              variant="ghost"
+              radius="full"
+              fullWidth
+              className="mt-4"
+              onPress={handleSkipPassword}
+              isDisabled={submitting}
+            >
+              Skip for now
+            </Button>
+          ) : null}
         </div>
       );
     }
@@ -1145,8 +1196,8 @@ export function LoginPage() {
   );
 
   // Keep the sign-in form out of the handoff for an existing session. Password
-  // recovery remains available to signed-in users who opened a recovery link.
-  if (loading || (user && !recoveryMode)) {
+  // recovery and optional signup password setup remain available while signed in.
+  if (loading || (user && !recoveryMode && !awaitingSignupPassword)) {
     return <EntryLoadingScreen />;
   }
 
@@ -1245,7 +1296,7 @@ export function LoginPage() {
                   {message}
                 </InlineNotice>
               ) : null}
-              {error && step !== "password" ? (
+              {error && step !== "password" && step !== "recovery" && step !== "setPassword" ? (
                 <InlineNotice tone="danger" role="alert" className="mt-6" data-testid="login-error">
                   {error}
                 </InlineNotice>

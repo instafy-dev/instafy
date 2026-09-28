@@ -13,6 +13,7 @@ on:
     paths:
       - ".github/workflows/auth-email.yml"
       - "scripts/auth-email-smoke.mjs"
+      - "scripts/auth-email-templates.test.mjs"
       - "scripts/check-database-ci-routing.test.mjs"
       - "scripts/supabase-stack.mjs"
       - "scripts/lib/localSupabaseEnv.mjs"
@@ -30,6 +31,7 @@ on:
     paths:
       - ".github/workflows/auth-email.yml"
       - "scripts/auth-email-smoke.mjs"
+      - "scripts/auth-email-templates.test.mjs"
       - "scripts/check-database-ci-routing.test.mjs"
       - "scripts/supabase-stack.mjs"
       - "scripts/lib/localSupabaseEnv.mjs"
