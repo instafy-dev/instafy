@@ -22,8 +22,13 @@ type CapturedRequest = {
   body: string;
 };
 
-function startMockController(projectId: string, conversations: MockConversation[]) {
+function startMockController(
+  projectId: string,
+  conversations: MockConversation[],
+  requests: string[] = [],
+) {
   const server = http.createServer((req, res) => {
+    requests.push(req.url ?? "");
     const url = new URL(req.url ?? "/", "http://127.0.0.1");
 
     if (req.method === "GET" && url.pathname === `/projects/${projectId}/conversations`) {
@@ -325,8 +330,9 @@ describe("conversation commands", () => {
     conversations: MockConversation[],
     target: string[],
     env: NodeJS.ProcessEnv,
+    requests: string[] = [],
   ) {
-    const server = startMockController(projectId, conversations);
+    const server = startMockController(projectId, conversations, requests);
     await once(server, "listening");
     try {
       const address = server.address();
@@ -405,6 +411,42 @@ describe("conversation commands", () => {
     expect(stderr).toContain(
       "No conversation given. Pass an id or title, or set INSTAFY_CONVERSATION_ID.",
     );
+  });
+
+  it("rejects an environment conversation that is not an id before any request", async () => {
+    const projectId = randomUUID();
+    const { current, other } = twoConversations();
+
+    // The value goes into /conversations/<id>/messages, so a path or query in it would ask the
+    // controller for something else, and a stray word would only come back as a bare 404.
+    for (const value of ["../../projects/x", "abc?limit=1&x=", "not-a-uuid"]) {
+      for (const [name, env] of [
+        ["INSTAFY_CONVERSATION_ID", { INSTAFY_CONVERSATION_ID: value, CONVERSATION_ID: current.id }],
+        ["CONVERSATION_ID", { INSTAFY_CONVERSATION_ID: "", CONVERSATION_ID: value }],
+      ] as const) {
+        const label = `${name}=${value}`;
+        const requests: string[] = [];
+        const { code, stdout, stderr } = await showWithEnv(
+          projectId,
+          [other, current],
+          [],
+          env,
+          requests,
+        );
+
+        expect(code, label).toBe(1);
+        expect(stdout, label).toBe("");
+        expect(stderr, label).toContain(`${name} is not a conversation id.`);
+        expect(requests, label).toEqual([]);
+      }
+    }
+
+    // A named conversation never reads the environment, so a bad value there does not matter.
+    const explicit = await showWithEnv(projectId, [other, current], ["Fruit planning"], {
+      INSTAFY_CONVERSATION_ID: "../../projects/x",
+    });
+    expect(explicit.code).toBe(0);
+    expect(JSON.parse(explicit.stdout).conversation.id).toBe(other.id);
   });
 
   it("rejects an explicit empty target instead of showing the current conversation", async () => {

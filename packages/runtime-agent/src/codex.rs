@@ -2128,6 +2128,49 @@ pub(crate) fn provider_thread_restorable_on_this_runtime(
             .is_some_and(|rollout_path| rollout_path.exists())
 }
 
+/// The provider state `execute_inner` saves after the stored thread could not be restored and
+/// the run started a fresh thread whose rollout is `rollout_path`. Job tests use it to carry a
+/// turn's saved state into the next turn without running Codex.
+#[cfg(test)]
+pub(crate) fn provider_state_after_fresh_thread(
+    previous: Option<&JsonValue>,
+    browser_mode: bool,
+    rollout_path: &Path,
+) -> JsonValue {
+    update_provider_conversation_state(
+        previous,
+        thread_mode_key(browser_mode),
+        &ThreadId::new(),
+        Some(rollout_path),
+        true,
+        "failed_new",
+    )
+}
+
+/// The provider state `execute_inner` saves after resuming the thread the stored state names
+/// for this mode from its rollout, with the same lookups, including the browser mode's
+/// fallback to the legacy thread keys.
+#[cfg(test)]
+pub(crate) fn provider_state_after_thread_resumed(
+    previous: &JsonValue,
+    browser_mode: bool,
+) -> JsonValue {
+    let mode_key = thread_mode_key(browser_mode);
+    let thread_id = extract_thread_id_from_provider_state(Some(previous), mode_key)
+        .expect("stored state names a thread");
+    let rollout_path = extract_rollout_path_from_provider_state(Some(previous), mode_key)
+        .expect("stored state names a rollout");
+    assert!(rollout_path.exists(), "the resumed rollout is on this disk");
+    update_provider_conversation_state(
+        Some(previous),
+        mode_key,
+        &thread_id,
+        Some(&rollout_path),
+        false,
+        "rollout",
+    )
+}
+
 fn update_provider_conversation_state(
     previous: Option<&JsonValue>,
     mode_key: &str,

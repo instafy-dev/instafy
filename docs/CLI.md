@@ -85,6 +85,9 @@ With no target, `conversation show` reads the conversation named by `INSTAFY_CON
 or either variable, the command fails. An explicit empty target, such as an unset shell variable,
 also fails rather than falling back to the current conversation. CLI versions before this change
 require a target, so an agent on an older CLI passes the id from its runtime context instead.
+The variable must hold a conversation UUID, here and for `instafy history messages` and
+`instafy history runs` without `--conversation`. Any other value, such as a title or a path, is
+rejected before a request is sent.
 
 `conversation search` inspects recent titles/previews and recent messages in at most 12
 conversations. It does not search all persisted message content. For exact evidence in older
