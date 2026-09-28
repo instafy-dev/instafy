@@ -129,7 +129,7 @@ describe("controllerConversationNotice", () => {
     });
     for (const message of [withCode, textOnly]) {
       expect(resolveControllerConversationNoticeContent(message)).toBe(
-        "Waiting for a free cloud runtime. This team’s one runtime is busy in another space; stop it in Machines and this request will send.",
+        "Waiting for a free cloud runtime. All of this team’s runtimes are busy in other spaces; stop one in Machines and this request will send.",
       );
       expect(resolveControllerConversationNoticeLabel(message)).toBe("Waiting for a runtime");
       // Stopping the blocker is the fix, so the card keeps its button.
