@@ -561,8 +561,11 @@ starts from GHCR by the same digest, with ECR Public as the fallback.
   `public.ecr.aws/supabase/<name>:<tag>` reference. The pinned CLI finds that
   reference locally and skips its own pull. The CLI registry is not redirected.
   Pulls run one at a time, bounded to three minutes each and ten minutes in
-  total. A failure is logged with the same fixed hints as serial preparation and
-  leaves that image to the CLI's own pull, which was the previous behavior.
+  total. A pull that times out or cannot reach its registry is not retried, and
+  that registry is skipped for the rest of the start, so a stalled GHCR costs
+  one three-minute timeout rather than the whole budget. A failure is logged
+  with the same fixed hints as serial preparation and leaves that image to the
+  CLI's own pull, which was the previous behavior.
 
 `SUPABASE_IMAGE_MIRROR=ghcr` turns the mirror on and `off` turns it off. Unset,
 it is on only when `GITHUB_ACTIONS=true`, so local startup is unchanged unless

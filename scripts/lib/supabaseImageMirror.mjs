@@ -45,6 +45,16 @@ const TAG = /^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$/u;
 const UPSTREAM = /^docker\.io\/[a-z0-9]+(?:[._-][a-z0-9]+)*\/([a-z0-9]+(?:[._-][a-z0-9]+)*)$/u;
 // Registry answers that another attempt at the same registry cannot change.
 const PERMANENT_PULL_FAILURE = /denied|unauthorized|forbidden|authentication required|manifest unknown|not found/iu;
+// Transport failures: the registry did not answer this runner at all. A stalled
+// pull only ends at its own timeout, so retrying it, or asking the same
+// registry for the next image, would spend the whole budget on one stall.
+const UNREACHABLE_PULL_FAILURE = /i\/o timeout|context deadline exceeded|client\.timeout exceeded|tls handshake timeout|no such host|temporary failure in name resolution|connection refused|network is unreachable|no route to host|proxyconnect/iu;
+
+/** A pull killed at its timeout, or one that never reached the registry. */
+export function registryUnreachable(result) {
+  return result?.error?.code === "ETIMEDOUT" || Boolean(result?.signal)
+    || UNREACHABLE_PULL_FAILURE.test(String(result?.stderr ?? ""));
+}
 
 function invalidLock(reason) {
   return new Error(`supabase-image-mirror-lock-invalid: ${reason}`);
@@ -197,6 +207,9 @@ export function prepareSupabaseImageMirror({
 
   const images = imagesForMode(lock, mode);
   Object.assign(summary, { enabled: true, images: images.length });
+  // A registry that timed out or was unreachable once is skipped for the rest
+  // of this start, so a stalled GHCR costs one pull timeout, not the budget.
+  const unreachable = new Set();
   for (const [index, image] of images.entries()) {
     const local = cliImageRef(image);
     if (remaining() <= 0) {
@@ -211,6 +224,10 @@ export function prepareSupabaseImageMirror({
     let pulled;
     let deadline = false;
     for (const [stage, ref] of [["mirror-pull", mirrorImageRef(image)], ["ecr-pull", sourceImageRef(image)]]) {
+      if (unreachable.has(stage)) continue;
+      if (stage === "ecr-pull") {
+        log(`[supabase-stack] GHCR mirror unavailable for ${image.name}; pulling the same digest from ECR Public.`);
+      }
       for (let attempt = 1; attempt <= IMAGE_MIRROR_PULL_ATTEMPTS; attempt += 1) {
         const result = run("docker", ["pull", "--quiet", ref], IMAGE_MIRROR_PULL_TIMEOUT_MS);
         if (succeeded(result)) {
@@ -222,13 +239,16 @@ export function prepareSupabaseImageMirror({
           break;
         }
         report(stage, local, result);
+        if (registryUnreachable(result)) {
+          unreachable.add(stage);
+          log(`[supabase-stack] ${stage === "mirror-pull" ? "GHCR" : "ECR Public"} timed out or was unreachable; `
+            + "skipping it for the remaining images.");
+          break;
+        }
         if (attempt === IMAGE_MIRROR_PULL_ATTEMPTS || PERMANENT_PULL_FAILURE.test(String(result.stderr ?? ""))) break;
         wait(Math.max(0, Math.min(IMAGE_MIRROR_BACKOFF_MS * attempt, remaining())));
       }
       if (pulled || deadline) break;
-      if (stage === "mirror-pull") {
-        log(`[supabase-stack] GHCR mirror unavailable for ${image.name}; pulling the same digest from ECR Public.`);
-      }
     }
     if (!pulled) {
       summary.deferred += 1;

@@ -6,7 +6,8 @@ import { POSTGRES_IMAGE } from "../test-supabase-migrations-empty-db.mjs";
 import {
   IMAGE_MIRROR_BUDGET_MS, IMAGE_MIRROR_LOCK_URL, IMAGE_MIRROR_MODES, IMAGE_MIRROR_PULL_TIMEOUT_MS,
   cliImageRef, imagesForMode, loadSupabaseImageMirrorLock, mirrorImageFor, mirrorImageRef,
-  prepareSupabaseImageMirror, resolveSupabaseImageMirror, sourceImageRef, validateSupabaseImageMirrorLock,
+  prepareSupabaseImageMirror, registryUnreachable, resolveSupabaseImageMirror, sourceImageRef,
+  validateSupabaseImageMirrorLock,
 } from "./supabaseImageMirror.mjs";
 import { ANCILLARY_IMAGES, SERIAL_PULL_CLI_VERSION, SERVICE_NAMES } from "./supabaseSerialPull.mjs";
 import { AUTH_ONLY_EXCLUDED_CONTAINERS, BROWSER_TEST_EXCLUDED_CONTAINERS } from "./supabaseStartMode.mjs";
@@ -145,7 +146,7 @@ function harness({ env = { GITHUB_ACTIONS: "true", PATH: "/usr/bin" }, present =
     repoRoot: "/inert", env, execute, now: () => clock, wait: (milliseconds) => { waits.push(milliseconds); clock += milliseconds; },
     log: (line) => logs.push(line), ...options,
   });
-  return { calls, waits, logs, cached, run, advance: (milliseconds) => { clock += milliseconds; } };
+  return { calls, waits, logs, cached, run, execute, now: () => clock, advance: (milliseconds) => { clock += milliseconds; } };
 }
 
 const pulls = (calls) => calls.filter(({ args }) => args[0] === "pull").map(({ args }) => args.at(-1));
@@ -233,6 +234,81 @@ test("when both registries fail the CLI's own pull remains the last resort, with
   assert.ok(h.logs.every((line) => !/never-log|host\.invalid/.test(line)));
   assert.ok(h.logs.includes("[supabase-stack] Leaving postgres to the Supabase CLI's own pull."));
   assert.equal(h.logs.filter((line) => line.includes("hints=rate-limit")).length, 4);
+});
+
+// What spawnSync returns when it SIGKILLs a pull at its timeout.
+const timedOut = () => ({
+  status: null, signal: "SIGKILL", stdout: "", stderr: "",
+  error: Object.assign(new Error("spawnSync docker ETIMEDOUT"), { code: "ETIMEDOUT" }),
+});
+
+test("only a pull timeout or a transport failure counts as an unreachable registry", () => {
+  for (const result of [timedOut(), { status: null, signal: "SIGKILL", stderr: "" },
+    { status: 1, stderr: 'Get "https://ghcr.io/v2/": net/http: TLS handshake timeout' },
+    { status: 1, stderr: "dial tcp: lookup ghcr.io on 127.0.0.53:53: no such host" },
+    { status: 1, stderr: "dial tcp 140.82.1.1:443: i/o timeout" },
+    { status: 1, stderr: "proxyconnect tcp: dial tcp 10.0.0.1:3128: connect: connection refused" }]) {
+    assert.equal(registryUnreachable(result), true, JSON.stringify(result));
+  }
+  for (const result of [ok(), { status: 1, stderr: "unexpected EOF" }, { status: 1, stderr: "toomanyrequests: Data limit exceeded" },
+    { status: 1, stderr: "Error response from daemon: error from registry: denied" }, { thrown: new Error("ENOENT") }, undefined]) {
+    assert.equal(registryUnreachable(result), false, JSON.stringify(result));
+  }
+});
+
+test("a stalled GHCR costs one pull timeout, not the budget; every image then comes from ECR Public", () => {
+  for (const [options, mode] of [[{ databaseOnly: true }, "database"], [{ browserTest: true }, "browser-test"]]) {
+    const h = harness();
+    const images = imagesForMode(lock, mode);
+    const execute = (binary, args, runOptions) => {
+      if (args[0] === "pull" && args.at(-1).startsWith("ghcr.io/")) {
+        h.calls.push({ binary, args, options: runOptions });
+        h.advance(runOptions.timeout);
+        return timedOut();
+      }
+      if (args[0] === "pull") h.advance(30_000);
+      return h.execute(binary, args, runOptions);
+    };
+    assert.deepEqual(h.run({ ...options, execute }),
+      { enabled: true, images: images.length, present: 0, mirrored: 0, fallback: images.length, deferred: 0 });
+    assert.deepEqual(pulls(h.calls), [mirrorImageRef(images[0]), ...images.map(sourceImageRef)], mode);
+    assert.deepEqual(h.waits, [], "a timed-out pull is not retried");
+    assert.equal(h.now(), IMAGE_MIRROR_PULL_TIMEOUT_MS + images.length * 30_000);
+    assert.ok(h.now() < IMAGE_MIRROR_BUDGET_MS);
+    assert.ok(h.logs.includes("[supabase-stack] Docker preparation failed stage=mirror-pull image=postgres exit=unknown signal=SIGKILL error=ETIMEDOUT hints=unclassified"));
+    assert.deepEqual(h.logs.filter((line) => line.includes("skipping it for the remaining images")),
+      ["[supabase-stack] GHCR timed out or was unreachable; skipping it for the remaining images."]);
+  }
+});
+
+test("an unreachable GHCR and a stalled ECR Public leave the remaining images to the CLI without further pulls", () => {
+  const h = harness();
+  const execute = (binary, args, runOptions) => {
+    if (args[0] === "pull" && args.at(-1).startsWith("ghcr.io/")) {
+      h.calls.push({ binary, args, options: runOptions });
+      return { status: 1, stdout: "", stderr: 'Error response from daemon: Get "https://ghcr.io/v2/": proxyconnect tcp: dial tcp 10.0.0.1:3128: connect: connection refused' };
+    }
+    if (args[0] === "pull") {
+      h.calls.push({ binary, args, options: runOptions });
+      h.advance(runOptions.timeout);
+      return timedOut();
+    }
+    return h.execute(binary, args, runOptions);
+  };
+  assert.deepEqual(h.run({ databaseOnly: true, execute }),
+    { enabled: true, images: 4, present: 0, mirrored: 0, fallback: 0, deferred: 4 });
+  const [postgres] = databaseImages;
+  assert.deepEqual(pulls(h.calls), [mirrorImageRef(postgres), sourceImageRef(postgres)]);
+  assert.deepEqual(h.waits, []);
+  assert.equal(h.now(), IMAGE_MIRROR_PULL_TIMEOUT_MS);
+  assert.ok(h.logs.includes("[supabase-stack] Docker preparation failed stage=mirror-pull image=postgres exit=1 signal=none-or-unknown error=none-or-unknown hints=unclassified"));
+  assert.ok(h.logs.includes("[supabase-stack] Docker preparation failed stage=ecr-pull image=postgres exit=unknown signal=SIGKILL error=ETIMEDOUT hints=unclassified"));
+  assert.ok(h.logs.every((line) => !line.includes("10.0.0.1")));
+  assert.deepEqual(h.logs.filter((line) => line.includes("skipping it for the remaining images")), [
+    "[supabase-stack] GHCR timed out or was unreachable; skipping it for the remaining images.",
+    "[supabase-stack] ECR Public timed out or was unreachable; skipping it for the remaining images.",
+  ]);
+  assert.equal(h.logs.filter((line) => /^\[supabase-stack\] Leaving .* to the Supabase CLI's own pull\.$/.test(line)).length, 4);
 });
 
 test("a spawn failure is reported with fixed metadata and does not stop preparation", () => {
