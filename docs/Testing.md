@@ -530,6 +530,57 @@ For the full-stack suites, run the local stack first:
 - `pnpm stack:up`
 - `pnpm stack:down` when finished.
 
+## Supabase CI image mirror
+
+ECR Public caps anonymous pulls by data volume per source IP, and GitHub-hosted
+runners share IPs, so CI stacks failed with `toomanyrequests: Data limit
+exceeded` and reruns did not help. CI therefore pulls the Supabase images it
+starts from GHCR by the same digest, with ECR Public as the fallback.
+
+- `supabase/image-mirror.lock.json` pins the ten images the locked Supabase CLI
+  2.92.0 starts in CI, each by its upstream index digest, and records which
+  startup profiles use it. Its tests fail until the lock matches the CLI version
+  in `pnpm-lock.yaml`, that CLI's image tags, and the digest pinned by the
+  empty-database migration test.
+- `.github/workflows/mirror-supabase-images.yml` runs only on protected `main`
+  (lock, script or workflow changes, weekly, or manual dispatch; never for pull
+  requests). It copies each index unchanged to
+  `ghcr.io/instafy-dev/supabase/<name>` under the upstream tag with
+  `docker buildx imagetools create`, skips digests GHCR already serves, and then
+  proves anonymously that every index, tag and child manifest resolves to the
+  locked digest. The source is ECR Public, with Docker Hub (identical digests)
+  as its fallback. Only `GITHUB_TOKEN` with `packages: write` is used. These are
+  unmodified upstream images, not Instafy builds.
+- `scripts/ensure-supabase-postgres-image.mjs` (the contracts lane and the
+  private composition job) makes one bounded GHCR pull after the local and cache
+  checks, then falls back to its unchanged five-attempt ECR pull. Either pull is
+  by digest, so the digest-bound cache tag is unchanged.
+- `pnpm supabase:up` pulls each image the selected profile needs (four for
+  database-only, seven for Auth-only, ten for browser-test and full) from GHCR by
+  digest, or from ECR Public by digest, and tags it with the CLI's own
+  `public.ecr.aws/supabase/<name>:<tag>` reference. The pinned CLI finds that
+  reference locally and skips its own pull. The CLI registry is not redirected.
+  Pulls run one at a time, bounded to three minutes each and ten minutes in
+  total. A failure is logged with the same fixed hints as serial preparation and
+  leaves that image to the CLI's own pull, which was the previous behavior.
+
+`SUPABASE_IMAGE_MIRROR=ghcr` turns the mirror on and `off` turns it off. Unset,
+it is on only when `GITHUB_ACTIONS=true`, so local startup is unchanged unless
+you opt in. Anonymous GHCR pulls work locally once the packages are public.
+Startup leaves pulls to the CLI when `SUPABASE_INTERNAL_IMAGE_REGISTRY` is set or
+when the installed CLI is not the locked version. Running
+`pnpm test:migrations:empty-db` on its own still pulls from ECR Public; run
+`node scripts/ensure-supabase-postgres-image.mjs` first to use the mirror.
+
+When the Supabase CLI is bumped, update the lock's tags and digests in the same
+change. The mirror workflow copies them after merge; until then CI falls back to
+ECR Public. If the workflow reports that a package is not anonymously pullable,
+an organization owner must set that `supabase/<name>` package's visibility to
+Public in its package settings. This is irreversible, and the upstream images
+are already public. Run
+`node --test scripts/lib/supabaseImageMirror.test.mjs scripts/mirror-supabase-images.test.mjs scripts/ensure-supabase-postgres-image.test.mjs`
+for offline regression tests.
+
 ## Disposable database and auth-email CI
 
 For a clean, unlinked local stack on a connection-constrained Docker host,
@@ -544,7 +595,9 @@ complete pinned inventory: five persistent services plus Realtime and Storage
 images for the CLI's one-shot schema initialization. Serial preparation itself does not change the selected
 startup profile, skip tests, alter TLS, or increase runner limits.
 The separate browser-test profile validates that complete inventory too, then
-prepares all 13 images except Edge Runtime.
+prepares all 13 images except Edge Runtime. When the
+[GHCR mirror](#supabase-ci-image-mirror) is on, it runs first, so serial
+preparation finds those references already present.
 
 Preparation uses an empty temporary CLI/Docker home and anonymous public-ECR
 pulls against the default local Docker daemon. Linked projects, local dotenv
