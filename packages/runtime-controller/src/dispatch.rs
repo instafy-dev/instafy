@@ -2203,15 +2203,14 @@ pub(crate) async fn process_dispatch_prompt(
                             error = %api_error.message,
                             "dispatch prompt failed to reconnect unavailable runtime"
                         );
-                        // The code lets the studio tell a start that failed
-                        // from one the team's machine limit refused, which
-                        // is a wait, not a failure.
-                        reconnect_metadata = Some(json!({
-                            "status": "failed",
-                            "runtimeId": record.id.to_string(),
-                            "error": api_error.message,
-                            "code": api_error.code,
-                        }));
+                        let active_lease_status =
+                            load_live_active_lease_status(&connection, &record.id).await;
+                        reconnect_metadata = Some(dispatch_reconnect_failure_metadata(
+                            &record.id,
+                            status,
+                            &api_error,
+                            active_lease_status.as_deref(),
+                        ));
                     }
                 }
             }
@@ -3602,6 +3601,78 @@ fn should_retarget_unavailable_runtime(
 ) -> bool {
     matches!(reason, "runtime_not_ready" | "runtime_unavailable")
         && strict_browser_runtime_id.is_none()
+}
+
+/// The status of the runtime's live generation, read after the dispatch
+/// reconnect failed. A read error counts as nothing starting, so the alert
+/// stays terminal rather than hiding a real failure.
+async fn load_live_active_lease_status(
+    client: &tokio_postgres::Client,
+    runtime_id: &Uuid,
+) -> Option<String> {
+    match client
+        .query_opt(
+            "select rl.status
+             from runtimes r
+             join runtime_leases rl on rl.id = r.active_lease_id
+             where r.id = $1
+               and rl.released_at is null",
+            &[runtime_id],
+        )
+        .await
+    {
+        Ok(row) => row.map(|row| row.get::<_, String>("status")),
+        Err(error) => {
+            warn!(
+                runtime_id = %runtime_id,
+                %error,
+                "dispatch prompt could not read the runtime lease after a failed reconnect"
+            );
+            None
+        }
+    }
+}
+
+/// Classify a reconnect the dispatch could not complete.
+///
+/// The code lets the studio tell a start that failed from one the team's
+/// machine limit refused, which is a wait, not a failure. A limit refusal
+/// therefore keeps the failed status the studio reads as that wait.
+///
+/// The reconnect can also lose to another start of the same runtime. The
+/// studio's own ensure, for example, holds the runtime row through its
+/// provider call, and this duplicate attempt then errors while that launch
+/// is still in flight. The queued job has already been unpinned, so it runs
+/// once that start registers. While the runtime holds a live launching or
+/// active lease, the refusal is recorded as a start in progress, so no
+/// terminal "Workspace startup failed" message is written. The error and
+/// its code stay in the metadata. A cleanup_pending lease is not starting
+/// anything, and it stays terminal like a runtime with no live lease.
+///
+/// A server error without a code is the controller failing this attempt
+/// itself, for example a missing token signing key or an unavailable
+/// database. The launch path can return one after it committed this
+/// reconnect's own launching lease, and nothing marks that lease failed.
+/// The lease read back is then the dead launch, not another start, so such
+/// an error stays terminal. Losing to another start shows up as a conflict
+/// or as a coded refusal instead.
+fn dispatch_reconnect_failure_metadata(
+    runtime_id: &Uuid,
+    status: StatusCode,
+    error: &ApiError,
+    active_lease_status: Option<&str>,
+) -> JsonValue {
+    let limit_refusal = error.code.as_deref() == Some(runtime::RUNTIME_LIMIT_REACHED_CODE);
+    let controller_failure = status.is_server_error() && error.code.is_none();
+    let start_in_flight = !limit_refusal
+        && !controller_failure
+        && matches!(active_lease_status, Some("launching" | "active"));
+    json!({
+        "status": if start_in_flight { "starting" } else { "failed" },
+        "runtimeId": runtime_id.to_string(),
+        "error": error.message,
+        "code": error.code,
+    })
 }
 
 fn should_persist_runtime_alert_conversation_message(
@@ -5149,6 +5220,107 @@ mod tests {
             Some("status=503"),
             None,
         ));
+    }
+
+    #[test]
+    fn a_reconnect_that_loses_to_a_live_start_is_not_a_terminal_alert() {
+        let runtime_id = Uuid::new_v4();
+        let detail = Some("status=requested, lastSeen=unknown");
+        let contention = ApiError::new(
+            "managed runtime flavor does not match the active lease; stop it before changing flavor",
+        );
+
+        for lease_status in ["launching", "active"] {
+            let reconnect = dispatch_reconnect_failure_metadata(
+                &runtime_id,
+                StatusCode::CONFLICT,
+                &contention,
+                Some(lease_status),
+            );
+            assert_eq!(reconnect["status"], json!("starting"), "{lease_status}");
+            assert_eq!(reconnect["error"], json!(contention.message));
+            assert_eq!(reconnect["runtimeId"], json!(runtime_id.to_string()));
+            assert!(!should_persist_runtime_alert_conversation_message(
+                "runtime_not_ready",
+                detail,
+                Some(&reconnect),
+            ));
+        }
+
+        // Nothing is starting: no live lease, or one waiting on provider
+        // cleanup, or a lease the reuse check discarded.
+        for lease_status in [None, Some("cleanup_pending"), Some("failed")] {
+            let reconnect = dispatch_reconnect_failure_metadata(
+                &runtime_id,
+                StatusCode::CONFLICT,
+                &contention,
+                lease_status,
+            );
+            assert_eq!(reconnect["status"], json!("failed"), "{lease_status:?}");
+            assert!(should_persist_runtime_alert_conversation_message(
+                "runtime_not_ready",
+                detail,
+                Some(&reconnect),
+            ));
+        }
+
+        // A coded provider failure can precede another start that is now
+        // launching, so it still counts as a start in progress.
+        let provider_failure = ApiError::with_details(
+            "provider failed to ensure runtime",
+            "provider_launch_failed",
+            json!({}),
+        );
+        let reconnect = dispatch_reconnect_failure_metadata(
+            &runtime_id,
+            StatusCode::INTERNAL_SERVER_ERROR,
+            &provider_failure,
+            Some("launching"),
+        );
+        assert_eq!(reconnect["status"], json!("starting"));
+
+        // A server error without a code can leave this reconnect's own
+        // launching lease behind, so that lease proves nothing is starting.
+        for (status, message) in [
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "origin token signing key not configured",
+            ),
+            (
+                StatusCode::SERVICE_UNAVAILABLE,
+                "Runtime provider launch guard is temporarily unavailable. Please retry.",
+            ),
+        ] {
+            let reconnect = dispatch_reconnect_failure_metadata(
+                &runtime_id,
+                status,
+                &ApiError::new(message),
+                Some("launching"),
+            );
+            assert_eq!(reconnect["status"], json!("failed"), "{status}");
+            assert_eq!(reconnect["error"], json!(message));
+            assert!(should_persist_runtime_alert_conversation_message(
+                "runtime_not_ready",
+                detail,
+                Some(&reconnect),
+            ));
+        }
+
+        // The studio shows a limit refusal as a wait for a free runtime, and
+        // it only reads it that way from a failed reconnect.
+        let limit = ApiError::with_details(
+            "Your team's hosted runtime is in use in another space.",
+            runtime::RUNTIME_LIMIT_REACHED_CODE,
+            json!({}),
+        );
+        let reconnect = dispatch_reconnect_failure_metadata(
+            &runtime_id,
+            StatusCode::PAYMENT_REQUIRED,
+            &limit,
+            Some("launching"),
+        );
+        assert_eq!(reconnect["status"], json!("failed"));
+        assert_eq!(reconnect["code"], json!("runtime_limit_reached"));
     }
 
     #[test]
