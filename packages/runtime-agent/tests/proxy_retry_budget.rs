@@ -20,6 +20,7 @@ use uuid::Uuid;
 const CHILD_MARKER: &str = "INSTAFY_PROXY_RETRY_TEST_CHILD";
 const API_KEY: &str = "inert-local-retry-test-key";
 const FINAL_TEXT: &str = "LOCAL_RETRY_OK";
+const STEP_TEXT: &str = "LOCAL_RETRY_STEP_DONE";
 
 struct MockState {
     scenario: String,
@@ -28,19 +29,26 @@ struct MockState {
     errors: Mutex<Vec<String>>,
 }
 
-fn sse(mut item: Value) -> Response {
+fn sse(item: Value) -> Response {
+    sse_with_end_turn(item, None)
+}
+
+fn sse_with_end_turn(mut item: Value, end_turn: Option<bool>) -> Response {
     let response_id = format!("resp-{}", Uuid::new_v4());
     item["id"] = json!(format!("item-{}", Uuid::new_v4()));
     if item.get("call_id").is_some() {
         item["call_id"] = json!(format!("call-{}", Uuid::new_v4()));
     }
-    let response = json!({
+    let mut response = json!({
         "id":response_id, "object":"response", "status":"completed",
         "model":"gpt-6-luna", "output":[item.clone()],
         "usage":{"input_tokens":10,"output_tokens":5,"total_tokens":15,
             "input_tokens_details":{"cached_tokens":0},
             "output_tokens_details":{"reasoning_tokens":0}}
     });
+    if let Some(end_turn) = end_turn {
+        response["end_turn"] = json!(end_turn);
+    }
     let events = [
         json!({"type":"response.created","response":{"id":response_id,"status":"in_progress","model":"gpt-6-luna","output":[]}}),
         json!({"type":"response.output_item.done","output_index":0,"item":item}),
@@ -53,11 +61,43 @@ fn sse(mut item: Value) -> Response {
     ([("content-type", "text/event-stream")], body).into_response()
 }
 
+/// The Instafy proxy's envelope for a retryable upstream rate limit. The proxy always sends a
+/// Retry-After with it; one second keeps the scheduled retry short.
+fn proxy_rate_limit() -> Response {
+    let body = json!({"error":{"message":"The upstream provider rate limit was reached.",
+        "type":"upstream_error", "code":"upstream_rate_limit", "retryable":true}});
+    (
+        StatusCode::TOO_MANY_REQUESTS,
+        [("retry-after", "1")],
+        Json(body),
+    )
+        .into_response()
+}
+
+/// The proxy's envelope for an exhausted ChatGPT plan window, which resets in hours.
+fn proxy_usage_limit() -> Response {
+    let body = json!({"error":{"message":"The upstream plan usage limit was reached.",
+        "type":"usage_limit_reached", "code":"upstream_usage_limit_reached",
+        "retryable":false, "resets_at":4_102_444_800_i64}});
+    (StatusCode::TOO_MANY_REQUESTS, Json(body)).into_response()
+}
+
 fn answer(text: &str) -> Response {
     sse(
         json!({"type":"message","id":"msg-local-retry","role":"assistant",
         "status":"completed","phase":"final_answer",
         "content":[{"type":"output_text","text":text,"annotations":[]}]}),
+    )
+}
+
+/// A completed step that asks Codex for another sampling request in the same turn, the way a
+/// browser turn continues after each action, without depending on which tools are offered.
+fn continue_turn(text: &str) -> Response {
+    sse_with_end_turn(
+        json!({"type":"message","id":"msg-local-step","role":"assistant",
+        "status":"completed","phase":"commentary",
+        "content":[{"type":"output_text","text":text,"annotations":[]}]}),
+        Some(false),
     )
 }
 
@@ -82,7 +122,17 @@ async fn responses(
         return (StatusCode::BAD_REQUEST, "local fixture request ceiling").into_response();
     }
     let code = match state.scenario.as_str() {
-        "transient" if ordinal > 1 => return answer(FINAL_TEXT),
+        "transient" | "transient_429" if ordinal > 1 => return answer(FINAL_TEXT),
+        "transient_429" | "persistent_429" => return proxy_rate_limit(),
+        "usage_limit_429" => return proxy_usage_limit(),
+        // Two sampling requests in one browser-lane turn, each throttled once and recovered.
+        "browser_step_429s" => {
+            return match ordinal {
+                1 | 3 => proxy_rate_limit(),
+                2 => continue_turn(STEP_TEXT),
+                _ => answer(FINAL_TEXT),
+            };
+        }
         "transient" | "persistent" | "routing" => 503,
         "terminal_400" => 400,
         "terminal_401" => 401,
@@ -234,7 +284,16 @@ async fn run_scenario(scenario: &str, expected_requests: usize) -> Result<()> {
         .env("CODEX_RUNTIME_REASONING_EFFORT", "low")
         // The bounded proxy policy must win over these deliberately large values.
         .env("CODEX_MAX_RUN_RETRIES", "4")
-        .env("CODEX_MAX_STREAM_RETRIES", "5")
+        // The browser lane keeps the runtime's own stream-error cap. A cap of one allows one
+        // error per sampling request, so counting across the whole turn aborts on the second.
+        .env(
+            "CODEX_MAX_STREAM_RETRIES",
+            if scenario == "browser_step_429s" {
+                "1"
+            } else {
+                "5"
+            },
+        )
         .env("CODEX_RETRY_BASE_DELAY_MS", "1")
         .env(
             "CODEX_RUN_TIMEOUT_SECONDS",
@@ -309,6 +368,15 @@ async fn run_scenario(scenario: &str, expected_requests: usize) -> Result<()> {
         assert!(main_input.contains("Earlier human context for the local decline fixture."));
         assert!(main_input.contains("NO_RESPONSE"));
     }
+    if scenario == "browser_step_429s" {
+        assert!(
+            requests
+                .iter()
+                .skip(2)
+                .all(|r| r["input"].to_string().contains(STEP_TEXT)),
+            "the second step must continue the same session rather than replay the turn"
+        );
+    }
     if scenario == "tool_once" {
         assert_eq!(fs::read_to_string(workspace.join("tool-count.txt"))?, "x");
         assert!(
@@ -337,6 +405,18 @@ scenario_test!(
     2
 );
 scenario_test!(transient_503_recovers_in_same_session, "transient", 2);
+scenario_test!(transient_429_recovers_in_same_session, "transient_429", 2);
+scenario_test!(
+    persistent_429_is_bounded_and_reports_the_rate_limit,
+    "persistent_429",
+    2
+);
+scenario_test!(plan_usage_limit_429_is_not_retried, "usage_limit_429", 1);
+scenario_test!(
+    browser_turn_recovered_429s_do_not_accumulate_across_steps,
+    "browser_step_429s",
+    4
+);
 scenario_test!(terminal_400_is_not_retried, "terminal_400", 1);
 scenario_test!(terminal_401_is_not_retried, "terminal_401", 1);
 scenario_test!(terminal_402_is_not_retried, "terminal_402", 1);
@@ -396,6 +476,9 @@ async fn isolated_retry_child() -> Result<()> {
                 allow_plain_text_final_fallback: true,
                 suppress_contextual_instructions: true,
                 cancel_signal: Some(cancel),
+                // A browser session keeps Codex's default retries and the runtime's own
+                // stream-error cap instead of the bounded proxy policy.
+                expect_browser_session: scenario == "browser_step_429s",
                 ..Default::default()
             },
         )
@@ -403,11 +486,22 @@ async fn isolated_retry_child() -> Result<()> {
     if let Some(task) = canceller {
         task.abort();
     }
-    if scenario == "transient" {
+    if matches!(
+        scenario.as_str(),
+        "transient" | "transient_429" | "browser_step_429s"
+    ) {
         assert_eq!(result?.final_json["summary"], FINAL_TEXT);
     } else {
         let error = result.expect_err("scripted failure must remain an error");
         let message = format!("{error:#}").to_ascii_lowercase();
+        if scenario == "persistent_429" {
+            // The final error must still say it was a rate limit so it can be classified.
+            assert!(message.contains("429"), "{message}");
+            assert!(message.contains("rate limit was reached"), "{message}");
+        }
+        if scenario == "usage_limit_429" {
+            assert!(message.contains("usage limit"), "{message}");
+        }
         if scenario == "cancel" {
             assert!(message.contains("lease lost"), "{message}");
         }
