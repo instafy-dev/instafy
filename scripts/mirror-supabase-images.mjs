@@ -125,10 +125,12 @@ export async function fetchManifest(reference, { fetchImpl = fetch, timeoutMs = 
   }
 }
 
-/** Read a manifest by digest with bounded backoff on rate limits, 5xx and network errors. */
-export async function readVerifiedManifest(
+/**
+ * Read a manifest with bounded backoff on rate limits, 5xx and network errors.
+ * 401, 403 and 404 are answers, not outages, and are returned at once.
+ */
+export async function readManifestWithBackoff(
   reference,
-  expectedDigest,
   {
     read = fetchManifest,
     attempts = SOURCE_READ_ATTEMPTS,
@@ -140,17 +142,19 @@ export async function readVerifiedManifest(
   let last;
   for (let attempt = 1; attempt <= attempts; attempt += 1) {
     last = await read(reference);
-    if (last.ok) {
-      return last.digest === expectedDigest
-        ? last
-        : { ok: false, status: last.status, stage: "digest-mismatch" };
-    }
-    if (!retryableStatus(last.status) || attempt === attempts) break;
+    if (last.ok || !retryableStatus(last.status) || attempt === attempts) break;
     const wait = backoffMs * 2 ** (attempt - 1);
     log(`::warning::${reference.split("@")[0]} read failed (${last.stage} ${last.status}); retrying in ${wait / 1000}s.`);
     await sleep(wait);
   }
   return last;
+}
+
+/** Read a manifest by digest with bounded backoff, accepting only the expected bytes. */
+export async function readVerifiedManifest(reference, expectedDigest, options = {}) {
+  const last = await readManifestWithBackoff(reference, options);
+  if (!last.ok) return last;
+  return last.digest === expectedDigest ? last : { ok: false, status: last.status, stage: "digest-mismatch" };
 }
 
 function delay(milliseconds) {
@@ -348,13 +352,23 @@ export async function copyMirror(plan, { execute = spawnSync, sleep = delay, log
 }
 
 /** Anonymous proof for every lock entry: index, tag and each child manifest. */
-export async function verifyMirror(lock, { read = fetchManifest, log = console.log } = {}) {
+export async function verifyMirror(lock, { read = fetchManifest, sleep = delay, log = console.log } = {}) {
   const problems = [];
   const rows = [];
+  // A GHCR 429, 5xx or network error is retried with the source-read backoff
+  // rather than reported as a broken mirror. Once one read exhausts that
+  // backoff GHCR is having an outage, and the remaining reads are single
+  // attempts, so the job fails in minutes instead of at its timeout.
+  let degraded = false;
+  const readGhcr = async (reference) => {
+    const result = await readManifestWithBackoff(reference, { read, attempts: degraded ? 1 : SOURCE_READ_ATTEMPTS, sleep, log });
+    if (!result.ok && retryableStatus(result.status)) degraded = true;
+    return result;
+  };
   for (const image of lock.images) {
     const row = { name: image.name, tag: image.tag, digest: image.digest, ghcr: "ok", upstreamTag: "unchanged" };
     rows.push(row);
-    const { index, tagOk, missingChildren, unreadable } = await inspectMirror(image, read);
+    const { index, tagOk, missingChildren, unreadable } = await inspectMirror(image, readGhcr);
     if (!index.ok) {
       if (index.status === 401 || index.status === 403) {
         // GHCR answers 403 for both a private and an absent package. After a

@@ -331,7 +331,7 @@ test("verification proves every lock entry anonymously and names the package set
     for (const child of children) entries[`ghcr.io/instafy-dev/supabase/${image.name}@${child}`] = { ok: true, status: 200, digest: child, mediaType: "application/vnd.oci.image.manifest.v1+json", bytes: Buffer.from("{}") };
     entries[cliImageRef(image)] = served(image.digest);
   }
-  const clean = await verifyMirror(lock, { read: registry(entries).read, log: quiet });
+  const clean = await verifyMirror(lock, { read: registry(entries).read, sleep: noSleep, log: quiet });
   assert.deepEqual(clean.problems, []);
   assert.deepEqual(clean.rows.map((row) => row.name), lock.images.map((image) => image.name));
 
@@ -340,7 +340,7 @@ test("verification proves every lock entry anonymously and names the package set
   delete entries[`ghcr.io/instafy-dev/supabase/gotrue@${children[1]}`];
   entries[cliImageRef(realtime)] = served(`sha256:${"9".repeat(64)}`);
   const warnings = [];
-  const broken = await verifyMirror(lock, { read: registry(entries).read, log: (line) => warnings.push(line) });
+  const broken = await verifyMirror(lock, { read: registry(entries).read, sleep: noSleep, log: (line) => warnings.push(line) });
   assert.deepEqual(broken.problems, [
     `postgres is not anonymously pullable (HTTP 403). If the copy step succeeded, set the package visibility to Public: ${packageSettingsUrl("postgres")}`,
     `gotrue: child manifest ${children[1]} is not anonymously pullable from GHCR.`,
@@ -351,6 +351,49 @@ test("verification proves every lock entry anonymously and names the package set
   assert.match(summary, /\| postgres \| `17\.6\.1\.106` \| `sha256:21ab97114931` \| not public or missing \| unchanged \|/u);
   assert.match(summary, /\| realtime \| `v2\.82\.0` \| `sha256:e3a9a49c92d1` \| ok \| moved \|/u);
   assert.equal(gotrue.name, "gotrue");
+});
+
+test("verification retries a transient GHCR answer, and stops retrying once GHCR is down", async () => {
+  const children = [`sha256:${"1".repeat(64)}`, `sha256:${"2".repeat(64)}`];
+  const healthy = () => {
+    const entries = {};
+    for (const image of lock.images) {
+      entries[mirrorImageRef(image)] = served(image.digest, children);
+      entries[mirrorTagRef(image)] = served(image.digest);
+      for (const child of children) entries[`ghcr.io/instafy-dev/supabase/${image.name}@${child}`] = { ok: true, status: 200, digest: child, mediaType: "application/vnd.oci.image.manifest.v1+json", bytes: Buffer.from("{}") };
+      entries[cliImageRef(image)] = served(image.digest);
+    }
+    return entries;
+  };
+  const [postgres, gotrue] = lock.images;
+  const entries = healthy();
+  const unavailable = { ok: false, status: 503, stage: "manifest" };
+  entries[mirrorImageRef(postgres)] = [unavailable, served(postgres.digest, children)];
+  entries[mirrorTagRef(gotrue)] = [{ ok: false, status: 429, stage: "token" }, { ok: false, status: 0, stage: "network" }, served(gotrue.digest)];
+  const waits = [];
+  const recovered = await verifyMirror(lock, { read: registry(entries).read, sleep: async (ms) => waits.push(ms), log: quiet });
+  assert.deepEqual(recovered.problems, []);
+  assert.deepEqual(waits, [10_000, 10_000, 20_000]);
+
+  // 404 is an answer: reported at once, never retried.
+  const missing = healthy();
+  delete missing[`ghcr.io/instafy-dev/supabase/${gotrue.name}@${children[0]}`];
+  const missingWaits = [];
+  const fake = registry(missing);
+  const partial = await verifyMirror(lock, { read: fake.read, sleep: async (ms) => missingWaits.push(ms), log: quiet });
+  assert.deepEqual(partial.problems, [`gotrue: child manifest ${children[0]} is not anonymously pullable from GHCR.`]);
+  assert.deepEqual(missingWaits, []);
+  assert.equal(fake.reads.filter((reference) => reference.endsWith(`gotrue@${children[0]}`)).length, 1);
+
+  // A GHCR outage spends one backoff, then every remaining read is one attempt.
+  const outage = registry(Object.fromEntries(lock.images.map((image) => [cliImageRef(image), served(image.digest)])));
+  const down = async (reference) => (reference.startsWith("ghcr.io/") ? (outage.reads.push(reference), unavailable) : outage.read(reference));
+  const outageWaits = [];
+  const failed = await verifyMirror(lock, { read: down, sleep: async (ms) => outageWaits.push(ms), log: quiet });
+  assert.deepEqual(outageWaits, [10_000, 20_000, 40_000]);
+  assert.equal(outage.reads.filter((reference) => reference.startsWith("ghcr.io/")).length, 4 + lock.images.length - 1);
+  assert.deepEqual(failed.rows.map((row) => row.ghcr), lock.images.map(() => "unreachable (manifest 503)"));
+  assert.equal(failed.problems.length, lock.images.length);
 });
 
 function response(status, { body = "", headers = {} } = {}) {
