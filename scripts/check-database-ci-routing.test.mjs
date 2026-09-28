@@ -125,12 +125,20 @@ test('Auth opts into only the fixed five-service profile and changes to either h
   assert.match(step(jobs[1], 'Start local Supabase (GoTrue + mail catcher)'), /env:\n          SUPABASE_AUTH_ONLY: "1"\n        run: pnpm supabase:up/u);
   assert.equal((source(jobs[1]).match(/SUPABASE_AUTH_ONLY/g) ?? []).length, 1);
   assert.doesNotMatch(source(jobs[0]), /SUPABASE_AUTH_ONLY/u);
+  const block = (job, trigger) => source(job).split(`  ${trigger}:\n`)[1].split(/^  \w/mu)[0];
   for (const file of ['scripts/lib/supabaseStartMode.mjs', 'scripts/lib/supabaseStartMode.test.mjs',
-    'scripts/lib/supabaseSerialPull.mjs', 'scripts/lib/supabaseSerialPull.test.mjs']) {
+    'scripts/lib/supabaseSerialPull.mjs', 'scripts/lib/supabaseSerialPull.test.mjs',
+    // supabase-stack.mjs runs the GHCR image-mirror prefetch before every start.
+    'scripts/lib/supabaseImageMirror.mjs', 'scripts/lib/supabaseImageMirror.test.mjs', 'supabase/image-mirror.lock.json']) {
+    assert.ok(fs.existsSync(path.join(root, file)), file);
     for (const trigger of ['pull_request', 'push']) {
-      const block = source(jobs[1]).split(`  ${trigger}:\n`)[1].split(/^  \w/mu)[0];
-      assert.ok(block.includes(`      - "${file}"`), `${trigger} must include ${file}`);
+      assert.ok(block(jobs[1], trigger).includes(`      - "${file}"`), `${trigger} must include ${file}`);
     }
+  }
+  // Controller DB runs on every main push; its pull requests follow the
+  // database-only startup helpers (the lock is covered by supabase/**).
+  for (const file of ['scripts/lib/supabaseStartMode.mjs', 'scripts/lib/supabaseSerialPull.mjs', 'scripts/lib/supabaseImageMirror.mjs', 'supabase/**']) {
+    assert.ok(block(jobs[0], 'pull_request').includes(`      - "${file}"`), `controller pull_request must include ${file}`);
   }
 });
 
@@ -205,6 +213,8 @@ test('self-hosted controller compiler cache restores only and all other workflow
     hosted.replace("        if: runner.environment == 'github-hosted'\n", ''));
   // Complete controller-db-tests.yml at combined source 2ef4dde: same Cargo,
   // migrations, stack lifecycle, permissions, routing and resource limits.
+  // Its pull_request paths additionally list the serial-pull and GHCR
+  // image-mirror startup helpers, bound by the Auth/helper routing test above.
   assert.equal(createHash('sha256').update(normalized).digest('hex'),
-    '79ed4285fb5ea6ded4878bb041a26c000f938c848b10412c4e8310db67024c27');
+    'ea18dd18cf6547c0c5189f61f6cef9c7593358221d3758250a00db2fdce312c6');
 });
