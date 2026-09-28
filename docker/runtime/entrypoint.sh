@@ -188,8 +188,17 @@ start_browser_webrtc_sender_daemon() {
 }
 
 resolve_chromium_executable_path() {
+  # Playwright's Chromium builds unpack to chrome-linux64/ (the Chrome for
+  # Testing layout, as in the pinned Playwright 1.61 webdev base) or, in older
+  # builds, chrome-linux/. The Playwright base image sets PLAYWRIGHT_BROWSERS_PATH.
+  local browsers_path="${PLAYWRIGHT_BROWSERS_PATH:-/ms-playwright}"
+  if [ "${browsers_path}" = "0" ]; then
+    browsers_path=/ms-playwright
+  fi
   for candidate in \
-    /ms-playwright/chromium-*/chrome-linux/chrome \
+    "${browsers_path}"/chromium-*/chrome-linux64/chrome \
+    "${browsers_path}"/chromium-*/chrome-linux/chrome \
+    /root/.cache/ms-playwright/chromium-*/chrome-linux64/chrome \
     /root/.cache/ms-playwright/chromium-*/chrome-linux/chrome \
     /usr/bin/chromium \
     /usr/bin/chromium-browser \
