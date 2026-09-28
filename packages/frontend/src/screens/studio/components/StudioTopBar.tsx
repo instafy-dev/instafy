@@ -1,5 +1,5 @@
 import { isWorkspacePreviewTab } from "../../../workspace/workspacePreviewTabs";
-import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { desktopTitleBarFree } from "../../../lib/desktopShell";
 import { DialogTrigger } from "react-aria-components";
 import {
@@ -23,7 +23,7 @@ import { useProfile } from "../../../profile/ProfileProvider";
 import { HumanAvatar } from "../../../components/HumanAvatar";
 import { getOrgInitials } from "../../../org/orgNaming";
 import { useAuth } from "../../../providers/AuthProvider";
-import { MobileStudioNavigationHeader } from "./MobileStudioNavigationHeader";
+import { MobileStudioNavigationHeader, type MobilePageHeader } from "./MobileStudioNavigationHeader";
 import type { StudioHistory } from "../../../navigation/useStudioHistory";
 import { useNativeBackButtonAction } from "../../../native/useNativeBackButtonAction";
 import { useProject } from "../../../projects/useProject";
@@ -63,7 +63,7 @@ export interface StudioTopBarProps {
   newChatInSidebar?: boolean;
   contextHeaderAbove?: boolean;
   inlineDesktop?: boolean;
-  mobilePageHeader?: { title: string; actions: ReactNode };
+  mobilePageHeader?: MobilePageHeader;
   mobileNavigation?: {
     history: StudioHistory;
     visitKey: string;
@@ -570,6 +570,7 @@ export function StudioTopBar({ mobileNavigation, mobilePageHeader, newChatInSide
               title={mobilePageHeader?.title ?? topbarLocationTitle}
               titleIcon={mobilePageHeader ? undefined : topbarLocationOverride ? topbarLocationOverride.icon : activeWorkspaceTab?.icon}
               primaryActions={mobilePageHeader?.actions}
+              pageMenuActions={mobilePageHeader?.menuActions}
               spaceName={resolvedProjectName}
               showSpaceName={!contextHeaderAbove}
               sidebarOpen={sidebarOpen}

@@ -21,7 +21,9 @@ test.describe("File explorer UI", () => {
     await prepareStudio(page, { waitForHostedRuntime: false });
 
     await page.getByTestId("sidebar-nav-code").click();
-    await expect(page.getByTestId("code-search-input")).toBeVisible();
+    await expect(page.getByTestId("code-search-input")).toHaveCount(0);
+    await page.getByTestId("files-explorer-search-toggle").click();
+    await expect(page.getByTestId("code-search-input")).toBeFocused();
     await expect(page.getByTestId("code-search-icon")).toBeVisible();
   });
 

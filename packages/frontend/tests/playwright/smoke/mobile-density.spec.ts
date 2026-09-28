@@ -1,3 +1,4 @@
+import { fileExplorerSearch } from "../utils/filesExplorer.js";
 import { expect, test, type Locator } from "@playwright/test";
 
 import { prepareStudio, resetRuntimeUserState } from "../utils/harness.js";
@@ -150,10 +151,10 @@ test.describe("Narrow-phone Studio density", () => {
     await expect(dock).toHaveCount(0);
     const filesTree = page.getByTestId("files-explorer-tree");
     const searchRow = page.getByTestId("files-explorer-search-row");
-    const searchInput = page.getByTestId("code-search-input");
+    const searchInput = await fileExplorerSearch(page);
 
     await expect(filesTree).toBeVisible();
-    await expect(filesTree).toHaveCSS("padding-top", "12px");
+    await expect(filesTree).toHaveCSS("padding-top", "0px");
     await expect(filesTree).toHaveCSS("padding-right", "16px");
     await expect(filesTree).toHaveCSS("padding-bottom", "12px");
     await expect(filesTree).toHaveCSS("padding-left", "16px");
@@ -172,18 +173,18 @@ test.describe("Narrow-phone Studio density", () => {
     await page.setViewportSize({ width: 374, height: 649 });
     await expectHeightBetween(studioHeader, 56, 58);
     await expect(dock).toHaveCount(0);
-    await expect(filesTree).toHaveCSS("padding-top", "12px");
+    await expect(filesTree).toHaveCSS("padding-top", "0px");
     await expect(filesTree).toHaveCSS("padding-right", "16px");
     await expect(searchRow).toHaveCSS("margin-top", "12px");
 
     await page.setViewportSize({ width: 375, height: 649 });
     await expectHeightBetween(studioHeader, 56, 58);
     await expectHeightBetween(headerPicker, 48, 48);
-    await expect(filesTree).toHaveCSS("padding-top", "20px");
-    await expect(filesTree).toHaveCSS("padding-right", "20px");
-    await expect(filesTree).toHaveCSS("padding-bottom", "20px");
-    await expect(filesTree).toHaveCSS("padding-left", "20px");
-    await expect(searchRow).toHaveCSS("margin-top", "20px");
+    await expect(filesTree).toHaveCSS("padding-top", "0px");
+    await expect(filesTree).toHaveCSS("padding-right", "16px");
+    await expect(filesTree).toHaveCSS("padding-bottom", "12px");
+    await expect(filesTree).toHaveCSS("padding-left", "16px");
+    await expect(searchRow).toHaveCSS("margin-top", "12px");
     await expect(dock).toHaveCount(0);
   });
 
@@ -244,7 +245,7 @@ test.describe("Narrow-phone Studio density", () => {
 
     await sidebarOverlay.getByTestId("sidebar-nav-code").click();
     const filesDrawer = page.getByTestId("mobile-left-drawer-overlay");
-    const filesSearch = filesDrawer.getByTestId("code-search-input");
+    const filesSearch = await fileExplorerSearch(page);
     await expect(filesDrawer).toHaveCSS("padding-left", "27px");
     await expect(filesDrawer).toHaveCSS("padding-right", "48px");
     const filesSearchBox = await filesSearch.boundingBox();

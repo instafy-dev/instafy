@@ -1,7 +1,21 @@
 import { describe, expect, it } from "vitest";
-import { buildStudioDestinationSearch } from "../studioNavigation";
+import { buildStudioDestinationSearch, chatListDestination } from "../studioNavigation";
 
 describe("Studio destination construction", () => {
+  it("toggles desktop Chats without changing the open panel or its scope", () => {
+    const original = "?projectId=A&conversationId=C&panel=settings&settingsTab=profile&settingsCategory=appearance";
+    const opened = buildStudioDestinationSearch(original, chatListDestination(true, false));
+    expect(new URLSearchParams(opened).get("workspaceTab")).toBe("history");
+    expect(buildStudioDestinationSearch(opened, chatListDestination(true, true))).toBe(original);
+  });
+
+  it("keeps the mobile Chats destination open when selected again", () => {
+    const opened = buildStudioDestinationSearch("?projectId=A&panel=extensions", chatListDestination(false, false));
+    expect(new URLSearchParams(opened).has("panel")).toBe(false);
+    expect(new URLSearchParams(opened).get("workspaceTab")).toBe("history");
+    expect(buildStudioDestinationSearch(opened, chatListDestination(false, true))).toBe(opened);
+  });
+
   it("opens an exact message and clears its target on ordinary conversation or panel navigation", () => {
     const target = buildStudioDestinationSearch("?projectId=old&messageId=stale", {
       kind: "conversation", projectId: "A", conversationControllerId: "remote", messageId: "saved-message",

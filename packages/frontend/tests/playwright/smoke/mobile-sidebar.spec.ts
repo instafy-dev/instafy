@@ -1,3 +1,4 @@
+import { closeFileExplorer, openFileExplorerMenu } from "../utils/filesExplorer.js";
 import { test, expect, type Page } from "@playwright/test";
 import { openTeamDirectory } from "../utils/sidebar.js";
 import { prepareStudio, resetRuntimeUserState, writeWorkspaceFile } from "../utils/harness.js";
@@ -223,8 +224,8 @@ test.describe("Mobile sidebar drawer", () => {
     await page.goto(url.toString());
 
     await expect(page.getByTestId("mobile-left-drawer-overlay")).toHaveCount(0);
-    await expect(page.getByTestId("code-search-input")).toBeVisible();
-    await expect(page.getByTestId("files-explorer-touch-actions")).toBeVisible();
+    await expect(page.getByTestId("files-explorer-search-toggle")).toBeVisible();
+    await expect(page.getByTestId("mobile-header-more").filter({ visible: true })).toBeVisible();
   });
 
   test("labels the mobile drawer surface instead of the underlying tab", async ({ page }) => {
@@ -313,20 +314,20 @@ test.describe("Mobile sidebar drawer", () => {
 
     await expect(page.getByTestId("mobile-left-drawer-overlay")).toBeVisible();
     await expect(page.getByTestId("mobile-left-drawer-overlay").getByTestId("mobile-header-title")).toHaveText("Files");
-    await expect(page.getByTestId("code-search-input")).toBeVisible();
-    await expect(page.getByTestId("files-explorer-touch-actions")).toBeVisible();
-    await expect(page.getByTestId("files-explorer-close")).toBeVisible();
+    await expect(page.getByTestId("files-explorer-search-toggle")).toBeVisible();
+    await expect(page.getByTestId("mobile-header-more").filter({ visible: true })).toBeVisible();
+    await expect(page.getByTestId("files-explorer-close")).toHaveCount(0);
     await expect(page.getByText("Select a file to start editing.")).toHaveCount(0);
 
-    await page.getByTestId("files-explorer-touch-actions").click();
+    await openFileExplorerMenu(page);
     await expect(page.getByTestId("files-explorer-menu")).toBeVisible();
     await expect(page.getByTestId("files-explorer-menu-new-folder")).toBeVisible();
 
     await page.keyboard.press("Escape");
     await expect(page.getByTestId("files-explorer-menu")).toHaveCount(0);
-    await page.getByTestId("files-explorer-close").click();
+    await closeFileExplorer(page);
 
-    await expect(page.getByTestId("code-search-input")).toHaveCount(0);
+    await expect(page.getByTestId("files-explorer-search-toggle")).toHaveCount(0);
     await expect(page.getByTestId("files-explorer-close")).toHaveCount(0);
     await expect(page.getByTestId("mobile-left-drawer-overlay")).toHaveCount(0);
     await expect(page).toHaveURL(chatUrl);
@@ -359,7 +360,7 @@ test.describe("Mobile sidebar drawer", () => {
     await fileEntry.click();
 
     await expect(drawer).toHaveCount(0);
-    await expect(page.getByTestId("code-search-input")).toHaveCount(0);
+    await expect(page.getByTestId("files-explorer-search-toggle")).toHaveCount(0);
     await expect(page.getByRole("heading", { name: targetPath })).toBeVisible();
     await expect(page.getByTestId("monaco-editor")).toHaveAttribute("data-file", targetPath);
     await expect(page.getByTestId("files-back-button")).toBeVisible();
@@ -367,7 +368,7 @@ test.describe("Mobile sidebar drawer", () => {
     await openTouchSidebar(page);
     await expect(page.getByTestId("mobile-sidebar-overlay")).toBeVisible();
     await page.getByTestId("sidebar-nav-code").click();
-    await expect(page.getByTestId("code-search-input")).toBeVisible();
+    await expect(page.getByTestId("files-explorer-search-toggle")).toBeVisible();
     await expect
       .poll(() => new URL(page.url()).searchParams.get("workspaceTab"))
       .toBe("files");
@@ -376,14 +377,14 @@ test.describe("Mobile sidebar drawer", () => {
     await expect
       .poll(() => new URL(page.url()).searchParams.get("workspaceTab"))
       .not.toBe("files");
-    await expect(page.getByTestId("code-search-input")).toHaveCount(0);
+    await expect(page.getByTestId("files-explorer-search-toggle")).toHaveCount(0);
     await expect(page.getByTestId("monaco-editor")).toHaveAttribute("data-file", targetPath);
 
     await page.goForward();
     await expect
       .poll(() => new URL(page.url()).searchParams.get("workspaceTab"))
       .toBe("files");
-    await expect(page.getByTestId("code-search-input")).toBeVisible();
+    await expect(page.getByTestId("files-explorer-search-toggle")).toBeVisible();
     await expect(page.getByTestId("monaco-editor")).toHaveCount(0);
 
     await page.goBack();
@@ -400,17 +401,17 @@ test.describe("Mobile sidebar drawer", () => {
       .toBe("files");
 
     await page.setViewportSize({ width: 890, height: 800 });
-    await expect(page.getByTestId("code-search-input")).toBeVisible();
+    await expect(page.getByTestId("files-explorer-search-toggle")).toBeVisible();
     await expect(page.getByTestId("monaco-editor")).toHaveCount(0);
-    await page.getByTestId("files-explorer-close").click();
+    await closeFileExplorer(page);
     await expect(page.getByTestId("monaco-editor")).toHaveAttribute("data-file", targetPath);
 
     await page.setViewportSize({ width: 360, height: 800 });
     await page.getByTestId("files-back-button").click();
-    await expect(page.getByTestId("code-search-input")).toBeVisible();
-    await page.getByTestId("files-explorer-close").click();
+    await expect(page.getByTestId("files-explorer-search-toggle")).toBeVisible();
+    await closeFileExplorer(page);
 
-    await expect(page.getByTestId("code-search-input")).toHaveCount(0);
+    await expect(page.getByTestId("files-explorer-search-toggle")).toHaveCount(0);
     await expect(page.getByTestId("monaco-editor")).toHaveAttribute("data-file", targetPath);
   });
 
@@ -442,10 +443,10 @@ test.describe("Mobile sidebar drawer", () => {
     await expect(page.getByRole("heading", { name: targetPath })).toBeVisible();
     await expect(page.getByRole("img", { name: targetPath })).toBeVisible();
     await expect(page.getByTestId("files-back-button")).toBeVisible();
-    await expect(page.getByTestId("code-search-input")).toHaveCount(0);
+    await expect(page.getByTestId("files-explorer-search-toggle")).toHaveCount(0);
 
     await page.getByTestId("files-back-button").click();
-    await expect(page.getByTestId("code-search-input")).toBeVisible();
+    await expect(page.getByTestId("files-explorer-search-toggle")).toBeVisible();
     await page.goBack();
     await expect(page.getByRole("heading", { name: targetPath })).toBeVisible();
     await expect(page.getByRole("img", { name: targetPath })).toBeVisible();
@@ -480,7 +481,7 @@ test.describe("Mobile sidebar drawer", () => {
       // bounded rAF handoff can lose the code-panel mount. Recover the way a
       // user would — reopen Files from the shared navigation and tap again.
       await openNavigationDestination(page, "Files");
-      await expect(page.getByTestId("code-search-input")).toBeVisible({ timeout: 15_000 });
+      await expect(page.getByTestId("files-explorer-search-toggle")).toBeVisible({ timeout: 15_000 });
       await page.getByText(targetPath, { exact: true }).first().click();
       await expect(heading).toBeVisible({ timeout: 15_000 });
     }
@@ -494,7 +495,7 @@ test.describe("Mobile sidebar drawer", () => {
     await expect(page.getByTestId("monaco-editor")).toHaveCount(0);
 
     await page.getByTestId("files-back-button").click();
-    await expect(page.getByTestId("code-search-input")).toBeVisible();
+    await expect(page.getByTestId("files-explorer-search-toggle")).toBeVisible();
     if (openedFromDrawer) {
       // Reopening through navigation pushes extra history entries, so the
       // history-restore expectation only holds on the clean drawer handoff.
@@ -516,14 +517,14 @@ test.describe("Mobile sidebar drawer", () => {
 
     const chatUrl = page.url();
     await openNavigationDestination(page, "Files");
-    await expect(page.getByTestId("code-search-input")).toBeVisible();
+    await expect(page.getByTestId("files-explorer-search-toggle")).toBeVisible();
     await expect(page.getByTestId("mobile-bottom-dock")).toHaveCount(0);
 
-    await page.getByTestId("mobile-left-drawer-overlay").getByTestId("mobile-header-back").click();
+    await closeFileExplorer(page);
     await expect(page).toHaveURL(chatUrl);
     await expect(page.getByTestId("chat-input")).toBeVisible();
     await expect(page.getByTestId("mobile-left-drawer-overlay")).toHaveCount(0);
-    await expect(page.getByTestId("code-search-input")).toHaveCount(0);
+    await expect(page.getByTestId("files-explorer-search-toggle")).toHaveCount(0);
   });
 
   test("keeps spaces search collapsed on mobile until requested", async ({ page }) => {

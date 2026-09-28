@@ -4,20 +4,23 @@ import { Xmark } from "iconoir-react";
 import { IconButton } from "../../components/Button";
 import { DrawerHeader } from "../../components/DrawerHeader";
 import { lazyStudioPanel } from "../../workspace/lazyStudioPanel";
+import type { MobilePageHeader } from "./components/MobileStudioNavigationHeader";
 import type { TeamPanelProps } from "./components/TeamPanel";
 
-function PanelFallback({ children, title, onClose, tabs, headerPortalTarget }: {
+function PanelFallback({ children, title, onClose, tabs, headerPortalTarget, actionsPortalTarget, renderMobileHeader }: {
   children: ReactNode;
   title: string;
   onClose?: (() => void) | null;
   tabs?: ReactNode;
   headerPortalTarget?: HTMLElement | null;
+  actionsPortalTarget?: HTMLElement | null;
+  renderMobileHeader?: (header: MobilePageHeader) => ReactNode;
 }) {
   return (
     <div className="flex h-full min-h-0 flex-col">
       {tabs}
-      {onClose ? (
-        <DrawerHeader portalTarget={headerPortalTarget} title={title} pageTitle={title === "Files" || title === "Changes"} frame="rail" actions={
+      {renderMobileHeader ? renderMobileHeader({ title, actions: null }) : actionsPortalTarget ? null : onClose ? (
+        <DrawerHeader portalTarget={headerPortalTarget} actionsPortalTarget={actionsPortalTarget} title={title} pageTitle={title === "Files" || title === "Changes"} frame="rail" actions={
           <IconButton variant="ghost" size="sm" radius="full" aria-label={`Close ${title.toLowerCase()}`} onPress={onClose}>
             <Xmark className="h-4 w-4" />
           </IconButton>
@@ -34,10 +37,10 @@ export const FilesPanel = lazyStudioPanel(
   (content, props) => {
     const explorer = props.showExplorer !== false && props.explorerPortalTarget
       ? createPortal(<PanelFallback title="Files" onClose={props.onRequestCloseExplorer}
-        headerPortalTarget={props.explorerHeaderPortalTarget}>{content}</PanelFallback>, props.explorerPortalTarget)
+        headerPortalTarget={props.explorerHeaderPortalTarget} renderMobileHeader={props.renderMobileExplorerHeader}>{content}</PanelFallback>, props.explorerPortalTarget)
       : null;
     if (props.renderMode === "portal") return explorer;
-    return <><PanelFallback title="Files" tabs={props.tabsSlot}>{content}</PanelFallback>{explorer}</>;
+    return <><PanelFallback title="Files" tabs={props.tabsSlot} renderMobileHeader={explorer ? undefined : props.renderMobileExplorerHeader}>{content}</PanelFallback>{explorer}</>;
   },
 );
 export const GitDiffView = lazyStudioPanel(
@@ -49,7 +52,7 @@ export const GitReviewView = lazyStudioPanel(
 );
 export const SourceControlDrawer = lazyStudioPanel(
   "Changes", async () => ({ default: (await import("./components/SourceControlDrawer")).SourceControlDrawer }),
-  (content, props) => <PanelFallback title="Changes" headerPortalTarget={props.headerPortalTarget} onClose={props.onRequestClose}>{content}</PanelFallback>,
+  (content, props) => <PanelFallback title="Changes" headerPortalTarget={props.headerPortalTarget} actionsPortalTarget={props.actionsPortalTarget} onClose={props.onRequestClose}>{content}</PanelFallback>,
 );
 export const CreditsPanel = lazyStudioPanel(
   "Credits", async () => ({ default: (await import("./components/CreditsPanel")).CreditsPanel }),

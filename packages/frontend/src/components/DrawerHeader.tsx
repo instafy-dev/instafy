@@ -6,6 +6,8 @@ import { usePageTitleInNavigation } from "./PageTitleContext";
 export interface DrawerHeaderProps {
   /** Place this header in the desktop shell while keeping its controls owned by the pane. */
   portalTarget?: HTMLElement | null;
+  /** Move only the actions into an enclosing mobile navigation header. */
+  actionsPortalTarget?: HTMLElement | null;
   title: ReactNode;
   subtitle?: ReactNode;
   titleAs?: ElementType;
@@ -25,6 +27,7 @@ export interface DrawerHeaderProps {
 
 export function DrawerHeader({
   portalTarget,
+  actionsPortalTarget,
   title,
   subtitle,
   titleAs = "p",
@@ -43,6 +46,9 @@ export function DrawerHeader({
   const hideTitle = pageTitle && titleInNavigation;
   const railFrame = frame === "rail";
   const touchDensity = !railFrame && density === "touch";
+  if (actionsPortalTarget) {
+    return actions ? createPortal(<div className="flex shrink-0 items-center gap-1">{actions}</div>, actionsPortalTarget) : null;
+  }
   if (hideTitle && !subtitle && !actions) return null;
   const header = (
     <div className={["flex min-w-0 items-center gap-3", hideTitle && !subtitle ? "justify-end" : "justify-between", railFrame && "h-12 shrink-0 px-4", className].filter(Boolean).join(" ")}>

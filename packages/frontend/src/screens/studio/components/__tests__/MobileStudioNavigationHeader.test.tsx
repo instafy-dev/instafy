@@ -39,6 +39,20 @@ describe("MobileStudioNavigationHeader", () => {
     expect(target).toBeDefined(); await act(async () => target!.click());
   }
 
+  it("keeps file actions in the shared overflow and closes it before running an action", async () => {
+    const fileActions = vi.fn();
+    props.title = "Files";
+    props.primaryActions = <Button aria-label="Filter loaded files">Search</Button>;
+    props.pageMenuActions = [{ label: "File actions", onPress: fileActions, testId: "file-actions" }];
+    await render();
+    expect(query("file-actions")).toBeNull();
+    await click("mobile-header-more");
+    expect(query("mobile-header-actions")?.contains(query("file-actions"))).toBe(true);
+    await click("file-actions");
+    expect(fileActions).toHaveBeenCalledOnce();
+    expect(query("mobile-header-more")?.getAttribute("aria-expanded")).toBe("false");
+  });
+
   it("omits history controls at direct entry and keeps chats accessible through the sidebar", async () => {
     await render();
     expect(query("mobile-history-controls")).toBeNull();

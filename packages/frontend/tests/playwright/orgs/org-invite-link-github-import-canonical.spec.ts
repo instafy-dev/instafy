@@ -1,4 +1,4 @@
-import { fileExplorerAction } from "../utils/filesExplorer.js";
+import { fileExplorerAction, fileExplorerSearch } from "../utils/filesExplorer.js";
 import { expect, test, type APIResponse, type Page } from "@playwright/test";
 import { openTeamDirectory } from "../utils/sidebar.js";
 import { randomUUID } from "node:crypto";
@@ -264,7 +264,7 @@ async function openWorkspaceFile(page: Page, filePath: string) {
   const refreshButton = await fileExplorerAction(page, "refresh");
   await expect(refreshButton).toBeEnabled({ timeout: 30_000 });
   await refreshButton.click();
-  await page.getByTestId("code-search-input").fill("");
+  await (await fileExplorerSearch(page)).fill("");
 
   const segments = filePath.split("/").filter((segment) => segment.length > 0);
   let currentPath = "";

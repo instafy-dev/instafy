@@ -259,12 +259,12 @@ export function StudioSidebar({
     () => moreItems?.filter((item): item is StudioNavItem => Boolean(item)) ?? [],
     [moreItems],
   );
-  const hasRecentChats = Boolean(onSelectConversation);
+  const hasRecentChats = !desktopRail && Boolean(onSelectConversation);
   // External context already contains the space selector. Only compact
   // desktop navigation needs a second row for New chat below its toggle.
   const desktopHeaderRows = externalHeader ? showLabels ? 1 : 2 : pathHeader ? 1 : showLabels ? 2 : 3;
   const mobileHeaderRows = showLabels ? pathControls ? 1 : 2 : 4;
-  const fixedEntryCount = (desktopRail ? desktopHeaderRows : mobileHeaderRows) + items.length + (onOpenConversationHistory && !hasRecentChats ? 1 : 0);
+  const fixedEntryCount = (desktopRail ? desktopHeaderRows : mobileHeaderRows) + items.length + (!desktopRail && onOpenConversationHistory && !hasRecentChats ? 1 : 0);
   const recentChatsReservePx = hasRecentChats && showLabels && recentChatsExpanded
     ? Math.max(1, Math.min(recentConversations.length, SIDEBAR_RECENT_CHAT_LIMIT)) * 40 + 56
     : 0;
@@ -1293,7 +1293,7 @@ export function StudioSidebar({
           </li> : null}
           {selectedTeamHasActiveSpace ? <>
           {items.map((item) => {
-          if (item.id === "chat" && onSelectConversation) {
+          if (item.id === "chat" && hasRecentChats && onSelectConversation) {
             return (
               <li key={item.id}>
                 <StudioRecentChats
@@ -1314,9 +1314,11 @@ export function StudioSidebar({
               </li>
             );
           }
-          const IconComponent = item.icon;
-          const isActive =
-            item.id === activePanel && !(item.id === "chat" && isConversationHistoryActive);
+          const togglesChatPane = desktopRail && item.id === "chat" && Boolean(onOpenConversationHistory);
+          const IconComponent = togglesChatPane ? ChatsIcon : item.icon;
+          const label = togglesChatPane ? "Chats" : item.label;
+          const isActive = togglesChatPane ? isConversationHistoryActive
+            : item.id === activePanel && !(item.id === "chat" && isConversationHistoryActive);
           const isPinned = pinnedPanel === item.id;
           const badgeCount = item.badge?.count ?? 0;
           const badgeText = badgeCount > 9 ? "9+" : badgeCount.toString();
@@ -1325,20 +1327,21 @@ export function StudioSidebar({
             <Fragment key={item.id}>
               <li>
                 <Button
-                  onPress={() => runDestination(() => onSelect(item.id))}
+                  onPress={() => runDestination(() => togglesChatPane ? onOpenConversationHistory?.() : onSelect(item.id))}
                   variant="ghost"
                   size="sm"
                   radius="lg"
                   fullWidth
-                  data-testid={`sidebar-nav-${item.id}`}
+                  data-testid={togglesChatPane ? "sidebar-nav-history" : `sidebar-nav-${item.id}`}
                   className={[
                     "group/item relative py-1.5 transition focus-visible:ring-offset-0",
                     sidebarRowLayoutClass,
                     getSidebarRowToneClass(isActive),
                   ].join(" ")}
-                  aria-current={isActive ? "page" : undefined}
-                  aria-label={item.label}
-                  title={showLabels ? undefined : item.label}
+                  aria-current={!togglesChatPane && isActive ? "page" : undefined}
+                  aria-expanded={togglesChatPane ? isConversationHistoryActive : undefined}
+                  aria-label={label}
+                  title={showLabels ? undefined : label}
                 >
                   <span className={getSidebarNavIconClass(isActive, item.accent)}>
                     <IconComponent className="text-base" aria-hidden="true" />
@@ -1377,12 +1380,12 @@ export function StudioSidebar({
                   </span>
                   {showLabels ? (
                     <span className="flex flex-1 items-center justify-between gap-2 text-sm font-medium text-slate-700 dark:text-slate-200">
-                      <span>{item.label}</span>
+                      <span>{label}</span>
                     </span>
                   ) : null}
                 </Button>
               </li>
-              {item.id === "chat" && onOpenConversationHistory ? (
+              {!desktopRail && item.id === "chat" && onOpenConversationHistory ? (
                 <li>
                   <Button
                     onPress={() => runDestination(onOpenConversationHistory)}

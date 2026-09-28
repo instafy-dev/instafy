@@ -246,7 +246,7 @@ test.describe("GitHub private repo clone (secrets)", () => {
 
     // UI verification: refresh the explorer, expand the cloned repo, and ensure hello.md is visible.
     await page.getByTestId("sidebar-nav-code").click();
-    await page.getByTestId("code-search-input").waitFor({ timeout: 10_000 });
+    await page.getByTestId("files-explorer-search-toggle").waitFor({ timeout: 10_000 });
     await (await fileExplorerAction(page, "refresh")).click();
 
     const helloTestId = `files-entry-${helloPath.replace(/[^a-zA-Z0-9]/g, "-")}`;

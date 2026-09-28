@@ -86,7 +86,7 @@ their source whitespace and scroll horizontally when needed.
 On wide screens, a slim global rail selects Home or a team. A persistent context/search
 field above the workspace contains selectable team and space chips separated by a muted slash.
 It stays in place when the inner sidebar collapses or search opens. The adjacent sidebar
-contains recent chats and workspace tools. Its expand/collapse control stays at the same
+contains a Chats entry and workspace tools. Its expand/collapse control stays at the same
 position in either width, with **New chat** beside it when expanded and below it when compact.
 New chat stays available for the active accessible space when another tab, including personal
 Settings, is selected. It is unavailable on Home or when no space in the selected team is active.
@@ -99,9 +99,15 @@ Their 48px header frame supplies structure without promoting them to page titles
 Desktop Chats, Files, Changes and the Spaces/Teams directory share the docked-pane
 header. With expanded navigation each pane's title and primary controls sit beside
 the tabs in the same top row. The tab strip starts at the workspace pane's edge,
-including after resizing the list. Chats stays open when selecting conversations;
-its name filter expands on demand. File paths and search, and version controls in
-Changes, remain inside their panes. Collapsed navigation keeps these headers inside
+including after resizing the list. Chats stays open when selecting conversations; its sidebar entry toggles the pane
+without changing the current workspace tab. On mobile, Chats remains a destination.
+Chats and Files reveal their filters on demand from the header. The Files filter
+matches names and paths in already-loaded folders and states that scope beside the
+input. Closing it clears the query; Escape returns focus to its toggle. File
+breadcrumbs appear only below the workspace root. On mobile, Files shares the
+navigation header, with secondary file actions in its More menu. Changes shows
+version-note and selection controls only when there are pending changes, while
+saved versions remain available in a clean workspace. Collapsed navigation keeps these headers inside
 the pane so the team and space pickers remain usable. Phone layouts retain their
 full-screen lists and navigation.
 
@@ -138,7 +144,7 @@ The space chip opens an anchored picker with up to six named space shortcuts and
 set is displayed alphabetically, with the current space highlighted in its alphabetical
 position. Choosing a shortcut does not move it to the front. Visiting another space can
 replace the oldest shortcut. Recent visits are remembered per account on this device.
-Chats retains its inline collapsible recent list scoped to the current space.
+Mobile navigation retains its inline collapsible recent chat list scoped to the current space.
 
 Space icons use the same numbered unread badges as Home and the full space directory:
 chats with unread assistant replies for the signed-in user, excluding the visible chat.
@@ -378,15 +384,21 @@ app visit, or removes only the picker from a direct-entry URL. Ordinary mobile s
 still use their own one-level Back behavior. Compact fine-pointer windows retain their existing
 composer navigation drawer control; touch conversations use the fixed Chats destination instead.
 
-The sidebar's **Chats** section starts expanded and shows up to three recently visited active
+On desktop, **Chats** toggles the full conversation pane directly in both expanded and compact
+navigation. It highlights while that pane is open, without replacing the active workspace tab.
+The sidebar has no separate recent-chat list, popover or Browse all chats link; tabs provide
+quick switching between open conversations. Selecting a conversation in the pane opens a
+preview or focuses its existing tab.
+
+The mobile sidebar's **Chats** section starts expanded and shows up to three recently visited active
 conversations in the current space. Selecting a row opens a preview or focuses its existing tab;
 closing a tab does not remove the conversation from recent chats. **Browse all chats** opens
 the existing searchable history. New chat creation lives in the top bar and full chat history;
 the sidebar Chats row only expands or collapses its recent list. Visit order is stored locally
 per account and space. Running or queued chats and the selected chat take priority in the
 bounded list; the remaining rows keep visit order. Other chats remain available through
-Browse all chats. The full history has an always-visible search field with its status
-filter inside, and New chat and Close actions beside the title. A non-default filter changes
+Browse all chats. The full history reveals search and status filters from its header, alongside
+New chat and a desktop Close action. A non-default filter changes
 the heading and marks the filter icon; counts live in the filter menu. Starting a chat clears
 the search and returns to active chats. Per-chat actions, including closing an open tab,
 live in its More menu.
@@ -394,8 +406,8 @@ live in its More menu.
 In fine-pointer windows below 900px, the composer's lower-left menu opens the navigation drawer
 with Chats expanded. Touch layouts open the full Chats overview from the composer and the
 navigation drawer from the header. Selecting
-a chat closes navigation, making chat switching two taps. On wider layouts, the expanded
-sidebar offers direct selection; a collapsed sidebar opens the same list in a popover. Home
+a chat closes navigation, making chat switching two taps. On wider layouts, the Chats button
+opens the full list beside the active workspace tab. Home
 remains in the sidebar, and the top menu remains available when the composer is hidden while
 scrolling.
 

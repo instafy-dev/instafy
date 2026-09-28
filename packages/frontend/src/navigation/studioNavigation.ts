@@ -44,6 +44,13 @@ export type StudioDestination =
       workspaceTab?: "history" | "files" | "sourceControl" | "workspaces" | null;
     };
 
+/** Desktop chat lists toggle beside the current tab; mobile Chats is a destination. */
+export function chatListDestination(isDesktop: boolean, historyOpen: boolean): StudioDestination {
+  return isDesktop
+    ? { kind: "drawer", workspaceTab: historyOpen ? null : "history" }
+    : { kind: "panel", panel: "chat", workspaceTab: "history" };
+}
+
 /** A destination is written once; route hydration selects the corresponding UI. */
 export function buildStudioDestinationSearch(search: string, destination: StudioDestination): string {
   if (destination.kind === "route") {

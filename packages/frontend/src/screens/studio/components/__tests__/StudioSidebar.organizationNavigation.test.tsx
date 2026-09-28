@@ -76,6 +76,7 @@ import { StudioSidebar } from "../StudioSidebar";
 import { StudioSearchContext } from "../StudioSearchContext";
 import { useStudioSearch } from "../useStudioSearch";
 import { recordProjectOpened } from "../../../../projects/projectRecency";
+import { createInitialConversation } from "../../../../conversations/conversationState";
 import { usesGlobalNavigationContext } from "../../teamNavigation";
 
 describe("StudioSidebar organization navigation", () => {
@@ -189,6 +190,44 @@ describe("StudioSidebar organization navigation", () => {
     headerPortal.remove();
     vi.restoreAllMocks();
     vi.unstubAllGlobals();
+  });
+
+  it.each([false, true])("opens Chats directly without desktop recent-list UI (collapsed=%s)", async collapsed => {
+    const onOpenConversationHistory = vi.fn();
+    const onSelectConversation = vi.fn();
+    const props: Partial<ComponentProps<typeof StudioSidebar>> = {
+      collapsed, onOpenConversationHistory, onSelectConversation,
+      items: [{ id: "chat", label: "Assistant", icon: () => <span />, accent: "" }],
+      recentConversations: [{ ...createInitialConversation({ localId: "recent-chat" }), title: "Recent conversation" }],
+    };
+    await render(props);
+    const chats = () => container.querySelector('[data-testid="sidebar-nav-history"]');
+    expect(chats()?.getAttribute("aria-label")).toBe("Chats");
+    expect(chats()?.getAttribute("aria-expanded")).toBe("false");
+    expect(container.querySelector('[data-testid="sidebar-recent-chats-list"]')).toBeNull();
+    expect(container.querySelector('[data-testid="sidebar-browse-all-chats"]')).toBeNull();
+    expect(container.querySelector('[data-testid="sidebar-nav-chat"]')).toBeNull();
+    await click("sidebar-nav-history");
+    expect(onOpenConversationHistory).toHaveBeenCalledOnce();
+    expect(document.querySelector('[data-testid="sidebar-recent-chats-popover"]')).toBeNull();
+    await render({ ...props, activePanel: "settings", isConversationHistoryActive: true });
+    expect(chats()?.getAttribute("aria-expanded")).toBe("true");
+    expect(chats()?.hasAttribute("aria-current")).toBe(false);
+    await click("sidebar-nav-history");
+    expect(onOpenConversationHistory).toHaveBeenCalledTimes(2);
+    expect(onSelect).not.toHaveBeenCalled();
+    expect(onSelectConversation).not.toHaveBeenCalled();
+  });
+
+  it("retains recent chats in the mobile navigation drawer", async () => {
+    fixture.desktop = false;
+    await render({ mobileOverlay: true, onSelectConversation: vi.fn(), onOpenConversationHistory: vi.fn(),
+      recentConversations: [{ ...createInitialConversation({ localId: "recent-chat" }), title: "Recent conversation" }],
+    });
+    expect(container.querySelector('[data-testid="sidebar-recent-chat-recent-chat"]')).not.toBeNull();
+    expect(container.querySelector('[data-testid="sidebar-browse-all-chats"]')).not.toBeNull();
+    await click("sidebar-nav-history");
+    expect(container.querySelector('[data-testid="sidebar-recent-chats-list"]')).toBeNull();
   });
 
   it.each([
@@ -705,8 +744,7 @@ describe("StudioSidebar organization navigation", () => {
       expect(onSelect).toHaveBeenLastCalledWith(id);
     }
     await click("sidebar-nav-history");
-    expect(document.querySelector('[data-testid="sidebar-recent-chats-popover"]')).not.toBeNull();
-    await act(async () => document.querySelector<HTMLButtonElement>('[data-testid="sidebar-browse-all-chats"]')?.click());
+    expect(document.querySelector('[data-testid="sidebar-recent-chats-popover"]')).toBeNull();
     expect(onBrowseAll).toHaveBeenCalledOnce();
     const more = container.querySelector('[data-testid="sidebar-nav-more"]');
     expect(more?.getAttribute("aria-label")).toBe("More");

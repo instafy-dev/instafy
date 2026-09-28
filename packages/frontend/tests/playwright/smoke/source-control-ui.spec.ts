@@ -407,7 +407,7 @@ test.describe("Source Control UI (git-canonical)", () => {
     const commitMessage = `playwright: save ${unique}`;
     await page.getByTestId("source-control-commit-message").fill(commitMessage);
     await page.getByTestId("source-control-sync").click();
-    await expect(page.getByTestId("source-control-sync")).toBeEnabled({ timeout: 120_000 });
+    await expect(page.getByTestId("source-control-sync")).toHaveCount(0, { timeout: 120_000 });
 
     await assertGitRemoteFileText(page, fileB, {
       projectId: activeProjectId,

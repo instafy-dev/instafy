@@ -8,12 +8,19 @@ import type { StudioHistory } from "../../../navigation/useStudioHistory";
 import { useNativeBackButtonAction } from "../../../native/useNativeBackButtonAction";
 import { MobileStudioHistoryControls } from "./MobileStudioHistoryControls";
 
+export interface MobilePageHeader {
+  title: string;
+  actions: ReactNode;
+  menuActions?: { label: string; icon?: ReactNode; onPress: () => void; testId?: string }[];
+}
+
 export interface MobileStudioNavigationHeaderProps {
   history: StudioHistory;
   historyInMenu?: boolean;
   title: string;
   titleIcon?: ReactNode;
   primaryActions?: ReactNode;
+  pageMenuActions?: MobilePageHeader["menuActions"];
   spaceName: string;
   showSpaceName?: boolean;
   onOpenPicker: () => void;
@@ -31,7 +38,7 @@ const TOUCH_TARGET = "!min-h-12 !min-w-12";
 /** Compact navigation uses the history owner supplied by Studio, never a second
  * history stack. Secondary actions keep the existing shared popover controls. */
 export function MobileStudioNavigationHeader({
-  history, historyInMenu = false, title, titleIcon, primaryActions, spaceName, showSpaceName = true, onOpenPicker,
+  history, historyInMenu = false, title, titleIcon, primaryActions, pageMenuActions, spaceName, showSpaceName = true, onOpenPicker,
   sidebarOpen = false, onOpenSettings,
   onNewChat, onNewPrivateChat, parentConversation, tabsAction, onMoreOpenChange,
 }: MobileStudioNavigationHeaderProps) {
@@ -85,6 +92,9 @@ export function MobileStudioNavigationHeader({
         <StudioDialogPopover placement="bottom end" offset={4} className="w-72 max-w-[calc(100vw-1.5rem)] p-2" data-testid="mobile-header-actions">
           <div className="flex flex-col gap-1">
             {historyInOverflow ? <MobileStudioHistoryControls history={history} onNavigate={() => changeMoreOpen(false)} /> : null}
+            {pageMenuActions?.map(action => <EntityRow key={action.label} title={action.label}
+              start={action.icon} surface="interactive" pressable className={TOUCH_TARGET}
+              onPress={() => actAndClose(action.onPress)} data-testid={action.testId} />)}
             {onNewChat ? <EntityRow title="Public chat" surface="interactive" pressable className={TOUCH_TARGET}
               start={<ChatLines className="h-5 w-5" aria-hidden="true" />} onPress={() => actAndClose(onNewChat)} data-testid="chat-new-chat-public" /> : null}
             {onNewPrivateChat ? <EntityRow title="Private chat" surface="interactive" pressable className={TOUCH_TARGET}

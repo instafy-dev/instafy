@@ -1,3 +1,4 @@
+import { chatListDestination } from "../navigation/studioNavigation";
 import { DEFAULT_HOME_LIST_STATE, StudioListNavigationProvider, useStudioListNavigation } from "../navigation/StudioListNavigation";
 import { StudioDraftsProvider, StudioDraftPanel } from "../workspace/StudioDrafts";
 import { StudioDraftNavigationGuard } from "../navigation/StudioDraftNavigationGuard";
@@ -1277,8 +1278,8 @@ function StudioLayoutInner() {
   }, [isLargeScreen, mobileGitReviewSheet, setMobileGitReviewSheet]);
 
   const handleOpenConversationHistory = useCallback(() => {
-    navigateToDestination({ kind: "panel", panel: "chat", workspaceTab: "history" });
-  }, [navigateToDestination]);
+    navigateToDestination(chatListDestination(isLargeScreen, leftDrawer === "history"));
+  }, [isLargeScreen, leftDrawer, navigateToDestination]);
 
   const [mobilePickerMode, setMobilePickerMode] = useState<"teams-and-spaces" | "spaces">("teams-and-spaces");
   const handleWorkspaceSwitcherOpenChange = useCallback((open: boolean) => {
@@ -1748,6 +1749,7 @@ function StudioLayoutInner() {
       : routedPanel === "team" ? navigationScope.orgKey : null,
   });
 
+  const [mobileDrawerActionsTarget, setMobileDrawerActionsTarget] = useState<HTMLDivElement | null>(null);
   const [desktopDrawerHeaderTarget, setDesktopDrawerHeaderTarget] = useState<HTMLDivElement | null>(null);
   const globalNavigationContext = usesGlobalNavigationContext(navigationScope.page, activeProjectId);
   const desktopPaneHeaderTarget = isLargeScreen && !sidebarCollapsed && !globalNavigationContext
@@ -1780,6 +1782,7 @@ function StudioLayoutInner() {
         showExplorer
         explorerPortalTarget={filesExplorerPortalTarget}
         explorerHeaderPortalTarget={leftDrawer === "files" ? desktopPaneHeaderTarget : null}
+        renderMobileExplorerHeader={!isLargeScreen ? header => <StudioTopBar contextHeaderAbove mobileNavigation={mobileTopbarNavigation} mobilePageHeader={header} /> : undefined}
         mobileView={filesMobileView}
         onMobileViewChange={handleFilesMobileViewChange}
         onRequestOpenExplorer={handleRequestOpenFilesExplorer}
@@ -2024,6 +2027,10 @@ function StudioLayoutInner() {
     onSpace={id => handleActivateProject(id, navigationScope.orgKey)}
   />;
 
+  const mobileDrawerPageHeader = !isLargeScreen && leftDrawer === "sourceControl"
+    ? { title: "Changes", actions: <div ref={setMobileDrawerActionsTarget} /> }
+    : undefined;
+
   if (!user) return null;
 
   return (
@@ -2032,20 +2039,6 @@ function StudioLayoutInner() {
     <StudioListNavigationProvider value={listNavigation}>
     <StudioSearchReturnProvider value={{ originToken: searchHistory.originToken, returnToResults: () => runStudioNavigation(searchHistory.returnToResults) }}>
     <ControllerNoticeActionsProvider value={controllerNoticeActionsValue}>
-      {shouldRenderFilesExplorerPortal ? (
-        <FilesPanel
-          renderMode="portal"
-          previewOwnerId={user?.id ?? null}
-          onDirectoryEntriesLoaded={knownWorkspaceFiles.recordDirectory}
-          showExplorer
-          explorerPortalTarget={filesExplorerPortalTarget}
-          explorerHeaderPortalTarget={leftDrawer === "files" ? desktopPaneHeaderTarget : null}
-          mobileView={filesMobileView}
-          onMobileViewChange={handleFilesMobileViewChange}
-          onRequestOpenExplorer={handleRequestOpenFilesExplorer}
-          onRequestCloseExplorer={handleRequestCloseFilesExplorer}
-        />
-      ) : null}
       <div
         className="studio-context-layout relative flex h-screen min-h-screen overflow-hidden bg-slate-50 dark:bg-[var(--color-studio-dark-canvas)]"
         data-search-open={search.open}
@@ -2101,6 +2094,21 @@ function StudioLayoutInner() {
             shakeToReportDetail: bugReportController.shakeToReportDetail,
           }}
         >
+          {shouldRenderFilesExplorerPortal ? (
+            <FilesPanel
+              renderMode="portal"
+              previewOwnerId={user?.id ?? null}
+              onDirectoryEntriesLoaded={knownWorkspaceFiles.recordDirectory}
+              showExplorer
+              explorerPortalTarget={filesExplorerPortalTarget}
+              explorerHeaderPortalTarget={leftDrawer === "files" ? desktopPaneHeaderTarget : null}
+              renderMobileExplorerHeader={!isLargeScreen ? header => <StudioTopBar contextHeaderAbove mobileNavigation={mobileTopbarNavigation} mobilePageHeader={header} /> : undefined}
+              mobileView={filesMobileView}
+              onMobileViewChange={handleFilesMobileViewChange}
+              onRequestOpenExplorer={handleRequestOpenFilesExplorer}
+              onRequestCloseExplorer={handleRequestCloseFilesExplorer}
+            />
+          ) : null}
           {isLargeScreen ? <StudioDesktopHeader contextRef={setDesktopContextTarget} searchTriggerRef={desktopSearchTriggerRef}
             searchOpen={search.open} onSearch={search.openSearch}
             drawerHeaderRef={setDesktopDrawerHeaderTarget} drawerWidth={leftDrawer ? leftDrawerWidth : 0}
@@ -2213,7 +2221,7 @@ function StudioLayoutInner() {
             inert={search.open || showMobileLeftDrawerOverlay || undefined}
           >
             {!isLargeScreen && !hideMobileContextWhileTyping ? mobileContextHeader() : null}
-            {!isLargeScreen ? navigationScope.page === "workspace" ? <StudioTopBar contextHeaderAbove mobileNavigation={mobileTopbarNavigation} /> : <div className={`flex min-h-14 shrink-0 items-center gap-2 border-b border-slate-200/70 bg-slate-50 px-1 py-1 ${DARK_RAIL_SURFACE_CLASS}`}>
+            {!isLargeScreen ? navigationScope.page === "workspace" ? shouldShowFilesWorkspace && filesMobileView === "tree" ? null : <StudioTopBar contextHeaderAbove mobileNavigation={mobileTopbarNavigation} mobilePageHeader={!showMobileLeftDrawerOverlay && filesMobileView === "tree" ? mobileDrawerPageHeader : undefined} /> : <div className={`flex min-h-14 shrink-0 items-center gap-2 border-b border-slate-200/70 bg-slate-50 px-1 py-1 ${DARK_RAIL_SURFACE_CLASS}`}>
               <IconButton variant="ghost" aria-label="Open navigation" data-testid="topbar-sidebar-toggle" onPress={handleToggleSidebar} className="!min-h-12 !min-w-12"><SidebarExpand className="h-[18px] w-[18px]" aria-hidden="true" /></IconButton>
               <MobileStudioHistoryControls history={mobileHistory} />
               <h1 className="min-w-0 flex-1 truncate text-sm font-semibold text-slate-700 dark:text-slate-200">{mobilePageTitle}</h1>
@@ -2309,7 +2317,7 @@ function StudioLayoutInner() {
               }}
             >
               {mobileContextHeader(true)}
-              {leftDrawer !== "history" ? <StudioTopBar contextHeaderAbove mobileNavigation={mobileTopbarNavigation} /> : null}
+              {leftDrawer !== "history" && leftDrawer !== "files" ? <StudioTopBar contextHeaderAbove mobileNavigation={mobileTopbarNavigation} mobilePageHeader={mobileDrawerPageHeader} /> : null}
               <div className="flex-1 min-h-0 overflow-hidden">
                   {leftDrawer === "history" ? (
                     <ConversationHistoryTab
@@ -2328,6 +2336,7 @@ function StudioLayoutInner() {
                   />
                 ) : leftDrawer === "sourceControl" ? (
                   <SourceControlDrawer
+                    actionsPortalTarget={mobileDrawerActionsTarget}
                     openRequest={sourceControlOpenRequest}
                     onRequestClose={() => {
                       requestHistoryPush();
