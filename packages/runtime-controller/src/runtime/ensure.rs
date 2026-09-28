@@ -1176,6 +1176,7 @@ pub(crate) async fn runtime_ensure(
                 metadata.clone(),
                 RuntimeLeaseScope::Exclusive,
                 origin_options.clone(),
+                ReusedLeaseMetadata::Requested,
             )
             .await?
         }
@@ -1198,6 +1199,7 @@ pub(crate) async fn runtime_ensure(
                 metadata.clone(),
                 RuntimeLeaseScope::Shared,
                 origin_options.clone(),
+                ReusedLeaseMetadata::Requested,
             )
             .await?
         }
@@ -1341,6 +1343,7 @@ async fn request_runtime_inner(
         body.metadata.clone(),
         RuntimeLeaseScope::Exclusive,
         origin_options,
+        ReusedLeaseMetadata::Requested,
     )
     .await?;
 
@@ -1402,6 +1405,7 @@ pub(super) async fn ensure_runtime_for_requeued_jobs(
         Some(metadata),
         RuntimeLeaseScope::Exclusive,
         OriginEnsureOptions::new(None, None, None),
+        ReusedLeaseMetadata::Requested,
     )
     .await
 }
@@ -1415,6 +1419,7 @@ pub(crate) async fn ensure_runtime_for_dispatch_reconnect(
     // Read before a forced handoff releases the lease, so the successor
     // launches with the same image and size as the generation it replaces.
     let live_lease = load_live_lease_metadata(state, &runtime.id).await?;
+    let carried_from = live_lease.as_ref().map(|(lease_id, _)| *lease_id);
     let metadata = build_dispatch_reconnect_metadata(
         &runtime.provider,
         live_lease
@@ -1450,6 +1455,7 @@ pub(crate) async fn ensure_runtime_for_dispatch_reconnect(
         Some(metadata),
         RuntimeLeaseScope::Exclusive,
         OriginEnsureOptions::new(None, None, None),
+        ReusedLeaseMetadata::CarriedFrom(carried_from),
     )
     .await
 }
@@ -1628,6 +1634,7 @@ pub(crate) async fn ensure_runtime_for_automation(
         metadata,
         RuntimeLeaseScope::Exclusive,
         OriginEnsureOptions::new(None, None, None),
+        ReusedLeaseMetadata::Requested,
     )
     .await
 }
@@ -1673,6 +1680,35 @@ fn normalize_runtime_size_metadata(
     (Some(JsonValue::Object(map)), size)
 }
 
+/// Which metadata a live lease keeps when an ensure reuses it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum ReusedLeaseMetadata {
+    /// The request's own metadata, once its flavor matches the lease's
+    /// launch. A caller that names settings gets them on the reused lease.
+    Requested,
+    /// The request carries forward the settings of this lease generation
+    /// (`None`: there was no live lease), read before the allocation
+    /// transaction. Only that same lease takes them on reuse.
+    CarriedFrom(Option<Uuid>),
+}
+
+impl ReusedLeaseMetadata {
+    /// Whether reusing `lease_id` writes the request's metadata onto it.
+    ///
+    /// Carried settings are read outside the allocation transaction, so a
+    /// concurrent ensure can replace the lease they came from before this one
+    /// reuses the runtime. Written onto that other generation, one lease's
+    /// size and env would bill and relaunch another as the wrong machine, and
+    /// a flavor copied from it would refuse a live runtime that is fine as it
+    /// is. Any other lease therefore keeps its own metadata.
+    fn applies_to_reused_lease(self, lease_id: Uuid) -> bool {
+        match self {
+            Self::Requested => true,
+            Self::CarriedFrom(source) => source == Some(lease_id),
+        }
+    }
+}
+
 /// [`ensure_runtime_launch`] for a request that must not be forgotten when the
 /// organization's hosted runtime limit refuses it: the refusal is recorded so
 /// the limit-wait sweep can replay this exact request once work is queued in
@@ -1689,6 +1725,7 @@ pub(super) async fn ensure_runtime_launch_recording_limit_wait(
     metadata: Option<JsonValue>,
     scope: RuntimeLeaseScope,
     origin_options: OriginEnsureOptions,
+    reused_lease_metadata: ReusedLeaseMetadata,
 ) -> Result<RuntimeEnsureResponse, (StatusCode, Json<ApiError>)> {
     let wait_request = LimitWaitEnsureRequest {
         provider: provider.clone(),
@@ -1710,6 +1747,7 @@ pub(super) async fn ensure_runtime_launch_recording_limit_wait(
         metadata,
         scope,
         origin_options,
+        reused_lease_metadata,
     )
     .await;
     if let Err(error) = &result {
@@ -1744,10 +1782,12 @@ pub(super) async fn ensure_runtime_for_limit_wait(
             Some(request.origin_protocols.clone()),
             None,
         ),
+        ReusedLeaseMetadata::Requested,
     )
     .await
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn ensure_runtime_launch(
     state: &AppState,
     project_id: Uuid,
@@ -1758,6 +1798,7 @@ async fn ensure_runtime_launch(
     metadata: Option<JsonValue>,
     scope: RuntimeLeaseScope,
     origin_options: OriginEnsureOptions,
+    reused_lease_metadata: ReusedLeaseMetadata,
 ) -> Result<RuntimeEnsureResponse, (StatusCode, Json<ApiError>)> {
     #[cfg(test)]
     {
@@ -1771,6 +1812,7 @@ async fn ensure_runtime_launch(
             metadata,
             scope,
             origin_options,
+            reused_lease_metadata,
             None,
         )
         .await;
@@ -1787,6 +1829,7 @@ async fn ensure_runtime_launch(
         metadata,
         scope,
         origin_options,
+        reused_lease_metadata,
     )
     .await
 }
@@ -1925,6 +1968,7 @@ async fn ensure_runtime_launch_inner(
     metadata: Option<JsonValue>,
     scope: RuntimeLeaseScope,
     origin_options: OriginEnsureOptions,
+    reused_lease_metadata: ReusedLeaseMetadata,
     #[cfg(test)] admission_test_hook: Option<ProviderLaunchAdmissionTestHook>,
 ) -> Result<RuntimeEnsureResponse, (StatusCode, Json<ApiError>)> {
     if super::provider::provider_is_self_hosted(state, &provider) && runtime_id.is_none() {
@@ -2070,23 +2114,27 @@ async fn ensure_runtime_launch_inner(
         }
 
         if let Some(existing) = reusable_lease {
-            let reusable_metadata = super::managed::reconcile_reused_managed_runtime_metadata(
-                &provider,
-                metadata.clone(),
-                existing.metadata.as_ref(),
-                existing.id,
-            )
-            .map_err(|message| (StatusCode::CONFLICT, Json(ApiError::new(message))))?;
-            if let Some(meta) = reusable_metadata.as_ref() {
-                transaction
-                    .execute(
-                        "update runtime_leases set metadata = $2::jsonb, updated_at = now() where id = $1",
-                        &[&existing.id, meta],
-                    )
-                    .await
-                    .map_err(|error| {
-                        internal_error(format!("failed to update reusable lease metadata: {error}"))
-                    })?;
+            if reused_lease_metadata.applies_to_reused_lease(existing.id) {
+                let reusable_metadata = super::managed::reconcile_reused_managed_runtime_metadata(
+                    &provider,
+                    metadata.clone(),
+                    existing.metadata.as_ref(),
+                    existing.id,
+                )
+                .map_err(|message| (StatusCode::CONFLICT, Json(ApiError::new(message))))?;
+                if let Some(meta) = reusable_metadata.as_ref() {
+                    transaction
+                        .execute(
+                            "update runtime_leases set metadata = $2::jsonb, updated_at = now() where id = $1",
+                            &[&existing.id, meta],
+                        )
+                        .await
+                        .map_err(|error| {
+                            internal_error(format!(
+                                "failed to update reusable lease metadata: {error}"
+                            ))
+                        })?;
+                }
             }
 
             let origin_instance = upsert_origin_instance(
@@ -2429,10 +2477,16 @@ async fn ensure_runtime_launch_inner(
 
         ensure_project_available_for_runtime_launch(&transaction, &project_id).await?;
 
-        transaction
-            .commit()
-            .await
-            .map_err(|error| internal_error(format!("failed to commit runtime-ensure: {error}")))?;
+        // A commit error does not prove the commit failed: the server can
+        // commit and the reply still be lost. The lease may then be the
+        // runtime's live generation, so the error names it like any later
+        // launch failure, or a caller would take it for another start.
+        transaction.commit().await.map_err(|error| {
+            with_committed_lease_id(
+                internal_error(format!("failed to commit runtime-ensure: {error}")),
+                lease.id,
+            )
+        })?;
 
         break 'allocation Ok::<_, (StatusCode, Json<ApiError>)>((
             runtime,
@@ -2490,8 +2544,8 @@ fn with_committed_lease_id(
     (status, Json(error))
 }
 
-/// The lease generation a failed ensure had already committed, if it got that
-/// far.
+/// The lease generation a failed ensure had already committed, or tried to
+/// commit when the commit itself reported the error, if it got that far.
 pub(crate) fn ensure_error_committed_lease_id(error: &ApiError) -> Option<Uuid> {
     error
         .details
@@ -3368,6 +3422,22 @@ mod tests {
         );
         assert!(requested.get("runtimeFlavor").is_none(), "{requested}");
         assert_eq!(requested["sizeId"], "boost");
+    }
+
+    #[test]
+    fn carried_settings_only_apply_to_the_lease_they_were_read_from() {
+        let read_lease = Uuid::new_v4();
+        let other_lease = Uuid::new_v4();
+
+        assert!(ReusedLeaseMetadata::Requested.applies_to_reused_lease(read_lease));
+        assert!(
+            ReusedLeaseMetadata::CarriedFrom(Some(read_lease)).applies_to_reused_lease(read_lease)
+        );
+        // Another generation, or one that appeared after the reconnect found
+        // no live lease, keeps its own settings.
+        assert!(!ReusedLeaseMetadata::CarriedFrom(Some(read_lease))
+            .applies_to_reused_lease(other_lease));
+        assert!(!ReusedLeaseMetadata::CarriedFrom(None).applies_to_reused_lease(other_lease));
     }
 
     #[test]

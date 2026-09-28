@@ -3795,8 +3795,11 @@ fn runtime_alert_message(
     runtime_alert_fallback_message(reason, terminal_alert)
 }
 
-/// Mirrors the Studio's wording in `controllerConversationNotice.ts`.
-const RUNTIME_LIMIT_WAIT_MESSAGE: &str = "Waiting for a free cloud runtime. This team\u{2019}s one runtime is busy in another space; stop it in Machines and this request will send.";
+/// Mirrors the Studio's wording in `controllerConversationNotice.ts`. It does
+/// not name a count: plans allow different numbers of runtimes, and the
+/// refusal's counts are only in its prose, so a number here would be wrong
+/// for every plan but one.
+const RUNTIME_LIMIT_WAIT_MESSAGE: &str = "Waiting for a free cloud runtime. All of this team\u{2019}s runtimes are busy in other spaces; stop one in Machines and this request will send.";
 
 /// These sentences name the surface the reader can actually reach. They used to
 /// say "the Runtime button by the composer"; that button's only renderer lost
@@ -5552,11 +5555,14 @@ mod tests {
             "error": "Instafy Cloud runtime limit reached for this organization (1 active; max 1).",
         });
         let message = runtime_alert_message("runtime_not_ready", true, Some(&limit));
-        assert!(
-            message.starts_with("Waiting for a free cloud runtime."),
-            "{message}"
+        // Word for word what the Studio shows for it, apostrophe included.
+        assert_eq!(
+            message,
+            "Waiting for a free cloud runtime. All of this team\u{2019}s runtimes are busy in other spaces; stop one in Machines and this request will send."
         );
-        assert!(!message.contains("startup failed"), "{message}");
+        // A plan with more than one runtime reads the same text, so it must
+        // not claim the team has exactly one.
+        assert!(!message.contains("one runtime"), "{message}");
 
         // Any other failed reconnect is still a failed startup.
         let other = json!({ "status": "failed", "code": "provider_launch_failed" });

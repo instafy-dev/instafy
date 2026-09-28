@@ -26947,7 +26947,7 @@ struct SeededRuntimeLease {
     requested_seconds_ago: i64,
 }
 
-struct UnregisteredRuntimeDispatch {
+struct HostedRuntimeDispatch {
     runtime_id: Uuid,
     lease_id: Option<Uuid>,
     /// The reconnect the run recorded.
@@ -26963,17 +26963,43 @@ async fn dispatch_prompt_to_unregistered_hosted_runtime(
     state: &AppState,
     project_id: Uuid,
     lease: Option<SeededRuntimeLease>,
-) -> anyhow::Result<UnregisteredRuntimeDispatch> {
+) -> anyhow::Result<HostedRuntimeDispatch> {
+    dispatch_prompt_to_hosted_runtime(pool, state, project_id, None, lease).await
+}
+
+/// [`dispatch_prompt_to_unregistered_hosted_runtime`], or, with
+/// `last_seen_seconds_ago`, a runtime that registered and has sent no
+/// heartbeat for that long. The dispatch reconnect replaces such a runtime's
+/// generation (`forceNewLease`) instead of reusing it.
+async fn dispatch_prompt_to_hosted_runtime(
+    pool: &PgPool,
+    state: &AppState,
+    project_id: Uuid,
+    last_seen_seconds_ago: Option<i64>,
+    lease: Option<SeededRuntimeLease>,
+) -> anyhow::Result<HostedRuntimeDispatch> {
     let runtime_id = Uuid::new_v4();
     let conversation_id = Uuid::new_v4();
     let mut lease_id = None;
     {
         let connection = pool.get().await?;
+        let runtime_status = if last_seen_seconds_ago.is_some() {
+            "ready"
+        } else {
+            "requested"
+        };
         connection
             .execute(
-                "insert into runtimes (id, project_id, provider, status, idle_ttl_seconds)
-                 values ($1, $2, 'instafy-cloud', 'requested', 600)",
-                &[&runtime_id, &project_id],
+                "insert into runtimes
+                   (id, project_id, provider, status, idle_ttl_seconds, last_seen_at)
+                 values ($1, $2, 'instafy-cloud', $3, 600,
+                         now() - ($4::bigint * interval '1 second'))",
+                &[
+                    &runtime_id,
+                    &project_id,
+                    &runtime_status,
+                    &last_seen_seconds_ago,
+                ],
             )
             .await?;
         if let Some(lease) = lease {
@@ -27091,7 +27117,7 @@ async fn dispatch_prompt_to_unregistered_hosted_runtime(
         .iter()
         .map(|row| row.get::<_, String>("content"))
         .collect();
-    Ok(UnregisteredRuntimeDispatch {
+    Ok(HostedRuntimeDispatch {
         runtime_id,
         lease_id,
         reconnect: run_metadata.0["runtimeAlert"]["reconnect"].clone(),
@@ -27447,6 +27473,591 @@ async fn dispatch_reconnect_that_strands_its_own_launch_still_writes_the_alert(
         assert_eq!(
             dispatched.alerts,
             vec![WORKSPACE_STARTUP_FAILED_ALERT.to_string()]
+        );
+        Ok(())
+    })
+    .await
+}
+
+/// A relay to the test database that loses the reply to one commit.
+///
+/// Once a connection through it inserts a runtime lease, the relay passes
+/// that connection's next COMMIT to the server, reads the server's answer,
+/// and closes the connection without relaying it. The server has committed
+/// and the client sees only a closed connection, which is what a commit whose
+/// reply was lost looks like to the controller.
+struct CommitReplyDroppingProxy {
+    /// A pool whose connections all go through the relay.
+    pool: PgPool,
+    /// Set once a commit's reply has been lost.
+    dropped: Arc<AtomicBool>,
+    _listener: AbortingTask<()>,
+}
+
+async fn spawn_commit_reply_dropping_proxy() -> anyhow::Result<CommitReplyDroppingProxy> {
+    let url = std::env::var("TEST_DATABASE_URL")
+        .context("the commit relay requires TEST_DATABASE_URL")?;
+    let upstream: tokio_postgres::Config = url.parse()?;
+    let upstream_host = match upstream.get_hosts().first() {
+        Some(tokio_postgres::config::Host::Tcp(host)) => host.clone(),
+        _ => anyhow::bail!("the commit relay needs a TCP database host"),
+    };
+    let upstream_port = upstream.get_ports().first().copied().unwrap_or(5432);
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+    let address = listener.local_addr()?;
+    let dropped = Arc::new(AtomicBool::new(false));
+    let relay_dropped = dropped.clone();
+    let listener_task = spawn_aborting(async move {
+        while let Ok((client, _)) = listener.accept().await {
+            let Ok(server) =
+                tokio::net::TcpStream::connect((upstream_host.as_str(), upstream_port)).await
+            else {
+                continue;
+            };
+            tokio::spawn(relay_losing_one_commit_reply(
+                client,
+                server,
+                relay_dropped.clone(),
+            ));
+        }
+    });
+
+    // Plain TCP, so the relay can read the protocol it passes on.
+    let mut config = tokio_postgres::Config::new();
+    config
+        .host("127.0.0.1")
+        .port(address.port())
+        .ssl_mode(tokio_postgres::config::SslMode::Disable);
+    if let Some(user) = upstream.get_user() {
+        config.user(user);
+    }
+    if let Some(password) = upstream.get_password() {
+        config.password(password);
+    }
+    if let Some(dbname) = upstream.get_dbname() {
+        config.dbname(dbname);
+    }
+    let manager = PostgresConnectionManager::new(config, crate::config::database_tls());
+    let pool = bb8::Pool::builder()
+        .max_size(5)
+        .build(manager)
+        .await
+        .map_err(|error| anyhow::anyhow!("failed to build the relayed test pool: {error}"))?;
+    Ok(CommitReplyDroppingProxy {
+        pool,
+        dropped,
+        _listener: listener_task,
+    })
+}
+
+fn bytes_contain(haystack: &[u8], needle: &[u8]) -> bool {
+    haystack
+        .windows(needle.len())
+        .any(|window| window == needle)
+}
+
+async fn relay_losing_one_commit_reply(
+    client: tokio::net::TcpStream,
+    server: tokio::net::TcpStream,
+    dropped: Arc<AtomicBool>,
+) {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    // The allocation's lease insert, then its COMMIT: a simple query whose
+    // text, and whose reply's command tag, is exactly this.
+    const LEASE_INSERT: &[u8] = b"insert into runtime_leases";
+    const COMMIT: &[u8] = b"COMMIT\0";
+
+    let (mut client_read, mut client_write) = client.into_split();
+    let (mut server_read, mut server_write) = server.into_split();
+    let lose_reply = Arc::new(AtomicBool::new(false));
+
+    let upstream = {
+        let lose_reply = lose_reply.clone();
+        async move {
+            let mut armed = false;
+            let mut seen = Vec::new();
+            let mut buffer = [0u8; 8192];
+            loop {
+                let read = match client_read.read(&mut buffer).await {
+                    Ok(0) | Err(_) => break,
+                    Ok(read) => read,
+                };
+                seen.extend_from_slice(&buffer[..read]);
+                if !armed && bytes_contain(&seen, LEASE_INSERT) {
+                    armed = true;
+                    seen.clear();
+                }
+                // Decided before the COMMIT goes on, so its reply cannot
+                // arrive ahead of the flag.
+                if armed && bytes_contain(&seen, COMMIT) && !dropped.swap(true, Ordering::SeqCst) {
+                    lose_reply.store(true, Ordering::SeqCst);
+                }
+                if server_write.write_all(&buffer[..read]).await.is_err() {
+                    break;
+                }
+                // Enough to find a pattern split across two reads.
+                let stale = seen.len().saturating_sub(64);
+                seen.drain(..stale);
+            }
+        }
+    };
+    let downstream = async move {
+        let mut seen = Vec::new();
+        let mut buffer = [0u8; 8192];
+        loop {
+            let read = match server_read.read(&mut buffer).await {
+                Ok(0) | Err(_) => break,
+                Ok(read) => read,
+            };
+            if lose_reply.load(Ordering::SeqCst) {
+                // Wait for the server to answer the COMMIT, so it has
+                // committed, then close without passing the answer on.
+                seen.extend_from_slice(&buffer[..read]);
+                if bytes_contain(&seen, COMMIT) {
+                    break;
+                }
+                continue;
+            }
+            if client_write.write_all(&buffer[..read]).await.is_err() {
+                break;
+            }
+        }
+    };
+    // Either direction ending drops both halves of both sockets.
+    tokio::select! {
+        _ = upstream => {}
+        _ = downstream => {}
+    }
+}
+
+/// The allocation's commit can reach the server and its reply still be lost.
+/// The reconnect then errors, but its launching lease is committed and
+/// fresh, and would pass for another start in flight: the prompt would wait
+/// for a launch nobody is running, with no alert, until the launch-timeout
+/// sweep. The commit error names the lease, as every later launch error
+/// does, so the reconnect knows it as its own.
+#[tokio::test]
+async fn dispatch_reconnect_whose_commit_reply_is_lost_still_writes_the_alert() -> anyhow::Result<()>
+{
+    let pool = require_origin_test_pool("dispatch reconnect lost commit reply test").await?;
+    let org_id = Uuid::new_v4();
+    let project_id = Uuid::new_v4();
+    let fixture = SharedDbFixture {
+        organizations: vec![org_id],
+        projects: vec![project_id],
+    };
+
+    with_shared_db_fixture(fixture, async {
+        let label = "dispatch-reconnect-lost-commit-reply";
+        seed_dispatch_reconnect_projects(&pool, org_id, &[project_id], label).await?;
+        let proxy = spawn_commit_reply_dropping_proxy().await?;
+        let mut config = dispatch_reconnect_test_config(label);
+        // Never called: the launch ends at the allocation commit.
+        config.runtime_providers[0].endpoint = Some("http://127.0.0.1:9".to_string());
+        let state = build_test_state(proxy.pool.clone(), config);
+
+        let dispatched = timeout(
+            std::time::Duration::from_secs(30),
+            dispatch_prompt_to_unregistered_hosted_runtime(&pool, &state, project_id, None),
+        )
+        .await??;
+        let reconnect = &dispatched.reconnect;
+        assert!(
+            proxy.dropped.load(Ordering::SeqCst),
+            "the allocation commit's reply must have been lost: {reconnect}"
+        );
+
+        let committed_lease_status: Option<String> = pool
+            .get()
+            .await?
+            .query_opt(
+                "select rl.status
+                 from runtimes r
+                 join runtime_leases rl on rl.id = r.active_lease_id
+                 where r.id = $1 and rl.released_at is null",
+                &[&dispatched.runtime_id],
+            )
+            .await?
+            .map(|row| row.get("status"));
+        assert_eq!(
+            committed_lease_status.as_deref(),
+            Some("launching"),
+            "the server committed the reconnect's lease: {reconnect}"
+        );
+        assert!(
+            reconnect["error"]
+                .as_str()
+                .is_some_and(|error| error.contains("failed to commit runtime-ensure")),
+            "{reconnect}"
+        );
+        assert_eq!(
+            reconnect["status"],
+            json!("failed"),
+            "a lease whose commit reply was lost is the reconnect's own: {reconnect}"
+        );
+        assert!(reconnect.get("leaseId").is_none(), "{reconnect}");
+        assert_eq!(
+            dispatched.alerts,
+            vec![WORKSPACE_STARTUP_FAILED_ALERT.to_string()]
+        );
+        Ok(())
+    })
+    .await
+}
+
+/// A hosted provider that releases and launches whatever it is asked to, and
+/// records each call with its request body.
+struct RecordingHostedProvider {
+    endpoint: String,
+    calls: Arc<tokio::sync::Mutex<Vec<(&'static str, serde_json::Value)>>>,
+    _server: AbortingTask<()>,
+}
+
+async fn spawn_recording_hosted_provider() -> anyhow::Result<RecordingHostedProvider> {
+    let calls: Arc<tokio::sync::Mutex<Vec<(&'static str, serde_json::Value)>>> =
+        Arc::new(tokio::sync::Mutex::new(Vec::new()));
+    let app = axum::Router::new()
+        .route(
+            "/runtime/ensure",
+            axum::routing::post({
+                let calls = calls.clone();
+                move |AxumJson(body): AxumJson<serde_json::Value>| {
+                    let calls = calls.clone();
+                    async move {
+                        calls.lock().await.push(("launch", body));
+                        AxumJson(json!({ "message": "runtime ensured" }))
+                    }
+                }
+            }),
+        )
+        .route(
+            "/runtime/release",
+            axum::routing::post({
+                let calls = calls.clone();
+                move |AxumJson(body): AxumJson<serde_json::Value>| {
+                    let calls = calls.clone();
+                    async move {
+                        calls.lock().await.push(("release", body));
+                        StatusCode::NO_CONTENT
+                    }
+                }
+            }),
+        );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+    let address = listener.local_addr()?;
+    let server = spawn_aborting(async move {
+        axum::serve(listener, app)
+            .await
+            .expect("serve the recording hosted provider");
+    });
+    Ok(RecordingHostedProvider {
+        endpoint: format!("http://{address}"),
+        calls,
+        _server: server,
+    })
+}
+
+/// A runtime that registered and then went quiet is not reused: the
+/// reconnect releases its lease and launches a successor (`forceNewLease`).
+/// The successor has to come back as the same machine, so a webdev Boost
+/// runtime relaunches as webdev, attested for the new generation, at the
+/// Boost size, and not as the standard base image a bare request asks for.
+#[tokio::test]
+async fn dispatch_reconnect_relaunches_a_stale_webdev_runtime_with_its_settings(
+) -> anyhow::Result<()> {
+    let pool = require_origin_test_pool("dispatch reconnect stale webdev relaunch test").await?;
+    let org_id = Uuid::new_v4();
+    let project_id = Uuid::new_v4();
+    let fixture = SharedDbFixture {
+        organizations: vec![org_id],
+        projects: vec![project_id],
+    };
+
+    with_shared_db_fixture(fixture, async {
+        let label = "dispatch-reconnect-stale-webdev";
+        seed_dispatch_reconnect_projects(&pool, org_id, &[project_id], label).await?;
+        let provider = spawn_recording_hosted_provider().await?;
+        let mut config = dispatch_reconnect_test_config(label);
+        config.runtime_providers[0].endpoint = Some(provider.endpoint.clone());
+        let state = build_test_state(pool.clone(), config);
+
+        // Ten minutes without a heartbeat is far past the dispatch window.
+        let dispatched = dispatch_prompt_to_hosted_runtime(
+            &pool,
+            &state,
+            project_id,
+            Some(600),
+            Some(SeededRuntimeLease {
+                status: "active",
+                scope: "exclusive",
+                webdev: true,
+                requested_seconds_ago: 3600,
+            }),
+        )
+        .await?;
+        let reconnect = &dispatched.reconnect;
+        let stale_lease_id = dispatched.lease_id.expect("seeded lease");
+        assert_eq!(reconnect["status"], json!("requested"), "{reconnect}");
+        assert_eq!(reconnect["forceNewLease"], json!(true), "{reconnect}");
+        let successor_id = reconnect["leaseId"]
+            .as_str()
+            .and_then(|value| Uuid::parse_str(value).ok())
+            .expect("the reconnect names the lease it launched");
+        assert_ne!(
+            successor_id, stale_lease_id,
+            "a stale generation is replaced, not reused"
+        );
+        assert!(dispatched.alerts.is_empty(), "{:?}", dispatched.alerts);
+
+        let connection = pool.get().await?;
+        let row = connection
+            .query_one(
+                "select r.active_lease_id,
+                        (select released_at is not null
+                         from runtime_leases where id = $2) as stale_released,
+                        rl.metadata
+                 from runtimes r
+                 join runtime_leases rl on rl.id = $3
+                 where r.id = $1",
+                &[&dispatched.runtime_id, &stale_lease_id, &successor_id],
+            )
+            .await?;
+        assert_eq!(
+            row.get::<_, Option<Uuid>>("active_lease_id"),
+            Some(successor_id)
+        );
+        assert!(row.get::<_, bool>("stale_released"));
+        let metadata = row.get::<_, PgJson<serde_json::Value>>("metadata").0;
+        assert_eq!(metadata["runtimeFlavor"], json!("webdev"), "{metadata}");
+        assert_eq!(
+            metadata["_instafyManagedRuntimeLaunch"]["generation"],
+            json!(successor_id.to_string()),
+            "the successor is attested for its own generation: {metadata}"
+        );
+        assert_eq!(metadata["sizeId"], json!("boost"), "{metadata}");
+        assert_eq!(
+            metadata["env"]["INSTAFY_ENABLE_BROWSER_SESSION"],
+            json!("1"),
+            "{metadata}"
+        );
+        assert_eq!(
+            metadata["env"]["RUNTIME_MEMORY_LIMIT"],
+            json!("8g"),
+            "{metadata}"
+        );
+
+        // The provider released the old generation, then launched the new
+        // one with the webdev image.
+        let calls = provider.calls.lock().await.clone();
+        let kinds: Vec<&str> = calls.iter().map(|(kind, _)| *kind).collect();
+        assert_eq!(kinds, vec!["release", "launch"], "{calls:?}");
+        assert_eq!(calls[0].1["lease_id"], json!(stale_lease_id.to_string()));
+        assert_eq!(calls[1].1["lease_id"], json!(successor_id.to_string()));
+        assert_eq!(calls[1].1["metadata"]["runtimeFlavor"], json!("webdev"));
+        assert_eq!(calls[1].1["metadata"]["sizeId"], json!("boost"));
+        Ok(())
+    })
+    .await
+}
+
+/// The reconnect reads the live lease's settings before its allocation
+/// transaction, and another start can replace that lease in between. Reuse
+/// then sees a different generation, which keeps its own settings: the first
+/// lease's size and env written onto it would bill and relaunch it as the
+/// wrong machine.
+#[tokio::test]
+async fn dispatch_reconnect_keeps_the_settings_of_a_lease_that_replaced_the_one_it_read(
+) -> anyhow::Result<()> {
+    let pool = require_origin_test_pool("dispatch reconnect replaced lease test").await?;
+    let org_id = Uuid::new_v4();
+    let project_id = Uuid::new_v4();
+    let fixture = SharedDbFixture {
+        organizations: vec![org_id],
+        projects: vec![project_id],
+    };
+
+    with_shared_db_fixture(fixture, async {
+        let label = "dispatch-reconnect-replaced-lease";
+        seed_dispatch_reconnect_projects(&pool, org_id, &[project_id], label).await?;
+        let state = build_test_state(pool.clone(), dispatch_reconnect_test_config(label));
+
+        let runtime_id = Uuid::new_v4();
+        let read_lease_id = Uuid::new_v4();
+        let successor_lease_id = Uuid::new_v4();
+        let read_metadata = json!({
+            "runtimeFlavor": "webdev",
+            "source": "browser-session",
+            "sizeId": "boost",
+            "env": {
+                "INSTAFY_ENABLE_BROWSER_SESSION": "1",
+                "RUNTIME_CPU_LIMIT": "4",
+                "RUNTIME_MEMORY_LIMIT": "8g",
+            },
+            "_instafyManagedRuntimeLaunch": {
+                "version": 1,
+                "flavor": "webdev",
+                "generation": read_lease_id.to_string(),
+            },
+        });
+        // Another start's webdev generation at the standard size.
+        let successor_metadata = json!({
+            "runtimeFlavor": "webdev",
+            "source": "studio",
+            "sizeId": "standard",
+            "env": {
+                "INSTAFY_ENABLE_BROWSER_SESSION": "1",
+                "RUNTIME_CPU_LIMIT": "2",
+                "RUNTIME_MEMORY_LIMIT": "4g",
+            },
+            "_instafyManagedRuntimeLaunch": {
+                "version": 1,
+                "flavor": "webdev",
+                "generation": successor_lease_id.to_string(),
+            },
+        });
+        {
+            let connection = pool.get().await?;
+            connection
+                .execute(
+                    "insert into runtimes (id, project_id, provider, status, idle_ttl_seconds)
+                     values ($1, $2, 'instafy-cloud', 'requested', 600)",
+                    &[&runtime_id, &project_id],
+                )
+                .await?;
+            connection
+                .execute(
+                    "insert into runtime_leases
+                       (id, project_id, runtime_id, status, scope, metadata, requested_at)
+                     values ($1, $2, $3, 'launching', 'exclusive', $4, now())",
+                    &[
+                        &read_lease_id,
+                        &project_id,
+                        &runtime_id,
+                        &PgJson(read_metadata),
+                    ],
+                )
+                .await?;
+            connection
+                .execute(
+                    "update runtimes set active_lease_id = $2 where id = $1",
+                    &[&runtime_id, &read_lease_id],
+                )
+                .await?;
+        }
+
+        // The other start replaces the lease and holds the runtime row until
+        // the reconnect has read the first lease and waits for that row.
+        let mut replacing_connection = pool.get().await?;
+        let replacement = replacing_connection.transaction().await?;
+        replacement
+            .query_one(
+                "select id from runtimes where id = $1 for update",
+                &[&runtime_id],
+            )
+            .await?;
+        replacement
+            .execute(
+                "update runtime_leases set status = 'released', released_at = now()
+                 where id = $1",
+                &[&read_lease_id],
+            )
+            .await?;
+        replacement
+            .execute(
+                "insert into runtime_leases
+                   (id, project_id, runtime_id, status, scope, metadata, requested_at)
+                 values ($1, $2, $3, 'launching', 'exclusive', $4, now())",
+                &[
+                    &successor_lease_id,
+                    &project_id,
+                    &runtime_id,
+                    &PgJson(successor_metadata.clone()),
+                ],
+            )
+            .await?;
+        replacement
+            .execute(
+                "update runtimes set active_lease_id = $2 where id = $1",
+                &[&runtime_id, &successor_lease_id],
+            )
+            .await?;
+        let replacing_pid: i32 = replacement
+            .query_one("select pg_backend_pid()", &[])
+            .await?
+            .get(0);
+
+        let record = runtime::RuntimeRecord {
+            id: runtime_id,
+            project_id,
+            provider: "instafy-cloud".to_string(),
+            status: "requested".to_string(),
+            idle_ttl_seconds: 600,
+            capabilities: json!({}),
+            display_name: None,
+            active_lease_id: Some(read_lease_id),
+        };
+        let reconnect_state = state.clone();
+        let reconnect = spawn_aborting(async move {
+            runtime::ensure_runtime_for_dispatch_reconnect(
+                &reconnect_state,
+                &record,
+                "dispatch_runtime_alert",
+                false,
+            )
+            .await
+        });
+
+        let observer = pool.get().await?;
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            let waiting: i64 = observer
+                .query_one(
+                    "select count(*) from pg_stat_activity
+                     where $1 = any(pg_blocking_pids(pid))",
+                    &[&replacing_pid],
+                )
+                .await?
+                .get(0);
+            if waiting > 0 {
+                break;
+            }
+            anyhow::ensure!(
+                !reconnect.is_finished(),
+                "the reconnect finished without waiting for the runtime row"
+            );
+            anyhow::ensure!(
+                tokio::time::Instant::now() < deadline,
+                "the reconnect never waited for the runtime row"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        drop(observer);
+        replacement.commit().await?;
+        drop(replacing_connection);
+
+        let response = timeout(std::time::Duration::from_secs(10), reconnect)
+            .await??
+            .map_err(|(status, body)| {
+                anyhow::anyhow!("reconnect failed ({status}): {}", body.0.message)
+            })?;
+        assert_eq!(
+            response.lease_id,
+            successor_lease_id.to_string(),
+            "the reconnect reuses the lease that replaced the one it read"
+        );
+        let stored: PgJson<serde_json::Value> = pool
+            .get()
+            .await?
+            .query_one(
+                "select metadata from runtime_leases where id = $1",
+                &[&successor_lease_id],
+            )
+            .await?
+            .get("metadata");
+        assert_eq!(
+            stored.0, successor_metadata,
+            "the reused lease keeps the settings it launched with"
         );
         Ok(())
     })

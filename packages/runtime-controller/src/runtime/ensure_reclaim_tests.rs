@@ -32,6 +32,7 @@ impl ReclaimFixture {
             None,
             RuntimeLeaseScope::Exclusive,
             OriginEnsureOptions::new(None, None, None),
+            ReusedLeaseMetadata::Requested,
         )
         .await
     }
@@ -473,6 +474,7 @@ async fn silent_tunnel_broker_cannot_hold_launch_admission_during_reclaim() -> a
                     None,
                     RuntimeLeaseScope::Exclusive,
                     OriginEnsureOptions::new(None, None, None),
+                    ReusedLeaseMetadata::Requested,
                 )
                 .await
             }
