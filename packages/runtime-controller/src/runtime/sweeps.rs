@@ -24,7 +24,9 @@ use super::stop::{stop_runtime_safely, SafeRuntimeStop, StopOptions};
 
 const TERMINAL_RUNTIME_RETENTION_SECONDS: i64 = 10 * 60;
 const TERMINAL_RUNTIME_CLEANUP_BATCH_SIZE: i64 = 50;
-const REQUESTED_RUNTIME_LAUNCH_TIMEOUT_SECONDS: i64 = 15 * 60;
+/// How long a launch may go without its runtime registering before
+/// `auto_stop_stuck_requested_runtimes` stops it as timed out.
+pub(crate) const REQUESTED_RUNTIME_LAUNCH_TIMEOUT_SECONDS: i64 = 15 * 60;
 const REQUESTED_RUNTIME_CLEANUP_BATCH_SIZE: i64 = 50;
 const STUCK_QUEUED_JOB_MAX_AGE_SECONDS: i64 = 90;
 const STUCK_QUEUED_RUNTIME_HEARTBEAT_MAX_AGE_SECONDS: i64 = 60;

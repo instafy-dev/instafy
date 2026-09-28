@@ -164,6 +164,11 @@ Runtimes can be provisioned with different runtime-agent container images (for e
 - An active managed lease cannot change flavor in place; stop it and create a
   new provider generation. Runtime registration cannot spoof the protected
   `_instafySharedBrowserAgentConsent` capability.
+- Relaunches the controller starts on its own keep the generation's settings.
+  A dispatch reconnect asks for the live lease's attested flavor, size and
+  browser settings, so it reuses a live webdev runtime (or replaces a stale one
+  with the same image) instead of being refused. A requeue relaunch copies the
+  latest lease's metadata.
 - Custom and self-hosted providers retain their explicit metadata/image behavior.
 - Hetzner user-data templates may include `{{RUNTIME_AGENT_IMAGE}}`; when present, the allocator will substitute `metadata.runtimeAgentImage` (or `runtime_agent_image`) into the cloud-init payload.
 - Hetzner templates can also consume dynamic runtime env data via `{{RUNTIME_ENV_FLAGS}}` (shell `-e KEY='value'` segment) or `{{RUNTIME_ENV_EXPORTS}}` (`export KEY='value'` lines). This includes controller lease/origin env plus `metadata.env` overrides such as `INSTAFY_ENABLE_BROWSER_SESSION=1`.

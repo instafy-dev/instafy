@@ -26934,18 +26934,39 @@ async fn agent_context_cards_prune_oldest_per_user_project_agent() -> anyhow::Re
     Ok(())
 }
 
+/// A lease another start holds on the runtime when the prompt arrives.
+struct SeededRuntimeLease {
+    status: &'static str,
+    /// A shared lease makes the dispatch reconnect's exclusive request fail
+    /// before it commits anything, while the lease stays live. That refusal
+    /// stands in for any error the reconnect gets while another start is in
+    /// flight.
+    scope: &'static str,
+    /// Launched as the webdev image, boosted, with the Shared Browser on.
+    webdev: bool,
+    requested_seconds_ago: i64,
+}
+
+struct UnregisteredRuntimeDispatch {
+    runtime_id: Uuid,
+    lease_id: Option<Uuid>,
+    /// The reconnect the run recorded.
+    reconnect: serde_json::Value,
+    /// The runtime alert messages the conversation received.
+    alerts: Vec<String>,
+}
+
 /// Seed a hosted runtime that has not registered yet, optionally holding a
-/// live lease from another start, then send one chat prompt to it. Returns the
-/// reconnect the run recorded and the runtime alert messages the conversation
-/// received.
+/// live lease from another start, then send one chat prompt to it.
 async fn dispatch_prompt_to_unregistered_hosted_runtime(
     pool: &PgPool,
     state: &AppState,
     project_id: Uuid,
-    lease_status: Option<&str>,
-) -> anyhow::Result<(serde_json::Value, Vec<String>)> {
+    lease: Option<SeededRuntimeLease>,
+) -> anyhow::Result<UnregisteredRuntimeDispatch> {
     let runtime_id = Uuid::new_v4();
     let conversation_id = Uuid::new_v4();
+    let mut lease_id = None;
     {
         let connection = pool.get().await?;
         connection
@@ -26955,37 +26976,55 @@ async fn dispatch_prompt_to_unregistered_hosted_runtime(
                 &[&runtime_id, &project_id],
             )
             .await?;
-        if let Some(lease_status) = lease_status {
-            // The other start launched the webdev image. The dispatch
-            // reconnect asks for the base image, so the reuse check refuses
-            // it with a 409 while this lease is still live.
-            let lease_id = Uuid::new_v4();
+        if let Some(lease) = lease {
+            let id = Uuid::new_v4();
+            // What the launch path stores for each kind of launch.
+            let metadata = if lease.webdev {
+                json!({
+                    "runtimeFlavor": "webdev",
+                    "source": "browser-session",
+                    "sizeId": "boost",
+                    "env": {
+                        "INSTAFY_ENABLE_BROWSER_SESSION": "1",
+                        "RUNTIME_CPU_LIMIT": "4",
+                        "RUNTIME_MEMORY_LIMIT": "8g",
+                    },
+                    "_instafyManagedRuntimeLaunch": {
+                        "version": 1,
+                        "flavor": "webdev",
+                        "generation": id.to_string(),
+                    },
+                })
+            } else {
+                json!({
+                    "source": "studio",
+                    "sizeId": "standard",
+                    "env": { "RUNTIME_CPU_LIMIT": "2", "RUNTIME_MEMORY_LIMIT": "4g" },
+                })
+            };
             connection
                 .execute(
-                    "insert into runtime_leases (id, project_id, runtime_id, status, metadata)
-                     values ($1, $2, $3, $4, $5)",
+                    "insert into runtime_leases
+                       (id, project_id, runtime_id, status, scope, metadata, requested_at)
+                     values ($1, $2, $3, $4, $5, $6, now() - ($7::bigint * interval '1 second'))",
                     &[
-                        &lease_id,
+                        &id,
                         &project_id,
                         &runtime_id,
-                        &lease_status,
-                        &PgJson(json!({
-                            "runtimeFlavor": "webdev",
-                            "_instafyManagedRuntimeLaunch": {
-                                "version": 1,
-                                "flavor": "webdev",
-                                "generation": lease_id.to_string(),
-                            },
-                        })),
+                        &lease.status,
+                        &lease.scope,
+                        &PgJson(metadata),
+                        &lease.requested_seconds_ago,
                     ],
                 )
                 .await?;
             connection
                 .execute(
                     "update runtimes set active_lease_id = $2 where id = $1",
-                    &[&runtime_id, &lease_id],
+                    &[&runtime_id, &id],
                 )
                 .await?;
+            lease_id = Some(id);
         }
     }
 
@@ -27052,107 +27091,293 @@ async fn dispatch_prompt_to_unregistered_hosted_runtime(
         .iter()
         .map(|row| row.get::<_, String>("content"))
         .collect();
-    Ok((run_metadata.0["runtimeAlert"]["reconnect"].clone(), alerts))
+    Ok(UnregisteredRuntimeDispatch {
+        runtime_id,
+        lease_id,
+        reconnect: run_metadata.0["runtimeAlert"]["reconnect"].clone(),
+        alerts,
+    })
 }
 
-/// On Sep 26 the dispatch reconnect errored while the studio's own ensure was
-/// launching the same runtime. The controller wrote "Workspace startup
-/// failed" beside a start that went on to run the request. A live launching
-/// lease now records the reconnect as starting, while the same kind of
-/// failure with no live lease still writes the terminal alert.
-#[tokio::test]
-async fn dispatch_reconnect_that_loses_to_a_live_launch_writes_no_terminal_alert(
+async fn seed_dispatch_reconnect_projects(
+    pool: &PgPool,
+    org_id: Uuid,
+    project_ids: &[Uuid],
+    label: &str,
 ) -> anyhow::Result<()> {
-    let pool = require_origin_test_pool("dispatch reconnect live launch test").await?;
+    let connection = pool.get().await?;
+    connection
+        .execute(
+            "insert into organizations (id, slug, name) values ($1, $2, $3)",
+            &[
+                &org_id,
+                &format!("{label}-{org_id}"),
+                &"Dispatch reconnect test",
+            ],
+        )
+        .await?;
+    connection
+        .execute(
+            "insert into projects (id, org_id, project_type, status)
+             select id, $2, 'customer', 'active' from unnest($1::uuid[]) as id",
+            &[&project_ids.to_vec(), &org_id],
+        )
+        .await?;
+    Ok(())
+}
+
+/// A controller whose hosted provider has no endpoint, so a reconnect that
+/// needs a new launch fails before it commits one.
+fn dispatch_reconnect_test_config(label: &str) -> AppConfig {
+    let mut config = build_app_config(test_origin_private_key(), test_origin_public_key(), label);
+    config.runtime_providers = vec![RuntimeProviderConfig {
+        id: "instafy-cloud".to_string(),
+        display_name: "Instafy Cloud".to_string(),
+        kind: "noop".to_string(),
+        owner_org_id: None,
+        allowed_org_ids: vec![],
+        endpoint: None,
+        auth_token: None,
+        metadata: None,
+    }];
+    config
+}
+
+const WORKSPACE_STARTUP_FAILED_ALERT: &str =
+    "Workspace startup failed. Open Machines to reconnect Instafy Cloud.";
+
+/// The dispatch reconnect used to name no flavor, and reuse refuses a request
+/// whose flavor differs from the live lease's ("managed runtime flavor does
+/// not match the active lease") with a 409. Every reconnect to a live webdev
+/// runtime therefore failed instead of reusing it. The reconnect now carries
+/// the live lease's flavor and settings, and reuses it.
+#[tokio::test]
+async fn dispatch_reconnect_reuses_a_live_webdev_runtime() -> anyhow::Result<()> {
+    let pool = require_origin_test_pool("dispatch reconnect webdev reuse test").await?;
     let org_id = Uuid::new_v4();
     let launching_project_id = Uuid::new_v4();
-    let unleased_project_id = Uuid::new_v4();
+    let active_project_id = Uuid::new_v4();
     let fixture = SharedDbFixture {
         organizations: vec![org_id],
-        projects: vec![launching_project_id, unleased_project_id],
+        projects: vec![launching_project_id, active_project_id],
     };
 
     with_shared_db_fixture(fixture, async {
-        {
-            let connection = pool.get().await?;
-            connection
-                .execute(
-                    "insert into organizations (id, slug, name) values ($1, $2, $3)",
-                    &[
-                        &org_id,
-                        &format!("dispatch-reconnect-{org_id}"),
-                        &"Dispatch reconnect test",
-                    ],
-                )
-                .await?;
-            connection
-                .execute(
-                    "insert into projects (id, org_id, project_type, status)
-                     select id, $2, 'customer', 'active' from unnest($1::uuid[]) as id",
-                    &[&vec![launching_project_id, unleased_project_id], &org_id],
-                )
-                .await?;
-        }
-
-        let mut config = build_app_config(
-            test_origin_private_key(),
-            test_origin_public_key(),
-            "dispatch-reconnect-live-launch",
-        );
-        config.runtime_providers = vec![RuntimeProviderConfig {
-            id: "instafy-cloud".to_string(),
-            display_name: "Instafy Cloud".to_string(),
-            kind: "noop".to_string(),
-            owner_org_id: None,
-            allowed_org_ids: vec![],
-            endpoint: None,
-            auth_token: None,
-            metadata: None,
-        }];
-        let state = build_test_state(pool.clone(), config);
-
-        let (reconnect, alerts) = dispatch_prompt_to_unregistered_hosted_runtime(
+        let label = "dispatch-reconnect-webdev-reuse";
+        seed_dispatch_reconnect_projects(
             &pool,
-            &state,
-            launching_project_id,
-            Some("launching"),
+            org_id,
+            &[launching_project_id, active_project_id],
+            label,
         )
         .await?;
+        let state = build_test_state(pool.clone(), dispatch_reconnect_test_config(label));
+
+        for (project_id, lease_status) in [
+            (launching_project_id, "launching"),
+            (active_project_id, "active"),
+        ] {
+            let dispatched = dispatch_prompt_to_unregistered_hosted_runtime(
+                &pool,
+                &state,
+                project_id,
+                Some(SeededRuntimeLease {
+                    status: lease_status,
+                    scope: "exclusive",
+                    webdev: true,
+                    requested_seconds_ago: 30,
+                }),
+            )
+            .await?;
+            let reconnect = &dispatched.reconnect;
+            let lease_id = dispatched.lease_id.expect("seeded lease");
+            assert_eq!(
+                reconnect["status"],
+                json!("requested"),
+                "a reconnect to a live webdev runtime reuses it ({lease_status}): {reconnect}"
+            );
+            assert_eq!(reconnect["leaseId"], json!(lease_id.to_string()));
+            assert!(reconnect.get("error").is_none(), "{reconnect}");
+            assert!(
+                dispatched.alerts.is_empty(),
+                "a reused runtime must not get a startup alert: {:?}",
+                dispatched.alerts
+            );
+
+            let connection = pool.get().await?;
+            let row = connection
+                .query_one(
+                    "select r.active_lease_id, rl.status, rl.metadata,
+                            (select count(*) from runtime_leases where runtime_id = r.id)
+                              as lease_count
+                     from runtimes r
+                     join runtime_leases rl on rl.id = $2
+                     where r.id = $1",
+                    &[&dispatched.runtime_id, &lease_id],
+                )
+                .await?;
+            assert_eq!(
+                row.get::<_, Option<Uuid>>("active_lease_id"),
+                Some(lease_id)
+            );
+            assert_eq!(row.get::<_, String>("status"), lease_status);
+            assert_eq!(row.get::<_, i64>("lease_count"), 1);
+            let metadata: PgJson<serde_json::Value> = row.get("metadata");
+            let metadata = metadata.0;
+            assert_eq!(metadata["runtimeFlavor"], json!("webdev"), "{metadata}");
+            assert_eq!(
+                metadata["_instafyManagedRuntimeLaunch"]["generation"],
+                json!(lease_id.to_string()),
+                "the lease stays attested as webdev: {metadata}"
+            );
+            // Reuse writes the request onto the lease, so a bare reconnect
+            // would also have reset what billing and a requeue read back.
+            assert_eq!(metadata["sizeId"], json!("boost"), "{metadata}");
+            assert_eq!(
+                metadata["env"]["INSTAFY_ENABLE_BROWSER_SESSION"],
+                json!("1"),
+                "{metadata}"
+            );
+            assert_eq!(metadata["source"], json!("dispatch_runtime_alert"));
+        }
+        Ok(())
+    })
+    .await
+}
+
+/// When the reconnect fails while another start holds the runtime, the prompt
+/// waits for that start only while it can still run it: a launch inside the
+/// launch-timeout window, recorded with its lease. A launch past that window
+/// or an active lease whose runtime never reported is no start at all, and
+/// the conversation gets the terminal alert, as it does with no live lease.
+#[tokio::test]
+async fn dispatch_reconnect_waits_only_for_a_fresh_start() -> anyhow::Result<()> {
+    let pool = require_origin_test_pool("dispatch reconnect fresh start test").await?;
+    let org_id = Uuid::new_v4();
+    let fresh_project_id = Uuid::new_v4();
+    let stale_launch_project_id = Uuid::new_v4();
+    let silent_active_project_id = Uuid::new_v4();
+    let unleased_project_id = Uuid::new_v4();
+    let project_ids = vec![
+        fresh_project_id,
+        stale_launch_project_id,
+        silent_active_project_id,
+        unleased_project_id,
+    ];
+    let fixture = SharedDbFixture {
+        organizations: vec![org_id],
+        projects: project_ids.clone(),
+    };
+
+    with_shared_db_fixture(fixture, async {
+        let label = "dispatch-reconnect-fresh-start";
+        seed_dispatch_reconnect_projects(&pool, org_id, &project_ids, label).await?;
+        let state = build_test_state(pool.clone(), dispatch_reconnect_test_config(label));
+        let launch_timeout = runtime::REQUESTED_RUNTIME_LAUNCH_TIMEOUT_SECONDS;
+
+        let fresh = dispatch_prompt_to_unregistered_hosted_runtime(
+            &pool,
+            &state,
+            fresh_project_id,
+            Some(SeededRuntimeLease {
+                status: "launching",
+                scope: "shared",
+                webdev: false,
+                requested_seconds_ago: 30,
+            }),
+        )
+        .await?;
+        let reconnect = &fresh.reconnect;
         assert_eq!(
             reconnect["status"],
             json!("starting"),
-            "a reconnect that loses to a live launch is a start in progress: {reconnect}"
+            "a reconnect that loses to a fresh launch is a start in progress: {reconnect}"
         );
+        assert_eq!(
+            reconnect["leaseId"],
+            json!(fresh.lease_id.expect("seeded lease").to_string()),
+            "the record names the start it is waiting for: {reconnect}"
+        );
+        assert_eq!(reconnect["runtimeId"], json!(fresh.runtime_id.to_string()));
         assert!(
             reconnect["error"]
                 .as_str()
-                .is_some_and(|error| error.contains("flavor")),
+                .is_some_and(|error| error.contains("shared lease")),
             "the run keeps the reconnect error: {reconnect}"
         );
         assert!(
-            alerts.is_empty(),
-            "a live launch must not get a terminal alert: {alerts:?}"
+            fresh.alerts.is_empty(),
+            "a fresh launch must not get a terminal alert: {:?}",
+            fresh.alerts
         );
+
+        for (project_id, lease) in [
+            (
+                stale_launch_project_id,
+                SeededRuntimeLease {
+                    status: "launching",
+                    scope: "shared",
+                    webdev: false,
+                    requested_seconds_ago: launch_timeout + 60,
+                },
+            ),
+            (
+                silent_active_project_id,
+                SeededRuntimeLease {
+                    status: "active",
+                    scope: "shared",
+                    webdev: false,
+                    requested_seconds_ago: 30,
+                },
+            ),
+        ] {
+            let lease_status = lease.status;
+            let dispatched = dispatch_prompt_to_unregistered_hosted_runtime(
+                &pool,
+                &state,
+                project_id,
+                Some(lease),
+            )
+            .await?;
+            let reconnect = &dispatched.reconnect;
+            assert_eq!(
+                reconnect["status"],
+                json!("failed"),
+                "a stale {lease_status} lease is no start: {reconnect}"
+            );
+            assert!(reconnect.get("leaseId").is_none(), "{reconnect}");
+            assert_eq!(
+                dispatched.alerts,
+                vec![WORKSPACE_STARTUP_FAILED_ALERT.to_string()],
+                "{lease_status}"
+            );
+        }
 
         // Without a live lease the reconnect fails on the missing provider
         // endpoint, and nothing else is starting the runtime.
-        let (reconnect, alerts) = dispatch_prompt_to_unregistered_hosted_runtime(
+        let unleased = dispatch_prompt_to_unregistered_hosted_runtime(
             &pool,
             &state,
             unleased_project_id,
             None,
         )
         .await?;
-        assert_eq!(reconnect["status"], json!("failed"), "{reconnect}");
+        assert_eq!(
+            unleased.reconnect["status"],
+            json!("failed"),
+            "{}",
+            unleased.reconnect
+        );
         assert!(
-            reconnect["error"]
+            unleased.reconnect["error"]
                 .as_str()
                 .is_some_and(|error| error.contains("missing an endpoint")),
-            "{reconnect}"
+            "{}",
+            unleased.reconnect
         );
         assert_eq!(
-            alerts,
-            vec!["Workspace startup failed. Open Machines to reconnect Instafy Cloud.".to_string()]
+            unleased.alerts,
+            vec![WORKSPACE_STARTUP_FAILED_ALERT.to_string()]
         );
         Ok(())
     })
@@ -27161,8 +27386,10 @@ async fn dispatch_reconnect_that_loses_to_a_live_launch_writes_no_terminal_alert
 
 /// The reconnect can commit its own launching lease and then fail inside the
 /// controller, here on the token signing key a self-hosted controller never
-/// set. Nothing marks that lease failed, so reading it back must not turn a
-/// launch that died into a start in progress.
+/// set. Nothing marks that lease failed, and it is fresh, so it would pass for
+/// another start in flight. The ensure error names the lease it committed,
+/// and reading that lease back must not turn a launch that died into a start
+/// in progress.
 #[tokio::test]
 async fn dispatch_reconnect_that_strands_its_own_launch_still_writes_the_alert(
 ) -> anyhow::Result<()> {
@@ -27175,50 +27402,19 @@ async fn dispatch_reconnect_that_strands_its_own_launch_still_writes_the_alert(
     };
 
     with_shared_db_fixture(fixture, async {
-        {
-            let connection = pool.get().await?;
-            connection
-                .execute(
-                    "insert into organizations (id, slug, name) values ($1, $2, $3)",
-                    &[
-                        &org_id,
-                        &format!("dispatch-stranded-{org_id}"),
-                        &"Dispatch stranded launch test",
-                    ],
-                )
-                .await?;
-            connection
-                .execute(
-                    "insert into projects (id, org_id, project_type, status)
-                     values ($1, $2, 'customer', 'active')",
-                    &[&project_id, &org_id],
-                )
-                .await?;
-        }
-
-        let mut config = build_app_config(
-            test_origin_private_key(),
-            test_origin_public_key(),
-            "dispatch-reconnect-stranded-launch",
-        );
+        let label = "dispatch-reconnect-stranded-launch";
+        seed_dispatch_reconnect_projects(&pool, org_id, &[project_id], label).await?;
+        let mut config = dispatch_reconnect_test_config(label);
         // The key is optional at config load and the launch path first needs
         // it after the lease commit, so the reconnect fails with a 500 and no
         // code before it ever calls the provider.
         config.origin_token_private_key = None;
-        config.runtime_providers = vec![RuntimeProviderConfig {
-            id: "instafy-cloud".to_string(),
-            display_name: "Instafy Cloud".to_string(),
-            kind: "noop".to_string(),
-            owner_org_id: None,
-            allowed_org_ids: vec![],
-            endpoint: Some("http://127.0.0.1:9".to_string()),
-            auth_token: None,
-            metadata: None,
-        }];
+        config.runtime_providers[0].endpoint = Some("http://127.0.0.1:9".to_string());
         let state = build_test_state(pool.clone(), config);
 
-        let (reconnect, alerts) =
+        let dispatched =
             dispatch_prompt_to_unregistered_hosted_runtime(&pool, &state, project_id, None).await?;
+        let reconnect = &dispatched.reconnect;
 
         let stranded_lease_status: Option<String> = pool
             .get()
@@ -27227,8 +27423,8 @@ async fn dispatch_reconnect_that_strands_its_own_launch_still_writes_the_alert(
                 "select rl.status
                  from runtimes r
                  join runtime_leases rl on rl.id = r.active_lease_id
-                 where r.project_id = $1 and rl.released_at is null",
-                &[&project_id],
+                 where r.id = $1 and rl.released_at is null",
+                &[&dispatched.runtime_id],
             )
             .await?
             .map(|row| row.get("status"));
@@ -27249,8 +27445,8 @@ async fn dispatch_reconnect_that_strands_its_own_launch_still_writes_the_alert(
             "a lease the failed reconnect left behind is not a start in progress: {reconnect}"
         );
         assert_eq!(
-            alerts,
-            vec!["Workspace startup failed. Open Machines to reconnect Instafy Cloud.".to_string()]
+            dispatched.alerts,
+            vec![WORKSPACE_STARTUP_FAILED_ALERT.to_string()]
         );
         Ok(())
     })

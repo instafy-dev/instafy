@@ -32,7 +32,10 @@ pub(crate) use db::{
     ensure_runtime_record, mark_runtime_ready, record_runtime_event,
     record_runtime_event_with_conversation, touch_runtime_last_seen, RuntimeRecord,
 };
-pub(crate) use ensure::{ensure_runtime_for_automation, ensure_runtime_for_dispatch_reconnect};
+pub(crate) use ensure::{
+    ensure_error_committed_lease_id, ensure_runtime_for_automation,
+    ensure_runtime_for_dispatch_reconnect,
+};
 pub(crate) use limit_waits::{spawn_hosted_runtime_limit_wait_sweep, RUNTIME_LIMIT_REACHED_CODE};
 pub(crate) use managed::runtime_supports_shared_browser_agent_consent;
 pub(crate) use provider::provider_is_self_hosted;
@@ -50,7 +53,7 @@ pub(crate) use stop::{
 pub(crate) use sweeps::{
     prune_expired_runtime_events, reset_hosted_runtime_credit_sweep_pool_pressure,
     should_report_hosted_runtime_credit_sweep_error, sweep_hosted_runtime_credit_usage,
-    sweep_idle_activity,
+    sweep_idle_activity, REQUESTED_RUNTIME_LAUNCH_TIMEOUT_SECONDS,
 };
 pub(crate) use token::{
     ensure_bound_runtime_generation_matches, ensure_runtime_generation_matches,
