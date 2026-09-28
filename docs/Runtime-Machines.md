@@ -86,10 +86,13 @@ another machine is never retried or given up on by the wait, so it keeps this
 ## Waiting on the runtime limit
 
 When every hosted runtime an organization may run is in use, an ensure for
-another space is refused with 402 `runtime_limit_reached`. If the machine
-holding the slot has been idle for `RUNTIME_LIMIT_RECLAIM_IDLE_SECONDS`
-(default 120, 0 disables), the ensure stops it and launches the waiting space
-instead (reason `runtime_limit_reclaim`). That reclaim only runs inside an
+another runtime is refused with 402 `runtime_limit_reached`. The runtime
+holding the slot can be in another space or in the same one: a space's
+standard runtime can hold the slot its Webdev runtime needs. If the machine
+holding the slot is in another space and has been idle for
+`RUNTIME_LIMIT_RECLAIM_IDLE_SECONDS` (default 120, 0 disables), the ensure
+stops it and launches the waiting space instead (reason
+`runtime_limit_reclaim`). That reclaim only runs inside an
 ensure, and clients ask again only on interaction, so the controller retries
 for them (`runtime/limit_waits.rs`):
 

@@ -170,7 +170,15 @@ Runtimes can be provisioned with different runtime-agent container images (for e
   the same image) instead of being refused. If another start has replaced
   that lease by the time the reconnect reuses the runtime, the new lease keeps
   its own settings. A runtime with no live lease, such as one stopped for
-  idling, relaunches at the standard size with the base image. A requeue
+  idling, relaunches at the standard size. It keeps the webdev image and its
+  Shared Browser settings only when the launch attestation of its newest own
+  launch proves a webdev launch; a stored or client-supplied `runtimeFlavor`
+  does not count, and neither does a tenant lease another project attached,
+  whose metadata the attaching caller wrote. The settings carried are the env keys a client may request itself
+  (the browser session switch and viewer preferences such as the CDP
+  screencast), which pass the request boundary again; resource limits and
+  TURN credentials are injected fresh. Otherwise it relaunches with the base
+  image. Its size, and so its Boost billing, is not carried. A requeue
   relaunch copies the latest lease's metadata.
 - Custom and self-hosted providers retain their explicit metadata/image behavior.
 - Hetzner user-data templates may include `{{RUNTIME_AGENT_IMAGE}}`; when present, the allocator will substitute `metadata.runtimeAgentImage` (or `runtime_agent_image`) into the cloud-init payload.

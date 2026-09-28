@@ -26979,7 +26979,6 @@ async fn dispatch_prompt_to_hosted_runtime(
     lease: Option<SeededRuntimeLease>,
 ) -> anyhow::Result<HostedRuntimeDispatch> {
     let runtime_id = Uuid::new_v4();
-    let conversation_id = Uuid::new_v4();
     let mut lease_id = None;
     {
         let connection = pool.get().await?;
@@ -27054,6 +27053,18 @@ async fn dispatch_prompt_to_hosted_runtime(
         }
     }
 
+    dispatch_prompt_to_seeded_runtime(pool, state, project_id, runtime_id, lease_id).await
+}
+
+/// Send one chat prompt to a hosted runtime the test has already seeded.
+async fn dispatch_prompt_to_seeded_runtime(
+    pool: &PgPool,
+    state: &AppState,
+    project_id: Uuid,
+    runtime_id: Uuid,
+    lease_id: Option<Uuid>,
+) -> anyhow::Result<HostedRuntimeDispatch> {
+    let conversation_id = Uuid::new_v4();
     let normalized = dispatch::normalize_dispatch_request(DispatchPromptRequest {
         project_id: Some(project_id.to_string()),
         session_id: None,
@@ -27856,6 +27867,518 @@ async fn dispatch_reconnect_relaunches_a_stale_webdev_runtime_with_its_settings(
         assert_eq!(calls[1].1["lease_id"], json!(successor_id.to_string()));
         assert_eq!(calls[1].1["metadata"]["runtimeFlavor"], json!("webdev"));
         assert_eq!(calls[1].1["metadata"]["sizeId"], json!("boost"));
+        Ok(())
+    })
+    .await
+}
+
+/// A lease an idle-stopped runtime once held.
+struct EndedRuntimeLease {
+    id: Uuid,
+    requested_seconds_ago: i64,
+    metadata: serde_json::Value,
+}
+
+/// Seed a hosted runtime the way the idle stop leaves it: stopped, with no
+/// active lease, and every lease released.
+async fn seed_idle_stopped_hosted_runtime(
+    pool: &PgPool,
+    project_id: Uuid,
+    runtime_id: Uuid,
+    display_name: &str,
+    leases: &[EndedRuntimeLease],
+) -> anyhow::Result<()> {
+    let connection = pool.get().await?;
+    connection
+        .execute(
+            "insert into runtimes
+               (id, project_id, provider, status, idle_ttl_seconds, display_name, last_seen_at)
+             values ($1, $2, 'instafy-cloud', 'stopped', 600, $3, now() - interval '20 minutes')",
+            &[&runtime_id, &project_id, &display_name],
+        )
+        .await?;
+    for lease in leases {
+        connection
+            .execute(
+                "insert into runtime_leases
+                   (id, project_id, runtime_id, status, scope, metadata, requested_at, released_at)
+                 values ($1, $2, $3, 'released', 'exclusive', $4,
+                         now() - ($5::bigint * interval '1 second'),
+                         now() - ($5::bigint * interval '1 second') + interval '30 minutes')",
+                &[
+                    &lease.id,
+                    &project_id,
+                    &runtime_id,
+                    &PgJson(lease.metadata.clone()),
+                    &lease.requested_seconds_ago,
+                ],
+            )
+            .await?;
+    }
+    Ok(())
+}
+
+/// The metadata the launch path stores for a webdev Boost launch of
+/// generation `lease_id` whose Studio asked for a CDP screencast in a
+/// viewport-only window, as production's Shared Browser modal does.
+fn webdev_boost_lease_metadata(lease_id: Uuid) -> serde_json::Value {
+    json!({
+        "runtimeFlavor": "webdev",
+        "source": "browser-session",
+        "sizeId": "boost",
+        "env": {
+            "INSTAFY_ENABLE_BROWSER_SESSION": "1",
+            "INSTAFY_BROWSER_CDP_SCREENCAST": "1",
+            "INSTAFY_BROWSER_VIEWPORT_ONLY": "1",
+            "RUNTIME_CPU_LIMIT": "4",
+            "RUNTIME_MEMORY_LIMIT": "8g",
+        },
+        "_instafyManagedRuntimeLaunch": {
+            "version": 1,
+            "flavor": "webdev",
+            "generation": lease_id.to_string(),
+        },
+    })
+}
+
+/// The lease a successful dispatch reconnect launched, and its metadata.
+async fn reconnect_successor_lease(
+    pool: &PgPool,
+    dispatched: &HostedRuntimeDispatch,
+) -> anyhow::Result<(Uuid, serde_json::Value)> {
+    let reconnect = &dispatched.reconnect;
+    anyhow::ensure!(
+        reconnect["status"] == json!("requested"),
+        "the reconnect launches the runtime: {reconnect}"
+    );
+    let successor_id = reconnect["leaseId"]
+        .as_str()
+        .and_then(|value| Uuid::parse_str(value).ok())
+        .ok_or_else(|| anyhow::anyhow!("the reconnect names its lease: {reconnect}"))?;
+    let connection = pool.get().await?;
+    let row = connection
+        .query_one(
+            "select r.active_lease_id, rl.metadata
+             from runtimes r
+             join runtime_leases rl on rl.id = $2 and rl.runtime_id = r.id
+             where r.id = $1",
+            &[&dispatched.runtime_id, &successor_id],
+        )
+        .await?;
+    anyhow::ensure!(
+        row.get::<_, Option<Uuid>>("active_lease_id") == Some(successor_id),
+        "the successor is the runtime's live lease"
+    );
+    Ok((
+        successor_id,
+        row.get::<_, PgJson<serde_json::Value>>("metadata").0,
+    ))
+}
+
+/// A runtime stopped for idling has no live lease, so the reconnect used to
+/// relaunch it bare: the base image at the standard size. The Webdev runtime
+/// then came back still named and chosen as webdev, without the webdev image
+/// the Shared Browser needs. When its newest lease was a webdev launch the
+/// controller attested, it now relaunches as webdev with the browser switch
+/// on, attested for the new generation. It does not carry the Boost size:
+/// nothing is running at that size, and a reconnect must not start billing
+/// for it.
+#[tokio::test]
+async fn dispatch_reconnect_relaunches_an_idle_stopped_webdev_runtime_as_webdev(
+) -> anyhow::Result<()> {
+    let pool = require_origin_test_pool("dispatch reconnect idle-stopped webdev test").await?;
+    let org_id = Uuid::new_v4();
+    let project_id = Uuid::new_v4();
+    let fixture = SharedDbFixture {
+        organizations: vec![org_id],
+        projects: vec![project_id],
+    };
+
+    with_shared_db_fixture(fixture, async {
+        let label = "dispatch-reconnect-idle-webdev";
+        seed_dispatch_reconnect_projects(&pool, org_id, &[project_id], label).await?;
+        let provider = spawn_recording_hosted_provider().await?;
+        let mut config = dispatch_reconnect_test_config(label);
+        config.runtime_providers[0].endpoint = Some(provider.endpoint.clone());
+        let state = build_test_state(pool.clone(), config);
+
+        let runtime_id = Uuid::new_v4();
+        let base_lease_id = Uuid::new_v4();
+        let webdev_lease_id = Uuid::new_v4();
+        seed_idle_stopped_hosted_runtime(
+            &pool,
+            project_id,
+            runtime_id,
+            "Webdev runtime (Playwright)",
+            &[
+                EndedRuntimeLease {
+                    id: base_lease_id,
+                    requested_seconds_ago: 7200,
+                    metadata: json!({
+                        "source": "studio",
+                        "sizeId": "standard",
+                        "env": { "RUNTIME_CPU_LIMIT": "2", "RUNTIME_MEMORY_LIMIT": "4g" },
+                    }),
+                },
+                EndedRuntimeLease {
+                    id: webdev_lease_id,
+                    requested_seconds_ago: 3600,
+                    metadata: webdev_boost_lease_metadata(webdev_lease_id),
+                },
+            ],
+        )
+        .await?;
+
+        let dispatched =
+            dispatch_prompt_to_seeded_runtime(&pool, &state, project_id, runtime_id, None).await?;
+        assert!(dispatched.alerts.is_empty(), "{:?}", dispatched.alerts);
+        let (successor_id, metadata) = reconnect_successor_lease(&pool, &dispatched).await?;
+        assert!(
+            successor_id != base_lease_id && successor_id != webdev_lease_id,
+            "an ended lease is not revived"
+        );
+        assert_eq!(metadata["runtimeFlavor"], json!("webdev"), "{metadata}");
+        assert_eq!(
+            metadata["_instafyManagedRuntimeLaunch"]["generation"],
+            json!(successor_id.to_string()),
+            "the successor is attested for its own generation: {metadata}"
+        );
+        assert_eq!(metadata["sizeId"], json!("standard"), "{metadata}");
+        assert_eq!(metadata["env"]["RUNTIME_MEMORY_LIMIT"], json!("4g"));
+        assert_eq!(
+            metadata["env"]["INSTAFY_ENABLE_BROWSER_SESSION"],
+            json!("1"),
+            "{metadata}"
+        );
+        // The Shared Browser comes back with the viewer the Studio asked for.
+        for key in [
+            "INSTAFY_BROWSER_CDP_SCREENCAST",
+            "INSTAFY_BROWSER_VIEWPORT_ONLY",
+        ] {
+            assert_eq!(metadata["env"][key], json!("1"), "{key}: {metadata}");
+        }
+        assert_eq!(metadata["source"], json!("dispatch_runtime_alert"));
+
+        // Nothing was running to release. The provider launched the new
+        // generation with the webdev image at the standard size.
+        let calls = provider.calls.lock().await.clone();
+        let kinds: Vec<&str> = calls.iter().map(|(kind, _)| *kind).collect();
+        assert_eq!(kinds, vec!["launch"], "{calls:?}");
+        let launch = &calls[0].1;
+        assert_eq!(launch["lease_id"], json!(successor_id.to_string()));
+        assert_eq!(launch["metadata"]["runtimeFlavor"], json!("webdev"));
+        assert_eq!(
+            launch["metadata"]["_instafyManagedRuntimeLaunch"]["generation"],
+            json!(successor_id.to_string())
+        );
+        assert_eq!(launch["metadata"]["sizeId"], json!("standard"));
+        assert_eq!(
+            launch["metadata"]["env"]["RUNTIME_MEMORY_LIMIT"],
+            json!("4g")
+        );
+        for key in [
+            "INSTAFY_ENABLE_BROWSER_SESSION",
+            "INSTAFY_BROWSER_CDP_SCREENCAST",
+            "INSTAFY_BROWSER_VIEWPORT_ONLY",
+        ] {
+            assert_eq!(launch["metadata"]["env"][key], json!("1"), "{key}");
+        }
+        Ok(())
+    })
+    .await
+}
+
+/// Only the newest lease's own controller attestation makes an idle-stopped
+/// runtime relaunch as webdev. A stored `runtimeFlavor` is what a client
+/// asked for, and an attestation copied from an older generation proves
+/// nothing about this one: either way the runtime relaunches with the base
+/// image, and nothing else of that lease carries over.
+#[tokio::test]
+async fn dispatch_reconnect_relaunches_an_unattested_webdev_claim_with_the_base_image(
+) -> anyhow::Result<()> {
+    let pool = require_origin_test_pool("dispatch reconnect unattested webdev test").await?;
+    let unattested_org_id = Uuid::new_v4();
+    let copied_org_id = Uuid::new_v4();
+    let unattested_project_id = Uuid::new_v4();
+    let copied_project_id = Uuid::new_v4();
+    let fixture = SharedDbFixture {
+        organizations: vec![unattested_org_id, copied_org_id],
+        projects: vec![unattested_project_id, copied_project_id],
+    };
+
+    with_shared_db_fixture(fixture, async {
+        let label = "dispatch-reconnect-unattested-webdev";
+        let provider = spawn_recording_hosted_provider().await?;
+        let mut config = dispatch_reconnect_test_config(label);
+        config.runtime_providers[0].endpoint = Some(provider.endpoint.clone());
+        let state = build_test_state(pool.clone(), config);
+
+        for (case, org_id, project_id, copies_attestation) in [
+            (
+                "unattested",
+                unattested_org_id,
+                unattested_project_id,
+                false,
+            ),
+            ("copied attestation", copied_org_id, copied_project_id, true),
+        ] {
+            // Separate teams, so the first relaunch does not hold the
+            // second's runtime slot.
+            seed_dispatch_reconnect_projects(&pool, org_id, &[project_id], label).await?;
+            let runtime_id = Uuid::new_v4();
+            let attested_lease_id = Uuid::new_v4();
+            let claiming_lease_id = Uuid::new_v4();
+            let mut claim = json!({
+                "runtimeFlavor": "webdev",
+                "source": "studio",
+                "sizeId": "boost",
+                "env": {
+                    "INSTAFY_ENABLE_BROWSER_SESSION": "1",
+                    "RUNTIME_CPU_LIMIT": "4",
+                    "RUNTIME_MEMORY_LIMIT": "8g",
+                },
+            });
+            if copies_attestation {
+                claim["_instafyManagedRuntimeLaunch"] =
+                    webdev_boost_lease_metadata(attested_lease_id)["_instafyManagedRuntimeLaunch"]
+                        .clone();
+            }
+            seed_idle_stopped_hosted_runtime(
+                &pool,
+                project_id,
+                runtime_id,
+                "Webdev runtime (Playwright)",
+                &[
+                    // An older, genuinely attested webdev launch.
+                    EndedRuntimeLease {
+                        id: attested_lease_id,
+                        requested_seconds_ago: 7200,
+                        metadata: webdev_boost_lease_metadata(attested_lease_id),
+                    },
+                    EndedRuntimeLease {
+                        id: claiming_lease_id,
+                        requested_seconds_ago: 3600,
+                        metadata: claim,
+                    },
+                ],
+            )
+            .await?;
+
+            let dispatched =
+                dispatch_prompt_to_seeded_runtime(&pool, &state, project_id, runtime_id, None)
+                    .await?;
+            assert!(
+                dispatched.alerts.is_empty(),
+                "{case}: {:?}",
+                dispatched.alerts
+            );
+            let (successor_id, metadata) = reconnect_successor_lease(&pool, &dispatched).await?;
+            assert!(
+                metadata.get("runtimeFlavor").is_none(),
+                "{case}: {metadata}"
+            );
+            assert!(
+                metadata.get("_instafyManagedRuntimeLaunch").is_none(),
+                "{case}: {metadata}"
+            );
+            assert_eq!(metadata["sizeId"], json!("standard"), "{case}: {metadata}");
+            assert!(
+                metadata["env"]
+                    .get("INSTAFY_ENABLE_BROWSER_SESSION")
+                    .is_none(),
+                "{case}: {metadata}"
+            );
+
+            let calls = provider.calls.lock().await.clone();
+            let launches: Vec<&serde_json::Value> = calls
+                .iter()
+                .filter(|(kind, body)| {
+                    *kind == "launch" && body["lease_id"] == json!(successor_id.to_string())
+                })
+                .map(|(_, body)| body)
+                .collect();
+            assert_eq!(launches.len(), 1, "{case}: {calls:?}");
+            let launched = &launches[0]["metadata"];
+            assert!(
+                launched.get("runtimeFlavor").is_none(),
+                "{case}: {launched}"
+            );
+            assert!(
+                launched.get("_instafyManagedRuntimeLaunch").is_none(),
+                "{case}: {launched}"
+            );
+            assert_eq!(launched["sizeId"], json!("standard"), "{case}: {launched}");
+        }
+        Ok(())
+    })
+    .await
+}
+
+/// A tenant lease that another project attached to this runtime carries the
+/// runtime's id, but its metadata is whatever the attaching caller sent,
+/// including an attestation bound to its own id. The idle relaunch reads only
+/// the runtime's own launch generations: when the newest of those is a base
+/// launch it relaunches with the base image, and when it is an attested
+/// webdev launch it keeps that launch's settings, never the tenant's.
+#[tokio::test]
+async fn dispatch_reconnect_ignores_another_projects_tenant_lease_on_an_idle_runtime(
+) -> anyhow::Result<()> {
+    let pool = require_origin_test_pool("dispatch reconnect tenant lease test").await?;
+    let base_org_id = Uuid::new_v4();
+    let webdev_org_id = Uuid::new_v4();
+    let base_project_id = Uuid::new_v4();
+    let webdev_project_id = Uuid::new_v4();
+    let base_tenant_project_id = Uuid::new_v4();
+    let webdev_tenant_project_id = Uuid::new_v4();
+    let fixture = SharedDbFixture {
+        organizations: vec![base_org_id, webdev_org_id],
+        projects: vec![
+            base_project_id,
+            webdev_project_id,
+            base_tenant_project_id,
+            webdev_tenant_project_id,
+        ],
+    };
+
+    with_shared_db_fixture(fixture, async {
+        let label = "dispatch-reconnect-tenant-lease";
+        let provider = spawn_recording_hosted_provider().await?;
+        let mut config = dispatch_reconnect_test_config(label);
+        config.runtime_providers[0].endpoint = Some(provider.endpoint.clone());
+        let state = build_test_state(pool.clone(), config);
+
+        for (case, org_id, project_id, tenant_project_id, own_launch_is_webdev) in [
+            (
+                "base launch",
+                base_org_id,
+                base_project_id,
+                base_tenant_project_id,
+                false,
+            ),
+            (
+                "webdev launch",
+                webdev_org_id,
+                webdev_project_id,
+                webdev_tenant_project_id,
+                true,
+            ),
+        ] {
+            // Separate teams, so the first relaunch does not hold the
+            // second's runtime slot.
+            seed_dispatch_reconnect_projects(
+                &pool,
+                org_id,
+                &[project_id, tenant_project_id],
+                label,
+            )
+            .await?;
+            let runtime_id = Uuid::new_v4();
+            let own_lease_id = Uuid::new_v4();
+            let own_metadata = if own_launch_is_webdev {
+                webdev_boost_lease_metadata(own_lease_id)
+            } else {
+                json!({
+                    "source": "studio",
+                    "sizeId": "standard",
+                    "env": { "RUNTIME_CPU_LIMIT": "2", "RUNTIME_MEMORY_LIMIT": "4g" },
+                })
+            };
+            seed_idle_stopped_hosted_runtime(
+                &pool,
+                project_id,
+                runtime_id,
+                "Webdev runtime (Playwright)",
+                &[EndedRuntimeLease {
+                    id: own_lease_id,
+                    requested_seconds_ago: 7200,
+                    metadata: own_metadata,
+                }],
+            )
+            .await?;
+            // Newer than the runtime's own launch, from another project, and
+            // bound to its own id as if the controller had launched it.
+            let tenant_lease_id = Uuid::new_v4();
+            let tenant_metadata = json!({
+                "runtimeFlavor": "webdev",
+                "sizeId": "boost",
+                "env": {
+                    "INSTAFY_ENABLE_BROWSER_SESSION": "1",
+                    "INSTAFY_BROWSER_PREFERRED_VIEWER": "rfb",
+                    "INSTAFY_BROWSER_VIEWPORT_ONLY": "0",
+                },
+                "_instafyManagedRuntimeLaunch": {
+                    "version": 1,
+                    "flavor": "webdev",
+                    "generation": tenant_lease_id.to_string(),
+                },
+            });
+            pool.get()
+                .await?
+                .execute(
+                    "insert into runtime_leases
+                       (id, project_id, runtime_id, status, scope, parent_lease_id, metadata,
+                        requested_at, released_at)
+                     values ($1, $2, $3, 'released', 'tenant', $4, $5,
+                             now() - interval '10 minutes', now() - interval '5 minutes')",
+                    &[
+                        &tenant_lease_id,
+                        &tenant_project_id,
+                        &runtime_id,
+                        &own_lease_id,
+                        &PgJson(tenant_metadata),
+                    ],
+                )
+                .await?;
+
+            let dispatched =
+                dispatch_prompt_to_seeded_runtime(&pool, &state, project_id, runtime_id, None)
+                    .await?;
+            assert!(
+                dispatched.alerts.is_empty(),
+                "{case}: {:?}",
+                dispatched.alerts
+            );
+            let (successor_id, metadata) = reconnect_successor_lease(&pool, &dispatched).await?;
+            assert_eq!(metadata["sizeId"], json!("standard"), "{case}: {metadata}");
+            assert!(
+                metadata["env"]
+                    .get("INSTAFY_BROWSER_PREFERRED_VIEWER")
+                    .is_none(),
+                "{case}: the tenant's settings never carry: {metadata}"
+            );
+            if own_launch_is_webdev {
+                assert_eq!(
+                    metadata["runtimeFlavor"],
+                    json!("webdev"),
+                    "{case}: {metadata}"
+                );
+                assert_eq!(
+                    metadata["_instafyManagedRuntimeLaunch"]["generation"],
+                    json!(successor_id.to_string()),
+                    "{case}: {metadata}"
+                );
+                assert_eq!(
+                    metadata["env"]["INSTAFY_BROWSER_VIEWPORT_ONLY"],
+                    json!("1"),
+                    "{case}: the runtime's own launch settings: {metadata}"
+                );
+            } else {
+                assert!(
+                    metadata.get("runtimeFlavor").is_none(),
+                    "{case}: {metadata}"
+                );
+                assert!(
+                    metadata.get("_instafyManagedRuntimeLaunch").is_none(),
+                    "{case}: {metadata}"
+                );
+                assert!(
+                    metadata["env"]
+                        .get("INSTAFY_ENABLE_BROWSER_SESSION")
+                        .is_none(),
+                    "{case}: {metadata}"
+                );
+            }
+        }
         Ok(())
     })
     .await
