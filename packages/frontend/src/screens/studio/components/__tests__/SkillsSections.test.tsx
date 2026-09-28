@@ -173,4 +173,20 @@ describe("Skills responsive controls", () => {
       expect(isSelectDisabled(query(`skills-discovery-${id}-select`))).toBe(true);
     }
   });
+
+  it("labels discovery filters for assistive technology without render-time accessibility warnings", async () => {
+    layout.large = true;
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      await render(<SkillsDiscoverySection {...discoveryProps()} />);
+      for (const [id, label] of [["source", "Source"], ["category", "Category"], ["sort", "Sort"]]) {
+        const control = query(`skills-discovery-${id}-select`);
+        const labels = control?.getAttribute("aria-labelledby")?.split(/\s+/).map(id => document.getElementById(id)?.textContent ?? "").join(" ") ?? "";
+        expect(`${control?.getAttribute("aria-label") ?? ""} ${labels}`).toContain(label);
+      }
+      expect(warn.mock.calls.flat().join(" ")).not.toContain("you must specify an aria-label");
+    } finally {
+      warn.mockRestore();
+    }
+  });
 });
