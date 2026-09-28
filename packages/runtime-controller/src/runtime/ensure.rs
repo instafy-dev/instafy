@@ -1420,9 +1420,20 @@ pub(crate) async fn ensure_runtime_for_dispatch_reconnect(
     // launches with the same image and size as the generation it replaces.
     let live_lease = load_live_lease_metadata(state, &runtime.id).await?;
     let carried_from = live_lease.as_ref().map(|(lease_id, _)| *lease_id);
+    // With no live lease, as after an idle stop, the newest lease still says
+    // which image the runtime was launched with. The reconnect still passes
+    // `CarriedFrom(None)`, so a lease another start creates meanwhile keeps
+    // its own settings and is never refused over a flavor read from this one.
+    let ended_lease = match live_lease {
+        Some(_) => None,
+        None => load_newest_lease_metadata(state, &runtime.id).await?,
+    };
     let metadata = build_dispatch_reconnect_metadata(
         &runtime.provider,
         live_lease
+            .as_ref()
+            .map(|(lease_id, metadata)| (*lease_id, metadata.as_ref())),
+        ended_lease
             .as_ref()
             .map(|(lease_id, metadata)| (*lease_id, metadata.as_ref())),
         runtime.id,
@@ -1488,6 +1499,35 @@ async fn load_live_lease_metadata(
     Ok(row.map(|row| (row.get("id"), row.get("metadata"))))
 }
 
+/// The runtime's newest lease and the metadata it holds, newest by request
+/// time as the requeue path reads it.
+async fn load_newest_lease_metadata(
+    state: &AppState,
+    runtime_id: &Uuid,
+) -> Result<Option<(Uuid, Option<JsonValue>)>, (StatusCode, Json<ApiError>)> {
+    let conn = state
+        .pool
+        .get()
+        .await
+        .map_err(|error| database_unavailable("Runtime lease", error))?;
+    let row = conn
+        .query_opt(
+            "select id, metadata
+             from runtime_leases
+             where runtime_id = $1
+             order by requested_at desc
+             limit 1",
+            &[runtime_id],
+        )
+        .await
+        .map_err(|error| {
+            internal_error(format!(
+                "failed to load newest runtime lease metadata: {error}"
+            ))
+        })?;
+    Ok(row.map(|row| (row.get("id"), row.get("metadata"))))
+}
+
 /// The metadata a dispatch reconnect ensures its runtime with.
 ///
 /// Reuse compares the requested managed flavor with the one the live lease
@@ -1500,29 +1540,42 @@ async fn load_live_lease_metadata(
 /// forward, as the requeue path does. The flavor is taken from the lease's
 /// launch attestation rather than its stored field, because the attestation
 /// is what reuse compares against.
+///
+/// `ended_lease` is the runtime's newest lease, read only when no lease is
+/// live; see [`ended_lease_launch_settings`] for the little it carries.
 fn build_dispatch_reconnect_metadata(
     provider: &str,
     live_lease: Option<(Uuid, Option<&JsonValue>)>,
+    ended_lease: Option<(Uuid, Option<&JsonValue>)>,
     runtime_id: Uuid,
     source: &str,
     force_new_lease: bool,
 ) -> JsonValue {
-    let mut metadata = match live_lease.and_then(|(_, metadata)| metadata) {
-        Some(JsonValue::Object(existing)) => existing.clone(),
-        _ => serde_json::Map::new(),
+    let mut metadata = match live_lease {
+        Some((lease_id, lease_metadata)) => {
+            let mut metadata = match lease_metadata {
+                Some(JsonValue::Object(existing)) => existing.clone(),
+                _ => serde_json::Map::new(),
+            };
+            // An attestation binds one lease generation, and the launch path
+            // writes its own for the lease it reuses or creates.
+            metadata.remove(super::managed::MANAGED_RUNTIME_LAUNCH_ATTESTATION);
+            metadata.remove(super::managed::MANAGED_RUNTIME_FLAVOR_KEY);
+            if super::managed::managed_webdev_launch_is_attested(provider, lease_metadata, lease_id)
+            {
+                metadata.insert(
+                    super::managed::MANAGED_RUNTIME_FLAVOR_KEY.to_string(),
+                    JsonValue::String(super::managed::MANAGED_RUNTIME_WEBDEV_FLAVOR.to_string()),
+                );
+            }
+            metadata
+        }
+        None => ended_lease
+            .map(|(lease_id, lease_metadata)| {
+                ended_lease_launch_settings(provider, lease_id, lease_metadata)
+            })
+            .unwrap_or_default(),
     };
-    // An attestation binds one lease generation, and the launch path writes
-    // its own for the lease it reuses or creates.
-    metadata.remove(super::managed::MANAGED_RUNTIME_LAUNCH_ATTESTATION);
-    metadata.remove(super::managed::MANAGED_RUNTIME_FLAVOR_KEY);
-    if live_lease.is_some_and(|(lease_id, metadata)| {
-        super::managed::managed_webdev_launch_is_attested(provider, metadata, lease_id)
-    }) {
-        metadata.insert(
-            super::managed::MANAGED_RUNTIME_FLAVOR_KEY.to_string(),
-            JsonValue::String(super::managed::MANAGED_RUNTIME_WEBDEV_FLAVOR.to_string()),
-        );
-    }
     metadata.insert("source".to_string(), JsonValue::String(source.to_string()));
     metadata.insert("runtimeId".to_string(), json!(runtime_id));
     metadata.insert(
@@ -1530,6 +1583,54 @@ fn build_dispatch_reconnect_metadata(
         JsonValue::Bool(force_new_lease),
     );
     JsonValue::Object(metadata)
+}
+
+/// What a dispatch reconnect keeps of a runtime with no live lease, such as
+/// one stopped for idling: the image it launched with and its Shared Browser
+/// settings, and nothing that changes its bill.
+///
+/// A webdev runtime is named and chosen as the webdev runtime, and the Shared
+/// Browser needs the webdev image, so relaunching it with the base image left
+/// a runtime that looked right and could not do its job. When the newest
+/// lease's own launch attestation proves a webdev launch, the reconnect asks
+/// for the webdev flavor again, plus that lease's browser settings: the
+/// browser session switch, without which the image starts no browser, and the
+/// viewer preferences the Studio asked for, so the Shared Browser comes back
+/// with the same viewer. Only env keys a client may request itself
+/// (`allowed_managed_runtime_request_env_key`) are carried, and they pass the
+/// same request boundary again; resource limits and TURN credentials are
+/// injected fresh after it. A stored `runtimeFlavor` without that attestation
+/// is only what someone asked for, not what the controller launched, and
+/// carries nothing.
+///
+/// `sizeId` stays behind. It is what billing reads, and with no live lease
+/// there is no running machine whose size the reconnect has to keep, so the
+/// runtime starts at the standard size; a Boost has to be asked for again.
+fn ended_lease_launch_settings(
+    provider: &str,
+    lease_id: Uuid,
+    lease_metadata: Option<&JsonValue>,
+) -> serde_json::Map<String, JsonValue> {
+    let mut settings = serde_json::Map::new();
+    if !super::managed::managed_webdev_launch_is_attested(provider, lease_metadata, lease_id) {
+        return settings;
+    }
+    settings.insert(
+        super::managed::MANAGED_RUNTIME_FLAVOR_KEY.to_string(),
+        JsonValue::String(super::managed::MANAGED_RUNTIME_WEBDEV_FLAVOR.to_string()),
+    );
+    let browser_env: serde_json::Map<String, JsonValue> = lease_metadata
+        .and_then(|metadata| metadata.get("env"))
+        .and_then(JsonValue::as_object)
+        .into_iter()
+        .flatten()
+        .filter(|(key, _)| super::managed::allowed_managed_runtime_request_env_key(key))
+        .map(|(key, value)| (key.clone(), value.clone()))
+        .collect();
+    if !browser_env.is_empty() {
+        settings.insert("env".to_string(), JsonValue::Object(browser_env));
+    }
+    settings
 }
 
 async fn load_runtime_requeue_metadata(
@@ -3344,6 +3445,7 @@ mod tests {
         let requested = build_dispatch_reconnect_metadata(
             "instafy-cloud",
             Some((lease_id, Some(&lease_metadata))),
+            None,
             runtime_id,
             "dispatch_runtime_alert",
             false,
@@ -3384,6 +3486,7 @@ mod tests {
             let requested = build_dispatch_reconnect_metadata(
                 "instafy-cloud",
                 Some((lease_id, Some(&base_metadata))),
+                None,
                 runtime_id,
                 "dispatch_runtime_alert",
                 false,
@@ -3398,6 +3501,7 @@ mod tests {
         // No live lease: nothing to inherit.
         let requested = build_dispatch_reconnect_metadata(
             "instafy-cloud",
+            None,
             None,
             runtime_id,
             "dispatch_runtime_alert",
@@ -3416,12 +3520,173 @@ mod tests {
         let requested = build_dispatch_reconnect_metadata(
             "acme-provider",
             Some((lease_id, Some(&webdev_lease_metadata(lease_id)))),
+            None,
             runtime_id,
             "dispatch_runtime_alert",
             false,
         );
         assert!(requested.get("runtimeFlavor").is_none(), "{requested}");
         assert_eq!(requested["sizeId"], "boost");
+    }
+
+    /// What a new lease `lease_id` launches with for a request, through the
+    /// same steps the launch path takes.
+    fn new_launch_metadata(requested: JsonValue, lease_id: Uuid) -> JsonValue {
+        let sanitized = super::super::managed::sanitize_managed_runtime_request_metadata(
+            "instafy-cloud",
+            Some(requested),
+        )
+        .expect("a reconnect request passes the managed request boundary");
+        let (sanitized, _) = normalize_runtime_size_metadata(sanitized);
+        super::super::managed::attest_new_managed_runtime_launch(
+            "instafy-cloud",
+            sanitized,
+            lease_id,
+        )
+        .expect("managed launch metadata")
+    }
+
+    #[test]
+    fn dispatch_reconnect_relaunches_an_ended_webdev_lease_as_webdev_at_the_standard_size() {
+        let runtime_id = Uuid::new_v4();
+        let ended_lease_id = Uuid::new_v4();
+        // A webdev Boost lease stopped for idling, whose browser also asked
+        // for a CDP screencast in a viewport-only window. Its TURN
+        // credentials were injected by the controller for that lease.
+        let mut ended_metadata = webdev_lease_metadata(ended_lease_id);
+        ended_metadata["env"]["INSTAFY_BROWSER_CDP_SCREENCAST"] = json!("1");
+        ended_metadata["env"]["INSTAFY_BROWSER_VIEWPORT_ONLY"] = json!("1");
+        ended_metadata["env"]["INSTAFY_BROWSER_WEBRTC_ICE_SERVERS_JSON"] =
+            json!("[{\"urls\":\"turn:stale.example\"}]");
+        ended_metadata["env"]["INSTAFY_BROWSER_WEBRTC_REQUIRE_TURN"] = json!("1");
+
+        let requested = build_dispatch_reconnect_metadata(
+            "instafy-cloud",
+            None,
+            Some((ended_lease_id, Some(&ended_metadata))),
+            runtime_id,
+            "dispatch_runtime_alert",
+            true,
+        );
+        // The image and the browser settings a client may ask for; not the
+        // size, the resource limits or the old lease's TURN credentials.
+        assert_eq!(
+            requested,
+            json!({
+                "runtimeFlavor": "webdev",
+                "env": {
+                    "INSTAFY_ENABLE_BROWSER_SESSION": "1",
+                    "INSTAFY_BROWSER_CDP_SCREENCAST": "1",
+                    "INSTAFY_BROWSER_VIEWPORT_ONLY": "1",
+                },
+                "source": "dispatch_runtime_alert",
+                "runtimeId": runtime_id.to_string(),
+                "forceNewLease": true,
+            })
+        );
+
+        let successor_id = Uuid::new_v4();
+        let launched = new_launch_metadata(requested, successor_id);
+        assert!(super::super::managed::managed_webdev_launch_is_attested(
+            "instafy-cloud",
+            Some(&launched),
+            successor_id,
+        ));
+        assert_eq!(launched["sizeId"], "standard");
+        assert_eq!(launched["env"]["RUNTIME_CPU_LIMIT"], "2");
+        assert_eq!(launched["env"]["RUNTIME_MEMORY_LIMIT"], "4g");
+        assert_eq!(launched["env"]["INSTAFY_ENABLE_BROWSER_SESSION"], "1");
+        assert_eq!(launched["env"]["INSTAFY_BROWSER_CDP_SCREENCAST"], "1");
+        assert_eq!(launched["env"]["INSTAFY_BROWSER_VIEWPORT_ONLY"], "1");
+        assert_ne!(
+            launched["env"].get("INSTAFY_BROWSER_WEBRTC_ICE_SERVERS_JSON"),
+            ended_metadata["env"].get("INSTAFY_BROWSER_WEBRTC_ICE_SERVERS_JSON"),
+            "the old lease's TURN credentials never carry over: {launched}"
+        );
+
+        // A webdev launch without the browser switch comes back without it.
+        let mut switchless = webdev_lease_metadata(ended_lease_id);
+        switchless["env"]
+            .as_object_mut()
+            .expect("env")
+            .remove("INSTAFY_ENABLE_BROWSER_SESSION");
+        let requested = build_dispatch_reconnect_metadata(
+            "instafy-cloud",
+            None,
+            Some((ended_lease_id, Some(&switchless))),
+            runtime_id,
+            "dispatch_runtime_alert",
+            true,
+        );
+        assert_eq!(requested["runtimeFlavor"], "webdev");
+        assert!(requested.get("env").is_none(), "{requested}");
+    }
+
+    #[test]
+    fn dispatch_reconnect_takes_an_ended_lease_flavor_only_from_its_own_attestation() {
+        let runtime_id = Uuid::new_v4();
+        let ended_lease_id = Uuid::new_v4();
+        let bare = json!({
+            "source": "dispatch_runtime_alert",
+            "runtimeId": runtime_id.to_string(),
+            "forceNewLease": true,
+        });
+
+        for (provider, ended_metadata) in [
+            // A base Boost launch.
+            (
+                "instafy-cloud",
+                Some(json!({
+                    "source": "studio",
+                    "sizeId": "boost",
+                    "env": { "RUNTIME_CPU_LIMIT": "4", "RUNTIME_MEMORY_LIMIT": "8g" },
+                })),
+            ),
+            // A stored flavor the controller never attested.
+            (
+                "instafy-cloud",
+                Some(json!({
+                    "runtimeFlavor": "webdev",
+                    "sizeId": "boost",
+                    "env": { "INSTAFY_ENABLE_BROWSER_SESSION": "1" },
+                })),
+            ),
+            // An attestation copied from another generation.
+            ("instafy-cloud", Some(webdev_lease_metadata(Uuid::new_v4()))),
+            ("instafy-cloud", None),
+            // Only the exact managed provider honors the attestation.
+            ("acme-provider", Some(webdev_lease_metadata(ended_lease_id))),
+        ] {
+            let requested = build_dispatch_reconnect_metadata(
+                provider,
+                None,
+                Some((ended_lease_id, ended_metadata.as_ref())),
+                runtime_id,
+                "dispatch_runtime_alert",
+                true,
+            );
+            assert_eq!(requested, bare, "{provider}: {ended_metadata:?}");
+        }
+
+        let launched = new_launch_metadata(bare, Uuid::new_v4());
+        assert!(launched.get("runtimeFlavor").is_none(), "{launched}");
+        assert!(launched.get("_instafyManagedRuntimeLaunch").is_none());
+        assert_eq!(launched["sizeId"], "standard");
+
+        // A live lease decides on its own; an older ended lease adds nothing.
+        let live_lease_id = Uuid::new_v4();
+        let live_metadata = json!({ "source": "studio", "sizeId": "standard" });
+        let ended_metadata = webdev_lease_metadata(ended_lease_id);
+        let requested = build_dispatch_reconnect_metadata(
+            "instafy-cloud",
+            Some((live_lease_id, Some(&live_metadata))),
+            Some((ended_lease_id, Some(&ended_metadata))),
+            runtime_id,
+            "dispatch_runtime_alert",
+            false,
+        );
+        assert!(requested.get("runtimeFlavor").is_none(), "{requested}");
+        assert!(requested.get("env").is_none(), "{requested}");
     }
 
     #[test]

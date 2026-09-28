@@ -3775,8 +3775,8 @@ fn should_persist_runtime_alert_conversation_message(
 }
 
 /// A reconnect refused by the team's hosted runtime limit is a wait, not a
-/// failed startup: the queued request sends by itself once the other space's
-/// runtime stops. The Studio already words it this way from the reconnect
+/// failed startup: the queued request sends by itself once one of the team's
+/// runtimes stops. The Studio already words it this way from the reconnect
 /// code, but the stored content is what the CLI, history and the agent's own
 /// context read, so it has to say the same thing.
 fn runtime_alert_message(
@@ -3798,8 +3798,10 @@ fn runtime_alert_message(
 /// Mirrors the Studio's wording in `controllerConversationNotice.ts`. It does
 /// not name a count: plans allow different numbers of runtimes, and the
 /// refusal's counts are only in its prose, so a number here would be wrong
-/// for every plan but one.
-const RUNTIME_LIMIT_WAIT_MESSAGE: &str = "Waiting for a free cloud runtime. All of this team\u{2019}s runtimes are busy in other spaces; stop one in Machines and this request will send.";
+/// for every plan but one. Nor does it say where the busy runtimes are: the
+/// one holding the slot can be in this same space, such as its standard
+/// runtime while its Webdev runtime waits to start.
+const RUNTIME_LIMIT_WAIT_MESSAGE: &str = "Waiting for a free cloud runtime. All of this team\u{2019}s cloud runtimes are in use; stop one in Machines and this request will send.";
 
 /// These sentences name the surface the reader can actually reach. They used to
 /// say "the Runtime button by the composer"; that button's only renderer lost
@@ -5558,11 +5560,14 @@ mod tests {
         // Word for word what the Studio shows for it, apostrophe included.
         assert_eq!(
             message,
-            "Waiting for a free cloud runtime. All of this team\u{2019}s runtimes are busy in other spaces; stop one in Machines and this request will send."
+            "Waiting for a free cloud runtime. All of this team\u{2019}s cloud runtimes are in use; stop one in Machines and this request will send."
         );
         // A plan with more than one runtime reads the same text, so it must
         // not claim the team has exactly one.
         assert!(!message.contains("one runtime"), "{message}");
+        // The runtime holding the slot can be in this same space, so the text
+        // must not place it in another one.
+        assert!(!message.contains("space"), "{message}");
 
         // Any other failed reconnect is still a failed startup.
         let other = json!({ "status": "failed", "code": "provider_launch_failed" });
