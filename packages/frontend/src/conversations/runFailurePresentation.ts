@@ -252,6 +252,10 @@ export type RetryingStatusPresentation = {
   fullText: string;
 };
 
+// Status kinds the runtime agent writes while Codex retries: a re-dispatched
+// run, and a recovered stream error such as a rate-limited request.
+const RETRYING_STATUS_KINDS = new Set(["codex_retry", "codex_stream_retry"]);
+
 /**
  * Map interim "Retrying: <technical reason>" status lines to a calm display
  * label. The stored message is untouched; the full original line is returned
@@ -264,7 +268,7 @@ export function resolveRetryingStatusPresentation(params: {
   const content = params.content.trim();
   const metadata = isRecord(params.metadata) ? params.metadata : null;
   const kind = normalizedStringField(metadata, "kind");
-  if (kind === "codex_retry") {
+  if (RETRYING_STATUS_KINDS.has(kind)) {
     return {
       displayText: RETRYING_STATUS_DISPLAY_TEXT,
       fullText: content || RETRYING_STATUS_DISPLAY_TEXT,
