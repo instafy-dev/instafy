@@ -54,10 +54,6 @@ export const COPY_BACKOFF_MS = 15_000;
 export const COPY_TIMEOUT_MS = 15 * 60_000;
 export const VISIBILITY_ATTEMPTS = 6;
 const REQUEST_TIMEOUT_MS = 30_000;
-const INDEX_MEDIA_TYPES = new Set([
-  "application/vnd.oci.image.index.v1+json",
-  "application/vnd.docker.distribution.manifest.list.v2+json",
-]);
 
 export const sha256Digest = (bytes) => `sha256:${createHash("sha256").update(bytes).digest("hex")}`;
 
@@ -161,10 +157,46 @@ function delay(milliseconds) {
   return new Promise((resolve) => setTimeout(resolve, milliseconds));
 }
 
-function childDigests(manifest) {
-  if (!INDEX_MEDIA_TYPES.has(manifest.mediaType)) return [];
-  const parsed = JSON.parse(manifest.bytes.toString("utf8"));
-  return (parsed.manifests ?? []).map((entry) => entry.digest);
+/**
+ * Child manifest digests of an image index, [] for a single-platform manifest,
+ * or null when the bytes are not a manifest this script can read.
+ */
+function childDigests(bytes) {
+  let parsed;
+  try {
+    parsed = JSON.parse(Buffer.from(bytes).toString("utf8"));
+  } catch {
+    return null;
+  }
+  if (!parsed || typeof parsed !== "object") return null;
+  if (!Array.isArray(parsed.manifests)) return [];
+  const digests = parsed.manifests.map((entry) => entry?.digest);
+  return digests.every((digest) => typeof digest === "string" && /^sha256:[0-9a-f]{64}$/u.test(digest)) ? digests : null;
+}
+
+const mirrorDigestRef = (name, digest) => `${IMAGE_MIRROR_REGISTRY}/${name}@${digest}`;
+
+/**
+ * Anonymous read of everything CI can request from GHCR for one lock entry:
+ * the index by digest, the upstream tag, and every child manifest. GHCR lists
+ * each child of a multi-platform index as its own untagged package version,
+ * so an index can outlive a child that CI's by-digest pull then misses.
+ */
+async function inspectMirror(image, read) {
+  const index = await read(mirrorImageRef(image));
+  if (!index.ok || index.digest !== image.digest) return { index, complete: false };
+  const tag = await read(mirrorTagRef(image));
+  const tagOk = tag.ok && tag.digest === image.digest;
+  const children = childDigests(index.bytes);
+  const missingChildren = [];
+  for (const child of children ?? []) {
+    const manifest = await read(mirrorDigestRef(image.name, child));
+    if (!manifest.ok || manifest.digest !== child) missingChildren.push(child);
+  }
+  return {
+    index, tagOk, missingChildren, unreadable: children === null,
+    complete: tagOk && children !== null && missingChildren.length === 0,
+  };
 }
 
 /** Decide which lock entries GHCR does not already serve anonymously, and a verified source for each. */
@@ -172,10 +204,16 @@ export async function planMirror(lock, { read = fetchManifest, sleep = delay, lo
   const entries = [];
   const present = [];
   for (const image of lock.images) {
-    const mirrored = await read(mirrorImageRef(image));
-    if (mirrored.ok && mirrored.digest === image.digest) {
+    const mirrored = await inspectMirror(image, read);
+    if (mirrored.complete) {
       present.push(image.name);
       continue;
+    }
+    if (mirrored.index.ok && mirrored.index.digest === image.digest) {
+      const gaps = [...(mirrored.tagOk ? [] : [`tag ${image.tag}`]),
+        ...mirrored.missingChildren.map((child) => `child manifest ${child}`),
+        ...(mirrored.unreadable ? ["a readable index"] : [])];
+      log(`::warning::${image.name}: GHCR serves ${image.digest} but not its ${gaps.join(", ")}; copying it again.`);
     }
     const candidates = [sourceImageRef(image), upstreamImageRef(image)];
     let verified;
@@ -226,7 +264,8 @@ function commandTail(result) {
   return String(result?.stderr ?? "").trim().split("\n").slice(-10).join("\n").slice(-2_000);
 }
 
-export function inspectRawDigest(reference, { execute = spawnSync } = {}) {
+/** Raw manifest bytes and their digest as the logged-in Docker client sees them, or null. */
+export function inspectRaw(reference, { execute = spawnSync } = {}) {
   const result = execute("docker", ["buildx", "imagetools", "inspect", "--raw", reference], {
     encoding: "buffer",
     stdio: ["ignore", "pipe", "pipe"],
@@ -234,19 +273,35 @@ export function inspectRawDigest(reference, { execute = spawnSync } = {}) {
     maxBuffer: 8 * 1024 * 1024,
   });
   if (!result || result.error || result.status !== 0) return null;
-  return sha256Digest(result.stdout);
+  return { bytes: result.stdout, digest: sha256Digest(result.stdout) };
+}
+
+export const inspectRawDigest = (reference, options) => inspectRaw(reference, options)?.digest ?? null;
+
+/** The first thing GHCR lacks for a plan entry (index, tag or a child manifest), or null when it holds all of it. */
+function ghcrGap(entry, { execute }) {
+  const index = inspectRaw(mirrorDigestRef(entry.name, entry.digest), { execute });
+  if (index?.digest !== entry.digest) return `index ${entry.digest}`;
+  if (inspectRawDigest(entry.target, { execute }) !== entry.digest) return `tag ${entry.target}`;
+  const children = childDigests(index.bytes);
+  if (children === null) return "a readable index";
+  const missing = children.find((child) => inspectRawDigest(mirrorDigestRef(entry.name, child), { execute }) !== child);
+  return missing ? `child manifest ${missing}` : null;
 }
 
 /** Copy each planned image with the logged-in Docker client, then prove the digest. */
 export async function copyMirror(plan, { execute = spawnSync, sleep = delay, log = console.log } = {}) {
   const copied = [];
   for (const entry of plan.entries) {
-    const immutable = `${IMAGE_MIRROR_REGISTRY}/${entry.name}@${entry.digest}`;
-    // A package GHCR already holds (for example one that is not public yet)
-    // is already correct; do not rewrite it, verify it below.
-    if (inspectRawDigest(immutable, { execute }) === entry.digest) {
-      log(`${entry.name}: GHCR already holds ${entry.digest}; skipping the copy.`);
+    const immutable = mirrorDigestRef(entry.name, entry.digest);
+    // A package GHCR already holds completely (for example one that is not
+    // public yet) is already correct; do not rewrite it, verify it below. A
+    // missing tag or child manifest is re-pushed by the same idempotent copy.
+    const gap = ghcrGap(entry, { execute });
+    if (gap === null) {
+      log(`${entry.name}: GHCR already holds ${entry.digest}, its tag and every child manifest; skipping the copy.`);
     } else {
+      if (!gap.startsWith("index ")) log(`${entry.name}: GHCR holds ${entry.digest} but not its ${gap}; copying it again.`);
       let done = false;
       for (const source of entry.sources) {
         for (let attempt = 1; attempt <= COPY_ATTEMPTS && !done; attempt += 1) {
@@ -268,18 +323,23 @@ export async function copyMirror(plan, { execute = spawnSync, sleep = delay, log
       if (!done) throw new Error(`${entry.name}: every source failed; the image was not published`);
     }
     // GHCR can expose a new manifest a few seconds after the write returns.
-    let immutableDigest = null;
+    let index = null;
     for (let attempt = 1; attempt <= VISIBILITY_ATTEMPTS; attempt += 1) {
-      immutableDigest = inspectRawDigest(immutable, { execute });
-      if (immutableDigest === entry.digest || attempt === VISIBILITY_ATTEMPTS) break;
+      index = inspectRaw(immutable, { execute });
+      if (index?.digest === entry.digest || attempt === VISIBILITY_ATTEMPTS) break;
       await sleep(1_000 * 2 ** attempt);
     }
-    if (immutableDigest !== entry.digest) {
-      throw new Error(`${entry.name}: GHCR does not serve ${entry.digest} (got ${immutableDigest ?? "nothing"})`);
+    if (index?.digest !== entry.digest) {
+      throw new Error(`${entry.name}: GHCR does not serve ${entry.digest} (got ${index?.digest ?? "nothing"})`);
     }
     const tagDigest = inspectRawDigest(entry.target, { execute });
     if (tagDigest !== entry.digest) {
       throw new Error(`${entry.name}: ${entry.target} resolves to ${tagDigest ?? "nothing"}, not ${entry.digest}`);
+    }
+    for (const child of childDigests(index.bytes) ?? []) {
+      if (inspectRawDigest(mirrorDigestRef(entry.name, child), { execute }) !== child) {
+        throw new Error(`${entry.name}: GHCR does not serve child manifest ${child} of ${entry.digest}`);
+      }
     }
     copied.push(entry.name);
     log(`${entry.name}: GHCR serves ${entry.digest}.`);
@@ -294,7 +354,7 @@ export async function verifyMirror(lock, { read = fetchManifest, log = console.l
   for (const image of lock.images) {
     const row = { name: image.name, tag: image.tag, digest: image.digest, ghcr: "ok", upstreamTag: "unchanged" };
     rows.push(row);
-    const index = await read(mirrorImageRef(image));
+    const { index, tagOk, missingChildren, unreadable } = await inspectMirror(image, read);
     if (!index.ok) {
       if (index.status === 401 || index.status === 403) {
         // GHCR answers 403 for both a private and an absent package. After a
@@ -309,17 +369,17 @@ export async function verifyMirror(lock, { read = fetchManifest, log = console.l
       row.ghcr = "digest mismatch";
       problems.push(`${image.name}: GHCR returned ${index.digest} for ${image.digest}.`);
     } else {
-      const tag = await read(mirrorTagRef(image));
-      if (!tag.ok || tag.digest !== image.digest) {
+      if (!tagOk) {
         row.ghcr = "tag mismatch";
         problems.push(`${image.name}: ${mirrorTagRef(image)} does not resolve to ${image.digest}.`);
       }
-      for (const child of childDigests(index)) {
-        const manifest = await read(`${IMAGE_MIRROR_REGISTRY}/${image.name}@${child}`);
-        if (!manifest.ok || manifest.digest !== child) {
-          row.ghcr = "incomplete";
-          problems.push(`${image.name}: child manifest ${child} is not anonymously pullable from GHCR.`);
-        }
+      if (unreadable) {
+        row.ghcr = "incomplete";
+        problems.push(`${image.name}: GHCR served ${image.digest} but not as an image manifest.`);
+      }
+      for (const child of missingChildren) {
+        row.ghcr = "incomplete";
+        problems.push(`${image.name}: child manifest ${child} is not anonymously pullable from GHCR.`);
       }
     }
     // Informational: the mirror keeps the locked bytes even if upstream moves a tag.

@@ -119,7 +119,8 @@ test("planning an empty mirror copies every lock image, in lock order, from a ve
 
 test("planning skips digests GHCR already serves anonymously", async () => {
   const entries = Object.fromEntries(lock.images.flatMap((image) => [
-    [mirrorImageRef(image), served(image.digest)], [sourceImageRef(image), served(image.digest)],
+    [mirrorImageRef(image), served(image.digest)], [mirrorTagRef(image), served(image.digest)],
+    [sourceImageRef(image), served(image.digest)],
   ]));
   const [postgres] = lock.images;
   delete entries[mirrorImageRef(postgres)];
@@ -128,6 +129,33 @@ test("planning skips digests GHCR already serves anonymously", async () => {
   assert.deepEqual(plan.present, lock.images.slice(1).map((image) => image.name));
   assert.deepEqual(plan.entries.map((entry) => entry.name), ["postgres"]);
   assert.ok(!reads.some((reference) => reference.startsWith("public.ecr.aws/") && !reference.includes("/postgres@")));
+});
+
+test("planning re-copies an image whose tag or child manifest GHCR no longer serves", async () => {
+  const [postgres, gotrue, realtime] = lock.images;
+  const children = [`sha256:${"1".repeat(64)}`, `sha256:${"2".repeat(64)}`];
+  const child = (image, digest) => [`ghcr.io/instafy-dev/supabase/${image.name}@${digest}`,
+    { ok: true, status: 200, digest, mediaType: "application/vnd.oci.image.manifest.v1+json", bytes: Buffer.from("{}") }];
+  const entries = {};
+  for (const image of [postgres, gotrue, realtime]) {
+    Object.assign(entries, {
+      [mirrorImageRef(image)]: served(image.digest, children), [mirrorTagRef(image)]: served(image.digest),
+      [sourceImageRef(image)]: served(image.digest),
+    }, Object.fromEntries(children.map((digest) => child(image, digest))));
+  }
+  // An untagged-version cleanup removed one postgres child; a tag was deleted by hand from gotrue.
+  delete entries[`ghcr.io/instafy-dev/supabase/postgres@${children[1]}`];
+  delete entries[mirrorTagRef(gotrue)];
+  const logs = [];
+  const plan = await planMirror({ ...lock, images: [postgres, gotrue, realtime] },
+    { read: registry(entries).read, sleep: noSleep, log: (line) => logs.push(line) });
+  assert.deepEqual(plan.present, ["realtime"]);
+  assert.deepEqual(plan.entries.map((entry) => entry.name), ["postgres", "gotrue"]);
+  assert.deepEqual(plan.entries[0].sources, [sourceImageRef(postgres), upstreamImageRef(postgres)]);
+  assert.deepEqual(logs, [
+    `::warning::postgres: GHCR serves ${postgres.digest} but not its child manifest ${children[1]}; copying it again.`,
+    `::warning::gotrue: GHCR serves ${gotrue.digest} but not its tag ${gotrue.tag}; copying it again.`,
+  ]);
 });
 
 test("ECR reads back off on rate limits, then Docker Hub serves the same digest", async () => {
@@ -172,15 +200,22 @@ test("a plan cannot name anything the lock does not", () => {
 
 // Registry bytes for synthetic entries: a digest maps to bytes that hash to it.
 const manifestBytes = new Map();
-function entryFor(image) {
-  const bytes = Buffer.from(`manifest for ${image.name}`);
+function stored(value) {
+  const bytes = Buffer.from(JSON.stringify(value));
   const digest = sha256Digest(bytes);
   manifestBytes.set(digest, bytes);
-  return { name: image.name, tag: image.tag, digest, target: mirrorTagRef(image),
-    sources: [sourceImageRef({ ...image, digest }), upstreamImageRef({ ...image, digest })] };
+  return digest;
 }
+function entryFor(image, { platforms = 0 } = {}) {
+  const children = Array.from({ length: platforms }, (_, platform) => stored({ schemaVersion: 2, name: image.name, platform }));
+  const digest = stored(platforms ? { schemaVersion: 2, manifests: children.map((child) => ({ digest: child })) }
+    : { schemaVersion: 2, name: image.name });
+  return { name: image.name, tag: image.tag, digest, target: mirrorTagRef(image),
+    sources: [sourceImageRef({ ...image, digest }), upstreamImageRef({ ...image, digest })], children };
+}
+const plannedEntry = ({ children, ...entry }) => entry;
 
-function docker({ ghcr = {}, createFailures = 0 } = {}) {
+function docker({ ghcr = {}, createFailures = 0, dropChild = null } = {}) {
   const calls = [];
   let failures = createFailures;
   const execute = (command, args, options) => {
@@ -192,8 +227,13 @@ function docker({ ghcr = {}, createFailures = 0 } = {}) {
       }
       const [, , , , target, source] = args;
       const digest = source.split("@")[1];
+      const repository = target.split(":")[0];
+      // Like buildx: every child manifest, then the index, then the tag.
+      for (const { digest: child } of JSON.parse(manifestBytes.get(digest)).manifests ?? []) {
+        if (child !== dropChild) ghcr[`${repository}@${child}`] = child;
+      }
       ghcr[target] = digest;
-      ghcr[`${target.split(":")[0]}@${digest}`] = digest;
+      ghcr[`${repository}@${digest}`] = digest;
       return { status: 0, stderr: "" };
     }
     if (args[2] === "inspect") {
@@ -207,7 +247,7 @@ function docker({ ghcr = {}, createFailures = 0 } = {}) {
 
 test("copy republishes one source with no annotations or platform filter, then proves the digest and tag", async () => {
   const [postgres] = lock.images;
-  const entry = entryFor(postgres);
+  const entry = plannedEntry(entryFor(postgres));
   const fake = docker();
   assert.deepEqual(await copyMirror({ entries: [entry] }, { execute: fake.execute, sleep: noSleep, log: quiet }), ["postgres"]);
   const creates = fake.calls.filter(({ args }) => args[2] === "create");
@@ -223,7 +263,7 @@ test("copy republishes one source with no annotations or platform filter, then p
 
 test("copy retries with backoff, falls back to the second source, and skips digests already in GHCR", async () => {
   const [postgres] = lock.images;
-  const entry = entryFor(postgres);
+  const entry = plannedEntry(entryFor(postgres));
   const waits = [];
   const flaky = docker({ createFailures: COPY_ATTEMPTS });
   await copyMirror({ entries: [entry] }, { execute: flaky.execute, sleep: async (ms) => waits.push(ms), log: quiet });
@@ -236,9 +276,41 @@ test("copy retries with backoff, falls back to the second source, and skips dige
   assert.equal(existing.calls.filter(({ args }) => args[2] === "create").length, 0);
 });
 
+test("copy re-pushes a missing tag or child manifest, and skips only a complete image", async () => {
+  const [postgres] = lock.images;
+  const { children, ...entry } = entryFor(postgres, { platforms: 2 });
+  const repository = "ghcr.io/instafy-dev/supabase/postgres";
+  const holding = (...digests) => Object.fromEntries(digests.map((digest) => [`${repository}@${digest}`, digest]));
+  const creates = (fake) => fake.calls.filter(({ args }) => args[2] === "create").length;
+
+  const complete = docker({ ghcr: { ...holding(entry.digest, ...children), [entry.target]: entry.digest } });
+  const logs = [];
+  await copyMirror({ entries: [entry] }, { execute: complete.execute, sleep: noSleep, log: (line) => logs.push(line) });
+  assert.equal(creates(complete), 0);
+  assert.ok(logs.includes(`postgres: GHCR already holds ${entry.digest}, its tag and every child manifest; skipping the copy.`));
+  assert.ok(children.every((child) => complete.calls.some(({ args }) => args[2] === "inspect" && args.at(-1) === `${repository}@${child}`)));
+
+  const childless = docker({ ghcr: { ...holding(entry.digest, children[0]), [entry.target]: entry.digest } });
+  logs.length = 0;
+  assert.deepEqual(await copyMirror({ entries: [entry] }, { execute: childless.execute, sleep: noSleep, log: (line) => logs.push(line) }), ["postgres"]);
+  assert.equal(creates(childless), 1);
+  assert.equal(childless.ghcr[`${repository}@${children[1]}`], children[1]);
+  assert.ok(logs.includes(`postgres: GHCR holds ${entry.digest} but not its child manifest ${children[1]}; copying it again.`));
+
+  const untagged = docker({ ghcr: holding(entry.digest, ...children) });
+  logs.length = 0;
+  await copyMirror({ entries: [entry] }, { execute: untagged.execute, sleep: noSleep, log: (line) => logs.push(line) });
+  assert.equal(creates(untagged), 1);
+  assert.equal(untagged.ghcr[entry.target], entry.digest);
+  assert.ok(logs.includes(`postgres: GHCR holds ${entry.digest} but not its tag ${entry.target}; copying it again.`));
+
+  await assert.rejects(copyMirror({ entries: [entry] }, { execute: docker({ dropChild: children[1] }).execute, sleep: noSleep, log: quiet }),
+    new RegExp(`postgres: GHCR does not serve child manifest ${children[1]} of ${entry.digest}`, "u"));
+});
+
 test("copy fails loudly when every source fails or GHCR serves other bytes", async () => {
   const [postgres] = lock.images;
-  const entry = entryFor(postgres);
+  const entry = plannedEntry(entryFor(postgres));
   await assert.rejects(copyMirror({ entries: [entry] }, { execute: docker({ createFailures: 2 * COPY_ATTEMPTS }).execute, sleep: noSleep, log: quiet }),
     /postgres: every source failed/u);
   const moved = docker();

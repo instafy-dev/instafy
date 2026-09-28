@@ -546,9 +546,10 @@ starts from GHCR by the same digest, with ECR Public as the fallback.
   (lock, script or workflow changes, weekly, or manual dispatch; never for pull
   requests). It copies each index unchanged to
   `ghcr.io/instafy-dev/supabase/<name>` under the upstream tag with
-  `docker buildx imagetools create`, skips digests GHCR already serves, and then
-  proves anonymously that every index, tag and child manifest resolves to the
-  locked digest. The source is ECR Public, with Docker Hub (identical digests)
+  `docker buildx imagetools create`, skips images whose index, tag and child
+  manifests GHCR already serves (a deleted tag or child manifest is copied
+  again), and then proves anonymously that every index, tag and child manifest
+  resolves to the locked digest. The source is ECR Public, with Docker Hub (identical digests)
   as its fallback. Only `GITHUB_TOKEN` with `packages: write` is used. These are
   unmodified upstream images, not Instafy builds.
 - `scripts/ensure-supabase-postgres-image.mjs` (the contracts lane and the

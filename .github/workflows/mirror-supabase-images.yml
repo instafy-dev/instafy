@@ -17,7 +17,8 @@ on:
       - "scripts/mirror-supabase-images.mjs"
       - "scripts/lib/supabaseImageMirror.mjs"
   schedule:
-    # Weekly re-verification; re-copies anything GHCR no longer serves.
+    # Weekly re-verification; re-copies any index, tag or child manifest GHCR
+    # no longer serves.
     - cron: "23 5 * * 1"
   workflow_dispatch: {}
 
@@ -75,8 +76,9 @@ jobs:
           version: v0.35.0
           driver: docker
 
-      # Anonymous reads only: which locked digests GHCR does not serve publicly
-      # yet, and a source (ECR Public, else Docker Hub) that serves each one.
+      # Anonymous reads only: which locked images GHCR does not fully serve
+      # publicly (index, tag and every child manifest), and a source (ECR
+      # Public, else Docker Hub) that serves each one.
       - name: Plan the copy from the lock
         id: plan
         run: node scripts/mirror-supabase-images.mjs plan --output "$RUNNER_TEMP/supabase-image-mirror-plan.json"
