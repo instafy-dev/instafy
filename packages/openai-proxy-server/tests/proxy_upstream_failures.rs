@@ -265,7 +265,67 @@ async fn rate_limit_retry_after_is_forwarded_derived_or_defaulted() -> Result<()
             ],
             "30",
         ),
-        (None, vec![], "2"),
+        // The bucket at zero refused, whatever the other bucket's reset.
+        (
+            None,
+            vec![
+                ("x-ratelimit-remaining-requests", "12"),
+                ("x-ratelimit-remaining-tokens", "0"),
+                ("x-ratelimit-reset-requests", "20s"),
+                ("x-ratelimit-reset-tokens", "6s"),
+            ],
+            "6",
+        ),
+        (
+            None,
+            vec![
+                ("x-ratelimit-remaining-requests", "0"),
+                ("x-ratelimit-remaining-tokens", "5000"),
+                ("x-ratelimit-reset-requests", "8s"),
+                ("x-ratelimit-reset-tokens", "20s"),
+            ],
+            "8",
+        ),
+        (
+            None,
+            vec![
+                ("x-ratelimit-remaining-requests", "0"),
+                ("x-ratelimit-remaining-tokens", "0"),
+                ("x-ratelimit-reset-requests", "8s"),
+                ("x-ratelimit-reset-tokens", "20s"),
+            ],
+            "20",
+        ),
+        (
+            None,
+            vec![
+                ("x-ratelimit-reset-requests", "8s"),
+                ("x-ratelimit-reset-tokens", "20s"),
+            ],
+            "20",
+        ),
+        // With no bucket at zero, neither is trusted on its own and the later reset is used.
+        (
+            None,
+            vec![
+                ("x-ratelimit-remaining-requests", "12"),
+                ("x-ratelimit-remaining-tokens", "5000"),
+                ("x-ratelimit-reset-requests", "20s"),
+                ("x-ratelimit-reset-tokens", "6s"),
+            ],
+            "20",
+        ),
+        // A reset of up to five minutes is waited out, bounded to the longest derived delay.
+        (
+            None,
+            vec![
+                ("x-ratelimit-remaining-requests", "12"),
+                ("x-ratelimit-remaining-tokens", "0"),
+                ("x-ratelimit-reset-tokens", "5m0s"),
+            ],
+            "30",
+        ),
+        (None, vec![], "5"),
     ] {
         let mut failure = Reply::error(StatusCode::TOO_MANY_REQUESTS);
         failure.retry_after = retry_after;
@@ -305,10 +365,53 @@ async fn rate_limit_retry_after_is_forwarded_derived_or_defaulted() -> Result<()
 
 #[tokio::test]
 #[serial]
+async fn rate_limit_window_longer_than_five_minutes_is_terminal() -> Result<()> {
+    let _env = EnvGuard::isolated();
+    // A bucket at zero that needs more than five minutes to refill, such as a daily limit, cannot
+    // recover within the client's retries, so the proxy withdraws the retry instead of sending
+    // the client to sleep through it.
+    for headers in [
+        vec![
+            ("x-ratelimit-remaining-requests", "0"),
+            ("x-ratelimit-remaining-tokens", "5000"),
+            ("x-ratelimit-reset-requests", "13h20m0s"),
+            ("x-ratelimit-reset-tokens", "6s"),
+        ],
+        vec![
+            ("x-ratelimit-remaining-requests", "12"),
+            ("x-ratelimit-remaining-tokens", "0"),
+            ("x-ratelimit-reset-requests", "1s"),
+            ("x-ratelimit-reset-tokens", "13h20m0s"),
+        ],
+        vec![
+            ("x-ratelimit-remaining-tokens", "0"),
+            ("x-ratelimit-reset-tokens", "5m1s"),
+        ],
+    ] {
+        let mut failure = Reply::error(StatusCode::TOO_MANY_REQUESTS);
+        failure.headers = headers;
+        let (endpoint, mock, _upstream) = mock_server(vec![failure]).await?;
+        let (addr, _proxy) = proxy(api_credentials(endpoint)).await?;
+        let response = request(addr).await?;
+        assert!(response.headers().get(header::RETRY_AFTER).is_none());
+        assert_error(
+            response,
+            StatusCode::TOO_MANY_REQUESTS,
+            false,
+            "upstream_rate_limit",
+        )
+        .await?;
+        assert_eq!(mock.calls.load(Ordering::SeqCst), 1);
+    }
+    Ok(())
+}
+
+#[tokio::test]
+#[serial]
 async fn plan_usage_limits_are_terminal_and_keep_the_provider_type() -> Result<()> {
     let _env = EnvGuard::isolated();
-    // A ChatGPT plan window resets in hours, so the client must not retry it. Codex recognises
-    // these error types in a 429 body and reports the plan limit with its reset time.
+    // No wait within a turn lifts a ChatGPT plan limit, so the client must not retry it. Codex
+    // recognises these error types in a 429 body and reports the plan limit with its reset time.
     for (field, provider_type, code) in [
         (
             "type",
@@ -455,7 +558,7 @@ async fn structured_http_and_stream_quota_exhaustion_are_terminal() -> Result<()
                 .headers()
                 .get(header::RETRY_AFTER)
                 .map(|value| value.to_str().unwrap()),
-            (code == "rate_limit_exceeded").then_some("2")
+            (code == "rate_limit_exceeded").then_some("5")
         );
         let error_type = if code == "usage_limit_reached" {
             code

@@ -89,6 +89,12 @@ describe("classifyRunFailureText", () => {
         '{"error":{"message":"The upstream provider rate limit was reached.","type":"upstream_error","code":"upstream_rate_limit","retryable":true}}',
       ),
     ).toBe("provider_rate_limited");
+    // The proxy's answer when the exhausted window resets in hours: terminal, still a rate limit.
+    expect(
+      classifyRunFailureText(
+        '{"error":{"message":"The upstream provider rate limit was reached.","type":"upstream_error","code":"upstream_rate_limit","retryable":false}}',
+      ),
+    ).toBe("provider_rate_limited");
     expect(
       classifyRunFailureText(
         'backend responded with 429 Too Many Requests: {"error":{"type":"rate_limit_error","message":"Rate limit reached"}}',
@@ -385,6 +391,16 @@ describe("resolveRetryingStatusPresentation", () => {
     expect(
       resolveRetryingStatusPresentation({
         metadata: { kind: "codex_retry", reason: "missing_final", attempt: 2 },
+        content: raw,
+      }),
+    ).toEqual({ displayText: RETRYING_STATUS_DISPLAY_TEXT, fullText: raw });
+  });
+
+  it("maps codex_stream_retry status metadata regardless of wording", () => {
+    const raw = "stream disconnected before completion: 429 Too Many Requests";
+    expect(
+      resolveRetryingStatusPresentation({
+        metadata: { kind: "codex_stream_retry", event: { type: "stream.retry" } },
         content: raw,
       }),
     ).toEqual({ displayText: RETRYING_STATUS_DISPLAY_TEXT, fullText: raw });
