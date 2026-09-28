@@ -65,6 +65,7 @@ export function ChatMessageAvatar({
   scrollReactive = false,
   seed,
   size = "sm",
+  testId: testIdOverride,
 }: {
   kind: ChatMessageAvatarKind;
   metadata?: unknown;
@@ -75,6 +76,12 @@ export function ChatMessageAvatar({
   scrollReactive?: boolean;
   seed?: string | null;
   size?: "2xs" | "xs" | "sm" | "lg";
+  /**
+   * A second face of the same speaker on one row (the phone-only thinking
+   * indicator beside the gutter avatar) needs its own selector, or the
+   * gutter's chat-avatar-* selector would match both.
+   */
+  testId?: string;
 }) {
   const agentIdentity =
     kind === "assistant"
@@ -90,7 +97,8 @@ export function ChatMessageAvatar({
   const usesAssistantImageAvatar = kind === "assistant" && Boolean(assistantAvatarImageSrc);
   const usesCanonicalOctoAvatar =
     kind === "assistant" && assistantAvatarImageSrc === OCTO_AVATAR_SRC;
-  const testId = kind === "assistant" ? "chat-avatar-assistant" : "chat-avatar-human";
+  const testId =
+    testIdOverride ?? (kind === "assistant" ? "chat-avatar-assistant" : "chat-avatar-human");
   const wrapperClass =
     kind === "assistant"
       ? usesAssistantImageAvatar

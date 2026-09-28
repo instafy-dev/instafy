@@ -1,6 +1,5 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState, type JSX, type ReactNode } from "react";
 import { CompressLines } from "iconoir-react";
-import { OctoMark } from "../../../components/OctoMark";
 import { OCTO_AVATAR_SRC, resolveAgentAvatarImageSrc } from "../../../utils/agentAvatar";
 import { ChatActivityBubble } from "./ChatActivityBubble";
 import { ChatBubbleRow } from "./ChatBubbleRow";
@@ -128,9 +127,14 @@ export function ChatTypingRows({
     handle: typingAgentHandle,
     avatarSeed: typingAgentAvatarSeed,
   });
-  const showCompactThinkingOcto = hasMultipleTypingAgents
-    ? typingAgents.some((agent) => agent.isThinking && usesCanonicalOctoAvatar(agent))
-    : usesCanonicalOcto && typingIndicatorState?.phase === "thinking";
+  const compactThinkingOcto = hasMultipleTypingAgents
+    ? typingAgents.find((agent) => agent.isThinking && usesCanonicalOctoAvatar(agent)) ?? null
+    : usesCanonicalOcto && typingIndicatorState?.phase === "thinking"
+      ? { handle: typingAgentHandle, avatarSeed: typingAgentAvatarSeed }
+      : null;
+  // Strings rather than the object keep the status snapshot memo stable.
+  const compactThinkingOctoHandle = compactThinkingOcto?.handle ?? null;
+  const compactThinkingOctoAvatarSeed = compactThinkingOcto?.avatarSeed ?? null;
   const assistantStatusSnapshot = useMemo<AssistantTypingStatusSnapshot>(
     () => ({
       phase: typingIndicatorState?.phase ?? null,
@@ -147,20 +151,31 @@ export function ChatTypingRows({
             className="h-3.5 w-3.5 flex-shrink-0 text-slate-500 dark:text-slate-300"
             aria-hidden="true"
           />
-        ) : showCompactThinkingOcto ? (
-          <span
-            data-testid="assistant-thinking-octo-compact"
-            aria-hidden="true"
-            className="block h-4 w-4 flex-shrink-0 text-brand-ink dark:text-brand-paper sm:hidden"
-          >
-            <OctoMark className="h-full w-full" motion="thinking" scrollReactive />
+        ) : compactThinkingOctoHandle !== null ? (
+          // Phones hide the avatar gutter, so this is the row's only face. It
+          // is the same chat face as the gutter and the posted reply header,
+          // at the header's inline size, so Octo keeps its white coin in dark
+          // mode (docs/Brand.md) instead of turning into the reverse logo mark.
+          <span className="flex flex-shrink-0 sm:hidden">
+            <ChatMessageAvatar
+              kind="assistant"
+              agent={{
+                handle: compactThinkingOctoHandle,
+                avatarSeed: compactThinkingOctoAvatarSeed,
+              }}
+              motion="thinking"
+              scrollReactive
+              size="xs"
+              testId="assistant-thinking-octo-compact"
+            />
           </span>
         ) : null,
     }),
     [
+      compactThinkingOctoAvatarSeed,
+      compactThinkingOctoHandle,
       hasMultipleTypingAgents,
       isThinkingLabelExpanded,
-      showCompactThinkingOcto,
       typingIndicatorState?.label,
       typingIndicatorState?.phase,
       typingStatusAriaLabel,

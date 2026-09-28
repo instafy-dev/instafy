@@ -6,6 +6,7 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { RouterProvider } from "react-router-dom";
 import "./styles/tailwind.css";
 import { router } from "./applicationRouter";
+import { registerAppRouter } from "./navigation/appRouterBridge";
 import { AuthProvider } from "./providers/AuthProvider";
 import { ConversationHistoryCacheLifecycle } from "./conversations/ConversationHistoryCacheLifecycle";
 import { ProfileProvider } from "./profile/ProfileProvider";
@@ -77,6 +78,10 @@ if (import.meta.env.PROD && typeof window !== "undefined" && "serviceWorker" in 
 }
 
 installServiceWorkerPushDebugListener();
+// Before anything renders, so code without the router's hooks, such as
+// clearing the space on sign-out, moves the router along with the address bar.
+const unregisterAppRouter = registerAppRouter(router);
+if (import.meta.hot) import.meta.hot.dispose(unregisterAppRouter);
 installDesktopUpdateBootstrap();
 void installNativeOtaBootstrap();
 installNativeDeepLinkBootstrap(router);

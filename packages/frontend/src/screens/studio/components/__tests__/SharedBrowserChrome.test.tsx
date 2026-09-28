@@ -119,6 +119,30 @@ describe("SharedBrowserChrome", () => {
     ).toBe("https://two.example/");
   });
 
+  it("keeps address labels and navigation independent in simultaneous browser surfaces", async () => {
+    const first = props();
+    const second = props({ pages: [page({ id: "page-2", url: "https://two.example/" })] });
+    await act(async () => root.render(<><SharedBrowserChrome {...first} /><SharedBrowserChrome {...second} /></>));
+    const inputs = container.querySelectorAll<HTMLInputElement>('[data-testid="shared-browser-address"]');
+    const labels = container.querySelectorAll<HTMLLabelElement>("label");
+    expect(inputs[0].id).not.toBe(inputs[1].id);
+    expect(labels[0].control).toBe(inputs[0]);
+    expect(labels[1].control).toBe(inputs[1]);
+
+    await act(async () => {
+      inputs[1].focus();
+      setInputValue(inputs[1], "instafy.dev/docs");
+    });
+    await act(async () => {
+      const submit = inputs[1].form!.querySelector<HTMLButtonElement>('button[type="submit"]')!;
+      submit.focus();
+      submit.click();
+    });
+    expect(first.onNavigate).not.toHaveBeenCalled();
+    expect(second.onNavigate).toHaveBeenCalledExactlyOnceWith("page-2", "https://instafy.dev/docs");
+    expect(inputs[0].value).toBe("https://example.com/");
+  });
+
   it("honors live history capabilities when they are available", async () => {
     const model = props({
       pages: [

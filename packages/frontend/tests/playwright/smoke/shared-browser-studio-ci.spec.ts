@@ -396,6 +396,7 @@ test.describe("Disposable signed-in Studio Shared Browser", () => {
       expect(dialog.message()).toContain("Clear Shared Browser data for everyone in this space?");
       await dialog.accept();
     });
+    await page.getByTestId("shared-browser-sessions-toggle").click();
     await page.getByTestId("shared-browser-clear-data").click();
     expect((await clearResponse).ok()).toBe(true);
     await expectBrowserReady(page);

@@ -39,8 +39,10 @@ There is no Team runtime mode. Adding one later requires host-local consent, sep
 
 ## Resume on another device
 
-**Sessions & resume** shows the current runtime identity and a **Copy resume link**
-action. The link contains only the space and runtime UUIDs; it grants no access
+**Browser options** (the toolbar's three-dot button) opens sessions, a **Copy resume link**
+action and browser-data controls. The raw resume link, runtime identity and login-recovery
+status are under **Session details**; no extra session row is shown while browsing. The link contains
+only the space and runtime UUIDs; it grants no access
 and transfers no cookies, webpage URL, field values or browser-control token.
 Open it while signed in on another device to request that exact live Shared
 session. The new device is a separate participant and must acquire input control
@@ -61,6 +63,11 @@ an account switch does not inherit another account's saved session choice.
 ## One browser shell, three pixel transports
 
 The Studio always owns the address bar, Go/history controls, status, errors, action ticker, and AI cursor. The runtime owns the page and profile.
+Personal and Shared Browser use one `BrowserAddressField` and the common Instafy
+`Input`, `Button`, `IconButton` and `Checkbox` primitives for their address, actions
+and settings. Navigation state, permissions and control ownership stay in each
+browser controller; the shared components supply consistent themes, keyboard focus
+and touch targets.
 
 ```text
 Studio Shared Browser shell

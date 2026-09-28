@@ -125,6 +125,12 @@ RUN cargo chef prepare --recipe-path /src/recipe.json
 ########################
 # Dependencies builder
 ########################
+# The recipe stubs only runtime-agent itself: cargo-chef keeps the out-of-tree
+# path crates (runtime-contracts, origin-http-server, codex-rs) as real sources,
+# so this layer is keyed on them too. target/ is deliberately NOT a cache mount
+# here: exported layer caches (the publisher's type=gha, mode=max) keep image
+# layers but never cache mounts, so only a layer carries the compiled
+# dependencies to a fresh runner.
 FROM ${RUST_IMAGE} AS builder-deps
 ARG BUILD_PROFILE=dev
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -144,31 +150,29 @@ COPY --from=chef /src/proto /src/proto
 COPY --from=chef /src/recipe.json /src/recipe.json
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/usr/local/cargo/git \
-    --mount=type=cache,target=/src/packages/runtime-agent/target \
     cargo chef cook --profile ${BUILD_PROFILE} --recipe-path /src/recipe.json --locked
 
 ########################
 # Application builder
 ########################
-FROM ${RUST_IMAGE} AS builder
+# Build on top of the cooked dependency layer (same toolchain, packages and
+# environment). target/ is a cache mount seeded from that layer rather than an
+# empty one: a fresh runner starts from the cooked dependencies, a local daemon
+# keeps its incremental state, and the per-commit compiled workspace stays out
+# of the exported layer cache.
+# Only runtime-agent's own sources are copied here. The path crates
+# (runtime-contracts, openai-proxy-server, origin-http-server, codex-rs, proto)
+# are already in builder-deps with the exact content and mtimes they were
+# cooked from; copying a fresh checkout over them gives every file a newer
+# mtime, and cargo then recompiles every path crate although nothing changed.
+FROM builder-deps AS builder
 ARG BUILD_PROFILE=dev
 ARG BUILD_ARTIFACT_DIR=debug
-RUN apt-get update && apt-get install -y --no-install-recommends \
-      build-essential pkg-config libssl-dev libcap-dev protobuf-compiler \
-      clang lld curl \
-    && rm -rf /var/lib/apt/lists/*
-ENV CARGO_HOME=/usr/local/cargo \
-    RUSTFLAGS="-C link-arg=-fuse-ld=lld"
 WORKDIR /src
 COPY packages/runtime-agent/ packages/runtime-agent/
-COPY packages/runtime-contracts/ packages/runtime-contracts/
-COPY packages/openai-proxy-server/ packages/openai-proxy-server/
-COPY packages/origin-http-server/ packages/origin-http-server/
-COPY codex/codex-rs/ codex/codex-rs/
-COPY proto/ proto/
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/usr/local/cargo/git \
-    --mount=type=cache,target=/src/packages/runtime-agent/target \
+    --mount=type=cache,target=/src/packages/runtime-agent/target,from=builder-deps,source=/src/packages/runtime-agent/target \
     cargo build --profile ${BUILD_PROFILE} --manifest-path packages/runtime-agent/Cargo.toml --locked \
     && cargo build --profile ${BUILD_PROFILE} --manifest-path packages/runtime-agent/Cargo.toml -p codex-linux-sandbox --locked \
     && mkdir -p /src/build-artifacts/${BUILD_ARTIFACT_DIR} \

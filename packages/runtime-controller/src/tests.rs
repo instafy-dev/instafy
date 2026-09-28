@@ -26353,6 +26353,181 @@ async fn load_previous_provider_conversation_state_prefers_matching_provider() -
 }
 
 #[tokio::test]
+async fn load_skill_setup_openers_finds_openers_behind_the_history_window() -> anyhow::Result<()> {
+    let Some((mut client, connection_handle)) = connect_test_db().await? else {
+        eprintln!("skipping skill setup opener test: TEST_DATABASE_URL not set");
+        return Ok(());
+    };
+
+    client
+        .batch_execute(
+            "CREATE TEMP TABLE conversation_messages (
+                id uuid PRIMARY KEY,
+                conversation_id uuid not null,
+                prompt_id uuid,
+                role text not null,
+                content text not null,
+                metadata jsonb,
+                created_at timestamptz not null default now()
+            );",
+        )
+        .await?;
+
+    let conversation_id = Uuid::new_v4();
+    let other_conversation_id = Uuid::new_v4();
+    let mistyped_prompt = Uuid::new_v4();
+    let import_prompt = Uuid::new_v4();
+    let import_opener =
+        "/skills import https://github.com/instafy-dev/skills/tree/main/packs/bookkeeping --start";
+    let mut minute: i32 = 0;
+    let mut insert = |conversation: Uuid,
+                      prompt: Option<Uuid>,
+                      role: &str,
+                      content: String,
+                      metadata: serde_json::Value| {
+        minute += 1;
+        (
+            conversation,
+            prompt,
+            role.to_string(),
+            content,
+            metadata,
+            minute,
+        )
+    };
+    let mut rows = vec![
+        insert(
+            conversation_id,
+            Some(mistyped_prompt),
+            "user",
+            "/skills start freefinace".to_string(),
+            json!({}),
+        ),
+        insert(
+            conversation_id,
+            Some(mistyped_prompt),
+            "assistant",
+            "Skills command help".to_string(),
+            json!({"source": "agent", "outcome": "succeeded", "provider": "skills"}),
+        ),
+        insert(
+            conversation_id,
+            Some(import_prompt),
+            "user",
+            format!("{import_opener}\nSet up the bookkeeping pack."),
+            json!({}),
+        ),
+    ];
+    // The kickoff's progress rows come first and carry no provider of their
+    // own. There are more of them than the history window holds.
+    for index in 0..120 {
+        rows.push(insert(
+            conversation_id,
+            Some(import_prompt),
+            "assistant",
+            format!("Thinking step {index}"),
+            json!({
+                "source": "agent",
+                "kind": "update",
+                "outcome": "in_progress",
+                "messageType": "reasoning",
+                "details": {"provider": "not-the-reply"}
+            }),
+        ));
+    }
+    rows.extend([
+        insert(
+            conversation_id,
+            Some(import_prompt),
+            "assistant",
+            "FreeFinance lists one Mandant. Is that the one?".to_string(),
+            json!({"source": "agent", "outcome": "succeeded", "provider": "codex-embedded"}),
+        ),
+        insert(
+            conversation_id,
+            Some(Uuid::new_v4()),
+            "user",
+            "/skills list".to_string(),
+            json!({}),
+        ),
+        insert(
+            conversation_id,
+            Some(Uuid::new_v4()),
+            "user",
+            "Could you /skills start freefinance for me?".to_string(),
+            json!({}),
+        ),
+        // Recorded without a dispatch, so nothing ran it.
+        insert(
+            conversation_id,
+            None,
+            "user",
+            "/skills start freefinance".to_string(),
+            json!({}),
+        ),
+        insert(
+            other_conversation_id,
+            Some(Uuid::new_v4()),
+            "user",
+            "/skills start notion".to_string(),
+            json!({}),
+        ),
+        insert(
+            conversation_id,
+            Some(Uuid::new_v4()),
+            "user",
+            "yes".to_string(),
+            json!({}),
+        ),
+    ]);
+    for (conversation, prompt, role, content, metadata, minute) in rows {
+        client
+            .execute(
+                "INSERT INTO conversation_messages
+                   (id, conversation_id, prompt_id, role, content, metadata, created_at)
+                 VALUES ($1, $2, $3, $4, $5, $6::jsonb,
+                         '2026-01-01T00:00:00Z'::timestamptz + ($7::int * interval '1 minute'))",
+                &[
+                    &Uuid::new_v4(),
+                    &conversation,
+                    &prompt,
+                    &role,
+                    &content,
+                    &PgJson(metadata),
+                    &minute,
+                ],
+            )
+            .await?;
+    }
+
+    let transaction = client.transaction().await?;
+    let openers =
+        crate::agent::load_skill_setup_openers_for_agent(&transaction, &conversation_id, 5)
+            .await
+            .expect("load skill setup openers");
+    assert_eq!(
+        openers,
+        vec![
+            json!({"content": import_opener, "replyProvider": "codex-embedded"}),
+            json!({"content": "/skills start freefinace", "replyProvider": "skills"}),
+        ]
+    );
+
+    let newest_only =
+        crate::agent::load_skill_setup_openers_for_agent(&transaction, &conversation_id, 1)
+            .await
+            .expect("load newest skill setup opener");
+    assert_eq!(
+        newest_only,
+        vec![json!({"content": import_opener, "replyProvider": "codex-embedded"})]
+    );
+
+    transaction.rollback().await?;
+    connection_handle.abort();
+    Ok(())
+}
+
+#[tokio::test]
 async fn load_previous_provider_conversation_state_stays_within_agent_scope() -> anyhow::Result<()>
 {
     let Some((mut client, connection_handle)) = connect_test_db().await? else {

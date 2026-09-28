@@ -17,6 +17,13 @@ const MAX_SOURCE_LISTING_ENTRIES: usize = 20_000;
 const GITHUB_USER_AGENT: &str = "instafy-runtime-agent/skills";
 const GITHUB_URL_FORMAT_ERROR: &str = "unsupported GitHub URL; expected `https://github.com/<owner>/<repo>`, `/tree/<branch>[/<path>]`, or `/blob/<branch>/.../SKILL.md`";
 
+/// The provider every execution this lane finishes on its own reports. A
+/// `/skills start` or `--start` import answered by this provider never reached
+/// the model: the name was unknown, the import failed or no AI was connected.
+/// Later turns read it back from the reply to tell a setup that began from one
+/// that did not.
+pub const SKILLS_LANE_PROVIDER: &str = "skills";
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SkillsRequest {
     List,
@@ -369,7 +376,7 @@ pub fn build_no_ai_kickoff_execution(
     JobExecution {
         summary: "Skills are installed; connect an AI to start them.".to_string(),
         suggested_replies: Vec::new(),
-        provider: "skills".to_string(),
+        provider: SKILLS_LANE_PROVIDER.to_string(),
         artifacts,
         credit_snapshot: None,
         provider_conversation_state: None,
@@ -403,7 +410,7 @@ pub async fn build_skills_execution(request: SkillsRequest, workspace_dir: &Path
                         "List skills".to_string(),
                         "Run /learn to fold this into workspace memory".to_string(),
                     ],
-                    provider: "skills".to_string(),
+                    provider: SKILLS_LANE_PROVIDER.to_string(),
                     artifacts,
                     credit_snapshot: None,
                     provider_conversation_state: None,
@@ -421,7 +428,7 @@ fn build_import_error_execution(error: &anyhow::Error) -> JobExecution {
     JobExecution {
         summary: format!("Skill import failed: {}", error),
         suggested_replies: Vec::new(),
-        provider: "skills".to_string(),
+        provider: SKILLS_LANE_PROVIDER.to_string(),
         artifacts: Vec::new(),
         credit_snapshot: None,
         provider_conversation_state: None,
@@ -652,7 +659,7 @@ fn build_list_execution(workspace_dir: &Path) -> JobExecution {
         return JobExecution {
             summary: "No skills installed under `.agents/skills` yet.".to_string(),
             suggested_replies: vec!["Import a skill from GitHub".to_string()],
-            provider: "skills".to_string(),
+            provider: SKILLS_LANE_PROVIDER.to_string(),
             artifacts: Vec::new(),
             credit_snapshot: None,
             provider_conversation_state: None,
@@ -674,7 +681,7 @@ fn build_list_execution(workspace_dir: &Path) -> JobExecution {
     JobExecution {
         summary: format!("{} skill(s) available in `.agents/skills`.", skills.len()),
         suggested_replies: Vec::new(),
-        provider: "skills".to_string(),
+        provider: SKILLS_LANE_PROVIDER.to_string(),
         artifacts: Vec::new(),
         credit_snapshot: None,
         provider_conversation_state: None,
@@ -703,7 +710,7 @@ fn build_help_execution(reason: Option<String>) -> JobExecution {
     JobExecution {
         summary: "Skills command help".to_string(),
         suggested_replies: Vec::new(),
-        provider: "skills".to_string(),
+        provider: SKILLS_LANE_PROVIDER.to_string(),
         artifacts: Vec::new(),
         credit_snapshot: None,
         provider_conversation_state: None,

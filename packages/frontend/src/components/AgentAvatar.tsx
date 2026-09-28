@@ -14,8 +14,11 @@ export function AgentAvatar({ agent, size = "md", imageSrc }: {
   const customImage = src && src !== OCTO_AVATAR_SRC && src !== failedSrc;
   const builtIn = src === OCTO_AVATAR_SRC;
   const dimensions = size === "lg" ? "h-16 w-16 text-lg" : size === "sm" ? "h-7 w-7 text-xs" : "h-9 w-9 text-sm";
+  // Octo is the same white coin with a brand-ink mark in both themes, like its
+  // chat face (docs/Brand.md); only the hairline border adapts to the surface.
+  const builtInCoin = "border border-slate-200 bg-white text-brand-ink dark:border-slate-700";
   return (
-    <span aria-hidden="true" className={`inline-flex shrink-0 items-center justify-center overflow-hidden rounded-full ${dimensions} ${builtIn ? "bg-slate-100 text-slate-900 dark:bg-[var(--color-studio-dark-active)] dark:text-slate-100" : "text-white"}`}
+    <span aria-hidden="true" className={`inline-flex shrink-0 items-center justify-center overflow-hidden rounded-full ${dimensions} ${builtIn ? builtInCoin : "text-white"}`}
       style={customImage || builtIn ? undefined : { backgroundImage: resolveAgentAvatarGradient(normalizeCustomAgentAvatarSrc(agent.avatarSeed) ? agent.id || agent.handle : agent.avatarSeed || agent.handle) }}>
       {builtIn ? <OctoMark className="h-3/4 w-3/4" /> : customImage ? (
         <img src={src} alt="" className="h-full w-full object-cover" decoding="async" draggable={false} onError={() => setFailedSrc(src)} />

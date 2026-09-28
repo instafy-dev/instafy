@@ -20,6 +20,8 @@ import {
   Trash,
   MoreHoriz,
 } from "iconoir-react";
+import { BrowserAddressField } from "./BrowserAddressField";
+import { Checkbox } from "../../../components/Checkbox";
 import { Button, IconButton } from "../../../components/Button";
 import { StudioDialogModal } from "../../../components/aria/StudioModal";
 import { BrowserToolsOverlayContext, BrowserToolsPopover } from "./BrowserToolsPopover";
@@ -352,28 +354,30 @@ export function PersonalBrowserSurface({
         leading={transportSelector}
         navigation={
           <div className="flex items-center gap-0.5">
-          <IconButton
-            aria-label="Back"
-            className={compactChrome ? "hidden" : "max-[540px]:h-10 max-[540px]:w-10"}
-            isDisabled={!ready || humanInputLocked || !model.status?.canGoBack}
-            onPress={() => void model.goBack()}
-            radius="full"
-            size="sm"
-            variant="ghost"
-          >
-            <NavArrowLeft className="h-4 w-4" aria-hidden="true" />
-          </IconButton>
-          <IconButton
-            aria-label="Forward"
-            className={compactChrome ? "hidden" : "max-[540px]:h-10 max-[540px]:w-10"}
-            isDisabled={!ready || humanInputLocked || !model.status?.canGoForward}
-            onPress={() => void model.goForward()}
-            radius="full"
-            size="sm"
-            variant="ghost"
-          >
-            <NavArrowRight className="h-4 w-4" aria-hidden="true" />
-          </IconButton>
+          {!compactChrome ? (<>
+            <IconButton
+              aria-label="Back"
+              className="max-[540px]:h-10 max-[540px]:w-10"
+              isDisabled={!ready || humanInputLocked || !model.status?.canGoBack}
+              onPress={() => void model.goBack()}
+              radius="full"
+              size="sm"
+              variant="ghost"
+            >
+              <NavArrowLeft className="h-4 w-4" aria-hidden="true" />
+            </IconButton>
+            <IconButton
+              aria-label="Forward"
+              className="max-[540px]:h-10 max-[540px]:w-10"
+              isDisabled={!ready || humanInputLocked || !model.status?.canGoForward}
+              onPress={() => void model.goForward()}
+              radius="full"
+              size="sm"
+              variant="ghost"
+            >
+              <NavArrowRight className="h-4 w-4" aria-hidden="true" />
+            </IconButton>
+          </>) : null}
           <IconButton
             aria-label="Reload"
             className="max-[540px]:h-10 max-[540px]:w-10"
@@ -388,25 +392,14 @@ export function PersonalBrowserSurface({
           </div>
         }
         address={
-          <form
-            className="relative w-full min-w-0"
-            data-testid="personal-browser-address-form"
-            onSubmit={handleNavigate}
-          >
-          <label className="sr-only" htmlFor="personal-browser-address">
-            Address
-          </label>
-          <input
+          <BrowserAddressField
             ref={addressInputRef}
-            id="personal-browser-address"
-            aria-describedby={model.navigationError ? "personal-browser-address-error" : undefined}
-            aria-invalid={model.navigationError ? true : undefined}
-            aria-label="Address"
-            autoCapitalize="none"
-            autoComplete="off"
-            className="h-8 w-full rounded-full border border-slate-200 bg-white pl-3 pr-9 text-xs text-slate-800 shadow-inner outline-none transition focus:border-primary-400 focus:ring-2 focus:ring-primary-500/20 max-[540px]:h-10 max-[540px]:pr-11 pointer-coarse:h-11 pointer-coarse:pr-12 dark:border-[color:var(--color-studio-dark-raised-control-border)] dark:bg-slate-950 dark:text-slate-100"
-            data-testid="personal-browser-address"
+            testIdPrefix="personal-browser"
+            errorId={model.navigationError ? "personal-browser-address-error" : undefined}
+            invalid={Boolean(model.navigationError)}
             disabled={!ready || humanInputLocked}
+            value={address}
+            onSubmit={handleNavigate}
             onChange={(event) => {
               setAddress(event.target.value);
               model.clearNavigationError();
@@ -424,21 +417,7 @@ export function PersonalBrowserSurface({
                     ? "Personal Browser unavailable"
                     : "Opening Personal Browser…"
             }
-            spellCheck={false}
-            type="text"
-            value={address}
           />
-          <button
-            aria-label="Go"
-            className="absolute right-0 top-1/2 inline-flex h-6 w-6 -translate-y-1/2 touch-manipulation items-center justify-center rounded-full text-slate-500 transition hover:bg-slate-200/70 hover:text-slate-900 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary-500/50 disabled:cursor-not-allowed disabled:opacity-40 max-[540px]:h-10 max-[540px]:w-10 pointer-coarse:min-h-11 pointer-coarse:min-w-11 dark:text-slate-400 dark:hover:bg-[var(--color-studio-dark-control-hover)] dark:hover:text-slate-50"
-            data-testid="personal-browser-go"
-            disabled={!ready || humanInputLocked}
-            title="Go"
-            type="submit"
-          >
-            <NavArrowRight aria-hidden="true" className="h-3.5 w-3.5" />
-          </button>
-          </form>
         }
         status={
           <BrowserStatusPill
@@ -491,17 +470,14 @@ export function PersonalBrowserSurface({
           <BrowserToolsPopover label="Browser settings" trigger={<IconButton aria-label="Browser settings" variant="ghost" radius="full" size="sm"><MoreHoriz className="h-4 w-4" aria-hidden="true" /></IconButton>}>
             {routineApprovalAvailable ? (
               <div className="flex shrink-0 flex-wrap items-center gap-x-3 gap-y-1 border-b border-slate-200 px-3 py-2 text-xs dark:border-slate-800" data-browser-session-safe-zone="true">
-                <label className="flex min-h-8 cursor-pointer items-center gap-2">
-                  <input
-                    checked={humanInputLocked ? model.status?.approvalMode === "routine" : selectedApprovalMode === "routine"}
-                    className="h-4 w-4"
-                    data-testid="personal-browser-routine-approval"
-                    disabled={humanInputLocked}
-                    onChange={(event) => model.setPreferredApprovalMode(event.target.checked ? "routine" : "ask")}
-                    type="checkbox"
-                  />
-                  Allow routine browsing without asking each time
-                </label>
+                <Checkbox
+                  label="Allow routine browsing without asking each time"
+                  isSelected={humanInputLocked ? model.status?.approvalMode === "routine" : selectedApprovalMode === "routine"}
+                  data-testid="personal-browser-routine-approval"
+                  isDisabled={humanInputLocked}
+                  onChange={(checked) => model.setPreferredApprovalMode(checked ? "routine" : "ask")}
+                  className="min-h-8 pointer-coarse:min-h-11"
+                />
                 <span className="text-slate-500 dark:text-slate-400">
                   {model.status?.tabControlActive
                     ? "Take back control before continuing the AI task."

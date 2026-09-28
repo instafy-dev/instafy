@@ -351,37 +351,158 @@ describe("AgentJobThreadPreviewLayout", () => {
     expect(container.querySelector('[aria-label="Thinking"]')).not.toBeNull();
   });
 
-  it("labels live command status with the acting agent", async () => {
-    await act(async () => {
-      root.render(
-        <AgentJobThreadPreviewLayout
-          {...createProps({
-            message: createMessage({
-              metadata: {
-                messageType: "agent_job_thread",
-                jobId: "run-1",
-                  },
-            }),
-            showHeaderAvatar: false,
-            isCompleted: false,
-            isRunning: true,
-            isThreadUnresolved: true,
-            visibleCompactEvents: [{ id: "command", kind: "command", actorHandle: "@octo" }],
-            latestCompactEventId: "command",
-            showCollapsedCompactRailStatus: true,
-            compactRailStatusText: "Running command…",
-            latestCommandAgentHandle: "@octo",
-            finalSummaryMessage: null,
-            showSummaryBody: false,
-          })}
-        />,
-      );
-    });
+  // The live command chip sits in two rows: the collapsed caption row and the
+  // placeholder row shown before a command prints output. Both follow the
+  // rail's rule and name an agent only for a step another agent ran.
+  const OWNERLESS_THREAD_MESSAGE = createMessage({
+    metadata: {
+      messageType: "agent_job_thread",
+      jobId: "run-1",
+    },
+  });
 
-    expect(container.querySelector('[data-testid="agent-thread-command-owner"]')?.textContent).toBe(
-      "@octo",
+  function createLiveCaptionProps(
+    overrides: Partial<AgentJobThreadPreviewLayoutProps> = {},
+  ): AgentJobThreadPreviewLayoutProps {
+    return createProps({
+      showHeaderAvatar: false,
+      isCompleted: false,
+      isRunning: true,
+      isThreadUnresolved: true,
+      visibleCompactEvents: [{ id: "command", kind: "command", actorHandle: "@octo" }],
+      latestCompactEventId: "command",
+      showCollapsedCompactRailStatus: true,
+      compactRailStatusText: "Running command…",
+      finalSummaryMessage: null,
+      showSummaryBody: false,
+      ...overrides,
+    });
+  }
+
+  // The placeholder row summarizes "pnpm test" as "Running tests…", which the
+  // cases below use to confirm the row actually rendered.
+  function createLiveCommandPlaceholderProps(
+    overrides: Partial<AgentJobThreadPreviewLayoutProps> = {},
+  ): AgentJobThreadPreviewLayoutProps {
+    return createProps({
+      showHeaderAvatar: false,
+      isCompleted: false,
+      isRunning: true,
+      isThreadUnresolved: true,
+      showLiveCommandPlaceholder: true,
+      latestCommandExecution: { command: "pnpm test", output: "", status: "running" },
+      latestCommandPreview: "pnpm test",
+      finalSummaryMessage: null,
+      showSummaryBody: false,
+      ...overrides,
+    });
+  }
+
+  async function renderCommandActorChipText(
+    props: AgentJobThreadPreviewLayoutProps,
+  ): Promise<string | null> {
+    await act(async () => {
+      root.render(<AgentJobThreadPreviewLayout {...props} />);
+    });
+    return (
+      container.querySelector('[data-testid="agent-thread-command-owner"]')?.textContent ?? null
     );
+  }
+
+  it("omits the actor chip when the row's own agent runs the step", async () => {
+    // Conversation rows suppress the preview header, and the row's avatar and
+    // speaker label already name the owner, stamped or defaulted to octo.
+    const sameAgentCases: Array<[string, AgentJobThreadPreviewLayoutProps]> = [
+      [
+        "caption, stamped owner",
+        createLiveCaptionProps({ showHeaderIdentity: false, latestCommandAgentHandle: "@octo" }),
+      ],
+      [
+        "caption, stamped owner, preview header shown",
+        createLiveCaptionProps({ latestCommandAgentHandle: "@Octo" }),
+      ],
+      [
+        "caption, ownerless main-chat thread",
+        createLiveCaptionProps({
+          message: OWNERLESS_THREAD_MESSAGE,
+          showHeaderIdentity: false,
+          latestCommandAgentHandle: "@octo",
+        }),
+      ],
+      [
+        "caption, later thinking step",
+        createLiveCaptionProps({
+          showHeaderIdentity: false,
+          compactRailStatusText: "Thinking…",
+          latestCommandAgentHandle: "@octo",
+        }),
+      ],
+      [
+        "command placeholder, stamped owner",
+        createLiveCommandPlaceholderProps({
+          showHeaderIdentity: false,
+          latestCommandAgentHandle: "@octo",
+        }),
+      ],
+      [
+        "command placeholder, ownerless main-chat thread",
+        createLiveCommandPlaceholderProps({
+          message: OWNERLESS_THREAD_MESSAGE,
+          showHeaderIdentity: false,
+          latestCommandAgentHandle: "@octo",
+        }),
+      ],
+    ];
+
+    for (const [label, props] of sameAgentCases) {
+      expect(await renderCommandActorChipText(props), label).toBeNull();
+    }
+    expect(container.textContent).toContain("Running tests…");
+  });
+
+  it("names a different agent on the live caption and command placeholder rows", async () => {
+    expect(
+      await renderCommandActorChipText(
+        createLiveCaptionProps({ showHeaderIdentity: false, latestCommandAgentHandle: "@ben" }),
+      ),
+    ).toBe("@ben");
     expect(container.textContent).toContain("Running command…");
+
+    expect(
+      await renderCommandActorChipText(
+        createLiveCommandPlaceholderProps({
+          showHeaderIdentity: false,
+          latestCommandAgentHandle: "@ben",
+        }),
+      ),
+    ).toBe("@ben");
+    expect(container.textContent).toContain("Running tests…");
+
+    // An ownerless main-chat thread is labelled octo, so a custom agent's
+    // step still needs its own name.
+    expect(
+      await renderCommandActorChipText(
+        createLiveCaptionProps({
+          message: OWNERLESS_THREAD_MESSAGE,
+          showHeaderIdentity: false,
+          latestCommandAgentHandle: "@ben",
+        }),
+      ),
+    ).toBe("@ben");
+  });
+
+  it("shows no actor chip when the step's actor is unknown", async () => {
+    expect(
+      await renderCommandActorChipText(createLiveCaptionProps({ latestCommandAgentHandle: null })),
+    ).toBeNull();
+    expect(container.textContent).toContain("Running command…");
+
+    expect(
+      await renderCommandActorChipText(
+        createLiveCommandPlaceholderProps({ latestCommandAgentHandle: null }),
+      ),
+    ).toBeNull();
+    expect(container.textContent).toContain("Running tests…");
   });
 
   const COMMAND_LABEL = "whoami; git -C ~/work/core rev-parse --short HEAD";
