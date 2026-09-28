@@ -195,6 +195,15 @@ export function LoginPage() {
     return "/studio";
   }, [location.search]);
 
+  const finishLogin = useCallback(() => {
+    try {
+      window.sessionStorage?.removeItem(OAUTH_REDIRECT_TARGET_KEY);
+    } catch {
+      // A blocked storage API must not prevent completing sign-in.
+    }
+    navigate(redirectTarget, { replace: true });
+  }, [navigate, redirectTarget]);
+
   const [intent, setIntent] = useState<LoginIntent>("login");
   const [invalidCredentials, setInvalidCredentials] = useState(false);
   const [step, setStep] = useState<LoginStep>("email");
@@ -331,16 +340,9 @@ export function LoginPage() {
           return next;
         });
       }
-      if (typeof window !== "undefined") {
-        try {
-          window.sessionStorage?.removeItem(OAUTH_REDIRECT_TARGET_KEY);
-        } catch {
-          // ignore session storage failures
-        }
-      }
-      navigate(redirectTarget, { replace: true });
+      finishLogin();
     }
-  }, [loading, user, navigate, redirectTarget, recoveryMode, normalizedEmail, awaitingSignupPassword]);
+  }, [loading, user, finishLogin, recoveryMode, normalizedEmail, awaitingSignupPassword]);
 
   useEffect(() => {
     if (recoveryMode) {
@@ -391,7 +393,7 @@ export function LoginPage() {
     setPendingControl("guest");
     try {
       await signInAnonymously();
-      navigate(redirectTarget, { replace: true });
+      finishLogin();
     } catch (err) {
       const details = err instanceof Error ? err.message : "Unable to sign in as guest.";
       setError(details);
@@ -454,7 +456,7 @@ export function LoginPage() {
         writeRememberedAccounts(next);
         return next;
       });
-      navigate(redirectTarget, { replace: true });
+      finishLogin();
     } catch (err) {
       const invalid = isInvalidCredentials(err);
       setInvalidCredentials(invalid);
@@ -520,7 +522,7 @@ export function LoginPage() {
         setPasswordVisible(false);
         setStep("setPassword");
       } else {
-        navigate(redirectTarget, { replace: true });
+        finishLogin();
       }
     } catch (err) {
       const details = err instanceof Error ? err.message : "Unable to verify code.";
@@ -599,7 +601,7 @@ export function LoginPage() {
       await updatePassword(password);
       setPassword("");
       setPasswordConfirm("");
-      navigate(redirectTarget, { replace: true });
+      finishLogin();
     } catch (err) {
       const code = err && typeof err === "object" && "code" in err ? err.code : null;
       setError(
@@ -618,7 +620,7 @@ export function LoginPage() {
     if (pendingControlRef.current !== null) return;
     setPassword("");
     setPasswordConfirm("");
-    navigate(redirectTarget, { replace: true });
+    finishLogin();
   };
 
   const touchRememberedAccount = (account: RememberedAccount) => {

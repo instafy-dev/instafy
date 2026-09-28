@@ -174,6 +174,7 @@ describe("LoginPage sign-up and password alternatives", () => {
   };
 
   it("holds a session published before verification resolves, then offers password setup", async () => {
+    sessionStorage.setItem("instafy.oauth.redirectTarget", "/studio?projectId=older-project");
     let resolveVerify: () => void = () => {};
     auth.verifyEmailOtp.mockImplementation(() => new Promise<void>((resolve) => { resolveVerify = resolve; }));
     await render();
@@ -190,12 +191,15 @@ describe("LoginPage sign-up and password alternatives", () => {
     expect(document.activeElement).toBe(container.querySelector("#password"));
     await render();
     expect(container.querySelector('[data-testid="destination"]')).toBeNull();
+    expect(sessionStorage.getItem("instafy.oauth.redirectTarget")).not.toBeNull();
     await click("Skip for now");
+    expect(sessionStorage.getItem("instafy.oauth.redirectTarget")).toBeNull();
     expect(auth.updatePassword).not.toHaveBeenCalled();
     expect(container.querySelector('[data-testid="destination"]')?.textContent).toBe("/studio?projectId=project-1");
   });
 
   it("saves once, blocks skipping while pending, and then continues to the original destination", async () => {
+    sessionStorage.setItem("instafy.oauth.redirectTarget", "/studio?projectId=older-project");
     let resolveUpdate: () => void = () => {};
     auth.updatePassword.mockImplementation(() => new Promise<void>((resolve) => { resolveUpdate = resolve; }));
     await verifySignup();
@@ -210,6 +214,7 @@ describe("LoginPage sign-up and password alternatives", () => {
     expect(button("Skip for now").disabled).toBe(true);
     expect(container.querySelector('[data-testid="destination"]')).toBeNull();
     await act(async () => resolveUpdate());
+    expect(sessionStorage.getItem("instafy.oauth.redirectTarget")).toBeNull();
     expect(container.querySelector('[data-testid="destination"]')?.textContent).toBe("/studio?projectId=project-1");
   });
 
