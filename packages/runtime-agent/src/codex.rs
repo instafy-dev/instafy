@@ -3209,13 +3209,22 @@ struct CommandExecutionState {
 /// cutover, legacy managed-AI billing (the controller's `extract_turn_usage_from_artifacts`, then
 /// `reconcile_managed_ai_usage_charge`) reads that per-turn value. Earlier turns no longer
 /// inflate it, but tokens of any turn whose `turn.completed` the controller does not read are no
-/// longer picked up by the next turn's running total either. That covers a turn the runtime
-/// stops reading at `Error`, `TurnAborted` or a fatal stream error, which emits none, and a turn
-/// the runtime stops reading at a user Stop or a lost lease, which end `next_codex_event` with
-/// "lease lost" before any `TurnAborted`, or drops at the Codex run timeout, which fails the run
-/// with "Codex run timed out"; neither emits one. It also covers every retry attempt after the
-/// first within one job, because the controller reads the first run-log that has a
-/// `turn.completed`. A stopped turn is billed only its flat reserve.
+/// longer picked up by the next turn's running total either. That covers:
+/// - a turn the runtime stops reading at `Error`, `TurnAborted` or a fatal stream error, which
+///   emits none;
+/// - a turn the runtime stops reading at a user Stop or a lost lease, or at a shared-browser
+///   deadline, which end `next_codex_event` with "lease lost" before any `TurnAborted` and emit
+///   none;
+/// - a run that hits the Codex run timeout. Outside the bounded lane, a timed-out attempt (like
+///   a retryable upstream error) is replayed once on the resumed thread, and the replay reports
+///   only its own tokens, so the timed-out attempt's go unbilled; only the last timeout fails
+///   the run with "Codex run timed out";
+/// - every recovery retry after the first attempt within one job, because the controller reads
+///   the first run-log that has a `turn.completed`;
+/// - a completed turn whose job then fails without artifacts (a retry that errors out), since
+///   the failed completion carries no run-log to read.
+///
+/// A stopped or failed turn is billed only its flat reserve.
 #[derive(Debug, Clone, Default)]
 pub(crate) struct TurnStartTokenUsage(Arc<parking_lot::Mutex<HashMap<String, TokenUsage>>>);
 
