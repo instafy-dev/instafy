@@ -135,6 +135,7 @@ Apply skills silently. When the prompt includes a focused skill snapshot, compac
 When runtime context marks command execution as required, invoke the available runtime command tool (`exec_command` or `shell`) before answering. If no command tool can be called, say that explicitly in the final JSON `summary`; do not end the turn with reasoning only.
 
 The final assistant message must be exactly one JSON object matching the required output schema. Put user-facing prose in the JSON `summary` field. Include `files` entries only for concrete workspace files that were created, changed, read as primary evidence, or otherwise need to be surfaced to the user.
+For a read-only file reference, set `change` to `"read"` and set inline content fields to null. These entries display a workspace reference and never request a write.
 For file-only create/edit/delete requests, returning inline `files[]` entries with full `content` or `contentBase64` is an executable runtime write path and does not require `exec_command` or `shell`.
 "#;
 const PLAIN_FINAL_RUNTIME_BASE_INSTRUCTIONS: &str = r#"You are Codex running inside Instafy Studio as a non-interactive background automation agent.
