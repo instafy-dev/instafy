@@ -1,5 +1,5 @@
 import type { ReactNode } from "react";
-import { Group } from "iconoir-react";
+import { CursorPointer, Group } from "iconoir-react";
 import { Dialog, DialogTrigger } from "react-aria-components";
 import { StudioPopover } from "../../../components/aria/StudioPopover";
 import { Button } from "../../../components/Button";
@@ -158,9 +158,17 @@ export function SharedBrowserCollaborationControls({
       ) : null}
     </span>
   ) : null;
+  const hasListedController = Boolean(agentDisplayName || humanOwner);
+  const controlIndicator = (
+    <span role="img" aria-label={statusLabel} title={statusLabel}
+      className="mt-0.5 shrink-0 text-slate-500 dark:text-slate-300"
+      data-testid="shared-browser-controller-indicator">
+      <CursorPointer aria-hidden="true" className="h-3.5 w-3.5" />
+    </span>
+  );
   const ownershipStatus = (
     <span
-      className={compact ? "block break-words text-sm font-medium" : `inline-flex h-7 min-w-0 items-center rounded-full border px-2 text-xxs font-medium ${
+      className={compact ? hasListedController ? "sr-only" : "mt-3 block text-xs text-slate-500 dark:text-slate-400" : `inline-flex h-7 min-w-0 items-center rounded-full border px-2 text-xxs font-medium ${
         selfOwnsControl
           ? "border-emerald-500/30 bg-emerald-500/10 text-emerald-700 dark:text-emerald-300"
           : agentDisplayName
@@ -228,22 +236,34 @@ export function SharedBrowserCollaborationControls({
             className="w-72 max-w-[calc(100vw-1.5rem)] p-3"
             data-browser-session-safe-zone="true"
           >
-            <Dialog aria-label="Browser participants and control" className="space-y-3 outline-none">
-              {ownershipStatus}
-              {requestLabel ? <p className="text-xs text-slate-500 dark:text-slate-400">{requestLabel}</p> : null}
-              {controlAction}
-              {children}
-              {participants.length ? (
-                <ul aria-label="Browser participants" className="space-y-2 border-t border-slate-200 pt-3 text-xs dark:border-slate-700">
+            <Dialog aria-label="Browser participants and control" className="outline-none">
+              {participants.length || agentDisplayName ? (
+                <ul aria-label="Browser participants" className="space-y-2 text-xs">
                   {participants.map((participant) => (
-                    <li className="flex min-w-0 items-start gap-2" key={participant.id}>
+                    <li className="flex min-w-0 items-start gap-2" key={participant.id} data-participant-id={participant.id}>
                       <span aria-hidden="true" className="mt-1 h-2 w-2 shrink-0 rounded-full" style={{ backgroundColor: participant.color }} />
-                      <span className="min-w-0 break-words">
+                      <span className="min-w-0 flex-1 break-words">
                         {participant.displayName}{participant.id === client.participantId ? " (you)" : ""}
                       </span>
+                      {!agentDisplayName && humanOwner?.id === participant.id ? controlIndicator : null}
                     </li>
                   ))}
+                  {agentDisplayName ? (
+                    <li className="flex min-w-0 items-start gap-2" data-controller-kind="agent">
+                      <span aria-hidden="true" className="mt-1 h-2 w-2 shrink-0 rounded-full bg-violet-500" />
+                      <span className="min-w-0 flex-1 break-words">{agentDisplayName}</span>
+                      {controlIndicator}
+                    </li>
+                  ) : null}
                 </ul>
+              ) : null}
+              {ownershipStatus}
+              {pendingRequestCount || controlAction || children ? (
+                <div className={`space-y-2 ${participants.length || agentDisplayName ? "mt-3 border-t border-slate-200 pt-3 dark:border-slate-700" : "mt-2"}`}>
+                  {pendingRequestCount ? <p className="text-xs text-slate-500 dark:text-slate-400">{requestLabel}</p> : null}
+                  {controlAction}
+                  {children}
+                </div>
               ) : null}
             </Dialog>
           </StudioPopover>

@@ -238,10 +238,22 @@ for (const width of [320, 360, 390]) {
     const participantsDialog = page.getByRole("dialog", { name: "Browser participants and control" });
     await expect(participantsDialog).toBeVisible();
     await expect(controlState).toContainText("A teammate with an exceptionally long display name controls");
-    await expect(participantsDialog.getByRole("list", { name: "Browser participants" }).getByRole("listitem")).toHaveCount(4);
+    await expect(controlState).toHaveClass(/sr-only/);
+    const participantList = participantsDialog.getByRole("list", { name: "Browser participants" });
+    await expect(participantList.getByRole("listitem")).toHaveCount(4);
+    const controllerIndicator = participantsDialog.getByTestId("shared-browser-controller-indicator");
+    await expect(controllerIndicator).toHaveCount(1);
+    await expect(controllerIndicator).toHaveAccessibleName("A teammate with an exceptionally long display name controls");
+    await expect(participantList.locator('li[data-participant-id="peer"]').getByTestId("shared-browser-controller-indicator")).toBeVisible();
+    await expect(participantList.locator('li[data-participant-id="self"]').getByTestId("shared-browser-controller-indicator")).toHaveCount(0);
     await expect(action).toHaveAccessibleName("Request control");
     await expect(action).toHaveText("Request control");
     await expect(action).toBeEnabled();
+    const listBounds = await participantList.boundingBox();
+    const actionBounds = await action.boundingBox();
+    expect(listBounds).not.toBeNull();
+    expect(actionBounds).not.toBeNull();
+    expect(actionBounds!.y).toBeGreaterThanOrEqual(listBounds!.y + listBounds!.height);
     await expect(participantsDialog).not.toContainText("Ask ");
     await page.keyboard.press("Escape");
     await expect(participantsDialog).toHaveCount(0);
@@ -279,6 +291,11 @@ for (const width of [320, 360, 390]) {
     await expect(collaboration).toHaveAccessibleName(/Octo with a very long agent name controls/);
     await collaboration.click();
     await expect(controlState).toContainText("Octo with a very long agent name controls");
+    await expect(controlState).toHaveClass(/sr-only/);
+    await expect(controllerIndicator).toHaveCount(1);
+    await expect(controllerIndicator).toHaveAccessibleName("Octo with a very long agent name controls");
+    await expect(participantList.locator('li[data-controller-kind="agent"]').getByTestId("shared-browser-controller-indicator")).toBeVisible();
+    await expect(participantList.locator('li[data-participant-id]').getByTestId("shared-browser-controller-indicator")).toHaveCount(0);
     await expect(action).toHaveCount(0);
     await page.keyboard.press("Escape");
 

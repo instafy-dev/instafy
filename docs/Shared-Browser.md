@@ -73,7 +73,8 @@ an account switch does not inherit another account's saved session choice.
 The Studio always owns the address bar, Go/history controls, status, errors, action ticker, and AI cursor. The runtime owns the page and profile.
 
 On narrow screens and split panes, the address bar keeps participant avatars on its
-right. Open the avatars to see who controls the page and **Request control**; this
+right. Open the avatars to see the participant list, where a cursor icon marks the
+current controller. **Request control** appears below the list; this
 asks the current driver to hand over input, rather than sending a chat message.
 Pending requests show a badge for the current driver. **Browser options** contains
 history navigation, page selection and **Expand browser** so the toolbar stays on

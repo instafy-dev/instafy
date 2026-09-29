@@ -35,6 +35,8 @@ describe("SharedBrowserCollaborationControls", () => {
   const find = <T extends HTMLElement = HTMLElement>(id: string) => document.querySelector<T>(`[data-testid="${id}"]`);
   const action = () => find<HTMLButtonElement>("shared-browser-collaboration-control-action");
   const status = () => find("shared-browser-collaboration-control-state");
+  const controller = () => find("shared-browser-controller-indicator");
+  const participantsList = () => document.querySelector<HTMLElement>('[aria-label="Browser participants"]')!;
   const trigger = () => find<HTMLButtonElement>("shared-browser-collaboration-toggle")!;
   const click = async (element: HTMLElement) => act(async () => { element.focus(); element.click(); });
   const finishFocusRestoration = async () => act(async () => new Promise<void>(resolve => requestAnimationFrame(() => resolve())));
@@ -92,6 +94,14 @@ describe("SharedBrowserCollaborationControls", () => {
 
     await openControls();
     expect(status()?.textContent).toBe("You control");
+    expect(status()?.classList.contains("sr-only")).toBe(true);
+    expect(controller()?.getAttribute("role")).toBe("img");
+    expect(controller()?.getAttribute("aria-label")).toBe("You control");
+    expect(controller()?.closest("li")?.dataset.participantId).toBe("self");
+    expect(document.querySelectorAll('[data-testid="shared-browser-controller-indicator"]')).toHaveLength(1);
+    expect(participantsList().compareDocumentPosition(action()!) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    const continueControl = Array.from(document.querySelectorAll("button")).find(button => button.textContent === "Let AI continue")!;
+    expect(participantsList().compareDocumentPosition(continueControl) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
     expect(document.querySelector('[aria-label="Browser participants"]')?.textContent).toContain("Taylor (you)AnnaGrace");
     expect(document.body.textContent).toContain("Let AI continue");
     expect(action()?.textContent).toBe("Release control");
@@ -124,6 +134,10 @@ describe("SharedBrowserCollaborationControls", () => {
     await openControls();
     expect(document.querySelector('[aria-label="Browser participants"]')?.textContent).toContain(longName);
     expect(status()?.textContent).toBe("Octo with a long agent name controls");
+    expect(status()?.classList.contains("sr-only")).toBe(true);
+    expect(controller()?.closest("li")?.dataset.controllerKind).toBe("agent");
+    expect(controller()?.getAttribute("aria-label")).toBe("Octo with a long agent name controls");
+    expect(document.querySelector('li[data-participant-id] [data-testid="shared-browser-controller-indicator"]')).toBeNull();
     expect(action()).toBeNull();
   });
 
@@ -134,6 +148,9 @@ describe("SharedBrowserCollaborationControls", () => {
     });
     await openControls();
     expect(status()?.textContent).toBe("Runtime Octo controls");
+    expect(controller()?.closest("li")?.textContent).toBe("Runtime Octo");
+    expect(controller()?.closest("li")?.dataset.controllerKind).toBe("agent");
+    expect(participantsList().textContent).not.toContain("Queued agent");
     expect(action()).toBeNull();
   });
 
@@ -142,6 +159,10 @@ describe("SharedBrowserCollaborationControls", () => {
     await render({ client: peerOwns, compact });
     if (compact) await openControls();
     expect(status()?.textContent).toBe("Anna controls");
+    if (compact) {
+      expect(controller()?.closest("li")?.dataset.participantId).toBe("peer");
+      expect(controller()?.getAttribute("aria-label")).toBe("Anna controls");
+    }
     expect(action()?.textContent).toBe("Request control");
     expect(action()?.getAttribute("aria-label")).toBe("Request control");
     await click(action()!);
@@ -177,15 +198,21 @@ describe("SharedBrowserCollaborationControls", () => {
     await render({ client: deviceClient("self", "self") });
     await openControls();
     expect(status()?.textContent).toBe("You control");
+    expect(controller()?.closest("li")?.dataset.participantId).toBe("self");
     await click(action()!);
     expect(props.onGrantControl).toHaveBeenCalledExactlyOnceWith("second-device");
     await render({ client: deviceClient("self", "second-device") });
     expect(status()?.textContent).toBe("Taylor controls");
+    expect(controller()?.closest("li")?.dataset.participantId).toBe("second-device");
+    expect(document.querySelector('li[data-participant-id="self"] [data-testid="shared-browser-controller-indicator"]')).toBeNull();
+    expect(document.querySelectorAll('[data-testid="shared-browser-controller-indicator"]')).toHaveLength(1);
     expect(action()?.dataset.action).toBe("request");
     await click(action()!);
     expect(props.onRequestControl).toHaveBeenCalledOnce();
     await render({ client: deviceClient("second-device", "second-device") });
     expect(status()?.textContent).toBe("You control");
+    expect(controller()?.closest("li")?.dataset.participantId).toBe("second-device");
+    expect(controller()?.getAttribute("aria-label")).toBe("You control");
     expect(action()?.dataset.action).toBe("release");
   });
 
@@ -206,7 +233,22 @@ describe("SharedBrowserCollaborationControls", () => {
     await render({ client: client({ state: { ...client().state!, controlOwner: null } }) });
     await openControls();
     expect(action()?.textContent).toBe("Take control");
+    expect(status()?.textContent).toBe("Control available");
+    expect(status()?.classList.contains("sr-only")).toBe(false);
+    expect(controller()).toBeNull();
     await click(action()!);
     expect(props.onTakeControl).toHaveBeenCalledOnce();
   });
+
+  it.each([
+    { state: null, label: "Control syncing…" },
+    { state: { ...client().state!, controlOwner: { kind: "human" as const, participantId: "not-yet-present" } }, label: "Teammate controls" },
+  ])("keeps $label readable when there is no matching controller row", async ({ state, label }) => {
+    await render({ client: client({ state }) });
+    await openControls();
+    expect(status()?.textContent).toBe(label);
+    expect(status()?.classList.contains("sr-only")).toBe(false);
+    expect(controller()).toBeNull();
+  });
+
 });
