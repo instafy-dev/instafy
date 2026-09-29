@@ -19,6 +19,121 @@ const LEGACY_PUBLIC_MIGRATION_COUNT = 64;
 const LEGACY_PUBLIC_MIGRATION_SET_SHA256 =
   "7835727c4a5699afdfb2a193487b41606f7a873cad164941b8d4e4788b56645d";
 
+// The first words of the statements that end or open a transaction. Each
+// migration runs in the one transaction its runner opens and commits, and the
+// empty-database test reads the locks a migration holds before that commit.
+const TRANSACTION_CONTROL = new Set([
+  "abort",
+  "begin",
+  "commit",
+  "end",
+  "rollback",
+  "start",
+]);
+const ROUTINE_KINDS = new Set(["function", "procedure"]);
+const IDENTIFIER = /[A-Za-z_\u{80}-\u{10FFFF}][A-Za-z0-9_$\u{80}-\u{10FFFF}]*/uy;
+const DOLLAR_QUOTE = /\$(?:[A-Za-z_\u{80}-\u{10FFFF}][A-Za-z0-9_\u{80}-\u{10FFFF}]*)?\$/uy;
+
+function matchAt(pattern, text, index) {
+  pattern.lastIndex = index;
+  return pattern.exec(text)?.[0] ?? null;
+}
+
+// The end of the quoted string or identifier that opens at `index`. A doubled
+// quote stands for itself, and an E'...' string also escapes with a backslash.
+function quotedEnd(sql, index, backslashEscapes) {
+  const quote = sql[index];
+  let cursor = index + 1;
+  while (cursor < sql.length) {
+    if (backslashEscapes && sql[cursor] === "\\") {
+      cursor += 2;
+    } else if (sql[cursor] === quote) {
+      if (sql[cursor + 1] !== quote) {
+        return cursor + 1;
+      }
+      cursor += 2;
+    } else {
+      cursor += 1;
+    }
+  }
+  return sql.length;
+}
+
+// The first word of every top-level statement in `sql`, lowercased. Comments,
+// quoted strings and identifiers, and dollar-quoted bodies such as a DO block
+// or a function body are skipped, so the BEGIN and END inside them do not
+// count. Statements split the way psql splits them: a semicolon inside
+// parentheses, or inside the BEGIN ATOMIC body of a CREATE FUNCTION or
+// PROCEDURE, does not end one.
+function topLevelStatementKeywords(sql) {
+  const keywords = [];
+  let words = [];
+  let parenDepth = 0;
+  let beginDepth = 0;
+  let index = 0;
+  while (index < sql.length) {
+    const char = sql[index];
+    const identifier = matchAt(IDENTIFIER, sql, index);
+    const dollarQuote = identifier ? null : matchAt(DOLLAR_QUOTE, sql, index);
+    if (sql.startsWith("--", index)) {
+      const lineEnd = sql.indexOf("\n", index);
+      index = lineEnd === -1 ? sql.length : lineEnd + 1;
+    } else if (sql.startsWith("/*", index)) {
+      let depth = 0;
+      do {
+        if (sql.startsWith("/*", index)) {
+          depth += 1;
+          index += 2;
+        } else if (sql.startsWith("*/", index)) {
+          depth -= 1;
+          index += 2;
+        } else {
+          index += 1;
+        }
+      } while (depth > 0 && index < sql.length);
+    } else if (dollarQuote) {
+      const close = sql.indexOf(dollarQuote, index + dollarQuote.length);
+      index = close === -1 ? sql.length : close + dollarQuote.length;
+    } else if (identifier) {
+      const word = identifier.toLowerCase();
+      index += identifier.length;
+      if (sql[index] === "'" && word === "e") {
+        index = quotedEnd(sql, index, true);
+        continue;
+      }
+      if (words.length === 0) {
+        keywords.push(word);
+      }
+      words.push(word);
+      const [create, second, third, fourth] = words;
+      const routine =
+        create === "create" &&
+        (ROUTINE_KINDS.has(second) ||
+          (second === "or" && third === "replace" && ROUTINE_KINDS.has(fourth)));
+      if (routine && parenDepth === 0) {
+        if (word === "begin" || (word === "case" && beginDepth > 0)) {
+          beginDepth += 1;
+        } else if (word === "end" && beginDepth > 0) {
+          beginDepth -= 1;
+        }
+      }
+    } else if (char === "'" || char === '"') {
+      index = quotedEnd(sql, index, false);
+      words.push(char);
+    } else {
+      if (char === "(") {
+        parenDepth += 1;
+      } else if (char === ")") {
+        parenDepth = Math.max(0, parenDepth - 1);
+      } else if (char === ";" && parenDepth === 0 && beginDepth === 0) {
+        words = [];
+      }
+      index += 1;
+    }
+  }
+  return keywords;
+}
+
 function migrationVersion(fileName) {
   const match = MIGRATION_NAME.exec(fileName);
   if (!match) {
@@ -59,8 +174,17 @@ function validatePublicMigrationTrack(directory = DEFAULT_MIGRATIONS) {
       throw new Error(`duplicate public migration version: ${version}`);
     }
     versions.add(version.toString());
-    if (readFileSync(path.join(directory, entry.name)).length === 0) {
+    const source = readFileSync(path.join(directory, entry.name));
+    if (source.length === 0) {
       throw new Error(`public migration is empty: ${entry.name}`);
+    }
+    const control = topLevelStatementKeywords(source.toString("utf8")).find(
+      (keyword) => TRANSACTION_CONTROL.has(keyword),
+    );
+    if (control) {
+      throw new Error(
+        `public migration ${entry.name} has a top-level ${control.toUpperCase()}; it must run in the one transaction its runner opens and commits`,
+      );
     }
     if (version > LANE_BOUNDARY && version % 2n !== 0n) {
       throw new Error(
@@ -128,5 +252,6 @@ export {
   MIGRATION_NAME,
   migrationVersion,
   publicMigrationSetSha256,
+  topLevelStatementKeywords,
   validatePublicMigrationTrack,
 };

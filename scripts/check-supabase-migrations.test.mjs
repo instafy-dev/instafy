@@ -12,6 +12,7 @@ import test from "node:test";
 import {
   LEGACY_PUBLIC_MIGRATION_COUNT,
   LANE_BOUNDARY,
+  topLevelStatementKeywords,
   validatePublicMigrationTrack,
 } from "./check-supabase-migrations.mjs";
 
@@ -70,5 +71,63 @@ test("invalid, empty, and special entries fail closed", (t) => {
   assert.throws(
     () => validatePublicMigrationTrack(directory),
     /contains a non-file/u,
+  );
+});
+
+test("a migration may not end or open the transaction it runs in", (t) => {
+  const directory = fixture();
+  t.after(() => rmSync(directory, { force: true, recursive: true }));
+  const name = "20260000000064_public.sql";
+  for (const [keyword, sql] of [
+    ["BEGIN", "begin;\ncreate table t (id int);\n"],
+    ["COMMIT", "create table t (id int);\ncommit;\nalter table t add column c text;\n"],
+    ["COMMIT", "create table t (id int);\nCOMMIT AND CHAIN;\n"],
+    ["END", "create table t (id int);\nend;\n"],
+    ["ROLLBACK", "create table t (id int);\nrollback;\n"],
+    ["START", "start transaction;\ncreate table t (id int);\n"],
+    ["ABORT", "/* a comment */ abort;\n"],
+  ]) {
+    writeFileSync(path.join(directory, name), sql);
+    assert.throws(
+      () => validatePublicMigrationTrack(directory),
+      new RegExp(`${name} has a top-level ${keyword};`, "u"),
+      sql,
+    );
+  }
+  // BEGIN and END inside a body, a string, a quoted name or a comment are not
+  // transaction control.
+  writeFileSync(
+    path.join(directory, name),
+    [
+      "do $$ begin perform 1; end $$;",
+      "create function f() returns int as $body$ begin return 1; end; $body$ language plpgsql;",
+      "create function g() returns int language sql begin atomic select case when true then 1 end; end;",
+      "create function h() returns text as 'begin; commit;' language sql;",
+      "select E'it\\'s; commit;', \"end;\", 'a;''commit';",
+      "/* nested /* ; */ commit; */ select 1; -- rollback;",
+      "",
+    ].join("\n"),
+  );
+  assert.equal(validatePublicMigrationTrack(directory).length, 1);
+});
+
+test("statements split the way psql splits them", () => {
+  // psql ran this as 10 statements, in this order.
+  assert.deepEqual(
+    topLevelStatementKeywords(
+      [
+        "create function lex_f1() returns int language sql begin atomic select 1; end;",
+        "create or replace procedure lex_p1() language sql begin atomic select case when true then 1 end; select 2; end;",
+        "select E'it\\'s ; commit';",
+        "select 'a;''b';",
+        'select "we;ird" from (select 1 as "we;ird") t;',
+        "/* nested /* ; */ commit; */ select 1;",
+        "do $body$ begin perform 1; end $body$;",
+        "select $$;$$;",
+        "select (select 1); -- ; commit",
+        "create function lex_f2() returns int as 'select 1; ' language sql;",
+      ].join("\n"),
+    ),
+    ["create", "create", "select", "select", "select", "select", "do", "select", "select", "create"],
   );
 });

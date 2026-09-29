@@ -52,15 +52,22 @@ const REQUIRED_PUBLIC_RELATIONS = [
   "runtime_providers",
   "user_credentials",
 ];
-// Live requests lock both tables of each pair, in both orders. Completion and
+// Live requests lock any two of these tables in both orders. Completion and
 // the expired-job sweep update agent_jobs and then write the credit ledger,
-// while dispatch and deferred billing write the ledger and then agent_jobs. A
-// migration that holds a conflicting lock on both tables until it commits can
-// therefore deadlock a live request, whichever table it locks first. After the
-// lane boundary a migration may hold such a lock on one table of a pair and
-// only read the other; a change to both is split into migrations that commit
+// while dispatch and deferred billing write the ledger and then agent_jobs.
+// An insert into the ledger locks it and then runs a trigger that writes and
+// locks the org's org_credit_balances row, while a credit burn inserts or
+// locks that row for its daily refill before it inserts into the ledger, and
+// dispatch burns credits before it writes agent_jobs. A migration that holds a
+// conflicting lock on two of the tables until it commits can therefore
+// deadlock a live request, whichever table it locks first. After the lane
+// boundary a migration may hold such a lock on one of the tables and only read
+// the others; a change to two of them is split into migrations that commit
 // separately.
-const BOTH_ORDER_TABLE_PAIRS = [["agent_jobs", "org_credit_ledger"]];
+const BOTH_ORDER_TABLES = ["agent_jobs", "org_credit_ledger", "org_credit_balances"];
+const BOTH_ORDER_TABLE_PAIRS = BOTH_ORDER_TABLES.flatMap((left, index) =>
+  BOTH_ORDER_TABLES.slice(index + 1).map((right) => [left, right]),
+);
 // The table lock modes a live write can end up waiting on. SHARE and stronger
 // block a live INSERT, UPDATE or DELETE outright. ROW SHARE and ROW EXCLUSIVE
 // block no live write themselves, but they come with SELECT ... FOR UPDATE and
@@ -68,8 +75,8 @@ const BOTH_ORDER_TABLE_PAIRS = [["agent_jobs", "org_credit_ledger"]];
 // waits on. Postgres takes these table locks even when a statement matches no
 // rows, so the empty database still shows them. ACCESS SHARE (a plain read) and
 // SHARE UPDATE EXCLUSIVE conflict with no live write. Locks taken only for a
-// row that exists, such as a foreign-key check or a row trigger that writes the
-// other table, cannot show on an empty database.
+// row that exists, such as a foreign-key check or a row trigger that writes
+// another of the tables, cannot show on an empty database.
 const CONFLICTING_LOCK_MODES = new Set([
   "RowShareLock",
   "RowExclusiveLock",
@@ -79,19 +86,49 @@ const CONFLICTING_LOCK_MODES = new Set([
   "AccessExclusiveLock",
 ]);
 const HELD_LOCK_MARKER = "instafy-migration-holds";
-// Appended to a migration, so it runs inside that migration's transaction
-// before COMMIT, while every lock the migration took is still held. It prints
-// one row per table and lock mode.
-const HELD_LOCK_QUERY = `select '${HELD_LOCK_MARKER} ' || c.relname || ' ' || l.mode
+const TRANSACTION_MARKER = "instafy-migration-xact";
+// psql runs it first in the one transaction it opens for a migration, before
+// the migration itself. It prints the id of that transaction.
+const TRANSACTION_QUERY = `select '${TRANSACTION_MARKER} ' || pg_current_xact_id();`;
+// psql runs it after the migration in the same transaction, before COMMIT,
+// while every lock the migration took is still held. It prints the id of the
+// transaction it runs in, then one row per table and lock mode.
+const HELD_LOCK_QUERY = `select '${TRANSACTION_MARKER} ' || pg_current_xact_id()
+union all
+select '${HELD_LOCK_MARKER} ' || c.relname || ' ' || l.mode
 from pg_locks l
 join pg_class c on c.oid = l.relation
 where l.pid = pg_backend_pid()
   and l.granted
   and c.relnamespace = 'public'::regnamespace
-  and c.relname in (${[...new Set(BOTH_ORDER_TABLE_PAIRS.flat())]
-    .map((table) => `'${table}'`)
-    .join(", ")});
+  and c.relname in (${BOTH_ORDER_TABLES.map((table) => `'${table}'`).join(", ")});
 `;
+const TRANSACTION_WARNINGS = [
+  "there is already a transaction in progress",
+  "there is no transaction in progress",
+];
+
+// Why HELD_LOCK_QUERY did not read the migration's own locks, or null when it
+// did. A top-level COMMIT, END or ROLLBACK in the migration, or COMMIT AND
+// CHAIN, ends the transaction psql opened for it early, and the probe then
+// runs in a later transaction that holds none of the locks the migration took
+// before that. The probe prints the same id as TRANSACTION_QUERY only while
+// that first transaction is still open. psql also warns when the migration
+// opens a transaction of its own with BEGIN.
+function heldLockProbeProblem(stdout, stderr) {
+  const ids = [];
+  for (const line of String(stdout).split("\n")) {
+    const [marker, id, ...rest] = line.trim().split(" ");
+    if (marker === TRANSACTION_MARKER && rest.length === 0) {
+      ids.push(id);
+    }
+  }
+  if (ids.length !== 2 || !/^[0-9]+$/u.test(ids[0]) || ids[0] !== ids[1]) {
+    return `transaction ids ${ids.join(", ") || "missing"}`;
+  }
+  const warning = TRANSACTION_WARNINGS.find((text) => String(stderr).includes(text));
+  return warning ? `psql warned "${warning}"` : null;
+}
 
 // The pairs on both of whose tables a migration's HELD_LOCK_QUERY output
 // reports a conflicting lock.
@@ -243,7 +280,8 @@ function runEmptyDatabaseMigrationTest({
 
     for (const migration of migrations) {
       const checkHeldLocks = BigInt(migration.version) > LANE_BOUNDARY;
-      const sql = readFileSync(migration.source);
+      // With --single-transaction, psql runs its commands in order inside one
+      // transaction: the id query, the migration from stdin, then the probe.
       const applied = commandResult(
         dockerCommand,
         [
@@ -259,14 +297,26 @@ function runEmptyDatabaseMigrationTest({
           "postgres",
           "--dbname",
           "postgres",
+          ...(checkHeldLocks
+            ? [
+                "--command",
+                TRANSACTION_QUERY,
+                "--file",
+                "-",
+                "--command",
+                HELD_LOCK_QUERY,
+              ]
+            : []),
         ],
-        {
-          input: checkHeldLocks
-            ? Buffer.concat([sql, Buffer.from(`\n;\n${HELD_LOCK_QUERY}`)])
-            : sql,
-        },
+        { input: readFileSync(migration.source) },
       );
       if (checkHeldLocks) {
+        const problem = heldLockProbeProblem(applied.stdout, applied.stderr);
+        if (problem) {
+          throw new Error(
+            `${migration.track}:${migration.fileName} does not run in the one transaction psql opens for it, so its held locks cannot be checked (${problem}); remove its own BEGIN, COMMIT, END or ROLLBACK`,
+          );
+        }
         const violations = bothOrderLockViolations(applied.stdout);
         if (violations.length > 0) {
           throw new Error(
@@ -345,10 +395,13 @@ if (isDirectExecution) {
 
 export {
   BOTH_ORDER_TABLE_PAIRS,
+  BOTH_ORDER_TABLES,
   HELD_LOCK_QUERY,
   POSTGRES_IMAGE,
   REQUIRED_PUBLIC_RELATIONS,
+  TRANSACTION_QUERY,
   bothOrderLockViolations,
+  heldLockProbeProblem,
   resolveRunnableImage,
   runEmptyDatabaseMigrationTest,
   validateMigrationPlan,
