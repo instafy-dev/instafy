@@ -48,9 +48,10 @@ const AUTO_STOP_STALE_RUNTIMES_QUERY: &str = "select id from runtimes
 const REQUEUED_JOB_EXPIRY_SECONDS: i64 = 15 * 60;
 /// How long a queued platform AI job is left alone before
 /// `fail_platform_jobs_stranded_on_private_runtimes` may fail it. Dispatch
-/// commits a job pinned to its runtime and unpins it just after when that
-/// runtime is not dispatch-ready, so a younger job pinned to a stopped
-/// desktop may be one a hosted runtime is about to take.
+/// queues a platform job for a runtime that is not dispatch-ready unpinned,
+/// but a controller from before it did commits such a job pinned and unpins
+/// it just after, so during a rolling deploy a younger job pinned to a
+/// stopped desktop may be one a hosted runtime is about to take.
 pub(crate) const STRANDED_PLATFORM_JOB_GRACE_SECONDS: i64 = 30;
 /// runtime_events is an append-only telemetry/audit log with no natural bound.
 /// Most rows are not read after a few days (the widest telemetry lookback is the
@@ -704,8 +705,7 @@ fn platform_job_has_only_private_runners(state: &AppState, row: &tokio_postgres:
 /// reserve they never used is given back.
 ///
 /// A job queued less than [`STRANDED_PLATFORM_JOB_GRACE_SECONDS`] ago is left
-/// to a later sweep: dispatch commits a job pinned to a stopped desktop and
-/// unpins it only after, and a hosted runtime then takes it.
+/// to a later sweep, in case its dispatch is about to unpin it.
 async fn fail_platform_jobs_stranded_on_private_runtimes(state: &AppState) -> AnyResult<usize> {
     let mut connection = state
         .pool

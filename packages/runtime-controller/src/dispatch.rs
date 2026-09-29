@@ -1733,12 +1733,10 @@ pub(crate) async fn process_dispatch_prompt(
     // this dispatch's, and a spread plan are refused. A job pinned to this
     // dispatch's runtime while that runtime is not dispatch-ready (a stopped
     // desktop, say) is not: the alert below unpins it and a hosted runtime
-    // answers, as before this refusal existed. The job is committed pinned
-    // and unpinned only after, so the idle sweep leaves a platform job alone
-    // for its first STRANDED_PLATFORM_JOB_GRACE_SECONDS. Should the desktop
-    // come back between this check and that unpin, the job stays pinned to
-    // it, and the sweep fails it with this refusal's reason once that grace
-    // has passed.
+    // answers, as before this refusal existed. Such a platform job is queued
+    // unpinned in this transaction ([`queued_job_runtime_id`]), so no restart,
+    // failed read or heartbeat between the commit and the alert can leave it
+    // pinned to a runtime that never leases it.
     // Service-role dispatches (plan workers, lead continuations, queued sends
     // with no user) have no managed gate and are refused whatever
     // MANAGED_AI_ENABLED says, because the lease rule does not depend on it;
@@ -2057,6 +2055,9 @@ pub(crate) async fn process_dispatch_prompt(
         .unwrap_or(false);
 
     let mut job_ids: Vec<Uuid> = Vec::new();
+    // Platform jobs queued unpinned from `unpinned_runtime_id`; the runtime
+    // alert reports them as retargeted with the jobs it unpins itself.
+    let mut unpinned_job_ids: Vec<Uuid> = Vec::new();
     let mut primary_job_id: Option<Uuid> = None;
     let mut dispatches: Vec<(Uuid, Option<Uuid>, Option<JsonValue>, Option<JsonValue>)> =
         Vec::new();
@@ -2156,6 +2157,8 @@ pub(crate) async fn process_dispatch_prompt(
             metadata_uses_personal_browser(&agent_request.metadata),
         )
         .await?;
+        let queued_runtime_id =
+            queued_job_runtime_id(target_runtime_id, target.credential_id, unpinned_runtime_id);
         let job_id = agent::enqueue_agent_job_record(
             &transaction,
             &project,
@@ -2163,7 +2166,7 @@ pub(crate) async fn process_dispatch_prompt(
             &agent_request,
             run_id,
             &prompt_id,
-            target_runtime_id,
+            queued_runtime_id,
             target.credential_id,
             provider_conversation_state.as_ref(),
         )
@@ -2192,6 +2195,9 @@ pub(crate) async fn process_dispatch_prompt(
                 primary_job_id = Some(job_uuid);
             }
             job_ids.push(job_uuid);
+            if queued_runtime_id != target_runtime_id {
+                unpinned_job_ids.push(job_uuid);
+            }
         }
     }
 
@@ -2391,7 +2397,7 @@ pub(crate) async fn process_dispatch_prompt(
         let detail_message = runtime_alert_detail
             .as_deref()
             .filter(|value| !value.is_empty());
-        let mut retargeted_job_ids: Vec<Uuid> = Vec::new();
+        let mut retargeted_job_ids: Vec<Uuid> = unpinned_job_ids.clone();
         let mut cleared_runtime_preference = false;
         let mut reconnect_metadata: Option<JsonValue> = None;
         if should_retarget_unavailable_runtime(reason, strict_browser_runtime_id) {
@@ -3951,6 +3957,29 @@ fn runtime_not_dispatch_ready_detail(
         return Some("agent/origin capabilities missing".to_string());
     }
     None
+}
+
+/// The runtime a job for `target_runtime_id` is queued pinned to. A platform
+/// job (no `credential_id`) for `unpinned_runtime_id`, the dispatch's runtime
+/// when [`dispatch_unpins_jobs_from_its_runtime`] says the alert unpins its
+/// jobs, is queued unpinned instead, in the dispatch's own transaction: were
+/// it committed pinned and unpinned only by the alert after the commit, a
+/// restart, a failed runtime read or a heartbeat in between would leave it
+/// pinned to a runtime that never leases it. Every other job keeps its
+/// target, and the alert still unpins it as before.
+fn queued_job_runtime_id(
+    target_runtime_id: Option<Uuid>,
+    credential_id: Option<Uuid>,
+    unpinned_runtime_id: Option<Uuid>,
+) -> Option<Uuid> {
+    if credential_id.is_none()
+        && target_runtime_id.is_some()
+        && target_runtime_id == unpinned_runtime_id
+    {
+        None
+    } else {
+        target_runtime_id
+    }
 }
 
 /// Whether this dispatch's runtime alert will unpin its queued jobs from its
@@ -5607,6 +5636,41 @@ mod tests {
                 "strategy": "reuse"
             }
         })));
+    }
+
+    #[test]
+    fn platform_jobs_for_a_runtime_the_dispatch_unpins_are_queued_unpinned() {
+        let stopped_desktop = Uuid::new_v4();
+        let other_runtime = Uuid::new_v4();
+        let credential = Uuid::new_v4();
+
+        // A platform job for the runtime this dispatch unpins from.
+        assert_eq!(
+            queued_job_runtime_id(Some(stopped_desktop), None, Some(stopped_desktop)),
+            None
+        );
+        // An own-key job keeps its pin; the alert unpins it after commit.
+        assert_eq!(
+            queued_job_runtime_id(
+                Some(stopped_desktop),
+                Some(credential),
+                Some(stopped_desktop)
+            ),
+            Some(stopped_desktop)
+        );
+        // A pin to another runtime, or a dispatch that unpins nothing.
+        assert_eq!(
+            queued_job_runtime_id(Some(other_runtime), None, Some(stopped_desktop)),
+            Some(other_runtime)
+        );
+        assert_eq!(
+            queued_job_runtime_id(Some(stopped_desktop), None, None),
+            Some(stopped_desktop)
+        );
+        assert_eq!(
+            queued_job_runtime_id(None, None, Some(stopped_desktop)),
+            None
+        );
     }
 
     #[test]
