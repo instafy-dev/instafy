@@ -51,9 +51,9 @@ enum ProxyBackend {
 }
 
 /// The credentials the proxy started with (`OPENAI_API_KEY` or `auth.json`).
-/// They serve every request whose token names no credential, managed runs
-/// included, so they are the operator's key just like the controller's
-/// managed lease.
+/// They serve the platform lane and, on a proxy without a controller, every
+/// request, so they are the operator's key just like the controller's managed
+/// lease.
 #[derive(Clone)]
 struct StaticCredentials {
     credentials: Credentials,
@@ -77,15 +77,16 @@ impl StaticCredentials {
         }
     }
 
-    /// The static credentials for a request whose token names no credential
-    /// (a token that names one leases it from the controller instead). A
-    /// managed run gets the managed lease's model policy: pinned to
-    /// `PROXY_PINNED_MODEL`, which also refuses audio. Everything else (no
-    /// controller, session envelopes) keeps the requested model.
-    fn lease_for(&self, claims: Option<&ProxyClaims>) -> LeasedCredentials {
-        if !managed_run_token(claims) {
-            return LeasedCredentials::unpinned(self.credentials.clone());
-        }
+    /// The static credentials for a proxy without a controller, which checks
+    /// no token: every request keeps the model it asks for.
+    fn unauthenticated_lease(&self) -> LeasedCredentials {
+        LeasedCredentials::unpinned(self.credentials.clone())
+    }
+
+    /// The static credentials for a platform-lane request, a managed run: it
+    /// gets the managed lease's model policy, pinned to `PROXY_PINNED_MODEL`,
+    /// which also refuses audio.
+    fn platform_lease(&self) -> LeasedCredentials {
         if self.pinned_model.is_none()
             && self
                 .unpinned_managed_run_warnings
@@ -99,6 +100,15 @@ impl StaticCredentials {
         LeasedCredentials {
             credentials: self.credentials.clone(),
             pinned_model: self.pinned_model.clone(),
+        }
+    }
+
+    /// `staticCredentialKind` in the platform lane report.
+    fn kind(&self) -> &'static str {
+        match self.credentials {
+            Credentials::ApiKey { .. } => "api_key",
+            Credentials::ChatGpt { .. } => "chatgpt",
+            Credentials::GeminiCodeAssist { .. } => "gemini_code_assist",
         }
     }
 }
@@ -346,29 +356,39 @@ fn requested_tools(payload: &Value) -> Option<Vec<Value>> {
         .cloned()
 }
 
-/// The client tool types a pinned lease forwards: exactly the types codex,
-/// the runtime's client at the revision this repository pins, puts in
-/// `tools` (its `ToolSpec`, `codex-rs/tools/src/tool_spec.rs`). A hosted tool
-/// codex never sends, such as `image_generation`, can run a model of its own
-/// or add a per-call fee on the key the operator pays for.
-const PINNED_LEASE_TOOL_TYPES: [&str; 5] = [
-    "function",
-    "custom",
-    "namespace",
-    "tool_search",
-    "web_search",
-];
+/// The client tool types a pinned lease forwards: the types codex, the
+/// runtime's client at the revision this repository pins, puts in `tools`
+/// (its `ToolSpec`, `codex-rs/tools/src/tool_spec.rs`), less the hosted ones
+/// in [`PLATFORM_DROPPED_TOOL_TYPES`]. A hosted tool codex never sends, such
+/// as `image_generation`, can run a model of its own or add a per-call fee on
+/// the key the operator pays for.
+const PINNED_LEASE_TOOL_TYPES: [&str; 4] = ["function", "custom", "namespace", "tool_search"];
+
+/// Codex tool types that OpenAI runs on its side, billed per call on top of
+/// tokens. The platform lane keeps them off on purpose: credits price tokens
+/// only. A user's own credential is never pinned, so it keeps them.
+const PLATFORM_DROPPED_TOOL_TYPES: [&str; 1] = ["web_search"];
 
 /// Why a pinned lease drops a client tool, or `None` to forward it: its type
-/// must be one codex emits, it must name no model of its own, and a
-/// namespace passes only when every tool it groups does.
+/// must be one codex emits and not a hosted one, a tool search must run on
+/// the client, it must name no model of its own, and a namespace passes only
+/// when every tool it groups does.
 fn pinned_lease_tool_rejection(tool: &Value) -> Option<&'static str> {
     let Some(tool) = tool.as_object() else {
         return Some("type");
     };
     let tool_type = tool.get("type").and_then(Value::as_str).unwrap_or_default();
+    if PLATFORM_DROPPED_TOOL_TYPES.contains(&tool_type) {
+        return Some("hosted");
+    }
     if !PINNED_LEASE_TOOL_TYPES.contains(&tool_type) {
         return Some("type");
+    }
+    // Codex runs its tool search itself (`execution: "client"`); any other
+    // execution asks OpenAI to run the search.
+    if tool_type == "tool_search" && tool.get("execution").and_then(Value::as_str) != Some("client")
+    {
+        return Some("hosted");
     }
     if tool.contains_key("model") {
         return Some("model");
@@ -599,62 +619,82 @@ fn run_id_from_claims(claims: Option<&ProxyClaims>) -> Option<&str> {
         .filter(|value| !value.is_empty())
 }
 
-/// A managed run: a dispatch job token (it carries a `run_id`) that names no
-/// credential. See [`dynamic_lease_target`] for why the `run_id` matters.
-fn managed_run_token(claims: Option<&ProxyClaims>) -> bool {
-    credential_id_from_claims(claims).is_none() && run_id_from_claims(claims).is_some()
+/// Whose credential one request goes upstream on, from the token that
+/// authenticated it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum UpstreamLane<'a> {
+    /// The token names the user's own credential: leased from the controller
+    /// by id, never pinned by the platform and never metered.
+    Byo { credential_id: &'a str },
+    /// A dispatch job token that names no credential, a managed run: the
+    /// platform key, which the managed model pin applies to.
+    Platform,
+    /// The proxy has no controller integration, so it checked no token: its
+    /// static credentials serve the request as they always have.
+    Unauthenticated,
 }
 
-/// A token naming a credential is a BYOC turn. A credential-less token is the
-/// managed lane on either backend: static material on `RemoteStatic`, the
-/// controller-served managed lease on `RemoteDynamic`.
-fn proxy_auth_mode(claims: Option<&ProxyClaims>) -> &'static str {
-    if credential_id_from_claims(claims).is_some() {
-        "byoc"
-    } else {
-        "managed"
+impl UpstreamLane<'_> {
+    /// `provider.auth` in the instructions the proxy adds. A proxy without a
+    /// controller serves its own static credentials, which it has always
+    /// called managed.
+    fn auth_mode(self) -> &'static str {
+        match self {
+            Self::Byo { .. } => "byoc",
+            Self::Platform | Self::Unauthenticated => "managed",
+        }
     }
 }
 
-/// Which controller credential a `RemoteDynamic` proxy leases for a request,
-/// with the `credential_source` label used in error context.
+/// The lane a request's claims put it on; `None` claims mean the proxy has no
+/// controller integration.
 ///
 /// The controller mints a credential-less token when the user has no
 /// credential of their own (the managed lane) and serves the platform key
-/// under [`MANAGED_AI_CREDENTIAL_ID`]. Leasing that id lets a per-runtime
-/// sidecar with no static credentials complete managed turns.
-///
-/// Only a dispatch job token is a managed turn, and every dispatch job token
-/// carries a `run_id` (`runtime-controller::agent::enqueue_agent_job_record`
-/// requires one; `auth::issue_proxy_envelope` copies it into the claims).
-/// The controller also mints credential-less tokens with no `run_id` at agent
-/// login and runtime register; those are session envelopes, not turns, and
-/// keep the pre-existing rejection so they never spend the platform key.
+/// under [`MANAGED_AI_CREDENTIAL_ID`]. Only a dispatch job token is a managed
+/// turn, and every dispatch job token carries a `run_id`
+/// (`runtime-controller::agent::enqueue_agent_job_record` requires one;
+/// `auth::issue_proxy_envelope` copies it into the claims). The controller
+/// also mints credential-less tokens with no `run_id` at agent login and
+/// runtime register; those are session envelopes, not turns, so both
+/// backends refuse them with the pre-existing rejection and they never spend
+/// the platform key, static credentials included.
 /// `PROXY_REQUIRE_CREDENTIAL_CLAIM` rejects credential-less tokens during
-/// authentication, so the public lane never reaches this fallback.
-fn dynamic_lease_target(claims: Option<&ProxyClaims>) -> Result<(&str, &'static str), AppError> {
-    if let Some(credential_id) = credential_id_from_claims(claims) {
-        return Ok((credential_id, "claim"));
+/// authentication, so the public lane never reaches the platform lane.
+fn classify_upstream_lane(claims: Option<&ProxyClaims>) -> Result<UpstreamLane<'_>, AppError> {
+    if claims.is_none() {
+        return Ok(UpstreamLane::Unauthenticated);
     }
-    if managed_run_token(claims) {
-        return Ok((MANAGED_AI_CREDENTIAL_ID, "managed"));
+    if let Some(credential_id) = credential_id_from_claims(claims) {
+        return Ok(UpstreamLane::Byo { credential_id });
+    }
+    if run_id_from_claims(claims).is_some() {
+        return Ok(UpstreamLane::Platform);
     }
     Err(AppError::unauthorized(anyhow!(
         "proxy token missing credential_id for BYOC request"
     )))
 }
 
+/// The credentials one request goes upstream on.
+struct LaneLease<'a> {
+    leased: LeasedCredentials,
+    /// The controller credential the lease came from, which a lease renewal
+    /// asks for again and a usage report names; `None` for static
+    /// credentials.
+    controller_credential_id: Option<&'a str>,
+    /// `claim`, `managed` or `static`: the `credential_source` in error
+    /// context.
+    source: &'static str,
+}
+
 /// A failed managed lease keeps today's rejection text as its prefix (a
 /// controller without `MANAGED_AI_OPENAI_API_KEY` answers 404) and appends the
 /// cause so an operator can tell the two apart.
-fn dynamic_lease_error(credential_source: &str, error: anyhow::Error) -> AppError {
-    if credential_source == "managed" {
-        AppError::unauthorized(anyhow!(
-            "proxy token missing credential_id for BYOC request; managed AI credential lease failed: {error:#}"
-        ))
-    } else {
-        AppError::unauthorized(error)
-    }
+fn managed_lease_error(error: anyhow::Error) -> AppError {
+    AppError::unauthorized(anyhow!(
+        "proxy token missing credential_id for BYOC request; managed AI credential lease failed: {error:#}"
+    ))
 }
 
 fn build_proxy_instructions(
@@ -834,6 +874,7 @@ async fn healthz(State(state): State<ProxyState>) -> impl IntoResponse {
         "credentialLeaseProtocol": 1,
         "authenticationRequired": state.controller.is_some(),
         "credentialClaimRequired": state.require_credential_claim,
+        "platformLane": state.platform_lane_report(),
     }))
 }
 
@@ -865,6 +906,7 @@ async fn readyz(State(state): State<ProxyState>) -> impl IntoResponse {
         "credentialLeaseProtocol": 1,
         "authenticationRequired": state.controller.is_some(),
         "credentialClaimRequired": state.require_credential_claim,
+        "platformLane": state.platform_lane_report(),
         })),
     )
 }
@@ -963,6 +1005,103 @@ impl ProxyState {
         }
 
         Ok(())
+    }
+
+    /// The credentials a request on `lane` goes upstream on. A user's own
+    /// credential is leased from the controller on either backend; the
+    /// platform lane takes the static credentials when the proxy has them
+    /// and the controller's managed lease otherwise.
+    async fn lease_for_lane<'a>(&self, lane: UpstreamLane<'a>) -> Result<LaneLease<'a>, AppError> {
+        match (&self.backend, lane) {
+            (_, UpstreamLane::Byo { credential_id }) => Ok(LaneLease {
+                leased: self
+                    .require_controller()?
+                    .acquire_credential_lease(credential_id)
+                    .await
+                    .and_then(|lease| lease.into_material())
+                    .map_err(AppError::unauthorized)?,
+                controller_credential_id: Some(credential_id),
+                source: "claim",
+            }),
+            (ProxyBackend::RemoteStatic(static_creds), UpstreamLane::Platform) => Ok(LaneLease {
+                leased: static_creds.platform_lease(),
+                controller_credential_id: None,
+                source: "static",
+            }),
+            (ProxyBackend::RemoteStatic(static_creds), UpstreamLane::Unauthenticated) => {
+                Ok(LaneLease {
+                    leased: static_creds.unauthenticated_lease(),
+                    controller_credential_id: None,
+                    source: "static",
+                })
+            }
+            (ProxyBackend::RemoteDynamic, UpstreamLane::Platform) => Ok(LaneLease {
+                leased: self
+                    .require_controller()?
+                    .acquire_credential_lease(MANAGED_AI_CREDENTIAL_ID)
+                    .await
+                    .and_then(|lease| lease.into_material())
+                    .map_err(managed_lease_error)?,
+                controller_credential_id: Some(MANAGED_AI_CREDENTIAL_ID),
+                source: "managed",
+            }),
+            // A dynamic proxy always has a controller, so it checks every
+            // token and never sees this lane.
+            (ProxyBackend::RemoteDynamic, UpstreamLane::Unauthenticated) => Err(
+                AppError::unauthorized(anyhow!("proxy controller authentication is required")),
+            ),
+        }
+    }
+
+    fn require_controller(&self) -> Result<&ControllerIntegration, AppError> {
+        self.controller.as_ref().ok_or_else(|| {
+            AppError::unauthorized(anyhow!("proxy controller integration is not configured"))
+        })
+    }
+
+    /// `platformLane` on `/healthz` and `/readyz`: how this proxy serves a
+    /// managed run, which the controller reads to check its proxy.
+    ///
+    /// - `servedBy`: `refused` when `PROXY_REQUIRE_CREDENTIAL_CLAIM` turns
+    ///   away credential-less tokens, else `static` for static credentials
+    ///   and `controller_lease` for the controller's managed lease.
+    /// - `pinnedModel`: the model static credentials serve managed runs as.
+    ///   Only a controller-signed token marks a managed run, so a proxy
+    ///   without a controller pins nothing; a managed lease brings its own
+    ///   pin, reported as `null`.
+    /// - `staticCredentialKind`: `api_key`, `chatgpt` or
+    ///   `gemini_code_assist` when static credentials serve the lane.
+    /// - `sessionTokensRefused`: credential-less tokens without a run id
+    ///   are refused, which needs a controller to sign tokens.
+    /// - `reportsUsage`, `controllerMeteringProtocol`, `outputCeilingSource`:
+    ///   the proxy reports no usage to the controller, reads no metering
+    ///   protocol from it and sends no output ceiling upstream yet.
+    fn platform_lane_report(&self) -> Value {
+        let static_creds = match &self.backend {
+            ProxyBackend::RemoteStatic(static_creds) if !self.require_credential_claim => {
+                Some(static_creds)
+            }
+            _ => None,
+        };
+        let served_by = if self.require_credential_claim {
+            "refused"
+        } else if static_creds.is_some() {
+            "static"
+        } else {
+            "controller_lease"
+        };
+        let pinned_model = static_creds
+            .filter(|_| self.controller.is_some())
+            .and_then(|static_creds| static_creds.pinned_model.as_deref());
+        json!({
+            "servedBy": served_by,
+            "pinnedModel": pinned_model,
+            "staticCredentialKind": static_creds.map(StaticCredentials::kind),
+            "sessionTokensRefused": self.controller.is_some(),
+            "reportsUsage": false,
+            "controllerMeteringProtocol": null,
+            "outputCeilingSource": null,
+        })
     }
 
     async fn begin_credit_burn(
@@ -1254,6 +1393,7 @@ async fn create_response(
     AuthenticatedProxyClaims(claims): AuthenticatedProxyClaims,
     Json(payload): Json<Value>,
 ) -> Result<impl IntoResponse, AppError> {
+    let lane = classify_upstream_lane(claims.as_ref())?;
     // Empty = absent: resolve_model_for_credentials substitutes the
     // credential's default; an explicit id is honored verbatim.
     let model = payload
@@ -1266,7 +1406,7 @@ async fn create_response(
 
     let input_items = extract_input_items(&payload).map_err(AppError::bad_request)?;
 
-    let auth_mode = proxy_auth_mode(claims.as_ref());
+    let auth_mode = lane.auth_mode();
     let mut credit_guard = if let Some(ref claims) = claims {
         // Credit burn is keyed before credential resolution, so an absent
         // model uses the crate default as its ledger dimension.
@@ -1317,105 +1457,39 @@ async fn create_response(
         }),
     };
 
-    let completion = match &state.backend {
-        ProxyBackend::RemoteStatic(static_creds) => {
-            let credential_id = claims
-                .as_ref()
-                .and_then(|claim| claim.credential_id.as_deref())
-                .map(str::trim)
-                .filter(|value| !value.is_empty());
-            let creds = if let Some(credential_id) = credential_id {
-                let Some(controller) = state.controller.as_ref() else {
-                    return Err(AppError::unauthorized(anyhow!(
-                        "proxy controller integration is not configured"
-                    )));
-                };
-                controller
-                    .acquire_credential_lease(credential_id)
-                    .await
-                    .and_then(|lease| lease.into_material())
-                    .map_err(AppError::unauthorized)?
-            } else {
-                static_creds.lease_for(claims.as_ref())
-            };
-
-            let credential_source = if credential_id.is_some() {
-                "claim"
-            } else {
-                "static"
-            };
-            match complete_with_optional_controller_refresh(
-                creds,
-                &completion_options,
-                &input_items,
+    let LaneLease {
+        leased,
+        controller_credential_id,
+        source: credential_source,
+    } = state.lease_for_lane(lane).await?;
+    let completion = match complete_with_optional_controller_refresh(
+        leased,
+        &completion_options,
+        &input_items,
+        state.controller.as_ref(),
+        controller_credential_id,
+    )
+    .await
+    {
+        Ok((response, _upstream_model)) => {
+            spawn_credential_usage_report(
                 state.controller.as_ref(),
-                credential_id,
-            )
-            .await
-            {
-                Ok((response, _upstream_model)) => {
-                    spawn_credential_usage_report(
-                        state.controller.as_ref(),
-                        credential_id,
-                        &response,
-                    );
-                    ProxyCompletion::Remote(response)
-                }
-                Err(error) => {
-                    if let Some(burn) = credit_guard.take() {
-                        if let Err(err) = burn.refund("proxy upstream failure").await {
-                            eprintln!("[proxy] failed to refund credits: {err}");
-                        }
-                    }
-                    let error = error.context(format!(
-                        "upstream request failed (credential_source={}, requested_model={})",
-                        credential_source, model,
-                    ));
-                    return Err(AppError::upstream(error));
-                }
-            }
+                controller_credential_id,
+                &response,
+            );
+            ProxyCompletion::Remote(response)
         }
-        ProxyBackend::RemoteDynamic => {
-            let (credential_id, credential_source) = dynamic_lease_target(claims.as_ref())?;
-
-            let Some(controller) = state.controller.as_ref() else {
-                return Err(AppError::unauthorized(anyhow!(
-                    "proxy controller integration is not configured"
-                )));
-            };
-
-            let creds = controller
-                .acquire_credential_lease(credential_id)
-                .await
-                .and_then(|lease| lease.into_material())
-                .map_err(|error| dynamic_lease_error(credential_source, error))?;
-
-            match complete_with_optional_controller_refresh(
-                creds,
-                &completion_options,
-                &input_items,
-                Some(controller),
-                Some(credential_id),
-            )
-            .await
-            {
-                Ok((response, _upstream_model)) => {
-                    spawn_credential_usage_report(Some(controller), Some(credential_id), &response);
-                    ProxyCompletion::Remote(response)
-                }
-                Err(error) => {
-                    if let Some(burn) = credit_guard.take() {
-                        if let Err(err) = burn.refund("proxy upstream failure").await {
-                            eprintln!("[proxy] failed to refund credits: {err}");
-                        }
-                    }
-                    let error = error.context(format!(
-                        "upstream request failed (credential_source={}, requested_model={})",
-                        credential_source, model,
-                    ));
-                    return Err(AppError::upstream(error));
+        Err(error) => {
+            if let Some(burn) = credit_guard.take() {
+                if let Err(err) = burn.refund("proxy upstream failure").await {
+                    eprintln!("[proxy] failed to refund credits: {err}");
                 }
             }
+            let error = error.context(format!(
+                "upstream request failed (credential_source={}, requested_model={})",
+                credential_source, model,
+            ));
+            return Err(AppError::upstream(error));
         }
     };
 
@@ -1447,6 +1521,7 @@ async fn create_chat_completion(
     AuthenticatedProxyClaims(claims): AuthenticatedProxyClaims,
     Json(payload): Json<Value>,
 ) -> Result<Response, AppError> {
+    let lane = classify_upstream_lane(claims.as_ref())?;
     // Empty = absent: resolve_model_for_credentials substitutes the
     // credential's default; an explicit id is honored verbatim.
     let requested_model = payload
@@ -1459,7 +1534,7 @@ async fn create_chat_completion(
 
     let input_items = parse_chat_completion_inputs(&payload).map_err(AppError::bad_request)?;
 
-    let auth_mode = proxy_auth_mode(claims.as_ref());
+    let auth_mode = lane.auth_mode();
     let mut credit_guard = if let Some(ref claims) = claims {
         // Credit burn is keyed before credential resolution, so an absent
         // model uses the crate default as its ledger dimension.
@@ -1494,103 +1569,41 @@ async fn create_chat_completion(
         }),
     };
 
-    match &state.backend {
-        ProxyBackend::RemoteStatic(static_creds) => {
-            let credential_id = claims
-                .as_ref()
-                .and_then(|claim| claim.credential_id.as_deref())
-                .map(str::trim)
-                .filter(|value| !value.is_empty());
-            let creds = if let Some(credential_id) = credential_id {
-                let Some(controller) = state.controller.as_ref() else {
-                    return Err(AppError::unauthorized(anyhow!(
-                        "proxy controller integration is not configured"
-                    )));
-                };
-                controller
-                    .acquire_credential_lease(credential_id)
-                    .await
-                    .and_then(|lease| lease.into_material())
-                    .map_err(AppError::unauthorized)?
-            } else {
-                static_creds.lease_for(claims.as_ref())
-            };
-
-            let credential_source = if credential_id.is_some() {
-                "claim"
-            } else {
-                "static"
-            };
-            let (completion, upstream_model) = match complete_with_optional_controller_refresh(
-                creds,
-                &completion_options,
-                &input_items,
-                state.controller.as_ref(),
-                credential_id,
-            )
-            .await
-            {
-                Ok(result) => result,
-                Err(error) => {
-                    if let Some(burn) = credit_guard.take() {
-                        if let Err(err) = burn.refund("proxy upstream failure").await {
-                            eprintln!("[proxy] failed to refund credits: {err}");
-                        }
-                    }
-                    let error = error.context(format!(
-                        "upstream request failed (credential_source={}, requested_model={})",
-                        credential_source, requested_model,
-                    ));
-                    return Err(AppError::upstream(error));
+    let LaneLease {
+        leased,
+        controller_credential_id,
+        source: credential_source,
+    } = state.lease_for_lane(lane).await?;
+    let (completion, upstream_model) = match complete_with_optional_controller_refresh(
+        leased,
+        &completion_options,
+        &input_items,
+        state.controller.as_ref(),
+        controller_credential_id,
+    )
+    .await
+    {
+        Ok(result) => result,
+        Err(error) => {
+            if let Some(burn) = credit_guard.take() {
+                if let Err(err) = burn.refund("proxy upstream failure").await {
+                    eprintln!("[proxy] failed to refund credits: {err}");
                 }
-            };
-
-            spawn_credential_usage_report(state.controller.as_ref(), credential_id, &completion);
-            build_remote_chat_response(&payload, completion, upstream_model, credit_guard).await
+            }
+            let error = error.context(format!(
+                "upstream request failed (credential_source={}, requested_model={})",
+                credential_source, requested_model,
+            ));
+            return Err(AppError::upstream(error));
         }
-        ProxyBackend::RemoteDynamic => {
-            let (credential_id, credential_source) = dynamic_lease_target(claims.as_ref())?;
+    };
 
-            let Some(controller) = state.controller.as_ref() else {
-                return Err(AppError::unauthorized(anyhow!(
-                    "proxy controller integration is not configured"
-                )));
-            };
-
-            let creds = controller
-                .acquire_credential_lease(credential_id)
-                .await
-                .and_then(|lease| lease.into_material())
-                .map_err(|error| dynamic_lease_error(credential_source, error))?;
-
-            let (completion, upstream_model) = match complete_with_optional_controller_refresh(
-                creds,
-                &completion_options,
-                &input_items,
-                Some(controller),
-                Some(credential_id),
-            )
-            .await
-            {
-                Ok(result) => result,
-                Err(error) => {
-                    if let Some(burn) = credit_guard.take() {
-                        if let Err(err) = burn.refund("proxy upstream failure").await {
-                            eprintln!("[proxy] failed to refund credits: {err}");
-                        }
-                    }
-                    let error = error.context(format!(
-                        "upstream request failed (credential_source={}, requested_model={})",
-                        credential_source, requested_model,
-                    ));
-                    return Err(AppError::upstream(error));
-                }
-            };
-
-            spawn_credential_usage_report(Some(controller), Some(credential_id), &completion);
-            build_remote_chat_response(&payload, completion, upstream_model, credit_guard).await
-        }
-    }
+    spawn_credential_usage_report(
+        state.controller.as_ref(),
+        controller_credential_id,
+        &completion,
+    );
+    build_remote_chat_response(&payload, completion, upstream_model, credit_guard).await
 }
 
 /// A pinned lease serves only its pinned model. Speech and transcription
@@ -1841,50 +1854,12 @@ async fn create_speech(
     AuthenticatedProxyClaims(claims): AuthenticatedProxyClaims,
     Json(payload): Json<Value>,
 ) -> Result<Response, AppError> {
-    let claim_credential_id = claims
-        .as_ref()
-        .and_then(|claim| claim.credential_id.as_deref())
-        .map(str::trim)
-        .filter(|value| !value.is_empty());
-    let (leased, controller_credential_id) = match &state.backend {
-        ProxyBackend::RemoteStatic(static_creds) => {
-            if let Some(credential_id) = claim_credential_id {
-                let Some(controller) = state.controller.as_ref() else {
-                    return Err(AppError::unauthorized(anyhow!(
-                        "proxy controller integration is not configured"
-                    )));
-                };
-                (
-                    controller
-                        .acquire_credential_lease(credential_id)
-                        .await
-                        .and_then(|lease| lease.into_material())
-                        .map_err(AppError::unauthorized)?,
-                    Some(credential_id),
-                )
-            } else {
-                (static_creds.lease_for(claims.as_ref()), None)
-            }
-        }
-        ProxyBackend::RemoteDynamic => {
-            let (credential_id, credential_source) = dynamic_lease_target(claims.as_ref())?;
-
-            let Some(controller) = state.controller.as_ref() else {
-                return Err(AppError::unauthorized(anyhow!(
-                    "proxy controller integration is not configured"
-                )));
-            };
-
-            (
-                controller
-                    .acquire_credential_lease(credential_id)
-                    .await
-                    .and_then(|lease| lease.into_material())
-                    .map_err(|error| dynamic_lease_error(credential_source, error))?,
-                Some(credential_id),
-            )
-        }
-    };
+    let lane = classify_upstream_lane(claims.as_ref())?;
+    let LaneLease {
+        leased,
+        controller_credential_id,
+        ..
+    } = state.lease_for_lane(lane).await?;
 
     refuse_audio_on_pinned_lease(&leased, "speech synthesis")?;
     let mut credentials = leased.credentials;
@@ -1926,50 +1901,12 @@ async fn create_transcription(
     headers: HeaderMap,
     body: Bytes,
 ) -> Result<Response, AppError> {
-    let claim_credential_id = claims
-        .as_ref()
-        .and_then(|claim| claim.credential_id.as_deref())
-        .map(str::trim)
-        .filter(|value| !value.is_empty());
-    let (leased, controller_credential_id) = match &state.backend {
-        ProxyBackend::RemoteStatic(static_creds) => {
-            if let Some(credential_id) = claim_credential_id {
-                let Some(controller) = state.controller.as_ref() else {
-                    return Err(AppError::unauthorized(anyhow!(
-                        "proxy controller integration is not configured"
-                    )));
-                };
-                (
-                    controller
-                        .acquire_credential_lease(credential_id)
-                        .await
-                        .and_then(|lease| lease.into_material())
-                        .map_err(AppError::unauthorized)?,
-                    Some(credential_id),
-                )
-            } else {
-                (static_creds.lease_for(claims.as_ref()), None)
-            }
-        }
-        ProxyBackend::RemoteDynamic => {
-            let (credential_id, credential_source) = dynamic_lease_target(claims.as_ref())?;
-
-            let Some(controller) = state.controller.as_ref() else {
-                return Err(AppError::unauthorized(anyhow!(
-                    "proxy controller integration is not configured"
-                )));
-            };
-
-            (
-                controller
-                    .acquire_credential_lease(credential_id)
-                    .await
-                    .and_then(|lease| lease.into_material())
-                    .map_err(|error| dynamic_lease_error(credential_source, error))?,
-                Some(credential_id),
-            )
-        }
-    };
+    let lane = classify_upstream_lane(claims.as_ref())?;
+    let LaneLease {
+        leased,
+        controller_credential_id,
+        ..
+    } = state.lease_for_lane(lane).await?;
 
     refuse_audio_on_pinned_lease(&leased, "speech transcription")?;
     let mut credentials = leased.credentials;
@@ -3252,38 +3189,68 @@ mod tests {
         assert!(refuse_audio_on_pinned_lease(&unpinned, "speech synthesis").is_ok());
     }
 
-    #[test]
-    fn static_credentials_pin_only_managed_runs_to_the_proxy_pinned_model() {
+    /// A proxy with static credentials and no controller. The lanes a
+    /// controller would add are served the same way without one.
+    fn static_state(credentials: Credentials, pinned_model: Option<&str>) -> ProxyState {
+        ProxyState {
+            backend: ProxyBackend::RemoteStatic(StaticCredentials::new(
+                credentials,
+                pinned_model.map(str::to_string),
+            )),
+            controller: None,
+            require_controller_auth: false,
+            require_credential_claim: false,
+        }
+    }
+
+    #[tokio::test]
+    async fn static_credentials_pin_only_the_platform_lane_to_the_proxy_pinned_model() {
         let managed_key = api_key("https://api.openai.com/v1/responses", None);
-        let static_creds = StaticCredentials::new(managed_key.clone(), Some(" gpt-6-luna ".into()));
+        let state = static_state(managed_key.clone(), Some(" gpt-6-luna "));
         // A dispatch job token that names no credential is a managed run on
         // the operator's key: pinned like the controller's managed lease.
-        for claims in [
-            controller_claims(Some("run-1"), None),
-            controller_claims(Some("run-1"), Some("   ")),
-        ] {
-            let leased = static_creds.lease_for(Some(&claims));
-            assert_eq!(leased.pinned_model(), Some("gpt-6-luna"));
-            assert_eq!(
-                resolve_model_for_lease("gpt-5.6-sol", &leased),
-                "gpt-6-luna"
-            );
-            assert!(refuse_audio_on_pinned_lease(&leased, "speech synthesis").is_err());
-        }
-        // No controller and session envelopes are not managed runs.
-        let envelope = controller_claims(None, None);
-        for claims in [None, Some(&envelope)] {
-            let leased = static_creds.lease_for(claims);
-            assert!(leased.pinned_model().is_none());
-            assert_eq!(
-                resolve_model_for_lease("gpt-5.6-sol", &leased),
-                "gpt-5.6-sol"
-            );
-        }
+        let lease = state
+            .lease_for_lane(UpstreamLane::Platform)
+            .await
+            .unwrap_or_else(|_| panic!("platform lane"));
+        assert_eq!(lease.source, "static");
+        assert!(lease.controller_credential_id.is_none());
+        assert_eq!(lease.leased.pinned_model(), Some("gpt-6-luna"));
+        assert_eq!(
+            resolve_model_for_lease("gpt-5.6-sol", &lease.leased),
+            "gpt-6-luna"
+        );
+        assert!(refuse_audio_on_pinned_lease(&lease.leased, "speech synthesis").is_err());
+
+        // A proxy without a controller checks no token and pins nothing.
+        let lease = state
+            .lease_for_lane(UpstreamLane::Unauthenticated)
+            .await
+            .unwrap_or_else(|_| panic!("unauthenticated lane"));
+        assert_eq!(lease.source, "static");
+        assert!(lease.leased.pinned_model().is_none());
+        assert_eq!(
+            resolve_model_for_lease("gpt-5.6-sol", &lease.leased),
+            "gpt-5.6-sol"
+        );
+
+        // A user's own credential needs the controller to lease it.
+        let error = state
+            .lease_for_lane(UpstreamLane::Byo {
+                credential_id: "cred-1",
+            })
+            .await
+            .err()
+            .expect("no controller to lease from");
+        assert_eq!(error.status, StatusCode::UNAUTHORIZED);
+        assert_eq!(
+            error.message,
+            "proxy controller integration is not configured"
+        );
+
         // A blank setting is no pin.
         let blank = StaticCredentials::new(managed_key, Some("   ".into()));
-        let leased = blank.lease_for(Some(&controller_claims(Some("run-1"), None)));
-        assert!(leased.pinned_model().is_none());
+        assert!(blank.platform_lease().pinned_model().is_none());
     }
 
     #[test]
@@ -3296,17 +3263,14 @@ mod tests {
                 .load(Ordering::Relaxed)
         };
         // Requests that are not managed runs have nothing to warn about.
-        let envelope = controller_claims(None, None);
-        static_creds.lease_for(None);
-        static_creds.lease_for(Some(&envelope));
+        static_creds.unauthenticated_lease();
         assert_eq!(warnings(), 0);
 
         // Managed runs keep today's behaviour, and the proxy says once that
         // the managed model is not pinned. Handlers get a clone of the state,
         // so the count is shared.
-        let managed_run = controller_claims(Some("run-1"), None);
         for _ in 0..3 {
-            let leased = static_creds.clone().lease_for(Some(&managed_run));
+            let leased = static_creds.clone().platform_lease();
             assert!(leased.pinned_model().is_none());
             assert_eq!(
                 resolve_model_for_lease("gpt-5.6-sol", &leased),
@@ -3321,7 +3285,7 @@ mod tests {
             api_key("https://api.openai.com/v1/responses", None),
             Some("gpt-6-luna".into()),
         );
-        pinned.lease_for(Some(&managed_run));
+        pinned.platform_lease();
         assert_eq!(
             pinned.unpinned_managed_run_warnings.load(Ordering::Relaxed),
             0
@@ -3329,9 +3293,84 @@ mod tests {
     }
 
     #[test]
+    fn upstream_lane_classifies_byo_platform_session_and_unauthenticated() {
+        // A token naming a credential is BYO whether or not it carries a
+        // run_id, and a blank credential_id is no credential.
+        for claims in [
+            controller_claims(Some("run-1"), Some("cred-1")),
+            controller_claims(None, Some(" cred-1 ")),
+        ] {
+            let lane = classify_upstream_lane(Some(&claims)).expect("byo lane");
+            assert_eq!(
+                lane,
+                UpstreamLane::Byo {
+                    credential_id: "cred-1"
+                }
+            );
+            assert_eq!(lane.auth_mode(), "byoc");
+        }
+
+        // A dispatch job token that names no credential: the platform lane.
+        for claims in [
+            controller_claims(Some("run-1"), None),
+            controller_claims(Some("run-1"), Some("   ")),
+        ] {
+            let lane = classify_upstream_lane(Some(&claims)).expect("platform lane");
+            assert_eq!(lane, UpstreamLane::Platform);
+            assert_eq!(lane.auth_mode(), "managed");
+        }
+
+        // The agent-login and runtime-register envelopes: no run_id, no
+        // credential. Refused with the exact pre-existing rejection, which
+        // the controller recognises in a failed turn's error.
+        for claims in [
+            controller_claims(None, None),
+            controller_claims(Some("   "), None),
+            controller_claims(None, Some("")),
+        ] {
+            let error = classify_upstream_lane(Some(&claims)).expect_err("session envelope");
+            assert_eq!(error.status, StatusCode::UNAUTHORIZED);
+            assert_eq!(error.message, BYOC_REJECTION);
+        }
+
+        // No claims: the proxy has no controller integration.
+        let lane = classify_upstream_lane(None).expect("unauthenticated lane");
+        assert_eq!(lane, UpstreamLane::Unauthenticated);
+        assert_eq!(lane.auth_mode(), "managed");
+    }
+
+    #[test]
+    fn platform_lane_report_names_the_static_credential_kind() {
+        let gemini = Credentials::GeminiCodeAssist {
+            access_token: "test".to_string(),
+            project_id: "project".to_string(),
+            endpoint: None,
+            default_model: None,
+        };
+        for (credentials, kind) in [
+            (
+                api_key("https://api.openai.com/v1/responses", None),
+                "api_key",
+            ),
+            (chatgpt("gpt-5.5"), "chatgpt"),
+            (gemini, "gemini_code_assist"),
+        ] {
+            let report = static_state(credentials, Some("gpt-6-luna")).platform_lane_report();
+            assert_eq!(report["servedBy"], json!("static"));
+            assert_eq!(report["staticCredentialKind"], json!(kind));
+            // Without a controller no token marks a managed run, so
+            // PROXY_PINNED_MODEL pins nothing and no token is refused.
+            assert_eq!(report["pinnedModel"], json!(null));
+            assert_eq!(report["sessionTokensRefused"], json!(false));
+            assert_eq!(report["reportsUsage"], json!(false));
+        }
+    }
+
+    #[test]
     fn pinned_lease_tool_types_match_the_codex_tool_spec() {
         // A codex update that adds a tool type fails here, so the type is
-        // allowed on the platform key, or kept off it, on purpose.
+        // allowed on the platform key, or kept off it, on purpose: every
+        // codex type is either allowed or a hosted type the platform drops.
         const TOOL_SPEC: &str = include_str!(concat!(
             env!("CARGO_MANIFEST_DIR"),
             "/../../codex/codex-rs/tools/src/tool_spec.rs"
@@ -3350,17 +3389,24 @@ mod tests {
             })
             .collect::<Vec<_>>();
         codex_types.sort_unstable();
-        let mut allowed = PINNED_LEASE_TOOL_TYPES.to_vec();
-        allowed.sort_unstable();
-        assert_eq!(codex_types, allowed);
+        assert!(
+            PINNED_LEASE_TOOL_TYPES
+                .iter()
+                .all(|allowed| !PLATFORM_DROPPED_TOOL_TYPES.contains(allowed)),
+            "a type is either allowed or dropped"
+        );
+        let mut accounted = PINNED_LEASE_TOOL_TYPES.to_vec();
+        accounted.extend(PLATFORM_DROPPED_TOOL_TYPES);
+        accounted.sort_unstable();
+        assert_eq!(codex_types, accounted);
     }
 
     #[test]
-    fn pinned_lease_forwards_only_the_tool_types_codex_emits() {
+    fn pinned_lease_forwards_the_codex_tool_types_except_hosted_ones() {
         // One entry per codex ToolSpec variant, shaped as codex serialises it.
         // A property named `model` inside a function's schema is an argument,
         // not the tool's own model.
-        let codex_tools = vec![
+        let codex_client_tools = vec![
             json!({
                 "type": "function",
                 "name": "exec_command",
@@ -3395,14 +3441,22 @@ mod tests {
                 "description": "Search deferred tools.",
                 "parameters": { "type": "object", "properties": {} }
             }),
-            json!({ "type": "web_search", "external_web_access": true }),
         ];
+        let mut codex_tools = codex_client_tools.clone();
+        codex_tools.push(json!({ "type": "web_search", "external_web_access": true }));
         let (kept, dropped) = tools_for_pinned_lease(&codex_tools, "tools");
         assert_eq!(
-            kept, codex_tools,
-            "every tool codex emits goes upstream as is"
+            kept, codex_client_tools,
+            "every client tool codex emits goes upstream as is"
         );
-        assert!(dropped.is_empty());
+        assert_eq!(
+            dropped
+                .iter()
+                .map(|tool| (tool.carrier, tool.tool_type.as_str(), tool.reason))
+                .collect::<Vec<_>>(),
+            vec![("tools", "web_search", "hosted")],
+            "hosted web search stays off the platform key"
+        );
 
         let hand_built = vec![
             json!({ "type": "image_generation", "model": "gpt-image-1" }),
@@ -3504,6 +3558,59 @@ mod tests {
     }
 
     #[test]
+    fn pinned_lease_drops_server_executed_tool_search() {
+        // Codex runs its tool search on the client. A tool search with any
+        // other execution, or none, asks OpenAI to run it on the platform
+        // key, in `tools`, in a tool-carrying input item or in a namespace.
+        let tool_search = |execution: Option<&str>| {
+            let mut tool = json!({
+                "type": "tool_search",
+                "description": "Search deferred tools.",
+                "parameters": { "type": "object", "properties": {} }
+            });
+            if let Some(execution) = execution {
+                tool["execution"] = json!(execution);
+            }
+            tool
+        };
+        let client = tool_search(Some("client"));
+        let tools = vec![
+            client.clone(),
+            tool_search(Some("server")),
+            tool_search(Some("Client")),
+            tool_search(None),
+            json!({ "type": "namespace", "name": "n", "tools": [tool_search(Some("server"))] }),
+        ];
+        let (kept, dropped) = tools_for_pinned_lease(&tools, "tools");
+        assert_eq!(kept, vec![client.clone()]);
+        assert_eq!(
+            dropped
+                .iter()
+                .map(|tool| (tool.carrier, tool.tool_type.as_str(), tool.reason))
+                .collect::<Vec<_>>(),
+            vec![
+                ("tools", "tool_search", "hosted"),
+                ("tools", "tool_search", "hosted"),
+                ("tools", "tool_search", "hosted"),
+                ("tools", "namespace", "member"),
+            ]
+        );
+
+        let input = vec![json!({
+            "type": "additional_tools",
+            "role": "developer",
+            "tools": [client.clone(), tool_search(Some("server"))]
+        })];
+        let (kept, dropped) = input_items_for_pinned_lease(&input);
+        assert_eq!(
+            kept.into_owned(),
+            vec![json!({ "type": "additional_tools", "role": "developer", "tools": [client] })]
+        );
+        assert_eq!(dropped.len(), 1);
+        assert_eq!(dropped[0].reason, "hosted");
+    }
+
+    #[test]
     fn a_drop_summary_is_one_bounded_record_however_many_tools_drop() {
         let drop = |carrier, tool_type: &str, reason| DroppedTool {
             carrier,
@@ -3583,75 +3690,8 @@ mod tests {
     }
 
     #[test]
-    fn dynamic_lease_target_leases_the_claimed_credential_first() {
-        // A BYOC token leases its own id whether or not it carries a run_id.
-        let claims = controller_claims(Some("run-1"), Some("cred-1"));
-        assert_eq!(
-            dynamic_lease_target(Some(&claims)).expect("claimed credential"),
-            ("cred-1", "claim")
-        );
-        let claims = controller_claims(None, Some("cred-1"));
-        assert_eq!(
-            dynamic_lease_target(Some(&claims)).expect("claimed credential"),
-            ("cred-1", "claim")
-        );
-    }
-
-    #[test]
-    fn dynamic_lease_target_falls_back_to_the_managed_credential_for_job_tokens() {
-        // A dispatch job token: run_id set, no credential (the managed lane).
-        let claims = controller_claims(Some("run-1"), None);
-        assert_eq!(
-            dynamic_lease_target(Some(&claims)).expect("managed fallback"),
-            (MANAGED_AI_CREDENTIAL_ID, "managed")
-        );
-        // A blank credential_id is no credential.
-        let claims = controller_claims(Some("run-1"), Some("   "));
-        assert_eq!(
-            dynamic_lease_target(Some(&claims)).expect("managed fallback"),
-            (MANAGED_AI_CREDENTIAL_ID, "managed")
-        );
-    }
-
-    #[test]
-    fn dynamic_lease_target_rejects_credential_less_tokens_without_a_run_id() {
-        // The agent-login and runtime-register envelopes: no run_id, no
-        // credential. They must keep the exact pre-existing rejection and
-        // never reach the managed lease.
-        for claims in [
-            controller_claims(None, None),
-            controller_claims(Some("   "), None),
-            controller_claims(None, Some("")),
-        ] {
-            let error = dynamic_lease_target(Some(&claims)).expect_err("no managed fallback");
-            assert_eq!(error.status, StatusCode::UNAUTHORIZED);
-            assert_eq!(error.message, BYOC_REJECTION);
-        }
-        // No claims at all (controller auth not required) is not a managed turn.
-        let error = dynamic_lease_target(None).expect_err("no managed fallback");
-        assert_eq!(error.status, StatusCode::UNAUTHORIZED);
-        assert_eq!(error.message, BYOC_REJECTION);
-        assert!(credential_id_from_claims(None).is_none());
-        assert!(run_id_from_claims(None).is_none());
-    }
-
-    #[test]
-    fn proxy_auth_mode_is_managed_only_for_credential_less_tokens() {
-        let mut claims = controller_claims(None, None);
-        assert_eq!(proxy_auth_mode(None), "managed");
-        assert_eq!(proxy_auth_mode(Some(&claims)), "managed");
-        claims.credential_id = Some("   ".to_string());
-        assert_eq!(proxy_auth_mode(Some(&claims)), "managed");
-        claims.credential_id = Some("cred-1".to_string());
-        assert_eq!(proxy_auth_mode(Some(&claims)), "byoc");
-    }
-
-    #[test]
     fn managed_lease_failure_keeps_the_byoc_rejection_prefix() {
-        let error = dynamic_lease_error(
-            "managed",
-            anyhow!("controller credentials returned 404 Not Found"),
-        );
+        let error = managed_lease_error(anyhow!("controller credentials returned 404 Not Found"));
         assert_eq!(error.status, StatusCode::UNAUTHORIZED);
         assert!(
             error
@@ -3661,10 +3701,6 @@ mod tests {
             error.message
         );
         assert!(error.message.contains("404 Not Found"));
-
-        let error = dynamic_lease_error("claim", anyhow!("controller credential lease failed"));
-        assert_eq!(error.status, StatusCode::UNAUTHORIZED);
-        assert_eq!(error.message, "controller credential lease failed");
     }
 
     #[test]

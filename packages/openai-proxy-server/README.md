@@ -126,21 +126,28 @@ request on that lease as the pinned model, whatever model the request names, and
 `credential lease pins the model` with the requested and sent ids when they differ. Speech and
 transcription requests name an audio model the pinned model cannot replace, so both routes
 answer 400 on a pinned lease without contacting the provider. Client tools on a pinned lease are
-limited to the types codex emits (`function`, `custom`, `namespace`, `tool_search`,
-`web_search`), both in `tools` and in the input items that carry tool definitions
+limited to codex's client tool types (`function`, `custom`, `namespace`, and `tool_search` with
+`execution: "client"`), both in `tools` and in the input items that carry tool definitions
 (`additional_tools`, where codex lists its tools for Responses Lite models such as the managed
 one, and `tool_search_output`). Before the request goes upstream the proxy drops any other type,
 any tool that names its own `model`, and a namespace holding either, and logs
-`credential lease drops a client tool` with the tool type. Leases without `pinnedModel`
-(bring-your-own API keys, ChatGPT logins, and leases from a controller that predates the field)
-keep the rules above and forward client tools unchanged.
+`credential lease drops client tools` with a count per tool type and reason. Hosted tools, which
+OpenAI runs and bills per call, are off on the platform key: `web_search`, which codex sends, and
+a tool search with any other `execution` are dropped with reason `hosted`, and a drift test fails
+when codex adds a tool type that is neither allowed nor dropped on purpose. Leases without
+`pinnedModel` (bring-your-own API keys, ChatGPT logins, and leases from a controller that predates
+the field) keep the rules above and forward client tools unchanged, hosted ones included.
 
-Static proxy credentials (`OPENAI_API_KEY` or `auth.json`) serve every request whose token names
-no credential, including managed runs: controller-signed job tokens with a `run_id` and no
+With controller integration, static proxy credentials (`OPENAI_API_KEY` or `auth.json`) serve
+the platform lane: managed runs, whose controller-signed job tokens carry a `run_id` and no
 `credential_id`. Set `PROXY_PINNED_MODEL` to the controller's `MANAGED_AI_MODEL_ID` and those
-runs get exactly the pinned-lease policy above. Other requests on static credentials (standalone
-mode without a controller, and tokens without a `run_id`) and tokens that name a credential,
-which the proxy leases from the controller, are never pinned by it. Without the setting managed
+runs get exactly the pinned-lease policy above. A controller-signed token with neither a
+`credential_id` nor a `run_id` (the agent-login and runtime-register session envelopes) is not a
+turn, and both backends refuse it with 401 `proxy token missing credential_id for BYOC request`
+instead of serving it on the operator's key (a proxy with `PROXY_REQUIRE_CREDENTIAL_CLAIM` refuses
+every credential-less token earlier, with `proxy token missing valid credential_id claim`). Tokens that name a credential are leased from the
+controller and never pinned by the setting. In standalone mode, without a controller, the proxy
+checks no token and its static credentials serve every request unpinned. Without the setting managed
 runs keep the rules above, and the first one logs a warning that the managed model is not pinned.
 A proxy without static credentials ignores the setting. The runtime compose files
 (`docker/docker-compose.runtime.provider.yml` and `docker/docker-compose.runtime.yml`) set it on
@@ -148,6 +155,22 @@ the sidecar from the environment that runs `docker compose`, which on a provider
 provider service's: `PROXY_PINNED_MODEL` there, or else `MANAGED_AI_MODEL_ID`; an explicitly
 empty `PROXY_PINNED_MODEL` means no pin. That entry overrides the sidecar's env file, so a value
 in `proxy-credential-lease.env` has no effect.
+
+### Platform lane health report
+
+`/healthz` and `/readyz` carry a `platformLane` object that says how the proxy serves managed runs
+(the platform lane, on the operator's key). The controller reads it from its own proxy at startup
+and logs it.
+
+| Field | Meaning |
+| --- | --- |
+| `servedBy` | `controller_lease` (no static credentials: the controller's managed lease), `static` (the proxy's static credentials), or `refused` (`PROXY_REQUIRE_CREDENTIAL_CLAIM` turns away every credential-less token) |
+| `pinnedModel` | The model static credentials serve managed runs as (`PROXY_PINNED_MODEL`). `null` for a controller lease, which carries its own pin, and in standalone mode, where no token marks a managed run |
+| `staticCredentialKind` | `api_key`, `chatgpt` or `gemini_code_assist` when `servedBy` is `static`, else `null` |
+| `sessionTokensRefused` | `true` with controller integration: credential-less tokens without a `run_id` get 401 |
+| `reportsUsage` | Whether the proxy reports platform-lane usage to the controller; `false` today |
+| `controllerMeteringProtocol` | The controller's usage metering protocol as the proxy last read it; `null` today |
+| `outputCeilingSource` | Where the output token ceiling sent upstream comes from; `null` today, no ceiling is sent |
 
 ### Upstream failures and retries
 
