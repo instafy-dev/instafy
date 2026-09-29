@@ -58,14 +58,16 @@ nothing and is not billed; the runtime's own project keeps paying for it.
   without metadata under the same shared lease keeps the stored metadata. A
   re-attach after a relaunch creates a new lease that holds only the metadata
   it sends.
-- A tenant lease ends with the shared lease it attached under: releasing
-  that lease, as a stop does, or failing its launch releases the tenant
-  leases in the same transaction. A re-attach reuses the project's tenant
-  lease only under the runtime's current shared lease; after a relaunch it
-  creates a new one. In an existing database, tenant leases whose shared
-  lease was released before this rule existed stay unreleased. No migration
-  closes them: the attach never reuses them, and no reader treats a tenant
-  lease as live.
+- A tenant lease ends with the shared lease it attached under: releasing that
+  lease, as a stop does, or failing its launch releases the tenant leases in
+  the same transaction. A dispatch reconnect that forces a new lease ends
+  tenant attachments too: it stops the runtime and relaunches it under an
+  `exclusive` lease, which tenants cannot attach to. A re-attach reuses the
+  project's tenant lease only under the runtime's current shared lease; after
+  a relaunch it creates a new one. In an existing database, tenant leases
+  whose shared lease was released before this rule existed stay unreleased. No
+  migration closes them: the attach never reuses them, and no reader treats a
+  tenant lease as live.
 - The attach leaves the runtime's origin alone. The response's `origin` is
   the host project's origin for its shared lease, as it is, or absent when
   there is none; `originMode`, `originProtocols` and `originMetadata` are
