@@ -4,7 +4,11 @@
 -- client reads these tables.
 --
 -- Each foreign key to agent_jobs below holds a SHARE ROW EXCLUSIVE lock on
--- agent_jobs until commit. This migration takes no lock on org_credit_ledger:
+-- agent_jobs until commit. The first table declares its foreign keys parent
+-- first (organizations, projects, then agent_jobs), the order an org or
+-- project delete cascades in, so this migration waits behind such a delete
+-- instead of deadlocking with it; the later tables reuse locks already held.
+-- This migration takes no lock on org_credit_ledger:
 -- the ledger changes are part 1,
 -- 20260929100000_managed_ai_metering_ledger.sql, which commits first in its own
 -- transaction for the lock-order reason given there.
@@ -14,7 +18,7 @@ set local lock_timeout = '5s';
 -- without a row has no platform lane. The billing fields are stamped when the
 -- row is created and never change; the counters are the job's running totals.
 create table if not exists public.ai_usage_jobs (
-  job_id uuid primary key references public.agent_jobs(id) on delete cascade,
+  job_id uuid primary key,
   org_id uuid not null references public.organizations(id) on delete cascade,
   project_id uuid not null references public.projects(id) on delete cascade,
   run_id uuid,
@@ -42,7 +46,9 @@ create table if not exists public.ai_usage_jobs (
   last_platform_lease_at timestamptz,
   last_settled_at timestamptz,
   created_at timestamptz not null default now(),
-  updated_at timestamptz not null default now()
+  updated_at timestamptz not null default now(),
+  -- Declared after the column references so agent_jobs is locked last.
+  foreign key (job_id) references public.agent_jobs(id) on delete cascade
 );
 create index if not exists ai_usage_jobs_prompt_idx on public.ai_usage_jobs(prompt_id);
 create index if not exists ai_usage_jobs_run_idx on public.ai_usage_jobs(run_id);
