@@ -5087,6 +5087,50 @@ mod tests {
     }
 
     #[test]
+    fn turn_usage_is_absent_when_the_turn_reported_none() {
+        // The runtime leaves `usage` out of a turn that reported none and keeps only the
+        // thread's running total. That must read as no usage, so the flat reserve stands.
+        let thread_total =
+            json!({"input_tokens":150_000,"cached_input_tokens":135_000,"output_tokens":3_000});
+        let unreported = json!([{"kind":"codex/run-log","events":[
+            {"type":"turn.completed","threadTotalUsage":thread_total}
+        ]}]);
+        assert!(extract_turn_usage_from_artifacts(&unreported).is_none());
+
+        let reported = json!([{"kind":"codex/run-log","events":[
+            {"type":"turn.completed","usageScope":"turn","threadTotalUsage":thread_total,
+                "usage":{"input_tokens":50_000,"cached_input_tokens":45_000,"output_tokens":1_000}}
+        ]}]);
+        let usage = extract_turn_usage_from_artifacts(&reported).expect("the turn's usage");
+        assert_eq!(
+            (
+                usage.input_tokens,
+                usage.cached_input_tokens,
+                usage.output_tokens
+            ),
+            (50_000, 45_000, 1_000)
+        );
+
+        // A zero usage is not the same: it prices to nothing and refunds the whole reserve.
+        let config = crate::tests::build_app_config(
+            crate::tests::test_origin_private_key(),
+            crate::tests::test_origin_public_key(),
+            "test-key",
+        );
+        let zero = crate::credits::calculate_managed_ai_usage_charge(
+            &config,
+            ManagedAiTokenUsage {
+                input_tokens: 0,
+                cached_input_tokens: 0,
+                output_tokens: 0,
+            },
+        );
+        assert!(zero.reserve_units > 0);
+        assert_eq!(zero.charged_units, 0);
+        assert_eq!(zero.adjustment_units, -zero.reserve_units);
+    }
+
+    #[test]
     fn completion_silences_only_successful_explicit_declines() {
         assert!(completion_is_successful_explicit_decline(
             "succeeded",
