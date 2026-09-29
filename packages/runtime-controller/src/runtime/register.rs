@@ -91,11 +91,20 @@ async fn lock_runtime_registration_identity(
     presented_self_hosted_owner: Option<Uuid>,
 ) -> Result<RuntimeRegistrationIdentity, (StatusCode, Json<ApiError>)> {
     let lease_hint = if let Some(lease_id) = lease_id {
+        // A tenant lease registers nothing: it attaches a project to a
+        // runtime that the runtime's own project registers under its shared
+        // lease. It is answered as a lease that does not exist, before any
+        // lock is taken. The runtime lock below covers only a runtime of the
+        // request's project, and a tenant lease usually names another
+        // project's runtime: locking the tenant lease without that runtime
+        // could deadlock with a stop of it, which locks the runtime and then
+        // its tenant leases.
         let row = transaction
             .query_opt(
                 "select project_id, runtime_id
                  from runtime_leases
-                 where id = $1",
+                 where id = $1
+                   and scope <> 'tenant'",
                 &[&lease_id],
             )
             .await

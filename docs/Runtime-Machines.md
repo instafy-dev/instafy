@@ -73,6 +73,9 @@ nothing and is not billed; the runtime's own project keeps paying for it.
 - Launch-generation readers (requeue relaunch, dispatch reconnect, provider
   route rotation, operator hosted hours) ignore tenant leases, and a
   runtime's status shows only its own project's origin.
+- A tenant lease registers no runtime. `POST /runtime/register` answers a
+  tenant lease's id with the `404` for a lease that does not exist, before
+  it locks anything.
 
 ## Idle stop (pause/wake lifecycle)
 

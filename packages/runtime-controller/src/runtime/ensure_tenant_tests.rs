@@ -242,12 +242,40 @@ impl TenantAttachFixture {
         bearer: &str,
         request: JsonValue,
     ) -> anyhow::Result<(StatusCode, JsonValue)> {
+        self.post(bearer, "/runtime/ensure", request).await
+    }
+
+    /// `POST /runtime/register` for `project_id` under `lease_id`.
+    async fn register(
+        &self,
+        bearer: &str,
+        project_id: Uuid,
+        lease_id: Uuid,
+    ) -> anyhow::Result<(StatusCode, JsonValue)> {
+        self.post(
+            bearer,
+            "/runtime/register",
+            json!({
+                "projectId": project_id.to_string(),
+                "leaseId": lease_id.to_string(),
+                "provider": OPEN_PROVIDER,
+            }),
+        )
+        .await
+    }
+
+    async fn post(
+        &self,
+        bearer: &str,
+        uri: &str,
+        request: JsonValue,
+    ) -> anyhow::Result<(StatusCode, JsonValue)> {
         let response = crate::runtime::router()
             .with_state(self.state.clone())
             .oneshot(
                 Request::builder()
                     .method("POST")
-                    .uri("/runtime/ensure")
+                    .uri(uri)
                     .header("authorization", format!("Bearer {bearer}"))
                     .header("content-type", "application/json")
                     .body(Body::from(request.to_string()))?,
@@ -1175,6 +1203,81 @@ async fn requeue_metadata_ignores_newer_tenant_leases() -> anyhow::Result<()> {
                 metadata,
                 Some(json!({ "source": "host", "sizeId": "standard" })),
                 "the runtime's own launch, not a tenant's"
+            );
+            Ok(())
+        })
+        .await
+}
+
+/// A tenant lease registers no runtime: `POST /runtime/register` answers it
+/// as a lease that does not exist, before taking any lock. A stop of the host
+/// runtime locks the runtime and then its tenant leases, so a registration
+/// holding a tenant lease while it waits for that runtime could deadlock with
+/// it. Here the registration is answered while another transaction holds the
+/// host runtime, as a stop does.
+#[tokio::test]
+async fn tenant_lease_registration_is_refused_before_any_lock() -> anyhow::Result<()> {
+    use tokio::time::timeout;
+
+    let fixture = TenantAttachFixture::setup("tenant-lease-register").await?;
+    fixture
+        .run(async {
+            let fixture = &fixture;
+            let (status, body) = fixture
+                .attach(
+                    &fixture.user_token(fixture.host_writer)?,
+                    fixture.same_org_tenant_project_id,
+                    fixture.runtime_id,
+                    json!({ "source": "tenant-attach-test" }),
+                )
+                .await?;
+            assert_eq!(status, StatusCode::OK, "{body}");
+            let tenant_lease_id = body["leaseId"]
+                .as_str()
+                .and_then(|value| Uuid::parse_str(value).ok())
+                .ok_or_else(|| anyhow::anyhow!("no tenant lease id: {body}"))?;
+            let tenant_lease_before = fixture.lease_state(tenant_lease_id).await?;
+
+            let (missing_status, missing_body) = fixture
+                .register(
+                    SERVICE_ROLE_TOKEN,
+                    fixture.same_org_tenant_project_id,
+                    Uuid::new_v4(),
+                )
+                .await?;
+            assert_eq!(missing_status, StatusCode::NOT_FOUND, "{missing_body}");
+
+            // The host runtime's row, locked and changed but not committed,
+            // as a stop leaves it before it ends the tenant leases.
+            let mut holder_connection = fixture.pool.get().await?;
+            let holder = holder_connection.transaction().await?;
+            holder
+                .execute(
+                    "update runtimes set updated_at = now() where id = $1",
+                    &[&fixture.runtime_id],
+                )
+                .await?;
+
+            let (status, body) = timeout(
+                Duration::from_secs(10),
+                fixture.register(
+                    SERVICE_ROLE_TOKEN,
+                    fixture.same_org_tenant_project_id,
+                    tenant_lease_id,
+                ),
+            )
+            .await
+            .map_err(|_| anyhow::anyhow!("the registration waited for the host runtime"))??;
+            holder.rollback().await?;
+            assert_eq!(status, missing_status, "{body}");
+            assert_eq!(
+                body, missing_body,
+                "the same answer as a lease that does not exist"
+            );
+            assert_eq!(
+                fixture.lease_state(tenant_lease_id).await?,
+                tenant_lease_before,
+                "a refused registration leaves the tenant lease as it is"
             );
             Ok(())
         })
