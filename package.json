@@ -109,7 +109,7 @@
     "test:e2e:status": "node scripts/test-e2e.mjs status",
     "test:e2e:stop": "node scripts/test-e2e.mjs stop",
     "test:e2e:supabase": "node scripts/test-e2e-supabase.mjs",
-    "test:auth:email": "node scripts/auth-email-smoke.mjs",
+    "test:auth:email": "node --test scripts/auth-email-templates.test.mjs && node scripts/auth-email-smoke.mjs",
     "test:live": "node scripts/test-live.mjs",
     "deepseek:smoke": "node scripts/deepseek-smoke.mjs",
     "zai:smoke": "node scripts/zai-smoke.mjs",

@@ -75,7 +75,7 @@ describe("LoginPage entry handoff", () => {
       .toBe("true");
     expect(container.textContent).not.toContain("Instafy");
     expect(container.querySelector('input[type="email"]')).toBeNull();
-    expect(container.textContent).not.toContain("Log in or sign up");
+    expect(container.textContent).not.toContain("Log in to Instafy");
 
     auth.loading = false;
     await render();
@@ -83,7 +83,7 @@ describe("LoginPage entry handoff", () => {
     expect(container.querySelector('[role="status"]')).toBeNull();
     expect(container.querySelector('[data-octo-motion="idle"]')).not.toBeNull();
     expect(container.querySelector("animate, animateTransform")).toBeNull();
-    expect(container.textContent).toContain("Log in or sign up");
+    expect(container.textContent).toContain("Log in to Instafy");
     expect(document.activeElement).toBe(container.querySelector('input[type="email"]'));
   });
 

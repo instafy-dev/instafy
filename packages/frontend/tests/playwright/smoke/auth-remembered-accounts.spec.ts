@@ -25,7 +25,7 @@ test.describe("remembered login accounts", () => {
     await page.goto("/login", { waitUntil: "domcontentloaded" });
 
     await expect(page.getByRole("heading", { name: /log back in/i })).toBeVisible();
-    await expect(page.getByText("Continue with GitHub")).toBeVisible();
+    await expect(page.getByRole("button", { name: "Continue with GitHub as github-user@example.com" })).toBeVisible();
 
     await page.getByRole("button", { name: /continue with password as password-user@example.com/i }).click();
     await expect(page.getByRole("heading", { name: /enter your password/i })).toBeVisible();
