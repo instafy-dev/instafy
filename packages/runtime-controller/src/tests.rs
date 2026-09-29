@@ -244,6 +244,7 @@ pub(crate) fn build_app_config(private_key: &str, public_key: &str, key_id: &str
         managed_ai_label: "Instafy AI".to_string(),
         managed_ai_credit_burn_amount: 1,
         managed_ai_daily_prompt_limit: 20,
+        managed_ai_decline_waiver_units: 2,
         managed_ai_model_id: default_managed_ai_model_id().to_string(),
         managed_ai_model_label: default_managed_ai_model_label().to_string(),
         managed_ai_input_usd_micros_per_1k: DEFAULT_MANAGED_AI_INPUT_USD_MICROS_PER_1K,

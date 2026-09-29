@@ -3578,6 +3578,8 @@ mod tests {
             runtime_id: None,
             run_id: run_id.map(str::to_string),
             credential_id: credential_id.map(str::to_string),
+            job_id: None,
+            lease_attempt: None,
             agent_handle: None,
             agent_display_name: None,
             agent_description: None,

@@ -83,6 +83,8 @@ mod tests_managed_ai_refund;
 #[cfg(test)]
 mod tests_managed_credential;
 #[cfg(test)]
+mod tests_platform_job_record;
+#[cfg(test)]
 mod tests_runtime_stop_fence;
 mod tokens;
 mod tunnels;

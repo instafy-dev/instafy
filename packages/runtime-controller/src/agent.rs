@@ -22,7 +22,8 @@ use crate::active_job_auth::{
     authorize_active_job_if_scoped, ActiveJobAuthorization, ActiveJobProjectAccess,
 };
 use crate::auth::{
-    authenticate_request, issue_agent_token_for_runtime, issue_proxy_envelope, RequestContext,
+    authenticate_request, issue_agent_token_for_runtime, issue_proxy_envelope, ProxyJobBinding,
+    RequestContext,
 };
 use crate::conversations::{
     ensure_conversation_access, load_conversation_record, map_conversation_message_row,
@@ -696,6 +697,7 @@ pub(crate) async fn agent_login(
         None,
         None,
         None,
+        None,
     );
 
     info!(
@@ -913,16 +915,32 @@ pub(crate) async fn agent_lease(
                     extract_multi_agent_group_id_from_job_payload(&job.payload);
                 let (agent_handle, agent_display_name, agent_description) =
                     extract_agent_prompt_identity_from_job_payload(&job.payload);
+                // The token names this lease attempt, and a platform job's
+                // record keeps its hash, so metering accepts only the token
+                // minted here for this attempt.
                 job.proxy = issue_proxy_envelope(
                     &state.config,
                     &project_id,
                     &runtime_id,
                     job.run_id.as_ref(),
                     job.credential_id.as_ref(),
+                    Some(ProxyJobBinding {
+                        job_id: job.id,
+                        lease_attempt: job.lease_attempts,
+                    }),
                     agent_handle.as_deref(),
                     agent_display_name.as_deref(),
                     agent_description.as_deref(),
                 );
+                if let Some(proxy) = job.proxy.as_ref() {
+                    crate::ai_metering::job_record::bind_job_token(
+                        &transaction,
+                        &job.id,
+                        job.lease_attempts,
+                        &proxy.token,
+                    )
+                    .await?;
+                }
                 jobs.push(job);
                 if jobs.len() == 1 {
                     if is_runtime_spread_job {

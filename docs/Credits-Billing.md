@@ -223,6 +223,31 @@ under a lock on the team's balance row:
   moving the balance, also under `ON CONFLICT DO NOTHING` and between concurrent writers. Rows
   without a project are never deduplicated, as in the ledger's unique index.
 
+### Usage metering (record-only)
+The controller is starting to meter managed AI from the proxy's reports of exact upstream usage,
+beside the reserve-and-reconcile billing above, which still decides every charge. Today it only
+records which jobs run on the platform key and which tokens they hold:
+- Dispatch writes one `ai_usage_jobs` row for every platform job, in the transaction that enqueues
+  it: an agent job whose intent needs AI (not a `terminal_command`) and whose target has no
+  credential. Service-role dispatches such as plan workers, lead continuations and queued sends
+  without a user get one too. BYO jobs, including the BYO targets of a mixed dispatch, and
+  terminal commands get none, so they have no platform lane to meter.
+- The row is the job's billing identity and is written once. Its `billing_mode` is `record_only`:
+  nothing is posted to the ledger from it. Its `decline_waiver_units` is
+  `MANAGED_AI_DECLINE_WAIVER_UNITS` (default `2`) for a skill-mode ambient evaluation, as the
+  dispatch's own participation decision classified it, and `0` for every other job, scheduled
+  automations included. It is never read from the job payload, which a client or a later decline
+  can change.
+- Every job token the job lease mints now names its job and lease attempt (`job_id`,
+  `lease_attempt`), and the lease records the token's SHA-256 in the platform job's row under that
+  attempt, in the lease transaction. The metering checks still to come (the managed-key lease and
+  the usage report) accept only a token recorded that way, so even a holder of the proxy signing
+  secret can use only tokens the controller minted for that job attempt. The controller's other
+  proxy tokens (the agent-login and runtime-register envelopes, and those for its own credential
+  checks, inline completions and conversation titles) carry neither claim. Proxies ignore both
+  claims for now and accept tokens with or without them, so the controller and the proxy can be
+  updated in either order.
+
 ## Controller Endpoints
 - `GET /credits/status` — current team credit balance/limit.
 - `GET /credits/ledger` — recent burn/refill events.
