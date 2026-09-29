@@ -18,7 +18,7 @@ Rust binary that runs inside the hosted runtime container. Responsibilities:
 
 - The agent now embeds `codex-core` + `codex-exec` directly. We run conversations in-process, collect streaming events via the JSONL event processor, and surface the final assistant JSON without spawning the CLI.
 - Plan / approval flows are unimplemented placeholders and will be wired once Codex events feed into progress reporting.
-- Credits are still handled by the controller/proxy; the runtime will forward proxy metadata when those APIs land.
+- Credits are handled by the controller; the runtime will forward proxy metadata when those APIs land.
 
 ## Runtime images (base vs webdev)
 
@@ -68,7 +68,7 @@ updated when the human running the workflow explicitly requests it.
   - `RATHOLE_USE_SUBCOMMANDS` — set to `1` to force legacy `rathole client -c` CLI (defaults to auto-detect/new style).
   - Hosted runtime images include `rathole` in `/usr/local/bin` so self-hosted tunnels work out of the box.
 
-Proxy routing (burn/refund) still relies on the shared runtime proxy. Set the proxy variables documented in `docs/Architecture.md` to steer Codex traffic through it.
+Proxy routing still relies on the shared runtime proxy. Set the proxy variables documented in `docs/Architecture.md` to steer Codex traffic through it.
 
 Ordinary proxy-backed turns use one retry owner: Codex may recover a failed sampling step
 once in the same session (at most two requests to the proxy for that step). Nested HTTP retries and

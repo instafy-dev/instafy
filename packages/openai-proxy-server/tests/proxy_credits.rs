@@ -1,21 +1,21 @@
+use std::io::Read;
 use std::net::SocketAddr;
-use std::sync::Arc;
+use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::time::Duration;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
-use anyhow::{Context, Result};
-use axum::body::Body;
-use axum::extract::{Path, State};
+use anyhow::{Context, Result, bail};
+use axum::extract::{Path, Request, State};
 use axum::http::{HeaderMap, StatusCode};
-use axum::response::IntoResponse;
+use axum::middleware::{self, Next};
+use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use jsonwebtoken::{EncodingKey, Header};
-use prost::Message;
-use runtime_contracts::{CreditEventRequest, CreditEventResponse};
 use serde_json::json;
 use serial_test::serial;
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
 
 use openai_proxy_server::auth::Credentials;
@@ -23,13 +23,16 @@ use openai_proxy_server::client::DEFAULT_MODEL;
 use openai_proxy_server::proxy::run_proxy_with_shutdown;
 use openai_proxy_server::proxy_auth::ProxyClaims;
 
+/// The proxy once debited PROXY_CREDIT_BURN_AMOUNT through the controller's
+/// `/credits` route before every request and refunded it on an upstream
+/// failure. Nothing may reach that route now, even from a sidecar whose
+/// environment still sets the amount, and the proxy says once that it ignores it.
 #[tokio::test]
 #[serial]
-async fn proxy_emits_credit_burn_on_success() -> Result<()> {
+async fn no_credit_burn_request_is_sent_even_when_amount_configured() -> Result<()> {
     let mut controller = spawn_controller().await?;
-    let openai = spawn_openai(OpenAiMode::Success).await?;
-
-    let env_guard = EnvGuard::set(&[
+    let openai = spawn_openai(OpenAiMode::FailPromptsContaining("fail upstream")).await?;
+    let proxy = spawn_proxy_process(&[
         ("CONTROLLER_BASE_URL", format_http_base(&controller.addr())),
         ("CONTROLLER_INTERNAL_TOKEN", "controller-secret".to_string()),
         (
@@ -38,97 +41,102 @@ async fn proxy_emits_credit_burn_on_success() -> Result<()> {
         ),
         ("PROXY_SIGNING_SECRET", "test-signing".to_string()),
         ("PROXY_CREDIT_BURN_AMOUNT", "5".to_string()),
+        ("OPENAI_API_KEY", "test-api-key".to_string()),
         ("CODEX_OPENAI_ENDPOINT", openai.endpoint()),
-    ]);
+    ])
+    .await?;
+    let client = reqwest::Client::new();
+    let token = issue_proxy_token("test-signing");
 
-    let credentials = Credentials::ApiKey {
-        key: "test-api-key".to_string(),
-        endpoint: None,
-        default_model: None,
-    };
+    // A managed run served on the sidecar's static key, the lane the burn
+    // charged, on both routes.
+    let chat = send_proxy_request(proxy.addr, "test-signing").await?;
+    assert!(chat.status().is_success());
+    let responses = client
+        .post(format!("http://{}/v1/responses", proxy.addr))
+        .bearer_auth(&token)
+        .json(&json!({
+            "model": DEFAULT_MODEL,
+            "stream": false,
+            "input": "Say hello to the controller test."
+        }))
+        .send()
+        .await?;
+    assert!(responses.status().is_success());
 
-    let proxy = spawn_proxy(credentials).await?;
+    // An upstream failure, which the burn followed with a refund.
+    let failed = client
+        .post(format!("http://{}/v1/chat/completions", proxy.addr))
+        .bearer_auth(&token)
+        .json(&json!({
+            "model": DEFAULT_MODEL,
+            "stream": false,
+            "messages": [{"role": "user", "content": "Please fail upstream."}]
+        }))
+        .send()
+        .await?;
+    assert_eq!(failed.status(), StatusCode::BAD_GATEWAY);
 
-    let response = send_proxy_request(proxy.addr, "test-signing").await?;
-    assert!(response.status().is_success());
+    let stderr = proxy.stop();
+    let credit_requests = controller
+        .requests()
+        .into_iter()
+        .filter(|request| request.ends_with(" /credits"))
+        .collect::<Vec<_>>();
+    assert!(
+        credit_requests.is_empty(),
+        "the proxy must not send credit events: {credit_requests:?}"
+    );
+    assert_eq!(
+        stderr
+            .matches("PROXY_CREDIT_BURN_AMOUNT is ignored")
+            .count(),
+        1,
+        "expected one ignored-setting warning, got stderr: {stderr}"
+    );
 
-    let burn = controller
-        .expect_event(Duration::from_secs(2))
-        .await
-        .context("missing burn event")?;
-
-    assert_eq!(burn.action, "burn");
-    assert_eq!(burn.project_id, "project-123");
-    assert_eq!(burn.runtime_id, "runtime-456");
-    assert_eq!(burn.run_id, "run-789");
-    assert_eq!(burn.provider, DEFAULT_MODEL);
-    assert_eq!(burn.amount, 5);
-
-    assert!(controller.try_event().is_none(), "unexpected extra events");
-
-    proxy.shutdown().await;
     controller.shutdown().await;
     openai.shutdown().await;
-    drop(env_guard);
-
     Ok(())
 }
 
+/// A standalone proxy, with no controller to debit, still says once that it
+/// ignores the amount, and serves requests without repeating the warning.
 #[tokio::test]
 #[serial]
-async fn proxy_refunds_credits_on_failure() -> Result<()> {
-    let mut controller = spawn_controller().await?;
-    let openai = spawn_openai(OpenAiMode::Failure).await?;
-
-    let env_guard = EnvGuard::set(&[
-        ("CONTROLLER_BASE_URL", format_http_base(&controller.addr())),
-        ("CONTROLLER_INTERNAL_TOKEN", "controller-secret".to_string()),
-        (
-            "PROXY_CREDENTIAL_LEASE_TOKEN",
-            "credential-lease-secret".to_string(),
-        ),
-        ("PROXY_SIGNING_SECRET", "test-signing".to_string()),
-        ("PROXY_CREDIT_BURN_AMOUNT", "4".to_string()),
+async fn standalone_proxy_warns_once_that_credit_burn_amount_is_ignored() -> Result<()> {
+    let openai = spawn_openai(OpenAiMode::SuccessWithBearer(
+        "Bearer test-api-key".to_string(),
+    ))
+    .await?;
+    let proxy = spawn_proxy_process(&[
+        ("PROXY_CREDIT_BURN_AMOUNT", "5".to_string()),
+        ("OPENAI_API_KEY", "test-api-key".to_string()),
         ("CODEX_OPENAI_ENDPOINT", openai.endpoint()),
-    ]);
+    ])
+    .await?;
 
-    let credentials = Credentials::ApiKey {
-        key: "test-api-key".to_string(),
-        endpoint: None,
-        default_model: None,
-    };
+    let response = reqwest::Client::new()
+        .post(format!("http://{}/v1/chat/completions", proxy.addr))
+        .json(&json!({
+            "model": DEFAULT_MODEL,
+            "stream": false,
+            "messages": [{"role": "user", "content": "Say hello without a controller."}]
+        }))
+        .send()
+        .await?;
+    assert!(response.status().is_success());
 
-    let proxy = spawn_proxy(credentials).await?;
-
-    let response = send_proxy_request(proxy.addr, "test-signing").await?;
-    assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
-
-    let burn = controller
-        .expect_event(Duration::from_secs(2))
-        .await
-        .context("missing burn event")?;
-    assert_eq!(burn.action, "burn");
-    assert_eq!(burn.amount, 4);
-
-    let refund = controller
-        .expect_event(Duration::from_secs(2))
-        .await
-        .context("missing refund event")?;
-    assert_eq!(refund.action, "refill");
-    assert_eq!(refund.amount, 4);
-    assert!(
-        refund.reason.contains("proxy upstream failure") || refund.reason.contains("proxy refund"),
-        "unexpected refund reason: {}",
-        refund.reason
+    let stderr = proxy.stop();
+    assert_eq!(
+        stderr
+            .matches("PROXY_CREDIT_BURN_AMOUNT is ignored")
+            .count(),
+        1,
+        "expected one ignored-setting warning, got stderr: {stderr}"
     );
 
-    assert!(controller.try_event().is_none(), "unexpected extra events");
-
-    proxy.shutdown().await;
-    controller.shutdown().await;
     openai.shutdown().await;
-    drop(env_guard);
-
     Ok(())
 }
 
@@ -159,10 +167,6 @@ async fn proxy_rejects_missing_auth_before_parsing_request_body() -> Result<()> 
         .send()
         .await?;
     assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
-    assert!(
-        controller.try_event().is_none(),
-        "unauthorized input must not emit credit events"
-    );
 
     proxy.shutdown().await;
     controller.shutdown().await;
@@ -297,10 +301,6 @@ async fn proxy_public_lane_rejects_non_byoc_or_non_run_scoped_tokens_before_body
         .send()
         .await?;
     assert_eq!(public_response.status(), StatusCode::UNAUTHORIZED);
-    assert!(
-        controller.try_event().is_none(),
-        "rejected public tokens must not emit credit events"
-    );
 
     proxy.shutdown().await;
     controller.shutdown().await;
@@ -358,10 +358,6 @@ async fn proxy_public_lane_uses_run_scoped_byoc_credential() -> Result<()> {
         .send()
         .await?;
     assert!(response.status().is_success());
-    assert!(
-        controller.try_event().is_none(),
-        "BYOC public requests must not emit managed-credit events"
-    );
 
     proxy.shutdown().await;
     controller.shutdown().await;
@@ -540,6 +536,87 @@ async fn spawn_proxy(credentials: Credentials) -> Result<ProxyHandle> {
     })
 }
 
+/// The real `proxy` binary with only `vars` in its environment, so its
+/// startup log can be read back.
+struct ProxyProcess {
+    addr: SocketAddr,
+    child: Option<Child>,
+    stderr: Option<std::thread::JoinHandle<String>>,
+}
+
+impl ProxyProcess {
+    /// Stops the proxy and returns everything it wrote to stderr.
+    fn stop(mut self) -> String {
+        if let Some(mut child) = self.child.take() {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+        self.stderr
+            .take()
+            .and_then(|reader| reader.join().ok())
+            .unwrap_or_default()
+    }
+}
+
+impl Drop for ProxyProcess {
+    fn drop(&mut self) {
+        if let Some(mut child) = self.child.take() {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+    }
+}
+
+async fn spawn_proxy_process(vars: &[(&str, String)]) -> Result<ProxyProcess> {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0")?;
+    let addr = listener.local_addr()?;
+    drop(listener);
+
+    let mut child = Command::new(env!("CARGO_BIN_EXE_proxy"))
+        .env_clear()
+        .env("CODEX_PROXY_ADDR", addr.to_string())
+        .envs(vars.iter().map(|(key, value)| (*key, value.as_str())))
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .context("failed to start the proxy binary")?;
+    let mut stderr = child.stderr.take().context("proxy stderr is piped")?;
+    let stderr = std::thread::spawn(move || {
+        let mut output = String::new();
+        let _ = stderr.read_to_string(&mut output);
+        output
+    });
+    let mut proxy = ProxyProcess {
+        addr,
+        child: Some(child),
+        stderr: Some(stderr),
+    };
+
+    let client = reqwest::Client::new();
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        let healthy = client
+            .get(format!("http://{addr}/healthz"))
+            .send()
+            .await
+            .is_ok_and(|response| response.status().is_success());
+        if healthy {
+            return Ok(proxy);
+        }
+        if let Some(status) = proxy
+            .child
+            .as_mut()
+            .and_then(|child| child.try_wait().ok().flatten())
+        {
+            bail!("proxy exited with {status}: {}", proxy.stop());
+        }
+        if Instant::now() > deadline {
+            bail!("proxy did not become healthy: {}", proxy.stop());
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
 struct EnvGuard(Vec<(String, Option<String>)>);
 
 impl EnvGuard {
@@ -572,9 +649,13 @@ impl Drop for EnvGuard {
     }
 }
 
+/// Every request the controller stub received, as `METHOD /path`.
+#[derive(Clone, Default)]
+struct RequestLog(Arc<Mutex<Vec<String>>>);
+
 struct ControllerHandle {
     addr: SocketAddr,
-    receiver: mpsc::Receiver<CreditEventRequest>,
+    requests: RequestLog,
     shutdown_tx: Option<oneshot::Sender<()>>,
     task: Option<JoinHandle<()>>,
 }
@@ -584,15 +665,8 @@ impl ControllerHandle {
         self.addr
     }
 
-    async fn expect_event(&mut self, timeout: Duration) -> Option<CreditEventRequest> {
-        match tokio::time::timeout(timeout, self.receiver.recv()).await {
-            Ok(event) => event,
-            Err(_) => None,
-        }
-    }
-
-    fn try_event(&mut self) -> Option<CreditEventRequest> {
-        self.receiver.try_recv().ok()
+    fn requests(&self) -> Vec<String> {
+        self.requests.0.lock().expect("request log").clone()
     }
 
     async fn shutdown(&mut self) {
@@ -617,21 +691,25 @@ async fn spawn_controller_with_credential(
         .context("failed to bind controller stub")?;
     let addr = listener.local_addr()?;
 
-    let (tx, rx) = mpsc::channel::<CreditEventRequest>(8);
+    let requests = RequestLog::default();
     let state = ControllerState {
         credential_endpoint,
-        events: tx.clone(),
-        service_token: "controller-secret".to_string(),
         credential_lease_token: "credential-lease-secret".to_string(),
     };
 
+    // Unknown routes, the old `/credits` among them, fall back to 404 and are
+    // still logged.
     let router = Router::new()
         .route("/healthz", get(controller_health_handler))
-        .route("/credits", post(controller_handler))
         .route(
             "/internal/credentials/:credential_id",
             get(controller_credential_handler),
         )
+        .fallback(|| async { StatusCode::NOT_FOUND })
+        .layer(middleware::from_fn_with_state(
+            requests.clone(),
+            record_controller_request,
+        ))
         .with_state(state);
     let (shutdown_tx, shutdown_rx) = oneshot::channel();
 
@@ -650,7 +728,7 @@ async fn spawn_controller_with_credential(
 
     Ok(ControllerHandle {
         addr,
-        receiver: rx,
+        requests,
         shutdown_tx: Some(shutdown_tx),
         task: Some(task),
     })
@@ -659,9 +737,20 @@ async fn spawn_controller_with_credential(
 #[derive(Clone)]
 struct ControllerState {
     credential_endpoint: Option<String>,
-    events: mpsc::Sender<CreditEventRequest>,
-    service_token: String,
     credential_lease_token: String,
+}
+
+async fn record_controller_request(
+    State(requests): State<RequestLog>,
+    request: Request,
+    next: Next,
+) -> Response {
+    requests.0.lock().expect("request log").push(format!(
+        "{} {}",
+        request.method(),
+        request.uri().path()
+    ));
+    next.run(request).await
 }
 
 async fn controller_health_handler() -> impl IntoResponse {
@@ -701,41 +790,6 @@ async fn controller_credential_handler(
     .into_response()
 }
 
-async fn controller_handler(
-    State(state): State<ControllerState>,
-    headers: HeaderMap,
-    body: axum::body::Bytes,
-) -> impl IntoResponse {
-    let auth_header = headers
-        .get(axum::http::header::AUTHORIZATION)
-        .and_then(|value| value.to_str().ok())
-        .unwrap_or("");
-
-    if auth_header != format!("Bearer {}", state.service_token) {
-        return StatusCode::UNAUTHORIZED.into_response();
-    }
-
-    let request = match CreditEventRequest::decode(body) {
-        Ok(req) => req,
-        Err(err) => return (StatusCode::BAD_REQUEST, err.to_string()).into_response(),
-    };
-
-    let _ = state.events.send(request).await;
-
-    let response = CreditEventResponse::default();
-    let mut buf = Vec::new();
-    if let Err(err) = response.encode(&mut buf) {
-        return (StatusCode::INTERNAL_SERVER_ERROR, err.to_string()).into_response();
-    }
-
-    axum::response::Response::builder()
-        .status(StatusCode::OK)
-        .header(axum::http::header::CONTENT_TYPE, "application/x-protobuf")
-        .body(Body::from(buf))
-        .unwrap()
-        .into_response()
-}
-
 struct OpenAiHandle {
     addr: SocketAddr,
     shutdown_tx: Option<oneshot::Sender<()>>,
@@ -758,9 +812,9 @@ impl OpenAiHandle {
 }
 
 enum OpenAiMode {
-    Success,
     SuccessWithBearer(String),
-    Failure,
+    /// Fails any request whose body contains the marker, and serves the rest.
+    FailPromptsContaining(&'static str),
 }
 
 async fn spawn_openai(mode: OpenAiMode) -> Result<OpenAiHandle> {
@@ -813,34 +867,12 @@ async fn openai_handler(
         }
     }
 
-    match mode.as_ref() {
-        OpenAiMode::Success | OpenAiMode::SuccessWithBearer(_) => {
-            let body = json!({
-                "id": "resp-success",
-                "model": payload
-                    .get("model")
-                    .and_then(|value| value.as_str())
-                    .unwrap_or(DEFAULT_MODEL),
-                "output": [
-                    {
-                        "role": "assistant",
-                        "content": [
-                            {
-                                "type": "output_text",
-                                "text": "Hello from the stub!"
-                            }
-                        ]
-                    }
-                ],
-                "usage": {
-                    "input_text_tokens": 12,
-                    "output_text_tokens": 7,
-                    "total_tokens": 19
-                }
-            });
-            Json(body).into_response()
-        }
-        OpenAiMode::Failure => (
+    let fail = match mode.as_ref() {
+        OpenAiMode::SuccessWithBearer(_) => false,
+        OpenAiMode::FailPromptsContaining(marker) => payload.to_string().contains(marker),
+    };
+    if fail {
+        return (
             StatusCode::BAD_GATEWAY,
             Json(json!({
                 "error": {
@@ -849,8 +881,33 @@ async fn openai_handler(
                 }
             })),
         )
-            .into_response(),
+            .into_response();
     }
+
+    let body = json!({
+        "id": "resp-success",
+        "model": payload
+            .get("model")
+            .and_then(|value| value.as_str())
+            .unwrap_or(DEFAULT_MODEL),
+        "output": [
+            {
+                "role": "assistant",
+                "content": [
+                    {
+                        "type": "output_text",
+                        "text": "Hello from the stub!"
+                    }
+                ]
+            }
+        ],
+        "usage": {
+            "input_text_tokens": 12,
+            "output_text_tokens": 7,
+            "total_tokens": 19
+        }
+    });
+    Json(body).into_response()
 }
 
 fn format_http_base(addr: &SocketAddr) -> String {

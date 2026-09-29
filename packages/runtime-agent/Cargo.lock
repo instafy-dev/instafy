@@ -7886,8 +7886,6 @@ dependencies = [
  "futures-util",
  "httpdate",
  "jsonwebtoken",
- "prost 0.13.5",
- "prost-types",
  "reqwest 0.12.28",
  "runtime-contracts",
  "serde",

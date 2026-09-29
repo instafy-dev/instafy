@@ -946,8 +946,6 @@ dependencies = [
  "httpdate",
  "jsonwebtoken",
  "native-tls",
- "prost",
- "prost-types",
  "reqwest",
  "runtime-contracts",
  "serde",

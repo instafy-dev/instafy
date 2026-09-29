@@ -18,7 +18,7 @@ use axum::routing::{get, post};
 use axum::{Json, Router};
 use futures_util::stream;
 use reqwest::Url;
-use serde_json::{Map as JsonMap, Value, json};
+use serde_json::{Value, json};
 use tokio::net::TcpListener;
 use uuid::Uuid;
 
@@ -27,8 +27,7 @@ use crate::client::{
     CodexClient, CodexCompletion, DEFAULT_INSTRUCTIONS, DEFAULT_MODEL, conversation_id_enabled,
     normalize_reasoning_effort,
 };
-use crate::controller_client::ControllerCreditsError;
-use crate::controller_integration::{ControllerIntegration, CreditBurn as ControllerCreditBurn};
+use crate::controller_integration::ControllerIntegration;
 use crate::credential_lease::LeasedCredentials;
 use crate::proxy_auth::ProxyClaims;
 use crate::upstream_error::{self, UpstreamFailure};
@@ -761,6 +760,13 @@ pub async fn run_proxy_with_shutdown<Fut>(
 where
     Fut: Future<Output = ()> + Send + 'static,
 {
+    // The proxy used to debit this many credits per request; that flat burn is
+    // gone, so an environment that still sets it gets one startup warning.
+    if std::env::var("PROXY_CREDIT_BURN_AMOUNT").is_ok_and(|value| !value.trim().is_empty()) {
+        eprintln!(
+            "[proxy] PROXY_CREDIT_BURN_AMOUNT is ignored: the proxy no longer debits credits per request"
+        );
+    }
     let require_controller_auth = boolean_env("PROXY_REQUIRE_CONTROLLER_AUTH")?;
     let require_credential_claim = boolean_env("PROXY_REQUIRE_CREDENTIAL_CLAIM")?;
     let controller = ControllerIntegration::from_env()?;
@@ -964,57 +970,6 @@ impl ProxyState {
 
         Ok(())
     }
-
-    async fn begin_credit_burn(
-        &self,
-        claims: &ProxyClaims,
-        model: &str,
-    ) -> Result<Option<ControllerCreditBurn>, AppError> {
-        let Some(controller) = self.controller.as_ref() else {
-            return Ok(None);
-        };
-        if !controller.should_burn_credits() {
-            return Ok(None);
-        }
-
-        match controller.burn(claims, model).await {
-            Ok(burn) => Ok(Some(burn)),
-            Err(error) => {
-                if let Some(credits_error) = controller_credits_error(&error) {
-                    let status = credits_error.status.as_u16();
-                    if status == 400 || status == 402 {
-                        let message = extract_controller_error_message(&credits_error.body)
-                            .unwrap_or_else(|| credits_error.body.trim().to_string());
-                        if message
-                            .to_ascii_lowercase()
-                            .contains("insufficient credits")
-                        {
-                            return Err(AppError::payment_required(anyhow!(
-                                "Out of credits. Open the Credits panel to refill."
-                            )));
-                        }
-                    }
-                }
-                eprintln!("[proxy] credit burn failed; continuing without charge: {error}");
-                Ok(None)
-            }
-        }
-    }
-}
-
-fn controller_credits_error(error: &anyhow::Error) -> Option<&ControllerCreditsError> {
-    error
-        .chain()
-        .find_map(|cause| cause.downcast_ref::<ControllerCreditsError>())
-}
-
-fn extract_controller_error_message(body: &str) -> Option<String> {
-    let payload = serde_json::from_str::<Value>(body).ok()?;
-    payload
-        .get("message")
-        .and_then(Value::as_str)
-        .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty())
 }
 
 struct RemoteResponseControls<'a> {
@@ -1267,18 +1222,6 @@ async fn create_response(
     let input_items = extract_input_items(&payload).map_err(AppError::bad_request)?;
 
     let auth_mode = proxy_auth_mode(claims.as_ref());
-    let mut credit_guard = if let Some(ref claims) = claims {
-        // Credit burn is keyed before credential resolution, so an absent
-        // model uses the crate default as its ledger dimension.
-        let burn_model = if model.is_empty() {
-            DEFAULT_MODEL
-        } else {
-            &model
-        };
-        state.begin_credit_burn(claims, burn_model).await?
-    } else {
-        None
-    };
     let plain_text_completion = plain_text_completion_requested(&payload);
     let proxy_base_instructions = proxy_base_instructions_for_payload(&payload);
     let requested_tools = requested_tools(&payload);
@@ -1362,11 +1305,6 @@ async fn create_response(
                     ProxyCompletion::Remote(response)
                 }
                 Err(error) => {
-                    if let Some(burn) = credit_guard.take() {
-                        if let Err(err) = burn.refund("proxy upstream failure").await {
-                            eprintln!("[proxy] failed to refund credits: {err}");
-                        }
-                    }
                     let error = error.context(format!(
                         "upstream request failed (credential_source={}, requested_model={})",
                         credential_source, model,
@@ -1404,11 +1342,6 @@ async fn create_response(
                     ProxyCompletion::Remote(response)
                 }
                 Err(error) => {
-                    if let Some(burn) = credit_guard.take() {
-                        if let Err(err) = burn.refund("proxy upstream failure").await {
-                            eprintln!("[proxy] failed to refund credits: {err}");
-                        }
-                    }
                     let error = error.context(format!(
                         "upstream request failed (credential_source={}, requested_model={})",
                         credential_source, model,
@@ -1424,22 +1357,12 @@ async fn create_response(
         .and_then(Value::as_bool)
         .unwrap_or(true);
 
-    let snapshot_value = credit_guard
-        .as_ref()
-        .and_then(|guard| guard.snapshot())
-        .and_then(|snapshot| serde_json::to_value(snapshot).ok());
-
     if stream_requested {
         let ProxyCompletion::Remote(remote) = completion;
-        let mut response = remote.raw.clone();
-        attach_credit_snapshot(&mut response, &snapshot_value);
-        return stream_responses_from_value(response);
+        return stream_responses_from_value(remote.raw);
     }
 
-    let mut response_body = completion.into_response_body();
-    attach_credit_snapshot(&mut response_body, &snapshot_value);
-
-    Ok(Json(response_body).into_response())
+    Ok(Json(completion.into_response_body()).into_response())
 }
 
 async fn create_chat_completion(
@@ -1460,18 +1383,6 @@ async fn create_chat_completion(
     let input_items = parse_chat_completion_inputs(&payload).map_err(AppError::bad_request)?;
 
     let auth_mode = proxy_auth_mode(claims.as_ref());
-    let mut credit_guard = if let Some(ref claims) = claims {
-        // Credit burn is keyed before credential resolution, so an absent
-        // model uses the crate default as its ledger dimension.
-        let burn_model = if requested_model.is_empty() {
-            DEFAULT_MODEL
-        } else {
-            &requested_model
-        };
-        state.begin_credit_burn(claims, burn_model).await?
-    } else {
-        None
-    };
     let plain_text_completion = plain_text_completion_requested(&payload);
     let proxy_base_instructions = proxy_base_instructions_for_payload(&payload);
     let reasoning_effort = payload
@@ -1532,11 +1443,6 @@ async fn create_chat_completion(
             {
                 Ok(result) => result,
                 Err(error) => {
-                    if let Some(burn) = credit_guard.take() {
-                        if let Err(err) = burn.refund("proxy upstream failure").await {
-                            eprintln!("[proxy] failed to refund credits: {err}");
-                        }
-                    }
                     let error = error.context(format!(
                         "upstream request failed (credential_source={}, requested_model={})",
                         credential_source, requested_model,
@@ -1546,7 +1452,7 @@ async fn create_chat_completion(
             };
 
             spawn_credential_usage_report(state.controller.as_ref(), credential_id, &completion);
-            build_remote_chat_response(&payload, completion, upstream_model, credit_guard).await
+            build_remote_chat_response(&payload, completion, upstream_model).await
         }
         ProxyBackend::RemoteDynamic => {
             let (credential_id, credential_source) = dynamic_lease_target(claims.as_ref())?;
@@ -1574,11 +1480,6 @@ async fn create_chat_completion(
             {
                 Ok(result) => result,
                 Err(error) => {
-                    if let Some(burn) = credit_guard.take() {
-                        if let Err(err) = burn.refund("proxy upstream failure").await {
-                            eprintln!("[proxy] failed to refund credits: {err}");
-                        }
-                    }
                     let error = error.context(format!(
                         "upstream request failed (credential_source={}, requested_model={})",
                         credential_source, requested_model,
@@ -1588,7 +1489,7 @@ async fn create_chat_completion(
             };
 
             spawn_credential_usage_report(Some(controller), Some(credential_id), &completion);
-            build_remote_chat_response(&payload, completion, upstream_model, credit_guard).await
+            build_remote_chat_response(&payload, completion, upstream_model).await
         }
     }
 }
@@ -2014,9 +1915,7 @@ async fn build_remote_chat_response(
     payload: &Value,
     completion: CodexCompletion,
     requested_model: String,
-    credit_guard: Option<ControllerCreditBurn>,
 ) -> Result<Response, AppError> {
-    let _ = credit_guard;
     let assistant_text = completion.text.clone().unwrap_or_default();
 
     let response_model = if completion.model.trim().is_empty() {
@@ -2070,25 +1969,6 @@ async fn build_remote_chat_response(
     }
 
     stream_responses_from_value(completion.raw)
-}
-
-fn attach_credit_snapshot(target: &mut Value, snapshot: &Option<Value>) {
-    let Some(snapshot_value) = snapshot.clone() else {
-        return;
-    };
-
-    if let Value::Object(map) = target {
-        let metadata_value = map
-            .entry("metadata".to_string())
-            .or_insert_with(|| Value::Object(JsonMap::new()));
-        if let Value::Object(meta_map) = metadata_value {
-            meta_map.insert("creditSnapshot".to_string(), snapshot_value);
-        } else {
-            let mut meta_map = JsonMap::new();
-            meta_map.insert("creditSnapshot".to_string(), snapshot_value);
-            *metadata_value = Value::Object(meta_map);
-        }
-    }
 }
 
 fn stream_responses_from_value(mut completed_response: Value) -> Result<Response, AppError> {
@@ -2272,16 +2152,6 @@ impl AppError {
             error_type: classified.error_type,
             message: classified.message.to_string(),
             upstream: Some(classified),
-        }
-    }
-
-    fn payment_required(err: impl Into<anyhow::Error>) -> Self {
-        let err = err.into();
-        Self {
-            status: StatusCode::PAYMENT_REQUIRED,
-            error_type: "insufficient_credits",
-            message: err.to_string(),
-            upstream: None,
         }
     }
 }

@@ -101,12 +101,16 @@ returns a surfaced upstream error instead of silently pretending the backend is 
 | `CODEX_OPENAI_ENDPOINT` | Upstream Responses endpoint for API-key credentials | `https://api.openai.com/v1/responses` |
 | `CODEX_REASONING_EFFORT` | Fallback effort (`minimal`, `low`, `medium`, `high`, `xhigh`, `max`), read once at startup/first use | Unset; ChatGPT defaults to `medium` |
 | `PROXY_CONTROLLER_BASE_URL` | Enables controller-integrated hosted mode | `None` |
-| `CONTROLLER_INTERNAL_TOKEN` | Service bearer used for controller credit events | `None` |
+| `CONTROLLER_INTERNAL_TOKEN` | Required with controller integration; the proxy derives its token signing secret from it when `PROXY_SIGNING_SECRET` is unset | `None` |
 | `PROXY_CREDENTIAL_LEASE_TOKEN` | Dedicated bearer used only for controller credential leases | `None` |
 | `PROXY_PINNED_MODEL` | The only model static credentials serve managed runs as (set it to the controller's `MANAGED_AI_MODEL_ID`); see [Model selection](#model-selection) | `None` |
 | `CODEX_PROXY_CHATGPT_ENDPOINT` | Upstream ChatGPT Codex Responses endpoint | `https://chatgpt.com/backend-api/codex/responses` |
 
 `CODEX_OPENAI_ENDPOINT` can also point at an OpenAI-compatible Chat Completions endpoint (e.g. `.../chat/completions`). When it does, the proxy will call that upstream endpoint and adapt the result into an OpenAI Responses-shaped payload for downstream callers.
+
+The proxy does not debit credits. `PROXY_CREDIT_BURN_AMOUNT`, which once charged a flat amount
+per request through the controller, has no effect; the proxy logs one warning at startup when it
+is still set, with or without controller integration.
 
 Standalone local mode may read and refresh the operator's own `auth.json`. In
 controller-integrated mode, the controller is the only refresh-token authority: the proxy gets a
