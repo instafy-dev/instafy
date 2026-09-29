@@ -174,12 +174,13 @@ Runtimes can be provisioned with different runtime-agent container images (for e
   Shared Browser settings only when the launch attestation of its newest own
   launch proves a webdev launch; a stored or client-supplied `runtimeFlavor`
   does not count, and neither does a tenant lease another project attached,
-  whose metadata the attaching caller wrote. The settings carried are the env keys a client may request itself
+  which launched nothing. The settings carried are the env keys a client may request itself
   (the browser session switch and viewer preferences such as the CDP
   screencast), which pass the request boundary again; resource limits and
   TURN credentials are injected fresh. Otherwise it relaunches with the base
   image. Its size, and so its Boost billing, is not carried. A requeue
-  relaunch copies the latest lease's metadata.
+  relaunch copies the metadata of the runtime's live lease or, without one,
+  of its newest own launch; a tenant lease is never read.
 - Custom and self-hosted providers retain their explicit metadata/image behavior.
 - Hetzner user-data templates may include `{{RUNTIME_AGENT_IMAGE}}`; when present, the allocator will substitute `metadata.runtimeAgentImage` (or `runtime_agent_image`) into the cloud-init payload.
 - Hetzner templates can also consume dynamic runtime env data via `{{RUNTIME_ENV_FLAGS}}` (shell `-e KEY='value'` segment) or `{{RUNTIME_ENV_EXPORTS}}` (`export KEY='value'` lines). This includes controller lease/origin env plus `metadata.env` overrides such as `INSTAFY_ENABLE_BROWSER_SESSION=1`.
