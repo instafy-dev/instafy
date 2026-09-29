@@ -102,11 +102,27 @@ it:
 A sidecar with neither refuses managed turns with `proxy token missing credential_id for BYOC
 request`.
 
-The controller puts `CODEX_MODEL=MANAGED_AI_MODEL_ID` in a job's runtime environment
-(`secrets.rs`) only for jobs flagged `managedAiUsed`. Other jobs that reach the platform key
-(skill-mode ambient evaluations, service-role worker and lead-continuation dispatches, jobs whose
-secrets fetch failed) ask for the runtime default, `gpt-5.6-sol`, which lists at 50 to 60 times
-Luna's rates above. The managed credential lease therefore carries `pinnedModel`, and the proxy
+Managed turns run only on Instafy-hosted runtimes. A managed dispatch whose job would be pinned
+to a desktop or another private self-hosted runtime, through the chosen runtime or the agent's
+own runtime setting, is refused with "Instafy AI runs on Instafy-hosted runtimes. Connect your
+own AI to use this runtime." before any reserve is taken or daily prompt counted. With
+`MANAGED_AI_ENABLED=false` there is no Instafy AI to point at, so such a dispatch gets the usual
+"Managed Instafy AI is unavailable right now" refusal instead. In a skill-mode
+ambient turn such a managed participant is skipped instead: it gets no job, its run is closed
+with `metadata.managedAiSkipped.reason = "self_hosted_runtime"`, and the human's message and any
+own-key participants go ahead. A private self-hosted runtime never leases a platform AI job, so
+unpinned managed work waits for a hosted runtime; own-key jobs and terminal commands still run
+there.
+
+The controller puts `CODEX_MODEL=MANAGED_AI_MODEL_ID` and `CODEX_MODEL_PROVIDER=openai` in the
+runtime environment (`secrets.rs`) of every job on the platform lane: an AI job whose target has
+no credential, whether or not it names an agent. This keys on the job itself rather than the
+`managedAiUsed` flag, so skill-mode ambient evaluations that have not answered yet and
+service-role worker and lead-continuation dispatches get the managed model too. Own-key jobs and
+terminal commands keep their agent's model, and with `MANAGED_AI_ENABLED=false` no job is
+changed, because the credential-less lane is then the proxy's own key. A job whose secrets fetch
+failed still asks for the runtime default, `gpt-5.6-sol`, which lists at 50 to 60 times Luna's
+rates above. The managed credential lease therefore carries `pinnedModel`, and the proxy
 sends every request on it as `MANAGED_AI_MODEL_ID`, whatever model the job asked for; speech and
 transcription are refused on it. A pinned request also forwards only the client tool types codex
 emits (`function`, `custom`, `namespace`, `tool_search` and `web_search`), in `tools` and in the

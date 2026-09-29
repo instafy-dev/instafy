@@ -50,7 +50,9 @@ Private preferences and local-workspace registrations are keyed by user as well 
 and its current generation, even with `STRICT_MODE=false`. A project-scoped `agent.lease`
 token without that identity cannot claim jobs or obtain their prompts and conversation history;
 supplying a runtime ID in the request body does not grant that identity. Private runtimes can
-lease only work belonging to their attested owner.
+lease only work belonging to their attested owner, and never a platform AI job (an AI job whose
+target has no credential): Instafy AI runs only on Instafy-hosted runtimes. Own-key jobs and
+terminal commands still run there.
 
 `POST /agent/secrets` independently requires the same signed runtime identity and current
 generation. The requested job must belong to that exact runtime, remain leased, and have a

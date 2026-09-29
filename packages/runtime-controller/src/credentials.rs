@@ -588,10 +588,10 @@ fn managed_ai_internal_credential(
         provider: Some(PROVIDER_OPENAI.to_string()),
         upstream_endpoint: Some(default_endpoint_for_provider(PROVIDER_OPENAI).to_string()),
         default_model: Some(config.managed_ai_model_id.clone()),
-        // Jobs that reach this lease without managedAiUsed (skill-mode ambient
-        // evaluations, service-role dispatches, a failed secrets fetch) never
-        // get CODEX_MODEL set to the managed model, so the pin is what keeps
-        // them off the runtime default on the platform key.
+        // /agent/secrets sets CODEX_MODEL to the managed model for every
+        // credential-less AI job, but a job whose secrets fetch failed still
+        // asks for the runtime default, so the pin is what keeps it off that
+        // model on the platform key.
         pinned_model: Some(config.managed_ai_model_id.clone()),
         auth_mode: None,
         code_assist_project: None,

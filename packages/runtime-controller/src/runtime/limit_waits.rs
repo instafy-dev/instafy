@@ -330,9 +330,11 @@ fn runtime_is_live(r: &str, rl: &str) -> String {
 }
 
 /// Whether the runtime `r` is a private machine (a desktop, a personal
-/// browser) that does not lease unpinned work of the job `j`'s user. The same
-/// rule `lease_next_agent_job` applies when that machine asks for work.
-fn runtime_is_private_to_another_user(r: &str, j: &str) -> String {
+/// browser) that does not lease the unpinned job `j`: work of another user,
+/// or a platform AI job (an AI job whose target has no credential), which runs
+/// only on Instafy-hosted runtimes. The same rules `lease_next_agent_job`
+/// applies when that machine asks for work.
+fn private_runtime_does_not_lease(r: &str, j: &str) -> String {
     format!(
         "coalesce(
            (lower(replace(replace(btrim({r}.provider), '-', '_'), ' ', '_')) = 'self_hosted'
@@ -340,12 +342,16 @@ fn runtime_is_private_to_another_user(r: &str, j: &str) -> String {
             or {r}.capabilities ? '_instafy_self_hosted_access'
             or {r}.capabilities ? 'personalBrowser'
             or {r}.capabilities ? 'personal_browser')
-           and coalesce(
-             {r}.capabilities #>> '{{_instafySelfHostedAccess,ownerUserId}}',
-             {r}.capabilities #>> '{{_instafy_self_hosted_access,owner_user_id}}',
-             {r}.capabilities #>> '{{personalBrowser,ownerUserId}}',
-             {r}.capabilities #>> '{{personal_browser,owner_user_id}}'
-           ) is distinct from {j}.payload #>> '{{user_id}}',
+           and (
+             coalesce(
+               {r}.capabilities #>> '{{_instafySelfHostedAccess,ownerUserId}}',
+               {r}.capabilities #>> '{{_instafy_self_hosted_access,owner_user_id}}',
+               {r}.capabilities #>> '{{personalBrowser,ownerUserId}}',
+               {r}.capabilities #>> '{{personal_browser,owner_user_id}}'
+             ) is distinct from {j}.payload #>> '{{user_id}}'
+             or ({j}.credential_id is null
+                 and lower(btrim(coalesce({j}.intent, ''))) <> 'terminal_command')
+           ),
            false
          )"
     )
@@ -353,10 +359,10 @@ fn runtime_is_private_to_another_user(r: &str, j: &str) -> String {
 
 /// Whether a live runtime could run the waiting job `j` now: a hosted runtime
 /// of its space (what the wait asked for), the machine the job is pinned to,
-/// or, for unpinned work, a machine in the space that leases unpinned work for
-/// the job's user. Any other heartbeating machine (a desktop that never
-/// leases work pinned to the hosted runtime, or one that only runs its owner's
-/// work) leaves the job waiting on the limit.
+/// or, for unpinned work, a machine in the space that would lease it. Any
+/// other heartbeating machine (a desktop that never leases work pinned to the
+/// hosted runtime, or one that only runs its owner's own-key work and terminal
+/// commands) leaves the job waiting on the limit.
 ///
 /// A runtime preference held in one controller's memory can also keep a
 /// machine from leasing unpinned work; the database cannot see it, so such a
@@ -377,7 +383,7 @@ fn job_has_live_runner(j: &str) -> String {
          )",
         live = runtime_is_live("lr", "lrl"),
         hosted = hosted_provider("lr"),
-        private = runtime_is_private_to_another_user("lr", j),
+        private = private_runtime_does_not_lease("lr", j),
     )
 }
 

@@ -1530,16 +1530,19 @@ async fn add_heartbeating_desktop(
 }
 
 /// A desktop (or any machine) that is up does not end a wait for work it
-/// would never run: a job pinned to the space's hosted runtime, or unpinned
-/// work of another user. The retry and the give-up go on for those. Work the
-/// desktop does run (unpinned, its owner's) ends the wait.
+/// would never run: a job pinned to the space's hosted runtime, unpinned work
+/// of another user, or its owner's platform AI job (no credential), which
+/// runs only on Instafy-hosted runtimes. The retry and the give-up go on for
+/// those. Work the desktop does run (unpinned, its owner's terminal command)
+/// ends the wait.
 #[tokio::test]
 async fn a_heartbeating_desktop_only_ends_a_wait_for_work_it_would_run() -> anyhow::Result<()> {
-    let fixture = setup("limit-wait-desktop", 3, 10).await?;
+    let fixture = setup("limit-wait-desktop", 4, 10).await?;
     crate::tests::with_shared_db_fixture(fixture.shared_db_fixture(), async {
         let pinned_to_hosted = fixture.waiting_project_ids[0];
         let another_users_work = fixture.waiting_project_ids[1];
         let owners_work = fixture.waiting_project_ids[2];
+        let owners_platform_work = fixture.waiting_project_ids[3];
         let owner = Uuid::new_v4();
         let someone_else = Uuid::new_v4();
 
@@ -1563,15 +1566,22 @@ async fn a_heartbeating_desktop_only_ends_a_wait_for_work_it_would_run() -> anyh
             .await?;
         let others_job = Uuid::new_v4();
         let owners_job = Uuid::new_v4();
-        for (job_id, project_id, user_id) in [
-            (others_job, another_users_work, someone_else),
-            (owners_job, owners_work, owner),
+        let owners_platform_job = Uuid::new_v4();
+        for (job_id, project_id, user_id, intent) in [
+            (
+                others_job,
+                another_users_work,
+                someone_else,
+                "terminal_command",
+            ),
+            (owners_job, owners_work, owner, "terminal_command"),
+            (owners_platform_job, owners_platform_work, owner, "feature"),
         ] {
             connection
                 .execute(
-                    "insert into agent_jobs (id, project_id, status, payload)
-                     values ($1, $2, 'queued', jsonb_build_object('user_id', $3::text))",
-                    &[&job_id, &project_id, &user_id.to_string()],
+                    "insert into agent_jobs (id, project_id, status, intent, payload)
+                     values ($1, $2, 'queued', $4, jsonb_build_object('user_id', $3::text))",
+                    &[&job_id, &project_id, &user_id.to_string(), &intent],
                 )
                 .await?;
         }
@@ -1581,8 +1591,8 @@ async fn a_heartbeating_desktop_only_ends_a_wait_for_work_it_would_run() -> anyh
         }
 
         let report = sweep_hosted_runtime_limit_waits(&fixture.state, &policy()).await?;
-        assert_eq!(report.attempted, 2, "{report:?}");
-        for project_id in [pinned_to_hosted, another_users_work] {
+        assert_eq!(report.attempted, 3, "{report:?}");
+        for project_id in [pinned_to_hosted, another_users_work, owners_platform_work] {
             let wait = fixture
                 .wait_row(project_id)
                 .await?
@@ -1600,7 +1610,12 @@ async fn a_heartbeating_desktop_only_ends_a_wait_for_work_it_would_run() -> anyh
             .execute(
                 "update agent_jobs set created_at = now() - interval '31 minutes'
                  where id = any($1)",
-                &[&vec![pinned_job, others_job, owners_job]],
+                &[&vec![
+                    pinned_job,
+                    others_job,
+                    owners_job,
+                    owners_platform_job,
+                ]],
             )
             .await?;
         connection
@@ -1613,9 +1628,10 @@ async fn a_heartbeating_desktop_only_ends_a_wait_for_work_it_would_run() -> anyh
             .await?;
         drop(connection);
         let report = sweep_hosted_runtime_limit_waits(&fixture.state, &policy()).await?;
-        assert_eq!(report.expired_jobs, 2, "{report:?}");
+        assert_eq!(report.expired_jobs, 3, "{report:?}");
         assert_eq!(fixture.job_state(pinned_job).await?.0, "failed");
         assert_eq!(fixture.job_state(others_job).await?.0, "failed");
+        assert_eq!(fixture.job_state(owners_platform_job).await?.0, "failed");
         assert_eq!(
             fixture.job_state(owners_job).await?.0,
             "queued",

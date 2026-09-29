@@ -684,8 +684,134 @@ fn managed_ai_gate_message(managed_ai: &credentials::ManagedAiAccessResponse) ->
     "Connect your own AI to continue. This request needs a personal AI connection.".to_string()
 }
 
-fn dispatch_requires_ai_access(intent: &str) -> bool {
+pub(crate) fn dispatch_requires_ai_access(intent: &str) -> bool {
     !intent.trim().eq_ignore_ascii_case("terminal_command")
+}
+
+/// Refusal for a managed-AI dispatch whose platform job would run on a
+/// private self-hosted runtime (a desktop or a self-hosted machine), which
+/// never leases platform jobs (see `lease_next_agent_job`).
+const MANAGED_AI_SELF_HOSTED_RUNTIME_MESSAGE: &str =
+    "Instafy AI runs on Instafy-hosted runtimes. Connect your own AI to use this runtime.";
+
+/// Why a managed participant of an ambient evaluation was not dispatched.
+/// Its run is closed with the code as `metadata.managedAiSkipped.reason`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ManagedAiSkipReason {
+    /// Its job would run on a private self-hosted runtime.
+    SelfHostedRuntime,
+}
+
+impl ManagedAiSkipReason {
+    fn code(self) -> &'static str {
+        match self {
+            Self::SelfHostedRuntime => "self_hosted_runtime",
+        }
+    }
+
+    fn message(self) -> &'static str {
+        match self {
+            Self::SelfHostedRuntime => MANAGED_AI_SELF_HOSTED_RUNTIME_MESSAGE,
+        }
+    }
+}
+
+/// Runs of the credential-less targets (the platform lane) whose job would be
+/// pinned to a private self-hosted runtime, in dispatch order. Callers pass
+/// only AI dispatches. An unpinned job is not listed: the lease keeps it off
+/// private runtimes.
+async fn platform_runs_on_private_self_hosted_runtimes(
+    state: &AppState,
+    transaction: &Transaction<'_>,
+    project_id: &Uuid,
+    metadata: &JsonValue,
+    agent_runs: &[(Uuid, AgentTarget)],
+    preferred_runtime_id: Option<Uuid>,
+) -> Result<Vec<Uuid>, (StatusCode, Json<ApiError>)> {
+    let mut private_by_runtime: HashMap<Uuid, bool> = HashMap::new();
+    let mut run_ids = Vec::new();
+    for (run_id, target) in agent_runs {
+        if target.credential_id.is_some() {
+            continue;
+        }
+        let Some(runtime_id) =
+            target_runtime_for_agent_job(metadata, target.runtime_id, preferred_runtime_id)
+        else {
+            continue;
+        };
+        let is_private = match private_by_runtime.get(&runtime_id) {
+            Some(is_private) => *is_private,
+            None => {
+                let row = transaction
+                    .query_opt(
+                        "select provider, capabilities
+                         from runtimes
+                         where project_id = $1 and id = $2",
+                        &[project_id, &runtime_id],
+                    )
+                    .await
+                    .map_err(|error| {
+                        internal_error(format!("failed to load managed AI target runtime: {error}"))
+                    })?;
+                let is_private = row.is_some_and(|row| {
+                    runtime::runtime_is_private_self_hosted(
+                        state,
+                        &row.get::<_, String>("provider"),
+                        &row.get::<_, JsonValue>("capabilities"),
+                    )
+                });
+                private_by_runtime.insert(runtime_id, is_private);
+                is_private
+            }
+        };
+        if is_private {
+            run_ids.push(*run_id);
+        }
+    }
+    Ok(run_ids)
+}
+
+/// Close the already-inserted run of a managed ambient participant that is
+/// not dispatched. It gets no job and, as for every ambient turn, nothing is
+/// written to the conversation on the agent's behalf: the reason stays on the
+/// run.
+async fn skip_managed_ai_ambient_participant(
+    transaction: &Transaction<'_>,
+    project_id: &Uuid,
+    run_id: &Uuid,
+    reason: ManagedAiSkipReason,
+) -> Result<(), (StatusCode, Json<ApiError>)> {
+    let updated = transaction
+        .execute(
+            "update runs
+             set status = 'canceled',
+                 progress_stage = null,
+                 last_message = $3,
+                 metadata =
+                     (case
+                        when jsonb_typeof(metadata) = 'object' then metadata
+                        else '{}'::jsonb
+                      end)
+                     || jsonb_build_object(
+                         'managedAiSkipped',
+                         jsonb_build_object('reason', $4::text)
+                     ),
+                 updated_at = now()
+             where id = $1
+               and project_id = $2
+               and status = 'queued'",
+            &[run_id, project_id, &reason.message(), &reason.code()],
+        )
+        .await
+        .map_err(|error| {
+            internal_error(format!("failed to close skipped managed AI run: {error}"))
+        })?;
+    if updated != 1 {
+        return Err(internal_error(
+            "skipped managed AI participant has no queued run",
+        ));
+    }
+    Ok(())
 }
 
 #[instrument(skip(state, headers, payload))]
@@ -1514,6 +1640,8 @@ pub(crate) async fn process_dispatch_prompt(
     // Set when this dispatch wrote the managed-AI reserve burn, so the org's
     // viewers get credits.updated once the dispatch transaction commits.
     let mut managed_ai_credit_org_id: Option<Uuid> = None;
+    // Managed ambient participants that get no job; their runs are closed.
+    let mut managed_ai_skipped_runs: Vec<(Uuid, ManagedAiSkipReason)> = Vec::new();
     if uses_managed_ai && skill_mode_ambient_evaluation {
         // Deferred billing: ambient evaluations are free unless the agent
         // actually speaks. The flat prompt burn (and the managedAiUsed
@@ -1522,6 +1650,24 @@ pub(crate) async fn process_dispatch_prompt(
         // turn (NO_RESPONSE sentinel) burns nothing. The availability gate is
         // deferred with it: erroring here would reject the human's own chat
         // message, which these ambient turns must never do.
+        //
+        // For the same reason a managed participant whose job would run on a
+        // private self-hosted runtime is skipped rather than refused. The
+        // human's message and every BYO participant still go ahead.
+        for run_id in platform_runs_on_private_self_hosted_runtimes(
+            state,
+            &transaction,
+            &project.id,
+            &request.metadata,
+            &agent_runs,
+            runtime_id,
+        )
+        .await?
+        {
+            let reason = ManagedAiSkipReason::SelfHostedRuntime;
+            skip_managed_ai_ambient_participant(&transaction, &project.id, &run_id, reason).await?;
+            managed_ai_skipped_runs.push((run_id, reason));
+        }
         let map = ensure_object(&mut request.metadata);
         map.insert(
             "aiAccessMode".to_string(),
@@ -1549,6 +1695,25 @@ pub(crate) async fn process_dispatch_prompt(
             JsonValue::from(state.config.managed_ai_credit_burn_amount),
         );
     } else if uses_managed_ai {
+        // A desktop or self-hosted machine never leases a platform job.
+        // Refuse before the proxy check, the daily count and the reserve, so
+        // the refusal spends no credit and no daily prompt. With managed AI
+        // off the credential-less lane is not Instafy AI, so the gate below
+        // gives its own "unavailable" refusal instead.
+        if state.config.managed_ai_enabled
+            && !platform_runs_on_private_self_hosted_runtimes(
+                state,
+                &transaction,
+                &project.id,
+                &request.metadata,
+                &agent_runs,
+                runtime_id,
+            )
+            .await?
+            .is_empty()
+        {
+            return Err(bad_request(MANAGED_AI_SELF_HOSTED_RUNTIME_MESSAGE));
+        }
         let proxy_requirements = if let Some(proxy_base_url) = state.config.proxy_base_url.as_ref()
         {
             credentials::fetch_proxy_credential_requirements(
@@ -1790,11 +1955,26 @@ pub(crate) async fn process_dispatch_prompt(
     // agent's delivered turn can name the peers that are also evaluating it
     // (the wrapper excludes the agent itself). Job-payload-only: the persisted
     // human message keeps only the server-authored participation marker.
+    let is_managed_ai_skipped = |run_id: &Uuid| {
+        managed_ai_skipped_runs
+            .iter()
+            .any(|(skipped, _)| skipped == run_id)
+    };
     let ambient_ai_participants = skill_mode_ambient_evaluation
-        .then(|| build_ambient_ai_participants(&agent_runs))
+        .then(|| {
+            let evaluating_runs: Vec<(Uuid, AgentTarget)> = agent_runs
+                .iter()
+                .filter(|(run_id, _)| !is_managed_ai_skipped(run_id))
+                .cloned()
+                .collect();
+            build_ambient_ai_participants(&evaluating_runs)
+        })
         .filter(|value| value.as_array().is_some_and(|list| !list.is_empty()));
 
     for (run_id, target) in agent_runs.iter() {
+        if is_managed_ai_skipped(run_id) {
+            continue;
+        }
         let mut agent_request = request.clone();
         apply_agent_prompt_segment(&mut agent_request, &prompt_segments, target);
         inject_agent_target_metadata(&mut agent_request.metadata, target);
@@ -1969,6 +2149,46 @@ pub(crate) async fn process_dispatch_prompt(
                 "jobId": job_id,
                 "writeScope": write_scope,
                 "multiAgentPlan": multi_agent_plan,
+                "run": run_payload,
+            }),
+        );
+    }
+
+    // A skipped participant's run was never queued. Settle it for clients that
+    // already hold its id from this response, as a cancellation does.
+    for (run_id, reason) in managed_ai_skipped_runs.iter() {
+        let (event_session, run_payload) =
+            match runs::load_run_snapshot(&mut *connection, run_id).await {
+                Ok(Some(snapshot)) => (
+                    snapshot.session_id.or(request.session_id),
+                    runs::run_snapshot_to_json(&snapshot),
+                ),
+                Ok(None) => (request.session_id, JsonValue::Null),
+                Err((status, Json(api_error))) => {
+                    warn!(
+                        run_id = %run_id,
+                        status = status.as_u16(),
+                        error = %api_error.message,
+                        "failed to load skipped managed AI run snapshot"
+                    );
+                    (request.session_id, JsonValue::Null)
+                }
+            };
+        publish_controller_event_with_conversation(
+            &state.events,
+            "run.completed",
+            Some(project.id),
+            event_session,
+            request.conversation_id,
+            Some(*run_id),
+            None,
+            json!({
+                "outcome": "canceled",
+                "finalStatus": "canceled",
+                "runStatus": "canceled",
+                "summary": reason.message(),
+                "errorMessage": null,
+                "managedAiSkipped": { "reason": reason.code() },
                 "run": run_payload,
             }),
         );
