@@ -40,8 +40,15 @@ nothing and is not billed; the runtime's own project keeps paying for it.
 
 - The caller needs write access to the tenant project and to the runtime's
   own project, and the tenant project's organization must be allowed to use
-  the runtime's provider. A caller without host access gets the same
-  `404` (`code: "runtime_not_found"`) as for a runtime id that does not exist.
+  the runtime's provider. Access to the runtime's project is checked again
+  when the attach locks the runtime.
+- Tenant refusals are uniform with each other: a runtime id that does not
+  exist, a runtime whose own project is missing or deleted, and a runtime
+  whose own project the caller cannot write to all get the same `404`
+  (`code: "runtime_not_found"`). This applies to `scope: "tenant"` only. The
+  `exclusive` and `shared` scopes and `POST /projects/:id/runtime/request`
+  answer a `runtimeId` as before, for example with `403` for a runtime of
+  another project.
 - Tenant lease metadata keeps only the string fields `source` and `label`,
   whatever the provider. Every other key is dropped, on the first attach and
   on re-attach: `_instafy`-prefixed keys and launch settings such as

@@ -1050,9 +1050,12 @@ async fn authorize_explicit_runtime_target(
     ))
 }
 
-/// Stable code of a refused tenant attach. A runtime that does not exist and a
-/// runtime the caller may not attach to get the same answer, so the refusal
-/// does not confirm that a runtime id exists.
+/// Stable code of a refused tenant attach. A tenant attach answers a runtime
+/// that does not exist, a runtime whose project is missing or deleted, and a
+/// runtime whose project the caller cannot write to alike, so these tenant
+/// refusals cannot be told apart from each other. This covers the tenant
+/// scope only: the other scopes answer a `runtimeId` in their own way (see
+/// `authorize_explicit_runtime_target`).
 const TENANT_RUNTIME_NOT_FOUND_CODE: &str = "runtime_not_found";
 
 fn tenant_runtime_not_found() -> (StatusCode, Json<ApiError>) {
@@ -1073,8 +1076,8 @@ fn tenant_runtime_not_found() -> (StatusCode, Json<ApiError>) {
 /// host project as well as to the tenant project, the rule the tenant manifest
 /// on `/projects/:id/runtime/activity` already applies, and the tenant
 /// project's organization must be allowed to use the host runtime's provider.
-/// A missing runtime and a host project the caller cannot write to are both
-/// refused with [`tenant_runtime_not_found`].
+/// A missing runtime, a missing or deleted host project and a host project the
+/// caller cannot write to are all refused with [`tenant_runtime_not_found`].
 ///
 /// Returns the host project id. The attach runs in a later transaction, which
 /// locks the runtime, requires it to still belong to this project and checks
