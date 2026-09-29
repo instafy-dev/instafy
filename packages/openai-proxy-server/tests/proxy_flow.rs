@@ -34,6 +34,9 @@ const PINNED_MODEL: &str = "gpt-6-luna";
 /// production; a bare loopback endpoint reads as a BYOC provider, where
 /// OpenAI-shaped ids fall back to the credential default.
 const UPSTREAM_RESPONSES_PATH: &str = "/api.openai.com/v1/responses";
+/// The model stub's ChatGPT Codex Responses path, for static credentials
+/// that are a ChatGPT login.
+const UPSTREAM_CHATGPT_PATH: &str = "/backend-api/codex/responses";
 const LEASE_BEARER: &str = "credential-lease";
 const SIGNING_SECRET: &str = "proxy-signing-test";
 /// The run a dispatch job token belongs to. Session envelopes (agent login,
@@ -286,11 +289,8 @@ async fn controller_health_stub() -> impl IntoResponse {
     )
 }
 
-async fn upstream_responses_stub(
-    State(stub): State<UpstreamStub>,
-    headers: HeaderMap,
-    AxumJson(payload): AxumJson<Value>,
-) -> impl IntoResponse {
+/// Logs one model request on the stub and returns its authorization header.
+fn record_upstream_request(stub: &UpstreamStub, headers: &HeaderMap, payload: &Value) -> String {
     let authorization = headers
         .get(header::AUTHORIZATION)
         .and_then(|value| value.to_str().ok())
@@ -315,6 +315,36 @@ async fn upstream_responses_stub(
         .lock()
         .expect("input log")
         .push(payload.get("input").cloned().unwrap_or(Value::Null));
+    authorization
+}
+
+/// The ChatGPT Codex endpoint, which answers with an event stream.
+async fn upstream_chatgpt_stub(
+    State(stub): State<UpstreamStub>,
+    headers: HeaderMap,
+    AxumJson(payload): AxumJson<Value>,
+) -> axum::response::Response {
+    let authorization = record_upstream_request(&stub, &headers, &payload);
+    if authorization != format!("Bearer {MANAGED_STUB_KEY}") {
+        return (
+            StatusCode::UNAUTHORIZED,
+            AxumJson(json!({ "error": { "message": "bad upstream token" } })),
+        )
+            .into_response();
+    }
+    (
+        [(header::CONTENT_TYPE, "text/event-stream")],
+        RESPONSES_FIXTURE,
+    )
+        .into_response()
+}
+
+async fn upstream_responses_stub(
+    State(stub): State<UpstreamStub>,
+    headers: HeaderMap,
+    AxumJson(payload): AxumJson<Value>,
+) -> impl IntoResponse {
+    let authorization = record_upstream_request(&stub, &headers, &payload);
     if authorization != format!("Bearer {MANAGED_STUB_KEY}")
         && authorization != format!("Bearer {BYO_STUB_KEY}")
     {
@@ -425,6 +455,9 @@ enum StackProxy<'a> {
     /// Static credentials holding the operator's key, the self-hosted
     /// managed lane, with this `PROXY_PINNED_MODEL` (`None` leaves it unset).
     Static { pinned_model: Option<&'a str> },
+    /// As `Static`, but the operator's credentials are a ChatGPT login
+    /// (`auth.json`), which the proxy sends to the ChatGPT Codex endpoint.
+    StaticChatGpt { pinned_model: Option<&'a str> },
     /// Static credentials and no controller integration: the proxy checks
     /// no token. The controller stub still runs but the proxy never calls it.
     Standalone { pinned_model: Option<&'a str> },
@@ -462,6 +495,7 @@ async fn spawn_stack(
     let (upstream_addr, upstream_guard) = spawn_router(
         Router::new()
             .route(UPSTREAM_RESPONSES_PATH, post(upstream_responses_stub))
+            .route(UPSTREAM_CHATGPT_PATH, post(upstream_chatgpt_stub))
             .route("/v1/audio/speech", post(upstream_audio_stub))
             .route("/v1/audio/transcriptions", post(upstream_audio_stub))
             .with_state(upstream.clone()),
@@ -492,13 +526,25 @@ async fn spawn_stack(
             default_model: None,
         })
     };
+    let static_chatgpt_login = || {
+        Some(Credentials::ChatGpt {
+            access_token: MANAGED_STUB_KEY.to_string(),
+            refresh_token: None,
+            account_id: None,
+            default_model: None,
+            auth_path: None,
+        })
+    };
     let (static_credentials, static_pinned_model, controller_integration) = match proxy {
         StackProxy::Dynamic => (None, None, true),
         StackProxy::Static { pinned_model } => (static_key(), pinned_model, true),
+        StackProxy::StaticChatGpt { pinned_model } => (static_chatgpt_login(), pinned_model, true),
         StackProxy::Standalone { pinned_model } => (static_key(), pinned_model, false),
     };
     let controller_base_url = format!("http://{controller_addr}");
+    let chatgpt_endpoint = format!("http://{upstream_addr}{UPSTREAM_CHATGPT_PATH}");
     let env = vec![
+        EnvGuard::set("CODEX_PROXY_CHATGPT_ENDPOINT", Some(&chatgpt_endpoint)),
         EnvGuard::set("PROXY_PINNED_MODEL", static_pinned_model),
         EnvGuard::set(
             "PROXY_CONTROLLER_BASE_URL",
@@ -1234,6 +1280,108 @@ async fn byo_lane_forwards_web_search() -> Result<()> {
             .map(|(id, _)| id.clone())
             .collect::<Vec<_>>();
         assert_eq!(ids, vec![BYO_CREDENTIAL_ID.to_string()], "{name}");
+    }
+
+    Ok(())
+}
+
+/// Each tool's name, or its type when it has none, in order.
+fn tool_labels(tools: &Value) -> Vec<&str> {
+    tools
+        .as_array()
+        .map(|tools| {
+            tools
+                .iter()
+                .filter_map(|tool| tool.get("name").or_else(|| tool.get("type")))
+                .filter_map(Value::as_str)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+#[tokio::test]
+#[serial]
+async fn pinned_lease_drops_web_search_from_the_proxy_default_tools() -> Result<()> {
+    // A ChatGPT login whose request keeps no tools gets the proxy's default
+    // tools, and CODEX_ENABLE_WEB_SEARCH adds web search to them. Codex lists
+    // a Responses Lite model's tools, the managed model's among them, only in
+    // an `additional_tools` input item, and Chat Completions forwards no
+    // tools, so a managed run on a pinned ChatGPT login gets those defaults
+    // on both routes. The pin must filter the tools the request finally
+    // carries, in `tools` and in the input alike.
+    let _env = [
+        EnvGuard::set("CODEX_ENABLE_WEB_SEARCH", Some("1")),
+        EnvGuard::set("CODEX_INCLUDE_APPLY_PATCH_TOOL", None),
+        EnvGuard::set("CODEX_INCLUDE_PLAN_TOOL", None),
+        EnvGuard::set("CODEX_INCLUDE_VIEW_IMAGE_TOOL", None),
+    ];
+    let (client_tools, tools) = client_and_hosted_tools();
+    let token = proxy_token(Some(RUN_ID), None);
+    let lite_request = json!({
+        "model": "gpt-5.6-sol",
+        "stream": false,
+        "input": [
+            { "type": "additional_tools", "role": "developer", "tools": tools },
+            {
+                "type": "message",
+                "role": "user",
+                "content": [{ "type": "input_text", "text": CHAT_PROMPT }]
+            }
+        ]
+    });
+
+    // Pinned by PROXY_PINNED_MODEL, then the same platform lane unpinned,
+    // which keeps every tool: the pin decides, and the unpinned run shows
+    // the defaults do carry web search here.
+    for (name, pinned_model) in [("pinned", Some(PINNED_MODEL)), ("unpinned", None)] {
+        let (proxy_addr, _controller, upstream, _stack_env, _guards) = spawn_stack(
+            None,
+            None,
+            false,
+            StackProxy::StaticChatGpt { pinned_model },
+        )
+        .await?;
+        let (status, body) =
+            post_through_proxy(proxy_addr, &token, "/v1/responses", lite_request.clone()).await?;
+        assert_eq!(status, StatusCode::OK, "{name} responses: {body}");
+        let (status, body) = chat_through_proxy(proxy_addr, &token).await?;
+        assert_eq!(status, StatusCode::OK, "{name} chat: {body}");
+
+        let (expected_defaults, expected_input_tools) = if pinned_model.is_some() {
+            (
+                vec!["shell", "apply_patch", "update_plan", "view_image"],
+                client_tools.clone(),
+            )
+        } else {
+            (
+                vec![
+                    "shell",
+                    "apply_patch",
+                    "update_plan",
+                    "web_search",
+                    "view_image",
+                ],
+                tools.clone(),
+            )
+        };
+        let sent_tools = upstream.tools.lock().expect("tool log").clone();
+        assert_eq!(
+            sent_tools.iter().map(tool_labels).collect::<Vec<_>>(),
+            vec![expected_defaults.clone(), expected_defaults],
+            "{name}: the proxy's default tools on the Responses and Chat Completions routes"
+        );
+        assert_eq!(
+            upstream_additional_tools(&upstream),
+            vec![expected_input_tools, Value::Null],
+            "{name}: the tools carried in the input"
+        );
+        if let Some(pinned_model) = pinned_model {
+            assert_eq!(
+                upstream.models.lock().expect("model log").clone(),
+                vec![pinned_model, pinned_model],
+                "{name}: a managed run on the pinned model"
+            );
+        }
     }
 
     Ok(())

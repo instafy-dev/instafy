@@ -84,8 +84,10 @@ impl StaticCredentials {
     }
 
     /// The static credentials for a platform-lane request, a managed run: it
-    /// gets the managed lease's model policy, pinned to `PROXY_PINNED_MODEL`,
-    /// which also refuses audio.
+    /// gets the managed lease's pinned-lease policy, pinned to
+    /// `PROXY_PINNED_MODEL`, which also refuses audio and drops hosted and
+    /// model-naming client tools. Without the setting the lease is unpinned
+    /// and none of that applies.
     fn platform_lease(&self) -> LeasedCredentials {
         if self.pinned_model.is_none()
             && self
@@ -94,7 +96,7 @@ impl StaticCredentials {
                 .is_ok()
         {
             eprintln!(
-                "[proxy] static proxy credentials are serving a managed run but the managed model is not pinned: managed runs keep the model they ask for, and speech and transcription stay available, on these credentials. Set PROXY_PINNED_MODEL to MANAGED_AI_MODEL_ID to pin them."
+                "[proxy] static proxy credentials are serving a managed run but the managed model is not pinned: managed runs keep the model they ask for and every client tool, hosted ones such as web search included, and speech and transcription stay available, on these credentials. Set PROXY_PINNED_MODEL to MANAGED_AI_MODEL_ID to pin them."
             );
         }
         LeasedCredentials {
@@ -359,15 +361,18 @@ fn requested_tools(payload: &Value) -> Option<Vec<Value>> {
 /// The client tool types a pinned lease forwards: the types codex, the
 /// runtime's client at the revision this repository pins, puts in `tools`
 /// (its `ToolSpec`, `codex-rs/tools/src/tool_spec.rs`), less the hosted ones
-/// in [`PLATFORM_DROPPED_TOOL_TYPES`]. A hosted tool codex never sends, such
-/// as `image_generation`, can run a model of its own or add a per-call fee on
-/// the key the operator pays for.
+/// in [`PINNED_LEASE_DROPPED_TOOL_TYPES`]. A hosted tool codex never sends,
+/// such as `image_generation`, can run a model of its own or add a per-call
+/// fee on the key the operator pays for.
 const PINNED_LEASE_TOOL_TYPES: [&str; 4] = ["function", "custom", "namespace", "tool_search"];
 
 /// Codex tool types that OpenAI runs on its side, billed per call on top of
-/// tokens. The platform lane keeps them off on purpose: credits price tokens
-/// only. A user's own credential is never pinned, so it keeps them.
-const PLATFORM_DROPPED_TOOL_TYPES: [&str; 1] = ["web_search"];
+/// tokens. A pinned lease drops them on purpose: credits price tokens only.
+/// The pin, not the lane, decides it. Only the platform lane is ever pinned
+/// (the controller's managed lease, static credentials with
+/// `PROXY_PINNED_MODEL`), and an unpinned lease keeps them: a user's own
+/// credential, and the platform lane before the pin reaches it.
+const PINNED_LEASE_DROPPED_TOOL_TYPES: [&str; 1] = ["web_search"];
 
 /// Why a pinned lease drops a client tool, or `None` to forward it: its type
 /// must be one codex emits and not a hosted one, a tool search must run on
@@ -378,7 +383,7 @@ fn pinned_lease_tool_rejection(tool: &Value) -> Option<&'static str> {
         return Some("type");
     };
     let tool_type = tool.get("type").and_then(Value::as_str).unwrap_or_default();
-    if PLATFORM_DROPPED_TOOL_TYPES.contains(&tool_type) {
+    if PINNED_LEASE_DROPPED_TOOL_TYPES.contains(&tool_type) {
         return Some("hosted");
     }
     if !PINNED_LEASE_TOOL_TYPES.contains(&tool_type) {
@@ -446,9 +451,11 @@ fn tools_for_pinned_lease(
 /// Most distinct (carrier, type, reason) groups one drop summary names.
 const MAX_LOGGED_DROP_GROUPS: usize = 8;
 
-/// One log record for every tool a request lost to the pin: counts per
-/// (carrier, type, reason), the largest groups first. A request can carry
-/// millions of tool entries, so the record is bounded however many it drops.
+/// One log record per filter pass over the tools a request lost to the pin:
+/// counts per (carrier, type, reason), the largest groups first. The client's
+/// tools and the proxy's own default tools are filtered in separate passes, so
+/// a request can log two records. A request can carry millions of tool
+/// entries, so each record is bounded however many it drops.
 fn dropped_tools_summary(dropped: &[DroppedTool]) -> Value {
     let mut counts: BTreeMap<(&str, &str, &str), usize> = BTreeMap::new();
     for tool in dropped {
@@ -474,6 +481,12 @@ fn dropped_tools_summary(dropped: &[DroppedTool]) -> Value {
             .collect::<Vec<_>>(),
         "otherGroups": group_count.saturating_sub(MAX_LOGGED_DROP_GROUPS),
     })
+}
+
+fn log_dropped_tools(dropped: &[DroppedTool], run_id: Option<&str>) {
+    let mut summary = dropped_tools_summary(dropped);
+    summary["runId"] = json!(run_id);
+    eprintln!("[proxy] credential lease drops client tools {summary}");
 }
 
 /// Input item types that carry tool definitions. Codex sends its whole tool
@@ -627,7 +640,9 @@ enum UpstreamLane<'a> {
     /// by id, never pinned by the platform and never metered.
     Byo { credential_id: &'a str },
     /// A dispatch job token that names no credential, a managed run: the
-    /// platform key, which the managed model pin applies to.
+    /// platform key. Its lease is the only one ever pinned, and the pinned
+    /// lease policy (model, audio, client tools) follows that pin, not this
+    /// lane, so an unpinned platform lease keeps the unpinned rules.
     Platform,
     /// The proxy has no controller integration, so it checked no token: its
     /// static credentials serve the request as they always have.
@@ -1207,7 +1222,9 @@ fn build_remote_completion_client<'i>(
     }
     // Only the pinned model may run on a pinned lease, so a client tool that
     // brings its own model or hosted work does not go upstream, whether the
-    // request lists it in `tools` or in a tool-carrying input item.
+    // request lists it in `tools` or in a tool-carrying input item. The
+    // client sends input items as given, so the filtered ones below are the
+    // ones the provider sees.
     let mut dropped_tools = Vec::new();
     let requested_tools = options
         .response_controls
@@ -1228,10 +1245,9 @@ fn build_remote_completion_client<'i>(
     } else {
         Cow::Borrowed(input_items)
     };
+    let run_id = run_id_from_claims(options.claims);
     if log_lease_policy && !dropped_tools.is_empty() {
-        let mut summary = dropped_tools_summary(&dropped_tools);
-        summary["runId"] = json!(run_id_from_claims(options.claims));
-        eprintln!("[proxy] credential lease drops client tools {summary}");
+        log_dropped_tools(&dropped_tools, run_id);
     }
     let creds = leased.credentials;
     let instructions = build_proxy_instructions(
@@ -1247,6 +1263,20 @@ fn build_remote_completion_client<'i>(
         .with_model(upstream_model.clone())
         .with_instructions(instructions)
         .with_tools_enabled(!options.plain_text_completion);
+    if pinned {
+        // A ChatGPT login whose request keeps no tools gets the client's
+        // default tools, web search among them with CODEX_ENABLE_WEB_SEARCH,
+        // after the filter above. The pin runs again on the list the request
+        // finally carries; tools it already kept pass unchanged.
+        let run_id = run_id.map(str::to_string);
+        client = client.with_tool_filter(move |tools| {
+            let (kept, dropped) = tools_for_pinned_lease(tools, "tools");
+            if log_lease_policy && !dropped.is_empty() {
+                log_dropped_tools(&dropped, run_id.as_deref());
+            }
+            kept
+        });
+    }
 
     if let Some(controls) = options.response_controls.as_ref() {
         client = client
@@ -3369,8 +3399,8 @@ mod tests {
     #[test]
     fn pinned_lease_tool_types_match_the_codex_tool_spec() {
         // A codex update that adds a tool type fails here, so the type is
-        // allowed on the platform key, or kept off it, on purpose: every
-        // codex type is either allowed or a hosted type the platform drops.
+        // allowed on a pinned lease, or kept off it, on purpose: every codex
+        // type is either allowed or a hosted type a pinned lease drops.
         const TOOL_SPEC: &str = include_str!(concat!(
             env!("CARGO_MANIFEST_DIR"),
             "/../../codex/codex-rs/tools/src/tool_spec.rs"
@@ -3392,11 +3422,11 @@ mod tests {
         assert!(
             PINNED_LEASE_TOOL_TYPES
                 .iter()
-                .all(|allowed| !PLATFORM_DROPPED_TOOL_TYPES.contains(allowed)),
+                .all(|allowed| !PINNED_LEASE_DROPPED_TOOL_TYPES.contains(allowed)),
             "a type is either allowed or dropped"
         );
         let mut accounted = PINNED_LEASE_TOOL_TYPES.to_vec();
-        accounted.extend(PLATFORM_DROPPED_TOOL_TYPES);
+        accounted.extend(PINNED_LEASE_DROPPED_TOOL_TYPES);
         accounted.sort_unstable();
         assert_eq!(codex_types, accounted);
     }
@@ -3455,7 +3485,7 @@ mod tests {
                 .map(|tool| (tool.carrier, tool.tool_type.as_str(), tool.reason))
                 .collect::<Vec<_>>(),
             vec![("tools", "web_search", "hosted")],
-            "hosted web search stays off the platform key"
+            "hosted web search stays off a pinned lease"
         );
 
         let hand_built = vec![

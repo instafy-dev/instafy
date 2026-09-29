@@ -92,12 +92,12 @@ it:
 - Give every proxy a runtime calls static credentials (`OPENAI_API_KEY` or an API-key `auth.json`
   at `/opt/instafy/proxy-codex/auth.json` on each provider host), and set `PROXY_PINNED_MODEL` on
   it to `MANAGED_AI_MODEL_ID`. Without it the proxy serves managed turns on its key with whatever
-  model a job asks for, speech and transcription included, and logs once that the managed model
-  is not pinned. Both runtime compose files set the sidecar's `PROXY_PINNED_MODEL` from the
-  environment that runs `docker compose`, which on a provider host is the provider service's:
-  `PROXY_PINNED_MODEL` there, or else `MANAGED_AI_MODEL_ID`; an explicitly empty
-  `PROXY_PINNED_MODEL` means no pin. That entry overrides the sidecar's env file, so a value in
-  `proxy-credential-lease.env` has no effect.
+  model a job asks for, speech, transcription and hosted tools such as web search included, and
+  logs once that the managed model is not pinned. Both runtime compose files set the sidecar's
+  `PROXY_PINNED_MODEL` from the environment that runs `docker compose`, which on a provider host
+  is the provider service's: `PROXY_PINNED_MODEL` there, or else `MANAGED_AI_MODEL_ID`; an
+  explicitly empty `PROXY_PINNED_MODEL` means no pin. That entry overrides the sidecar's env file,
+  so a value in `proxy-credential-lease.env` has no effect.
 
 A sidecar with neither refuses managed turns with `proxy token missing credential_id for BYOC
 request`. Only a job token, which carries a run id, is a managed turn. The controller also signs
@@ -116,12 +116,15 @@ transcription are refused on it. A pinned request also forwards only codex's cli
 (`function`, `custom`, `namespace`, and `tool_search` with `execution: "client"`), in `tools` and in
 the `additional_tools` and `tool_search_output` input items, and drops any tool that names its own
 model, so a hand-built hosted tool such as `image_generation` cannot run on the platform key.
-Hosted OpenAI tools are off on the platform key: credits price tokens, and a hosted tool bills per
+Hosted OpenAI tools are off on a pinned lease: credits price tokens, and a hosted tool bills per
 call on top of them. The proxy therefore also drops `web_search`, which codex does send, and any
-tool search OpenAI would run, so managed turns run without web search. A user's own key or
-ChatGPT login is never pinned and keeps every tool. The pin needs both a controller and a proxy
-that know `pinnedModel`. Either can be updated first: until both are, requests keep the model they
-ask for. This is separate from the key rollout order in the next paragraph. Static proxy
+tool search OpenAI would run, from the tools a pinned request finally carries, including the
+default tools the proxy adds for a ChatGPT login, so pinned managed turns run without web search.
+The tool filter follows the pin, like the model and the audio refusal, not the lane: only the
+platform lane is ever pinned, and a user's own key or ChatGPT login is never pinned and keeps
+every tool. The pin needs both a controller and a proxy that know `pinnedModel`. Either can be
+updated first: until both are, requests keep the model they ask for and every tool, web search
+included. This is separate from the key rollout order in the next paragraph. Static proxy
 credentials serving managed turns get the same pin from `PROXY_PINNED_MODEL`, as described above.
 
 Roll the proxy out first. Setting `MANAGED_AI_OPENAI_API_KEY` is what makes the controller

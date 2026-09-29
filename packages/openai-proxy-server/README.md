@@ -132,11 +132,16 @@ limited to codex's client tool types (`function`, `custom`, `namespace`, and `to
 one, and `tool_search_output`). Before the request goes upstream the proxy drops any other type,
 any tool that names its own `model`, and a namespace holding either, and logs
 `credential lease drops client tools` with a count per tool type and reason. Hosted tools, which
-OpenAI runs and bills per call, are off on the platform key: `web_search`, which codex sends, and
+OpenAI runs and bills per call, are off on a pinned lease: `web_search`, which codex sends, and
 a tool search with any other `execution` are dropped with reason `hosted`, and a drift test fails
-when codex adds a tool type that is neither allowed nor dropped on purpose. Leases without
-`pinnedModel` (bring-your-own API keys, ChatGPT logins, and leases from a controller that predates
-the field) keep the rules above and forward client tools unchanged, hosted ones included.
+when codex adds a tool type that is neither allowed nor dropped on purpose. The filter runs
+again on the tools the request finally carries, so the default tools the proxy gives a ChatGPT
+login's request that keeps none of its own lose `web_search` too, whatever
+`CODEX_ENABLE_WEB_SEARCH` says. The pin, not the lane, decides all of this. Only the platform
+lane is ever pinned, by the controller's managed lease or by `PROXY_PINNED_MODEL` below, but a
+platform lane without a pin is not filtered. Leases without `pinnedModel` (bring-your-own API
+keys, ChatGPT logins, and leases from a controller that predates the field) keep the rules above
+and forward client tools unchanged, hosted ones included.
 
 With controller integration, static proxy credentials (`OPENAI_API_KEY` or `auth.json`) serve
 the platform lane: managed runs, whose controller-signed job tokens carry a `run_id` and no
@@ -148,7 +153,8 @@ instead of serving it on the operator's key (a proxy with `PROXY_REQUIRE_CREDENT
 every credential-less token earlier, with `proxy token missing valid credential_id claim`). Tokens that name a credential are leased from the
 controller and never pinned by the setting. In standalone mode, without a controller, the proxy
 checks no token and its static credentials serve every request unpinned. Without the setting managed
-runs keep the rules above, and the first one logs a warning that the managed model is not pinned.
+runs are not pinned: they keep the requested model, speech, transcription and every client tool,
+hosted ones included, and the first one logs a warning that says so.
 A proxy without static credentials ignores the setting. The runtime compose files
 (`docker/docker-compose.runtime.provider.yml` and `docker/docker-compose.runtime.yml`) set it on
 the sidecar from the environment that runs `docker compose`, which on a provider host is the
