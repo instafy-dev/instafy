@@ -451,6 +451,26 @@ fn map_origin_instance_row(row: &Row) -> OriginInstanceRecord {
     }
 }
 
+/// The origin instance `project_id` holds for `lease_id`, read without
+/// changing it.
+pub(super) async fn load_origin_instance_for_lease(
+    transaction: &Transaction<'_>,
+    project_id: &Uuid,
+    lease_id: &Uuid,
+) -> Result<Option<OriginInstanceRecord>, (StatusCode, Json<ApiError>)> {
+    let row = transaction
+        .query_opt(
+            "select id, lease_id, origin_id, mode, status, endpoint, protocols, metadata
+             from origin_instances
+             where lease_id = $1
+               and project_id = $2",
+            &[lease_id, project_id],
+        )
+        .await
+        .map_err(|error| internal_error(format!("failed to load origin instance: {error}")))?;
+    Ok(row.as_ref().map(map_origin_instance_row))
+}
+
 pub(super) async fn upsert_origin_instance(
     transaction: &Transaction<'_>,
     project_id: &Uuid,

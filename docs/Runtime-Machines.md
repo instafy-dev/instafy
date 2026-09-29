@@ -47,6 +47,10 @@ nothing and is not billed; the runtime's own project keeps paying for it.
   on re-attach: `_instafy`-prefixed keys and launch settings such as
   `runtimeFlavor`, `sizeId`, `env` or `runtimeAgentImage` alike. A re-attach
   without metadata keeps the stored metadata.
+- The attach leaves the runtime's origin alone. The response's `origin` is
+  the host project's origin for its shared lease, as it is, or absent when
+  there is none; `originMode`, `originProtocols` and `originMetadata` are
+  ignored.
 - Launch-generation readers (requeue relaunch, dispatch reconnect, provider
   route rotation, operator hosted hours) ignore tenant leases, and a
   runtime's status shows only its own project's origin.

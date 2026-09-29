@@ -26,10 +26,11 @@ use crate::{
 
 use super::db::{
     create_runtime_lease, ensure_project_exists, ensure_runtime_record, fetch_runtime_for_update,
-    fetch_runtime_lease_for_update, mark_runtime_lease_active, mark_runtime_lease_launching,
-    mark_runtime_lease_released, record_runtime_event, release_origin_instances_for_runtime,
-    runtime_provider_identity_matches, upsert_origin_instance, OriginInstanceRecord,
-    RuntimeDetails, RuntimeLeaseDetails, RuntimeLeaseRecord, RuntimeRecord,
+    fetch_runtime_lease_for_update, load_origin_instance_for_lease, mark_runtime_lease_active,
+    mark_runtime_lease_launching, mark_runtime_lease_released, record_runtime_event,
+    release_origin_instances_for_runtime, runtime_provider_identity_matches,
+    upsert_origin_instance, OriginInstanceRecord, RuntimeDetails, RuntimeLeaseDetails,
+    RuntimeLeaseRecord, RuntimeRecord,
 };
 use super::lease::{parse_lease_scope, RuntimeLeaseScope};
 use super::limit_waits::{
@@ -1299,13 +1300,13 @@ pub(crate) async fn runtime_ensure(
         RuntimeLeaseScope::Tenant => {
             let (runtime_id, host_project_id) =
                 tenant_target.ok_or_else(|| internal_error("tenant attach was not authorized"))?;
+            // The origin options are not used: the origin is the host's.
             ensure_runtime_tenant(
                 &state,
                 project_id,
                 runtime_id,
                 host_project_id,
                 metadata.clone(),
-                origin_options,
             )
             .await?
         }
@@ -3185,13 +3186,16 @@ async fn launch_committed_runtime_lease(
 
 /// `host_project_id` is the project `authorize_tenant_host_runtime` authorized
 /// the caller for; the runtime must still belong to it once locked.
+///
+/// The attach leaves the runtime's origin alone. That origin belongs to the
+/// host project, which requests and registers it for its shared lease; the
+/// response reports it as it is.
 async fn ensure_runtime_tenant(
     state: &AppState,
     project_id: Uuid,
     runtime_id: Uuid,
     host_project_id: Uuid,
     metadata: Option<JsonValue>,
-    origin_options: OriginEnsureOptions,
 ) -> Result<RuntimeEnsureResponse, (StatusCode, Json<ApiError>)> {
     let mut conn = state
         .pool
@@ -3248,18 +3252,8 @@ async fn ensure_runtime_tenant(
     )
     .await?;
 
-    let origin_instance = Some(
-        upsert_origin_instance(
-            &transaction,
-            &project_id,
-            &runtime_id,
-            &shared_lease.id,
-            origin_options.mode.clone(),
-            origin_options.protocols.clone(),
-            origin_options.metadata.clone(),
-        )
-        .await?,
-    );
+    let origin_instance =
+        load_origin_instance_for_lease(&transaction, &runtime.project_id, &shared_lease.id).await?;
 
     record_runtime_event(
         &transaction,

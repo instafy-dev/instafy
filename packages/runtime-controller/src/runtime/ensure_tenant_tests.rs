@@ -217,14 +217,22 @@ impl TenantAttachFixture {
             .map_err(|(status, Json(error))| anyhow::anyhow!("{status}: {}", error.message))
     }
 
-    /// `POST /runtime/ensure` asking to attach `tenant_project_id` to
-    /// `runtime_id` as a tenant.
-    async fn attach(
+    /// The body of a `POST /runtime/ensure` asking to attach
+    /// `tenant_project_id` to `runtime_id` as a tenant.
+    fn attach_request(tenant_project_id: Uuid, runtime_id: Uuid, metadata: JsonValue) -> JsonValue {
+        json!({
+            "project_id": tenant_project_id.to_string(),
+            "provider": OPEN_PROVIDER,
+            "scope": "tenant",
+            "runtimeId": runtime_id.to_string(),
+            "metadata": metadata,
+        })
+    }
+
+    async fn ensure(
         &self,
         bearer: &str,
-        tenant_project_id: Uuid,
-        runtime_id: Uuid,
-        metadata: JsonValue,
+        request: JsonValue,
     ) -> anyhow::Result<(StatusCode, JsonValue)> {
         let response = crate::runtime::router()
             .with_state(self.state.clone())
@@ -234,22 +242,40 @@ impl TenantAttachFixture {
                     .uri("/runtime/ensure")
                     .header("authorization", format!("Bearer {bearer}"))
                     .header("content-type", "application/json")
-                    .body(Body::from(
-                        json!({
-                            "project_id": tenant_project_id.to_string(),
-                            "provider": OPEN_PROVIDER,
-                            "scope": "tenant",
-                            "runtimeId": runtime_id.to_string(),
-                            "metadata": metadata,
-                        })
-                        .to_string(),
-                    ))?,
+                    .body(Body::from(request.to_string()))?,
             )
             .await?;
         let status = response.status();
         let body: JsonValue =
             serde_json::from_slice(&to_bytes(response.into_body(), usize::MAX).await?)?;
         Ok((status, body))
+    }
+
+    async fn attach(
+        &self,
+        bearer: &str,
+        tenant_project_id: Uuid,
+        runtime_id: Uuid,
+        metadata: JsonValue,
+    ) -> anyhow::Result<(StatusCode, JsonValue)> {
+        self.ensure(
+            bearer,
+            Self::attach_request(tenant_project_id, runtime_id, metadata),
+        )
+        .await
+    }
+
+    async fn origin_instance_count(&self) -> anyhow::Result<i64> {
+        Ok(self
+            .pool
+            .get()
+            .await?
+            .query_one(
+                "select count(*) from origin_instances where runtime_id = $1",
+                &[&self.runtime_id],
+            )
+            .await?
+            .get(0))
     }
 
     async fn tenant_leases(&self) -> anyhow::Result<Vec<(Uuid, Uuid, Option<Uuid>)>> {
@@ -360,7 +386,9 @@ impl TenantAttachFixture {
 /// A tenant attach names a runtime of another project. Writing to the tenant
 /// project is not enough: the caller must also be able to write to the
 /// runtime's own project. A caller who cannot is answered exactly as for a
-/// runtime id that does not exist, and nothing on the host changes.
+/// runtime id that does not exist, and nothing on the host changes. An
+/// allowed attach leaves the host's origin alone as well: it reports that
+/// origin, applies no origin options and records no origin of its own.
 #[tokio::test]
 async fn tenant_attach_requires_write_access_to_the_host_runtimes_project() -> anyhow::Result<()> {
     let fixture = TenantAttachFixture::setup("tenant-attach-authorization").await?;
@@ -425,7 +453,6 @@ async fn tenant_attach_requires_write_access_to_the_host_runtimes_project() -> a
                 fixture.runtime_id,
                 fixture.other_org_project_id,
                 Some(metadata.clone()),
-                OriginEnsureOptions::new(None, None, None),
             )
             .await
             .expect_err("a runtime outside the authorized host project is refused");
@@ -442,27 +469,45 @@ async fn tenant_attach_requires_write_access_to_the_host_runtimes_project() -> a
                 "a refused attach leaves the host's origin alone"
             );
 
-            for (case, bearer, tenant_project_id) in [
+            // With origin options too, which a tenant attach does not apply.
+            let mut with_origin_options = TenantAttachFixture::attach_request(
+                fixture.service_tenant_project_id,
+                fixture.runtime_id,
+                metadata.clone(),
+            );
+            with_origin_options["originMode"] = json!("tunnel");
+            with_origin_options["originProtocols"] = json!(["http", "ws"]);
+            with_origin_options["originMetadata"] = json!({ "owner": "tenant" });
+            for (case, bearer, request) in [
                 (
                     "writer of both projects",
                     fixture.user_token(fixture.host_writer)?,
-                    fixture.same_org_tenant_project_id,
+                    TenantAttachFixture::attach_request(
+                        fixture.same_org_tenant_project_id,
+                        fixture.runtime_id,
+                        metadata.clone(),
+                    ),
                 ),
                 (
                     "service role",
                     SERVICE_ROLE_TOKEN.to_string(),
-                    fixture.service_tenant_project_id,
+                    with_origin_options,
                 ),
             ] {
-                let (status, body) = fixture
-                    .attach(
-                        &bearer,
-                        tenant_project_id,
-                        fixture.runtime_id,
-                        metadata.clone(),
-                    )
-                    .await?;
+                let (status, body) = fixture.ensure(&bearer, request).await?;
                 assert_eq!(status, StatusCode::OK, "{case}: {body}");
+                assert_eq!(
+                    body["origin"],
+                    json!({
+                        "status": "online",
+                        "leaseId": fixture.shared_lease_id.to_string(),
+                        "mode": "hosted",
+                        "protocols": ["http"],
+                        "endpoint": "https://origin.test",
+                        "metadata": { "owner": "host" },
+                    }),
+                    "{case}: the host's origin as it is"
+                );
                 assert_eq!(body["scope"], json!("tenant"), "{case}: {body}");
                 assert_eq!(
                     body["runtime_id"],
@@ -487,6 +532,38 @@ async fn tenant_attach_requires_write_access_to_the_host_runtimes_project() -> a
                 assert_eq!(lease_project_id, tenant_project_id);
                 assert_eq!(parent_lease_id, Some(fixture.shared_lease_id));
             }
+            assert_eq!(
+                fixture.host_origin().await?,
+                host_origin_before,
+                "an attach leaves the host's origin alone"
+            );
+            assert_eq!(
+                fixture.origin_instance_count().await?,
+                1,
+                "an attach records no origin of its own"
+            );
+
+            // Nor does it create one for a host that has none.
+            fixture
+                .pool
+                .get()
+                .await?
+                .execute(
+                    "delete from origin_instances where runtime_id = $1",
+                    &[&fixture.runtime_id],
+                )
+                .await?;
+            let (status, body) = fixture
+                .attach(
+                    &fixture.user_token(fixture.host_writer)?,
+                    fixture.same_org_tenant_project_id,
+                    fixture.runtime_id,
+                    metadata.clone(),
+                )
+                .await?;
+            assert_eq!(status, StatusCode::OK, "{body}");
+            assert!(body.get("origin").is_none(), "{body}");
+            assert_eq!(fixture.origin_instance_count().await?, 0);
             Ok(())
         })
         .await
