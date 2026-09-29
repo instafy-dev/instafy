@@ -101,6 +101,10 @@ services:
       CODEX_HOME: /root/.codex
       CODEX_AUTH_PATH: /root/.codex/auth.json
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      # Pins managed runs on static credentials to the managed model. Unset
+      # falls back to MANAGED_AI_MODEL_ID; an empty PROXY_PINNED_MODEL is no
+      # pin (see docker-compose.runtime.provider.yml).
+      PROXY_PINNED_MODEL: ${PROXY_PINNED_MODEL-${MANAGED_AI_MODEL_ID:-}}
       CONTROLLER_BASE_URL: ${CONTROLLER_BASE_URL:-http://host.docker.internal:8788}
       CONTROLLER_INTERNAL_TOKEN: ${CONTROLLER_INTERNAL_TOKEN:-}
       PROXY_CREDENTIAL_LEASE_TOKEN: ${PROXY_CREDENTIAL_LEASE_TOKEN:-}

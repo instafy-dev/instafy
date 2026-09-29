@@ -588,6 +588,9 @@ describe("useChatSubmitFlow group participation ordering", () => {
       runtimeReady: true,
       sharedBrowserActive: true,
       sharedBrowserRuntimeId: "shared-runtime",
+      browserSessionOpen: true,
+      preferredBrowserPage: { id: "page-1", url: "https://example.com/", host: "example.com",
+        label: "Example", title: "Example", lastReferencedAt: 1, isActive: true },
       targetsOverlapActiveRuns: vi.fn(() => false),
     });
     const resultRef: MutableRefObject<HookResult | null> = { current: null };
@@ -615,5 +618,33 @@ describe("useChatSubmitFlow group participation ordering", () => {
         }),
       }),
     );
+  });
+  it("keeps a browser task unsent when no live page is available", async () => {
+    const options = createOptions({ sharedBrowserActive: true, sharedBrowserRuntimeId: "shared-runtime",
+      browserSessionOpen: true, preferredBrowserPage: null, inputValue: "Click the button",
+      resolveGroupParticipationBeforeSubmit: vi.fn(async ({ metadata }) => ({ mode: "dispatch" as const, metadata })),
+    });
+    const resultRef: MutableRefObject<HookResult | null> = { current: null };
+    await act(async () => root.render(<Harness options={options} resultRef={resultRef} />));
+    await act(async () => { expect(await resultRef.current!.submitMessage()).toBe(false); });
+    expect(options.performSubmit).not.toHaveBeenCalled();
+    expect(options.clearComposerIfUnchanged).not.toHaveBeenCalled();
+    expect(options.showStatus).toHaveBeenCalledWith(expect.stringContaining("Open a page"), "warning", 5000);
+  });
+
+  it.each([
+    { name: "normal Chat with a browser pane open", sharedBrowserActive: false, pendingBrowserLaunchMode: null },
+    { name: "a new-page request without a live page", sharedBrowserActive: true, pendingBrowserLaunchMode: "new_page" as const },
+  ])("uses the general agent for $name", async ({ sharedBrowserActive, pendingBrowserLaunchMode }) => {
+    const options = createOptions({ browserSessionOpen: true, sharedBrowserActive, pendingBrowserLaunchMode,
+      sharedBrowserRuntimeId: "shared-runtime", inputValue: "Create notes.md with a heading",
+      credentialsReady: true, runtimeReady: true, isAssistantTyping: false, outOfCredits: false,
+      resolveGroupParticipationBeforeSubmit: vi.fn(async ({ metadata }) => ({ mode: "dispatch" as const, metadata })),
+    });
+    const resultRef: MutableRefObject<HookResult | null> = { current: null };
+    await act(async () => root.render(<Harness options={options} resultRef={resultRef} />));
+    await act(async () => { expect(await resultRef.current!.submitMessage()).toBe(true); });
+    expect(options.performSubmit).toHaveBeenCalledWith(expect.objectContaining({ runtimeOverride: null }));
+    expect(vi.mocked(options.performSubmit).mock.calls[0][0].metadata).not.toHaveProperty("browserTransport");
   });
 });

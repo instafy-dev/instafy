@@ -6473,7 +6473,7 @@ impl JobProcessor {
                     retry_stream_events.push(event.clone());
                     if retry_stream_active {
                         let messages = with_runtime_metadata_vec(
-                            extract_codex_messages(&retry_stream_events),
+                            extract_codex_attempt_messages(&retry_stream_events, 2),
                             &registration.runtime_id,
                         );
                         for message in messages.iter().skip(retry_streamed_count) {
@@ -6513,7 +6513,7 @@ impl JobProcessor {
             );
 
             let retry_raw_messages = with_runtime_metadata_vec(
-                extract_codex_messages(&retry_output.events),
+                extract_codex_attempt_messages(&retry_output.events, 2),
                 &registration.runtime_id,
             );
             let retry_safety_check_downgrade_warning =
@@ -7990,6 +7990,7 @@ Avoid creating dependency caches or stores in the canonical workspace root when 
             - When you describe file changes, include a `change` object such as { type: 'created' | 'deleted' | 'changed', optional lines: [{ from: number, to: number }] } whenever you can do so reliably.\n\
             - When the user references another conversation (see \"Referenced conversations\"), treat it as additional context.\n\
             - If the user asks about token usage for a previous answer, retrieve it (do not guess) via `instafy history messages` (it already knows this conversation; `instafy api get` is the fallback) and then reply in the exact format `Token usage — input: <n>, cached: <n>, output: <n>`.\n\
+            - Those `token_usage` rows are per turn: each counts only its own turn's tokens, not the conversation's running total. For how much one answer used, add the rows whose `metadata.details.usageScope` is `turn` and whose `metadata.jobId` is that answer's job: a recovery retry adds its own row, marked with `metadata.details.attempt`. The row without `usageScope` and the credit ledger reflect only the first attempt, so do not add that row or quote either for the answer. For a total across answers, add only the rows whose `metadata.details.usageScope` is `turn`; rows from before per-turn reporting have none and hold a running total. If an answer's job has no `usageScope` `turn` row, its usage was not reported: say so rather than quoting a neighbouring row or a zero. A final wrap-up pass after a missing answer is not reported as a row, so a job that ran one used somewhat more than its rows add up to.\n\
             - When the request depends on observable workspace, runtime, repo, process, or server state, use the appropriate tool calls before answering and report concrete observed output (for example: exit code, process status, line counts, tail output).\n\
             - For browser/UI tasks, execute real browser automation and report observed page output. When interactive browser tools are not exposed, follow instafy-browser-automation and emit request_browser to continue in Studio's browser. That action is a handoff, not evidence that a page was opened or a task completed.\n\
             - For nearby/location-dependent browsing requests (for example \"good coffee nearby\"), do not stop at a generic search-results page if the user asked for a recommendation. Continue until you can report at least one concrete candidate or the exact blocker.\n\
@@ -16011,17 +16012,18 @@ fn extract_codex_messages(events: &[JsonValue]) -> Vec<JobMessage> {
                     let key = format!("turn.completed::{input}::{cached}::{output}");
                     let content =
                         format!("Token usage — input: {input}, cached: {cached}, output: {output}");
-                    push_message(
-                        key,
-                        content,
-                        Some("token_usage"),
-                        json!({
-                            "kind": "codex_turn_usage",
-                            "model": model,
-                            "event": event.clone(),
-                            "usage": usage,
-                        }),
-                    );
+                    let mut details = json!({
+                        "kind": "codex_turn_usage",
+                        "model": model,
+                        "event": event.clone(),
+                        "usage": usage,
+                    });
+                    // The adapter reports the turn's own usage, not the thread's running
+                    // total, and says so on the event.
+                    if let Some(scope) = map.get("usageScope").and_then(JsonValue::as_str) {
+                        details["usageScope"] = json!(scope);
+                    }
+                    push_message(key, content, Some("token_usage"), details);
                 }
             }
             "stream.retry" => {
@@ -16105,6 +16107,21 @@ fn extract_codex_messages(events: &[JsonValue]) -> Vec<JobMessage> {
     }
 
     results
+}
+
+/// Messages of a later attempt within one job. Its `token_usage` rows carry `attempt`, since the
+/// controller's completion row and the ledger repeat only the first attempt's usage.
+fn extract_codex_attempt_messages(events: &[JsonValue], attempt: u64) -> Vec<JobMessage> {
+    let mut messages = extract_codex_messages(events);
+    for message in &mut messages {
+        if message.message_type.as_deref() != Some("token_usage") {
+            continue;
+        }
+        if let Some(JsonValue::Object(details)) = message.metadata.as_mut() {
+            details.insert("attempt".to_string(), JsonValue::from(attempt));
+        }
+    }
+    messages
 }
 
 fn should_surface_agent_text(text: &str) -> bool {
@@ -18305,6 +18322,53 @@ mod tests {
                     prompt.contains(
                         "via `instafy history messages` (it already knows this conversation;"
                     ),
+                    "{mode}"
+                );
+                // Quoting a row as the whole conversation's usage would repeat the old
+                // thread-total overstatement.
+                assert!(
+                    prompt.contains(
+                        "Those `token_usage` rows are per turn: each counts only its own turn's tokens"
+                    ),
+                    "{mode}"
+                );
+                // The controller's completion row repeats the runtime row's numbers without
+                // a scope, so adding every row of a run counts it twice.
+                assert!(
+                    prompt.contains(
+                        "For a total across answers, add only the rows whose `metadata.details.usageScope` is `turn`"
+                    ),
+                    "{mode}"
+                );
+                assert!(!prompt.contains("add rows together"), "{mode}");
+                // A recovery retry streams its own per-turn row, while the completion row and
+                // the ledger repeat only the first attempt, so one row understates the answer.
+                assert!(
+                    prompt.contains(
+                        "For how much one answer used, add the rows whose `metadata.details.usageScope` is `turn` and whose `metadata.jobId` is that answer's job"
+                    ),
+                    "{mode}"
+                );
+                assert!(
+                    prompt.contains(
+                        "a recovery retry adds its own row, marked with `metadata.details.attempt`"
+                    ),
+                    "{mode}"
+                );
+                assert!(
+                    prompt.contains(
+                        "The row without `usageScope` and the credit ledger reflect only the first attempt"
+                    ),
+                    "{mode}"
+                );
+                assert!(
+                    prompt.contains(
+                        "If an answer's job has no `usageScope` `turn` row, its usage was not reported"
+                    ),
+                    "{mode}"
+                );
+                assert!(
+                    !prompt.contains("Quote the row for the answer the user asked about"),
                     "{mode}"
                 );
             }
@@ -26031,6 +26095,114 @@ mod tests {
         assert_eq!(
             metadata.get("kind").and_then(JsonValue::as_str),
             Some("codex_turn_usage")
+        );
+    }
+
+    /// The third turn of a thread: Codex's running total goes from 100k to 150k, so this turn
+    /// used 50k.
+    async fn third_turn_codex_events() -> Vec<JsonValue> {
+        use crate::codex::{CodexEventStreamAdapter, TurnStartTokenUsage, start_test_turn};
+        use codex_protocol::protocol::{
+            Event, EventMsg, TokenCountEvent, TokenUsage, TokenUsageInfo, TurnCompleteEvent,
+        };
+
+        let usage = |input: i64, cached: i64, output: i64| TokenUsage {
+            input_tokens: input,
+            cached_input_tokens: cached,
+            cache_write_input_tokens: 0,
+            output_tokens: output,
+            reasoning_output_tokens: 0,
+            total_tokens: input + output,
+        };
+        let turn_start = TurnStartTokenUsage::default();
+        start_test_turn(
+            &turn_start,
+            "thread-main",
+            "turn-3",
+            &usage(100_000, 90_000, 2_000),
+        )
+        .await;
+        let mut adapter = CodexEventStreamAdapter::with_turn_start_token_usage(turn_start);
+        [
+            EventMsg::TokenCount(TokenCountEvent {
+                info: Some(TokenUsageInfo {
+                    total_token_usage: usage(150_000, 135_000, 3_000),
+                    last_token_usage: usage(50_000, 45_000, 1_000),
+                    model_context_window: Some(272_000),
+                }),
+                rate_limits: None,
+            }),
+            EventMsg::TurnComplete(TurnCompleteEvent {
+                turn_id: "turn-3".to_string(),
+                last_agent_message: None,
+                error: None,
+                started_at: None,
+                completed_at: None,
+                duration_ms: None,
+                time_to_first_token_ms: None,
+            }),
+        ]
+        .into_iter()
+        .flat_map(|msg| {
+            adapter.collect(&Event {
+                id: "turn-3".to_string(),
+                msg,
+            })
+        })
+        .collect()
+    }
+
+    #[tokio::test]
+    async fn extract_codex_messages_marks_usage_scope_turn() {
+        let messages = extract_codex_messages(&third_turn_codex_events().await);
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].message_type.as_deref(), Some("token_usage"));
+        assert!(
+            messages[0]
+                .content
+                .ends_with("input: 50000, cached: 45000, output: 1000")
+        );
+        let metadata = messages[0].metadata.as_ref().expect("metadata");
+        assert_eq!(metadata["usageScope"], "turn");
+        assert_eq!(metadata["usage"]["input_tokens"], 50_000);
+        assert_eq!(
+            metadata["event"]["threadTotalUsage"]["input_tokens"],
+            150_000
+        );
+        assert_eq!(metadata.get("attempt"), None);
+    }
+
+    #[tokio::test]
+    async fn retry_attempt_usage_rows_carry_their_attempt() {
+        // A recovery retry streams its own per-turn row. The completion row and the ledger
+        // repeat only the first attempt, so the retry row says which attempt it counts.
+        let mut events = third_turn_codex_events().await;
+        events.insert(
+            0,
+            json!({"type":"item.completed","item":{"id":"msg-1","type":"agent_message","text":"Checking the workspace."}}),
+        );
+
+        let messages = extract_codex_attempt_messages(&events, 2);
+
+        assert_eq!(messages.len(), 2, "{messages:?}");
+        let usage_row = messages
+            .iter()
+            .find(|message| message.message_type.as_deref() == Some("token_usage"))
+            .expect("the retry's usage row");
+        let metadata = usage_row.metadata.as_ref().expect("metadata");
+        assert_eq!(metadata["attempt"], 2);
+        assert_eq!(metadata["usageScope"], "turn");
+        assert_eq!(metadata["usage"]["input_tokens"], 50_000);
+        let other = messages
+            .iter()
+            .find(|message| message.message_type.as_deref() != Some("token_usage"))
+            .expect("the retry's agent message");
+        assert_eq!(
+            other
+                .metadata
+                .as_ref()
+                .and_then(|metadata| metadata.get("attempt")),
+            None
         );
     }
 

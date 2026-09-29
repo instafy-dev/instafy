@@ -6,10 +6,9 @@ use axum::http::HeaderMap;
 use runtime_contracts::{CreditEventRequest, CreditSnapshotPayload};
 use uuid::Uuid;
 
-use crate::auth::Credentials;
 use crate::controller_client::ControllerClient;
 use crate::controller_credential_source::ControllerCredentialSource;
-use crate::credential_lease::{CredentialLease, CredentialLeasePurpose};
+use crate::credential_lease::{CredentialLease, CredentialLeasePurpose, LeasedCredentials};
 use crate::proxy_auth::{ProxyClaims, ProxyTokenValidator};
 
 #[derive(Clone)]
@@ -126,7 +125,7 @@ impl ControllerIntegration {
     pub async fn acquire_credential_lease(
         &self,
         credential_id: &str,
-    ) -> Result<CredentialLease<Credentials>> {
+    ) -> Result<CredentialLease<LeasedCredentials>> {
         self.credential_source
             .acquire_lease(credential_id, CredentialLeasePurpose::InitialRequest)
             .await
@@ -135,7 +134,7 @@ impl ControllerIntegration {
     pub async fn renew_credential_lease_after_rejection(
         &self,
         credential_id: &str,
-    ) -> Result<CredentialLease<Credentials>> {
+    ) -> Result<CredentialLease<LeasedCredentials>> {
         self.credential_source
             .acquire_lease(
                 credential_id,

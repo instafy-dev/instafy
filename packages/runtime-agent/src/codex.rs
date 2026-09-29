@@ -17,7 +17,10 @@ use codex_core::{
     resolve_installation_id, thread_store_from_config,
 };
 use codex_exec_server::{EnvironmentManager, LOCAL_ENVIRONMENT_ID, LOCAL_FS};
-use codex_extension_api::empty_extension_registry;
+use codex_extension_api::{
+    ExtensionFuture, ExtensionRegistry, ExtensionRegistryBuilder, TurnLifecycleContributor,
+    TurnStartInput,
+};
 use codex_features::Feature;
 use codex_git_utils::resolve_root_git_project_for_trust;
 use codex_login::AuthManager;
@@ -33,7 +36,7 @@ use codex_protocol::models::{ContentItem, MessagePhase, ResponseItem};
 use codex_protocol::openai_models::ReasoningEffort;
 use codex_protocol::protocol::{
     AskForApproval, CodexErrorInfo, Event, EventMsg, McpServerRefreshConfig, Op, SandboxPolicy,
-    SessionSource, StreamErrorEvent, ThreadSettingsOverrides, TurnEnvironmentSelection,
+    SessionSource, StreamErrorEvent, ThreadSettingsOverrides, TokenUsage, TurnEnvironmentSelection,
     TurnEnvironmentSelections,
 };
 use codex_protocol::user_input::UserInput;
@@ -1284,6 +1287,7 @@ impl CodexClient {
         let installation_id = resolve_installation_id(&config.codex_home)
             .await
             .context("failed to resolve Codex installation id")?;
+        let turn_start_token_usage = TurnStartTokenUsage::default();
         let thread_manager = Arc::new(ThreadManager::new(
             &config,
             auth_manager.clone(),
@@ -1291,7 +1295,7 @@ impl CodexClient {
             CodexAppsToolsCache::default(),
             SessionSource::Exec,
             environment_manager,
-            empty_extension_registry(),
+            codex_extension_registry(&turn_start_token_usage),
             Arc::new(EmptyUserInstructionsProvider),
             None,
             thread_store,
@@ -1443,7 +1447,8 @@ impl CodexClient {
         };
 
         let run_result = async {
-            let mut aggregator = CodexEventStreamAdapter::default();
+            let mut aggregator =
+                CodexEventStreamAdapter::with_turn_start_token_usage(turn_start_token_usage);
         let mut events = Vec::new();
 
         if let Some(configured) = session_configured_event {
@@ -3194,17 +3199,181 @@ struct CommandExecutionState {
     aggregated_output: String,
 }
 
-#[derive(Debug, Default)]
+/// Codex's thread token total at the start of each turn, keyed by turn id.
+///
+/// Codex's `total_token_usage` runs over the whole thread and a resumed thread restores it from
+/// the rollout, so `turn.completed` reports the turn's own usage as its end total less this
+/// baseline, and the running total as `threadTotalUsage`. A turn with no count that moves the
+/// total off its baseline, or with no baseline, has no `usage`, which the controller reads as no
+/// usage reported: the flat reserve stands instead of settling at zero. Until the metering
+/// cutover, legacy managed-AI billing (the controller's `extract_turn_usage_from_artifacts`, then
+/// `reconcile_managed_ai_usage_charge`) reads that per-turn value. Earlier turns no longer
+/// inflate it, but tokens of any turn whose `turn.completed` the controller does not read are no
+/// longer picked up by the next turn's running total either. That covers:
+/// - a turn the runtime stops reading at `Error`, `TurnAborted` or a fatal stream error, which
+///   emits none;
+/// - a turn the runtime stops reading at a user Stop or a lost lease, or at a shared-browser
+///   deadline, which end `next_codex_event` with "lease lost" before any `TurnAborted` and emit
+///   none;
+/// - a run that hits the Codex run timeout. Outside the bounded lane, a timed-out attempt (like
+///   a retryable upstream error) is replayed once on the resumed thread, and the replay reports
+///   only its own tokens, so the timed-out attempt's go unbilled; only the last timeout fails
+///   the run with "Codex run timed out";
+/// - every recovery retry after the first attempt within one job, because the controller reads
+///   the first run-log that has a `turn.completed`;
+/// - a completed turn whose job then fails without artifacts (a retry that errors out), since
+///   the failed completion carries no run-log to read.
+///
+/// A stopped or failed turn is billed only its flat reserve.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct TurnStartTokenUsage(Arc<parking_lot::Mutex<HashMap<String, TokenUsage>>>);
+
+impl TurnStartTokenUsage {
+    fn record(&self, turn_id: &str, usage: &TokenUsage) {
+        self.0.lock().insert(turn_id.to_string(), usage.clone());
+    }
+
+    /// Whether `total` differs from the turn's baseline. False when there is no baseline.
+    fn moved_since_start(&self, turn_id: &str, total: &TokenUsage) -> bool {
+        self.0
+            .lock()
+            .get(turn_id)
+            .is_some_and(|start| start != total)
+    }
+
+    fn take(&self, turn_id: &str) -> Option<TokenUsage> {
+        self.0.lock().remove(turn_id)
+    }
+}
+
+/// Records the baseline Codex itself captures before a turn runs. Subagent threads share the
+/// registry, but each of their turns has its own id, so none replaces this thread's baseline.
+struct TurnStartTokenUsageRecorder(TurnStartTokenUsage);
+
+impl TurnLifecycleContributor for TurnStartTokenUsageRecorder {
+    fn on_turn_start<'a>(&'a self, input: TurnStartInput<'a>) -> ExtensionFuture<'a, ()> {
+        self.0
+            .record(input.turn_id, input.token_usage_at_turn_start);
+        Box::pin(async {})
+    }
+}
+
+/// The extension registry a run hands Codex. It records each turn's baseline into
+/// `turn_start_token_usage`, which the run's `CodexEventStreamAdapter` reads.
+fn codex_extension_registry(
+    turn_start_token_usage: &TurnStartTokenUsage,
+) -> Arc<ExtensionRegistry<Config>> {
+    let mut extensions = ExtensionRegistryBuilder::new();
+    extensions.turn_lifecycle_contributor(Arc::new(TurnStartTokenUsageRecorder(
+        turn_start_token_usage.clone(),
+    )));
+    Arc::new(extensions.build())
+}
+
+/// Starts a turn the way Codex does: through the registry a run hands it, with the thread total
+/// captured before the turn runs. Each store has its own id, so a recorder keyed by anything but
+/// the turn id misses the turn.
+#[cfg(test)]
+pub(crate) async fn start_test_turn(
+    turn_start_token_usage: &TurnStartTokenUsage,
+    thread_id: &str,
+    turn_id: &str,
+    total: &TokenUsage,
+) {
+    let session_store = codex_extension_api::ExtensionData::new("session");
+    let thread_store = codex_extension_api::ExtensionData::new(thread_id);
+    let turn_store = codex_extension_api::ExtensionData::new(turn_id);
+    let collaboration_mode = codex_protocol::config_types::CollaborationMode {
+        mode: codex_protocol::config_types::ModeKind::default(),
+        settings: codex_protocol::config_types::Settings {
+            model: DEFAULT_CODEX_MODEL.to_string(),
+            reasoning_effort: None,
+            developer_instructions: None,
+        },
+    };
+    let registry = codex_extension_registry(turn_start_token_usage);
+    for contributor in registry.turn_lifecycle_contributors() {
+        contributor
+            .on_turn_start(TurnStartInput {
+                turn_id,
+                collaboration_mode: &collaboration_mode,
+                token_usage_at_turn_start: total,
+                session_store: &session_store,
+                thread_store: &thread_store,
+                turn_store: &turn_store,
+            })
+            .await;
+    }
+}
+
+/// Usage between two readings of a thread total, clamped at zero per field as Codex's own turn
+/// telemetry does. A context-window reset lowers the total, which must not report a negative.
+fn token_usage_since(total: &TokenUsage, start: &TokenUsage) -> TokenUsage {
+    let since = |end: i64, begin: i64| end.saturating_sub(begin).max(0);
+    TokenUsage {
+        input_tokens: since(total.input_tokens, start.input_tokens),
+        cached_input_tokens: since(total.cached_input_tokens, start.cached_input_tokens),
+        cache_write_input_tokens: since(
+            total.cache_write_input_tokens,
+            start.cache_write_input_tokens,
+        ),
+        output_tokens: since(total.output_tokens, start.output_tokens),
+        reasoning_output_tokens: since(
+            total.reasoning_output_tokens,
+            start.reasoning_output_tokens,
+        ),
+        total_tokens: since(total.total_tokens, start.total_tokens),
+    }
+}
+
+/// Codex records every turn's baseline through the registry a run hands it, so a turn without
+/// one means the adapter was built without that registry. Its usage stays unreported rather
+/// than estimated. Logged once per process, with no identifiers or counts.
+fn warn_missing_turn_start_token_usage() {
+    static WARNED: std::sync::Once = std::sync::Once::new();
+    WARNED.call_once(|| {
+        tracing::warn!(
+            "Codex turn completed without a turn-start token baseline; its usage is not reported"
+        );
+    });
+}
+
+#[derive(Debug)]
 pub(crate) struct CodexEventStreamAdapter {
     command_states: HashMap<String, CommandExecutionState>,
     patch_apply_paths: HashMap<String, Vec<String>>,
     agent_message_delta_buffers: HashMap<String, String>,
     last_agent_message_delta_id: Option<String>,
     completed_agent_message_seen: bool,
-    last_total_token_usage: Option<JsonValue>,
+    turn_start_token_usage: TurnStartTokenUsage,
+    last_total_token_usage: Option<TokenUsage>,
+    /// Turns with a count that moved the thread total off the turn's baseline.
+    turns_with_reported_usage: HashSet<String>,
+}
+
+/// For tests that do not look at usage. Nothing feeds this baseline store, so no turn reports
+/// usage; production passes the store `codex_extension_registry` feeds.
+#[cfg(test)]
+impl Default for CodexEventStreamAdapter {
+    fn default() -> Self {
+        Self::with_turn_start_token_usage(TurnStartTokenUsage::default())
+    }
 }
 
 impl CodexEventStreamAdapter {
+    pub(crate) fn with_turn_start_token_usage(turn_start_token_usage: TurnStartTokenUsage) -> Self {
+        Self {
+            command_states: HashMap::new(),
+            patch_apply_paths: HashMap::new(),
+            agent_message_delta_buffers: HashMap::new(),
+            last_agent_message_delta_id: None,
+            completed_agent_message_seen: false,
+            turn_start_token_usage,
+            last_total_token_usage: None,
+            turns_with_reported_usage: HashSet::new(),
+        }
+    }
+
     pub(crate) fn collect(&mut self, event: &Event) -> Vec<JsonValue> {
         if let Some(kind) = unprojected_tool_activity_kind(&event.msg) {
             // Observation only: retain no tool arguments, output, paths or identifiers.
@@ -3368,22 +3537,44 @@ impl CodexEventStreamAdapter {
                 })]
             }
             EventMsg::TokenCount(token_count) => {
-                self.last_total_token_usage = token_count
-                    .info
-                    .as_ref()
-                    .and_then(|info| serde_json::to_value(&info.total_token_usage).ok());
+                // A count that carries only rate limits says nothing about usage.
+                if let Some(info) = &token_count.info {
+                    // A resumed thread repeats its restored total on every count, also in a
+                    // turn whose responses report no usage. Only a count that moves the total
+                    // off the baseline Codex recorded under this turn's id shows usage.
+                    if self
+                        .turn_start_token_usage
+                        .moved_since_start(&event.id, &info.total_token_usage)
+                    {
+                        self.turns_with_reported_usage.insert(event.id.clone());
+                    }
+                    self.last_total_token_usage = Some(info.total_token_usage.clone());
+                }
                 Vec::new()
             }
-            EventMsg::TurnComplete(_) => {
+            EventMsg::TurnComplete(turn) => {
                 let mut events = Vec::new();
                 if let Some(completed_message) = self.completed_agent_message_from_deltas() {
                     events.push(completed_message);
                 }
-                if let Some(usage) = self.last_total_token_usage.clone() {
-                    events.push(json!({
+                let turn_start = self.turn_start_token_usage.take(&turn.turn_id);
+                if turn_start.is_none() {
+                    warn_missing_turn_start_token_usage();
+                }
+                let usage_reported = self.turns_with_reported_usage.remove(&turn.turn_id);
+                if let Some(total) = self.last_total_token_usage.clone() {
+                    let mut completed = json!({
                         "type": "turn.completed",
-                        "usage": usage,
-                    }));
+                        "threadTotalUsage": total,
+                    });
+                    // Only a turn with a baseline and a count that moved the total has usage of
+                    // its own. Otherwise `usage` stays out and the controller keeps the flat
+                    // reserve, where a zero would refund it and the thread total overcharge it.
+                    if let Some(turn_start) = turn_start.filter(|_| usage_reported) {
+                        completed["usage"] = json!(token_usage_since(&total, &turn_start));
+                        completed["usageScope"] = json!("turn");
+                    }
+                    events.push(completed);
                 }
                 events
             }
@@ -6344,33 +6535,36 @@ required = true
         ));
     }
 
-    #[test]
-    fn codex_event_stream_adapter_emits_turn_usage_after_token_count() {
-        let mut adapter = CodexEventStreamAdapter::default();
-        let token_usage = TokenUsage {
-            input_tokens: 1000,
-            cached_input_tokens: 200,
+    fn usage(input: i64, cached: i64, output: i64) -> TokenUsage {
+        TokenUsage {
+            input_tokens: input,
+            cached_input_tokens: cached,
             cache_write_input_tokens: 0,
-            output_tokens: 250,
-            reasoning_output_tokens: 50,
-            total_tokens: 1250,
-        };
-        let _ = adapter.collect(&Event {
-            id: "evt_tokens".to_string(),
+            output_tokens: output,
+            reasoning_output_tokens: output / 4,
+            total_tokens: input + output,
+        }
+    }
+
+    fn token_count(turn_id: &str, total: TokenUsage, last: TokenUsage) -> Event {
+        Event {
+            id: turn_id.to_string(),
             msg: EventMsg::TokenCount(TokenCountEvent {
                 info: Some(TokenUsageInfo {
-                    total_token_usage: token_usage.clone(),
-                    last_token_usage: token_usage.clone(),
+                    total_token_usage: total,
+                    last_token_usage: last,
                     model_context_window: Some(128_000),
                 }),
                 rate_limits: None,
             }),
-        });
+        }
+    }
 
-        let completed = adapter.collect(&Event {
-            id: "evt_turn_complete".to_string(),
+    fn turn_complete(turn_id: &str) -> Event {
+        Event {
+            id: turn_id.to_string(),
             msg: EventMsg::TurnComplete(TurnCompleteEvent {
-                turn_id: "turn_1".to_string(),
+                turn_id: turn_id.to_string(),
                 last_agent_message: None,
                 error: None,
                 started_at: None,
@@ -6378,13 +6572,215 @@ required = true
                 duration_ms: None,
                 time_to_first_token_ms: None,
             }),
-        });
+        }
+    }
 
-        assert_eq!(completed.len(), 1);
-        assert_eq!(completed[0]["type"], "turn.completed");
-        assert_eq!(completed[0]["usage"]["input_tokens"], 1000);
-        assert_eq!(completed[0]["usage"]["cached_input_tokens"], 200);
-        assert_eq!(completed[0]["usage"]["output_tokens"], 250);
+    /// Starts a turn on the main thread through the registry a run hands Codex.
+    async fn start_turn(turn_start: &TurnStartTokenUsage, turn_id: &str, total: &TokenUsage) {
+        start_test_turn(turn_start, "thread-main", turn_id, total).await;
+    }
+
+    fn only_turn_completed(adapter: &mut CodexEventStreamAdapter, events: &[Event]) -> JsonValue {
+        let mut completed = events
+            .iter()
+            .flat_map(|event| adapter.collect(event))
+            .filter(|value| value["type"] == "turn.completed")
+            .collect::<Vec<_>>();
+        assert_eq!(completed.len(), 1, "{completed:?}");
+        completed.remove(0)
+    }
+
+    #[tokio::test]
+    async fn turn_completed_reports_per_turn_delta_on_resumed_thread() {
+        // A new job resumes the thread from its rollout, which restores the 100k total of the
+        // earlier turns. Codex's first count of this turn can repeat that total together with
+        // the previous turn's last request, as it does after a response without usage.
+        let restored = usage(100_000, 90_000, 2_000);
+        let turn_start = TurnStartTokenUsage::default();
+        start_turn(&turn_start, "turn-2", &restored).await;
+        let mut adapter = CodexEventStreamAdapter::with_turn_start_token_usage(turn_start);
+
+        let completed = only_turn_completed(
+            &mut adapter,
+            &[
+                token_count("turn-2", restored.clone(), usage(50_000, 45_000, 1_000)),
+                token_count(
+                    "turn-2",
+                    usage(150_000, 135_000, 3_000),
+                    usage(50_000, 45_000, 1_000),
+                ),
+                turn_complete("turn-2"),
+            ],
+        );
+
+        assert_eq!(completed["usageScope"], "turn");
+        assert_eq!(completed["usage"], json!(usage(50_000, 45_000, 1_000)));
+        assert_eq!(
+            completed["threadTotalUsage"],
+            json!(usage(150_000, 135_000, 3_000))
+        );
+    }
+
+    #[tokio::test]
+    async fn turn_completed_ignores_rate_limit_only_token_counts() {
+        let rate_limit_only = || Event {
+            id: "turn-1".to_string(),
+            msg: EventMsg::TokenCount(TokenCountEvent {
+                info: None,
+                rate_limits: Some(codex_protocol::protocol::RateLimitSnapshot {
+                    limit_id: None,
+                    limit_name: None,
+                    primary: None,
+                    secondary: None,
+                    credits: None,
+                    individual_limit: None,
+                    spend_control_reached: None,
+                    plan_type: None,
+                    rate_limit_reached_type: None,
+                }),
+            }),
+        };
+        let turn_start = TurnStartTokenUsage::default();
+        start_turn(&turn_start, "turn-1", &TokenUsage::default()).await;
+        let mut adapter = CodexEventStreamAdapter::with_turn_start_token_usage(turn_start);
+
+        let completed = only_turn_completed(
+            &mut adapter,
+            &[
+                rate_limit_only(),
+                token_count(
+                    "turn-1",
+                    usage(50_000, 45_000, 1_000),
+                    usage(50_000, 45_000, 1_000),
+                ),
+                rate_limit_only(),
+                turn_complete("turn-1"),
+            ],
+        );
+
+        assert_eq!(completed["usage"], json!(usage(50_000, 45_000, 1_000)));
+        assert_eq!(
+            completed["threadTotalUsage"],
+            json!(usage(50_000, 45_000, 1_000))
+        );
+    }
+
+    #[tokio::test]
+    async fn turn_completed_clamps_after_context_window_reset() {
+        // When the context window overflows, Codex fills the thread total to the window size
+        // and zeroes every other field, so the total falls below the turn's baseline.
+        let turn_start = TurnStartTokenUsage::default();
+        start_turn(&turn_start, "turn-3", &usage(150_000, 135_000, 3_000)).await;
+        let mut adapter = CodexEventStreamAdapter::with_turn_start_token_usage(turn_start);
+        let filled = TokenUsage {
+            total_tokens: 128_000,
+            ..TokenUsage::default()
+        };
+
+        let completed = only_turn_completed(
+            &mut adapter,
+            &[
+                token_count("turn-3", filled.clone(), TokenUsage::default()),
+                turn_complete("turn-3"),
+            ],
+        );
+
+        assert_eq!(completed["usage"], json!(TokenUsage::default()));
+        assert_eq!(completed["threadTotalUsage"], json!(filled));
+    }
+
+    #[tokio::test]
+    async fn subagent_turn_start_does_not_move_main_baseline() {
+        // A subagent runs on its own thread with its own event stream, so none of its counts
+        // reach this adapter. It shares the registry, though, so its turn start is recorded.
+        let turn_start = TurnStartTokenUsage::default();
+        start_turn(&turn_start, "turn-main", &usage(100_000, 90_000, 2_000)).await;
+        let mut adapter = CodexEventStreamAdapter::with_turn_start_token_usage(turn_start.clone());
+        let _ = adapter.collect(&token_count(
+            "turn-main",
+            usage(130_000, 117_000, 2_600),
+            usage(30_000, 27_000, 600),
+        ));
+        start_test_turn(
+            &turn_start,
+            "thread-subagent",
+            "turn-subagent",
+            &usage(7_000, 0, 500),
+        )
+        .await;
+
+        let completed = only_turn_completed(
+            &mut adapter,
+            &[
+                token_count(
+                    "turn-main",
+                    usage(150_000, 135_000, 3_000),
+                    usage(20_000, 18_000, 400),
+                ),
+                turn_complete("turn-main"),
+            ],
+        );
+
+        assert_eq!(completed["usage"], json!(usage(50_000, 45_000, 1_000)));
+    }
+
+    #[tokio::test]
+    async fn turn_completed_leaves_usage_out_when_no_count_moved_the_total() {
+        // The resumed thread restores its 150k total, and no response of this turn reports
+        // usage, so each of its counts repeats that total with the previous turn's request.
+        let restored = usage(150_000, 135_000, 3_000);
+        let turn_start = TurnStartTokenUsage::default();
+        start_turn(&turn_start, "turn-4", &restored).await;
+        let mut adapter = CodexEventStreamAdapter::with_turn_start_token_usage(turn_start);
+
+        let completed = only_turn_completed(
+            &mut adapter,
+            &[
+                token_count("turn-4", restored.clone(), usage(50_000, 45_000, 1_000)),
+                token_count("turn-4", restored.clone(), usage(50_000, 45_000, 1_000)),
+                turn_complete("turn-4"),
+            ],
+        );
+
+        // With no `usage` object on the run's `turn.completed`, the controller's
+        // `extract_turn_usage_from_artifacts` returns none, so the flat reserve stands. A zero
+        // `usage` would reconcile to nothing and refund it.
+        assert_eq!(
+            completed,
+            json!({"type": "turn.completed", "threadTotalUsage": restored})
+        );
+    }
+
+    #[test]
+    fn turn_completed_without_turn_start_record_reports_only_the_thread_total() {
+        // Without the registry's recorder there is no baseline. Estimating one reproduced the
+        // running-total overcount, so only the thread total is reported, and not as the turn's.
+        let mut adapter = CodexEventStreamAdapter::default();
+
+        let completed = only_turn_completed(
+            &mut adapter,
+            &[
+                token_count(
+                    "turn-1",
+                    usage(150_000, 135_000, 3_000),
+                    usage(40_000, 36_000, 800),
+                ),
+                token_count(
+                    "turn-1",
+                    usage(160_000, 144_000, 3_200),
+                    usage(10_000, 9_000, 200),
+                ),
+                turn_complete("turn-1"),
+            ],
+        );
+
+        assert_eq!(
+            completed,
+            json!({
+                "type": "turn.completed",
+                "threadTotalUsage": usage(160_000, 144_000, 3_200),
+            })
+        );
     }
 }
 

@@ -20,6 +20,7 @@ import {
   resolveLocalSupabaseServiceRoleKey,
 } from "./lib/localSupabaseEnv.mjs";
 import { ensureSupabaseEmailTemplateMounts } from "./lib/supabaseEmailTemplateMounts.mjs";
+import { prepareSupabaseImageMirror } from "./lib/supabaseImageMirror.mjs";
 import { prepareSupabaseSerialPull } from "./lib/supabaseSerialPull.mjs";
 import {
   buildSupabaseStartArgs,
@@ -107,6 +108,10 @@ function startSupabase() {
   });
   syncSupabaseMigrationsDir();
   // Preparation failures must not enter the existing startup retry fallback.
+  // The GHCR mirror pre-seeds the CLI's exact local image references (on by
+  // default only under GitHub Actions), so neither the optional serial pull
+  // nor the CLI contacts ECR Public for images it already has.
+  prepareSupabaseImageMirror({ repoRoot, databaseOnly, authOnly, browserTest });
   prepareSupabaseSerialPull({ repoRoot, databaseOnly, authOnly, browserTest });
   console.log(
     databaseOnly

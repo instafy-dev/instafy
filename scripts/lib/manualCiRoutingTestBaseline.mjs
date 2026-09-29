@@ -38,8 +38,12 @@ export const MANUAL_CI_BASELINES = {
   // existing runtime-agent Cargo command; check-rust-ci binds its exact argv.
   "build.yml": { sha256: "fbbfb06f4c0cccf601107e9b08abffeabf500f119732b3db15e7b7800d7de23d" },
   "browser-e2e.yml": { sha256: "5a227820568dfe71f344bd816f77fe41c4d1d8980041937792de09ab956c121b" },
-  "auth-email.yml": { sha256: "198c97e67fe98118e3ee90c1f70dff088e2c00935f13dbf7e41eefad4d431e8a" },
-  "controller-db-tests.yml": { sha256: "465d5f037751932001abdc9956dba92327ab8483de91af47a627eae3d3b5d5e3" },
+  // The reviewed Auth and Controller DB baselines additionally trigger on the
+  // GHCR image-mirror helper (and its lock/test for Auth, the serial-pull helper
+  // for Controller DB); check-database-ci-routing binds those path lists.
+  // Auth also triggers on its email-template contract test in both event filters.
+  "auth-email.yml": { sha256: "131392418f749d19a71fc0cf557da98ec43d38073a35551bf8d5d3070a2c1973" },
+  "controller-db-tests.yml": { sha256: "dbda9359add1eb75752d6723e720c1506eb87abaf2110be218a7a8493f65bd59" },
   "git-conflict-canary.yml": { sha256: "8c7e5c51772e998058fba924e3eff5fb166d5b012856f56b2bcf6d208a47de3b" },
   "npm-release.yml": { sha256: "07f5c41b6ed624ce3d511dd43eda470573aefafd334996cfd76c8a072407612b" }
 };

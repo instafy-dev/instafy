@@ -8,6 +8,7 @@ import { useChatBrowserSessionState } from "../useChatBrowserSessionState";
 type BrowserSessionState = ReturnType<typeof useChatBrowserSessionState>;
 
 const setSessionRuntimeOverride = vi.fn();
+const refreshRuntimeStatuses = vi.fn();
 function TestHarness({ resultRef, userId = "user-1", projectId = "project-1", onHydrated }: {
   resultRef: { current: BrowserSessionState | null }; userId?: string | null; projectId?: string;
   onHydrated?: (userId: string | null, runtimeId: string | null) => void;
@@ -19,7 +20,7 @@ function TestHarness({ resultRef, userId = "user-1", projectId = "project-1", on
     activeProjectId: projectId,
     effectiveRuntimeId: null,
     preferredRuntimeId: null,
-    refreshRuntimeStatuses: vi.fn(),
+    refreshRuntimeStatuses,
     setSessionRuntimeOverride,
   });
   const { browserSessionStateHydrated, exactBrowserRuntimeId } = resultRef.current;
@@ -39,6 +40,7 @@ describe("useChatBrowserSessionState", () => {
     window.sessionStorage.clear();
     window.localStorage.clear();
     setSessionRuntimeOverride.mockClear();
+    refreshRuntimeStatuses.mockClear();
     container = document.createElement("div");
     document.body.appendChild(container);
     root = createRoot(container);
@@ -94,6 +96,48 @@ describe("useChatBrowserSessionState", () => {
     });
   });
 
+  it.each(["observed", "resumed"])("keeps the %s exact browser after a hidden unavailable response", async (binding) => {
+    const key = "instafy:browser-session:user-1:project-1:conversation-1";
+    await act(async () => root.render(<TestHarness resultRef={resultRef} />));
+    await act(async () => {
+      if (binding === "observed") resultRef.current?.handleBrowserRuntimeIdResolved("saved-browser");
+      else resultRef.current?.resumeBrowserSession("saved-browser");
+    });
+    await act(async () => resultRef.current?.handleBrowserSessionOpenChange(false));
+    await act(async () => resultRef.current?.handleHiddenBrowserSessionUnavailable());
+
+    expect(resultRef.current?.browserSessionOpen).toBe(false);
+    expect(resultRef.current?.hasHiddenBrowserSession).toBe(true);
+    expect(resultRef.current?.exactBrowserRuntimeId).toBe("saved-browser");
+    expect(refreshRuntimeStatuses).toHaveBeenCalledTimes(1);
+    for (const storage of [window.sessionStorage, window.localStorage]) {
+      expect(JSON.parse(storage.getItem(key)!)).toMatchObject({
+        open: false, runtimeId: "saved-browser", exactRuntimeId: "saved-browser",
+      });
+    }
+
+    await act(async () => resultRef.current?.handleToggleBrowserSession());
+    expect(resultRef.current?.browserSessionOpen).toBe(true);
+    expect(resultRef.current?.exactBrowserRuntimeId).toBe("saved-browser");
+    await act(async () => root.unmount());
+    window.sessionStorage.clear();
+    root = createRoot(container);
+    await act(async () => root.render(<TestHarness resultRef={resultRef} />));
+    expect(resultRef.current?.resolvedBrowserRuntimeId).toBe("saved-browser");
+    expect(resultRef.current?.exactBrowserRuntimeId).toBe("saved-browser");
+  });
+
+  it("clears an unavailable hidden runtime preference that was never confirmed", async () => {
+    await act(async () => root.render(<TestHarness resultRef={resultRef} />));
+    await act(async () => resultRef.current?.openBrowserSession("preferred-runtime"));
+    await act(async () => resultRef.current?.handleBrowserSessionOpenChange(false));
+    await act(async () => resultRef.current?.handleHiddenBrowserSessionUnavailable());
+    expect(resultRef.current?.hasHiddenBrowserSession).toBe(false);
+    expect(resultRef.current?.resolvedBrowserRuntimeId).toBeNull();
+    expect(resultRef.current?.exactBrowserRuntimeId).toBeNull();
+    expect(refreshRuntimeStatuses).toHaveBeenCalledTimes(1);
+  });
+
   it("pins an observed runtime and restores only explicitly recorded exact intent", async () => {
     window.sessionStorage.setItem("instafy:browser-session:user-1:project-1:conversation-1", JSON.stringify({ open: true, runtimeId: "old-preference" }));
     await act(async () => root.render(<TestHarness resultRef={resultRef} />));
@@ -128,6 +172,7 @@ describe("useChatBrowserSessionState", () => {
     "isolates saved exact intent and stale callbacks when identity changes: %j", async (next) => {
       await act(async () => root.render(<TestHarness resultRef={resultRef} />));
       await act(async () => resultRef.current?.handleBrowserRuntimeIdResolved("first-browser"));
+      await act(async () => resultRef.current?.handleBrowserSessionOpenChange(false));
       const stale = resultRef.current!;
       await act(async () => root.render(<TestHarness resultRef={resultRef} {...next} />));
       expect(resultRef.current?.browserSessionStateHydrated).toBe(true);
@@ -139,10 +184,12 @@ describe("useChatBrowserSessionState", () => {
         stale.openBrowserSession("late-browser");
         stale.resumeBrowserSession("late-browser");
         stale.handleBrowserSessionOpenChange(true);
+        stale.handleHiddenBrowserSessionUnavailable();
       });
       expect(resultRef.current?.exactBrowserRuntimeId).toBeNull();
       expect(resultRef.current?.browserSessionOpen).toBe(false);
       expect(setSessionRuntimeOverride).not.toHaveBeenCalled();
+      expect(refreshRuntimeStatuses).not.toHaveBeenCalled();
       expect(window.sessionStorage.getItem(`instafy:browser-session:${next.userId}:${next.projectId}:conversation-1`)).toBeNull();
       expect(window.localStorage.getItem(`instafy:browser-session:${next.userId}:${next.projectId}:conversation-1`)).toBeNull();
       await act(async () => resultRef.current?.handleBrowserRuntimeIdResolved("second-browser"));

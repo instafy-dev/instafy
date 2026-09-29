@@ -6,6 +6,8 @@ import { fileURLToPath } from "node:url";
 
 import {
   cacheTagFor,
+  ensurePinnedPostgresImage,
+  pullMirroredImage,
   pullPinnedImage,
   resolvePinnedPostgresImage,
 } from "./ensure-supabase-postgres-image.mjs";
@@ -123,4 +125,113 @@ test("pinned image pulls fail after the configured attempt budget", () => {
   );
   assert.equal(calls.length, 3);
   assert.deepEqual(waits, [10, 20]);
+});
+
+test("the GHCR mirror gets one bounded pull of the same digest and never retries", () => {
+  const digest = `sha256:${"d".repeat(64)}`;
+  const image = `public.ecr.aws/supabase/postgres@${digest}`;
+  const calls = [];
+  const quiet = { log() {}, warn() {} };
+  const pulled = pullMirroredImage(image, {
+    docker: "fake-docker",
+    runCommand(command, args, options) {
+      calls.push({ command, args, options });
+      return { status: 0 };
+    },
+    logger: quiet,
+  });
+  assert.equal(pulled, `ghcr.io/instafy-dev/supabase/postgres@${digest}`);
+  assert.deepEqual(calls, [
+    { command: "fake-docker", args: ["pull", pulled], options: { timeout: 180_000 } },
+  ]);
+
+  calls.length = 0;
+  const warnings = [];
+  assert.equal(
+    pullMirroredImage(image, {
+      runCommand(command, args, options) {
+        calls.push({ command, args, options });
+        return { status: 1, stderr: "denied" };
+      },
+      logger: { log() {}, warn: (line) => warnings.push(line) },
+    }),
+    null,
+  );
+  assert.equal(calls.length, 1);
+  assert.match(warnings[0], /falling back to ECR Public/u);
+  assert.throws(() => pullMirroredImage("public.ecr.aws/supabase/postgres:17", { runCommand() {} }));
+});
+
+function ensureHarness({ present = [], mirror = "ok", tarball = false } = {}) {
+  const image = `public.ecr.aws/supabase/postgres@sha256:${"e".repeat(64)}`;
+  const events = [];
+  const options = {
+    image,
+    docker: "fake-docker",
+    env: { GITHUB_ACTIONS: "true" },
+    cacheDir: "/inert-cache",
+    cacheTar: "/inert-cache/supabase-postgres.tar",
+    runCommand(command, args) {
+      events.push(["docker", ...args]);
+      if (args[0] === "image") return { status: present.includes(args[2]) ? 0 : 1 };
+      return { status: 0 };
+    },
+    fileExists: () => tarball,
+    makeDirectory: () => events.push(["mkdir"]),
+    pullMirror(reference, pullOptions) {
+      events.push(["mirror", reference, pullOptions.docker]);
+      return mirror === "ok" ? `ghcr.io/instafy-dev/supabase/postgres@${reference.split("@")[1]}` : null;
+    },
+    pullPinned(reference, pullOptions) {
+      events.push(["ecr", reference, pullOptions.docker]);
+      return reference;
+    },
+    logger: { log() {}, warn() {} },
+  };
+  return { image, events, options, cacheTag: cacheTagFor(image) };
+}
+
+test("a cold runner pulls the mirror first and caches the digest-bound tag from what it pulled", () => {
+  const h = ensureHarness();
+  assert.equal(ensurePinnedPostgresImage(h.options), h.cacheTag);
+  const mirrorRef = `ghcr.io/instafy-dev/supabase/postgres@${h.image.split("@")[1]}`;
+  assert.deepEqual(h.events, [
+    ["docker", "image", "inspect", h.image],
+    ["docker", "image", "inspect", h.cacheTag],
+    ["mirror", h.image, "fake-docker"],
+    ["docker", "tag", mirrorRef, h.cacheTag],
+    ["mkdir"],
+    ["docker", "save", "--output", "/inert-cache/supabase-postgres.tar", h.cacheTag],
+  ]);
+});
+
+test("a failed mirror pull falls back to the unchanged ECR retry budget", () => {
+  const h = ensureHarness({ mirror: "fail" });
+  ensurePinnedPostgresImage(h.options);
+  assert.deepEqual(h.events.slice(2, 5), [
+    ["mirror", h.image, "fake-docker"],
+    ["ecr", h.image, "fake-docker"],
+    ["docker", "tag", h.image, h.cacheTag],
+  ]);
+});
+
+test("the mirror follows the shared switch and local images or caches need no registry", () => {
+  const off = ensureHarness();
+  ensurePinnedPostgresImage({ ...off.options, env: { GITHUB_ACTIONS: "true", SUPABASE_IMAGE_MIRROR: "off" } });
+  assert.deepEqual(off.events.filter(([kind]) => kind === "mirror" || kind === "ecr").map(([kind]) => kind), ["ecr"]);
+  const local = ensureHarness();
+  ensurePinnedPostgresImage({ ...local.options, env: {} });
+  assert.deepEqual(local.events.filter(([kind]) => kind === "mirror" || kind === "ecr").map(([kind]) => kind), ["ecr"]);
+  for (const present of [[ensureHarness().image], [ensureHarness().cacheTag]]) {
+    const cached = ensureHarness({ present });
+    ensurePinnedPostgresImage(cached.options);
+    assert.ok(cached.events.every(([kind]) => kind === "docker"));
+    assert.ok(cached.events.every(([, verb]) => verb === "image"));
+  }
+  const invalid = ensureHarness();
+  assert.throws(
+    () => ensurePinnedPostgresImage({ ...invalid.options, env: { SUPABASE_IMAGE_MIRROR: "yes" } }),
+    /SUPABASE_IMAGE_MIRROR must be/u,
+  );
+  assert.deepEqual(invalid.events, []);
 });

@@ -2362,7 +2362,7 @@ fn managed_ai_failure_never_reached_upstream(error_message: Option<&str>) -> boo
 /// A managed-AI run that failed before reaching a model still holds the
 /// prompt reserve burned at dispatch and the daily prompt slot that goes with
 /// it. Give both back, once, when nothing shows the model was ever called:
-/// no usage in the artifacts, no visible assistant message, no tool updates,
+/// no completed Codex turn in the artifacts, no visible assistant message, no tool updates,
 /// and an error that the proxy rejected the request outright. Returns the
 /// org id when this call wrote the refund, for a post-commit
 /// `credits.updated`.
@@ -2392,7 +2392,9 @@ async fn refund_managed_ai_reserve_on_failed_completion(
     let Some(prompt_uuid) = prompt_id else {
         return Ok(None);
     };
-    if extract_turn_usage_from_artifacts(artifacts_value).is_some()
+    // Any completed Codex turn proves the model answered, even one that
+    // reported no usage and so carries no `usage` to reconcile.
+    if artifacts_show_a_completed_codex_turn(artifacts_value)
         || run_has_visible_assistant_message(transaction, project_id, run_id).await?
         || count_job_tool_update_messages(transaction, project_id, job_id).await? > 0
     {
@@ -3271,6 +3273,21 @@ struct TurnUsage {
     input_tokens: u64,
     cached_input_tokens: u64,
     output_tokens: u64,
+}
+
+/// Whether any Codex run log in the artifacts holds a `turn.completed`,
+/// with or without usage.
+fn artifacts_show_a_completed_codex_turn(artifacts: &JsonValue) -> bool {
+    artifacts
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|artifact| {
+            artifact.get("kind").and_then(JsonValue::as_str) == Some("codex/run-log")
+        })
+        .filter_map(|artifact| artifact.get("events").and_then(JsonValue::as_array))
+        .flatten()
+        .any(|event| event.get("type").and_then(JsonValue::as_str) == Some("turn.completed"))
 }
 
 fn extract_turn_usage_from_artifacts(artifacts: &JsonValue) -> Option<TurnUsage> {
@@ -5084,6 +5101,50 @@ mod tests {
         )));
         assert!(!managed_ai_failure_never_reached_upstream(Some("   ")));
         assert!(!managed_ai_failure_never_reached_upstream(None));
+    }
+
+    #[test]
+    fn turn_usage_is_absent_when_the_turn_reported_none() {
+        // The runtime leaves `usage` out of a turn that reported none and keeps only the
+        // thread's running total. That must read as no usage, so the flat reserve stands.
+        let thread_total =
+            json!({"input_tokens":150_000,"cached_input_tokens":135_000,"output_tokens":3_000});
+        let unreported = json!([{"kind":"codex/run-log","events":[
+            {"type":"turn.completed","threadTotalUsage":thread_total}
+        ]}]);
+        assert!(extract_turn_usage_from_artifacts(&unreported).is_none());
+
+        let reported = json!([{"kind":"codex/run-log","events":[
+            {"type":"turn.completed","usageScope":"turn","threadTotalUsage":thread_total,
+                "usage":{"input_tokens":50_000,"cached_input_tokens":45_000,"output_tokens":1_000}}
+        ]}]);
+        let usage = extract_turn_usage_from_artifacts(&reported).expect("the turn's usage");
+        assert_eq!(
+            (
+                usage.input_tokens,
+                usage.cached_input_tokens,
+                usage.output_tokens
+            ),
+            (50_000, 45_000, 1_000)
+        );
+
+        // A zero usage is not the same: it prices to nothing and refunds the whole reserve.
+        let config = crate::tests::build_app_config(
+            crate::tests::test_origin_private_key(),
+            crate::tests::test_origin_public_key(),
+            "test-key",
+        );
+        let zero = crate::credits::calculate_managed_ai_usage_charge(
+            &config,
+            ManagedAiTokenUsage {
+                input_tokens: 0,
+                cached_input_tokens: 0,
+                output_tokens: 0,
+            },
+        );
+        assert!(zero.reserve_units > 0);
+        assert_eq!(zero.charged_units, 0);
+        assert_eq!(zero.adjustment_units, -zero.reserve_units);
     }
 
     #[test]

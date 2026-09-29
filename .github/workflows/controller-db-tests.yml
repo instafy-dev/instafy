@@ -10,6 +10,8 @@ on:
       - "scripts/supabase-stack.mjs"
       - "scripts/lib/localSupabaseEnv.mjs"
       - "scripts/lib/supabaseStartMode.mjs"
+      - "scripts/lib/supabaseSerialPull.mjs"
+      - "scripts/lib/supabaseImageMirror.mjs"
       - "scripts/lib/supabaseEmailTemplateMounts.mjs"
       - ".github/workflows/controller-db-tests.yml"
   push:

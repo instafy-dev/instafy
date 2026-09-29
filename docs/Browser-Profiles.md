@@ -46,6 +46,9 @@ Browser location and the exact Workspace runtime binding are stored locally per
 Instafy user, project and conversation, so closing the Studio tab does not erase
 them. A live tab keeps its own runtime selection. The controller still checks
 access and availability; an expired runtime cannot be restored from an identifier.
+If a hidden browser becomes unavailable, polling pauses while its confirmed
+session selection remains saved. Reopening retries that session or offers an
+explicit choice if it has ended; it does not silently switch browsers.
 This record is not synced across devices. Use the existing resume link for a
 Workspace session on another device.
 

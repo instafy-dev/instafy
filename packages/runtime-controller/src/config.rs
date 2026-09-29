@@ -540,7 +540,8 @@ pub struct AppConfig {
     /// [`MANAGED_AI_CREDENTIAL_ID`], so a per-runtime proxy sidecar with no
     /// static credentials of its own can still serve managed turns. Unset
     /// keeps the static-proxy path: managed turns then need a proxy that
-    /// holds its own `OPENAI_API_KEY` or `auth.json`.
+    /// holds its own `OPENAI_API_KEY` or `auth.json`, and `PROXY_PINNED_MODEL`
+    /// to pin them to the managed model.
     pub managed_ai_openai_api_key: Option<String>,
     pub tunnel_broker_hook_secret: Option<String>,
     pub git_event_hook_secret: Option<String>,
