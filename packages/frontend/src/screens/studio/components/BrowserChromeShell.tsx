@@ -124,7 +124,7 @@ export function BrowserChromeShell({
       <div
         aria-busy={busy || undefined}
         aria-label={label}
-        className={`flex h-11 w-full min-w-0 flex-nowrap items-center gap-1 overflow-hidden border-b border-slate-200 bg-slate-50 px-2 max-[400px]:gap-0.5 max-[400px]:px-1 dark:border-[color:var(--color-studio-dark-divider)] dark:bg-[var(--color-studio-dark-panel-soft)] ${compact ? "" : "max-[540px]:h-auto max-[540px]:flex-wrap"}`}
+        className={`flex w-full min-w-0 flex-nowrap items-center gap-1 overflow-hidden border-b border-slate-200 bg-slate-50 px-2 max-[400px]:px-1 dark:border-[color:var(--color-studio-dark-divider)] dark:bg-[var(--color-studio-dark-panel-soft)] ${compact ? "h-12 pointer-coarse:h-13" : "h-11 max-[540px]:h-auto max-[540px]:flex-wrap max-[400px]:gap-0.5"}`}
         data-testid={testId}
         data-browser-session-safe-zone="true"
         role="toolbar"
@@ -139,14 +139,14 @@ export function BrowserChromeShell({
           >
             {status ? (
               <div
-                className="flex shrink-0 items-center"
+                className={compact ? "contents" : "flex shrink-0 items-center"}
                 data-testid="browser-chrome-status-slot"
               >
                 {status}
               </div>
             ) : null}
             {actions ? (
-              <div className="flex min-w-0 shrink-0 items-center gap-0.5 max-[540px]:flex-1 max-[540px]:justify-end max-[540px]:overflow-hidden">
+              <div className={`flex min-w-0 shrink-0 items-center max-[540px]:flex-1 max-[540px]:justify-end max-[540px]:overflow-hidden ${compact ? "gap-1" : "gap-0.5"}`}>
                 {actions}
               </div>
             ) : null}

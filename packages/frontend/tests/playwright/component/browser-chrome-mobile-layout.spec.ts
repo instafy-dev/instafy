@@ -173,6 +173,30 @@ async function mountCompactBrowserChrome(page: Page): Promise<void> {
   expect(failedRequests, failedRequests.join("; ")).toEqual([]);
 }
 
+async function browserChromeGeometry(page: Page) {
+  return page.evaluate(() => {
+    const bounds = (testId: string) => {
+      const element = document.querySelector<HTMLElement>(`[data-testid="${testId}"]`);
+      if (!element) return null;
+      const rect = element.getBoundingClientRect();
+      return { bottom: rect.bottom, height: rect.height, left: rect.left, right: rect.right, top: rect.top, width: rect.width };
+    };
+    const chromeElement = document.querySelector<HTMLElement>('[data-testid="shared-browser-chrome"]');
+    return {
+      coarse: window.matchMedia("(pointer: coarse)").matches,
+      address: bounds("shared-browser-address"),
+      collaboration: bounds("shared-browser-collaboration-toggle"),
+      browserTab: bounds("conversation-subtab-browser"),
+      chrome: bounds("shared-browser-chrome"),
+      chromeFits: chromeElement ? chromeElement.scrollWidth <= chromeElement.clientWidth : false,
+      documentWidth: document.documentElement.scrollWidth,
+      reload: bounds("shared-browser-reload"),
+      locationMenu: bounds("browser-location-menu"),
+      options: bounds("shared-browser-sessions-toggle"),
+    };
+  });
+}
+
 for (const width of [320, 360, 390]) {
   test(`keeps the compact browser in one address row at ${width}px`, async ({ page }, testInfo) => {
     await page.setViewportSize({ width, height: 800 });
@@ -200,32 +224,19 @@ for (const width of [320, 360, 390]) {
     await expect(page.getByTestId("conversation-subtab-browser")).toHaveAccessibleName("Browser, approval needed");
     await expect(page.getByTestId("shared-browser-approval-attention")).toBeVisible();
 
-    const geometry = await page.evaluate(() => {
-      const bounds = (testId: string) => {
-        const element = document.querySelector<HTMLElement>(`[data-testid="${testId}"]`);
-        if (!element) return null;
-        const rect = element.getBoundingClientRect();
-        return { height: rect.height, left: rect.left, right: rect.right, top: rect.top, width: rect.width };
-      };
-      const chromeElement = document.querySelector<HTMLElement>('[data-testid="shared-browser-chrome"]');
-      return {
-        address: bounds("shared-browser-address"),
-        collaboration: bounds("shared-browser-collaboration-toggle"),
-        browserTab: bounds("conversation-subtab-browser"),
-        chrome: bounds("shared-browser-chrome"),
-        chromeFits: chromeElement ? chromeElement.scrollWidth <= chromeElement.clientWidth : false,
-        documentWidth: document.documentElement.scrollWidth,
-        reload: bounds("shared-browser-reload"),
-        locationMenu: bounds("browser-location-menu"),
-        options: bounds("shared-browser-sessions-toggle"),
-      };
-    });
+    const geometry = await browserChromeGeometry(page);
 
     expect(geometry.documentWidth).toBeLessThanOrEqual(width);
     expect(geometry.chromeFits).toBe(true);
-    expect(geometry.chrome?.height ?? Infinity).toBeLessThanOrEqual(48);
+    expect(geometry.coarse).toBe(false);
+    expect(geometry.chrome?.height).toBe(48);
     expect(geometry.address?.width ?? 0).toBeGreaterThanOrEqual(96);
-    expect(geometry.collaboration!.left).toBeGreaterThanOrEqual(geometry.address!.right);
+    expect(geometry.collaboration!.left - geometry.address!.right).toBeCloseTo(4, 1);
+    expect(geometry.options!.left - geometry.collaboration!.right).toBeCloseTo(4, 1);
+    for (const target of [geometry.address, geometry.collaboration, geometry.reload, geometry.locationMenu, geometry.options]) {
+      expect(Math.abs(target!.top - geometry.chrome!.top - 4)).toBeLessThanOrEqual(1);
+      expect(Math.abs(geometry.chrome!.bottom - target!.bottom - 4)).toBeLessThanOrEqual(1);
+    }
     expect(Math.abs(geometry.collaboration!.top - geometry.address!.top)).toBeLessThanOrEqual(2);
     for (const target of [geometry.collaboration, geometry.browserTab, geometry.reload, geometry.locationMenu, geometry.options]) {
       expect(target).not.toBeNull();
@@ -308,6 +319,35 @@ for (const width of [320, 360, 390]) {
     });
   });
 }
+
+test("keeps comfortable touch targets and spacing in the 320px browser toolbar", async ({ browser, baseURL }) => {
+  const context = await browser.newContext({ baseURL, hasTouch: true, viewport: { width: 320, height: 800 } });
+  try {
+    const page = await context.newPage();
+    await mountCompactBrowserChrome(page);
+    await expect(page.getByTestId("shared-browser-chrome")).toBeVisible();
+    const geometry = await browserChromeGeometry(page);
+
+    expect(geometry.coarse).toBe(true);
+    expect(geometry.chrome?.height).toBe(52);
+    expect(geometry.chromeFits).toBe(true);
+    expect(geometry.documentWidth).toBeLessThanOrEqual(320);
+    expect(geometry.address?.width ?? 0).toBeGreaterThanOrEqual(96);
+    expect(geometry.collaboration!.left - geometry.address!.right).toBeCloseTo(4, 1);
+    expect(geometry.options!.left - geometry.collaboration!.right).toBeCloseTo(4, 1);
+    for (const target of [geometry.address, geometry.collaboration, geometry.reload, geometry.locationMenu, geometry.options]) {
+      expect(target).not.toBeNull();
+      expect(target!.height).toBeGreaterThanOrEqual(44);
+      expect(target!.width).toBeGreaterThanOrEqual(44);
+      expect(target!.left).toBeGreaterThanOrEqual(0);
+      expect(target!.right).toBeLessThanOrEqual(320);
+      expect(Math.abs(target!.top - geometry.chrome!.top - 4)).toBeLessThanOrEqual(1);
+      expect(Math.abs(geometry.chrome!.bottom - target!.bottom - 4)).toBeLessThanOrEqual(1);
+    }
+  } finally {
+    await context.close();
+  }
+});
 
 test("keeps the unified browser address usable at tablet portrait width", async ({ page }) => {
   await page.setViewportSize({ width: 768, height: 1024 });
