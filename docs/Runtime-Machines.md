@@ -32,6 +32,24 @@ Per-size credits/hour are exposed in `/credits/policy` (`usage.runtimeSizes`).
 The frontend preference is per-project (`runtime/runtimeSizePreference.ts`,
 localStorage) with a picker in the runtime menu; it applies on next start.
 
+## Tenant leases
+
+`POST /runtime/ensure` with `scope: "tenant"` and a `runtimeId` attaches the
+request's project to a runtime whose active lease is `shared`. It launches
+nothing and is not billed; the runtime's own project keeps paying for it.
+
+- The caller needs write access to the tenant project and to the runtime's
+  own project, and the tenant project's organization must be allowed to use
+  the runtime's provider. A caller without host access gets the same
+  `404` (`code: "runtime_not_found"`) as for a runtime id that does not exist.
+- Tenant lease metadata passes the managed request boundary, then loses every
+  `_instafy`-prefixed key and every launch setting (`runtimeFlavor`,
+  `runtimeImagePreset`, `sizeId`, `env`), on the first attach and on
+  re-attach.
+- Launch-generation readers (requeue relaunch, dispatch reconnect, provider
+  route rotation, operator hosted hours) ignore tenant leases, and a
+  runtime's status shows only its own project's origin.
+
 ## Idle stop (pause/wake lifecycle)
 
 `RUNTIME_IDLE_STOP_SECONDS` (default 1800, 0 disables). A hosted runtime stops
