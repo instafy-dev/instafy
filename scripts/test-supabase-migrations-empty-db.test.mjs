@@ -1321,6 +1321,11 @@ test("a migration sets its lock timeout only with a first top-level SET LOCAL", 
     "set local lock_timeout = '500us';\n",
     "set local lock_timeout to default;\n",
     "set local lock_timeout = '5s\n",
+    // Postgres reads these as 0 or 1 ms; the scanner alone would read 5 or 9.
+    "set local lock_timeout = .5;\n",
+    "set local lock_timeout = .9;\n",
+    "set local lock_timeout = +.5;\n",
+    "set local lock_timeout = + .5;\n",
     "set local statement_timeout = '5s';\n",
   ]) {
     assert.equal(setsLockTimeoutFirst(sql), null, sql);

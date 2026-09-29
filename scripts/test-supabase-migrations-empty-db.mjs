@@ -445,6 +445,13 @@ function setsLockTimeoutFirst(sql) {
   if (set !== "set" || local !== "local" || name !== "lock_timeout" || value.length !== 1) {
     return null;
   }
+  // The scanner drops punctuation, so "= .5" or "= +.5" would read as 5,
+  // where Postgres sets 0: the value must follow the name directly in the
+  // source.
+  const written = /\block_timeout\s*(?:=|\bto\b)\s*('[^']*'|[^;\s]+)\s*;/iu.exec(sql);
+  if (written === null || written[1].toLowerCase() !== value[0].toLowerCase()) {
+    return null;
+  }
   const quoted = value[0].length > 1 && value[0].startsWith("'") && value[0].endsWith("'");
   const match = LOCK_TIMEOUT_VALUE.exec(quoted ? value[0].slice(1, -1) : value[0]);
   if (match === null) {
