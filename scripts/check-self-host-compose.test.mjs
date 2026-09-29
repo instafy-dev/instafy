@@ -31,7 +31,8 @@ test("self-host validation is bound to the public Compose example", () => {
 
 // PROXY_PINNED_MODEL pins managed runs on the sidecar's static credentials to
 // the managed model, so both runtime Compose files must pass it through when
-// the operator sets it, and fall back to MANAGED_AI_MODEL_ID otherwise.
+// the operator sets it, fall back to MANAGED_AI_MODEL_ID when it is unset, and
+// treat an explicitly empty value as no pin.
 test(
   "the proxy sidecar takes its pinned model from the environment that runs Compose",
   { skip: !composeAvailable && "Docker Compose v2 unavailable" },
@@ -95,6 +96,11 @@ test(
           pinnedModel(composeFile, { MANAGED_AI_MODEL_ID: "gpt-6-luna" }),
           "gpt-6-luna",
           `${composeFile}: falls back to MANAGED_AI_MODEL_ID`,
+        );
+        assert.equal(
+          pinnedModel(composeFile, { PROXY_PINNED_MODEL: "", MANAGED_AI_MODEL_ID: "gpt-6-luna" }),
+          "",
+          `${composeFile}: an explicitly empty PROXY_PINNED_MODEL switches the pin off`,
         );
         assert.equal(
           pinnedModel(composeFile, { PROXY_PINNED_MODEL: "gpt-6-luna" }),

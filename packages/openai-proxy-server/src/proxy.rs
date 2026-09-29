@@ -1,4 +1,5 @@
 use std::borrow::Cow;
+use std::collections::BTreeMap;
 use std::convert::Infallible;
 use std::future::Future;
 use std::net::SocketAddr;
@@ -420,6 +421,39 @@ fn tools_for_pinned_lease(
         }
     }
     (kept, dropped)
+}
+
+/// Most distinct (carrier, type, reason) groups one drop summary names.
+const MAX_LOGGED_DROP_GROUPS: usize = 8;
+
+/// One log record for every tool a request lost to the pin: counts per
+/// (carrier, type, reason), the largest groups first. A request can carry
+/// millions of tool entries, so the record is bounded however many it drops.
+fn dropped_tools_summary(dropped: &[DroppedTool]) -> Value {
+    let mut counts: BTreeMap<(&str, &str, &str), usize> = BTreeMap::new();
+    for tool in dropped {
+        *counts
+            .entry((tool.carrier, tool.tool_type.as_str(), tool.reason))
+            .or_default() += 1;
+    }
+    let group_count = counts.len();
+    let mut groups: Vec<_> = counts.into_iter().collect();
+    // Stable, so equal counts keep the map's deterministic order.
+    groups.sort_by(|left, right| right.1.cmp(&left.1));
+    json!({
+        "total": dropped.len(),
+        "groups": groups
+            .into_iter()
+            .take(MAX_LOGGED_DROP_GROUPS)
+            .map(|((carrier, tool_type, reason), count)| json!({
+                "carrier": carrier,
+                "toolType": tool_type,
+                "reason": reason,
+                "count": count,
+            }))
+            .collect::<Vec<_>>(),
+        "otherGroups": group_count.saturating_sub(MAX_LOGGED_DROP_GROUPS),
+    })
 }
 
 /// Input item types that carry tool definitions. Codex sends its whole tool
@@ -1055,18 +1089,10 @@ fn build_remote_completion_client<'i>(
     } else {
         Cow::Borrowed(input_items)
     };
-    if log_lease_policy {
-        for dropped in dropped_tools {
-            eprintln!(
-                "[proxy] credential lease drops a client tool {}",
-                json!({
-                    "carrier": dropped.carrier,
-                    "toolType": dropped.tool_type,
-                    "reason": dropped.reason,
-                    "runId": run_id_from_claims(options.claims),
-                })
-            );
-        }
+    if log_lease_policy && !dropped_tools.is_empty() {
+        let mut summary = dropped_tools_summary(&dropped_tools);
+        summary["runId"] = json!(run_id_from_claims(options.claims));
+        eprintln!("[proxy] credential lease drops client tools {summary}");
     }
     let creds = leased.credentials;
     let instructions = build_proxy_instructions(
@@ -3475,6 +3501,38 @@ mod tests {
                 ("tool_search_output", "image_generation", "type"),
             ]
         );
+    }
+
+    #[test]
+    fn a_drop_summary_is_one_bounded_record_however_many_tools_drop() {
+        let drop = |carrier, tool_type: &str, reason| DroppedTool {
+            carrier,
+            tool_type: tool_type.to_string(),
+            reason,
+        };
+        // A flood of one junk type, a few of another, and more distinct groups
+        // than one record names.
+        let mut dropped: Vec<DroppedTool> = (0..10_000)
+            .map(|_| drop("additional_tools", "x", "type"))
+            .collect();
+        dropped.extend((0..3).map(|_| drop("tools", "image_generation", "type")));
+        dropped.extend((0..12).map(|index| drop("tools", &format!("t{index:02}"), "type")));
+
+        let summary = dropped_tools_summary(&dropped);
+        assert_eq!(summary["total"], json!(10_015));
+        let groups = summary["groups"].as_array().expect("groups");
+        assert_eq!(groups.len(), MAX_LOGGED_DROP_GROUPS);
+        assert_eq!(
+            groups[0],
+            json!({ "carrier": "additional_tools", "toolType": "x", "reason": "type", "count": 10_000 })
+        );
+        assert_eq!(
+            groups[1],
+            json!({ "carrier": "tools", "toolType": "image_generation", "reason": "type", "count": 3 })
+        );
+        // 14 distinct groups, 8 named.
+        assert_eq!(summary["otherGroups"], json!(6));
+        assert!(summary.to_string().len() < 2_048, "{summary}");
     }
 
     #[test]

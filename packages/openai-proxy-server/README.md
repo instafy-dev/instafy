@@ -145,8 +145,9 @@ runs keep the rules above, and the first one logs a warning that the managed mod
 A proxy without static credentials ignores the setting. The runtime compose files
 (`docker/docker-compose.runtime.provider.yml` and `docker/docker-compose.runtime.yml`) set it on
 the sidecar from the environment that runs `docker compose`, which on a provider host is the
-provider service's: `PROXY_PINNED_MODEL` there, or else `MANAGED_AI_MODEL_ID`. That entry
-overrides the sidecar's env file, so a value in `proxy-credential-lease.env` has no effect.
+provider service's: `PROXY_PINNED_MODEL` there, or else `MANAGED_AI_MODEL_ID`; an explicitly
+empty `PROXY_PINNED_MODEL` means no pin. That entry overrides the sidecar's env file, so a value
+in `proxy-credential-lease.env` has no effect.
 
 ### Upstream failures and retries
 

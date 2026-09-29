@@ -95,8 +95,9 @@ it:
   model a job asks for, speech and transcription included, and logs once that the managed model
   is not pinned. Both runtime compose files set the sidecar's `PROXY_PINNED_MODEL` from the
   environment that runs `docker compose`, which on a provider host is the provider service's:
-  `PROXY_PINNED_MODEL` there, or else `MANAGED_AI_MODEL_ID`. That entry overrides the sidecar's
-  env file, so a value in `proxy-credential-lease.env` has no effect.
+  `PROXY_PINNED_MODEL` there, or else `MANAGED_AI_MODEL_ID`; an explicitly empty
+  `PROXY_PINNED_MODEL` means no pin. That entry overrides the sidecar's env file, so a value in
+  `proxy-credential-lease.env` has no effect.
 
 A sidecar with neither refuses managed turns with `proxy token missing credential_id for BYOC
 request`.
