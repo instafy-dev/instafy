@@ -43,6 +43,9 @@ pub struct CredentialResponse {
     pub provider: Option<String>,
     pub upstream_endpoint: Option<String>,
     pub default_model: Option<String>,
+    /// Set when the controller allows this lease exactly one model (the
+    /// managed lane). Absent from controllers that predate it.
+    pub pinned_model: Option<String>,
     pub auth_mode: Option<String>,
     pub code_assist_project: Option<String>,
     pub lease_expires_in_seconds: Option<u64>,

@@ -103,6 +103,7 @@ returns a surfaced upstream error instead of silently pretending the backend is 
 | `PROXY_CONTROLLER_BASE_URL` | Enables controller-integrated hosted mode | `None` |
 | `CONTROLLER_INTERNAL_TOKEN` | Service bearer used for controller credit events | `None` |
 | `PROXY_CREDENTIAL_LEASE_TOKEN` | Dedicated bearer used only for controller credential leases | `None` |
+| `PROXY_PINNED_MODEL` | The only model static credentials serve managed runs as (set it to the controller's `MANAGED_AI_MODEL_ID`); see [Model selection](#model-selection) | `None` |
 | `CODEX_PROXY_CHATGPT_ENDPOINT` | Upstream ChatGPT Codex Responses endpoint | `https://chatgpt.com/backend-api/codex/responses` |
 
 `CODEX_OPENAI_ENDPOINT` can also point at an OpenAI-compatible Chat Completions endpoint (e.g. `.../chat/completions`). When it does, the proxy will call that upstream endpoint and adapt the result into an OpenAI Responses-shaped payload for downstream callers.
@@ -110,6 +111,43 @@ returns a surfaced upstream error instead of silently pretending the backend is 
 Standalone local mode may read and refresh the operator's own `auth.json`. In
 controller-integrated mode, the controller is the only refresh-token authority: the proxy gets a
 short-lived access/API-key lease and never receives the stored refresh token.
+
+### Model selection
+
+A request's `model` picks the upstream model. An absent or empty model uses the credential's
+default. An explicit id goes to OpenAI endpoints as is. On a bring-your-own provider endpoint
+(DeepSeek, z.ai, Gemini) the credential's default replaces it, and a ChatGPT login given another
+provider's id uses its default, so a mismatched id does not fail upstream.
+
+In controller-integrated mode the controller can pin a credential lease to one model with
+`pinnedModel` on the lease response. It pins the managed Instafy AI lease, which the operator
+pays for, to `MANAGED_AI_MODEL_ID`. The proxy then sends every Responses and Chat Completions
+request on that lease as the pinned model, whatever model the request names, and logs
+`credential lease pins the model` with the requested and sent ids when they differ. Speech and
+transcription requests name an audio model the pinned model cannot replace, so both routes
+answer 400 on a pinned lease without contacting the provider. Client tools on a pinned lease are
+limited to the types codex emits (`function`, `custom`, `namespace`, `tool_search`,
+`web_search`), both in `tools` and in the input items that carry tool definitions
+(`additional_tools`, where codex lists its tools for Responses Lite models such as the managed
+one, and `tool_search_output`). Before the request goes upstream the proxy drops any other type,
+any tool that names its own `model`, and a namespace holding either, and logs
+`credential lease drops a client tool` with the tool type. Leases without `pinnedModel`
+(bring-your-own API keys, ChatGPT logins, and leases from a controller that predates the field)
+keep the rules above and forward client tools unchanged.
+
+Static proxy credentials (`OPENAI_API_KEY` or `auth.json`) serve every request whose token names
+no credential, including managed runs: controller-signed job tokens with a `run_id` and no
+`credential_id`. Set `PROXY_PINNED_MODEL` to the controller's `MANAGED_AI_MODEL_ID` and those
+runs get exactly the pinned-lease policy above. Other requests on static credentials (standalone
+mode without a controller, and tokens without a `run_id`) and tokens that name a credential,
+which the proxy leases from the controller, are never pinned by it. Without the setting managed
+runs keep the rules above, and the first one logs a warning that the managed model is not pinned.
+A proxy without static credentials ignores the setting. The runtime compose files
+(`docker/docker-compose.runtime.provider.yml` and `docker/docker-compose.runtime.yml`) set it on
+the sidecar from the environment that runs `docker compose`, which on a provider host is the
+provider service's: `PROXY_PINNED_MODEL` there, or else `MANAGED_AI_MODEL_ID`; an explicitly
+empty `PROXY_PINNED_MODEL` means no pin. That entry overrides the sidecar's env file, so a value
+in `proxy-credential-lease.env` has no effect.
 
 ### Upstream failures and retries
 
