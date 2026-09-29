@@ -62,8 +62,9 @@ overlays cannot paint above a native WebContentsView. The preview stays on the
 owner’s device, is bounded to 1600×1200 pixels and one MiB of JPEG, and is cleared
 when the menu closes or browser ownership changes. This is tracked as
 `occluded` separately from browser visibility: the source viewport, sharing and
-input leases stay unchanged. Closing the popover restores the native surface;
-leaving the browser still invalidates sharing as before.
+input leases stay unchanged. Closing the popover restores the native surface.
+Switching to Chat or a file within the same conversation keeps sharing active;
+releasing the browser owner or changing projects ends the share.
 Approving control keeps focus in the menu: Escape dismisses it without revoking
 the grant. Once the native page is focused, Escape retains its take-back behavior.
 
@@ -370,8 +371,9 @@ layout and independent page scrolling described above.
   capacity is eight concurrent connections; registry capacity is
   eight sessions per space, one per owner and 64 per controller process.
 - A session lasts at most one hour and expires after twenty seconds without a
-  publisher frame or video heartbeat. Closing or hiding the host browser ends the publisher. The
-  computer must remain online. Reconnection requires a new explicit share.
+  publisher frame or video heartbeat. Closing the host browser or releasing its owner ends
+  the publisher; hiding its pane within the same conversation does not. The computer must
+  remain online. Reconnection requires a new explicit share.
 - Registry state is process-local and ephemeral. A controller restart ends every
   share. A replicated deployment needs shared session routing/revocation before
   this can be treated as a generally available multi-controller feature.
