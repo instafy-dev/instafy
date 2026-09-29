@@ -158,6 +158,43 @@ pub(crate) fn sanitize_managed_runtime_request_metadata(
     ))
 }
 
+/// Prefix of the metadata and capability keys only the controller writes, such
+/// as [`MANAGED_RUNTIME_LAUNCH_ATTESTATION`]. Matched without regard to case.
+const CONTROLLER_OWNED_KEY_PREFIX: &str = "_instafy";
+
+/// Request metadata that only a runtime launch reads: the image, the machine
+/// size (which billing reads back from the lease) and the runtime environment.
+const LAUNCH_ONLY_METADATA_KEYS: [&str; 4] = [
+    MANAGED_RUNTIME_FLAVOR_KEY,
+    "runtimeImagePreset",
+    "sizeId",
+    "env",
+];
+
+/// Metadata a caller may store on a tenant lease.
+///
+/// A tenant lease launches nothing: it records that another project is
+/// attached to a runtime its own project already runs. The request passes the
+/// same boundary as a managed launch request, and then, for every provider,
+/// loses every controller-owned key and every launch-only setting, so the row
+/// can never hold a launch attestation, a machine size or a runtime
+/// environment. Runs on every write of the row, first attach and re-attach.
+pub(crate) fn sanitize_tenant_lease_request_metadata(
+    provider: &str,
+    metadata: Option<JsonValue>,
+) -> Result<Option<JsonValue>, &'static str> {
+    let sanitized = sanitize_managed_runtime_request_metadata(provider, metadata)?;
+    let Some(JsonValue::Object(mut root)) = sanitized else {
+        return Ok(sanitized);
+    };
+    root.retain(|key, _| {
+        !key.to_ascii_lowercase()
+            .starts_with(CONTROLLER_OWNED_KEY_PREFIX)
+            && !LAUNCH_ONLY_METADATA_KEYS.contains(&key.as_str())
+    });
+    Ok(Some(JsonValue::Object(root)))
+}
+
 fn launch_attestation(lease_id: Uuid) -> JsonValue {
     json!({
         "version": MANAGED_RUNTIME_LAUNCH_ATTESTATION_VERSION,
@@ -352,6 +389,51 @@ mod tests {
         assert_eq!(sanitized["env"]["INSTAFY_BROWSER_VIEWPORT_ONLY"], "1");
         assert_eq!(sanitized["env"]["INSTAFY_BROWSER_WEBRTC_ENABLED"], "1");
         assert_eq!(sanitized["env"]["INSTAFY_VNC_PORT"], "5900");
+    }
+
+    #[test]
+    fn tenant_lease_metadata_keeps_no_controller_owned_key_or_launch_setting() {
+        let supplied = json!({
+            "source": "tenant-attach",
+            "label": "docs preview",
+            "runtimeFlavor": "webdev",
+            "runtimeImagePreset": "default",
+            "sizeId": "boost",
+            "env": { "INSTAFY_ENABLE_BROWSER_SESSION": "1" },
+            "_instafyManagedRuntimeLaunch": {
+                "version": 1,
+                "flavor": "webdev",
+                "generation": Uuid::new_v4().to_string(),
+            },
+            "_instafySelfHostedAccess": { "mode": "private" },
+            "_InstafyLeasePolicy": { "mode": "shared" },
+        });
+
+        let managed =
+            sanitize_tenant_lease_request_metadata("instafy-cloud", Some(supplied.clone()))
+                .expect("managed tenant metadata");
+        assert_eq!(managed, Some(json!({ "source": "tenant-attach" })));
+
+        for provider in ["acme-provider", "self-hosted", "instafy-cloud-custom"] {
+            let custom = sanitize_tenant_lease_request_metadata(provider, Some(supplied.clone()))
+                .expect("custom tenant metadata");
+            assert_eq!(
+                custom,
+                Some(json!({ "source": "tenant-attach", "label": "docs preview" })),
+                "{provider}"
+            );
+        }
+
+        // The managed request boundary still applies.
+        assert!(sanitize_tenant_lease_request_metadata(
+            "instafy-cloud",
+            Some(json!({ "runtimeFlavor": "custom-image" })),
+        )
+        .is_err());
+        assert_eq!(
+            sanitize_tenant_lease_request_metadata("acme-provider", None).expect("no metadata"),
+            None
+        );
     }
 
     #[test]

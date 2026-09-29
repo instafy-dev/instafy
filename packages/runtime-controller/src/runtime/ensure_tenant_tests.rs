@@ -277,6 +277,19 @@ impl TenantAttachFixture {
             .collect())
     }
 
+    async fn lease_metadata(&self, lease_id: Uuid) -> anyhow::Result<Option<JsonValue>> {
+        Ok(self
+            .pool
+            .get()
+            .await?
+            .query_one(
+                "select metadata from runtime_leases where id = $1",
+                &[&lease_id],
+            )
+            .await?
+            .get("metadata"))
+    }
+
     async fn set_runtime_provider(&self, provider: &str) -> anyhow::Result<()> {
         self.pool
             .get()
@@ -474,6 +487,81 @@ async fn tenant_attach_requires_write_access_to_the_host_runtimes_project() -> a
                 assert_eq!(lease_project_id, tenant_project_id);
                 assert_eq!(parent_lease_id, Some(fixture.shared_lease_id));
             }
+            Ok(())
+        })
+        .await
+}
+
+/// A tenant lease's metadata is the caller's description of the attachment.
+/// Controller-owned keys, such as a launch attestation, and launch-only
+/// settings are removed on the first attach and again on a re-attach, even
+/// when the attestation names the tenant lease's own id.
+#[tokio::test]
+async fn tenant_lease_metadata_drops_controller_owned_keys_on_attach_and_reattach(
+) -> anyhow::Result<()> {
+    let fixture = TenantAttachFixture::setup("tenant-attach-metadata").await?;
+    fixture
+        .run(async {
+            let fixture = &fixture;
+            let token = fixture.user_token(fixture.host_writer)?;
+
+            let (status, body) = fixture
+                .attach(
+                    &token,
+                    fixture.same_org_tenant_project_id,
+                    fixture.runtime_id,
+                    json!({
+                        "source": "tenant-attach-test",
+                        "label": "first",
+                        "runtimeFlavor": "webdev",
+                        "sizeId": "boost",
+                        "env": { "INSTAFY_ENABLE_BROWSER_SESSION": "1" },
+                        "_instafyManagedRuntimeLaunch": {
+                            "version": 1,
+                            "flavor": "webdev",
+                            "generation": Uuid::new_v4().to_string(),
+                        },
+                    }),
+                )
+                .await?;
+            assert_eq!(status, StatusCode::OK, "{body}");
+            let lease_id = body["leaseId"]
+                .as_str()
+                .and_then(|value| Uuid::parse_str(value).ok())
+                .ok_or_else(|| anyhow::anyhow!("no tenant lease id: {body}"))?;
+            assert_eq!(
+                fixture.lease_metadata(lease_id).await?,
+                Some(json!({ "source": "tenant-attach-test", "label": "first" })),
+                "first attach"
+            );
+
+            let (status, body) = fixture
+                .attach(
+                    &token,
+                    fixture.same_org_tenant_project_id,
+                    fixture.runtime_id,
+                    json!({
+                        "label": "second",
+                        "sizeId": "boost",
+                        "_instafyManagedRuntimeLaunch": {
+                            "version": 1,
+                            "flavor": "webdev",
+                            "generation": lease_id.to_string(),
+                        },
+                    }),
+                )
+                .await?;
+            assert_eq!(status, StatusCode::OK, "{body}");
+            assert_eq!(
+                body["leaseId"],
+                json!(lease_id.to_string()),
+                "a re-attach reuses the tenant lease: {body}"
+            );
+            assert_eq!(
+                fixture.lease_metadata(lease_id).await?,
+                Some(json!({ "label": "second" })),
+                "re-attach"
+            );
             Ok(())
         })
         .await
