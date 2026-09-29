@@ -1,4 +1,5 @@
 use std::net::SocketAddr;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -9,7 +10,7 @@ use axum::http::{HeaderMap, header};
 use axum::response::IntoResponse;
 use axum::routing::{get, post};
 use jsonwebtoken::{Algorithm, EncodingKey, Header, encode};
-use openai_proxy_server::auth;
+use openai_proxy_server::auth::{self, Credentials};
 use openai_proxy_server::client::DEFAULT_MODEL;
 use openai_proxy_server::proxy::{MANAGED_AI_CREDENTIAL_ID, run_proxy_with_shutdown};
 use reqwest::StatusCode;
@@ -22,6 +23,10 @@ use tokio::sync::oneshot;
 const CHAT_PROMPT: &str = "Say hello to the integration test in one short sentence.";
 const RESPONSES_FIXTURE: &str = include_str!("fixtures/responses_success.sse");
 const MANAGED_STUB_KEY: &str = "sk-managed-stub";
+/// A user's own API key, which the controller stub serves unpinned under
+/// `BYO_CREDENTIAL_ID`.
+const BYO_STUB_KEY: &str = "sk-byo-stub";
+const BYO_CREDENTIAL_ID: &str = "55555555-5555-4555-8555-555555555555";
 /// The managed model the controller stub pins its lease to.
 const PINNED_MODEL: &str = "gpt-6-luna";
 /// The model stub's Responses path. It names the OpenAI host so the proxy
@@ -194,6 +199,13 @@ struct UpstreamStub {
     bearers: Arc<Mutex<Vec<String>>>,
     /// The `model` of each request the model endpoint received.
     models: Arc<Mutex<Vec<String>>>,
+    /// The `tools` of each request the model endpoint received (null when
+    /// absent).
+    tools: Arc<Mutex<Vec<Value>>>,
+    /// The `input` of each request the model endpoint received.
+    inputs: Arc<Mutex<Vec<Value>>>,
+    /// How many of the next model requests to reject as an expired token.
+    expire_next: Arc<AtomicUsize>,
     /// Paths of the audio requests that reached the provider.
     audio: Arc<Mutex<Vec<String>>>,
 }
@@ -241,10 +253,25 @@ async fn controller_lease_stub(
             None => (
                 StatusCode::NOT_FOUND,
                 AxumJson(json!({
-                    "message": "managed AI credential is not configured: set MANAGED_AI_OPENAI_API_KEY on the controller or give the proxy static credentials"
+                    "message": "managed AI credential is not configured: set MANAGED_AI_OPENAI_API_KEY on the controller or give the proxy static credentials and PROXY_PINNED_MODEL"
                 })),
             ),
         };
+    }
+    if credential_id == BYO_CREDENTIAL_ID {
+        return (
+            StatusCode::OK,
+            AxumJson(json!({
+                "credentialId": credential_id,
+                "kind": "openai_api_key",
+                "openaiApiKey": BYO_STUB_KEY,
+                "provider": "openai",
+                "upstreamEndpoint": format!("{}{UPSTREAM_RESPONSES_PATH}", stub.upstream_base),
+                "defaultModel": "gpt-5.6-sol",
+                "leaseExpiresInSeconds": 60,
+                "renewalAuthority": "controller",
+            })),
+        );
     }
     (
         StatusCode::NOT_FOUND,
@@ -280,10 +307,37 @@ async fn upstream_responses_stub(
             .unwrap_or_default()
             .to_string(),
     );
-    if authorization != format!("Bearer {MANAGED_STUB_KEY}") {
+    stub.tools
+        .lock()
+        .expect("tool log")
+        .push(payload.get("tools").cloned().unwrap_or(Value::Null));
+    stub.inputs
+        .lock()
+        .expect("input log")
+        .push(payload.get("input").cloned().unwrap_or(Value::Null));
+    if authorization != format!("Bearer {MANAGED_STUB_KEY}")
+        && authorization != format!("Bearer {BYO_STUB_KEY}")
+    {
         return (
             StatusCode::UNAUTHORIZED,
             AxumJson(json!({ "error": { "message": "bad upstream key" } })),
+        );
+    }
+    if stub
+        .expire_next
+        .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |left| {
+            left.checked_sub(1)
+        })
+        .is_ok()
+    {
+        return (
+            StatusCode::UNAUTHORIZED,
+            AxumJson(json!({
+                "error": {
+                    "message": "Your authentication token has expired.",
+                    "code": "token_expired"
+                }
+            })),
         );
     }
     (StatusCode::OK, AxumJson(fixture_completed_response()))
@@ -337,7 +391,9 @@ async fn spawn_router(app: Router) -> Result<(SocketAddr, ChildGuard)> {
     Ok((addr, ChildGuard(Some(shutdown_tx))))
 }
 
-async fn spawn_dynamic_proxy() -> Result<(SocketAddr, ChildGuard)> {
+/// Without static credentials the proxy boots as RemoteDynamic, exactly like
+/// the provider-host sidecar.
+async fn spawn_proxy(credentials: Option<Credentials>) -> Result<(SocketAddr, ChildGuard)> {
     let listener = TcpListener::bind(("127.0.0.1", 0)).await?;
     let addr = listener.local_addr()?;
     drop(listener);
@@ -346,14 +402,29 @@ async fn spawn_dynamic_proxy() -> Result<(SocketAddr, ChildGuard)> {
         let shutdown = async move {
             let _ = shutdown_rx.await;
         };
-        // No static credentials: the proxy boots as RemoteDynamic, exactly
-        // like the provider-host sidecar.
-        if let Err(error) = run_proxy_with_shutdown(addr, None, shutdown).await {
-            eprintln!("[proxy-test] dynamic proxy exited with error: {error}");
+        if let Err(error) = run_proxy_with_shutdown(addr, credentials, shutdown).await {
+            eprintln!("[proxy-test] proxy exited with error: {error}");
         }
     });
     tokio::time::sleep(Duration::from_millis(150)).await;
     Ok((addr, ChildGuard(Some(shutdown_tx))))
+}
+
+type Stack = (
+    SocketAddr,
+    ControllerStub,
+    UpstreamStub,
+    Vec<EnvGuard>,
+    Vec<ChildGuard>,
+);
+
+/// Which proxy a stack runs.
+enum StackProxy<'a> {
+    /// No static credentials (RemoteDynamic), the hosted sidecar.
+    Dynamic,
+    /// Static credentials holding the operator's key, the self-hosted
+    /// managed lane, with this `PROXY_PINNED_MODEL` (`None` leaves it unset).
+    Static { pinned_model: Option<&'a str> },
 }
 
 /// A managed-lane stack: upstream model stub, controller stub, dynamic proxy.
@@ -362,13 +433,28 @@ async fn spawn_managed_stack(
     managed_key: Option<&str>,
     pinned_model: Option<&str>,
     require_credential_claim: bool,
-) -> Result<(
-    SocketAddr,
-    ControllerStub,
-    UpstreamStub,
-    Vec<EnvGuard>,
-    Vec<ChildGuard>,
-)> {
+) -> Result<Stack> {
+    spawn_stack(
+        managed_key,
+        pinned_model,
+        require_credential_claim,
+        StackProxy::Dynamic,
+    )
+    .await
+}
+
+/// A self-hosted managed lane: the proxy holds the operator's key as static
+/// credentials, and the controller serves no managed lease.
+async fn spawn_static_stack(pinned_model: Option<&str>) -> Result<Stack> {
+    spawn_stack(None, None, false, StackProxy::Static { pinned_model }).await
+}
+
+async fn spawn_stack(
+    managed_key: Option<&str>,
+    pinned_model: Option<&str>,
+    require_credential_claim: bool,
+    proxy: StackProxy<'_>,
+) -> Result<Stack> {
     let upstream = UpstreamStub::default();
     let (upstream_addr, upstream_guard) = spawn_router(
         Router::new()
@@ -396,7 +482,19 @@ async fn spawn_managed_stack(
     )
     .await?;
 
+    let (static_credentials, static_pinned_model) = match proxy {
+        StackProxy::Dynamic => (None, None),
+        StackProxy::Static { pinned_model } => (
+            Some(Credentials::ApiKey {
+                key: MANAGED_STUB_KEY.to_string(),
+                endpoint: Some(format!("http://{upstream_addr}{UPSTREAM_RESPONSES_PATH}")),
+                default_model: None,
+            }),
+            pinned_model,
+        ),
+    };
     let env = vec![
+        EnvGuard::set("PROXY_PINNED_MODEL", static_pinned_model),
         EnvGuard::set(
             "PROXY_CONTROLLER_BASE_URL",
             Some(&format!("http://{controller_addr}")),
@@ -411,7 +509,7 @@ async fn spawn_managed_stack(
             require_credential_claim.then_some("1"),
         ),
     ];
-    let (proxy_addr, proxy_guard) = spawn_dynamic_proxy().await?;
+    let (proxy_addr, proxy_guard) = spawn_proxy(static_credentials).await?;
 
     Ok((
         proxy_addr,
@@ -767,6 +865,299 @@ async fn managed_lane_refuses_audio_on_the_pinned_lease() -> Result<()> {
             vec!["/v1/audio/speech", "/v1/audio/transcriptions"]
         );
     }
+
+    Ok(())
+}
+
+#[tokio::test]
+#[serial]
+async fn managed_lane_keeps_the_pin_when_a_rejected_lease_is_renewed() -> Result<()> {
+    // A 401 token_expired from the provider makes the proxy renew the lease
+    // (forceRefresh) and send the request again. The pin is the controller's
+    // policy for the credential, so the retry goes out as the pinned model
+    // too. Only the client's own token refresh is ChatGPT-only: the lease
+    // renewal takes any leased credential, the managed API key included,
+    // whose 401 body reports an expired or invalidated token.
+    let token = proxy_token(Some(RUN_ID), None);
+    let (proxy_addr, controller, upstream, _env, _guards) =
+        spawn_managed_stack(Some(MANAGED_STUB_KEY), Some(PINNED_MODEL), false).await?;
+    upstream.expire_next.store(1, Ordering::SeqCst);
+
+    let (status, body) = responses_through_proxy(proxy_addr, &token, "gpt-5.6-sol").await?;
+    assert_eq!(status, StatusCode::OK, "renewed request: {body}");
+    assert_eq!(
+        upstream.models.lock().expect("model log").clone(),
+        vec![PINNED_MODEL; 2],
+        "the rejected request and its retry both go out as the managed model"
+    );
+    assert_eq!(
+        upstream.bearers.lock().expect("bearer log").clone(),
+        vec![format!("Bearer {MANAGED_STUB_KEY}"); 2]
+    );
+    let lease_ids = controller
+        .leases
+        .lock()
+        .expect("lease log")
+        .iter()
+        .map(|(id, _)| id.clone())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        lease_ids,
+        vec![MANAGED_AI_CREDENTIAL_ID.to_string(); 2],
+        "the initial lease and its renewal"
+    );
+
+    Ok(())
+}
+
+/// Sends `tools` both as the request's `tools` and in an `additional_tools`
+/// input item, where codex puts its tool list for Responses Lite models.
+async fn responses_with_tools_through_proxy(
+    addr: SocketAddr,
+    token: &str,
+    tools: &Value,
+) -> Result<(StatusCode, String)> {
+    post_through_proxy(
+        addr,
+        token,
+        "/v1/responses",
+        json!({
+            "model": "gpt-5.6-sol",
+            "stream": false,
+            "tools": tools,
+            "input": [
+                { "type": "additional_tools", "role": "developer", "tools": tools },
+                {
+                    "type": "message",
+                    "role": "user",
+                    "content": [{ "type": "input_text", "text": CHAT_PROMPT }]
+                }
+            ]
+        }),
+    )
+    .await
+}
+
+/// The tools of the `additional_tools` input item each upstream request
+/// carried.
+fn upstream_additional_tools(upstream: &UpstreamStub) -> Vec<Value> {
+    upstream
+        .inputs
+        .lock()
+        .expect("input log")
+        .iter()
+        .map(|input| {
+            input
+                .as_array()
+                .and_then(|items| {
+                    items.iter().find(|item| {
+                        item.get("type").and_then(Value::as_str) == Some("additional_tools")
+                    })
+                })
+                .and_then(|item| item.get("tools").cloned())
+                .unwrap_or(Value::Null)
+        })
+        .collect()
+}
+
+#[tokio::test]
+#[serial]
+async fn pinned_lease_forwards_only_the_client_tools_codex_emits() -> Result<()> {
+    // A hand-built hosted tool would run its own model, or add a per-call
+    // fee, on the key the operator pays for. A pinned lease forwards only
+    // the tool types codex emits, and none that names its own model.
+    let function = json!({
+        "type": "function",
+        "name": "exec_command",
+        "description": "Runs a command.",
+        "strict": false,
+        "parameters": { "type": "object", "properties": {} }
+    });
+    let web_search = json!({ "type": "web_search", "external_web_access": true });
+    let tools = json!([
+        function,
+        web_search,
+        { "type": "image_generation", "model": "gpt-image-1" },
+        {
+            "type": "function",
+            "name": "priced",
+            "parameters": { "type": "object", "properties": {} },
+            "model": "gpt-5.6-sol"
+        }
+    ]);
+    let token = proxy_token(Some(RUN_ID), None);
+
+    // The controller's pinned managed lease, and static credentials pinned
+    // with PROXY_PINNED_MODEL.
+    for name in ["managed lease", "static credentials"] {
+        let (proxy_addr, _controller, upstream, _env, _guards) = if name == "managed lease" {
+            spawn_managed_stack(Some(MANAGED_STUB_KEY), Some(PINNED_MODEL), false).await?
+        } else {
+            spawn_static_stack(Some(PINNED_MODEL)).await?
+        };
+        let (status, body) = responses_with_tools_through_proxy(proxy_addr, &token, &tools).await?;
+        assert_eq!(status, StatusCode::OK, "{name}: {body}");
+        assert_eq!(
+            upstream.tools.lock().expect("tool log").clone(),
+            vec![json!([function, web_search])],
+            "{name}: only the allowed, model-free tools reach the provider"
+        );
+        assert_eq!(
+            upstream_additional_tools(&upstream),
+            vec![json!([function, web_search])],
+            "{name}: the same holds for tools carried in the input"
+        );
+    }
+
+    // An unpinned lease (a controller that predates the pin) forwards every
+    // client tool exactly as before.
+    let (proxy_addr, _controller, upstream, _env, _guards) =
+        spawn_managed_stack(Some(MANAGED_STUB_KEY), None, false).await?;
+    let (status, body) = responses_with_tools_through_proxy(proxy_addr, &token, &tools).await?;
+    assert_eq!(status, StatusCode::OK, "unpinned lease: {body}");
+    assert_eq!(
+        upstream.tools.lock().expect("tool log").clone(),
+        vec![tools.clone()]
+    );
+    assert_eq!(upstream_additional_tools(&upstream), vec![tools]);
+
+    Ok(())
+}
+
+#[tokio::test]
+#[serial]
+async fn managed_lane_filters_client_tools_when_a_rejected_lease_is_renewed() -> Result<()> {
+    // A lease renewal rebuilds the request from the client's original body,
+    // so the retry must drop the same tools as the rejected attempt, in
+    // `tools` and in the input.
+    let function = json!({
+        "type": "function",
+        "name": "exec_command",
+        "parameters": { "type": "object", "properties": {} }
+    });
+    let tools = json!([function, { "type": "image_generation", "model": "gpt-image-1" }]);
+    let token = proxy_token(Some(RUN_ID), None);
+    let (proxy_addr, controller, upstream, _env, _guards) =
+        spawn_managed_stack(Some(MANAGED_STUB_KEY), Some(PINNED_MODEL), false).await?;
+    upstream.expire_next.store(1, Ordering::SeqCst);
+
+    let (status, body) = responses_with_tools_through_proxy(proxy_addr, &token, &tools).await?;
+    assert_eq!(status, StatusCode::OK, "renewed request: {body}");
+    assert_eq!(
+        controller.leases.lock().expect("lease log").len(),
+        2,
+        "the initial lease and its renewal"
+    );
+    assert_eq!(
+        upstream.tools.lock().expect("tool log").clone(),
+        vec![json!([function]); 2],
+        "the rejected request and its retry forward only the allowed tools"
+    );
+    assert_eq!(
+        upstream_additional_tools(&upstream),
+        vec![json!([function]); 2],
+        "the same holds for tools carried in the input"
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
+#[serial]
+async fn static_credentials_send_managed_runs_as_the_proxy_pinned_model() -> Result<()> {
+    // A self-hoster serves managed runs from the proxy's own key. With
+    // PROXY_PINNED_MODEL set they get the managed lease's policy: every
+    // request goes out as the pinned model and audio is refused.
+    let (proxy_addr, controller, upstream, _env, _guards) =
+        spawn_static_stack(Some(PINNED_MODEL)).await?;
+    let managed = proxy_token(Some(RUN_ID), None);
+    for model in ["gpt-5.6-sol", ""] {
+        let (status, body) = responses_through_proxy(proxy_addr, &managed, model).await?;
+        assert_eq!(status, StatusCode::OK, "/v1/responses as {model:?}: {body}");
+    }
+    let (status, body) = chat_through_proxy_as(proxy_addr, &managed, "gpt-5.6-sol").await?;
+    assert_eq!(status, StatusCode::OK, "/v1/chat/completions: {body}");
+    assert_eq!(
+        upstream.models.lock().expect("model log").clone(),
+        vec![PINNED_MODEL; 3]
+    );
+    assert_eq!(
+        upstream.bearers.lock().expect("bearer log").clone(),
+        vec![format!("Bearer {MANAGED_STUB_KEY}"); 3],
+        "the static key serves managed runs"
+    );
+    let speech = json!({ "model": "gpt-4o-mini-tts", "voice": "cedar", "input": "Hello." });
+    let transcription = json!({ "model": "gpt-4o-transcribe" });
+    for (path, body) in [
+        ("/v1/audio/speech", speech.clone()),
+        ("/v1/audio/transcriptions", transcription.clone()),
+    ] {
+        let (status, body) = post_through_proxy(proxy_addr, &managed, path, body).await?;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{path}: {body}");
+        assert!(
+            body.contains("only serves model gpt-6-luna"),
+            "{path}: {body}"
+        );
+    }
+    assert!(upstream.audio.lock().expect("audio log").is_empty());
+    assert!(
+        controller.leases.lock().expect("lease log").is_empty(),
+        "static credentials serve managed runs without a lease"
+    );
+
+    // A user's own credential on the same proxy is leased from the
+    // controller and never pinned by the setting.
+    let byo = proxy_token(Some(RUN_ID), Some(BYO_CREDENTIAL_ID));
+    let (status, body) = responses_through_proxy(proxy_addr, &byo, "gpt-5.6-sol").await?;
+    assert_eq!(status, StatusCode::OK, "BYO /v1/responses: {body}");
+    let (status, body) = chat_through_proxy_as(proxy_addr, &byo, "gpt-5.6-sol").await?;
+    assert_eq!(status, StatusCode::OK, "BYO /v1/chat/completions: {body}");
+    assert_eq!(
+        upstream.models.lock().expect("model log")[3..].to_vec(),
+        vec!["gpt-5.6-sol"; 2]
+    );
+    assert_eq!(
+        upstream.bearers.lock().expect("bearer log")[3..].to_vec(),
+        vec![format!("Bearer {BYO_STUB_KEY}"); 2]
+    );
+    for (path, body) in [
+        ("/v1/audio/speech", speech),
+        ("/v1/audio/transcriptions", transcription),
+    ] {
+        let (status, body) = post_through_proxy(proxy_addr, &byo, path, body).await?;
+        assert_eq!(status, StatusCode::OK, "BYO {path}: {body}");
+    }
+    assert_eq!(
+        upstream.audio.lock().expect("audio log").clone(),
+        vec!["/v1/audio/speech", "/v1/audio/transcriptions"]
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
+#[serial]
+async fn static_credentials_without_a_pinned_model_keep_the_requested_model() -> Result<()> {
+    // Without PROXY_PINNED_MODEL, static credentials serve managed runs as
+    // they always have (the proxy warns once that the pin is missing).
+    let (proxy_addr, _controller, upstream, _env, _guards) = spawn_static_stack(None).await?;
+    let managed = proxy_token(Some(RUN_ID), None);
+    let (status, body) = responses_through_proxy(proxy_addr, &managed, "gpt-5.6-sol").await?;
+    assert_eq!(status, StatusCode::OK, "/v1/responses: {body}");
+    let (status, body) = chat_through_proxy_as(proxy_addr, &managed, "gpt-5.6-sol").await?;
+    assert_eq!(status, StatusCode::OK, "/v1/chat/completions: {body}");
+    assert_eq!(
+        upstream.models.lock().expect("model log").clone(),
+        vec!["gpt-5.6-sol"; 2]
+    );
+    let (status, body) = post_through_proxy(
+        proxy_addr,
+        &managed,
+        "/v1/audio/speech",
+        json!({ "model": "gpt-4o-mini-tts", "voice": "cedar", "input": "Hello." }),
+    )
+    .await?;
+    assert_eq!(status, StatusCode::OK, "/v1/audio/speech: {body}");
 
     Ok(())
 }

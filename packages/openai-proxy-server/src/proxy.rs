@@ -1,6 +1,8 @@
+use std::borrow::Cow;
 use std::convert::Infallible;
 use std::future::Future;
 use std::net::SocketAddr;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -43,8 +45,61 @@ pub const MANAGED_AI_CREDENTIAL_ID: &str = "4d414e41-4745-4441-8949-4e5354414659
 
 #[derive(Clone)]
 enum ProxyBackend {
-    RemoteStatic(Credentials),
+    RemoteStatic(StaticCredentials),
     RemoteDynamic,
+}
+
+/// The credentials the proxy started with (`OPENAI_API_KEY` or `auth.json`).
+/// They serve every request whose token names no credential, managed runs
+/// included, so they are the operator's key just like the controller's
+/// managed lease.
+#[derive(Clone)]
+struct StaticCredentials {
+    credentials: Credentials,
+    /// `PROXY_PINNED_MODEL`: the only model managed runs on these credentials
+    /// may use, the static counterpart of the managed lease's `pinnedModel`.
+    pinned_model: Option<String>,
+    /// Warnings logged because a managed run was served without
+    /// `PROXY_PINNED_MODEL`: at most one, and the proxy builds one backend per
+    /// process.
+    unpinned_managed_run_warnings: Arc<AtomicUsize>,
+}
+
+impl StaticCredentials {
+    fn new(credentials: Credentials, pinned_model: Option<String>) -> Self {
+        Self {
+            credentials,
+            pinned_model: pinned_model
+                .map(|value| value.trim().to_string())
+                .filter(|value| !value.is_empty()),
+            unpinned_managed_run_warnings: Arc::new(AtomicUsize::new(0)),
+        }
+    }
+
+    /// The static credentials for a request whose token names no credential
+    /// (a token that names one leases it from the controller instead). A
+    /// managed run gets the managed lease's model policy: pinned to
+    /// `PROXY_PINNED_MODEL`, which also refuses audio. Everything else (no
+    /// controller, session envelopes) keeps the requested model.
+    fn lease_for(&self, claims: Option<&ProxyClaims>) -> LeasedCredentials {
+        if !managed_run_token(claims) {
+            return LeasedCredentials::unpinned(self.credentials.clone());
+        }
+        if self.pinned_model.is_none()
+            && self
+                .unpinned_managed_run_warnings
+                .compare_exchange(0, 1, Ordering::Relaxed, Ordering::Relaxed)
+                .is_ok()
+        {
+            eprintln!(
+                "[proxy] static proxy credentials are serving a managed run but the managed model is not pinned: managed runs keep the model they ask for, and speech and transcription stay available, on these credentials. Set PROXY_PINNED_MODEL to MANAGED_AI_MODEL_ID to pin them."
+            );
+        }
+        LeasedCredentials {
+            credentials: self.credentials.clone(),
+            pinned_model: self.pinned_model.clone(),
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -290,6 +345,123 @@ fn requested_tools(payload: &Value) -> Option<Vec<Value>> {
         .cloned()
 }
 
+/// The client tool types a pinned lease forwards: exactly the types codex,
+/// the runtime's client at the revision this repository pins, puts in
+/// `tools` (its `ToolSpec`, `codex-rs/tools/src/tool_spec.rs`). A hosted tool
+/// codex never sends, such as `image_generation`, can run a model of its own
+/// or add a per-call fee on the key the operator pays for.
+const PINNED_LEASE_TOOL_TYPES: [&str; 5] = [
+    "function",
+    "custom",
+    "namespace",
+    "tool_search",
+    "web_search",
+];
+
+/// Why a pinned lease drops a client tool, or `None` to forward it: its type
+/// must be one codex emits, it must name no model of its own, and a
+/// namespace passes only when every tool it groups does.
+fn pinned_lease_tool_rejection(tool: &Value) -> Option<&'static str> {
+    let Some(tool) = tool.as_object() else {
+        return Some("type");
+    };
+    let tool_type = tool.get("type").and_then(Value::as_str).unwrap_or_default();
+    if !PINNED_LEASE_TOOL_TYPES.contains(&tool_type) {
+        return Some("type");
+    }
+    if tool.contains_key("model") {
+        return Some("model");
+    }
+    if tool
+        .get("tools")
+        .and_then(Value::as_array)
+        .is_some_and(|members| {
+            members
+                .iter()
+                .any(|member| pinned_lease_tool_rejection(member).is_some())
+        })
+    {
+        return Some("member");
+    }
+    None
+}
+
+/// A client tool a pinned lease did not forward, as logged.
+#[derive(Debug)]
+struct DroppedTool {
+    /// Where the request carried it: `tools`, or the input item type.
+    carrier: &'static str,
+    tool_type: String,
+    reason: &'static str,
+}
+
+/// The client tools a pinned lease forwards, plus each one it drops.
+fn tools_for_pinned_lease(
+    tools: &[Value],
+    carrier: &'static str,
+) -> (Vec<Value>, Vec<DroppedTool>) {
+    let mut kept = Vec::with_capacity(tools.len());
+    let mut dropped = Vec::new();
+    for tool in tools {
+        match pinned_lease_tool_rejection(tool) {
+            None => kept.push(tool.clone()),
+            Some(reason) => dropped.push(DroppedTool {
+                carrier,
+                // Client text, so bounded; a tool entry carries no credential.
+                tool_type: tool
+                    .get("type")
+                    .and_then(Value::as_str)
+                    .unwrap_or("unknown")
+                    .chars()
+                    .take(64)
+                    .collect(),
+                reason,
+            }),
+        }
+    }
+    (kept, dropped)
+}
+
+/// Input item types that carry tool definitions. Codex sends its whole tool
+/// list as an `additional_tools` item instead of `tools` when the model uses
+/// Responses Lite, as the managed model does, and replays client tool search
+/// results as `tool_search_output`.
+const TOOL_CARRYING_INPUT_TYPES: [&str; 2] = ["additional_tools", "tool_search_output"];
+
+/// The input a pinned lease forwards: the tools inside tool-carrying items
+/// pass the same test as the request's `tools`. Borrowed unless one is
+/// dropped.
+fn input_items_for_pinned_lease(input_items: &[Value]) -> (Cow<'_, [Value]>, Vec<DroppedTool>) {
+    let mut filtered: Option<Vec<Value>> = None;
+    let mut dropped = Vec::new();
+    for (index, item) in input_items.iter().enumerate() {
+        let Some(carrier) = item
+            .get("type")
+            .and_then(Value::as_str)
+            .and_then(|item_type| {
+                TOOL_CARRYING_INPUT_TYPES
+                    .into_iter()
+                    .find(|carrier| *carrier == item_type)
+            })
+        else {
+            continue;
+        };
+        let Some(tools) = item.get("tools").and_then(Value::as_array) else {
+            continue;
+        };
+        let (kept, item_dropped) = tools_for_pinned_lease(tools, carrier);
+        if item_dropped.is_empty() {
+            continue;
+        }
+        dropped.extend(item_dropped);
+        filtered.get_or_insert_with(|| input_items.to_vec())[index]["tools"] = Value::Array(kept);
+    }
+    (
+        filtered.map_or(Cow::Borrowed(input_items), Cow::Owned),
+        dropped,
+    )
+}
+
 fn requested_tool_names(tools: &[Value]) -> Vec<String> {
     tools
         .iter()
@@ -393,6 +565,12 @@ fn run_id_from_claims(claims: Option<&ProxyClaims>) -> Option<&str> {
         .filter(|value| !value.is_empty())
 }
 
+/// A managed run: a dispatch job token (it carries a `run_id`) that names no
+/// credential. See [`dynamic_lease_target`] for why the `run_id` matters.
+fn managed_run_token(claims: Option<&ProxyClaims>) -> bool {
+    credential_id_from_claims(claims).is_none() && run_id_from_claims(claims).is_some()
+}
+
 /// A token naming a credential is a BYOC turn. A credential-less token is the
 /// managed lane on either backend: static material on `RemoteStatic`, the
 /// controller-served managed lease on `RemoteDynamic`.
@@ -424,7 +602,7 @@ fn dynamic_lease_target(claims: Option<&ProxyClaims>) -> Result<(&str, &'static 
     if let Some(credential_id) = credential_id_from_claims(claims) {
         return Ok((credential_id, "claim"));
     }
-    if run_id_from_claims(claims).is_some() {
+    if managed_run_token(claims) {
         return Ok((MANAGED_AI_CREDENTIAL_ID, "managed"));
     }
     Err(AppError::unauthorized(anyhow!(
@@ -559,7 +737,12 @@ where
     }
 
     let backend = match credentials {
-        Some(creds) => ProxyBackend::RemoteStatic(creds),
+        // Only static credentials read the pin: a remote_dynamic proxy takes
+        // it from the controller's managed lease.
+        Some(creds) => ProxyBackend::RemoteStatic(StaticCredentials::new(
+            creds,
+            std::env::var("PROXY_PINNED_MODEL").ok(),
+        )),
         None => {
             if controller.is_some() {
                 ProxyBackend::RemoteDynamic
@@ -822,14 +1005,21 @@ fn error_indicates_chatgpt_token_refreshable(error: &anyhow::Error) -> bool {
     upstream_error::refreshable_auth(error)
 }
 
-fn build_remote_completion_client(
+/// Also returns the input items to send, which a pinned lease may filter.
+/// `log_lease_policy` is false when a lease renewal rebuilds the client for a
+/// request that already logged what its pinned lease changed.
+fn build_remote_completion_client<'i>(
     leased: LeasedCredentials,
     options: &RemoteCompletionOptions<'_>,
-) -> Result<(CodexClient, String, String)> {
+    input_items: &'i [Value],
+    log_lease_policy: bool,
+) -> Result<(CodexClient, String, String, Cow<'i, [Value]>)> {
     let endpoint_for_error = format_endpoint_for_error(leased.credentials.endpoint());
     let upstream_model = resolve_model_for_lease(options.requested_model, &leased);
     let requested_model = options.requested_model.trim();
-    if leased.pinned_model().is_some()
+    let pinned = leased.pinned_model().is_some();
+    if log_lease_policy
+        && pinned
         && !requested_model.is_empty()
         && requested_model != upstream_model
     {
@@ -841,6 +1031,42 @@ fn build_remote_completion_client(
                 "runId": run_id_from_claims(options.claims),
             })
         );
+    }
+    // Only the pinned model may run on a pinned lease, so a client tool that
+    // brings its own model or hosted work does not go upstream, whether the
+    // request lists it in `tools` or in a tool-carrying input item.
+    let mut dropped_tools = Vec::new();
+    let requested_tools = options
+        .response_controls
+        .as_ref()
+        .and_then(|controls| controls.requested_tools)
+        .map(|tools| {
+            if !pinned {
+                return tools.clone();
+            }
+            let (kept, dropped) = tools_for_pinned_lease(tools, "tools");
+            dropped_tools.extend(dropped);
+            kept
+        });
+    let input_items = if pinned {
+        let (kept, dropped) = input_items_for_pinned_lease(input_items);
+        dropped_tools.extend(dropped);
+        kept
+    } else {
+        Cow::Borrowed(input_items)
+    };
+    if log_lease_policy {
+        for dropped in dropped_tools {
+            eprintln!(
+                "[proxy] credential lease drops a client tool {}",
+                json!({
+                    "carrier": dropped.carrier,
+                    "toolType": dropped.tool_type,
+                    "reason": dropped.reason,
+                    "runId": run_id_from_claims(options.claims),
+                })
+            );
+        }
     }
     let creds = leased.credentials;
     let instructions = build_proxy_instructions(
@@ -861,7 +1087,7 @@ fn build_remote_completion_client(
         client = client
             .with_reasoning_effort(controls.reasoning_effort.map(str::to_string))
             .with_response_controls(
-                controls.requested_tools.cloned(),
+                requested_tools,
                 controls.requested_tool_choice.cloned(),
                 controls.requested_parallel_tool_calls,
                 controls.requested_text_controls.cloned(),
@@ -888,7 +1114,7 @@ fn build_remote_completion_client(
         }
     }
 
-    Ok((client, upstream_model, endpoint_for_error))
+    Ok((client, upstream_model, endpoint_for_error, input_items))
 }
 
 async fn complete_with_optional_controller_refresh(
@@ -898,10 +1124,11 @@ async fn complete_with_optional_controller_refresh(
     controller: Option<&ControllerIntegration>,
     credential_id: Option<&str>,
 ) -> Result<(CodexCompletion, String)> {
-    let (mut client, upstream_model, endpoint_for_error) =
-        build_remote_completion_client(leased, options)?;
+    let first_lease_pinned = leased.pinned_model().is_some();
+    let (mut client, upstream_model, endpoint_for_error, first_input) =
+        build_remote_completion_client(leased, options, input_items, true)?;
 
-    match client.complete_with_input(input_items).await {
+    match client.complete_with_input(&first_input).await {
         Ok(response) => return Ok((response, upstream_model)),
         Err(first_error) => {
             let can_refresh = controller.is_some()
@@ -923,11 +1150,18 @@ async fn complete_with_optional_controller_refresh(
                 .context(UpstreamFailure::CredentialRefresh)?
                 .into_material()
                 .context(UpstreamFailure::CredentialRefresh)?;
-            let (mut retry_client, retry_model, retry_endpoint) =
-                build_remote_completion_client(refreshed, options)?;
+            // The renewed lease carries the controller's pin again; the first
+            // attempt already logged it unless that lease had none.
+            let (mut retry_client, retry_model, retry_endpoint, retry_input) =
+                build_remote_completion_client(
+                    refreshed,
+                    options,
+                    input_items,
+                    !first_lease_pinned,
+                )?;
 
             return retry_client
-                .complete_with_input(input_items)
+                .complete_with_input(&retry_input)
                 .await
                 .map(|response| (response, retry_model.clone()))
                 .map_err(|retry_error| {
@@ -1076,7 +1310,7 @@ async fn create_response(
                     .and_then(|lease| lease.into_material())
                     .map_err(AppError::unauthorized)?
             } else {
-                LeasedCredentials::unpinned(static_creds.clone())
+                static_creds.lease_for(claims.as_ref())
             };
 
             let credential_source = if credential_id.is_some() {
@@ -1253,7 +1487,7 @@ async fn create_chat_completion(
                     .and_then(|lease| lease.into_material())
                     .map_err(AppError::unauthorized)?
             } else {
-                LeasedCredentials::unpinned(static_creds.clone())
+                static_creds.lease_for(claims.as_ref())
             };
 
             let credential_source = if credential_id.is_some() {
@@ -1603,7 +1837,7 @@ async fn create_speech(
                     Some(credential_id),
                 )
             } else {
-                (LeasedCredentials::unpinned(static_creds.clone()), None)
+                (static_creds.lease_for(claims.as_ref()), None)
             }
         }
         ProxyBackend::RemoteDynamic => {
@@ -1688,7 +1922,7 @@ async fn create_transcription(
                     Some(credential_id),
                 )
             } else {
-                (LeasedCredentials::unpinned(static_creds.clone()), None)
+                (static_creds.lease_for(claims.as_ref()), None)
             }
         }
         ProxyBackend::RemoteDynamic => {
@@ -2990,6 +3224,257 @@ mod tests {
 
         let unpinned = LeasedCredentials::unpinned(pinned.credentials.clone());
         assert!(refuse_audio_on_pinned_lease(&unpinned, "speech synthesis").is_ok());
+    }
+
+    #[test]
+    fn static_credentials_pin_only_managed_runs_to_the_proxy_pinned_model() {
+        let managed_key = api_key("https://api.openai.com/v1/responses", None);
+        let static_creds = StaticCredentials::new(managed_key.clone(), Some(" gpt-6-luna ".into()));
+        // A dispatch job token that names no credential is a managed run on
+        // the operator's key: pinned like the controller's managed lease.
+        for claims in [
+            controller_claims(Some("run-1"), None),
+            controller_claims(Some("run-1"), Some("   ")),
+        ] {
+            let leased = static_creds.lease_for(Some(&claims));
+            assert_eq!(leased.pinned_model(), Some("gpt-6-luna"));
+            assert_eq!(
+                resolve_model_for_lease("gpt-5.6-sol", &leased),
+                "gpt-6-luna"
+            );
+            assert!(refuse_audio_on_pinned_lease(&leased, "speech synthesis").is_err());
+        }
+        // No controller and session envelopes are not managed runs.
+        let envelope = controller_claims(None, None);
+        for claims in [None, Some(&envelope)] {
+            let leased = static_creds.lease_for(claims);
+            assert!(leased.pinned_model().is_none());
+            assert_eq!(
+                resolve_model_for_lease("gpt-5.6-sol", &leased),
+                "gpt-5.6-sol"
+            );
+        }
+        // A blank setting is no pin.
+        let blank = StaticCredentials::new(managed_key, Some("   ".into()));
+        let leased = blank.lease_for(Some(&controller_claims(Some("run-1"), None)));
+        assert!(leased.pinned_model().is_none());
+    }
+
+    #[test]
+    fn static_credentials_without_a_pinned_model_warn_once_about_managed_runs() {
+        let static_creds =
+            StaticCredentials::new(api_key("https://api.openai.com/v1/responses", None), None);
+        let warnings = || {
+            static_creds
+                .unpinned_managed_run_warnings
+                .load(Ordering::Relaxed)
+        };
+        // Requests that are not managed runs have nothing to warn about.
+        let envelope = controller_claims(None, None);
+        static_creds.lease_for(None);
+        static_creds.lease_for(Some(&envelope));
+        assert_eq!(warnings(), 0);
+
+        // Managed runs keep today's behaviour, and the proxy says once that
+        // the managed model is not pinned. Handlers get a clone of the state,
+        // so the count is shared.
+        let managed_run = controller_claims(Some("run-1"), None);
+        for _ in 0..3 {
+            let leased = static_creds.clone().lease_for(Some(&managed_run));
+            assert!(leased.pinned_model().is_none());
+            assert_eq!(
+                resolve_model_for_lease("gpt-5.6-sol", &leased),
+                "gpt-5.6-sol"
+            );
+            assert!(refuse_audio_on_pinned_lease(&leased, "speech synthesis").is_ok());
+        }
+        assert_eq!(warnings(), 1);
+
+        // A pinned proxy has nothing to warn about.
+        let pinned = StaticCredentials::new(
+            api_key("https://api.openai.com/v1/responses", None),
+            Some("gpt-6-luna".into()),
+        );
+        pinned.lease_for(Some(&managed_run));
+        assert_eq!(
+            pinned.unpinned_managed_run_warnings.load(Ordering::Relaxed),
+            0
+        );
+    }
+
+    #[test]
+    fn pinned_lease_tool_types_match_the_codex_tool_spec() {
+        // A codex update that adds a tool type fails here, so the type is
+        // allowed on the platform key, or kept off it, on purpose.
+        const TOOL_SPEC: &str = include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../codex/codex-rs/tools/src/tool_spec.rs"
+        ));
+        let variants = TOOL_SPEC
+            .split("pub enum ToolSpec {")
+            .nth(1)
+            .and_then(|rest| rest.split("\n}\n").next())
+            .expect("codex ToolSpec enum");
+        let mut codex_types = variants
+            .lines()
+            .filter_map(|line| {
+                line.trim()
+                    .strip_prefix("#[serde(rename = \"")?
+                    .strip_suffix("\")]")
+            })
+            .collect::<Vec<_>>();
+        codex_types.sort_unstable();
+        let mut allowed = PINNED_LEASE_TOOL_TYPES.to_vec();
+        allowed.sort_unstable();
+        assert_eq!(codex_types, allowed);
+    }
+
+    #[test]
+    fn pinned_lease_forwards_only_the_tool_types_codex_emits() {
+        // One entry per codex ToolSpec variant, shaped as codex serialises it.
+        // A property named `model` inside a function's schema is an argument,
+        // not the tool's own model.
+        let codex_tools = vec![
+            json!({
+                "type": "function",
+                "name": "exec_command",
+                "description": "Runs a command.",
+                "strict": false,
+                "parameters": {
+                    "type": "object",
+                    "properties": { "model": { "type": "string" } }
+                }
+            }),
+            json!({
+                "type": "custom",
+                "name": "apply_patch",
+                "description": "Edit files.",
+                "format": { "type": "grammar", "syntax": "lark", "definition": "start: /.+/" }
+            }),
+            json!({
+                "type": "namespace",
+                "name": "mcp__browser",
+                "description": "Tools in the mcp__browser namespace.",
+                "tools": [{
+                    "type": "function",
+                    "name": "observe",
+                    "description": "Observe the page.",
+                    "strict": false,
+                    "parameters": { "type": "object", "properties": {} }
+                }]
+            }),
+            json!({
+                "type": "tool_search",
+                "execution": "client",
+                "description": "Search deferred tools.",
+                "parameters": { "type": "object", "properties": {} }
+            }),
+            json!({ "type": "web_search", "external_web_access": true }),
+        ];
+        let (kept, dropped) = tools_for_pinned_lease(&codex_tools, "tools");
+        assert_eq!(
+            kept, codex_tools,
+            "every tool codex emits goes upstream as is"
+        );
+        assert!(dropped.is_empty());
+
+        let hand_built = vec![
+            json!({ "type": "image_generation", "model": "gpt-image-1" }),
+            json!({ "type": "code_interpreter", "container": { "type": "auto" } }),
+            json!({ "type": "local_shell" }),
+            json!({ "type": "function", "name": "f", "parameters": {}, "model": "gpt-5.6-sol" }),
+            json!({
+                "type": "namespace",
+                "name": "n",
+                "tools": [{ "type": "image_generation" }]
+            }),
+            json!({ "name": "untyped" }),
+            json!("function"),
+        ];
+        let (kept, dropped) = tools_for_pinned_lease(&hand_built, "tools");
+        assert!(
+            kept.is_empty(),
+            "nothing hand-built goes upstream: {kept:?}"
+        );
+        assert_eq!(
+            dropped
+                .iter()
+                .map(|tool| (tool.carrier, tool.tool_type.as_str(), tool.reason))
+                .collect::<Vec<_>>(),
+            vec![
+                ("tools", "image_generation", "type"),
+                ("tools", "code_interpreter", "type"),
+                ("tools", "local_shell", "type"),
+                ("tools", "function", "model"),
+                ("tools", "namespace", "member"),
+                ("tools", "unknown", "type"),
+                ("tools", "unknown", "type"),
+            ]
+        );
+    }
+
+    #[test]
+    fn pinned_lease_filters_tools_carried_in_input_items() {
+        // Codex puts its tool list in an `additional_tools` input item for
+        // Responses Lite models (the managed one included) and replays
+        // client tool search results as `tool_search_output`.
+        let function = json!({ "type": "function", "name": "f", "parameters": {} });
+        let hosted = json!({ "type": "image_generation", "model": "gpt-image-1" });
+        let message = json!({
+            "type": "message",
+            "role": "user",
+            "content": [{ "type": "input_text", "text": "hi" }],
+            "tools": [hosted.clone()]
+        });
+        let codex_input = vec![
+            json!({ "type": "additional_tools", "role": "developer", "tools": [function.clone()] }),
+            message.clone(),
+        ];
+        let (kept, dropped) = input_items_for_pinned_lease(&codex_input);
+        assert!(matches!(kept, Cow::Borrowed(_)), "nothing to drop, no copy");
+        assert!(dropped.is_empty());
+
+        let hand_built = vec![
+            json!({
+                "type": "additional_tools",
+                "role": "developer",
+                "tools": [function.clone(), hosted.clone()]
+            }),
+            json!({
+                "type": "tool_search_output",
+                "call_id": "call-1",
+                "status": "completed",
+                "execution": "client",
+                "tools": [hosted.clone(), function.clone()]
+            }),
+            message.clone(),
+        ];
+        let (kept, dropped) = input_items_for_pinned_lease(&hand_built);
+        assert_eq!(
+            kept.into_owned(),
+            vec![
+                json!({ "type": "additional_tools", "role": "developer", "tools": [function.clone()] }),
+                json!({
+                    "type": "tool_search_output",
+                    "call_id": "call-1",
+                    "status": "completed",
+                    "execution": "client",
+                    "tools": [function]
+                }),
+                // Only tool-carrying item types are filtered.
+                message,
+            ]
+        );
+        assert_eq!(
+            dropped
+                .iter()
+                .map(|tool| (tool.carrier, tool.tool_type.as_str(), tool.reason))
+                .collect::<Vec<_>>(),
+            vec![
+                ("additional_tools", "image_generation", "type"),
+                ("tool_search_output", "image_generation", "type"),
+            ]
+        );
     }
 
     #[test]

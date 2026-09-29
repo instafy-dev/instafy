@@ -13,8 +13,8 @@ pub struct LeasedCredentials {
     pub credentials: Credentials,
     /// The only model the controller lets these credentials serve (the
     /// managed lane, where the operator pays). `None` keeps the requested
-    /// model, as for user credentials, static proxy credentials and leases
-    /// from a controller that predates the pin.
+    /// model, as for user credentials, static proxy credentials without
+    /// `PROXY_PINNED_MODEL` and leases from a controller that predates the pin.
     pub pinned_model: Option<String>,
 }
 

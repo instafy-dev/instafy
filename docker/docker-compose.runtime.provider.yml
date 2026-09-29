@@ -8,6 +8,12 @@ services:
       CODEX_HOME: /root/.codex
       CODEX_AUTH_PATH: /root/.codex/auth.json
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      # Pins managed runs on static credentials (OPENAI_API_KEY or auth.json)
+      # to the managed model. Empty is no pin; a sidecar without static
+      # credentials takes the pin from the controller's managed lease. Set
+      # PROXY_PINNED_MODEL, or MANAGED_AI_MODEL_ID, where compose runs: this
+      # entry overrides one in the env_file above.
+      PROXY_PINNED_MODEL: ${PROXY_PINNED_MODEL:-${MANAGED_AI_MODEL_ID:-}}
       PROXY_CONTROLLER_BASE_URL: ${PROXY_CONTROLLER_BASE_URL:-http://host.docker.internal:80}
       CONTROLLER_INTERNAL_TOKEN: ${CONTROLLER_INTERNAL_TOKEN:-}
       PROXY_SIGNING_SECRET: ${PROXY_SIGNING_SECRET:-}
