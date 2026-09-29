@@ -2478,6 +2478,110 @@ mod tests {
         Ok(())
     }
 
+    /// A queued send with no user is dispatched as service role, which has no
+    /// managed gate. Its credential-less AI job would be pinned to a desktop
+    /// that never leases a platform job, so the dispatch is refused and the
+    /// entry fails with the reason instead of queueing a job that never starts.
+    #[tokio::test]
+    async fn userless_queued_send_pinned_to_a_private_runtime_fails_in_the_queue(
+    ) -> anyhow::Result<()> {
+        let Some(pool) = crate::tests::setup_origin_test_pool().await? else {
+            eprintln!("skipping private runtime queue refusal test: TEST_DATABASE_URL not set");
+            return Ok(());
+        };
+        let project_id = Uuid::new_v4();
+        let conversation_id = Uuid::new_v4();
+        let entry_id = Uuid::new_v4();
+        let desktop_runtime_id = Uuid::new_v4();
+        insert_service_queue_fixture(&pool, project_id, conversation_id).await?;
+        let test_result: anyhow::Result<()> = async {
+            let connection = pool.get().await?;
+            connection
+                .execute(
+                    "insert into runtimes (
+                         id, project_id, provider, status, idle_ttl_seconds, last_seen_at,
+                         capabilities
+                     ) values ($1, $2, 'self-hosted', 'ready', 600, now(), $3)",
+                    &[
+                        &desktop_runtime_id,
+                        &project_id,
+                        &PgJson(json!({
+                            "agent": true,
+                            "_instafySelfHostedAccess": {
+                                "mode": "private",
+                                "ownerUserId": Uuid::new_v4().to_string(),
+                            }
+                        })),
+                    ],
+                )
+                .await?;
+            let mut message = prompt_with_metadata(json!({
+                "agentSelection": { "active": ["octo"], "mentions": [] }
+            }));
+            message["runtimeId"] = json!(desktop_runtime_id.to_string());
+            connection
+                .execute(
+                    "insert into conversation_send_queue (
+                         id, project_id, conversation_id, status, request
+                     ) values ($1, $2, $3, 'queued', $4)",
+                    &[&entry_id, &project_id, &conversation_id, &PgJson(message)],
+                )
+                .await?;
+            drop(connection);
+            let state = crate::tests::build_test_state(
+                pool.clone(),
+                crate::tests::build_app_config(
+                    crate::tests::test_origin_private_key(),
+                    crate::tests::test_origin_public_key(),
+                    "queue-private-runtime-refusal",
+                ),
+            );
+
+            drain_send_queue_with_reclaim_after(&state, conversation_id, Duration::from_secs(60))
+                .await
+                .map_err(|(status, Json(error))| {
+                    anyhow::anyhow!("queue drain failed ({status}): {}", error.message)
+                })?;
+
+            let connection = pool.get().await?;
+            let entry = connection
+                .query_one(
+                    "select status, error_message from conversation_send_queue where id = $1",
+                    &[&entry_id],
+                )
+                .await?;
+            assert_eq!(entry.get::<_, String>("status"), "failed");
+            assert_eq!(
+                entry.get::<_, Option<String>>("error_message"),
+                Some(format!(
+                    "{} (400)",
+                    crate::dispatch::MANAGED_AI_SELF_HOSTED_RUNTIME_MESSAGE
+                ))
+            );
+            let jobs: i64 = connection
+                .query_one(
+                    "select count(*) from agent_jobs where conversation_id = $1",
+                    &[&conversation_id],
+                )
+                .await?
+                .get(0);
+            assert_eq!(
+                jobs, 0,
+                "no job is queued for a runtime that never takes it"
+            );
+            Ok(())
+        }
+        .await;
+        let cleanup = pool
+            .get()
+            .await?
+            .execute("delete from projects where id = $1", &[&project_id])
+            .await;
+        test_result?;
+        cleanup?;
+        Ok(())
+    }
+
     #[tokio::test]
     async fn duplicate_drains_complete_with_a_two_connection_pool() -> anyhow::Result<()> {
         if crate::tests::setup_origin_test_pool().await?.is_none() {

@@ -105,24 +105,49 @@ request`.
 Managed turns run only on Instafy-hosted runtimes. A managed dispatch whose job would be pinned
 to a desktop or another private self-hosted runtime, through the chosen runtime or the agent's
 own runtime setting, is refused with "Instafy AI runs on Instafy-hosted runtimes. Connect your
-own AI to use this runtime." before any reserve is taken or daily prompt counted. With
-`MANAGED_AI_ENABLED=false` there is no Instafy AI to point at, so such a dispatch gets the usual
-"Managed Instafy AI is unavailable right now" refusal instead. In a skill-mode
-ambient turn such a managed participant is skipped instead: it gets no job, its run is closed
-with `metadata.managedAiSkipped.reason = "self_hosted_runtime"`, and the human's message and any
-own-key participants go ahead. A private self-hosted runtime never leases a platform AI job, so
-unpinned managed work waits for a hosted runtime; own-key jobs and terminal commands still run
-there.
+own AI to use this runtime." (error code `managed_ai_hosted_runtime_required`, with the runtimes
+in `details.runtimeIds`) before the proxy check, the daily prompt count and the reserve, so it
+spends nothing. With `MANAGED_AI_ENABLED=false` there is no Instafy AI to point at, so a user's
+dispatch there gets the usual "Managed Instafy AI is unavailable right now" refusal instead. In a
+skill-mode ambient turn such a managed participant is skipped instead: it gets no job, its run is
+closed with `metadata.managedAiSkipped.reason = "self_hosted_runtime"`, and the human's message
+and any own-key participants go ahead.
+
+A private self-hosted runtime never leases a platform AI job, whatever `MANAGED_AI_ENABLED` says,
+so unpinned managed work waits for a hosted runtime; own-key jobs and terminal commands still run
+there. With managed AI off the controller refuses the managed credential lease, so only a proxy's
+own static key can serve a credential-less job, and a private runtime calls the proxy the
+controller names unless its owner sets `PROXY_BASE_URL`. That key belongs to the deployment, so
+the rule does not relax with the flag. Service-role dispatches, which have no managed gate (plan
+workers, lead continuations, and queued sends with no user), are therefore refused the same way
+whether or not managed AI is on:
+- A skill-authored plan whose workers have no credential of their own would run them only on
+  the planning agent's desktop or self-hosted runtime. A plan that reuses the runtime pins them
+  there. A plan that spreads them leaves them unpinned, but only its parent runtime and the extra
+  runtimes started for it, on the parent's provider, may take them, and those are private too.
+  The workers stay in that workspace rather than moving to a hosted runtime, so none is queued:
+  the planning run fails with the reason, the conversation gets it as an error message, and a
+  message queued behind the planning turn is sent.
+- A refused lead checkpoint is written to the conversation as an error message, once per plan.
+- A refused queued send is marked failed in the send queue.
+
+A platform AI job that is already queued where only private runtimes could lease it (pinned to
+one, or a spread plan worker whose parent runtime and plan runtimes are all private), queued
+before this refusal existed or by any path around it, is failed by the controller's idle sweep
+within seconds, with the same reason in its run and conversation. A managed-AI reserve it never
+used is refunded, as for an expired requeued job.
 
 The controller puts `CODEX_MODEL=MANAGED_AI_MODEL_ID` and `CODEX_MODEL_PROVIDER=openai` in the
-runtime environment (`secrets.rs`) of every job on the platform lane: an AI job whose target has
-no credential, whether or not it names an agent. This keys on the job itself rather than the
-`managedAiUsed` flag, so skill-mode ambient evaluations that have not answered yet and
+job secrets (`/agent/secrets`, `secrets.rs`) of every job on the platform lane: an AI job whose
+target has no credential, whether or not it names an agent. This keys on the job itself rather
+than the `managedAiUsed` flag, so skill-mode ambient evaluations that have not answered yet and
 service-role worker and lead-continuation dispatches get the managed model too. Own-key jobs and
 terminal commands keep their agent's model, and with `MANAGED_AI_ENABLED=false` no job is
-changed, because the credential-less lane is then the proxy's own key. A job whose secrets fetch
-failed still asks for the runtime default, `gpt-5.6-sol`, which lists at 50 to 60 times Luna's
-rates above. The managed credential lease therefore carries `pinnedModel`, and the proxy
+changed, because the credential-less lane is then the proxy's own key. Not every platform job
+reads those secrets, though: a write-scoped worker lane that the runtime runs in parallel never
+fetches job secrets, and a job whose secrets fetch failed has none. Both still ask for the
+runtime's own model, by default `gpt-5.6-sol`, which lists at 50 to 60 times Luna's rates above.
+The managed credential lease therefore carries `pinnedModel`, and the proxy
 sends every request on it as `MANAGED_AI_MODEL_ID`, whatever model the job asked for; speech and
 transcription are refused on it. A pinned request also forwards only the client tool types codex
 emits (`function`, `custom`, `namespace`, `tool_search` and `web_search`), in `tools` and in the

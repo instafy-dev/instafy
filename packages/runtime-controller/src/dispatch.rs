@@ -688,11 +688,43 @@ pub(crate) fn dispatch_requires_ai_access(intent: &str) -> bool {
     !intent.trim().eq_ignore_ascii_case("terminal_command")
 }
 
-/// Refusal for a managed-AI dispatch whose platform job would run on a
-/// private self-hosted runtime (a desktop or a self-hosted machine), which
-/// never leases platform jobs (see `lease_next_agent_job`).
-const MANAGED_AI_SELF_HOSTED_RUNTIME_MESSAGE: &str =
+/// Refusal for a dispatch whose platform job would run on a private
+/// self-hosted runtime (a desktop or a self-hosted machine), which never
+/// leases platform jobs (see `lease_next_agent_job`).
+pub(crate) const MANAGED_AI_SELF_HOSTED_RUNTIME_MESSAGE: &str =
     "Instafy AI runs on Instafy-hosted runtimes. Connect your own AI to use this runtime.";
+
+/// Error code of that refusal, so callers can tell it from other failures.
+pub(crate) const MANAGED_AI_HOSTED_RUNTIME_REQUIRED_CODE: &str =
+    "managed_ai_hosted_runtime_required";
+
+/// The refusal of a dispatch whose platform runs `private_runs` (run and
+/// runtime, see [`platform_runs_on_private_self_hosted_runtimes`]) would have
+/// only private runtimes to run on.
+fn managed_ai_hosted_runtime_refusal(
+    private_runs: &[(Uuid, Uuid)],
+) -> (StatusCode, Json<ApiError>) {
+    let mut runtime_ids: Vec<Uuid> = Vec::new();
+    for (_, runtime_id) in private_runs {
+        if !runtime_ids.contains(runtime_id) {
+            runtime_ids.push(*runtime_id);
+        }
+    }
+    (
+        StatusCode::BAD_REQUEST,
+        Json(ApiError::with_details(
+            MANAGED_AI_SELF_HOSTED_RUNTIME_MESSAGE,
+            MANAGED_AI_HOSTED_RUNTIME_REQUIRED_CODE,
+            json!({ "runtimeIds": runtime_ids }),
+        )),
+    )
+}
+
+/// Whether `error` is the refusal of a platform AI dispatch to a private
+/// self-hosted runtime.
+pub(crate) fn is_managed_ai_hosted_runtime_refusal(error: &(StatusCode, Json<ApiError>)) -> bool {
+    error.1 .0.code.as_deref() == Some(MANAGED_AI_HOSTED_RUNTIME_REQUIRED_CODE)
+}
 
 /// Why a managed participant of an ambient evaluation was not dispatched.
 /// Its run is closed with the code as `metadata.managedAiSkipped.reason`.
@@ -716,10 +748,35 @@ impl ManagedAiSkipReason {
     }
 }
 
-/// Runs of the credential-less targets (the platform lane) whose job would be
-/// pinned to a private self-hosted runtime, in dispatch order. Callers pass
-/// only AI dispatches. An unpinned job is not listed: the lease keeps it off
-/// private runtimes.
+/// The parent runtime (`multiAgentPlan.parentRuntimeId`) of a spread worker of
+/// a skill-authored plan. Such a worker is not pinned, but
+/// `lease_next_agent_job` lets only that runtime, or a runtime leased for the
+/// plan's group, take it.
+fn spread_plan_parent_runtime_id(metadata: &JsonValue) -> Option<Uuid> {
+    if metadata_uses_personal_browser(metadata)
+        || metadata_uses_shared_browser(metadata)
+        || !metadata_allows_runtime_spread(metadata)
+    {
+        return None;
+    }
+    let plan = metadata.get("multiAgentPlan")?;
+    plan.get("groupId")
+        .and_then(JsonValue::as_str)
+        .filter(|group_id| !group_id.is_empty())?;
+    plan.get("parentRuntimeId")
+        .and_then(JsonValue::as_str)
+        .and_then(|runtime_id| Uuid::parse_str(runtime_id.trim()).ok())
+}
+
+/// Runs of the credential-less targets (the platform lane) whose job would
+/// have only private self-hosted runtimes to run on, with the runtime that
+/// decides it, in dispatch order. Callers pass only AI dispatches.
+///
+/// That is a job pinned to a private runtime, or a spread worker of a plan
+/// whose parent runtime is private and whose extra runtimes would be too
+/// ([`runtime::spread_plan_parent_is_private`]). Any other unpinned job is
+/// not listed: the lease keeps it off private runtimes, and a hosted runtime
+/// takes it.
 async fn platform_runs_on_private_self_hosted_runtimes(
     state: &AppState,
     transaction: &Transaction<'_>,
@@ -727,20 +784,25 @@ async fn platform_runs_on_private_self_hosted_runtimes(
     metadata: &JsonValue,
     agent_runs: &[(Uuid, AgentTarget)],
     preferred_runtime_id: Option<Uuid>,
-) -> Result<Vec<Uuid>, (StatusCode, Json<ApiError>)> {
-    let mut private_by_runtime: HashMap<Uuid, bool> = HashMap::new();
-    let mut run_ids = Vec::new();
+) -> Result<Vec<(Uuid, Uuid)>, (StatusCode, Json<ApiError>)> {
+    // Per runtime: whether it is private, and whether it is as the parent of
+    // a spread plan.
+    let mut privacy_by_runtime: HashMap<Uuid, (bool, bool)> = HashMap::new();
+    let mut private_runs = Vec::new();
     for (run_id, target) in agent_runs {
         if target.credential_id.is_some() {
             continue;
         }
-        let Some(runtime_id) =
-            target_runtime_for_agent_job(metadata, target.runtime_id, preferred_runtime_id)
-        else {
-            continue;
-        };
-        let is_private = match private_by_runtime.get(&runtime_id) {
-            Some(is_private) => *is_private,
+        let (runtime_id, spread_plan_parent) =
+            match target_runtime_for_agent_job(metadata, target.runtime_id, preferred_runtime_id) {
+                Some(runtime_id) => (runtime_id, false),
+                None => match spread_plan_parent_runtime_id(metadata) {
+                    Some(runtime_id) => (runtime_id, true),
+                    None => continue,
+                },
+            };
+        let (runtime_private, spread_parent_private) = match privacy_by_runtime.get(&runtime_id) {
+            Some(privacy) => *privacy,
             None => {
                 let row = transaction
                     .query_opt(
@@ -753,22 +815,28 @@ async fn platform_runs_on_private_self_hosted_runtimes(
                     .map_err(|error| {
                         internal_error(format!("failed to load managed AI target runtime: {error}"))
                     })?;
-                let is_private = row.is_some_and(|row| {
-                    runtime::runtime_is_private_self_hosted(
-                        state,
-                        &row.get::<_, String>("provider"),
-                        &row.get::<_, JsonValue>("capabilities"),
+                let privacy = row.map_or((false, false), |row| {
+                    let provider = row.get::<_, String>("provider");
+                    let capabilities = row.get::<_, JsonValue>("capabilities");
+                    (
+                        runtime::runtime_is_private_self_hosted(state, &provider, &capabilities),
+                        runtime::spread_plan_parent_is_private(state, &provider, &capabilities),
                     )
                 });
-                private_by_runtime.insert(runtime_id, is_private);
-                is_private
+                privacy_by_runtime.insert(runtime_id, privacy);
+                privacy
             }
         };
+        let is_private = if spread_plan_parent {
+            spread_parent_private
+        } else {
+            runtime_private
+        };
         if is_private {
-            run_ids.push(*run_id);
+            private_runs.push((*run_id, runtime_id));
         }
     }
-    Ok(run_ids)
+    Ok(private_runs)
 }
 
 /// Close the already-inserted run of a managed ambient participant that is
@@ -1631,11 +1699,41 @@ pub(crate) async fn process_dispatch_prompt(
     // the Codex/provider lane is entered. They must remain usable when the
     // assistant is disabled or the user has not connected an AI credential,
     // and must not consume an included-AI prompt or credit.
-    let uses_managed_ai = dispatch_requires_ai_access(&request.intent)
-        && !context.is_service_role
+    let platform_lane_ai_dispatch = dispatch_requires_ai_access(&request.intent)
         && agent_runs
             .iter()
             .any(|(_, target)| target.credential_id.is_none());
+    let uses_managed_ai = platform_lane_ai_dispatch && !context.is_service_role;
+
+    // A desktop or self-hosted machine never leases a platform job, and no
+    // other runtime leases a job pinned to one (or a spread plan worker whose
+    // plan has only private runtimes), so such a job would stay queued
+    // forever. Refuse it here, before the proxy check, the daily count
+    // and the reserve, so the refusal spends no credit and no daily prompt.
+    // Service-role dispatches (plan workers, lead continuations, queued sends
+    // with no user) have no managed gate and are refused whatever
+    // MANAGED_AI_ENABLED says, because the lease rule does not depend on it;
+    // their callers record the failure. A user's dispatch with managed AI off
+    // gets the gate's own "unavailable" refusal below instead, since the
+    // credential-less lane is then not Instafy AI. Ambient participants are
+    // skipped rather than refused (below).
+    if platform_lane_ai_dispatch
+        && !skill_mode_ambient_evaluation
+        && (context.is_service_role || state.config.managed_ai_enabled)
+    {
+        let private_runs = platform_runs_on_private_self_hosted_runtimes(
+            state,
+            &transaction,
+            &project.id,
+            &request.metadata,
+            &agent_runs,
+            runtime_id,
+        )
+        .await?;
+        if !private_runs.is_empty() {
+            return Err(managed_ai_hosted_runtime_refusal(&private_runs));
+        }
+    }
 
     // Set when this dispatch wrote the managed-AI reserve burn, so the org's
     // viewers get credits.updated once the dispatch transaction commits.
@@ -1654,7 +1752,7 @@ pub(crate) async fn process_dispatch_prompt(
         // For the same reason a managed participant whose job would run on a
         // private self-hosted runtime is skipped rather than refused. The
         // human's message and every BYO participant still go ahead.
-        for run_id in platform_runs_on_private_self_hosted_runtimes(
+        for (run_id, _) in platform_runs_on_private_self_hosted_runtimes(
             state,
             &transaction,
             &project.id,
@@ -1695,25 +1793,6 @@ pub(crate) async fn process_dispatch_prompt(
             JsonValue::from(state.config.managed_ai_credit_burn_amount),
         );
     } else if uses_managed_ai {
-        // A desktop or self-hosted machine never leases a platform job.
-        // Refuse before the proxy check, the daily count and the reserve, so
-        // the refusal spends no credit and no daily prompt. With managed AI
-        // off the credential-less lane is not Instafy AI, so the gate below
-        // gives its own "unavailable" refusal instead.
-        if state.config.managed_ai_enabled
-            && !platform_runs_on_private_self_hosted_runtimes(
-                state,
-                &transaction,
-                &project.id,
-                &request.metadata,
-                &agent_runs,
-                runtime_id,
-            )
-            .await?
-            .is_empty()
-        {
-            return Err(bad_request(MANAGED_AI_SELF_HOSTED_RUNTIME_MESSAGE));
-        }
         let proxy_requirements = if let Some(proxy_base_url) = state.config.proxy_base_url.as_ref()
         {
             credentials::fetch_proxy_credential_requirements(

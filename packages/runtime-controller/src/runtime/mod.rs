@@ -26,7 +26,7 @@ pub(crate) use access::{
     ensure_self_hosted_runtime_access, provider_is_private_self_hosted_or_quarantined,
     runtime_has_private_self_hosted_identity, runtime_is_private_self_hosted,
     self_hosted_owner_user_id, self_hosted_runtime_is_accessible_to_user,
-    set_self_hosted_access_attestation,
+    set_self_hosted_access_attestation, spread_plan_parent_is_private,
 };
 pub(crate) use db::{
     ensure_runtime_record, mark_runtime_ready, record_runtime_event,

@@ -329,19 +329,45 @@ fn runtime_is_live(r: &str, rl: &str) -> String {
     )
 }
 
-/// Whether the runtime `r` is a private machine (a desktop, a personal
-/// browser) that does not lease the unpinned job `j`: work of another user,
-/// or a platform AI job (an AI job whose target has no credential), which runs
-/// only on Instafy-hosted runtimes. The same rules `lease_next_agent_job`
+/// Whether the runtime `r` is a private machine: a desktop, a personal
+/// browser or another self-hosted machine.
+fn runtime_is_private(r: &str) -> String {
+    format!(
+        "(lower(replace(replace(btrim({r}.provider), '-', '_'), ' ', '_')) = 'self_hosted'
+          or {r}.capabilities ? '_instafySelfHostedAccess'
+          or {r}.capabilities ? '_instafy_self_hosted_access'
+          or {r}.capabilities ? 'personalBrowser'
+          or {r}.capabilities ? 'personal_browser')"
+    )
+}
+
+/// Whether the job `j` is a platform AI job (an AI job whose target has no
+/// credential), which runs only on Instafy-hosted runtimes.
+fn job_is_platform_ai(j: &str) -> String {
+    format!(
+        "({j}.credential_id is null
+          and lower(btrim(coalesce({j}.intent, ''))) <> 'terminal_command')"
+    )
+}
+
+/// Whether the runtime `r` is a private machine that does not lease the job
+/// `j` pinned to it: a platform AI job. The same rule `lease_next_agent_job`
 /// applies when that machine asks for work.
+fn private_runtime_does_not_lease_pinned(r: &str, j: &str) -> String {
+    format!(
+        "coalesce({private} and {platform}, false)",
+        private = runtime_is_private(r),
+        platform = job_is_platform_ai(j),
+    )
+}
+
+/// Whether the runtime `r` is a private machine that does not lease the
+/// unpinned job `j`: work of another user, or a platform AI job. The same
+/// rules `lease_next_agent_job` applies when that machine asks for work.
 fn private_runtime_does_not_lease(r: &str, j: &str) -> String {
     format!(
         "coalesce(
-           (lower(replace(replace(btrim({r}.provider), '-', '_'), ' ', '_')) = 'self_hosted'
-            or {r}.capabilities ? '_instafySelfHostedAccess'
-            or {r}.capabilities ? '_instafy_self_hosted_access'
-            or {r}.capabilities ? 'personalBrowser'
-            or {r}.capabilities ? 'personal_browser')
+           {private}
            and (
              coalesce(
                {r}.capabilities #>> '{{_instafySelfHostedAccess,ownerUserId}}',
@@ -349,20 +375,22 @@ fn private_runtime_does_not_lease(r: &str, j: &str) -> String {
                {r}.capabilities #>> '{{personalBrowser,ownerUserId}}',
                {r}.capabilities #>> '{{personal_browser,owner_user_id}}'
              ) is distinct from {j}.payload #>> '{{user_id}}'
-             or ({j}.credential_id is null
-                 and lower(btrim(coalesce({j}.intent, ''))) <> 'terminal_command')
+             or {platform}
            ),
            false
-         )"
+         )",
+        private = runtime_is_private(r),
+        platform = job_is_platform_ai(j),
     )
 }
 
 /// Whether a live runtime could run the waiting job `j` now: a hosted runtime
-/// of its space (what the wait asked for), the machine the job is pinned to,
-/// or, for unpinned work, a machine in the space that would lease it. Any
-/// other heartbeating machine (a desktop that never leases work pinned to the
-/// hosted runtime, or one that only runs its owner's own-key work and terminal
-/// commands) leaves the job waiting on the limit.
+/// of its space (what the wait asked for), the machine the job is pinned to
+/// unless that machine never leases it, or, for unpinned work, a machine in
+/// the space that would lease it. Any other heartbeating machine (a desktop
+/// that never leases work pinned to the hosted runtime, one that only runs its
+/// owner's own-key work and terminal commands, or one a platform AI job is
+/// pinned to) leaves the job waiting on the limit.
 ///
 /// A runtime preference held in one controller's memory can also keep a
 /// machine from leasing unpinned work; the database cannot see it, so such a
@@ -377,12 +405,13 @@ fn job_has_live_runner(j: &str) -> String {
              and {live}
              and (
                {hosted}
-               or lr.id = {j}.target_runtime_id
+               or (lr.id = {j}.target_runtime_id and not {private_pinned})
                or ({j}.target_runtime_id is null and not {private})
              )
          )",
         live = runtime_is_live("lr", "lrl"),
         hosted = hosted_provider("lr"),
+        private_pinned = private_runtime_does_not_lease_pinned("lr", j),
         private = private_runtime_does_not_lease("lr", j),
     )
 }
@@ -1049,46 +1078,15 @@ async fn fail_waiting_jobs(
         return Ok(0);
     }
 
-    let settled =
-        super::sweeps::settle_expired_queued_jobs(&mut transaction, &rows, "runtime limit").await?;
-
-    let mut conversation_messages = Vec::new();
-    for row in &rows {
-        let Some(conversation_id) = row.get::<_, Option<Uuid>>("conversation_id") else {
-            continue;
-        };
-        let job_id: Uuid = row.get("id");
-        let run_id: Option<Uuid> = row.get("run_id");
-        let payload = row.get::<_, PgJson<JsonValue>>("payload").0;
-        let metadata = json!({
-            "source": "controller",
-            "kind": kind,
-            "outcome": "failed",
-            "messageType": "error",
-            "jobId": job_id,
-            "runId": run_id,
-            "errorMessage": message,
-            "agent": payload.pointer("/metadata/agent").cloned(),
-        });
-        let recorded = crate::conversations::record_controller_assistant_message(
-            &transaction,
-            &project_id,
-            &conversation_id,
-            row.get("session_id"),
-            row.get("prompt_id"),
-            run_id,
-            message,
-            &metadata,
-        )
-        .await
-        .map_err(|(status, Json(error))| {
-            anyhow::anyhow!(
-                "failed to record the runtime limit wait failure message ({status}): {}",
-                error.message
-            )
-        })?;
-        conversation_messages.push(recorded);
-    }
+    let failed = super::sweeps::settle_failed_queued_jobs_with_message(
+        &mut transaction,
+        &rows,
+        "runtime limit",
+        kind,
+        outcome,
+        message,
+    )
+    .await?;
 
     transaction
         .commit()
@@ -1096,90 +1094,17 @@ async fn fail_waiting_jobs(
         .context("failed to commit failing jobs behind the runtime limit")?;
     drop(connection);
 
-    crate::send_intents::publish_job_input_state_updates(state, &settled.job_input_state_updates);
-    super::sweeps::publish_credits_updated_for_orgs(state, settled.refunded_org_ids).await;
-    for message_row in &conversation_messages {
-        crate::conversations::publish_conversation_message_event(&state.events, message_row);
-        crate::notifications::enqueue_message_push_notifications(
-            state.clone(),
-            message_row.clone(),
-        );
-    }
-
-    let mut conversations = std::collections::BTreeSet::new();
     for row in &rows {
         let job_id: Uuid = row.get("id");
-        let run_id: Option<Uuid> = row.get("run_id");
-        let conversation_id: Option<Uuid> = row.get("conversation_id");
         info!(
             %job_id,
             %project_id,
             kind,
             "failed a job waiting on the hosted runtime limit"
         );
-        if let Some(run_id) = run_id {
-            publish_failed_run(
-                state,
-                project_id,
-                run_id,
-                job_id,
-                conversation_id,
-                outcome,
-                message,
-            )
-            .await;
-        }
-        if let Some(conversation_id) = conversation_id {
-            conversations.insert(conversation_id);
-        }
     }
-    // Whatever was queued behind the failed turn may go now.
-    for conversation_id in conversations {
-        crate::send_queue::spawn_send_queue_drain(state.clone(), conversation_id);
-    }
+    super::sweeps::publish_failed_queued_jobs(state, failed).await;
     Ok(rows.len())
-}
-
-async fn publish_failed_run(
-    state: &AppState,
-    project_id: Uuid,
-    run_id: Uuid,
-    job_id: Uuid,
-    conversation_id: Option<Uuid>,
-    outcome: &str,
-    message: &str,
-) {
-    let snapshot = match state.pool.get().await {
-        Ok(mut connection) => crate::runs::load_run_snapshot(&mut *connection, &run_id)
-            .await
-            .ok()
-            .flatten(),
-        Err(_) => None,
-    };
-    let (session_id, conversation_id, run_payload) = match snapshot.as_ref() {
-        Some(snapshot) => (
-            snapshot.session_id,
-            snapshot.conversation_id.or(conversation_id),
-            crate::runs::run_snapshot_to_json(snapshot),
-        ),
-        None => (None, conversation_id, JsonValue::Null),
-    };
-    crate::publish_controller_event_with_conversation(
-        &state.events,
-        "run.completed",
-        Some(project_id),
-        session_id,
-        conversation_id,
-        Some(run_id),
-        Some(job_id),
-        json!({
-            "outcome": outcome,
-            "finalStatus": "failed",
-            "runStatus": "failed",
-            "errorMessage": message,
-            "run": run_payload,
-        }),
-    );
 }
 
 #[cfg(test)]

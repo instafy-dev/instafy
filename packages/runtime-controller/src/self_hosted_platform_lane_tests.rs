@@ -1,12 +1,38 @@
 //! Platform AI jobs (an AI job whose target has no credential) run only on
 //! Instafy-hosted runtimes. A managed dispatch to a desktop or self-hosted
 //! runtime is refused before any reserve, an ambient managed participant
-//! there is skipped, and such a runtime never leases a platform job.
+//! there is skipped, and such a runtime never leases a platform job. The
+//! service-role dispatches of a skill-authored plan, pinned or spread over
+//! only private runtimes, are refused the same way and the plan fails
+//! visibly. The idle sweep fails such a job that is already queued.
 
 use super::*;
 
 const SELF_HOSTED_REFUSAL: &str =
     "Instafy AI runs on Instafy-hosted runtimes. Connect your own AI to use this runtime.";
+const SELF_HOSTED_REFUSAL_CODE: &str = "managed_ai_hosted_runtime_required";
+
+/// Assert that `result` is the refusal of a platform dispatch pinned to the
+/// private runtime `runtime_id`.
+fn assert_hosted_runtime_refusal<T: std::fmt::Debug>(
+    result: Result<T, (StatusCode, axum::Json<ApiError>)>,
+    runtime_id: Uuid,
+    case: &str,
+) {
+    let (status, axum::Json(error)) = result.expect_err(case);
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{case}");
+    assert_eq!(error.message, SELF_HOSTED_REFUSAL, "{case}");
+    assert_eq!(
+        error.code.as_deref(),
+        Some(SELF_HOSTED_REFUSAL_CODE),
+        "{case}"
+    );
+    assert_eq!(
+        error.details,
+        Some(json!({ "runtimeIds": [runtime_id] })),
+        "{case}"
+    );
+}
 
 /// A ready desktop runtime privately owned by `owner`, bound to `generation`.
 async fn insert_private_runtime(
@@ -238,10 +264,12 @@ async fn managed_dispatch_to_self_hosted_runtime_refused_without_reserve_or_slot
                 "private",
             )?,
         )
-        .await
-        .expect_err("a managed dispatch to a desktop runtime is refused");
-        assert_eq!(refused.0, StatusCode::BAD_REQUEST);
-        assert_eq!(refused.1 .0.message, SELF_HOSTED_REFUSAL);
+        .await;
+        assert_hosted_runtime_refusal(
+            refused,
+            desktop_runtime_id,
+            "a managed dispatch to a desktop runtime is refused",
+        );
         assert_nothing_spent("desktop composer runtime").await?;
 
         // The agent is pinned to the desktop while the composer runtime is
@@ -265,10 +293,12 @@ async fn managed_dispatch_to_self_hosted_runtime_refused_without_reserve_or_slot
                 "private",
             )?,
         )
-        .await
-        .expect_err("a managed agent pinned to a desktop runtime is refused");
-        assert_eq!(refused.0, StatusCode::BAD_REQUEST);
-        assert_eq!(refused.1 .0.message, SELF_HOSTED_REFUSAL);
+        .await;
+        assert_hosted_runtime_refusal(
+            refused,
+            desktop_runtime_id,
+            "a managed agent pinned to a desktop runtime is refused",
+        );
         assert_nothing_spent("agent pinned to the desktop").await?;
 
         // With managed AI off (the self-host default) the credential-less
@@ -561,6 +591,14 @@ struct LeaseFixture {
 
 impl LeaseFixture {
     async fn new(pool: PgPool, label: &str) -> anyhow::Result<Self> {
+        Self::new_with_config(pool, label, |_| {}).await
+    }
+
+    async fn new_with_config(
+        pool: PgPool,
+        label: &str,
+        configure: impl FnOnce(&mut AppConfig),
+    ) -> anyhow::Result<Self> {
         let owner_user_id = Uuid::new_v4();
         let project_id = Uuid::new_v4();
         let desktop_runtime_id = Uuid::new_v4();
@@ -582,7 +620,9 @@ impl LeaseFixture {
             &desktop_generation,
         )
         .await?;
-        let config = build_app_config(test_origin_private_key(), test_origin_public_key(), label);
+        let mut config =
+            build_app_config(test_origin_private_key(), test_origin_public_key(), label);
+        configure(&mut config);
         let app = agent::router().with_state(build_test_state(pool.clone(), config.clone()));
         Ok(Self {
             pool,
@@ -777,6 +817,1404 @@ async fn self_hosted_runtime_still_leases_byo_and_terminal_jobs() -> anyhow::Res
         let mut expected = vec![byo, byo_unpinned, terminal];
         expected.sort();
         assert_eq!(leased, expected);
+        Ok(())
+    }
+    .await;
+    let cleanup = fixture.cleanup().await;
+    test_result?;
+    cleanup
+}
+
+/// With managed AI off the credential-less lane is a proxy's own static key,
+/// which belongs to the deployment, so a private runtime still never leases a
+/// platform job.
+#[tokio::test]
+async fn private_runtime_does_not_lease_platform_jobs_with_managed_ai_off() -> anyhow::Result<()> {
+    let Some(pool) = setup_origin_test_pool().await? else {
+        eprintln!("skipping managed-AI-off platform lease test: TEST_DATABASE_URL not set");
+        return Ok(());
+    };
+    let fixture = LeaseFixture::new_with_config(pool, "managed-ai-off-platform-lease", |config| {
+        config.managed_ai_enabled = false;
+    })
+    .await?;
+    let test_result: anyhow::Result<()> = async {
+        let pinned = fixture
+            .insert_job(Some("feature"), None, Some(fixture.desktop_runtime_id))
+            .await?;
+        let unpinned = fixture.insert_job(Some("question"), None, None).await?;
+        let terminal = fixture
+            .insert_job(
+                Some("terminal_command"),
+                None,
+                Some(fixture.desktop_runtime_id),
+            )
+            .await?;
+
+        let leased = fixture
+            .lease_all(fixture.desktop_runtime_id, Some(fixture.desktop_generation))
+            .await?;
+        assert_eq!(
+            leased,
+            vec![terminal],
+            "only the terminal command is leased"
+        );
+        for job_id in [pinned, unpinned] {
+            assert_eq!(
+                fixture.job_status(&job_id).await?,
+                ("queued".to_string(), 0)
+            );
+        }
+        Ok(())
+    }
+    .await;
+    let cleanup = fixture.cleanup().await;
+    test_result?;
+    cleanup
+}
+
+/// A runtime of a configured provider that is neither the canonical Instafy
+/// Cloud id nor self-hosted (a self-hoster's own managed provider) is not
+/// private, so it leases platform jobs, pinned or not.
+#[tokio::test]
+async fn non_private_custom_provider_runtime_still_leases_platform_jobs() -> anyhow::Result<()> {
+    let Some(pool) = setup_origin_test_pool().await? else {
+        eprintln!("skipping custom provider platform lease test: TEST_DATABASE_URL not set");
+        return Ok(());
+    };
+    let fixture = LeaseFixture::new_with_config(pool, "custom-provider-platform-lease", |config| {
+        config.runtime_providers = vec![RuntimeProviderConfig {
+            id: "acme-cloud".to_string(),
+            display_name: "Acme Cloud".to_string(),
+            kind: "noop".to_string(),
+            owner_org_id: None,
+            allowed_org_ids: vec![],
+            endpoint: None,
+            auth_token: None,
+            metadata: None,
+        }];
+    })
+    .await?;
+    let test_result: anyhow::Result<()> = async {
+        let acme_runtime_id = Uuid::new_v4();
+        insert_ready_runtime(
+            &fixture.pool,
+            &fixture.project_id,
+            &acme_runtime_id,
+            "acme-cloud",
+            json!({ "agent": true, "origin": true }),
+        )
+        .await?;
+        let pinned = fixture
+            .insert_job(Some("feature"), None, Some(acme_runtime_id))
+            .await?;
+        let unpinned = fixture.insert_job(Some("question"), None, None).await?;
+
+        let mut leased = fixture.lease_all(acme_runtime_id, None).await?;
+        leased.sort();
+        let mut expected = vec![pinned, unpinned];
+        expected.sort();
+        assert_eq!(leased, expected);
+        Ok(())
+    }
+    .await;
+    let cleanup = fixture.cleanup().await;
+    test_result?;
+    cleanup
+}
+
+/// A space in an organization with credits: its owner with an `@octo` that
+/// has no credential and no default credential, a ready desktop runtime the
+/// owner attested, a ready hosted runtime and a ready runtime of a
+/// non-canonical managed provider (`acme-cloud`).
+struct ManagedSpace {
+    pool: PgPool,
+    owner_user_id: Uuid,
+    org_id: Uuid,
+    project_id: Uuid,
+    desktop_runtime_id: Uuid,
+    hosted_runtime_id: Uuid,
+    acme_runtime_id: Uuid,
+}
+
+impl ManagedSpace {
+    async fn seed(pool: PgPool, label: &str) -> anyhow::Result<Self> {
+        let space = Self {
+            pool,
+            owner_user_id: Uuid::new_v4(),
+            org_id: Uuid::new_v4(),
+            project_id: Uuid::new_v4(),
+            desktop_runtime_id: Uuid::new_v4(),
+            hosted_runtime_id: Uuid::new_v4(),
+            acme_runtime_id: Uuid::new_v4(),
+        };
+        ensure_test_user(&space.pool, &space.owner_user_id).await?;
+        let seeded: anyhow::Result<()> = async {
+            let connection = space.pool.get().await?;
+            connection
+                .execute(
+                    "insert into organizations (id, slug, name) values ($1, $2, $3)",
+                    &[&space.org_id, &format!("{label}-{}", space.org_id), &label],
+                )
+                .await?;
+            connection
+                .execute(
+                    "insert into org_memberships (org_id, user_id, role)
+                     values ($1, $2, 'owner')",
+                    &[&space.org_id, &space.owner_user_id],
+                )
+                .await?;
+            connection
+                .execute(
+                    "insert into projects (id, org_id, owner_user_id, project_type, status)
+                     values ($1, $2, $3, 'customer', 'active')",
+                    &[&space.project_id, &space.org_id, &space.owner_user_id],
+                )
+                .await?;
+            connection
+                .execute(
+                    "insert into org_credit_ledger (org_id, project_id, delta, reason, metadata)
+                     values ($1, $2, 20, 'test_seed', '{}'::jsonb)",
+                    &[&space.org_id, &space.project_id],
+                )
+                .await?;
+            connection
+                .execute(
+                    "insert into user_agents (id, user_id, provider, handle, avatar_seed)
+                     values ($1, $2, 'openai', 'octo', 'octo')",
+                    &[&Uuid::new_v4(), &space.owner_user_id],
+                )
+                .await?;
+            drop(connection);
+            insert_private_runtime(
+                &space.pool,
+                &space.project_id,
+                &space.desktop_runtime_id,
+                &space.owner_user_id,
+                &Uuid::new_v4(),
+            )
+            .await?;
+            for (runtime_id, provider) in [
+                (space.hosted_runtime_id, "instafy-cloud"),
+                (space.acme_runtime_id, "acme-cloud"),
+            ] {
+                insert_ready_runtime(
+                    &space.pool,
+                    &space.project_id,
+                    &runtime_id,
+                    provider,
+                    json!({ "agent": true, "origin": true }),
+                )
+                .await?;
+            }
+            Ok(())
+        }
+        .await;
+        if let Err(error) = seeded {
+            let _ = space.cleanup().await;
+            return Err(error);
+        }
+        Ok(space)
+    }
+
+    /// A config whose managed gate passes (the controller holds the managed
+    /// key), with both hosted providers configured.
+    fn config(&self, label: &str) -> AppConfig {
+        let mut config =
+            build_app_config(test_origin_private_key(), test_origin_public_key(), label);
+        config.managed_ai_openai_api_key = Some("sk-managed-test".to_string());
+        config.runtime_providers = ["instafy-cloud", "acme-cloud"]
+            .into_iter()
+            .map(|id| RuntimeProviderConfig {
+                id: id.to_string(),
+                display_name: id.to_string(),
+                kind: "noop".to_string(),
+                owner_org_id: None,
+                allowed_org_ids: vec![],
+                endpoint: None,
+                auth_token: None,
+                metadata: None,
+            })
+            .collect();
+        config
+    }
+
+    /// The owner sends a turn to `agents` in a new private conversation with
+    /// the composer on `runtime_id`.
+    async fn dispatch(
+        &self,
+        state: &AppState,
+        context: &RequestContext,
+        runtime_id: Uuid,
+        agents: &[&str],
+    ) -> Result<dispatch::DispatchPromptResponse, (StatusCode, axum::Json<ApiError>)> {
+        let request = platform_lane_dispatch_request(
+            &self.project_id,
+            &Uuid::new_v4(),
+            &runtime_id,
+            agents,
+            "private",
+        )
+        .expect("a valid dispatch request");
+        dispatch::process_dispatch_prompt(state, context, request).await
+    }
+
+    async fn count(&self, table: &str, predicate: &str) -> anyhow::Result<i64> {
+        Ok(self
+            .pool
+            .get()
+            .await?
+            .query_one(
+                &format!("select count(*)::bigint from {table} where {predicate}"),
+                &[&self.project_id],
+            )
+            .await?
+            .get(0))
+    }
+
+    async fn cleanup(&self) -> anyhow::Result<()> {
+        let project_cleanup = cleanup_origin_project(&self.pool, &self.project_id).await;
+        let org_cleanup = cleanup_org(&self.pool, &self.org_id).await;
+        let user_cleanup = cleanup_test_user(&self.pool, &self.owner_user_id).await;
+        project_cleanup?;
+        org_cleanup?;
+        user_cleanup
+    }
+}
+
+fn service_role_context(user_id: Uuid) -> RequestContext {
+    RequestContext {
+        user_id: Some(user_id),
+        is_service_role: true,
+        scoped_claims: None,
+    }
+}
+
+/// Proxy credential-check reports (a `telemetry.system_issue.*` event) the
+/// dispatches of `project_id` have published since the last call.
+fn proxy_check_reports(
+    events: &mut tokio::sync::broadcast::Receiver<crate::state::ControllerEvent>,
+    project_id: Uuid,
+) -> usize {
+    let mut reports = 0;
+    while let Ok(event) = events.try_recv() {
+        if event.project_id == Some(project_id) && event.kind.starts_with("telemetry.system_issue.")
+        {
+            reports += 1;
+        }
+    }
+    reports
+}
+
+/// The private-runtime refusal comes before each of the managed gate's own
+/// refusals: the reserve (an unaffordable burn), the daily prompt count (the
+/// day's one prompt used) and the proxy check (an unreachable proxy). The same
+/// dispatch to the hosted runtime hits each of them, so they were live.
+#[tokio::test]
+async fn self_hosted_refusal_comes_before_the_proxy_check_daily_count_and_reserve(
+) -> anyhow::Result<()> {
+    let Some(pool) = setup_origin_test_pool().await? else {
+        eprintln!("skipping self-hosted refusal order test: TEST_DATABASE_URL not set");
+        return Ok(());
+    };
+    let space = ManagedSpace::seed(pool, "self-hosted-refusal-order").await?;
+    let test_result: anyhow::Result<()> = async {
+        let owner = owner_context(space.owner_user_id);
+        let desktop = space.desktop_runtime_id;
+        let hosted = space.hosted_runtime_id;
+
+        // The reserve refuses: the burn is more than the balance can be.
+        let mut config = space.config("self-hosted-refusal-order-reserve");
+        config.managed_ai_credit_burn_amount = 1_000_000;
+        let state = build_test_state(space.pool.clone(), config);
+        let refused = space
+            .dispatch(&state, &owner, hosted, &["octo"])
+            .await
+            .expect_err("an unaffordable reserve is refused");
+        assert_eq!(
+            refused.1 .0.message,
+            "insufficient credits available for requested burn"
+        );
+        assert_hosted_runtime_refusal(
+            space.dispatch(&state, &owner, desktop, &["octo"]).await,
+            desktop,
+            "refused before the reserve",
+        );
+
+        // The daily count refuses: the day's one prompt is used.
+        let mut config = space.config("self-hosted-refusal-order-daily");
+        config.managed_ai_daily_prompt_limit = 1;
+        let state = build_test_state(space.pool.clone(), config);
+        space
+            .dispatch(&state, &owner, hosted, &["octo"])
+            .await
+            .map_err(|error| controller_error("the day's one managed prompt", error))?;
+        let refused = space
+            .dispatch(&state, &owner, hosted, &["octo"])
+            .await
+            .expect_err("the daily limit refuses the second prompt");
+        assert_eq!(
+            refused.1 .0.message,
+            "Connect your own AI to continue. You have used all 1 Instafy AI prompts available today."
+        );
+        assert_hosted_runtime_refusal(
+            space.dispatch(&state, &owner, desktop, &["octo"]).await,
+            desktop,
+            "refused before the daily count",
+        );
+
+        // The proxy check refuses: nothing listens on the proxy's port, and
+        // the check reports that as a system issue.
+        let closed_port = std::net::TcpListener::bind("127.0.0.1:0")?
+            .local_addr()?
+            .port();
+        let mut config = space.config("self-hosted-refusal-order-proxy");
+        config.proxy_base_url = Some(format!("http://127.0.0.1:{closed_port}"));
+        let state = build_test_state(space.pool.clone(), config);
+        let mut events = state.events.subscribe();
+        assert_hosted_runtime_refusal(
+            space.dispatch(&state, &owner, desktop, &["octo"]).await,
+            desktop,
+            "refused before the proxy check",
+        );
+        assert_eq!(
+            proxy_check_reports(&mut events, space.project_id),
+            0,
+            "the refused dispatch never probed the proxy"
+        );
+        let refused = space
+            .dispatch(&state, &owner, hosted, &["octo"])
+            .await
+            .expect_err("an unreachable proxy refuses the managed turn");
+        assert_eq!(
+            refused.1 .0.message,
+            "Connect your own AI to continue. This request needs a personal AI connection."
+        );
+        assert_eq!(proxy_check_reports(&mut events, space.project_id), 1);
+
+        // Only the day's one prompt was admitted and reserved.
+        assert_eq!(space.count("prompts", "project_id = $1").await?, 1);
+        assert_eq!(space.count("agent_jobs", "project_id = $1").await?, 1);
+        assert_eq!(
+            space
+                .count(
+                    "org_credit_ledger",
+                    "project_id = $1 and reason = 'managed_ai_prompt'"
+                )
+                .await?,
+            1
+        );
+        Ok(())
+    }
+    .await;
+    let cleanup = space.cleanup().await;
+    test_result?;
+    cleanup
+}
+
+/// A service-role dispatch (a plan worker, a lead continuation, a queued send
+/// with no user) has no managed gate. When its credential-less AI job would
+/// be pinned to a private runtime it is refused, with managed AI on or off,
+/// since that runtime would never lease it. The same dispatch to a hosted or
+/// a non-canonical managed runtime, an own-key one to the desktop, and a
+/// user's managed dispatch to the non-canonical runtime go ahead.
+#[tokio::test]
+async fn service_role_platform_dispatch_to_a_private_runtime_is_refused() -> anyhow::Result<()> {
+    let Some(pool) = setup_origin_test_pool().await? else {
+        eprintln!("skipping service-role self-hosted dispatch test: TEST_DATABASE_URL not set");
+        return Ok(());
+    };
+    let space = ManagedSpace::seed(pool, "service-role-self-hosted").await?;
+    let test_result: anyhow::Result<()> = async {
+        let service = service_role_context(space.owner_user_id);
+        let reviewer_credential_id = Uuid::new_v4();
+        seed_custom_agent(
+            &space.pool,
+            &space.owner_user_id,
+            &reviewer_credential_id,
+            &Uuid::new_v4(),
+            "reviewer",
+            "Reviews changes with its own key",
+        )
+        .await?;
+
+        for managed_ai_enabled in [true, false] {
+            let mut config = space.config("service-role-self-hosted");
+            config.managed_ai_enabled = managed_ai_enabled;
+            let state = build_test_state(space.pool.clone(), config);
+            assert_hosted_runtime_refusal(
+                space
+                    .dispatch(&state, &service, space.desktop_runtime_id, &["scout"])
+                    .await,
+                space.desktop_runtime_id,
+                &format!("service-role worker to the desktop, managed AI {managed_ai_enabled}"),
+            );
+            for table in ["prompts", "runs", "agent_jobs"] {
+                assert_eq!(
+                    space.count(table, "project_id = $1").await?,
+                    0,
+                    "{table} after the refusal with managed AI {managed_ai_enabled}"
+                );
+            }
+        }
+
+        let state = build_test_state(space.pool.clone(), space.config("service-role-self-hosted"));
+        let mut accepted = Vec::new();
+        for (runtime_id, agent, credential_id) in [
+            (space.hosted_runtime_id, "scout", None),
+            (space.acme_runtime_id, "scout", None),
+            (
+                space.desktop_runtime_id,
+                "reviewer",
+                Some(reviewer_credential_id),
+            ),
+        ] {
+            let response = space
+                .dispatch(&state, &service, runtime_id, &[agent])
+                .await
+                .map_err(|error| controller_error("accepted service-role dispatch", error))?;
+            accepted.push((
+                response.job_id.expect("a queued job"),
+                runtime_id,
+                credential_id,
+            ));
+        }
+        let connection = space.pool.get().await?;
+        for (job_id, runtime_id, credential_id) in accepted {
+            let job = connection
+                .query_one(
+                    "select target_runtime_id, credential_id from agent_jobs where id = $1",
+                    &[&job_id],
+                )
+                .await?;
+            assert_eq!(
+                job.get::<_, Option<Uuid>>("target_runtime_id"),
+                Some(runtime_id)
+            );
+            assert_eq!(job.get::<_, Option<Uuid>>("credential_id"), credential_id);
+        }
+        drop(connection);
+
+        // The non-canonical managed runtime is not private, so a user's
+        // managed dispatch to it passes the gate and takes its reserve.
+        let response = space
+            .dispatch(
+                &state,
+                &owner_context(space.owner_user_id),
+                space.acme_runtime_id,
+                &["octo"],
+            )
+            .await
+            .map_err(|error| controller_error("managed dispatch to acme-cloud", error))?;
+        let target: Option<Uuid> = space
+            .pool
+            .get()
+            .await?
+            .query_one(
+                "select target_runtime_id from agent_jobs where id = $1",
+                &[&response.job_id.expect("a queued managed job")],
+            )
+            .await?
+            .get(0);
+        assert_eq!(target, Some(space.acme_runtime_id));
+        assert_eq!(
+            space
+                .count(
+                    "org_credit_ledger",
+                    "project_id = $1 and reason = 'managed_ai_prompt'"
+                )
+                .await?,
+            1,
+            "only the user's managed dispatch reserves; service-role ones do not"
+        );
+        Ok(())
+    }
+    .await;
+    let cleanup = space.cleanup().await;
+    test_result?;
+    cleanup
+}
+
+/// Insert a conversation of the space, and a run and an agent job in it
+/// leased by `runtime_id` for `credential_id`, with `metadata` on the job.
+async fn insert_leased_plan_job(
+    space: &ManagedSpace,
+    runtime_id: Uuid,
+    credential_id: Option<Uuid>,
+    metadata: serde_json::Value,
+) -> anyhow::Result<(Uuid, Uuid, Uuid, serde_json::Value)> {
+    let conversation_id = Uuid::new_v4();
+    let run_id = Uuid::new_v4();
+    let job_id = Uuid::new_v4();
+    let payload = json!({
+        "project_id": space.project_id,
+        "conversation_id": conversation_id,
+        "user_id": space.owner_user_id,
+        "prompt_text": "Split this review across a team.",
+        "metadata": metadata,
+    });
+    let connection = space.pool.get().await?;
+    connection
+        .execute(
+            "insert into conversations (id, project_id, created_by, metadata, visibility)
+             values ($1, $2, $3, '{}'::jsonb, 'private')",
+            &[&conversation_id, &space.project_id, &space.owner_user_id],
+        )
+        .await?;
+    connection
+        .execute(
+            "insert into runs (id, project_id, conversation_id, run_type, status)
+             values ($1, $2, $3, 'prompt', 'in_progress')",
+            &[&run_id, &space.project_id, &conversation_id],
+        )
+        .await?;
+    connection
+        .execute(
+            "insert into agent_jobs (
+                 id, project_id, run_id, conversation_id, status, intent, credential_id,
+                 target_runtime_id, leased_by_runtime_id, leased_at, lease_expires_at,
+                 lease_attempts, payload
+             ) values ($1, $2, $3, $4, 'leased', 'feature', $5, $6, $6, now(),
+                       now() + interval '5 minutes', 1, $7)",
+            &[
+                &job_id,
+                &space.project_id,
+                &run_id,
+                &conversation_id,
+                &credential_id,
+                &runtime_id,
+                &PgJson(payload.clone()),
+            ],
+        )
+        .await?;
+    Ok((conversation_id, run_id, job_id, payload))
+}
+
+/// A plan authored on a desktop by an own-key agent, whose workers have no
+/// credential of their own, would pin those workers to the desktop. They are
+/// not moved to a hosted runtime: none is queued, the planning run fails with
+/// the reason, and the conversation says why. The same plan authored on a
+/// hosted runtime queues its workers there.
+#[tokio::test]
+async fn plan_workers_pinned_to_a_private_runtime_fail_the_planning_run() -> anyhow::Result<()> {
+    let Some(pool) = setup_origin_test_pool().await? else {
+        eprintln!("skipping self-hosted plan worker test: TEST_DATABASE_URL not set");
+        return Ok(());
+    };
+    let space = ManagedSpace::seed(pool, "self-hosted-plan-workers").await?;
+    let test_result: anyhow::Result<()> = async {
+        let planner_credential_id = Uuid::new_v4();
+        seed_custom_agent(
+            &space.pool,
+            &space.owner_user_id,
+            &planner_credential_id,
+            &Uuid::new_v4(),
+            "planner",
+            "Plans with its own key",
+        )
+        .await?;
+        let state = build_test_state(space.pool.clone(), space.config("self-hosted-plan-workers"));
+        let plan_message = json!({
+            "messageType": "multi_agent_plan",
+            "details": {
+                "mode": "read_only",
+                "agents": [
+                    { "handle": "scout-a", "prompt": "Read the README." },
+                    { "handle": "scout-b", "prompt": "Read the docs folder." }
+                ]
+            }
+        });
+        let plan_text = "Two scouts will read the README and the docs.";
+        let expected_reason = format!("The plan's agents could not start. {SELF_HOSTED_REFUSAL}");
+
+        let (conversation_id, run_id, job_id, payload) = insert_leased_plan_job(
+            &space,
+            space.desktop_runtime_id,
+            Some(planner_credential_id),
+            json!({ "agent": { "handle": "planner" } }),
+        )
+        .await?;
+        let mut events = state.events.subscribe();
+        let handled = crate::multi_agent_plan::maybe_execute_multi_agent_plan_message(
+            &state,
+            &payload,
+            job_id,
+            Some(run_id),
+            &plan_message,
+            plan_text,
+        )
+        .await
+        .map_err(|error| controller_error("refused plan", error))?;
+        assert!(handled, "the plan message was handled");
+
+        let connection = space.pool.get().await?;
+        let jobs: i64 = connection
+            .query_one(
+                "select count(*)::bigint from agent_jobs where conversation_id = $1",
+                &[&conversation_id],
+            )
+            .await?
+            .get(0);
+        assert_eq!(jobs, 1, "no worker is queued");
+        let job = connection
+            .query_one(
+                "select status, outcome, error_message from agent_jobs where id = $1",
+                &[&job_id],
+            )
+            .await?;
+        assert_eq!(job.get::<_, String>("status"), "failed");
+        assert_eq!(
+            job.get::<_, Option<String>>("outcome").as_deref(),
+            Some("failed")
+        );
+        assert_eq!(
+            job.get::<_, Option<String>>("error_message").as_deref(),
+            Some(expected_reason.as_str())
+        );
+        let run = connection
+            .query_one(
+                "select status, last_message from runs where id = $1",
+                &[&run_id],
+            )
+            .await?;
+        assert_eq!(run.get::<_, String>("status"), "failed");
+        assert_eq!(
+            run.get::<_, Option<String>>("last_message").as_deref(),
+            Some(expected_reason.as_str())
+        );
+        let messages = connection
+            .query(
+                "select role, content, run_id, metadata from conversation_messages
+                 where conversation_id = $1",
+                &[&conversation_id],
+            )
+            .await?;
+        assert_eq!(messages.len(), 1, "the conversation hears why");
+        assert_eq!(messages[0].get::<_, String>("role"), "assistant");
+        assert_eq!(messages[0].get::<_, String>("content"), expected_reason);
+        assert_eq!(messages[0].get::<_, Option<Uuid>>("run_id"), Some(run_id));
+        let metadata = messages[0]
+            .get::<_, PgJson<serde_json::Value>>("metadata")
+            .0;
+        assert_eq!(metadata["kind"], SELF_HOSTED_REFUSAL_CODE);
+        assert_eq!(metadata["messageType"], "error");
+        assert_eq!(metadata["multiAgentPlan"]["role"], "worker");
+        drop(connection);
+        let mut run_completed = Vec::new();
+        while let Ok(event) = events.try_recv() {
+            if event.run_id == Some(run_id) && event.kind == "run.completed" {
+                run_completed.push(event.data);
+            }
+        }
+        assert_eq!(run_completed.len(), 1, "{run_completed:?}");
+        assert_eq!(run_completed[0]["outcome"], "failed");
+        assert_eq!(run_completed[0]["errorMessage"], expected_reason);
+
+        // The same plan authored on the hosted runtime queues its workers
+        // there, credential-less.
+        let (conversation_id, _, job_id, payload) = insert_leased_plan_job(
+            &space,
+            space.hosted_runtime_id,
+            Some(planner_credential_id),
+            json!({ "agent": { "handle": "planner" } }),
+        )
+        .await?;
+        crate::multi_agent_plan::maybe_execute_multi_agent_plan_message(
+            &state,
+            &payload,
+            job_id,
+            None,
+            &plan_message,
+            plan_text,
+        )
+        .await
+        .map_err(|error| controller_error("hosted plan", error))?;
+        let connection = space.pool.get().await?;
+        let workers = connection
+            .query(
+                "select target_runtime_id, credential_id from agent_jobs
+                 where conversation_id = $1 and id <> $2",
+                &[&conversation_id, &job_id],
+            )
+            .await?;
+        assert_eq!(workers.len(), 2);
+        for worker in workers {
+            assert_eq!(
+                worker.get::<_, Option<Uuid>>("target_runtime_id"),
+                Some(space.hosted_runtime_id)
+            );
+            assert_eq!(worker.get::<_, Option<Uuid>>("credential_id"), None);
+        }
+        let parent_status: String = connection
+            .query_one("select status from agent_jobs where id = $1", &[&job_id])
+            .await?
+            .get(0);
+        assert_eq!(parent_status, "completed");
+        Ok(())
+    }
+    .await;
+    let cleanup = space.cleanup().await;
+    test_result?;
+    cleanup
+}
+
+/// Insert a finished worker of plan `group_id` whose runtime preference is
+/// `runtime_id`, with `@octo` (no credential) as the plan's lead.
+async fn insert_finished_plan_worker(
+    space: &ManagedSpace,
+    group_id: Uuid,
+    runtime_id: Uuid,
+) -> anyhow::Result<(Uuid, Uuid, serde_json::Value)> {
+    let (conversation_id, run_id, job_id, _) = insert_leased_plan_job(
+        space,
+        runtime_id,
+        None,
+        json!({
+            "agent": { "handle": "scout" },
+            "runtimePreference": { "runtimeId": runtime_id },
+            "multiAgentPlan": {
+                "groupId": group_id,
+                "role": "worker",
+                "lead": { "leadHandle": "octo" }
+            }
+        }),
+    )
+    .await?;
+    let connection = space.pool.get().await?;
+    let payload = connection
+        .query_one(
+            "update agent_jobs
+             set status = 'completed', outcome = 'succeeded', summary = 'Read it.',
+                 completed_at = now()
+             where id = $1
+             returning payload",
+            &[&job_id],
+        )
+        .await?
+        .get::<_, PgJson<serde_json::Value>>(0)
+        .0;
+    connection
+        .execute(
+            "update runs set status = 'success' where id = $1",
+            &[&run_id],
+        )
+        .await?;
+    Ok((conversation_id, job_id, payload))
+}
+
+/// A lead checkpoint whose lead has no credential of its own would be pinned
+/// to the desktop its workers ran on. It is not moved to a hosted runtime: no
+/// lead job is queued and the conversation says why, once per plan however
+/// often the checkpoint is tried. On a hosted runtime the lead is queued.
+#[tokio::test]
+async fn lead_checkpoint_pinned_to_a_private_runtime_is_written_to_the_conversation_once(
+) -> anyhow::Result<()> {
+    let Some(pool) = setup_origin_test_pool().await? else {
+        eprintln!("skipping self-hosted lead checkpoint test: TEST_DATABASE_URL not set");
+        return Ok(());
+    };
+    let space = ManagedSpace::seed(pool, "self-hosted-lead-checkpoint").await?;
+    let test_result: anyhow::Result<()> = async {
+        let state = build_test_state(
+            space.pool.clone(),
+            space.config("self-hosted-lead-checkpoint"),
+        );
+        let group_id = Uuid::new_v4();
+        let (conversation_id, worker_job_id, payload) =
+            insert_finished_plan_worker(&space, group_id, space.desktop_runtime_id).await?;
+        for attempt in 0..2 {
+            let dispatched =
+                crate::multi_agent_plan::maybe_enqueue_lead_continuation_after_completion(
+                    &state,
+                    worker_job_id,
+                    &payload,
+                )
+                .await
+                .map_err(|error| controller_error("refused lead checkpoint", error))?;
+            assert!(!dispatched, "attempt {attempt} queued no lead");
+        }
+
+        let connection = space.pool.get().await?;
+        let jobs: i64 = connection
+            .query_one(
+                "select count(*)::bigint from agent_jobs where conversation_id = $1",
+                &[&conversation_id],
+            )
+            .await?
+            .get(0);
+        assert_eq!(jobs, 1, "only the worker");
+        let messages = connection
+            .query(
+                "select content, metadata from conversation_messages
+                 where conversation_id = $1",
+                &[&conversation_id],
+            )
+            .await?;
+        assert_eq!(messages.len(), 1, "said once");
+        assert_eq!(
+            messages[0].get::<_, String>("content"),
+            format!("@octo could not continue the plan. {SELF_HOSTED_REFUSAL}")
+        );
+        let metadata = messages[0]
+            .get::<_, PgJson<serde_json::Value>>("metadata")
+            .0;
+        assert_eq!(metadata["kind"], SELF_HOSTED_REFUSAL_CODE);
+        assert_eq!(metadata["messageType"], "error");
+        assert_eq!(metadata["multiAgentPlan"]["role"], "lead_continuation");
+        assert_eq!(
+            metadata["multiAgentPlan"]["groupId"],
+            json!(group_id.to_string())
+        );
+        drop(connection);
+
+        let hosted_group_id = Uuid::new_v4();
+        let (conversation_id, worker_job_id, payload) =
+            insert_finished_plan_worker(&space, hosted_group_id, space.hosted_runtime_id).await?;
+        let dispatched = crate::multi_agent_plan::maybe_enqueue_lead_continuation_after_completion(
+            &state,
+            worker_job_id,
+            &payload,
+        )
+        .await
+        .map_err(|error| controller_error("hosted lead checkpoint", error))?;
+        assert!(dispatched);
+        let lead_target: Option<Uuid> = space
+            .pool
+            .get()
+            .await?
+            .query_one(
+                "select target_runtime_id from agent_jobs
+                 where conversation_id = $1 and id <> $2",
+                &[&conversation_id, &worker_job_id],
+            )
+            .await?
+            .get(0);
+        assert_eq!(lead_target, Some(space.hosted_runtime_id));
+        Ok(())
+    }
+    .await;
+    let cleanup = space.cleanup().await;
+    test_result?;
+    cleanup
+}
+
+/// The plan-authoring message of a read-only plan with two credential-less
+/// scouts, spread over runtimes when `spread` says so.
+fn scout_plan_message(spread: bool) -> serde_json::Value {
+    let mut details = json!({
+        "mode": "read_only",
+        "agents": [
+            { "handle": "scout-a", "prompt": "Read the README." },
+            { "handle": "scout-b", "prompt": "Read the docs folder." }
+        ]
+    });
+    if spread {
+        // One slot: the plan starts no extra runtime here.
+        details["runtimeRouting"] = json!({ "strategy": "spread", "desiredSlots": 1 });
+    }
+    json!({ "messageType": "multi_agent_plan", "details": details })
+}
+
+/// Lease, as `runtime_id` of `project_id` and inside a transaction that is
+/// rolled back, the next job of plan `group_id`, excluding platform AI jobs
+/// when the runtime is private, as `/agent/lease` does.
+async fn lease_plan_group_job(
+    pool: &PgPool,
+    project_id: Uuid,
+    runtime_id: Uuid,
+    runtime_is_private: bool,
+    group_id: Uuid,
+) -> anyhow::Result<Option<Uuid>> {
+    let mut connection = pool.get().await?;
+    let transaction = connection.transaction().await?;
+    let group_id = group_id.to_string();
+    let leased = agent::lease_next_agent_job(
+        &transaction,
+        &project_id,
+        Some(&runtime_id),
+        60,
+        true,
+        false,
+        false,
+        false,
+        None,
+        Some(group_id.as_str()),
+        runtime_is_private,
+    )
+    .await
+    .map_err(|error| controller_error("lease a plan group job", error))?;
+    transaction.rollback().await?;
+    Ok(leased.map(|job| job.id))
+}
+
+/// A spread plan's workers are not pinned, but only the plan's parent runtime
+/// or extra runtimes started for the plan on the parent's provider may take
+/// them. Authored on a desktop, with workers that have no credential of their
+/// own, the plan is refused like a pinned one: no worker is queued and the
+/// planning run fails with the reason. The same plan authored on a
+/// non-canonical managed runtime queues its workers unpinned, and that
+/// runtime takes them.
+#[tokio::test]
+async fn spread_plan_workers_on_a_private_parent_fail_the_planning_run() -> anyhow::Result<()> {
+    let Some(pool) = setup_origin_test_pool().await? else {
+        eprintln!("skipping self-hosted spread plan test: TEST_DATABASE_URL not set");
+        return Ok(());
+    };
+    let space = ManagedSpace::seed(pool, "self-hosted-spread-plan").await?;
+    let test_result: anyhow::Result<()> = async {
+        let planner_credential_id = Uuid::new_v4();
+        seed_custom_agent(
+            &space.pool,
+            &space.owner_user_id,
+            &planner_credential_id,
+            &Uuid::new_v4(),
+            "planner",
+            "Plans with its own key",
+        )
+        .await?;
+        let state = build_test_state(space.pool.clone(), space.config("self-hosted-spread-plan"));
+        let plan_message = scout_plan_message(true);
+        let plan_text = "Two scouts will read the README and the docs, side by side.";
+        let expected_reason = format!("The plan's agents could not start. {SELF_HOSTED_REFUSAL}");
+
+        let (conversation_id, run_id, job_id, payload) = insert_leased_plan_job(
+            &space,
+            space.desktop_runtime_id,
+            Some(planner_credential_id),
+            json!({ "agent": { "handle": "planner" } }),
+        )
+        .await?;
+        let handled = crate::multi_agent_plan::maybe_execute_multi_agent_plan_message(
+            &state,
+            &payload,
+            job_id,
+            Some(run_id),
+            &plan_message,
+            plan_text,
+        )
+        .await
+        .map_err(|error| controller_error("refused spread plan", error))?;
+        assert!(handled, "the plan message was handled");
+
+        let connection = space.pool.get().await?;
+        let jobs: i64 = connection
+            .query_one(
+                "select count(*)::bigint from agent_jobs where conversation_id = $1",
+                &[&conversation_id],
+            )
+            .await?
+            .get(0);
+        assert_eq!(jobs, 1, "no worker is queued");
+        let job = connection
+            .query_one(
+                "select status, error_message from agent_jobs where id = $1",
+                &[&job_id],
+            )
+            .await?;
+        assert_eq!(job.get::<_, String>("status"), "failed");
+        assert_eq!(
+            job.get::<_, Option<String>>("error_message").as_deref(),
+            Some(expected_reason.as_str())
+        );
+        let run_status: String = connection
+            .query_one("select status from runs where id = $1", &[&run_id])
+            .await?
+            .get(0);
+        assert_eq!(run_status, "failed");
+        let metadata = connection
+            .query_one(
+                "select metadata from conversation_messages
+                 where conversation_id = $1 and role = 'assistant'",
+                &[&conversation_id],
+            )
+            .await?
+            .get::<_, PgJson<serde_json::Value>>(0)
+            .0;
+        assert_eq!(metadata["kind"], SELF_HOSTED_REFUSAL_CODE);
+        drop(connection);
+
+        let (conversation_id, _, job_id, payload) = insert_leased_plan_job(
+            &space,
+            space.acme_runtime_id,
+            Some(planner_credential_id),
+            json!({ "agent": { "handle": "planner" } }),
+        )
+        .await?;
+        crate::multi_agent_plan::maybe_execute_multi_agent_plan_message(
+            &state,
+            &payload,
+            job_id,
+            None,
+            &plan_message,
+            plan_text,
+        )
+        .await
+        .map_err(|error| controller_error("spread plan on acme-cloud", error))?;
+        let connection = space.pool.get().await?;
+        let workers = connection
+            .query(
+                "select id, target_runtime_id, credential_id, payload from agent_jobs
+                 where conversation_id = $1 and id <> $2",
+                &[&conversation_id, &job_id],
+            )
+            .await?;
+        assert_eq!(workers.len(), 2);
+        let mut group_id = None;
+        for worker in &workers {
+            assert_eq!(worker.get::<_, Option<Uuid>>("target_runtime_id"), None);
+            assert_eq!(worker.get::<_, Option<Uuid>>("credential_id"), None);
+            let plan = &worker.get::<_, PgJson<serde_json::Value>>("payload").0["metadata"]
+                ["multiAgentPlan"];
+            assert_eq!(
+                plan["parentRuntimeId"],
+                json!(space.acme_runtime_id.to_string())
+            );
+            group_id = plan["groupId"]
+                .as_str()
+                .and_then(|value| Uuid::parse_str(value).ok());
+        }
+        let parent_status: String = connection
+            .query_one("select status from agent_jobs where id = $1", &[&job_id])
+            .await?
+            .get(0);
+        assert_eq!(parent_status, "completed");
+        drop(connection);
+        let leased = lease_plan_group_job(
+            &space.pool,
+            space.project_id,
+            space.acme_runtime_id,
+            false,
+            group_id.expect("the workers carry their plan group"),
+        )
+        .await?;
+        assert!(
+            leased.is_some_and(|job_id| workers
+                .iter()
+                .any(|worker| worker.get::<_, Uuid>("id") == job_id)),
+            "the plan's parent runtime takes a worker, got {leased:?}"
+        );
+        Ok(())
+    }
+    .await;
+    let cleanup = space.cleanup().await;
+    test_result?;
+    cleanup
+}
+
+/// A refused plan fails its planning turn, which then no longer holds the
+/// conversation's lane: a message queued behind that turn is sent right away
+/// rather than waiting for some later turn to finish.
+#[tokio::test]
+async fn refused_plan_sends_the_message_queued_behind_the_planning_turn() -> anyhow::Result<()> {
+    let Some(pool) = setup_origin_test_pool().await? else {
+        eprintln!("skipping refused plan send queue test: TEST_DATABASE_URL not set");
+        return Ok(());
+    };
+    let space = ManagedSpace::seed(pool, "self-hosted-plan-send-queue").await?;
+    let test_result: anyhow::Result<()> = async {
+        let planner_credential_id = Uuid::new_v4();
+        seed_custom_agent(
+            &space.pool,
+            &space.owner_user_id,
+            &planner_credential_id,
+            &Uuid::new_v4(),
+            "planner",
+            "Plans with its own key",
+        )
+        .await?;
+        let state = build_test_state(
+            space.pool.clone(),
+            space.config("self-hosted-plan-send-queue"),
+        );
+        let (conversation_id, run_id, job_id, payload) = insert_leased_plan_job(
+            &space,
+            space.desktop_runtime_id,
+            Some(planner_credential_id),
+            json!({ "agent": { "handle": "planner" } }),
+        )
+        .await?;
+        // The owner queued a follow-up to @planner while it was planning.
+        let entry_id = Uuid::new_v4();
+        space
+            .pool
+            .get()
+            .await?
+            .execute(
+                "insert into conversation_send_queue (
+                     id, project_id, conversation_id, user_id, status, request
+                 ) values ($1, $2, $3, $4, 'queued', $5)",
+                &[
+                    &entry_id,
+                    &space.project_id,
+                    &conversation_id,
+                    &space.owner_user_id,
+                    &PgJson(json!({
+                        "promptText": "Then summarize what the scouts found.",
+                        "intent": "feature",
+                        "metadata": {
+                            "agentSelection": { "active": ["planner"], "mentions": [] }
+                        },
+                        "runtimeId": space.hosted_runtime_id.to_string(),
+                    })),
+                ],
+            )
+            .await?;
+
+        crate::multi_agent_plan::maybe_execute_multi_agent_plan_message(
+            &state,
+            &payload,
+            job_id,
+            Some(run_id),
+            &scout_plan_message(false),
+            "Two scouts will read the README and the docs.",
+        )
+        .await
+        .map_err(|error| controller_error("refused plan", error))?;
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        let entry = loop {
+            let entry = space
+                .pool
+                .get()
+                .await?
+                .query_one(
+                    "select status, error_message, dispatched_run_id
+                     from conversation_send_queue where id = $1",
+                    &[&entry_id],
+                )
+                .await?;
+            if entry.get::<_, String>("status") == "failed"
+                || entry.get::<_, Option<Uuid>>("dispatched_run_id").is_some()
+            {
+                break entry;
+            }
+            anyhow::ensure!(
+                std::time::Instant::now() < deadline,
+                "the queued message was not sent after the refusal (status {})",
+                entry.get::<_, String>("status")
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        };
+        assert_eq!(
+            entry.get::<_, String>("status"),
+            "dispatched",
+            "{:?}",
+            entry.get::<_, Option<String>>("error_message")
+        );
+        let dispatched_run_id = entry
+            .get::<_, Option<Uuid>>("dispatched_run_id")
+            .expect("the sent message has a run");
+        let job = space
+            .pool
+            .get()
+            .await?
+            .query_one(
+                "select target_runtime_id, credential_id from agent_jobs where run_id = $1",
+                &[&dispatched_run_id],
+            )
+            .await?;
+        assert_eq!(
+            job.get::<_, Option<Uuid>>("target_runtime_id"),
+            Some(space.hosted_runtime_id)
+        );
+        assert_eq!(
+            job.get::<_, Option<Uuid>>("credential_id"),
+            Some(planner_credential_id)
+        );
+        Ok(())
+    }
+    .await;
+    let cleanup = space.cleanup().await;
+    test_result?;
+    cleanup
+}
+
+/// Queue a credential-less spread worker of plan `group_id` whose plan's
+/// parent runtime is `parent_runtime_id`.
+async fn insert_spread_plan_worker(
+    fixture: &LeaseFixture,
+    group_id: Option<Uuid>,
+    parent_runtime_id: Uuid,
+) -> anyhow::Result<Uuid> {
+    let job_id = Uuid::new_v4();
+    fixture
+        .pool
+        .get()
+        .await?
+        .execute(
+            "insert into agent_jobs (id, project_id, status, intent, payload)
+             values ($1, $2, 'queued', 'multi_agent_plan', $3)",
+            &[
+                &job_id,
+                &fixture.project_id,
+                &PgJson(json!({
+                    "user_id": fixture.owner_user_id,
+                    "prompt_text": "Read the docs folder.",
+                    "metadata": {
+                        "runtimeRouting": {
+                            "strategy": "spread",
+                            "allowUntargetedAcrossPreferredRuntimes": true
+                        },
+                        "multiAgentPlan": {
+                            "groupId": group_id,
+                            "role": "worker",
+                            "parentRuntimeId": parent_runtime_id
+                        }
+                    }
+                })),
+            ],
+        )
+        .await?;
+    Ok(job_id)
+}
+
+/// Give `runtime_id` an active lease started for plan `group_id`, as the
+/// extra runtimes of a spread plan get.
+async fn lease_runtime_for_plan_group(
+    fixture: &LeaseFixture,
+    runtime_id: Uuid,
+    group_id: Uuid,
+) -> anyhow::Result<()> {
+    let lease_id = Uuid::new_v4();
+    let connection = fixture.pool.get().await?;
+    connection
+        .execute(
+            "insert into runtime_leases (
+                 id, project_id, runtime_id, status, requested_at, launched_at, metadata
+             ) values ($1, $2, $3, 'active', now(), now(), $4)",
+            &[
+                &lease_id,
+                &fixture.project_id,
+                &runtime_id,
+                &PgJson(json!({ "groupId": group_id, "source": "skill_multi_agent_plan" })),
+            ],
+        )
+        .await?;
+    connection
+        .execute(
+            "update runtimes set active_lease_id = $2 where id = $1",
+            &[&runtime_id, &lease_id],
+        )
+        .await?;
+    Ok(())
+}
+
+/// A spread worker of a plan that is already queued (before dispatch refused
+/// such plans, or by any path around it) with a desktop parent and a
+/// self-hosted extra runtime can never start: no runtime of the space leases
+/// it. The controller's idle sweep fails it with the dispatch refusal's
+/// reason. It leaves alone a spread worker that a hosted runtime leased for
+/// its plan, or its hosted parent, takes, and a spread job of no plan.
+#[tokio::test]
+async fn spread_plan_worker_with_only_private_runtimes_is_failed_by_the_idle_sweep(
+) -> anyhow::Result<()> {
+    let Some(pool) = setup_origin_test_pool().await? else {
+        eprintln!("skipping spread plan worker sweep test: TEST_DATABASE_URL not set");
+        return Ok(());
+    };
+    let fixture = LeaseFixture::new(pool, "spread-private-plan-sweep").await?;
+    let test_result: anyhow::Result<()> = async {
+        let desktop = fixture.desktop_runtime_id;
+        let desktop_slot = Uuid::new_v4();
+        insert_private_runtime(
+            &fixture.pool,
+            &fixture.project_id,
+            &desktop_slot,
+            &fixture.owner_user_id,
+            &Uuid::new_v4(),
+        )
+        .await?;
+        let hosted = Uuid::new_v4();
+        let hosted_slot = Uuid::new_v4();
+        for runtime_id in [hosted, hosted_slot] {
+            insert_ready_runtime(
+                &fixture.pool,
+                &fixture.project_id,
+                &runtime_id,
+                "instafy-cloud",
+                json!({ "agent": true, "origin": true }),
+            )
+            .await?;
+        }
+        let stranded_group = Uuid::new_v4();
+        let hosted_slot_group = Uuid::new_v4();
+        let hosted_parent_group = Uuid::new_v4();
+        lease_runtime_for_plan_group(&fixture, desktop_slot, stranded_group).await?;
+        lease_runtime_for_plan_group(&fixture, hosted_slot, hosted_slot_group).await?;
+        let stranded = insert_spread_plan_worker(&fixture, Some(stranded_group), desktop).await?;
+        let hosted_slot_worker =
+            insert_spread_plan_worker(&fixture, Some(hosted_slot_group), desktop).await?;
+        let hosted_parent_worker =
+            insert_spread_plan_worker(&fixture, Some(hosted_parent_group), hosted).await?;
+        let ungrouped = insert_spread_plan_worker(&fixture, None, desktop).await?;
+
+        for (runtime_id, runtime_is_private) in [
+            (desktop, true),
+            (desktop_slot, true),
+            (hosted, false),
+            (hosted_slot, false),
+        ] {
+            assert_eq!(
+                lease_plan_group_job(
+                    &fixture.pool,
+                    fixture.project_id,
+                    runtime_id,
+                    runtime_is_private,
+                    stranded_group,
+                )
+                .await?,
+                None,
+                "runtime {runtime_id} leased the stranded worker"
+            );
+        }
+
+        let state = build_test_state(fixture.pool.clone(), fixture.config.clone());
+        runtime::sweep_idle_activity(&state).await?;
+
+        assert_eq!(
+            fixture.job_status(&stranded).await?,
+            ("failed".to_string(), 0)
+        );
+        let error_message: Option<String> = fixture
+            .pool
+            .get()
+            .await?
+            .query_one(
+                "select error_message from agent_jobs where id = $1",
+                &[&stranded],
+            )
+            .await?
+            .get(0);
+        assert_eq!(error_message.as_deref(), Some(SELF_HOSTED_REFUSAL));
+        for job_id in [hosted_slot_worker, hosted_parent_worker, ungrouped] {
+            assert_eq!(
+                fixture.job_status(&job_id).await?,
+                ("queued".to_string(), 0),
+                "job {job_id} has a runtime to run on"
+            );
+        }
+        assert_eq!(
+            lease_plan_group_job(
+                &fixture.pool,
+                fixture.project_id,
+                hosted_slot,
+                false,
+                hosted_slot_group,
+            )
+            .await?,
+            Some(hosted_slot_worker)
+        );
+        assert_eq!(
+            lease_plan_group_job(
+                &fixture.pool,
+                fixture.project_id,
+                hosted,
+                false,
+                hosted_parent_group,
+            )
+            .await?,
+            Some(hosted_parent_worker)
+        );
         Ok(())
     }
     .await;

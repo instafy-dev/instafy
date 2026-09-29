@@ -892,7 +892,15 @@ pub(crate) async fn agent_lease(
             batch_conversation_id.as_ref(),
             batch_group_id.as_deref(),
             // Platform AI jobs run only on Instafy-hosted runtimes, so a
-            // desktop or self-hosted machine never leases them.
+            // desktop or self-hosted machine never leases them. This holds
+            // with MANAGED_AI_ENABLED=false too. The controller then refuses
+            // the managed credential lease, so only a proxy's own static key
+            // can serve a credential-less token, and a private runtime calls
+            // the proxy this controller names (the job's envelope) unless its
+            // owner overrides PROXY_BASE_URL. That key belongs to the
+            // deployment, not to the machine's owner, and the controller
+            // cannot tell which proxy the machine will call, so the rule does
+            // not depend on the flag.
             runtime_is_private_self_hosted,
         )
         .await?

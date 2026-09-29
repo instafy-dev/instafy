@@ -52,7 +52,12 @@ token without that identity cannot claim jobs or obtain their prompts and conver
 supplying a runtime ID in the request body does not grant that identity. Private runtimes can
 lease only work belonging to their attested owner, and never a platform AI job (an AI job whose
 target has no credential): Instafy AI runs only on Instafy-hosted runtimes. Own-key jobs and
-terminal commands still run there.
+terminal commands still run there. The rule holds with `MANAGED_AI_ENABLED=false` too: a
+credential-less job is then served by a proxy's own static key, the private runtime calls the
+proxy the controller names unless its owner overrides `PROXY_BASE_URL`, and that key belongs to
+the deployment. Dispatch refuses such a job when only private runtimes could run it (pinned to
+one, or a spread plan worker whose plan runtimes are all private), and one already queued that
+way is failed by the controller's idle sweep (see [Credits and billing](Credits-Billing.md)).
 
 `POST /agent/secrets` independently requires the same signed runtime identity and current
 generation. The requested job must belong to that exact runtime, remain leased, and have a
