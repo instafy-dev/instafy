@@ -186,13 +186,13 @@ test('only self-hosted Rust children install the fixed missing native packages w
   for(const item of aggregates)assert.doesNotMatch(job(item.key),/apt-get|Install scoped Rust native prerequisites/u);
 });
 
-test('the full reviewed five check and six test commands and working directories are hash-bound', () => {
+test('the full reviewed five check and seven test commands and working directories are hash-bound', () => {
   // Exact normalized command order + working-directory from build.yml at f20002b,
-  // plus the reviewed runtime-agent proxy_retry_budget integration-test selector.
+  // plus the reviewed runtime-agent proxy_retry_budget and read-reference selectors.
   // Commands are literal steps, not a matrix/shell fragment that can drop a crate.
   for (const [list, stepName, hash, expectedCount] of [
     [checks, 'Check public Rust package', '555d7092d19a4cc330abb80fa5dc6c1a8785b916a0119adcc2fdfc2741e678ff', 5],
-    [suites, 'Run database-free Rust test suite', 'dde0ee198d42d9ba7806a6f62aead78e4f6f96d1b8350bb8c27fbce89947add6', 6],
+    [suites, 'Run database-free Rust test suite', '5faef3f01f2a1f32c04863191a1eb6a517e70bc30611787bcc08fd4004fb9870', 7],
   ]) {
     const inventory = list.flatMap(item => {
       const part = step(item.key, stepName);
@@ -211,9 +211,10 @@ test('the full reviewed five check and six test commands and working directories
     assert.equal(inventory.length, expectedCount);
     assert.equal(createHash('sha256').update(JSON.stringify(inventory)).digest('hex'), hash);
   }
-  assert.equal(children.reduce((sum, item) => sum + (job(item.key).match(/^          cargo (?:check|test) /gmu) ?? []).length, 0), 11);
+  assert.equal(children.reduce((sum, item) => sum + (job(item.key).match(/^          cargo (?:check|test) /gmu) ?? []).length, 0), 12);
   const agent = step('rust-test-agent', 'Run database-free Rust test suite');
   assert.match(agent, /--no-run\n          cargo test .* --lib --test controller_client --test proxy_retry_budget -- --test-threads=1/u);
+  assert.match(agent, /cargo test --manifest-path packages\/runtime-agent\/Cargo.toml --test proxy_integration codex_read_reference_ -- --test-threads=1\n/u);
 });
 
 test('test children preserve unfiltered frozen Node20 installation and host-only disk cleanup', () => {
@@ -240,7 +241,7 @@ test('only the runtime-agent Cargo step defaults self-hosted Linux linking, with
   assert.ok(step('rust-test-agent', 'Install scoped Rust native prerequisites').includes('ld.lld --version'));
 });
 
-test('actual runtime-agent Bash defaults only unset flags on self-hosted Linux and preserves both Cargo invocations', () => {
+test('actual runtime-agent Bash defaults only unset flags on self-hosted Linux and preserves all three Cargo invocations', () => {
   const script = step('rust-test-agent', 'Run database-free Rust test suite').split('        run: |\n')[1]
     .trimEnd().split('\n').map(line => line.slice(10)).join('\n');
   const expression = "${{ runner.environment == 'self-hosted' && runner.os == 'Linux' }}";
@@ -248,6 +249,7 @@ test('actual runtime-agent Bash defaults only unset flags on self-hosted Linux a
   const commands = [
     ['test', '--manifest-path', 'packages/runtime-agent/Cargo.toml', '--no-run'],
     ['test', '--manifest-path', 'packages/runtime-agent/Cargo.toml', '--lib', '--test', 'controller_client', '--test', 'proxy_retry_budget', '--', '--test-threads=1'],
+    ['test', '--manifest-path', 'packages/runtime-agent/Cargo.toml', '--test', 'proxy_integration', 'codex_read_reference_', '--', '--test-threads=1'],
   ];
   const fixture = `cargo() { printf 'CALL\\0%s\\0%s\\0' "\${RUSTFLAGS+x}" "\${RUSTFLAGS-}"; printf '%s\\0' "$@"; return "\${CARGO_FIXTURE_STATUS:-0}"; }\n`;
   for (const environment of ['self-hosted', 'github-hosted', '', 'unknown']) for (const os of ['Linux', 'macOS', 'Windows', '']) {
@@ -316,10 +318,10 @@ test('the restore-only mitigation preserves every other byte of the reviewed Bui
       hosted.replace("        if: runner.environment == 'github-hosted'\n", ''));
   }
   // Full build.yml at the reviewed combined source 2ef4dde, plus only the reviewed
-  // proxy_retry_budget selector: retains all functional commands, aggregate guards,
+  // proxy_retry_budget and read-reference selectors: retains all functional commands, aggregate guards,
   // routing, permissions and other jobs.
   assert.equal(createHash('sha256').update(normalized).digest('hex'),
-    '797d337e031b930e12f8c2fd48e26c98db724ca5e6e10d950ef0c53fe546e4b1');
+    '2e24a805b71e93726e4a43a5cd42db94ddeafbf6b1303740aa99bf7cdcd60c9b');
 });
 
 test('actual inline runner qualification rejects wrong native identity, ambient private env and missing compilers', () => {

@@ -337,6 +337,9 @@ pub(crate) async fn commit_to_hosted_origin(
     let mut changed_paths = BTreeSet::<String>::new();
 
     for file in files {
+        if file.is_read_reference() {
+            continue;
+        }
         let normalized = normalize_relative_path(&file.workspace_path)
             .or_else(|| normalize_relative_path(&file.path));
         let Some(normalized) = normalized else {
@@ -957,6 +960,16 @@ mod tests {
         }
     }
 
+    fn read_file_descriptor(path: &str) -> CodexFileDescriptor {
+        let mut file = changed_file_descriptor(path);
+        file.change = Some(FileChangeDescriptor {
+            kind: FileChangeKind::Read,
+            lines: Vec::new(),
+            raw: serde_json::json!({ "type": "read" }),
+        });
+        file
+    }
+
     /// Origin stand-in serving /apply and /git/sync, counting apply hits.
     async fn spawn_origin_server(rev: &'static str) -> (SocketAddr, Arc<AtomicUsize>) {
         async fn git_sync() -> (AxumStatusCode, &'static str) {
@@ -1093,6 +1106,113 @@ mod tests {
             resolve_origin_sync_endpoint(origin_id, "https://abc123.rt.instafy.dev", Some(&local));
         assert!(!is_local);
         assert_eq!(endpoint, "https://abc123.rt.instafy.dev");
+    }
+
+    #[tokio::test]
+    async fn read_references_do_not_acquire_a_workspace_lease() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let workspace = temp.path().join("workspace");
+        std::fs::create_dir_all(&workspace)?;
+        std::fs::write(workspace.join("reference.txt"), "read-only evidence\n")?;
+
+        let requests = Arc::new(AtomicUsize::new(0));
+        let requests_for_handler = Arc::clone(&requests);
+        let app = Router::new().fallback(move || {
+            let requests = Arc::clone(&requests_for_handler);
+            async move {
+                requests.fetch_add(1, Ordering::SeqCst);
+                AxumStatusCode::BAD_REQUEST
+            }
+        });
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+        let address = listener.local_addr()?;
+        let server = tokio::spawn(async move { axum::serve(listener, app).await });
+        let result = commit_to_hosted_origin(
+            &reqwest::Url::parse(&format!("http://{address}/"))?,
+            "controller-token",
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            None,
+            &workspace,
+            &[read_file_descriptor("reference.txt")],
+            Some(true),
+            None,
+            None,
+        )
+        .await;
+        server.abort();
+
+        assert!(result?.is_none());
+        assert_eq!(requests.load(Ordering::SeqCst), 0);
+        assert_eq!(
+            std::fs::read(workspace.join("reference.txt"))?,
+            b"read-only evidence\n"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn mixed_changes_upload_only_mutations_not_read_references() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let workspace = temp.path().join("workspace");
+        std::fs::create_dir_all(&workspace)?;
+        std::fs::write(workspace.join("changed.txt"), "requested change\n")?;
+        std::fs::write(workspace.join("reference.txt"), "read-only evidence\n")?;
+
+        let apply_bodies = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let bodies_for_handler = Arc::clone(&apply_bodies);
+        let app = Router::new().route(
+            "/apply",
+            post(move |body: axum::body::Bytes| {
+                let bodies = Arc::clone(&bodies_for_handler);
+                async move {
+                    bodies.lock().unwrap().push(body.to_vec());
+                    (AxumStatusCode::OK, r#"{"rev":"mixedrev","baseRev":"base"}"#)
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+        let address = listener.local_addr()?;
+        let server = tokio::spawn(async move { axum::serve(listener, app).await });
+        let (controller_address, token_mints) =
+            spawn_stub_controller(Uuid::new_v4(), format!("http://{address}")).await;
+        let result = commit_to_hosted_origin(
+            &reqwest::Url::parse(&format!("http://{controller_address}/"))?,
+            "controller-token",
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            None,
+            &workspace,
+            &[
+                read_file_descriptor("reference.txt"),
+                changed_file_descriptor("changed.txt"),
+            ],
+            Some(false),
+            None,
+            None,
+        )
+        .await;
+        server.abort();
+
+        let result = result?.context("expected the changed file to be committed")?;
+        assert_eq!(result.paths, vec!["changed.txt"]);
+        assert_eq!(token_mints.load(Ordering::SeqCst), 1);
+        let bodies = apply_bodies.lock().unwrap();
+        assert_eq!(bodies.len(), 1);
+        let body = &bodies[0];
+        // Filenames are present in both the JSON manifest and ZIP directory entries.
+        assert!(
+            body.windows(b"changed.txt".len())
+                .any(|part| part == b"changed.txt")
+        );
+        assert!(
+            !body
+                .windows(b"reference.txt".len())
+                .any(|part| part == b"reference.txt")
+        );
+        Ok(())
     }
 
     #[tokio::test]
