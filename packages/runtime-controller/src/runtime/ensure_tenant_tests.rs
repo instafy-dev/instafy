@@ -438,10 +438,11 @@ impl TenantAttachFixture {
 /// A tenant attach names a runtime of another project. The caller must be able
 /// to write to both projects: the tenant project and the runtime's own
 /// project. A caller who cannot write to the runtime's project is answered
-/// exactly as for a runtime id that does not exist, and a refused attach
-/// changes nothing on the host. An allowed attach leaves the host's origin
-/// alone as well: it reports that origin, applies no origin options and
-/// records no origin of its own.
+/// exactly as for a runtime id that does not exist, also when the runtime's
+/// provider is closed to the tenant project's organization, and a refused
+/// attach changes nothing on the host. An allowed attach leaves the host's
+/// origin alone as well: it reports that origin, applies no origin options
+/// and records no origin of its own.
 #[tokio::test]
 async fn tenant_attach_requires_write_access_to_the_host_runtimes_project() -> anyhow::Result<()> {
     let fixture = TenantAttachFixture::setup("tenant-attach-authorization").await?;
@@ -466,10 +467,13 @@ async fn tenant_attach_requires_write_access_to_the_host_runtimes_project() -> a
                 "{missing_body}"
             );
 
-            for (case, user_id) in [
+            // Callers who can write to the tenant project but not to the
+            // host project.
+            let host_outsiders = [
                 ("writer of the tenant project only", fixture.outsider),
                 ("viewer of the host project", fixture.host_viewer),
-            ] {
+            ];
+            for (case, user_id) in host_outsiders {
                 let (status, body) = fixture
                     .attach(
                         &fixture.user_token(user_id)?,
@@ -511,6 +515,28 @@ async fn tenant_attach_requires_write_access_to_the_host_runtimes_project() -> a
                 )
                 .await?;
             assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+
+            // Host project access is checked before the provider: a caller
+            // who cannot write to the host project still gets the answer for
+            // a missing runtime, not the provider refusal.
+            for (case, user_id) in host_outsiders {
+                let (status, body) = fixture
+                    .attach(
+                        &fixture.user_token(user_id)?,
+                        fixture.other_org_project_id,
+                        fixture.runtime_id,
+                        metadata.clone(),
+                    )
+                    .await?;
+                assert_eq!(
+                    status, missing_status,
+                    "{case}, host organization's provider: {body}"
+                );
+                assert_eq!(
+                    body, missing_body,
+                    "{case}, host organization's provider: the same answer as a missing runtime"
+                );
+            }
             fixture.set_runtime_provider(OPEN_PROVIDER).await?;
 
             // The attach checks the authorized host again under its row lock.
