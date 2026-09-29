@@ -1,4 +1,4 @@
-//! Local-only retry contract tests. Every embedded Codex run is in an env-cleared
+//! Local-only retry and turn-usage contract tests. Every embedded Codex run is in an env-cleared
 //! child with an owned HOME and inert API credentials; no host auth is consulted.
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -33,29 +33,45 @@ fn sse(item: Value) -> Response {
     sse_with_end_turn(item, None)
 }
 
-fn sse_with_end_turn(mut item: Value, end_turn: Option<bool>) -> Response {
+fn sse_with_end_turn(item: Value, end_turn: Option<bool>) -> Response {
+    let usage = json!({"input_tokens":10,"output_tokens":5,"total_tokens":15,
+        "input_tokens_details":{"cached_tokens":0},
+        "output_tokens_details":{"reasoning_tokens":0}});
+    sse_with_usage(item, end_turn, Some(usage))
+}
+
+fn sse_with_usage(item: Value, end_turn: Option<bool>, usage: Option<Value>) -> Response {
+    sse_output(Some(item), end_turn, usage)
+}
+
+/// A completed response with at most one output item. Without one, the turn ends with no
+/// assistant message at all.
+fn sse_output(item: Option<Value>, end_turn: Option<bool>, usage: Option<Value>) -> Response {
     let response_id = format!("resp-{}", Uuid::new_v4());
-    item["id"] = json!(format!("item-{}", Uuid::new_v4()));
-    if item.get("call_id").is_some() {
-        item["call_id"] = json!(format!("call-{}", Uuid::new_v4()));
-    }
+    let item = item.map(|mut item| {
+        item["id"] = json!(format!("item-{}", Uuid::new_v4()));
+        if item.get("call_id").is_some() {
+            item["call_id"] = json!(format!("call-{}", Uuid::new_v4()));
+        }
+        item
+    });
     let mut response = json!({
         "id":response_id, "object":"response", "status":"completed",
-        "model":"gpt-6-luna", "output":[item.clone()],
-        "usage":{"input_tokens":10,"output_tokens":5,"total_tokens":15,
-            "input_tokens_details":{"cached_tokens":0},
-            "output_tokens_details":{"reasoning_tokens":0}}
+        "model":"gpt-6-luna", "output":item.iter().collect::<Vec<_>>()
     });
+    if let Some(usage) = usage {
+        response["usage"] = usage;
+    }
     if let Some(end_turn) = end_turn {
         response["end_turn"] = json!(end_turn);
     }
-    let events = [
-        json!({"type":"response.created","response":{"id":response_id,"status":"in_progress","model":"gpt-6-luna","output":[]}}),
-        json!({"type":"response.output_item.done","output_index":0,"item":item}),
-        json!({"type":"response.completed","response":response}),
-    ];
-    let body = events
-        .into_iter()
+    let created = json!({"type":"response.created","response":{"id":response_id,"status":"in_progress","model":"gpt-6-luna","output":[]}});
+    let done =
+        item.map(|item| json!({"type":"response.output_item.done","output_index":0,"item":item}));
+    let completed = json!({"type":"response.completed","response":response});
+    let body = std::iter::once(created)
+        .chain(done)
+        .chain(std::iter::once(completed))
         .map(|event| format!("data: {event}\n\n"))
         .collect::<String>();
     ([("content-type", "text/event-stream")], body).into_response()
@@ -82,23 +98,26 @@ fn proxy_usage_limit() -> Response {
     (StatusCode::TOO_MANY_REQUESTS, Json(body)).into_response()
 }
 
+fn answer_item(text: &str) -> Value {
+    json!({"type":"message","id":"msg-local-retry","role":"assistant",
+    "status":"completed","phase":"final_answer",
+    "content":[{"type":"output_text","text":text,"annotations":[]}]})
+}
+
 fn answer(text: &str) -> Response {
-    sse(
-        json!({"type":"message","id":"msg-local-retry","role":"assistant",
-        "status":"completed","phase":"final_answer",
-        "content":[{"type":"output_text","text":text,"annotations":[]}]}),
-    )
+    sse(answer_item(text))
+}
+
+fn step_item(text: &str) -> Value {
+    json!({"type":"message","id":"msg-local-step","role":"assistant",
+    "status":"completed","phase":"commentary",
+    "content":[{"type":"output_text","text":text,"annotations":[]}]})
 }
 
 /// A completed step that asks Codex for another sampling request in the same turn, the way a
 /// browser turn continues after each action, without depending on which tools are offered.
 fn continue_turn(text: &str) -> Response {
-    sse_with_end_turn(
-        json!({"type":"message","id":"msg-local-step","role":"assistant",
-        "status":"completed","phase":"commentary",
-        "content":[{"type":"output_text","text":text,"annotations":[]}]}),
-        Some(false),
-    )
+    sse_with_end_turn(step_item(text), Some(false))
 }
 
 async fn responses(
@@ -131,6 +150,46 @@ async fn responses(
                 1 | 3 => proxy_rate_limit(),
                 2 => continue_turn(STEP_TEXT),
                 _ => answer(FINAL_TEXT),
+            };
+        }
+        // Four jobs on one thread, 50k input tokens per turn. The second job's first step
+        // reports no usage, so Codex's first count of that turn repeats the restored total.
+        // The fourth job's only response reports none at all.
+        "per_turn_usage" => {
+            let usage = json!({"input_tokens":50_000,"output_tokens":1_000,
+                "total_tokens":51_000, "input_tokens_details":{"cached_tokens":45_000},
+                "output_tokens_details":{"reasoning_tokens":250}});
+            return match ordinal {
+                2 => sse_with_usage(step_item(STEP_TEXT), Some(false), None),
+                5 => sse_with_usage(answer_item(FINAL_TEXT), None, None),
+                _ => sse_with_usage(answer_item(FINAL_TEXT), None, Some(usage)),
+            };
+        }
+        // A routed job whose first attempt ends with no final message, so the runtime retries
+        // it once. Each attempt reports its own usage.
+        "retry_usage" => {
+            let usage = |input: u64, cached: u64, output: u64| {
+                json!({"input_tokens":input, "output_tokens":output,
+                    "total_tokens":input + output, "input_tokens_details":{"cached_tokens":cached},
+                    "output_tokens_details":{"reasoning_tokens":0}})
+            };
+            return match ordinal {
+                1 => answer(
+                    &json!({
+                        "summary":"The user asks a direct question.",
+                        "route":"direct", "reason":"Answer directly.",
+                        "selectedSkills":[], "confidence":0.9,
+                        "requiresContextLookup":false, "requiresCommandExecution":false,
+                        "requiresWorkspaceFileChanges":false, "observationCommands":[]
+                    })
+                    .to_string(),
+                ),
+                2 => sse_output(None, None, Some(usage(30_000, 27_000, 600))),
+                _ => sse_with_usage(
+                    answer_item(&json!({"summary":FINAL_TEXT, "files":[]}).to_string()),
+                    None,
+                    Some(usage(12_000, 10_000, 400)),
+                ),
             };
         }
         "transient" | "persistent" | "routing" => 503,
@@ -435,6 +494,16 @@ scenario_test!(
     "ambient_decline",
     2
 );
+scenario_test!(
+    turn_completed_reports_each_turn_of_a_resumed_thread,
+    "per_turn_usage",
+    5
+);
+scenario_test!(
+    recovery_retry_usage_rows_carry_their_attempt,
+    "retry_usage",
+    3
+);
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "Child entrypoint; outer tests supply an isolated environment and loopback proxy"]
@@ -448,12 +517,18 @@ async fn isolated_retry_child() -> Result<()> {
         json!({"OPENAI_API_KEY":API_KEY}).to_string()
     );
     let workspace = std::env::var("INSTAFY_RETRY_TEST_WORKSPACE")?;
-    if matches!(scenario.as_str(), "routing" | "ambient_decline") {
+    if matches!(
+        scenario.as_str(),
+        "routing" | "ambient_decline" | "retry_usage"
+    ) {
         return run_routing_job(&scenario).await;
     }
     let client = CodexClient::new(CodexConfig {
         workspace_dir: workspace.into(),
     });
+    if scenario == "per_turn_usage" {
+        return run_per_turn_usage_jobs(&client).await;
+    }
     let cancel = JobCancelSignal::new();
     let cancel_on_request = scenario == "cancel";
     let signal = cancel.clone();
@@ -517,10 +592,72 @@ async fn isolated_retry_child() -> Result<()> {
     Ok(())
 }
 
+/// Runs four jobs on one persisted thread. Each job builds a fresh thread manager, so the
+/// later ones resume the thread from the rollout, restoring Codex's running total.
+async fn run_per_turn_usage_jobs(client: &CodexClient) -> Result<()> {
+    let mut provider_conversation_state = None;
+    let mut reported = Vec::new();
+    for _ in 0..4 {
+        let output = client
+            .execute_with_options(
+                "Run the supplied local diagnostic and finish with its result.",
+                None,
+                CodexRunOptions {
+                    disable_final_output_json_schema: true,
+                    allow_plain_text_final_fallback: true,
+                    suppress_contextual_instructions: true,
+                    persist_conversation_thread: true,
+                    provider_conversation_state: provider_conversation_state.take(),
+                    ..Default::default()
+                },
+            )
+            .await?;
+        assert_eq!(output.final_json["summary"], FINAL_TEXT);
+        let state = output
+            .provider_conversation_state
+            .context("a persisted thread returns its state")?;
+        let completed: Vec<&Value> = output
+            .events
+            .iter()
+            .filter(|event| event["type"] == "turn.completed")
+            .collect();
+        assert_eq!(completed.len(), 1, "{completed:?}");
+        reported.push(json!({
+            "restoredFrom": state["defaultThreadRestoreSource"],
+            "hasUsage": completed[0].get("usage").is_some(),
+            "usageScope": completed[0]["usageScope"],
+            "input": completed[0]["usage"]["input_tokens"],
+            "cached": completed[0]["usage"]["cached_input_tokens"],
+            "output": completed[0]["usage"]["output_tokens"],
+            "threadInput": completed[0]["threadTotalUsage"]["input_tokens"],
+        }));
+        provider_conversation_state = Some(state);
+    }
+    let turn = |restored_from: &str, thread_input: u64| {
+        json!({"restoredFrom":restored_from, "hasUsage":true, "usageScope":"turn",
+            "input":50_000, "cached":45_000, "output":1_000, "threadInput":thread_input})
+    };
+    // A turn that reported no usage has no `usage`, which the controller reads as none
+    // reported and keeps the flat reserve. A zero would refund it.
+    let unreported = json!({"restoredFrom":"rollout", "hasUsage":false, "usageScope":null,
+        "input":null, "cached":null, "output":null, "threadInput":150_000});
+    assert_eq!(
+        reported,
+        [
+            turn("new", 50_000),
+            turn("rollout", 100_000),
+            turn("rollout", 150_000),
+            unreported
+        ]
+    );
+    Ok(())
+}
+
 async fn run_routing_job(scenario: &str) -> Result<()> {
     use runtime_agent::config::Config;
     use runtime_agent::controller::{LeaseJob, Registration};
-    use runtime_agent::jobs::JobProcessor;
+    use runtime_agent::jobs::{JobMessage, JobProcessor, JobProgress};
+    use std::sync::atomic::AtomicBool;
     let config = Arc::new(Config::from_env()?);
     let origin = config.controller_base_url.clone();
     let registration = Registration {
@@ -555,9 +692,47 @@ async fn run_routing_job(scenario: &str) -> Result<()> {
         "run_id":Uuid::new_v4(), "conversation_id":Uuid::new_v4(), "payload":payload
     }))?;
     let processor = JobProcessor::new(config);
+    // The retry scenario streams, so the retry's rows also take the streamed path.
+    let (sender, mut progress_messages) = tokio::sync::mpsc::unbounded_channel();
+    let progress = (scenario == "retry_usage").then(|| JobProgress {
+        sender,
+        status: Arc::new(AtomicBool::new(true)),
+    });
     let result = processor
-        .run_apply_job(&registration, &job, false, None, None, None)
+        .run_apply_job(&registration, &job, false, progress, None, None)
         .await;
+    if scenario == "retry_usage" {
+        let execution = result?;
+        assert_eq!(execution.summary, FINAL_TEXT);
+        let usage_rows = |messages: &[JobMessage]| {
+            messages
+                .iter()
+                .filter(|message| message.message_type.as_deref() == Some("token_usage"))
+                .map(|message| {
+                    let metadata = message.metadata.clone().unwrap_or_default();
+                    json!({"attempt":metadata.get("attempt"), "usageScope":metadata["usageScope"],
+                        "input":metadata["usage"]["input_tokens"]})
+                })
+                .collect::<Vec<_>>()
+        };
+        let mut streamed = Vec::new();
+        while let Ok(message) = progress_messages.try_recv() {
+            streamed.push(message);
+        }
+        // Each attempt streams its own per-turn row. The completion row and the ledger repeat
+        // only the first, so the retry's row says which attempt it counts.
+        let retry = json!({"attempt":2, "usageScope":"turn", "input":12_000});
+        assert_eq!(
+            usage_rows(&streamed),
+            [
+                json!({"attempt":null, "usageScope":"turn", "input":30_000}),
+                retry.clone()
+            ]
+        );
+        // A retried job delivers only the retry's messages.
+        assert_eq!(usage_rows(&execution.messages), [retry]);
+        return Ok(());
+    }
     if scenario == "ambient_decline" {
         let execution = result?;
         assert_eq!(execution.summary, "NO_RESPONSE");
