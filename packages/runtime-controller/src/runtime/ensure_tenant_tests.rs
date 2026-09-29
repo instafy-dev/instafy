@@ -324,6 +324,50 @@ impl TenantAttachFixture {
             .get("metadata"))
     }
 
+    /// A lease's status and whether it is released.
+    async fn lease_state(&self, lease_id: Uuid) -> anyhow::Result<(String, bool)> {
+        let row = self
+            .pool
+            .get()
+            .await?
+            .query_one(
+                "select status, released_at is not null as released
+                 from runtime_leases
+                 where id = $1",
+                &[&lease_id],
+            )
+            .await?;
+        Ok((row.get("status"), row.get("released")))
+    }
+
+    /// The runtime launched again under a new active shared lease, as the
+    /// host project's next shared ensure leaves it.
+    async fn relaunch_under_new_shared_lease(&self) -> anyhow::Result<Uuid> {
+        let lease_id = Uuid::new_v4();
+        let connection = self.pool.get().await?;
+        connection
+            .execute(
+                "insert into runtime_leases
+                    (id, project_id, runtime_id, status, scope, metadata,
+                     requested_at, launched_at)
+                 values ($1, $2, $3, 'active', 'shared', $4, now(), now())",
+                &[
+                    &lease_id,
+                    &self.host_project_id,
+                    &self.runtime_id,
+                    &PgJson(json!({ "source": "host" })),
+                ],
+            )
+            .await?;
+        connection
+            .execute(
+                "update runtimes set active_lease_id = $2, status = 'ready' where id = $1",
+                &[&self.runtime_id, &lease_id],
+            )
+            .await?;
+        Ok(lease_id)
+    }
+
     async fn set_runtime_provider(&self, provider: &str) -> anyhow::Result<()> {
         self.pool
             .get()
@@ -814,6 +858,134 @@ async fn tenant_lease_metadata_keeps_only_descriptive_strings_on_attach_and_reat
                 fixture.lease_metadata(lease_id).await?,
                 Some(json!({ "label": "second" })),
                 "a re-attach without metadata keeps the stored metadata"
+            );
+            Ok(())
+        })
+        .await
+}
+
+/// A tenant lease ends with the shared lease it attached under: releasing the
+/// runtime's lease releases its tenant leases, and so does a failed launch.
+/// After the runtime relaunches under a new shared lease, a re-attach creates
+/// a tenant lease under that one. It does so even when a tenant lease under an
+/// earlier shared lease was left unreleased, as releases before this rule
+/// left them.
+#[tokio::test]
+async fn tenant_leases_end_with_their_shared_lease_and_follow_a_relaunch() -> anyhow::Result<()> {
+    let fixture = TenantAttachFixture::setup("tenant-attach-relaunch").await?;
+    fixture
+        .run(async {
+            let fixture = &fixture;
+            let token = fixture.user_token(fixture.host_writer)?;
+            let attach = || async {
+                let (status, body) = fixture
+                    .attach(
+                        &token,
+                        fixture.same_org_tenant_project_id,
+                        fixture.runtime_id,
+                        json!({ "source": "tenant-attach-test" }),
+                    )
+                    .await?;
+                anyhow::ensure!(status == StatusCode::OK, "{status}: {body}");
+                let lease_id = body["leaseId"]
+                    .as_str()
+                    .and_then(|value| Uuid::parse_str(value).ok())
+                    .ok_or_else(|| anyhow::anyhow!("no tenant lease id: {body}"))?;
+                let parent_lease_id = body["parentLeaseId"]
+                    .as_str()
+                    .and_then(|value| Uuid::parse_str(value).ok())
+                    .ok_or_else(|| anyhow::anyhow!("no parent lease id: {body}"))?;
+                anyhow::Ok((lease_id, parent_lease_id))
+            };
+
+            let (first_tenant_lease, parent) = attach().await?;
+            assert_eq!(parent, fixture.shared_lease_id);
+
+            // The host's runtime stops: its shared lease is released.
+            {
+                let mut connection = fixture.pool.get().await?;
+                let transaction = connection.transaction().await?;
+                mark_runtime_lease_released(
+                    &transaction,
+                    &fixture.runtime_id,
+                    &fixture.shared_lease_id,
+                    false,
+                )
+                .await
+                .map_err(|(_, Json(error))| anyhow::anyhow!(error.message))?;
+                transaction.commit().await?;
+            }
+            assert_eq!(
+                fixture.lease_state(first_tenant_lease).await?,
+                ("released".to_string(), true),
+                "released with its shared lease"
+            );
+
+            let second_shared_lease = fixture.relaunch_under_new_shared_lease().await?;
+            let (second_tenant_lease, parent) = attach().await?;
+            assert_ne!(second_tenant_lease, first_tenant_lease);
+            assert_eq!(parent, second_shared_lease);
+
+            // A shared lease released without its tenant leases, as releases
+            // did before tenant leases ended with their parent.
+            fixture
+                .pool
+                .get()
+                .await?
+                .execute(
+                    "update runtime_leases
+                     set status = 'released', released_at = now()
+                     where id = $1",
+                    &[&second_shared_lease],
+                )
+                .await?;
+            let third_shared_lease = fixture.relaunch_under_new_shared_lease().await?;
+            let (third_tenant_lease, parent) = attach().await?;
+            assert_ne!(
+                third_tenant_lease, second_tenant_lease,
+                "a tenant lease under an earlier shared lease is not reused"
+            );
+            assert_eq!(parent, third_shared_lease);
+
+            let leases = fixture.tenant_leases().await?;
+            assert_eq!(
+                leases,
+                vec![
+                    (
+                        first_tenant_lease,
+                        fixture.same_org_tenant_project_id,
+                        Some(fixture.shared_lease_id),
+                    ),
+                    (
+                        second_tenant_lease,
+                        fixture.same_org_tenant_project_id,
+                        Some(second_shared_lease),
+                    ),
+                    (
+                        third_tenant_lease,
+                        fixture.same_org_tenant_project_id,
+                        Some(third_shared_lease),
+                    ),
+                ]
+            );
+
+            // A failed launch of the runtime's lease ends its tenant leases
+            // as well.
+            assert!(
+                mark_runtime_launch_failed_if_current(
+                    &fixture.state,
+                    &fixture.host_project_id,
+                    &fixture.runtime_id,
+                    &third_shared_lease,
+                    OPEN_PROVIDER,
+                )
+                .await?,
+                "the third shared lease is the runtime's current launch"
+            );
+            assert_eq!(
+                fixture.lease_state(third_tenant_lease).await?,
+                ("released".to_string(), true),
+                "released with its failed shared lease"
             );
             Ok(())
         })

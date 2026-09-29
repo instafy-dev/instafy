@@ -54,6 +54,11 @@ nothing and is not billed; the runtime's own project keeps paying for it.
   on re-attach: `_instafy`-prefixed keys and launch settings such as
   `runtimeFlavor`, `sizeId`, `env` or `runtimeAgentImage` alike. A re-attach
   without metadata keeps the stored metadata.
+- A tenant lease ends with the shared lease it attached under: releasing
+  that lease, as a stop does, or failing its launch releases the tenant
+  leases in the same transaction. A re-attach reuses the project's tenant
+  lease only under the runtime's current shared lease; after a relaunch it
+  creates a new one.
 - The attach leaves the runtime's origin alone. The response's `origin` is
   the host project's origin for its shared lease, as it is, or absent when
   there is none; `originMode`, `originProtocols` and `originMetadata` are

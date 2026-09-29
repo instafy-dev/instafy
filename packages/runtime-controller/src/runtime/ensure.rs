@@ -28,9 +28,9 @@ use super::db::{
     create_runtime_lease, ensure_project_exists, ensure_runtime_record, fetch_runtime_for_update,
     fetch_runtime_lease_for_update, load_origin_instance_for_lease, mark_runtime_lease_active,
     mark_runtime_lease_launching, mark_runtime_lease_released, record_runtime_event,
-    release_origin_instances_for_runtime, runtime_provider_identity_matches,
-    upsert_origin_instance, OriginInstanceRecord, RuntimeDetails, RuntimeLeaseDetails,
-    RuntimeLeaseRecord, RuntimeRecord,
+    release_origin_instances_for_runtime, release_tenant_leases_of_parent,
+    runtime_provider_identity_matches, upsert_origin_instance, OriginInstanceRecord,
+    RuntimeDetails, RuntimeLeaseDetails, RuntimeLeaseRecord, RuntimeRecord,
 };
 use super::lease::{parse_lease_scope, RuntimeLeaseScope};
 use super::limit_waits::{
@@ -496,6 +496,14 @@ async fn mark_runtime_launch_failed_if_current(
         })?;
         return Ok(false);
     }
+    release_tenant_leases_of_parent(&transaction, lease_id)
+        .await
+        .map_err(|(_, payload)| {
+            anyhow::anyhow!(
+                "failed to release tenant leases after launch failure: {}",
+                payload.0.message
+            )
+        })?;
 
     let runtime_rows = transaction
         .execute(
@@ -3312,6 +3320,10 @@ async fn ensure_runtime_tenant(
     })
 }
 
+/// Reuse the project's tenant lease under `parent_lease_id`, the runtime's
+/// current shared lease, or create one. A tenant lease under an earlier shared
+/// lease of the same runtime is never reused: its parent was released when the
+/// runtime relaunched, and a lease left unreleased by then is stale.
 async fn ensure_tenant_runtime_lease(
     transaction: &Transaction<'_>,
     project_id: &Uuid,
@@ -3326,13 +3338,14 @@ async fn ensure_tenant_runtime_lease(
              from runtime_leases
              where project_id = $1
                and runtime_id = $2
+               and parent_lease_id = $3
                and scope = 'tenant'
                and released_at is null
                and status <> 'failed'
              order by requested_at desc
              limit 1
              for update",
-            &[project_id, runtime_id],
+            &[project_id, runtime_id, parent_lease_id],
         )
         .await
         .map_err(|error| internal_error(format!("failed to load tenant lease: {error}")))?
