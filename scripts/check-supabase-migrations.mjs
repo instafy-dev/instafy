@@ -32,7 +32,13 @@ const TRANSACTION_CONTROL = new Set([
 ]);
 const ROUTINE_KINDS = new Set(["function", "procedure"]);
 const IDENTIFIER = /[A-Za-z_\u{80}-\u{10FFFF}][A-Za-z0-9_$\u{80}-\u{10FFFF}]*/uy;
+// psql reads a digit and the letters, digits and dots right after it as one
+// token, such as 1e or 0x1f, so the e of 1e'...' does not open an E'...'
+// string.
+const NUMBER = /[0-9][A-Za-z0-9_$.\u{80}-\u{10FFFF}]*/uy;
 const DOLLAR_QUOTE = /\$(?:[A-Za-z_\u{80}-\u{10FFFF}][A-Za-z0-9_\u{80}-\u{10FFFF}]*)?\$/uy;
+const META_COMMAND = /\\[^\s\\]*/uy;
+const STANDARD_CONFORMING_STRINGS = /standard_conforming_strings/iu;
 
 function matchAt(pattern, text, index) {
   pattern.lastIndex = index;
@@ -59,14 +65,17 @@ function quotedEnd(sql, index, backslashEscapes) {
   return sql.length;
 }
 
-// The first word of every top-level statement in `sql`, lowercased. Comments,
-// quoted strings and identifiers, and dollar-quoted bodies such as a DO block
-// or a function body are skipped, so the BEGIN and END inside them do not
-// count. Statements split the way psql splits them: a semicolon inside
-// parentheses, or inside the BEGIN ATOMIC body of a CREATE FUNCTION or
-// PROCEDURE, does not end one.
-function topLevelStatementKeywords(sql) {
+// The first word of every top-level statement in `sql`, lowercased, and every
+// psql meta-command in it. Comments, quoted strings and identifiers, and
+// dollar-quoted bodies such as a DO block or a function body are skipped, so
+// the BEGIN and END inside them do not count. Statements split the way psql
+// splits them: a semicolon inside parentheses, or inside the BEGIN ATOMIC body
+// of a CREATE FUNCTION or PROCEDURE, does not end one. psql runs a backslash
+// anywhere else, at the start of a line or after a query, as a meta-command
+// that takes the rest of the line.
+function scanTopLevel(sql) {
   const keywords = [];
+  const metaCommands = [];
   let words = [];
   let parenDepth = 0;
   let beginDepth = 0;
@@ -75,6 +84,7 @@ function topLevelStatementKeywords(sql) {
     const char = sql[index];
     const identifier = matchAt(IDENTIFIER, sql, index);
     const dollarQuote = identifier ? null : matchAt(DOLLAR_QUOTE, sql, index);
+    const number = identifier || dollarQuote ? null : matchAt(NUMBER, sql, index);
     if (sql.startsWith("--", index)) {
       const lineEnd = sql.indexOf("\n", index);
       index = lineEnd === -1 ? sql.length : lineEnd + 1;
@@ -94,6 +104,9 @@ function topLevelStatementKeywords(sql) {
     } else if (dollarQuote) {
       const close = sql.indexOf(dollarQuote, index + dollarQuote.length);
       index = close === -1 ? sql.length : close + dollarQuote.length;
+    } else if (number) {
+      index += number.length;
+      words.push(number);
     } else if (identifier) {
       const word = identifier.toLowerCase();
       index += identifier.length;
@@ -120,6 +133,10 @@ function topLevelStatementKeywords(sql) {
     } else if (char === "'" || char === '"') {
       index = quotedEnd(sql, index, false);
       words.push(char);
+    } else if (char === "\\") {
+      metaCommands.push(matchAt(META_COMMAND, sql, index));
+      const lineEnd = sql.indexOf("\n", index);
+      index = lineEnd === -1 ? sql.length : lineEnd + 1;
     } else {
       if (char === "(") {
         parenDepth += 1;
@@ -131,7 +148,15 @@ function topLevelStatementKeywords(sql) {
       index += 1;
     }
   }
-  return keywords;
+  return { keywords, metaCommands };
+}
+
+function topLevelStatementKeywords(sql) {
+  return scanTopLevel(sql).keywords;
+}
+
+function topLevelMetaCommands(sql) {
+  return scanTopLevel(sql).metaCommands;
 }
 
 function migrationVersion(fileName) {
@@ -178,12 +203,28 @@ function validatePublicMigrationTrack(directory = DEFAULT_MIGRATIONS) {
     if (source.length === 0) {
       throw new Error(`public migration is empty: ${entry.name}`);
     }
-    const control = topLevelStatementKeywords(source.toString("utf8")).find(
-      (keyword) => TRANSACTION_CONTROL.has(keyword),
-    );
+    const { keywords, metaCommands } = scanTopLevel(source.toString("utf8"));
+    const control = keywords.find((keyword) => TRANSACTION_CONTROL.has(keyword));
     if (control) {
       throw new Error(
         `public migration ${entry.name} has a top-level ${control.toUpperCase()}; it must run in the one transaction its runner opens and commits`,
+      );
+    }
+    // supabase db push sends a migration to the server as plain SQL, where a
+    // meta-command is a syntax error, and the empty-database test sends one
+    // after the lane boundary the same way. Only psql reading the file as a
+    // script runs one, where it could print or hide output that test reads.
+    if (metaCommands.length > 0) {
+      throw new Error(
+        `public migration ${entry.name} has the psql meta-command ${metaCommands[0]}; a migration must be plain SQL`,
+      );
+    }
+    // With standard_conforming_strings off, a backslash escapes a quote in a
+    // plain '...' string, and this scan, which reads such a string the
+    // default way, could then take a meta-command for part of a string.
+    if (STANDARD_CONFORMING_STRINGS.test(source.toString("utf8"))) {
+      throw new Error(
+        `public migration ${entry.name} mentions standard_conforming_strings; a migration must keep the server's default string syntax`,
       );
     }
     if (version > LANE_BOUNDARY && version % 2n !== 0n) {
@@ -252,6 +293,7 @@ export {
   MIGRATION_NAME,
   migrationVersion,
   publicMigrationSetSha256,
+  topLevelMetaCommands,
   topLevelStatementKeywords,
   validatePublicMigrationTrack,
 };

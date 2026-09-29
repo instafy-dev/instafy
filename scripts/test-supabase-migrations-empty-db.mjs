@@ -52,22 +52,46 @@ const REQUIRED_PUBLIC_RELATIONS = [
   "runtime_providers",
   "user_credentials",
 ];
-// Live requests lock any two of these tables in both orders. Completion and
-// the expired-job sweep update agent_jobs and then write the credit ledger,
-// while dispatch and deferred billing write the ledger and then agent_jobs.
-// An insert into the ledger locks it and then runs a trigger that writes and
-// locks the org's org_credit_balances row, while a credit burn inserts or
-// locks that row for its daily refill before it inserts into the ledger, and
-// dispatch burns credits before it writes agent_jobs. A migration that holds a
-// conflicting lock on two of the tables until it commits can therefore
-// deadlock a live request, whichever table it locks first. After the lane
-// boundary a migration may hold such a lock on one of the tables and only read
-// the others; a change to two of them is split into migrations that commit
-// separately.
-const BOTH_ORDER_TABLES = ["agent_jobs", "org_credit_ledger", "org_credit_balances"];
-const BOTH_ORDER_TABLE_PAIRS = BOTH_ORDER_TABLES.flatMap((left, index) =>
-  BOTH_ORDER_TABLES.slice(index + 1).map((right) => [left, right]),
-);
+// Live requests write these tables in one transaction, each in both orders
+// with another of them. Dispatch inserts the prompt, the run and the user's
+// message, which updates its conversation, then burns credits and inserts the
+// agent_jobs row. Completion and cancel update agent_jobs and then the run,
+// and completion then writes the ledger and the agent's message and its
+// conversation; the expired-job sweep also updates agent_jobs before the
+// ledger. Deferred billing writes the ledger and then the prompt, the run,
+// agent_jobs and the message. An insert into the ledger locks it and then
+// runs a trigger that writes and locks the org's org_credit_balances row,
+// while a credit burn inserts or locks that row for its daily refill before it
+// inserts into the ledger. A migration that holds a conflicting lock on two of
+// the tables until it commits can therefore deadlock a live request,
+// whichever table it locks first. After the lane boundary a change to two of
+// them is split into migrations that commit separately.
+const BOTH_ORDER_TABLES = [
+  "agent_jobs",
+  "org_credit_ledger",
+  "org_credit_balances",
+  "runs",
+  "prompts",
+  "conversations",
+  "conversation_messages",
+];
+// Migrations already on main that the rules below reject only because runs,
+// prompts, conversations and conversation_messages joined the list after
+// them. History is append-only, so these are checked against the first three
+// tables only.
+const FIRST_THREE_TABLES_ONLY = new Set([
+  20260816213316n,
+  20260816213318n,
+  20260906120000n,
+]);
+
+function tablePairs(tables) {
+  return tables.flatMap((left, index) =>
+    tables.slice(index + 1).map((right) => [left, right]),
+  );
+}
+
+const BOTH_ORDER_TABLE_PAIRS = tablePairs(BOTH_ORDER_TABLES);
 // The table lock modes a live write can end up waiting on. SHARE and stronger
 // block a live INSERT, UPDATE or DELETE outright. ROW SHARE and ROW EXCLUSIVE
 // block no live write themselves, but they come with SELECT ... FOR UPDATE and
@@ -85,28 +109,88 @@ const CONFLICTING_LOCK_MODES = new Set([
   "ExclusiveLock",
   "AccessExclusiveLock",
 ]);
+// The same requests also read and row-lock other tables between their writes
+// to those, in both orders: a refill locks the org's balance row and then
+// inserts into the ledger, whose foreign-key check row-locks the
+// organization; credit status reads org_subscriptions after that balance lock;
+// completion updates agent_jobs and then reads projects. So a migration that
+// holds a conflicting lock on one of BOTH_ORDER_TABLES may hold none of these
+// modes on any other table that existed before it: ACCESS EXCLUSIVE blocks
+// even a read, EXCLUSIVE blocks a row lock, and ROW SHARE and ROW EXCLUSIVE
+// come with the migration's own row locks, which a request that locks the same
+// row waits on. SHARE and SHARE ROW EXCLUSIVE, which an index or a foreign key
+// takes, block only a write to that other table and stay allowed, because no
+// live request writes such a table in both orders with BOTH_ORDER_TABLES;
+// MIGRATIONS.md describes the lock order they still depend on. A table that
+// live requests come to write in both orders with them belongs in
+// BOTH_ORDER_TABLES.
+const OTHER_TABLE_LOCK_MODES = new Set([
+  "RowShareLock",
+  "RowExclusiveLock",
+  "ExclusiveLock",
+  "AccessExclusiveLock",
+]);
+const EXISTING_RELATION_MARKER = "instafy-migration-existing";
 const HELD_LOCK_MARKER = "instafy-migration-holds";
 const TRANSACTION_MARKER = "instafy-migration-xact";
+// Both probe queries first set search_path to pg_catalog alone, so that no
+// table, view, function or operator a migration creates, in public or as a
+// temporary object, stands in for a catalog one.
+const CATALOG_SEARCH_PATH = "set local search_path = pg_catalog, pg_temp;";
 // psql runs it first in the one transaction it opens for a migration, before
-// the migration itself. It prints the id of that transaction.
-const TRANSACTION_QUERY = `select '${TRANSACTION_MARKER} ' || pg_current_xact_id();`;
+// the migration itself. It prints the id of that transaction, then one row per
+// public relation that exists before the migration: its oid and the table it
+// belongs to, which for an index is the table the index is on. It then sets
+// search_path back to the session's default for the migration.
+//
+// Because it runs first, a migration whose first statement is SET TRANSACTION
+// ISOLATION LEVEL, which Postgres accepts only before a transaction's first
+// query, fails this test with "must be called before any query", although
+// supabase db push would apply it. No migration does that.
+const TRANSACTION_QUERY = `${CATALOG_SEARCH_PATH}
+select '${TRANSACTION_MARKER} ' || pg_current_xact_id()
+union all
+select '${EXISTING_RELATION_MARKER} ' || c.oid || ' ' || coalesce(t.relname, c.relname)
+from pg_class c
+left join pg_index i on i.indexrelid = c.oid
+left join pg_class t on t.oid = i.indrelid
+where c.relnamespace = 'public'::regnamespace;
+set local search_path to default;
+`;
 // psql runs it after the migration in the same transaction, before COMMIT,
 // while every lock the migration took is still held. It prints the id of the
-// transaction it runs in, then one row per table and lock mode.
-const HELD_LOCK_QUERY = `select '${TRANSACTION_MARKER} ' || pg_current_xact_id()
+// transaction it runs in, then one row per relation lock the transaction holds
+// on a public relation, or on one it dropped: the relation's oid and the mode.
+const HELD_LOCK_QUERY = `${CATALOG_SEARCH_PATH}
+select '${TRANSACTION_MARKER} ' || pg_current_xact_id()
 union all
-select '${HELD_LOCK_MARKER} ' || c.relname || ' ' || l.mode
+select '${HELD_LOCK_MARKER} ' || l.relation || ' ' || l.mode
 from pg_locks l
-join pg_class c on c.oid = l.relation
+left join pg_class c on c.oid = l.relation
 where l.pid = pg_backend_pid()
   and l.granted
-  and c.relnamespace = 'public'::regnamespace
-  and c.relname in (${BOTH_ORDER_TABLES.map((table) => `'${table}'`).join(", ")});
+  and l.locktype = 'relation'
+  and (c.oid is null or c.relnamespace = 'public'::regnamespace);
 `;
 const TRANSACTION_WARNINGS = [
   "there is already a transaction in progress",
   "there is no transaction in progress",
 ];
+// Linux limits one argument of a process, its terminating NUL included, to
+// 128 KiB, and the runner passes a checked migration to psql as one.
+const MAX_COMMAND_BYTES = 128 * 1024 - 1;
+
+// The rows of one marker in psql's output, as [oid, the rest of the row].
+function markedRows(psqlOutput, wanted) {
+  const rows = [];
+  for (const line of String(psqlOutput).split("\n")) {
+    const [marker, oid, ...rest] = line.trim().split(" ");
+    if (marker === wanted && rest.length > 0) {
+      rows.push([oid, rest.join(" ")]);
+    }
+  }
+  return rows;
+}
 
 // Why HELD_LOCK_QUERY did not read the migration's own locks, or null when it
 // did. A top-level COMMIT, END or ROLLBACK in the migration, or COMMIT AND
@@ -130,23 +214,64 @@ function heldLockProbeProblem(stdout, stderr) {
   return warning ? `psql warned "${warning}"` : null;
 }
 
-// The pairs on both of whose tables a migration's HELD_LOCK_QUERY output
-// reports a conflicting lock.
-function bothOrderLockViolations(psqlOutput) {
-  const held = new Set();
-  for (const line of String(psqlOutput).split("\n")) {
-    const [marker, table, mode, ...rest] = line.trim().split(" ");
-    if (
-      marker === HELD_LOCK_MARKER &&
-      rest.length === 0 &&
-      CONFLICTING_LOCK_MODES.has(mode)
-    ) {
-      held.add(table);
+// The table that each relation TRANSACTION_QUERY listed before the migration
+// belongs to, by oid. psql prints those rows before any output of the
+// migration, so the first row for an oid is the probe's own. A later row for
+// the same oid, which a SELECT in the migration can print, does not replace
+// it.
+function existingTablesByOid(psqlOutput) {
+  const tableByOid = new Map();
+  for (const [oid, table] of markedRows(psqlOutput, EXISTING_RELATION_MARKER)) {
+    if (!tableByOid.has(oid)) {
+      tableByOid.set(oid, table);
     }
   }
-  return BOTH_ORDER_TABLE_PAIRS.filter(
-    ([left, right]) => held.has(left) && held.has(right),
-  );
+  return tableByOid;
+}
+
+// The tables of BOTH_ORDER_TABLES missing from the relations TRANSACTION_QUERY
+// listed before the migration. bothOrderLockViolations counts a lock only on a
+// listed relation, so it would pass a migration that locks one of these.
+function unlistedBothOrderTables(stdout) {
+  const listed = new Set(existingTablesByOid(stdout).values());
+  return BOTH_ORDER_TABLES.filter((table) => !listed.has(table));
+}
+
+// The pairs of tables a migration's probe output shows it locks until it
+// commits in a way a live request can deadlock against: two of `tables` with a
+// conflicting lock, or another table that existed before the migration with a
+// lock in OTHER_TABLE_LOCK_MODES beside one of `tables` with a conflicting
+// lock, as [other, one of `tables`]. A lock on an index counts as a lock on
+// its table. A relation the migration created is left out, because no live
+// request can have locked it.
+function bothOrderLockViolations(psqlOutput, tables = BOTH_ORDER_TABLES) {
+  const tableByOid = existingTablesByOid(psqlOutput);
+  const modesByTable = new Map();
+  for (const [oid, mode] of markedRows(psqlOutput, HELD_LOCK_MARKER)) {
+    const table = tableByOid.get(oid);
+    if (table !== undefined) {
+      modesByTable.set(table, (modesByTable.get(table) ?? new Set()).add(mode));
+    }
+  }
+  const holds = (table, modes) =>
+    [...(modesByTable.get(table) ?? [])].some((mode) => modes.has(mode));
+  const locked = tables.filter((table) => holds(table, CONFLICTING_LOCK_MODES));
+  const others = [...modesByTable.keys()]
+    .filter((table) => !tables.includes(table) && holds(table, OTHER_TABLE_LOCK_MODES))
+    .sort();
+  return [
+    ...tablePairs(tables).filter(
+      ([left, right]) => locked.includes(left) && locked.includes(right),
+    ),
+    ...others.flatMap((other) => locked.map((table) => [other, table])),
+  ];
+}
+
+// An argument that spans lines, such as a query or a migration, is shown in a
+// failed command by its first line, so the error does not repeat its text.
+function shownArgument(argument) {
+  const [firstLine, ...rest] = argument.split("\n");
+  return rest.length > 0 ? `${firstLine}...` : argument;
 }
 
 function commandResult(command, args, options = {}) {
@@ -162,7 +287,7 @@ function commandResult(command, args, options = {}) {
       .trim()
       .slice(-4_000);
     throw new Error(
-      `${command} ${args.join(" ")} failed${detail ? `: ${detail}` : ""}`,
+      `${command} ${args.map(shownArgument).join(" ")} failed${detail ? `: ${detail}` : ""}`,
     );
   }
   return result;
@@ -279,14 +404,31 @@ function runEmptyDatabaseMigrationTest({
     }
 
     for (const migration of migrations) {
-      const checkHeldLocks = BigInt(migration.version) > LANE_BOUNDARY;
+      const version = BigInt(migration.version);
+      const checkHeldLocks = version > LANE_BOUNDARY;
+      const source = readFileSync(migration.source);
+      const sql = source.toString("utf8");
+      // psql sends a --command to the server as it is, so a psql meta-command
+      // in the migration is a syntax error, as it is under supabase db push,
+      // and cannot hide or print the probe's rows. psql runs a --command that
+      // starts with a backslash as a meta-command instead.
+      if (checkHeldLocks && sql.startsWith("\\")) {
+        throw new Error(
+          `${migration.track}:${migration.fileName} starts with a psql meta-command; a migration must be plain SQL`,
+        );
+      }
+      if (checkHeldLocks && Buffer.byteLength(sql) > MAX_COMMAND_BYTES) {
+        throw new Error(
+          `${migration.track}:${migration.fileName} is larger than the ${MAX_COMMAND_BYTES} bytes one psql --command can carry; split it`,
+        );
+      }
       // With --single-transaction, psql runs its commands in order inside one
-      // transaction: the id query, the migration from stdin, then the probe.
+      // transaction: the id query, the migration, then the probe.
       const applied = commandResult(
         dockerCommand,
         [
           "exec",
-          "--interactive",
+          ...(checkHeldLocks ? [] : ["--interactive"]),
           containerName,
           "psql",
           "--no-psqlrc",
@@ -301,14 +443,14 @@ function runEmptyDatabaseMigrationTest({
             ? [
                 "--command",
                 TRANSACTION_QUERY,
-                "--file",
-                "-",
+                "--command",
+                sql,
                 "--command",
                 HELD_LOCK_QUERY,
               ]
             : []),
         ],
-        { input: readFileSync(migration.source) },
+        checkHeldLocks ? { stdio: ["ignore", "pipe", "pipe"] } : { input: source },
       );
       if (checkHeldLocks) {
         const problem = heldLockProbeProblem(applied.stdout, applied.stderr);
@@ -317,7 +459,18 @@ function runEmptyDatabaseMigrationTest({
             `${migration.track}:${migration.fileName} does not run in the one transaction psql opens for it, so its held locks cannot be checked (${problem}); remove its own BEGIN, COMMIT, END or ROLLBACK`,
           );
         }
-        const violations = bothOrderLockViolations(applied.stdout);
+        const unlisted = unlistedBothOrderTables(applied.stdout);
+        if (unlisted.length > 0) {
+          throw new Error(
+            `${migration.track}:${migration.fileName} ran without ${unlisted.join(", ")} among the public tables before it, so its held locks cannot be checked`,
+          );
+        }
+        const violations = bothOrderLockViolations(
+          applied.stdout,
+          FIRST_THREE_TABLES_ONLY.has(version)
+            ? BOTH_ORDER_TABLES.slice(0, 3)
+            : BOTH_ORDER_TABLES,
+        );
         if (violations.length > 0) {
           throw new Error(
             `${migration.track}:${migration.fileName} writes or locks both ${violations
@@ -396,7 +549,10 @@ if (isDirectExecution) {
 export {
   BOTH_ORDER_TABLE_PAIRS,
   BOTH_ORDER_TABLES,
+  FIRST_THREE_TABLES_ONLY,
   HELD_LOCK_QUERY,
+  MAX_COMMAND_BYTES,
+  OTHER_TABLE_LOCK_MODES,
   POSTGRES_IMAGE,
   REQUIRED_PUBLIC_RELATIONS,
   TRANSACTION_QUERY,
@@ -404,5 +560,6 @@ export {
   heldLockProbeProblem,
   resolveRunnableImage,
   runEmptyDatabaseMigrationTest,
+  unlistedBothOrderTables,
   validateMigrationPlan,
 };

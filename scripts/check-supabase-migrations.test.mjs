@@ -12,6 +12,7 @@ import test from "node:test";
 import {
   LEGACY_PUBLIC_MIGRATION_COUNT,
   LANE_BOUNDARY,
+  topLevelMetaCommands,
   topLevelStatementKeywords,
   validatePublicMigrationTrack,
 } from "./check-supabase-migrations.mjs";
@@ -109,6 +110,106 @@ test("a migration may not end or open the transaction it runs in", (t) => {
     ].join("\n"),
   );
   assert.equal(validatePublicMigrationTrack(directory).length, 1);
+});
+
+test("a migration may not contain a psql meta-command", (t) => {
+  const directory = fixture();
+  t.after(() => rmSync(directory, { force: true, recursive: true }));
+  const name = "20260000000064_public.sql";
+  for (const [command, sql] of [
+    // Forged the id rows the empty-database test reads and hid the probe's
+    // own, and passed both checks.
+    [
+      "\\gset",
+      [
+        "select pg_current_xact_id() as fake_id \\gset",
+        "\\echo instafy-migration-xact :fake_id",
+        "\\o /dev/null",
+        "create table t (id int);",
+        "",
+      ].join("\n"),
+    ],
+    ["\\echo", "\\echo instafy-migration-xact 1066\n"],
+    ["\\o", "create table t (id int);\n  \\o /dev/null\n"],
+    ["\\i", "create table t (\n  id int\n\\i other.sql\n);\n"],
+    ["\\!", "create table t (id int); \\! true\n"],
+    // psql reads 1e as one token and '\' as a plain string, then runs \r,
+    // which drops the junk before the server sees it, and the lines after.
+    // Read as an E'...' string, it hid them all from this check.
+    [
+      "\\r",
+      [
+        "alter table organizations add column x text;",
+        "alter table org_credit_balances add column y text;",
+        "1e'\\' \\r",
+        "select pg_current_xact_id() as fake_id \\gset",
+        "\\echo instafy-migration-xact :fake_id",
+        "\\o /dev/null",
+        "",
+      ].join("\n"),
+    ],
+    ["\\r", "select 0x1e'\\' \\r\n"],
+    ["\\r", "select 1.e'\\' \\r\n"],
+  ]) {
+    writeFileSync(path.join(directory, name), sql);
+    assert.throws(
+      () => validatePublicMigrationTrack(directory),
+      new RegExp(
+        `${name} has the psql meta-command ${command.replace(/\\/gu, "\\\\")}; a migration must be plain SQL$`,
+        "u",
+      ),
+      sql,
+    );
+  }
+  // A backslash in a string, a quoted name, a comment or a body is not one.
+  const plain = [
+    "select E'a\\\\b\\n', 'a\\', '^x\\.y$', \"we\\ird\";",
+    "do $$ begin raise notice '\\echo'; end $$;",
+    "create function f() returns text as $body$ select '\\o'::text $body$ language sql;",
+    "-- \\echo in a comment",
+    "/* \\o /dev/null */ select 1;",
+    "",
+  ].join("\n");
+  assert.deepEqual(topLevelMetaCommands(plain), []);
+  writeFileSync(path.join(directory, name), plain);
+  assert.equal(validatePublicMigrationTrack(directory).length, 1);
+  assert.deepEqual(
+    topLevelMetaCommands("select 1 \\gset\n\\echo x\nselect 2;\n\\o\n"),
+    ["\\gset", "\\echo", "\\o"],
+  );
+  // An E'...' string still escapes its quote with a backslash.
+  assert.deepEqual(topLevelMetaCommands("select e'\\' \\r', 1 e'\\' \\r';\n"), []);
+});
+
+test("a migration may not change standard_conforming_strings", (t) => {
+  const directory = fixture();
+  t.after(() => rmSync(directory, { force: true, recursive: true }));
+  const name = "20260000000064_public.sql";
+  for (const sql of [
+    // With it off, psql reads 'x\'' as the string x', and this check read the
+    // rest of the file as a string, so the meta-commands after it passed.
+    [
+      "set standard_conforming_strings = off;",
+      "select 'x\\'';",
+      "select pg_current_xact_id() as fake_id \\gset",
+      "\\echo instafy-migration-xact :fake_id",
+      "\\o /dev/null",
+      "",
+    ].join("\n"),
+    "SET LOCAL Standard_Conforming_Strings TO off;\n",
+    "select set_config('standard_conforming_strings', 'off', true);\n",
+    "alter role postgres set standard_conforming_strings = off;\n",
+  ]) {
+    writeFileSync(path.join(directory, name), sql);
+    assert.throws(
+      () => validatePublicMigrationTrack(directory),
+      new RegExp(
+        `${name} mentions standard_conforming_strings; a migration must keep the server's default string syntax$`,
+        "u",
+      ),
+      sql,
+    );
+  }
 });
 
 test("statements split the way psql splits them", () => {

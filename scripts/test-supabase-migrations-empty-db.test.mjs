@@ -1,18 +1,32 @@
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import {
+  chmodSync,
+  existsSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import test from "node:test";
 
 import { validatePublicMigrationTrack } from "./check-supabase-migrations.mjs";
 import {
   BOTH_ORDER_TABLE_PAIRS,
   BOTH_ORDER_TABLES,
+  FIRST_THREE_TABLES_ONLY,
   HELD_LOCK_QUERY,
+  MAX_COMMAND_BYTES,
+  OTHER_TABLE_LOCK_MODES,
   POSTGRES_IMAGE,
   REQUIRED_PUBLIC_RELATIONS,
   TRANSACTION_QUERY,
   bothOrderLockViolations,
   heldLockProbeProblem,
   resolveRunnableImage,
+  runEmptyDatabaseMigrationTest,
+  unlistedBothOrderTables,
   validateMigrationPlan,
 } from "./test-supabase-migrations-empty-db.mjs";
 
@@ -90,32 +104,66 @@ test("container startup cannot perform an implicit registry pull", () => {
   assert.match(source, /"run",\s*"--pull",\s*"never"/u);
 });
 
-// psql prints the transaction id query's row, the migration's own command
-// tags, then the probe rows indented under a header: the transaction id again
-// and one row per lock. The rows below are what Postgres 17 reported for each
-// case.
+// The public relations that exist before a synthetic migration, as the id
+// query lists them: the relation's oid and the table it belongs to. 16408 is
+// an index on agent_jobs.
+const EXISTING_RELATIONS = [
+  ["16401", "agent_jobs"],
+  ["16402", "org_credit_ledger"],
+  ["16403", "org_credit_balances"],
+  ["16404", "organizations"],
+  ["16405", "projects"],
+  ["16406", "org_subscriptions"],
+  ["16407", "runs"],
+  ["16408", "agent_jobs"],
+  ["16409", "prompts"],
+  ["16410", "conversations"],
+  ["16411", "conversation_messages"],
+  ["16412", "runtimes"],
+];
+
+// A probe row names a relation by its oid. A test names it by table, or by oid
+// for an index; a table missing from EXISTING_RELATIONS is one the migration
+// created, with an oid the id query did not list.
+function lockRow(row) {
+  const [relation, mode] = row.split(" ");
+  const existing = EXISTING_RELATIONS.find(([, table]) => table === relation);
+  const oid = /^[0-9]+$/u.test(relation) ? relation : existing?.[0] ?? "17001";
+  return `${oid} ${mode}`;
+}
+
+function aligned(rows) {
+  return [
+    "                            ?column?                             ",
+    "-----------------------------------------------------------------",
+    ...rows.map((row) => ` ${row}`),
+    `(${rows.length} ${rows.length === 1 ? "row" : "rows"})`,
+    "",
+  ];
+}
+
+// psql prints the rows of the id query, the migration's own command tags,
+// then the probe rows, each query's rows indented under a header. The id
+// query prints the transaction id and one row per existing relation; the
+// probe prints the transaction id again and one row per lock. The rows below
+// are what Postgres 17 reported for each case.
 function psqlOutput({
   startId = "1066",
   endId = startId,
+  existing = EXISTING_RELATIONS,
   tags = ["SET", "ALTER TABLE"],
   rows = [],
 } = {}) {
-  const probeRows = [
-    ...(endId === null ? [] : [`instafy-migration-xact ${endId}`]),
-    ...rows.map((row) => `instafy-migration-holds ${row}`),
-  ];
   return [
-    "          ?column?           ",
-    "-----------------------------",
-    ` instafy-migration-xact ${startId}`,
-    "(1 row)",
-    "",
+    ...aligned([
+      ...(startId === null ? [] : [`instafy-migration-xact ${startId}`]),
+      ...existing.map(([oid, table]) => `instafy-migration-existing ${oid} ${table}`),
+    ]),
     ...tags,
-    "                            ?column?                             ",
-    "-----------------------------------------------------------------",
-    ...probeRows.map((row) => ` ${row}`),
-    `(${probeRows.length} ${probeRows.length === 1 ? "row" : "rows"})`,
-    "",
+    ...aligned([
+      ...(endId === null ? [] : [`instafy-migration-xact ${endId}`]),
+      ...rows.map((row) => `instafy-migration-holds ${lockRow(row)}`),
+    ]),
   ].join("\n");
 }
 
@@ -190,38 +238,246 @@ test("a migration that writes or row-locks one table of a pair and locks the oth
   }
 });
 
-test("the held-lock probe reports every table lock this transaction holds on the pair tables", () => {
+test("the held-lock probe reports every relation lock this transaction holds on a public relation", () => {
   assert.match(HELD_LOCK_QUERY, /l\.pid = pg_backend_pid\(\)/u);
   assert.match(HELD_LOCK_QUERY, /l\.granted/u);
+  assert.match(HELD_LOCK_QUERY, /l\.locktype = 'relation'/u);
+  // Every public relation, and one the migration dropped, whose pg_class row
+  // this transaction no longer sees.
   assert.match(
     HELD_LOCK_QUERY,
-    /c\.relname in \('agent_jobs', 'org_credit_ledger', 'org_credit_balances'\)/u,
+    /left join pg_class c on c\.oid = l\.relation\n[^;]*\(c\.oid is null or c\.relnamespace = 'public'::regnamespace\);/u,
   );
-  assert.match(HELD_LOCK_QUERY, /c\.relname \|\| ' ' \|\| l\.mode/u);
-  // The mode is judged in bothOrderLockViolations, so the probe keeps them all.
-  assert.doesNotMatch(HELD_LOCK_QUERY, /l\.mode in/u);
-  // Both queries print the id of the transaction they run in.
-  assert.equal(
+  assert.match(HELD_LOCK_QUERY, /'instafy-migration-holds ' \|\| l\.relation \|\| ' ' \|\| l\.mode/u);
+  // The tables and modes are judged in bothOrderLockViolations, so the probe
+  // keeps them all.
+  assert.doesNotMatch(HELD_LOCK_QUERY, /relname in|l\.mode in/u);
+  // The id query lists every public relation before the migration, with the
+  // table an index is on.
+  assert.match(
     TRANSACTION_QUERY,
-    "select 'instafy-migration-xact ' || pg_current_xact_id();",
+    /'instafy-migration-existing ' \|\| c\.oid \|\| ' ' \|\| coalesce\(t\.relname, c\.relname\)\nfrom pg_class c\nleft join pg_index i on i\.indexrelid = c\.oid\nleft join pg_class t on t\.oid = i\.indrelid\nwhere c\.relnamespace = 'public'::regnamespace;/u,
   );
-  assert.ok(
-    HELD_LOCK_QUERY.startsWith(
-      "select 'instafy-migration-xact ' || pg_current_xact_id()\nunion all\n",
+  // Both queries resolve every name in pg_catalog, so that a view such as
+  // create temporary view pg_locks as select * from pg_catalog.pg_locks where false;
+  // cannot empty the probe, and print the id of the transaction they run in.
+  for (const query of [TRANSACTION_QUERY, HELD_LOCK_QUERY]) {
+    assert.ok(
+      query.startsWith(
+        "set local search_path = pg_catalog, pg_temp;\nselect 'instafy-migration-xact ' || pg_current_xact_id()\nunion all\n",
+      ),
+    );
+  }
+  // The migration runs with the session's own search_path.
+  assert.ok(TRANSACTION_QUERY.endsWith(";\nset local search_path to default;\n"));
+  assert.equal(HELD_LOCK_QUERY.match(/search_path/gu).length, 1);
+});
+
+test("a migration may not hold a blocking lock on another existing table beside one of the list", () => {
+  assert.deepEqual(
+    [...OTHER_TABLE_LOCK_MODES].sort(),
+    ["AccessExclusiveLock", "ExclusiveLock", "RowExclusiveLock", "RowShareLock"],
+  );
+  for (const [rows, expected] of [
+    // alter table organizations add column x text;
+    // alter table org_credit_balances add column y text;
+    // Raced against a seeded org, it deadlocked a refill: the balance upsert,
+    // its FOR UPDATE, then a ledger insert whose foreign-key check row-locks
+    // the organization.
+    [
+      ["organizations AccessExclusiveLock", "org_credit_balances AccessExclusiveLock"],
+      [["organizations", "org_credit_balances"]],
+    ],
+    // alter table projects add column x text;
+    // alter table agent_jobs add column y text;
+    // It deadlocked a completion: update agent_jobs, then a read of projects.
+    [
+      ["projects AccessExclusiveLock", "agent_jobs AccessExclusiveLock"],
+      [["projects", "agent_jobs"]],
+    ],
+    // alter table org_subscriptions add column x text;
+    // alter table org_credit_balances add column y text;
+    // It deadlocked credit status, which reads org_subscriptions after the
+    // refill's balance lock.
+    [
+      ["org_subscriptions AccessExclusiveLock", "org_credit_balances AccessExclusiveLock"],
+      [["org_subscriptions", "org_credit_balances"]],
+    ],
+    // lock table organizations in exclusive mode;
+    // alter table org_credit_balances add column y text;
+    // EXCLUSIVE allows the refill's reads but not its foreign-key row lock,
+    // and it deadlocked the refill too.
+    [
+      ["organizations ExclusiveLock", "org_credit_balances AccessExclusiveLock"],
+      [["organizations", "org_credit_balances"]],
+    ],
+    // update runtimes set status = status where false;
+    // alter table agent_jobs add column y text;
+    // The update's row locks block a request that locks the same rows.
+    [
+      ["runtimes RowExclusiveLock", "agent_jobs AccessExclusiveLock"],
+      [["runtimes", "agent_jobs"]],
+    ],
+    // select from runtimes for update; update agent_jobs
+    [
+      ["runtimes RowShareLock", "agent_jobs RowExclusiveLock"],
+      [["runtimes", "agent_jobs"]],
+    ],
+    // Each other table pairs with each table of the list it locks, after the
+    // pairs within the list.
+    [
+      [
+        "runtimes RowExclusiveLock",
+        "projects AccessExclusiveLock",
+        "agent_jobs RowExclusiveLock",
+        "org_credit_ledger RowExclusiveLock",
+      ],
+      [
+        ["agent_jobs", "org_credit_ledger"],
+        ["projects", "agent_jobs"],
+        ["projects", "org_credit_ledger"],
+        ["runtimes", "agent_jobs"],
+        ["runtimes", "org_credit_ledger"],
+      ],
+    ],
+  ]) {
+    assert.deepEqual(bothOrderLockViolations(probeOutput(...rows)), expected, rows.join(", "));
+  }
+});
+
+test("a migration may read, index or reference another table beside one of the list", () => {
+  for (const rows of [
+    // 20260929100100 as the empty database reports it: foreign keys to
+    // organizations, projects and agent_jobs from the tables it creates.
+    [
+      "organizations AccessShareLock",
+      "organizations ShareRowExclusiveLock",
+      "projects AccessShareLock",
+      "projects ShareRowExclusiveLock",
+      "agent_jobs AccessShareLock",
+      "agent_jobs ShareRowExclusiveLock",
+      "ai_usage_jobs AccessExclusiveLock",
+      "ai_usage_jobs ShareLock",
+    ],
+    // create table hyp (org_id uuid references organizations(id));
+    // alter table org_credit_balances add column y text;
+    // SHARE ROW EXCLUSIVE blocks only a write to organizations. Raced the same
+    // way, the refill committed.
+    ["organizations ShareRowExclusiveLock", "org_credit_balances AccessExclusiveLock"],
+    // create table hyp (project_id uuid references projects(id));
+    // alter table agent_jobs add column y text;
+    // The completion committed.
+    ["projects ShareRowExclusiveLock", "agent_jobs AccessExclusiveLock"],
+    // create index on organizations; alter table org_credit_balances
+    ["organizations ShareLock", "org_credit_balances AccessExclusiveLock"],
+    // A read of projects and a COMMENT on runs beside an ALTER of agent_jobs.
+    [
+      "projects AccessShareLock",
+      "runs ShareUpdateExclusiveLock",
+      "agent_jobs AccessExclusiveLock",
+    ],
+    // alter table projects; alter table organizations. Neither is in the
+    // list.
+    ["projects AccessExclusiveLock", "organizations AccessExclusiveLock"],
+    // alter table projects beside a read of agent_jobs.
+    ["projects AccessExclusiveLock", "agent_jobs AccessShareLock"],
+  ]) {
+    assert.deepEqual(bothOrderLockViolations(probeOutput(...rows)), [], rows.join(", "));
+  }
+});
+
+test("only relations that existed before the migration count, an index as its table", () => {
+  // create table hyp_new (id uuid primary key);
+  // alter table hyp_new add column z text;
+  // alter table agent_jobs add column y text;
+  // No live request can lock a table before the migration that creates it
+  // commits.
+  assert.deepEqual(
+    bothOrderLockViolations(
+      probeOutput("hyp_new AccessExclusiveLock", "agent_jobs AccessExclusiveLock"),
     ),
+    [],
+  );
+  // The same table, listed as existing, does count.
+  assert.deepEqual(
+    bothOrderLockViolations(
+      psqlOutput({
+        existing: [...EXISTING_RELATIONS, ["17001", "hyp_new"]],
+        rows: ["hyp_new AccessExclusiveLock", "agent_jobs AccessExclusiveLock"],
+      }),
+    ),
+    [["hyp_new", "agent_jobs"]],
+  );
+  // 16408 is an index on agent_jobs: a rewrite of agent_jobs locks it, and
+  // that is a lock on agent_jobs, not on another table.
+  assert.deepEqual(
+    bothOrderLockViolations(
+      probeOutput("agent_jobs AccessExclusiveLock", "16408 AccessExclusiveLock"),
+    ),
+    [],
+  );
+  assert.deepEqual(
+    bothOrderLockViolations(
+      probeOutput("16408 AccessExclusiveLock", "org_credit_ledger RowExclusiveLock"),
+    ),
+    [["agent_jobs", "org_credit_ledger"]],
+  );
+  // The tables of the list must be listed before the migration, or their
+  // locks would not count.
+  assert.deepEqual(unlistedBothOrderTables(psqlOutput()), []);
+  assert.deepEqual(
+    unlistedBothOrderTables(
+      psqlOutput({
+        existing: EXISTING_RELATIONS.filter(([, table]) => table !== "org_credit_ledger"),
+      }),
+    ),
+    ["org_credit_ledger"],
+  );
+});
+
+test("a row the migration prints cannot rename a relation the id query listed", () => {
+  // alter table agent_jobs add column y text;
+  // alter table org_credit_ledger add column z text;
+  // select 'instafy-migration-existing ' || 'public.agent_jobs'::regclass::oid || ' hyp_a'
+  // union all select 'instafy-migration-existing ' || 'public.org_credit_ledger'::regclass::oid || ' hyp_b';
+  // It passed when the last row for an oid named its table.
+  const forged = aligned([
+    "instafy-migration-existing 16401 hyp_a",
+    "instafy-migration-existing 16402 hyp_b",
+  ]);
+  assert.deepEqual(
+    bothOrderLockViolations(
+      psqlOutput({
+        tags: ["SET", "ALTER TABLE", "ALTER TABLE", ...forged],
+        rows: ["agent_jobs AccessExclusiveLock", "org_credit_ledger AccessExclusiveLock"],
+      }),
+    ),
+    [["agent_jobs", "org_credit_ledger"]],
+  );
+  // alter table organizations add column x text;
+  // alter table org_credit_balances add column y text;
+  // then a row that names the balances' oid organizations.
+  assert.deepEqual(
+    bothOrderLockViolations(
+      psqlOutput({
+        tags: ["ALTER TABLE", "ALTER TABLE", ...aligned(["instafy-migration-existing 16403 organizations"])],
+        rows: ["organizations AccessExclusiveLock", "org_credit_balances AccessExclusiveLock"],
+      }),
+    ),
+    [["organizations", "org_credit_balances"]],
   );
 });
 
 test("a migration may not lock any two of agent_jobs, the ledger and the balances", () => {
-  assert.deepEqual(BOTH_ORDER_TABLES, [
+  assert.deepEqual(BOTH_ORDER_TABLES.slice(0, 3), [
     "agent_jobs",
     "org_credit_ledger",
     "org_credit_balances",
   ]);
-  assert.deepEqual(BOTH_ORDER_TABLE_PAIRS, [
+  assert.deepEqual(BOTH_ORDER_TABLE_PAIRS.slice(0, 3), [
     ["agent_jobs", "org_credit_ledger"],
     ["agent_jobs", "org_credit_balances"],
-    ["org_credit_ledger", "org_credit_balances"],
+    ["agent_jobs", "runs"],
   ]);
   // alter table org_credit_balances add column hyp_note text;
   // create table hyp_job_marks(job_id uuid references agent_jobs(id));
@@ -264,20 +520,105 @@ test("a migration may not lock any two of agent_jobs, the ledger and the balance
         "org_credit_ledger RowExclusiveLock",
       ),
     ),
-    BOTH_ORDER_TABLE_PAIRS,
+    [
+      ["agent_jobs", "org_credit_ledger"],
+      ["agent_jobs", "org_credit_balances"],
+      ["org_credit_ledger", "org_credit_balances"],
+    ],
   );
 });
 
+test("runs, prompts and the conversation tables pair with the other tables of the list", () => {
+  assert.deepEqual(BOTH_ORDER_TABLES, [
+    "agent_jobs",
+    "org_credit_ledger",
+    "org_credit_balances",
+    "runs",
+    "prompts",
+    "conversations",
+    "conversation_messages",
+  ]);
+  assert.equal(BOTH_ORDER_TABLE_PAIRS.length, 21);
+  for (const [rows, expected] of [
+    // alter table agent_jobs add column hyp_run uuid references runs(id);
+    // Dispatch inserts the run and then the job, and cancel and completion
+    // update the job and then the run, so no lock order is safe. Raced
+    // against dispatch, it deadlocked.
+    [
+      ["runs AccessShareLock", "runs ShareRowExclusiveLock", "agent_jobs AccessExclusiveLock"],
+      [["agent_jobs", "runs"]],
+    ],
+    // create table hyp_j1 (run_id uuid references runs(id));
+    // alter table agent_jobs add column y text;
+    // The runs-first order deadlocked a cancel.
+    [
+      ["hyp_j1 AccessExclusiveLock", "runs ShareRowExclusiveLock", "agent_jobs AccessExclusiveLock"],
+      [["agent_jobs", "runs"]],
+    ],
+    // create index on agent_jobs(created_at); create index on runs(created_at);
+    [["agent_jobs ShareLock", "runs ShareLock"], [["agent_jobs", "runs"]]],
+    // create index on prompts(created_at);
+    // alter table org_credit_ledger add column y text;
+    // Dispatch inserts the prompt before the ledger, and deferred billing
+    // writes the ledger before the prompt.
+    [
+      ["prompts ShareLock", "org_credit_ledger AccessExclusiveLock"],
+      [["org_credit_ledger", "prompts"]],
+    ],
+    // create index on conversation_messages(created_at);
+    // alter table agent_jobs add column y text;
+    // Dispatch inserts the user's message before the job, and completion
+    // updates the job before it inserts the agent's message.
+    [
+      ["conversation_messages ShareLock", "agent_jobs AccessExclusiveLock"],
+      [["agent_jobs", "conversation_messages"]],
+    ],
+    // create table hyp_c (conversation_id uuid references conversations(id));
+    // alter table org_credit_ledger add column y text;
+    [
+      ["conversations ShareRowExclusiveLock", "org_credit_ledger AccessExclusiveLock"],
+      [["org_credit_ledger", "conversations"]],
+    ],
+  ]) {
+    assert.deepEqual(bothOrderLockViolations(probeOutput(...rows)), expected, rows.join(", "));
+  }
+  // Against the first three tables alone, runs is another table, where SHARE
+  // ROW EXCLUSIVE is allowed.
+  assert.deepEqual(
+    bothOrderLockViolations(
+      probeOutput("runs ShareRowExclusiveLock", "agent_jobs AccessExclusiveLock"),
+      BOTH_ORDER_TABLES.slice(0, 3),
+    ),
+    [],
+  );
+});
+
+test("migrations on main that only the longer list rejects are checked against the first three", () => {
+  // Each holds a foreign key or more on runs, conversations or
+  // conversation_messages beside a conflicting lock on another table of the
+  // list, or beside an ALTER of another existing table. They merged before the
+  // list grew, and history is append-only.
+  assert.deepEqual([...FIRST_THREE_TABLES_ONLY].sort(), [
+    20260816213316n,
+    20260816213318n,
+    20260906120000n,
+  ]);
+  const track = validatePublicMigrationTrack().map(({ version }) => version);
+  for (const version of FIRST_THREE_TABLES_ONLY) {
+    assert.ok(track.includes(version), `${version}`);
+  }
+});
+
 test("the probe reads the locks of the transaction the migration ran in", () => {
-  // psql opens one transaction and runs the id query, the migration from
-  // stdin, then the probe in it.
+  // psql opens one transaction and runs the id query, the migration, then the
+  // probe in it.
   const source = readFileSync(
     new URL("./test-supabase-migrations-empty-db.mjs", import.meta.url),
     "utf8",
   );
   assert.match(
     source,
-    /"--single-transaction",[^\]]*"--command",\s*TRANSACTION_QUERY,\s*"--file",\s*"-",\s*"--command",\s*HELD_LOCK_QUERY,/u,
+    /"--single-transaction",[^\]]*"--command",\s*TRANSACTION_QUERY,\s*"--command",\s*sql,\s*"--command",\s*HELD_LOCK_QUERY,/u,
   );
   // The migration ran as one transaction.
   assert.equal(
@@ -342,4 +683,201 @@ test("the probe reads the locks of the transaction the migration ran in", () => 
     "transaction ids 1066",
   );
   assert.equal(heldLockProbeProblem("CREATE TABLE\n", ""), "transaction ids missing");
+});
+
+// A stand-in for docker that the runner drives through a whole run: it
+// reports the container healthy, keeps the arguments and the input of the
+// migration's psql, and answers it with the output and the exit status a test
+// wrote beside it.
+function fakeDocker(t) {
+  const directory = mkdtempSync(path.join(os.tmpdir(), "instafy-fake-docker-"));
+  t.after(() => rmSync(directory, { force: true, recursive: true }));
+  const command = path.join(directory, "docker");
+  writeFileSync(
+    command,
+    [
+      "#!/bin/sh",
+      'here=$(dirname "$0")',
+      'case "$1 $2" in',
+      '  "inspect --format") echo healthy ;;',
+      '  "exec "*)',
+      '    case "$*" in',
+      "      *pg_isready*) ;;",
+      "      *--single-transaction*)",
+      '        rm -f "$here"/arg.*',
+      "        n=0",
+      '        for arg in "$@"; do n=$((n + 1)); printf %s "$arg" >"$here/arg.$n"; done',
+      '        cat >"$here/input"',
+      '        cat "$here/stdout"',
+      '        cat "$here/stderr" >&2',
+      '        exit "$(cat "$here/status")" ;;',
+      "      *) echo true ;;",
+      "    esac ;;",
+      "esac",
+      "",
+    ].join("\n"),
+  );
+  chmodSync(command, 0o755);
+  const run = (
+    stdout,
+    stderr = "",
+    {
+      version = 20260000000064n,
+      sql = "alter table public.org_credit_ledger add column hyp text;\n",
+      status = 0,
+    } = {},
+  ) => {
+    const fileName = `${version}_public.sql`;
+    const source = path.join(directory, fileName);
+    writeFileSync(source, sql);
+    writeFileSync(path.join(directory, "stdout"), stdout);
+    writeFileSync(path.join(directory, "stderr"), stderr);
+    writeFileSync(path.join(directory, "status"), `${status}\n`);
+    runEmptyDatabaseMigrationTest({
+      label: "fake",
+      dockerCommand: command,
+      migrations: [{ fileName, source, track: "public", version }],
+    });
+  };
+  // The arguments and the input of the last migration's psql.
+  run.psql = () => {
+    const args = [];
+    for (let n = 1; existsSync(path.join(directory, `arg.${n}`)); n += 1) {
+      args.push(readFileSync(path.join(directory, `arg.${n}`), "utf8"));
+    }
+    return { args, input: readFileSync(path.join(directory, "input"), "utf8") };
+  };
+  return run;
+}
+
+test("the runner fails a migration whose locks it cannot read in the migration's transaction", (t) => {
+  t.mock.method(console, "log", () => {});
+  const run = fakeDocker(t);
+  const rows = ["org_credit_ledger AccessExclusiveLock"];
+  assert.doesNotThrow(() => run(psqlOutput({ rows })));
+  const unchecked = (problem) =>
+    new RegExp(
+      `^Error: public:20260000000064_public\\.sql does not run in the one transaction psql opens for it, so its held locks cannot be checked \\(${problem}\\); remove its own BEGIN, COMMIT, END or ROLLBACK$`,
+      "u",
+    );
+  // The probe printed no transaction id, the id query printed none, or
+  // neither did.
+  assert.throws(() => run(psqlOutput({ endId: null, rows })), unchecked("transaction ids 1066"));
+  assert.throws(
+    () => run(psqlOutput({ startId: null, endId: "1066", rows })),
+    unchecked("transaction ids 1066"),
+  );
+  assert.throws(
+    () => run(psqlOutput({ startId: null, endId: null, rows })),
+    unchecked("transaction ids missing"),
+  );
+  // The two ids differ.
+  assert.throws(
+    () => run(psqlOutput({ startId: "1071", endId: "1073", rows })),
+    unchecked("transaction ids 1071, 1073"),
+  );
+  // The ids match, but psql warned about each of its transaction commands.
+  for (const warning of [
+    "there is already a transaction in progress",
+    "there is no transaction in progress",
+  ]) {
+    assert.throws(
+      () => run(psqlOutput({ rows }), `psql:<stdin>:1: WARNING:  ${warning}\n`),
+      unchecked(`psql warned "${warning}"`),
+    );
+  }
+  // The tables of the list were not all listed before the migration.
+  assert.throws(
+    () =>
+      run(
+        psqlOutput({
+          existing: EXISTING_RELATIONS.filter(([, table]) => table !== "org_credit_ledger"),
+          rows,
+        }),
+      ),
+    /^Error: public:20260000000064_public\.sql ran without org_credit_ledger among the public tables before it, so its held locks cannot be checked$/u,
+  );
+  // The locks were read and are a violation.
+  assert.throws(
+    () => run(psqlOutput({ rows: ["projects AccessExclusiveLock", "agent_jobs AccessExclusiveLock"] })),
+    /^Error: public:20260000000064_public\.sql writes or locks both projects and agent_jobs until it commits; split it into migrations that commit separately$/u,
+  );
+});
+
+test("the runner sends a migration after the boundary to the server as it is", (t) => {
+  t.mock.method(console, "log", () => {});
+  const run = fakeDocker(t);
+  const rows = ["org_credit_ledger AccessExclusiveLock"];
+  // psql passes a --command to the server without running a meta-command or
+  // replacing a variable in it, as supabase db push does. It reads a file as
+  // a script, where
+  // select pg_current_xact_id() as fake_id \gset
+  // \echo instafy-migration-xact :fake_id
+  // \o /dev/null
+  // forged the id rows and hid the probe's own.
+  const sql = "alter table public.org_credit_ledger add column hyp text;\n";
+  run(psqlOutput({ rows }), "", { sql });
+  const { args, input } = run.psql();
+  assert.deepEqual(args.slice(args.indexOf("--command")), [
+    "--command",
+    TRANSACTION_QUERY,
+    "--command",
+    sql,
+    "--command",
+    HELD_LOCK_QUERY,
+  ]);
+  assert.ok(!args.includes("--file") && !args.includes("--interactive"), args.join(" "));
+  assert.equal(input, "");
+  // psql runs a --command that starts with a backslash as a meta-command.
+  assert.throws(
+    () => run(psqlOutput({ rows }), "", { sql: "\\echo instafy-migration-xact 1066\nselect 1;\n" }),
+    /^Error: public:20260000000064_public\.sql starts with a psql meta-command; a migration must be plain SQL$/u,
+  );
+  // Linux limits one argument to 128 KiB, its terminating NUL included.
+  assert.equal(MAX_COMMAND_BYTES, 131_071);
+  assert.throws(
+    () => run(psqlOutput({ rows }), "", { sql: `-- ${"x".repeat(MAX_COMMAND_BYTES - 3)}\n` }),
+    /^Error: public:20260000000064_public\.sql is larger than the 131071 bytes one psql --command can carry; split it$/u,
+  );
+  assert.doesNotThrow(() =>
+    run(psqlOutput({ rows }), "", { sql: `-- ${"x".repeat(MAX_COMMAND_BYTES - 4)}\n` }),
+  );
+  // A failed psql names each query and the migration by its first line.
+  assert.throws(
+    () =>
+      run("", "ERROR:  column \"hyp\" already exists\n", {
+        sql: "-- The ledger column.\nalter table public.org_credit_ledger add column hyp text;\n",
+        status: 1,
+      }),
+    /--command set local search_path = pg_catalog, pg_temp;\.\.\. --command -- The ledger column\.\.\.\. --command set local search_path = pg_catalog, pg_temp;\.\.\. failed: ERROR: {2}column "hyp" already exists$/u,
+  );
+});
+
+test("the runner checks a migration on main against the first three tables", (t) => {
+  t.mock.method(console, "log", () => {});
+  const run = fakeDocker(t);
+  // 20260816213318 as the empty database reports it: foreign keys to runs,
+  // conversations and conversation_messages from the table it creates, and an
+  // ALTER of agent_jobs.
+  const rows = [
+    "runs ShareRowExclusiveLock",
+    "conversations ShareRowExclusiveLock",
+    "conversation_messages ShareRowExclusiveLock",
+    "agent_jobs AccessExclusiveLock",
+  ];
+  assert.doesNotThrow(() => run(psqlOutput({ rows }), "", { version: 20260816213318n }));
+  assert.throws(
+    () => run(psqlOutput({ rows }), "", { version: 20260929100200n }),
+    /^Error: public:20260929100200_public\.sql writes or locks both agent_jobs and runs, agent_jobs and conversations, agent_jobs and conversation_messages, runs and conversations, /u,
+  );
+  // The first three still pair for it.
+  assert.throws(
+    () =>
+      run(
+        psqlOutput({ rows: ["agent_jobs AccessExclusiveLock", "org_credit_ledger RowExclusiveLock"] }),
+        "",
+        { version: 20260816213318n },
+      ),
+    /writes or locks both agent_jobs and org_credit_ledger until it commits/u,
+  );
 });
