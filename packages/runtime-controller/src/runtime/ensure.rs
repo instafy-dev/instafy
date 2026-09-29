@@ -1060,9 +1060,9 @@ async fn authorize_explicit_runtime_target(
 
 /// Stable code of a refused tenant attach. A tenant attach answers a runtime
 /// that does not exist, a runtime whose project is missing or deleted, and a
-/// runtime whose project the caller cannot write to alike, so these tenant
-/// refusals cannot be told apart from each other. This covers the tenant
-/// scope only: the other scopes answer a `runtimeId` in their own way (see
+/// runtime whose project the caller cannot write to alike: these tenant
+/// refusals get the same status and body. This covers the tenant scope only:
+/// the other scopes answer a `runtimeId` in their own way (see
 /// `authorize_explicit_runtime_target`).
 const TENANT_RUNTIME_NOT_FOUND_CODE: &str = "runtime_not_found";
 
