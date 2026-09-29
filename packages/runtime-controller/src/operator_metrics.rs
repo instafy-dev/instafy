@@ -2065,6 +2065,14 @@ mod operator_metrics_tests {
             .await?;
         let now = Utc::now();
         let before = hosted_lease_totals(&transaction, now).await?;
+        // One hour inside yesterday (UTC), whatever the time of day: the
+        // hosted-hours query counts a lease once for every UTC day it
+        // overlaps, so a lease that crossed midnight would count twice.
+        let launched_at = (now.date_naive() - Duration::days(1))
+            .and_hms_opt(1, 0, 0)
+            .expect("01:00 is a valid time")
+            .and_utc();
+        let released_at = launched_at + Duration::hours(1);
 
         let host_project_id = Uuid::new_v4();
         let tenant_project_id = Uuid::new_v4();
@@ -2089,9 +2097,14 @@ mod operator_metrics_tests {
                 "insert into runtime_leases
                     (id, project_id, runtime_id, status, scope, requested_at, launched_at,
                      released_at)
-                 values ($1, $2, $3, 'released', 'shared', now() - interval '2 hours',
-                         now() - interval '2 hours', now() - interval '1 hour')",
-                &[&host_lease_id, &host_project_id, &runtime_id],
+                 values ($1, $2, $3, 'released', 'shared', $4, $4, $5)",
+                &[
+                    &host_lease_id,
+                    &host_project_id,
+                    &runtime_id,
+                    &launched_at,
+                    &released_at,
+                ],
             )
             .await?;
         let with_host_lease = hosted_lease_totals(&transaction, now).await?;
@@ -2100,7 +2113,11 @@ mod operator_metrics_tests {
             before.0 + 1,
             "the host's own lease counts"
         );
-        assert!(with_host_lease.1 > before.1, "the host's own lease counts");
+        assert_eq!(
+            with_host_lease.1,
+            before.1 + 3600,
+            "the host's own lease counts"
+        );
         assert_eq!(
             with_host_lease.2,
             before.2 + 1,
@@ -2112,9 +2129,14 @@ mod operator_metrics_tests {
                 "insert into runtime_leases
                     (project_id, runtime_id, status, scope, parent_lease_id, requested_at,
                      launched_at, released_at)
-                 values ($1, $2, 'released', 'tenant', $3, now() - interval '2 hours',
-                         now() - interval '2 hours', now() - interval '1 hour')",
-                &[&tenant_project_id, &runtime_id, &host_lease_id],
+                 values ($1, $2, 'released', 'tenant', $3, $4, $4, $5)",
+                &[
+                    &tenant_project_id,
+                    &runtime_id,
+                    &host_lease_id,
+                    &launched_at,
+                    &released_at,
+                ],
             )
             .await?;
         assert_eq!(
