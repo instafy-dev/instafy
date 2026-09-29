@@ -1049,6 +1049,88 @@ async fn authorize_explicit_runtime_target(
     ))
 }
 
+/// Stable code of a refused tenant attach. A runtime that does not exist and a
+/// runtime the caller may not attach to get the same answer, so the refusal
+/// does not confirm that a runtime id exists.
+const TENANT_RUNTIME_NOT_FOUND_CODE: &str = "runtime_not_found";
+
+fn tenant_runtime_not_found() -> (StatusCode, Json<ApiError>) {
+    (
+        StatusCode::NOT_FOUND,
+        Json(ApiError {
+            message: "runtime not found".to_string(),
+            code: Some(TENANT_RUNTIME_NOT_FOUND_CODE.to_string()),
+            details: None,
+        }),
+    )
+}
+
+/// Authorize a tenant attach against the runtime it names.
+///
+/// A tenant lease attaches the payload project to a runtime that another
+/// project, the host, owns and runs. The caller must be able to write to the
+/// host project as well as to the tenant project, the rule the tenant manifest
+/// on `/projects/:id/runtime/activity` already applies, and the tenant
+/// project's organization must be allowed to use the host runtime's provider.
+/// A missing runtime and a host project the caller cannot write to are both
+/// refused with [`tenant_runtime_not_found`].
+///
+/// Returns the host project id, which the attach checks again under its row
+/// lock.
+async fn authorize_tenant_host_runtime(
+    state: &AppState,
+    transaction: &Transaction<'_>,
+    tenant_project: &crate::ProjectRecord,
+    runtime_id: Uuid,
+    context: &RequestContext,
+) -> Result<Uuid, (StatusCode, Json<ApiError>)> {
+    let row = transaction
+        .query_opt(
+            "select project_id, provider
+             from runtimes
+             where id = $1
+             for share",
+            &[&runtime_id],
+        )
+        .await
+        .map_err(|error| internal_error(format!("failed to load tenant host runtime: {error}")))?;
+    let Some(row) = row else {
+        return Err(tenant_runtime_not_found());
+    };
+    let host_project_id: Uuid = row.get("project_id");
+    let provider: String = row.get("provider");
+
+    // Anonymous dev-mode requests skip project access checks for the tenant
+    // project too (see `runtime_ensure`).
+    if context.is_service_role || context.user_id.is_some() {
+        let host_project = load_project_record(transaction, &host_project_id)
+            .await
+            .map_err(as_tenant_runtime_not_found)?;
+        ensure_project_write_access(transaction, &host_project, context, None)
+            .await
+            .map_err(as_tenant_runtime_not_found)?;
+    }
+
+    authorize_provider_for_project(state, &provider, tenant_project.org_id)?;
+    Ok(host_project_id)
+}
+
+/// A missing runtime or host project, or a refused host project access check,
+/// becomes the tenant attach's not-found answer; any other failure (a database
+/// error) is reported as is.
+fn as_tenant_runtime_not_found(
+    (status, body): (StatusCode, Json<ApiError>),
+) -> (StatusCode, Json<ApiError>) {
+    if matches!(
+        status,
+        StatusCode::NOT_FOUND | StatusCode::FORBIDDEN | StatusCode::UNAUTHORIZED
+    ) {
+        tenant_runtime_not_found()
+    } else {
+        (status, body)
+    }
+}
+
 pub(crate) async fn runtime_ensure(
     axum::extract::State(state): axum::extract::State<AppState>,
     headers: HeaderMap,
@@ -1129,6 +1211,17 @@ pub(crate) async fn runtime_ensure(
         ensure_project_write_access(&transaction, &project, &auth, None).await?;
     }
 
+    let tenant_target = if scope == RuntimeLeaseScope::Tenant {
+        let runtime_id =
+            runtime_id.ok_or_else(|| bad_request("runtimeId is required for tenant leases"))?;
+        let host_project_id =
+            authorize_tenant_host_runtime(&state, &transaction, &project, runtime_id, &auth)
+                .await?;
+        Some((runtime_id, host_project_id))
+    } else {
+        None
+    };
+
     let targets_private_self_hosted_runtime = if scope == RuntimeLeaseScope::Tenant {
         false
     } else {
@@ -1204,12 +1297,13 @@ pub(crate) async fn runtime_ensure(
             .await?
         }
         RuntimeLeaseScope::Tenant => {
-            let runtime_id =
-                runtime_id.ok_or_else(|| bad_request("runtimeId is required for tenant leases"))?;
+            let (runtime_id, host_project_id) =
+                tenant_target.ok_or_else(|| internal_error("tenant attach was not authorized"))?;
             ensure_runtime_tenant(
                 &state,
                 project_id,
                 runtime_id,
+                host_project_id,
                 metadata.clone(),
                 origin_options,
             )
@@ -3083,10 +3177,13 @@ async fn launch_committed_runtime_lease(
     Ok(response)
 }
 
+/// `host_project_id` is the project `authorize_tenant_host_runtime` authorized
+/// the caller for; the runtime must still belong to it once locked.
 async fn ensure_runtime_tenant(
     state: &AppState,
     project_id: Uuid,
     runtime_id: Uuid,
+    host_project_id: Uuid,
     metadata: Option<JsonValue>,
     origin_options: OriginEnsureOptions,
 ) -> Result<RuntimeEnsureResponse, (StatusCode, Json<ApiError>)> {
@@ -3102,7 +3199,12 @@ async fn ensure_runtime_tenant(
 
     ensure_project_exists(&transaction, &project_id, state.config.auto_create_projects).await?;
 
-    let runtime = fetch_runtime_for_update(&transaction, &runtime_id).await?;
+    let runtime = fetch_runtime_for_update(&transaction, &runtime_id)
+        .await
+        .map_err(as_tenant_runtime_not_found)?;
+    if runtime.project_id != host_project_id {
+        return Err(tenant_runtime_not_found());
+    }
     if super::access::runtime_is_private_self_hosted(
         state,
         &runtime.provider,
@@ -3262,6 +3364,10 @@ mod concurrency_tests;
 #[cfg(test)]
 #[path = "ensure_reclaim_tests.rs"]
 mod reclaim_tests;
+
+#[cfg(test)]
+#[path = "ensure_tenant_tests.rs"]
+mod tenant_tests;
 
 #[cfg(test)]
 mod tests {
