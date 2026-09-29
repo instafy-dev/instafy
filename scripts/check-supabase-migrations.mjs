@@ -43,8 +43,11 @@ const STANDARD_CONFORMING_STRINGS = /standard_conforming_strings/iu;
 // way, invalid bytes become U+FFFD, which the server accepts, so the
 // empty-database test, which passes a migration to psql as a string, would
 // apply such a migration. ignoreBOM keeps a leading byte order mark, as that
-// way does.
+// way does, so that validatePublicMigrationTrack can reject it: psql passes it
+// to the server as part of the first statement of a --command, where it is a
+// syntax error.
 const STRICT_UTF8 = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true });
+const BYTE_ORDER_MARK = "\ufeff";
 
 function matchAt(pattern, text, index) {
   pattern.lastIndex = index;
@@ -71,10 +74,13 @@ function quotedEnd(sql, index, backslashEscapes) {
   return sql.length;
 }
 
-// The first word of every top-level statement in `sql`, lowercased, and every
-// psql meta-command in it. Comments, quoted strings and identifiers, and
-// dollar-quoted bodies such as a DO block or a function body are skipped, so
-// the BEGIN and END inside them do not count. Statements split the way psql
+// The first word of every top-level statement in `sql`, lowercased, the words
+// of each such statement, and every psql meta-command in it. Comments,
+// quoted strings and identifiers, and dollar-quoted bodies such as a DO block
+// or a function body are skipped, so the BEGIN and END inside them do not
+// count. A statement's words are its names and keywords, lowercased, its
+// numbers, and each '...' string or "..." identifier whole, quotes included;
+// its operators and punctuation are left out. Statements split the way psql
 // splits them: a semicolon inside parentheses, or inside the BEGIN ATOMIC body
 // of a CREATE FUNCTION or PROCEDURE, does not end one. psql runs a backslash
 // anywhere else, at the start of a line or after a query, as a meta-command
@@ -82,6 +88,7 @@ function quotedEnd(sql, index, backslashEscapes) {
 function scanTopLevel(sql) {
   const keywords = [];
   const metaCommands = [];
+  const statements = [];
   let words = [];
   let parenDepth = 0;
   let beginDepth = 0;
@@ -137,8 +144,9 @@ function scanTopLevel(sql) {
         }
       }
     } else if (char === "'" || char === '"') {
-      index = quotedEnd(sql, index, false);
-      words.push(char);
+      const end = quotedEnd(sql, index, false);
+      words.push(sql.slice(index, end));
+      index = end;
     } else if (char === "\\") {
       metaCommands.push(matchAt(META_COMMAND, sql, index));
       const lineEnd = sql.indexOf("\n", index);
@@ -149,16 +157,26 @@ function scanTopLevel(sql) {
       } else if (char === ")") {
         parenDepth = Math.max(0, parenDepth - 1);
       } else if (char === ";" && parenDepth === 0 && beginDepth === 0) {
+        if (words.length > 0) {
+          statements.push(words);
+        }
         words = [];
       }
       index += 1;
     }
   }
-  return { keywords, metaCommands };
+  if (words.length > 0) {
+    statements.push(words);
+  }
+  return { keywords, metaCommands, statements };
 }
 
 function topLevelStatementKeywords(sql) {
   return scanTopLevel(sql).keywords;
+}
+
+function topLevelStatements(sql) {
+  return scanTopLevel(sql).statements;
 }
 
 function topLevelMetaCommands(sql) {
@@ -214,6 +232,11 @@ function validatePublicMigrationTrack(directory = DEFAULT_MIGRATIONS) {
       sql = STRICT_UTF8.decode(source);
     } catch {
       throw new Error(`public migration ${entry.name} is not valid UTF-8`);
+    }
+    if (sql.startsWith(BYTE_ORDER_MARK)) {
+      throw new Error(
+        `public migration ${entry.name} starts with a byte order mark; save it as UTF-8 without a BOM`,
+      );
     }
     const { keywords, metaCommands } = scanTopLevel(sql);
     const control = keywords.find((keyword) => TRANSACTION_CONTROL.has(keyword));
@@ -307,5 +330,6 @@ export {
   publicMigrationSetSha256,
   topLevelMetaCommands,
   topLevelStatementKeywords,
+  topLevelStatements,
   validatePublicMigrationTrack,
 };

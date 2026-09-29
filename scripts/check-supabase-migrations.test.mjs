@@ -14,6 +14,7 @@ import {
   LANE_BOUNDARY,
   topLevelMetaCommands,
   topLevelStatementKeywords,
+  topLevelStatements,
   validatePublicMigrationTrack,
 } from "./check-supabase-migrations.mjs";
 
@@ -236,10 +237,24 @@ test("a migration must be valid UTF-8", (t) => {
       source.toString("hex"),
     );
   }
-  // The same character encoded as UTF-8, and a leading byte order mark.
+  // The same character encoded as UTF-8.
   writeFileSync(path.join(directory, name), "-- é\nselect 'é';\n");
   assert.equal(validatePublicMigrationTrack(directory).length, 1);
-  writeFileSync(path.join(directory, name), "﻿select 1;\n");
+  // psql passed a leading byte order mark to the server as part of the first
+  // statement of a --command, where it was a syntax error.
+  for (const sql of ["\ufeffselect 1;\n", "\ufeff-- A comment.\nselect 1;\n"]) {
+    writeFileSync(path.join(directory, name), sql);
+    assert.throws(
+      () => validatePublicMigrationTrack(directory),
+      new RegExp(
+        `^Error: public migration ${name} starts with a byte order mark; save it as UTF-8 without a BOM$`,
+        "u",
+      ),
+      sql,
+    );
+  }
+  // The same character anywhere else is a zero-width no-break space.
+  writeFileSync(path.join(directory, name), "select '\ufeff';\n");
   assert.equal(validatePublicMigrationTrack(directory).length, 1);
 });
 
@@ -261,5 +276,40 @@ test("statements split the way psql splits them", () => {
       ].join("\n"),
     ),
     ["create", "create", "select", "select", "select", "select", "do", "select", "select", "create"],
+  );
+});
+
+test("each top-level statement keeps its words, and its strings whole", () => {
+  assert.deepEqual(
+    topLevelStatements(
+      [
+        "-- set local lock_timeout = '1s';",
+        "SET LOCAL lock_timeout TO '5s';",
+        "/* ; */ select 'a;''b', \"We;ird\", 1.5e3 from t where x = $$;$$;",
+        "do $$ begin set local lock_timeout = 0; end $$;",
+        "create function f() returns int language sql begin atomic select 1; end;",
+        "select 2",
+      ].join("\n"),
+    ),
+    [
+      ["set", "local", "lock_timeout", "to", "'5s'"],
+      ["select", "'a;''b'", "\"We;ird\"", "1.5e3", "from", "t", "where", "x"],
+      ["do"],
+      [
+        "create",
+        "function",
+        "f",
+        "returns",
+        "int",
+        "language",
+        "sql",
+        "begin",
+        "atomic",
+        "select",
+        "1",
+        "end",
+      ],
+      ["select", "2"],
+    ],
   );
 });

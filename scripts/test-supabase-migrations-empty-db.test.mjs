@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import {
   chmodSync,
   existsSync,
@@ -25,13 +26,18 @@ import {
   OTHER_TABLE_LOCK_MODES,
   POSTGRES_IMAGE,
   REQUIRED_PUBLIC_RELATIONS,
+  REVIEWED_LOCK_EXCEPTIONS,
   TRANSACTION_QUERY,
   bothOrderLockViolations,
   heldLockProbeProblem,
+  heldLockTimeout,
+  mentionsLockTimeoutOnce,
   resolveRunnableImage,
   runEmptyDatabaseMigrationTest,
+  setsLockTimeoutFirst,
   unlistedBothOrderTables,
   validateMigrationPlan,
+  validateReviewedLockExceptions,
 } from "./test-supabase-migrations-empty-db.mjs";
 
 test("empty-database tests use an immutable Supabase Postgres image", () => {
@@ -163,13 +169,15 @@ function aligned(rows) {
 // psql prints the rows of the id query, the migration's own command tags,
 // then the probe rows, each query's rows indented under a header. The id
 // query prints the transaction id and one row per existing relation; the
-// probe prints the transaction id again and one row per lock. The rows below
-// are what Postgres 17 reported for each case.
+// probe prints the transaction id again, the lock_timeout in milliseconds and
+// one row per lock. The rows below are what Postgres 17 reported for each
+// case.
 function psqlOutput({
   startId = "1066",
   endId = startId,
   existing = EXISTING_RELATIONS,
   tags = ["SET", "ALTER TABLE"],
+  lockTimeout = "5000",
   rows = [],
 } = {}) {
   return [
@@ -180,6 +188,7 @@ function psqlOutput({
     ...tags,
     ...aligned([
       ...(endId === null ? [] : [`instafy-migration-xact ${endId}`]),
+      ...(lockTimeout === null ? [] : [`instafy-migration-lock-timeout ${lockTimeout}`]),
       ...rows.map((row) => `instafy-migration-holds ${lockRow(row)}`),
     ]),
   ].join("\n");
@@ -270,6 +279,23 @@ test("the held-lock probe reports every relation lock this transaction holds on 
   // The tables and modes are judged in bothOrderLockViolations, so the probe
   // keeps them all.
   assert.doesNotMatch(HELD_LOCK_QUERY, /relname in|l\.mode in/u);
+  // It also reads the lock_timeout, in milliseconds, that the migration left
+  // in force.
+  assert.match(
+    HELD_LOCK_QUERY,
+    /\nunion all\nselect 'instafy-migration-lock-timeout ' \|\| setting from pg_settings where name = 'lock_timeout'\nunion all\n/u,
+  );
+  assert.equal(heldLockTimeout(psqlOutput({ lockTimeout: "5000" })), 5000);
+  assert.equal(heldLockTimeout(psqlOutput({ lockTimeout: "0" })), 0);
+  // No row, or a second one that the migration printed, cannot be read.
+  assert.equal(heldLockTimeout(psqlOutput({ lockTimeout: null })), null);
+  assert.equal(
+    heldLockTimeout(
+      psqlOutput({ lockTimeout: "0", tags: ["SET", ...aligned(["instafy-migration-lock-timeout 5000"])] }),
+    ),
+    null,
+  );
+  assert.equal(heldLockTimeout(psqlOutput({ lockTimeout: "5s" })), null);
   // The id query lists every public relation before the migration, with the
   // table an index is on.
   assert.match(
@@ -1004,6 +1030,7 @@ function fakeDocker(t) {
       version = 20260000000064n,
       sql = "alter table public.org_credit_ledger add column hyp text;\n",
       status = 0,
+      exceptions = new Map(),
     } = {},
   ) => {
     const fileName = `${version}_public.sql`;
@@ -1016,6 +1043,7 @@ function fakeDocker(t) {
       label: "fake",
       dockerCommand: command,
       migrations: [{ fileName, source, track: "public", version }],
+      reviewedLockExceptions: exceptions,
     });
   };
   // The arguments and the input of the last migration's psql.
@@ -1091,7 +1119,7 @@ test("the runner fails a migration whose locks it cannot read in the migration's
   // The locks were read and are a violation.
   assert.throws(
     () => run(psqlOutput({ rows: ["projects AccessExclusiveLock", "agent_jobs AccessExclusiveLock"] })),
-    /^Error: public:20260000000064_public\.sql writes or locks both projects and agent_jobs until it commits; split it into migrations that commit separately$/u,
+    /^Error: public:20260000000064_public\.sql writes or locks both projects and agent_jobs until it commits; split it into migrations that commit separately, or, when one statement locks both tables \(a foreign key between two listed tables\), add a reviewed exception as supabase\/MIGRATIONS\.md describes$/u,
   );
 });
 
@@ -1185,4 +1213,320 @@ test("the runner checks a migration on main against the first three tables", (t)
       ),
     /writes or locks both agent_jobs and org_credit_ledger until it commits/u,
   );
+});
+
+test("a migration sets its lock timeout only with a first top-level SET LOCAL", () => {
+  for (const sql of [
+    "set local lock_timeout = '5s';\nalter table agent_jobs add column hyp text;\n",
+    "-- Bound the wait.\nSET LOCAL lock_timeout TO '5s';\nselect 1;\n",
+    "/* a comment */ set local lock_timeout = 5000;\n",
+    "set local lock_timeout = '1.5 min';\n",
+    "set local lock_timeout = '1000us';\n",
+  ]) {
+    assert.equal(setsLockTimeoutFirst(sql), true, sql);
+  }
+  for (const sql of [
+    "alter table agent_jobs add column hyp text;\n",
+    // After the statement that takes the locks, it does not bound their wait.
+    "alter table agent_jobs add column hyp text;\nset local lock_timeout = '5s';\n",
+    // A comment, a string or a body sets nothing.
+    "-- set local lock_timeout = '5s';\nalter table agent_jobs add column hyp text;\n",
+    "/* set local lock_timeout = '5s'; */ alter table agent_jobs add column hyp text;\n",
+    "select 'set local lock_timeout = ''5s''';\nset local lock_timeout = '5s';\n",
+    "do $$ begin set local lock_timeout = '5s'; end $$;\n",
+    // For the session, not the migration's own transaction.
+    "set lock_timeout = '5s';\n",
+    "set session lock_timeout = '5s';\n",
+    // No bound at all, or less than the one millisecond Postgres rounds to.
+    "set local lock_timeout = 0;\n",
+    "set local lock_timeout = '0';\n",
+    "set local lock_timeout = '500us';\n",
+    "set local lock_timeout to default;\n",
+    "set local lock_timeout = '5s\n",
+    "set local statement_timeout = '5s';\n",
+  ]) {
+    assert.equal(setsLockTimeoutFirst(sql), false, sql);
+  }
+});
+
+test("a migration under a reviewed lock exception mentions lock_timeout only where it sets it", () => {
+  const first = "set local lock_timeout = '5s';\n";
+  const statement =
+    "alter table public.agent_jobs add column lease_id uuid references public.runtime_leases(id);\n";
+  assert.equal(mentionsLockTimeoutOnce(`${first}${statement}`), true);
+  assert.equal(mentionsLockTimeoutOnce(`-- Bound the wait.\n${first}${statement}`), true);
+  // Each of these lifts the timeout before the statement that takes the
+  // locks, and setsLockTimeoutFirst accepts every one.
+  for (const lift of [
+    "reset lock_timeout;\n",
+    "set local lock_timeout = 0;\n",
+    "SET LOCAL LOCK_TIMEOUT TO DEFAULT;\n",
+    "set lock_timeout = 0;\n",
+    "select set_config('lock_timeout', '0', true);\n",
+    "do $$ begin perform set_config('lock_timeout', '0', true); end $$;\n",
+  ]) {
+    const sql = `${first}${lift}${statement}`;
+    assert.equal(setsLockTimeoutFirst(sql), true, sql);
+    assert.equal(mentionsLockTimeoutOnce(sql), false, sql);
+  }
+  // A comment that mentions it counts too.
+  assert.equal(mentionsLockTimeoutOnce(`-- lock_timeout bounds the wait.\n${first}${statement}`), false);
+  assert.equal(mentionsLockTimeoutOnce(`${first}${statement}-- lock_timeout is set.\n`), false);
+});
+
+test("a reviewed lock exception passes only the reviewed file, with its lock timeout first", (t) => {
+  const log = t.mock.method(console, "log", () => {});
+  const run = fakeDocker(t);
+  const version = 20260929100200n;
+  // alter table agent_jobs add column lease_id uuid references runtime_leases(id);
+  // as Postgres 17 reported it. The foreign key locks both tables in one
+  // statement, so no split helps.
+  const rows = [
+    "agent_jobs AccessExclusiveLock",
+    "agent_jobs AccessShareLock",
+    "agent_jobs ShareRowExclusiveLock",
+    "runtime_leases AccessShareLock",
+    "runtime_leases ShareRowExclusiveLock",
+  ];
+  const first = "set local lock_timeout = '5s';\n";
+  const statement =
+    "alter table public.agent_jobs add column lease_id uuid references public.runtime_leases(id);\n";
+  const sql = `${first}${statement}`;
+  const sha256 = (text) => createHash("sha256").update(text).digest("hex");
+  const reason = "agent_jobs.lease_id references runtime_leases";
+  const reviewed = (text, pairs = [["agent_jobs", "runtime_leases"]]) =>
+    new Map([[version, { sha256: sha256(text), pairs, reason }]]);
+  const where = "public:20260929100200_public.sql";
+  const failsWith = (message) => (error) => {
+    assert.equal(error.message, message);
+    return true;
+  };
+
+  // Without an entry, the message names both routes.
+  assert.throws(
+    () => run(psqlOutput({ rows }), "", { version, sql }),
+    failsWith(
+      `${where} writes or locks both agent_jobs and runtime_leases until it commits; split it into migrations that commit separately, or, when one statement locks both tables (a foreign key between two listed tables), add a reviewed exception as supabase/MIGRATIONS.md describes`,
+    ),
+  );
+  // With an entry for the exact bytes and pairs and a lock timeout first, it
+  // passes, and the run says what it let through and why.
+  log.mock.resetCalls();
+  assert.doesNotThrow(() =>
+    run(psqlOutput({ rows }), "", { version, sql, exceptions: reviewed(sql) }),
+  );
+  assert.deepEqual(
+    log.mock.calls.slice(0, 2).map(({ arguments: [line] }) => line),
+    [
+      `[empty-db:fake] ${where} writes or locks both agent_jobs and runtime_leases until it commits, under its reviewed lock exception: ${reason}`,
+      `[empty-db:fake] applied ${where}`,
+    ],
+  );
+  // The entry allows the pairs it lists and no others. Beside the foreign key,
+  // alter table public.projects add column hyp text;
+  // update public.runs set id = id where false;
+  // add pairs that a split would remove.
+  const overbroad = `${sql}alter table public.projects add column hyp text;\nupdate public.runs set id = id where false;\n`;
+  assert.throws(
+    () =>
+      run(
+        psqlOutput({ rows: [...rows, "projects AccessExclusiveLock", "runs RowExclusiveLock"] }),
+        "",
+        { version, sql: overbroad, exceptions: reviewed(overbroad) },
+      ),
+    failsWith(
+      `${where} writes or locks both agent_jobs and runs, runs and runtime_leases, projects and agent_jobs, projects and runs, projects and runtime_leases until it commits, which its reviewed lock exception does not list; split it into migrations that commit separately, or have a reviewer add the pairs to its entry`,
+    ),
+  );
+  // A pair is written as the message names it.
+  assert.throws(
+    () =>
+      run(psqlOutput({ rows }), "", {
+        version,
+        sql,
+        exceptions: reviewed(sql, [["runtime_leases", "agent_jobs"]]),
+      }),
+    failsWith(
+      `${where} writes or locks both agent_jobs and runtime_leases until it commits, which its reviewed lock exception does not list; split it into migrations that commit separately, or have a reviewer add the pairs to its entry`,
+    ),
+  );
+  // A reviewed pair the migration no longer holds is stale.
+  assert.throws(
+    () =>
+      run(psqlOutput({ rows }), "", {
+        version,
+        sql,
+        exceptions: reviewed(sql, [
+          ["agent_jobs", "runtime_leases"],
+          ["agent_jobs", "runs"],
+        ]),
+      }),
+    failsWith(
+      `${where} has a reviewed lock exception for agent_jobs and runs but no longer writes or locks them that way; remove them from its entry`,
+    ),
+  );
+  // Any change to the file, even one more newline, needs a new review.
+  const changed = `${sql}\n`;
+  assert.throws(
+    () => run(psqlOutput({ rows }), "", { version, sql: changed, exceptions: reviewed(sql) }),
+    failsWith(
+      `${where} changed since its lock exception was reviewed: its sha256 is ${sha256(changed)}, not the reviewed ${sha256(sql)}; have the change reviewed and update the entry`,
+    ),
+  );
+  // The reviewed bytes must set a lock timeout first, not in a comment or
+  // after the statement that takes the locks.
+  for (const text of [
+    statement,
+    `${statement}${first}`,
+    `-- ${first}${statement}`,
+    `set local lock_timeout = 0;\n${statement}`,
+  ]) {
+    assert.throws(
+      () => run(psqlOutput({ rows }), "", { version, sql: text, exceptions: reviewed(text) }),
+      failsWith(
+        `${where} has a reviewed lock exception but does not set a lock timeout first; start it with set local lock_timeout = '5s';`,
+      ),
+      text,
+    );
+  }
+  // Nor lift it again before that statement.
+  for (const lift of [
+    "reset lock_timeout;\n",
+    "set local lock_timeout = 0;\n",
+    "select set_config('lock_timeout', '0', true);\n",
+    "do $$ begin perform set_config('lock_timeout', '0', true); end $$;\n",
+  ]) {
+    const text = `${first}${lift}${statement}`;
+    assert.throws(
+      () => run(psqlOutput({ rows }), "", { version, sql: text, exceptions: reviewed(text) }),
+      failsWith(
+        `${where} has a reviewed lock exception but mentions lock_timeout outside its first statement; set it there once and mention it nowhere else, so that nothing after it can lift the timeout`,
+      ),
+      text,
+    );
+  }
+  // RESET ALL lifts it without naming it, and the probe then reads 0.
+  const resetAll = `${first}reset all;\n${statement}`;
+  assert.throws(
+    () =>
+      run(psqlOutput({ rows, lockTimeout: "0" }), "", {
+        version,
+        sql: resetAll,
+        exceptions: reviewed(resetAll),
+      }),
+    failsWith(
+      `${where} has a reviewed lock exception but leaves lock_timeout at 0 before it commits; set it once, first, and do not lift it`,
+    ),
+  );
+  // A row the migration prints cannot stand in for the probe's.
+  const forged = `${first}select 'instafy-migration-lock-timeout 5000';\nreset all;\n${statement}`;
+  assert.throws(
+    () =>
+      run(
+        psqlOutput({
+          rows,
+          lockTimeout: "0",
+          tags: ["SET", ...aligned(["instafy-migration-lock-timeout 5000"]), "RESET", "ALTER TABLE"],
+        }),
+        "",
+        { version, sql: forged, exceptions: reviewed(forged) },
+      ),
+    failsWith(
+      `${where} has a reviewed lock exception but its lock_timeout could not be read before it commits; set it once, first, and do not lift it`,
+    ),
+  );
+  // An entry cannot outlive the violation it excuses.
+  assert.throws(
+    () =>
+      run(psqlOutput({ rows: ["agent_jobs AccessExclusiveLock"] }), "", {
+        version,
+        sql,
+        exceptions: reviewed(sql),
+      }),
+    failsWith(
+      `${where} has a reviewed lock exception but no longer writes or locks two tables that way; remove its entry`,
+    ),
+  );
+  // Nor the migration it names, which the runner checks before it starts a
+  // container.
+  assert.throws(
+    () =>
+      run(psqlOutput({ rows }), "", {
+        version,
+        sql,
+        exceptions: new Map([
+          [20260929100400n, { sha256: sha256(sql), pairs: [["agent_jobs", "runtime_leases"]], reason }],
+        ]),
+      }),
+    failsWith(
+      "reviewed lock exception 20260929100400 names no migration after 20260000000063; remove it",
+    ),
+  );
+});
+
+test("reviewed lock exceptions name a checked migration with its sha256, its pairs and a one-line reason", () => {
+  const plan = [{ version: 20260000000063n }, { version: 20260929100200n }];
+  const entry = {
+    sha256: "a".repeat(64),
+    pairs: [["agent_jobs", "runtime_leases"]],
+    reason: "agent_jobs.lease_id references runtime_leases",
+  };
+  assert.doesNotThrow(() =>
+    validateReviewedLockExceptions(new Map([[20260929100200n, entry]]), plan),
+  );
+  assert.doesNotThrow(() =>
+    validateReviewedLockExceptions(
+      new Map([[20260929100200n, { ...entry, pairs: [...entry.pairs, ["projects", "agent_jobs"]] }]]),
+      plan,
+    ),
+  );
+  // The legacy history runs without the lock check, so an entry for it would
+  // never apply, and a version as a string or a number matches no migration.
+  for (const version of [20260000000063n, 20260929100400n, "20260929100200", 20260929100200]) {
+    assert.throws(
+      () => validateReviewedLockExceptions(new Map([[version, entry]]), plan),
+      new RegExp(
+        `^Error: reviewed lock exception ${version} names no migration after 20260000000063; remove it$`,
+        "u",
+      ),
+      `${typeof version} ${version}`,
+    );
+  }
+  const { pairs, ...withoutPairs } = entry;
+  for (const bad of [
+    null,
+    { reason: entry.reason, pairs },
+    { ...entry, sha256: "A".repeat(64) },
+    { ...entry, sha256: "a".repeat(63) },
+    { sha256: entry.sha256, pairs },
+    { ...entry, reason: " " },
+    { ...entry, reason: "one line\nand another" },
+    withoutPairs,
+    { ...entry, pairs: [] },
+    { ...entry, pairs: "agent_jobs and runtime_leases" },
+    { ...entry, pairs: ["agent_jobs", "runtime_leases"] },
+    { ...entry, pairs: [["agent_jobs"]] },
+    { ...entry, pairs: [["agent_jobs", "runtime_leases", "runs"]] },
+    { ...entry, pairs: [["agent_jobs", "agent_jobs"]] },
+    { ...entry, pairs: [["agent_jobs", 1]] },
+    { ...entry, pairs: [["agent_jobs", "public.runtime_leases"]] },
+    { ...entry, pairs: [...pairs, ["agent_jobs", "runtime_leases"]] },
+  ]) {
+    assert.throws(
+      () => validateReviewedLockExceptions(new Map([[20260929100200n, bad]]), plan),
+      /^Error: reviewed lock exception 20260929100200 needs the sha256 of its migration, the pairs of tables it allows and a one-line reason$/u,
+      JSON.stringify(bad),
+    );
+  }
+});
+
+test("each checked-in reviewed lock exception matches its migration", () => {
+  const track = validatePublicMigrationTrack();
+  assert.doesNotThrow(() => validateReviewedLockExceptions(REVIEWED_LOCK_EXCEPTIONS, track));
+  for (const [version, { sha256 }] of REVIEWED_LOCK_EXCEPTIONS) {
+    const source = readFileSync(track.find((migration) => migration.version === version).source);
+    assert.equal(createHash("sha256").update(source).digest("hex"), sha256, `${version}`);
+    assert.ok(setsLockTimeoutFirst(source.toString("utf8")), `${version}`);
+    assert.ok(mentionsLockTimeoutOnce(source.toString("utf8")), `${version}`);
+  }
 });

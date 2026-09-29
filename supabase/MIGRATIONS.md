@@ -26,8 +26,9 @@ a top-level `BEGIN`, `START TRANSACTION`, `COMMIT`, `END`, `ROLLBACK` or `ABORT`
 be plain SQL: `supabase db push` sends its statements to the server without psql, so a psql
 meta-command such as `\gset`, `\echo` or `\o` cannot run in production. It must not mention
 `standard_conforming_strings`, which changes how a backslash in a string is read. And it must
-be valid UTF-8, which the server requires. `node scripts/check-supabase-migrations.mjs` rejects
-all four.
+be valid UTF-8, which the server requires, saved without a byte order mark: psql sends a
+leading one to the server as part of the first statement of a `--command`, where it is a syntax
+error. `node scripts/check-supabase-migrations.mjs` rejects each of these.
 
 Live requests write `agent_jobs`, `org_credit_ledger`, `org_credit_balances`, `runs`,
 `prompts`, `conversations`, `conversation_messages`, `runtimes`, `notification_events`,
@@ -98,6 +99,26 @@ rules only because the tables after `org_credit_balances` joined the list after 
 is append-only, so the test checks those three against `agent_jobs`, `org_credit_ledger` and
 `org_credit_balances` alone.
 
+Common splits, each step in a migration of its own that commits before the next:
+
+- A new table with foreign keys to two listed tables declares one of them, and a later
+  migration adds the second with `ALTER TABLE ... ADD CONSTRAINT`. That later migration holds
+  `SHARE ROW EXCLUSIVE` on the new table, by then another existing table where it is allowed,
+  and on the one listed table it references.
+- A new foreign-key column goes in bare first, with `ALTER TABLE ... ADD COLUMN`, and the next
+  migration adds its constraint with `ALTER TABLE ... ADD CONSTRAINT`. On another existing
+  table that references a listed one, the column's `ACCESS EXCLUSIVE` and the reference's lock
+  on the listed table break the rules together and pass apart. Between two listed tables this
+  does not help, because the constraint alone locks both; see the reviewed exception below.
+- Each `VALIDATE CONSTRAINT` of a foreign key gets a migration of its own. It takes
+  `SHARE UPDATE EXCLUSIVE` on its table and `ROW SHARE` on the table it references, without
+  locking a row there, so it blocks no live write. The test cannot tell that `ROW SHARE` from
+  the one `SELECT ... FOR UPDATE` takes with its row locks, though, so it rejects two
+  validations in one migration, such as those of `NOT VALID` foreign keys to `runs` and to
+  `agent_jobs`.
+- A single statement that locks two listed tables, which no split separates, goes in as a
+  reviewed exception, described below.
+
 The list is best effort. It comes from a code audit of the transactions in
 `packages/runtime-controller`, which followed every table the controller writes, and the
 triggers and SQL functions that write for it, through the helpers each transaction calls. It
@@ -111,6 +132,31 @@ Postgres deadlock detection: a lock cycle between the migration and a request en
 `deadlock_timeout` with one of them aborted, and a migration that waits longer than its
 `lock_timeout` aborts before the requests queued behind it pile up. A miss therefore costs one
 aborted request or a retried release, not an outage.
+
+Some changes lock two listed tables in one statement, which no split separates. On Postgres 17
+a foreign key between two listed tables, even `NOT VALID`, takes `SHARE ROW EXCLUSIVE` on both
+when it is added and `ACCESS EXCLUSIVE` on both when it is dropped, so
+`alter table agent_jobs add column lease_id uuid references runtime_leases(id)` breaks the
+rules however it is split. Such a migration goes in as a reviewed exception: an entry in
+`REVIEWED_LOCK_EXCEPTIONS` in `scripts/test-supabase-migrations-empty-db.mjs`, keyed by the
+migration's version, with the sha256 of the migration file's exact bytes (`sha256sum`, or
+`shasum -a 256`), the pairs of tables it allows, each written as the test's failure message
+names it, such as `["agent_jobs", "runtime_leases"]`, and a one-line reason. The migration's
+first statement sets its lock timeout, `set local lock_timeout = '5s';`, so that the timeout
+bounds the wait for every lock after it, and nothing else in the file mentions `lock_timeout`,
+not even a comment, so that no later `RESET`, `SET` or `set_config` lifts it. The same backstop
+makes this safe enough: a lock cycle between the migration and a live request ends after
+`deadlock_timeout` with one of them aborted, and the migration's `lock_timeout` aborts it before
+the requests queued behind it pile up, so the worst case is one aborted request or a retried
+release. The rules keep even that off the normal path, so an entry needs a reviewer: the pull
+request that adds it needs the approval of a reviewer who checked that no split helps. The
+empty-database test then accepts the pairs the entry lists and no others, so a lock that a
+split could move out of the migration still fails it. It also fails when the file's sha256 no
+longer matches the entry, so any change to the file needs a new review; when the migration does
+not set a lock timeout first or mentions `lock_timeout` again; and when the probe reads
+`lock_timeout` as 0 before the migration commits, as after a `RESET ALL`. And it fails when an
+entry names no migration after `20260000000063`, or a pair the migration no longer holds, so the
+list cannot go stale.
 
 Two things remain for review by hand. The first is a lock taken only for a row that exists,
 which an empty database cannot show: a foreign-key check, a row trigger, or a statement that a
