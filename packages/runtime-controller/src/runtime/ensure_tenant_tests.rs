@@ -498,9 +498,14 @@ async fn tenant_attach_requires_write_access_to_the_host_runtimes_project() -> a
                     metadata.clone(),
                 )
                 .await?;
-            assert!(
-                matches!(status, StatusCode::FORBIDDEN | StatusCode::NOT_FOUND),
-                "writer of the host project only: {status} {body}"
+            assert_eq!(
+                status,
+                StatusCode::FORBIDDEN,
+                "writer of the host project only: {body}"
+            );
+            assert_ne!(
+                body, missing_body,
+                "writer of the host project only: refused by the tenant project's check"
             );
 
             // Allowed to write both projects, but the tenant project's
