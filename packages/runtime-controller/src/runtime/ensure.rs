@@ -1765,14 +1765,20 @@ async fn load_runtime_requeue_metadata(
         }
     }
 
+    // Otherwise the runtime's newest own launch generation. A tenant lease
+    // carries this runtime's id, but it launched nothing and its metadata is
+    // what the attaching caller sent (see `load_newest_lease_metadata`).
     let row = conn
         .query_opt(
             "select metadata
              from runtime_leases
              where runtime_id = $1
+               and project_id = $2
+               and scope <> 'tenant'
+               and parent_lease_id is null
              order by requested_at desc
              limit 1",
-            &[&runtime.id],
+            &[&runtime.id, &runtime.project_id],
         )
         .await
         .map_err(|error| {

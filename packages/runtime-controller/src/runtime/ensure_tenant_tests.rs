@@ -566,3 +566,76 @@ async fn tenant_lease_metadata_drops_controller_owned_keys_on_attach_and_reattac
         })
         .await
 }
+
+/// A requeue relaunch of a runtime with no live lease copies the metadata of
+/// the runtime's newest own launch. Tenant leases on the runtime are newer
+/// but launched nothing: neither another project's nor one that attached the
+/// runtime's own project, whose parent lease is gone.
+#[tokio::test]
+async fn requeue_metadata_ignores_newer_tenant_leases() -> anyhow::Result<()> {
+    let fixture = TenantAttachFixture::setup("tenant-requeue-metadata").await?;
+    fixture
+        .run(async {
+            let fixture = &fixture;
+            let connection = fixture.pool.get().await?;
+            connection
+                .execute(
+                    "update runtime_leases
+                     set status = 'released', released_at = now() - interval '30 minutes'
+                     where id = $1",
+                    &[&fixture.shared_lease_id],
+                )
+                .await?;
+            connection
+                .execute(
+                    "update runtimes set active_lease_id = null, status = 'stopped' where id = $1",
+                    &[&fixture.runtime_id],
+                )
+                .await?;
+            for (tenant_project_id, parent_lease_id, minutes_ago) in [
+                (
+                    fixture.same_org_tenant_project_id,
+                    Some(fixture.shared_lease_id),
+                    10,
+                ),
+                (fixture.host_project_id, None, 5),
+            ] {
+                connection
+                    .execute(
+                        "insert into runtime_leases
+                            (project_id, runtime_id, status, scope, parent_lease_id, metadata,
+                             requested_at)
+                         values ($1, $2, 'active', 'tenant', $3, $4,
+                                 now() - ($5::integer * interval '1 minute'))",
+                        &[
+                            &tenant_project_id,
+                            &fixture.runtime_id,
+                            &parent_lease_id,
+                            &PgJson(json!({ "source": "tenant", "sizeId": "boost" })),
+                            &minutes_ago,
+                        ],
+                    )
+                    .await?;
+            }
+
+            let runtime = {
+                let mut connection = fixture.pool.get().await?;
+                let transaction = connection.transaction().await?;
+                let runtime = fetch_runtime_for_update(&transaction, &fixture.runtime_id)
+                    .await
+                    .map_err(|(_, Json(error))| anyhow::anyhow!(error.message))?;
+                transaction.rollback().await?;
+                runtime
+            };
+            let metadata = load_runtime_requeue_metadata(&fixture.state, &runtime)
+                .await
+                .map_err(|(_, Json(error))| anyhow::anyhow!(error.message))?;
+            assert_eq!(
+                metadata,
+                Some(json!({ "source": "host", "sizeId": "standard" })),
+                "the runtime's own launch, not a tenant's"
+            );
+            Ok(())
+        })
+        .await
+}
