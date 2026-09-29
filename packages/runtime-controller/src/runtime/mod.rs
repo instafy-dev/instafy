@@ -72,6 +72,8 @@ pub(crate) use stop::{
     PERSONAL_BROWSER_DISCONNECTED_ERROR, SHARED_BROWSER_DISCONNECTED_ERROR,
 };
 #[cfg(test)]
+pub(crate) use sweeps::STRANDED_PLATFORM_JOB_GRACE_SECONDS;
+#[cfg(test)]
 pub(crate) use token::RuntimeTokenResponse;
 
 pub(crate) fn router() -> Router<AppState> {

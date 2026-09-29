@@ -400,7 +400,11 @@ async fn finish_parent_plan_job(
     }
 
     // A refused plan is written to the conversation whether or not the
-    // planning turn was still open: its agents never start either way.
+    // planning turn was still open: its agents never start either way. The
+    // message names the plan's group but no plan role. The Studio keeps a
+    // "worker" message out of the root transcript and, since this one
+    // carries the planning job's id, would drop the plan's announcement with
+    // it, leaving the refused plan with nothing to show.
     let refusal_message = match refusal {
         Some((group_id, reason)) => Some(
             crate::conversations::record_controller_assistant_message(
@@ -422,7 +426,7 @@ async fn finish_parent_plan_job(
                     "runId": run_id,
                     "errorMessage": reason,
                     "agent": job_payload.pointer("/metadata/agent").cloned(),
-                    "multiAgentPlan": { "groupId": group_id, "role": "worker" },
+                    "multiAgentPlan": { "groupId": group_id },
                 }),
             )
             .await?,

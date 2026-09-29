@@ -2505,8 +2505,11 @@ mod tests {
                     &[
                         &desktop_runtime_id,
                         &project_id,
+                        // Dispatch-ready: a desktop that is not would have
+                        // the job unpinned from it rather than refused.
                         &PgJson(json!({
                             "agent": true,
+                            "origin": true,
                             "_instafySelfHostedAccess": {
                                 "mode": "private",
                                 "ownerUserId": Uuid::new_v4().to_string(),
@@ -2569,6 +2572,159 @@ mod tests {
                 jobs, 0,
                 "no job is queued for a runtime that never takes it"
             );
+            Ok(())
+        }
+        .await;
+        let cleanup = pool
+            .get()
+            .await?
+            .execute("delete from projects where id = $1", &[&project_id])
+            .await;
+        test_result?;
+        cleanup?;
+        Ok(())
+    }
+
+    /// The same userless queued send while the desktop is stopped is not
+    /// refused: dispatch unpins its job from the desktop, which is not
+    /// dispatch-ready, and the space's hosted runtime takes it, as before
+    /// private runtimes refused platform jobs.
+    #[tokio::test]
+    async fn userless_queued_send_to_a_stopped_desktop_goes_to_a_hosted_runtime(
+    ) -> anyhow::Result<()> {
+        let Some(pool) = crate::tests::setup_origin_test_pool().await? else {
+            eprintln!("skipping stopped desktop queue fallback test: TEST_DATABASE_URL not set");
+            return Ok(());
+        };
+        let project_id = Uuid::new_v4();
+        let conversation_id = Uuid::new_v4();
+        let entry_id = Uuid::new_v4();
+        let desktop_runtime_id = Uuid::new_v4();
+        let hosted_runtime_id = Uuid::new_v4();
+        insert_service_queue_fixture(&pool, project_id, conversation_id).await?;
+        let test_result: anyhow::Result<()> = async {
+            let connection = pool.get().await?;
+            for (runtime_id, provider, status, last_seen_minutes_ago, capabilities) in [
+                (
+                    desktop_runtime_id,
+                    "self-hosted",
+                    "stopped",
+                    60,
+                    json!({
+                        "agent": true,
+                        "origin": true,
+                        "_instafySelfHostedAccess": {
+                            "mode": "private",
+                            "ownerUserId": Uuid::new_v4().to_string(),
+                        }
+                    }),
+                ),
+                (
+                    hosted_runtime_id,
+                    "instafy-cloud",
+                    "ready",
+                    0,
+                    json!({ "agent": true, "origin": true }),
+                ),
+            ] {
+                connection
+                    .execute(
+                        "insert into runtimes (
+                             id, project_id, provider, status, idle_ttl_seconds, last_seen_at,
+                             capabilities
+                         ) values ($1, $2, $3, $4, 600,
+                             now() - make_interval(mins => $5), $6)",
+                        &[
+                            &runtime_id,
+                            &project_id,
+                            &provider,
+                            &status,
+                            &last_seen_minutes_ago,
+                            &PgJson(capabilities),
+                        ],
+                    )
+                    .await?;
+            }
+            let mut message = prompt_with_metadata(json!({
+                "agentSelection": { "active": ["octo"], "mentions": [] }
+            }));
+            message["runtimeId"] = json!(desktop_runtime_id.to_string());
+            connection
+                .execute(
+                    "insert into conversation_send_queue (
+                         id, project_id, conversation_id, status, request
+                     ) values ($1, $2, $3, 'queued', $4)",
+                    &[&entry_id, &project_id, &conversation_id, &PgJson(message)],
+                )
+                .await?;
+            drop(connection);
+            let state = crate::tests::build_test_state(
+                pool.clone(),
+                crate::tests::build_app_config(
+                    crate::tests::test_origin_private_key(),
+                    crate::tests::test_origin_public_key(),
+                    "queue-stopped-desktop-fallback",
+                ),
+            );
+
+            drain_send_queue_with_reclaim_after(&state, conversation_id, Duration::from_secs(60))
+                .await
+                .map_err(|(status, Json(error))| {
+                    anyhow::anyhow!("queue drain failed ({status}): {}", error.message)
+                })?;
+
+            let mut connection = pool.get().await?;
+            let entry = connection
+                .query_one(
+                    "select status, error_message, dispatched_run_id
+                     from conversation_send_queue where id = $1",
+                    &[&entry_id],
+                )
+                .await?;
+            assert_eq!(
+                entry.get::<_, String>("status"),
+                "dispatched",
+                "{:?}",
+                entry.get::<_, Option<String>>("error_message")
+            );
+            let job = connection
+                .query_one(
+                    "select id, target_runtime_id, credential_id from agent_jobs where run_id = $1",
+                    &[&entry
+                        .get::<_, Option<Uuid>>("dispatched_run_id")
+                        .expect("the sent message has a run")],
+                )
+                .await?;
+            let job_id: Uuid = job.get("id");
+            assert_eq!(
+                job.get::<_, Option<Uuid>>("target_runtime_id"),
+                None,
+                "the job is unpinned from the stopped desktop"
+            );
+            assert_eq!(job.get::<_, Option<Uuid>>("credential_id"), None);
+
+            // The hosted runtime's lease (a hosted runtime does not exclude
+            // platform AI jobs) takes it.
+            let transaction = connection.transaction().await?;
+            let leased = crate::agent::lease_next_agent_job(
+                &transaction,
+                &project_id,
+                Some(&hosted_runtime_id),
+                60,
+                true,
+                false,
+                false,
+                false,
+                None,
+                None,
+                false,
+            )
+            .await
+            .map_err(|(status, Json(error))| {
+                anyhow::anyhow!("hosted lease failed ({status}): {}", error.message)
+            })?;
+            transaction.rollback().await?;
+            assert_eq!(leased.map(|job| job.id), Some(job_id));
             Ok(())
         }
         .await;

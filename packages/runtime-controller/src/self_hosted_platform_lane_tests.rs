@@ -579,6 +579,193 @@ async fn ambient_managed_participant_on_self_hosted_runtime_skipped() -> anyhow:
     Ok(())
 }
 
+/// Lease through `app`'s `/agent/lease` as `runtime_id` of `project_id` until
+/// it gets nothing, and return what it got.
+async fn lease_all_jobs(
+    app: &axum::Router,
+    config: &AppConfig,
+    project_id: Uuid,
+    runtime_id: Uuid,
+    generation: Option<Uuid>,
+) -> anyhow::Result<Vec<Uuid>> {
+    let token = crate::auth::issue_agent_token(config, &project_id, &runtime_id, None, generation)
+        .map_err(|error| controller_error("issue agent token", error))?
+        .token;
+    let mut leased = Vec::new();
+    loop {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/agent/lease")
+                    .header(axum::http::header::CONTENT_TYPE, "application/json")
+                    .header(axum::http::header::AUTHORIZATION, format!("Bearer {token}"))
+                    .body(Body::from(json!({ "max": 1 }).to_string()))?,
+            )
+            .await?;
+        let status = response.status();
+        let body: serde_json::Value =
+            serde_json::from_slice(&to_bytes(response.into_body(), usize::MAX).await?)?;
+        anyhow::ensure!(status == StatusCode::OK, "lease returned {status}: {body}");
+        let jobs = body["jobs"].as_array().cloned().unwrap_or_default();
+        if jobs.is_empty() {
+            return Ok(leased);
+        }
+        for job in jobs {
+            leased.push(Uuid::parse_str(job["id"].as_str().unwrap_or_default())?);
+        }
+    }
+}
+
+/// Stop `runtime_id` as an idle stop leaves it: stopped, with no live lease
+/// and a heartbeat long past.
+async fn stop_runtime(pool: &PgPool, runtime_id: &Uuid) -> anyhow::Result<()> {
+    pool.get()
+        .await?
+        .execute(
+            "update runtimes
+             set status = 'stopped', last_seen_at = now() - interval '1 hour'
+             where id = $1",
+            &[runtime_id],
+        )
+        .await?;
+    Ok(())
+}
+
+/// An ambient managed participant is skipped by the same rule a dispatch is
+/// refused by. On the owner's stopped desktop it is not skipped: its job, like
+/// the own-key participant's, is unpinned from the desktop once queued, and
+/// the hosted runtime of the space takes it.
+#[tokio::test]
+async fn ambient_managed_participant_on_a_stopped_desktop_falls_back_to_a_hosted_runtime(
+) -> anyhow::Result<()> {
+    let Some(pool) = setup_origin_test_pool().await? else {
+        eprintln!("skipping stopped desktop ambient participant test: TEST_DATABASE_URL not set");
+        return Ok(());
+    };
+    let owner_user_id = Uuid::new_v4();
+    let other_user_id = Uuid::new_v4();
+    let org_id = Uuid::new_v4();
+    let project_id = Uuid::new_v4();
+    let conversation_id = Uuid::new_v4();
+    let desktop_runtime_id = Uuid::new_v4();
+    let hosted_runtime_id = Uuid::new_v4();
+    ensure_test_user(&pool, &owner_user_id).await?;
+    ensure_test_user(&pool, &other_user_id).await?;
+
+    let test_result: anyhow::Result<()> = async {
+        seed_group_participation_project(
+            &pool,
+            &org_id,
+            &project_id,
+            &owner_user_id,
+            &other_user_id,
+            "Stopped desktop ambient participant",
+        )
+        .await?;
+        seed_custom_agent(
+            &pool,
+            &owner_user_id,
+            &Uuid::new_v4(),
+            &Uuid::new_v4(),
+            "reviewer",
+            "Reviews frontend changes",
+        )
+        .await?;
+        insert_private_runtime(
+            &pool,
+            &project_id,
+            &desktop_runtime_id,
+            &owner_user_id,
+            &Uuid::new_v4(),
+        )
+        .await?;
+        stop_runtime(&pool, &desktop_runtime_id).await?;
+        insert_ready_runtime(
+            &pool,
+            &project_id,
+            &hosted_runtime_id,
+            "instafy-cloud",
+            json!({ "agent": true, "origin": true }),
+        )
+        .await?;
+
+        let config = build_app_config(
+            test_origin_private_key(),
+            test_origin_public_key(),
+            "stopped-desktop-ambient-participant",
+        );
+        let state = build_test_state(pool.clone(), config.clone());
+        let response = dispatch::process_dispatch_prompt(
+            &state,
+            &owner_context(owner_user_id),
+            platform_lane_dispatch_request(
+                &project_id,
+                &conversation_id,
+                &desktop_runtime_id,
+                &["octo", "reviewer"],
+                "public",
+            )?,
+        )
+        .await
+        .map_err(|error| controller_error("ambient dispatch on a stopped desktop", error))?;
+        assert_eq!(response.status, "queued");
+
+        let connection = pool.get().await?;
+        let jobs = connection
+            .query(
+                "select aj.id, aj.target_runtime_id, aj.payload #>> '{metadata,agent,handle}' as handle,
+                        r.status as run_status, r.metadata as run_metadata
+                 from agent_jobs aj
+                 join runs r on r.id = aj.run_id
+                 where aj.conversation_id = $1
+                 order by handle",
+                &[&conversation_id],
+            )
+            .await?;
+        assert_eq!(
+            jobs.iter()
+                .map(|job| job.get::<_, Option<String>>("handle"))
+                .collect::<Vec<_>>(),
+            vec![Some("octo".to_string()), Some("reviewer".to_string())],
+            "both participants get a job"
+        );
+        for job in &jobs {
+            assert_eq!(job.get::<_, Option<Uuid>>("target_runtime_id"), None);
+            assert_ne!(job.get::<_, String>("run_status"), "canceled");
+            assert!(job
+                .get::<_, PgJson<serde_json::Value>>("run_metadata")
+                .0
+                .get("managedAiSkipped")
+                .is_none());
+        }
+        let octo_job_id: Uuid = jobs[0].get("id");
+        drop(connection);
+
+        let app = agent::router().with_state(state.clone());
+        let leased =
+            lease_all_jobs(&app, &config, project_id, hosted_runtime_id, None).await?;
+        assert!(
+            leased.contains(&octo_job_id),
+            "the hosted runtime takes the managed participant's job, got {leased:?}"
+        );
+        Ok(())
+    }
+    .await;
+
+    let project_cleanup = cleanup_origin_project(&pool, &project_id).await;
+    let org_cleanup = cleanup_org(&pool, &org_id).await;
+    let owner_cleanup = cleanup_test_user(&pool, &owner_user_id).await;
+    let other_cleanup = cleanup_test_user(&pool, &other_user_id).await;
+    test_result?;
+    project_cleanup?;
+    org_cleanup?;
+    owner_cleanup?;
+    other_cleanup?;
+    Ok(())
+}
+
 struct LeaseFixture {
     pool: PgPool,
     app: axum::Router,
@@ -687,41 +874,14 @@ impl LeaseFixture {
         runtime_id: Uuid,
         generation: Option<Uuid>,
     ) -> anyhow::Result<Vec<Uuid>> {
-        let token = crate::auth::issue_agent_token(
+        lease_all_jobs(
+            &self.app,
             &self.config,
-            &self.project_id,
-            &runtime_id,
-            None,
+            self.project_id,
+            runtime_id,
             generation,
         )
-        .map_err(|error| controller_error("issue agent token", error))?
-        .token;
-        let mut leased = Vec::new();
-        loop {
-            let response = self
-                .app
-                .clone()
-                .oneshot(
-                    Request::builder()
-                        .method("POST")
-                        .uri("/agent/lease")
-                        .header(axum::http::header::CONTENT_TYPE, "application/json")
-                        .header(axum::http::header::AUTHORIZATION, format!("Bearer {token}"))
-                        .body(Body::from(json!({ "max": 1 }).to_string()))?,
-                )
-                .await?;
-            let status = response.status();
-            let body: serde_json::Value =
-                serde_json::from_slice(&to_bytes(response.into_body(), usize::MAX).await?)?;
-            anyhow::ensure!(status == StatusCode::OK, "lease returned {status}: {body}");
-            let jobs = body["jobs"].as_array().cloned().unwrap_or_default();
-            if jobs.is_empty() {
-                return Ok(leased);
-            }
-            for job in jobs {
-                leased.push(Uuid::parse_str(job["id"].as_str().unwrap_or_default())?);
-            }
-        }
+        .await
     }
 
     async fn job_status(&self, job_id: &Uuid) -> anyhow::Result<(String, i32)> {
@@ -1335,6 +1495,253 @@ async fn service_role_platform_dispatch_to_a_private_runtime_is_refused() -> any
     cleanup
 }
 
+/// A platform dispatch to a desktop that is not dispatch-ready is unpinned
+/// from it once queued, and a hosted runtime answers it, as before private
+/// runtimes refused platform jobs. So a managed dispatch to the owner's
+/// stopped desktop is queued, reserved, unpinned and leased by the hosted
+/// runtime of the space, where the same dispatch to the ready desktop is
+/// refused. An agent's own pin to the stopped desktop, with the composer on
+/// the hosted runtime, is not unpinned, so it is still refused.
+#[tokio::test]
+async fn platform_dispatch_to_a_stopped_desktop_falls_back_to_a_hosted_runtime(
+) -> anyhow::Result<()> {
+    let Some(pool) = setup_origin_test_pool().await? else {
+        eprintln!("skipping stopped desktop fallback test: TEST_DATABASE_URL not set");
+        return Ok(());
+    };
+    let space = ManagedSpace::seed(pool, "stopped-desktop-fallback").await?;
+    let test_result: anyhow::Result<()> = async {
+        let config = space.config("stopped-desktop-fallback");
+        let state = build_test_state(space.pool.clone(), config.clone());
+        let owner = owner_context(space.owner_user_id);
+        let desktop = space.desktop_runtime_id;
+        assert_hosted_runtime_refusal(
+            space.dispatch(&state, &owner, desktop, &["octo"]).await,
+            desktop,
+            "a managed dispatch to the ready desktop",
+        );
+
+        stop_runtime(&space.pool, &desktop).await?;
+        let response = space
+            .dispatch(&state, &owner, desktop, &["octo"])
+            .await
+            .map_err(|error| controller_error("managed dispatch to the stopped desktop", error))?;
+        let job_id = response.job_id.expect("a queued managed job");
+        let job = space
+            .pool
+            .get()
+            .await?
+            .query_one(
+                "select status, target_runtime_id, credential_id from agent_jobs where id = $1",
+                &[&job_id],
+            )
+            .await?;
+        assert_eq!(job.get::<_, String>("status"), "queued");
+        assert_eq!(
+            job.get::<_, Option<Uuid>>("target_runtime_id"),
+            None,
+            "the job is unpinned from the stopped desktop"
+        );
+        assert_eq!(job.get::<_, Option<Uuid>>("credential_id"), None);
+        assert_eq!(
+            space
+                .count(
+                    "org_credit_ledger",
+                    "project_id = $1 and reason = 'managed_ai_prompt'"
+                )
+                .await?,
+            1,
+            "the managed turn is reserved as on a hosted runtime"
+        );
+        let app = agent::router().with_state(state.clone());
+        assert_eq!(
+            lease_all_jobs(
+                &app,
+                &config,
+                space.project_id,
+                space.hosted_runtime_id,
+                None
+            )
+            .await?,
+            vec![job_id],
+            "the hosted runtime answers it"
+        );
+
+        // The agent's own pin to the stopped desktop is not this dispatch's
+        // runtime, so nothing unpins it.
+        let octo_agent_id: Uuid = space
+            .pool
+            .get()
+            .await?
+            .query_one(
+                "select id from user_agents where user_id = $1 and handle = 'octo'",
+                &[&space.owner_user_id],
+            )
+            .await?
+            .get(0);
+        space
+            .pool
+            .get()
+            .await?
+            .execute(
+                "insert into user_agent_project_settings (user_id, project_id, agent_id, runtime_id)
+                 values ($1, $2, $3, $4)",
+                &[
+                    &space.owner_user_id,
+                    &space.project_id,
+                    &octo_agent_id,
+                    &desktop,
+                ],
+            )
+            .await?;
+        assert_hosted_runtime_refusal(
+            space
+                .dispatch(&state, &owner, space.hosted_runtime_id, &["octo"])
+                .await,
+            desktop,
+            "a managed agent pinned to the stopped desktop",
+        );
+        assert_eq!(space.count("agent_jobs", "project_id = $1").await?, 1);
+        Ok(())
+    }
+    .await;
+    let cleanup = space.cleanup().await;
+    test_result?;
+    cleanup
+}
+
+/// Backdate the queued `job_ids` past the idle sweep's grace for platform
+/// jobs, as jobs queued before the last sweep ran are.
+async fn age_past_the_stranded_job_grace(pool: &PgPool, job_ids: &[Uuid]) -> anyhow::Result<()> {
+    pool.get()
+        .await?
+        .execute(
+            "update agent_jobs
+             set created_at = now() - ($2::bigint + 1) * interval '1 second'
+             where id = any($1)",
+            &[&job_ids, &runtime::STRANDED_PLATFORM_JOB_GRACE_SECONDS],
+        )
+        .await?;
+    Ok(())
+}
+
+/// Pin the queued `job_id` to `runtime_id`.
+async fn pin_job(pool: &PgPool, job_id: Uuid, runtime_id: Uuid) -> anyhow::Result<()> {
+    pool.get()
+        .await?
+        .execute(
+            "update agent_jobs set target_runtime_id = $2 where id = $1",
+            &[&job_id, &runtime_id],
+        )
+        .await?;
+    Ok(())
+}
+
+/// The status and error message of `job_id`.
+async fn job_status_and_error(
+    pool: &PgPool,
+    job_id: Uuid,
+) -> anyhow::Result<(String, Option<String>)> {
+    let row = pool
+        .get()
+        .await?
+        .query_one(
+            "select status, error_message from agent_jobs where id = $1",
+            &[&job_id],
+        )
+        .await?;
+    Ok((row.get("status"), row.get("error_message")))
+}
+
+/// Dispatch commits a platform job pinned to a stopped desktop and unpins it
+/// only after. An idle sweep that runs in between leaves the job alone, so the
+/// hosted runtime still answers it. A job that stays pinned there, because the
+/// desktop came back before the unpin, is failed once the grace has passed.
+#[tokio::test]
+async fn idle_sweep_leaves_a_job_that_dispatch_is_about_to_unpin() -> anyhow::Result<()> {
+    let Some(pool) = setup_origin_test_pool().await? else {
+        eprintln!("skipping sweep before unpin test: TEST_DATABASE_URL not set");
+        return Ok(());
+    };
+    let space = ManagedSpace::seed(pool, "sweep-before-unpin").await?;
+    let test_result: anyhow::Result<()> = async {
+        let config = space.config("sweep-before-unpin");
+        let state = build_test_state(space.pool.clone(), config.clone());
+        let owner = owner_context(space.owner_user_id);
+        let desktop = space.desktop_runtime_id;
+        stop_runtime(&space.pool, &desktop).await?;
+
+        let job_id = space
+            .dispatch(&state, &owner, desktop, &["octo"])
+            .await
+            .map_err(|error| controller_error("managed dispatch to the stopped desktop", error))?
+            .job_id
+            .expect("a queued managed job");
+        // The job as the dispatch's commit left it, before its unpin.
+        pin_job(&space.pool, job_id, desktop).await?;
+        runtime::sweep_idle_activity(&state).await?;
+        assert_eq!(
+            job_status_and_error(&space.pool, job_id).await?,
+            ("queued".to_string(), None),
+            "the sweep leaves a job that dispatch is about to unpin"
+        );
+        // The dispatch's unpin, and the hosted runtime answers.
+        space
+            .pool
+            .get()
+            .await?
+            .execute(
+                "update agent_jobs set target_runtime_id = null
+                 where id = $1 and status = 'queued' and target_runtime_id = $2",
+                &[&job_id, &desktop],
+            )
+            .await?;
+        let app = agent::router().with_state(state.clone());
+        assert_eq!(
+            lease_all_jobs(
+                &app,
+                &config,
+                space.project_id,
+                space.hosted_runtime_id,
+                None
+            )
+            .await?,
+            vec![job_id],
+            "the hosted runtime answers it"
+        );
+
+        let kept_job_id = space
+            .dispatch(&state, &owner, desktop, &["octo"])
+            .await
+            .map_err(|error| controller_error("second dispatch to the stopped desktop", error))?
+            .job_id
+            .expect("a queued managed job");
+        pin_job(&space.pool, kept_job_id, desktop).await?;
+        age_past_the_stranded_job_grace(&space.pool, &[kept_job_id]).await?;
+        runtime::sweep_idle_activity(&state).await?;
+        assert_eq!(
+            job_status_and_error(&space.pool, kept_job_id).await?,
+            ("failed".to_string(), Some(SELF_HOSTED_REFUSAL.to_string())),
+            "a job left pinned to the desktop fails once the grace has passed"
+        );
+        assert_eq!(
+            space
+                .count(
+                    "org_credit_ledger",
+                    "project_id = $1 and reason = 'managed_ai_refund'"
+                )
+                .await?,
+            1,
+            "only the failed job's reserve is given back"
+        );
+        Ok(())
+    }
+    .await;
+    let cleanup = space.cleanup().await;
+    test_result?;
+    cleanup
+}
+
 /// Insert a conversation of the space, and a run and an agent job in it
 /// leased by `runtime_id` for `credential_id`, with `metadata` on the job.
 async fn insert_leased_plan_job(
@@ -1391,10 +1798,12 @@ async fn insert_leased_plan_job(
 }
 
 /// A plan authored on a desktop by an own-key agent, whose workers have no
-/// credential of their own, would pin those workers to the desktop. They are
-/// not moved to a hosted runtime: none is queued, the planning run fails with
-/// the reason, and the conversation says why. The same plan authored on a
-/// hosted runtime queues its workers there.
+/// credential of their own, would pin those workers to the desktop. While the
+/// desktop is dispatch-ready they are not moved to a hosted runtime: none is
+/// queued, the planning run fails with the reason, and the conversation says
+/// why. The same plan authored on a hosted runtime queues its workers there,
+/// and one authored on a desktop that has since stopped queues them unpinned,
+/// for the hosted runtime.
 #[tokio::test]
 async fn plan_workers_pinned_to_a_private_runtime_fail_the_planning_run() -> anyhow::Result<()> {
     let Some(pool) = setup_origin_test_pool().await? else {
@@ -1413,7 +1822,8 @@ async fn plan_workers_pinned_to_a_private_runtime_fail_the_planning_run() -> any
             "Plans with its own key",
         )
         .await?;
-        let state = build_test_state(space.pool.clone(), space.config("self-hosted-plan-workers"));
+        let config = space.config("self-hosted-plan-workers");
+        let state = build_test_state(space.pool.clone(), config.clone());
         let plan_message = json!({
             "messageType": "multi_agent_plan",
             "details": {
@@ -1498,7 +1908,19 @@ async fn plan_workers_pinned_to_a_private_runtime_fail_the_planning_run() -> any
             .0;
         assert_eq!(metadata["kind"], SELF_HOSTED_REFUSAL_CODE);
         assert_eq!(metadata["messageType"], "error");
-        assert_eq!(metadata["multiAgentPlan"]["role"], "worker");
+        assert_eq!(metadata["jobId"], json!(job_id.to_string()));
+        // The plan's group, but no plan role: the Studio hides a "worker"
+        // message, and with it the plan's announcement.
+        assert!(
+            metadata["multiAgentPlan"]["groupId"]
+                .as_str()
+                .is_some_and(|group_id| Uuid::parse_str(group_id).is_ok()),
+            "{metadata}"
+        );
+        assert!(
+            metadata["multiAgentPlan"].get("role").is_none(),
+            "{metadata}"
+        );
         drop(connection);
         let mut run_completed = Vec::new();
         while let Ok(event) = events.try_recv() {
@@ -1550,6 +1972,65 @@ async fn plan_workers_pinned_to_a_private_runtime_fail_the_planning_run() -> any
             .await?
             .get(0);
         assert_eq!(parent_status, "completed");
+        drop(connection);
+
+        // The same plan authored on the desktop, which has stopped since, is
+        // not refused: its workers are unpinned from the desktop, as from any
+        // runtime that is not dispatch-ready, and the hosted runtime runs them.
+        stop_runtime(&space.pool, &space.desktop_runtime_id).await?;
+        let (conversation_id, _, job_id, payload) = insert_leased_plan_job(
+            &space,
+            space.desktop_runtime_id,
+            Some(planner_credential_id),
+            json!({ "agent": { "handle": "planner" } }),
+        )
+        .await?;
+        crate::multi_agent_plan::maybe_execute_multi_agent_plan_message(
+            &state,
+            &payload,
+            job_id,
+            None,
+            &plan_message,
+            plan_text,
+        )
+        .await
+        .map_err(|error| controller_error("plan on the stopped desktop", error))?;
+        let connection = space.pool.get().await?;
+        let workers = connection
+            .query(
+                "select id, status, target_runtime_id, credential_id from agent_jobs
+                 where conversation_id = $1 and id <> $2",
+                &[&conversation_id, &job_id],
+            )
+            .await?;
+        assert_eq!(workers.len(), 2);
+        for worker in &workers {
+            assert_eq!(worker.get::<_, String>("status"), "queued");
+            assert_eq!(worker.get::<_, Option<Uuid>>("target_runtime_id"), None);
+            assert_eq!(worker.get::<_, Option<Uuid>>("credential_id"), None);
+        }
+        let parent_status: String = connection
+            .query_one("select status from agent_jobs where id = $1", &[&job_id])
+            .await?
+            .get(0);
+        assert_eq!(parent_status, "completed");
+        drop(connection);
+        let app = agent::router().with_state(state.clone());
+        let leased = lease_all_jobs(
+            &app,
+            &config,
+            space.project_id,
+            space.hosted_runtime_id,
+            None,
+        )
+        .await?;
+        for worker in &workers {
+            let worker_id: Uuid = worker.get("id");
+            assert!(
+                leased.contains(&worker_id),
+                "the hosted runtime runs worker {worker_id}, got {leased:?}"
+            );
+        }
         Ok(())
     }
     .await;
@@ -2168,6 +2649,16 @@ async fn spread_plan_worker_with_only_private_runtimes_is_failed_by_the_idle_swe
             );
         }
 
+        age_past_the_stranded_job_grace(
+            &fixture.pool,
+            &[
+                stranded,
+                hosted_slot_worker,
+                hosted_parent_worker,
+                ungrouped,
+            ],
+        )
+        .await?;
         let state = build_test_state(fixture.pool.clone(), fixture.config.clone());
         runtime::sweep_idle_activity(&state).await?;
 

@@ -58,6 +58,9 @@ proxy the controller names unless its owner overrides `PROXY_BASE_URL`, and that
 the deployment. Dispatch refuses such a job when only private runtimes could run it (pinned to
 one, or a spread plan worker whose plan runtimes are all private), and one already queued that
 way is failed by the controller's idle sweep (see [Credits and billing](Credits-Billing.md)).
+A job pinned to the dispatch's chosen runtime while that runtime is not dispatch-ready (a
+stopped desktop, say) is not refused: dispatch unpins it, as from any runtime that is not ready,
+and a hosted runtime takes it. The private runtime never receives it.
 
 `POST /agent/secrets` independently requires the same signed runtime identity and current
 generation. The requested job must belong to that exact runtime, remain leased, and have a

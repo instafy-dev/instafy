@@ -107,11 +107,21 @@ to a desktop or another private self-hosted runtime, through the chosen runtime 
 own runtime setting, is refused with "Instafy AI runs on Instafy-hosted runtimes. Connect your
 own AI to use this runtime." (error code `managed_ai_hosted_runtime_required`, with the runtimes
 in `details.runtimeIds`) before the proxy check, the daily prompt count and the reserve, so it
-spends nothing. With `MANAGED_AI_ENABLED=false` there is no Instafy AI to point at, so a user's
-dispatch there gets the usual "Managed Instafy AI is unavailable right now" refusal instead. In a
-skill-mode ambient turn such a managed participant is skipped instead: it gets no job, its run is
-closed with `metadata.managedAiSkipped.reason = "self_hosted_runtime"`, and the human's message
-and any own-key participants go ahead.
+spends nothing. The exception is a chosen runtime that is not dispatch-ready: not ready or
+running, without a heartbeat in the last 90 seconds, or without the agent and origin
+capabilities, as a stopped desktop is. Dispatch unpins its queued jobs from such a runtime,
+private or not, and a hosted runtime of the space answers the turn, reserved and charged like
+any other managed turn. That job is not refused. A ready private runtime, and an agent's own
+runtime setting that names a private runtime other than the chosen one, are refused whatever
+their state. Dispatch commits the job pinned and unpins it just after, so the idle sweep below
+leaves a platform job alone for its first 30 seconds. Should the desktop come back between the
+dispatch's readiness check and that unpin, the job stays pinned to it, and the sweep fails it
+with the refusal's reason once those 30 seconds have passed.
+With `MANAGED_AI_ENABLED=false` there is no Instafy AI to point at, so a user's dispatch there
+gets the usual "Managed Instafy AI is unavailable right now" refusal instead. In a skill-mode
+ambient turn such a managed participant is skipped instead, by the same rule: it gets no job, its
+run is closed with `metadata.managedAiSkipped.reason = "self_hosted_runtime"`, and the human's
+message and any own-key participants go ahead.
 
 A private self-hosted runtime never leases a platform AI job, whatever `MANAGED_AI_ENABLED` says,
 so unpinned managed work waits for a hosted runtime; own-key jobs and terminal commands still run
@@ -123,19 +133,27 @@ workers, lead continuations, and queued sends with no user), are therefore refus
 whether or not managed AI is on:
 - A skill-authored plan whose workers have no credential of their own would run them only on
   the planning agent's desktop or self-hosted runtime. A plan that reuses the runtime pins them
-  there. A plan that spreads them leaves them unpinned, but only its parent runtime and the extra
-  runtimes started for it, on the parent's provider, may take them, and those are private too.
-  The workers stay in that workspace rather than moving to a hosted runtime, so none is queued:
-  the planning run fails with the reason, the conversation gets it as an error message, and a
-  message queued behind the planning turn is sent.
+  there. A plan that spreads them leaves them unpinned, but only its parent runtime and the
+  extra runtimes started for it, on the parent's provider, may take them, and those are private
+  too. While the planning runtime is dispatch-ready, as it normally is right after the planning
+  turn, the workers stay in that workspace rather than moving to a hosted runtime, so none is
+  queued: the planning run fails with the reason, the conversation gets it as an error message,
+  and a message queued behind the planning turn is sent. A reusing plan whose runtime is no
+  longer dispatch-ready (the desktop stopped, say) is not refused: its workers are unpinned as
+  above, and a hosted runtime runs them. A spreading plan is refused whatever its runtime's
+  state.
 - A refused lead checkpoint is written to the conversation as an error message, once per plan.
+  A lead checkpoint whose runtime is no longer dispatch-ready is unpinned instead, like the
+  workers of a reusing plan.
 - A refused queued send is marked failed in the send queue.
 
 A platform AI job that is already queued where only private runtimes could lease it (pinned to
 one, or a spread plan worker whose parent runtime and plan runtimes are all private), queued
-before this refusal existed or by any path around it, is failed by the controller's idle sweep
-within seconds, with the same reason in its run and conversation. A managed-AI reserve it never
-used is refunded, as for an expired requeued job.
+before this refusal existed, pinned to a desktop that came back before dispatch could unpin it,
+or by any path around the refusal, is failed by the controller's idle sweep once it has been
+queued for 30 seconds, with the same reason in its run and conversation. A job unpinned between
+the sweep's check and its failure is left queued. A managed-AI reserve it never used is
+refunded, as for an expired requeued job.
 
 The controller puts `CODEX_MODEL=MANAGED_AI_MODEL_ID` and `CODEX_MODEL_PROVIDER=openai` in the
 job secrets (`/agent/secrets`, `secrets.rs`) of every job on the platform lane: an AI job whose

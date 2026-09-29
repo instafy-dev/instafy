@@ -46,6 +46,12 @@ const AUTO_STOP_STALE_RUNTIMES_QUERY: &str = "select id from runtimes
 /// How long a stop-requeued job may wait for a runtime before it expires
 /// instead of silently re-running whenever a runtime next appears.
 const REQUEUED_JOB_EXPIRY_SECONDS: i64 = 15 * 60;
+/// How long a queued platform AI job is left alone before
+/// `fail_platform_jobs_stranded_on_private_runtimes` may fail it. Dispatch
+/// commits a job pinned to its runtime and unpins it just after when that
+/// runtime is not dispatch-ready, so a younger job pinned to a stopped
+/// desktop may be one a hosted runtime is about to take.
+pub(crate) const STRANDED_PLATFORM_JOB_GRACE_SECONDS: i64 = 30;
 /// runtime_events is an append-only telemetry/audit log with no natural bound.
 /// Most rows are not read after a few days (the widest telemetry lookback is the
 /// 7-day OOM window), so retain two weeks and prune them. The low-volume stop and
@@ -630,7 +636,7 @@ async fn publish_failed_run(
 }
 
 /// Whether no runtime but a private one could lease the queued platform AI
-/// job `row` (a candidate of [`fail_platform_jobs_stranded_on_private_runtimes`]),
+/// job `row` (a candidate of [`load_platform_jobs_stranded_on_private_runtimes`]),
 /// by the rules of `lease_next_agent_job`:
 /// - a job that does not spread runs only on the runtime it is pinned to;
 /// - a spread worker of a plan (it has a group) runs on the runtime it is
@@ -697,17 +703,46 @@ fn platform_job_has_only_private_runners(state: &AppState, row: &tokio_postgres:
 /// forever. They fail with the dispatch refusal's reason, and a managed-AI
 /// reserve they never used is given back.
 ///
-/// Privacy is decided like the lease decides it
-/// ([`super::runtime_is_private_self_hosted`], which also knows the provider
-/// registry), so the candidates are classified here rather than in SQL. The
-/// spread and browser rules are the lease's own SQL.
+/// A job queued less than [`STRANDED_PLATFORM_JOB_GRACE_SECONDS`] ago is left
+/// to a later sweep: dispatch commits a job pinned to a stopped desktop and
+/// unpins it only after, and a hosted runtime then takes it.
 async fn fail_platform_jobs_stranded_on_private_runtimes(state: &AppState) -> AnyResult<usize> {
     let mut connection = state
         .pool
         .get()
         .await
         .context("failed to acquire connection for stranded platform job expiry")?;
-    let candidates = connection
+    let stranded = load_platform_jobs_stranded_on_private_runtimes(state, &connection).await?;
+    let Some(failed) = fail_stranded_platform_jobs(&mut connection, &stranded).await? else {
+        return Ok(0);
+    };
+    drop(connection);
+
+    for (project_id, job_id, _, _) in &failed.jobs {
+        info!(
+            %job_id,
+            %project_id,
+            "failed a platform AI job that only private self-hosted runtimes could lease"
+        );
+    }
+    let failed_count = failed.jobs.len();
+    publish_failed_queued_jobs(state, failed).await;
+    Ok(failed_count)
+}
+
+/// The queued platform AI jobs, older than
+/// [`STRANDED_PLATFORM_JOB_GRACE_SECONDS`], that only a private self-hosted
+/// runtime could lease, each with the runtime it is pinned to, if any.
+///
+/// Privacy is decided like the lease decides it
+/// ([`super::runtime_is_private_self_hosted`], which also knows the provider
+/// registry), so the candidates are classified here rather than in SQL. The
+/// spread and browser rules are the lease's own SQL.
+async fn load_platform_jobs_stranded_on_private_runtimes(
+    state: &AppState,
+    client: &tokio_postgres::Client,
+) -> AnyResult<Vec<(Uuid, Option<Uuid>)>> {
+    let candidates = client
         .query(
             "with platform_jobs as (
                  select aj.id,
@@ -743,8 +778,10 @@ async fn fail_platform_jobs_stranded_on_private_runtimes(state: &AppState) -> An
                  where aj.status = 'queued'
                    and aj.credential_id is null
                    and lower(btrim(coalesce(aj.intent, ''))) <> 'terminal_command'
+                   and aj.created_at < now() - ($1::bigint * interval '1 second')
              )
              select pj.id,
+                    pj.target_runtime_id,
                     pj.spreads,
                     pj.group_id is not null as in_plan_group,
                     target.provider as target_provider,
@@ -776,42 +813,57 @@ async fn fail_platform_jobs_stranded_on_private_runtimes(state: &AppState) -> An
               and parent.project_id = pj.project_id
              where target.id is not null
                 or (pj.spreads and parent.id is not null)",
-            &[],
+            &[&STRANDED_PLATFORM_JOB_GRACE_SECONDS],
         )
         .await
         .context("failed to load queued platform jobs that may have no runtime")?;
-    let job_ids: Vec<Uuid> = candidates
+    Ok(candidates
         .iter()
         .filter(|row| platform_job_has_only_private_runners(state, row))
-        .map(|row| row.get("id"))
-        .collect();
-    if job_ids.is_empty() {
-        return Ok(0);
+        .map(|row| (row.get("id"), row.get("target_runtime_id")))
+        .collect())
+}
+
+/// Fail the `stranded` jobs ([`load_platform_jobs_stranded_on_private_runtimes`])
+/// that are still queued for no credential and still pinned where they were
+/// when classified. A job unpinned since, by dispatch or by its runtime's
+/// stop, may now go to a hosted runtime and is left alone. Returns `None` when
+/// no job failed, and otherwise what to publish once `client` is released.
+async fn fail_stranded_platform_jobs(
+    client: &mut tokio_postgres::Client,
+    stranded: &[(Uuid, Option<Uuid>)],
+) -> AnyResult<Option<FailedQueuedJobs>> {
+    if stranded.is_empty() {
+        return Ok(None);
     }
+    let (job_ids, target_runtime_ids): (Vec<Uuid>, Vec<Option<Uuid>>) =
+        stranded.iter().copied().unzip();
 
     let message = crate::dispatch::MANAGED_AI_SELF_HOSTED_RUNTIME_MESSAGE;
-    let mut transaction = connection
+    let mut transaction = client
         .transaction()
         .await
         .context("failed to start failing stranded platform jobs")?;
     let rows = transaction
         .query(
-            "update agent_jobs
+            "update agent_jobs aj
              set status = 'failed',
                  outcome = 'failed',
-                 error_message = $2,
+                 error_message = $3,
                  completed_at = now(),
                  active_input_ready_runtime_id = null,
                  active_input_ready_expires_at = null,
                  active_input_ready_turn_id = null,
                  updated_at = now()
-             where id = any($1)
-               and status = 'queued'
-               and credential_id is null
-               and lower(btrim(coalesce(intent, ''))) <> 'terminal_command'
-             returning id, project_id, run_id, conversation_id, session_id, prompt_id,
-                       payload, error_message, lease_attempts",
-            &[&job_ids, &message],
+             from unnest($1::uuid[], $2::uuid[]) as stranded(id, target_runtime_id)
+             where aj.id = stranded.id
+               and aj.target_runtime_id is not distinct from stranded.target_runtime_id
+               and aj.status = 'queued'
+               and aj.credential_id is null
+               and lower(btrim(coalesce(aj.intent, ''))) <> 'terminal_command'
+             returning aj.id, aj.project_id, aj.run_id, aj.conversation_id, aj.session_id,
+                       aj.prompt_id, aj.payload, aj.error_message, aj.lease_attempts",
+            &[&job_ids, &target_runtime_ids, &message],
         )
         .await
         .context("failed to fail platform jobs stranded on private runtimes")?;
@@ -820,7 +872,7 @@ async fn fail_platform_jobs_stranded_on_private_runtimes(state: &AppState) -> An
             .rollback()
             .await
             .context("failed to close an empty stranded platform job failure")?;
-        return Ok(0);
+        return Ok(None);
     }
 
     let failed = settle_failed_queued_jobs_with_message(
@@ -836,19 +888,7 @@ async fn fail_platform_jobs_stranded_on_private_runtimes(state: &AppState) -> An
         .commit()
         .await
         .context("failed to commit failing stranded platform jobs")?;
-    drop(connection);
-
-    for row in &rows {
-        let job_id: Uuid = row.get("id");
-        let project_id: Uuid = row.get("project_id");
-        info!(
-            %job_id,
-            %project_id,
-            "failed a platform AI job that only private self-hosted runtimes could lease"
-        );
-    }
-    publish_failed_queued_jobs(state, failed).await;
-    Ok(rows.len())
+    Ok(Some(failed))
 }
 
 /// Jobs requeued by a runtime stop expire if nothing resumes them promptly.
@@ -2390,6 +2430,114 @@ mod tests {
         fixture.cleanup().await
     }
 
+    /// Backdate every job of `project_id` past the idle sweep's grace for
+    /// platform jobs, as jobs queued before the last sweep ran are.
+    async fn age_project_jobs_past_the_stranded_job_grace(
+        pool: &crate::config::PgPool,
+        project_id: Uuid,
+    ) -> anyhow::Result<()> {
+        pool.get()
+            .await?
+            .execute(
+                "update agent_jobs
+                 set created_at = now() - ($2::bigint + 1) * interval '1 second'
+                 where project_id = $1",
+                &[&project_id, &super::STRANDED_PLATFORM_JOB_GRACE_SECONDS],
+            )
+            .await?;
+        Ok(())
+    }
+
+    /// A stranded platform job that is unpinned after the sweep classified it
+    /// (a desktop's stop, or dispatch's unpin from a runtime that is not
+    /// ready) may now go to a hosted runtime. The sweep's failing step leaves
+    /// it queued, with its reserve, rather than failing it on the stale
+    /// classification.
+    #[tokio::test]
+    async fn stranded_platform_job_unpinned_after_classification_stays_queued() -> anyhow::Result<()>
+    {
+        use crate::tests_managed_ai_refund::{credit_balance, seed_reserved_managed_ai_prompt};
+        use serde_json::json;
+        use tokio_postgres::types::Json as PgJson;
+
+        let Some(fixture) =
+            seed_reserved_managed_ai_prompt("unpinned-after-classification").await?
+        else {
+            eprintln!("skipping stranded job reclassification test: TEST_DATABASE_URL not set");
+            return Ok(());
+        };
+        let test_result: anyhow::Result<()> = async {
+            let desktop_runtime_id = Uuid::new_v4();
+            let mut connection = fixture.pool.get().await?;
+            let mut desktop_capabilities = json!({ "agent": true });
+            crate::runtime::set_self_hosted_access_attestation(
+                desktop_capabilities
+                    .as_object_mut()
+                    .expect("capabilities object"),
+                fixture.owner_user_id,
+            );
+            connection
+                .execute(
+                    "insert into runtimes (
+                         id, project_id, provider, status, idle_ttl_seconds, last_seen_at,
+                         capabilities
+                     ) values ($1, $2, 'self-hosted', 'ready', 600, now(), $3)",
+                    &[
+                        &desktop_runtime_id,
+                        &fixture.project_id,
+                        &PgJson(desktop_capabilities),
+                    ],
+                )
+                .await?;
+            connection
+                .execute(
+                    "update agent_jobs set target_runtime_id = $2 where id = $1",
+                    &[&fixture.job_id, &desktop_runtime_id],
+                )
+                .await?;
+            age_project_jobs_past_the_stranded_job_grace(&fixture.pool, fixture.project_id).await?;
+
+            let stranded: Vec<(Uuid, Option<Uuid>)> =
+                super::load_platform_jobs_stranded_on_private_runtimes(&fixture.state, &connection)
+                    .await?
+                    .into_iter()
+                    .filter(|(job_id, _)| *job_id == fixture.job_id)
+                    .collect();
+            assert_eq!(stranded, vec![(fixture.job_id, Some(desktop_runtime_id))]);
+
+            connection
+                .execute(
+                    "update agent_jobs set target_runtime_id = null where id = $1",
+                    &[&fixture.job_id],
+                )
+                .await?;
+            assert!(
+                super::fail_stranded_platform_jobs(&mut connection, &stranded)
+                    .await?
+                    .is_none(),
+                "nothing is failed on a stale classification"
+            );
+            let status: String = connection
+                .query_one(
+                    "select status from agent_jobs where id = $1",
+                    &[&fixture.job_id],
+                )
+                .await?
+                .get(0);
+            assert_eq!(status, "queued");
+            assert_eq!(
+                credit_balance(&fixture.pool, &fixture.org_id).await?,
+                fixture.reserved_balance,
+                "the reserve is kept for the hosted runtime's turn"
+            );
+            Ok(())
+        }
+        .await;
+        let cleanup = fixture.cleanup().await;
+        test_result?;
+        cleanup
+    }
+
     /// A platform AI job queued against a desktop (before dispatch refused
     /// that, or by any path around it) can never start. The periodic idle
     /// sweep fails it with the dispatch refusal's reason, tells its
@@ -2498,6 +2646,7 @@ mod tests {
                         .await?;
                 }
             }
+            age_project_jobs_past_the_stranded_job_grace(&fixture.pool, fixture.project_id).await?;
 
             let _watch = fixture.state.events.watch_project(fixture.project_id);
             let mut events = fixture.state.events.subscribe();
