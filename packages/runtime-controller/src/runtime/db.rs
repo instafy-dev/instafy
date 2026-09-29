@@ -584,7 +584,9 @@ pub(crate) async fn release_origin_instances_for_runtime(
 /// attaches another project to the runtime's shared lease and ends with it:
 /// [`mark_runtime_lease_released`] and the failed-launch path call this in the
 /// transaction that ends the parent lease. A lease without tenants releases
-/// nothing.
+/// nothing. Tenant leases whose parent was released by a controller without
+/// this call stay unreleased; the attach never reuses them, because it reuses
+/// a tenant lease only under the runtime's current shared lease.
 pub(crate) async fn release_tenant_leases_of_parent(
     transaction: &Transaction<'_>,
     parent_lease_id: &Uuid,
