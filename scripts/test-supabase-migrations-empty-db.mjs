@@ -148,14 +148,17 @@ const FIRST_THREE_TABLES_ONLY = new Set([
 // BOTH_ORDER_TABLES in one statement, which no split can separate: on
 // Postgres 17 a foreign key between two of them, even NOT VALID, takes SHARE
 // ROW EXCLUSIVE on both, and dropping one takes ACCESS EXCLUSIVE on both.
-// Each entry holds the sha256 of the migration file's exact bytes, the pairs
-// of tables the migration may lock that way, each as bothOrderLockViolations
-// returns it and the failure message names it, and a one-line reason. The
-// migration's first statement sets a lock timeout, and nothing else in it
-// mentions lock_timeout. MIGRATIONS.md describes the route and why it is safe
-// enough, and a reviewer adds each entry.
+// Each entry, keyed by the version as a BigInt literal, holds the sha256 of
+// the migration file's exact bytes in lowercase hex, the pairs of tables the
+// migration may lock that way, each as bothOrderLockViolations returns it and
+// the failure message names it, and a one-line reason. The migration's first
+// statement sets a lock timeout of at most MAX_LOCK_TIMEOUT_MS, nothing else
+// in it mentions lock_timeout, the probe reads the same value before COMMIT,
+// and no function outside pg_catalog and information_schema sets lock_timeout
+// in its SET clause or names it in its body. MIGRATIONS.md describes the
+// route and why it is safe enough, and a reviewer adds each entry.
 const REVIEWED_LOCK_EXCEPTIONS = new Map([
-  // [20261001120000n, { sha256: "<64 hex digits>", pairs: [["agent_jobs", "runtime_leases"]], reason: "agent_jobs.lease_id references runtime_leases" }],
+  // [20261001120000n, { sha256: "<64 lowercase hex digits>", pairs: [["agent_jobs", "runtime_leases"]], reason: "agent_jobs.lease_id references runtime_leases, added NOT VALID" }],
 ]);
 
 function tablePairs(tables) {
@@ -208,16 +211,38 @@ const OTHER_TABLE_LOCK_MODES = new Set([
 const EXISTING_RELATION_MARKER = "instafy-migration-existing";
 const HELD_LOCK_MARKER = "instafy-migration-holds";
 const LOCK_TIMEOUT_MARKER = "instafy-migration-lock-timeout";
+const LOCK_TIMEOUT_FUNCTION_MARKER = "instafy-migration-lock-timeout-function";
 const TRANSACTION_MARKER = "instafy-migration-xact";
 // Both probe queries first set search_path to pg_catalog alone, so that no
 // table, view, function or operator a migration creates, in public or as a
 // temporary object, stands in for a catalog one.
 const CATALOG_SEARCH_PATH = "set local search_path = pg_catalog, pg_temp;";
+// One row per function outside pg_catalog and information_schema whose SET
+// clause sets lock_timeout or whose body names it as a word: the function as
+// its signature. Postgres sets a SET clause's value while the function runs
+// and restores the caller's on return, and a body can change the timeout and
+// set it back, so a migration can lift its timeout for one statement, through
+// a function it calls or one an event trigger runs around its DDL, while the
+// probe, after it, still reads the value the migration set. A SQL-standard
+// body has an empty prosrc, so its text comes from pg_get_function_sqlbody.
+// Both probe queries list them, so that a migration that drops the function
+// after it called it is still seen.
+const LOCK_TIMEOUT_FUNCTION_QUERY = `select '${LOCK_TIMEOUT_FUNCTION_MARKER} ' || p.oid::regprocedure
+from pg_proc p
+where p.pronamespace not in ('pg_catalog'::regnamespace, 'information_schema'::regnamespace)
+  and (
+    coalesce(pg_get_function_sqlbody(p.oid), p.prosrc) ~* '\\mlock_timeout\\M'
+    or exists (
+      select from unnest(p.proconfig) as c(setting)
+      where lower(split_part(c.setting, '=', 1)) = 'lock_timeout'
+    )
+  )`;
 // psql runs it first in the one transaction it opens for a migration, before
-// the migration itself. It prints the id of that transaction, then one row per
-// public relation that exists before the migration: its oid and the table it
-// belongs to, which for an index is the table the index is on. It then sets
-// search_path back to the session's default for the migration.
+// the migration itself. It prints the id of that transaction, the functions
+// LOCK_TIMEOUT_FUNCTION_QUERY lists, then one row per public relation that
+// exists before the migration: its oid and the table it belongs to, which for
+// an index is the table the index is on. It then sets search_path back to the
+// session's default for the migration.
 //
 // Because it runs first, a migration whose first statement is SET TRANSACTION
 // ISOLATION LEVEL, which Postgres accepts only before a transaction's first
@@ -225,6 +250,8 @@ const CATALOG_SEARCH_PATH = "set local search_path = pg_catalog, pg_temp;";
 // supabase db push would apply it. No migration does that.
 const TRANSACTION_QUERY = `${CATALOG_SEARCH_PATH}
 select '${TRANSACTION_MARKER} ' || pg_current_xact_id()
+union all
+${LOCK_TIMEOUT_FUNCTION_QUERY}
 union all
 select '${EXISTING_RELATION_MARKER} ' || c.oid || ' ' || coalesce(t.relname, c.relname)
 from pg_class c
@@ -236,12 +263,15 @@ set local search_path to default;
 // psql runs it after the migration in the same transaction, before COMMIT,
 // while every lock the migration took is still held. It prints the id of the
 // transaction it runs in, the lock_timeout in milliseconds that the migration
-// left in force, then one row per relation lock the transaction holds on a
-// public relation, or on one it dropped: the relation's oid and the mode.
+// left in force, the functions LOCK_TIMEOUT_FUNCTION_QUERY lists, then one row
+// per relation lock the transaction holds on a public relation, or on one it
+// dropped: the relation's oid and the mode.
 const HELD_LOCK_QUERY = `${CATALOG_SEARCH_PATH}
 select '${TRANSACTION_MARKER} ' || pg_current_xact_id()
 union all
 select '${LOCK_TIMEOUT_MARKER} ' || setting from pg_settings where name = 'lock_timeout'
+union all
+${LOCK_TIMEOUT_FUNCTION_QUERY}
 union all
 select '${HELD_LOCK_MARKER} ' || l.relation || ' ' || l.mode
 from pg_locks l
@@ -258,18 +288,30 @@ const TRANSACTION_WARNINGS = [
 // Linux limits one argument of a process, its terminating NUL included, to
 // 128 KiB, and the runner passes a checked migration to psql as one.
 const MAX_COMMAND_BYTES = 128 * 1024 - 1;
-// The value of a SET LOCAL lock_timeout that bounds the wait: a number of
-// milliseconds, or of a time unit, quoted or not, that comes to at least one
-// millisecond. 0 and DEFAULT leave the wait unbounded.
-const LOCK_TIMEOUT_VALUE = /^([0-9]+(?:\.[0-9]+)?)\s*(us|ms|s|min|h|d)?$/u;
-const LOCK_TIMEOUT_UNIT_MS = new Map([
-  ["us", 0.001],
-  ["ms", 1],
-  ["s", 1_000],
-  ["min", 60_000],
-  ["h", 3_600_000],
+// The value of a SET LOCAL lock_timeout: a number of milliseconds, or of a
+// time unit, quoted or not. A number with a leading zero, such as 010, is not
+// accepted, because Postgres reads a quoted '010' as octal and an unquoted 010
+// as decimal.
+const LOCK_TIMEOUT_VALUE = /^((?:0|[1-9][0-9]*)(?:\.[0-9]+)?)\s*(us|ms|s|min|h|d)?$/u;
+// The time units Postgres reads, largest first, in milliseconds.
+const LOCK_TIMEOUT_UNITS = [
   ["d", 86_400_000],
-]);
+  ["h", 3_600_000],
+  ["min", 60_000],
+  ["s", 1_000],
+  ["ms", 1],
+  ["us", 1 / 1000],
+];
+// The longest lock timeout a reviewed lock exception may set. The requests
+// queued behind the migration wait as long as it does.
+const MAX_LOCK_TIMEOUT_MS = 60_000;
+
+// C's rint, which Postgres rounds a setting with: to the nearest integer, and
+// a half to the even one.
+function rint(value) {
+  const rounded = Math.round(value);
+  return rounded - value === 0.5 && rounded % 2 !== 0 ? rounded - 1 : rounded;
+}
 
 // The rows of one marker in psql's output, as [oid, the rest of the row].
 function markedRows(psqlOutput, wanted) {
@@ -317,6 +359,20 @@ function heldLockTimeout(psqlOutput) {
     }
   }
   return values.length === 1 && /^[0-9]+$/u.test(values[0] ?? "") ? Number(values[0]) : null;
+}
+
+// The functions whose SET clause sets lock_timeout or whose body names it, as
+// either probe query listed them. A row the migration prints can only add
+// one, which fails the migration too.
+function lockTimeoutFunctions(psqlOutput) {
+  const functions = new Set();
+  for (const line of String(psqlOutput).split("\n")) {
+    const [marker, ...rest] = line.trim().split(" ");
+    if (marker === LOCK_TIMEOUT_FUNCTION_MARKER && rest.length > 0) {
+      functions.add(rest.join(" "));
+    }
+  }
+  return [...functions];
 }
 
 // The table that each relation TRANSACTION_QUERY listed before the migration
@@ -375,33 +431,49 @@ function bothOrderLockViolations(psqlOutput, tables = BOTH_ORDER_TABLES) {
   ];
 }
 
-// Whether the first top-level statement of a migration sets a positive
-// lock_timeout for its own transaction, as
+// The lock_timeout in milliseconds that the first top-level statement of a
+// migration sets for its own transaction, as
 // set local lock_timeout = '5s';
-// A timeout set after a statement took its locks does not bound the wait for
-// them, and one in a comment, a string or a function body sets nothing.
+// rounded the way Postgres rounds it, or null unless that statement sets a
+// positive one. A timeout set after a statement took its locks does not bound
+// the wait for them, and one in a comment, a string or a function body sets
+// nothing.
 function setsLockTimeoutFirst(sql) {
   const [first = []] = topLevelStatements(sql);
   const [set, local, name, ...rest] = first;
   const value = rest[0] === "to" ? rest.slice(1) : rest;
   if (set !== "set" || local !== "local" || name !== "lock_timeout" || value.length !== 1) {
-    return false;
+    return null;
   }
   const quoted = value[0].length > 1 && value[0].startsWith("'") && value[0].endsWith("'");
   const match = LOCK_TIMEOUT_VALUE.exec(quoted ? value[0].slice(1, -1) : value[0]);
-  return (
-    match !== null && Number(match[1]) * LOCK_TIMEOUT_UNIT_MS.get(match[2] ?? "ms") >= 1
-  );
+  if (match === null) {
+    return null;
+  }
+  // Postgres rounds a value in a unit to the next smaller unit, then to a
+  // whole millisecond.
+  let milliseconds = Number(match[1]);
+  const unit = LOCK_TIMEOUT_UNITS.findIndex(([unitName]) => unitName === match[2]);
+  if (unit !== -1) {
+    milliseconds *= LOCK_TIMEOUT_UNITS[unit][1];
+    const smaller = LOCK_TIMEOUT_UNITS[unit + 1]?.[1];
+    if (smaller !== undefined) {
+      milliseconds = rint(milliseconds / smaller) * smaller;
+    }
+  }
+  milliseconds = rint(milliseconds);
+  return milliseconds >= 1 ? milliseconds : null;
 }
 
 // Whether a migration mentions lock_timeout, in any case, only once: with
 // setsLockTimeoutFirst, in the first statement that sets it. A later RESET,
 // SET or set_config, at the top level or in a body, could lift the timeout
-// before the statement that takes the locks, which the probe, reading the
-// timeout only before COMMIT, would not see. A comment counts as well, so that
-// the rule stays one a scan of the text can check.
+// before the statement that takes the locks and set it back after, which the
+// probe, reading the timeout only before COMMIT, would not see. A comment
+// counts as well, so that the rule stays one a scan of the text can check. It
+// counts the whole word, so deadlock_timeout is not a mention.
 function mentionsLockTimeoutOnce(sql) {
-  return (sql.match(/lock_timeout/giu) ?? []).length === 1;
+  return (sql.match(/\block_timeout\b/giu) ?? []).length === 1;
 }
 
 // A pair of tables as bothOrderLockViolations returns it and a failure message
@@ -412,7 +484,8 @@ function pairName([left, right]) {
 
 // Every reviewed lock exception must name a migration after the lane boundary
 // in the plan, with the sha256 of its file, the pairs of tables it allows and
-// a one-line reason, so that an entry cannot outlive its migration.
+// a one-line reason, so that an entry cannot outlive its migration. Each error
+// names the field that is wrong.
 function validateReviewedLockExceptions(exceptions, migrations) {
   const checked = new Set(
     migrations.map(({ version }) => BigInt(version)).filter((version) => version > LANE_BOUNDARY),
@@ -423,24 +496,38 @@ function validateReviewedLockExceptions(exceptions, migrations) {
     pair.every((table) => typeof table === "string" && /^[a-z_][a-z0-9_]*$/u.test(table)) &&
     pair[0] !== pair[1];
   for (const [version, exception] of exceptions) {
-    if (typeof version !== "bigint" || !checked.has(version)) {
+    if (typeof version !== "bigint") {
+      throw new Error(
+        `reviewed lock exception ${typeof version === "string" ? JSON.stringify(version) : String(version)} has a version that is a ${typeof version}; keys must be BigInt literals such as 20260930100000n`,
+      );
+    }
+    if (!checked.has(version)) {
       throw new Error(
         `reviewed lock exception ${version} names no migration after ${LANE_BOUNDARY}; remove it`,
       );
     }
-    const pairs = exception?.pairs;
+    const entry = `reviewed lock exception ${version}`;
+    if (typeof exception !== "object" || exception === null) {
+      throw new Error(`${entry} must be an object with its sha256, pairs and reason`);
+    }
+    if (typeof exception.sha256 !== "string" || !/^[0-9a-f]{64}$/u.test(exception.sha256)) {
+      throw new Error(
+        `${entry} needs a sha256 of 64 lowercase hex digits, the sha256 of its migration file`,
+      );
+    }
+    const { pairs } = exception;
     if (
-      !/^[0-9a-f]{64}$/u.test(exception?.sha256 ?? "") ||
       !Array.isArray(pairs) ||
       pairs.length === 0 ||
       !pairs.every(isPair) ||
-      new Set(pairs.map(pairName)).size !== pairs.length ||
-      typeof exception.reason !== "string" ||
-      !/^[^\n]*\S[^\n]*$/u.test(exception.reason)
+      new Set(pairs.map(pairName)).size !== pairs.length
     ) {
       throw new Error(
-        `reviewed lock exception ${version} needs the sha256 of its migration, the pairs of tables it allows and a one-line reason`,
+        `${entry} needs pairs: one or more distinct pairs of two different table names, such as [["agent_jobs", "runtime_leases"]]`,
       );
+    }
+    if (typeof exception.reason !== "string" || !/^[^\n]*\S[^\n]*$/u.test(exception.reason)) {
+      throw new Error(`${entry} needs a reason of one line that is not blank`);
     }
   }
 }
@@ -667,8 +754,9 @@ function runEmptyDatabaseMigrationTest({
               `${migration.track}:${migration.fileName} has a reviewed lock exception but no longer writes or locks two tables that way; remove its entry`,
             );
           }
-          // The entry allows the pairs a reviewer read, and no others, so a
-          // lock that a split could move out of the migration still fails.
+          // The entry allows the pairs a reviewer read, and no others, so an
+          // unlisted pair still fails. A stronger lock mode or an extra
+          // statement on a listed pair is caught only by review.
           const observed = violations.map(pairName);
           const reviewed = exception.pairs.map(pairName);
           const unreviewed = observed.filter((pair) => !reviewed.includes(pair));
@@ -689,9 +777,15 @@ function runEmptyDatabaseMigrationTest({
               `${migration.track}:${migration.fileName} changed since its lock exception was reviewed: its sha256 is ${sha256}, not the reviewed ${exception.sha256}; have the change reviewed and update the entry`,
             );
           }
-          if (!setsLockTimeoutFirst(sql)) {
+          const declared = setsLockTimeoutFirst(sql);
+          if (declared === null) {
             throw new Error(
               `${migration.track}:${migration.fileName} has a reviewed lock exception but does not set a lock timeout first; start it with set local lock_timeout = '5s';`,
+            );
+          }
+          if (declared > MAX_LOCK_TIMEOUT_MS) {
+            throw new Error(
+              `${migration.track}:${migration.fileName} has a reviewed lock exception but sets lock_timeout to ${declared} ms, above the ${MAX_LOCK_TIMEOUT_MS} ms it may wait; start it with set local lock_timeout = '5s';`,
             );
           }
           if (!mentionsLockTimeoutOnce(sql)) {
@@ -699,12 +793,23 @@ function runEmptyDatabaseMigrationTest({
               `${migration.track}:${migration.fileName} has a reviewed lock exception but mentions lock_timeout outside its first statement; set it there once and mention it nowhere else, so that nothing after it can lift the timeout`,
             );
           }
-          // A RESET ALL, or a name the text does not spell out, can still
-          // lift the timeout, so the probe's reading must show it in force.
-          const lockTimeout = heldLockTimeout(applied.stdout);
-          if (lockTimeout === null || lockTimeout === 0) {
+          // Such a function, called by the migration or run by an event
+          // trigger around its DDL, can lift the timeout for one statement and
+          // restore it before the probe reads it.
+          const functions = lockTimeoutFunctions(applied.stdout);
+          if (functions.length > 0) {
+            const one = functions.length === 1;
             throw new Error(
-              `${migration.track}:${migration.fileName} has a reviewed lock exception but ${lockTimeout === null ? "its lock_timeout could not be read" : "leaves lock_timeout at 0"} before it commits; set it once, first, and do not lift it`,
+              `${migration.track}:${migration.fileName} has a reviewed lock exception but ${one ? "function" : "functions"} ${functions.join(", ")} ${one ? "sets lock_timeout in its SET clause or names it in its body" : "set lock_timeout in their SET clauses or name it in their bodies"}, which can lift the timeout for a statement of the migration; remove lock_timeout from ${one ? "that function" : "those functions"}`,
+            );
+          }
+          // A RESET ALL, or a name the text does not spell out, can still
+          // change the timeout, so the probe must read the one the first
+          // statement set.
+          const lockTimeout = heldLockTimeout(applied.stdout);
+          if (lockTimeout !== declared) {
+            throw new Error(
+              `${migration.track}:${migration.fileName} has a reviewed lock exception but ${lockTimeout === null ? "its lock_timeout could not be read" : `leaves lock_timeout at ${lockTimeout} ms, not the ${declared} ms its first statement sets,`} before it commits; set it once, first, and do not change it`,
             );
           }
           console.log(
@@ -785,7 +890,9 @@ export {
   BOTH_ORDER_TABLES_CREATED_BY,
   FIRST_THREE_TABLES_ONLY,
   HELD_LOCK_QUERY,
+  LOCK_TIMEOUT_FUNCTION_QUERY,
   MAX_COMMAND_BYTES,
+  MAX_LOCK_TIMEOUT_MS,
   OTHER_TABLE_LOCK_MODES,
   POSTGRES_IMAGE,
   REQUIRED_PUBLIC_RELATIONS,
@@ -794,6 +901,7 @@ export {
   bothOrderLockViolations,
   heldLockProbeProblem,
   heldLockTimeout,
+  lockTimeoutFunctions,
   mentionsLockTimeoutOnce,
   resolveRunnableImage,
   runEmptyDatabaseMigrationTest,

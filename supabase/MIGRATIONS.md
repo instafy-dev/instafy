@@ -108,8 +108,9 @@ Common splits, each step in a migration of its own that commits before the next:
 - A new foreign-key column goes in bare first, with `ALTER TABLE ... ADD COLUMN`, and the next
   migration adds its constraint with `ALTER TABLE ... ADD CONSTRAINT`. On another existing
   table that references a listed one, the column's `ACCESS EXCLUSIVE` and the reference's lock
-  on the listed table break the rules together and pass apart. Between two listed tables this
-  does not help, because the constraint alone locks both; see the reviewed exception below.
+  on the listed table break the rules together and pass apart. Between two listed tables the
+  constraint alone still locks both, so it goes in as the reviewed exception below, and the bare
+  column keeps its `ACCESS EXCLUSIVE` out of that exception.
 - Each `VALIDATE CONSTRAINT` of a foreign key gets a migration of its own. It takes
   `SHARE UPDATE EXCLUSIVE` on its table and `ROW SHARE` on the table it references, without
   locking a row there, so it blocks no live write. The test cannot tell that `ROW SHARE` from
@@ -135,28 +136,58 @@ aborted request or a retried release, not an outage.
 
 Some changes lock two listed tables in one statement, which no split separates. On Postgres 17
 a foreign key between two listed tables, even `NOT VALID`, takes `SHARE ROW EXCLUSIVE` on both
-when it is added and `ACCESS EXCLUSIVE` on both when it is dropped, so
-`alter table agent_jobs add column lease_id uuid references runtime_leases(id)` breaks the
-rules however it is split. Such a migration goes in as a reviewed exception: an entry in
-`REVIEWED_LOCK_EXCEPTIONS` in `scripts/test-supabase-migrations-empty-db.mjs`, keyed by the
-migration's version, with the sha256 of the migration file's exact bytes (`sha256sum`, or
+when it is added and `ACCESS EXCLUSIVE` on both when it is dropped. Such a statement goes in as
+a reviewed exception, alone and in its lightest form. For a reference from `agent_jobs` to
+`runtime_leases`, each step in a migration of its own:
+
+1. An ordinary migration adds the column bare,
+   `alter table agent_jobs add column lease_id uuid;`, which locks `agent_jobs` alone.
+2. The reviewed migration sets its lock timeout and then adds only the constraint, `NOT VALID`:
+   `alter table agent_jobs add constraint agent_jobs_lease_id_fkey foreign key (lease_id)
+   references runtime_leases(id) not valid;`. It holds `SHARE ROW EXCLUSIVE` on both tables,
+   which blocks a write to them but no read, and checks no rows.
+3. A later migration validates it, `alter table agent_jobs validate constraint
+   agent_jobs_lease_id_fkey;`, as the splits above describe. It needs no entry.
+
+Do not add the column with an inline reference, `add column lease_id uuid references
+runtime_leases(id)`, in the reviewed migration: it passes with the same entry, but holds
+`ACCESS EXCLUSIVE` on `agent_jobs`, which blocks even a read, and `SHARE ROW EXCLUSIVE` on
+`runtime_leases` while it validates the new column.
+
+The entry goes in `REVIEWED_LOCK_EXCEPTIONS` in `scripts/test-supabase-migrations-empty-db.mjs`,
+keyed by the migration's version as a BigInt literal, with its `n`, such as `20260930100000n`.
+It holds the sha256 of the migration file's exact bytes in lowercase hex (`sha256sum`, or
 `shasum -a 256`), the pairs of tables it allows, each written as the test's failure message
-names it, such as `["agent_jobs", "runtime_leases"]`, and a one-line reason. The migration's
-first statement sets its lock timeout, `set local lock_timeout = '5s';`, so that the timeout
-bounds the wait for every lock after it, and nothing else in the file mentions `lock_timeout`,
-not even a comment, so that no later `RESET`, `SET` or `set_config` lifts it. The same backstop
-makes this safe enough: a lock cycle between the migration and a live request ends after
-`deadlock_timeout` with one of them aborted, and the migration's `lock_timeout` aborts it before
-the requests queued behind it pile up, so the worst case is one aborted request or a retried
-release. The rules keep even that off the normal path, so an entry needs a reviewer: the pull
-request that adds it needs the approval of a reviewer who checked that no split helps. The
-empty-database test then accepts the pairs the entry lists and no others, so a lock that a
-split could move out of the migration still fails it. It also fails when the file's sha256 no
-longer matches the entry, so any change to the file needs a new review; when the migration does
-not set a lock timeout first or mentions `lock_timeout` again; and when the probe reads
-`lock_timeout` as 0 before the migration commits, as after a `RESET ALL`. And it fails when an
-entry names no migration after `20260000000063`, or a pair the migration no longer holds, so the
-list cannot go stale.
+names it, such as `["agent_jobs", "runtime_leases"]`, and a one-line reason. Hash the file as
+committed, with LF line endings: a checkout that rewrites them, such as Windows with
+`core.autocrlf`, gives a sha256 that CI's bytes do not match.
+
+The migration's first statement sets its lock timeout, `set local lock_timeout = '5s';`, so that
+the timeout bounds the wait for every lock after it. Five seconds is the recommended value, and
+the test rejects one above 60 seconds, which the requests queued behind the migration would
+wait out too. The test also checks that nothing else in the file mentions `lock_timeout` as a
+word, not even a comment (`deadlock_timeout` does not count), which catches a later `RESET`,
+`SET` or `set_config` that names it; that the probe reads the same value before the migration
+commits, which catches a `RESET ALL` or a new value under a name the file builds from pieces;
+and that no function outside `pg_catalog` and `information_schema` sets `lock_timeout` in its
+`SET` clause or names it in its body, before or after the migration. Such a function, called by
+the migration or run by an event trigger around its DDL, can lift the timeout for one statement
+and restore it before the probe reads it. A change under a name no migration spells out, such
+as one built from pieces in the file or in a function body, that is restored before the
+migration commits, is left to the reviewer, who reads every function the migration calls and
+every event trigger.
+
+The same backstop makes this safe enough: a lock cycle between the migration and a live
+request ends after `deadlock_timeout` with one of them aborted, and the migration's
+`lock_timeout` aborts it before the requests queued behind it pile up, so the worst case is one
+aborted request or a retried release. The rules keep even that off the normal path, so an entry
+needs a reviewer: the pull request that adds it needs the approval of a reviewer who checked
+that no split helps and that the migration takes the lightest form above. The empty-database
+test then accepts the pairs the entry lists and no others: an unlisted pair still fails, but a
+stronger lock mode or an extra statement on a listed pair is caught only by review. It also
+fails when the file's sha256 no longer matches the entry, so any change to the file needs a new
+review, and when an entry names no migration after `20260000000063`, or a pair the migration no
+longer holds, so the list cannot go stale.
 
 Two things remain for review by hand. The first is a lock taken only for a row that exists,
 which an empty database cannot show: a foreign-key check, a row trigger, or a statement that a

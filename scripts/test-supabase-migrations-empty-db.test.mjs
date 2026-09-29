@@ -22,7 +22,9 @@ import {
   BOTH_ORDER_TABLES_CREATED_BY,
   FIRST_THREE_TABLES_ONLY,
   HELD_LOCK_QUERY,
+  LOCK_TIMEOUT_FUNCTION_QUERY,
   MAX_COMMAND_BYTES,
+  MAX_LOCK_TIMEOUT_MS,
   OTHER_TABLE_LOCK_MODES,
   POSTGRES_IMAGE,
   REQUIRED_PUBLIC_RELATIONS,
@@ -31,6 +33,7 @@ import {
   bothOrderLockViolations,
   heldLockProbeProblem,
   heldLockTimeout,
+  lockTimeoutFunctions,
   mentionsLockTimeoutOnce,
   resolveRunnableImage,
   runEmptyDatabaseMigrationTest,
@@ -168,27 +171,32 @@ function aligned(rows) {
 
 // psql prints the rows of the id query, the migration's own command tags,
 // then the probe rows, each query's rows indented under a header. The id
-// query prints the transaction id and one row per existing relation; the
-// probe prints the transaction id again, the lock_timeout in milliseconds and
-// one row per lock. The rows below are what Postgres 17 reported for each
-// case.
+// query prints the transaction id, the functions whose SET clause sets
+// lock_timeout or whose body names it and one row per existing relation; the probe prints the
+// transaction id again, the lock_timeout in milliseconds, those functions
+// again and one row per lock. The rows below are what Postgres 17 reported
+// for each case.
 function psqlOutput({
   startId = "1066",
   endId = startId,
   existing = EXISTING_RELATIONS,
   tags = ["SET", "ALTER TABLE"],
   lockTimeout = "5000",
+  functionsBefore = [],
+  functions = functionsBefore,
   rows = [],
 } = {}) {
   return [
     ...aligned([
       ...(startId === null ? [] : [`instafy-migration-xact ${startId}`]),
+      ...functionsBefore.map((name) => `instafy-migration-lock-timeout-function ${name}`),
       ...existing.map(([oid, table]) => `instafy-migration-existing ${oid} ${table}`),
     ]),
     ...tags,
     ...aligned([
       ...(endId === null ? [] : [`instafy-migration-xact ${endId}`]),
       ...(lockTimeout === null ? [] : [`instafy-migration-lock-timeout ${lockTimeout}`]),
+      ...functions.map((name) => `instafy-migration-lock-timeout-function ${name}`),
       ...rows.map((row) => `instafy-migration-holds ${lockRow(row)}`),
     ]),
   ].join("\n");
@@ -296,6 +304,46 @@ test("the held-lock probe reports every relation lock this transaction holds on 
     null,
   );
   assert.equal(heldLockTimeout(psqlOutput({ lockTimeout: "5s" })), null);
+  // Both queries list each function outside pg_catalog and information_schema
+  // whose SET clause sets lock_timeout or whose body names it as a word, the
+  // id query before the migration and the probe after it. A SQL-standard
+  // body (BEGIN ATOMIC) has an empty prosrc on Postgres 17, so its text comes
+  // from pg_get_function_sqlbody.
+  assert.equal(
+    LOCK_TIMEOUT_FUNCTION_QUERY,
+    [
+      "select 'instafy-migration-lock-timeout-function ' || p.oid::regprocedure",
+      "from pg_proc p",
+      "where p.pronamespace not in ('pg_catalog'::regnamespace, 'information_schema'::regnamespace)",
+      "  and (",
+      "    coalesce(pg_get_function_sqlbody(p.oid), p.prosrc) ~* '\\mlock_timeout\\M'",
+      "    or exists (",
+      "      select from unnest(p.proconfig) as c(setting)",
+      "      where lower(split_part(c.setting, '=', 1)) = 'lock_timeout'",
+      "    )",
+      "  )",
+    ].join("\n"),
+  );
+  assert.ok(
+    TRANSACTION_QUERY.includes(
+      `pg_current_xact_id()\nunion all\n${LOCK_TIMEOUT_FUNCTION_QUERY}\nunion all\n`,
+    ),
+  );
+  assert.ok(
+    HELD_LOCK_QUERY.includes(
+      `where name = 'lock_timeout'\nunion all\n${LOCK_TIMEOUT_FUNCTION_QUERY}\nunion all\n`,
+    ),
+  );
+  assert.deepEqual(lockTimeoutFunctions(psqlOutput()), []);
+  assert.deepEqual(
+    lockTimeoutFunctions(
+      psqlOutput({
+        functionsBefore: ["public.lift(text)"],
+        functions: ["public.lift(text)", "public.hold(character varying)"],
+      }),
+    ),
+    ["public.lift(text)", "public.hold(character varying)"],
+  );
   // The id query lists every public relation before the migration, with the
   // table an index is on.
   assert.match(
@@ -990,19 +1038,21 @@ test("the probe reads the locks of the transaction the migration ran in", () => 
   assert.equal(heldLockProbeProblem("CREATE TABLE\n", ""), "transaction ids missing");
 });
 
-// A stand-in for docker that the runner drives through a whole run: it
-// reports the container healthy, keeps the arguments and the input of the
-// migration's psql, and answers it with the output and the exit status a test
-// wrote beside it.
+// A stand-in for docker that the runner drives through a whole run: it logs
+// each subcommand, reports the container healthy, keeps the arguments and the
+// input of the migration's psql, and answers it with the output and the exit
+// status a test wrote beside it.
 function fakeDocker(t) {
   const directory = mkdtempSync(path.join(os.tmpdir(), "instafy-fake-docker-"));
   t.after(() => rmSync(directory, { force: true, recursive: true }));
   const command = path.join(directory, "docker");
+  const calls = path.join(directory, "calls");
   writeFileSync(
     command,
     [
       "#!/bin/sh",
       'here=$(dirname "$0")',
+      'printf "%s\\n" "$1" >>"$here/calls"',
       'case "$1 $2" in',
       '  "inspect --format") echo healthy ;;',
       '  "exec "*)',
@@ -1036,6 +1086,7 @@ function fakeDocker(t) {
     const fileName = `${version}_public.sql`;
     const source = path.join(directory, fileName);
     writeFileSync(source, sql);
+    rmSync(calls, { force: true });
     writeFileSync(path.join(directory, "stdout"), stdout);
     writeFileSync(path.join(directory, "stderr"), stderr);
     writeFileSync(path.join(directory, "status"), `${status}\n`);
@@ -1054,6 +1105,9 @@ function fakeDocker(t) {
     }
     return { args, input: readFileSync(path.join(directory, "input"), "utf8") };
   };
+  // The docker subcommands of the last run, in order.
+  run.calls = () =>
+    existsSync(calls) ? readFileSync(calls, "utf8").split("\n").filter(Boolean) : [];
   return run;
 }
 
@@ -1216,16 +1270,40 @@ test("the runner checks a migration on main against the first three tables", (t)
 });
 
 test("a migration sets its lock timeout only with a first top-level SET LOCAL", () => {
-  for (const sql of [
-    "set local lock_timeout = '5s';\nalter table agent_jobs add column hyp text;\n",
-    "-- Bound the wait.\nSET LOCAL lock_timeout TO '5s';\nselect 1;\n",
-    "/* a comment */ set local lock_timeout = 5000;\n",
-    "set local lock_timeout = '1.5 min';\n",
-    "set local lock_timeout = '1000us';\n",
+  for (const [sql, milliseconds] of [
+    ["set local lock_timeout = '5s';\nalter table agent_jobs add column hyp text;\n", 5_000],
+    ["-- Bound the wait.\nSET LOCAL lock_timeout TO '5s';\nselect 1;\n", 5_000],
+    ["/* a comment */ set local lock_timeout = 5000;\n", 5_000],
+    ["set local lock_timeout = '1000us';\n", 1],
+    // Values beyond the 60 seconds a reviewed lock exception may set, which
+    // the runner rejects.
+    ["set local lock_timeout = '1.5 min';\n", 90_000],
+    ["set local lock_timeout = '24d';\n", 2_073_600_000],
+    ["set local lock_timeout = 2147483647;\n", 2_147_483_647],
+    // Rounded as Postgres 17 rounds them: to the next smaller unit, then to a
+    // whole millisecond, a half to the even one.
+    ["set local lock_timeout = '0.6';\n", 1],
+    ["set local lock_timeout = '600us';\n", 1],
+    ["set local lock_timeout = '1500us';\n", 2],
+    ["set local lock_timeout = '2500us';\n", 2],
+    ["set local lock_timeout = '3500us';\n", 4],
+    ["set local lock_timeout = 2.5;\n", 2],
+    ["set local lock_timeout = '1.4999ms';\n", 2],
+    ["set local lock_timeout = '1.0005s';\n", 1_000],
+    ["set local lock_timeout = '1.0015s';\n", 1_002],
+    ["set local lock_timeout = '0.9999999 min';\n", 60_000],
+    ["set local lock_timeout = '0.0417h';\n", 180_000],
   ]) {
-    assert.equal(setsLockTimeoutFirst(sql), true, sql);
+    assert.equal(setsLockTimeoutFirst(sql), milliseconds, sql);
   }
+  assert.equal(MAX_LOCK_TIMEOUT_MS, 60_000);
   for (const sql of [
+    // Postgres rounds these to 0, which leaves the wait unbounded.
+    "set local lock_timeout = '0.4';\n",
+    "set local lock_timeout = '0.0005 min';\n",
+    "set local lock_timeout = '0.00001h';\n",
+    // Postgres reads a quoted leading zero as octal.
+    "set local lock_timeout = '010';\n",
     "alter table agent_jobs add column hyp text;\n",
     // After the statement that takes the locks, it does not bound their wait.
     "alter table agent_jobs add column hyp text;\nset local lock_timeout = '5s';\n",
@@ -1245,7 +1323,7 @@ test("a migration sets its lock timeout only with a first top-level SET LOCAL", 
     "set local lock_timeout = '5s\n",
     "set local statement_timeout = '5s';\n",
   ]) {
-    assert.equal(setsLockTimeoutFirst(sql), false, sql);
+    assert.equal(setsLockTimeoutFirst(sql), null, sql);
   }
 });
 
@@ -1266,12 +1344,23 @@ test("a migration under a reviewed lock exception mentions lock_timeout only whe
     "do $$ begin perform set_config('lock_timeout', '0', true); end $$;\n",
   ]) {
     const sql = `${first}${lift}${statement}`;
-    assert.equal(setsLockTimeoutFirst(sql), true, sql);
+    assert.equal(setsLockTimeoutFirst(sql), 5_000, sql);
     assert.equal(mentionsLockTimeoutOnce(sql), false, sql);
   }
   // A comment that mentions it counts too.
   assert.equal(mentionsLockTimeoutOnce(`-- lock_timeout bounds the wait.\n${first}${statement}`), false);
   assert.equal(mentionsLockTimeoutOnce(`${first}${statement}-- lock_timeout is set.\n`), false);
+  // Only the whole word counts: deadlock_timeout, which MIGRATIONS.md names
+  // beside it, is another setting.
+  assert.equal(
+    mentionsLockTimeoutOnce(
+      `-- A lock cycle ends after deadlock_timeout.\n${first}${statement}-- Or DEADLOCK_TIMEOUT.\n`,
+    ),
+    true,
+  );
+  for (const mention of ["'lock_timeout'", '"LOCK_TIMEOUT"', "(lock_timeout)", "x.lock_timeout"]) {
+    assert.equal(mentionsLockTimeoutOnce(`${first}-- ${mention}\n${statement}`), false, mention);
+  }
 });
 
 test("a reviewed lock exception passes only the reviewed file, with its lock timeout first", (t) => {
@@ -1322,6 +1411,16 @@ test("a reviewed lock exception passes only the reviewed file, with its lock tim
       `[empty-db:fake] applied ${where}`,
     ],
   );
+  assert.deepEqual(
+    run.calls().filter((call) => call !== "exec" && call !== "inspect"),
+    ["version", "image", "run", "rm"],
+  );
+  // A comment in the words MIGRATIONS.md uses, deadlock_timeout, is not a
+  // mention of lock_timeout.
+  const commented = `-- A lock cycle ends after deadlock_timeout.\n${sql}`;
+  assert.doesNotThrow(() =>
+    run(psqlOutput({ rows }), "", { version, sql: commented, exceptions: reviewed(commented) }),
+  );
   // The entry allows the pairs it lists and no others. Beside the foreign key,
   // alter table public.projects add column hyp text;
   // update public.runs set id = id where false;
@@ -1365,14 +1464,17 @@ test("a reviewed lock exception passes only the reviewed file, with its lock tim
       `${where} has a reviewed lock exception for agent_jobs and runs but no longer writes or locks them that way; remove them from its entry`,
     ),
   );
-  // Any change to the file, even one more newline, needs a new review.
-  const changed = `${sql}\n`;
-  assert.throws(
-    () => run(psqlOutput({ rows }), "", { version, sql: changed, exceptions: reviewed(sql) }),
-    failsWith(
-      `${where} changed since its lock exception was reviewed: its sha256 is ${sha256(changed)}, not the reviewed ${sha256(sql)}; have the change reviewed and update the entry`,
-    ),
-  );
+  // Any change to the file, even one more newline, needs a new review, and so
+  // do the same lines checked out with CRLF line endings.
+  for (const changed of [`${sql}\n`, sql.replaceAll("\n", "\r\n")]) {
+    assert.throws(
+      () => run(psqlOutput({ rows }), "", { version, sql: changed, exceptions: reviewed(sql) }),
+      failsWith(
+        `${where} changed since its lock exception was reviewed: its sha256 is ${sha256(changed)}, not the reviewed ${sha256(sql)}; have the change reviewed and update the entry`,
+      ),
+      JSON.stringify(changed),
+    );
+  }
   // The reviewed bytes must set a lock timeout first, not in a comment or
   // after the statement that takes the locks.
   for (const text of [
@@ -1405,6 +1507,35 @@ test("a reviewed lock exception passes only the reviewed file, with its lock tim
       text,
     );
   }
+  // Nor set one longer than 60 seconds, which the requests queued behind it
+  // would wait out too. 60 seconds itself passes.
+  for (const [value, milliseconds] of [
+    ["'24d'", 2_073_600_000],
+    ["2147483647", 2_147_483_647],
+    ["'60001ms'", 60_001],
+  ]) {
+    const text = `set local lock_timeout = ${value};\n${statement}`;
+    assert.throws(
+      () =>
+        run(psqlOutput({ rows, lockTimeout: `${milliseconds}` }), "", {
+          version,
+          sql: text,
+          exceptions: reviewed(text),
+        }),
+      failsWith(
+        `${where} has a reviewed lock exception but sets lock_timeout to ${milliseconds} ms, above the 60000 ms it may wait; start it with set local lock_timeout = '5s';`,
+      ),
+      text,
+    );
+  }
+  const oneMinute = `set local lock_timeout = '1 min';\n${statement}`;
+  assert.doesNotThrow(() =>
+    run(psqlOutput({ rows, lockTimeout: "60000" }), "", {
+      version,
+      sql: oneMinute,
+      exceptions: reviewed(oneMinute),
+    }),
+  );
   // RESET ALL lifts it without naming it, and the probe then reads 0.
   const resetAll = `${first}reset all;\n${statement}`;
   assert.throws(
@@ -1415,7 +1546,66 @@ test("a reviewed lock exception passes only the reviewed file, with its lock tim
         exceptions: reviewed(resetAll),
       }),
     failsWith(
-      `${where} has a reviewed lock exception but leaves lock_timeout at 0 before it commits; set it once, first, and do not lift it`,
+      `${where} has a reviewed lock exception but leaves lock_timeout at 0 ms, not the 5000 ms its first statement sets, before it commits; set it once, first, and do not change it`,
+    ),
+  );
+  // A name built from pieces raises it without a mention, and the probe then
+  // reads the raised value, which must equal the one the first statement set.
+  const raised = `${first}select set_config('lock' || '_timeout', '24d', true);\n${statement}`;
+  assert.throws(
+    () =>
+      run(psqlOutput({ rows, lockTimeout: "2073600000" }), "", {
+        version,
+        sql: raised,
+        exceptions: reviewed(raised),
+      }),
+    failsWith(
+      `${where} has a reviewed lock exception but leaves lock_timeout at 2073600000 ms, not the 5000 ms its first statement sets, before it commits; set it once, first, and do not change it`,
+    ),
+  );
+  // A function can lift the timeout for one statement and restore it before
+  // the probe, which then reads 5000. An earlier migration could create
+  // create function public.lift_timeout(command text) returns void
+  //   language plpgsql set lock_timeout = 0 as $$ begin execute command; end $$;
+  // whose SET clause Postgres applies while it runs and undoes on return, or
+  // public.run_unbounded(command text), whose body saves lock_timeout, sets it
+  // to 0, runs the command and sets it back, and this one call either. The id
+  // query lists it before the migration, so dropping it after the call does
+  // not hide it, and the probe lists one the migration leaves behind.
+  const lifted = (name) =>
+    `${where} has a reviewed lock exception but function ${name} sets lock_timeout in its SET clause or names it in its body, which can lift the timeout for a statement of the migration; remove lock_timeout from that function`;
+  for (const name of ["public.lift_timeout", "public.run_unbounded"]) {
+    const called = `${first}select ${name}('alter table public.agent_jobs add column hyp text');\n${statement}`;
+    const listed = `${name}(text)`;
+    for (const [functionsBefore, functions] of [
+      [[listed], [listed]],
+      [[listed], []],
+      [[], [listed]],
+    ]) {
+      assert.throws(
+        () =>
+          run(psqlOutput({ rows, functionsBefore, functions }), "", {
+            version,
+            sql: called,
+            exceptions: reviewed(called),
+          }),
+        failsWith(lifted(listed)),
+        JSON.stringify([functionsBefore, functions]),
+      );
+    }
+  }
+  // Event triggers on ddl_command_start and ddl_command_end whose bodies zero
+  // and restore it lift it for the file's own ALTER TABLE, although the file
+  // is only the timeout and the statement.
+  assert.throws(
+    () =>
+      run(
+        psqlOutput({ rows, functionsBefore: ["public.ddl_lift()", "public.ddl_restore()"] }),
+        "",
+        { version, sql, exceptions: reviewed(sql) },
+      ),
+    failsWith(
+      `${where} has a reviewed lock exception but functions public.ddl_lift(), public.ddl_restore() set lock_timeout in their SET clauses or name it in their bodies, which can lift the timeout for a statement of the migration; remove lock_timeout from those functions`,
     ),
   );
   // A row the migration prints cannot stand in for the probe's.
@@ -1432,7 +1622,7 @@ test("a reviewed lock exception passes only the reviewed file, with its lock tim
         { version, sql: forged, exceptions: reviewed(forged) },
       ),
     failsWith(
-      `${where} has a reviewed lock exception but its lock_timeout could not be read before it commits; set it once, first, and do not lift it`,
+      `${where} has a reviewed lock exception but its lock_timeout could not be read before it commits; set it once, first, and do not change it`,
     ),
   );
   // An entry cannot outlive the violation it excuses.
@@ -1447,21 +1637,29 @@ test("a reviewed lock exception passes only the reviewed file, with its lock tim
       `${where} has a reviewed lock exception but no longer writes or locks two tables that way; remove its entry`,
     ),
   );
-  // Nor the migration it names, which the runner checks before it starts a
-  // container.
-  assert.throws(
-    () =>
-      run(psqlOutput({ rows }), "", {
-        version,
-        sql,
-        exceptions: new Map([
-          [20260929100400n, { sha256: sha256(sql), pairs: [["agent_jobs", "runtime_leases"]], reason }],
-        ]),
-      }),
-    failsWith(
+  // Nor the migration it names. The runner checks that, and the shape of
+  // every entry, before it runs docker at all.
+  const entry = { sha256: sha256(sql), pairs: [["agent_jobs", "runtime_leases"]], reason };
+  for (const [exceptions, message] of [
+    [
+      new Map([[20260929100400n, entry]]),
       "reviewed lock exception 20260929100400 names no migration after 20260000000063; remove it",
-    ),
-  );
+    ],
+    [
+      new Map([[version, { ...entry, sha256: sha256(sql).toUpperCase() }]]),
+      "reviewed lock exception 20260929100200 needs a sha256 of 64 lowercase hex digits, the sha256 of its migration file",
+    ],
+    [
+      new Map([[Number(version), entry]]),
+      "reviewed lock exception 20260929100200 has a version that is a number; keys must be BigInt literals such as 20260930100000n",
+    ],
+  ]) {
+    assert.throws(
+      () => run(psqlOutput({ rows }), "", { version, sql, exceptions }),
+      failsWith(message),
+    );
+    assert.deepEqual(run.calls(), [], message);
+  }
 });
 
 test("reviewed lock exceptions name a checked migration with its sha256, its pairs and a one-line reason", () => {
@@ -1481,40 +1679,69 @@ test("reviewed lock exceptions name a checked migration with its sha256, its pai
     ),
   );
   // The legacy history runs without the lock check, so an entry for it would
-  // never apply, and a version as a string or a number matches no migration.
-  for (const version of [20260000000063n, 20260929100400n, "20260929100200", 20260929100200]) {
+  // never apply.
+  for (const version of [20260000000063n, 20260929100400n]) {
     assert.throws(
       () => validateReviewedLockExceptions(new Map([[version, entry]]), plan),
       new RegExp(
         `^Error: reviewed lock exception ${version} names no migration after 20260000000063; remove it$`,
         "u",
       ),
+      `${version}`,
+    );
+  }
+  // A version as a string or a number matches no migration, whatever its
+  // digits.
+  for (const [version, shown] of [
+    ["20260929100200", '"20260929100200"'],
+    [20260929100200, "20260929100200"],
+  ]) {
+    assert.throws(
+      () => validateReviewedLockExceptions(new Map([[version, entry]]), plan),
+      new RegExp(
+        `^Error: reviewed lock exception ${shown} has a version that is a ${typeof version}; keys must be BigInt literals such as 20260930100000n$`,
+        "u",
+      ),
       `${typeof version} ${version}`,
     );
   }
+  // Each other error names the field that is wrong.
+  const needs = {
+    entry: "must be an object with its sha256, pairs and reason",
+    sha256: "needs a sha256 of 64 lowercase hex digits, the sha256 of its migration file",
+    pairs:
+      'needs pairs: one or more distinct pairs of two different table names, such as [["agent_jobs", "runtime_leases"]]',
+    reason: "needs a reason of one line that is not blank",
+  };
   const { pairs, ...withoutPairs } = entry;
-  for (const bad of [
-    null,
-    { reason: entry.reason, pairs },
-    { ...entry, sha256: "A".repeat(64) },
-    { ...entry, sha256: "a".repeat(63) },
-    { sha256: entry.sha256, pairs },
-    { ...entry, reason: " " },
-    { ...entry, reason: "one line\nand another" },
-    withoutPairs,
-    { ...entry, pairs: [] },
-    { ...entry, pairs: "agent_jobs and runtime_leases" },
-    { ...entry, pairs: ["agent_jobs", "runtime_leases"] },
-    { ...entry, pairs: [["agent_jobs"]] },
-    { ...entry, pairs: [["agent_jobs", "runtime_leases", "runs"]] },
-    { ...entry, pairs: [["agent_jobs", "agent_jobs"]] },
-    { ...entry, pairs: [["agent_jobs", 1]] },
-    { ...entry, pairs: [["agent_jobs", "public.runtime_leases"]] },
-    { ...entry, pairs: [...pairs, ["agent_jobs", "runtime_leases"]] },
+  for (const [bad, field] of [
+    [null, "entry"],
+    ["a".repeat(64), "entry"],
+    [{ reason: entry.reason, pairs }, "sha256"],
+    [{ ...entry, sha256: "A".repeat(64) }, "sha256"],
+    [{ ...entry, sha256: `${"a".repeat(63)}F` }, "sha256"],
+    [{ ...entry, sha256: "a".repeat(63) }, "sha256"],
+    [{ ...entry, sha256: `${"a".repeat(64)}\n` }, "sha256"],
+    [{ sha256: entry.sha256, pairs }, "reason"],
+    [{ ...entry, reason: " " }, "reason"],
+    [{ ...entry, reason: "one line\nand another" }, "reason"],
+    [withoutPairs, "pairs"],
+    [{ ...entry, pairs: [] }, "pairs"],
+    [{ ...entry, pairs: "agent_jobs and runtime_leases" }, "pairs"],
+    [{ ...entry, pairs: ["agent_jobs", "runtime_leases"] }, "pairs"],
+    [{ ...entry, pairs: [["agent_jobs"]] }, "pairs"],
+    [{ ...entry, pairs: [["agent_jobs", "runtime_leases", "runs"]] }, "pairs"],
+    [{ ...entry, pairs: [["agent_jobs", "agent_jobs"]] }, "pairs"],
+    [{ ...entry, pairs: [["agent_jobs", 1]] }, "pairs"],
+    [{ ...entry, pairs: [["agent_jobs", "public.runtime_leases"]] }, "pairs"],
+    [{ ...entry, pairs: [...pairs, ["agent_jobs", "runtime_leases"]] }, "pairs"],
   ]) {
     assert.throws(
       () => validateReviewedLockExceptions(new Map([[20260929100200n, bad]]), plan),
-      /^Error: reviewed lock exception 20260929100200 needs the sha256 of its migration, the pairs of tables it allows and a one-line reason$/u,
+      (error) => {
+        assert.equal(error.message, `reviewed lock exception 20260929100200 ${needs[field]}`);
+        return true;
+      },
       JSON.stringify(bad),
     );
   }
@@ -1526,7 +1753,8 @@ test("each checked-in reviewed lock exception matches its migration", () => {
   for (const [version, { sha256 }] of REVIEWED_LOCK_EXCEPTIONS) {
     const source = readFileSync(track.find((migration) => migration.version === version).source);
     assert.equal(createHash("sha256").update(source).digest("hex"), sha256, `${version}`);
-    assert.ok(setsLockTimeoutFirst(source.toString("utf8")), `${version}`);
+    const declared = setsLockTimeoutFirst(source.toString("utf8"));
+    assert.ok(declared !== null && declared <= MAX_LOCK_TIMEOUT_MS, `${version}`);
     assert.ok(mentionsLockTimeoutOnce(source.toString("utf8")), `${version}`);
   }
 });
