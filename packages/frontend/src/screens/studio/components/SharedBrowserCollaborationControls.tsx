@@ -261,8 +261,10 @@ export function SharedBrowserCollaborationControls({
               {pendingRequestCount || controlAction || children ? (
                 <div className={`space-y-2 ${participants.length || agentDisplayName ? "mt-3 border-t border-slate-200 pt-3 dark:border-slate-700" : "mt-2"}`}>
                   {pendingRequestCount ? <p className="text-xs text-slate-500 dark:text-slate-400">{requestLabel}</p> : null}
-                  {controlAction}
-                  {children}
+                  <div className="flex flex-wrap justify-end gap-2">
+                    {controlAction}
+                    {children}
+                  </div>
                 </div>
               ) : null}
             </Dialog>

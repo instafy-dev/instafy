@@ -29,7 +29,7 @@ export function BrowserHumanInputStatus(props: BrowserHumanInputOptions & Browse
     ? "Continuing the AI task. Input remains locked."
     : "Waiting for agent control to stop. Input remains locked.";
   const controls = (
-    <div className="flex shrink-0 items-center gap-2 text-xs" data-testid="browser-human-input-controls" data-browser-session-safe-zone="true">
+    <div className="flex min-w-0 max-w-full shrink-0 items-center gap-2 text-xs" data-testid="browser-human-input-controls" data-browser-session-safe-zone="true">
       {state.active && props.humanControlConfirmed ? (
         <Button type="button" size="sm" variant="primary" radius="full" className="min-h-9 shrink-0"
           isDisabled={state.busy !== null || props.canContinue === false} title={state.error ?? manualGuidance}

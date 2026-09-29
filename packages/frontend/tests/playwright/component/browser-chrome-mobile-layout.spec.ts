@@ -254,6 +254,7 @@ for (const width of [320, 360, 390]) {
     expect(listBounds).not.toBeNull();
     expect(actionBounds).not.toBeNull();
     expect(actionBounds!.y).toBeGreaterThanOrEqual(listBounds!.y + listBounds!.height);
+    expect(actionBounds!.x + actionBounds!.width).toBeCloseTo(listBounds!.x + listBounds!.width, 0);
     await expect(participantsDialog).not.toContainText("Ask ");
     await page.keyboard.press("Escape");
     await expect(participantsDialog).toHaveCount(0);
