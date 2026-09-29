@@ -105,10 +105,12 @@ async function mountCompactBrowserChrome(page: Page): Promise<void> {
             state: "ready",
             testId: "browser-session-status",
           }),
-          toolbarActions: h(React.Fragment, null, collaboration, h(SharedBrowserSessionControl, {
+          toolbarActions: (compactNavigation) => h(React.Fragment, null, collaboration, h(SharedBrowserSessionControl, {
             runtimeId: "fixture-runtime", resumeUrl: null, open: optionsOpen, onOpenChange: setOptionsOpen,
             busy: false, candidates: [], error: null, canStart: false, onChoose: () => {}, onStart: () => {}, onRefresh: () => {},
-          }), h(BrowserExpandButton, { expanded, onPress: () => setExpanded(!expanded) })),
+            actions: compact ? h(React.Fragment, null, compactNavigation,
+              h(BrowserExpandButton, { expanded, showLabel: true, onPress: () => setExpanded(!expanded) })) : null,
+          }), compact ? null : h(BrowserExpandButton, { expanded, onPress: () => setExpanded(!expanded) })),
           interactionEnabled: false,
         }),
         h("div", { "data-testid": "keyboard-layout-stage", style: { position: "relative", height: 240 } },
@@ -171,108 +173,123 @@ async function mountCompactBrowserChrome(page: Page): Promise<void> {
   expect(failedRequests, failedRequests.join("; ")).toEqual([]);
 }
 
-test("keeps compact browser identity, control, and tabs usable at 360px", async ({ page }, testInfo) => {
-  await page.setViewportSize({ width: 360, height: 800 });
-  await mountCompactBrowserChrome(page);
+for (const width of [320, 360, 390]) {
+  test(`keeps the compact browser in one address row at ${width}px`, async ({ page }, testInfo) => {
+    await page.setViewportSize({ width, height: 800 });
+    await mountCompactBrowserChrome(page);
 
-  const chrome = page.getByTestId("shared-browser-chrome");
-  const context = page.getByTestId("browser-chrome-context-row");
-  const participants = page.getByTestId("shared-browser-participants");
-  const controlState = page.getByTestId("shared-browser-collaboration-control-state");
-  const action = page.getByTestId("shared-browser-collaboration-control-action");
-  const address = page.getByTestId("shared-browser-address");
-  const pageSelect = page.getByTestId("shared-browser-page-select");
+    const chrome = page.getByTestId("shared-browser-chrome");
+    const participants = page.getByTestId("shared-browser-participants");
+    const collaboration = page.getByTestId("shared-browser-collaboration-toggle");
+    const controlState = page.getByTestId("shared-browser-collaboration-control-state");
+    const action = page.getByTestId("shared-browser-collaboration-control-action");
+    const address = page.getByTestId("shared-browser-address");
+    const options = page.getByTestId("shared-browser-sessions-toggle");
+    const pageSelect = page.getByTestId("shared-browser-page-select");
 
-  await expect(context).toBeVisible();
-  await expect(page.getByTestId("browser-session-status")).toBeVisible();
-  await expect(participants).toBeVisible();
-  await expect(participants).toHaveAttribute(
-    "aria-label",
-    /A teammate with an exceptionally long display name/,
-  );
-  await expect(participants).toContainText("+3");
-  await expect(controlState).toBeVisible();
-  await expect(controlState).toContainText("A teammate with an exceptionally long display name");
-  await expect(action).toBeVisible();
-  await expect(action).toHaveAccessibleName(
-    "Request control",
-  );
-  await expect(pageSelect).toBeVisible();
-  await expect(pageSelect.locator("option")).toHaveCount(3);
-  await expect(address).toBeVisible();
-  await expect(page.getByTestId("browser-session-fullscreen-toggle")).toBeVisible();
-  await page.getByTestId("browser-session-fullscreen-toggle").click();
-  await expect(page.getByTestId("browser-session-fullscreen-toggle")).toHaveAttribute("aria-expanded", "true");
-  await expect(page.getByTestId("conversation-subtab-browser")).toHaveAccessibleName(
-    "Browser, approval needed",
-  );
-  await expect(page.getByTestId("shared-browser-approval-attention")).toBeVisible();
+    await expect(chrome).toBeVisible();
+    await expect(participants).toBeVisible();
+    await expect(participants).toHaveAttribute("aria-label", /A teammate with an exceptionally long display name/);
+    await expect(participants).toContainText("+3");
+    await expect(collaboration).toHaveAccessibleName(/A teammate with an exceptionally long display name controls/);
+    await expect(controlState).toHaveCount(0);
+    await expect(action).toHaveCount(0);
+    await expect(pageSelect).toHaveCount(0);
+    await expect(page.getByTestId("browser-session-fullscreen-toggle")).toHaveCount(0);
+    await expect(address).toBeVisible();
+    await expect(page.getByTestId("conversation-subtab-browser")).toHaveAccessibleName("Browser, approval needed");
+    await expect(page.getByTestId("shared-browser-approval-attention")).toBeVisible();
 
-  const geometry = await page.evaluate(() => {
-    const bounds = (testId: string) => {
-      const element = document.querySelector<HTMLElement>(`[data-testid="${testId}"]`);
-      if (!element) {
-        return null;
-      }
-      const rect = element.getBoundingClientRect();
-      return { height: rect.height, left: rect.left, right: rect.right, width: rect.width };
-    };
-    const chromeElement = document.querySelector<HTMLElement>(
-      '[data-testid="shared-browser-chrome"]',
-    );
-    return {
-      address: bounds("shared-browser-address"),
-      action: bounds("shared-browser-collaboration-control-action"),
-      browserTab: bounds("conversation-subtab-browser"),
-      chromeFits: chromeElement ? chromeElement.scrollWidth <= chromeElement.clientWidth : false,
-      documentWidth: document.documentElement.scrollWidth,
-      reload: bounds("shared-browser-reload"),
-      locationMenu: bounds("browser-location-menu"),
-      options: bounds("shared-browser-sessions-toggle"),
-    };
-  });
+    const geometry = await page.evaluate(() => {
+      const bounds = (testId: string) => {
+        const element = document.querySelector<HTMLElement>(`[data-testid="${testId}"]`);
+        if (!element) return null;
+        const rect = element.getBoundingClientRect();
+        return { height: rect.height, left: rect.left, right: rect.right, top: rect.top, width: rect.width };
+      };
+      const chromeElement = document.querySelector<HTMLElement>('[data-testid="shared-browser-chrome"]');
+      return {
+        address: bounds("shared-browser-address"),
+        collaboration: bounds("shared-browser-collaboration-toggle"),
+        browserTab: bounds("conversation-subtab-browser"),
+        chrome: bounds("shared-browser-chrome"),
+        chromeFits: chromeElement ? chromeElement.scrollWidth <= chromeElement.clientWidth : false,
+        documentWidth: document.documentElement.scrollWidth,
+        reload: bounds("shared-browser-reload"),
+        locationMenu: bounds("browser-location-menu"),
+        options: bounds("shared-browser-sessions-toggle"),
+      };
+    });
 
-  expect(geometry.documentWidth).toBeLessThanOrEqual(360);
-  expect(geometry.chromeFits).toBe(true);
-  expect(geometry.address?.width ?? 0).toBeGreaterThanOrEqual(96);
-  for (const target of [
-    geometry.action,
-    geometry.browserTab,
-    geometry.reload,
-    geometry.locationMenu,
-    geometry.options,
-  ]) {
-    expect(target).not.toBeNull();
-    expect(target!.height).toBeGreaterThanOrEqual(40);
-    expect(target!.left).toBeGreaterThanOrEqual(0);
-    expect(target!.right).toBeLessThanOrEqual(360);
-  }
-
-  await page.evaluate(() => {
-    const setAgentControls = (
-      window as Window & { __setAgentControls?: (active: boolean) => void }
-    ).__setAgentControls;
-    if (!setAgentControls) {
-      throw new Error("Compact browser fixture was not ready");
+    expect(geometry.documentWidth).toBeLessThanOrEqual(width);
+    expect(geometry.chromeFits).toBe(true);
+    expect(geometry.chrome?.height ?? Infinity).toBeLessThanOrEqual(48);
+    expect(geometry.address?.width ?? 0).toBeGreaterThanOrEqual(96);
+    expect(geometry.collaboration!.left).toBeGreaterThanOrEqual(geometry.address!.right);
+    expect(Math.abs(geometry.collaboration!.top - geometry.address!.top)).toBeLessThanOrEqual(2);
+    for (const target of [geometry.collaboration, geometry.browserTab, geometry.reload, geometry.locationMenu, geometry.options]) {
+      expect(target).not.toBeNull();
+      expect(target!.height).toBeGreaterThanOrEqual(40);
+      expect(target!.left).toBeGreaterThanOrEqual(0);
+      expect(target!.right).toBeLessThanOrEqual(width);
     }
-    setAgentControls(true);
-  });
-  await expect(controlState).toContainText("Octo with a very long agent name controls");
-  await expect(controlState).toHaveAttribute(
-    "title",
-    "Octo with a very long agent name controls",
-  );
-  await expect(action).toHaveCount(0);
-  await expect(context).toBeVisible();
-  await expect(chrome).toBeVisible();
 
-  const screenshotPath = testInfo.outputPath("shared-browser-chrome-360x800.png");
-  await page.screenshot({ animations: "disabled", path: screenshotPath });
-  await testInfo.attach("Shared Browser compact chrome at 360×800", {
-    contentType: "image/png",
-    path: screenshotPath,
+    await collaboration.click();
+    const participantsDialog = page.getByRole("dialog", { name: "Browser participants and control" });
+    await expect(participantsDialog).toBeVisible();
+    await expect(controlState).toContainText("A teammate with an exceptionally long display name controls");
+    await expect(participantsDialog.getByRole("list", { name: "Browser participants" }).getByRole("listitem")).toHaveCount(4);
+    await expect(action).toHaveAccessibleName("Request control");
+    await expect(action).toHaveText("Request control");
+    await expect(action).toBeEnabled();
+    await expect(participantsDialog).not.toContainText("Ask ");
+    await page.keyboard.press("Escape");
+    await expect(participantsDialog).toHaveCount(0);
+    await expect(collaboration).toBeFocused();
+
+    await options.click();
+    const optionsDialog = page.getByRole("dialog", { name: "Browser options" });
+    await expect(optionsDialog).toBeVisible();
+    await expect(page.getByTestId("shared-browser-back")).toBeVisible();
+    await expect(page.getByTestId("shared-browser-forward")).toBeVisible();
+    await expect(page.getByTestId("shared-browser-back")).toBeDisabled();
+    await expect(page.getByTestId("shared-browser-forward")).toBeDisabled();
+    await expect(pageSelect).toBeVisible();
+    await expect(pageSelect.locator("option")).toHaveCount(3);
+    await expect(pageSelect).toBeDisabled();
+    const expand = page.getByTestId("browser-session-fullscreen-toggle");
+    await expect(expand).toBeVisible();
+    await expect(expand).toHaveAccessibleName("Expand browser");
+    await expand.click();
+    await expect(expand).toHaveAttribute("aria-expanded", "true");
+    await expect(expand).toHaveAccessibleName("Exit expanded browser");
+    const optionsBounds = await optionsDialog.boundingBox();
+    expect(optionsBounds).not.toBeNull();
+    expect(optionsBounds!.x).toBeGreaterThanOrEqual(0);
+    expect(optionsBounds!.x + optionsBounds!.width).toBeLessThanOrEqual(width);
+    await page.keyboard.press("Escape");
+    await expect(optionsDialog).toHaveCount(0);
+    await expect(options).toBeFocused();
+
+    await page.evaluate(() => {
+      const setAgentControls = (window as Window & { __setAgentControls?: (active: boolean) => void }).__setAgentControls;
+      if (!setAgentControls) throw new Error("Compact browser fixture was not ready");
+      setAgentControls(true);
+    });
+    await expect(collaboration).toHaveAccessibleName(/Octo with a very long agent name controls/);
+    await collaboration.click();
+    await expect(controlState).toContainText("Octo with a very long agent name controls");
+    await expect(action).toHaveCount(0);
+    await page.keyboard.press("Escape");
+
+    const screenshotPath = testInfo.outputPath(`shared-browser-chrome-${width}x800.png`);
+    await page.screenshot({ animations: "disabled", path: screenshotPath });
+    await testInfo.attach(`Shared Browser compact chrome at ${width}×800`, {
+      contentType: "image/png",
+      path: screenshotPath,
+    });
   });
-});
+}
 
 test("keeps the unified browser address usable at tablet portrait width", async ({ page }) => {
   await page.setViewportSize({ width: 768, height: 1024 });

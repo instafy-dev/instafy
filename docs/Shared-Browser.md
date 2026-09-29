@@ -71,6 +71,15 @@ an account switch does not inherit another account's saved session choice.
 ## One browser shell, three pixel transports
 
 The Studio always owns the address bar, Go/history controls, status, errors, action ticker, and AI cursor. The runtime owns the page and profile.
+
+On narrow screens and split panes, the address bar keeps participant avatars on its
+right. Open the avatars to see who controls the page and **Request control**; this
+asks the current driver to hand over input, rather than sending a chat message.
+Pending requests show a badge for the current driver. **Browser options** contains
+history navigation, page selection and **Expand browser** so the toolbar stays on
+one row. AI takeover and **Let AI continue** are in the same participant controls;
+clicking the shared page can still open the takeover confirmation.
+
 Personal and Shared Browser use one `BrowserAddressField` and the common Instafy
 `Input`, `Button`, `IconButton` and `Checkbox` primitives for their address, actions
 and settings. Navigation state, permissions and control ownership stay in each
