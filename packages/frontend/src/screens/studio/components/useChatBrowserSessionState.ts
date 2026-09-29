@@ -227,12 +227,17 @@ export function useChatBrowserSessionState({
     if (!hasHiddenBrowserSession || !browserSessionStateStorageKey || currentIdentityRef.current !== browserSessionStateStorageKey) {
       return;
     }
-    browserSessionStateDirtyRef.current = true;
-    setBrowserSessionRuntimeId(null);
-    setExactBrowserRuntimeId(null);
-    setBrowserSessionOpen(false);
+    // Hidden polling already suspends on unavailability, including transient
+    // gateway errors. Keep confirmed intent so reopening retries this browser
+    // or offers explicit replacement instead of silently choosing another one.
+    if (!exactBrowserRuntimeId) {
+      browserSessionStateDirtyRef.current = true;
+      setBrowserSessionRuntimeId(null);
+      setExactBrowserRuntimeId(null);
+      setBrowserSessionOpen(false);
+    }
     void refreshRuntimeStatuses();
-  }, [browserSessionStateStorageKey, hasHiddenBrowserSession, refreshRuntimeStatuses]);
+  }, [browserSessionStateStorageKey, exactBrowserRuntimeId, hasHiddenBrowserSession, refreshRuntimeStatuses]);
 
   useEffect(() => {
     if (typeof window === "undefined") {

@@ -47,6 +47,7 @@ import { useConversationControllerDispatch } from "./useConversationControllerDi
 import { useConversationGoalContinuationEffects } from "./useConversationGoalContinuationEffects";
 import { ConversationMessageMetadataProvider } from "./ConversationMessageMetadata";
 import { studioPerformance } from "../telemetry/studioPerformance";
+import { restoreConversationDrafts, saveConversationDrafts } from "./conversationDraftStorage";
 
 const {
   listForProject: fetchProjectConversationsFromController,
@@ -129,6 +130,11 @@ declare global {
 const normalizeExtraAgentHandle = (handle: string) => normalizeCustomAgentHandle(handle);
 
 export const ConversationsProvider = ({ children }: PropsWithChildren) => {
+  const { user } = useAuth();
+  return <AccountConversationsProvider key={user?.id ?? "anonymous"}>{children}</AccountConversationsProvider>;
+};
+
+const AccountConversationsProvider = ({ children }: PropsWithChildren) => {
   const [state, dispatch] = useReducer(conversationsReducer, undefined, createInitialState);
   const [controllerConversationSyncEpoch, bumpControllerConversationSyncEpoch] = useReducer(
     (value: number) => value + 1,
@@ -230,9 +236,16 @@ export const ConversationsProvider = ({ children }: PropsWithChildren) => {
       ? cloneConversationsState(savedState)
       : cloneConversationsState(createInitialState(projectKey));
     nextState.projectKey = projectKey;
-    dispatch({ type: "LOAD_STATE", state: nextState });
+    dispatch({ type: "LOAD_STATE", state: currentUserId
+      ? restoreConversationDrafts(currentUserId, nextState) : nextState });
     lastProjectIdRef.current = projectKey;
-  }, [projectKey]);
+  }, [currentUserId, projectKey]);
+
+  useLayoutEffect(() => {
+    // Never overwrite the destination space with the previous reducer state
+    // during the one-render project transition. Commit before a reload can run.
+    if (currentUserId && state.projectKey === projectKey) saveConversationDrafts(currentUserId, state);
+  }, [currentUserId, projectKey, state]);
 
   const {
     remoteConversationHistoryResolved,

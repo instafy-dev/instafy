@@ -62,24 +62,24 @@ export async function applyWorkspaceChangesViaOrigin(
   let acquiredLease: WorkspaceLease | null = null;
 
   try {
-    const origin = await fetchOriginSummary({
-      projectId,
-      protocol: "http",
-      accessToken: params.accessToken ?? null,
-    });
-    if (!origin) {
-      return { ok: false, error: "no origin available" };
-    }
-    if (origin.presence?.status === "offline") {
-      return { ok: false, error: "origin is offline" };
-    }
     const requestedOriginId = params.originId?.trim() || null;
-    if (
-      !runtimePreference &&
-      (!requestedOriginId || requestedOriginId === origin.originId)
-    ) {
-      runtimePreference = origin.runtimeId ?? null;
-      runtimeId = params.runtimeId ?? runtimePreference;
+    let resolvedOriginId = requestedOriginId;
+    // A project summary can describe the hosted gateway or a different runtime.
+    // When a runtime is selected, let the controller resolve its exact origin;
+    // combining that preference with the default origin is an invalid binding.
+    if (!runtimePreference) {
+      const origin = await fetchOriginSummary({
+        projectId,
+        protocol: "http",
+        accessToken: params.accessToken ?? null,
+      });
+      if (!origin) return { ok: false, error: "no origin available" };
+      if (origin.presence?.status === "offline") return { ok: false, error: "origin is offline" };
+      if (!requestedOriginId || requestedOriginId === origin.originId) {
+        resolvedOriginId = origin.originId;
+        runtimePreference = origin.runtimeId ?? null;
+        runtimeId = runtimePreference;
+      }
     }
 
     if (!leaseId) {
@@ -109,7 +109,7 @@ export async function applyWorkspaceChangesViaOrigin(
       projectId,
       protocol: "http",
       scopes: ["fs.write"],
-      originId: params.originId ?? origin.originId,
+      originId: resolvedOriginId,
       leaseId,
       preferRuntime: runtimePreference,
       accessToken: params.accessToken ?? null,

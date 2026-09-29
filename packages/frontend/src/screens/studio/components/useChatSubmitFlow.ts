@@ -397,7 +397,7 @@ export function useChatSubmitFlow({
       terminalRequest,
     });
     const sharedBrowserRouting = resolveSharedBrowserSubmitRouting({
-      active: !queuedRuntimeOverride && sharedBrowserActive,
+      active: !queuedRuntimeOverride && sharedBrowserActive && browserLaunchMode !== "new_page",
       messageRequiresAi: effectiveMessageRequiresAi,
       resolvedRuntimeId: sharedBrowserRuntimeId,
       terminalRequest,
@@ -445,6 +445,14 @@ export function useChatSubmitFlow({
       queuedRuntimeOverride ??
       personalBrowserRouting.runtimeOverride ??
       sharedBrowserRouting.runtimeOverride;
+    if (useSharedBrowserRuntime && !browserPageTarget) {
+      showStatus(
+        "Open a page in the browser before sending a browser task. Your message is kept.",
+        "warning",
+        5000,
+      );
+      return false;
+    }
     const submitMetadata = usePersonalBrowserRuntime
       ? withPersonalBrowserRuntimeExpectations({
           ...(resolvedBaseSubmitMetadata ?? {}),
