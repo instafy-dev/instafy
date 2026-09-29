@@ -1,4 +1,4 @@
-//! Local-only retry contract tests. Every embedded Codex run is in an env-cleared
+//! Local-only retry and turn-usage contract tests. Every embedded Codex run is in an env-cleared
 //! child with an owned HOME and inert API credentials; no host auth is consulted.
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -33,7 +33,14 @@ fn sse(item: Value) -> Response {
     sse_with_end_turn(item, None)
 }
 
-fn sse_with_end_turn(mut item: Value, end_turn: Option<bool>) -> Response {
+fn sse_with_end_turn(item: Value, end_turn: Option<bool>) -> Response {
+    let usage = json!({"input_tokens":10,"output_tokens":5,"total_tokens":15,
+        "input_tokens_details":{"cached_tokens":0},
+        "output_tokens_details":{"reasoning_tokens":0}});
+    sse_with_usage(item, end_turn, Some(usage))
+}
+
+fn sse_with_usage(mut item: Value, end_turn: Option<bool>, usage: Option<Value>) -> Response {
     let response_id = format!("resp-{}", Uuid::new_v4());
     item["id"] = json!(format!("item-{}", Uuid::new_v4()));
     if item.get("call_id").is_some() {
@@ -41,11 +48,11 @@ fn sse_with_end_turn(mut item: Value, end_turn: Option<bool>) -> Response {
     }
     let mut response = json!({
         "id":response_id, "object":"response", "status":"completed",
-        "model":"gpt-6-luna", "output":[item.clone()],
-        "usage":{"input_tokens":10,"output_tokens":5,"total_tokens":15,
-            "input_tokens_details":{"cached_tokens":0},
-            "output_tokens_details":{"reasoning_tokens":0}}
+        "model":"gpt-6-luna", "output":[item.clone()]
     });
+    if let Some(usage) = usage {
+        response["usage"] = usage;
+    }
     if let Some(end_turn) = end_turn {
         response["end_turn"] = json!(end_turn);
     }
@@ -82,23 +89,26 @@ fn proxy_usage_limit() -> Response {
     (StatusCode::TOO_MANY_REQUESTS, Json(body)).into_response()
 }
 
+fn answer_item(text: &str) -> Value {
+    json!({"type":"message","id":"msg-local-retry","role":"assistant",
+    "status":"completed","phase":"final_answer",
+    "content":[{"type":"output_text","text":text,"annotations":[]}]})
+}
+
 fn answer(text: &str) -> Response {
-    sse(
-        json!({"type":"message","id":"msg-local-retry","role":"assistant",
-        "status":"completed","phase":"final_answer",
-        "content":[{"type":"output_text","text":text,"annotations":[]}]}),
-    )
+    sse(answer_item(text))
+}
+
+fn step_item(text: &str) -> Value {
+    json!({"type":"message","id":"msg-local-step","role":"assistant",
+    "status":"completed","phase":"commentary",
+    "content":[{"type":"output_text","text":text,"annotations":[]}]})
 }
 
 /// A completed step that asks Codex for another sampling request in the same turn, the way a
 /// browser turn continues after each action, without depending on which tools are offered.
 fn continue_turn(text: &str) -> Response {
-    sse_with_end_turn(
-        json!({"type":"message","id":"msg-local-step","role":"assistant",
-        "status":"completed","phase":"commentary",
-        "content":[{"type":"output_text","text":text,"annotations":[]}]}),
-        Some(false),
-    )
+    sse_with_end_turn(step_item(text), Some(false))
 }
 
 async fn responses(
@@ -131,6 +141,17 @@ async fn responses(
                 1 | 3 => proxy_rate_limit(),
                 2 => continue_turn(STEP_TEXT),
                 _ => answer(FINAL_TEXT),
+            };
+        }
+        // Three jobs on one thread, 50k input tokens per turn. The second job's first step
+        // reports no usage, so Codex's first count of that turn repeats the restored total.
+        "per_turn_usage" => {
+            let usage = json!({"input_tokens":50_000,"output_tokens":1_000,
+                "total_tokens":51_000, "input_tokens_details":{"cached_tokens":45_000},
+                "output_tokens_details":{"reasoning_tokens":250}});
+            return match ordinal {
+                2 => sse_with_usage(step_item(STEP_TEXT), Some(false), None),
+                _ => sse_with_usage(answer_item(FINAL_TEXT), None, Some(usage)),
             };
         }
         "transient" | "persistent" | "routing" => 503,
@@ -435,6 +456,11 @@ scenario_test!(
     "ambient_decline",
     2
 );
+scenario_test!(
+    turn_completed_reports_each_turn_of_a_resumed_thread,
+    "per_turn_usage",
+    4
+);
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "Child entrypoint; outer tests supply an isolated environment and loopback proxy"]
@@ -454,6 +480,9 @@ async fn isolated_retry_child() -> Result<()> {
     let client = CodexClient::new(CodexConfig {
         workspace_dir: workspace.into(),
     });
+    if scenario == "per_turn_usage" {
+        return run_per_turn_usage_jobs(&client).await;
+    }
     let cancel = JobCancelSignal::new();
     let cancel_on_request = scenario == "cancel";
     let signal = cancel.clone();
@@ -514,6 +543,61 @@ async fn isolated_retry_child() -> Result<()> {
             tokio::time::sleep(Duration::from_millis(1200)).await;
         }
     }
+    Ok(())
+}
+
+/// Runs three jobs on one persisted thread. Each job builds a fresh thread manager, so the
+/// second and third resume the thread from the rollout, restoring Codex's running total.
+async fn run_per_turn_usage_jobs(client: &CodexClient) -> Result<()> {
+    let mut provider_conversation_state = None;
+    let mut reported = Vec::new();
+    for _ in 0..3 {
+        let output = client
+            .execute_with_options(
+                "Run the supplied local diagnostic and finish with its result.",
+                None,
+                CodexRunOptions {
+                    disable_final_output_json_schema: true,
+                    allow_plain_text_final_fallback: true,
+                    suppress_contextual_instructions: true,
+                    persist_conversation_thread: true,
+                    provider_conversation_state: provider_conversation_state.take(),
+                    ..Default::default()
+                },
+            )
+            .await?;
+        assert_eq!(output.final_json["summary"], FINAL_TEXT);
+        let state = output
+            .provider_conversation_state
+            .context("a persisted thread returns its state")?;
+        let completed: Vec<&Value> = output
+            .events
+            .iter()
+            .filter(|event| event["type"] == "turn.completed")
+            .collect();
+        assert_eq!(completed.len(), 1, "{completed:?}");
+        reported.push(json!({
+            "restoredFrom": state["defaultThreadRestoreSource"],
+            "usageScope": completed[0]["usageScope"],
+            "input": completed[0]["usage"]["input_tokens"],
+            "cached": completed[0]["usage"]["cached_input_tokens"],
+            "output": completed[0]["usage"]["output_tokens"],
+            "threadInput": completed[0]["threadTotalUsage"]["input_tokens"],
+        }));
+        provider_conversation_state = Some(state);
+    }
+    let turn = |restored_from: &str, thread_input: u64| {
+        json!({"restoredFrom":restored_from, "usageScope":"turn", "input":50_000,
+            "cached":45_000, "output":1_000, "threadInput":thread_input})
+    };
+    assert_eq!(
+        reported,
+        [
+            turn("new", 50_000),
+            turn("rollout", 100_000),
+            turn("rollout", 150_000)
+        ]
+    );
     Ok(())
 }
 

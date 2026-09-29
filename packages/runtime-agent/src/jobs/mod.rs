@@ -7990,6 +7990,7 @@ Avoid creating dependency caches or stores in the canonical workspace root when 
             - When you describe file changes, include a `change` object such as { type: 'created' | 'deleted' | 'changed', optional lines: [{ from: number, to: number }] } whenever you can do so reliably.\n\
             - When the user references another conversation (see \"Referenced conversations\"), treat it as additional context.\n\
             - If the user asks about token usage for a previous answer, retrieve it (do not guess) via `instafy history messages` (it already knows this conversation; `instafy api get` is the fallback) and then reply in the exact format `Token usage — input: <n>, cached: <n>, output: <n>`.\n\
+            - Those `token_usage` rows are per turn: each counts only its own turn's tokens, not the conversation's running total. Quote the row for the answer the user asked about. For a total across answers, add only the rows whose `metadata.details.usageScope` is `turn`: an answer can also have a row without it that repeats the same numbers, and rows from before per-turn reporting have none and hold a running total.\n\
             - When the request depends on observable workspace, runtime, repo, process, or server state, use the appropriate tool calls before answering and report concrete observed output (for example: exit code, process status, line counts, tail output).\n\
             - For browser/UI tasks, execute real browser automation and report observed page output. When interactive browser tools are not exposed, follow instafy-browser-automation and emit request_browser to continue in Studio's browser. That action is a handoff, not evidence that a page was opened or a task completed.\n\
             - For nearby/location-dependent browsing requests (for example \"good coffee nearby\"), do not stop at a generic search-results page if the user asked for a recommendation. Continue until you can report at least one concrete candidate or the exact blocker.\n\
@@ -16011,17 +16012,18 @@ fn extract_codex_messages(events: &[JsonValue]) -> Vec<JobMessage> {
                     let key = format!("turn.completed::{input}::{cached}::{output}");
                     let content =
                         format!("Token usage — input: {input}, cached: {cached}, output: {output}");
-                    push_message(
-                        key,
-                        content,
-                        Some("token_usage"),
-                        json!({
-                            "kind": "codex_turn_usage",
-                            "model": model,
-                            "event": event.clone(),
-                            "usage": usage,
-                        }),
-                    );
+                    let mut details = json!({
+                        "kind": "codex_turn_usage",
+                        "model": model,
+                        "event": event.clone(),
+                        "usage": usage,
+                    });
+                    // The adapter reports the turn's own usage, not the thread's running
+                    // total, and says so on the event.
+                    if let Some(scope) = map.get("usageScope").and_then(JsonValue::as_str) {
+                        details["usageScope"] = json!(scope);
+                    }
+                    push_message(key, content, Some("token_usage"), details);
                 }
             }
             "stream.retry" => {
@@ -18307,6 +18309,23 @@ mod tests {
                     ),
                     "{mode}"
                 );
+                // Quoting a row as the whole conversation's usage would repeat the old
+                // thread-total overstatement.
+                assert!(
+                    prompt.contains(
+                        "Those `token_usage` rows are per turn: each counts only its own turn's tokens"
+                    ),
+                    "{mode}"
+                );
+                // The controller's completion row repeats the runtime row's numbers without
+                // a scope, so adding every row of a run counts it twice.
+                assert!(
+                    prompt.contains(
+                        "For a total across answers, add only the rows whose `metadata.details.usageScope` is `turn`"
+                    ),
+                    "{mode}"
+                );
+                assert!(!prompt.contains("add rows together"), "{mode}");
             }
         }
     }
@@ -26031,6 +26050,68 @@ mod tests {
         assert_eq!(
             metadata.get("kind").and_then(JsonValue::as_str),
             Some("codex_turn_usage")
+        );
+    }
+
+    #[test]
+    fn extract_codex_messages_marks_usage_scope_turn() {
+        use crate::codex::CodexEventStreamAdapter;
+        use codex_protocol::protocol::{
+            Event, EventMsg, TokenCountEvent, TokenUsage, TokenUsageInfo, TurnCompleteEvent,
+        };
+
+        let usage = |input: i64, cached: i64, output: i64| TokenUsage {
+            input_tokens: input,
+            cached_input_tokens: cached,
+            cache_write_input_tokens: 0,
+            output_tokens: output,
+            reasoning_output_tokens: 0,
+            total_tokens: input + output,
+        };
+        // The third turn of a thread: Codex's running total is 150k, this turn used 50k.
+        let mut adapter = CodexEventStreamAdapter::default();
+        let events = [
+            EventMsg::TokenCount(TokenCountEvent {
+                info: Some(TokenUsageInfo {
+                    total_token_usage: usage(150_000, 135_000, 3_000),
+                    last_token_usage: usage(50_000, 45_000, 1_000),
+                    model_context_window: Some(272_000),
+                }),
+                rate_limits: None,
+            }),
+            EventMsg::TurnComplete(TurnCompleteEvent {
+                turn_id: "turn-3".to_string(),
+                last_agent_message: None,
+                error: None,
+                started_at: None,
+                completed_at: None,
+                duration_ms: None,
+                time_to_first_token_ms: None,
+            }),
+        ]
+        .into_iter()
+        .flat_map(|msg| {
+            adapter.collect(&Event {
+                id: "turn-3".to_string(),
+                msg,
+            })
+        })
+        .collect::<Vec<_>>();
+
+        let messages = extract_codex_messages(&events);
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].message_type.as_deref(), Some("token_usage"));
+        assert!(
+            messages[0]
+                .content
+                .ends_with("input: 50000, cached: 45000, output: 1000")
+        );
+        let metadata = messages[0].metadata.as_ref().expect("metadata");
+        assert_eq!(metadata["usageScope"], "turn");
+        assert_eq!(metadata["usage"]["input_tokens"], 50_000);
+        assert_eq!(
+            metadata["event"]["threadTotalUsage"]["input_tokens"],
+            150_000
         );
     }
 
