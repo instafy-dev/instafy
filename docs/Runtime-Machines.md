@@ -41,7 +41,9 @@ nothing and is not billed; the runtime's own project keeps paying for it.
 - The caller needs write access to the tenant project and to the runtime's
   own project, and the tenant project's organization must be allowed to use
   the runtime's provider. Access to the runtime's project is checked again
-  when the attach locks the runtime.
+  when the attach locks the runtime. Access to the tenant project is checked
+  once, before the attach, as the `exclusive` and `shared` scopes check
+  their project.
 - Tenant refusals are uniform with each other: a runtime id that does not
   exist, a runtime whose own project is missing or deleted, and a runtime
   whose own project the caller cannot write to all get the same `404`

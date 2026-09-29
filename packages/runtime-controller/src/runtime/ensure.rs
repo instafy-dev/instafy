@@ -3213,7 +3213,9 @@ async fn launch_committed_runtime_lease(
 /// the caller for in an earlier transaction. Once the runtime is locked, it
 /// must still belong to that project, and the caller's write access to the
 /// project is checked again in this transaction: access revoked in between
-/// refuses the attach.
+/// refuses the attach. Only the host project's access is checked again. The
+/// tenant project's own access is checked once, in `runtime_ensure`'s first
+/// transaction, as the exclusive and shared scopes check their project's.
 ///
 /// The attach leaves the runtime's origin alone. That origin belongs to the
 /// host project, which requests and registers it for its shared lease; the
