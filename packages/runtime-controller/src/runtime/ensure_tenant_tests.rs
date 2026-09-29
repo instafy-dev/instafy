@@ -658,6 +658,73 @@ async fn tenant_attach_refuses_host_access_revoked_after_authorization() -> anyh
         .await
 }
 
+/// A runtime whose project is deleted is answered as a runtime that does not
+/// exist, for a caller who could write to that project and for the service
+/// role alike.
+#[tokio::test]
+async fn tenant_attach_to_a_deleted_host_project_is_answered_as_a_missing_runtime(
+) -> anyhow::Result<()> {
+    let fixture = TenantAttachFixture::setup("tenant-attach-deleted-host").await?;
+    fixture
+        .run(async {
+            let fixture = &fixture;
+            let host_writer_token = fixture.user_token(fixture.host_writer)?;
+            let metadata = json!({ "source": "tenant-attach-test" });
+            let (missing_status, missing_body) = fixture
+                .attach(
+                    &host_writer_token,
+                    fixture.same_org_tenant_project_id,
+                    Uuid::new_v4(),
+                    metadata.clone(),
+                )
+                .await?;
+            assert_eq!(missing_status, StatusCode::NOT_FOUND, "{missing_body}");
+
+            // As project deletion marks it.
+            fixture
+                .pool
+                .get()
+                .await?
+                .execute(
+                    "update projects set status = 'deleted', updated_at = now() where id = $1",
+                    &[&fixture.host_project_id],
+                )
+                .await?;
+            for (case, bearer, tenant_project_id) in [
+                (
+                    "writer of both projects",
+                    host_writer_token.clone(),
+                    fixture.same_org_tenant_project_id,
+                ),
+                (
+                    "service role",
+                    SERVICE_ROLE_TOKEN.to_string(),
+                    fixture.service_tenant_project_id,
+                ),
+            ] {
+                let (status, body) = fixture
+                    .attach(
+                        &bearer,
+                        tenant_project_id,
+                        fixture.runtime_id,
+                        metadata.clone(),
+                    )
+                    .await?;
+                assert_eq!(status, missing_status, "{case}: {body}");
+                assert_eq!(
+                    body, missing_body,
+                    "{case}: the same answer as a missing runtime"
+                );
+            }
+            assert!(
+                fixture.tenant_leases().await?.is_empty(),
+                "a refused attach creates no lease"
+            );
+            Ok(())
+        })
+        .await
+}
+
 /// A tenant lease's metadata is the caller's description of the attachment:
 /// only its `source` and `label` strings are stored. Controller-owned keys,
 /// such as a launch attestation, and launch settings, such as a runtime image,
