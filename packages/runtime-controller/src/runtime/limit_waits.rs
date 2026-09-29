@@ -53,7 +53,7 @@ use crate::{publish_controller_event, ApiError, AppState};
 use super::lease::RuntimeLeaseScope;
 
 /// Error code of the organization-limit refusal (`hosted_runtime_limit_refusal`).
-pub(super) const RUNTIME_LIMIT_REACHED_CODE: &str = "runtime_limit_reached";
+pub(crate) const RUNTIME_LIMIT_REACHED_CODE: &str = "runtime_limit_reached";
 
 const SWEEP_INTERVAL: Duration = Duration::from_secs(10);
 /// A recorded request larger than this is stored without its metadata. The

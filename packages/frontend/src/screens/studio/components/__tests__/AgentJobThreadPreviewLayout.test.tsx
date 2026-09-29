@@ -2,8 +2,9 @@
 
 import { act, type CSSProperties } from "react";
 import { createRoot, type Root } from "react-dom/client";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, onTestFinished, vi } from "vitest";
 
+import { mergeAndSortMessages } from "../../../../conversations/conversationMessageUtils";
 import { cancelAgentJob } from "../../../../services/runtimeController/jobs";
 import type { ChatMessage } from "../../types";
 import {
@@ -217,6 +218,104 @@ describe("AgentJobThreadPreviewLayout", () => {
     expect(runningStatus?.textContent).toBe("Clarifying whitespace handling");
     expect(runningStatus?.getAttribute("data-sweep-text")).toBe("Clarifying whitespace handling");
     expect(container.textContent).not.toContain("The user seems");
+  });
+
+  it("shows a readable failure with a retry when a provider 429 ends the run", async () => {
+    // The controller stores the Codex error twice under one job: a streamed
+    // progress update and the job failure. Both arrived more than 45 s ago, so
+    // an unfinished thread would read "Status unavailable".
+    const errorText = "exceeded retry limit, last status: 429 Too Many Requests";
+    const now = Date.now();
+    const commandUpdate = (id: string, command: string, timestamp: number): ChatMessage => ({
+      id,
+      role: "assistant",
+      authorId: null,
+      content: command,
+      timestamp,
+      files: null,
+      messageType: "command_execution",
+      metadata: {
+        jobId: JOB_ID,
+        source: "agent",
+        kind: "update",
+        outcome: "in_progress",
+        messageType: "command_execution",
+        details: { command, status: "completed", aggregatedOutput: "ok" },
+      },
+    });
+    const threadMessages = [
+      commandUpdate("00000000-0000-4000-8000-000000000001", "cat bookkeeping/profile.json", now - 120_000),
+      commandUpdate(
+        "00000000-0000-4000-8000-000000000002",
+        "instafy conversation show --include-threads --json",
+        now - 90_000,
+      ),
+      ...mergeAndSortMessages([
+        {
+          id: "11111111-1111-4111-8111-111111111111",
+          role: "assistant",
+          authorId: null,
+          content: errorText,
+          timestamp: now - 60_000,
+          files: null,
+          messageType: "error",
+          metadata: {
+            jobId: JOB_ID,
+            source: "agent",
+            kind: "update",
+            outcome: "in_progress",
+            messageType: "error",
+            details: { kind: "agent_error", event: { type: "error", message: errorText } },
+          },
+        },
+        {
+          id: "22222222-2222-4222-8222-222222222222",
+          role: "assistant",
+          authorId: null,
+          content: errorText,
+          timestamp: now - 59_000,
+          files: null,
+          messageType: "error",
+          metadata: {
+            jobId: JOB_ID,
+            source: "agent",
+            outcome: "failed",
+            messageType: "error",
+            errorMessage: errorText,
+          },
+        },
+      ]),
+    ] satisfies ChatMessage[];
+    const baseMessage = createMessage();
+    const message = createMessage({
+      metadata: { ...baseMessage.metadata, threadMessages },
+    });
+    const requestRetry = vi.fn();
+    // A phone-width row uses the compact rail, where a stuck thread prints
+    // "Status unavailable" (jsdom otherwise reports a width of 0).
+    const clientWidth = vi.spyOn(HTMLElement.prototype, "clientWidth", "get").mockReturnValue(390);
+    onTestFinished(() => clientWidth.mockRestore());
+
+    await act(async () => {
+      root.render(
+        <RunFailureRetryProvider value={{ pendingRetryKey: null, requestRetry, autoRetryingKey: null }}>
+          <LiveAgentJobThreadPreview message={message} />
+        </RunFailureRetryProvider>,
+      );
+    });
+
+    expect(container.textContent).not.toContain("Status unavailable");
+    expect(container.querySelector('[data-testid="run-failure-body"] p')?.textContent).toBe(
+      "The AI provider is limiting requests right now, so this turn stopped. Wait a little, then try again. If it keeps happening, the provider account may have reached its usage limit.",
+    );
+    const retryButton = container.querySelector(
+      '[data-testid="run-failure-retry"]',
+    ) as HTMLButtonElement | null;
+    expect(retryButton?.textContent).toBe("Try again");
+    await act(async () => {
+      retryButton?.click();
+    });
+    expect(requestRetry).toHaveBeenCalledTimes(1);
   });
 
   it("renders owner identity without the prompt or scope summary chip", async () => {

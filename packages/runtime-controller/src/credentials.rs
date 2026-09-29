@@ -127,6 +127,13 @@ struct InternalCredentialResponse {
     upstream_endpoint: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     default_model: Option<String>,
+    /// The only model this lease may serve. Set for the managed lane, where
+    /// the operator pays and the controller alone picks the model; the proxy
+    /// sends every request on the lease as this model, whatever the request
+    /// names. Absent for user credentials, which keep the requested model.
+    /// Additive: a proxy that predates the field ignores it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pinned_model: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     auth_mode: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -493,7 +500,7 @@ pub(crate) async fn ensure_managed_ai_proxy_ready(
 
     let proxy_base_url = config.proxy_base_url.as_ref().ok_or_else(|| {
         anyhow::anyhow!(
-            "managed AI is enabled but PROXY_BASE_URL is unset; disable MANAGED_AI_ENABLED or configure a proxy with static credentials"
+            "managed AI is enabled but PROXY_BASE_URL is unset; disable MANAGED_AI_ENABLED or configure a proxy with static credentials and PROXY_PINNED_MODEL"
         )
     })?;
 
@@ -528,7 +535,7 @@ pub(crate) async fn ensure_managed_ai_proxy_ready(
 
     if !proxy_serves_managed(&requirements) {
         anyhow::bail!(
-            "managed AI startup check failed for {}: proxy reports requiresCredential=true; provide static proxy credentials (OPENAI_API_KEY or auth.json), set MANAGED_AI_OPENAI_API_KEY on the controller so proxies lease it, or disable MANAGED_AI_ENABLED",
+            "managed AI startup check failed for {}: proxy reports requiresCredential=true; provide static proxy credentials (OPENAI_API_KEY or auth.json, with PROXY_PINNED_MODEL set to MANAGED_AI_MODEL_ID), set MANAGED_AI_OPENAI_API_KEY on the controller so proxies lease it, or disable MANAGED_AI_ENABLED",
             proxy_base_url
         );
     }
@@ -568,7 +575,7 @@ fn managed_ai_internal_credential(
         .ok_or_else(|| {
             not_found(
                 "managed AI credential is not configured: set MANAGED_AI_OPENAI_API_KEY on the \
-                 controller or give the proxy static credentials",
+                 controller or give the proxy static credentials and PROXY_PINNED_MODEL",
             )
         })?;
 
@@ -581,6 +588,11 @@ fn managed_ai_internal_credential(
         provider: Some(PROVIDER_OPENAI.to_string()),
         upstream_endpoint: Some(default_endpoint_for_provider(PROVIDER_OPENAI).to_string()),
         default_model: Some(config.managed_ai_model_id.clone()),
+        // Jobs that reach this lease without managedAiUsed (skill-mode ambient
+        // evaluations, service-role dispatches, a failed secrets fetch) never
+        // get CODEX_MODEL set to the managed model, so the pin is what keeps
+        // them off the runtime default on the platform key.
+        pinned_model: Some(config.managed_ai_model_id.clone()),
         auth_mode: None,
         code_assist_project: None,
         lease_expires_in_seconds: INTERNAL_CREDENTIAL_LEASE_SECONDS,
@@ -2571,6 +2583,7 @@ fn materialize_internal_credential(
             provider,
             upstream_endpoint,
             default_model,
+            pinned_model: None,
             auth_mode,
             code_assist_project,
             lease_expires_in_seconds: INTERNAL_CREDENTIAL_LEASE_SECONDS,
@@ -2606,6 +2619,7 @@ fn materialize_internal_credential(
         upstream_endpoint,
         // ChatGPT login lease: user-paid subscription, keep the Sol default.
         default_model: default_model.or_else(|| Some(default_chatgpt_model_id().to_string())),
+        pinned_model: None,
         auth_mode,
         code_assist_project,
         lease_expires_in_seconds: INTERNAL_CREDENTIAL_LEASE_SECONDS,
@@ -3068,6 +3082,51 @@ mod credential_lease_contract_tests {
         let (status, _) = managed_ai_internal_credential(&config)
             .expect_err("disabled managed AI must not lease the platform key");
         assert_eq!(status, StatusCode::NOT_FOUND);
+    }
+
+    #[test]
+    fn only_the_managed_lease_pins_its_model() {
+        // The platform key is pinned to the managed model on the wire, so the
+        // proxy sends a job that asked for another model as the managed one.
+        let mut config = build_app_config("", "", "");
+        config.managed_ai_model_id = "gpt-6-luna".to_string();
+        config.managed_ai_openai_api_key = Some("sk-managed".to_string());
+        let managed =
+            serde_json::to_value(managed_ai_internal_credential(&config).expect("managed lease"))
+                .expect("managed lease should serialize");
+        assert_eq!(
+            managed.get("pinnedModel").and_then(Value::as_str),
+            Some("gpt-6-luna")
+        );
+
+        // User credentials keep the requested model: no pin on the wire for a
+        // BYO API key or a ChatGPT login, even with a stored default model.
+        let byo_api_key = materialize_internal_credential(
+            Uuid::new_v4(),
+            CREDENTIAL_KIND_OPENAI_API_KEY,
+            &json!({ "OPENAI_API_KEY": "test-api-key" }),
+            &json!({ "provider": "openai", "default_model": "gpt-5.6-sol" }),
+        )
+        .expect("API key should materialize");
+        let chatgpt = materialize_internal_credential(
+            Uuid::new_v4(),
+            CREDENTIAL_KIND_CODEX_AUTH_JSON,
+            &json!({ "tokens": { "access_token": "test-access-token" } }),
+            &json!({ "provider": "openai", "default_model": "gpt-5.6-sol" }),
+        )
+        .expect("ChatGPT login should materialize");
+        for (name, lease) in [("API key", byo_api_key), ("ChatGPT", chatgpt)] {
+            let wire = serde_json::to_value(lease).expect("lease should serialize");
+            assert_eq!(
+                wire.get("defaultModel").and_then(Value::as_str),
+                Some("gpt-5.6-sol"),
+                "{name} lease keeps its default"
+            );
+            assert!(
+                wire.get("pinnedModel").is_none(),
+                "{name} lease must not pin a model: {wire}"
+            );
+        }
     }
 
     #[test]

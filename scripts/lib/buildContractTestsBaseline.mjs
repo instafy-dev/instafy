@@ -4,7 +4,13 @@ import assert from "node:assert/strict";
 // "Test public migration and self-host contracts" step after its whole-file
 // baselines were reviewed; not runtime authority. Every entry must be present
 // exactly once, so dropping one from CI fails here instead of passing quietly.
-export const ADDED_BUILD_CONTRACT_TESTS = ["scripts/lib/localUserTokenSecret.test.mjs"];
+export const ADDED_BUILD_CONTRACT_TESTS = [
+  "scripts/lib/localUserTokenSecret.test.mjs",
+  "scripts/lib/supabaseImageMirror.test.mjs",
+  "scripts/mirror-supabase-images.test.mjs",
+  "scripts/lib/supabaseStartMode.test.mjs",
+  "scripts/lib/supabaseSerialPull.test.mjs",
+];
 
 export const addedBuildContractTestLine = (file) => `            ${file} \\\n`;
 

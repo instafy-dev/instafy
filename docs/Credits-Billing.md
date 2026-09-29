@@ -90,8 +90,32 @@ it:
   credentials (`remote_dynamic`) leases it like any other credential. The key stays on the
   controller; provider hosts and runtime containers never hold it. This is the recommended setup.
 - Give every proxy a runtime calls static credentials (`OPENAI_API_KEY` or an API-key `auth.json`
-  at `/opt/instafy/proxy-codex/auth.json` on each provider host). A sidecar without either
-  refuses managed turns with `proxy token missing credential_id for BYOC request`.
+  at `/opt/instafy/proxy-codex/auth.json` on each provider host), and set `PROXY_PINNED_MODEL` on
+  it to `MANAGED_AI_MODEL_ID`. Without it the proxy serves managed turns on its key with whatever
+  model a job asks for, speech and transcription included, and logs once that the managed model
+  is not pinned. Both runtime compose files set the sidecar's `PROXY_PINNED_MODEL` from the
+  environment that runs `docker compose`, which on a provider host is the provider service's:
+  `PROXY_PINNED_MODEL` there, or else `MANAGED_AI_MODEL_ID`; an explicitly empty
+  `PROXY_PINNED_MODEL` means no pin. That entry overrides the sidecar's env file, so a value in
+  `proxy-credential-lease.env` has no effect.
+
+A sidecar with neither refuses managed turns with `proxy token missing credential_id for BYOC
+request`.
+
+The controller puts `CODEX_MODEL=MANAGED_AI_MODEL_ID` in a job's runtime environment
+(`secrets.rs`) only for jobs flagged `managedAiUsed`. Other jobs that reach the platform key
+(skill-mode ambient evaluations, service-role worker and lead-continuation dispatches, jobs whose
+secrets fetch failed) ask for the runtime default, `gpt-5.6-sol`, which lists at 50 to 60 times
+Luna's rates above. The managed credential lease therefore carries `pinnedModel`, and the proxy
+sends every request on it as `MANAGED_AI_MODEL_ID`, whatever model the job asked for; speech and
+transcription are refused on it. A pinned request also forwards only the client tool types codex
+emits (`function`, `custom`, `namespace`, `tool_search` and `web_search`), in `tools` and in the
+`additional_tools` and `tool_search_output` input items, and drops any tool that names its own
+model, so a hand-built hosted tool such as `image_generation` cannot run on the platform key. The
+pin needs both a controller and a proxy that know `pinnedModel`. Either can be updated first:
+until both are, requests keep the model they ask for. This is separate from the key rollout order
+in the next paragraph. Static proxy credentials serving managed turns get the same pin from
+`PROXY_PINNED_MODEL`, as described above.
 
 Roll the proxy out first. Setting `MANAGED_AI_OPENAI_API_KEY` is what makes the controller
 advertise managed AI and charge for managed turns, so every provider host must already run a

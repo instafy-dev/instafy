@@ -2592,7 +2592,7 @@ conversationContextCommand.action(async (conversationId, messageId, opts) => {
 const conversationShowCommand = conversationCommand
   .command("show")
   .description("Show messages from a conversation by id or title/search text")
-  .argument("<conversation...>", "Conversation id or title/search text")
+  .argument("[conversation...]", "Conversation id or title/search text (defaults to INSTAFY_CONVERSATION_ID)")
   .option("--space <id>", "Space UUID (defaults to SPACE_ID or .instafy/space.json)")
   .option("--include-threads", "Include child threads in addition to root conversations")
   .option("--limit <n>", "Max messages to return (1-200, default: 80)", Number.parseInt)
@@ -2602,7 +2602,9 @@ addAccessTokenOptions(conversationShowCommand, "Instafy access token");
 conversationShowCommand.action(async (targetParts, opts) => {
   try {
     await showConversation({
-      target: Array.isArray(targetParts) ? targetParts.join(" ") : String(targetParts ?? ""),
+      // Only a command with no target words falls back to the current conversation.
+      target:
+        Array.isArray(targetParts) && targetParts.length > 0 ? targetParts.join(" ") : undefined,
       project: opts.space,
       includeThreads: opts.includeThreads,
       limit: opts.limit,

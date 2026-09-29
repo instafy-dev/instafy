@@ -39,7 +39,7 @@ fn allowed_managed_runtime_request_metadata_key(key: &str) -> bool {
 /// Controller-derived resource limits, git remotes, profile persistence and
 /// TURN credentials are intentionally absent: their authoritative values are
 /// injected only after this request boundary.
-fn allowed_managed_runtime_request_env_key(key: &str) -> bool {
+pub(crate) fn allowed_managed_runtime_request_env_key(key: &str) -> bool {
     matches!(
         key,
         // Shared Browser launch and rendering preferences.

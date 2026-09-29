@@ -2,6 +2,39 @@ use std::time::Instant;
 
 use anyhow::{Result, anyhow};
 
+use crate::auth::Credentials;
+
+/// Request-ready credentials plus the model policy the controller attached to
+/// them.
+///
+/// Like [`CredentialLease`], this deliberately does not implement `Debug`.
+#[derive(Clone)]
+pub struct LeasedCredentials {
+    pub credentials: Credentials,
+    /// The only model the controller lets these credentials serve (the
+    /// managed lane, where the operator pays). `None` keeps the requested
+    /// model, as for user credentials, static proxy credentials without
+    /// `PROXY_PINNED_MODEL` and leases from a controller that predates the pin.
+    pub pinned_model: Option<String>,
+}
+
+impl LeasedCredentials {
+    /// Credentials the controller attached no model policy to.
+    pub fn unpinned(credentials: Credentials) -> Self {
+        Self {
+            credentials,
+            pinned_model: None,
+        }
+    }
+
+    pub fn pinned_model(&self) -> Option<&str> {
+        self.pinned_model
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+    }
+}
+
 /// Why the proxy is asking the controller for request-ready credential material.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CredentialLeasePurpose {

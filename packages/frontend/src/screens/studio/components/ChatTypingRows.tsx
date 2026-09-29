@@ -9,9 +9,8 @@ import type {
   AssistantAvatarRenderOptions,
   AssistantTypingAgent,
 } from "./chatAssistantIdentity";
+import type { TypingIndicatorPhase, TypingIndicatorState } from "./typingIndicatorState";
 
-type TypingIndicatorPhase = "typing" | "finalizing" | "thinking" | "waiting" | "compacting";
-type TypingIndicatorState = { phase: TypingIndicatorPhase; label: string | null };
 type AssistantTypingStatusSnapshot = {
   phase: TypingIndicatorPhase | null;
   label: string;

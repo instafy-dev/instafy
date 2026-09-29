@@ -103,6 +103,7 @@ returns a surfaced upstream error instead of silently pretending the backend is 
 | `PROXY_CONTROLLER_BASE_URL` | Enables controller-integrated hosted mode | `None` |
 | `CONTROLLER_INTERNAL_TOKEN` | Service bearer used for controller credit events | `None` |
 | `PROXY_CREDENTIAL_LEASE_TOKEN` | Dedicated bearer used only for controller credential leases | `None` |
+| `PROXY_PINNED_MODEL` | The only model static credentials serve managed runs as (set it to the controller's `MANAGED_AI_MODEL_ID`); see [Model selection](#model-selection) | `None` |
 | `CODEX_PROXY_CHATGPT_ENDPOINT` | Upstream ChatGPT Codex Responses endpoint | `https://chatgpt.com/backend-api/codex/responses` |
 
 `CODEX_OPENAI_ENDPOINT` can also point at an OpenAI-compatible Chat Completions endpoint (e.g. `.../chat/completions`). When it does, the proxy will call that upstream endpoint and adapt the result into an OpenAI Responses-shaped payload for downstream callers.
@@ -111,19 +112,86 @@ Standalone local mode may read and refresh the operator's own `auth.json`. In
 controller-integrated mode, the controller is the only refresh-token authority: the proxy gets a
 short-lived access/API-key lease and never receives the stored refresh token.
 
+### Model selection
+
+A request's `model` picks the upstream model. An absent or empty model uses the credential's
+default. An explicit id goes to OpenAI endpoints as is. On a bring-your-own provider endpoint
+(DeepSeek, z.ai, Gemini) the credential's default replaces it, and a ChatGPT login given another
+provider's id uses its default, so a mismatched id does not fail upstream.
+
+In controller-integrated mode the controller can pin a credential lease to one model with
+`pinnedModel` on the lease response. It pins the managed Instafy AI lease, which the operator
+pays for, to `MANAGED_AI_MODEL_ID`. The proxy then sends every Responses and Chat Completions
+request on that lease as the pinned model, whatever model the request names, and logs
+`credential lease pins the model` with the requested and sent ids when they differ. Speech and
+transcription requests name an audio model the pinned model cannot replace, so both routes
+answer 400 on a pinned lease without contacting the provider. Client tools on a pinned lease are
+limited to the types codex emits (`function`, `custom`, `namespace`, `tool_search`,
+`web_search`), both in `tools` and in the input items that carry tool definitions
+(`additional_tools`, where codex lists its tools for Responses Lite models such as the managed
+one, and `tool_search_output`). Before the request goes upstream the proxy drops any other type,
+any tool that names its own `model`, and a namespace holding either, and logs
+`credential lease drops a client tool` with the tool type. Leases without `pinnedModel`
+(bring-your-own API keys, ChatGPT logins, and leases from a controller that predates the field)
+keep the rules above and forward client tools unchanged.
+
+Static proxy credentials (`OPENAI_API_KEY` or `auth.json`) serve every request whose token names
+no credential, including managed runs: controller-signed job tokens with a `run_id` and no
+`credential_id`. Set `PROXY_PINNED_MODEL` to the controller's `MANAGED_AI_MODEL_ID` and those
+runs get exactly the pinned-lease policy above. Other requests on static credentials (standalone
+mode without a controller, and tokens without a `run_id`) and tokens that name a credential,
+which the proxy leases from the controller, are never pinned by it. Without the setting managed
+runs keep the rules above, and the first one logs a warning that the managed model is not pinned.
+A proxy without static credentials ignores the setting. The runtime compose files
+(`docker/docker-compose.runtime.provider.yml` and `docker/docker-compose.runtime.yml`) set it on
+the sidecar from the environment that runs `docker compose`, which on a provider host is the
+provider service's: `PROXY_PINNED_MODEL` there, or else `MANAGED_AI_MODEL_ID`; an explicitly
+empty `PROXY_PINNED_MODEL` means no pin. That entry overrides the sidecar's env file, so a value
+in `proxy-credential-lease.env` has no effect.
+
 ### Upstream failures and retries
 
 Responses, Chat Completions, speech and transcription preserve upstream HTTP error statuses. A rejected request or
-credential (400/401/403) is terminal; rate limits (429), timeouts (504), and temporary upstream
-failures (5xx) remain retryable. Recognized `insufficient_quota` codes in an HTTP 429 body or a
-failed Responses stream return terminal 402. Failed credential renewal and invalid request or
-redirect configuration return terminal 424. Unknown transport errors, including opaque TLS
-handshake failures, return retryable 502 because they may be temporary.
+credential (400/401/403) is terminal; rate limits (429, except an exhausted bucket that needs more
+than five minutes to refill, as described below), timeouts (504), and temporary upstream failures (5xx) remain retryable.
+Recognized `insufficient_quota` codes in an HTTP 429 body or a failed Responses stream return
+terminal 402. A ChatGPT plan limit (`usage_limit_reached` or
+`usage_not_included` in an HTTP 429 body or a failed Responses stream) stays 429 but is terminal
+and carries no `Retry-After`, because no wait within a turn lifts it: `usage_limit_reached` means
+the plan's usage window is spent until it rolls over, hours or days later, and
+`usage_not_included` means the plan does not include that usage at all. Failed credential renewal
+and invalid request or redirect configuration return terminal 424. Unknown transport errors,
+including opaque TLS handshake failures, return retryable 502 because they may be temporary.
 
 Upstream error envelopes retain `error.type: "upstream_error"` and a safe `error.message`, and
-add a stable `error.code` and boolean `error.retryable`. Raw provider messages, response bodies,
-credentials, and endpoint URLs are not echoed. Valid `Retry-After` seconds or HTTP dates are
-forwarded for 429 and 503; other header values are discarded.
+add a stable `error.code` and boolean `error.retryable`. The one exception is a plan limit,
+whose `error.type` is the provider's `usage_limit_reached` or `usage_not_included` so Codex
+reports it as a usage limit, with a positive integer `error.resets_at` (Unix seconds) when the
+provider gave one. Raw provider messages, response bodies, credentials, and endpoint URLs are
+not echoed. Valid `Retry-After` seconds or HTTP dates are forwarded for 429 and 503 with the
+provider's value and no bound of the proxy's own (Codex reads it only on a retryable 429 and
+clamps that wait to 1-30 seconds); other
+header values are discarded. Every retryable 429 carries a `Retry-After`. When the provider
+sends no usable one, the proxy derives it from the rate-limit bucket that refused the request,
+using OpenAI's `x-ratelimit-remaining-*` and `x-ratelimit-reset-*` headers (reset durations such
+as `6s` or `1m2.5s` are rounded up to whole seconds):
+
+- A bucket whose `x-ratelimit-remaining-*` count is 0 refused the request, so the proxy waits
+  for that bucket's reset, or for the later of both resets when both counts are 0.
+- When no count is 0, or the counts are missing, nothing shows which bucket refused: a tokens
+  bucket with room left can still refuse a large request. The proxy then waits for the later of
+  the two resets.
+
+A derived delay is clamped to 1-30 seconds. With no usable reset, and for an in-stream
+`rate_limit_exceeded`, which carries no headers, the proxy uses 5 seconds, the same fallback
+Codex applies to a retryable 429 without `Retry-After`. Reset headers are time until a bucket
+is completely full, and a per-minute bucket is full again within about a minute. When a bucket
+at 0 needs more than five minutes to refill, as with a daily requests or tokens limit, the
+turn's retries (roughly five waits of up to 30 seconds) cannot outlast it: the proxy answers a
+terminal 429 (`upstream_rate_limit`, `retryable: false`) with no `Retry-After`, and Codex ends
+the turn with a rate-limit error instead of waiting out its retry budget. When no bucket is at
+0, a long reset does not prove that the slower bucket is the one that refused, so that 429
+stays retryable.
 
 The proxy does not replay ordinary failed model requests. It retains one credential renewal
 and one resend after an eligible ChatGPT 401. Controller mode performs that renewal through

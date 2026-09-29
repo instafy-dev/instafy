@@ -13,11 +13,11 @@ export const SERIAL_PULL_BUDGET_MS = 10 * 60_000;
 
 // services --output json omits these four images. Keep this inventory coupled to
 // the exact CLI: https://github.com/supabase/cli/blob/v2.92.0/pkg/config/templates/Dockerfile
-const ANCILLARY_IMAGES = Object.freeze([
+export const ANCILLARY_IMAGES = Object.freeze([
   "library/kong:2.8.1", "axllent/mailpit:v1.22.3",
   "darthsim/imgproxy:v3.8.0", "timberio/vector:0.53.0-alpine",
 ]);
-const SERVICE_NAMES = Object.freeze([
+export const SERVICE_NAMES = Object.freeze([
   "supabase/postgres", "supabase/gotrue", "postgrest/postgrest",
   "supabase/realtime", "supabase/storage-api", "supabase/edge-runtime",
   "supabase/studio", "supabase/postgres-meta", "supabase/logflare", "supabase/supavisor",
@@ -98,7 +98,7 @@ export function assertSerialPullProject(repoRoot, env) {
   if (optionalStat(path.join(temporary, "project-ref"))) throw new Error("supabase-serial-requires-unlinked-project");
   for (const [key, value] of Object.entries(env)) {
     if (!value) continue;
-    if ((key.startsWith("SUPABASE_") && !["SUPABASE_SERIAL_PULL", "SUPABASE_DATABASE_ONLY", "SUPABASE_AUTH_ONLY", "SUPABASE_BROWSER_TEST"].includes(key))
+    if ((key.startsWith("SUPABASE_") && !["SUPABASE_SERIAL_PULL", "SUPABASE_DATABASE_ONLY", "SUPABASE_AUTH_ONLY", "SUPABASE_BROWSER_TEST", "SUPABASE_IMAGE_MIRROR"].includes(key))
       || ["DOCKER_HOST", "DOCKER_CONTEXT", "DOCKER_CONFIG", "DOCKER_AUTH_CONFIG", "DOCKER_TLS_VERIFY", "DOCKER_CERT_PATH"].includes(key)) {
       throw new Error("supabase-serial-unsupported-override");
     }
@@ -148,7 +148,8 @@ function assertCliDiagnostics(stderr) {
 
 // Only fixed categories and bounded process metadata may leave a failed Docker
 // invocation. Never echo stderr, URLs, paths, arbitrary error messages or tags.
-function reportDockerFailure(log, stage, image, result, thrown) {
+// Shared with the GHCR image-mirror preparation in supabaseImageMirror.mjs.
+export function reportDockerFailure(log, stage, image, result, thrown) {
   const knownNames = [...SERVICE_NAMES, ...ANCILLARY_IMAGES].map((ref) => ref.split("/").at(-1).split(":")[0]);
   const name = typeof image === "string" ? image.split("/").at(-1).split(":")[0] : "unknown";
   const exit = Number.isInteger(result?.status) && result.status >= 0 && result.status <= 255 ? result.status : "unknown";
@@ -160,7 +161,7 @@ function reportDockerFailure(log, stage, image, result, thrown) {
   if (typeof stderr === "string" && Buffer.byteLength(stderr, "utf8") <= 32_768) {
     for (const [hint, pattern] of [
       ["rate-limit", /too many requests|toomanyrequests|(?:status code|http)[: ]+429/i],
-      ["registry-auth", /unauthorized|authentication required|pull access denied/i],
+      ["registry-auth", /unauthorized|authentication required|pull access denied|error from registry: denied/i],
       ["manifest-missing", /manifest unknown|manifest not found/i],
       ["platform-missing", /no matching manifest for/i],
       ["proxy-denied", /proxyconnect[^\r\n]*forbidden|proxy authentication required/i],

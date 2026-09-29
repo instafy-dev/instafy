@@ -128,9 +128,12 @@ describe("controllerConversationNotice", () => {
       },
     });
     for (const message of [withCode, textOnly]) {
-      expect(resolveControllerConversationNoticeContent(message)).toBe(
-        "Waiting for a free cloud runtime. This team’s one runtime is busy in another space; stop it in Machines and this request will send.",
+      const content = resolveControllerConversationNoticeContent(message);
+      expect(content).toBe(
+        "Waiting for a free cloud runtime. All of this team’s cloud runtimes are in use; stop one in Machines and this request will send.",
       );
+      // The runtime holding the slot can be in this same space.
+      expect(content).not.toMatch(/space/);
       expect(resolveControllerConversationNoticeLabel(message)).toBe("Waiting for a runtime");
       // Stopping the blocker is the fix, so the card keeps its button.
       expect(resolveControllerConversationNoticeAction(message)).toEqual({ label: "Open Machines", kind: "open_machines" });

@@ -168,9 +168,10 @@ import {
   shouldAssistantMessagesShareVisualGroup,
 } from "./assistantMessageGrouping";
 import {
-  isCompactionStatusText,
-  resolveAssistantStatusHeadline,
-} from "./assistantStatusHeuristics";
+  COMPACTION_STATUS_LABEL,
+  resolveTypingIndicatorState,
+  type TypingIndicatorPhase,
+} from "./typingIndicatorState";
 import {
   readWorkspaceFileStaleNotice,
   type WorkspaceFileStaleNotice,
@@ -229,7 +230,6 @@ import {
   toBrowserSessionPageTarget,
   type BrowserSessionPageTarget,
 } from "./browserSessionPages";
-import { truncate } from "./chatContentHelpers";
 import { resolveChatComposerAffordances } from "./chatComposerAffordances";
 import { useChatInvitePromptHandlers } from "./useChatInvitePromptHandlers";
 import { useChatComposerAttachments } from "./useChatComposerAttachments";
@@ -6362,60 +6362,6 @@ function clampMessageMenuPosition(clientX: number, clientY: number) {
     surfaceHeight: MESSAGE_MENU_HEIGHT_ESTIMATE,
     padding: MESSAGE_MENU_PADDING,
   });
-}
-
-type TypingIndicatorPhase = "typing" | "finalizing" | "thinking" | "waiting" | "compacting";
-const COMPACTION_STATUS_LABEL = "Re-organizing my thoughts";
-
-function resolveTypingIndicatorState(
-  messages: ChatMessage[],
-  fallback: { phase: TypingIndicatorPhase; label: string | null } | null = null,
-): { phase: TypingIndicatorPhase; label: string | null } {
-  let lastUserIndex = -1;
-  for (let index = messages.length - 1; index >= 0; index -= 1) {
-    if (messages[index].role === "user") {
-      lastUserIndex = index;
-      break;
-    }
-  }
-  const startIndex = lastUserIndex;
-
-  for (let index = messages.length - 1; index > startIndex; index -= 1) {
-    const message = messages[index];
-    if (message.role !== "assistant") {
-      continue;
-    }
-    const type = getMessageType(message);
-    if (type !== "reasoning" && type !== "status") {
-      continue;
-    }
-    // Only the headline goes in the one-line status row. A reasoning summary
-    // body stays behind "Agent thinking" instead of leaking in here.
-    const normalized = resolveAssistantStatusHeadline(message.content);
-    if (!normalized) {
-      continue;
-    }
-    if (isCompactionStatusText(normalized)) {
-      return { phase: "compacting", label: COMPACTION_STATUS_LABEL };
-    }
-    const lowered = normalized.toLowerCase();
-    if (lowered === "completed") {
-      continue;
-    }
-
-    const phase = lowered.includes("response summary")
-      ? "finalizing"
-      : lowered.includes("drafting response")
-        ? "typing"
-        : "thinking";
-
-    return { phase, label: truncate(normalized, 120) };
-  }
-
-  if (fallback) {
-    return fallback;
-  }
-  return { phase: "typing", label: null };
 }
 
 function resolveRunSortTimestamp(run: RunRecord): number {

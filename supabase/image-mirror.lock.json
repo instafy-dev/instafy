@@ -1,0 +1,78 @@
+{
+  "schemaVersion": 1,
+  "supabaseCli": "2.92.0",
+  "source": "public.ecr.aws/supabase",
+  "mirror": "ghcr.io/instafy-dev/supabase",
+  "images": [
+    {
+      "name": "postgres",
+      "tag": "17.6.1.106",
+      "digest": "sha256:21ab971149317ea9cd12a8126fe4ebb34def08c8972956b0958cba0924409dab",
+      "upstream": "docker.io/supabase/postgres",
+      "modes": ["database", "auth-email", "browser-test", "full"]
+    },
+    {
+      "name": "gotrue",
+      "tag": "v2.188.1",
+      "digest": "sha256:87db8c737af49a64236c461882ed3925f8b1e5c2c47176c64694dedc65153573",
+      "upstream": "docker.io/supabase/gotrue",
+      "modes": ["database", "auth-email", "browser-test", "full"]
+    },
+    {
+      "name": "realtime",
+      "tag": "v2.82.0",
+      "digest": "sha256:e3a9a49c92d1fe7decf5bceda84c036dd8ecdedb145a94d39fc9433becb0b989",
+      "upstream": "docker.io/supabase/realtime",
+      "modes": ["database", "auth-email", "browser-test", "full"]
+    },
+    {
+      "name": "storage-api",
+      "tag": "v1.48.28",
+      "digest": "sha256:38850bce7c3056ef76acdc4c6357aa474b3124b22d383ed86843b765a1efe242",
+      "upstream": "docker.io/supabase/storage-api",
+      "modes": ["database", "auth-email", "browser-test", "full"]
+    },
+    {
+      "name": "postgrest",
+      "tag": "v14.8",
+      "digest": "sha256:4173b72e0be29cf15349dc827798c3e464c5f2cc7f9c1697022f9cd1874b4c36",
+      "upstream": "docker.io/postgrest/postgrest",
+      "modes": ["auth-email", "browser-test", "full"]
+    },
+    {
+      "name": "kong",
+      "tag": "2.8.1",
+      "digest": "sha256:1b53405d8680a09d6f44494b7990bf7da2ea43f84a258c59717d4539abf09f6d",
+      "upstream": "docker.io/library/kong",
+      "modes": ["auth-email", "browser-test", "full"]
+    },
+    {
+      "name": "mailpit",
+      "tag": "v1.22.3",
+      "digest": "sha256:f7f7c31de4de59540ad6515a0ca057a77525bca2069b6e747d873ca66c10fe08",
+      "upstream": "docker.io/axllent/mailpit",
+      "modes": ["auth-email", "browser-test", "full"]
+    },
+    {
+      "name": "imgproxy",
+      "tag": "v3.8.0",
+      "digest": "sha256:0facd355d50f3be665ebe674486f2b2e9cdaebd3f74404acd9b7fece2f661435",
+      "upstream": "docker.io/darthsim/imgproxy",
+      "modes": ["browser-test", "full"]
+    },
+    {
+      "name": "studio",
+      "tag": "2026.04.08-sha-205cbe7",
+      "digest": "sha256:6df01717260781224d6e5fc24532511a184d43b705be39ba592b4958ccf4109d",
+      "upstream": "docker.io/supabase/studio",
+      "modes": ["browser-test", "full"]
+    },
+    {
+      "name": "postgres-meta",
+      "tag": "v0.96.4",
+      "digest": "sha256:4dd3e0ff3e9a0f9f62dd1a1a827f124645549b439ddb2a53598575744585e32d",
+      "upstream": "docker.io/supabase/postgres-meta",
+      "modes": ["browser-test", "full"]
+    }
+  ]
+}

@@ -228,6 +228,11 @@ test("unsafe configuration, linked projects and arbitrary overrides fail before 
     assert.throws(() => h.run({ env: { SUPABASE_SERIAL_PULL: "true", [key]: "inert" } }), /unsupported-override/);
     assert.equal(h.calls.length, 0);
   }
+  // The GHCR mirror switch runs before serial preparation and changes no CLI input.
+  const mirrored = harness(t);
+  assert.deepEqual(mirrored.run({ env: { PATH: "/usr/bin:/bin", SUPABASE_SERIAL_PULL: "true", SUPABASE_IMAGE_MIRROR: "ghcr" }, databaseOnly: true }),
+    { enabled: true, images: 1, pulled: 1 });
+  assert.equal(mirrored.calls[0].options.env.SUPABASE_IMAGE_MIRROR, undefined);
 });
 
 test("symlinked config, project path, .temp and linked-state paths are never followed", (t) => {
@@ -272,6 +277,7 @@ test("Docker failures retain fixed symptom hints without logging raw output", (t
   for (const [stderr, hint] of [
     ["toomanyrequests: too many requests", "rate-limit"],
     ["unauthorized: authentication required", "registry-auth"],
+    ["Error response from daemon: error from registry: denied\ndenied", "registry-auth"],
     ["manifest unknown", "manifest-missing"],
     ["no matching manifest for linux/arm64", "platform-missing"],
     ["proxyconnect tcp: Forbidden", "proxy-denied"],

@@ -26,11 +26,12 @@ function statusFromDetail(value: unknown): string | null {
 }
 
 /**
- * A reconnect the team's machine limit refused. The start did not fail: the
- * one machine the team may run is busy in another space, and the request is
- * waiting for it. It used to read "Workspace startup failed", beside a live
- * line saying the machine was busy. The controller now records the refusal's
- * code; older records carry only the text, which names the limit.
+ * A reconnect the team's runtime limit refused. The start did not fail: every
+ * cloud runtime the team's plan allows is in use, in another space or in this
+ * one, and the request waits for one to stop. It used to read "Workspace
+ * startup failed", beside a live line saying the machine was busy. The
+ * controller now records the refusal's code; older records carry only the
+ * text, which names the limit.
  */
 export function isRuntimeLimitWaitAlert(details: Record<string, unknown> | null | undefined): boolean {
   const reconnect = details?.reconnect;

@@ -345,6 +345,13 @@ function isLocalCapabilityMetadata(value: Record<string, unknown> | null | undef
   return kind === "local_capability_result";
 }
 
+function isFailedOrCanceledOutcome(message: ChatMessage): boolean {
+  const outcome = isPlainObject(message.metadata)
+    ? normalizeMessageTypeValue(message.metadata["outcome"])
+    : null;
+  return outcome === "failed" || outcome === "canceled" || outcome === "cancelled";
+}
+
 function mergeDuplicateMessage(existing: ChatMessage, incoming: ChatMessage): ChatMessage {
   const existingMetadata =
     existing.metadata && typeof existing.metadata === "object"
@@ -803,6 +810,7 @@ export function mergeAndSortMessages(messages: ChatMessage[]): ChatMessage[] {
           const incomingNoisy = incomingType ? noisyTypes.has(incomingType) : false;
 
           let preferIncoming = false;
+          let incomingFailureSupersedesProgress = false;
           if (existingNoisy !== incomingNoisy) {
             preferIncoming = !incomingNoisy;
           } else {
@@ -810,6 +818,11 @@ export function mergeAndSortMessages(messages: ChatMessage[]): ChatMessage[] {
             const incomingOutcomeRank = resolveOutcomeRank(message);
             if (incomingOutcomeRank !== existingOutcomeRank) {
               preferIncoming = incomingOutcomeRank > existingOutcomeRank;
+              // A failed run is reported twice with the same text: once as a streamed
+              // progress update and once as the job failure. Only the failure closes
+              // the run, so it must not inherit the update's markers below.
+              incomingFailureSupersedesProgress =
+                existingOutcomeRank === 0 && isFailedOrCanceledOutcome(message);
             } else {
               // Last write wins for identical-ish duplicates.
               preferIncoming = message.timestamp >= existing.timestamp;
@@ -823,9 +836,10 @@ export function mergeAndSortMessages(messages: ChatMessage[]): ChatMessage[] {
             }
             entries[sameContentIndex] = null;
             const merged = mergeDuplicateMessage(existing, message);
-            if (existingNoisy && !incomingNoisy) {
+            if ((existingNoisy && !incomingNoisy) || incomingFailureSupersedesProgress) {
               // The selected answer owns its presentation, including absent fields.
-              // Rehydrating the losing status/hidden markers can hide the final reply.
+              // Rehydrating the losing status/hidden markers can hide the final reply,
+              // and a leftover `kind: "update"` keeps a failed run looking unfinished.
               merged.messageType = message.messageType ?? null;
               if (merged.metadata) {
                 for (const key of ["messageType", "message_type", "kind", "details", "presentation"]) {

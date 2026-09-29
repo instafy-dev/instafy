@@ -58,5 +58,6 @@ Use this skill when the user says things like:
 - Search ranks recent conversations by title, preview, and recent message content.
 - Include threads by default when the user does not know which agent/thread owned the prior work.
 - Runtime jobs provide controller auth and project/conversation IDs through the environment; do not ask the user to sign in unless the CLI returns an auth error.
+- To re-read the current conversation, run `instafy conversation show --include-threads --json` with no target. It reads the id from the environment. Only if an older CLI reports a missing conversation argument, pass the Conversation ID from the runtime context.
 - Always finish with a normal user-facing answer, even when lookup is empty or ambiguous.
 - Use plain language as the primary UX. This skill exists so the user does not need explicit `#conversation` references.

@@ -724,6 +724,7 @@ async fn provider_launch_guard_orders_ensure_before_tombstone_and_release() -> a
             None,
             RuntimeLeaseScope::Exclusive,
             OriginEnsureOptions::new(None, None, None),
+            ReusedLeaseMetadata::Requested,
         )
         .await
     });
@@ -756,6 +757,7 @@ async fn provider_launch_guard_orders_ensure_before_tombstone_and_release() -> a
             None,
             RuntimeLeaseScope::Exclusive,
             OriginEnsureOptions::new(None, None, None),
+            ReusedLeaseMetadata::Requested,
         ),
     )
     .await
@@ -1044,6 +1046,7 @@ async fn queued_launch_uses_provider_snapshot_refreshed_after_admission_wait() -
             None,
             RuntimeLeaseScope::Exclusive,
             OriginEnsureOptions::new(None, None, None),
+            ReusedLeaseMetadata::Requested,
         )
         .await
     });
@@ -1079,6 +1082,7 @@ async fn queued_launch_uses_provider_snapshot_refreshed_after_admission_wait() -
             None,
             RuntimeLeaseScope::Exclusive,
             OriginEnsureOptions::new(None, None, None),
+            ReusedLeaseMetadata::Requested,
             Some(target_hook),
         )
         .await
@@ -1255,6 +1259,7 @@ async fn slow_provider_ensure_pins_at_most_one_pool_connection() -> anyhow::Resu
                 None,
                 RuntimeLeaseScope::Exclusive,
                 OriginEnsureOptions::new(None, None, None),
+                ReusedLeaseMetadata::Requested,
             )
             .await
         });
@@ -1293,6 +1298,7 @@ async fn slow_provider_ensure_pins_at_most_one_pool_connection() -> anyhow::Resu
                 None,
                 RuntimeLeaseScope::Exclusive,
                 OriginEnsureOptions::new(None, None, None),
+                ReusedLeaseMetadata::Requested,
                 Some(queued_hook),
             )
             .await
