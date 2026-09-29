@@ -391,12 +391,13 @@ impl TenantAttachFixture {
     }
 }
 
-/// A tenant attach names a runtime of another project. Writing to the tenant
-/// project is not enough: the caller must also be able to write to the
-/// runtime's own project. A caller who cannot is answered exactly as for a
-/// runtime id that does not exist, and nothing on the host changes. An
-/// allowed attach leaves the host's origin alone as well: it reports that
-/// origin, applies no origin options and records no origin of its own.
+/// A tenant attach names a runtime of another project. The caller must be able
+/// to write to both projects: the tenant project and the runtime's own
+/// project. A caller who cannot write to the runtime's project is answered
+/// exactly as for a runtime id that does not exist, and a refused attach
+/// changes nothing on the host. An allowed attach leaves the host's origin
+/// alone as well: it reports that origin, applies no origin options and
+/// records no origin of its own.
 #[tokio::test]
 async fn tenant_attach_requires_write_access_to_the_host_runtimes_project() -> anyhow::Result<()> {
     let fixture = TenantAttachFixture::setup("tenant-attach-authorization").await?;
@@ -439,6 +440,20 @@ async fn tenant_attach_requires_write_access_to_the_host_runtimes_project() -> a
                     "{case}: the same answer as a missing runtime"
                 );
             }
+
+            // Allowed to write the host project, but not the tenant project.
+            let (status, body) = fixture
+                .attach(
+                    &fixture.user_token(fixture.host_writer)?,
+                    fixture.other_org_project_id,
+                    fixture.runtime_id,
+                    metadata.clone(),
+                )
+                .await?;
+            assert!(
+                matches!(status, StatusCode::FORBIDDEN | StatusCode::NOT_FOUND),
+                "writer of the host project only: {status} {body}"
+            );
 
             // Allowed to write both projects, but the tenant project's
             // organization may not use the host runtime's provider.
