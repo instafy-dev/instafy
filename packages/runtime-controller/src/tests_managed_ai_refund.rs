@@ -565,6 +565,29 @@ async fn managed_ai_prompt_keeps_charge_when_failure_may_have_reached_upstream(
             credit_signals: 0,
         },
         Case {
+            // A completed turn that reported no usage (the runtime leaves
+            // `usage` out and keeps only the thread total) still shows the
+            // model was called, so a later proxy rejection is no refund.
+            label: "turn-completed-without-usage",
+            error_message: PROXY_401_ERROR,
+            artifacts: json!([
+                {
+                    "kind": "codex/run-log",
+                    "events": [
+                        {
+                            "type": "turn.completed",
+                            "threadTotalUsage": {
+                                "input_tokens": 150000,
+                                "cached_input_tokens": 135000,
+                                "output_tokens": 3000
+                            }
+                        }
+                    ]
+                }
+            ]),
+            credit_signals: 0,
+        },
+        Case {
             // An upstream error is not proof the model was never called.
             label: "upstream-error",
             error_message: "unexpected status 500 Internal Server Error",
