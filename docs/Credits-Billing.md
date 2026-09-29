@@ -156,7 +156,9 @@ one, or a spread plan worker whose parent runtime and plan runtimes are all priv
 before this refusal existed, or by any path around the refusal, is failed by the controller's
 idle sweep once it has been queued for 30 seconds, with the same reason in its run and
 conversation. A job unpinned between the sweep's check and its failure is left queued. A
-managed-AI reserve it never used is refunded, as for an expired requeued job.
+managed-AI reserve it never used is refunded, as for an expired requeued job. A plan worker
+failed this way runs its plan's lead checkpoint as a canceled worker does: once no worker of
+the plan is left live, the lead is queued, or refused as above, once per plan.
 
 The controller puts `CODEX_MODEL=MANAGED_AI_MODEL_ID` and `CODEX_MODEL_PROVIDER=openai` in the
 job secrets (`/agent/secrets`, `secrets.rs`) of every job on the platform lane: an AI job whose

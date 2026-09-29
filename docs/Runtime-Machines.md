@@ -182,7 +182,9 @@ for them (`runtime/limit_waits.rs`):
   operator detail, so it gets a plain "a cloud runtime could not be started
   for this space" reason and the refusal goes to the controller log. A
   recorded request that cannot be replayed at all fails its work the same
-  way. Conflicts, throttling and 5xx keep backing off.
+  way. When that fails the last waiting workers of a multi-agent plan, the
+  lead their failure queues fails with the same reason too, since the wait
+  that would start it is over. Conflicts, throttling and 5xx keep backing off.
 - Work that has waited on the limit for 30 minutes fails with a reason in
   the conversation ("every cloud runtime in this team stayed busy for 30
   minutes...") and a Try again, its run fails, and the managed-AI reserve of
@@ -193,7 +195,9 @@ for them (`runtime/limit_waits.rs`):
   began waiting, whichever is later: a job that sat behind its own busy
   machine gets the full window once it is refused a new one. The studio's
   waiting copy promises this bound. Queued follow-ups in that conversation
-  are then dispatched as after any finished turn.
+  are then dispatched as after any finished turn, and when the failed job was
+  the last live worker of a multi-agent plan, the plan's lead checkpoint runs
+  first, once per plan, as for a canceled worker.
 - The wait ends when a live runtime (an unreleased lease or a recent
   heartbeat) would run the waiting work: a hosted runtime of the space, the
   machine a job is pinned to (unless that machine is private and the job is a
