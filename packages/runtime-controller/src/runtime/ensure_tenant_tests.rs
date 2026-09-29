@@ -733,6 +733,91 @@ async fn tenant_attach_refuses_host_access_revoked_after_authorization() -> anyh
         .await
 }
 
+/// The attach checks host project access once it holds the runtime's row
+/// lock. Access revoked while the attach waits for that lock, held here by
+/// another transaction as a stop would hold it, refuses the attach once the
+/// lock is released.
+#[tokio::test]
+async fn tenant_attach_checks_host_access_after_waiting_for_the_runtime_lock() -> anyhow::Result<()>
+{
+    use tokio::time::{sleep, timeout};
+
+    let fixture = TenantAttachFixture::setup("tenant-attach-lock-wait").await?;
+    fixture
+        .run(async {
+            let fixture = &fixture;
+            let context = TenantAttachFixture::user_context(fixture.cross_org_writer);
+
+            let mut holder_connection = fixture.pool.get().await?;
+            let holder = holder_connection.transaction().await?;
+            let holder_pid: i32 = holder
+                .query_one("select pg_backend_pid()", &[])
+                .await?
+                .get(0);
+            holder
+                .query_one(
+                    "select id from runtimes where id = $1 for update",
+                    &[&fixture.runtime_id],
+                )
+                .await?;
+
+            let attach = ensure_runtime_tenant(
+                &fixture.state,
+                fixture.other_org_project_id,
+                fixture.runtime_id,
+                fixture.host_project_id,
+                Some(json!({ "source": "tenant-attach-test" })),
+                &context,
+            );
+            let revoke_while_the_attach_waits = async move {
+                // Not a timing assumption: wait until PostgreSQL reports a
+                // backend blocked by the holder, which only the attach can be.
+                let observer = fixture.pool.get().await?;
+                timeout(Duration::from_secs(10), async {
+                    loop {
+                        let blocked: i64 = observer
+                            .query_one(
+                                "select count(*)
+                                 from pg_stat_activity
+                                 where $1 = any(pg_blocking_pids(pid))",
+                                &[&holder_pid],
+                            )
+                            .await?
+                            .get(0);
+                        if blocked > 0 {
+                            return anyhow::Ok(());
+                        }
+                        sleep(Duration::from_millis(10)).await;
+                    }
+                })
+                .await
+                .map_err(|_| anyhow::anyhow!("the attach never waited for the runtime lock"))??;
+
+                observer
+                    .execute(
+                        "delete from project_memberships where project_id = $1 and user_id = $2",
+                        &[&fixture.host_project_id, &fixture.cross_org_writer],
+                    )
+                    .await?;
+                holder.rollback().await?;
+                anyhow::Ok(())
+            };
+            let (attached, revoked) = tokio::join!(attach, revoke_while_the_attach_waits);
+            revoked?;
+
+            let (status, Json(error)) = attached
+                .expect_err("host access revoked while the attach waited refuses the attach");
+            assert_eq!(status, StatusCode::NOT_FOUND);
+            assert_eq!(error.code.as_deref(), Some(TENANT_RUNTIME_NOT_FOUND_CODE));
+            assert!(
+                fixture.tenant_leases().await?.is_empty(),
+                "a refused attach creates no lease"
+            );
+            Ok(())
+        })
+        .await
+}
+
 /// A runtime whose project is deleted is answered as a runtime that does not
 /// exist, for a caller who could write to that project and for the service
 /// role alike.
