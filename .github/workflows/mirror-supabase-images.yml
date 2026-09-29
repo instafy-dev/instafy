@@ -1,0 +1,105 @@
+name: Mirror Supabase CI images
+
+# Copies the exact Supabase images pinned in supabase/image-mirror.lock.json
+# from ECR Public to ghcr.io/instafy-dev/supabase/<name> without changing
+# their index digests, so CI can pull them from GHCR instead of depending on
+# ECR Public's anonymous per-IP data cap. Nothing is built or executed from
+# the images; the lock reviewed on protected main is the only input. Never
+# trigger this from pull requests: the job holds packages: write.
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - "supabase/image-mirror.lock.json"
+      - ".github/workflows/mirror-supabase-images.yml"
+      - "scripts/mirror-supabase-images.mjs"
+      - "scripts/lib/supabaseImageMirror.mjs"
+  schedule:
+    # Weekly re-verification; re-copies any index, tag or child manifest GHCR
+    # no longer serves.
+    - cron: "23 5 * * 1"
+  workflow_dispatch: {}
+
+permissions: {}
+
+concurrency:
+  group: mirror-supabase-images
+  cancel-in-progress: false
+
+jobs:
+  mirror:
+    name: Mirror pinned Supabase images to GHCR
+    if: >-
+      github.repository == 'instafy-dev/instafy'
+      && github.repository_id == '1309636737'
+      && github.ref == 'refs/heads/main'
+      && github.ref_protected == true
+      && (github.event_name == 'push' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Bind to protected main
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "$GITHUB_REPOSITORY" != "instafy-dev/instafy" ]]; then
+            echo "::error::The Supabase image mirror runs only in instafy-dev/instafy."
+            exit 1
+          fi
+          if [[ "$GITHUB_REF" != "refs/heads/main" || "$GITHUB_REF_PROTECTED" != "true" ]]; then
+            echo "::error::The Supabase image mirror runs only from protected main."
+            exit 1
+          fi
+
+      - name: Checkout exact protected-main commit
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+          ref: ${{ github.sha }}
+
+      - name: Set up Node.js
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: "20"
+
+      # The docker driver needs no BuildKit container image, so this job pulls
+      # nothing but the locked images.
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+        with:
+          version: v0.35.0
+          driver: docker
+
+      # Anonymous reads only: which locked images GHCR does not fully serve
+      # publicly (index, tag and every child manifest), and a source (ECR
+      # Public, else Docker Hub) that serves each one.
+      - name: Plan the copy from the lock
+        id: plan
+        run: node scripts/mirror-supabase-images.mjs plan --output "$RUNNER_TEMP/supabase-image-mirror-plan.json"
+
+      - name: Login to GHCR
+        if: steps.plan.outputs.missing != '0'
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Copy exact digests to GHCR
+        if: steps.plan.outputs.missing != '0'
+        run: node scripts/mirror-supabase-images.mjs copy --plan "$RUNNER_TEMP/supabase-image-mirror-plan.json"
+
+      - name: Log out of GHCR
+        if: always()
+        run: docker logout ghcr.io
+
+      # Anonymous proof that CI, including untrusted public PR runs, can pull
+      # every index, tag and child manifest by the locked digest.
+      - name: Verify anonymous pulls by digest
+        run: node scripts/mirror-supabase-images.mjs verify

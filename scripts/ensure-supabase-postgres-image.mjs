@@ -10,19 +10,26 @@
 //   1. the image is already in the local docker daemon (a restored cache was
 //      loaded on a previous step, or a warm self-hosted runner has it),
 //   2. a cached tarball exists -> `docker load` it, no network at all,
-//   3. pull with exponential backoff, then `docker save` a tarball so the
-//      cache step after this one can persist it for the next run.
+//   3. one bounded pull of the same digest from the GHCR mirror
+//      (supabase/image-mirror.lock.json; on by default under GitHub Actions,
+//      SUPABASE_IMAGE_MIRROR=ghcr|off overrides),
+//   4. pull from ECR Public with exponential backoff,
+//   and after 3 or 4 `docker save` a tarball so the cache step after this one
+//   can persist it for the next run.
 //
 // The image reference is read from the migration test script rather than
 // duplicated: that file's digest pin is already guarded by
 // test-supabase-migrations-empty-db.test.mjs, and two copies of a digest is
-// how one silently goes stale.
+// how one silently goes stale. The mirror lock's Postgres entry must equal it;
+// scripts/lib/supabaseImageMirror.test.mjs fails when they differ.
 
 import { mkdirSync, readFileSync, existsSync } from "node:fs";
 import path from "node:path";
 import process from "node:process";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
+
+import { mirrorImageFor, resolveSupabaseImageMirror } from "./lib/supabaseImageMirror.mjs";
 
 const MODULE_DIR = path.dirname(fileURLToPath(import.meta.url));
 const MIGRATION_SCRIPT = path.join(MODULE_DIR, "test-supabase-migrations-empty-db.mjs");
@@ -32,6 +39,9 @@ const CACHE_DIR =
 const CACHE_TAR = path.join(CACHE_DIR, "supabase-postgres.tar");
 const PULL_ATTEMPTS = 5;
 const PULL_BACKOFF_BASE_MS = 5_000;
+// A single mirror attempt keeps the worst case inside callers' outer deadlines;
+// the ECR budget above is unchanged and still follows a failed mirror pull.
+const MIRROR_PULL_TIMEOUT_MS = 180_000;
 
 /**
  * The local handle for the cached image. `docker save` does not preserve
@@ -122,48 +132,99 @@ export function pullPinnedImage(
   );
 }
 
-function main() {
-  const image = resolvePinnedPostgresImage(readFileSync(MIGRATION_SCRIPT, "utf8"));
-  const docker = process.env.DOCKER || "docker";
+/**
+ * One bounded pull of the same digest from the GHCR copy of the upstream
+ * index. Returns the pulled reference, or null so the caller falls back to
+ * ECR Public with its own retry budget. Docker verifies by-digest pulls, so
+ * the mirror can only ever supply the pinned bytes.
+ */
+export function pullMirroredImage(
+  image,
+  {
+    docker = "docker",
+    timeoutMs = MIRROR_PULL_TIMEOUT_MS,
+    runCommand = run,
+    logger = console,
+  } = {},
+) {
+  const mirror = mirrorImageFor(image);
+  logger.log("Pulling pinned Postgres image from the GHCR mirror...");
+  const pull = runCommand(docker, ["pull", mirror], { timeout: timeoutMs });
+  if (!pull.error && pull.status === 0) {
+    return mirror;
+  }
+  const detail = String(pull.stderr || pull.stdout || pull.error?.message || "")
+    .trim()
+    .slice(-400);
+  logger.warn(`GHCR mirror pull failed; falling back to ECR Public.${detail ? ` ${detail}` : ""}`);
+  return null;
+}
 
-  if (run(docker, ["image", "inspect", image]).status === 0) {
-    console.log("Pinned Postgres image already present locally.");
-    return;
+export function ensurePinnedPostgresImage({
+  image,
+  docker = "docker",
+  env = process.env,
+  cacheDir = CACHE_DIR,
+  cacheTar = CACHE_TAR,
+  runCommand = run,
+  fileExists = existsSync,
+  makeDirectory = mkdirSync,
+  pullMirror = pullMirroredImage,
+  pullPinned = pullPinnedImage,
+  logger = console,
+}) {
+  // An invalid override fails before any Docker work.
+  const useMirror = resolveSupabaseImageMirror(env);
+
+  if (runCommand(docker, ["image", "inspect", image]).status === 0) {
+    logger.log("Pinned Postgres image already present locally.");
+    return image;
   }
 
   const cacheTag = cacheTagFor(image);
-  if (run(docker, ["image", "inspect", cacheTag]).status === 0) {
-    console.log("Pinned Postgres image already present locally (cache tag).");
-    return;
+  if (runCommand(docker, ["image", "inspect", cacheTag]).status === 0) {
+    logger.log("Pinned Postgres image already present locally (cache tag).");
+    return cacheTag;
   }
 
-  if (existsSync(CACHE_TAR)) {
-    console.log("Loading pinned Postgres image from cache tarball...");
-    const load = run(docker, ["load", "--input", CACHE_TAR]);
-    if (load.status === 0 && run(docker, ["image", "inspect", cacheTag]).status === 0) {
-      console.log("Loaded from cache; no registry contact needed.");
-      return;
+  if (fileExists(cacheTar)) {
+    logger.log("Loading pinned Postgres image from cache tarball...");
+    const load = runCommand(docker, ["load", "--input", cacheTar]);
+    if (load.status === 0 && runCommand(docker, ["image", "inspect", cacheTag]).status === 0) {
+      logger.log("Loaded from cache; no registry contact needed.");
+      return cacheTag;
     }
     // A truncated or stale tarball must not fail the build: fall through to
     // the pull and overwrite it below.
-    console.warn("Cache tarball did not yield the pinned image; falling back to pull.");
+    logger.warn("Cache tarball did not yield the pinned image; falling back to pull.");
   }
 
-  pullPinnedImage(image, { docker });
-  const tag = run(docker, ["tag", image, cacheTag]);
+  // Either pull is by digest, so the cache tag below still names only the
+  // pinned bytes, whichever registry served them.
+  const pulled =
+    (useMirror ? pullMirror(image, { docker }) : null) ?? pullPinned(image, { docker });
+  const tag = runCommand(docker, ["tag", pulled, cacheTag]);
   if (tag.status !== 0) {
     throw new Error(`failed to apply cache tag ${cacheTag}`);
   }
-  mkdirSync(CACHE_DIR, { recursive: true });
-  console.log("Saving image tarball for the cache step...");
-  const save = run(docker, ["save", "--output", CACHE_TAR, cacheTag], {
+  makeDirectory(cacheDir, { recursive: true });
+  logger.log("Saving image tarball for the cache step...");
+  const save = runCommand(docker, ["save", "--output", cacheTar, cacheTag], {
     timeout: 600_000,
   });
   if (save.status !== 0) {
     // The build only needs the image in the daemon; a failed save just
     // means the next run pulls again.
-    console.warn("docker save failed; continuing without refreshing the cache.");
+    logger.warn("docker save failed; continuing without refreshing the cache.");
   }
+  return cacheTag;
+}
+
+function main() {
+  ensurePinnedPostgresImage({
+    image: resolvePinnedPostgresImage(readFileSync(MIGRATION_SCRIPT, "utf8")),
+    docker: process.env.DOCKER || "docker",
+  });
 }
 
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
