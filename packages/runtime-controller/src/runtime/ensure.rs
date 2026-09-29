@@ -1076,8 +1076,11 @@ fn tenant_runtime_not_found() -> (StatusCode, Json<ApiError>) {
 /// A missing runtime and a host project the caller cannot write to are both
 /// refused with [`tenant_runtime_not_found`].
 ///
-/// Returns the host project id, which the attach checks again under its row
-/// lock.
+/// Returns the host project id. The attach runs in a later transaction, which
+/// locks the runtime, requires it to still belong to this project and checks
+/// the caller's write access to the project again (see
+/// `ensure_runtime_tenant`). A lock taken here would end with this
+/// transaction, before the attach, so this read takes none.
 async fn authorize_tenant_host_runtime(
     state: &AppState,
     transaction: &Transaction<'_>,
@@ -1089,8 +1092,7 @@ async fn authorize_tenant_host_runtime(
         .query_opt(
             "select project_id, provider
              from runtimes
-             where id = $1
-             for share",
+             where id = $1",
             &[&runtime_id],
         )
         .await
@@ -1101,19 +1103,30 @@ async fn authorize_tenant_host_runtime(
     let host_project_id: Uuid = row.get("project_id");
     let provider: String = row.get("provider");
 
-    // Anonymous dev-mode requests skip project access checks for the tenant
-    // project too (see `runtime_ensure`).
-    if context.is_service_role || context.user_id.is_some() {
-        let host_project = load_project_record(transaction, &host_project_id)
-            .await
-            .map_err(as_tenant_runtime_not_found)?;
-        ensure_project_write_access(transaction, &host_project, context, None)
-            .await
-            .map_err(as_tenant_runtime_not_found)?;
-    }
+    ensure_tenant_host_write_access(transaction, &host_project_id, context).await?;
 
     authorize_provider_for_project(state, &provider, tenant_project.org_id)?;
     Ok(host_project_id)
+}
+
+/// The caller must be able to write to the host project, the project that
+/// owns the runtime a tenant attach names. Anonymous dev-mode requests skip
+/// project access checks for the tenant project too (see `runtime_ensure`).
+async fn ensure_tenant_host_write_access(
+    transaction: &Transaction<'_>,
+    host_project_id: &Uuid,
+    context: &RequestContext,
+) -> Result<(), (StatusCode, Json<ApiError>)> {
+    if !context.is_service_role && context.user_id.is_none() {
+        return Ok(());
+    }
+    let host_project = load_project_record(transaction, host_project_id)
+        .await
+        .map_err(as_tenant_runtime_not_found)?;
+    ensure_project_write_access(transaction, &host_project, context, None)
+        .await
+        .map_err(as_tenant_runtime_not_found)?;
+    Ok(())
 }
 
 /// A missing runtime or host project, or a refused host project access check,
@@ -1307,6 +1320,7 @@ pub(crate) async fn runtime_ensure(
                 runtime_id,
                 host_project_id,
                 metadata.clone(),
+                &auth,
             )
             .await?
         }
@@ -3185,7 +3199,10 @@ async fn launch_committed_runtime_lease(
 }
 
 /// `host_project_id` is the project `authorize_tenant_host_runtime` authorized
-/// the caller for; the runtime must still belong to it once locked.
+/// the caller for in an earlier transaction. Once the runtime is locked, it
+/// must still belong to that project, and the caller's write access to the
+/// project is checked again in this transaction: access revoked in between
+/// refuses the attach.
 ///
 /// The attach leaves the runtime's origin alone. That origin belongs to the
 /// host project, which requests and registers it for its shared lease; the
@@ -3196,6 +3213,7 @@ async fn ensure_runtime_tenant(
     runtime_id: Uuid,
     host_project_id: Uuid,
     metadata: Option<JsonValue>,
+    context: &RequestContext,
 ) -> Result<RuntimeEnsureResponse, (StatusCode, Json<ApiError>)> {
     let mut conn = state
         .pool
@@ -3215,6 +3233,7 @@ async fn ensure_runtime_tenant(
     if runtime.project_id != host_project_id {
         return Err(tenant_runtime_not_found());
     }
+    ensure_tenant_host_write_access(&transaction, &runtime.project_id, context).await?;
     if super::access::runtime_is_private_self_hosted(
         state,
         &runtime.provider,

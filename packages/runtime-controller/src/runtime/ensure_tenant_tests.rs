@@ -211,6 +211,14 @@ impl TenantAttachFixture {
         }
     }
 
+    fn user_context(user_id: Uuid) -> RequestContext {
+        RequestContext {
+            user_id: Some(user_id),
+            is_service_role: false,
+            scoped_claims: None,
+        }
+    }
+
     fn user_token(&self, user_id: Uuid) -> anyhow::Result<String> {
         crate::auth::issue_controller_token(&self.state.config, &user_id)
             .map(|token| token.token)
@@ -453,6 +461,7 @@ async fn tenant_attach_requires_write_access_to_the_host_runtimes_project() -> a
                 fixture.runtime_id,
                 fixture.other_org_project_id,
                 Some(metadata.clone()),
+                &TenantAttachFixture::user_context(fixture.host_writer),
             )
             .await
             .expect_err("a runtime outside the authorized host project is refused");
@@ -564,6 +573,71 @@ async fn tenant_attach_requires_write_access_to_the_host_runtimes_project() -> a
             assert_eq!(status, StatusCode::OK, "{body}");
             assert!(body.get("origin").is_none(), "{body}");
             assert_eq!(fixture.origin_instance_count().await?, 0);
+            Ok(())
+        })
+        .await
+}
+
+/// The endpoint authorizes a tenant attach in one transaction and attaches in
+/// the next. Host project access revoked in between refuses the attach: the
+/// attach checks it again after locking the runtime, and answers as for a
+/// runtime that does not exist.
+#[tokio::test]
+async fn tenant_attach_refuses_host_access_revoked_after_authorization() -> anyhow::Result<()> {
+    let fixture = TenantAttachFixture::setup("tenant-attach-revoked-host-access").await?;
+    fixture
+        .run(async {
+            let fixture = &fixture;
+            let context = TenantAttachFixture::user_context(fixture.cross_org_writer);
+
+            let host_project_id = {
+                let mut connection = fixture.pool.get().await?;
+                let transaction = connection.transaction().await?;
+                let tenant_project =
+                    load_project_record(&transaction, &fixture.other_org_project_id)
+                        .await
+                        .map_err(|(_, Json(error))| anyhow::anyhow!(error.message))?;
+                let host_project_id = authorize_tenant_host_runtime(
+                    &fixture.state,
+                    &transaction,
+                    &tenant_project,
+                    fixture.runtime_id,
+                    &context,
+                )
+                .await
+                .map_err(|(_, Json(error))| anyhow::anyhow!(error.message))?;
+                transaction.commit().await?;
+                host_project_id
+            };
+            assert_eq!(host_project_id, fixture.host_project_id);
+
+            fixture
+                .pool
+                .get()
+                .await?
+                .execute(
+                    "delete from project_memberships where project_id = $1 and user_id = $2",
+                    &[&fixture.host_project_id, &fixture.cross_org_writer],
+                )
+                .await?;
+
+            let (status, Json(error)) = ensure_runtime_tenant(
+                &fixture.state,
+                fixture.other_org_project_id,
+                fixture.runtime_id,
+                host_project_id,
+                Some(json!({ "source": "tenant-attach-test" })),
+                &context,
+            )
+            .await
+            .expect_err("host access revoked after authorization refuses the attach");
+            assert_eq!(status, StatusCode::NOT_FOUND);
+            assert_eq!(error.code.as_deref(), Some(TENANT_RUNTIME_NOT_FOUND_CODE));
+            assert_eq!(error.message, "runtime not found");
+            assert!(
+                fixture.tenant_leases().await?.is_empty(),
+                "a refused attach creates no lease"
+            );
             Ok(())
         })
         .await
