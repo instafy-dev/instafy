@@ -53,7 +53,9 @@ nothing and is not billed; the runtime's own project keeps paying for it.
   whatever the provider. Every other key is dropped, on the first attach and
   on re-attach: `_instafy`-prefixed keys and launch settings such as
   `runtimeFlavor`, `sizeId`, `env` or `runtimeAgentImage` alike. A re-attach
-  without metadata keeps the stored metadata.
+  without metadata under the same shared lease keeps the stored metadata. A
+  re-attach after a relaunch creates a new lease that holds only the metadata
+  it sends.
 - A tenant lease ends with the shared lease it attached under: releasing
   that lease, as a stop does, or failing its launch releases the tenant
   leases in the same transaction. A re-attach reuses the project's tenant
