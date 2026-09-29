@@ -7887,7 +7887,6 @@ dependencies = [
  "httpdate",
  "jsonwebtoken",
  "reqwest 0.12.28",
- "runtime-contracts",
  "serde",
  "serde_json",
  "tokio",
