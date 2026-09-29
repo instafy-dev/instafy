@@ -3237,9 +3237,7 @@ async fn ensure_runtime_tenant(
     }
 
     // Both the first attach and a re-attach store only this.
-    let metadata =
-        super::managed::sanitize_tenant_lease_request_metadata(&runtime.provider, metadata)
-            .map_err(bad_request)?;
+    let metadata = super::managed::sanitize_tenant_lease_request_metadata(metadata);
     let metadata_for_event = metadata.clone();
     let tenant_lease = ensure_tenant_runtime_lease(
         &transaction,

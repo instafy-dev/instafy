@@ -492,12 +492,14 @@ async fn tenant_attach_requires_write_access_to_the_host_runtimes_project() -> a
         .await
 }
 
-/// A tenant lease's metadata is the caller's description of the attachment.
-/// Controller-owned keys, such as a launch attestation, and launch-only
-/// settings are removed on the first attach and again on a re-attach, even
-/// when the attestation names the tenant lease's own id.
+/// A tenant lease's metadata is the caller's description of the attachment:
+/// only its `source` and `label` strings are stored. Controller-owned keys,
+/// such as a launch attestation, and launch settings, such as a runtime image,
+/// are removed on the first attach and again on a re-attach, even when the
+/// attestation names the tenant lease's own id. A re-attach without metadata
+/// keeps what is stored.
 #[tokio::test]
-async fn tenant_lease_metadata_drops_controller_owned_keys_on_attach_and_reattach(
+async fn tenant_lease_metadata_keeps_only_descriptive_strings_on_attach_and_reattach(
 ) -> anyhow::Result<()> {
     let fixture = TenantAttachFixture::setup("tenant-attach-metadata").await?;
     fixture
@@ -514,6 +516,8 @@ async fn tenant_lease_metadata_drops_controller_owned_keys_on_attach_and_reattac
                         "source": "tenant-attach-test",
                         "label": "first",
                         "runtimeFlavor": "webdev",
+                        "runtimeAgentImage": "acme/runtime:one",
+                        "runtime_agent_image": "acme/runtime:one",
                         "sizeId": "boost",
                         "env": { "INSTAFY_ENABLE_BROWSER_SESSION": "1" },
                         "_instafyManagedRuntimeLaunch": {
@@ -561,6 +565,22 @@ async fn tenant_lease_metadata_drops_controller_owned_keys_on_attach_and_reattac
                 fixture.lease_metadata(lease_id).await?,
                 Some(json!({ "label": "second" })),
                 "re-attach"
+            );
+
+            let (status, body) = fixture
+                .attach(
+                    &token,
+                    fixture.same_org_tenant_project_id,
+                    fixture.runtime_id,
+                    JsonValue::Null,
+                )
+                .await?;
+            assert_eq!(status, StatusCode::OK, "{body}");
+            assert_eq!(body["leaseId"], json!(lease_id.to_string()), "{body}");
+            assert_eq!(
+                fixture.lease_metadata(lease_id).await?,
+                Some(json!({ "label": "second" })),
+                "a re-attach without metadata keeps the stored metadata"
             );
             Ok(())
         })

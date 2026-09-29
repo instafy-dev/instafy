@@ -42,10 +42,11 @@ nothing and is not billed; the runtime's own project keeps paying for it.
   own project, and the tenant project's organization must be allowed to use
   the runtime's provider. A caller without host access gets the same
   `404` (`code: "runtime_not_found"`) as for a runtime id that does not exist.
-- Tenant lease metadata passes the managed request boundary, then loses every
-  `_instafy`-prefixed key and every launch setting (`runtimeFlavor`,
-  `runtimeImagePreset`, `sizeId`, `env`), on the first attach and on
-  re-attach.
+- Tenant lease metadata keeps only the string fields `source` and `label`,
+  whatever the provider. Every other key is dropped, on the first attach and
+  on re-attach: `_instafy`-prefixed keys and launch settings such as
+  `runtimeFlavor`, `sizeId`, `env` or `runtimeAgentImage` alike. A re-attach
+  without metadata keeps the stored metadata.
 - Launch-generation readers (requeue relaunch, dispatch reconnect, provider
   route rotation, operator hosted hours) ignore tenant leases, and a
   runtime's status shows only its own project's origin.
