@@ -212,6 +212,37 @@ test("a migration may not change standard_conforming_strings", (t) => {
   }
 });
 
+test("a migration must be valid UTF-8", (t) => {
+  const directory = fixture();
+  t.after(() => rmSync(directory, { force: true, recursive: true }));
+  const name = "20260000000064_public.sql";
+  // The server rejected the first, whose 0xe9 is a Latin-1 e with an acute
+  // accent, when psql sent the file's bytes. Read as a string, the byte became
+  // U+FFFD, which the server took when the empty-database test passed the
+  // migration to psql as a --command.
+  for (const [before, bytes, after] of [
+    ["select 'caf", [0xe9], "';\n"],
+    // A truncated two-byte sequence, an overlong encoding of "/", and a byte
+    // in a comment.
+    ["select '", [0xc3], "';\n"],
+    ["select '", [0xc0, 0xaf], "';\n"],
+    ["-- ", [0xe9], "\nselect 1;\n"],
+  ]) {
+    const source = Buffer.concat([Buffer.from(before), Buffer.from(bytes), Buffer.from(after)]);
+    writeFileSync(path.join(directory, name), source);
+    assert.throws(
+      () => validatePublicMigrationTrack(directory),
+      new RegExp(`^Error: public migration ${name} is not valid UTF-8$`, "u"),
+      source.toString("hex"),
+    );
+  }
+  // The same character encoded as UTF-8, and a leading byte order mark.
+  writeFileSync(path.join(directory, name), "-- é\nselect 'é';\n");
+  assert.equal(validatePublicMigrationTrack(directory).length, 1);
+  writeFileSync(path.join(directory, name), "﻿select 1;\n");
+  assert.equal(validatePublicMigrationTrack(directory).length, 1);
+});
+
 test("statements split the way psql splits them", () => {
   // psql ran this as 10 statements, in this order.
   assert.deepEqual(

@@ -11,10 +11,14 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 
-import { validatePublicMigrationTrack } from "./check-supabase-migrations.mjs";
+import {
+  LANE_BOUNDARY,
+  validatePublicMigrationTrack,
+} from "./check-supabase-migrations.mjs";
 import {
   BOTH_ORDER_TABLE_PAIRS,
   BOTH_ORDER_TABLES,
+  BOTH_ORDER_TABLES_CREATED_BY,
   FIRST_THREE_TABLES_ONLY,
   HELD_LOCK_QUERY,
   MAX_COMMAND_BYTES,
@@ -120,6 +124,20 @@ const EXISTING_RELATIONS = [
   ["16410", "conversations"],
   ["16411", "conversation_messages"],
   ["16412", "runtimes"],
+  ["16413", "notification_events"],
+  ["16414", "notification_recipients"],
+  ["16415", "notification_delivery_jobs"],
+  ["16416", "agent_job_inputs"],
+  ["16417", "activity_events"],
+  ["16418", "runtime_events"],
+  ["16419", "conversation_participants"],
+  ["16420", "runtime_leases"],
+  ["16421", "automations"],
+  ["16422", "bug_reports"],
+  ["16423", "bug_report_messages"],
+  ["16424", "origin_instances"],
+  ["16425", "notification_delivery_attempts"],
+  ["16426", "user_agents"],
 ];
 
 // A probe row names a relation by its oid. A test names it by table, or by oid
@@ -311,33 +329,33 @@ test("a migration may not hold a blocking lock on another existing table beside 
       ["organizations ExclusiveLock", "org_credit_balances AccessExclusiveLock"],
       [["organizations", "org_credit_balances"]],
     ],
-    // update runtimes set status = status where false;
+    // update projects set name = name where false;
     // alter table agent_jobs add column y text;
     // The update's row locks block a request that locks the same rows.
     [
-      ["runtimes RowExclusiveLock", "agent_jobs AccessExclusiveLock"],
-      [["runtimes", "agent_jobs"]],
+      ["projects RowExclusiveLock", "agent_jobs AccessExclusiveLock"],
+      [["projects", "agent_jobs"]],
     ],
-    // select from runtimes for update; update agent_jobs
+    // select from projects for update; update agent_jobs
     [
-      ["runtimes RowShareLock", "agent_jobs RowExclusiveLock"],
-      [["runtimes", "agent_jobs"]],
+      ["projects RowShareLock", "agent_jobs RowExclusiveLock"],
+      [["projects", "agent_jobs"]],
     ],
     // Each other table pairs with each table of the list it locks, after the
     // pairs within the list.
     [
       [
-        "runtimes RowExclusiveLock",
-        "projects AccessExclusiveLock",
+        "projects RowExclusiveLock",
+        "org_subscriptions AccessExclusiveLock",
         "agent_jobs RowExclusiveLock",
         "org_credit_ledger RowExclusiveLock",
       ],
       [
         ["agent_jobs", "org_credit_ledger"],
+        ["org_subscriptions", "agent_jobs"],
+        ["org_subscriptions", "org_credit_ledger"],
         ["projects", "agent_jobs"],
         ["projects", "org_credit_ledger"],
-        ["runtimes", "agent_jobs"],
-        ["runtimes", "org_credit_ledger"],
       ],
     ],
   ]) {
@@ -424,14 +442,75 @@ test("only relations that existed before the migration count, an index as its ta
   );
   // The tables of the list must be listed before the migration, or their
   // locks would not count.
-  assert.deepEqual(unlistedBothOrderTables(psqlOutput()), []);
+  assert.deepEqual(unlistedBothOrderTables(psqlOutput(), 20260929100200n), []);
   assert.deepEqual(
     unlistedBothOrderTables(
       psqlOutput({
         existing: EXISTING_RELATIONS.filter(([, table]) => table !== "org_credit_ledger"),
       }),
+      20260000000064n,
     ),
     ["org_credit_ledger"],
+  );
+  // A table of the list that a migration after the lane boundary created is
+  // not listed before that migration, or before an earlier one, and is listed
+  // before every later one.
+  const withoutLaterTables = psqlOutput({
+    existing: EXISTING_RELATIONS.filter(
+      ([, table]) => !BOTH_ORDER_TABLES_CREATED_BY.has(table),
+    ),
+  });
+  for (const version of [20260000000064n, 20260816213316n, 20260816213318n]) {
+    assert.deepEqual(unlistedBothOrderTables(withoutLaterTables, version), [], `${version}`);
+  }
+  assert.deepEqual(unlistedBothOrderTables(withoutLaterTables, 20260816213320n), [
+    "agent_job_inputs",
+  ]);
+  assert.deepEqual(unlistedBothOrderTables(withoutLaterTables, 20260905120000n), [
+    "agent_job_inputs",
+    "activity_events",
+  ]);
+  assert.deepEqual(unlistedBothOrderTables(withoutLaterTables, 20260905120002n), [
+    "agent_job_inputs",
+    "activity_events",
+    "bug_report_messages",
+  ]);
+  assert.deepEqual(unlistedBothOrderTables(withoutLaterTables, 20260906120000n), [
+    "agent_job_inputs",
+    "activity_events",
+    "bug_report_messages",
+  ]);
+  assert.deepEqual(unlistedBothOrderTables(withoutLaterTables, 20260906120002n), [
+    "notification_events",
+    "notification_recipients",
+    "notification_delivery_jobs",
+    "agent_job_inputs",
+    "activity_events",
+    "bug_report_messages",
+    "notification_delivery_attempts",
+  ]);
+});
+
+test("each table of the list is expected from the migration after the one that created it", () => {
+  // The checked-in migration that first creates each table: one at or before
+  // the lane boundary, or the one BOTH_ORDER_TABLES_CREATED_BY names.
+  const track = validatePublicMigrationTrack();
+  for (const table of BOTH_ORDER_TABLES) {
+    const creates = new RegExp(
+      `^create table (if not exists )?(public\\.)?${table}\\s*\\(`,
+      "imu",
+    );
+    const creator = track.find(({ source }) => creates.test(readFileSync(source, "utf8")));
+    assert.ok(creator, table);
+    if (BOTH_ORDER_TABLES_CREATED_BY.has(table)) {
+      assert.equal(creator.version, BOTH_ORDER_TABLES_CREATED_BY.get(table), table);
+    } else {
+      assert.ok(creator.version <= LANE_BOUNDARY, `${table} ${creator.version}`);
+    }
+  }
+  assert.deepEqual(
+    [...BOTH_ORDER_TABLES_CREATED_BY.keys()].filter((table) => !BOTH_ORDER_TABLES.includes(table)),
+    [],
   );
 });
 
@@ -529,7 +608,7 @@ test("a migration may not lock any two of agent_jobs, the ledger and the balance
 });
 
 test("runs, prompts and the conversation tables pair with the other tables of the list", () => {
-  assert.deepEqual(BOTH_ORDER_TABLES, [
+  assert.deepEqual(BOTH_ORDER_TABLES.slice(0, 7), [
     "agent_jobs",
     "org_credit_ledger",
     "org_credit_balances",
@@ -538,7 +617,6 @@ test("runs, prompts and the conversation tables pair with the other tables of th
     "conversations",
     "conversation_messages",
   ]);
-  assert.equal(BOTH_ORDER_TABLE_PAIRS.length, 21);
   for (const [rows, expected] of [
     // alter table agent_jobs add column hyp_run uuid references runs(id);
     // Dispatch inserts the run and then the job, and cancel and completion
@@ -587,6 +665,207 @@ test("runs, prompts and the conversation tables pair with the other tables of th
   assert.deepEqual(
     bothOrderLockViolations(
       probeOutput("runs ShareRowExclusiveLock", "agent_jobs AccessExclusiveLock"),
+      BOTH_ORDER_TABLES.slice(0, 3),
+    ),
+    [],
+  );
+});
+
+test("runtimes, the notification tables, job inputs, activity and runtime events pair with the list", () => {
+  assert.deepEqual(BOTH_ORDER_TABLES.slice(7, 14), [
+    "runtimes",
+    "notification_events",
+    "notification_recipients",
+    "notification_delivery_jobs",
+    "agent_job_inputs",
+    "activity_events",
+    "runtime_events",
+  ]);
+  // Each migration below holds only SHARE or SHARE ROW EXCLUSIVE on the first
+  // table, which the rule for other tables allowed. Raced in both orders
+  // against a live request that writes the two tables in the other order,
+  // each one deadlocked, and in the request's own order each committed.
+  for (const [rows, expected] of [
+    // create index on runtimes (created_at);
+    // alter table agent_jobs add column y text;
+    // Dispatch, lease and heartbeat write runtimes before agent_jobs, and a
+    // runtime stop requeues agent_jobs before it updates runtimes.
+    [
+      ["runtimes ShareLock", "agent_jobs AccessExclusiveLock"],
+      [["agent_jobs", "runtimes"]],
+    ],
+    // create table hyp_r (runtime_id uuid references runtimes(id));
+    // alter table agent_jobs add column y text;
+    [
+      ["hyp_r AccessExclusiveLock", "runtimes ShareRowExclusiveLock", "agent_jobs AccessExclusiveLock"],
+      [["agent_jobs", "runtimes"]],
+    ],
+    // create index on notification_events (occurred_at), and the same on the
+    // other two; alter table agent_jobs add column y text;
+    // Dispatch inserts the user's message, whose trigger writes all three,
+    // before agent_jobs. Completion updates agent_jobs before its reply's
+    // trigger and the deferred run trigger write them.
+    [
+      ["notification_events ShareLock", "agent_jobs AccessExclusiveLock"],
+      [["agent_jobs", "notification_events"]],
+    ],
+    [
+      ["notification_recipients ShareLock", "agent_jobs AccessExclusiveLock"],
+      [["agent_jobs", "notification_recipients"]],
+    ],
+    [
+      ["notification_delivery_jobs ShareLock", "agent_jobs AccessExclusiveLock"],
+      [["agent_jobs", "notification_delivery_jobs"]],
+    ],
+    // create index on agent_job_inputs (created_at);
+    // alter table conversation_messages add column y text;
+    // A steer inserts the message before its input, and an acknowledgement
+    // updates the input before the message.
+    [
+      ["agent_job_inputs ShareLock", "conversation_messages AccessExclusiveLock"],
+      [["conversation_messages", "agent_job_inputs"]],
+    ],
+    // create index on activity_events (created_at);
+    // alter table agent_jobs add column y text;
+    // Dispatch records a new conversation before it inserts the job, and
+    // completion updates the job before it records the finished run.
+    [
+      ["activity_events ShareLock", "agent_jobs AccessExclusiveLock"],
+      [["agent_jobs", "activity_events"]],
+    ],
+    // create index on runtime_events (created_at);
+    // alter table agent_jobs add column y text;
+    // Dispatch records a new runtime's event before it inserts the job, and
+    // completion and a runtime stop update the job before their events.
+    [
+      ["runtime_events ShareLock", "agent_jobs AccessExclusiveLock"],
+      [["agent_jobs", "runtime_events"]],
+    ],
+  ]) {
+    assert.deepEqual(bothOrderLockViolations(probeOutput(...rows)), expected, rows.join(", "));
+  }
+  // Against the first three tables alone, runtimes is another table, where
+  // SHARE is allowed.
+  assert.deepEqual(
+    bothOrderLockViolations(
+      probeOutput("runtimes ShareLock", "agent_jobs AccessExclusiveLock"),
+      BOTH_ORDER_TABLES.slice(0, 3),
+    ),
+    [],
+  );
+});
+
+test("participants, leases, automations, support reports, origins, attempts and agents pair with the list", () => {
+  assert.deepEqual(BOTH_ORDER_TABLES.slice(14), [
+    "conversation_participants",
+    "runtime_leases",
+    "automations",
+    "bug_reports",
+    "bug_report_messages",
+    "origin_instances",
+    "notification_delivery_attempts",
+    "user_agents",
+  ]);
+  assert.equal(BOTH_ORDER_TABLE_PAIRS.length, 231);
+  // Each migration below holds only SHARE or SHARE ROW EXCLUSIVE on the first
+  // table, which the rule for other tables allowed. Raced in both orders
+  // against a live request that writes the two tables in the other order,
+  // each one deadlocked, and in the request's own order each committed.
+  for (const [rows, expected] of [
+    // create index on conversation_participants (created_at);
+    // alter table agent_jobs add column y text;
+    // Dispatch adds the sender before it inserts the job, and a steer locks
+    // the job before it adds the sender.
+    [
+      ["conversation_participants ShareLock", "agent_jobs AccessExclusiveLock"],
+      [["agent_jobs", "conversation_participants"]],
+    ],
+    // The same beside conversation_messages: dispatch in a new conversation
+    // adds its owner before the message, and every dispatch adds the sender
+    // after it.
+    [
+      ["conversation_participants ShareLock", "conversation_messages AccessExclusiveLock"],
+      [["conversation_messages", "conversation_participants"]],
+    ],
+    // create index on runtime_leases (requested_at);
+    // alter table agent_jobs add column y text;
+    // A provider-managed stop quarantines the lease before it requeues the
+    // jobs, and its final transaction updates the jobs before it releases the
+    // lease.
+    [
+      ["runtime_leases ShareLock", "agent_jobs AccessExclusiveLock"],
+      [["agent_jobs", "runtime_leases"]],
+    ],
+    // create table hyp_l (lease_id uuid references runtime_leases(id));
+    // alter table agent_jobs add column y text;
+    [
+      ["hyp_l AccessExclusiveLock", "runtime_leases ShareRowExclusiveLock", "agent_jobs AccessExclusiveLock"],
+      [["agent_jobs", "runtime_leases"]],
+    ],
+    // create index on automations (created_at);
+    // alter table conversations add column y text;
+    // Creating or editing an automation writes its conversation first, and a
+    // launch failure updates the automation before it posts its notice.
+    [
+      ["automations ShareLock", "conversations AccessExclusiveLock"],
+      [["conversations", "automations"]],
+    ],
+    // create index on bug_reports (created_at);
+    // alter table notification_recipients add column y text;
+    // A support acknowledgement updates the report first, and marking its
+    // notification read updates the recipient first.
+    [
+      ["bug_reports ShareLock", "notification_recipients AccessExclusiveLock"],
+      [["notification_recipients", "bug_reports"]],
+    ],
+    // create index on bug_report_messages (created_at);
+    // create index on bug_reports (created_at);
+    // A reply inserts its message before it updates the report, and a status
+    // change updates the report before its system message. Both first lock
+    // the report with FOR UPDATE, which an ALTER would wait on from the
+    // start, so this race used two indexes.
+    [
+      ["bug_report_messages ShareLock", "bug_reports ShareLock"],
+      [["bug_reports", "bug_report_messages"]],
+    ],
+    // create index on origin_instances (created_at);
+    // alter table runtime_events add column y text;
+    // Ensuring a new runtime records its event before its origin instance,
+    // and a stop releases the origin instances before its event.
+    [
+      ["origin_instances ShareLock", "runtime_events AccessExclusiveLock"],
+      [["runtime_events", "origin_instances"]],
+    ],
+    // create index on notification_delivery_attempts (attempt_no);
+    // create index on notification_delivery_jobs (next_attempt_at);
+    // A delivery result updates the job before its attempt, and leasing a job
+    // whose lease expired updates the attempt first.
+    [
+      ["notification_delivery_attempts ShareLock", "notification_delivery_jobs ShareLock"],
+      [["notification_delivery_jobs", "notification_delivery_attempts"]],
+    ],
+    // create index on user_agents (created_at);
+    // create index on conversations (created_at);
+    // A user's first dispatch creates their agent after a new conversation,
+    // or before the message updates an existing one.
+    [
+      ["user_agents ShareLock", "conversations ShareLock"],
+      [["conversations", "user_agents"]],
+    ],
+    // create index on user_agents (created_at);
+    // alter table conversation_participants add column y text;
+    [
+      ["user_agents ShareLock", "conversation_participants AccessExclusiveLock"],
+      [["conversation_participants", "user_agents"]],
+    ],
+  ]) {
+    assert.deepEqual(bothOrderLockViolations(probeOutput(...rows)), expected, rows.join(", "));
+  }
+  // Against the first three tables alone, these are other tables, where SHARE
+  // is allowed.
+  assert.deepEqual(
+    bothOrderLockViolations(
+      probeOutput("runtime_leases ShareLock", "agent_jobs AccessExclusiveLock"),
       BOTH_ORDER_TABLES.slice(0, 3),
     ),
     [],
@@ -797,6 +1076,18 @@ test("the runner fails a migration whose locks it cannot read in the migration's
       ),
     /^Error: public:20260000000064_public\.sql ran without org_credit_ledger among the public tables before it, so its held locks cannot be checked$/u,
   );
+  // 20260906120000 creates the notification tables, so they are not listed
+  // before it, but they are before every later migration.
+  const withoutNotifications = EXISTING_RELATIONS.filter(
+    ([, table]) => !table.startsWith("notification_"),
+  );
+  assert.doesNotThrow(() =>
+    run(psqlOutput({ existing: withoutNotifications, rows }), "", { version: 20260906120000n }),
+  );
+  assert.throws(
+    () => run(psqlOutput({ existing: withoutNotifications, rows }), "", { version: 20260906120002n }),
+    /^Error: public:20260906120002_public\.sql ran without notification_events, notification_recipients, notification_delivery_jobs, notification_delivery_attempts among the public tables before it, so its held locks cannot be checked$/u,
+  );
   // The locks were read and are a violation.
   assert.throws(
     () => run(psqlOutput({ rows: ["projects AccessExclusiveLock", "agent_jobs AccessExclusiveLock"] })),
@@ -842,6 +1133,20 @@ test("the runner sends a migration after the boundary to the server as it is", (
   assert.doesNotThrow(() =>
     run(psqlOutput({ rows }), "", { sql: `-- ${"x".repeat(MAX_COMMAND_BYTES - 4)}\n` }),
   );
+  // The limit counts bytes, not string length: \u00e9 takes two bytes in
+  // UTF-8 and one place in a string, so each of these strings is about half
+  // as long as the limit.
+  const atLimit = `--${"\u00e9".repeat(65_534)}\n`;
+  const overLimit = `-- ${"\u00e9".repeat(65_534)}\n`;
+  assert.equal(Buffer.byteLength(atLimit), 131_071);
+  assert.equal(Buffer.byteLength(overLimit), 131_072);
+  assert.equal(overLimit.length, 65_538);
+  assert.throws(
+    () => run(psqlOutput({ rows }), "", { sql: overLimit }),
+    /^Error: public:20260000000064_public\.sql is larger than the 131071 bytes one psql --command can carry; split it$/u,
+  );
+  assert.doesNotThrow(() => run(psqlOutput({ rows }), "", { sql: atLimit }));
+  assert.equal(run.psql().args.at(-3), atLimit);
   // A failed psql names each query and the migration by its first line.
   assert.throws(
     () =>

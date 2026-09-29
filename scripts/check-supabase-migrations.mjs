@@ -39,6 +39,12 @@ const NUMBER = /[0-9][A-Za-z0-9_$.\u{80}-\u{10FFFF}]*/uy;
 const DOLLAR_QUOTE = /\$(?:[A-Za-z_\u{80}-\u{10FFFF}][A-Za-z0-9_\u{80}-\u{10FFFF}]*)?\$/uy;
 const META_COMMAND = /\\[^\s\\]*/uy;
 const STANDARD_CONFORMING_STRINGS = /standard_conforming_strings/iu;
+// The server rejects SQL that is not valid UTF-8. Read as a string the usual
+// way, invalid bytes become U+FFFD, which the server accepts, so the
+// empty-database test, which passes a migration to psql as a string, would
+// apply such a migration. ignoreBOM keeps a leading byte order mark, as that
+// way does.
+const STRICT_UTF8 = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true });
 
 function matchAt(pattern, text, index) {
   pattern.lastIndex = index;
@@ -203,7 +209,13 @@ function validatePublicMigrationTrack(directory = DEFAULT_MIGRATIONS) {
     if (source.length === 0) {
       throw new Error(`public migration is empty: ${entry.name}`);
     }
-    const { keywords, metaCommands } = scanTopLevel(source.toString("utf8"));
+    let sql;
+    try {
+      sql = STRICT_UTF8.decode(source);
+    } catch {
+      throw new Error(`public migration ${entry.name} is not valid UTF-8`);
+    }
+    const { keywords, metaCommands } = scanTopLevel(sql);
     const control = keywords.find((keyword) => TRANSACTION_CONTROL.has(keyword));
     if (control) {
       throw new Error(
@@ -222,7 +234,7 @@ function validatePublicMigrationTrack(directory = DEFAULT_MIGRATIONS) {
     // With standard_conforming_strings off, a backslash escapes a quote in a
     // plain '...' string, and this scan, which reads such a string the
     // default way, could then take a meta-command for part of a string.
-    if (STANDARD_CONFORMING_STRINGS.test(source.toString("utf8"))) {
+    if (STANDARD_CONFORMING_STRINGS.test(sql)) {
       throw new Error(
         `public migration ${entry.name} mentions standard_conforming_strings; a migration must keep the server's default string syntax`,
       );

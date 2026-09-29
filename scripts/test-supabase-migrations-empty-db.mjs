@@ -62,10 +62,40 @@ const REQUIRED_PUBLIC_RELATIONS = [
 // agent_jobs and the message. An insert into the ledger locks it and then
 // runs a trigger that writes and locks the org's org_credit_balances row,
 // while a credit burn inserts or locks that row for its daily refill before it
-// inserts into the ledger. A migration that holds a conflicting lock on two of
-// the tables until it commits can therefore deadlock a live request,
-// whichever table it locks first. After the lane boundary a change to two of
-// them is split into migrations that commit separately.
+// inserts into the ledger. Dispatch also writes runtimes and runtime_events,
+// and through the insert trigger on conversation_messages the notification
+// tables, before it inserts agent_jobs, and records a new conversation's
+// activity_events row before its run and job. Lease and heartbeat update
+// runtimes before agent_jobs. A runtime stop updates agent_jobs before
+// runtimes and runtime_events, and completion updates agent_jobs and the run
+// before its activity_events and runtime_events rows and its reply, whose
+// trigger writes the notification tables. A steer inserts the user's message
+// and then its agent_job_inputs row, while an input acknowledgement updates
+// agent_job_inputs and then the message. Dispatch adds the sender to
+// conversation_participants before it inserts agent_jobs, while a steer locks
+// agent_jobs and then adds the sender. A provider-managed stop marks its
+// runtime_leases row cleanup pending before it requeues agent_jobs, then
+// updates agent_jobs before it releases the lease. Creating or editing an
+// automation writes its conversation and then automations, while a launch
+// failure updates automations and then posts a notice to the conversation. A
+// support acknowledgement updates bug_reports and then notification_recipients,
+// while marking a support notification read updates them the other way round.
+// A support or customer reply inserts into bug_report_messages and then
+// updates bug_reports, while a status change updates bug_reports and then
+// posts a system message. A user's first dispatch creates their agent in
+// user_agents after a new conversation and its participant, or before the
+// message's conversation update and participant in an existing conversation.
+// Ensuring a new runtime records its runtime_events row before it inserts
+// origin_instances, while a stop releases origin_instances before its event.
+// Delivering a notification updates notification_delivery_jobs and then its
+// notification_delivery_attempts row, while leasing a job whose lease expired
+// updates the attempt first. A migration that holds a conflicting lock on two
+// of the tables until it commits can therefore deadlock a live request, or a
+// chain of requests that each hold one of the tables while they wait for the
+// next, whichever table it locks first. After the lane boundary a change to
+// two of them is split into migrations that commit separately. The list comes
+// from a code audit of the controller's transactions, so it is best effort;
+// MIGRATIONS.md describes the backstop for a table it misses.
 const BOTH_ORDER_TABLES = [
   "agent_jobs",
   "org_credit_ledger",
@@ -74,11 +104,38 @@ const BOTH_ORDER_TABLES = [
   "prompts",
   "conversations",
   "conversation_messages",
+  "runtimes",
+  "notification_events",
+  "notification_recipients",
+  "notification_delivery_jobs",
+  "agent_job_inputs",
+  "activity_events",
+  "runtime_events",
+  "conversation_participants",
+  "runtime_leases",
+  "automations",
+  "bug_reports",
+  "bug_report_messages",
+  "origin_instances",
+  "notification_delivery_attempts",
+  "user_agents",
 ];
-// Migrations already on main that the rules below reject only because runs,
-// prompts, conversations and conversation_messages joined the list after
-// them. History is append-only, so these are checked against the first three
-// tables only.
+// The tables of BOTH_ORDER_TABLES that a migration after the lane boundary
+// created, by the version of that migration. Every other table of the list
+// existed by the lane boundary. A table is expected among the public tables
+// before every migration after the one that created it.
+const BOTH_ORDER_TABLES_CREATED_BY = new Map([
+  ["agent_job_inputs", 20260816213318n],
+  ["activity_events", 20260902200000n],
+  ["bug_report_messages", 20260905120000n],
+  ["notification_events", 20260906120000n],
+  ["notification_recipients", 20260906120000n],
+  ["notification_delivery_jobs", 20260906120000n],
+  ["notification_delivery_attempts", 20260906120000n],
+]);
+// Migrations already on main that the rules below reject only because tables
+// after the first three joined the list after them. History is append-only,
+// so these are checked against the first three tables only.
 const FIRST_THREE_TABLES_ONLY = new Set([
   20260816213316n,
   20260816213318n,
@@ -119,10 +176,12 @@ const CONFLICTING_LOCK_MODES = new Set([
 // even a read, EXCLUSIVE blocks a row lock, and ROW SHARE and ROW EXCLUSIVE
 // come with the migration's own row locks, which a request that locks the same
 // row waits on. SHARE and SHARE ROW EXCLUSIVE, which an index or a foreign key
-// takes, block only a write to that other table and stay allowed, because no
-// live request writes such a table in both orders with BOTH_ORDER_TABLES;
-// MIGRATIONS.md describes the lock order they still depend on. A table that
-// live requests come to write in both orders with them belongs in
+// takes, block only a write to that other table and stay allowed, because the
+// audit behind BOTH_ORDER_TABLES, which covered every table the controller
+// writes and the triggers and functions that write for it, found no other
+// table that live requests write both before and after the same table of the
+// list; MIGRATIONS.md describes the lock order they still depend on. A table
+// that live requests come to write in both orders with one of them belongs in
 // BOTH_ORDER_TABLES.
 const OTHER_TABLE_LOCK_MODES = new Set([
   "RowShareLock",
@@ -230,11 +289,14 @@ function existingTablesByOid(psqlOutput) {
 }
 
 // The tables of BOTH_ORDER_TABLES missing from the relations TRANSACTION_QUERY
-// listed before the migration. bothOrderLockViolations counts a lock only on a
+// listed before the migration of `version`, other than one that this migration
+// or a later one creates. bothOrderLockViolations counts a lock only on a
 // listed relation, so it would pass a migration that locks one of these.
-function unlistedBothOrderTables(stdout) {
+function unlistedBothOrderTables(stdout, version) {
   const listed = new Set(existingTablesByOid(stdout).values());
-  return BOTH_ORDER_TABLES.filter((table) => !listed.has(table));
+  const notCreatedYet = (table) =>
+    version <= (BOTH_ORDER_TABLES_CREATED_BY.get(table) ?? LANE_BOUNDARY);
+  return BOTH_ORDER_TABLES.filter((table) => !listed.has(table) && !notCreatedYet(table));
 }
 
 // The pairs of tables a migration's probe output shows it locks until it
@@ -407,6 +469,9 @@ function runEmptyDatabaseMigrationTest({
       const version = BigInt(migration.version);
       const checkHeldLocks = version > LANE_BOUNDARY;
       const source = readFileSync(migration.source);
+      // main() first runs validatePublicMigrationTrack, which rejects a
+      // migration that is not valid UTF-8, whose bytes this would turn into
+      // U+FFFD.
       const sql = source.toString("utf8");
       // psql sends a --command to the server as it is, so a psql meta-command
       // in the migration is a syntax error, as it is under supabase db push,
@@ -459,7 +524,7 @@ function runEmptyDatabaseMigrationTest({
             `${migration.track}:${migration.fileName} does not run in the one transaction psql opens for it, so its held locks cannot be checked (${problem}); remove its own BEGIN, COMMIT, END or ROLLBACK`,
           );
         }
-        const unlisted = unlistedBothOrderTables(applied.stdout);
+        const unlisted = unlistedBothOrderTables(applied.stdout, version);
         if (unlisted.length > 0) {
           throw new Error(
             `${migration.track}:${migration.fileName} ran without ${unlisted.join(", ")} among the public tables before it, so its held locks cannot be checked`,
@@ -549,6 +614,7 @@ if (isDirectExecution) {
 export {
   BOTH_ORDER_TABLE_PAIRS,
   BOTH_ORDER_TABLES,
+  BOTH_ORDER_TABLES_CREATED_BY,
   FIRST_THREE_TABLES_ONLY,
   HELD_LOCK_QUERY,
   MAX_COMMAND_BYTES,
