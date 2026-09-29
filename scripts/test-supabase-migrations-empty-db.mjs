@@ -7,7 +7,10 @@ import process from "node:process";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
-import { validatePublicMigrationTrack } from "./check-supabase-migrations.mjs";
+import {
+  LANE_BOUNDARY,
+  validatePublicMigrationTrack,
+} from "./check-supabase-migrations.mjs";
 import {
   cacheTagFor,
   pullPinnedImage,
@@ -49,6 +52,65 @@ const REQUIRED_PUBLIC_RELATIONS = [
   "runtime_providers",
   "user_credentials",
 ];
+// Live requests lock both tables of each pair, in both orders. Completion and
+// the expired-job sweep update agent_jobs and then write the credit ledger,
+// while dispatch and deferred billing write the ledger and then agent_jobs. A
+// migration that holds a conflicting lock on both tables until it commits can
+// therefore deadlock a live request, whichever table it locks first. After the
+// lane boundary a migration may hold such a lock on one table of a pair and
+// only read the other; a change to both is split into migrations that commit
+// separately.
+const BOTH_ORDER_TABLE_PAIRS = [["agent_jobs", "org_credit_ledger"]];
+// The table lock modes a live write can end up waiting on. SHARE and stronger
+// block a live INSERT, UPDATE or DELETE outright. ROW SHARE and ROW EXCLUSIVE
+// block no live write themselves, but they come with SELECT ... FOR UPDATE and
+// with INSERT, UPDATE or DELETE, whose row locks a live write of the same row
+// waits on. Postgres takes these table locks even when a statement matches no
+// rows, so the empty database still shows them. ACCESS SHARE (a plain read) and
+// SHARE UPDATE EXCLUSIVE conflict with no live write. Locks taken only for a
+// row that exists, such as a foreign-key check or a row trigger that writes the
+// other table, cannot show on an empty database.
+const CONFLICTING_LOCK_MODES = new Set([
+  "RowShareLock",
+  "RowExclusiveLock",
+  "ShareLock",
+  "ShareRowExclusiveLock",
+  "ExclusiveLock",
+  "AccessExclusiveLock",
+]);
+const HELD_LOCK_MARKER = "instafy-migration-holds";
+// Appended to a migration, so it runs inside that migration's transaction
+// before COMMIT, while every lock the migration took is still held. It prints
+// one row per table and lock mode.
+const HELD_LOCK_QUERY = `select '${HELD_LOCK_MARKER} ' || c.relname || ' ' || l.mode
+from pg_locks l
+join pg_class c on c.oid = l.relation
+where l.pid = pg_backend_pid()
+  and l.granted
+  and c.relnamespace = 'public'::regnamespace
+  and c.relname in (${[...new Set(BOTH_ORDER_TABLE_PAIRS.flat())]
+    .map((table) => `'${table}'`)
+    .join(", ")});
+`;
+
+// The pairs on both of whose tables a migration's HELD_LOCK_QUERY output
+// reports a conflicting lock.
+function bothOrderLockViolations(psqlOutput) {
+  const held = new Set();
+  for (const line of String(psqlOutput).split("\n")) {
+    const [marker, table, mode, ...rest] = line.trim().split(" ");
+    if (
+      marker === HELD_LOCK_MARKER &&
+      rest.length === 0 &&
+      CONFLICTING_LOCK_MODES.has(mode)
+    ) {
+      held.add(table);
+    }
+  }
+  return BOTH_ORDER_TABLE_PAIRS.filter(
+    ([left, right]) => held.has(left) && held.has(right),
+  );
+}
 
 function commandResult(command, args, options = {}) {
   const result = spawnSync(command, args, {
@@ -180,8 +242,9 @@ function runEmptyDatabaseMigrationTest({
     }
 
     for (const migration of migrations) {
+      const checkHeldLocks = BigInt(migration.version) > LANE_BOUNDARY;
       const sql = readFileSync(migration.source);
-      commandResult(
+      const applied = commandResult(
         dockerCommand,
         [
           "exec",
@@ -197,8 +260,22 @@ function runEmptyDatabaseMigrationTest({
           "--dbname",
           "postgres",
         ],
-        { input: sql },
+        {
+          input: checkHeldLocks
+            ? Buffer.concat([sql, Buffer.from(`\n;\n${HELD_LOCK_QUERY}`)])
+            : sql,
+        },
       );
+      if (checkHeldLocks) {
+        const violations = bothOrderLockViolations(applied.stdout);
+        if (violations.length > 0) {
+          throw new Error(
+            `${migration.track}:${migration.fileName} writes or locks both ${violations
+              .map((pair) => pair.join(" and "))
+              .join(", ")} until it commits; split it into migrations that commit separately`,
+          );
+        }
+      }
       console.log(
         `[empty-db:${label}] applied ${migration.track}:${migration.fileName}`,
       );
@@ -267,8 +344,11 @@ if (isDirectExecution) {
 }
 
 export {
+  BOTH_ORDER_TABLE_PAIRS,
+  HELD_LOCK_QUERY,
   POSTGRES_IMAGE,
   REQUIRED_PUBLIC_RELATIONS,
+  bothOrderLockViolations,
   resolveRunnableImage,
   runEmptyDatabaseMigrationTest,
   validateMigrationPlan,

@@ -1,49 +1,14 @@
--- Managed AI metering. The proxy reports the exact usage of every request it
--- makes on the platform key, and the controller records it per job and per
--- request here. Controller-only: no client reads these tables.
+-- Managed AI metering, part 2 of 2: the metering tables. The proxy reports the
+-- exact usage of every request it makes on the platform key, and the
+-- controller records it per job and per request here. Controller-only: no
+-- client reads these tables.
+--
+-- Each foreign key to agent_jobs below holds a SHARE ROW EXCLUSIVE lock on
+-- agent_jobs until commit. This migration takes no lock on org_credit_ledger:
+-- the ledger changes are part 1,
+-- 20260929100000_managed_ai_metering_ledger.sql, which commits first in its own
+-- transaction for the lock-order reason given there.
 set local lock_timeout = '5s';
-
--- The ledger changes come first. Creating the tables below takes a lock on
--- agent_jobs for their foreign keys, held until commit, so they run last and
--- that lock lasts only as long as creating empty tables and their indexes.
-
--- A metered debit is posted after the request already ran upstream, so it may
--- take the balance below zero. Every other debit is still refused there.
-alter table public.org_credit_ledger
-  add column if not exists allow_overdraft boolean not null default false;
--- Serves the daily refill window lookup (org_id, reason, newest first).
-create index if not exists org_credit_ledger_org_reason_created_idx
-  on public.org_credit_ledger(org_id, reason, created_at desc);
-
--- Changes from the original guard: a debit with allow_overdraft may leave the
--- balance negative, a credit into a still-negative balance is allowed, and a
--- row whose idempotency key already exists is skipped without moving the
--- balance. The row trigger fires before ON CONFLICT is checked, so without the
--- skip a duplicate `insert ... on conflict do nothing` still moved the balance.
-create or replace function public.org_credit_ledger_before_insert() returns trigger as $$
-declare current_balance int;
-begin
-  insert into public.org_credit_balances(org_id) values (new.org_id) on conflict (org_id) do nothing;
-  select balance into current_balance from public.org_credit_balances where org_id = new.org_id for update;
-  -- Skip a duplicate key with no side effect. This runs after the balance lock, so a
-  -- concurrent insert of the same key has committed and is visible here. It mirrors the
-  -- unique index: a NULL project never matches. The index predicate is repeated so the
-  -- lookup can use that partial index.
-  if new.idempotency_key is not null and new.idempotency_key <> '' and exists (
-       select 1 from public.org_credit_ledger l
-       where l.org_id = new.org_id and l.project_id = new.project_id
-         and l.idempotency_key = new.idempotency_key
-         and l.idempotency_key is not null and l.idempotency_key <> '') then
-    return null;
-  end if;
-  current_balance := coalesce(current_balance, 0) + new.delta;
-  if new.delta < 0 and current_balance < 0 and not new.allow_overdraft then
-    raise exception 'Insufficient credits for org %', new.org_id;
-  end if;
-  update public.org_credit_balances set balance = current_balance, updated_at = now() where org_id = new.org_id;
-  new.balance_after := current_balance;
-  return new;
-end; $$ language plpgsql;
 
 -- One row per platform-lane agent job (a credential-less AI job). A job
 -- without a row has no platform lane. The billing fields are stamped when the
