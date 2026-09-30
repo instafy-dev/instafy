@@ -711,9 +711,10 @@ pub(crate) struct RuntimeBaseInstructionsLane {
     pub(crate) plain_text_write: bool,
 }
 
-/// Ordinary lanes replace the model prompt with the runtime's own contract;
-/// MCP and browser lanes keep the model's prompt. Either way the Codex policy
-/// appends Instafy's safety rules afterwards.
+/// Ordinary lanes (and team plan workers) replace the model prompt with the
+/// runtime's own non-interactive automation contract; MCP and browser lanes keep
+/// the model's Codex prompt, minus its Codex-product sections. Either way the
+/// Codex policy appends Instafy's Destructive Actions section afterwards.
 pub(crate) fn runtime_base_instructions(
     lane: RuntimeBaseInstructionsLane,
     operator_override: Option<String>,

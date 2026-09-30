@@ -3,9 +3,11 @@
 //! Every runtime run applies this policy to its loaded Codex `Config` before a
 //! thread manager or thread sees it. It keeps billing fixed across Codex bumps
 //! (no paid service tier, a 272k context window), blocks experimental tools the
-//! runtime cannot deliver, appends Instafy's safety rules to the instructions of
-//! every lane, and sets every Codex feature through one exhaustive match, so a
-//! new upstream feature fails the build until someone decides its value.
+//! runtime cannot deliver, composes the instructions of every lane (upstream's
+//! prompt without its Codex-product sections, or the runtime's own, plus
+//! Instafy's Destructive Actions section), and sets every Codex feature through
+//! one exhaustive match, so a new upstream feature fails the build until
+//! someone decides its value.
 
 use anyhow::{Context, Result, bail};
 use codex_core::config::{Config, ManagedFeatures};
@@ -27,51 +29,123 @@ pub(crate) const BLOCKED_MODEL_TOOLS: &[&str] = &[
     "clock",
 ];
 
-const RUNTIME_SAFETY_RULES: &str = include_str!("codex_runtime_safety_rules.md");
+/// Instafy's "Destructive Actions" section, verbatim from the GPT-6 prompt the runtime shipped
+/// before rust-v0.159.2 (instafy-dev/codex 99f24c873). Upstream's GPT-6 prompt dropped it; some
+/// other catalog prompts (gpt-5.6-sol) still carry the same text as "# Destructive actions".
+// Instafy-specific: agents run approval Never + DangerFullAccess, Desktop on the user's machine.
+const DESTRUCTIVE_ACTIONS_SECTION: &str = include_str!("codex_destructive_actions.md");
+const DESTRUCTIVE_ACTIONS_TITLE: &str = "Destructive Actions";
 
-/// Instafy's "File editing constraints" and "Destructive Actions" sections,
-/// kept verbatim from the GPT-6 prompt the runtime shipped before
-/// rust-v0.159.2 (instafy-dev/codex 99f24c873). Upstream's GPT-6 prompt dropped
-/// them; some other catalog prompts (gpt-5.6-sol) still carry the same text.
-pub(crate) fn runtime_safety_rules() -> &'static str {
-    RUNTIME_SAFETY_RULES.trim_end()
+/// Sections of Codex's catalog prompts that describe Codex-product features,
+/// removed by exact heading line (with everything up to the next heading of the
+/// same or a higher level) on every lane that uses a catalog or fallback prompt.
+///
+/// - `# Apps (Connectors)` and `# Plugins`: ChatGPT apps and Codex plugins.
+///   Instafy has its own connectors and skills.
+/// - `# Using skills`: runtime-agent does not use Codex's native skill loading.
+///   Its extension registry (`codex::codex_extension_registry`) holds only the
+///   turn-usage recorder and the required-execution gate. It never installs
+///   `codex_skills_extension`, which at rust-v0.159.2 is what renders the
+///   "## Skills" / "### Available skills" catalog this section refers to and
+///   serves `skills.list` / `skills.read`. Instafy skills under `.agents/skills`
+///   reach the model through the runtime's own prompt instead (workspace memory
+///   snapshot, focused skill snapshots, "Apply skills silently"), which the
+///   section's "inform the user in the commentary channel" contradicts. Bounded
+///   browser turns also turn skill instructions off. Core's host-skill discovery
+///   can still inline a `SKILL.md` for an explicit `$skill-name` mention; the
+///   runtime does not rely on it.
+///
+/// A test pins which of these headings each model Instafy uses carries, so a
+/// bump that renames or drops one fails instead of silently keeping the text.
+const REMOVED_CATALOG_SECTIONS: &[&str] = &["# Apps (Connectors)", "# Plugins", "# Using skills"];
+
+/// The Destructive Actions section every lane's prompt carries exactly once.
+fn destructive_actions_section() -> &'static str {
+    DESTRUCTIVE_ACTIONS_SECTION.trim_end()
 }
 
-/// The safety rules split into `(heading title, section text)` pairs.
-fn runtime_safety_sections() -> Vec<(&'static str, &'static str)> {
-    let rules = runtime_safety_rules();
-    let mut starts = Vec::new();
-    let mut offset = 0;
-    for line in rules.split_inclusive('\n') {
-        if let Some(title) = heading_title(line.trim_end()) {
-            starts.push((offset, title));
-        }
-        offset += line.len();
-    }
-    starts
-        .iter()
-        .enumerate()
-        .map(|(index, (start, title))| {
-            let end = starts.get(index + 1).map_or(rules.len(), |(next, _)| *next);
-            (*title, rules[*start..end].trim_end())
-        })
-        .collect()
-}
-
-/// The title of a Markdown heading line (`#` to `######`).
-fn heading_title(line: &str) -> Option<&str> {
+/// The level and title of a Markdown heading line (`#` to `######`).
+fn heading(line: &str) -> Option<(usize, &str)> {
+    let line = line.trim_end_matches(['\n', '\r']);
     let title = line.trim_start_matches('#');
     let level = line.len() - title.len();
-    ((1..=6).contains(&level) && title.starts_with(' ')).then(|| title.trim())
+    ((1..=6).contains(&level) && title.starts_with(' ')).then(|| (level, title.trim()))
+}
+
+/// Whether a line opens or closes a fenced code block, whose `#` lines are not
+/// headings.
+fn is_fence(line: &str) -> bool {
+    let line = line.trim_start();
+    line.starts_with("```") || line.starts_with("~~~")
+}
+
+/// The heading lines of `instructions`, outside fenced code blocks.
+fn headings(instructions: &str) -> Vec<(usize, &str)> {
+    let mut in_fence = false;
+    let mut found = Vec::new();
+    for line in instructions.lines() {
+        if is_fence(line) {
+            in_fence = !in_fence;
+        } else if !in_fence && let Some(heading) = heading(line) {
+            found.push(heading);
+        }
+    }
+    found
 }
 
 /// Whether `instructions` already has a section with this title, at any heading level and in
 /// any letter case (upstream's gpt-5.6-sol prompt says "Destructive actions").
 fn has_section(instructions: &str, title: &str) -> bool {
+    headings(instructions)
+        .iter()
+        .any(|(_, heading)| heading.eq_ignore_ascii_case(title))
+}
+
+/// Removes each section whose heading line is exactly one of `removed_headings`,
+/// through the line before the next heading of the same or a higher level.
+fn remove_sections(instructions: &str, removed_headings: &[&str]) -> String {
+    let mut kept = String::with_capacity(instructions.len());
+    let mut in_fence = false;
+    let mut removing_level = None;
+    for line in instructions.split_inclusive('\n') {
+        if is_fence(line) {
+            in_fence = !in_fence;
+        } else if !in_fence && let Some((level, _)) = heading(line) {
+            if removing_level.is_some_and(|removing| level <= removing) {
+                removing_level = None;
+            }
+            if removed_headings.contains(&line.trim_end_matches(['\n', '\r'])) {
+                removing_level = Some(level);
+            }
+        }
+        if removing_level.is_none() {
+            kept.push_str(line);
+        }
+    }
+    kept
+}
+
+/// Appends the Destructive Actions section unless `instructions` already has a
+/// section with that title.
+fn append_destructive_actions(instructions: &mut String) {
+    let trimmed = instructions.trim_end().len();
+    instructions.truncate(trimmed);
+    if has_section(instructions, DESTRUCTIVE_ACTIONS_TITLE) {
+        return;
+    }
+    if !instructions.is_empty() {
+        instructions.push_str("\n\n");
+    }
+    instructions.push_str(destructive_actions_section());
+}
+
+/// The prompt of a lane that uses a Codex catalog or fallback prompt: upstream's
+/// template without [`REMOVED_CATALOG_SECTIONS`], plus the Destructive Actions
+/// section. Composing an already composed prompt changes nothing.
+fn compose_catalog_instructions(template: &str) -> String {
+    let mut instructions = remove_sections(template, REMOVED_CATALOG_SECTIONS);
+    append_destructive_actions(&mut instructions);
     instructions
-        .lines()
-        .filter_map(heading_title)
-        .any(|heading| heading.eq_ignore_ascii_case(title))
 }
 
 /// Applies the runtime policy to a freshly loaded Codex configuration.
@@ -104,10 +178,11 @@ pub(crate) fn apply_runtime_codex_policy(config: &mut Config, bounded_browser: b
     apply_model_catalog_policy(&mut catalog);
     config.model_catalog = Some(catalog);
 
-    // Lanes with their own base instructions replace the model prompt entirely,
-    // so they carry the safety rules themselves.
+    // Ordinary lanes and team plan workers replace the model prompt with the
+    // runtime's own non-interactive automation contract (or an operator's), so
+    // it only gains the Destructive Actions section.
     if let Some(instructions) = config.base_instructions.as_mut() {
-        append_runtime_safety_rules(instructions);
+        append_destructive_actions(instructions);
     }
 
     // Model traffic uses only the configured provider route (the Instafy proxy).
@@ -145,13 +220,14 @@ fn apply_model_catalog_policy(catalog: &mut ModelsResponse) {
             .get_or_insert_default()
             .instructions_template
             .get_or_insert_default();
-        append_runtime_safety_rules(template);
+        *template = compose_catalog_instructions(template);
     }
 }
 
-/// Makes sure a lane that uses the model's own prompt carries the safety rules
-/// even when the model resolved to Codex's fallback metadata, which does not
-/// come from the catalog. Call with the model info Codex resolved for `config`.
+/// Composes the prompt of a lane that uses the model's own prompt when the model
+/// resolved to Codex's fallback metadata, which does not come from the catalog.
+/// Call with the model info Codex resolved for `config`; a catalog model's prompt
+/// is already composed and stays untouched.
 pub(crate) fn pin_instructions_for_resolved_model(config: &mut Config, model_info: &ModelInfo) {
     if config.base_instructions.is_some() {
         return;
@@ -161,33 +237,10 @@ pub(crate) fn pin_instructions_for_resolved_model(config: &mut Config, model_inf
         .as_ref()
         .and_then(|messages| messages.instructions_template.as_deref())
         .unwrap_or_default();
-    if runtime_safety_sections()
-        .iter()
-        .all(|(title, _)| has_section(template, title))
-    {
-        return;
+    let composed = compose_catalog_instructions(template);
+    if composed != template {
+        config.base_instructions = Some(composed);
     }
-    let mut instructions = template.to_string();
-    append_runtime_safety_rules(&mut instructions);
-    config.base_instructions = Some(instructions);
-}
-
-/// Appends each safety section `instructions` does not already have.
-fn append_runtime_safety_rules(instructions: &mut String) {
-    let missing: Vec<&str> = runtime_safety_sections()
-        .into_iter()
-        .filter(|(title, _)| !has_section(instructions, title))
-        .map(|(_, section)| section)
-        .collect();
-    if missing.is_empty() {
-        return;
-    }
-    let trimmed = instructions.trim_end().len();
-    instructions.truncate(trimmed);
-    if !instructions.is_empty() {
-        instructions.push_str("\n\n");
-    }
-    instructions.push_str(&missing.join("\n\n"));
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -432,6 +485,61 @@ mod tests {
 
     const POLICY_MODELS: &[&str] = &["gpt-6-luna", "gpt-5.6-sol", "gpt-5.5"];
 
+    /// The top-level sections of each policy model's upstream prompt at rust-v0.159.2, then of
+    /// the prompt its catalog lanes send. Fails closed: a bump that renames, drops or adds a
+    /// section (a removed one included) fails here, so what to remove and keep is decided again
+    /// instead of an exact-heading removal silently turning into a no-op.
+    const CATALOG_PROMPT_SECTIONS: &[(&str, &[&str], &[&str])] = &[
+        (
+            "gpt-6-luna",
+            &[
+                "Personality",
+                "When to ask the user for permission",
+                "Autonomy and persistence",
+                "Working with the user",
+                "Rules for getting work done",
+                "Using skills",
+                "Apps (Connectors)",
+                "Plugins",
+            ],
+            &[
+                "Personality",
+                "When to ask the user for permission",
+                "Autonomy and persistence",
+                "Working with the user",
+                "Rules for getting work done",
+                "Destructive Actions",
+            ],
+        ),
+        (
+            "gpt-5.6-sol",
+            &[
+                "Personality",
+                "Working with the user",
+                "Rules for getting work done",
+                "Destructive actions",
+                "Using skills",
+            ],
+            // Sol keeps its own "Destructive actions", which has our text (see below).
+            &[
+                "Personality",
+                "Working with the user",
+                "Rules for getting work done",
+                "Destructive actions",
+            ],
+        ),
+        (
+            "gpt-5.5",
+            &["Personality", "General", "Working with the user"],
+            &[
+                "Personality",
+                "General",
+                "Working with the user",
+                "Destructive Actions",
+            ],
+        ),
+    ];
+
     async fn load_config(
         model: &str,
         base_instructions: Option<String>,
@@ -477,74 +585,196 @@ mod tests {
         template(&construct_model_info_offline(model, config)).to_string()
     }
 
-    /// A section's text without its heading line.
-    fn section_body(section: &str) -> &str {
-        section.split_once('\n').expect("section body").1.trim()
+    fn top_level_headings(instructions: &str) -> Vec<&str> {
+        headings(instructions)
+            .into_iter()
+            .filter(|(level, _)| *level == 1)
+            .map(|(_, title)| title)
+            .collect()
+    }
+
+    /// How many sections with this title a prompt has, at any level and in any case.
+    fn section_count(instructions: &str, title: &str) -> usize {
+        headings(instructions)
+            .iter()
+            .filter(|(_, heading)| heading.eq_ignore_ascii_case(title))
+            .count()
+    }
+
+    /// The Destructive Actions text without its heading line.
+    fn destructive_actions_body() -> &'static str {
+        destructive_actions_section()
+            .split_once('\n')
+            .expect("section body")
+            .1
+            .trim()
+    }
+
+    fn assert_destructive_actions_once(instructions: &str, context: &str) {
+        assert_eq!(
+            section_count(instructions, DESTRUCTIVE_ACTIONS_TITLE),
+            1,
+            "{context}: Destructive Actions headings"
+        );
+        assert_eq!(
+            instructions.matches(destructive_actions_body()).count(),
+            1,
+            "{context}: Destructive Actions text"
+        );
+    }
+
+    /// Whether a heading still names a Codex-product feature the runtime removes.
+    fn names_codex_product_feature(title: &str) -> bool {
+        title
+            .split(|c: char| !c.is_ascii_alphanumeric())
+            .map(str::to_ascii_lowercase)
+            .any(|word| {
+                matches!(
+                    word.as_str(),
+                    "app"
+                        | "apps"
+                        | "connector"
+                        | "connectors"
+                        | "plugin"
+                        | "plugins"
+                        | "skill"
+                        | "skills"
+                )
+            })
     }
 
     #[test]
-    fn safety_rules_are_the_sections_upstream_dropped() {
-        let rules = runtime_safety_rules();
-        // Verbatim from 99f24c873, where file editing was a subsection of
-        // "Rules for getting work done".
-        assert!(rules.starts_with("## File editing constraints\n\nUse `apply_patch`"));
-        assert!(rules.contains("\n# Destructive Actions\n"));
-        assert!(rules.contains("prefer using `mktemp -d`"));
-        assert!(rules.contains("Never run commands such as `rm -rf $HOME`"));
-        assert!(rules.ends_with("whether it can be recovered."));
-        let sections = runtime_safety_sections();
-        assert_eq!(
-            sections.iter().map(|(title, _)| *title).collect::<Vec<_>>(),
-            ["File editing constraints", "Destructive Actions"]
-        );
-        assert_eq!(
-            sections
-                .iter()
-                .map(|(_, section)| *section)
-                .collect::<Vec<_>>()
-                .join("\n\n"),
-            rules
-        );
-        // Upstream's own GPT-6 prompt no longer carries them, which is why the
-        // runtime appends them.
-        let luna = template(&upstream_model("gpt-6-luna")).to_string();
-        for (title, _) in &sections {
-            assert!(!has_section(&luna, title), "{title}");
-        }
-    }
-
-    #[test]
-    fn a_prompt_that_already_has_a_section_keeps_its_own_copy() {
-        // Upstream's gpt-5.6-sol prompt carries both sections with the same text, under
-        // "## File editing constraints" and "# Destructive actions". If a bump changes that
-        // text, decide again whether skipping our copy is still right.
-        let sol = template(&upstream_model("gpt-5.6-sol")).to_string();
-        for (title, section) in runtime_safety_sections() {
-            assert!(has_section(&sol, title), "{title}");
-            assert_eq!(sol.matches(section_body(section)).count(), 1, "{title}");
-        }
-        let mut instructions = sol.clone();
-        append_runtime_safety_rules(&mut instructions);
-        assert_eq!(instructions, sol);
-
-        // Only a missing section is appended.
-        let mut partial = "Base prompt.\n\n# DESTRUCTIVE ACTIONS\n\nOwn text.".to_string();
-        append_runtime_safety_rules(&mut partial);
-        let (_, file_editing) = runtime_safety_sections()[0];
-        assert_eq!(
-            partial,
-            format!("Base prompt.\n\n# DESTRUCTIVE ACTIONS\n\nOwn text.\n\n{file_editing}")
-        );
-        // Plain text that merely mentions a title is not a heading.
+    fn destructive_actions_is_the_99f_section_upstream_luna_dropped() {
+        let section = destructive_actions_section();
+        // Verbatim from 99f24c873, and only this section: upstream dropped the old
+        // "File editing constraints" rules and the runtime follows it.
+        assert!(section.starts_with("# Destructive Actions\n\nBe cautious with commands"));
+        assert!(section.contains("prefer using `mktemp -d`"));
+        assert!(section.contains("Never run commands such as `rm -rf $HOME`"));
+        assert!(section.ends_with("whether it can be recovered."));
+        assert_eq!(headings(section), [(1, DESTRUCTIVE_ACTIONS_TITLE)]);
         assert!(!has_section(
-            "Follow the destructive actions policy.",
-            "Destructive Actions"
+            template(&upstream_model("gpt-6-luna")),
+            DESTRUCTIVE_ACTIONS_TITLE
         ));
-        assert!(!has_section("#Destructive Actions", "Destructive Actions"));
+        // Upstream's gpt-5.6-sol prompt carries the same text as "# Destructive actions", so it
+        // keeps its own copy. If a bump changes that text, decide again whether that is right.
+        let sol = upstream_model("gpt-5.6-sol");
+        assert_destructive_actions_once(template(&sol), "upstream gpt-5.6-sol");
+    }
+
+    #[test]
+    fn catalog_prompts_lose_exactly_the_codex_product_sections() {
+        let covered: Vec<&str> = CATALOG_PROMPT_SECTIONS
+            .iter()
+            .map(|(model, _, _)| *model)
+            .collect();
+        assert_eq!(covered, POLICY_MODELS);
+        for (model, upstream_sections, composed_sections) in CATALOG_PROMPT_SECTIONS {
+            let upstream = template(&upstream_model(model)).to_string();
+            assert_eq!(
+                top_level_headings(&upstream),
+                *upstream_sections,
+                "{model}: upstream's sections changed; review REMOVED_CATALOG_SECTIONS"
+            );
+            for removed in REMOVED_CATALOG_SECTIONS {
+                let title = removed.strip_prefix("# ").expect("top-level heading");
+                assert_eq!(
+                    upstream.lines().any(|line| line == *removed),
+                    upstream_sections.contains(&title),
+                    "{model}: `{removed}` must be an exact heading line"
+                );
+            }
+
+            let composed = compose_catalog_instructions(&upstream);
+            assert_eq!(top_level_headings(&composed), *composed_sections, "{model}");
+            assert_destructive_actions_once(&composed, model);
+            assert_eq!(compose_catalog_instructions(&composed), composed, "{model}");
+            // The kept sections are upstream's text, unchanged. At this tag every removed
+            // section trails the kept ones.
+            let kept = REMOVED_CATALOG_SECTIONS
+                .iter()
+                .filter_map(|removed| upstream.find(&format!("\n{removed}\n")))
+                .min()
+                .map_or(upstream.as_str(), |end| &upstream[..end])
+                .trim_end();
+            let appended = if has_section(kept, DESTRUCTIVE_ACTIONS_TITLE) {
+                String::new()
+            } else {
+                format!("\n\n{}", destructive_actions_section())
+            };
+            assert_eq!(composed, format!("{kept}{appended}"), "{model}");
+        }
     }
 
     #[tokio::test]
-    async fn every_lane_keeps_upstreams_prompt_or_its_own_and_carries_each_safety_section_once() {
+    async fn every_catalog_and_fallback_prompt_is_composed() {
+        // Child agents may switch to any catalog model, so every entry is composed, and a
+        // renamed Codex-product section anywhere in the catalog fails here.
+        let (_home, mut config) = load_config("gpt-6-luna", None, "").await;
+        apply_runtime_codex_policy(&mut config, false).expect("policy");
+        let catalog = config.model_catalog.as_ref().expect("catalog");
+        assert!(catalog.models.len() >= POLICY_MODELS.len());
+        let fallback = construct_model_info_offline("byo-provider-model", &config);
+        assert!(fallback.used_fallback_model_metadata);
+        let fallback_prompt = compose_catalog_instructions(template(&fallback));
+        let prompts = catalog
+            .models
+            .iter()
+            .map(|model| (model.slug.as_str(), template(model)))
+            .chain([("fallback", fallback_prompt.as_str())]);
+        for (slug, prompt) in prompts {
+            for (_, title) in headings(prompt) {
+                assert!(
+                    !names_codex_product_feature(title),
+                    "{slug}: `{title}` survived; add its exact heading to REMOVED_CATALOG_SECTIONS"
+                );
+            }
+            assert_destructive_actions_once(prompt, slug);
+            assert_eq!(compose_catalog_instructions(prompt), prompt, "{slug}");
+        }
+    }
+
+    #[test]
+    fn sections_are_removed_by_exact_heading_line_only() {
+        let prompt = "Intro.\n\n# Plugins\n\nPlugin text.\n\n## How to use plugins\n\n```sh\n# a shell comment, not a heading\n```\n\nMore plugin text.\n\n# Kept\n\nKept text.\n\n## Plugins\n\nA subsection stays.\n\n# Plugins (beta)\n\nRenamed stays.\n\n# plugins\n\nCase differs, stays.\n\n# Plugins\n\nRemoved again at the end.\n";
+        assert_eq!(
+            remove_sections(prompt, &["# Plugins"]),
+            "Intro.\n\n# Kept\n\nKept text.\n\n## Plugins\n\nA subsection stays.\n\n# Plugins (beta)\n\nRenamed stays.\n\n# plugins\n\nCase differs, stays.\n\n"
+        );
+        // A heading-like line inside a fence neither starts nor ends a section.
+        let fenced = "# Kept\n\n```md\n# Plugins\n```\n\nText.\n";
+        assert_eq!(remove_sections(fenced, &["# Plugins"]), fenced);
+        // Plain text that merely mentions a title is not a heading.
+        assert!(!has_section(
+            "Follow the destructive actions policy.",
+            DESTRUCTIVE_ACTIONS_TITLE
+        ));
+        assert!(!has_section(
+            "#Destructive Actions",
+            DESTRUCTIVE_ACTIONS_TITLE
+        ));
+    }
+
+    #[test]
+    fn destructive_actions_is_appended_once() {
+        let mut instructions = "Base prompt.\n\n".to_string();
+        append_destructive_actions(&mut instructions);
+        assert_eq!(
+            instructions,
+            format!("Base prompt.\n\n{}", destructive_actions_section())
+        );
+        let composed = instructions.clone();
+        append_destructive_actions(&mut instructions);
+        assert_eq!(instructions, composed);
+        // A prompt with its own section, at any level and in any case, keeps it.
+        let mut own = "Base prompt.\n\n## DESTRUCTIVE ACTIONS\n\nOwn text.\n".to_string();
+        append_destructive_actions(&mut own);
+        assert_eq!(own, "Base prompt.\n\n## DESTRUCTIVE ACTIONS\n\nOwn text.");
+    }
+
+    #[tokio::test]
+    async fn every_lane_sends_its_prompt_with_destructive_actions_exactly_once() {
         let lanes = [
             (
                 "ordinary structured",
@@ -593,42 +823,65 @@ mod tests {
             ),
         ];
         for model in POLICY_MODELS {
+            let upstream = template(&upstream_model(model)).to_string();
             for (lane_name, lane) in lanes {
+                let context = format!("{model} / {lane_name}");
                 let lane_instructions = runtime_base_instructions(lane, None);
                 let (_home, mut config) = load_config(model, lane_instructions.clone(), "").await;
                 apply_runtime_codex_policy(&mut config, lane.browser && lane.mcp)
                     .expect("apply runtime policy");
                 let resolved = construct_model_info_offline(model, &config);
                 pin_instructions_for_resolved_model(&mut config, &resolved);
-
                 let effective = effective_instructions(&config);
-                for (title, section) in runtime_safety_sections() {
-                    let headings = effective
-                        .lines()
-                        .filter_map(heading_title)
-                        .filter(|heading| heading.eq_ignore_ascii_case(title))
-                        .count();
-                    assert_eq!(headings, 1, "{model} / {lane_name}: `{title}` headings");
-                    assert_eq!(
-                        effective.matches(section_body(section)).count(),
-                        1,
-                        "{model} / {lane_name}: `{title}` text"
-                    );
+
+                assert_destructive_actions_once(&effective, &context);
+                match lane_instructions {
+                    // Ordinary lanes keep the runtime's own non-interactive automation prompt,
+                    // and the old file-editing rules are no longer added.
+                    Some(own) => {
+                        assert_eq!(
+                            effective,
+                            format!("{}\n\n{}", own.trim_end(), destructive_actions_section()),
+                            "{context}"
+                        );
+                        assert_eq!(
+                            section_count(&effective, "File editing constraints"),
+                            0,
+                            "{context}"
+                        );
+                    }
+                    // Catalog lanes send upstream's prompt without the Codex-product sections,
+                    // straight from the catalog entry (which child agents that switch models
+                    // read too), not through a base-instructions override.
+                    None => {
+                        assert_eq!(config.base_instructions, None, "{context}");
+                        assert_eq!(
+                            effective,
+                            compose_catalog_instructions(&upstream),
+                            "{context}"
+                        );
+                        for removed in REMOVED_CATALOG_SECTIONS {
+                            assert!(
+                                !effective.lines().any(|line| line == *removed),
+                                "{context}: {removed}"
+                            );
+                        }
+                        // Only a prompt that has its own file-editing rules (Sol) carries them.
+                        assert_eq!(
+                            section_count(&effective, "File editing constraints"),
+                            section_count(&upstream, "File editing constraints"),
+                            "{context}"
+                        );
+                    }
                 }
-                let expected_prefix = lane_instructions
-                    .unwrap_or_else(|| template(&upstream_model(model)).to_string());
-                assert!(
-                    effective.starts_with(expected_prefix.trim_end()),
-                    "{model} / {lane_name}: lane prompt was replaced"
-                );
             }
         }
     }
 
     #[tokio::test]
-    async fn operator_base_instructions_and_unknown_models_also_get_the_safety_rules() {
-        let custom = "Operator-provided base instructions.".to_string();
+    async fn operator_base_instructions_and_unknown_models_carry_destructive_actions_once() {
         let lane = RuntimeBaseInstructionsLane::default();
+        let custom = "Operator-provided base instructions.".to_string();
         let (_home, mut config) = load_config(
             "gpt-6-luna",
             runtime_base_instructions(lane, Some(custom.clone())),
@@ -638,20 +891,39 @@ mod tests {
         apply_runtime_codex_policy(&mut config, false).expect("policy");
         assert_eq!(
             effective_instructions(&config),
-            format!("{custom}\n\n{}", runtime_safety_rules())
+            format!("{custom}\n\n{}", destructive_actions_section())
         );
 
-        // A model outside the catalog resolves to Codex's fallback prompt, which
-        // the catalog policy cannot reach.
+        // An operator prompt with its own section keeps it instead of gaining a second one.
+        let own = "Operator prompt.\n\n# Destructive actions\n\nOperator rules.";
+        let (_home, mut config) = load_config(
+            "gpt-5.6-sol",
+            runtime_base_instructions(lane, Some(own.to_string())),
+            "",
+        )
+        .await;
+        apply_runtime_codex_policy(&mut config, false).expect("policy");
+        assert_eq!(effective_instructions(&config), own);
+
+        // A model outside the catalog resolves to Codex's fallback prompt, which the catalog
+        // policy cannot reach.
         let (_home, mut config) = load_config("byo-provider-model", None, "").await;
         apply_runtime_codex_policy(&mut config, true).expect("policy");
         let resolved = construct_model_info_offline("byo-provider-model", &config);
         assert!(resolved.used_fallback_model_metadata);
-        assert!(!template(&resolved).contains(runtime_safety_rules()));
+        let fallback = template(&resolved).to_string();
+        assert!(!has_section(&fallback, DESTRUCTIVE_ACTIONS_TITLE));
         pin_instructions_for_resolved_model(&mut config, &resolved);
         let effective = effective_instructions(&config);
-        assert!(effective.starts_with(template(&resolved).trim_end()));
-        assert!(effective.ends_with(runtime_safety_rules()));
+        assert_eq!(
+            effective,
+            format!(
+                "{}\n\n{}",
+                fallback.trim_end(),
+                destructive_actions_section()
+            )
+        );
+        assert_destructive_actions_once(&effective, "fallback");
     }
 
     #[tokio::test]

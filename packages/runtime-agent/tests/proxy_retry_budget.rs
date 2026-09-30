@@ -481,6 +481,21 @@ fn offered_tool_names(request: &Value) -> Vec<String> {
 }
 
 /// A proxy that must never be used: it records each connection and closes it unanswered.
+/// Collects every line of every string in a request. The prompt travels as `instructions`, or
+/// for a Responses Lite model (gpt-6-luna, gpt-5.6-sol) as a developer input item.
+fn request_text_lines(value: &Value, output: &mut Vec<String>) {
+    match value {
+        Value::String(text) => output.extend(text.lines().map(str::to_string)),
+        Value::Array(items) => items
+            .iter()
+            .for_each(|item| request_text_lines(item, output)),
+        Value::Object(fields) => fields
+            .values()
+            .for_each(|field| request_text_lines(field, output)),
+        _ => {}
+    }
+}
+
 async fn start_poison_proxy() -> Result<(String, Arc<Mutex<usize>>, tokio::task::JoinHandle<()>)> {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
     let url = format!("http://{}", listener.local_addr()?);
@@ -738,6 +753,27 @@ async fn run_scenario(scenario: &str, expected_requests: usize) -> Result<()> {
         expected_requests,
         "{scenario}: {diagnostics}"
     );
+    // Every lane's prompt reaches the model with Instafy's Destructive Actions section exactly
+    // once (a model's own copy counts) and without Codex's app, plugin and skill sections.
+    for request in requests.iter() {
+        let mut lines = Vec::new();
+        request_text_lines(request, &mut lines);
+        let model = test_model();
+        let destructive = lines
+            .iter()
+            .filter(|line| line.eq_ignore_ascii_case("# Destructive Actions"))
+            .count();
+        assert_eq!(
+            destructive, 1,
+            "{scenario} on {model}: Destructive Actions sections"
+        );
+        for removed in ["# Apps (Connectors)", "# Plugins", "# Using skills"] {
+            assert!(
+                !lines.iter().any(|line| line == removed),
+                "{scenario} on {model}: `{removed}` reached the model"
+            );
+        }
+    }
     if scenario == "routing" {
         assert!(
             requests.iter().all(|r| r
