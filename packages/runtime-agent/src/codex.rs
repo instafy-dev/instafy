@@ -12,14 +12,14 @@ use codex_core::config::{
 };
 use codex_core::test_support::EmptyUserInstructionsProvider;
 use codex_core::{
-    CodexAppsToolsCache, CodexThread, NewThread, SteerInputError, ThreadManager,
+    CodexAppsToolsCache, CodexThread, NewThread, StartThreadOptions, ThreadManager,
     build_models_manager, init_state_db, local_agent_graph_store_from_state_db,
     resolve_installation_id, thread_store_from_config,
 };
 use codex_exec_server::{EnvironmentManager, LOCAL_ENVIRONMENT_ID, LOCAL_FS};
 use codex_extension_api::{
-    ExtensionFuture, ExtensionRegistry, ExtensionRegistryBuilder, TurnLifecycleContributor,
-    TurnStartInput,
+    ExtensionData, ExtensionFuture, ExtensionRegistry, ExtensionRegistryBuilder,
+    TurnLifecycleContributor, TurnStartInput, TurnStartPhase,
 };
 use codex_features::Feature;
 use codex_git_utils::resolve_root_git_project_for_trust;
@@ -35,9 +35,13 @@ use codex_protocol::items::{AgentMessageContent, TurnItem};
 use codex_protocol::models::{ContentItem, MessagePhase, ResponseItem};
 use codex_protocol::openai_models::ReasoningEffort;
 use codex_protocol::protocol::{
-    AskForApproval, CodexErrorInfo, Event, EventMsg, McpServerRefreshConfig, Op, SandboxPolicy,
-    SessionSource, StreamErrorEvent, ThreadSettingsOverrides, TokenUsage, TurnEnvironmentSelection,
-    TurnEnvironmentSelections,
+    AskForApproval, CodexErrorInfo, EnvironmentConfigState, Event, EventMsg, Op, SandboxPolicy,
+    SessionSource, StreamErrorEvent, ThreadHistoryMode, ThreadSettingsOverrides, TokenUsage,
+    TurnEnvironmentSelection, TurnEnvironmentSelections,
+};
+use codex_protocol::turn_input::{
+    NotSubmittedReason, StartIfIdleSubmission, SteerSubmission, TurnInput, TurnInputRequest,
+    TurnStartOptions,
 };
 use codex_protocol::user_input::UserInput;
 use codex_utils_absolute_path::AbsolutePathBuf;
@@ -703,7 +707,18 @@ async fn start_codex_thread(
     thread_manager: Arc<ThreadManager>,
     config: Config,
 ) -> CodexResult<NewThread> {
-    run_on_fresh_task(async move { thread_manager.start_thread(config).await }).await
+    run_on_fresh_task(async move {
+        thread_manager
+            .start_thread(StartThreadOptions {
+                // Kept for resume, not for old rollouts: runtime-agent restores a thread from its
+                // rollout path, which only Legacy history supports. Paginated resume goes through
+                // the thread store by id and is a separate change.
+                history_mode: Some(ThreadHistoryMode::Legacy),
+                ..StartThreadOptions::new(config)
+            })
+            .await
+    })
+    .await
 }
 
 async fn resume_codex_thread(
@@ -714,7 +729,13 @@ async fn resume_codex_thread(
 ) -> CodexResult<NewThread> {
     run_on_fresh_task(async move {
         thread_manager
-            .resume_thread_from_rollout(config, rollout_path, auth_manager, None, false)
+            .resume_legacy_thread_from_rollout(
+                config,
+                rollout_path,
+                auth_manager,
+                None,
+                Default::default(),
+            )
             .await
     })
     .await
@@ -1279,9 +1300,14 @@ impl CodexClient {
                 config.codex_home.display()
             )
         })?;
-        let auth_manager = AuthManager::shared_from_config(&config, true).await;
-        // runtime-agent embeds Codex as a library, so there is no Codex CLI executable
-        // available to back exec-server helper re-entry points here.
+        ensure_no_codex_workload_identity()?;
+        let auth_manager = AuthManager::shared_from_config(&config, true)
+            .await
+            .context("failed to initialize Codex auth manager")?;
+        // Fragile hook: runtime-agent embeds Codex as a library, so there is no Codex CLI
+        // executable to back exec-server helper re-entry points. This and
+        // `EmptyUserInstructionsProvider` come from Codex's test support; recheck both on
+        // every Codex bump.
         let environment_manager = Arc::new(EnvironmentManager::default_for_tests());
         let state_db = init_state_db(&config).await;
         let thread_store = thread_store_from_config(&config, state_db.clone());
@@ -1299,6 +1325,7 @@ impl CodexClient {
             codex_extension_registry(&turn_start_token_usage),
             Arc::new(EmptyUserInstructionsProvider),
             None,
+            codex_core::passthrough_image_store(),
             thread_store,
             local_agent_graph_store_from_state_db(state_db.as_ref()),
             installation_id,
@@ -1471,36 +1498,8 @@ impl CodexClient {
             personal_browser_mode,
             !config.mcp_servers.is_empty(),
         ) {
-            let mcp_servers = serde_json::to_value(&*config.mcp_servers).unwrap_or_else(|err| {
-                tracing::warn!(error = %err, "failed to serialize MCP server config for refresh");
-                json!({})
-            });
-            let mcp_oauth_credentials_store_mode = serde_json::to_value(
-                config.mcp_oauth_credentials_store_mode,
-            )
-            .unwrap_or_else(|err| {
-                tracing::warn!(
-                    error = %err,
-                    "failed to serialize MCP OAuth store mode for refresh"
-                );
-                JsonValue::Null
-            });
-            let auth_keyring_backend_kind =
-                serde_json::to_value(config.auth_keyring_backend_kind()).unwrap_or_else(|err| {
-                    tracing::warn!(
-                        error = %err,
-                        "failed to serialize MCP auth keyring backend kind for refresh"
-                    );
-                    JsonValue::Null
-                });
             conversation
-                .submit(Op::RefreshMcpServers {
-                    config: McpServerRefreshConfig {
-                        mcp_servers,
-                        mcp_oauth_credentials_store_mode,
-                        auth_keyring_backend_kind,
-                    },
-                })
+                .submit(Op::RefreshMcpServers)
                 .await
                 .context("failed to request MCP server refresh before MCP-focused turn")?;
         }
@@ -1540,13 +1539,8 @@ impl CodexClient {
         });
 
         let bounded_browser_mode = personal_browser_mode || shared_browser_mode;
-        let active_turn_id = conversation
-            .submit(Op::UserInput {
-                items,
-                final_output_json_schema,
-                additional_context: Default::default(),
-                responsesapi_client_metadata,
-                thread_settings: ThreadSettingsOverrides {
+        let request = TurnInputRequest::user_input(items)
+            .with_thread_settings(ThreadSettingsOverrides {
                     // Browser-bound turns deliberately select no execution
                     // environment. MCP tools do not require one, while every
                     // filesystem, image, patch, and shell tool does. Ordinary
@@ -1568,10 +1562,24 @@ impl CodexClient {
                     service_tier: None,
                     collaboration_mode: None,
                     personality: default_personality,
-                },
+                    runtime_workspace_roots: None,
+                    disabled_plugin_ids: None,
             })
+            .on_start(TurnStartOptions {
+                final_output_json_schema,
+                ..Default::default()
+            })
+            .with_responses_metadata(responsesapi_client_metadata);
+        let active_turn_id = match conversation
+            .start_turn_if_idle(request)
             .await
-            .context("failed to submit prompt to Codex")?;
+            .context("failed to submit prompt to Codex")?
+        {
+            StartIfIdleSubmission::Started { turn_id } => turn_id,
+            StartIfIdleSubmission::NotSubmitted { reason } => {
+                return Err(anyhow!("Codex declined the runtime prompt: {reason:?}"));
+            }
+        };
 
         let mut last_agent_message: Option<String> = None;
         let mut last_agent_message_event: Option<String> = None;
@@ -1858,34 +1866,46 @@ async fn apply_active_turn_input(conversation: &CodexThread, command: ActiveTurn
         text: command.content.clone(),
         text_elements: Vec::new(),
     }];
+    let request = TurnInputRequest::new(TurnInput::UserInput {
+        content: items,
+        client_id: Some(command_id.to_string()),
+    });
+    let rejected = |message: &str| ActiveTurnInputOutcome::Rejected {
+        error_message: message.to_string(),
+    };
     let outcome = match conversation
-        .steer_input(
-            items,
-            Default::default(),
-            Some(&command.expected_turn_id),
-            Some(command_id.to_string()),
-            None,
-        )
+        .steer_turn(request, command.expected_turn_id.clone())
         .await
     {
-        Ok(codex_turn_id) => ActiveTurnInputOutcome::Applied { codex_turn_id },
-        Err(error) => {
-            let error_message = match error {
-                SteerInputError::NoActiveTurn(_) => "Codex turn completed before input submission",
-                SteerInputError::ExpectedTurnMismatch { .. } => {
-                    "Codex active turn changed before input submission"
-                }
-                SteerInputError::ActiveTurnNotSteerable { .. } => {
-                    "Codex active turn does not accept steering input"
-                }
-                SteerInputError::EmptyInput => "Codex rejected empty steering input",
-            };
-            ActiveTurnInputOutcome::Rejected {
-                error_message: error_message.to_string(),
-            }
-        }
+        Ok(SteerSubmission::Steered { turn_id }) => ActiveTurnInputOutcome::Applied {
+            codex_turn_id: turn_id,
+        },
+        Ok(SteerSubmission::NotSubmitted { reason }) => rejected(steer_rejection_message(&reason)),
+        Err(error) => rejected(&format!("Codex could not accept steering input: {error}")),
     };
     command.acknowledge(outcome);
+}
+
+/// Every reason is listed so a new upstream reason fails the build instead of
+/// silently sharing a generic message.
+fn steer_rejection_message(reason: &NotSubmittedReason) -> &'static str {
+    match reason {
+        NotSubmittedReason::NoActiveTurn => "Codex turn completed before input submission",
+        NotSubmittedReason::ExpectedTurnMismatch { .. } => {
+            "Codex active turn changed before input submission"
+        }
+        NotSubmittedReason::ActiveTurnNotSteerable { .. }
+        | NotSubmittedReason::ActiveTurnOutputSchemaMismatch => {
+            "Codex active turn does not accept steering input"
+        }
+        NotSubmittedReason::EmptyInput => "Codex rejected empty steering input",
+        NotSubmittedReason::Superseded => "Codex superseded the turn before input submission",
+        NotSubmittedReason::ServerDraining => "Codex is shutting down and accepts no new input",
+        // Reasons that only `start_turn_if_idle` reports.
+        NotSubmittedReason::NotIdle
+        | NotSubmittedReason::PendingTriggerTurn
+        | NotSubmittedReason::PlanMode => "Codex did not accept steering input",
+    }
 }
 
 async fn confirm_shared_browser_shutdown(conversation: &CodexThread) -> Result<()> {
@@ -2669,6 +2689,7 @@ fn install_browser_mcp_servers(
                     ("x-instafy-project-id".to_string(), project_id),
                 ])),
                 env_http_headers: None,
+                http_headers_helper: None,
             }),
         );
     }
@@ -2769,6 +2790,9 @@ fn local_browser_mcp_server_config(transport: McpServerTransportConfig) -> McpSe
         enabled: true,
         required: true,
         supports_parallel_tool_calls: false,
+        startup_readiness: Default::default(),
+        tool_input_schema_max_bytes: None,
+        omit_tools_from: None,
         disabled_reason: None,
         startup_timeout_sec: Some(Duration::from_secs(10)),
         tool_timeout_sec: Some(Duration::from_secs(90)),
@@ -2790,6 +2814,9 @@ fn browser_mcp_server_config(transport: McpServerTransportConfig) -> McpServerCo
         enabled: true,
         required: true,
         supports_parallel_tool_calls: false,
+        startup_readiness: Default::default(),
+        tool_input_schema_max_bytes: None,
+        omit_tools_from: None,
         disabled_reason: None,
         startup_timeout_sec: Some(Duration::from_secs(10)),
         tool_timeout_sec: Some(Duration::from_secs(40)),
@@ -2837,6 +2864,19 @@ fn validate_bounded_browser_mcp_server_set(
             "bounded browser MCP server must not carry an additional disabled-tool policy"
         ));
     }
+    // A header helper is a command Codex runs to mint request headers. The browser capability
+    // is carried only in the in-memory bearer header, never produced by a subprocess.
+    if matches!(
+        &server.transport,
+        McpServerTransportConfig::StreamableHttp {
+            http_headers_helper: Some(_),
+            ..
+        }
+    ) {
+        return Err(anyhow!(
+            "bounded browser MCP server must not run an HTTP header helper"
+        ));
+    }
     Ok(())
 }
 
@@ -2853,6 +2893,7 @@ pub fn personal_browser_capability_contract() -> Result<JsonValue> {
         bearer_token_env_var: None,
         http_headers: None,
         env_http_headers: None,
+        http_headers_helper: None,
     });
     let servers = HashMap::from([(PERSONAL_BROWSER_MCP_SERVER_NAME.to_string(), server)]);
     validate_bounded_browser_mcp_server_set(&servers, PERSONAL_BROWSER_MCP_SERVER_NAME)?;
@@ -2878,6 +2919,23 @@ pub fn personal_browser_capability_contract() -> Result<JsonValue> {
         "projectMcpServersAllowed": false,
         "localExecutionEnvironmentCount": environment_count,
     }))
+}
+
+/// Codex switches to workload identity when these are set and exchanges them for
+/// OpenAI credentials itself, which would send model traffic around the Instafy
+/// proxy. Jobs scrub them (see `model_environment`); refuse anything that did not.
+fn ensure_no_codex_workload_identity() -> Result<()> {
+    for key in [
+        codex_protocol::shell_environment::OPENAI_FEDERATION_RULE_ID_ENV_VAR,
+        codex_protocol::shell_environment::OPENAI_IDENTITY_TOKEN_FILE_ENV_VAR,
+    ] {
+        if std::env::var_os(key).is_some() {
+            return Err(anyhow!(
+                "{key} is set; runtime-agent routes all model traffic through the Instafy proxy and does not use Codex workload identity"
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn should_refresh_mcp_servers(
@@ -2973,7 +3031,6 @@ fn disable_bounded_browser_features(features: &mut ManagedFeatures) -> Result<()
 fn bounded_browser_disabled_features() -> impl Iterator<Item = Feature> {
     [
         Feature::ShellTool,
-        Feature::UnifiedExec,
         Feature::ShellZshFork,
         Feature::UnifiedExecZshFork,
         Feature::ExecPermissionApprovals,
@@ -3028,6 +3085,7 @@ fn turn_environment_selections(
             environment_id: LOCAL_ENVIRONMENT_ID.to_string(),
             cwd: PathUri::from_abs_path(&default_cwd),
             workspace_roots: vec![PathUri::from_abs_path(&default_cwd)],
+            config: EnvironmentConfigState::FromThread,
         }]
     };
     TurnEnvironmentSelections::new(default_cwd, environments)
@@ -3252,9 +3310,21 @@ impl TurnStartTokenUsage {
 struct TurnStartTokenUsageRecorder(TurnStartTokenUsage);
 
 impl TurnLifecycleContributor for TurnStartTokenUsageRecorder {
+    /// Codex passes the baseline only before task registration; the later
+    /// regular-task phase receives none. Pinned explicitly so a new upstream
+    /// default cannot silently drop every turn's baseline (and its billing).
+    fn turn_start_phase(&self, _thread_store: &ExtensionData) -> TurnStartPhase {
+        TurnStartPhase::BeforeTaskRegistration
+    }
+
     fn on_turn_start<'a>(&'a self, input: TurnStartInput<'a>) -> ExtensionFuture<'a, ()> {
-        self.0
-            .record(input.turn_id, input.token_usage_at_turn_start);
+        match input.token_usage_at_turn_start {
+            Some(usage) => self.0.record(input.turn_id, usage),
+            None => tracing::warn!(
+                turn_id = input.turn_id,
+                "Codex started a turn without its token usage baseline"
+            ),
+        }
         Box::pin(async {})
     }
 }
@@ -3298,7 +3368,7 @@ pub(crate) async fn start_test_turn(
             .on_turn_start(TurnStartInput {
                 turn_id,
                 collaboration_mode: &collaboration_mode,
-                token_usage_at_turn_start: total,
+                token_usage_at_turn_start: Some(total),
                 session_store: &session_store,
                 thread_store: &thread_store,
                 turn_store: &turn_store,
@@ -3324,6 +3394,7 @@ fn token_usage_since(total: &TokenUsage, start: &TokenUsage) -> TokenUsage {
             start.reasoning_output_tokens,
         ),
         total_tokens: since(total.total_tokens, start.total_tokens),
+        codex_rollout_budget_units: None,
     }
 }
 
@@ -4647,6 +4718,7 @@ mod tests {
                 bearer_token_env_var: None,
                 http_headers: None,
                 env_http_headers: None,
+                http_headers_helper: None,
             })
         };
         let servers = HashMap::from([
@@ -4659,6 +4731,24 @@ mod tests {
                 .expect_err("additional MCP server must fail closed")
                 .to_string();
         assert!(error.contains("exactly one MCP server"));
+    }
+
+    #[test]
+    fn bounded_browser_contract_rejects_an_http_header_helper() {
+        let server = browser_mcp_server_config(McpServerTransportConfig::StreamableHttp {
+            url: "http://127.0.0.1/contract-only".to_string(),
+            bearer_token_env_var: None,
+            http_headers: None,
+            env_http_headers: None,
+            http_headers_helper: Some("print-browser-headers".to_string()),
+        });
+        let servers = HashMap::from([(PERSONAL_BROWSER_MCP_SERVER_NAME.to_string(), server)]);
+
+        let error =
+            validate_bounded_browser_mcp_server_set(&servers, PERSONAL_BROWSER_MCP_SERVER_NAME)
+                .expect_err("a header helper must fail closed")
+                .to_string();
+        assert!(error.contains("HTTP header helper"), "{error}");
     }
 
     #[test]
@@ -5899,6 +5989,8 @@ required = true
                 parsed_cmd: Vec::new(),
                 source: ExecCommandSource::Agent,
                 interaction_input: None,
+                plugin_id: None,
+                script_path: None,
             }),
         });
         assert_eq!(started.len(), 1);
@@ -5938,6 +6030,8 @@ required = true
                 duration: Duration::from_millis(25),
                 formatted_output: "README.md".to_string(),
                 status: ExecCommandStatus::Completed,
+                plugin_id: None,
+                script_path: None,
             }),
         });
         assert_eq!(completed.len(), 1);
@@ -5979,6 +6073,8 @@ required = true
                 duration: Duration::from_millis(1),
                 formatted_output: "{}".into(),
                 status: ExecCommandStatus::Completed,
+                plugin_id: None,
+                script_path: None,
             }),
         });
         assert_eq!(events.len(), 1);
@@ -6025,6 +6121,9 @@ required = true
                     is_error: Some(true),
                     meta: None,
                 }),
+                mcp_app_ui: None,
+                read_only_hint: None,
+                turn_id: "turn-1".to_string(),
             }),
         };
 
@@ -6251,6 +6350,8 @@ required = true
                 parsed_cmd: Vec::new(),
                 source: ExecCommandSource::Agent,
                 interaction_input: None,
+                plugin_id: None,
+                script_path: None,
             }),
         });
         let _ = adapter.collect(&Event {
@@ -6283,6 +6384,8 @@ required = true
                 duration: Duration::from_millis(25),
                 formatted_output: String::new(),
                 status: ExecCommandStatus::Completed,
+                plugin_id: None,
+                script_path: None,
             }),
         });
 
@@ -6369,8 +6472,11 @@ required = true
                     }],
                     phase: None,
                     memory_citation: None,
+                    delivery: None,
+                    questions: None,
                 }),
                 completed_at_ms: 0,
+                started_at_ms: None,
             }),
         });
 
@@ -6414,8 +6520,11 @@ required = true
                     }],
                     phase: Some(MessagePhase::Commentary),
                     memory_citation: None,
+                    delivery: None,
+                    questions: None,
                 }),
                 completed_at_ms: 0,
+                started_at_ms: None,
             }),
         });
 
@@ -6433,6 +6542,8 @@ required = true
                     }],
                     phase: Some(MessagePhase::Commentary),
                     memory_citation: None,
+                    delivery: None,
+                    questions: None,
                 },
             )),
             None
@@ -6449,6 +6560,8 @@ required = true
                 message: "I am checking the project files.".to_string(),
                 phase: Some(MessagePhase::Commentary),
                 memory_citation: None,
+                delivery: None,
+                questions: None,
             }),
         });
 
@@ -6461,6 +6574,8 @@ required = true
                 message: "I am checking the project files.".to_string(),
                 phase: Some(MessagePhase::Commentary),
                 memory_citation: None,
+                delivery: None,
+                questions: None,
             }),
             None
         );
@@ -6559,6 +6674,7 @@ required = true
             output_tokens: output,
             reasoning_output_tokens: output / 4,
             total_tokens: input + output,
+            codex_rollout_budget_units: None,
         }
     }
 
@@ -6594,6 +6710,22 @@ required = true
     /// Starts a turn on the main thread through the registry a run hands Codex.
     async fn start_turn(turn_start: &TurnStartTokenUsage, turn_id: &str, total: &TokenUsage) {
         start_test_turn(turn_start, "thread-main", turn_id, total).await;
+    }
+
+    #[test]
+    fn turn_start_usage_recorder_runs_in_the_phase_that_carries_the_baseline() {
+        // Codex hands `token_usage_at_turn_start` only to contributors scheduled
+        // before task registration. Every per-turn usage row depends on it.
+        let registry = codex_extension_registry(&TurnStartTokenUsage::default());
+        let thread_store = ExtensionData::new("thread-main");
+        let contributors = registry.turn_lifecycle_contributors();
+        assert!(!contributors.is_empty());
+        for contributor in contributors {
+            assert_eq!(
+                contributor.turn_start_phase(&thread_store),
+                TurnStartPhase::BeforeTaskRegistration
+            );
+        }
     }
 
     fn only_turn_completed(adapter: &mut CodexEventStreamAdapter, events: &[Event]) -> JsonValue {
@@ -6653,6 +6785,7 @@ required = true
                     spend_control_reached: None,
                     plan_type: None,
                     rate_limit_reached_type: None,
+                    normal_model_slug: None,
                 }),
             }),
         };
