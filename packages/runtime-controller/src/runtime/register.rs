@@ -913,6 +913,7 @@ pub(crate) async fn runtime_register(
         None,
         None,
         None,
+        None,
     );
 
     let runtime_token = mint_scoped_token_with_runtime_generation(
