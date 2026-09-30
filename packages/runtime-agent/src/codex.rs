@@ -2723,6 +2723,10 @@ fn install_browser_mcp_servers(
     if personal_enabled {
         let (url, project_id, token) = crate::personal_browser::mcp_registration_from_process()
             .context("failed to prepare Personal Browser MCP registration")?;
+        // Codex sends the bearer below with its default proxy handling. Refuse the turn rather
+        // than let an ambient or system proxy receive it.
+        crate::loopback_proxy::ensure_no_proxy_intercepts(&url)
+            .context("refusing the Personal Browser turn")?;
         servers.insert(
             PERSONAL_BROWSER_MCP_SERVER_NAME.to_string(),
             browser_mcp_server_config(McpServerTransportConfig::StreamableHttp {

@@ -11,8 +11,8 @@ use codex_arg0::arg0_dispatch;
 use codex_utils_absolute_path::AbsolutePathBuf;
 use codex_utils_path_uri::PathUri;
 use runtime_agent::{
-    agent::RuntimeAgent, code_mode_host, config::Config, local_browser, personal_browser,
-    process_hardening, shared_browser,
+    agent::RuntimeAgent, code_mode_host, config::Config, local_browser, loopback_proxy,
+    personal_browser, process_hardening, shared_browser,
 };
 use tokio::signal;
 use tracing::{Level, error, info, warn};
@@ -35,6 +35,11 @@ fn main() -> anyhow::Result<()> {
         .context("failed to disable runtime-agent process inspection")?;
 
     sanitize_tmpdir();
+    // Codex's HTTP clients honor HTTP(S)_PROXY, ALL_PROXY and the system proxy, none of which
+    // exempts loopback. Device-local endpoints such as the Personal Browser broker (which
+    // receives a bearer token) must never be reached through a proxy.
+    // SAFETY: no other thread exists yet.
+    unsafe { loopback_proxy::exempt_loopback_from_proxy_env() };
     if let Some(exit_code) = maybe_dispatch_apply_patch_with_bootstrapped_updates() {
         std::process::exit(exit_code);
     }

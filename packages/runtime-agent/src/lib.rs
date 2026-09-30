@@ -15,6 +15,7 @@ pub mod controller_tokens;
 pub mod job_cancel;
 pub mod jobs;
 pub mod local_browser;
+pub mod loopback_proxy;
 mod model_environment;
 pub mod origin;
 pub mod personal_browser;

@@ -347,7 +347,7 @@ async fn responses(
             );
         }
         // A bounded browser turn only needs its tool inventory recorded; the parent checks it.
-        "personal_browser_tools" => return answer(FINAL_TEXT),
+        "personal_browser_tools" | "personal_browser_behind_proxy" => return answer(FINAL_TEXT),
         "tool_once" => {
             let supplied_history = body["input"].to_string();
             if !supplied_history.contains("TOOL_APPLIED") {
@@ -478,6 +478,21 @@ fn offered_tool_names(request: &Value) -> Vec<String> {
         }
     }
     names
+}
+
+/// A proxy that must never be used: it records each connection and closes it unanswered.
+async fn start_poison_proxy() -> Result<(String, Arc<Mutex<usize>>, tokio::task::JoinHandle<()>)> {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+    let url = format!("http://{}", listener.local_addr()?);
+    let connections = Arc::new(Mutex::new(0));
+    let counted = Arc::clone(&connections);
+    let task = tokio::spawn(async move {
+        while let Ok((stream, _)) = listener.accept().await {
+            *counted.lock().unwrap() += 1;
+            drop(stream);
+        }
+    });
+    Ok((url, connections, task))
 }
 
 fn test_model() -> String {
@@ -626,7 +641,38 @@ async fn run_scenario(scenario: &str, expected_requests: usize) -> Result<()> {
         .stdin(Stdio::null())
         .stdout(Stdio::from(output.try_clone()?))
         .stderr(Stdio::from(output));
-    if scenario == "personal_browser_tools" {
+    let personal_browser_scenario = matches!(
+        scenario,
+        "personal_browser_tools" | "personal_browser_behind_proxy" | "personal_browser_proxied"
+    );
+    let poison_proxy = if matches!(
+        scenario,
+        "personal_browser_behind_proxy" | "personal_browser_proxied"
+    ) {
+        let (url, connections, task) = start_poison_proxy().await?;
+        // Every proxy variable reqwest and curl read, as a corporate proxy setup exports them.
+        for key in [
+            "HTTP_PROXY",
+            "HTTPS_PROXY",
+            "ALL_PROXY",
+            "http_proxy",
+            "https_proxy",
+            "all_proxy",
+        ] {
+            command.env(key, &url);
+        }
+        if scenario == "personal_browser_behind_proxy" {
+            // What runtime-agent's main() merges into its own environment at start-up.
+            let no_proxy = runtime_agent::loopback_proxy::merge_loopback_no_proxy(None);
+            command
+                .env("NO_PROXY", &no_proxy)
+                .env("no_proxy", &no_proxy);
+        }
+        Some((connections, task))
+    } else {
+        None
+    };
+    if personal_browser_scenario {
         // The Personal Browser capability a desktop runtime receives, pointed at the mock.
         command
             .env("INSTAFY_PERSONAL_BROWSER_CONTROL_URL", &origin)
@@ -656,6 +702,14 @@ async fn run_scenario(scenario: &str, expected_requests: usize) -> Result<()> {
     };
     server.abort();
     let diagnostics = fs::read_to_string(output_path)?;
+    if let Some((connections, task)) = poison_proxy {
+        task.abort();
+        assert_eq!(
+            *connections.lock().unwrap(),
+            0,
+            "{scenario}: loopback traffic reached the ambient proxy: {diagnostics}"
+        );
+    }
     assert!(status.success(), "{scenario} child failed: {diagnostics}");
     assert_eq!(
         *state.errors.lock().unwrap(),
@@ -718,7 +772,16 @@ async fn run_scenario(scenario: &str, expected_requests: usize) -> Result<()> {
             "the follow-up must continue with the finished call's output: {continued:?}"
         );
     }
-    if scenario == "personal_browser_tools" {
+    if scenario == "personal_browser_proxied" {
+        assert!(
+            state.mcp_methods.lock().unwrap().is_empty(),
+            "a refused Personal Browser turn must not reach the broker"
+        );
+    }
+    if matches!(
+        scenario,
+        "personal_browser_tools" | "personal_browser_behind_proxy"
+    ) {
         for request in requests.iter() {
             let names = offered_tool_names(request);
             for forbidden in BOUNDED_BROWSER_FORBIDDEN_TOOLS {
@@ -815,6 +878,17 @@ scenario_test!(
     "personal_browser_tools",
     1
 );
+// The Personal Browser bearer must never reach an ambient proxy (HTTP_PROXY, ALL_PROXY, ...).
+scenario_test!(
+    personal_browser_turn_bypasses_an_ambient_proxy_for_loopback,
+    "personal_browser_behind_proxy",
+    1
+);
+scenario_test!(
+    personal_browser_turn_is_refused_when_a_proxy_would_see_its_bearer,
+    "personal_browser_proxied",
+    0
+);
 scenario_test!(terminal_400_is_not_retried, "terminal_400", 1);
 scenario_test!(terminal_401_is_not_retried, "terminal_401", 1);
 scenario_test!(terminal_402_is_not_retried, "terminal_402", 1);
@@ -868,6 +942,7 @@ async fn isolated_retry_child() -> Result<()> {
     if scenario == "per_turn_usage" {
         return run_per_turn_usage_jobs(&client).await;
     }
+    let personal_browser = scenario.starts_with("personal_browser_");
     let cancel = JobCancelSignal::new();
     let cancel_on_request = scenario == "cancel";
     let signal = cancel.clone();
@@ -893,9 +968,9 @@ async fn isolated_retry_child() -> Result<()> {
                 // A browser session keeps Codex's default retries and the runtime's own
                 // stream-error cap instead of the bounded proxy policy.
                 expect_browser_session: scenario.starts_with("browser_step_429s")
-                    || scenario == "personal_browser_tools",
-                personal_browser: scenario == "personal_browser_tools",
-                disable_shell_tool: scenario == "personal_browser_tools",
+                    || personal_browser,
+                personal_browser,
+                disable_shell_tool: personal_browser,
                 ..Default::default()
             },
         )
@@ -946,6 +1021,7 @@ async fn isolated_retry_child() -> Result<()> {
             | "browser_step_429s_sse"
             | "incomplete_after_tool_call"
             | "personal_browser_tools"
+            | "personal_browser_behind_proxy"
     ) {
         assert_eq!(result?.final_json["summary"], FINAL_TEXT);
     } else {
@@ -958,6 +1034,14 @@ async fn isolated_retry_child() -> Result<()> {
         }
         if scenario == "usage_limit_429" {
             assert!(message.contains("usage limit"), "{message}");
+        }
+        if scenario == "personal_browser_proxied" {
+            assert!(
+                message.contains("refusing the personal browser turn"),
+                "{message}"
+            );
+            assert!(message.contains("no_proxy"), "{message}");
+            assert!(!message.contains(PERSONAL_BROWSER_TOKEN), "{message}");
         }
         if scenario == "cancel" {
             assert!(message.contains("lease lost"), "{message}");

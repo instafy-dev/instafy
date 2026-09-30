@@ -10053,6 +10053,8 @@ dependencies = [
  "codex-utils-absolute-path",
  "codex-utils-path-uri",
  "futures-util",
+ "http 1.4.0",
+ "hyper-util",
  "jsonwebtoken",
  "libc",
  "once_cell",
