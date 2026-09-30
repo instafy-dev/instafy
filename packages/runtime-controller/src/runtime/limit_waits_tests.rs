@@ -1529,17 +1529,94 @@ async fn add_heartbeating_desktop(
     Ok(runtime_id)
 }
 
+/// A private machine never leases a platform AI job (an AI job whose target
+/// has no credential), so it is not the live runner of one pinned to it. It
+/// is for work it does lease there, such as its owner's terminal command.
+#[tokio::test]
+async fn a_desktop_is_not_the_live_runner_of_a_platform_job_pinned_to_it() -> anyhow::Result<()> {
+    if std::env::var("TEST_DATABASE_URL").is_err() {
+        eprintln!("skipping pinned platform live runner test: TEST_DATABASE_URL not set");
+        return Ok(());
+    }
+    let (mut client, driver) = raw_client().await?;
+    let transaction = client.transaction().await?;
+    let project_id = Uuid::new_v4();
+    let owner = Uuid::new_v4();
+    let desktop = Uuid::new_v4();
+    transaction
+        .execute(
+            "insert into projects (id, project_type, status) values ($1, 'customer', 'active')",
+            &[&project_id],
+        )
+        .await?;
+    transaction
+        .execute(
+            "insert into runtimes
+                (id, project_id, provider, status, idle_ttl_seconds, last_seen_at, capabilities)
+             values ($1, $2, 'self_hosted', 'ready', 600, now(), $3)",
+            &[
+                &desktop,
+                &project_id,
+                &json!({
+                    "_instafySelfHostedAccess": {
+                        "mode": "private",
+                        "ownerUserId": owner.to_string(),
+                    }
+                }),
+            ],
+        )
+        .await?;
+    let platform_job = Uuid::new_v4();
+    let terminal_job = Uuid::new_v4();
+    for (job_id, intent) in [
+        (platform_job, "feature"),
+        (terminal_job, "terminal_command"),
+    ] {
+        transaction
+            .execute(
+                "insert into agent_jobs (id, project_id, status, intent, target_runtime_id, payload)
+                 values ($1, $2, 'queued', $3, $4, jsonb_build_object('user_id', $5::text))",
+                &[&job_id, &project_id, &intent, &desktop, &owner.to_string()],
+            )
+            .await?;
+    }
+    let live_runner_query = format!(
+        "select {} as live from agent_jobs j where j.id = $1",
+        job_has_live_runner("j")
+    );
+    let platform_live: bool = transaction
+        .query_one(&live_runner_query, &[&platform_job])
+        .await?
+        .get("live");
+    let terminal_live: bool = transaction
+        .query_one(&live_runner_query, &[&terminal_job])
+        .await?
+        .get("live");
+    transaction.rollback().await?;
+    drop(client);
+    let _ = driver.await;
+    assert!(!platform_live, "the desktop never leases the platform job");
+    assert!(
+        terminal_live,
+        "the desktop runs its owner's terminal command"
+    );
+    Ok(())
+}
+
 /// A desktop (or any machine) that is up does not end a wait for work it
-/// would never run: a job pinned to the space's hosted runtime, or unpinned
-/// work of another user. The retry and the give-up go on for those. Work the
-/// desktop does run (unpinned, its owner's) ends the wait.
+/// would never run: a job pinned to the space's hosted runtime, unpinned work
+/// of another user, or its owner's platform AI job (no credential), which
+/// runs only on Instafy-hosted runtimes. The retry and the give-up go on for
+/// those. Work the desktop does run (unpinned, its owner's terminal command)
+/// ends the wait.
 #[tokio::test]
 async fn a_heartbeating_desktop_only_ends_a_wait_for_work_it_would_run() -> anyhow::Result<()> {
-    let fixture = setup("limit-wait-desktop", 3, 10).await?;
+    let fixture = setup("limit-wait-desktop", 4, 10).await?;
     crate::tests::with_shared_db_fixture(fixture.shared_db_fixture(), async {
         let pinned_to_hosted = fixture.waiting_project_ids[0];
         let another_users_work = fixture.waiting_project_ids[1];
         let owners_work = fixture.waiting_project_ids[2];
+        let owners_platform_work = fixture.waiting_project_ids[3];
         let owner = Uuid::new_v4();
         let someone_else = Uuid::new_v4();
 
@@ -1563,15 +1640,22 @@ async fn a_heartbeating_desktop_only_ends_a_wait_for_work_it_would_run() -> anyh
             .await?;
         let others_job = Uuid::new_v4();
         let owners_job = Uuid::new_v4();
-        for (job_id, project_id, user_id) in [
-            (others_job, another_users_work, someone_else),
-            (owners_job, owners_work, owner),
+        let owners_platform_job = Uuid::new_v4();
+        for (job_id, project_id, user_id, intent) in [
+            (
+                others_job,
+                another_users_work,
+                someone_else,
+                "terminal_command",
+            ),
+            (owners_job, owners_work, owner, "terminal_command"),
+            (owners_platform_job, owners_platform_work, owner, "feature"),
         ] {
             connection
                 .execute(
-                    "insert into agent_jobs (id, project_id, status, payload)
-                     values ($1, $2, 'queued', jsonb_build_object('user_id', $3::text))",
-                    &[&job_id, &project_id, &user_id.to_string()],
+                    "insert into agent_jobs (id, project_id, status, intent, payload)
+                     values ($1, $2, 'queued', $4, jsonb_build_object('user_id', $3::text))",
+                    &[&job_id, &project_id, &user_id.to_string(), &intent],
                 )
                 .await?;
         }
@@ -1581,8 +1665,8 @@ async fn a_heartbeating_desktop_only_ends_a_wait_for_work_it_would_run() -> anyh
         }
 
         let report = sweep_hosted_runtime_limit_waits(&fixture.state, &policy()).await?;
-        assert_eq!(report.attempted, 2, "{report:?}");
-        for project_id in [pinned_to_hosted, another_users_work] {
+        assert_eq!(report.attempted, 3, "{report:?}");
+        for project_id in [pinned_to_hosted, another_users_work, owners_platform_work] {
             let wait = fixture
                 .wait_row(project_id)
                 .await?
@@ -1600,7 +1684,12 @@ async fn a_heartbeating_desktop_only_ends_a_wait_for_work_it_would_run() -> anyh
             .execute(
                 "update agent_jobs set created_at = now() - interval '31 minutes'
                  where id = any($1)",
-                &[&vec![pinned_job, others_job, owners_job]],
+                &[&vec![
+                    pinned_job,
+                    others_job,
+                    owners_job,
+                    owners_platform_job,
+                ]],
             )
             .await?;
         connection
@@ -1613,9 +1702,10 @@ async fn a_heartbeating_desktop_only_ends_a_wait_for_work_it_would_run() -> anyh
             .await?;
         drop(connection);
         let report = sweep_hosted_runtime_limit_waits(&fixture.state, &policy()).await?;
-        assert_eq!(report.expired_jobs, 2, "{report:?}");
+        assert_eq!(report.expired_jobs, 3, "{report:?}");
         assert_eq!(fixture.job_state(pinned_job).await?.0, "failed");
         assert_eq!(fixture.job_state(others_job).await?.0, "failed");
+        assert_eq!(fixture.job_state(owners_platform_job).await?.0, "failed");
         assert_eq!(
             fixture.job_state(owners_job).await?.0,
             "queued",

@@ -864,7 +864,7 @@ pub(crate) async fn agent_lease(
         .await
         .map_err(|error| internal_error(format!("failed to start transaction: {error}")))?;
 
-    ensure_runtime_can_lease(
+    let runtime_is_private_self_hosted = ensure_runtime_can_lease(
         &state,
         &transaction,
         &project_id,
@@ -891,6 +891,17 @@ pub(crate) async fn agent_lease(
             batch_mode != AgentLeaseBatchMode::None,
             batch_conversation_id.as_ref(),
             batch_group_id.as_deref(),
+            // Platform AI jobs run only on Instafy-hosted runtimes, so a
+            // desktop or self-hosted machine never leases them. This holds
+            // with MANAGED_AI_ENABLED=false too. The controller then refuses
+            // the managed credential lease, so only a proxy's own static key
+            // can serve a credential-less token, and a private runtime calls
+            // the proxy this controller names (the job's envelope) unless its
+            // owner overrides PROXY_BASE_URL. That key belongs to the
+            // deployment, not to the machine's owner, and the controller
+            // cannot tell which proxy the machine will call, so the rule does
+            // not depend on the flag.
+            runtime_is_private_self_hosted,
         )
         .await?
         {
@@ -1056,6 +1067,8 @@ fn runtime_record_can_lease(
     provider_is_self_hosted && has_valid_owner
 }
 
+/// Validate that the runtime may lease jobs, and return whether it is a
+/// private self-hosted runtime.
 async fn ensure_runtime_can_lease(
     state: &AppState,
     transaction: &tokio_postgres::Transaction<'_>,
@@ -1063,7 +1076,7 @@ async fn ensure_runtime_can_lease(
     runtime_id: &Uuid,
     token_lease_id: Option<Uuid>,
     token_runtime_generation: Option<Uuid>,
-) -> Result<(), (StatusCode, Json<ApiError>)> {
+) -> Result<bool, (StatusCode, Json<ApiError>)> {
     let row = transaction
         .query_opt(
             "select provider, status, capabilities, active_lease_id
@@ -1083,22 +1096,19 @@ async fn ensure_runtime_can_lease(
     let status: String = row.get("status");
     let capabilities: JsonValue = row.get("capabilities");
     let active_lease_id: Option<Uuid> = row.get("active_lease_id");
+    let is_private_self_hosted =
+        runtime::runtime_is_private_self_hosted(state, &provider, &capabilities);
     ensure_agent_token_runtime_binding_matches(
         &capabilities,
         token_lease_id,
         active_lease_id,
         token_runtime_generation,
-        runtime::runtime_is_private_self_hosted(state, &provider, &capabilities),
+        is_private_self_hosted,
     )?;
-    if !runtime_record_can_lease(
-        &provider,
-        &status,
-        &capabilities,
-        runtime::runtime_is_private_self_hosted(state, &provider, &capabilities),
-    ) {
+    if !runtime_record_can_lease(&provider, &status, &capabilities, is_private_self_hosted) {
         return Err(forbidden("runtime is not eligible to lease jobs"));
     }
-    Ok(())
+    Ok(is_private_self_hosted)
 }
 
 fn runtime_status_can_heartbeat(status: &str) -> bool {
@@ -3627,12 +3637,16 @@ pub(crate) async fn lease_next_agent_job(
     exclude_runtime_spread: bool,
     batch_conversation_id: Option<&Uuid>,
     batch_multi_agent_group_id: Option<&str>,
+    exclude_platform_ai_jobs: bool,
 ) -> Result<Option<AgentJob>, (StatusCode, Json<ApiError>)> {
     let runtime_uuid: Option<Uuid> = runtime_id.cloned();
     let batch_conversation_uuid: Option<Uuid> = batch_conversation_id.cloned();
     let batch_multi_agent_group: Option<String> = batch_multi_agent_group_id.map(str::to_string);
     // Personal Browser jobs may carry inherited spread metadata, but their
     // explicit desktop runtime remains an exact device boundary.
+    //
+    // `exclude_platform_ai_jobs` ($10) skips the platform lane: an AI job whose
+    // target has no credential. BYO jobs and terminal commands stay leasable.
     let row = transaction
         .query_opt(
             "with eligible_jobs as (
@@ -3681,6 +3695,11 @@ pub(crate) async fn lease_next_agent_job(
                 from agent_jobs aj
                 where aj.project_id = $1
                   and status = 'queued'
+                  and not (
+                        $10::bool
+                        and aj.credential_id is null
+                        and lower(btrim(coalesce(aj.intent, ''))) <> 'terminal_command'
+                  )
              ),
              candidate as (
                 select id
@@ -3865,6 +3884,7 @@ pub(crate) async fn lease_next_agent_job(
                 &exclude_runtime_spread,
                 &batch_conversation_uuid,
                 &batch_multi_agent_group,
+                &exclude_platform_ai_jobs,
             ],
         )
         .await

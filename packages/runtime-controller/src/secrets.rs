@@ -1053,21 +1053,23 @@ fn parse_agent_job_identity(payload: &JsonValue) -> (Option<Uuid>, Option<String
     (user_id, agent_handle, agent_id)
 }
 
-fn payload_uses_managed_ai(payload: &JsonValue) -> bool {
-    payload
-        .get("metadata")
-        .and_then(JsonValue::as_object)
-        .and_then(|metadata| metadata.get("managedAiUsed"))
-        .and_then(JsonValue::as_bool)
-        .unwrap_or(false)
-}
-
+/// Point Codex's local model at the managed model for a job on the platform
+/// lane: an AI job whose target has no credential, which the proxy pins to
+/// that model. This keys on the job's own columns rather than the
+/// `managedAiUsed` payload flag, which stays false for service-role jobs and
+/// for ambient evaluations until they answer. Terminal commands and BYO jobs
+/// keep their model, and so does every job when managed AI is off, because
+/// the credential-less lane is then the proxy's own key.
 fn apply_managed_ai_env_overrides(
     env: &mut JsonMap<String, JsonValue>,
     config: &crate::config::AppConfig,
-    payload: &JsonValue,
+    credential_id: Option<Uuid>,
+    intent: Option<&str>,
 ) {
-    if !payload_uses_managed_ai(payload) {
+    if !config.managed_ai_enabled
+        || credential_id.is_some()
+        || !crate::dispatch::dispatch_requires_ai_access(intent.unwrap_or_default())
+    {
         return;
     }
 
@@ -1257,7 +1259,8 @@ async fn agent_secrets(
 
     let row = transaction
         .query_opt(
-            "select id, status, leased_by_runtime_id, lease_expires_at, payload, credential_id
+            "select id, status, leased_by_runtime_id, lease_expires_at, payload, credential_id,
+                    intent
              from agent_jobs
              where id = $1 and project_id = $2
              for share",
@@ -1285,6 +1288,8 @@ async fn agent_secrets(
     }
 
     let payload: JsonValue = row.get::<_, PgJson<JsonValue>>("payload").0;
+    let credential_id: Option<Uuid> = row.get("credential_id");
+    let intent: Option<String> = row.get("intent");
     let touch = body.touch.unwrap_or(true);
 
     let (user_id, agent_handle_raw, agent_id) = parse_agent_job_identity(&payload);
@@ -1295,12 +1300,16 @@ async fn agent_secrets(
         .map(|value| value.to_ascii_lowercase());
 
     if agent_handle.is_none() && agent_id.is_none() {
+        // No agent identity means no granted secrets and no agent model, but
+        // a platform-lane job still runs Codex on the managed model.
+        let mut env = JsonMap::new();
+        apply_managed_ai_env_overrides(&mut env, &state.config, credential_id, intent.as_deref());
         transaction
             .commit()
             .await
             .map_err(|error| internal_error(format!("failed to commit agent secrets: {error}")))?;
         return Ok(Json(AgentSecretsResponse {
-            env: JsonValue::Object(JsonMap::new()),
+            env: JsonValue::Object(env),
             inventory: Vec::new(),
         }));
     }
@@ -1454,7 +1463,7 @@ async fn agent_secrets(
             .await;
     }
 
-    apply_managed_ai_env_overrides(&mut env, &state.config, &payload);
+    apply_managed_ai_env_overrides(&mut env, &state.config, credential_id, intent.as_deref());
 
     transaction
         .commit()
@@ -1476,20 +1485,18 @@ async fn agent_secrets(
 mod security_tests;
 
 #[cfg(test)]
+#[path = "secrets_managed_model_tests.rs"]
+mod managed_model_tests;
+
+#[cfg(test)]
 mod tests {
     use super::apply_managed_ai_env_overrides;
     use crate::model_defaults::default_managed_ai_model_id;
     use crate::tests::build_app_config;
-    use serde_json::{json, Map as JsonMap, Value as JsonValue};
+    use serde_json::{Map as JsonMap, Value as JsonValue};
+    use uuid::Uuid;
 
-    #[test]
-    fn managed_ai_env_override_forces_managed_model_and_provider() {
-        let config = build_app_config("test-private", "test-public", "test-key");
-        let payload = json!({
-            "metadata": {
-                "managedAiUsed": true
-            }
-        });
+    fn agent_model_env() -> JsonMap<String, JsonValue> {
         let mut env = JsonMap::new();
         env.insert(
             "CODEX_MODEL".to_string(),
@@ -1499,44 +1506,63 @@ mod tests {
             "CODEX_MODEL_PROVIDER".to_string(),
             JsonValue::String("zai".to_string()),
         );
+        env
+    }
 
-        apply_managed_ai_env_overrides(&mut env, &config, &payload);
-
-        // Managed turns pin the operator-paid tier default (Luna), which is
-        // deliberately not the ChatGPT-login default (Sol).
-        assert_eq!(
+    fn env_model(env: &JsonMap<String, JsonValue>) -> (Option<&str>, Option<&str>) {
+        (
             env.get("CODEX_MODEL").and_then(JsonValue::as_str),
-            Some(default_managed_ai_model_id())
-        );
-        assert_eq!(
-            env.get("CODEX_MODEL").and_then(JsonValue::as_str),
-            Some("gpt-6-luna")
-        );
-        assert_eq!(
             env.get("CODEX_MODEL_PROVIDER").and_then(JsonValue::as_str),
-            Some("openai")
-        );
+        )
     }
 
     #[test]
-    fn non_managed_ai_env_override_leaves_existing_model_alone() {
+    fn managed_ai_env_override_forces_managed_model_and_provider() {
         let config = build_app_config("test-private", "test-public", "test-key");
-        let payload = json!({
-            "metadata": {
-                "managedAiUsed": false
-            }
-        });
-        let mut env = JsonMap::new();
-        env.insert(
-            "CODEX_MODEL".to_string(),
-            JsonValue::String("glm-4.5".to_string()),
-        );
+        // A job without an intent predates the column and is an AI job.
+        for intent in [Some("feature"), Some("question"), None] {
+            let mut env = agent_model_env();
 
-        apply_managed_ai_env_overrides(&mut env, &config, &payload);
+            apply_managed_ai_env_overrides(&mut env, &config, None, intent);
 
-        assert_eq!(
-            env.get("CODEX_MODEL").and_then(JsonValue::as_str),
-            Some("glm-4.5")
-        );
+            // Managed turns pin the operator-paid tier default (Luna), which is
+            // deliberately not the ChatGPT-login default (Sol).
+            assert_eq!(
+                env_model(&env),
+                (Some(default_managed_ai_model_id()), Some("openai")),
+                "{intent:?}"
+            );
+            assert_eq!(env_model(&env).0, Some("gpt-6-luna"));
+        }
+    }
+
+    #[test]
+    fn credential_or_terminal_intent_keeps_the_agent_model() {
+        let config = build_app_config("test-private", "test-public", "test-key");
+        for (credential_id, intent) in [
+            (Some(Uuid::new_v4()), Some("feature")),
+            (Some(Uuid::new_v4()), None),
+            (None, Some("terminal_command")),
+            (None, Some(" TERMINAL_COMMAND ")),
+        ] {
+            let mut env = agent_model_env();
+
+            apply_managed_ai_env_overrides(&mut env, &config, credential_id, intent);
+
+            assert_eq!(env, agent_model_env(), "{credential_id:?} {intent:?}");
+        }
+    }
+
+    #[test]
+    fn credentialless_job_keeps_agent_model_when_managed_ai_is_off() {
+        // With managed AI off the credential-less lane is the proxy's own key,
+        // so the controller has no model to impose on it.
+        let mut config = build_app_config("test-private", "test-public", "test-key");
+        config.managed_ai_enabled = false;
+        let mut env = agent_model_env();
+
+        apply_managed_ai_env_overrides(&mut env, &config, None, Some("feature"));
+
+        assert_eq!(env, agent_model_env());
     }
 }
