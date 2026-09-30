@@ -31,9 +31,47 @@ const RUNTIME_SAFETY_RULES: &str = include_str!("codex_runtime_safety_rules.md")
 
 /// Instafy's "File editing constraints" and "Destructive Actions" sections,
 /// kept verbatim from the GPT-6 prompt the runtime shipped before
-/// rust-v0.159.2 (instafy-dev/codex 99f24c873). Upstream's prompt dropped them.
+/// rust-v0.159.2 (instafy-dev/codex 99f24c873). Upstream's GPT-6 prompt dropped
+/// them; some other catalog prompts (gpt-5.6-sol) still carry the same text.
 pub(crate) fn runtime_safety_rules() -> &'static str {
     RUNTIME_SAFETY_RULES.trim_end()
+}
+
+/// The safety rules split into `(heading title, section text)` pairs.
+fn runtime_safety_sections() -> Vec<(&'static str, &'static str)> {
+    let rules = runtime_safety_rules();
+    let mut starts = Vec::new();
+    let mut offset = 0;
+    for line in rules.split_inclusive('\n') {
+        if let Some(title) = heading_title(line.trim_end()) {
+            starts.push((offset, title));
+        }
+        offset += line.len();
+    }
+    starts
+        .iter()
+        .enumerate()
+        .map(|(index, (start, title))| {
+            let end = starts.get(index + 1).map_or(rules.len(), |(next, _)| *next);
+            (*title, rules[*start..end].trim_end())
+        })
+        .collect()
+}
+
+/// The title of a Markdown heading line (`#` to `######`).
+fn heading_title(line: &str) -> Option<&str> {
+    let title = line.trim_start_matches('#');
+    let level = line.len() - title.len();
+    ((1..=6).contains(&level) && title.starts_with(' ')).then(|| title.trim())
+}
+
+/// Whether `instructions` already has a section with this title, at any heading level and in
+/// any letter case (upstream's gpt-5.6-sol prompt says "Destructive actions").
+fn has_section(instructions: &str, title: &str) -> bool {
+    instructions
+        .lines()
+        .filter_map(heading_title)
+        .any(|heading| heading.eq_ignore_ascii_case(title))
 }
 
 /// Applies the runtime policy to a freshly loaded Codex configuration.
@@ -123,7 +161,10 @@ pub(crate) fn pin_instructions_for_resolved_model(config: &mut Config, model_inf
         .as_ref()
         .and_then(|messages| messages.instructions_template.as_deref())
         .unwrap_or_default();
-    if template.contains(runtime_safety_rules()) {
+    if runtime_safety_sections()
+        .iter()
+        .all(|(title, _)| has_section(template, title))
+    {
         return;
     }
     let mut instructions = template.to_string();
@@ -131,9 +172,14 @@ pub(crate) fn pin_instructions_for_resolved_model(config: &mut Config, model_inf
     config.base_instructions = Some(instructions);
 }
 
+/// Appends each safety section `instructions` does not already have.
 fn append_runtime_safety_rules(instructions: &mut String) {
-    let rules = runtime_safety_rules();
-    if instructions.contains(rules) {
+    let missing: Vec<&str> = runtime_safety_sections()
+        .into_iter()
+        .filter(|(title, _)| !has_section(instructions, title))
+        .map(|(_, section)| section)
+        .collect();
+    if missing.is_empty() {
         return;
     }
     let trimmed = instructions.trim_end().len();
@@ -141,7 +187,7 @@ fn append_runtime_safety_rules(instructions: &mut String) {
     if !instructions.is_empty() {
         instructions.push_str("\n\n");
     }
-    instructions.push_str(rules);
+    instructions.push_str(&missing.join("\n\n"));
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -431,21 +477,74 @@ mod tests {
         template(&construct_model_info_offline(model, config)).to_string()
     }
 
+    /// A section's text without its heading line.
+    fn section_body(section: &str) -> &str {
+        section.split_once('\n').expect("section body").1.trim()
+    }
+
     #[test]
     fn safety_rules_are_the_sections_upstream_dropped() {
         let rules = runtime_safety_rules();
-        assert!(rules.starts_with("# File editing constraints\n\nUse `apply_patch`"));
+        // Verbatim from 99f24c873, where file editing was a subsection of
+        // "Rules for getting work done".
+        assert!(rules.starts_with("## File editing constraints\n\nUse `apply_patch`"));
         assert!(rules.contains("\n# Destructive Actions\n"));
         assert!(rules.contains("prefer using `mktemp -d`"));
         assert!(rules.contains("Never run commands such as `rm -rf $HOME`"));
         assert!(rules.ends_with("whether it can be recovered."));
+        let sections = runtime_safety_sections();
+        assert_eq!(
+            sections.iter().map(|(title, _)| *title).collect::<Vec<_>>(),
+            ["File editing constraints", "Destructive Actions"]
+        );
+        assert_eq!(
+            sections
+                .iter()
+                .map(|(_, section)| *section)
+                .collect::<Vec<_>>()
+                .join("\n\n"),
+            rules
+        );
         // Upstream's own GPT-6 prompt no longer carries them, which is why the
         // runtime appends them.
-        assert!(!template(&upstream_model("gpt-6-luna")).contains("# Destructive Actions"));
+        let luna = template(&upstream_model("gpt-6-luna")).to_string();
+        for (title, _) in &sections {
+            assert!(!has_section(&luna, title), "{title}");
+        }
+    }
+
+    #[test]
+    fn a_prompt_that_already_has_a_section_keeps_its_own_copy() {
+        // Upstream's gpt-5.6-sol prompt carries both sections with the same text, under
+        // "## File editing constraints" and "# Destructive actions". If a bump changes that
+        // text, decide again whether skipping our copy is still right.
+        let sol = template(&upstream_model("gpt-5.6-sol")).to_string();
+        for (title, section) in runtime_safety_sections() {
+            assert!(has_section(&sol, title), "{title}");
+            assert_eq!(sol.matches(section_body(section)).count(), 1, "{title}");
+        }
+        let mut instructions = sol.clone();
+        append_runtime_safety_rules(&mut instructions);
+        assert_eq!(instructions, sol);
+
+        // Only a missing section is appended.
+        let mut partial = "Base prompt.\n\n# DESTRUCTIVE ACTIONS\n\nOwn text.".to_string();
+        append_runtime_safety_rules(&mut partial);
+        let (_, file_editing) = runtime_safety_sections()[0];
+        assert_eq!(
+            partial,
+            format!("Base prompt.\n\n# DESTRUCTIVE ACTIONS\n\nOwn text.\n\n{file_editing}")
+        );
+        // Plain text that merely mentions a title is not a heading.
+        assert!(!has_section(
+            "Follow the destructive actions policy.",
+            "Destructive Actions"
+        ));
+        assert!(!has_section("#Destructive Actions", "Destructive Actions"));
     }
 
     #[tokio::test]
-    async fn every_lane_keeps_upstreams_prompt_or_its_own_and_ends_with_the_safety_rules() {
+    async fn every_lane_keeps_upstreams_prompt_or_its_own_and_carries_each_safety_section_once() {
         let lanes = [
             (
                 "ordinary structured",
@@ -503,15 +602,19 @@ mod tests {
                 pin_instructions_for_resolved_model(&mut config, &resolved);
 
                 let effective = effective_instructions(&config);
-                assert!(
-                    effective.ends_with(runtime_safety_rules()),
-                    "{model} / {lane_name}: safety rules missing"
-                );
-                assert_eq!(
-                    effective.matches("# Destructive Actions").count(),
-                    1,
-                    "{model} / {lane_name}: safety rules appended more than once"
-                );
+                for (title, section) in runtime_safety_sections() {
+                    let headings = effective
+                        .lines()
+                        .filter_map(heading_title)
+                        .filter(|heading| heading.eq_ignore_ascii_case(title))
+                        .count();
+                    assert_eq!(headings, 1, "{model} / {lane_name}: `{title}` headings");
+                    assert_eq!(
+                        effective.matches(section_body(section)).count(),
+                        1,
+                        "{model} / {lane_name}: `{title}` text"
+                    );
+                }
                 let expected_prefix = lane_instructions
                     .unwrap_or_else(|| template(&upstream_model(model)).to_string());
                 assert!(
