@@ -771,6 +771,9 @@ async fn load_runtime_status_response_for_viewer(
                 select oi.*
                 from origin_instances oi
                 where oi.runtime_id = r.id
+                  -- Only the runtime's own project's origins, never one a
+                  -- tenant attach recorded for another project.
+                  and oi.project_id = r.project_id
                   and oi.status <> 'released'
                 order by oi.updated_at desc
                 limit 1

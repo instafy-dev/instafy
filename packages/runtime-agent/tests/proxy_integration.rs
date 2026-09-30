@@ -4,7 +4,7 @@ use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::OnceLock;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::Duration;
 
 use anyhow::{Context, Result};
@@ -21,7 +21,7 @@ use runtime_agent::codex::{CodexClient, CodexRunOptions};
 use runtime_agent::config::Config;
 use runtime_agent::controller::{LeaseJob, Registration};
 use runtime_agent::jobs::{
-    JobProcessor, extract_job_failure_artifacts, extract_job_failure_message,
+    JobProcessor, JobProgress, extract_job_failure_artifacts, extract_job_failure_message,
 };
 use serde_json::{Value, json};
 use tempfile::TempDir;
@@ -43,6 +43,15 @@ struct EnvGuard {
 }
 
 impl EnvGuard {
+    fn remove(key: &str) -> Self {
+        let old = std::env::var(key).ok();
+        unsafe { std::env::remove_var(key) };
+        Self {
+            key: key.to_string(),
+            old,
+        }
+    }
+
     fn set(key: &str, value: impl AsRef<str>) -> Self {
         let old = std::env::var(key).ok();
         unsafe { std::env::set_var(key, value.as_ref()) };
@@ -89,6 +98,8 @@ const PROXY_RESPONSE_FIXTURE: &str = include_str!("fixtures/proxy_responses_succ
 enum StubResponse {
     Success,
     HttpError(u16),
+    ReadReference,
+    EmptyFinal,
 }
 
 struct StubState {
@@ -183,7 +194,7 @@ async fn spawn_stub_chatgpt_server(
 async fn handle_stub_chatgpt(
     State(state): State<Arc<StubState>>,
     headers: HeaderMap,
-    Json(_payload): Json<Value>,
+    Json(payload): Json<Value>,
 ) -> impl IntoResponse {
     println!("[stub] received proxy request");
     let expected_header = format!("Bearer {}", state.expected_token);
@@ -264,7 +275,66 @@ async fn handle_stub_chatgpt(
             )
                 .into_response()
         }
+        response @ (StubResponse::ReadReference | StubResponse::EmptyFinal) => {
+            // Unlike Success, this fixture never changes the workspace. Any
+            // changed bytes therefore came from processing the final descriptor.
+            // The API-key proxy leg requests JSON, even when native Codex asks
+            // the proxy for SSE. Returning the ChatGPT SSE fixture here would
+            // test transport retries instead of final-result normalization.
+            assert_eq!(payload.get("stream"), Some(&Value::Bool(false)));
+            assert!(
+                payload
+                    .pointer("/text/format/schema/properties/requiresContextLookup")
+                    .is_none(),
+                "read-reference fixtures must bypass routing"
+            );
+            Json(read_reference_fixture_response(matches!(
+                response,
+                StubResponse::ReadReference
+            )))
+            .into_response()
+        }
     }
+}
+
+const READ_REFERENCE_CONTENT: &str = "deployment_status=READY_FOR_REVIEW\n";
+
+fn read_reference_fixture_response(include_final: bool) -> Value {
+    let answer = json!({
+        "summary": "Read reference.txt: deployment_status is READY_FOR_REVIEW.",
+        "code": "",
+        "suggestions": [],
+        "actions": [],
+        "files": [{
+            "path": "reference.txt",
+            "workspacePath": "reference.txt",
+            "change": "read",
+            // Reproduce the bug: a display reference includes a model's copy
+            // of the file with its final newline missing.
+            "content": READ_REFERENCE_CONTENT.trim_end_matches('\n'),
+        }],
+    });
+    let output = if include_final {
+        vec![json!({
+            "id": format!("msg_{}", Uuid::new_v4()),
+            "type": "message",
+            "role": "assistant",
+            "status": "completed",
+            "phase": "final_answer",
+            "content": [{ "type": "output_text", "text": answer.to_string() }],
+        })]
+    } else {
+        Vec::new()
+    };
+    json!({
+        "id": format!("resp_{}", Uuid::new_v4()),
+        "object": "response",
+        "status": "completed",
+        "model": "gpt-5.5",
+        "output": output,
+        "metadata": if include_final { json!({ "codex": { "final": answer } }) } else { json!({}) },
+        "usage": { "input_tokens": 42, "output_tokens": 12, "total_tokens": 54 },
+    })
 }
 
 fn load_fixture_payloads() -> Vec<String> {
@@ -526,6 +596,296 @@ async fn wait_for_port(port: u16) -> Result<()> {
             Err(_) => sleep(Duration::from_millis(100)).await,
         }
     }
+}
+
+#[derive(Clone, Copy)]
+enum ReadReferenceCase {
+    Initial,
+    Recovery,
+    RequiredWrite,
+}
+
+#[test]
+fn codex_read_reference_preserves_file_bytes_via_proxy() -> Result<()> {
+    run_read_reference_proxy_case(ReadReferenceCase::Initial)
+}
+
+#[test]
+fn codex_read_reference_preserves_file_bytes_after_recovery_via_proxy() -> Result<()> {
+    run_read_reference_proxy_case(ReadReferenceCase::Recovery)
+}
+
+#[test]
+fn codex_read_reference_does_not_satisfy_required_write_via_proxy() -> Result<()> {
+    run_read_reference_proxy_case(ReadReferenceCase::RequiredWrite)
+}
+
+fn run_read_reference_proxy_case(case: ReadReferenceCase) -> Result<()> {
+    const STACK_SIZE: usize = 32 * 1024 * 1024;
+    std::thread::Builder::new()
+        .name("codex-read-reference-proxy-test".to_string())
+        .stack_size(STACK_SIZE)
+        .spawn(move || {
+            tokio::runtime::Builder::new_multi_thread()
+                .enable_all()
+                .worker_threads(2)
+                .thread_stack_size(STACK_SIZE)
+                .build()?
+                .block_on(read_reference_proxy_case(case))
+        })?
+        .join()
+        .map_err(|_| anyhow::anyhow!("read-reference proxy test panicked"))?
+}
+
+async fn read_reference_proxy_case(case: ReadReferenceCase) -> Result<()> {
+    let _env_guard = env_guard().await;
+    let workspace_root = TempDir::new()?;
+    let runtime_home = TempDir::new()?;
+    let project_id = Uuid::new_v4();
+    let workspace = workspace_root.path().join(project_id.to_string());
+    fs::create_dir_all(&workspace)?;
+    fs::write(workspace.join("reference.txt"), READ_REFERENCE_CONTENT)?;
+    let sentinel = b"untouched sentinel\r\n";
+    fs::write(workspace.join("sentinel.txt"), sentinel)?;
+
+    // This path is entirely local and uses constructed inert credentials. It
+    // must not load the operator's auth.json or enable controller integration.
+    let mut settings = [
+        "PROXY_CONTROLLER_BASE_URL",
+        "CONTROLLER_BASE_URL",
+        "CONTROLLER_INTERNAL_TOKEN",
+        "PROXY_CREDENTIAL_LEASE_TOKEN",
+        "PROXY_SIGNING_SECRET",
+        "PROXY_PINNED_MODEL",
+        "CODEX_PROFILE",
+        "CODEX_BASE_INSTRUCTIONS",
+    ]
+    .into_iter()
+    .map(EnvGuard::remove)
+    .collect::<Vec<_>>();
+    for (key, value) in [
+        ("PROXY_REQUIRE_CONTROLLER_AUTH", "false"),
+        ("PROXY_REQUIRE_CREDENTIAL_CLAIM", "false"),
+        ("OPENAI_API_KEY", "inert-runtime-proxy-key"),
+        ("CODEX_API_KEY", "inert-runtime-proxy-key"),
+        ("CODEX_MODEL", "gpt-5.5"),
+        ("CODEX_MODEL_PROVIDER", "openai"),
+        ("CODEX_DISABLED", "false"),
+        ("CODEX_SANDBOX_MODE", "workspace-write"),
+        ("CODEX_RUNTIME_REASONING_EFFORT", "low"),
+    ] {
+        settings.push(EnvGuard::set(key, value));
+    }
+    settings.push(EnvGuard::set(
+        "CODEX_HOME",
+        runtime_home.path().to_string_lossy(),
+    ));
+    let runtime_auth = runtime_home.path().join("auth.json");
+    fs::write(
+        &runtime_auth,
+        json!({ "OPENAI_API_KEY": "inert-runtime-proxy-key" }).to_string(),
+    )?;
+    settings.push(EnvGuard::set(
+        "CODEX_AUTH_PATH",
+        runtime_auth.to_string_lossy(),
+    ));
+
+    let responses = match case {
+        ReadReferenceCase::Recovery => vec![StubResponse::EmptyFinal, StubResponse::ReadReference],
+        _ => vec![StubResponse::ReadReference],
+    };
+    let (stub_addr, stub_shutdown, stub_state) = spawn_stub_chatgpt_server_with_responses(
+        workspace.clone(),
+        "inert-canned-provider-key".to_string(),
+        None,
+        responses,
+    )
+    .await?;
+    let stub_guard = ChildGuard::new(stub_shutdown);
+    let proxy_port = reserve_port()?;
+    let proxy_addr = SocketAddr::from(([127, 0, 0, 1], proxy_port));
+    let credentials = auth::Credentials::ApiKey {
+        key: "inert-canned-provider-key".to_string(),
+        endpoint: Some(format!("http://{stub_addr}/backend-api/codex/responses")),
+        default_model: Some("gpt-5.5".to_string()),
+    };
+    let (shutdown_tx, shutdown_rx) = oneshot::channel();
+    let proxy_task = tokio::spawn(proxy::run_proxy_with_shutdown(
+        proxy_addr,
+        Some(credentials),
+        async move {
+            let _ = shutdown_rx.await;
+        },
+    ));
+    let proxy_guard = ChildGuard::new(shutdown_tx);
+    wait_for_port(proxy_port).await?;
+    settings.push(EnvGuard::set(
+        "OPENAI_BASE_URL",
+        format!("http://{proxy_addr}/v1"),
+    ));
+
+    let processor = JobProcessor::new(Arc::new(Config {
+        controller_base_url: Url::parse("http://127.0.0.1:9")?,
+        controller_jwks_url: Url::parse("http://127.0.0.1:9/.well-known/jwks.json")?,
+        project_id,
+        runtime_id: None,
+        runtime_lease_id: None,
+        provider: "test-runtime".to_string(),
+        runtime_version: "test".to_string(),
+        capabilities: json!({}),
+        metadata: json!({}),
+        lease_scope: None,
+        workspace_manifest: None,
+        tenant_projects: Vec::new(),
+        parent_lease_id: None,
+        poll_interval: Duration::from_millis(10),
+        lease_max_jobs: 1,
+        lease_seconds: 30,
+        heartbeat_seconds: 30,
+        workspace_root: workspace_root.path().to_path_buf(),
+        project_workspace_override: None,
+        strict_mode: false,
+        dev_isolation_mode: false,
+        display_name: None,
+        origin: None,
+        codex_bin: None,
+        require_codex_bin: false,
+        runtime_access_token: None,
+        parent_dispositions_runtime_on_shutdown: false,
+    }));
+    let required_write = matches!(case, ReadReferenceCase::RequiredWrite);
+    let job = LeaseJob {
+        id: Uuid::new_v4(),
+        intent: Some("feature".to_string()),
+        project_id: Some(project_id),
+        run_id: Some(Uuid::new_v4()),
+        conversation_id: None,
+        session_id: None,
+        credential_id: None,
+        payload: json!({
+            "prompt_text": if required_write {
+                "Change the deployment_status in reference.txt to APPROVED."
+            } else {
+                "Read reference.txt and report deployment_status; do not edit any files."
+            },
+            "metadata": {
+                "execution_mode": "apply",
+                // Isolate final-result normalization from the routing model.
+                "agentRoutingPreflight": {},
+                "runtimeExpectations": {
+                    "workspaceFileChanges": required_write,
+                    "commandExecution": false,
+                    "genericMcpToolExecution": false,
+                },
+            },
+        }),
+        proxy: None,
+        controller_token: None,
+        controller_token_scopes: None,
+        controller_token_expires_at: None,
+        workspace_token: None,
+        workspace_token_scopes: None,
+        workspace_token_expires_at: None,
+    };
+    let registration = registration_for_live(Uuid::new_v4());
+    let (sender, mut messages) = tokio::sync::mpsc::unbounded_channel();
+    let result = tokio::time::timeout(
+        Duration::from_secs(60),
+        processor.run_apply_job(
+            &registration,
+            &job,
+            true,
+            Some(JobProgress {
+                sender,
+                status: Arc::new(AtomicBool::new(true)),
+            }),
+            None,
+            None,
+        ),
+    )
+    .await
+    .context("read-reference apply job timed out")?;
+
+    assert_eq!(
+        fs::read(workspace.join("reference.txt"))?,
+        READ_REFERENCE_CONTENT.as_bytes()
+    );
+    assert_eq!(fs::read(workspace.join("sentinel.txt"))?, sentinel);
+    let mut retries = Vec::new();
+    while let Ok(message) = messages.try_recv() {
+        if let Some(metadata) = message.metadata
+            && metadata.get("kind").and_then(Value::as_str) == Some("codex_retry")
+        {
+            retries.push(metadata);
+        }
+    }
+    let expected_retries = usize::from(!matches!(case, ReadReferenceCase::Initial));
+    let result_diagnostics = match &result {
+        Ok(execution) => json!({
+            "status": "completed",
+            "expectedReadSummary": execution.summary == "Read reference.txt: deployment_status is READY_FOR_REVIEW.",
+            "artifactKinds": execution.artifacts.iter().filter_map(|artifact| artifact.get("kind").and_then(Value::as_str)).collect::<Vec<_>>(),
+        }),
+        Err(error) => json!({
+            "status": "failed",
+            "kind": if extract_job_failure_message(error).is_some() { "job_failure" } else { "execution_error" },
+            "jobFailureMessage": extract_job_failure_message(error).map(|message| message.chars().take(240).collect::<String>()),
+            "errorChainDepth": error.chain().count(),
+        }),
+    };
+    assert_eq!(
+        retries.len(),
+        expected_retries,
+        "result={result_diagnostics}; retry metadata={retries:?}"
+    );
+    assert_eq!(
+        stub_state.request_index.load(Ordering::SeqCst),
+        1 + expected_retries,
+        "result={result_diagnostics}; retry metadata={retries:?}"
+    );
+
+    let artifacts = if required_write {
+        let error = result.expect_err("a read reference cannot fulfill a required workspace write");
+        assert!(
+            extract_job_failure_message(&error)
+                .map(str::to_owned)
+                .unwrap_or_else(|| error.to_string())
+                .contains("did not apply any workspace changes"),
+            "expected the required-write gate to reject the reference-only result"
+        );
+        extract_job_failure_artifacts(&error)
+            .context("required-write failure should preserve the read artifact")?
+            .to_vec()
+    } else {
+        let execution = result.context("read-reference apply job failed")?;
+        assert_eq!(
+            execution.summary,
+            "Read reference.txt: deployment_status is READY_FOR_REVIEW."
+        );
+        execution.artifacts
+    };
+    let files = artifacts
+        .iter()
+        .find(|artifact| artifact.get("kind").and_then(Value::as_str) == Some("apply/files"))
+        .and_then(|artifact| artifact.get("files"))
+        .and_then(Value::as_array)
+        .context("read reference should remain visible in apply/files")?;
+    assert_eq!(files.len(), 1);
+    assert_eq!(files[0]["path"], "reference.txt");
+    assert_eq!(files[0]["workspacePath"], "reference.txt");
+    assert_eq!(files[0]["change"], "read");
+    assert_eq!(files[0]["changeType"], "read");
+    assert!(
+        files[0].get("content").is_none(),
+        "display references must not retain inline write content"
+    );
+
+    drop(stub_guard);
+    drop(proxy_guard);
+    proxy_task
+        .await
+        .context("read-reference proxy task failed")??;
+    Ok(())
 }
 
 #[test]

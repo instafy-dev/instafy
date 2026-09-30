@@ -469,3 +469,104 @@ async fn runtime_inference_filters_private_rows_before_selecting_candidate() -> 
     cleanup_visibility_test(&pool, project_id, &[]).await?;
     Ok(())
 }
+
+/// A runtime's status shows an origin of the runtime's own project only. A
+/// tenant attach records an origin for its own project against the host's
+/// runtime; the host's status must not show it, however recently it changed.
+#[tokio::test]
+async fn runtime_status_shows_only_the_runtime_projects_origin() -> anyhow::Result<()> {
+    let pool = crate::tests::require_origin_test_pool("runtime status origin project test").await?;
+    let config = build_app_config(
+        test_origin_private_key(),
+        test_origin_public_key(),
+        "runtime-status-origin-project",
+    );
+    let state = build_test_state(pool.clone(), config);
+    let mut connection = pool.get().await?;
+    let transaction = connection.transaction().await?;
+
+    let host_project_id = Uuid::new_v4();
+    let tenant_project_id = Uuid::new_v4();
+    let runtime_id = Uuid::new_v4();
+    let host_lease_id = Uuid::new_v4();
+    let tenant_lease_id = Uuid::new_v4();
+    transaction
+        .execute(
+            "insert into projects (id, project_type, status)
+             values ($1, 'customer', 'active'), ($2, 'customer', 'active')",
+            &[&host_project_id, &tenant_project_id],
+        )
+        .await?;
+    transaction
+        .execute(
+            "insert into runtimes (id, project_id, provider, status, idle_ttl_seconds, last_seen_at)
+             values ($1, $2, 'default', 'ready', 600, now())",
+            &[&runtime_id, &host_project_id],
+        )
+        .await?;
+    transaction
+        .execute(
+            "insert into runtime_leases (id, project_id, runtime_id, status, scope, launched_at)
+             values ($1, $2, $3, 'active', 'shared', now()),
+                    ($4, $5, $3, 'active', 'tenant', now())",
+            &[
+                &host_lease_id,
+                &host_project_id,
+                &runtime_id,
+                &tenant_lease_id,
+                &tenant_project_id,
+            ],
+        )
+        .await?;
+    transaction
+        .execute(
+            "update runtime_leases set parent_lease_id = $2 where id = $1",
+            &[&tenant_lease_id, &host_lease_id],
+        )
+        .await?;
+    transaction
+        .execute(
+            "update runtimes set active_lease_id = $2 where id = $1",
+            &[&runtime_id, &host_lease_id],
+        )
+        .await?;
+    transaction
+        .execute(
+            "insert into origin_instances
+                (project_id, runtime_id, lease_id, required, mode, protocols, status, endpoint,
+                 updated_at)
+             values ($1, $3, $4, true, 'hosted', array['http'], 'online', 'https://host.test',
+                     now() - interval '1 minute'),
+                    ($2, $3, $5, true, 'desktop', array['http'], 'requested', null, now())",
+            &[
+                &host_project_id,
+                &tenant_project_id,
+                &runtime_id,
+                &host_lease_id,
+                &tenant_lease_id,
+            ],
+        )
+        .await?;
+
+    let status = super::load_runtime_status_response(&state, &transaction, &host_project_id)
+        .await
+        .map_err(|(_, body)| anyhow::anyhow!(body.0.message.clone()))?;
+    let payload = serde_json::to_value(&status)?;
+    let runtime = payload["runtimes"]
+        .as_array()
+        .and_then(|runtimes| {
+            runtimes
+                .iter()
+                .find(|runtime| runtime["runtimeId"] == json!(runtime_id.to_string()))
+        })
+        .ok_or_else(|| anyhow::anyhow!("runtime missing from status: {payload}"))?;
+    assert_eq!(runtime["origin"]["mode"], json!("hosted"), "{runtime}");
+    assert_eq!(
+        runtime["origin"]["leaseId"],
+        json!(host_lease_id.to_string()),
+        "{runtime}"
+    );
+
+    transaction.rollback().await?;
+    Ok(())
+}

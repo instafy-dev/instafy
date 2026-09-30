@@ -78,6 +78,8 @@ def main():
                 sql('create database notification_controller_tests template postgres;')
             sql((ROOT/'supabase/tests/durable_notifications.sql').read_text())
             print('PASS: support lifecycle, transactional rollback, preferences, account isolation, privacy, all producers, quiet runs, monotonic state, revocation')
+            sql((ROOT/'supabase/tests/org_credit_ledger_idempotency.sql').read_text())
+            print('PASS: a repeated credit ledger idempotency key adds no row and never moves the balance')
             before = sql('select count(*) from notification_events;')
             sql('begin;\n' + MIGRATION.read_text() + '\ncommit;')
             assert before == sql('select count(*) from notification_events;'), 'migration replay emitted historical events'
