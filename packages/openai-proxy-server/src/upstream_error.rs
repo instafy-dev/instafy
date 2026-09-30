@@ -21,6 +21,11 @@ const MAX_DERIVED_RETRY_AFTER_SECS: u64 = 30;
 /// hours. The client's retries within a turn cover roughly five 30 second waits, so a bucket that
 /// needs more than twice that to refill would only spend the turn's retries and then fail anyway.
 const LONG_RATE_LIMIT_WINDOW_SECS: u64 = 5 * 60;
+/// The OpenAI error `param` values that name a request's tool controls.
+const TOOL_CONTROL_PARAMS: [&str; 2] = ["tool_choice", "tools"];
+/// Most characters of a provider error code that a [`ToolControlRejection`] keeps, so a log
+/// line that names it stays bounded.
+const MAX_TOOL_CONTROL_ERROR_CODE_CHARS: usize = 64;
 
 #[derive(Debug)]
 pub(crate) enum UpstreamFailure {
@@ -28,6 +33,8 @@ pub(crate) enum UpstreamFailure {
         status: StatusCode,
         retry_after: Option<HeaderValue>,
         refreshable_auth: bool,
+        /// Set only for a 400 whose structured error blames the tool controls.
+        tool_control_rejection: Option<ToolControlRejection>,
     },
     CredentialRefresh,
     InvalidResponse,
@@ -74,6 +81,56 @@ impl PlanLimit {
     }
 }
 
+/// A 400 whose OpenAI error object blames the request's tool controls. It keeps only the
+/// structured fields that identify the error, never its message or any other body text.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ToolControlRejection {
+    /// `error.param` when it names `tool_choice` or `tools`; `None` when the error names no
+    /// param and its code and message name the tool choice instead.
+    pub(crate) param: Option<&'static str>,
+    /// `error.code`, or `error.type` when there is no code, cut to
+    /// [`MAX_TOOL_CONTROL_ERROR_CODE_CHARS`] characters.
+    pub(crate) code: Option<String>,
+}
+
+impl ToolControlRejection {
+    /// Reads a 400 body. It matches only the OpenAI error shape, `{"error": {...}}`, and only
+    /// when the error's `param` is exactly `tool_choice` or `tools`, or, with no `param` at
+    /// all, when it carries a code (`error.code` or `error.type`) and its `message` names the
+    /// tool choice. An error whose `param` names any other parameter never matches, whatever
+    /// its message says, and neither does a body without an error object.
+    fn from_body(status: StatusCode, body: &str) -> Option<Self> {
+        if status != StatusCode::BAD_REQUEST {
+            return None;
+        }
+        let body = serde_json::from_str::<serde_json::Value>(body).ok()?;
+        let error = body.get("error").filter(|error| error.is_object())?;
+        let text = |field: &str| error.get(field).and_then(serde_json::Value::as_str);
+        let code = text("code").or_else(|| text("type")).map(|code| {
+            code.chars()
+                .take(MAX_TOOL_CONTROL_ERROR_CODE_CHARS)
+                .collect::<String>()
+        });
+        match error.get("param") {
+            None | Some(serde_json::Value::Null) => {}
+            Some(param) => {
+                let param = TOOL_CONTROL_PARAMS
+                    .into_iter()
+                    .find(|name| param.as_str() == Some(*name))?;
+                return Some(Self {
+                    param: Some(param),
+                    code,
+                });
+            }
+        }
+        let names_tool_choice = text("message").is_some_and(|message| {
+            let message = message.to_ascii_lowercase();
+            message.contains("tool_choice") || message.contains("tool choice")
+        });
+        (code.is_some() && names_tool_choice).then_some(Self { param: None, code })
+    }
+}
+
 impl UpstreamFailure {
     pub(crate) fn http_body(status: StatusCode, headers: &HeaderMap, body: &str) -> Self {
         if status == StatusCode::TOO_MANY_REQUESTS
@@ -105,11 +162,19 @@ impl UpstreamFailure {
                 };
             }
         }
-        Self::http(
+        let mut failure = Self::http(
             status,
             headers,
             crate::auth::response_indicates_chatgpt_token_expired(status, body),
-        )
+        );
+        if let Self::Http {
+            tool_control_rejection,
+            ..
+        } = &mut failure
+        {
+            *tool_control_rejection = ToolControlRejection::from_body(status, body);
+        }
+        failure
     }
 
     pub(crate) fn http(status: StatusCode, headers: &HeaderMap, refreshable_auth: bool) -> Self {
@@ -140,6 +205,7 @@ impl UpstreamFailure {
             status,
             retry_after,
             refreshable_auth,
+            tool_control_rejection: None,
         }
     }
 }
@@ -178,6 +244,18 @@ pub(crate) fn refreshable_auth(error: &anyhow::Error) -> bool {
             ..
         })
     )
+}
+
+/// The tool control rejection `error` carries, if it is a 400 whose structured error blames
+/// the tool controls; see [`ToolControlRejection::from_body`].
+pub(crate) fn tool_control_rejection(error: &anyhow::Error) -> Option<&ToolControlRejection> {
+    match error.downcast_ref::<UpstreamFailure>() {
+        Some(UpstreamFailure::Http {
+            tool_control_rejection,
+            ..
+        }) => tool_control_rejection.as_ref(),
+        _ => None,
+    }
 }
 
 #[derive(Debug)]
@@ -868,6 +946,103 @@ mod tests {
             assert!(stream.retry_after.is_none());
             assert!(stream.resets_at.is_none());
         }
+    }
+
+    #[test]
+    fn only_a_400_that_blames_the_tool_controls_is_a_tool_control_rejection() {
+        let rejection = |status: StatusCode, body: &str| {
+            let error =
+                anyhow::Error::new(UpstreamFailure::http_body(status, &HeaderMap::new(), body))
+                    .context("request context");
+            tool_control_rejection(&error).cloned()
+        };
+        let bad_request = |body: &str| rejection(StatusCode::BAD_REQUEST, body);
+        let long_code = "c".repeat(80);
+        for (body, param, code) in [
+            (
+                r#"{"error":{"message":"private-token","type":"invalid_request_error","param":"tool_choice","code":null}}"#.to_string(),
+                Some("tool_choice"),
+                Some("invalid_request_error".to_string()),
+            ),
+            (
+                r#"{"error":{"message":"private-token","type":"invalid_request_error","param":"tools","code":"missing_required_parameter"}}"#.to_string(),
+                Some("tools"),
+                Some("missing_required_parameter".to_string()),
+            ),
+            // With no param, a code and a message that names the tool choice.
+            (
+                r#"{"error":{"message":"Invalid value for 'tool_choice': private-token","param":null,"code":"invalid_value"}}"#.to_string(),
+                None,
+                Some("invalid_value".to_string()),
+            ),
+            (
+                r#"{"error":{"message":"Tool choice 'required' needs tools. private-token","type":"invalid_request_error"}}"#.to_string(),
+                None,
+                Some("invalid_request_error".to_string()),
+            ),
+            // The code is cut, so a log line that names it stays bounded.
+            (
+                format!(r#"{{"error":{{"param":"tool_choice","code":"{long_code}"}}}}"#),
+                Some("tool_choice"),
+                Some("c".repeat(64)),
+            ),
+        ] {
+            assert_eq!(
+                bad_request(&body),
+                Some(ToolControlRejection { param, code }),
+                "{body}"
+            );
+        }
+
+        for body in [
+            // Another parameter is to blame, whatever the message says.
+            r#"{"error":{"message":"tool_choice","type":"invalid_request_error","param":"input","code":"invalid_value"}}"#,
+            r#"{"error":{"message":"Invalid tools","type":"invalid_request_error","param":"tools[0].name"}}"#,
+            r#"{"error":{"message":"tool_choice","type":"invalid_request_error","param":"TOOL_CHOICE"}}"#,
+            r#"{"error":{"message":"tool_choice","type":"invalid_request_error","param":1}}"#,
+            // No param, and either no code or a message that names no tool choice.
+            r#"{"error":{"message":"Invalid value for 'tool_choice'.","param":null,"code":null}}"#,
+            r#"{"error":{"message":"Invalid value for 'tools'.","type":"invalid_request_error"}}"#,
+            r#"{"error":{"message":"The model does not exist.","code":"model_not_found"}}"#,
+            // Not the OpenAI error shape.
+            r#"{"detail":"Unsupported parameter: tool_choice"}"#,
+            r#"{"error":"tool_choice"}"#,
+            r#"{"message":"tool_choice","param":"tool_choice"}"#,
+            "tool_choice",
+            "",
+        ] {
+            assert_eq!(bad_request(body), None, "{body}");
+        }
+
+        // Only a 400: any other status is classified as before.
+        let blames_tool_choice = r#"{"error":{"message":"tool_choice","type":"invalid_request_error","param":"tool_choice"}}"#;
+        for status in [
+            StatusCode::UNAUTHORIZED,
+            StatusCode::NOT_FOUND,
+            StatusCode::UNPROCESSABLE_ENTITY,
+            StatusCode::TOO_MANY_REQUESTS,
+            StatusCode::INTERNAL_SERVER_ERROR,
+        ] {
+            assert_eq!(rejection(status, blames_tool_choice), None, "{status}");
+        }
+        assert_eq!(
+            tool_control_rejection(&anyhow::anyhow!("tool_choice")),
+            None,
+            "an error that is not an upstream HTTP failure"
+        );
+
+        // The 400 still reaches the client as the terminal rejection it was.
+        let classified = classify(
+            &UpstreamFailure::http_body(
+                StatusCode::BAD_REQUEST,
+                &HeaderMap::new(),
+                blames_tool_choice,
+            )
+            .into(),
+        );
+        assert_eq!(classified.status, StatusCode::BAD_REQUEST);
+        assert_eq!(classified.code, "upstream_http_error");
+        assert!(!classified.retryable);
     }
 
     #[test]

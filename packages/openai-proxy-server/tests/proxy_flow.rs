@@ -1,3 +1,4 @@
+use std::collections::VecDeque;
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -218,6 +219,9 @@ struct UpstreamStub {
     bodies: Arc<Mutex<Vec<Value>>>,
     /// How many of the next model requests to reject as an expired token.
     expire_next: Arc<AtomicUsize>,
+    /// What the model endpoint answers its next requests with, in order,
+    /// ahead of `expire_next`; a request finds it empty answers as usual.
+    respond_next: Arc<Mutex<VecDeque<(StatusCode, Value)>>>,
     /// Paths of the audio requests that reached the provider.
     audio: Arc<Mutex<Vec<String>>>,
     /// The body of each audio request that reached the provider, as sent.
@@ -348,6 +352,14 @@ fn record_upstream_request(stub: &UpstreamStub, headers: &HeaderMap, payload: &V
     authorization
 }
 
+/// The next of the stub's `respond_next` answers, if any are left.
+fn next_canned_response(stub: &UpstreamStub) -> Option<(StatusCode, Value)> {
+    stub.respond_next
+        .lock()
+        .expect("canned response queue")
+        .pop_front()
+}
+
 /// The ChatGPT Codex endpoint, which answers with an event stream.
 async fn upstream_chatgpt_stub(
     State(stub): State<UpstreamStub>,
@@ -363,6 +375,9 @@ async fn upstream_chatgpt_stub(
             AxumJson(json!({ "error": { "message": "bad upstream token" } })),
         )
             .into_response();
+    }
+    if let Some((status, body)) = next_canned_response(&stub) {
+        return (status, AxumJson(body)).into_response();
     }
     (
         [(header::CONTENT_TYPE, "text/event-stream")],
@@ -384,6 +399,9 @@ async fn upstream_responses_stub(
             StatusCode::UNAUTHORIZED,
             AxumJson(json!({ "error": { "message": "bad upstream key" } })),
         );
+    }
+    if let Some((status, body)) = next_canned_response(&stub) {
+        return (status, AxumJson(body));
     }
     if stub
         .expire_next
@@ -1406,10 +1424,11 @@ async fn pinned_lease_drops_web_search_from_the_proxy_default_tools() -> Result<
     // A ChatGPT login whose request keeps no tools gets the proxy's default
     // tools, and CODEX_ENABLE_WEB_SEARCH adds web search to them. Codex lists
     // a Responses Lite model's tools, the managed model's among them, only in
-    // an `additional_tools` input item, and Chat Completions forwards no
-    // tools, so a managed run on a pinned ChatGPT login gets those defaults
-    // on both routes. The pin must filter the tools the request finally
-    // carries, in `tools` and in the input alike.
+    // an `additional_tools` input item, and such a request gets no default
+    // tools. A Responses request without that item, and a Chat Completions
+    // request, which forwards no tools, do get them on a pinned ChatGPT
+    // login. The pin must filter the tools the request finally carries, in
+    // `tools` and in the input alike.
     let _env = [
         EnvGuard::set("CODEX_ENABLE_WEB_SEARCH", Some("1")),
         EnvGuard::set("CODEX_INCLUDE_APPLY_PATCH_TOOL", None),
@@ -1444,6 +1463,8 @@ async fn pinned_lease_drops_web_search_from_the_proxy_default_tools() -> Result<
         .await?;
         let (status, body) =
             post_through_proxy(proxy_addr, &token, "/v1/responses", lite_request.clone()).await?;
+        assert_eq!(status, StatusCode::OK, "{name} Lite responses: {body}");
+        let (status, body) = responses_through_proxy(proxy_addr, &token, "gpt-5.6-sol").await?;
         assert_eq!(status, StatusCode::OK, "{name} responses: {body}");
         let (status, body) = chat_through_proxy(proxy_addr, &token).await?;
         assert_eq!(status, StatusCode::OK, "{name} chat: {body}");
@@ -1467,19 +1488,24 @@ async fn pinned_lease_drops_web_search_from_the_proxy_default_tools() -> Result<
         };
         let sent_tools = upstream.tools.lock().expect("tool log").clone();
         assert_eq!(
+            sent_tools[0],
+            Value::Null,
+            "{name}: no `tools` on the Responses Lite request"
+        );
+        assert_eq!(
             sent_tools.iter().map(tool_labels).collect::<Vec<_>>(),
-            vec![expected_defaults.clone(), expected_defaults],
-            "{name}: the proxy's default tools on the Responses and Chat Completions routes"
+            vec![Vec::new(), expected_defaults.clone(), expected_defaults],
+            "{name}: the proxy's default tools on every request but the Responses Lite one"
         );
         assert_eq!(
             upstream_additional_tools(&upstream),
-            vec![expected_input_tools, Value::Null],
+            vec![expected_input_tools, Value::Null, Value::Null],
             "{name}: the tools carried in the input"
         );
         if let Some(pinned_model) = pinned_model {
             assert_eq!(
                 upstream.models.lock().expect("model log").clone(),
-                vec![pinned_model, pinned_model],
+                vec![pinned_model; 3],
                 "{name}: a managed run on the pinned model"
             );
         }
@@ -1717,9 +1743,9 @@ fn forwarded_additional_tools(body: &Value) -> Option<&Value> {
 async fn required_tool_call_sends_a_responses_lite_request_required_on_every_lane() -> Result<()> {
     // Codex lists a Responses Lite model's tools in an `additional_tools`
     // input item and leaves `tools` empty. Without the key the proxy sends
-    // such a request no tool control on the OpenAI API and `auto` with its
-    // default tools on the ChatGPT Codex endpoint, as main does. With the
-    // key it sends `required`, and only that changes.
+    // such a request no `tool_choice` on the OpenAI API, only its own
+    // `parallel_tool_calls`, and `auto` with no tools on the ChatGPT Codex
+    // endpoint. With the key it sends `required`, and only that changes.
     let request = luna_lite_request();
     for lane in tool_control_lanes() {
         let (name, chatgpt) = (lane.name, lane.chatgpt);
@@ -1735,16 +1761,16 @@ async fn required_tool_call_sends_a_responses_lite_request_required_on_every_lan
 
         if chatgpt {
             assert_eq!(unchanged["tool_choice"], json!("auto"), "{name}");
+            assert_eq!(unchanged["parallel_tool_calls"], json!(false), "{name}");
             assert!(
-                unchanged["tools"]
-                    .as_array()
-                    .is_some_and(|tools| !tools.is_empty()),
-                "{name}: the proxy's default tools: {unchanged}"
+                unchanged.get("tools").is_none(),
+                "{name}: none of the proxy's default tools: {unchanged}"
             );
         } else {
-            for key in ["tools", "tool_choice", "parallel_tool_calls"] {
+            for key in ["tools", "tool_choice"] {
                 assert!(unchanged.get(key).is_none(), "{name} {key}: {unchanged}");
             }
+            assert_eq!(unchanged["parallel_tool_calls"], json!(false), "{name}");
         }
 
         assert_eq!(required["tool_choice"], json!("required"), "{name}");
@@ -1965,6 +1991,730 @@ async fn required_tool_call_needs_a_tool_the_pin_keeps() -> Result<()> {
     Ok(())
 }
 
+#[tokio::test]
+#[serial]
+async fn chatgpt_login_sends_a_responses_lite_request_no_default_tools() -> Result<()> {
+    // The runtime offers a Responses Lite model only the tools in its
+    // `additional_tools` item: a call to the proxy's default `shell` fails
+    // there as unsupported, and the other default tools run outside code
+    // mode. A ChatGPT login sends such a request none of them, with the key
+    // or without it, and even when the pin left its item empty. A request
+    // without the item keeps the default tools, and one with tools of its
+    // own keeps those.
+    let _env = [
+        EnvGuard::set("CODEX_ENABLE_WEB_SEARCH", None),
+        EnvGuard::set("CODEX_INCLUDE_APPLY_PATCH_TOOL", None),
+        EnvGuard::set("CODEX_INCLUDE_PLAN_TOOL", None),
+        EnvGuard::set("CODEX_INCLUDE_VIEW_IMAGE_TOOL", None),
+    ];
+    let lite = luna_lite_request();
+    let hosted_only = json!([{ "type": "web_search", "external_web_access": true }]);
+    let mut lite_hosted_only = lite.clone();
+    lite_hosted_only["input"][0]["tools"] = hosted_only.clone();
+    let own_tools = top_level_tools_request();
+    let mut no_tools = own_tools.clone();
+    no_tools
+        .as_object_mut()
+        .expect("request object")
+        .remove("tools");
+
+    let chatgpt_lane = |name, proxy, credential_id| ToolControlLane {
+        name,
+        proxy,
+        credential_id,
+        chatgpt: true,
+    };
+    for (lane, pinned) in [
+        (
+            chatgpt_lane(
+                "static ChatGPT login",
+                StackProxy::StaticChatGpt { pinned_model: None },
+                None,
+            ),
+            false,
+        ),
+        (
+            chatgpt_lane(
+                "pinned static ChatGPT login",
+                StackProxy::StaticChatGpt {
+                    pinned_model: Some(PINNED_MODEL),
+                },
+                None,
+            ),
+            true,
+        ),
+        (
+            chatgpt_lane(
+                "own ChatGPT login",
+                StackProxy::Dynamic,
+                Some(BYO_CHATGPT_CREDENTIAL_ID),
+            ),
+            false,
+        ),
+    ] {
+        let name = lane.name;
+        let bodies = upstream_bodies_on(
+            lane,
+            &[
+                lite.clone(),
+                with_require_tool_call(&lite, json!("1")),
+                lite_hosted_only.clone(),
+                no_tools.clone(),
+                own_tools.clone(),
+            ],
+        )
+        .await?;
+
+        // Responses Lite: no `tools`, the item as the pin leaves it, and the
+        // tool controls a request without `tools` gets.
+        let emptied_item = json!({
+            "type": "additional_tools",
+            "role": "developer",
+            "tools": if pinned { json!([]) } else { hosted_only.clone() }
+        });
+        for (case, body, item, tool_choice) in [
+            ("Lite", &bodies[0], &lite["input"][0], "auto"),
+            ("Lite, key", &bodies[1], &lite["input"][0], "required"),
+            ("Lite, hosted tools only", &bodies[2], &emptied_item, "auto"),
+        ] {
+            assert!(
+                body.get("tools").is_none(),
+                "{name} {case}: no default tools: {body}"
+            );
+            assert_eq!(
+                forwarded_additional_tools(body),
+                Some(item),
+                "{name} {case}"
+            );
+            assert_eq!(body["tool_choice"], json!(tool_choice), "{name} {case}");
+            assert_eq!(body["parallel_tool_calls"], json!(false), "{name} {case}");
+        }
+        let mut as_without_key = bodies[1].clone();
+        as_without_key["tool_choice"] = json!("auto");
+        assert_eq!(
+            as_without_key, bodies[0],
+            "{name}: the key changes only the choice"
+        );
+
+        // No item and no tools: the proxy's default tools, as before.
+        let defaults = &bodies[3];
+        assert_eq!(
+            tool_labels(&defaults["tools"]),
+            vec!["shell", "apply_patch", "update_plan", "view_image"],
+            "{name}: {defaults}"
+        );
+        assert_eq!(defaults["tool_choice"], json!("auto"), "{name}");
+        assert_eq!(defaults["parallel_tool_calls"], json!(false), "{name}");
+        assert_eq!(forwarded_additional_tools(defaults), None, "{name}");
+
+        // Tools of its own: sent as requested.
+        let own = &bodies[4];
+        assert_eq!(own["tools"], own_tools["tools"], "{name}");
+        assert_eq!(own["tool_choice"], json!("auto"), "{name}");
+        assert_eq!(own["parallel_tool_calls"], json!(true), "{name}");
+    }
+
+    Ok(())
+}
+
+#[tokio::test]
+#[serial]
+async fn openai_api_lanes_forward_a_responses_lite_request_its_parallel_tool_calls() -> Result<()> {
+    // Codex sends a Responses Lite model no `tools` and
+    // `parallel_tool_calls: false`. The OpenAI API gets the boolean the
+    // request sent, with the key or without it, and nothing when the request
+    // sent none or no boolean; its `tool_choice` is still not forwarded
+    // without the key. The ChatGPT Codex endpoint keeps the proxy's `false`.
+    let lite = luna_lite_request();
+    let with_parallel_tool_calls = |value: Option<Value>| {
+        let mut request = lite.clone();
+        let object = request.as_object_mut().expect("request object");
+        match value {
+            Some(value) => {
+                object.insert("parallel_tool_calls".to_string(), value);
+            }
+            None => {
+                object.remove("parallel_tool_calls");
+            }
+        }
+        request
+    };
+    let cases = [
+        (Some(json!(false)), Some(json!(false))),
+        (Some(json!(true)), Some(json!(true))),
+        (None, None),
+        (Some(json!("false")), None),
+        (Some(Value::Null), None),
+    ];
+    for lane in tool_control_lanes() {
+        let (name, chatgpt) = (lane.name, lane.chatgpt);
+        let requests = cases
+            .iter()
+            .flat_map(|(sent, _)| {
+                let request = with_parallel_tool_calls(sent.clone());
+                [with_require_tool_call(&request, json!("1")), request]
+            })
+            .collect::<Vec<_>>();
+        let bodies = upstream_bodies_on(lane, &requests).await?;
+        for ((sent, forwarded), pair) in cases.iter().zip(bodies.chunks(2)) {
+            let context = format!("{name} parallel_tool_calls={sent:?}");
+            let (with_key, without_key) = (&pair[0], &pair[1]);
+            let expected = if chatgpt {
+                Some(json!(false))
+            } else {
+                forwarded.clone()
+            };
+            for body in pair {
+                assert_eq!(
+                    body.get("parallel_tool_calls").cloned(),
+                    expected,
+                    "{context}: {body}"
+                );
+                assert!(body.get("tools").is_none(), "{context}: {body}");
+            }
+            assert_eq!(with_key["tool_choice"], json!("required"), "{context}");
+            assert_eq!(
+                without_key.get("tool_choice").cloned(),
+                chatgpt.then(|| json!("auto")),
+                "{context}"
+            );
+        }
+    }
+
+    Ok(())
+}
+
+/// Every refusal body below holds this; no log line may show it.
+const REFUSAL_MARKER: &str = "refusal-body-marker";
+
+/// 400 bodies with which OpenAI might refuse `tool_choice: "required"` for a
+/// request whose tools ride only in `additional_tools`: the error's `param`
+/// names `tool_choice` or `tools`, or, with no `param`, its code and message
+/// name the tool choice.
+fn tool_control_refusals() -> [(&'static str, Value); 3] {
+    [
+        (
+            "param tool_choice",
+            json!({ "error": {
+                "message": format!("Tool choice 'required' must be specified with 'tools' parameter. {REFUSAL_MARKER}"),
+                "type": "invalid_request_error",
+                "param": "tool_choice",
+                "code": null
+            } }),
+        ),
+        (
+            "param tools",
+            json!({ "error": {
+                "message": format!("Missing required parameter: 'tools'. {REFUSAL_MARKER}"),
+                "type": "invalid_request_error",
+                "param": "tools",
+                "code": "missing_required_parameter"
+            } }),
+        ),
+        (
+            "code and message",
+            json!({ "error": {
+                "message": format!("Invalid value for 'tool_choice': 'required'. {REFUSAL_MARKER}"),
+                "type": "invalid_request_error",
+                "param": null,
+                "code": "invalid_value"
+            } }),
+        ),
+    ]
+}
+
+/// The first of [`tool_control_refusals`], as the model stub answers it.
+fn refused_tool_choice() -> (StatusCode, Value) {
+    let [(_, body), ..] = tool_control_refusals();
+    (StatusCode::BAD_REQUEST, body)
+}
+
+/// Queues `answers` on the model stub, for its next requests in order.
+fn answer_next(upstream: &UpstreamStub, answers: impl IntoIterator<Item = (StatusCode, Value)>) {
+    upstream
+        .respond_next
+        .lock()
+        .expect("canned response queue")
+        .extend(answers);
+}
+
+/// `requiredToolCallFallbacks` from `/healthz`, which `/readyz` must match.
+async fn required_tool_call_fallbacks(proxy_addr: SocketAddr) -> Result<Value> {
+    let mut counts = Vec::new();
+    for path in ["/healthz", "/readyz"] {
+        let response = reqwest::Client::new()
+            .get(format!("http://{proxy_addr}{path}"))
+            .send()
+            .await?;
+        assert_eq!(response.status(), StatusCode::OK, "{path}");
+        let body: Value = response.json().await?;
+        counts.push(body["requiredToolCallFallbacks"].clone());
+    }
+    assert_eq!(counts[0], counts[1], "/healthz and /readyz");
+    Ok(counts.swap_remove(0))
+}
+
+/// The model request bodies the stub has received since the first `from`.
+fn upstream_bodies_since(upstream: &UpstreamStub, from: usize) -> Vec<Value> {
+    upstream.bodies.lock().expect("body log")[from..].to_vec()
+}
+
+#[tokio::test]
+#[serial]
+async fn required_tool_call_falls_back_once_when_upstream_refuses_required() -> Result<()> {
+    // Whether OpenAI takes `required` for a Responses Lite request, whose
+    // tools ride only in `additional_tools`, is unverified. When upstream
+    // answers the `required` the proxy set with a 400 that blames the tool
+    // controls, the proxy sends the request once more, on the same lease,
+    // exactly as it would without the key, and counts one fallback.
+    let top_level = top_level_tools_request();
+    let requests = [
+        ("Lite", luna_lite_request()),
+        ("tools, auto", top_level.clone()),
+        ("tools, no tool_choice", with_tool_choice(&top_level, None)),
+    ];
+    for lane in tool_control_lanes() {
+        let (name, chatgpt) = (lane.name, lane.chatgpt);
+        let dynamic = matches!(lane.proxy, StackProxy::Dynamic);
+        let (proxy_addr, controller, upstream, _env, _guards) = spawn_stack(
+            Some(MANAGED_STUB_KEY),
+            Some(PINNED_MODEL),
+            false,
+            lane.proxy,
+        )
+        .await?;
+        let token = proxy_token(Some(RUN_ID), lane.credential_id);
+        assert_eq!(
+            required_tool_call_fallbacks(proxy_addr).await?,
+            json!(0),
+            "{name}"
+        );
+        for (count, ((case, request), (refusal, refusal_body))) in
+            requests.iter().zip(tool_control_refusals()).enumerate()
+        {
+            let context = format!("{name} {case}, refused by {refusal}");
+            let sent = upstream.bodies.lock().expect("body log").len();
+            let leased = controller.leases.lock().expect("lease log").len();
+            answer_next(&upstream, [(StatusCode::BAD_REQUEST, refusal_body)]);
+            let (status, text) = post_through_proxy(
+                proxy_addr,
+                &token,
+                "/v1/responses",
+                with_require_tool_call(request, json!("1")),
+            )
+            .await?;
+            assert_eq!(status, StatusCode::OK, "{context}: {text}");
+            assert_eq!(
+                upstream_bodies_since(&upstream, sent).len(),
+                2,
+                "{context}: the refused attempt and one retry"
+            );
+            // The proxy caches a lease, so only the first request fetches
+            // one; a renewal would fetch another.
+            assert_eq!(
+                controller.leases.lock().expect("lease log").len() - leased,
+                usize::from(dynamic && count == 0),
+                "{context}: both attempts on one lease"
+            );
+            let bearers = upstream.bearers.lock().expect("bearer log")[sent..].to_vec();
+            assert_eq!(bearers[0], bearers[1], "{context}: the same credential");
+            assert_eq!(
+                required_tool_call_fallbacks(proxy_addr).await?,
+                json!(count + 1),
+                "{context}"
+            );
+
+            // The request without the key, which the retry must match.
+            let (status, text) =
+                post_through_proxy(proxy_addr, &token, "/v1/responses", request.clone()).await?;
+            assert_eq!(status, StatusCode::OK, "{context} without the key: {text}");
+            let bodies = upstream_bodies_since(&upstream, sent);
+            let (refused, retry, without_key) = (&bodies[0], &bodies[1], &bodies[2]);
+            assert_eq!(refused["tool_choice"], json!("required"), "{context}");
+            assert_eq!(
+                retry, without_key,
+                "{context}: the retry goes as the request would without the key"
+            );
+            // The request's own choice: `auto` with tools, or, for a
+            // Responses Lite request, none on the OpenAI API and the proxy's
+            // `auto` on a ChatGPT login.
+            let original = (*case != "Lite" || chatgpt).then(|| json!("auto"));
+            assert_eq!(retry.get("tool_choice").cloned(), original, "{context}");
+            let mut as_retry = refused.clone();
+            let object = as_retry.as_object_mut().expect("body object");
+            match original {
+                Some(choice) => {
+                    object.insert("tool_choice".to_string(), choice);
+                }
+                None => {
+                    object.remove("tool_choice");
+                }
+            }
+            assert_eq!(&as_retry, retry, "{context}: only the choice changes");
+        }
+        assert_eq!(
+            required_tool_call_fallbacks(proxy_addr).await?,
+            json!(requests.len()),
+            "{name}: one fallback per refused request"
+        );
+    }
+
+    Ok(())
+}
+
+#[tokio::test]
+#[serial]
+async fn a_second_refusal_is_returned_as_the_first_would_be_without_the_key() -> Result<()> {
+    // The retry is the only one: when upstream refuses it too, the client
+    // gets that failure exactly as a request without the key gets it.
+    for lane in tool_control_lanes() {
+        let name = lane.name;
+        let (proxy_addr, _controller, upstream, _env, _guards) = spawn_stack(
+            Some(MANAGED_STUB_KEY),
+            Some(PINNED_MODEL),
+            false,
+            lane.proxy,
+        )
+        .await?;
+        let token = proxy_token(Some(RUN_ID), lane.credential_id);
+        let lite = luna_lite_request();
+
+        answer_next(&upstream, [refused_tool_choice(), refused_tool_choice()]);
+        let refused_twice = post_through_proxy(
+            proxy_addr,
+            &token,
+            "/v1/responses",
+            with_require_tool_call(&lite, json!("1")),
+        )
+        .await?;
+        assert_eq!(
+            upstream_bodies_since(&upstream, 0).len(),
+            2,
+            "{name}: one retry"
+        );
+        assert_eq!(
+            required_tool_call_fallbacks(proxy_addr).await?,
+            json!(1),
+            "{name}"
+        );
+
+        answer_next(&upstream, [refused_tool_choice()]);
+        let refused_once = post_through_proxy(proxy_addr, &token, "/v1/responses", lite).await?;
+        assert_eq!(upstream_bodies_since(&upstream, 0).len(), 3, "{name}");
+        assert_eq!(refused_once.0, StatusCode::BAD_REQUEST, "{name}");
+        assert_eq!(refused_twice, refused_once, "{name}");
+        assert!(!refused_twice.1.contains(REFUSAL_MARKER), "{name}");
+    }
+
+    Ok(())
+}
+
+#[tokio::test]
+#[serial]
+async fn required_tool_call_does_not_fall_back_from_another_failure() -> Result<()> {
+    // Only a 400 whose structured error blames the tool controls falls
+    // back. Any other failure of a request that went upstream with the
+    // `required` the proxy set comes back after that one attempt, exactly as
+    // the request without the key gets it.
+    let [(_, blames_tool_choice), ..] = tool_control_refusals();
+    let failures = [
+        (
+            "400 for another param",
+            StatusCode::BAD_REQUEST,
+            json!({ "error": {
+                "message": "Invalid 'input': tool_choice",
+                "type": "invalid_request_error",
+                "param": "input",
+                "code": "invalid_value"
+            } }),
+        ),
+        (
+            "400 for a param inside tools",
+            StatusCode::BAD_REQUEST,
+            json!({ "error": {
+                "message": "Invalid 'tools[0].name': tool_choice",
+                "type": "invalid_request_error",
+                "param": "tools[0].name",
+                "code": "invalid_value"
+            } }),
+        ),
+        (
+            "400 whose message does not name the tool choice",
+            StatusCode::BAD_REQUEST,
+            json!({ "error": { "message": "The model does not exist.", "code": "model_not_found" } }),
+        ),
+        (
+            "400 without an OpenAI error object",
+            StatusCode::BAD_REQUEST,
+            json!({ "detail": "Unsupported parameter: tool_choice" }),
+        ),
+        (
+            "422 that blames the tool choice",
+            StatusCode::UNPROCESSABLE_ENTITY,
+            blames_tool_choice.clone(),
+        ),
+        (
+            "500 that blames the tool choice",
+            StatusCode::INTERNAL_SERVER_ERROR,
+            blames_tool_choice,
+        ),
+    ];
+    for lane in tool_control_lanes() {
+        let name = lane.name;
+        let (proxy_addr, _controller, upstream, _env, _guards) = spawn_stack(
+            Some(MANAGED_STUB_KEY),
+            Some(PINNED_MODEL),
+            false,
+            lane.proxy,
+        )
+        .await?;
+        let token = proxy_token(Some(RUN_ID), lane.credential_id);
+        let lite = luna_lite_request();
+        for (case, status, body) in &failures {
+            let context = format!("{name} {case}");
+            let sent = upstream.bodies.lock().expect("body log").len();
+            answer_next(&upstream, [(*status, body.clone())]);
+            let with_key = post_through_proxy(
+                proxy_addr,
+                &token,
+                "/v1/responses",
+                with_require_tool_call(&lite, json!("1")),
+            )
+            .await?;
+            assert_eq!(
+                upstream_bodies_since(&upstream, sent).len(),
+                1,
+                "{context}: no retry"
+            );
+            answer_next(&upstream, [(*status, body.clone())]);
+            let without_key =
+                post_through_proxy(proxy_addr, &token, "/v1/responses", lite.clone()).await?;
+            assert_eq!(*status, with_key.0, "{context}");
+            assert_eq!(with_key, without_key, "{context}");
+        }
+        assert_eq!(
+            required_tool_call_fallbacks(proxy_addr).await?,
+            json!(0),
+            "{name}"
+        );
+    }
+
+    Ok(())
+}
+
+#[tokio::test]
+#[serial]
+async fn required_tool_call_fallback_never_retries_a_request_the_proxy_did_not_change() -> Result<()>
+{
+    // The fallback undoes only a `required` the proxy set itself. A request
+    // it sent as it would without the key, one that chose `required` itself
+    // included, gets the refusal back after one attempt.
+    let lite = luna_lite_request();
+    let top_level = top_level_tools_request();
+    let chose_required = with_tool_choice(&top_level, Some(json!("required")));
+    let mut empty_additional_tools = lite.clone();
+    empty_additional_tools["input"][0]["tools"] = json!([]);
+    let one = json!("1");
+    let cases = [
+        ("Lite, no key", lite.clone()),
+        ("tools, no key", top_level.clone()),
+        ("tools choosing required, no key", chose_required.clone()),
+        (
+            "tools choosing required, key",
+            with_require_tool_call(&chose_required, one.clone()),
+        ),
+        (
+            "tools choosing none, key",
+            with_require_tool_call(
+                &with_tool_choice(&top_level, Some(json!("none"))),
+                one.clone(),
+            ),
+        ),
+        (
+            "tools choosing a function, key",
+            with_require_tool_call(
+                &with_tool_choice(
+                    &top_level,
+                    Some(json!({ "type": "function", "name": "exec_command" })),
+                ),
+                one.clone(),
+            ),
+        ),
+        (
+            "Lite choosing required, key",
+            with_require_tool_call(
+                &with_tool_choice(&lite, Some(json!("required"))),
+                one.clone(),
+            ),
+        ),
+        (
+            "Lite with an empty item, key",
+            with_require_tool_call(&empty_additional_tools, one),
+        ),
+        ("Lite, key 0", with_require_tool_call(&lite, json!("0"))),
+    ];
+    for lane in tool_control_lanes() {
+        let name = lane.name;
+        let (proxy_addr, _controller, upstream, _env, _guards) = spawn_stack(
+            Some(MANAGED_STUB_KEY),
+            Some(PINNED_MODEL),
+            false,
+            lane.proxy,
+        )
+        .await?;
+        let token = proxy_token(Some(RUN_ID), lane.credential_id);
+        for (case, request) in &cases {
+            let sent = upstream.bodies.lock().expect("body log").len();
+            answer_next(&upstream, [refused_tool_choice()]);
+            let (status, text) =
+                post_through_proxy(proxy_addr, &token, "/v1/responses", request.clone()).await?;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{name} {case}: {text}");
+            assert_eq!(
+                upstream_bodies_since(&upstream, sent).len(),
+                1,
+                "{name} {case}: no retry"
+            );
+        }
+        // A Chat Completions request carries no tool control at all.
+        let sent = upstream.bodies.lock().expect("body log").len();
+        answer_next(&upstream, [refused_tool_choice()]);
+        let (status, text) = chat_through_proxy(proxy_addr, &token).await?;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{name} chat: {text}");
+        assert_eq!(upstream_bodies_since(&upstream, sent).len(), 1, "{name}");
+        assert_eq!(
+            required_tool_call_fallbacks(proxy_addr).await?,
+            json!(0),
+            "{name}"
+        );
+    }
+
+    Ok(())
+}
+
+#[tokio::test]
+#[serial]
+async fn required_tool_call_fallback_counts_no_second_service_tier_override() -> Result<()> {
+    // The retry is part of the same request: it counts no second service
+    // tier override, and goes upstream with the same tier and credential.
+    let platform_lanes = [
+        ("pinned managed lease", StackProxy::Dynamic),
+        (
+            "pinned static key",
+            StackProxy::Static {
+                pinned_model: Some(PINNED_MODEL),
+            },
+        ),
+        (
+            "pinned static ChatGPT login",
+            StackProxy::StaticChatGpt {
+                pinned_model: Some(PINNED_MODEL),
+            },
+        ),
+    ];
+    for (name, proxy) in platform_lanes {
+        let dynamic = matches!(proxy, StackProxy::Dynamic);
+        let (proxy_addr, controller, upstream, _env, _guards) =
+            spawn_stack_with_service_tier_endpoints(
+                Some(MANAGED_STUB_KEY),
+                Some(PINNED_MODEL),
+                false,
+                proxy,
+                Some("all"),
+            )
+            .await?;
+        let mut request = with_require_tool_call(&luna_lite_request(), json!("1"));
+        request["service_tier"] = json!("priority");
+        answer_next(&upstream, [refused_tool_choice()]);
+        let (status, text) = post_through_proxy(
+            proxy_addr,
+            &proxy_token(Some(RUN_ID), None),
+            "/v1/responses",
+            request,
+        )
+        .await?;
+        assert_eq!(status, StatusCode::OK, "{name}: {text}");
+        assert_eq!(
+            platform_lane(proxy_addr, "/healthz").await?["serviceTierOverrides"],
+            json!(1),
+            "{name}"
+        );
+        assert_eq!(
+            required_tool_call_fallbacks(proxy_addr).await?,
+            json!(1),
+            "{name}"
+        );
+        assert_eq!(
+            controller.leases.lock().expect("lease log").len(),
+            usize::from(dynamic),
+            "{name}"
+        );
+        let tiers = upstream.service_tiers.lock().expect("tier log").clone();
+        assert_eq!(tiers.len(), 2, "{name}");
+        assert_eq!(tiers[0], tiers[1], "{name}");
+        let bearers = upstream.bearers.lock().expect("bearer log").clone();
+        assert_eq!(bearers[0], bearers[1], "{name}");
+    }
+
+    Ok(())
+}
+
+#[tokio::test]
+#[serial]
+async fn required_tool_call_fallback_and_a_lease_renewal_count_one_fallback() -> Result<()> {
+    // Upstream may refuse `required` before or after a lease renewal. The
+    // request falls back once either way, and a renewal after the fallback
+    // sends no `required` again.
+    let expired = (
+        StatusCode::UNAUTHORIZED,
+        json!({ "error": { "message": "Your authentication token has expired.", "code": "token_expired" } }),
+    );
+    let required = Some(json!("required"));
+    for (case, answers, choices) in [
+        (
+            "refused, then expired",
+            [refused_tool_choice(), expired.clone()],
+            [required.clone(), None, None],
+        ),
+        (
+            "expired, then refused",
+            [expired.clone(), refused_tool_choice()],
+            [required.clone(), required.clone(), None],
+        ),
+    ] {
+        let (proxy_addr, controller, upstream, _env, _guards) =
+            spawn_managed_stack(Some(MANAGED_STUB_KEY), Some(PINNED_MODEL), false).await?;
+        answer_next(&upstream, answers);
+        let (status, text) = post_through_proxy(
+            proxy_addr,
+            &proxy_token(Some(RUN_ID), None),
+            "/v1/responses",
+            with_require_tool_call(&luna_lite_request(), json!("1")),
+        )
+        .await?;
+        assert_eq!(status, StatusCode::OK, "{case}: {text}");
+        assert_eq!(
+            upstream_bodies_since(&upstream, 0)
+                .iter()
+                .map(|body| body.get("tool_choice").cloned())
+                .collect::<Vec<_>>(),
+            choices,
+            "{case}"
+        );
+        assert_eq!(
+            controller.leases.lock().expect("lease log").len(),
+            2,
+            "{case}: the lease and its renewal"
+        );
+        assert_eq!(
+            required_tool_call_fallbacks(proxy_addr).await?,
+            json!(1),
+            "{case}"
+        );
+    }
+
+    Ok(())
+}
+
 /// Set in the child process of the test below to the model stub path its
 /// proxy's key names.
 const REQUIRED_TOOL_CALL_LOG_CHILD: &str = "PROXY_FLOW_REQUIRED_TOOL_CALL_LOG_CHILD";
@@ -2070,6 +2820,82 @@ async fn send_required_tool_calls_to(upstream_path: &str) -> Result<()> {
             "{upstream_path}: {body}"
         );
     }
+    Ok(())
+}
+
+/// Set in the child process of the test below.
+const REQUIRED_TOOL_CALL_FALLBACK_LOG_CHILD: &str =
+    "PROXY_FLOW_REQUIRED_TOOL_CALL_FALLBACK_LOG_CHILD";
+/// The line the proxy logs for each request that falls back from the
+/// `required` it set.
+const REQUIRED_TOOL_CALL_FALLBACK_LOG: &str =
+    "[proxy] required tool call falls back to the request's own tool choice";
+
+#[test]
+#[serial]
+fn required_tool_call_fallback_logs_one_line_without_the_upstream_body() -> Result<()> {
+    if std::env::var(REQUIRED_TOOL_CALL_FALLBACK_LOG_CHILD).is_ok() {
+        return tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()?
+            .block_on(send_a_refused_required_tool_call());
+    }
+    // The child's stderr holds only its own proxy's log.
+    let output = std::process::Command::new(std::env::current_exe()?)
+        .env_clear()
+        .env(REQUIRED_TOOL_CALL_FALLBACK_LOG_CHILD, "1")
+        .args([
+            "--exact",
+            "required_tool_call_fallback_logs_one_line_without_the_upstream_body",
+            "--nocapture",
+        ])
+        .output()?;
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        output.status.success() && stdout.contains("test result: ok. 1 passed"),
+        "{stdout}\n{stderr}"
+    );
+    let lines = stderr
+        .lines()
+        .filter_map(|line| line.split_once(REQUIRED_TOOL_CALL_FALLBACK_LOG))
+        .map(|(_, record)| serde_json::from_str::<Value>(record.trim()))
+        .collect::<Result<Vec<_>, _>>()?;
+    assert_eq!(
+        lines,
+        vec![json!({
+            "route": "/v1/responses",
+            "runId": RUN_ID,
+            "upstreamErrorCode": "invalid_request_error",
+            "upstreamErrorParam": "tool_choice",
+        })],
+        "{stderr}"
+    );
+    assert!(!stderr.contains(REFUSAL_MARKER), "{stderr}");
+    // `required` went upstream once, on the first attempt.
+    assert_eq!(
+        stderr.matches(REQUIRED_TOOL_CALL_LOG).count(),
+        1,
+        "{stderr}"
+    );
+    Ok(())
+}
+
+/// The child side of the test above: a platform-lane request with the key
+/// whose `required` upstream refuses once.
+async fn send_a_refused_required_tool_call() -> Result<()> {
+    let (proxy_addr, _controller, upstream, _env, _guards) =
+        spawn_static_stack(Some(PINNED_MODEL)).await?;
+    answer_next(&upstream, [refused_tool_choice()]);
+    let (status, text) = post_through_proxy(
+        proxy_addr,
+        &proxy_token(Some(RUN_ID), None),
+        "/v1/responses",
+        with_require_tool_call(&luna_lite_request(), json!("1")),
+    )
+    .await?;
+    assert_eq!(status, StatusCode::OK, "{text}");
+    assert_eq!(upstream_bodies_since(&upstream, 0).len(), 2);
     Ok(())
 }
 
