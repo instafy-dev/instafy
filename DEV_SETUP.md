@@ -108,7 +108,10 @@ cargo build --manifest-path packages/runtime-agent/Cargo.toml --features code-mo
   -p runtime-agent -p codex-code-mode-host
 ```
 
-Runtime images build and install the host the same way (`docker/runtime/Dockerfile`). The
+Runtime images build and install the host the same way (`docker/runtime/Dockerfile`), and
+`pnpm --filter @instafy/desktop-app stage:runtime-agent` stages, and the Desktop package signs and
+checksums, it beside the bundled runtime-agent (a prebuilt `INSTAFY_RUNTIME_AGENT_PREBUILT` needs
+the host in the same directory). The
 runtime-agent integration tests link a built host next to their test binaries automatically; a
 `proxy_retry_budget` run for a code-mode-only model (the default `gpt-6-luna`, or whatever
 `INSTAFY_TEST_CODEX_MODEL` names) fails with this build command when the host is missing. CI

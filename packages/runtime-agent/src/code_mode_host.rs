@@ -2,9 +2,12 @@
 //!
 //! Upstream Codex removed its in-process V8 runtime (rust-v0.159), so a model
 //! whose catalog entry is `code_mode_only` (gpt-6-luna, gpt-5.6-sol) cannot call
-//! any tool without `codex-code-mode-host`. Runtime images and desktop builds
-//! install it next to the runtime-agent binary. Runtime-agent points Codex at
-//! exactly that file and refuses to start a turn that needs a missing host.
+//! any tool without `codex-code-mode-host`. Runtime images
+//! (`docker/runtime/Dockerfile`) and Desktop packages
+//! (`packages/desktop-app/scripts/stage-runtime-agent.mjs`, which also records
+//! it in the checksum manifest the app verifies) install it next to the
+//! runtime-agent binary. Runtime-agent points Codex at exactly that file and
+//! refuses to start a turn that needs a missing host.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -62,7 +65,7 @@ pub(crate) fn ensure_host_for_model(
         return Ok(());
     }
     bail!(
-        "Codex model `{}` runs its tools only through code mode, but the code-mode host is missing at {}. Install `{EXECUTABLE_NAME}` next to runtime-agent; runtime images and desktop builds ship it.",
+        "Codex model `{}` runs its tools only through code mode, but the code-mode host is missing at {}. Runtime images and Desktop packages ship `{EXECUTABLE_NAME}` next to runtime-agent; for a self-built runtime-agent, build it with `cargo build --features code-mode-host -p runtime-agent -p codex-code-mode-host` (see DEV_SETUP.md).",
         model_info.slug,
         host.display()
     )
