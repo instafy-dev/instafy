@@ -213,6 +213,16 @@ Starter guidance with the current defaults:
 - tunnels and hosted runtimes burn from the same pool, so heavy infra usage reduces how much managed AI remains that day
 - the balance resets once per day in UTC; there is no carry-over
 
+### Ledger guard
+Every `org_credit_ledger` insert moves the team balance through the ledger's balance trigger,
+under a lock on the team's balance row:
+- A debit that would leave the balance below zero is refused unless the row sets
+  `allow_overdraft`. No controller path sets it today.
+- A credit is always applied, including one that leaves a negative balance still negative.
+- A row whose idempotency key the team already has for the same project is skipped without
+  moving the balance, also under `ON CONFLICT DO NOTHING` and between concurrent writers. Rows
+  without a project are never deduplicated, as in the ledger's unique index.
+
 ## Controller Endpoints
 - `GET /credits/status` — current team credit balance/limit.
 - `GET /credits/ledger` — recent burn/refill events.

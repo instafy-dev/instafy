@@ -123,6 +123,21 @@ def main():
                 sql(f"update notification_delivery_jobs set lease_until=now()-interval '1 second' where id='{job}' and status='leased'; select count(*) from notification_lease_jobs(1,60);")
             assert sql(f"select status||':'||attempt_count from notification_delivery_jobs where id='{job}';") == 'failed:8'
             print('PASS: crash recovery fences stale workers and terminates at eight attempts')
+            sql((ROOT/'supabase/tests/managed_ai_metering.sql').read_text())
+            print('PASS: metering tables, ledger overdraft, refill into debt, duplicate ledger keys, admissions, privileges')
+            # Distinct sessions post the same ledger key. The guard skips a
+            # duplicate after taking the balance lock, so the balance moves once.
+            ledger_key = 'managed-ai-usage:' + str(uuid.uuid4())
+            balance = "select balance from org_credit_balances where org_id='00000000-0000-0000-0000-000000000101';"
+            balance_before = int(sql(balance))
+            post = f"""insert into org_credit_ledger(org_id,project_id,delta,reason,idempotency_key,allow_overdraft)
+              values ('00000000-0000-0000-0000-000000000101','00000000-0000-0000-0000-000000000111',
+              -1,'managed_ai_usage','{ledger_key}',true) on conflict do nothing;"""
+            with ThreadPoolExecutor(max_workers=8) as pool:
+                list(pool.map(sql, [post] * 16))
+            assert sql(f"select count(*) from org_credit_ledger where idempotency_key='{ledger_key}';") == '1'
+            assert int(sql(balance)) == balance_before - 1
+            print('PASS: 16 concurrent posts of one ledger key debit the balance once')
             for pattern in args.controller_test:
                 test_env = dict(os.environ, TEST_DATABASE_URL=f'postgresql://postgres@127.0.0.1:{port}/notification_controller_tests')
                 subprocess.run(['cargo', 'test', '--manifest-path',
