@@ -136,12 +136,11 @@ settings decide (`auto` follows it too). The proxy therefore sends every managed
 Completions request to the OpenAI API with `service_tier: "default"` explicitly. A managed request
 that asks for any other string tier, such as `priority`, which codex's Fast mode sends, is
 overridden to `default` rather than refused, so a stray codex setting never fails a managed turn.
-The proxy logs each override when the request goes upstream, and counts it as
-`serviceTierOverrides` in the `platformLane` health object, next to `serviceTier`; a request that
-never gets there, refused for bad input, missing credits or a failed lease, or failing inside the
-proxy after its lease, is not counted. A tier that is not a string, which codex never sends, is
-refused with 400 `service_tier_not_allowed` before the proxy leases a credential, burns credits or
-contacts the provider. A static ChatGPT login serving managed turns sends the ChatGPT endpoint no
+The proxy logs each override when it hands the request to its upstream HTTP client, and counts it
+as `serviceTierOverrides` in the `platformLane` health object, next to `serviceTier`; a request
+refused before that, for bad input or a failed lease, is not counted. A tier that is not a string,
+which codex never sends, is refused with 400 `service_tier_not_allowed` before the proxy leases a
+credential or contacts the provider. A static ChatGPT login serving managed turns sends the ChatGPT endpoint no
 tier, as before, since how that endpoint treats one is unverified; its overrides are counted and
 logged with no tier sent. The tier goes only to OpenAI's own API by default:
 `PROXY_PLATFORM_SERVICE_TIER_ENDPOINTS` is `openai` (hosts under `openai.com`), `all` (any endpoint

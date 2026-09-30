@@ -198,9 +198,9 @@ never fails a managed turn. Each override logs one
 `platform lane overrides the requested service tier` line with the route, the run id, the tier
 sent (`serviceTier`) and at most the first 32 characters of the requested tier, never the request
 body, and adds one to `serviceTierOverrides` in the health report below. Both happen when the
-request goes upstream, once per request however many attempts it takes; a request that never gets
-there, refused for bad input, missing credits or a failed lease, or failing inside the proxy after
-its lease, is neither logged nor counted. An explicit `null` counts as no tier. Codex never sends
+proxy hands the request to its upstream HTTP client, once per request however many attempts it
+takes, so a request that then fails to connect is still counted; one refused for bad input or a
+failed lease, or failing inside the proxy before that point, is neither logged nor counted. An explicit `null` counts as no tier. Codex never sends
 a tier that is not a string, so a number, boolean, object or array is refused with 400 before any
 lease or upstream request. The refusal's `error.type` is `invalid_request_error`, its
 `error.code` is `service_tier_not_allowed`, and its message says the platform key serves only the
@@ -222,7 +222,8 @@ Speech and transcription refuse instead of override. They forward the client's o
 override would mean rewriting it, a multipart form included, and codex sends no tier to either,
 so a refusal there costs no managed turn. OpenAI documents no service tier for audio, so the proxy
 adds none to them. On the platform lane a speech request whose JSON names any `service_tier` but
-`default`, or a transcription form with a `service_tier` field other than `default`, gets the same
+`default`, or a transcription form in which the proxy's own form reader finds a `service_tier` field
+other than `default`, gets the same
 coded 400 before any lease or upstream request, pinned or not, and counts no override. A
 platform-lane audio request with no tier, `null` or `default` goes upstream exactly as sent. On a
 bring-your-own lane and in standalone mode the audio body goes as sent, tier included, as before.

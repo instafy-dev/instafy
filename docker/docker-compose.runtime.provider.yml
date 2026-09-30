@@ -16,7 +16,9 @@ services:
       # PROXY_PINNED_MODEL to an empty value for no pin.
       PROXY_PINNED_MODEL: ${PROXY_PINNED_MODEL-${MANAGED_AI_MODEL_ID:-}}
       # Where managed runs send service_tier "default": openai (unset), all
-      # or none. See packages/openai-proxy-server/README.md.
+      # or none. See packages/openai-proxy-server/README.md. Like
+      # PROXY_PINNED_MODEL, this entry overrides one in the env_file above,
+      # so set it where compose runs.
       PROXY_PLATFORM_SERVICE_TIER_ENDPOINTS: ${PROXY_PLATFORM_SERVICE_TIER_ENDPOINTS:-}
       PROXY_CONTROLLER_BASE_URL: ${PROXY_CONTROLLER_BASE_URL:-http://host.docker.internal:80}
       CONTROLLER_INTERNAL_TOKEN: ${CONTROLLER_INTERNAL_TOKEN:-}
