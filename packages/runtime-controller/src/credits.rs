@@ -2433,6 +2433,21 @@ mod tests {
                     WHERE org_id = NEW.org_id
                     FOR UPDATE;
 
+                    IF NEW.project_id IS NOT NULL
+                       AND NEW.idempotency_key IS NOT NULL
+                       AND NEW.idempotency_key <> ''
+                       AND EXISTS (
+                           SELECT 1
+                           FROM org_credit_ledger
+                           WHERE org_id = NEW.org_id
+                             AND project_id = NEW.project_id
+                             AND idempotency_key = NEW.idempotency_key
+                             AND idempotency_key IS NOT NULL
+                             AND idempotency_key <> ''
+                       ) THEN
+                        RETURN NULL;
+                    END IF;
+
                     current_balance := coalesce(current_balance, 0) + NEW.delta;
 
                     IF current_balance < 0 THEN
@@ -3011,6 +3026,258 @@ mod tests {
 
         connection_handle.abort();
         Ok(())
+    }
+
+    /// Sessions that race one idempotency key in the concurrent ledger tests.
+    const LEDGER_RACE_SESSIONS: usize = 8;
+
+    /// An org and project in the migrated `public` schema. Temp tables are
+    /// per session, so a race across sessions needs the real ledger and its
+    /// trigger. No credit limit, so no daily refill joins the race.
+    async fn seed_shared_ledger_org(
+        client: &tokio_postgres::Client,
+        balance: i32,
+    ) -> anyhow::Result<(Uuid, Uuid)> {
+        let org_id = Uuid::new_v4();
+        let project_id = Uuid::new_v4();
+        client
+            .execute(
+                "INSERT INTO public.organizations (id, slug, name) VALUES ($1, $2, 'Ledger race')",
+                &[&org_id, &format!("ledger-race-{org_id}")],
+            )
+            .await?;
+        client
+            .execute(
+                "INSERT INTO public.projects (id, org_id, name) VALUES ($1, $2, 'Ledger race')",
+                &[&project_id, &org_id],
+            )
+            .await?;
+        client
+            .execute(
+                "INSERT INTO public.org_credit_balances (org_id, balance, credit_limit) VALUES ($1, $2, 0)",
+                &[&org_id, &balance],
+            )
+            .await?;
+        Ok((org_id, project_id))
+    }
+
+    async fn connect_ledger_race_session(
+        application_name: &str,
+    ) -> anyhow::Result<(tokio_postgres::Client, JoinHandle<()>)> {
+        let (client, handle) = connect_test_db()
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("TEST_DATABASE_URL is required for a ledger race"))?;
+        client
+            .execute(
+                "SELECT set_config('application_name', $1, false)",
+                &[&application_name],
+            )
+            .await?;
+        Ok((client, handle))
+    }
+
+    /// Runs `LEDGER_RACE_SESSIONS` controller-shaped sessions against one org.
+    /// A gate session holds the org balance row until every racer waits on
+    /// it, so all of them pass the unlocked idempotency pre-check before any
+    /// of them posts: the race the pre-check alone cannot close.
+    async fn race_behind_balance_lock<F, Fut, T>(org_id: Uuid, racer: F) -> anyhow::Result<Vec<T>>
+    where
+        F: Fn(tokio_postgres::Client) -> Fut,
+        Fut: std::future::Future<Output = anyhow::Result<T>> + Send + 'static,
+        T: Send + 'static,
+    {
+        let tag = format!("ledger-race-{org_id}");
+        let (gate, _gate_handle) = connect_ledger_race_session("ledger-race-gate").await?;
+        gate.batch_execute("BEGIN").await?;
+        gate.query_one(
+            "SELECT balance FROM public.org_credit_balances WHERE org_id = $1 FOR UPDATE",
+            &[&org_id],
+        )
+        .await?;
+
+        let mut racers = Vec::with_capacity(LEDGER_RACE_SESSIONS);
+        for _ in 0..LEDGER_RACE_SESSIONS {
+            let (client, handle) = connect_ledger_race_session(&tag).await?;
+            let race = racer(client);
+            racers.push(crate::tests::spawn_aborting(async move {
+                let result = race.await;
+                handle.abort();
+                result
+            }));
+        }
+
+        let (observer, observer_handle) =
+            connect_ledger_race_session("ledger-race-observer").await?;
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(20);
+        loop {
+            let waiting: i64 = observer
+                .query_one(
+                    "SELECT count(*) FROM pg_stat_activity
+                     WHERE application_name = $1 AND wait_event_type = 'Lock'",
+                    &[&tag],
+                )
+                .await?
+                .get(0);
+            if waiting == LEDGER_RACE_SESSIONS as i64 {
+                break;
+            }
+            anyhow::ensure!(
+                tokio::time::Instant::now() < deadline,
+                "only {waiting} of {LEDGER_RACE_SESSIONS} racers reached the balance lock"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        observer_handle.abort();
+        gate.batch_execute("COMMIT").await?;
+
+        let mut results = Vec::with_capacity(LEDGER_RACE_SESSIONS);
+        for racer in racers {
+            results.push(tokio::time::timeout(std::time::Duration::from_secs(30), racer).await???);
+        }
+        Ok(results)
+    }
+
+    /// One racer posted and every other one was told it deduped, and the key
+    /// left one row and moved the balance once. Errors rather than panics, so
+    /// the caller still removes its org.
+    async fn check_one_post_for_key(
+        client: &tokio_postgres::Client,
+        org_id: &Uuid,
+        project_id: &Uuid,
+        key: &str,
+        deduped: &[bool],
+        expected_balance: i32,
+    ) -> anyhow::Result<()> {
+        let posted = deduped.iter().filter(|deduped| !**deduped).count();
+        anyhow::ensure!(
+            deduped.len() == LEDGER_RACE_SESSIONS && posted == 1,
+            "exactly one racer posts and the rest report a dedupe, got {deduped:?}"
+        );
+        let rows: i64 = client
+            .query_one(
+                "SELECT count(*) FROM public.org_credit_ledger
+                 WHERE org_id = $1 AND project_id = $2 AND idempotency_key = $3",
+                &[org_id, project_id, &key],
+            )
+            .await?
+            .get(0);
+        anyhow::ensure!(rows == 1, "one key keeps one ledger row, got {rows}");
+        let balance: i32 = client
+            .query_one(
+                "SELECT balance FROM public.org_credit_balances WHERE org_id = $1",
+                &[org_id],
+            )
+            .await?
+            .get(0);
+        anyhow::ensure!(
+            balance == expected_balance,
+            "one key moves the balance once: expected {expected_balance}, got {balance}"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn concurrent_reserve_burns_with_one_key_debit_once() -> anyhow::Result<()> {
+        let Some((client, connection_handle)) = connect_test_db().await? else {
+            eprintln!("skipping concurrent ledger burn test: TEST_DATABASE_URL not set");
+            return Ok(());
+        };
+        let (org_id, project_id) = seed_shared_ledger_org(&client, 1000).await?;
+        let key = format!("managed-ai-prompt:{}", Uuid::new_v4());
+
+        let outcome = async {
+            // The dispatch reserve and the deferred burn: an unlocked
+            // pre-check, the balance lock, then `on conflict do nothing`.
+            let deduped = race_behind_balance_lock(org_id, |mut racer| {
+                let key = key.clone();
+                async move {
+                    let transaction = racer.transaction().await?;
+                    let mut metadata = json!({ "source": "managed_ai" });
+                    process_credit_burn(
+                        &transaction,
+                        &project_id,
+                        &org_id,
+                        None,
+                        5,
+                        "managed_ai_prompt",
+                        Some(&key),
+                        &mut metadata,
+                    )
+                    .await
+                    .map_err(|error| credit_error("racing reserve burn", error))?;
+                    transaction.commit().await?;
+                    Ok(!credit_ledger_row_written(&metadata))
+                }
+            })
+            .await?;
+            check_one_post_for_key(&client, &org_id, &project_id, &key, &deduped, 995).await
+        }
+        .await;
+
+        client
+            .execute("DELETE FROM public.organizations WHERE id = $1", &[&org_id])
+            .await?;
+        connection_handle.abort();
+        outcome
+    }
+
+    #[tokio::test]
+    async fn concurrent_managed_ai_refunds_credit_once() -> anyhow::Result<()> {
+        let Some((client, connection_handle)) = connect_test_db().await? else {
+            eprintln!("skipping concurrent managed AI refund test: TEST_DATABASE_URL not set");
+            return Ok(());
+        };
+        let (org_id, project_id) = seed_shared_ledger_org(&client, 1000).await?;
+        let prompt_id = Uuid::new_v4();
+        client
+            .execute(
+                "INSERT INTO public.org_credit_ledger (org_id, project_id, delta, reason, metadata, idempotency_key)
+                 VALUES ($1, $2, -5, 'managed_ai_prompt', '{}'::jsonb, $3)",
+                &[&org_id, &project_id, &format!("managed-ai-prompt:{prompt_id}")],
+            )
+            .await?;
+
+        let outcome = async {
+            // Both terminal sinks and their retries refund the same reserve.
+            let deduped = race_behind_balance_lock(org_id, |mut racer| async move {
+                let transaction = racer.transaction().await?;
+                let outcome = refund_unused_managed_ai_prompt(
+                    &transaction,
+                    &project_id,
+                    &org_id,
+                    None,
+                    &prompt_id,
+                    "proxy_auth_rejected",
+                )
+                .await
+                .map_err(|error| credit_error("racing managed AI refund", error))?;
+                transaction.commit().await?;
+                match outcome {
+                    ManagedAiRefundOutcome::Applied(_) => Ok(false),
+                    ManagedAiRefundOutcome::AlreadyRefunded(_) => Ok(true),
+                    ManagedAiRefundOutcome::NotRefundable => {
+                        anyhow::bail!("a burned reserve without usage must be refundable")
+                    }
+                }
+            })
+            .await?;
+            check_one_post_for_key(
+                &client,
+                &org_id,
+                &project_id,
+                &format!("managed-ai-refund:{prompt_id}"),
+                &deduped,
+                1000,
+            )
+            .await
+        }
+        .await;
+
+        client
+            .execute("DELETE FROM public.organizations WHERE id = $1", &[&org_id])
+            .await?;
+        connection_handle.abort();
+        outcome
     }
 
     #[tokio::test]

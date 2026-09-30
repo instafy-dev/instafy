@@ -36,6 +36,11 @@ pub struct CodexCompletion {
     pub rate_limits: Option<Value>,
 }
 
+/// A policy over the tools one upstream request carries. It gets the final
+/// `tools` list, which on a ChatGPT login that requested none is the default
+/// tool set this client adds, and returns the tools to send.
+pub(crate) type ToolFilter = Box<dyn Fn(&[Value]) -> Vec<Value> + Send + Sync>;
+
 pub struct CodexClient {
     http: reqwest::Client,
     credentials: Credentials,
@@ -49,6 +54,7 @@ pub struct CodexClient {
     requested_tool_choice: Option<Value>,
     requested_parallel_tool_calls: Option<bool>,
     requested_text_controls: Option<Value>,
+    tool_filter: Option<ToolFilter>,
     user_agent: String,
 }
 
@@ -138,6 +144,7 @@ impl CodexClient {
             requested_tool_choice: None,
             requested_parallel_tool_calls: None,
             requested_text_controls: None,
+            tool_filter: None,
             user_agent: format!("openai-proxy-server/{}", env!("CARGO_PKG_VERSION")),
         })
     }
@@ -173,6 +180,17 @@ impl CodexClient {
         self.requested_tool_choice = tool_choice;
         self.requested_parallel_tool_calls = parallel_tool_calls;
         self.requested_text_controls = text_controls;
+        self
+    }
+
+    /// Runs `filter` over the tools of every request this client sends, after
+    /// it adds its default tools, so the filter sees the list that goes
+    /// upstream.
+    pub(crate) fn with_tool_filter(
+        mut self,
+        filter: impl Fn(&[Value]) -> Vec<Value> + Send + Sync + 'static,
+    ) -> Self {
+        self.tool_filter = Some(Box::new(filter));
         self
     }
 
@@ -266,7 +284,7 @@ impl CodexClient {
         };
 
         let mut request_id_header: Option<String> = None;
-        let payload = if self.credentials.is_chatgpt() {
+        let mut payload = if self.credentials.is_chatgpt() {
             build_chatgpt_payload(
                 &self.model,
                 &self.instructions,
@@ -314,6 +332,9 @@ impl CodexClient {
                 }
             }
         };
+        if let Some(filter) = self.tool_filter.as_deref() {
+            filter_payload_tools(&mut payload, filter);
+        }
 
         if upstream_wire_api == UpstreamWireApi::GeminiCodeAssist {
             headers.insert(
@@ -970,6 +991,26 @@ fn number_to_u64(value: &Value) -> Option<u64> {
         }
     }
     None
+}
+
+/// Runs a [`ToolFilter`] over the `tools` a built payload carries. A payload
+/// left with no tools also loses `tool_choice` and `parallel_tool_calls`, the
+/// shape the builders give a request that carries none.
+fn filter_payload_tools(
+    payload: &mut Value,
+    filter: &(dyn Fn(&[Value]) -> Vec<Value> + Send + Sync),
+) {
+    let Some(tools) = payload.get("tools").and_then(Value::as_array) else {
+        return;
+    };
+    let kept = filter(tools);
+    if !kept.is_empty() {
+        payload["tools"] = Value::Array(kept);
+    } else if let Some(payload) = payload.as_object_mut() {
+        for key in ["tools", "tool_choice", "parallel_tool_calls"] {
+            payload.remove(key);
+        }
+    }
 }
 
 struct ChatGptToolMetadata {
@@ -1948,6 +1989,43 @@ mod tests {
         assert_eq!(payload["parallel_tool_calls"], json!(false));
         assert_eq!(payload["text"], json!({"format": {"type": "text"}}));
         assert!(payload.get("client_metadata").is_none());
+    }
+
+    #[test]
+    fn tool_filter_runs_on_the_final_tools_and_clears_empty_tool_controls() {
+        let without_web_search = |tools: &[Value]| {
+            tools
+                .iter()
+                .filter(|tool| tool["type"] != "web_search")
+                .cloned()
+                .collect::<Vec<_>>()
+        };
+        let mut payload = json!({
+            "tools": [{ "type": "function", "name": "shell" }, { "type": "web_search" }],
+            "tool_choice": "auto",
+            "parallel_tool_calls": false,
+        });
+        filter_payload_tools(&mut payload, &without_web_search);
+        assert_eq!(
+            payload["tools"],
+            json!([{ "type": "function", "name": "shell" }])
+        );
+        assert_eq!(payload["tool_choice"], json!("auto"));
+
+        // A request left with no tools has the shape of one that sent none.
+        let mut payload = json!({
+            "tools": [{ "type": "web_search" }],
+            "tool_choice": "auto",
+            "parallel_tool_calls": false,
+            "input": [],
+        });
+        filter_payload_tools(&mut payload, &without_web_search);
+        assert_eq!(payload, json!({ "input": [] }));
+
+        // Nothing to filter on a payload without tools.
+        let mut payload = json!({ "messages": [] });
+        filter_payload_tools(&mut payload, &without_web_search);
+        assert_eq!(payload, json!({ "messages": [] }));
     }
 
     #[test]

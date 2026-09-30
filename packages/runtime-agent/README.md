@@ -97,6 +97,20 @@ receipts. The existing bounded recovery attempt preserves permissions and output
 retaining evidence from the first attempt. See [Execution Evidence and Recovery](../../docs/Multi-Agent-Evaluation.md#execution-evidence-and-recovery)
 for receipt limitations and compatibility behavior.
 
+## Structured file results
+
+Structured responses may include workspace files as read references using `change: "read"`,
+`change: { "type": "read" }`, or `type: "read"`. Read markers are case-insensitive and allow
+surrounding whitespace. An explicit read marker takes precedence over a conflicting write marker.
+The runtime keeps the sanitized reference in the file artifacts, discards its inline content,
+and never writes, deletes, moves, mirrors, or uploads a file because of that reference. References
+also do not satisfy required file-change evidence or exempt a path from read-only restoration.
+This applies to both the initial response and recovery responses.
+
+Existing created/changed/deleted descriptors and legacy inline-write descriptors retain their
+behavior. References do not change the controller's workspace permissions or the separate
+`metadata.writeScope` policy; routing expectations are not permission grants.
+
 ## Realistic browser-skill simulation (local Codex auth)
 
 Use this when iterating browser skills before release. It runs a live runtime-agent apply job through the local proxy, loading credentials from `~/.codex/auth.json`.

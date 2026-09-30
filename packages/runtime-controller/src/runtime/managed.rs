@@ -158,6 +158,34 @@ pub(crate) fn sanitize_managed_runtime_request_metadata(
     ))
 }
 
+/// The only keys a tenant lease's metadata keeps, each only with a string
+/// value: the caller's description of the attachment.
+const TENANT_LEASE_METADATA_KEYS: [&str; 2] = ["source", "label"];
+
+/// Metadata a caller may store on a tenant lease.
+///
+/// A tenant lease launches nothing: it records that another project is
+/// attached to a runtime its own project already runs. Whatever the provider,
+/// the row keeps only the string fields in [`TENANT_LEASE_METADATA_KEYS`], so
+/// it can never hold a controller-owned key such as
+/// [`MANAGED_RUNTIME_LAUNCH_ATTESTATION`] or a launch setting of any provider
+/// (image, machine size, runtime environment), including settings added
+/// later. Metadata that is not an object keeps nothing. No metadata stays no
+/// metadata, so a re-attach without any leaves the stored metadata as it is.
+/// Runs on every write of the row, first attach and re-attach.
+pub(crate) fn sanitize_tenant_lease_request_metadata(
+    metadata: Option<JsonValue>,
+) -> Option<JsonValue> {
+    let mut root = match metadata? {
+        JsonValue::Object(root) => root,
+        _ => JsonMap::new(),
+    };
+    root.retain(|key, value| {
+        TENANT_LEASE_METADATA_KEYS.contains(&key.as_str()) && value.is_string()
+    });
+    Some(JsonValue::Object(root))
+}
+
 fn launch_attestation(lease_id: Uuid) -> JsonValue {
     json!({
         "version": MANAGED_RUNTIME_LAUNCH_ATTESTATION_VERSION,
@@ -352,6 +380,57 @@ mod tests {
         assert_eq!(sanitized["env"]["INSTAFY_BROWSER_VIEWPORT_ONLY"], "1");
         assert_eq!(sanitized["env"]["INSTAFY_BROWSER_WEBRTC_ENABLED"], "1");
         assert_eq!(sanitized["env"]["INSTAFY_VNC_PORT"], "5900");
+    }
+
+    #[test]
+    fn tenant_lease_metadata_keeps_only_its_descriptive_strings() {
+        let supplied = json!({
+            "source": "tenant-attach",
+            "label": "docs preview",
+            // Launch settings of the managed provider and of custom ones.
+            "runtimeFlavor": "custom-image",
+            "runtimeImagePreset": "default",
+            "runtimeAgentImage": "acme/runtime:one",
+            "runtime_agent_image": "acme/runtime:one",
+            "runtime-agent-image": "acme/runtime:one",
+            "sizeId": "boost",
+            "size_id": "boost",
+            "env": { "INSTAFY_ENABLE_BROWSER_SESSION": "1" },
+            // Controller-owned keys.
+            "_instafyManagedRuntimeLaunch": {
+                "version": 1,
+                "flavor": "webdev",
+                "generation": Uuid::new_v4().to_string(),
+            },
+            "_instafySelfHostedAccess": { "mode": "private" },
+            "_InstafyLeasePolicy": { "mode": "shared" },
+            "someFutureAllocatorKey": "on",
+        });
+        assert_eq!(
+            sanitize_tenant_lease_request_metadata(Some(supplied)),
+            Some(json!({ "source": "tenant-attach", "label": "docs preview" }))
+        );
+
+        // Only string values are kept, so no object rides along under an
+        // allowed key.
+        assert_eq!(
+            sanitize_tenant_lease_request_metadata(Some(json!({
+                "source": {
+                    "_instafyManagedRuntimeLaunch": {
+                        "version": 1,
+                        "flavor": "webdev",
+                        "generation": Uuid::new_v4().to_string(),
+                    },
+                },
+                "label": 7,
+            }))),
+            Some(json!({}))
+        );
+        assert_eq!(
+            sanitize_tenant_lease_request_metadata(Some(json!(["runtimeFlavor", "webdev"]))),
+            Some(json!({}))
+        );
+        assert_eq!(sanitize_tenant_lease_request_metadata(None), None);
     }
 
     #[test]

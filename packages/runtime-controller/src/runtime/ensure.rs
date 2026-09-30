@@ -26,8 +26,9 @@ use crate::{
 
 use super::db::{
     create_runtime_lease, ensure_project_exists, ensure_runtime_record, fetch_runtime_for_update,
-    fetch_runtime_lease_for_update, mark_runtime_lease_active, mark_runtime_lease_launching,
-    mark_runtime_lease_released, record_runtime_event, release_origin_instances_for_runtime,
+    fetch_runtime_lease_for_update, load_origin_instance_for_lease, mark_runtime_lease_active,
+    mark_runtime_lease_launching, mark_runtime_lease_released, record_runtime_event,
+    release_origin_instances_for_runtime, release_tenant_leases_of_parent,
     runtime_provider_identity_matches, upsert_origin_instance, OriginInstanceRecord,
     RuntimeDetails, RuntimeLeaseDetails, RuntimeLeaseRecord, RuntimeRecord,
 };
@@ -495,6 +496,14 @@ async fn mark_runtime_launch_failed_if_current(
         })?;
         return Ok(false);
     }
+    release_tenant_leases_of_parent(&transaction, lease_id)
+        .await
+        .map_err(|(_, payload)| {
+            anyhow::anyhow!(
+                "failed to release tenant leases after launch failure: {}",
+                payload.0.message
+            )
+        })?;
 
     let runtime_rows = transaction
         .execute(
@@ -1049,6 +1058,104 @@ async fn authorize_explicit_runtime_target(
     ))
 }
 
+/// Stable code of a refused tenant attach. A tenant attach answers a runtime
+/// that does not exist, a runtime whose project is missing or deleted, and a
+/// runtime whose project the caller cannot write to alike: these tenant
+/// refusals get the same status and body. This covers the tenant scope only:
+/// the other scopes answer a `runtimeId` in their own way (see
+/// `authorize_explicit_runtime_target`).
+const TENANT_RUNTIME_NOT_FOUND_CODE: &str = "runtime_not_found";
+
+fn tenant_runtime_not_found() -> (StatusCode, Json<ApiError>) {
+    (
+        StatusCode::NOT_FOUND,
+        Json(ApiError {
+            message: "runtime not found".to_string(),
+            code: Some(TENANT_RUNTIME_NOT_FOUND_CODE.to_string()),
+            details: None,
+        }),
+    )
+}
+
+/// Authorize a tenant attach against the runtime it names.
+///
+/// A tenant lease attaches the payload project to a runtime that another
+/// project, the host, owns and runs. The caller must be able to write to the
+/// host project as well as to the tenant project, the rule the tenant manifest
+/// on `/projects/:id/runtime/activity` already applies, and the tenant
+/// project's organization must be allowed to use the host runtime's provider.
+/// A missing runtime, a missing or deleted host project and a host project the
+/// caller cannot write to are all refused with [`tenant_runtime_not_found`].
+///
+/// Returns the host project id. The attach runs in a later transaction, which
+/// locks the runtime, requires it to still belong to this project and checks
+/// the caller's write access to the project again (see
+/// `ensure_runtime_tenant`). A lock taken here would end with this
+/// transaction, before the attach, so this read takes none.
+async fn authorize_tenant_host_runtime(
+    state: &AppState,
+    transaction: &Transaction<'_>,
+    tenant_project: &crate::ProjectRecord,
+    runtime_id: Uuid,
+    context: &RequestContext,
+) -> Result<Uuid, (StatusCode, Json<ApiError>)> {
+    let row = transaction
+        .query_opt(
+            "select project_id, provider
+             from runtimes
+             where id = $1",
+            &[&runtime_id],
+        )
+        .await
+        .map_err(|error| internal_error(format!("failed to load tenant host runtime: {error}")))?;
+    let Some(row) = row else {
+        return Err(tenant_runtime_not_found());
+    };
+    let host_project_id: Uuid = row.get("project_id");
+    let provider: String = row.get("provider");
+
+    ensure_tenant_host_write_access(transaction, &host_project_id, context).await?;
+
+    authorize_provider_for_project(state, &provider, tenant_project.org_id)?;
+    Ok(host_project_id)
+}
+
+/// The caller must be able to write to the host project, the project that
+/// owns the runtime a tenant attach names. Anonymous dev-mode requests skip
+/// project access checks for the tenant project too (see `runtime_ensure`).
+async fn ensure_tenant_host_write_access(
+    transaction: &Transaction<'_>,
+    host_project_id: &Uuid,
+    context: &RequestContext,
+) -> Result<(), (StatusCode, Json<ApiError>)> {
+    if !context.is_service_role && context.user_id.is_none() {
+        return Ok(());
+    }
+    let host_project = load_project_record(transaction, host_project_id)
+        .await
+        .map_err(as_tenant_runtime_not_found)?;
+    ensure_project_write_access(transaction, &host_project, context, None)
+        .await
+        .map_err(as_tenant_runtime_not_found)?;
+    Ok(())
+}
+
+/// A missing runtime or host project, or a refused host project access check,
+/// becomes the tenant attach's not-found answer; any other failure (a database
+/// error) is reported as is.
+fn as_tenant_runtime_not_found(
+    (status, body): (StatusCode, Json<ApiError>),
+) -> (StatusCode, Json<ApiError>) {
+    if matches!(
+        status,
+        StatusCode::NOT_FOUND | StatusCode::FORBIDDEN | StatusCode::UNAUTHORIZED
+    ) {
+        tenant_runtime_not_found()
+    } else {
+        (status, body)
+    }
+}
+
 pub(crate) async fn runtime_ensure(
     axum::extract::State(state): axum::extract::State<AppState>,
     headers: HeaderMap,
@@ -1129,6 +1236,17 @@ pub(crate) async fn runtime_ensure(
         ensure_project_write_access(&transaction, &project, &auth, None).await?;
     }
 
+    let tenant_target = if scope == RuntimeLeaseScope::Tenant {
+        let runtime_id =
+            runtime_id.ok_or_else(|| bad_request("runtimeId is required for tenant leases"))?;
+        let host_project_id =
+            authorize_tenant_host_runtime(&state, &transaction, &project, runtime_id, &auth)
+                .await?;
+        Some((runtime_id, host_project_id))
+    } else {
+        None
+    };
+
     let targets_private_self_hosted_runtime = if scope == RuntimeLeaseScope::Tenant {
         false
     } else {
@@ -1204,14 +1322,16 @@ pub(crate) async fn runtime_ensure(
             .await?
         }
         RuntimeLeaseScope::Tenant => {
-            let runtime_id =
-                runtime_id.ok_or_else(|| bad_request("runtimeId is required for tenant leases"))?;
+            let (runtime_id, host_project_id) =
+                tenant_target.ok_or_else(|| internal_error("tenant attach was not authorized"))?;
+            // The origin options are not used: the origin is the host's.
             ensure_runtime_tenant(
                 &state,
                 project_id,
                 runtime_id,
+                host_project_id,
                 metadata.clone(),
-                origin_options,
+                &auth,
             )
             .await?
         }
@@ -1671,14 +1791,20 @@ async fn load_runtime_requeue_metadata(
         }
     }
 
+    // Otherwise the runtime's newest own launch generation. A tenant lease
+    // carries this runtime's id, but it launched nothing and its metadata is
+    // what the attaching caller sent (see `load_newest_lease_metadata`).
     let row = conn
         .query_opt(
             "select metadata
              from runtime_leases
              where runtime_id = $1
+               and project_id = $2
+               and scope <> 'tenant'
+               and parent_lease_id is null
              order by requested_at desc
              limit 1",
-            &[&runtime.id],
+            &[&runtime.id, &runtime.project_id],
         )
         .await
         .map_err(|error| {
@@ -3083,12 +3209,24 @@ async fn launch_committed_runtime_lease(
     Ok(response)
 }
 
+/// `host_project_id` is the project `authorize_tenant_host_runtime` authorized
+/// the caller for in an earlier transaction. Once the runtime is locked, it
+/// must still belong to that project, and the caller's write access to the
+/// project is checked again in this transaction: access revoked in between
+/// refuses the attach. Only the host project's access is checked again. The
+/// tenant project's own access is checked once, in `runtime_ensure`'s first
+/// transaction, as the exclusive and shared scopes check their project's.
+///
+/// The attach leaves the runtime's origin alone. That origin belongs to the
+/// host project, which requests and registers it for its shared lease; the
+/// response reports it as it is.
 async fn ensure_runtime_tenant(
     state: &AppState,
     project_id: Uuid,
     runtime_id: Uuid,
+    host_project_id: Uuid,
     metadata: Option<JsonValue>,
-    origin_options: OriginEnsureOptions,
+    context: &RequestContext,
 ) -> Result<RuntimeEnsureResponse, (StatusCode, Json<ApiError>)> {
     let mut conn = state
         .pool
@@ -3102,7 +3240,13 @@ async fn ensure_runtime_tenant(
 
     ensure_project_exists(&transaction, &project_id, state.config.auto_create_projects).await?;
 
-    let runtime = fetch_runtime_for_update(&transaction, &runtime_id).await?;
+    let runtime = fetch_runtime_for_update(&transaction, &runtime_id)
+        .await
+        .map_err(as_tenant_runtime_not_found)?;
+    if runtime.project_id != host_project_id {
+        return Err(tenant_runtime_not_found());
+    }
+    ensure_tenant_host_write_access(&transaction, &runtime.project_id, context).await?;
     if super::access::runtime_is_private_self_hosted(
         state,
         &runtime.provider,
@@ -3128,6 +3272,8 @@ async fn ensure_runtime_tenant(
         return Err(bad_request("runtime shared lease is not active"));
     }
 
+    // Both the first attach and a re-attach store only this.
+    let metadata = super::managed::sanitize_tenant_lease_request_metadata(metadata);
     let metadata_for_event = metadata.clone();
     let tenant_lease = ensure_tenant_runtime_lease(
         &transaction,
@@ -3138,18 +3284,8 @@ async fn ensure_runtime_tenant(
     )
     .await?;
 
-    let origin_instance = Some(
-        upsert_origin_instance(
-            &transaction,
-            &project_id,
-            &runtime_id,
-            &shared_lease.id,
-            origin_options.mode.clone(),
-            origin_options.protocols.clone(),
-            origin_options.metadata.clone(),
-        )
-        .await?,
-    );
+    let origin_instance =
+        load_origin_instance_for_lease(&transaction, &runtime.project_id, &shared_lease.id).await?;
 
     record_runtime_event(
         &transaction,
@@ -3186,6 +3322,10 @@ async fn ensure_runtime_tenant(
     })
 }
 
+/// Reuse the project's tenant lease under `parent_lease_id`, the runtime's
+/// current shared lease, or create one. A tenant lease under an earlier shared
+/// lease of the same runtime is never reused: its parent was released when the
+/// runtime relaunched, and a lease left unreleased by then is stale.
 async fn ensure_tenant_runtime_lease(
     transaction: &Transaction<'_>,
     project_id: &Uuid,
@@ -3200,13 +3340,14 @@ async fn ensure_tenant_runtime_lease(
              from runtime_leases
              where project_id = $1
                and runtime_id = $2
+               and parent_lease_id = $3
                and scope = 'tenant'
                and released_at is null
                and status <> 'failed'
              order by requested_at desc
              limit 1
              for update",
-            &[project_id, runtime_id],
+            &[project_id, runtime_id, parent_lease_id],
         )
         .await
         .map_err(|error| internal_error(format!("failed to load tenant lease: {error}")))?
@@ -3262,6 +3403,10 @@ mod concurrency_tests;
 #[cfg(test)]
 #[path = "ensure_reclaim_tests.rs"]
 mod reclaim_tests;
+
+#[cfg(test)]
+#[path = "ensure_tenant_tests.rs"]
+mod tenant_tests;
 
 #[cfg(test)]
 mod tests {
