@@ -5582,9 +5582,9 @@ mod tests {
 
     #[test]
     fn should_retry_codex_run_does_not_replay_an_incomplete_response() {
-        // The provider stopped the response early and billed it. The proxy ends the turn with
-        // this error unless a tool call finished first, and a whole-run replay would send the
-        // same input again under the same cap or filter.
+        // The provider stopped the response early and billed it. Codex reports this when a
+        // stream ends with `response.incomplete`, which the Instafy proxy does not pass on, and a
+        // whole-run replay would send the same input again under the same cap or filter.
         for reason in ["max_output_tokens", "content_filter", "unknown"] {
             let message = format!("Incomplete response returned, reason: {reason}");
             assert!(!should_retry_codex_run(&message), "{message}");

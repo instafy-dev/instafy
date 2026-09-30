@@ -29,7 +29,7 @@ use crate::client::{
 };
 use crate::controller_integration::ControllerIntegration;
 use crate::credential_lease::LeasedCredentials;
-use crate::incomplete_response::{self, Delivery};
+use crate::incomplete_response;
 use crate::proxy_auth::ProxyClaims;
 use crate::upstream_error::{self, UpstreamFailure};
 
@@ -2370,10 +2370,7 @@ fn chat_finish_reason(raw: &Value) -> &'static str {
 /// response the upstream stopped early is first reduced to what the client may see, see
 /// [`incomplete_response`].
 fn stream_responses_from_value(response: Value) -> Result<Response, AppError> {
-    match incomplete_response::delivery(response) {
-        Delivery::Completed(response) => stream_completed_response(response),
-        Delivery::Failed(response) => stream_failed_response(response),
-    }
+    stream_completed_response(incomplete_response::delivered_response(response))
 }
 
 fn stream_completed_response(mut completed_response: Value) -> Result<Response, AppError> {
@@ -2428,30 +2425,13 @@ fn stream_completed_response(mut completed_response: Value) -> Result<Response, 
     sse_response(events)
 }
 
-/// Streams `failed_response`, which carries the `error`, as `response.failed`. A response the
-/// upstream created, which has an `id`, is announced with `response.created` first, as upstream
-/// streams do; a request the upstream refused never created one.
+/// Streams `failed_response`, which carries the `error`, as `response.failed`. It answers a
+/// request the upstream refused, which never created a response to announce first.
 fn stream_failed_response(failed_response: Value) -> Result<Response, AppError> {
-    let mut events = Vec::new();
-    if failed_response.get("id").is_some() {
-        let mut created_response = failed_response.clone();
-        if let Value::Object(ref mut map) = created_response {
-            map.remove("error");
-            map.insert(
-                "status".to_string(),
-                Value::String("in_progress".to_string()),
-            );
-        }
-        events.push(json!({
-            "type": "response.created",
-            "response": created_response,
-        }));
-    }
-    events.push(json!({
+    sse_response(vec![json!({
         "type": "response.failed",
         "response": failed_response,
-    }));
-    sse_response(events)
+    })])
 }
 
 /// Answers with `events` as server-sent events followed by `[DONE]`, and logs each one when

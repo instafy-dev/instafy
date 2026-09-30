@@ -431,7 +431,8 @@ async fn controller_integrated_proxy_fails_startup_without_credential_lease_toke
 
 /// A ChatGPT login's response that the upstream stops early is still a response the login's
 /// plan was charged for, so the proxy reports the subscription usage its headers carry, as for a
-/// completed one, while the client gets the proxy's terminal failure instead of a re-send.
+/// completed one, while the client gets a completed response that says why it stopped instead of
+/// a re-send.
 #[tokio::test]
 #[serial]
 async fn a_cut_short_chatgpt_response_still_reports_the_subscription_usage() -> Result<()> {
@@ -505,9 +506,10 @@ async fn a_cut_short_chatgpt_response_still_reports_the_subscription_usage() -> 
         .await?;
     assert_eq!(response.status(), StatusCode::OK);
     let body = response.text().await?;
-    assert!(body.contains("\"type\":\"response.failed\""), "{body}");
+    assert!(body.contains("\"type\":\"response.completed\""), "{body}");
+    assert!(!body.contains("\"type\":\"response.failed\""), "{body}");
     assert!(
-        body.contains("Incomplete response returned, reason: max_output_tokens"),
+        body.contains("The response was cut off before it finished (reason: max_output_tokens)."),
         "{body}"
     );
 

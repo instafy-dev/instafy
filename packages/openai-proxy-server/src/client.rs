@@ -2793,11 +2793,11 @@ data: {"delta":"truncated"}
             let raw = read_chatgpt_stream_text(&stream).expect("an incomplete response");
             assert_eq!(raw["status"], json!("incomplete"), "status {status:?}");
             assert_eq!(
-                crate::incomplete_response::delivery(raw),
-                crate::incomplete_response::Delivery::Completed(json!({
+                crate::incomplete_response::delivered_response(raw),
+                json!({
                     "id": "resp-cut", "status": "completed", "usage": usage,
                     "output": [finished_call],
-                })),
+                }),
                 "status {status:?}"
             );
         }
@@ -2817,21 +2817,23 @@ data: {"type":"response.incomplete","id":"resp-flat","status":"incomplete","inco
         let raw = read_chatgpt_stream_text(stream).expect("an incomplete response is a response");
         assert_eq!(raw["id"], json!("resp-flat"));
         assert_eq!(raw["status"], json!("incomplete"));
-        let crate::incomplete_response::Delivery::Failed(failed) =
-            crate::incomplete_response::delivery(raw)
-        else {
-            panic!("a filtered answer without a finished call fails");
-        };
-        assert_eq!(failed["status"], json!("failed"));
-        assert_eq!(failed["output"], json!([]));
+        // A filtered answer without a finished call completes with the text that arrived and the
+        // proxy's notice after it, keeping the usage. The flat event's own fields stay, `type`
+        // included.
         assert_eq!(
-            failed["error"],
-            json!({"code": "invalid_prompt",
-                "message": "Incomplete response returned, reason: content_filter"})
-        );
-        assert_eq!(
-            failed["usage"],
-            json!({"input_tokens": 40, "output_tokens": 12, "total_tokens": 52})
+            crate::incomplete_response::delivered_response(raw),
+            json!({
+                "id": "resp-flat", "type": "response.incomplete", "status": "completed",
+                "usage": {"input_tokens": 40, "output_tokens": 12, "total_tokens": 52},
+                "output": [
+                    {"id": "msg_1", "type": "message", "role": "assistant",
+                        "status": "incomplete",
+                        "content": [{"type": "output_text", "text": "A filtered"},
+                            {"type": "output_text",
+                                "text": "\n\nThe response was cut off before it finished (reason: content_filter).",
+                                "annotations": []}]},
+                ],
+            })
         );
     }
 

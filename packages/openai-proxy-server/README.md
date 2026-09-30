@@ -322,26 +322,40 @@ instead of `response.completed`. The upstream has produced and billed that respo
 Codex treats an upstream `response.incomplete` as a retryable stream error: it sends the same
 request again, billed again to whoever owns the key and most likely stopped the same way, and
 it runs any tool call the response carried, truncated arguments included. The proxy buffers the
-whole upstream response before it answers, so on every lane it decides what a streaming client
-gets instead:
+whole upstream response before it answers, so on every lane, and on both routes that stream
+(`/v1/responses`, and `/v1/chat/completions`, which streams the same Responses events), a
+streaming client gets `response.completed` instead, never `response.failed`:
 
-- Only the output items the upstream finished remain: those with status `completed` or with no
-  status. An item it finalized with status `incomplete`, such as a cut-off answer or a tool call
-  with truncated arguments, and an item it never finished (on a ChatGPT stream, one that was
-  only added, or text that only streamed as deltas) are dropped.
+- An output item is finished when its status is `completed`, or when it has no status and is
+  not the last item: the stop cuts off the last item, so that one is finished only when it says
+  so. Every other item was cut off, such as an answer or a tool call with truncated arguments
+  that the upstream finalized with status `incomplete`. On a ChatGPT stream, an item that was
+  only added, and text that only streamed as deltas, were cut off too and never reach the
+  output.
 - When a finished tool call that Codex runs remains (a `function_call`, a `custom_tool_call`,
-  or a `tool_search_call` with a `call_id` and `execution: "client"`), the client gets
-  `response.completed` with the remaining items. Codex runs the call and continues on its own
-  follow-up request, which hands the model the call's output.
-- Otherwise the client gets `response.created`, then `response.failed` with no output,
-  `error.code` `invalid_prompt` and `error.message`
-  `Incomplete response returned, reason: <reason>` (`unknown` when the upstream gave none),
-  Codex's own message for the case. Codex ends the turn on `invalid_prompt` instead of retrying,
-  and the Studio says the answer hit its length limit or was filtered.
+  or a `tool_search_call` with a `call_id` and `execution: "client"`), the response keeps only
+  the finished items. Codex runs the call and continues on its own follow-up request, which
+  hands the model the call's output.
+- Otherwise the response keeps the finished items and any assistant message the stop cut off
+  after some of its text arrived, with that text, and a notice the proxy adds,
+  `The response was cut off before it finished (reason: <reason>).` The reason is the
+  upstream's `incomplete_details.reason` when that is a reason code (1 to 64 lowercase letters,
+  digits and `_`), and `unknown` otherwise. Codex takes the turn's last assistant message with
+  text as the turn's answer, so the notice joins the last answer the response keeps, as an
+  `output_text` part of its own after that answer's text, and the turn's answer is the text that
+  arrived followed by the notice. Only when the response keeps no answer, or its last answer is
+  commentary, is the notice an assistant message of its own, with the id `proxy-notice-` and
+  the response id with each `_` written as `-`. Without a `_` it is not a prefixed item id, so
+  Codex drops the id before it sends the message back and the upstream never sees an id it did
+  not issue. Either way Codex records the output and ends the turn normally instead of sending
+  the request again.
+- A cut-off reasoning item or tool call never reaches the client.
 
-Both keep the upstream's `usage`, and a ChatGPT login's subscription-usage report is sent as
-for a completed response. Each cut-short response logs one `upstream response incomplete` line
-with its id, its reason, what was delivered and how many items were kept, never their content.
+The response keeps the upstream's `usage` either way, so Codex reports the turn's tokens as for
+any completed turn and the controller reconciles the charge on them. A ChatGPT login's
+subscription-usage report is sent as for a completed response. Each cut-short response logs one
+`upstream response incomplete` line with its id, its reason as the notice gives it, what was
+delivered (`tool_call` or `notice`) and how many items were kept, never their content.
 
 A request that does not stream gets the response as the upstream reported it, with
 `status: "incomplete"` and its `incomplete_details`, as the Responses API answers without a

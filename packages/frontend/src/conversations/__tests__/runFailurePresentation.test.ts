@@ -34,8 +34,8 @@ const PROVIDER_USAGE_LIMIT_REACHED =
 // reports it this way once its retries run out.
 const PROXY_STREAMED_RATE_LIMIT =
   "stream disconnected before completion: The upstream provider rate limit was reached (upstream_rate_limit, 429). Please try again in 5.5s.";
-// The proxy ends the turn with Codex's own message when the provider stopped
-// the answer early and no tool call had finished.
+// Codex's own message when the provider stopped the answer early and the
+// response did not come through the Instafy proxy, which completes it instead.
 const RESPONSE_INCOMPLETE = (reason: string) => `Incomplete response returned, reason: ${reason}`;
 
 function createMessage(overrides: Partial<ChatMessage>): ChatMessage {

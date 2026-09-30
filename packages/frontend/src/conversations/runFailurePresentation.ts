@@ -154,8 +154,10 @@ const PROVIDER_RATE_LIMITED_PATTERNS = [
   /upstream provider rate limit was reached/i,
 ];
 
-// The provider stopped the answer early and the proxy ended the turn instead
-// of sending the request again: "Incomplete response returned, reason: <reason>".
+// The provider stopped the answer early and Codex ended the turn with its own
+// message: "Incomplete response returned, reason: <reason>". The Instafy proxy
+// completes such a response with a notice instead, so this covers one that
+// reached Codex any other way.
 const RESPONSE_INCOMPLETE_PATTERN = /incomplete response returned, reason:\s*([a-z_]*)/i;
 
 const INCOMPLETE_RESPONSE_FRIENDLY_TEXT: Record<string, string> = {

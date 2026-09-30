@@ -228,13 +228,9 @@ controller's lease or the proxy's static credentials, with their kind and pinned
 The controller now reserves units at prompt dispatch and then reconciles the final charge after completion from actual input/cached/output token usage. Cached tokens are a subset of the reported input tokens, so only the uncached remainder is billed at the input rate and the cached prefix is billed once at the cached rate. The shared ledger keeps both the usage metadata and any follow-up adjustment row when the final charge differs from the reserve.
 
 Known gap, recorded only: until the proxy metering cutover, this reconciliation charges the token
-counts codex reports, and two kinds of upstream request never get one. A response the upstream
-cut short that the proxy delivers as `response.failed` (see "Responses the upstream cuts short"
-in the [proxy README](../packages/openai-proxy-server/README.md)) was produced and billed
-upstream, but codex emits no token count for a failed response, so legacy billing under-charges
-it. Codex multi-agent v2 subagent requests are under-charged the same way. The proxy sees the
-upstream usage of both, so its meter charges them once metering moves there; nothing changes
-the legacy charge before then.
+counts codex reports, and codex multi-agent v2 subagent requests never get one, so legacy billing
+under-charges them. The proxy sees their upstream usage, so its meter charges them once metering
+moves there; nothing changes the legacy charge before then.
 
 Ambient multi-human evaluation turns defer the managed reserve and prompt count until
 the agent actually answers. Telemetry and explicitly hidden progress do not start a

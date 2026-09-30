@@ -12,7 +12,7 @@ use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
-use runtime_agent::codex::{CodexClient, CodexConfig, CodexExecutionError, CodexRunOptions};
+use runtime_agent::codex::{CodexClient, CodexConfig, CodexRunOptions};
 use runtime_agent::job_cancel::JobCancelSignal;
 use serde_json::{Value, json};
 use uuid::Uuid;
@@ -22,6 +22,7 @@ const API_KEY: &str = "inert-local-retry-test-key";
 const FINAL_TEXT: &str = "LOCAL_RETRY_OK";
 const STEP_TEXT: &str = "LOCAL_RETRY_STEP_DONE";
 const FINISHED_CALL_ID: &str = "call-local-finished";
+const PARTIAL_TEXT: &str = "LOCAL_CUT_SHORT_PARTIAL";
 const TOOL_CMD: &str = "printf x >> tool-count.txt; printf TOOL_APPLIED";
 
 struct MockState {
@@ -115,30 +116,35 @@ fn sse_events(events: Vec<Value>) -> Response {
     ([("content-type", "text/event-stream")], body).into_response()
 }
 
-/// What the proxy streams for a response the upstream stopped early, for `reason`, with no
-/// finished tool call: the response it created, then a terminal `invalid_prompt` failure with
-/// codex's own message for an incomplete response, keeping the upstream usage. The upstream had
-/// finished a reasoning item and started an answer when it stopped; the proxy passes on neither.
-fn proxy_incomplete_failure(reason: &str) -> Response {
-    let response = json!({"id":format!("resp-{}", Uuid::new_v4()), "object":"response",
-        "model":"gpt-6-luna", "output":[], "usage":fixture_usage()});
-    let mut created = response.clone();
-    created["status"] = json!("in_progress");
-    let mut failed = response;
-    failed["status"] = json!("failed");
-    failed["error"] = json!({"code":"invalid_prompt",
-        "message":format!("Incomplete response returned, reason: {reason}")});
-    sse_events(vec![
-        json!({"type":"response.created","response":created}),
-        json!({"type":"response.failed","response":failed}),
-    ])
+/// The notice the proxy adds to a response the upstream stopped early, for `reason`, when no
+/// tool call finished.
+fn cut_short_notice(reason: &str) -> String {
+    format!("The response was cut off before it finished (reason: {reason}).")
 }
 
-/// What the proxy streams for a response the upstream stopped early after a tool call finished:
-/// a completed response with only the finished items, keeping the upstream usage. A second call
-/// the stop cut off is already dropped.
-fn proxy_completed_after_cut_off(items: Vec<Value>) -> Response {
-    let response = json!({"id":format!("resp-{}", Uuid::new_v4()), "object":"response",
+/// What the proxy streams for a response the upstream stopped early, for `reason`, with no
+/// finished tool call: a completed response with the reasoning item the upstream finished and
+/// the answer the stop cut off, with the text that arrived and then the proxy's notice of the
+/// stop as a part of its own, keeping the upstream usage.
+fn proxy_cut_short_with_notice(reason: &str) -> Response {
+    proxy_cut_short_completed(
+        &format!("resp-{}", Uuid::new_v4()),
+        vec![
+            json!({"type":"reasoning","id":"rs-local-cut","summary":[]}),
+            json!({"type":"message","id":"msg-local-cut","role":"assistant",
+                "status":"incomplete","phase":"final_answer",
+                "content":[{"type":"output_text","text":PARTIAL_TEXT,"annotations":[]},
+                    {"type":"output_text","text":format!("\n\n{}", cut_short_notice(reason)),
+                        "annotations":[]}]}),
+        ],
+    )
+}
+
+/// What the proxy streams for a response the upstream stopped early: a completed response with
+/// the items the proxy keeps, keeping the upstream usage. An item with text streams it as one
+/// delta, its text parts joined by a line break.
+fn proxy_cut_short_completed(response_id: &str, items: Vec<Value>) -> Response {
+    let response = json!({"id":response_id, "object":"response",
         "model":"gpt-6-luna", "output":items.clone(), "usage":fixture_usage()});
     let mut created = response.clone();
     created["status"] = json!("in_progress");
@@ -147,6 +153,15 @@ fn proxy_completed_after_cut_off(items: Vec<Value>) -> Response {
     let mut events = vec![json!({"type":"response.created","response":created})];
     for item in items {
         events.push(json!({"type":"response.output_item.added","item":item}));
+        let text = item["content"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|part| part["text"].as_str())
+            .collect::<Vec<_>>();
+        if !text.is_empty() {
+            events.push(json!({"type":"response.output_text.delta","delta":text.join("\n")}));
+        }
         events.push(json!({"type":"response.output_item.done","item":item}));
     }
     events.push(json!({"type":"response.completed","response":completed}));
@@ -220,9 +235,10 @@ async fn responses(
             };
         }
         // The upstream stopped the answer after a finished reasoning item. A re-send would send
-        // the same input again under the same cap or filter, so the proxy ends the turn.
-        "incomplete_max_output_tokens" => return proxy_incomplete_failure("max_output_tokens"),
-        "incomplete_content_filter" => return proxy_incomplete_failure("content_filter"),
+        // the same input again under the same cap or filter, so the proxy completes the response
+        // with the text that arrived and a notice, and codex ends the turn normally.
+        "incomplete_max_output_tokens" => return proxy_cut_short_with_notice("max_output_tokens"),
+        "incomplete_content_filter" => return proxy_cut_short_with_notice("content_filter"),
         // Parallel tool calls: the first finished, and max_output_tokens cut the second off. The
         // proxy passes on the finished one as a completed response, and codex continues with its
         // output on the next request.
@@ -231,7 +247,9 @@ async fn responses(
                 return answer(FINAL_TEXT);
             }
             return match workspace_command_call(&state, &body, FINISHED_CALL_ID, TOOL_CMD) {
-                Some(call) => proxy_completed_after_cut_off(vec![call]),
+                Some(call) => {
+                    proxy_cut_short_completed(&format!("resp-{}", Uuid::new_v4()), vec![call])
+                }
                 None => StatusCode::BAD_REQUEST.into_response(),
             };
         }
@@ -709,7 +727,41 @@ async fn isolated_retry_child() -> Result<()> {
     if let Some(task) = canceller {
         task.abort();
     }
-    if matches!(
+    if let Some(reason) = scenario
+        .strip_prefix("incomplete_")
+        .filter(|reason| *reason != "after_tool_call")
+    {
+        // The turn ends normally, its final answer the text that arrived and then the proxy's
+        // notice, and reports its usage as any completed turn does, so the controller reconciles
+        // it on its tokens.
+        let output = result.context("a cut-short answer must end the turn normally")?;
+        let answer = format!("{PARTIAL_TEXT}\n\n{}", cut_short_notice(reason));
+        assert_eq!(output.final_json["summary"], answer);
+        let agent_messages = output
+            .events
+            .iter()
+            .filter(|event| {
+                event["type"] == "item.completed" && event["item"]["type"] == "agent_message"
+            })
+            .filter_map(|event| event["item"]["text"].as_str())
+            .collect::<Vec<_>>();
+        assert!(
+            !agent_messages.is_empty() && agent_messages.iter().all(|text| *text == answer),
+            "one answer, the text that arrived and then the notice: {agent_messages:?}"
+        );
+        let completed = output
+            .events
+            .iter()
+            .filter(|event| event["type"] == "turn.completed")
+            .collect::<Vec<_>>();
+        assert_eq!(completed.len(), 1, "{completed:?}");
+        assert_eq!(completed[0]["usageScope"], "turn", "{completed:?}");
+        assert_eq!(completed[0]["usage"]["input_tokens"], 10, "{completed:?}");
+        assert_eq!(completed[0]["usage"]["output_tokens"], 5, "{completed:?}");
+        // Keep the process alive beyond Codex's initial stream-retry backoff: nothing may be
+        // sent again after the turn ended.
+        tokio::time::sleep(Duration::from_millis(1200)).await;
+    } else if matches!(
         scenario.as_str(),
         "transient"
             | "transient_429"
@@ -721,17 +773,6 @@ async fn isolated_retry_child() -> Result<()> {
         assert_eq!(result?.final_json["summary"], FINAL_TEXT);
     } else {
         let error = result.expect_err("scripted failure must remain an error");
-        if let Some(reason) = scenario.strip_prefix("incomplete_") {
-            // The run ends with the reason the upstream stopped the response, not with an
-            // exhausted stream retry.
-            let error = error
-                .downcast_ref::<CodexExecutionError>()
-                .context("an incomplete response ends the turn with a Codex error")?;
-            assert_eq!(
-                error.message,
-                format!("Incomplete response returned, reason: {reason}")
-            );
-        }
         let message = format!("{error:#}").to_ascii_lowercase();
         if scenario.starts_with("persistent_429") {
             // The final error must still say it was a rate limit so it can be classified.
@@ -747,10 +788,7 @@ async fn isolated_retry_child() -> Result<()> {
         if scenario == "timeout" {
             assert!(message.contains("timed out"), "{message}");
         }
-        if scenario.starts_with("terminal_")
-            || scenario.starts_with("incomplete_")
-            || scenario == "cancel"
-        {
+        if scenario.starts_with("terminal_") || scenario == "cancel" {
             // Keep the process alive beyond Codex's initial stream-retry backoff:
             // returning an error must not leave a scheduled request running behind it.
             tokio::time::sleep(Duration::from_millis(1200)).await;
