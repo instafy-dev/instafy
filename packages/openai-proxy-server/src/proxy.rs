@@ -682,11 +682,20 @@ impl UpstreamLane<'_> {
 /// the platform key, static credentials included.
 /// `PROXY_REQUIRE_CREDENTIAL_CLAIM` rejects credential-less tokens during
 /// authentication, so the public lane never reaches the platform lane.
+///
+/// [`MANAGED_AI_CREDENTIAL_ID`] is reserved for the platform lane: the proxy
+/// leases it itself for a credential-less token, and no token names it as
+/// its own credential, so one that does is refused.
 fn classify_upstream_lane(claims: Option<&ProxyClaims>) -> Result<UpstreamLane<'_>, AppError> {
     if claims.is_none() {
         return Ok(UpstreamLane::Unauthenticated);
     }
     if let Some(credential_id) = credential_id_from_claims(claims) {
+        if is_reserved_credential_id(credential_id) {
+            return Err(AppError::unauthorized(anyhow!(
+                "proxy token names a reserved credential"
+            )));
+        }
         return Ok(UpstreamLane::Byo { credential_id });
     }
     if run_id_from_claims(claims).is_some() {
@@ -695,6 +704,13 @@ fn classify_upstream_lane(claims: Option<&ProxyClaims>) -> Result<UpstreamLane<'
     Err(AppError::unauthorized(anyhow!(
         "proxy token missing credential_id for BYOC request"
     )))
+}
+
+/// Whether `credential_id` is [`MANAGED_AI_CREDENTIAL_ID`] in any spelling
+/// the controller would parse as that id.
+fn is_reserved_credential_id(credential_id: &str) -> bool {
+    let reserved = Uuid::parse_str(MANAGED_AI_CREDENTIAL_ID).ok();
+    reserved.is_some() && Uuid::parse_str(credential_id.trim()).ok() == reserved
 }
 
 /// The credentials one request goes upstream on.
@@ -3625,6 +3641,33 @@ mod tests {
             assert_eq!(error.status, StatusCode::UNAUTHORIZED);
             assert_eq!(error.message, BYOC_REJECTION);
         }
+
+        // The platform lane's own credential id is never a token's
+        // credential, whatever its spelling or whether a run_id comes with it.
+        let upper = MANAGED_AI_CREDENTIAL_ID.to_ascii_uppercase();
+        let braced = format!("{{{MANAGED_AI_CREDENTIAL_ID}}}");
+        let simple = MANAGED_AI_CREDENTIAL_ID.replace('-', "");
+        for credential_id in [
+            MANAGED_AI_CREDENTIAL_ID,
+            upper.as_str(),
+            braced.as_str(),
+            simple.as_str(),
+        ] {
+            for run_id in [Some("run-1"), None] {
+                let claims = controller_claims(run_id, Some(credential_id));
+                let error =
+                    classify_upstream_lane(Some(&claims)).expect_err("reserved credential id");
+                assert_eq!(error.status, StatusCode::UNAUTHORIZED, "{credential_id}");
+            }
+        }
+        let other = Uuid::new_v4().to_string();
+        let claims = controller_claims(Some("run-1"), Some(other.as_str()));
+        assert_eq!(
+            classify_upstream_lane(Some(&claims)).expect("byo lane"),
+            UpstreamLane::Byo {
+                credential_id: other.as_str()
+            }
+        );
 
         // No claims: the proxy has no controller integration.
         let lane = classify_upstream_lane(None).expect("unauthenticated lane");
