@@ -584,6 +584,15 @@ async fn run_scenario(scenario: &str, expected_requests: usize) -> Result<()> {
         )
         .with_state(state.clone());
     let server = tokio::spawn(async move { axum::serve(listener, app).await });
+    // An unreachable proxy: a loopback port nothing listens on.
+    let model_origin = if scenario == "proxy_unreachable" {
+        let closed = std::net::TcpListener::bind("127.0.0.1:0")?;
+        let origin = format!("http://{}", closed.local_addr()?);
+        drop(closed);
+        origin
+    } else {
+        origin.clone()
+    };
     let output_path = temp.path().join("child.log");
     let output = fs::File::create(&output_path)?;
     let mut command = Command::new(std::env::current_exe()?);
@@ -603,7 +612,7 @@ async fn run_scenario(scenario: &str, expected_requests: usize) -> Result<()> {
         .env("CODEX_AUTH_PATH", codex_home.join("auth.json"))
         .env("TMPDIR", &scratch)
         .env("LANG", "C.UTF-8")
-        .env("OPENAI_BASE_URL", format!("{origin}/v1"))
+        .env("OPENAI_BASE_URL", format!("{model_origin}/v1"))
         .env("OPENAI_API_KEY", API_KEY)
         .env("CODEX_API_KEY", API_KEY)
         .env("CODEX_MODEL", test_model())
@@ -894,6 +903,11 @@ scenario_test!(terminal_401_is_not_retried, "terminal_401", 1);
 scenario_test!(terminal_402_is_not_retried, "terminal_402", 1);
 scenario_test!(terminal_403_is_not_retried, "terminal_403", 1);
 scenario_test!(terminal_424_is_not_retried, "terminal_424", 1);
+scenario_test!(
+    unreachable_proxy_fails_fast_with_the_connection_error,
+    "proxy_unreachable",
+    0
+);
 scenario_test!(cancellation_does_not_restart_the_run, "cancel", 1);
 scenario_test!(timeout_does_not_restart_the_run, "timeout", 1);
 scenario_test!(
@@ -1005,6 +1019,7 @@ async fn isolated_retry_child() -> Result<()> {
             signal.cancel();
         })
     });
+    let started = Instant::now();
     let result = client
         .execute_with_options(
             "Run the supplied local diagnostic and finish with its result.",
@@ -1094,6 +1109,16 @@ async fn isolated_retry_child() -> Result<()> {
         }
         if scenario == "cancel" {
             assert!(message.contains("lease lost"), "{message}");
+        }
+        if scenario == "proxy_unreachable" {
+            // The bounded budget (one stream retry), not the 20 s run timeout, ends the run.
+            assert!(!message.contains("timed out"), "{message}");
+            assert!(message.contains("error sending request"), "{message}");
+            assert!(
+                started.elapsed() < Duration::from_secs(10),
+                "an unreachable proxy held the run for {:?}: {message}",
+                started.elapsed()
+            );
         }
         if scenario == "timeout" {
             assert!(message.contains("timed out"), "{message}");

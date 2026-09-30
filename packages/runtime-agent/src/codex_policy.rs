@@ -177,6 +177,10 @@ fn feature_pin(feature: Feature) -> FeaturePin {
         Feature::Personality => Off,
         // These would re-expose the blocked async-message and clock tools.
         Feature::SendMessageToUserAsync | Feature::CurrentTimeReminder => Off,
+        // Upstream retries a refused or dropped connection forever (5s to 60s backoff), ignoring
+        // the bounded proxy retry budget; an unreachable proxy would hold the job's lease until
+        // the run timeout instead of failing with the connection error.
+        Feature::UnboundedConnectionRetries => Off,
 
         // Upstream removed the in-process V8 runtime, so code-mode-only models
         // (gpt-6-luna, gpt-5.6-sol) run every tool through this host.
@@ -247,7 +251,6 @@ fn feature_pin(feature: Feature) -> FeaturePin {
         | Feature::LocalThreadStoreCompression
         | Feature::BackgroundPaginatedRolloutMigration
         | Feature::EnableRequestCompression
-        | Feature::UnboundedConnectionRetries
         | Feature::NetworkProxy
         | Feature::Worktrees
         | Feature::DeferMailboxPreemption
@@ -643,7 +646,7 @@ mod tests {
 
     #[tokio::test]
     async fn feature_pins_hold_on_every_lane_even_against_config_files() {
-        let config_toml = "[features]\nsleep_tool = true\nrespect_system_proxy = true\nsystem_proxy_fallback = true\nshell_snapshot = true\nsend_message_to_user_async = true\ncurrent_time_reminder = true\ncode_mode_host = false\nshell_tool = true\napps = true\n";
+        let config_toml = "[features]\nsleep_tool = true\nrespect_system_proxy = true\nsystem_proxy_fallback = true\nshell_snapshot = true\nsend_message_to_user_async = true\ncurrent_time_reminder = true\ncode_mode_host = false\nshell_tool = true\napps = true\nunbounded_connection_retries = true\n";
         for bounded_browser in [false, true] {
             let (_home, mut config) = load_config("gpt-6-luna", None, config_toml).await;
             apply_runtime_codex_policy(&mut config, bounded_browser).expect("policy");
@@ -657,6 +660,7 @@ mod tests {
                 }
             }
             assert!(config.features.enabled(Feature::CodeModeHost));
+            assert!(!config.features.enabled(Feature::UnboundedConnectionRetries));
             // Upstream multi-agent v2 stays on ordinary lanes; browser turns get no child agents.
             assert_eq!(config.agents_enabled, !bounded_browser);
             assert_eq!(
@@ -704,6 +708,7 @@ mod tests {
             "code_mode_host",
             "shell_tool",
             "view_image",
+            "unbounded_connection_retries",
         ] {
             assert!(forced.iter().any(|(forced, _)| *forced == key), "{key}");
         }
