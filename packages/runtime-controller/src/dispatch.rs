@@ -21,6 +21,7 @@ use crate::agent_write_scopes::{
     apply_agent_write_scope_metadata, build_agent_write_scope_plan, AgentWriteScopeAssignment,
 };
 use crate::ai_agents;
+use crate::ai_metering::job_record::{insert_platform_job_record, PlatformJobRecord};
 use crate::auth::{authenticate_request, RequestContext};
 use crate::bug_reports::{record_system_bug_report, SystemBugReportInput};
 use crate::credentials;
@@ -2178,6 +2179,32 @@ pub(crate) async fn process_dispatch_prompt(
             // that one-to-one identity durable in the same transaction as the
             // enqueue so initial hydration and reconnect cannot lose it.
             persist_run_job_identity(&transaction, &project.id, run_id, &job_uuid).await?;
+            // A credential-less AI job runs on the platform key, service-role
+            // dispatches included, so it gets its platform job record here.
+            // The waiver follows this dispatch's own ambient decision, never
+            // the job payload.
+            let platform_org_id = project.org_id.filter(|_| {
+                dispatch_requires_ai_access(&request.intent) && target.credential_id.is_none()
+            });
+            if let Some(org_id) = platform_org_id {
+                let decline_waiver_units = if skill_mode_ambient_evaluation {
+                    state.config.managed_ai_decline_waiver_units
+                } else {
+                    0
+                };
+                insert_platform_job_record(
+                    &transaction,
+                    &PlatformJobRecord {
+                        job_id: job_uuid,
+                        org_id,
+                        project_id: project.id,
+                        run_id: *run_id,
+                        prompt_id,
+                        decline_waiver_units,
+                    },
+                )
+                .await?;
+            }
         }
         dispatches.push((
             *run_id,
