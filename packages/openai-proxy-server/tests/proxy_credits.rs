@@ -429,6 +429,113 @@ async fn controller_integrated_proxy_fails_startup_without_credential_lease_toke
     Ok(())
 }
 
+/// A ChatGPT login's response that the upstream stops early is still a response the login's
+/// plan was charged for, so the proxy reports the subscription usage its headers carry, as for a
+/// completed one, while the client gets the proxy's terminal failure instead of a re-send.
+#[tokio::test]
+#[serial]
+async fn a_cut_short_chatgpt_response_still_reports_the_subscription_usage() -> Result<()> {
+    let upstream_calls = Arc::new(AtomicUsize::new(0));
+    let calls = upstream_calls.clone();
+    let chatgpt = Router::new().route(
+        "/backend-api/codex/responses",
+        post(move || {
+            calls.fetch_add(1, Ordering::SeqCst);
+            async {
+                let incomplete = json!({"type": "response.incomplete", "response": {
+                    "id": "resp-cut", "model": DEFAULT_MODEL, "status": "incomplete",
+                    "incomplete_details": {"reason": "max_output_tokens"}, "output": [],
+                    "usage": {"input_tokens": 40, "output_tokens": 128, "total_tokens": 168}}});
+                (
+                    [
+                        ("content-type", "text/event-stream"),
+                        ("x-codex-primary-used-percent", "37"),
+                        ("x-codex-primary-window-minutes", "300"),
+                    ],
+                    format!("data: {incomplete}\n\ndata: [DONE]\n\n"),
+                )
+            }
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+    let chatgpt_endpoint = format!(
+        "http://{}/backend-api/codex/responses",
+        listener.local_addr()?
+    );
+    let chatgpt_server = tokio::spawn(async move { axum::serve(listener, chatgpt).await });
+
+    let usage_reports = Arc::new(Mutex::new(Vec::new()));
+    let mut controller = spawn_controller_with_state(ControllerState {
+        credential_endpoint: None,
+        credential_lease_token: "credential-lease-secret".to_string(),
+        chatgpt_lease: true,
+        usage_reports: usage_reports.clone(),
+    })
+    .await?;
+    let env_guard = EnvGuard::set(&[
+        ("CONTROLLER_BASE_URL", format_http_base(&controller.addr())),
+        ("CONTROLLER_INTERNAL_TOKEN", "controller-secret".to_string()),
+        (
+            "PROXY_CREDENTIAL_LEASE_TOKEN",
+            "credential-lease-secret".to_string(),
+        ),
+        ("PROXY_SIGNING_SECRET", "test-signing".to_string()),
+        ("CODEX_PROXY_CHATGPT_ENDPOINT", chatgpt_endpoint),
+    ]);
+    let proxy = spawn_proxy(Credentials::ApiKey {
+        key: "platform-key-must-not-be-used".to_string(),
+        endpoint: None,
+        default_model: None,
+    })
+    .await?;
+    let credential_id = uuid::Uuid::new_v4().to_string();
+    let token = issue_proxy_token_with_claims(
+        "test-signing",
+        "project-123",
+        "runtime-456",
+        Some("run-789"),
+        Some(&credential_id),
+    );
+
+    let response = reqwest::Client::new()
+        .post(format!("http://{}/v1/responses", proxy.addr))
+        .bearer_auth(token)
+        .json(&json!({"model": DEFAULT_MODEL, "input": "Cut this short.", "stream": true}))
+        .send()
+        .await?;
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = response.text().await?;
+    assert!(body.contains("\"type\":\"response.failed\""), "{body}");
+    assert!(
+        body.contains("Incomplete response returned, reason: max_output_tokens"),
+        "{body}"
+    );
+
+    // The report is best effort and detached from the response.
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while usage_reports.lock().expect("usage reports").is_empty() && Instant::now() < deadline {
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let reports = usage_reports.lock().expect("usage reports").clone();
+    assert_eq!(reports.len(), 1, "{reports:?}");
+    assert_eq!(
+        reports[0]["windows"],
+        json!([{"kind": "primary", "usedPercent": 37, "windowMinutes": 300}])
+    );
+    assert!(
+        controller
+            .requests()
+            .contains(&format!("POST /internal/credentials/{credential_id}/usage"))
+    );
+    assert_eq!(upstream_calls.load(Ordering::SeqCst), 1);
+
+    proxy.shutdown().await;
+    controller.shutdown().await;
+    chatgpt_server.abort();
+    drop(env_guard);
+    Ok(())
+}
+
 async fn send_proxy_request(addr: SocketAddr, signing_secret: &str) -> Result<reqwest::Response> {
     let url = format!("http://{addr}/v1/chat/completions");
     let token = issue_proxy_token(signing_secret);
@@ -686,16 +793,22 @@ async fn spawn_controller() -> Result<ControllerHandle> {
 async fn spawn_controller_with_credential(
     credential_endpoint: Option<String>,
 ) -> Result<ControllerHandle> {
+    spawn_controller_with_state(ControllerState {
+        credential_endpoint,
+        credential_lease_token: "credential-lease-secret".to_string(),
+        chatgpt_lease: false,
+        usage_reports: Arc::default(),
+    })
+    .await
+}
+
+async fn spawn_controller_with_state(state: ControllerState) -> Result<ControllerHandle> {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
         .context("failed to bind controller stub")?;
     let addr = listener.local_addr()?;
 
     let requests = RequestLog::default();
-    let state = ControllerState {
-        credential_endpoint,
-        credential_lease_token: "credential-lease-secret".to_string(),
-    };
 
     // Unknown routes, the old `/credits` among them, fall back to 404 and are
     // still logged.
@@ -704,6 +817,10 @@ async fn spawn_controller_with_credential(
         .route(
             "/internal/credentials/:credential_id",
             get(controller_credential_handler),
+        )
+        .route(
+            "/internal/credentials/:credential_id/usage",
+            post(controller_usage_handler),
         )
         .fallback(|| async { StatusCode::NOT_FOUND })
         .layer(middleware::from_fn_with_state(
@@ -738,6 +855,10 @@ async fn spawn_controller_with_credential(
 struct ControllerState {
     credential_endpoint: Option<String>,
     credential_lease_token: String,
+    /// Leases a ChatGPT login instead of an API key.
+    chatgpt_lease: bool,
+    /// The subscription-usage snapshots the proxy reported.
+    usage_reports: Arc<Mutex<Vec<serde_json::Value>>>,
 }
 
 async fn record_controller_request(
@@ -775,6 +896,17 @@ async fn controller_credential_handler(
     if uuid::Uuid::parse_str(&credential_id).is_err() {
         return StatusCode::NOT_FOUND.into_response();
     }
+    if state.chatgpt_lease {
+        return Json(json!({
+            "kind": "codex_auth_json",
+            "accessToken": "inert-chatgpt-access",
+            "provider": "openai",
+            "defaultModel": DEFAULT_MODEL,
+            "leaseExpiresInSeconds": 60,
+            "renewalAuthority": "controller"
+        }))
+        .into_response();
+    }
     let Some(endpoint) = state.credential_endpoint else {
         return StatusCode::NOT_FOUND.into_response();
     };
@@ -788,6 +920,26 @@ async fn controller_credential_handler(
         "renewalAuthority": "controller"
     }))
     .into_response()
+}
+
+async fn controller_usage_handler(
+    State(state): State<ControllerState>,
+    headers: HeaderMap,
+    Json(snapshot): Json<serde_json::Value>,
+) -> StatusCode {
+    let auth_header = headers
+        .get(axum::http::header::AUTHORIZATION)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or("");
+    if auth_header != format!("Bearer {}", state.credential_lease_token) {
+        return StatusCode::UNAUTHORIZED;
+    }
+    state
+        .usage_reports
+        .lock()
+        .expect("usage reports")
+        .push(snapshot);
+    StatusCode::NO_CONTENT
 }
 
 struct OpenAiHandle {

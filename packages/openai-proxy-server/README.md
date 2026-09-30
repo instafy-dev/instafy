@@ -291,6 +291,66 @@ the turn with a rate-limit error instead of waiting out its retry budget. When n
 0, a long reset does not prove that the slower bucket is the one that refused, so that 429
 stays retryable.
 
+A streaming `/v1/responses` request, which is how Codex sends every request, gets a transient
+rate limit as a stream failure instead. Upstream Codex does not retry an HTTP 429 by itself
+(only the pinned fork's own patch does), but it does retry a stream that fails with
+`rate_limit_exceeded`, after the wait the failure's message names and within its stream retry
+budget. The proxy therefore answers HTTP 200 with one server-sent `response.failed` event, then
+`[DONE]`:
+
+```json
+{"type":"response.failed","response":{"status":"failed","error":{"code":"rate_limit_exceeded",
+  "message":"The upstream provider rate limit was reached (upstream_rate_limit, 429). Please try again in 5.734s."}}}
+```
+
+The wait is the `Retry-After` the 429 would have carried (the provider's own, the derived one,
+or 5 seconds), clamped to 1-30 seconds and spread by up to 20% so that runtimes sharing one key
+do not all retry at the same instant. The spread only lengthens a wait and never past 30
+seconds; a `Retry-After` of 30 seconds or more spreads below 30 instead. The wait is stated to
+the millisecond, the precision Codex reads back. The message keeps the `upstream_rate_limit`
+code and the words the Studio and the runtime recognise. Only a transient rate limit changes: a
+plan limit, a rate limit window too long to wait out, quota exhaustion and every other failure
+keep their HTTP error, and a request that does not stream, every Chat Completions request
+included, keeps the HTTP 429.
+
+### Responses the upstream cuts short
+
+The upstream can stop a response before it finishes, at `max_output_tokens` or by a content
+filter for example. An API key's Responses upstream answers with `status: "incomplete"` and
+`incomplete_details.reason`, and a ChatGPT login's stream ends with `response.incomplete`
+instead of `response.completed`. The upstream has produced and billed that response by then.
+Codex treats an upstream `response.incomplete` as a retryable stream error: it sends the same
+request again, billed again to whoever owns the key and most likely stopped the same way, and
+it runs any tool call the response carried, truncated arguments included. The proxy buffers the
+whole upstream response before it answers, so on every lane it decides what a streaming client
+gets instead:
+
+- Only the output items the upstream finished remain: those with status `completed` or with no
+  status. An item it finalized with status `incomplete`, such as a cut-off answer or a tool call
+  with truncated arguments, and an item it never finished (on a ChatGPT stream, one that was
+  only added, or text that only streamed as deltas) are dropped.
+- When a finished tool call that Codex runs remains (a `function_call`, a `custom_tool_call`,
+  or a `tool_search_call` with a `call_id` and `execution: "client"`), the client gets
+  `response.completed` with the remaining items. Codex runs the call and continues on its own
+  follow-up request, which hands the model the call's output.
+- Otherwise the client gets `response.created`, then `response.failed` with no output,
+  `error.code` `invalid_prompt` and `error.message`
+  `Incomplete response returned, reason: <reason>` (`unknown` when the upstream gave none),
+  Codex's own message for the case. Codex ends the turn on `invalid_prompt` instead of retrying,
+  and the Studio says the answer hit its length limit or was filtered.
+
+Both keep the upstream's `usage`, and a ChatGPT login's subscription-usage report is sent as
+for a completed response. Each cut-short response logs one `upstream response incomplete` line
+with its id, its reason, what was delivered and how many items were kept, never their content.
+
+A request that does not stream gets the response as the upstream reported it, with
+`status: "incomplete"` and its `incomplete_details`, as the Responses API answers without a
+stream; on a ChatGPT login its output holds the items the stream finished, including one the
+upstream finalized as `incomplete`. A non-streaming Chat Completions request gets the text the
+response has, with `finish_reason` `content_filter` for a filtered response and `length` for
+any other reason. Responses from a Chat Completions or Gemini Code Assist upstream are adapted
+as completed ones, as before.
+
 The proxy does not replay ordinary failed model requests. It retains one credential renewal
 and one resend after an eligible ChatGPT 401. Controller mode performs that renewal through
 the controller lease interface; standalone mode uses its local refresh authority. Calling
@@ -317,6 +377,8 @@ cargo test --lib --test proxy_upstream_failures
 This suite uses inert credentials and loopback HTTP mocks, covering terminal and transient
 statuses, recovery, one-shot refresh, malformed responses, safe diagnostics, and typed transport
 classification. It does not demonstrate live-provider availability or certificate repair.
+`cargo test --test proxy_cut_short` pins, the same way, the exact events a streaming client
+gets for a cut-short response and for a transient rate limit on each lane.
 
 ## Next steps
 

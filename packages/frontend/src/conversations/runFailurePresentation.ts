@@ -15,6 +15,7 @@ export type RunFailureKind =
   | "missing_verification"
   | "needs_ai"
   | "provider_rate_limited"
+  | "response_incomplete"
   | "generic";
 
 export type RunFailurePresentation = {
@@ -34,6 +35,10 @@ const RUN_FAILURE_FRIENDLY_TEXT: Record<RunFailureKind, string> = {
   // short throttle, so this copy cannot promise when a retry will work.
   provider_rate_limited:
     "The AI provider is limiting requests right now, so this turn stopped. Wait a little, then try again. If it keeps happening, the provider account may have reached its usage limit.",
+  // Used when the provider gave a reason this copy does not name; see
+  // INCOMPLETE_RESPONSE_FRIENDLY_TEXT for the ones it does.
+  response_incomplete:
+    "The AI provider stopped the answer before it was finished, so this turn stopped. Try again, or ask for less at once.",
   // Only used as a last-resort fallback now: an unclassified failure surfaces
   // its real reason inline (see inlineGenericFailureText) rather than this
   // uninformative sentence.
@@ -149,6 +154,22 @@ const PROVIDER_RATE_LIMITED_PATTERNS = [
   /upstream provider rate limit was reached/i,
 ];
 
+// The provider stopped the answer early and the proxy ended the turn instead
+// of sending the request again: "Incomplete response returned, reason: <reason>".
+const RESPONSE_INCOMPLETE_PATTERN = /incomplete response returned, reason:\s*([a-z_]*)/i;
+
+const INCOMPLETE_RESPONSE_FRIENDLY_TEXT: Record<string, string> = {
+  max_output_tokens:
+    "The answer hit the model's length limit before it was finished, so this turn stopped. Try asking for less at once, or split the request into smaller steps.",
+  content_filter:
+    "The AI provider's content filter stopped this answer before it was finished, so this turn stopped. Try rephrasing the request.",
+};
+
+function incompleteResponseFriendlyText(rawText: string): string {
+  const reason = RESPONSE_INCOMPLETE_PATTERN.exec(rawText)?.[1]?.toLowerCase() ?? "";
+  return INCOMPLETE_RESPONSE_FRIENDLY_TEXT[reason] ?? RUN_FAILURE_FRIENDLY_TEXT.response_incomplete;
+}
+
 // A 429 that names an exhausted quota or plan limit will not clear after a
 // short wait, so it keeps its raw reason instead of the rate limit copy.
 const PROVIDER_QUOTA_EXHAUSTED_PATTERN =
@@ -162,6 +183,8 @@ const PROVIDER_QUOTA_EXHAUSTED_PATTERN =
  * helps and/or the underlying cause is deterministic. `provider_rate_limited`
  * is excluded because an immediate resend adds load to a provider that is
  * already refusing requests; the person retries after a pause instead.
+ * `response_incomplete` is excluded because the provider already billed the
+ * cut-short answer, and the same request would most likely stop the same way.
  */
 export const AUTO_RETRY_ELIGIBLE_KINDS = [
   "missing_final_message",
@@ -198,6 +221,9 @@ export function classifyRunFailureText(rawText: string): Exclude<RunFailureKind,
   }
   if (NEEDS_AI_PATTERNS.some((pattern) => pattern.test(rawText))) {
     return "needs_ai";
+  }
+  if (RESPONSE_INCOMPLETE_PATTERN.test(rawText)) {
+    return "response_incomplete";
   }
   if (
     PROVIDER_RATE_LIMITED_PATTERNS.some((pattern) => pattern.test(rawText)) &&
@@ -243,7 +269,11 @@ export function resolveRunFailurePresentation(params: {
     return null;
   }
   const friendlyText =
-    kind === "generic" ? inlineGenericFailureText(rawText) : RUN_FAILURE_FRIENDLY_TEXT[kind];
+    kind === "generic"
+      ? inlineGenericFailureText(rawText)
+      : kind === "response_incomplete"
+        ? incompleteResponseFriendlyText(rawText)
+        : RUN_FAILURE_FRIENDLY_TEXT[kind];
   return { kind, friendlyText, rawText };
 }
 

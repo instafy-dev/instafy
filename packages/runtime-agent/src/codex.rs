@@ -5571,8 +5571,23 @@ mod tests {
             "stream disconnected before completion: 429 Too Many Requests: The AI provider is rate limiting requests.",
             "stream disconnected before completion: 429 Too Many Requests: The upstream provider rate limit was reached. (connection reset by peer)",
             "Codex stream aborted after 5 retries (limit 5): stream disconnected before completion: 429 Too Many Requests: upstream request timed out",
+            // The proxy streams a transient 429 as a rate_limit_exceeded failure that names
+            // its wait, and Codex reports it the same way once its retries run out.
+            "stream disconnected before completion: The upstream provider rate limit was reached (upstream_rate_limit, 429). Please try again in 5.5s.",
+            "Codex stream aborted after 1 retries (limit 1): stream disconnected before completion: The upstream provider rate limit was reached (upstream_rate_limit, 429). Please try again in 1s.",
         ] {
             assert!(!should_retry_codex_run(message), "{message}");
+        }
+    }
+
+    #[test]
+    fn should_retry_codex_run_does_not_replay_an_incomplete_response() {
+        // The provider stopped the response early and billed it. The proxy ends the turn with
+        // this error unless a tool call finished first, and a whole-run replay would send the
+        // same input again under the same cap or filter.
+        for reason in ["max_output_tokens", "content_filter", "unknown"] {
+            let message = format!("Incomplete response returned, reason: {reason}");
+            assert!(!should_retry_codex_run(&message), "{message}");
         }
     }
 
