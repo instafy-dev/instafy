@@ -40,6 +40,7 @@ mod browser_request;
 mod card_text;
 mod conversation_context;
 mod git_sync;
+mod known_safe_command;
 mod routing_evidence;
 mod routing_recovery;
 
