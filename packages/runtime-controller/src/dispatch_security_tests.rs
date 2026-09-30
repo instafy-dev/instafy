@@ -297,3 +297,128 @@ async fn dispatch_security_preserves_service_bootstrap_and_existing_user_dispatc
         Err(panic) => resume_unwind(panic),
     }
 }
+
+#[tokio::test]
+async fn dispatch_security_agents_never_target_the_reserved_credential_id() -> anyhow::Result<()> {
+    use crate::credentials::reserved_id_tests::{
+        api_error, insert_user_credential_row, reserved_id, seed_reserved_credential_row,
+    };
+
+    let pool = require_origin_test_pool("dispatch reserved credential id targets").await?;
+    let mut connection = pool.get().await?;
+    let transaction = connection.transaction().await?;
+    let user_id = Uuid::new_v4();
+    let project_id = Uuid::new_v4();
+    seed_reserved_credential_row(&transaction, &user_id, false).await?;
+    transaction
+        .execute(
+            "insert into user_agents (id, user_id, credential_id, provider, handle, avatar_seed)
+             values ($1, $2, $3, 'openai', 'reservedpin', 'reservedpin')",
+            &[&Uuid::new_v4(), &user_id, &reserved_id()],
+        )
+        .await?;
+
+    // An agent pinned to the reserved row has no credential of its own: with
+    // no default it runs on the managed lane (credential_id None, so the
+    // managed AI gate and credit reserve apply) ...
+    let targets = resolve_agent_targets(
+        &transaction,
+        &project_id,
+        Some(user_id),
+        vec!["reservedpin".to_string()],
+        None,
+    )
+    .await
+    .map_err(api_error)?;
+    assert_eq!(targets.len(), 1);
+    assert_eq!(targets[0].credential_id, None);
+
+    // ... and a reserved id handed in as the default never becomes a target.
+    for handles in [
+        vec!["reservedpin".to_string()],
+        vec!["octo".to_string()],
+        vec![],
+    ] {
+        let targets = resolve_agent_targets(
+            &transaction,
+            &project_id,
+            Some(user_id),
+            handles,
+            Some(reserved_id()),
+        )
+        .await
+        .map_err(api_error)?;
+        assert!(targets.iter().all(|target| target.credential_id.is_none()));
+    }
+
+    // With an ordinary default, the agent falls back to it.
+    let own = insert_user_credential_row(&transaction, &user_id, true).await?;
+    let default_credential_id =
+        credentials::load_default_credential_id(&transaction, Some(user_id))
+            .await
+            .map_err(api_error)?;
+    assert_eq!(default_credential_id, Some(own));
+    let targets = resolve_agent_targets(
+        &transaction,
+        &project_id,
+        Some(user_id),
+        vec!["reservedpin".to_string()],
+        default_credential_id,
+    )
+    .await
+    .map_err(api_error)?;
+    assert_eq!(targets[0].credential_id, Some(own));
+
+    transaction.rollback().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn dispatch_security_jobs_never_pin_the_reserved_credential_id() -> anyhow::Result<()> {
+    let pool = require_origin_test_pool("dispatch reserved credential id jobs").await?;
+    let mut connection = pool.get().await?;
+    let transaction = connection.transaction().await?;
+    let user_id = Uuid::new_v4();
+    let project_id = Uuid::new_v4();
+    let project = ProjectRecord {
+        id: project_id,
+        org_id: None,
+        name: None,
+        sandbox_session_id: None,
+        project_type: None,
+        owner_user_id: Some(user_id),
+        _status: None,
+    };
+    let context = RequestContext {
+        user_id: Some(user_id),
+        is_service_role: false,
+        scoped_claims: None,
+    };
+    let request = normalized_request(project_id, Uuid::new_v4());
+
+    let error = agent::enqueue_agent_job_record(
+        &transaction,
+        &project,
+        &context,
+        &request,
+        &Uuid::new_v4(),
+        &Uuid::new_v4(),
+        None,
+        Some(crate::config::managed_ai_credential_id()),
+        None,
+    )
+    .await
+    .expect_err("a job never pins the reserved id");
+    assert_eq!(error.0, StatusCode::NOT_FOUND);
+    let jobs: i64 = transaction
+        .query_one(
+            "select count(*)::bigint as count from agent_jobs where project_id = $1",
+            &[&project_id],
+        )
+        .await?
+        .get("count");
+    assert_eq!(jobs, 0);
+
+    transaction.rollback().await?;
+    Ok(())
+}

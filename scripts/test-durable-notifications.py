@@ -80,6 +80,8 @@ def main():
             print('PASS: support lifecycle, transactional rollback, preferences, account isolation, privacy, all producers, quiet runs, monotonic state, revocation')
             sql((ROOT/'supabase/tests/org_credit_ledger_idempotency.sql').read_text())
             print('PASS: a repeated credit ledger idempotency key adds no row and never moves the balance')
+            sql((ROOT/'supabase/tests/reserved_managed_credential_id.sql').read_text())
+            print('PASS: the managed credential id is reserved; ordinary credential rows still insert and update')
             before = sql('select count(*) from notification_events;')
             sql('begin;\n' + MIGRATION.read_text() + '\ncommit;')
             assert before == sql('select count(*) from notification_events;'), 'migration replay emitted historical events'

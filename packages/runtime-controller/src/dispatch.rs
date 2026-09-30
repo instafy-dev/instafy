@@ -534,7 +534,7 @@ async fn resolve_agent_targets(
                 })?;
             if let Some(row) = row {
                 agent_id = row.get("agent_id");
-                credential_id = row.get("credential_id");
+                credential_id = credentials::usable_user_credential_id(row.get("credential_id"));
                 runtime_id = row.get("runtime_id");
                 display_name = row.get("display_name");
                 description = row.get("description");
@@ -557,7 +557,8 @@ async fn resolve_agent_targets(
             avatar_seed = Some("octo".to_string());
         }
 
-        let resolved_credential_id = credential_id.or(default_credential_id);
+        let resolved_credential_id =
+            credentials::usable_user_credential_id(credential_id.or(default_credential_id));
         targets.push(AgentTarget {
             handle,
             agent_id,
@@ -581,7 +582,7 @@ async fn resolve_agent_targets(
         targets.push(AgentTarget {
             handle: "octo".to_string(),
             agent_id,
-            credential_id: default_credential_id,
+            credential_id: credentials::usable_user_credential_id(default_credential_id),
             runtime_id: None,
             display_name,
             description,
