@@ -812,6 +812,22 @@ async fn run_scenario(scenario: &str, expected_requests: usize) -> Result<()> {
     }
     if scenario == "tool_once" {
         assert_eq!(fs::read_to_string(workspace.join("tool-count.txt"))?, "x");
+        // What the Instafy proxy turns into `tool_choice: "required"` for direct-tool requests.
+        let requires_tool = |request: &Value| {
+            request.pointer("/client_metadata/instafy.require_tool_call") == Some(&json!("1"))
+        };
+        assert!(
+            requires_tool(&requests[0]),
+            "the first request must require a tool call: {}",
+            requests[0]["client_metadata"]
+        );
+        assert!(
+            requests
+                .iter()
+                .skip(1)
+                .all(|request| !requires_tool(request)),
+            "the executed tool must release the requirement"
+        );
         assert!(
             requests
                 .iter()
@@ -1035,6 +1051,8 @@ async fn isolated_retry_child() -> Result<()> {
                     || personal_browser,
                 personal_browser,
                 disable_shell_tool: personal_browser,
+                // The first request must require a tool; once the tool runs, the next may not.
+                require_first_tool_call: scenario == "tool_once",
                 ..Default::default()
             },
         )

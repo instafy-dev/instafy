@@ -52,6 +52,7 @@ use tokio::time::timeout;
 use crate::active_turn_input::{
     ActiveTurnInputCommand, ActiveTurnInputOutcome, ActiveTurnInputReceiver,
 };
+use crate::required_execution::RequiredExecutionGate;
 
 use crate::job_cancel::JobCancelSignal;
 use crate::model_environment::{
@@ -1354,6 +1355,7 @@ impl CodexClient {
             .await
             .context("failed to resolve Codex installation id")?;
         let turn_start_token_usage = TurnStartTokenUsage::default();
+        let required_execution = RequiredExecutionGate::default();
         let thread_manager = Arc::new(
             ThreadManager::new(
                 &config,
@@ -1362,7 +1364,7 @@ impl CodexClient {
                 CodexAppsToolsCache::default(),
                 SessionSource::Exec,
                 environment_manager,
-                codex_extension_registry(&turn_start_token_usage),
+                codex_extension_registry(&turn_start_token_usage, &required_execution),
                 Arc::new(EmptyUserInstructionsProvider),
                 None,
                 codex_core::passthrough_image_store(),
@@ -1575,12 +1577,19 @@ impl CodexClient {
 
         let requires_structured_final = final_output_json_schema.is_some();
 
+        // Kept for proxy log readability; the gate below is what makes the proxy require a tool.
         let responsesapi_client_metadata = options.require_first_tool_call.then(|| {
             HashMap::from([(
                 CODEX_REQUIRED_TOOL_METADATA_KEY.to_string(),
                 CODEX_REQUIRED_TOOL_COMMAND_ONCE.to_string(),
             )])
         });
+        if options.require_first_tool_call {
+            let thread_id = active_thread_id
+                .as_ref()
+                .context("a turn that must execute a tool has no Codex thread id")?;
+            required_execution.arm(&thread_id.to_string());
+        }
 
         let bounded_browser_mode = personal_browser_mode || shared_browser_mode;
         let request = TurnInputRequest::user_input(items)
@@ -3310,14 +3319,20 @@ impl TurnLifecycleContributor for TurnStartTokenUsageRecorder {
 }
 
 /// The extension registry a run hands Codex. It records each turn's baseline into
-/// `turn_start_token_usage`, which the run's `CodexEventStreamAdapter` reads.
+/// `turn_start_token_usage`, which the run's `CodexEventStreamAdapter` reads, and enforces
+/// `required_execution` on the threads the run arms.
 fn codex_extension_registry(
     turn_start_token_usage: &TurnStartTokenUsage,
+    required_execution: &RequiredExecutionGate,
 ) -> Arc<ExtensionRegistry<Config>> {
     let mut extensions = ExtensionRegistryBuilder::new();
     extensions.turn_lifecycle_contributor(Arc::new(TurnStartTokenUsageRecorder(
         turn_start_token_usage.clone(),
     )));
+    let gate = Arc::new(required_execution.clone());
+    extensions.model_request_contributor(gate.clone());
+    extensions.tool_lifecycle_contributor(gate.clone());
+    extensions.turn_lifecycle_contributor(gate);
     Arc::new(extensions.build())
 }
 
@@ -3342,7 +3357,8 @@ pub(crate) async fn start_test_turn(
             developer_instructions: None,
         },
     };
-    let registry = codex_extension_registry(turn_start_token_usage);
+    let registry =
+        codex_extension_registry(turn_start_token_usage, &RequiredExecutionGate::default());
     for contributor in registry.turn_lifecycle_contributors() {
         contributor
             .on_turn_start(TurnStartInput {
@@ -4682,6 +4698,50 @@ mod tests {
         let mut fresh_policy = ShellEnvironmentPolicy::default();
         scope_browser_capabilities_from_shell_environment(&mut fresh_policy);
         assert_eq!(fresh_policy.exclude.len(), 20);
+    }
+
+    #[tokio::test]
+    async fn run_registry_requires_execution_on_armed_threads_until_the_turn_stops() {
+        use codex_extension_api::{ModelRequestInput, ModelRequestKind, TurnStopInput};
+        let gate = RequiredExecutionGate::default();
+        let registry = codex_extension_registry(&TurnStartTokenUsage::default(), &gate);
+        gate.arm("thread-a");
+        let mut metadata = None;
+        for contributor in registry.model_request_contributors() {
+            assert!(
+                contributor
+                    .request(ModelRequestInput {
+                        kind: ModelRequestKind::Generation,
+                        thread_id: "thread-a",
+                        client_metadata: &mut metadata,
+                        model: "gpt-5.5",
+                    })
+                    .is_none()
+            );
+        }
+        assert_eq!(
+            metadata
+                .as_ref()
+                .and_then(|metadata| metadata
+                    .get(crate::required_execution::REQUIRE_TOOL_CALL_METADATA_KEY))
+                .map(String::as_str),
+            Some("1")
+        );
+        assert_eq!(registry.tool_lifecycle_contributors().len(), 1);
+
+        let session_store = codex_extension_api::ExtensionData::new("session");
+        let thread_store = codex_extension_api::ExtensionData::new("thread-a");
+        let turn_store = codex_extension_api::ExtensionData::new("turn-1");
+        for contributor in registry.turn_lifecycle_contributors() {
+            contributor
+                .on_turn_stop(TurnStopInput {
+                    session_store: &session_store,
+                    thread_store: &thread_store,
+                    turn_store: &turn_store,
+                })
+                .await;
+        }
+        assert!(!gate.is_armed("thread-a"));
     }
 
     #[test]
@@ -6753,7 +6813,10 @@ required = true
     fn turn_start_usage_recorder_runs_in_the_phase_that_carries_the_baseline() {
         // Codex hands `token_usage_at_turn_start` only to contributors scheduled
         // before task registration. Every per-turn usage row depends on it.
-        let registry = codex_extension_registry(&TurnStartTokenUsage::default());
+        let registry = codex_extension_registry(
+            &TurnStartTokenUsage::default(),
+            &RequiredExecutionGate::default(),
+        );
         let thread_store = ExtensionData::new("thread-main");
         let contributors = registry.turn_lifecycle_contributors();
         assert!(!contributors.is_empty());

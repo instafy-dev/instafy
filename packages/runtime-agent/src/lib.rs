@@ -21,6 +21,7 @@ mod model_environment;
 pub mod origin;
 pub mod personal_browser;
 pub mod process_hardening;
+mod required_execution;
 pub mod resources;
 pub mod shared_browser;
 pub mod tunnels;
