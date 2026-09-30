@@ -55,6 +55,7 @@ pub struct CodexClient {
     tools_enabled: bool,
     requested_tools: Option<Vec<Value>>,
     requested_tool_choice: Option<Value>,
+    required_tool_call: bool,
     requested_parallel_tool_calls: Option<bool>,
     requested_text_controls: Option<Value>,
     tool_filter: Option<ToolFilter>,
@@ -95,6 +96,15 @@ fn wire_api_for(credentials: &Credentials) -> UpstreamWireApi {
     } else {
         detect_upstream_wire_api(credentials.endpoint())
     }
+}
+
+/// Whether requests with `credentials` go upstream with the tool controls a
+/// client is given, [`CodexClient::with_required_tool_call`] among them:
+/// only the Responses wire API carries them, to the OpenAI API or to a
+/// ChatGPT login's Codex endpoint. A Chat Completions or Gemini Code Assist
+/// request forwards no client tools and no `tool_choice`.
+pub(crate) fn sends_tool_controls(credentials: &Credentials) -> bool {
+    wire_api_for(credentials) == UpstreamWireApi::Responses
 }
 
 fn detect_upstream_wire_api(endpoint: &str) -> UpstreamWireApi {
@@ -159,6 +169,7 @@ impl CodexClient {
             tools_enabled: true,
             requested_tools: None,
             requested_tool_choice: None,
+            required_tool_call: false,
             requested_parallel_tool_calls: None,
             requested_text_controls: None,
             tool_filter: None,
@@ -200,6 +211,16 @@ impl CodexClient {
         self.requested_tool_choice = tool_choice;
         self.requested_parallel_tool_calls = parallel_tool_calls;
         self.requested_text_controls = text_controls;
+        self
+    }
+
+    /// Sends `tool_choice: "required"` on the Responses paths, including a
+    /// Responses Lite request, whose tools ride in an `additional_tools`
+    /// input item and which otherwise gets no tool control of its own. The
+    /// proxy sets it only for a request that offers tools and leaves the
+    /// choice to the model.
+    pub(crate) fn with_required_tool_call(mut self, required: bool) -> Self {
+        self.required_tool_call = required;
         self
     }
 
@@ -331,6 +352,7 @@ impl CodexClient {
                 self.tools_enabled,
                 self.requested_tools.as_deref(),
                 self.requested_tool_choice.as_ref(),
+                self.required_tool_call,
                 self.requested_parallel_tool_calls,
                 self.requested_text_controls.as_ref(),
             )
@@ -346,6 +368,7 @@ impl CodexClient {
                     self.tools_enabled,
                     self.requested_tools.as_deref(),
                     self.requested_tool_choice.as_ref(),
+                    self.required_tool_call,
                     self.requested_parallel_tool_calls,
                     self.requested_text_controls.as_ref(),
                 ),
@@ -546,6 +569,7 @@ fn build_openai_payload(
     tools_enabled: bool,
     requested_tools: Option<&[Value]>,
     requested_tool_choice: Option<&Value>,
+    required_tool_call: bool,
     requested_parallel_tool_calls: Option<bool>,
     requested_text_controls: Option<&Value>,
 ) -> Value {
@@ -575,11 +599,14 @@ fn build_openai_payload(
 
     if tools_enabled && let Some(tools) = requested_tools.filter(|tools| !tools.is_empty()) {
         payload["tools"] = Value::Array(tools.to_vec());
-        payload["tool_choice"] = requested_tool_choice
-            .cloned()
-            .unwrap_or_else(|| json!("auto"));
+        payload["tool_choice"] = tool_choice_to_send(requested_tool_choice, required_tool_call);
         payload["parallel_tool_calls"] =
             Value::Bool(requested_parallel_tool_calls.unwrap_or(false));
+    } else if tools_enabled && required_tool_call {
+        // Responses Lite: the tools ride in an `additional_tools` input item
+        // and `tools` is empty, so only a required tool call sends a tool
+        // control. The request's own `tool_choice` is not forwarded.
+        payload["tool_choice"] = json!("required");
     }
 
     if let Some(text_controls) = requested_text_controls
@@ -589,6 +616,19 @@ fn build_openai_payload(
     }
 
     payload
+}
+
+/// The `tool_choice` a request goes upstream with where the builders send
+/// one: `"required"` when the proxy requires a tool call, otherwise the
+/// requested choice, `"auto"` when there is none.
+fn tool_choice_to_send(requested_tool_choice: Option<&Value>, required_tool_call: bool) -> Value {
+    if required_tool_call {
+        json!("required")
+    } else {
+        requested_tool_choice
+            .cloned()
+            .unwrap_or_else(|| json!("auto"))
+    }
 }
 
 fn build_openai_chat_completions_payload(
@@ -778,6 +818,7 @@ fn build_chatgpt_payload(
     tools_enabled: bool,
     requested_tools: Option<&[Value]>,
     requested_tool_choice: Option<&Value>,
+    required_tool_call: bool,
     requested_parallel_tool_calls: Option<bool>,
     requested_text_controls: Option<&Value>,
 ) -> Value {
@@ -801,15 +842,16 @@ fn build_chatgpt_payload(
 
     if tools_enabled && let Some(tools) = requested_tools.filter(|tools| !tools.is_empty()) {
         payload["tools"] = Value::Array(tools.to_vec());
-        payload["tool_choice"] = requested_tool_choice
-            .cloned()
-            .unwrap_or_else(|| json!("auto"));
+        payload["tool_choice"] = tool_choice_to_send(requested_tool_choice, required_tool_call);
         payload["parallel_tool_calls"] =
             Value::Bool(requested_parallel_tool_calls.unwrap_or(false));
     } else if tools_enabled {
+        // The request's own `tool_choice` is not forwarded with the default
+        // tools; a Responses Lite request that requires a tool call, whose
+        // tools ride in an `additional_tools` input item, gets `"required"`.
         let tool_metadata = resolve_chatgpt_tools(model);
         payload["tools"] = Value::Array(tool_metadata.tools);
-        payload["tool_choice"] = Value::String("auto".to_string());
+        payload["tool_choice"] = tool_choice_to_send(None, required_tool_call);
         payload["parallel_tool_calls"] = Value::Bool(tool_metadata.parallel_tool_calls);
     }
 
@@ -2021,6 +2063,7 @@ mod tests {
             true,
             None,
             None,
+            false,
             None,
             None,
         );
@@ -2049,6 +2092,7 @@ mod tests {
             false,
             None,
             None,
+            false,
             None,
             None,
         );
@@ -2091,6 +2135,7 @@ mod tests {
             true,
             Some(&tools),
             Some(&tool_choice),
+            false,
             Some(true),
             Some(&json!({"format": {"type": "text"}})),
         );
@@ -2135,6 +2180,7 @@ mod tests {
             true,
             Some(&tools),
             Some(&tool_choice),
+            false,
             Some(false),
             Some(&json!({"format": {"type": "text"}})),
         );
@@ -2144,6 +2190,154 @@ mod tests {
         assert_eq!(payload["parallel_tool_calls"], json!(false));
         assert_eq!(payload["text"], json!({"format": {"type": "text"}}));
         assert!(payload.get("client_metadata").is_none());
+    }
+
+    /// Codex's input for a Responses Lite model such as gpt-6-luna: the
+    /// tools ride in an `additional_tools` item and the request has no
+    /// `tools`.
+    fn responses_lite_input() -> Vec<Value> {
+        vec![
+            json!({
+                "type": "additional_tools",
+                "role": "developer",
+                "tools": [{ "type": "custom", "name": "exec" }]
+            }),
+            json!({
+                "type": "message",
+                "role": "user",
+                "content": [{"type": "input_text", "text": "Run the tests."}]
+            }),
+        ]
+    }
+
+    #[test]
+    fn openai_payload_requires_a_tool_call_on_a_responses_lite_request() {
+        let input = responses_lite_input();
+        let auto = json!("auto");
+        let build = |tools_enabled: bool, required_tool_call: bool| {
+            build_openai_payload(
+                "gpt-6-luna",
+                "",
+                &input,
+                None,
+                None,
+                Some("medium"),
+                tools_enabled,
+                None,
+                Some(&auto),
+                required_tool_call,
+                Some(false),
+                None,
+            )
+        };
+
+        // Without a required tool call, a request with no `tools` gets no
+        // tool control at all: its own `tool_choice` is not forwarded.
+        let unchanged = build(true, false);
+        for key in ["tools", "tool_choice", "parallel_tool_calls"] {
+            assert!(unchanged.get(key).is_none(), "{key}: {unchanged}");
+        }
+
+        // With one it gets `tool_choice: "required"` and nothing else.
+        let mut required = build(true, true);
+        assert_eq!(required["tool_choice"], json!("required"));
+        required
+            .as_object_mut()
+            .expect("payload object")
+            .remove("tool_choice");
+        assert_eq!(required, unchanged);
+
+        // A plain text completion sends no tool control either way.
+        let plain_text = build(false, true);
+        for key in ["tools", "tool_choice", "parallel_tool_calls"] {
+            assert!(plain_text.get(key).is_none(), "{key}: {plain_text}");
+        }
+    }
+
+    #[test]
+    fn chatgpt_payload_requires_a_tool_call_on_a_responses_lite_request() {
+        let input = responses_lite_input();
+        let auto = json!("auto");
+        let build = |tools_enabled: bool, required_tool_call: bool| {
+            build_chatgpt_payload(
+                "gpt-6-luna",
+                "",
+                &input,
+                None,
+                None,
+                Some("medium"),
+                tools_enabled,
+                None,
+                Some(&auto),
+                required_tool_call,
+                Some(false),
+                None,
+            )
+        };
+
+        // Without a required tool call, a request with no `tools` gets the
+        // default tools and `auto`.
+        let unchanged = build(true, false);
+        assert_eq!(unchanged["tool_choice"], json!("auto"));
+        assert!(
+            unchanged["tools"]
+                .as_array()
+                .is_some_and(|tools| !tools.is_empty()),
+            "{unchanged}"
+        );
+
+        // With one only the choice changes.
+        let mut required = build(true, true);
+        assert_eq!(required["tool_choice"], json!("required"));
+        required["tool_choice"] = json!("auto");
+        assert_eq!(required, unchanged);
+
+        let plain_text = build(false, true);
+        for key in ["tools", "tool_choice", "parallel_tool_calls"] {
+            assert!(plain_text.get(key).is_none(), "{key}: {plain_text}");
+        }
+    }
+
+    #[test]
+    fn payloads_with_tools_send_required_for_a_required_tool_call() {
+        let tools = vec![json!({ "type": "function", "name": "exec_command", "parameters": {} })];
+        let input = responses_lite_input();
+        let auto = json!("auto");
+        for chatgpt in [false, true] {
+            for requested_choice in [None, Some(&auto)] {
+                let build = |required_tool_call: bool| {
+                    let build_payload = if chatgpt {
+                        build_chatgpt_payload
+                    } else {
+                        build_openai_payload
+                    };
+                    build_payload(
+                        "gpt-5.5",
+                        "Use tools.",
+                        &input[1..],
+                        None,
+                        None,
+                        Some("medium"),
+                        true,
+                        Some(&tools),
+                        requested_choice,
+                        required_tool_call,
+                        Some(true),
+                        None,
+                    )
+                };
+                let context = format!("chatgpt={chatgpt} tool_choice={requested_choice:?}");
+                let unchanged = build(false);
+                assert_eq!(unchanged["tool_choice"], json!("auto"), "{context}");
+
+                let mut required = build(true);
+                assert_eq!(required["tool_choice"], json!("required"), "{context}");
+                assert_eq!(required["tools"], json!(tools), "{context}");
+                assert_eq!(required["parallel_tool_calls"], json!(true), "{context}");
+                required["tool_choice"] = json!("auto");
+                assert_eq!(required, unchanged, "{context}");
+            }
+        }
     }
 
     #[test]
