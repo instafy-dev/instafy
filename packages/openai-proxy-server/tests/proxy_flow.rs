@@ -27,6 +27,10 @@ const MANAGED_STUB_KEY: &str = "sk-managed-stub";
 /// `BYO_CREDENTIAL_ID`.
 const BYO_STUB_KEY: &str = "sk-byo-stub";
 const BYO_CREDENTIAL_ID: &str = "55555555-5555-4555-8555-555555555555";
+/// A user's own ChatGPT login, which the controller stub serves as an access
+/// token under `BYO_CHATGPT_CREDENTIAL_ID`.
+const BYO_CHATGPT_STUB_TOKEN: &str = "chatgpt-byo-stub";
+const BYO_CHATGPT_CREDENTIAL_ID: &str = "66666666-6666-4666-8666-666666666666";
 /// The managed model the controller stub pins its lease to.
 const PINNED_MODEL: &str = "gpt-6-luna";
 /// The model stub's Responses path. It names the OpenAI host so the proxy
@@ -207,10 +211,15 @@ struct UpstreamStub {
     tools: Arc<Mutex<Vec<Value>>>,
     /// The `input` of each request the model endpoint received.
     inputs: Arc<Mutex<Vec<Value>>>,
+    /// The `service_tier` of each request the model endpoint received
+    /// (`None` when absent).
+    service_tiers: Arc<Mutex<Vec<Option<Value>>>>,
     /// How many of the next model requests to reject as an expired token.
     expire_next: Arc<AtomicUsize>,
     /// Paths of the audio requests that reached the provider.
     audio: Arc<Mutex<Vec<String>>>,
+    /// The body of each audio request that reached the provider, as sent.
+    audio_bodies: Arc<Mutex<Vec<Vec<u8>>>>,
 }
 
 async fn controller_lease_stub(
@@ -276,6 +285,20 @@ async fn controller_lease_stub(
             })),
         );
     }
+    if credential_id == BYO_CHATGPT_CREDENTIAL_ID {
+        return (
+            StatusCode::OK,
+            AxumJson(json!({
+                "credentialId": credential_id,
+                "kind": "codex_auth_json",
+                "accessToken": BYO_CHATGPT_STUB_TOKEN,
+                "provider": "openai",
+                "defaultModel": "gpt-5.6-sol",
+                "leaseExpiresInSeconds": 60,
+                "renewalAuthority": "controller",
+            })),
+        );
+    }
     (
         StatusCode::NOT_FOUND,
         AxumJson(json!({ "message": "credential not found: it was revoked or removed" })),
@@ -315,6 +338,10 @@ fn record_upstream_request(stub: &UpstreamStub, headers: &HeaderMap, payload: &V
         .lock()
         .expect("input log")
         .push(payload.get("input").cloned().unwrap_or(Value::Null));
+    stub.service_tiers
+        .lock()
+        .expect("service tier log")
+        .push(payload.get("service_tier").cloned());
     authorization
 }
 
@@ -325,7 +352,9 @@ async fn upstream_chatgpt_stub(
     AxumJson(payload): AxumJson<Value>,
 ) -> axum::response::Response {
     let authorization = record_upstream_request(&stub, &headers, &payload);
-    if authorization != format!("Bearer {MANAGED_STUB_KEY}") {
+    if authorization != format!("Bearer {MANAGED_STUB_KEY}")
+        && authorization != format!("Bearer {BYO_CHATGPT_STUB_TOKEN}")
+    {
         return (
             StatusCode::UNAUTHORIZED,
             AxumJson(json!({ "error": { "message": "bad upstream token" } })),
@@ -376,11 +405,16 @@ async fn upstream_responses_stub(
 async fn upstream_audio_stub(
     State(stub): State<UpstreamStub>,
     uri: axum::http::Uri,
+    body: axum::body::Bytes,
 ) -> impl IntoResponse {
     stub.audio
         .lock()
         .expect("audio log")
         .push(uri.path().to_string());
+    stub.audio_bodies
+        .lock()
+        .expect("audio body log")
+        .push(body.to_vec());
     (
         StatusCode::OK,
         [(header::CONTENT_TYPE, "application/json")],
@@ -458,6 +492,10 @@ enum StackProxy<'a> {
     /// As `Static`, but the operator's credentials are a ChatGPT login
     /// (`auth.json`), which the proxy sends to the ChatGPT Codex endpoint.
     StaticChatGpt { pinned_model: Option<&'a str> },
+    /// As `Static`, but the key names the OpenAI API as its endpoint rather
+    /// than the model stub. Only for the health report, which never contacts
+    /// the model endpoint: a model request on it would leave the machine.
+    StaticOpenAiApi { pinned_model: Option<&'a str> },
     /// Static credentials and no controller integration: the proxy checks
     /// no token. The controller stub still runs but the proxy never calls it.
     Standalone { pinned_model: Option<&'a str> },
@@ -490,6 +528,27 @@ async fn spawn_stack(
     pinned_model: Option<&str>,
     require_credential_claim: bool,
     proxy: StackProxy<'_>,
+) -> Result<Stack> {
+    spawn_stack_with_service_tier_endpoints(
+        managed_key,
+        pinned_model,
+        require_credential_claim,
+        proxy,
+        None,
+    )
+    .await
+}
+
+/// As [`spawn_stack`], with `PROXY_PLATFORM_SERVICE_TIER_ENDPOINTS` set to
+/// `service_tier_endpoints` (`None` leaves it unset). The model stub listens
+/// on a loopback address, which is not an OpenAI host, so only `all` sends
+/// it the platform lane's tier.
+async fn spawn_stack_with_service_tier_endpoints(
+    managed_key: Option<&str>,
+    pinned_model: Option<&str>,
+    require_credential_claim: bool,
+    proxy: StackProxy<'_>,
+    service_tier_endpoints: Option<&str>,
 ) -> Result<Stack> {
     let upstream = UpstreamStub::default();
     let (upstream_addr, upstream_guard) = spawn_router(
@@ -526,6 +585,13 @@ async fn spawn_stack(
             default_model: None,
         })
     };
+    let static_openai_api_key = || {
+        Some(Credentials::ApiKey {
+            key: MANAGED_STUB_KEY.to_string(),
+            endpoint: Some("https://api.openai.com/v1/responses".to_string()),
+            default_model: None,
+        })
+    };
     let static_chatgpt_login = || {
         Some(Credentials::ChatGpt {
             access_token: MANAGED_STUB_KEY.to_string(),
@@ -539,6 +605,9 @@ async fn spawn_stack(
         StackProxy::Dynamic => (None, None, true),
         StackProxy::Static { pinned_model } => (static_key(), pinned_model, true),
         StackProxy::StaticChatGpt { pinned_model } => (static_chatgpt_login(), pinned_model, true),
+        StackProxy::StaticOpenAiApi { pinned_model } => {
+            (static_openai_api_key(), pinned_model, true)
+        }
         StackProxy::Standalone { pinned_model } => (static_key(), pinned_model, false),
     };
     let controller_base_url = format!("http://{controller_addr}");
@@ -558,6 +627,10 @@ async fn spawn_stack(
         EnvGuard::set(
             "PROXY_REQUIRE_CREDENTIAL_CLAIM",
             require_credential_claim.then_some("1"),
+        ),
+        EnvGuard::set(
+            "PROXY_PLATFORM_SERVICE_TIER_ENDPOINTS",
+            service_tier_endpoints,
         ),
     ];
     let (proxy_addr, proxy_guard) = spawn_proxy(static_credentials).await?;
@@ -1066,18 +1139,44 @@ async fn managed_lane_keeps_the_pin_when_a_rejected_lease_is_renewed() -> Result
     // policy for the credential, so the retry goes out as the pinned model
     // too. Only the client's own token refresh is ChatGPT-only: the lease
     // renewal takes any leased credential, the managed API key included,
-    // whose 401 body reports an expired or invalidated token.
+    // whose 401 body reports an expired or invalidated token. The request
+    // asks for "priority", which the platform lane overrides once for the
+    // request, so the retry goes out on the default tier as well. The model
+    // stub is not an OpenAI host, so the setting "all" sends it the tier.
     let token = proxy_token(Some(RUN_ID), None);
     let (proxy_addr, controller, upstream, _env, _guards) =
-        spawn_managed_stack(Some(MANAGED_STUB_KEY), Some(PINNED_MODEL), false).await?;
+        spawn_stack_with_service_tier_endpoints(
+            Some(MANAGED_STUB_KEY),
+            Some(PINNED_MODEL),
+            false,
+            StackProxy::Dynamic,
+            Some("all"),
+        )
+        .await?;
     upstream.expire_next.store(1, Ordering::SeqCst);
 
-    let (status, body) = responses_through_proxy(proxy_addr, &token, "gpt-5.6-sol").await?;
+    let (path, body) = model_requests(Some(&json!("priority"))).remove(0);
+    assert_eq!(path, "/v1/responses");
+    let (status, body) = post_through_proxy(proxy_addr, &token, path, body).await?;
     assert_eq!(status, StatusCode::OK, "renewed request: {body}");
     assert_eq!(
         upstream.models.lock().expect("model log").clone(),
         vec![PINNED_MODEL; 2],
         "the rejected request and its retry both go out as the managed model"
+    );
+    assert_eq!(
+        upstream
+            .service_tiers
+            .lock()
+            .expect("service tier log")
+            .clone(),
+        vec![Some(json!("default")); 2],
+        "and on the default tier"
+    );
+    assert_eq!(
+        platform_lane(proxy_addr, "/healthz").await?["serviceTierOverrides"],
+        json!(1),
+        "one override for the request, however many attempts it takes"
     );
     assert_eq!(
         upstream.bearers.lock().expect("bearer log").clone(),
@@ -1400,15 +1499,24 @@ async fn platform_lane(proxy_addr: SocketAddr, path: &str) -> Result<Value> {
 #[serial]
 async fn healthz_reports_static_pin_and_credential_kind() -> Result<()> {
     // Static credentials serve the platform lane on the proxy's own key, and
-    // the report says which kind of key and which model it is pinned to,
-    // on liveness and readiness alike.
+    // the report says which kind of key, which model it is pinned to and
+    // which service tier it sends, on liveness and readiness alike. The
+    // model stub is not an OpenAI host, so the setting "all" sends it the
+    // tier.
     for (pinned_model, reported_pin) in [
         (Some(PINNED_MODEL), json!(PINNED_MODEL)),
         (Some("   "), json!(null)),
         (None, json!(null)),
     ] {
         let (proxy_addr, _controller, _upstream, _env, _guards) =
-            spawn_static_stack(pinned_model).await?;
+            spawn_stack_with_service_tier_endpoints(
+                None,
+                None,
+                false,
+                StackProxy::Static { pinned_model },
+                Some("all"),
+            )
+            .await?;
         for path in ["/healthz", "/readyz"] {
             assert_eq!(
                 platform_lane(proxy_addr, path).await?,
@@ -1417,6 +1525,8 @@ async fn healthz_reports_static_pin_and_credential_kind() -> Result<()> {
                     "pinnedModel": reported_pin,
                     "staticCredentialKind": "api_key",
                     "sessionTokensRefused": true,
+                    "serviceTier": "default",
+                    "serviceTierOverrides": 0,
                     "reportsUsage": false,
                     "controllerMeteringProtocol": null,
                     "outputCeilingSource": null,
@@ -1426,18 +1536,92 @@ async fn healthz_reports_static_pin_and_credential_kind() -> Result<()> {
         }
     }
 
+    // The report says what goes upstream: the same key sends that endpoint
+    // no tier by default, where only an OpenAI host gets one, and none with
+    // the setting "none". A ChatGPT login is sent none under any setting.
+    for (name, proxy, setting) in [
+        (
+            "API key, setting unset",
+            StackProxy::Static {
+                pinned_model: Some(PINNED_MODEL),
+            },
+            None,
+        ),
+        (
+            "API key, setting openai",
+            StackProxy::Static {
+                pinned_model: Some(PINNED_MODEL),
+            },
+            Some("openai"),
+        ),
+        (
+            "API key, setting none",
+            StackProxy::Static {
+                pinned_model: Some(PINNED_MODEL),
+            },
+            Some("none"),
+        ),
+        (
+            "ChatGPT login, setting all",
+            StackProxy::StaticChatGpt {
+                pinned_model: Some(PINNED_MODEL),
+            },
+            Some("all"),
+        ),
+    ] {
+        let (proxy_addr, _controller, _upstream, _env, _guards) =
+            spawn_stack_with_service_tier_endpoints(None, None, false, proxy, setting).await?;
+        for path in ["/healthz", "/readyz"] {
+            let lane = platform_lane(proxy_addr, path).await?;
+            assert_eq!(lane["servedBy"], json!("static"), "{name} {path}: {lane}");
+            assert_eq!(lane["serviceTier"], json!(null), "{name} {path}: {lane}");
+        }
+    }
+
+    // A key whose endpoint is the OpenAI API gets the tier by default, unset
+    // or "openai", and with "all", but not with "none". A health probe never
+    // contacts the model endpoint, so this stack sends nothing to OpenAI.
+    for (setting, reported_tier) in [
+        (None, json!("default")),
+        (Some("openai"), json!("default")),
+        (Some("all"), json!("default")),
+        (Some("none"), json!(null)),
+    ] {
+        let (proxy_addr, _controller, _upstream, _env, _guards) =
+            spawn_stack_with_service_tier_endpoints(
+                None,
+                None,
+                false,
+                StackProxy::StaticOpenAiApi {
+                    pinned_model: Some(PINNED_MODEL),
+                },
+                setting,
+            )
+            .await?;
+        for path in ["/healthz", "/readyz"] {
+            let lane = platform_lane(proxy_addr, path).await?;
+            let context = format!("OpenAI API key with {setting:?} {path}: {lane}");
+            assert_eq!(lane["servedBy"], json!("static"), "{context}");
+            assert_eq!(lane["staticCredentialKind"], json!("api_key"), "{context}");
+            assert_eq!(lane["serviceTier"], reported_tier, "{context}");
+        }
+    }
+
     // The public lane (PROXY_REQUIRE_CREDENTIAL_CLAIM=1) refuses every
     // credential-less token even with static credentials, so it serves no
-    // platform lane and reports neither the pin nor the key kind.
-    let (proxy_addr, _controller, _upstream, _env, _guards) = spawn_stack(
-        None,
-        None,
-        true,
-        StackProxy::Static {
-            pinned_model: Some(PINNED_MODEL),
-        },
-    )
-    .await?;
+    // platform lane and reports neither the pin, the key kind nor a tier,
+    // even with a setting that would send one.
+    let (proxy_addr, _controller, _upstream, _env, _guards) =
+        spawn_stack_with_service_tier_endpoints(
+            None,
+            None,
+            true,
+            StackProxy::Static {
+                pinned_model: Some(PINNED_MODEL),
+            },
+            Some("all"),
+        )
+        .await?;
     for path in ["/healthz", "/readyz"] {
         assert_eq!(
             platform_lane(proxy_addr, path).await?,
@@ -1446,6 +1630,8 @@ async fn healthz_reports_static_pin_and_credential_kind() -> Result<()> {
                 "pinnedModel": null,
                 "staticCredentialKind": null,
                 "sessionTokensRefused": true,
+                "serviceTier": null,
+                "serviceTierOverrides": 0,
                 "reportsUsage": false,
                 "controllerMeteringProtocol": null,
                 "outputCeilingSource": null,
@@ -1455,16 +1641,18 @@ async fn healthz_reports_static_pin_and_credential_kind() -> Result<()> {
     }
 
     // Without a controller no token marks a managed run, so the setting pins
-    // nothing and no token is refused.
-    let (proxy_addr, _controller, _upstream, _env, _guards) = spawn_stack(
-        None,
-        None,
-        false,
-        StackProxy::Standalone {
-            pinned_model: Some(PINNED_MODEL),
-        },
-    )
-    .await?;
+    // nothing, no tier is sent and no token is refused.
+    let (proxy_addr, _controller, _upstream, _env, _guards) =
+        spawn_stack_with_service_tier_endpoints(
+            None,
+            None,
+            false,
+            StackProxy::Standalone {
+                pinned_model: Some(PINNED_MODEL),
+            },
+            Some("all"),
+        )
+        .await?;
     for path in ["/healthz", "/readyz"] {
         assert_eq!(
             platform_lane(proxy_addr, path).await?,
@@ -1473,6 +1661,8 @@ async fn healthz_reports_static_pin_and_credential_kind() -> Result<()> {
                 "pinnedModel": null,
                 "staticCredentialKind": "api_key",
                 "sessionTokensRefused": false,
+                "serviceTier": null,
+                "serviceTierOverrides": 0,
                 "reportsUsage": false,
                 "controllerMeteringProtocol": null,
                 "outputCeilingSource": null,
@@ -1488,33 +1678,60 @@ async fn healthz_reports_static_pin_and_credential_kind() -> Result<()> {
 #[serial]
 async fn healthz_reports_controller_lease_on_dynamic() -> Result<()> {
     // A sidecar without static credentials serves the platform lane from the
-    // controller's managed lease, which brings its own pin.
-    let (proxy_addr, _controller, _upstream, _env, _guards) =
-        spawn_managed_stack(Some(MANAGED_STUB_KEY), Some(PINNED_MODEL), false).await?;
-    for path in ["/healthz", "/readyz"] {
-        assert_eq!(
-            platform_lane(proxy_addr, path).await?,
-            json!({
-                "servedBy": "controller_lease",
-                "pinnedModel": null,
-                "staticCredentialKind": null,
-                "sessionTokensRefused": true,
-                "reportsUsage": false,
-                "controllerMeteringProtocol": null,
-                "outputCeilingSource": null,
-            }),
-            "{path}"
-        );
+    // controller's managed lease, which brings its own pin. The lease names
+    // its endpoint only when the proxy leases it, so the tier reported for
+    // it is what the setting implies for the controller's OpenAI API key:
+    // "default" unless the setting is "none".
+    for (setting, reported_tier) in [
+        (None, json!("default")),
+        (Some("openai"), json!("default")),
+        (Some("all"), json!("default")),
+        (Some("none"), json!(null)),
+    ] {
+        let (proxy_addr, _controller, _upstream, _env, _guards) =
+            spawn_stack_with_service_tier_endpoints(
+                Some(MANAGED_STUB_KEY),
+                Some(PINNED_MODEL),
+                false,
+                StackProxy::Dynamic,
+                setting,
+            )
+            .await?;
+        for path in ["/healthz", "/readyz"] {
+            assert_eq!(
+                platform_lane(proxy_addr, path).await?,
+                json!({
+                    "servedBy": "controller_lease",
+                    "pinnedModel": null,
+                    "staticCredentialKind": null,
+                    "sessionTokensRefused": true,
+                    "serviceTier": reported_tier,
+                    "serviceTierOverrides": 0,
+                    "reportsUsage": false,
+                    "controllerMeteringProtocol": null,
+                    "outputCeilingSource": null,
+                }),
+                "{path} with PROXY_PLATFORM_SERVICE_TIER_ENDPOINTS={setting:?}"
+            );
+        }
     }
 
     // The public lane (PROXY_REQUIRE_CREDENTIAL_CLAIM=1) refuses every
     // credential-less token, so it serves no platform lane at all.
     let (proxy_addr, _controller, _upstream, _env, _guards) =
-        spawn_managed_stack(Some(MANAGED_STUB_KEY), Some(PINNED_MODEL), true).await?;
+        spawn_stack_with_service_tier_endpoints(
+            Some(MANAGED_STUB_KEY),
+            Some(PINNED_MODEL),
+            true,
+            StackProxy::Dynamic,
+            Some("all"),
+        )
+        .await?;
     for path in ["/healthz", "/readyz"] {
         let lane = platform_lane(proxy_addr, path).await?;
         assert_eq!(lane["servedBy"], json!("refused"), "{path}: {lane}");
         assert_eq!(lane["sessionTokensRefused"], json!(true), "{path}: {lane}");
+        assert_eq!(lane["serviceTier"], json!(null), "{path}: {lane}");
     }
 
     Ok(())
@@ -1654,6 +1871,787 @@ async fn static_credentials_without_a_pinned_model_keep_the_requested_model() ->
     )
     .await?;
     assert_eq!(status, StatusCode::OK, "/v1/audio/speech: {body}");
+
+    Ok(())
+}
+
+/// The two model routes, shaped as in [`every_route`], each with
+/// `service_tier` set to `tier`, or left out for `None`.
+fn model_requests(tier: Option<&Value>) -> Vec<(&'static str, Value)> {
+    every_route()
+        .into_iter()
+        .filter(|(path, _)| !path.starts_with("/v1/audio/"))
+        .map(|(path, mut body)| {
+            if let Some(tier) = tier {
+                body["service_tier"] = tier.clone();
+            }
+            (path, body)
+        })
+        .collect()
+}
+
+/// Checks a response is the platform lane's coded refusal of a service tier.
+fn assert_service_tier_refused(status: StatusCode, text: &str, context: &str) -> Result<()> {
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{context}: {text}");
+    let error: Value = serde_json::from_str(text)?;
+    assert_eq!(
+        error["error"]["code"],
+        json!("service_tier_not_allowed"),
+        "{context}: {text}"
+    );
+    assert_eq!(
+        error["error"]["type"],
+        json!("invalid_request_error"),
+        "{context}: {text}"
+    );
+    assert!(
+        error["error"]["message"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("the platform key serves only the default tier"),
+        "{context}: {text}"
+    );
+    Ok(())
+}
+
+/// Every way a proxy serves the platform lane, pinned or not: the
+/// controller's managed lease on a sidecar without static credentials, and
+/// the proxy's static API key or ChatGPT login. Each comes with the
+/// `service_tier` its model requests go upstream with when
+/// `PROXY_PLATFORM_SERVICE_TIER_ENDPOINTS` names the model stub's endpoint:
+/// `default` on an API key, and none to the ChatGPT Codex endpoint.
+fn platform_lane_stacks() -> Vec<(
+    &'static str,
+    StackProxy<'static>,
+    Option<&'static str>,
+    Option<Value>,
+)> {
+    let default_tier = Some(json!("default"));
+    vec![
+        (
+            "pinned managed lease",
+            StackProxy::Dynamic,
+            Some(PINNED_MODEL),
+            default_tier.clone(),
+        ),
+        (
+            "unpinned managed lease",
+            StackProxy::Dynamic,
+            None,
+            default_tier.clone(),
+        ),
+        (
+            "pinned static key",
+            StackProxy::Static {
+                pinned_model: Some(PINNED_MODEL),
+            },
+            None,
+            default_tier.clone(),
+        ),
+        (
+            "unpinned static key",
+            StackProxy::Static { pinned_model: None },
+            None,
+            default_tier,
+        ),
+        (
+            "pinned static ChatGPT login",
+            StackProxy::StaticChatGpt {
+                pinned_model: Some(PINNED_MODEL),
+            },
+            None,
+            None,
+        ),
+    ]
+}
+
+/// String tiers other than exactly `default`: what codex's Fast mode
+/// (`priority`), a stray codex setting or a hand-built request may send.
+const OTHER_STRING_TIERS: [&str; 7] = [
+    "auto", "priority", "flex", "scale", "Default", " default", "",
+];
+
+/// Tiers that are not strings, which codex never sends.
+fn non_string_tiers() -> [Value; 4] {
+    [
+        json!(1),
+        json!(true),
+        json!({ "tier": "default" }),
+        json!(["default"]),
+    ]
+}
+
+#[tokio::test]
+#[serial]
+async fn platform_lane_holds_every_model_request_to_the_default_service_tier() -> Result<()> {
+    // Managed AI credits price the standard tier. A request with no
+    // service_tier runs on the OpenAI project's own default tier, which the
+    // project's settings decide, and "priority", which codex's Fast mode
+    // sends, costs about twice as much. So the platform lane sends every
+    // model request to the OpenAI API as "default", however the lane is
+    // served, and overrides any other string rather than refuse it, so a
+    // stray codex setting never fails a managed turn. The health report
+    // counts each override. The ChatGPT Codex endpoint is sent no tier. The
+    // model stub is not an OpenAI host, so the setting "all" sends it the
+    // tier, as it would an OpenAI-compatible provider that accepts one.
+    let token = proxy_token(Some(RUN_ID), None);
+    let tiers = [None, Some(Value::Null), Some(json!("default"))]
+        .into_iter()
+        .chain(OTHER_STRING_TIERS.map(|tier| Some(json!(tier))))
+        .collect::<Vec<_>>();
+    for (name, proxy, managed_pin, upstream_tier) in platform_lane_stacks() {
+        let (proxy_addr, _controller, upstream, _env, _guards) =
+            spawn_stack_with_service_tier_endpoints(
+                Some(MANAGED_STUB_KEY),
+                managed_pin,
+                false,
+                proxy,
+                Some("all"),
+            )
+            .await?;
+        for tier in &tiers {
+            for (path, body) in model_requests(tier.as_ref()) {
+                let (status, text) = post_through_proxy(proxy_addr, &token, path, body).await?;
+                assert_eq!(status, StatusCode::OK, "{name} {path} {tier:?}: {text}");
+            }
+        }
+        let sent = tiers.len() * 2;
+        assert_eq!(
+            upstream
+                .service_tiers
+                .lock()
+                .expect("service tier log")
+                .clone(),
+            vec![upstream_tier; sent],
+            "{name}: every request goes out on the lane's tier"
+        );
+        assert_eq!(
+            upstream.bearers.lock().expect("bearer log").clone(),
+            vec![format!("Bearer {MANAGED_STUB_KEY}"); sent],
+            "{name}: on the platform key"
+        );
+        for path in ["/healthz", "/readyz"] {
+            let lane = platform_lane(proxy_addr, path).await?;
+            assert_eq!(
+                lane["serviceTierOverrides"],
+                json!(OTHER_STRING_TIERS.len() * 2),
+                "{name} {path}: one override per request that asked for another string: {lane}"
+            );
+        }
+    }
+
+    Ok(())
+}
+
+#[tokio::test]
+#[serial]
+async fn platform_lane_sends_no_service_tier_where_the_setting_names_no_endpoint() -> Result<()> {
+    // By default, unset or "openai", the platform lane's tier goes only to
+    // an OpenAI host, since an OpenAI-compatible provider may reject the
+    // field or its value. The model stub listens on a loopback address, as
+    // a self-hosted provider might, so it gets no tier, as before the lane
+    // sent one. With "none" no endpoint gets one. Either way a request's
+    // other string tier is still overridden, here dropped, and counted.
+    let token = proxy_token(Some(RUN_ID), None);
+    let tiers = [None, Some(Value::Null), Some(json!("default"))]
+        .into_iter()
+        .chain(OTHER_STRING_TIERS.map(|tier| Some(json!(tier))))
+        .collect::<Vec<_>>();
+    for setting in [None, Some("openai"), Some(" OpenAI "), Some("none")] {
+        for (name, proxy, managed_pin, _) in platform_lane_stacks() {
+            // A controller lease names its endpoint only per lease, so its
+            // report says what the setting implies for the controller's
+            // OpenAI API key; static credentials report what they send.
+            let reported_tier = match (&proxy, setting) {
+                (StackProxy::Dynamic, Some("none")) => json!(null),
+                (StackProxy::Dynamic, _) => json!("default"),
+                _ => json!(null),
+            };
+            let (proxy_addr, _controller, upstream, _env, _guards) =
+                spawn_stack_with_service_tier_endpoints(
+                    Some(MANAGED_STUB_KEY),
+                    managed_pin,
+                    false,
+                    proxy,
+                    setting,
+                )
+                .await?;
+            let context = format!("{name} with {setting:?}");
+            for tier in &tiers {
+                for (path, body) in model_requests(tier.as_ref()) {
+                    let (status, text) = post_through_proxy(proxy_addr, &token, path, body).await?;
+                    assert_eq!(status, StatusCode::OK, "{context} {path} {tier:?}: {text}");
+                }
+            }
+            let sent = tiers.len() * 2;
+            assert_eq!(
+                upstream
+                    .service_tiers
+                    .lock()
+                    .expect("service tier log")
+                    .clone(),
+                vec![None; sent],
+                "{context}: no request carries a tier"
+            );
+            assert_eq!(
+                upstream.bearers.lock().expect("bearer log").clone(),
+                vec![format!("Bearer {MANAGED_STUB_KEY}"); sent],
+                "{context}: on the platform key"
+            );
+            for path in ["/healthz", "/readyz"] {
+                let lane = platform_lane(proxy_addr, path).await?;
+                assert_eq!(
+                    lane["serviceTierOverrides"],
+                    json!(OTHER_STRING_TIERS.len() * 2),
+                    "{context} {path}: one override per request that asked for another string: {lane}"
+                );
+                assert_eq!(
+                    lane["serviceTier"], reported_tier,
+                    "{context} {path}: {lane}"
+                );
+            }
+        }
+    }
+
+    Ok(())
+}
+
+#[tokio::test]
+#[serial]
+async fn proxy_refuses_to_start_with_an_unknown_service_tier_endpoints_setting() -> Result<()> {
+    // A value the proxy does not know stops it at startup, rather than guess
+    // which endpoints get the platform lane's tier. The proxy would
+    // otherwise start: static credentials without a controller.
+    for value in ["openai-only", "default", "api.openai.com", "true"] {
+        let _env = [
+            EnvGuard::set("PROXY_PLATFORM_SERVICE_TIER_ENDPOINTS", Some(value)),
+            EnvGuard::set("PROXY_CONTROLLER_BASE_URL", None),
+            EnvGuard::set("CONTROLLER_BASE_URL", None),
+            EnvGuard::set("PROXY_REQUIRE_CONTROLLER_AUTH", None),
+            EnvGuard::set("PROXY_REQUIRE_CREDENTIAL_CLAIM", None),
+        ];
+        let listener = std::net::TcpListener::bind("127.0.0.1:0")?;
+        let addr = listener.local_addr()?;
+        drop(listener);
+        let started = tokio::time::timeout(
+            Duration::from_secs(5),
+            run_proxy_with_shutdown(
+                addr,
+                Some(Credentials::ApiKey {
+                    key: MANAGED_STUB_KEY.to_string(),
+                    endpoint: Some("https://api.openai.com/v1/responses".to_string()),
+                    default_model: None,
+                }),
+                std::future::pending::<()>(),
+            ),
+        )
+        .await;
+        let error = match started {
+            Ok(result) => result.expect_err("an unknown setting fails startup"),
+            Err(_) => panic!("{value:?}: the proxy started"),
+        };
+        assert_eq!(
+            error.to_string(),
+            "PROXY_PLATFORM_SERVICE_TIER_ENDPOINTS must be openai, all or none",
+            "{value:?}"
+        );
+    }
+
+    Ok(())
+}
+
+#[tokio::test]
+#[serial]
+async fn platform_lane_refuses_a_service_tier_that_is_not_a_string() -> Result<()> {
+    // Codex sends a tier only as a string, so the platform lane refuses a
+    // number, a boolean, an object or an array with a coded 400 before it
+    // leases a credential or sends anything upstream, however it is served.
+    let token = proxy_token(Some(RUN_ID), None);
+    for (name, proxy, managed_pin, _) in platform_lane_stacks() {
+        let (proxy_addr, controller, upstream, _env, _guards) =
+            spawn_stack(Some(MANAGED_STUB_KEY), managed_pin, false, proxy).await?;
+        for tier in non_string_tiers() {
+            for (path, body) in model_requests(Some(&tier)) {
+                let (status, text) = post_through_proxy(proxy_addr, &token, path, body).await?;
+                assert_service_tier_refused(status, &text, &format!("{name} {path} {tier}"))?;
+            }
+        }
+        assert!(
+            upstream.bearers.lock().expect("bearer log").is_empty(),
+            "{name}: nothing reaches the model endpoint"
+        );
+        assert!(
+            controller.leases.lock().expect("lease log").is_empty(),
+            "{name}: no lease for a refused request"
+        );
+        assert_eq!(
+            platform_lane(proxy_addr, "/healthz").await?["serviceTierOverrides"],
+            json!(0),
+            "{name}: a refusal is not an override"
+        );
+
+        // The same proxy serves the default tier.
+        let (path, body) = model_requests(Some(&json!("default"))).remove(0);
+        let (status, text) = post_through_proxy(proxy_addr, &token, path, body).await?;
+        assert_eq!(status, StatusCode::OK, "{name} {path}: {text}");
+    }
+
+    Ok(())
+}
+
+#[tokio::test]
+#[serial]
+async fn platform_lane_counts_no_override_for_a_request_that_never_goes_upstream() -> Result<()> {
+    // An override is counted and logged when the request goes upstream, so
+    // a request that asks for "priority" but never gets there counts none:
+    // one refused for bad input or a failed lease, or one that fails inside
+    // the proxy after its lease.
+    let token = proxy_token(Some(RUN_ID), None);
+    let priority = json!("priority");
+
+    // Bad input: a Responses request with no input, and a Chat Completions
+    // request with no messages.
+    {
+        let (proxy_addr, _controller, upstream, _env, _guards) =
+            spawn_static_stack(Some(PINNED_MODEL)).await?;
+        let malformed = [
+            (
+                "/v1/responses",
+                json!({ "model": "gpt-5.6-sol", "stream": false, "service_tier": priority }),
+                "request is missing prompt content",
+            ),
+            (
+                "/v1/chat/completions",
+                json!({ "model": "gpt-5.6-sol", "stream": false, "service_tier": priority, "messages": [] }),
+                "request must include at least one user message with text content",
+            ),
+        ];
+        for (path, body, message) in malformed {
+            let (status, text) = post_through_proxy(proxy_addr, &token, path, body).await?;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{path}: {text}");
+            assert!(text.contains(message), "{path}: {text}");
+        }
+        assert!(upstream.bearers.lock().expect("bearer log").is_empty());
+        assert_eq!(
+            platform_lane(proxy_addr, "/healthz").await?["serviceTierOverrides"],
+            json!(0),
+            "a request refused for bad input overrides nothing"
+        );
+
+        // The same proxy counts the override of a request that goes upstream.
+        let (path, body) = model_requests(Some(&priority)).remove(0);
+        let (status, text) = post_through_proxy(proxy_addr, &token, path, body).await?;
+        assert_eq!(status, StatusCode::OK, "{path}: {text}");
+        assert_eq!(
+            platform_lane(proxy_addr, "/healthz").await?["serviceTierOverrides"],
+            json!(1)
+        );
+    }
+
+    // A failed lease: the controller has no managed credential.
+    {
+        let (proxy_addr, controller, upstream, _env, _guards) =
+            spawn_managed_stack(None, None, false).await?;
+        for (path, body) in model_requests(Some(&priority)) {
+            let (status, text) = post_through_proxy(proxy_addr, &token, path, body).await?;
+            assert_eq!(status, StatusCode::UNAUTHORIZED, "{path}: {text}");
+            assert!(
+                text.contains("managed AI credential lease failed"),
+                "{path}: {text}"
+            );
+        }
+        assert!(upstream.bearers.lock().expect("bearer log").is_empty());
+        assert!(!controller.leases.lock().expect("lease log").is_empty());
+        assert_eq!(
+            platform_lane(proxy_addr, "/healthz").await?["serviceTierOverrides"],
+            json!(0),
+            "a request whose lease failed overrides nothing"
+        );
+    }
+
+    // A failure inside the proxy after the lease: a Responses input of only
+    // a system message with no text leaves the client nothing to send.
+    {
+        let (proxy_addr, controller, upstream, _env, _guards) =
+            spawn_managed_stack(Some(MANAGED_STUB_KEY), None, false).await?;
+        let (status, text) = post_through_proxy(
+            proxy_addr,
+            &token,
+            "/v1/responses",
+            json!({
+                "model": "gpt-5.6-sol",
+                "stream": false,
+                "service_tier": priority,
+                "input": [{ "type": "message", "role": "system", "content": [] }],
+            }),
+        )
+        .await?;
+        assert!(!status.is_success(), "{status}: {text}");
+        assert!(
+            !controller.leases.lock().expect("lease log").is_empty(),
+            "the request held its lease"
+        );
+        assert!(upstream.bearers.lock().expect("bearer log").is_empty());
+        assert_eq!(
+            platform_lane(proxy_addr, "/healthz").await?["serviceTierOverrides"],
+            json!(0),
+            "a request that never went upstream overrides nothing"
+        );
+
+        // The same proxy counts the override of a request that goes upstream.
+        let (path, body) = model_requests(Some(&priority)).remove(0);
+        let (status, text) = post_through_proxy(proxy_addr, &token, path, body).await?;
+        assert_eq!(status, StatusCode::OK, "{path}: {text}");
+        assert_eq!(upstream.bearers.lock().expect("bearer log").len(), 1);
+        assert_eq!(
+            platform_lane(proxy_addr, "/healthz").await?["serviceTierOverrides"],
+            json!(1)
+        );
+    }
+
+    Ok(())
+}
+
+#[tokio::test]
+#[serial]
+async fn byo_lanes_send_no_service_tier() -> Result<()> {
+    // The proxy has never forwarded a service_tier on a user's own
+    // credential, and still does not: whatever tier the request asks for, a
+    // user's own API key or ChatGPT login goes upstream with none, on both
+    // model routes, on a proxy whose platform lane holds managed runs to
+    // the default tier, even with the setting "all", which would send the
+    // model stub the platform lane's tier. Dropping it is not a
+    // platform-lane override.
+    let tiers = [
+        Some(json!("priority")),
+        Some(json!("flex")),
+        Some(json!("default")),
+        None,
+    ];
+    for (name, credential_id, bearer) in [
+        ("API key", BYO_CREDENTIAL_ID, BYO_STUB_KEY),
+        (
+            "ChatGPT login",
+            BYO_CHATGPT_CREDENTIAL_ID,
+            BYO_CHATGPT_STUB_TOKEN,
+        ),
+    ] {
+        let (proxy_addr, controller, upstream, _env, _guards) =
+            spawn_stack_with_service_tier_endpoints(
+                Some(MANAGED_STUB_KEY),
+                Some(PINNED_MODEL),
+                false,
+                StackProxy::Dynamic,
+                Some("all"),
+            )
+            .await?;
+        let token = proxy_token(Some(RUN_ID), Some(credential_id));
+        for tier in &tiers {
+            for (path, body) in model_requests(tier.as_ref()) {
+                let (status, text) = post_through_proxy(proxy_addr, &token, path, body).await?;
+                assert_eq!(status, StatusCode::OK, "{name} {path} {tier:?}: {text}");
+            }
+        }
+        let sent = tiers.len() * 2;
+        assert_eq!(
+            upstream
+                .service_tiers
+                .lock()
+                .expect("service tier log")
+                .clone(),
+            vec![None; sent],
+            "{name}: no tier, whatever the request asked"
+        );
+        assert_eq!(
+            upstream.bearers.lock().expect("bearer log").clone(),
+            vec![format!("Bearer {bearer}"); sent],
+            "{name}: on the user's own credential"
+        );
+        let ids = controller
+            .leases
+            .lock()
+            .expect("lease log")
+            .iter()
+            .map(|(id, _)| id.clone())
+            .collect::<Vec<_>>();
+        assert_eq!(ids, vec![credential_id.to_string()], "{name}");
+        assert_eq!(
+            platform_lane(proxy_addr, "/healthz").await?["serviceTierOverrides"],
+            json!(0),
+            "{name}"
+        );
+    }
+
+    Ok(())
+}
+
+#[tokio::test]
+#[serial]
+async fn standalone_proxy_still_sends_no_service_tier() -> Result<()> {
+    // Without a controller no token marks a managed run, so there is no
+    // platform lane to hold to the default tier: the proxy forwards no
+    // tier, whatever the request asks for, as it always has, even with the
+    // setting "all", which would send the model stub the platform lane's.
+    let (proxy_addr, _controller, upstream, _env, _guards) =
+        spawn_stack_with_service_tier_endpoints(
+            None,
+            None,
+            false,
+            StackProxy::Standalone {
+                pinned_model: Some(PINNED_MODEL),
+            },
+            Some("all"),
+        )
+        .await?;
+    for tier in [None, Some(json!("priority"))] {
+        for (path, body) in model_requests(tier.as_ref()) {
+            let (status, text) = post_through_proxy(proxy_addr, "", path, body).await?;
+            assert_eq!(status, StatusCode::OK, "{path} {tier:?}: {text}");
+        }
+    }
+    assert_eq!(
+        upstream
+            .service_tiers
+            .lock()
+            .expect("service tier log")
+            .clone(),
+        vec![None; 4]
+    );
+    assert_eq!(
+        platform_lane(proxy_addr, "/healthz").await?["serviceTierOverrides"],
+        json!(0)
+    );
+
+    Ok(())
+}
+
+/// A speech request, with `service_tier` set to `tier`, or left out for
+/// `None`.
+fn speech_request(tier: Option<&Value>) -> Value {
+    let mut body = json!({ "model": "gpt-4o-mini-tts", "voice": "cedar", "input": "Hello." });
+    if let Some(tier) = tier {
+        body["service_tier"] = tier.clone();
+    }
+    body
+}
+
+const FORM_BOUNDARY: &str = "instafy-test-boundary";
+
+/// A transcription request as the multipart form OpenAI's endpoint reads:
+/// the model, a `service_tier` field when `tier` is set, and the audio file.
+fn transcription_form(tier: Option<&str>) -> Vec<u8> {
+    let mut form = format!(
+        "--{FORM_BOUNDARY}\r\nContent-Disposition: form-data; name=\"model\"\r\n\r\ngpt-4o-transcribe\r\n"
+    );
+    if let Some(tier) = tier {
+        form.push_str(&format!(
+            "--{FORM_BOUNDARY}\r\nContent-Disposition: form-data; name=\"service_tier\"\r\n\r\n{tier}\r\n"
+        ));
+    }
+    form.push_str(&format!(
+        "--{FORM_BOUNDARY}\r\nContent-Disposition: form-data; name=\"file\"; filename=\"hello.wav\"\r\nContent-Type: audio/wav\r\n\r\nRIFF inert audio\r\n--{FORM_BOUNDARY}--\r\n"
+    ));
+    form.into_bytes()
+}
+
+async fn transcribe_through_proxy(
+    addr: SocketAddr,
+    token: &str,
+    form: Vec<u8>,
+) -> Result<(StatusCode, String)> {
+    let response = reqwest::Client::new()
+        .post(format!("http://{addr}/v1/audio/transcriptions"))
+        .bearer_auth(token)
+        .header(
+            "content-type",
+            format!("multipart/form-data; boundary={FORM_BOUNDARY}"),
+        )
+        .body(form)
+        .send()
+        .await?;
+    let status = response.status();
+    let body = response.text().await?;
+    Ok((status, body))
+}
+
+#[tokio::test]
+#[serial]
+async fn platform_lane_refuses_every_other_service_tier_on_the_audio_routes() -> Result<()> {
+    // Speech and transcription forward the client's own body, so a tier in
+    // it would reach the provider on the platform key. The model routes
+    // override a string tier, but overriding one here means rewriting the
+    // body, a multipart form included, and codex sends audio no tier, so
+    // these routes refuse any tier but "default" with the same coded 400,
+    // before a lease or any upstream request, however the lane is served.
+    let token = proxy_token(Some(RUN_ID), None);
+    for (name, proxy, managed_pin, _) in platform_lane_stacks() {
+        let (proxy_addr, controller, upstream, _env, _guards) =
+            spawn_stack(Some(MANAGED_STUB_KEY), managed_pin, false, proxy).await?;
+        let speech_tiers = OTHER_STRING_TIERS
+            .map(|tier| json!(tier))
+            .into_iter()
+            .chain(non_string_tiers());
+        for tier in speech_tiers {
+            let (status, text) = post_through_proxy(
+                proxy_addr,
+                &token,
+                "/v1/audio/speech",
+                speech_request(Some(&tier)),
+            )
+            .await?;
+            assert_service_tier_refused(status, &text, &format!("{name} speech {tier}"))?;
+        }
+        for tier in OTHER_STRING_TIERS {
+            let (status, text) =
+                transcribe_through_proxy(proxy_addr, &token, transcription_form(Some(tier)))
+                    .await?;
+            assert_service_tier_refused(status, &text, &format!("{name} transcription {tier:?}"))?;
+        }
+        // A form a standard client encodes is read the same way.
+        let form = reqwest::multipart::Form::new()
+            .text("model", "gpt-4o-transcribe")
+            .text("service_tier", "priority")
+            .part(
+                "file",
+                reqwest::multipart::Part::bytes(b"RIFF inert audio".to_vec())
+                    .file_name("hello.wav"),
+            );
+        let response = reqwest::Client::new()
+            .post(format!("http://{proxy_addr}/v1/audio/transcriptions"))
+            .bearer_auth(&token)
+            .multipart(form)
+            .send()
+            .await?;
+        let status = response.status();
+        let text = response.text().await?;
+        assert_service_tier_refused(status, &text, &format!("{name} encoded transcription"))?;
+
+        assert!(
+            upstream.audio.lock().expect("audio log").is_empty(),
+            "{name}: nothing reaches the audio endpoints"
+        );
+        assert!(
+            controller.leases.lock().expect("lease log").is_empty(),
+            "{name}: no lease for a refused request"
+        );
+        assert_eq!(
+            platform_lane(proxy_addr, "/healthz").await?["serviceTierOverrides"],
+            json!(0),
+            "{name}: an audio refusal is not an override"
+        );
+    }
+
+    Ok(())
+}
+
+#[tokio::test]
+#[serial]
+async fn unpinned_platform_lane_forwards_default_tier_audio_as_sent() -> Result<()> {
+    // Speech and transcription take no service tier upstream, so the proxy
+    // adds none to them, even with the setting "all", which sends the model
+    // stub the platform lane's tier: a request with no tier, null or
+    // "default" reaches the provider exactly as sent.
+    let token = proxy_token(Some(RUN_ID), None);
+    for (name, proxy) in [
+        ("unpinned managed lease", StackProxy::Dynamic),
+        (
+            "unpinned static key",
+            StackProxy::Static { pinned_model: None },
+        ),
+    ] {
+        let (proxy_addr, _controller, upstream, _env, _guards) =
+            spawn_stack_with_service_tier_endpoints(
+                Some(MANAGED_STUB_KEY),
+                None,
+                false,
+                proxy,
+                Some("all"),
+            )
+            .await?;
+        let mut sent = Vec::new();
+        for tier in [None, Some(Value::Null), Some(json!("default"))] {
+            let body = speech_request(tier.as_ref());
+            let (status, text) =
+                post_through_proxy(proxy_addr, &token, "/v1/audio/speech", body.clone()).await?;
+            assert_eq!(status, StatusCode::OK, "{name} speech {tier:?}: {text}");
+            sent.push(body);
+        }
+        for tier in [None, Some("default")] {
+            let form = transcription_form(tier);
+            let (status, text) = transcribe_through_proxy(proxy_addr, &token, form).await?;
+            assert_eq!(
+                status,
+                StatusCode::OK,
+                "{name} transcription {tier:?}: {text}"
+            );
+        }
+        let forwarded = upstream
+            .audio_bodies
+            .lock()
+            .expect("audio body log")
+            .clone();
+        assert_eq!(forwarded.len(), 5, "{name}");
+        for (forwarded, sent) in forwarded.iter().zip(&sent) {
+            assert_eq!(
+                &serde_json::from_slice::<Value>(forwarded)?,
+                sent,
+                "{name}: speech goes as sent"
+            );
+        }
+        assert_eq!(
+            forwarded[3..].to_vec(),
+            vec![
+                transcription_form(None),
+                transcription_form(Some("default"))
+            ],
+            "{name}: the form goes as sent"
+        );
+    }
+
+    Ok(())
+}
+
+#[tokio::test]
+#[serial]
+async fn byo_and_standalone_audio_still_go_upstream_as_sent() -> Result<()> {
+    // The proxy has always forwarded an audio request's own body, and only
+    // the platform lane checks the tier in it. A user's own credential and a
+    // proxy without a controller keep that: their audio requests reach the
+    // provider as sent, tier included.
+    let speech = speech_request(Some(&json!("priority")));
+    let form = transcription_form(Some("priority"));
+    for (name, proxy, token) in [
+        (
+            "BYO API key",
+            StackProxy::Dynamic,
+            proxy_token(Some(RUN_ID), Some(BYO_CREDENTIAL_ID)),
+        ),
+        (
+            "standalone",
+            StackProxy::Standalone { pinned_model: None },
+            String::new(),
+        ),
+    ] {
+        let (proxy_addr, _controller, upstream, _env, _guards) =
+            spawn_stack(Some(MANAGED_STUB_KEY), Some(PINNED_MODEL), false, proxy).await?;
+        let (status, text) =
+            post_through_proxy(proxy_addr, &token, "/v1/audio/speech", speech.clone()).await?;
+        assert_eq!(status, StatusCode::OK, "{name} speech: {text}");
+        let (status, text) = transcribe_through_proxy(proxy_addr, &token, form.clone()).await?;
+        assert_eq!(status, StatusCode::OK, "{name} transcription: {text}");
+        let forwarded = upstream
+            .audio_bodies
+            .lock()
+            .expect("audio body log")
+            .clone();
+        assert_eq!(forwarded.len(), 2, "{name}");
+        assert_eq!(
+            serde_json::from_slice::<Value>(&forwarded[0])?,
+            speech,
+            "{name}"
+        );
+        assert_eq!(forwarded[1], form, "{name}");
+    }
 
     Ok(())
 }
