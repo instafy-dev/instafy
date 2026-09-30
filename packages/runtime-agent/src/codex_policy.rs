@@ -18,15 +18,14 @@ use codex_protocol::openai_models::{ModelInfo, ModelsResponse};
 /// models grow to 872k tokens on request; runtime turns never do.
 pub(crate) const MAX_BILLED_CONTEXT_WINDOW: i64 = 272_000;
 
-/// Experimental model tools the runtime cannot deliver. Async user messages and
-/// questions would reach nobody in a background job, and `clock` (with its
-/// sleep tool) lets a turn idle while it holds a runtime lease.
+/// Experimental model tools the runtime cannot deliver: async user messages and
+/// questions would reach nobody in a background job. `clock` follows upstream;
+/// with `Feature::SleepTool` pinned off it exposes only `curr_time`.
 pub(crate) const BLOCKED_MODEL_TOOLS: &[&str] = &[
     "send_user_message_async",
     "request_user_input_async",
     // Newer name for the same async user-messaging capability.
     "send_message_to_user_async",
-    "clock",
 ];
 
 /// Instafy's "Destructive Actions" section, verbatim from the GPT-6 prompt the runtime shipped
@@ -274,8 +273,10 @@ fn feature_pin(feature: Feature) -> FeaturePin {
         // Runtime jobs carry their own instructions; kept off although upstream
         // retired the flag.
         Feature::Personality => Off,
-        // These would re-expose the blocked async-message and clock tools.
-        Feature::SendMessageToUserAsync | Feature::CurrentTimeReminder => Off,
+        // This would re-expose the blocked async-message tools.
+        Feature::SendMessageToUserAsync => Off,
+        // Current-time reminders only add context; follow upstream.
+        Feature::CurrentTimeReminder => Upstream,
         // Upstream retries a refused or dropped connection forever (5s to 60s backoff), ignoring
         // the bounded proxy retry budget; an unreachable proxy would hold the job's lease until
         // the run timeout instead of failing with the connection error.
@@ -979,7 +980,7 @@ mod tests {
     #[tokio::test]
     async fn blocked_experimental_tools_leave_every_catalog_model() {
         assert!(
-            ["send_user_message_async", "clock"]
+            ["send_user_message_async"]
                 .iter()
                 .all(|tool| upstream_model("gpt-6-luna")
                     .experimental_supported_tools
@@ -1000,6 +1001,18 @@ mod tests {
                 );
             }
         }
+        // `clock` follows upstream; the sleep half stays off, so it only reads the time.
+        let luna = catalog
+            .models
+            .iter()
+            .find(|model| model.slug == "gpt-6-luna")
+            .expect("gpt-6-luna");
+        assert!(
+            luna.experimental_supported_tools
+                .iter()
+                .any(|tool| tool == "clock")
+        );
+        assert!(!config.features.enabled(Feature::SleepTool));
     }
 
     #[tokio::test]
