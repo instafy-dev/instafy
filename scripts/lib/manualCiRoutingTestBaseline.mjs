@@ -34,9 +34,9 @@ export const MANUAL_CI_JOBS = [
   {"file":"npm-release.yml","key":"pack","toggle":"CI_PUBLIC_CONTROL_SELF_HOSTED","label":"public-npm-pack","hosted":"ubuntu-24.04"},
 ];
 export const MANUAL_CI_BASELINES = {
-  // The reviewed Build baseline additionally selects proxy_retry_budget in the
-  // existing runtime-agent Cargo command; check-rust-ci binds its exact argv.
-  "build.yml": { sha256: "fbbfb06f4c0cccf601107e9b08abffeabf500f119732b3db15e7b7800d7de23d" },
+  // The reviewed Build baseline additionally selects proxy_retry_budget and
+  // filtered read-reference integration tests; check-rust-ci binds their exact argv.
+  "build.yml": { sha256: "70548038c41bda43078074e7f84b7372d63798ae8cc76eb2bef8ee62e24d59f5" },
   "browser-e2e.yml": { sha256: "5a227820568dfe71f344bd816f77fe41c4d1d8980041937792de09ab956c121b" },
   // The reviewed Auth and Controller DB baselines additionally trigger on the
   // GHCR image-mirror helper (and its lock/test for Auth, the serial-pull helper

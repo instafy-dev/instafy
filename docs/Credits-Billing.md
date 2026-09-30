@@ -8,6 +8,8 @@ The important product rule is that Instafy keeps one shared team balance and one
 
 The current controller still stores that balance as integer billing units. The Credits panel can now render those units directly or approximate them in USD using `BILLING_UNITS_PER_USD`, which keeps the accounting integer-safe while making the UI easier to reason about.
 
+Ledger posts are idempotent. A burn or refill that carries an idempotency key (the managed-AI reserve, adjustment and refund, a hosted-runtime billing bucket, a tunnel grant, or a keyed `POST /credits`) writes at most one row per org, project and key, and a repeated key never moves the balance. The ledger's insert trigger enforces this under the org balance lock, before it changes the balance, so concurrent retries are covered too: the first post wins, and no later post with that key writes a row or moves the balance. The controller normally reports such a retry as `deduped`. If the balance ran short in between, a burn retry can instead be rejected as insufficient credits. A post without a project or without a key is never deduplicated.
+
 The default managed-AI model is `gpt-6-luna` (label `GPT-6 Luna`), served by OpenAI. The controller pins `CODEX_MODEL_PROVIDER=openai` for managed turns (`secrets.rs`), so the model users see is the model that runs. Managed turns are paid by the operator out of the shared team balance, which is why the cheaper Luna tier is the default there. Bring-your-own ChatGPT logins and OpenAI API keys are paid by the user and keep `gpt-5.6-sol` as their default; that default, and the stale-model floor, are separate from the managed tier and did not move.
 
 The pricing envs define the rates users are actually charged. The defaults match the public `gpt-6-luna` standard-tier API list prices verified on September 22, 2026:
@@ -92,15 +94,19 @@ it:
 - Give every proxy a runtime calls static credentials (`OPENAI_API_KEY` or an API-key `auth.json`
   at `/opt/instafy/proxy-codex/auth.json` on each provider host), and set `PROXY_PINNED_MODEL` on
   it to `MANAGED_AI_MODEL_ID`. Without it the proxy serves managed turns on its key with whatever
-  model a job asks for, speech and transcription included, and logs once that the managed model
-  is not pinned. Both runtime compose files set the sidecar's `PROXY_PINNED_MODEL` from the
-  environment that runs `docker compose`, which on a provider host is the provider service's:
-  `PROXY_PINNED_MODEL` there, or else `MANAGED_AI_MODEL_ID`; an explicitly empty
-  `PROXY_PINNED_MODEL` means no pin. That entry overrides the sidecar's env file, so a value in
-  `proxy-credential-lease.env` has no effect.
+  model a job asks for, speech, transcription and hosted tools such as web search included, and
+  logs once that the managed model is not pinned. Both runtime compose files set the sidecar's
+  `PROXY_PINNED_MODEL` from the environment that runs `docker compose`, which on a provider host
+  is the provider service's: `PROXY_PINNED_MODEL` there, or else `MANAGED_AI_MODEL_ID`; an
+  explicitly empty `PROXY_PINNED_MODEL` means no pin. That entry overrides the sidecar's env file,
+  so a value in `proxy-credential-lease.env` has no effect.
 
 A sidecar with neither refuses managed turns with `proxy token missing credential_id for BYOC
-request`.
+request`. Only a job token, which carries a run id, is a managed turn. The controller also signs
+credential-less tokens without a run id at agent login and runtime register; every proxy with
+controller integration refuses those with the same error, so they never spend the platform key,
+static credentials included. (A proxy with `PROXY_REQUIRE_CREDENTIAL_CLAIM` refuses every
+credential-less token earlier, with `proxy token missing valid credential_id claim`.)
 
 Managed turns run only on Instafy-hosted runtimes. A managed dispatch whose job would be pinned
 to a desktop or another private self-hosted runtime, through the chosen runtime or the agent's
@@ -164,14 +170,20 @@ fetches job secrets, and a job whose secrets fetch failed has none. Both still a
 runtime's own model, by default `gpt-5.6-sol`, which lists at 50 to 60 times Luna's rates above.
 The managed credential lease therefore carries `pinnedModel`, and the proxy
 sends every request on it as `MANAGED_AI_MODEL_ID`, whatever model the job asked for; speech and
-transcription are refused on it. A pinned request also forwards only the client tool types codex
-emits (`function`, `custom`, `namespace`, `tool_search` and `web_search`), in `tools` and in the
-`additional_tools` and `tool_search_output` input items, and drops any tool that names its own
-model, so a hand-built hosted tool such as `image_generation` cannot run on the platform key. The
-pin needs both a controller and a proxy that know `pinnedModel`. Either can be updated first:
-until both are, requests keep the model they ask for. This is separate from the key rollout order
-in the next paragraph. Static proxy credentials serving managed turns get the same pin from
-`PROXY_PINNED_MODEL`, as described above.
+transcription are refused on it. A pinned request also forwards only codex's client tool types
+(`function`, `custom`, `namespace`, and `tool_search` with `execution: "client"`), in `tools` and in
+the `additional_tools` and `tool_search_output` input items, and drops any tool that names its own
+model, so a hand-built hosted tool such as `image_generation` cannot run on the platform key.
+Hosted OpenAI tools are off on a pinned lease: credits price tokens, and a hosted tool bills per
+call on top of them. The proxy therefore also drops `web_search`, which codex does send, and any
+tool search OpenAI would run, from the tools a pinned request finally carries, including the
+default tools the proxy adds for a ChatGPT login, so pinned managed turns run without web search.
+The tool filter follows the pin, like the model and the audio refusal, not the lane: only the
+platform lane is ever pinned, and a user's own key or ChatGPT login is never pinned and keeps
+every tool. The pin needs both a controller and a proxy that know `pinnedModel`. Either can be
+updated first: until both are, requests keep the model they ask for and every tool, web search
+included. This is separate from the key rollout order in the next paragraph. Static proxy
+credentials serving managed turns get the same pin from `PROXY_PINNED_MODEL`, as described above.
 
 Roll the proxy out first. Setting `MANAGED_AI_OPENAI_API_KEY` is what makes the controller
 advertise managed AI and charge for managed turns, so every provider host must already run a
@@ -182,7 +194,9 @@ already charging for.
 BYOC users connect an API key or sanitized `auth.json` through the credential flow. Neither
 credential path belongs in a Vite environment or browser bundle. `MANAGED_AI_STARTUP_CHECK=true`
 makes the controller fail closed when its own proxy can serve neither path; it does not probe
-per-runtime sidecars.
+per-runtime sidecars. When the check passes, the controller logs how that proxy serves managed
+turns, from the `platformLane` object on the proxy's `/healthz` (see the proxy README): the
+controller's lease or the proxy's static credentials, with their kind and pinned model.
 
 The controller now reserves units at prompt dispatch and then reconciles the final charge after completion from actual input/cached/output token usage. Cached tokens are a subset of the reported input tokens, so only the uncached remainder is billed at the input rate and the cached prefix is billed once at the cached rate. The shared ledger keeps both the usage metadata and any follow-up adjustment row when the final charge differs from the reserve.
 

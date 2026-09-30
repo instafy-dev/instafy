@@ -1834,6 +1834,7 @@ pub(crate) async fn process_dispatch_prompt(
             credentials::ProxyCredentialRequirements {
                 requires_user_credentials: true,
                 proxy_backend: "disabled".to_string(),
+                platform_lane: None,
                 error: None,
             }
         };

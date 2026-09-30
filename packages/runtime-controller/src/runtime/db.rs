@@ -451,6 +451,26 @@ fn map_origin_instance_row(row: &Row) -> OriginInstanceRecord {
     }
 }
 
+/// The origin instance `project_id` holds for `lease_id`, read without
+/// changing it.
+pub(super) async fn load_origin_instance_for_lease(
+    transaction: &Transaction<'_>,
+    project_id: &Uuid,
+    lease_id: &Uuid,
+) -> Result<Option<OriginInstanceRecord>, (StatusCode, Json<ApiError>)> {
+    let row = transaction
+        .query_opt(
+            "select id, lease_id, origin_id, mode, status, endpoint, protocols, metadata
+             from origin_instances
+             where lease_id = $1
+               and project_id = $2",
+            &[lease_id, project_id],
+        )
+        .await
+        .map_err(|error| internal_error(format!("failed to load origin instance: {error}")))?;
+    Ok(row.as_ref().map(map_origin_instance_row))
+}
+
 pub(super) async fn upsert_origin_instance(
     transaction: &Transaction<'_>,
     project_id: &Uuid,
@@ -560,6 +580,31 @@ pub(crate) async fn release_origin_instances_for_runtime(
     Ok(())
 }
 
+/// Release the tenant leases attached under `parent_lease_id`. A tenant lease
+/// attaches another project to the runtime's shared lease and ends with it:
+/// [`mark_runtime_lease_released`] and the failed-launch path call this in the
+/// transaction that ends the parent lease. A lease without tenants releases
+/// nothing. Tenant leases whose parent was released by a controller without
+/// this call stay unreleased; the attach never reuses them, because it reuses
+/// a tenant lease only under the runtime's current shared lease.
+pub(crate) async fn release_tenant_leases_of_parent(
+    transaction: &Transaction<'_>,
+    parent_lease_id: &Uuid,
+) -> Result<(), (StatusCode, Json<ApiError>)> {
+    transaction
+        .execute(
+            "update runtime_leases
+             set status = 'released', released_at = now(), updated_at = now()
+             where parent_lease_id = $1
+               and scope = 'tenant'
+               and released_at is null",
+            &[parent_lease_id],
+        )
+        .await
+        .map_err(|error| internal_error(format!("failed to release tenant leases: {error}")))?;
+    Ok(())
+}
+
 pub(crate) async fn mark_runtime_lease_released(
     transaction: &Transaction<'_>,
     runtime_id: &Uuid,
@@ -589,6 +634,7 @@ pub(crate) async fn mark_runtime_lease_released(
             )),
         ));
     }
+    release_tenant_leases_of_parent(transaction, lease_id).await?;
 
     let cleared = transaction
         .execute(

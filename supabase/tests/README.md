@@ -29,6 +29,15 @@ concurrent producers, concurrent support resolutions, concurrent `SKIP LOCKED`
 claims, lease recovery, stale-token fencing, bounded retry exhaustion, and replay
 of the notification migration without changing existing state.
 
+The same run also executes `org_credit_ledger_idempotency.sql`. It posts repeated
+burn and credit keys, with and without `on conflict do nothing`, and checks that a
+repeated key adds no ledger row and never moves the org balance. It also checks that
+other keys, projects and orgs stay distinct (including one project's key reused under
+another org) and that, like the partial unique index, a row without a project or
+with a NULL or empty key is never deduplicated. The concurrent case runs in the
+controller tests `credits::tests::concurrent_`, which need a fully migrated
+`TEST_DATABASE_URL`.
+
 To also run the real controller HTTP and mocked transport tests against a clean,
 fully migrated database in that same disposable cluster:
 

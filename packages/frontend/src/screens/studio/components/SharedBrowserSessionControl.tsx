@@ -9,7 +9,7 @@ import { writeClipboardText } from "../../../runtime/runtimeMenuShared";
 import type { BrowserRuntimeCandidate } from "./browserSessionRuntimeEnsure";
 
 export function SharedBrowserSessionControl({ runtimeId, resumeUrl, open, busy, candidates, error, canStart, selectionRequired = false,
-  onOpenChange, onChoose, onStart, onRefresh, children, footer }: {
+  onOpenChange, onChoose, onStart, onRefresh, actions, children, footer }: {
   runtimeId: string | null;
   resumeUrl: string | null;
   open: boolean;
@@ -22,6 +22,7 @@ export function SharedBrowserSessionControl({ runtimeId, resumeUrl, open, busy, 
   onChoose: (runtimeId: string) => void;
   onStart: () => void;
   onRefresh: () => void;
+  actions?: ReactNode;
   children?: ReactNode;
   footer?: ReactNode;
 }) {
@@ -64,6 +65,7 @@ export function SharedBrowserSessionControl({ runtimeId, resumeUrl, open, busy, 
               <Xmark className="h-3.5 w-3.5" aria-hidden="true" />
             </IconButton>
           </div>
+          {actions}
           {resumeUrl ? <Button size="sm" variant="ghost" className="w-full justify-start" onPress={() => {
             void writeClipboardText(resumeUrl).then(
               () => setCopyStatus({ url: resumeUrl, text: "Resume link copied." }),

@@ -34,6 +34,9 @@ const PINNED_MODEL: &str = "gpt-6-luna";
 /// production; a bare loopback endpoint reads as a BYOC provider, where
 /// OpenAI-shaped ids fall back to the credential default.
 const UPSTREAM_RESPONSES_PATH: &str = "/api.openai.com/v1/responses";
+/// The model stub's ChatGPT Codex Responses path, for static credentials
+/// that are a ChatGPT login.
+const UPSTREAM_CHATGPT_PATH: &str = "/backend-api/codex/responses";
 const LEASE_BEARER: &str = "credential-lease";
 const SIGNING_SECRET: &str = "proxy-signing-test";
 /// The run a dispatch job token belongs to. Session envelopes (agent login,
@@ -286,11 +289,8 @@ async fn controller_health_stub() -> impl IntoResponse {
     )
 }
 
-async fn upstream_responses_stub(
-    State(stub): State<UpstreamStub>,
-    headers: HeaderMap,
-    AxumJson(payload): AxumJson<Value>,
-) -> impl IntoResponse {
+/// Logs one model request on the stub and returns its authorization header.
+fn record_upstream_request(stub: &UpstreamStub, headers: &HeaderMap, payload: &Value) -> String {
     let authorization = headers
         .get(header::AUTHORIZATION)
         .and_then(|value| value.to_str().ok())
@@ -315,6 +315,36 @@ async fn upstream_responses_stub(
         .lock()
         .expect("input log")
         .push(payload.get("input").cloned().unwrap_or(Value::Null));
+    authorization
+}
+
+/// The ChatGPT Codex endpoint, which answers with an event stream.
+async fn upstream_chatgpt_stub(
+    State(stub): State<UpstreamStub>,
+    headers: HeaderMap,
+    AxumJson(payload): AxumJson<Value>,
+) -> axum::response::Response {
+    let authorization = record_upstream_request(&stub, &headers, &payload);
+    if authorization != format!("Bearer {MANAGED_STUB_KEY}") {
+        return (
+            StatusCode::UNAUTHORIZED,
+            AxumJson(json!({ "error": { "message": "bad upstream token" } })),
+        )
+            .into_response();
+    }
+    (
+        [(header::CONTENT_TYPE, "text/event-stream")],
+        RESPONSES_FIXTURE,
+    )
+        .into_response()
+}
+
+async fn upstream_responses_stub(
+    State(stub): State<UpstreamStub>,
+    headers: HeaderMap,
+    AxumJson(payload): AxumJson<Value>,
+) -> impl IntoResponse {
+    let authorization = record_upstream_request(&stub, &headers, &payload);
     if authorization != format!("Bearer {MANAGED_STUB_KEY}")
         && authorization != format!("Bearer {BYO_STUB_KEY}")
     {
@@ -425,6 +455,12 @@ enum StackProxy<'a> {
     /// Static credentials holding the operator's key, the self-hosted
     /// managed lane, with this `PROXY_PINNED_MODEL` (`None` leaves it unset).
     Static { pinned_model: Option<&'a str> },
+    /// As `Static`, but the operator's credentials are a ChatGPT login
+    /// (`auth.json`), which the proxy sends to the ChatGPT Codex endpoint.
+    StaticChatGpt { pinned_model: Option<&'a str> },
+    /// Static credentials and no controller integration: the proxy checks
+    /// no token. The controller stub still runs but the proxy never calls it.
+    Standalone { pinned_model: Option<&'a str> },
 }
 
 /// A managed-lane stack: upstream model stub, controller stub, dynamic proxy.
@@ -459,6 +495,7 @@ async fn spawn_stack(
     let (upstream_addr, upstream_guard) = spawn_router(
         Router::new()
             .route(UPSTREAM_RESPONSES_PATH, post(upstream_responses_stub))
+            .route(UPSTREAM_CHATGPT_PATH, post(upstream_chatgpt_stub))
             .route("/v1/audio/speech", post(upstream_audio_stub))
             .route("/v1/audio/transcriptions", post(upstream_audio_stub))
             .with_state(upstream.clone()),
@@ -482,27 +519,41 @@ async fn spawn_stack(
     )
     .await?;
 
-    let (static_credentials, static_pinned_model) = match proxy {
-        StackProxy::Dynamic => (None, None),
-        StackProxy::Static { pinned_model } => (
-            Some(Credentials::ApiKey {
-                key: MANAGED_STUB_KEY.to_string(),
-                endpoint: Some(format!("http://{upstream_addr}{UPSTREAM_RESPONSES_PATH}")),
-                default_model: None,
-            }),
-            pinned_model,
-        ),
+    let static_key = || {
+        Some(Credentials::ApiKey {
+            key: MANAGED_STUB_KEY.to_string(),
+            endpoint: Some(format!("http://{upstream_addr}{UPSTREAM_RESPONSES_PATH}")),
+            default_model: None,
+        })
     };
+    let static_chatgpt_login = || {
+        Some(Credentials::ChatGpt {
+            access_token: MANAGED_STUB_KEY.to_string(),
+            refresh_token: None,
+            account_id: None,
+            default_model: None,
+            auth_path: None,
+        })
+    };
+    let (static_credentials, static_pinned_model, controller_integration) = match proxy {
+        StackProxy::Dynamic => (None, None, true),
+        StackProxy::Static { pinned_model } => (static_key(), pinned_model, true),
+        StackProxy::StaticChatGpt { pinned_model } => (static_chatgpt_login(), pinned_model, true),
+        StackProxy::Standalone { pinned_model } => (static_key(), pinned_model, false),
+    };
+    let controller_base_url = format!("http://{controller_addr}");
+    let chatgpt_endpoint = format!("http://{upstream_addr}{UPSTREAM_CHATGPT_PATH}");
     let env = vec![
+        EnvGuard::set("CODEX_PROXY_CHATGPT_ENDPOINT", Some(&chatgpt_endpoint)),
         EnvGuard::set("PROXY_PINNED_MODEL", static_pinned_model),
         EnvGuard::set(
             "PROXY_CONTROLLER_BASE_URL",
-            Some(&format!("http://{controller_addr}")),
+            controller_integration.then_some(controller_base_url.as_str()),
         ),
+        EnvGuard::set("CONTROLLER_BASE_URL", None),
         EnvGuard::set("CONTROLLER_INTERNAL_TOKEN", Some("internal")),
         EnvGuard::set("PROXY_CREDENTIAL_LEASE_TOKEN", Some(LEASE_BEARER)),
         EnvGuard::set("PROXY_SIGNING_SECRET", Some(SIGNING_SECRET)),
-        EnvGuard::set("PROXY_CREDIT_BURN_AMOUNT", None),
         EnvGuard::set("PROXY_REQUIRE_CONTROLLER_AUTH", None),
         EnvGuard::set(
             "PROXY_REQUIRE_CREDENTIAL_CLAIM",
@@ -662,34 +713,86 @@ async fn managed_lane_leases_the_platform_credential_on_a_dynamic_proxy() -> Res
     Ok(())
 }
 
-#[tokio::test]
-#[serial]
-async fn session_envelope_without_a_run_id_keeps_the_byoc_rejection_on_a_dynamic_proxy()
--> Result<()> {
-    // The controller also mints credential-less tokens with no run_id at
-    // agent login and runtime register: session envelopes, not turns. Even
-    // with the managed credential configured, a dynamic proxy answers those
-    // with the exact pre-existing rejection and never leases the platform
-    // key for them.
-    let (proxy_addr, controller, upstream, _env, _guards) =
-        spawn_managed_stack(Some(MANAGED_STUB_KEY), None, false).await?;
+/// One request per proxy route, shaped as the runtime sends it.
+fn every_route() -> Vec<(&'static str, Value)> {
+    vec![
+        (
+            "/v1/responses",
+            json!({
+                "model": "gpt-5.6-sol",
+                "stream": false,
+                "input": [{
+                    "type": "message",
+                    "role": "user",
+                    "content": [{ "type": "input_text", "text": CHAT_PROMPT }]
+                }]
+            }),
+        ),
+        (
+            "/v1/chat/completions",
+            json!({
+                "model": "gpt-5.6-sol",
+                "stream": false,
+                "messages": [{ "role": "user", "content": CHAT_PROMPT }]
+            }),
+        ),
+        (
+            "/v1/audio/speech",
+            json!({ "model": "gpt-4o-mini-tts", "voice": "cedar", "input": "Hello." }),
+        ),
+        (
+            "/v1/audio/transcriptions",
+            json!({ "model": "gpt-4o-transcribe" }),
+        ),
+    ]
+}
 
-    let (status, body) = chat_through_proxy(proxy_addr, &proxy_token(None, None)).await?;
-    assert_eq!(status, StatusCode::UNAUTHORIZED, "unexpected body: {body}");
-    let error: Value = serde_json::from_str(&body)?;
-    assert_eq!(
-        error["error"]["message"].as_str(),
-        Some("proxy token missing credential_id for BYOC request"),
-        "the exact old rejection, with no managed-lease suffix: {body}"
-    );
+/// Sends a session envelope (a credential-less token without a run_id) on
+/// every route and checks each gets the exact pre-existing rejection, with
+/// no lease and nothing sent upstream.
+async fn assert_session_envelope_refused(
+    proxy_addr: SocketAddr,
+    controller: &ControllerStub,
+    upstream: &UpstreamStub,
+) -> Result<()> {
+    let envelope = proxy_token(None, None);
+    for (path, body) in every_route() {
+        let (status, body) = post_through_proxy(proxy_addr, &envelope, path, body).await?;
+        assert_eq!(status, StatusCode::UNAUTHORIZED, "{path}: {body}");
+        let error: Value = serde_json::from_str(&body)?;
+        assert_eq!(
+            error["error"]["message"].as_str(),
+            Some("proxy token missing credential_id for BYOC request"),
+            "{path}: the exact old rejection, with no managed-lease suffix: {body}"
+        );
+    }
     assert!(
         controller.leases.lock().expect("lease log").is_empty(),
-        "no managed lease attempt for a run_id-less token"
+        "no lease attempt for a run_id-less token"
     );
     assert!(
         upstream.bearers.lock().expect("bearer log").is_empty(),
         "nothing reaches the model endpoint"
     );
+    assert!(
+        upstream.audio.lock().expect("audio log").is_empty(),
+        "nothing reaches the audio endpoints"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+#[serial]
+async fn dynamic_proxy_refuses_credentialless_session_token() -> Result<()> {
+    // The controller also mints credential-less tokens with no run_id at
+    // agent login and runtime register: session envelopes, not turns. Even
+    // with the managed credential configured, a dynamic proxy answers those
+    // with the exact pre-existing rejection on every route and never leases
+    // the platform key for them.
+    let (proxy_addr, controller, upstream, _env, _guards) =
+        spawn_managed_stack(Some(MANAGED_STUB_KEY), None, false).await?;
+
+    assert_session_envelope_refused(proxy_addr, &controller, &upstream).await?;
 
     // The same proxy still serves a dispatch job token (run_id set).
     let (status, body) = chat_through_proxy(proxy_addr, &proxy_token(Some(RUN_ID), None)).await?;
@@ -702,6 +805,92 @@ async fn session_envelope_without_a_run_id_keeps_the_byoc_rejection_on_a_dynamic
         .map(|(id, _)| id.clone())
         .collect::<Vec<_>>();
     assert_eq!(ids, vec![MANAGED_AI_CREDENTIAL_ID.to_string()]);
+
+    Ok(())
+}
+
+#[tokio::test]
+#[serial]
+async fn static_proxy_refuses_credentialless_session_token() -> Result<()> {
+    // Static credentials used to serve a session envelope as they serve a
+    // proxy without a controller: on the operator's key, with any model and
+    // unmetered. With controller integration a static proxy refuses it
+    // exactly as a dynamic one does, pinned or not.
+    for pinned_model in [Some(PINNED_MODEL), None] {
+        let (proxy_addr, controller, upstream, _env, _guards) =
+            spawn_static_stack(pinned_model).await?;
+
+        assert_session_envelope_refused(proxy_addr, &controller, &upstream).await?;
+
+        // The same proxy still serves a managed run on its own key.
+        let managed = proxy_token(Some(RUN_ID), None);
+        let (status, body) = responses_through_proxy(proxy_addr, &managed, "gpt-5.6-sol").await?;
+        assert_eq!(status, StatusCode::OK, "managed run: {body}");
+        assert_eq!(
+            upstream.models.lock().expect("model log").clone(),
+            vec![pinned_model.unwrap_or("gpt-5.6-sol")]
+        );
+        assert_eq!(
+            upstream.bearers.lock().expect("bearer log").clone(),
+            vec![format!("Bearer {MANAGED_STUB_KEY}")]
+        );
+    }
+
+    Ok(())
+}
+
+#[tokio::test]
+#[serial]
+async fn static_proxy_without_controller_serves_unauthenticated_requests() -> Result<()> {
+    // Without a controller the proxy checks no token, so there is no lane
+    // to tell apart: every request goes out on its static credentials as it
+    // always has, with the model it asks for (PROXY_PINNED_MODEL pins only
+    // a controller-signed managed run) and audio available.
+    let (proxy_addr, controller, upstream, _env, _guards) = spawn_stack(
+        None,
+        None,
+        false,
+        StackProxy::Standalone {
+            pinned_model: Some(PINNED_MODEL),
+        },
+    )
+    .await?;
+
+    let client = reqwest::Client::new();
+    for (path, body) in every_route() {
+        // No Authorization header, and a session envelope the proxy cannot
+        // check, are served alike.
+        let anonymous = client
+            .post(format!("http://{proxy_addr}{path}"))
+            .json(&body)
+            .send()
+            .await?;
+        let status = anonymous.status();
+        let text = anonymous.text().await?;
+        assert_eq!(status, StatusCode::OK, "{path}: {text}");
+        let (status, text) =
+            post_through_proxy(proxy_addr, &proxy_token(None, None), path, body).await?;
+        assert_eq!(status, StatusCode::OK, "{path} with a token: {text}");
+    }
+    assert_eq!(
+        upstream.models.lock().expect("model log").clone(),
+        vec!["gpt-5.6-sol"; 4],
+        "responses and chat completions keep the requested model"
+    );
+    assert_eq!(
+        upstream.bearers.lock().expect("bearer log").clone(),
+        vec![format!("Bearer {MANAGED_STUB_KEY}"); 4]
+    );
+    assert_eq!(
+        upstream.audio.lock().expect("audio log").clone(),
+        vec![
+            "/v1/audio/speech",
+            "/v1/audio/speech",
+            "/v1/audio/transcriptions",
+            "/v1/audio/transcriptions"
+        ]
+    );
+    assert!(controller.leases.lock().expect("lease log").is_empty());
 
     Ok(())
 }
@@ -960,31 +1149,53 @@ fn upstream_additional_tools(upstream: &UpstreamStub) -> Vec<Value> {
         .collect()
 }
 
-#[tokio::test]
-#[serial]
-async fn pinned_lease_forwards_only_the_client_tools_codex_emits() -> Result<()> {
-    // A hand-built hosted tool would run its own model, or add a per-call
-    // fee, on the key the operator pays for. A pinned lease forwards only
-    // the tool types codex emits, and none that names its own model.
-    let function = json!({
-        "type": "function",
-        "name": "exec_command",
-        "description": "Runs a command.",
-        "strict": false,
-        "parameters": { "type": "object", "properties": {} }
-    });
-    let web_search = json!({ "type": "web_search", "external_web_access": true });
-    let tools = json!([
-        function,
-        web_search,
-        { "type": "image_generation", "model": "gpt-image-1" },
+/// Codex's client tools plus the hosted ones it can also emit (web search, a
+/// tool search OpenAI runs), and hand-built tools that run their own model.
+fn client_and_hosted_tools() -> (Value, Value) {
+    let client_tools = json!([
         {
+            "type": "function",
+            "name": "exec_command",
+            "description": "Runs a command.",
+            "strict": false,
+            "parameters": { "type": "object", "properties": {} }
+        },
+        {
+            "type": "tool_search",
+            "execution": "client",
+            "description": "Search deferred tools.",
+            "parameters": { "type": "object", "properties": {} }
+        }
+    ]);
+    let mut tools = client_tools.clone();
+    tools.as_array_mut().expect("tool list").extend([
+        json!({ "type": "web_search", "external_web_access": true }),
+        json!({
+            "type": "tool_search",
+            "execution": "server",
+            "description": "Search deferred tools.",
+            "parameters": { "type": "object", "properties": {} }
+        }),
+        json!({ "type": "image_generation", "model": "gpt-image-1" }),
+        json!({
             "type": "function",
             "name": "priced",
             "parameters": { "type": "object", "properties": {} },
             "model": "gpt-5.6-sol"
-        }
+        }),
     ]);
+    (client_tools, tools)
+}
+
+#[tokio::test]
+#[serial]
+async fn pinned_lease_drops_web_search_in_tools_and_additional_tools() -> Result<()> {
+    // A hosted tool runs on OpenAI's side and bills per call on top of the
+    // tokens credits price, and a hand-built one can run its own model, on
+    // the key the operator pays for. A pinned lease forwards only codex's
+    // client tools, and none that names its own model: web search and a
+    // server-run tool search stay off the platform key.
+    let (client_tools, tools) = client_and_hosted_tools();
     let token = proxy_token(Some(RUN_ID), None);
 
     // The controller's pinned managed lease, and static credentials pinned
@@ -999,12 +1210,12 @@ async fn pinned_lease_forwards_only_the_client_tools_codex_emits() -> Result<()>
         assert_eq!(status, StatusCode::OK, "{name}: {body}");
         assert_eq!(
             upstream.tools.lock().expect("tool log").clone(),
-            vec![json!([function, web_search])],
+            vec![client_tools.clone()],
             "{name}: only the allowed, model-free tools reach the provider"
         );
         assert_eq!(
             upstream_additional_tools(&upstream),
-            vec![json!([function, web_search])],
+            vec![client_tools.clone()],
             "{name}: the same holds for tools carried in the input"
         );
     }
@@ -1020,6 +1231,291 @@ async fn pinned_lease_forwards_only_the_client_tools_codex_emits() -> Result<()>
         vec![tools.clone()]
     );
     assert_eq!(upstream_additional_tools(&upstream), vec![tools]);
+
+    Ok(())
+}
+
+#[tokio::test]
+#[serial]
+async fn byo_lane_forwards_web_search() -> Result<()> {
+    // A user's own credential pays for its own hosted tools: the platform
+    // pin never applies to it, so every tool goes upstream unchanged, on a
+    // dynamic proxy whose managed lease is pinned and on a pinned static one.
+    let (_, tools) = client_and_hosted_tools();
+    let byo = proxy_token(Some(RUN_ID), Some(BYO_CREDENTIAL_ID));
+    for name in ["dynamic", "static"] {
+        let (proxy_addr, controller, upstream, _env, _guards) = if name == "dynamic" {
+            spawn_managed_stack(Some(MANAGED_STUB_KEY), Some(PINNED_MODEL), false).await?
+        } else {
+            spawn_static_stack(Some(PINNED_MODEL)).await?
+        };
+        let (status, body) = responses_with_tools_through_proxy(proxy_addr, &byo, &tools).await?;
+        assert_eq!(status, StatusCode::OK, "{name}: {body}");
+        assert_eq!(
+            upstream.tools.lock().expect("tool log").clone(),
+            vec![tools.clone()],
+            "{name}: every tool reaches the provider"
+        );
+        assert_eq!(
+            upstream_additional_tools(&upstream),
+            vec![tools.clone()],
+            "{name}: the input keeps every tool"
+        );
+        assert_eq!(
+            upstream.models.lock().expect("model log").clone(),
+            vec!["gpt-5.6-sol"],
+            "{name}: the requested model, not the pin"
+        );
+        assert_eq!(
+            upstream.bearers.lock().expect("bearer log").clone(),
+            vec![format!("Bearer {BYO_STUB_KEY}")],
+            "{name}: on the user's own key"
+        );
+        let ids = controller
+            .leases
+            .lock()
+            .expect("lease log")
+            .iter()
+            .map(|(id, _)| id.clone())
+            .collect::<Vec<_>>();
+        assert_eq!(ids, vec![BYO_CREDENTIAL_ID.to_string()], "{name}");
+    }
+
+    Ok(())
+}
+
+/// Each tool's name, or its type when it has none, in order.
+fn tool_labels(tools: &Value) -> Vec<&str> {
+    tools
+        .as_array()
+        .map(|tools| {
+            tools
+                .iter()
+                .filter_map(|tool| tool.get("name").or_else(|| tool.get("type")))
+                .filter_map(Value::as_str)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+#[tokio::test]
+#[serial]
+async fn pinned_lease_drops_web_search_from_the_proxy_default_tools() -> Result<()> {
+    // A ChatGPT login whose request keeps no tools gets the proxy's default
+    // tools, and CODEX_ENABLE_WEB_SEARCH adds web search to them. Codex lists
+    // a Responses Lite model's tools, the managed model's among them, only in
+    // an `additional_tools` input item, and Chat Completions forwards no
+    // tools, so a managed run on a pinned ChatGPT login gets those defaults
+    // on both routes. The pin must filter the tools the request finally
+    // carries, in `tools` and in the input alike.
+    let _env = [
+        EnvGuard::set("CODEX_ENABLE_WEB_SEARCH", Some("1")),
+        EnvGuard::set("CODEX_INCLUDE_APPLY_PATCH_TOOL", None),
+        EnvGuard::set("CODEX_INCLUDE_PLAN_TOOL", None),
+        EnvGuard::set("CODEX_INCLUDE_VIEW_IMAGE_TOOL", None),
+    ];
+    let (client_tools, tools) = client_and_hosted_tools();
+    let token = proxy_token(Some(RUN_ID), None);
+    let lite_request = json!({
+        "model": "gpt-5.6-sol",
+        "stream": false,
+        "input": [
+            { "type": "additional_tools", "role": "developer", "tools": tools },
+            {
+                "type": "message",
+                "role": "user",
+                "content": [{ "type": "input_text", "text": CHAT_PROMPT }]
+            }
+        ]
+    });
+
+    // Pinned by PROXY_PINNED_MODEL, then the same platform lane unpinned,
+    // which keeps every tool: the pin decides, and the unpinned run shows
+    // the defaults do carry web search here.
+    for (name, pinned_model) in [("pinned", Some(PINNED_MODEL)), ("unpinned", None)] {
+        let (proxy_addr, _controller, upstream, _stack_env, _guards) = spawn_stack(
+            None,
+            None,
+            false,
+            StackProxy::StaticChatGpt { pinned_model },
+        )
+        .await?;
+        let (status, body) =
+            post_through_proxy(proxy_addr, &token, "/v1/responses", lite_request.clone()).await?;
+        assert_eq!(status, StatusCode::OK, "{name} responses: {body}");
+        let (status, body) = chat_through_proxy(proxy_addr, &token).await?;
+        assert_eq!(status, StatusCode::OK, "{name} chat: {body}");
+
+        let (expected_defaults, expected_input_tools) = if pinned_model.is_some() {
+            (
+                vec!["shell", "apply_patch", "update_plan", "view_image"],
+                client_tools.clone(),
+            )
+        } else {
+            (
+                vec![
+                    "shell",
+                    "apply_patch",
+                    "update_plan",
+                    "web_search",
+                    "view_image",
+                ],
+                tools.clone(),
+            )
+        };
+        let sent_tools = upstream.tools.lock().expect("tool log").clone();
+        assert_eq!(
+            sent_tools.iter().map(tool_labels).collect::<Vec<_>>(),
+            vec![expected_defaults.clone(), expected_defaults],
+            "{name}: the proxy's default tools on the Responses and Chat Completions routes"
+        );
+        assert_eq!(
+            upstream_additional_tools(&upstream),
+            vec![expected_input_tools, Value::Null],
+            "{name}: the tools carried in the input"
+        );
+        if let Some(pinned_model) = pinned_model {
+            assert_eq!(
+                upstream.models.lock().expect("model log").clone(),
+                vec![pinned_model, pinned_model],
+                "{name}: a managed run on the pinned model"
+            );
+        }
+    }
+
+    Ok(())
+}
+
+async fn platform_lane(proxy_addr: SocketAddr, path: &str) -> Result<Value> {
+    let response = reqwest::Client::new()
+        .get(format!("http://{proxy_addr}{path}"))
+        .send()
+        .await?;
+    assert_eq!(response.status(), StatusCode::OK, "{path}");
+    let body: Value = response.json().await?;
+    Ok(body["platformLane"].clone())
+}
+
+#[tokio::test]
+#[serial]
+async fn healthz_reports_static_pin_and_credential_kind() -> Result<()> {
+    // Static credentials serve the platform lane on the proxy's own key, and
+    // the report says which kind of key and which model it is pinned to,
+    // on liveness and readiness alike.
+    for (pinned_model, reported_pin) in [
+        (Some(PINNED_MODEL), json!(PINNED_MODEL)),
+        (Some("   "), json!(null)),
+        (None, json!(null)),
+    ] {
+        let (proxy_addr, _controller, _upstream, _env, _guards) =
+            spawn_static_stack(pinned_model).await?;
+        for path in ["/healthz", "/readyz"] {
+            assert_eq!(
+                platform_lane(proxy_addr, path).await?,
+                json!({
+                    "servedBy": "static",
+                    "pinnedModel": reported_pin,
+                    "staticCredentialKind": "api_key",
+                    "sessionTokensRefused": true,
+                    "reportsUsage": false,
+                    "controllerMeteringProtocol": null,
+                    "outputCeilingSource": null,
+                }),
+                "{path} with PROXY_PINNED_MODEL={pinned_model:?}"
+            );
+        }
+    }
+
+    // The public lane (PROXY_REQUIRE_CREDENTIAL_CLAIM=1) refuses every
+    // credential-less token even with static credentials, so it serves no
+    // platform lane and reports neither the pin nor the key kind.
+    let (proxy_addr, _controller, _upstream, _env, _guards) = spawn_stack(
+        None,
+        None,
+        true,
+        StackProxy::Static {
+            pinned_model: Some(PINNED_MODEL),
+        },
+    )
+    .await?;
+    for path in ["/healthz", "/readyz"] {
+        assert_eq!(
+            platform_lane(proxy_addr, path).await?,
+            json!({
+                "servedBy": "refused",
+                "pinnedModel": null,
+                "staticCredentialKind": null,
+                "sessionTokensRefused": true,
+                "reportsUsage": false,
+                "controllerMeteringProtocol": null,
+                "outputCeilingSource": null,
+            }),
+            "{path} with static credentials on the public lane"
+        );
+    }
+
+    // Without a controller no token marks a managed run, so the setting pins
+    // nothing and no token is refused.
+    let (proxy_addr, _controller, _upstream, _env, _guards) = spawn_stack(
+        None,
+        None,
+        false,
+        StackProxy::Standalone {
+            pinned_model: Some(PINNED_MODEL),
+        },
+    )
+    .await?;
+    for path in ["/healthz", "/readyz"] {
+        assert_eq!(
+            platform_lane(proxy_addr, path).await?,
+            json!({
+                "servedBy": "static",
+                "pinnedModel": null,
+                "staticCredentialKind": "api_key",
+                "sessionTokensRefused": false,
+                "reportsUsage": false,
+                "controllerMeteringProtocol": null,
+                "outputCeilingSource": null,
+            }),
+            "{path} without a controller"
+        );
+    }
+
+    Ok(())
+}
+
+#[tokio::test]
+#[serial]
+async fn healthz_reports_controller_lease_on_dynamic() -> Result<()> {
+    // A sidecar without static credentials serves the platform lane from the
+    // controller's managed lease, which brings its own pin.
+    let (proxy_addr, _controller, _upstream, _env, _guards) =
+        spawn_managed_stack(Some(MANAGED_STUB_KEY), Some(PINNED_MODEL), false).await?;
+    for path in ["/healthz", "/readyz"] {
+        assert_eq!(
+            platform_lane(proxy_addr, path).await?,
+            json!({
+                "servedBy": "controller_lease",
+                "pinnedModel": null,
+                "staticCredentialKind": null,
+                "sessionTokensRefused": true,
+                "reportsUsage": false,
+                "controllerMeteringProtocol": null,
+                "outputCeilingSource": null,
+            }),
+            "{path}"
+        );
+    }
+
+    // The public lane (PROXY_REQUIRE_CREDENTIAL_CLAIM=1) refuses every
+    // credential-less token, so it serves no platform lane at all.
+    let (proxy_addr, _controller, _upstream, _env, _guards) =
+        spawn_managed_stack(Some(MANAGED_STUB_KEY), Some(PINNED_MODEL), true).await?;
+    for path in ["/healthz", "/readyz"] {
+        let lane = platform_lane(proxy_addr, path).await?;
+        assert_eq!(lane["servedBy"], json!("refused"), "{path}: {lane}");
+        assert_eq!(lane["sessionTokensRefused"], json!(true), "{path}: {lane}");
+    }
 
     Ok(())
 }
