@@ -1231,7 +1231,7 @@ impl CodexClient {
         let bounded_proxy_retries = uses_bounded_proxy_retries(&options);
         apply_runtime_proxy_model_provider_overrides(&mut config, bounded_proxy_retries);
         scope_runtime_model_shell_environment(&mut config.permissions.shell_environment_policy);
-        install_browser_mcp_servers(
+        let mut shared_browser_process_groups = install_browser_mcp_servers(
             &mut config,
             options.personal_browser,
             options.shared_browser,
@@ -1876,6 +1876,14 @@ impl CodexClient {
                 ));
             };
             confirm_shared_browser_shutdown(&conversation).await?;
+            // Codex reports ShutdownComplete after only signalling its MCP processes. Authority
+            // returns to the human once every recorded MCP process group is proven gone.
+            shared_browser_process_groups
+                .take()
+                .context("Shared Browser execution lost its MCP process-group registry")?
+                .terminate_and_confirm()
+                .await
+                .context("Shared Browser MCP processes could not be confirmed gone")?;
             shutdown_confirmation.confirm_shared_browser_shutdown();
         }
 
@@ -2687,6 +2695,7 @@ fn scope_browser_capabilities_from_shell_environment(policy: &mut ShellEnvironme
     }
 }
 
+/// Returns the process-group registry of the Shared Browser MCP when this turn installs it.
 fn install_browser_mcp_servers(
     config: &mut Config,
     personal_enabled: bool,
@@ -2694,7 +2703,7 @@ fn install_browser_mcp_servers(
     shared_page_id: Option<&str>,
     local_browser: Option<&crate::local_browser::LocalBrowserConfig>,
     workspace: &Path,
-) -> Result<()> {
+) -> Result<Option<crate::mcp_process_groups::McpProcessGroupRegistry>> {
     if personal_enabled && shared_enabled {
         return Err(anyhow!(
             "Personal Browser and Shared Browser cannot be enabled in the same Codex turn"
@@ -2742,6 +2751,7 @@ fn install_browser_mcp_servers(
         );
     }
 
+    let mut shared_browser_process_groups = None;
     if shared_enabled {
         let page_id = crate::shared_browser::validate_page_id(
             shared_page_id
@@ -2783,6 +2793,15 @@ fn install_browser_mcp_servers(
                 ));
             }
         }
+        let process_groups = crate::mcp_process_groups::McpProcessGroupRegistry::create()?;
+        environment.insert(
+            crate::mcp_process_groups::REGISTRY_ENV.to_string(),
+            process_groups
+                .registration_dir()
+                .to_string_lossy()
+                .into_owned(),
+        );
+        shared_browser_process_groups = Some(process_groups);
         servers.insert(
             SHARED_BROWSER_MCP_SERVER_NAME.to_string(),
             browser_mcp_server_config(McpServerTransportConfig::Stdio {
@@ -2827,7 +2846,7 @@ fn install_browser_mcp_servers(
         .mcp_servers
         .set(servers)
         .context("failed to install the bounded browser MCP server set")?;
-    Ok(())
+    Ok(shared_browser_process_groups)
 }
 
 fn local_browser_mcp_server_config(transport: McpServerTransportConfig) -> McpServerConfig {

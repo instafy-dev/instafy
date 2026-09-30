@@ -16,6 +16,7 @@ pub mod job_cancel;
 pub mod jobs;
 pub mod local_browser;
 pub mod loopback_proxy;
+pub mod mcp_process_groups;
 mod model_environment;
 pub mod origin;
 pub mod personal_browser;

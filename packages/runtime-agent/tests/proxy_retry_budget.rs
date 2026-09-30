@@ -918,6 +918,55 @@ scenario_test!(
     3
 );
 
+/// The real Shared Browser MCP entry point records its process group before it serves, and only
+/// when it leads that group, so the runtime can prove it gone before releasing the browser.
+#[cfg(unix)]
+#[test]
+fn shared_browser_mcp_records_its_own_process_group_before_serving() -> Result<()> {
+    use std::os::unix::process::CommandExt;
+    let registry = tempfile::tempdir()?;
+    let launch = |own_group: bool| -> Result<(u32, std::process::Output)> {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_runtime-agent"));
+        command
+            .arg("shared-browser-mcp")
+            .env_clear()
+            .env("PATH", "/usr/bin:/bin")
+            .env("INSTAFY_ENABLE_BROWSER_SESSION", "1")
+            .env(
+                runtime_agent::mcp_process_groups::REGISTRY_ENV,
+                registry.path(),
+            )
+            // Closed stdin ends the MCP session right after start-up.
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped());
+        if own_group {
+            // How Codex launches every MCP server.
+            command.process_group(0);
+        }
+        let child = command.spawn()?;
+        let pid = child.id();
+        Ok((pid, child.wait_with_output()?))
+    };
+
+    let (pid, output) = launch(false)?;
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("must lead its own process group"),
+        "{stderr}"
+    );
+    assert!(!registry.path().join(pid.to_string()).exists());
+
+    let (pid, output) = launch(true)?;
+    assert!(
+        registry.path().join(pid.to_string()).is_file(),
+        "the MCP did not record group {pid}: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    Ok(())
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "Child entrypoint; outer tests supply an isolated environment and loopback proxy"]
 async fn isolated_retry_child() -> Result<()> {
