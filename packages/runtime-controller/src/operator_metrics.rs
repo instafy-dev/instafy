@@ -982,7 +982,8 @@ const OPERATOR_RUNTIME_SCAN_SQL: &str = "
 // Hosted lease time is sliced at UTC midnight so a lease that runs overnight
 // is charged to both days; open leases run to $3 (now). generate_series is
 // only the slicing device — days with no lease produce no row and are
-// zero-filled by the builder.
+// zero-filled by the builder. A tenant lease is another project attached to a
+// runtime that its own lease already counts, so it is not hosted time.
 const OPERATOR_HOSTED_HOURS_SQL: &str = "
     with days as (
         select generate_series($1::date, $2::date, interval '1 day')::date as day
@@ -997,6 +998,7 @@ const OPERATOR_HOSTED_HOURS_SQL: &str = "
                  replace(lower(r.provider), '-', '_') = 'instafy_cloud'
                  or replace(lower(r.provider), '-', '_') like 'instafy\\_cloud\\_%'
                )
+           and rl.scope <> 'tenant'
            and coalesce(rl.released_at, $3::timestamptz) > ($1::date::timestamp at time zone 'UTC')
     )
     select d.day,
@@ -1014,7 +1016,8 @@ const OPERATOR_HOSTED_HOURS_SQL: &str = "
 ";
 
 // runtimes rows are never deleted (cleanup sets status = 'removed'), so
-// created_at is durable; a lease's released_at is the teardown timestamp.
+// created_at is durable; a lease's released_at is the teardown timestamp. A
+// tenant lease tears nothing down, so it is not counted.
 const OPERATOR_RUNTIME_LIFECYCLE_SQL: &str = "
     with created as (
         select (created_at at time zone 'UTC')::date as day, count(*) as created
@@ -1026,6 +1029,7 @@ const OPERATOR_RUNTIME_LIFECYCLE_SQL: &str = "
         select (released_at at time zone 'UTC')::date as day, count(*) as destroyed
           from runtime_leases
          where released_at >= $1
+           and scope <> 'tenant'
          group by 1
     )
     select coalesce(c.day, d.day) as day,
@@ -2014,5 +2018,134 @@ mod operator_metrics_tests {
         assert_eq!(payload["dailyHours"].as_array().unwrap().len(), 30);
         assert_eq!(payload["dailyLifecycle"].as_array().unwrap().len(), 30);
         assert_eq!(payload["stops14d"].as_array().unwrap().len(), 14);
+    }
+
+    /// Totals of the hosted-hours and lifecycle queries over yesterday and
+    /// today: (hosted leases, hosted seconds, destroyed).
+    async fn hosted_lease_totals(
+        transaction: &tokio_postgres::Transaction<'_>,
+        now: DateTime<Utc>,
+    ) -> anyhow::Result<(i64, i64, i64)> {
+        let today = now.date_naive();
+        let start = today - Duration::days(1);
+        let (mut leases, mut seconds) = (0, 0);
+        for row in transaction
+            .query(OPERATOR_HOSTED_HOURS_SQL, &[&start, &today, &now])
+            .await?
+        {
+            leases += row.get::<_, i64>("leases");
+            seconds += row.get::<_, i64>("seconds");
+        }
+        let start_at = start
+            .and_hms_opt(0, 0, 0)
+            .expect("midnight is a valid time")
+            .and_utc();
+        let destroyed = transaction
+            .query(OPERATOR_RUNTIME_LIFECYCLE_SQL, &[&start_at])
+            .await?
+            .iter()
+            .map(|row| row.get::<_, i64>("destroyed"))
+            .sum();
+        Ok((leases, seconds, destroyed))
+    }
+
+    /// A tenant lease is another project attached to a runtime whose own lease
+    /// is already counted: it adds no hosted time and tears nothing down.
+    #[tokio::test]
+    async fn tenant_leases_are_not_hosted_time_or_teardowns() -> anyhow::Result<()> {
+        let pool =
+            crate::tests::require_origin_test_pool("operator metrics tenant lease test").await?;
+        let mut connection = pool.get().await?;
+        // One snapshot for every total, so concurrent tests' leases cannot
+        // move them; this transaction's own rows are the only change.
+        let transaction = connection
+            .build_transaction()
+            .isolation_level(tokio_postgres::IsolationLevel::RepeatableRead)
+            .start()
+            .await?;
+        let now = Utc::now();
+        let before = hosted_lease_totals(&transaction, now).await?;
+        // One hour inside yesterday (UTC), whatever the time of day: the
+        // hosted-hours query counts a lease once for every UTC day it
+        // overlaps, so a lease that crossed midnight would count twice.
+        let launched_at = (now.date_naive() - Duration::days(1))
+            .and_hms_opt(1, 0, 0)
+            .expect("01:00 is a valid time")
+            .and_utc();
+        let released_at = launched_at + Duration::hours(1);
+
+        let host_project_id = Uuid::new_v4();
+        let tenant_project_id = Uuid::new_v4();
+        let runtime_id = Uuid::new_v4();
+        let host_lease_id = Uuid::new_v4();
+        transaction
+            .execute(
+                "insert into projects (id, project_type, status)
+                 values ($1, 'customer', 'active'), ($2, 'customer', 'active')",
+                &[&host_project_id, &tenant_project_id],
+            )
+            .await?;
+        transaction
+            .execute(
+                "insert into runtimes (id, project_id, provider, status, idle_ttl_seconds)
+                 values ($1, $2, 'instafy-cloud', 'stopped', 600)",
+                &[&runtime_id, &host_project_id],
+            )
+            .await?;
+        transaction
+            .execute(
+                "insert into runtime_leases
+                    (id, project_id, runtime_id, status, scope, requested_at, launched_at,
+                     released_at)
+                 values ($1, $2, $3, 'released', 'shared', $4, $4, $5)",
+                &[
+                    &host_lease_id,
+                    &host_project_id,
+                    &runtime_id,
+                    &launched_at,
+                    &released_at,
+                ],
+            )
+            .await?;
+        let with_host_lease = hosted_lease_totals(&transaction, now).await?;
+        assert_eq!(
+            with_host_lease.0,
+            before.0 + 1,
+            "the host's own lease counts"
+        );
+        assert_eq!(
+            with_host_lease.1,
+            before.1 + 3600,
+            "the host's own lease counts"
+        );
+        assert_eq!(
+            with_host_lease.2,
+            before.2 + 1,
+            "the host's own lease counts"
+        );
+
+        transaction
+            .execute(
+                "insert into runtime_leases
+                    (project_id, runtime_id, status, scope, parent_lease_id, requested_at,
+                     launched_at, released_at)
+                 values ($1, $2, 'released', 'tenant', $3, $4, $4, $5)",
+                &[
+                    &tenant_project_id,
+                    &runtime_id,
+                    &host_lease_id,
+                    &launched_at,
+                    &released_at,
+                ],
+            )
+            .await?;
+        assert_eq!(
+            hosted_lease_totals(&transaction, now).await?,
+            with_host_lease,
+            "a tenant lease adds no hosted lease, time or teardown"
+        );
+
+        transaction.rollback().await?;
+        Ok(())
     }
 }

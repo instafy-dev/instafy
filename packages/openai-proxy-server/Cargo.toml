@@ -15,9 +15,6 @@ uuid = { version = "1", features = ["v4", "serde"] }
 axum = { version = "0.7", features = ["json"] }
 futures-util = "0.3"
 jsonwebtoken = "9"
-runtime-contracts = { path = "../runtime-contracts" }
-prost-types = "0.13"
-prost = "0.13"
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 httpdate = "1"
 

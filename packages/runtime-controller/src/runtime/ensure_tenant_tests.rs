@@ -1,0 +1,1285 @@
+use super::*;
+
+use axum::body::{to_bytes, Body};
+use axum::http::Request;
+use futures_util::FutureExt;
+use tokio_postgres::types::Json as PgJson;
+use tower::ServiceExt;
+
+/// Open to every organization. The tenant request names it, and the host
+/// runtime runs on it unless a test moves it to [`HOST_ORG_PROVIDER`].
+const OPEN_PROVIDER: &str = "tenant-attach-open";
+/// Available to the host organization only.
+const HOST_ORG_PROVIDER: &str = "tenant-attach-host-org";
+const SERVICE_ROLE_TOKEN: &str = "service-role-token";
+
+fn test_provider(id: &str, owner_org_id: Option<Uuid>) -> crate::config::RuntimeProviderConfig {
+    crate::config::RuntimeProviderConfig {
+        id: id.to_string(),
+        display_name: id.to_string(),
+        kind: "noop".to_string(),
+        owner_org_id,
+        allowed_org_ids: vec![],
+        endpoint: None,
+        auth_token: None,
+        metadata: None,
+    }
+}
+
+/// A host project in one organization whose runtime holds an active shared
+/// lease and an online origin, plus candidate tenant projects in the host's
+/// organization and in another one.
+struct TenantAttachFixture {
+    pool: crate::config::PgPool,
+    state: AppState,
+    host_org_id: Uuid,
+    other_org_id: Uuid,
+    host_project_id: Uuid,
+    /// In the host organization.
+    same_org_tenant_project_id: Uuid,
+    /// In the host organization; attached by the service role.
+    service_tenant_project_id: Uuid,
+    /// In the other organization.
+    other_org_project_id: Uuid,
+    runtime_id: Uuid,
+    shared_lease_id: Uuid,
+    /// Owner of the host organization.
+    host_writer: Uuid,
+    /// Owner of the other organization only.
+    outsider: Uuid,
+    /// Owner of the other organization and a viewer of the host project.
+    host_viewer: Uuid,
+    /// Owner of the other organization and a builder of the host project.
+    cross_org_writer: Uuid,
+}
+
+impl TenantAttachFixture {
+    async fn setup(label: &str) -> anyhow::Result<Self> {
+        let pool = crate::tests::require_origin_test_pool(label).await?;
+        let mut config = crate::tests::build_app_config(
+            crate::tests::test_origin_private_key(),
+            crate::tests::test_origin_public_key(),
+            label,
+        );
+        let host_org_id = Uuid::new_v4();
+        config.runtime_providers = vec![
+            test_provider(OPEN_PROVIDER, None),
+            test_provider(HOST_ORG_PROVIDER, Some(host_org_id)),
+        ];
+        let state = crate::tests::build_test_state(pool.clone(), config);
+
+        let fixture = Self {
+            pool,
+            state,
+            host_org_id,
+            other_org_id: Uuid::new_v4(),
+            host_project_id: Uuid::new_v4(),
+            same_org_tenant_project_id: Uuid::new_v4(),
+            service_tenant_project_id: Uuid::new_v4(),
+            other_org_project_id: Uuid::new_v4(),
+            runtime_id: Uuid::new_v4(),
+            shared_lease_id: Uuid::new_v4(),
+            host_writer: Uuid::new_v4(),
+            outsider: Uuid::new_v4(),
+            host_viewer: Uuid::new_v4(),
+            cross_org_writer: Uuid::new_v4(),
+        };
+        for user_id in fixture.users() {
+            crate::tests::ensure_test_user(&fixture.pool, &user_id).await?;
+        }
+        let connection = fixture.pool.get().await?;
+        for org_id in [fixture.host_org_id, fixture.other_org_id] {
+            connection
+                .execute(
+                    "insert into organizations (id, slug, name) values ($1, $2, $3)",
+                    &[&org_id, &format!("{label}-{org_id}"), &label],
+                )
+                .await?;
+        }
+        connection
+            .execute(
+                "insert into projects (id, org_id, project_type, status)
+                 values ($1, $4, 'customer', 'active'),
+                        ($2, $4, 'customer', 'active'),
+                        ($3, $4, 'customer', 'active'),
+                        ($5, $6, 'customer', 'active')",
+                &[
+                    &fixture.host_project_id,
+                    &fixture.same_org_tenant_project_id,
+                    &fixture.service_tenant_project_id,
+                    &fixture.host_org_id,
+                    &fixture.other_org_project_id,
+                    &fixture.other_org_id,
+                ],
+            )
+            .await?;
+        connection
+            .execute(
+                "insert into org_memberships (org_id, user_id, role)
+                 values ($1, $2, 'owner'), ($3, $4, 'owner'), ($3, $5, 'owner'), ($3, $6, 'owner')",
+                &[
+                    &fixture.host_org_id,
+                    &fixture.host_writer,
+                    &fixture.other_org_id,
+                    &fixture.outsider,
+                    &fixture.host_viewer,
+                    &fixture.cross_org_writer,
+                ],
+            )
+            .await?;
+        connection
+            .execute(
+                "insert into project_memberships (project_id, user_id, role)
+                 values ($1, $2, 'viewer'), ($1, $3, 'builder')",
+                &[
+                    &fixture.host_project_id,
+                    &fixture.host_viewer,
+                    &fixture.cross_org_writer,
+                ],
+            )
+            .await?;
+        connection
+            .execute(
+                "insert into runtimes
+                    (id, project_id, provider, status, idle_ttl_seconds, last_seen_at)
+                 values ($1, $2, $3, 'ready', 600, now())",
+                &[
+                    &fixture.runtime_id,
+                    &fixture.host_project_id,
+                    &OPEN_PROVIDER,
+                ],
+            )
+            .await?;
+        connection
+            .execute(
+                "insert into runtime_leases
+                    (id, project_id, runtime_id, status, scope, metadata,
+                     requested_at, launched_at)
+                 values ($1, $2, $3, 'active', 'shared', $4,
+                         now() - interval '1 hour', now() - interval '1 hour')",
+                &[
+                    &fixture.shared_lease_id,
+                    &fixture.host_project_id,
+                    &fixture.runtime_id,
+                    &PgJson(json!({ "source": "host", "sizeId": "standard" })),
+                ],
+            )
+            .await?;
+        connection
+            .execute(
+                "update runtimes set active_lease_id = $2 where id = $1",
+                &[&fixture.runtime_id, &fixture.shared_lease_id],
+            )
+            .await?;
+        connection
+            .execute(
+                "insert into origin_instances
+                    (project_id, runtime_id, lease_id, required, mode, protocols,
+                     metadata, status, endpoint)
+                 values ($1, $2, $3, true, 'hosted', array['http'], $4, 'online',
+                         'https://origin.test')",
+                &[
+                    &fixture.host_project_id,
+                    &fixture.runtime_id,
+                    &fixture.shared_lease_id,
+                    &PgJson(json!({ "owner": "host" })),
+                ],
+            )
+            .await?;
+        drop(connection);
+        Ok(fixture)
+    }
+
+    fn users(&self) -> [Uuid; 4] {
+        [
+            self.host_writer,
+            self.outsider,
+            self.host_viewer,
+            self.cross_org_writer,
+        ]
+    }
+
+    fn shared_db_fixture(&self) -> crate::tests::SharedDbFixture {
+        crate::tests::SharedDbFixture {
+            organizations: vec![self.host_org_id, self.other_org_id],
+            projects: vec![
+                self.host_project_id,
+                self.same_org_tenant_project_id,
+                self.service_tenant_project_id,
+                self.other_org_project_id,
+            ],
+        }
+    }
+
+    fn user_context(user_id: Uuid) -> RequestContext {
+        RequestContext {
+            user_id: Some(user_id),
+            is_service_role: false,
+            scoped_claims: None,
+        }
+    }
+
+    fn user_token(&self, user_id: Uuid) -> anyhow::Result<String> {
+        crate::auth::issue_controller_token(&self.state.config, &user_id)
+            .map(|token| token.token)
+            .map_err(|(status, Json(error))| anyhow::anyhow!("{status}: {}", error.message))
+    }
+
+    /// The body of a `POST /runtime/ensure` asking to attach
+    /// `tenant_project_id` to `runtime_id` as a tenant.
+    fn attach_request(tenant_project_id: Uuid, runtime_id: Uuid, metadata: JsonValue) -> JsonValue {
+        json!({
+            "project_id": tenant_project_id.to_string(),
+            "provider": OPEN_PROVIDER,
+            "scope": "tenant",
+            "runtimeId": runtime_id.to_string(),
+            "metadata": metadata,
+        })
+    }
+
+    async fn ensure(
+        &self,
+        bearer: &str,
+        request: JsonValue,
+    ) -> anyhow::Result<(StatusCode, JsonValue)> {
+        self.post(bearer, "/runtime/ensure", request).await
+    }
+
+    /// `POST /runtime/register` for `project_id` under `lease_id`.
+    async fn register(
+        &self,
+        bearer: &str,
+        project_id: Uuid,
+        lease_id: Uuid,
+    ) -> anyhow::Result<(StatusCode, JsonValue)> {
+        self.post(
+            bearer,
+            "/runtime/register",
+            json!({
+                "projectId": project_id.to_string(),
+                "leaseId": lease_id.to_string(),
+                "provider": OPEN_PROVIDER,
+            }),
+        )
+        .await
+    }
+
+    async fn post(
+        &self,
+        bearer: &str,
+        uri: &str,
+        request: JsonValue,
+    ) -> anyhow::Result<(StatusCode, JsonValue)> {
+        let response = crate::runtime::router()
+            .with_state(self.state.clone())
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(uri)
+                    .header("authorization", format!("Bearer {bearer}"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(request.to_string()))?,
+            )
+            .await?;
+        let status = response.status();
+        let body: JsonValue =
+            serde_json::from_slice(&to_bytes(response.into_body(), usize::MAX).await?)?;
+        Ok((status, body))
+    }
+
+    async fn attach(
+        &self,
+        bearer: &str,
+        tenant_project_id: Uuid,
+        runtime_id: Uuid,
+        metadata: JsonValue,
+    ) -> anyhow::Result<(StatusCode, JsonValue)> {
+        self.ensure(
+            bearer,
+            Self::attach_request(tenant_project_id, runtime_id, metadata),
+        )
+        .await
+    }
+
+    async fn origin_instance_count(&self) -> anyhow::Result<i64> {
+        Ok(self
+            .pool
+            .get()
+            .await?
+            .query_one(
+                "select count(*) from origin_instances where runtime_id = $1",
+                &[&self.runtime_id],
+            )
+            .await?
+            .get(0))
+    }
+
+    async fn tenant_leases(&self) -> anyhow::Result<Vec<(Uuid, Uuid, Option<Uuid>)>> {
+        let rows = self
+            .pool
+            .get()
+            .await?
+            .query(
+                "select id, project_id, parent_lease_id
+                 from runtime_leases
+                 where runtime_id = $1 and scope = 'tenant'
+                 order by requested_at",
+                &[&self.runtime_id],
+            )
+            .await?;
+        Ok(rows
+            .into_iter()
+            .map(|row| {
+                (
+                    row.get("id"),
+                    row.get("project_id"),
+                    row.get("parent_lease_id"),
+                )
+            })
+            .collect())
+    }
+
+    async fn lease_metadata(&self, lease_id: Uuid) -> anyhow::Result<Option<JsonValue>> {
+        Ok(self
+            .pool
+            .get()
+            .await?
+            .query_one(
+                "select metadata from runtime_leases where id = $1",
+                &[&lease_id],
+            )
+            .await?
+            .get("metadata"))
+    }
+
+    /// A lease's status and whether it is released.
+    async fn lease_state(&self, lease_id: Uuid) -> anyhow::Result<(String, bool)> {
+        let row = self
+            .pool
+            .get()
+            .await?
+            .query_one(
+                "select status, released_at is not null as released
+                 from runtime_leases
+                 where id = $1",
+                &[&lease_id],
+            )
+            .await?;
+        Ok((row.get("status"), row.get("released")))
+    }
+
+    /// The runtime launched again under a new active shared lease, as the
+    /// host project's next shared ensure leaves it.
+    async fn relaunch_under_new_shared_lease(&self) -> anyhow::Result<Uuid> {
+        let lease_id = Uuid::new_v4();
+        let connection = self.pool.get().await?;
+        connection
+            .execute(
+                "insert into runtime_leases
+                    (id, project_id, runtime_id, status, scope, metadata,
+                     requested_at, launched_at)
+                 values ($1, $2, $3, 'active', 'shared', $4, now(), now())",
+                &[
+                    &lease_id,
+                    &self.host_project_id,
+                    &self.runtime_id,
+                    &PgJson(json!({ "source": "host" })),
+                ],
+            )
+            .await?;
+        connection
+            .execute(
+                "update runtimes set active_lease_id = $2, status = 'ready' where id = $1",
+                &[&self.runtime_id, &lease_id],
+            )
+            .await?;
+        Ok(lease_id)
+    }
+
+    async fn set_runtime_provider(&self, provider: &str) -> anyhow::Result<()> {
+        self.pool
+            .get()
+            .await?
+            .execute(
+                "update runtimes set provider = $2 where id = $1",
+                &[&self.runtime_id, &provider],
+            )
+            .await?;
+        Ok(())
+    }
+
+    /// The host's origin row, as the fields a tenant upsert would rewrite.
+    async fn host_origin(&self) -> anyhow::Result<JsonValue> {
+        let row = self
+            .pool
+            .get()
+            .await?
+            .query_one(
+                "select project_id, mode, protocols, metadata, status, endpoint, updated_at
+                 from origin_instances
+                 where lease_id = $1",
+                &[&self.shared_lease_id],
+            )
+            .await?;
+        Ok(json!({
+            "projectId": row.get::<_, Uuid>("project_id"),
+            "mode": row.get::<_, Option<String>>("mode"),
+            "protocols": row.get::<_, Vec<String>>("protocols"),
+            "metadata": row.get::<_, Option<JsonValue>>("metadata"),
+            "status": row.get::<_, String>("status"),
+            "endpoint": row.get::<_, Option<String>>("endpoint"),
+            "updatedAt": row.get::<_, chrono::DateTime<Utc>>("updated_at").to_rfc3339(),
+        }))
+    }
+
+    /// Run a test body, then delete the fixture's rows and users however it
+    /// ends.
+    async fn run(
+        &self,
+        body: impl std::future::Future<Output = anyhow::Result<()>>,
+    ) -> anyhow::Result<()> {
+        let outcome = std::panic::AssertUnwindSafe(crate::tests::with_shared_db_fixture(
+            self.shared_db_fixture(),
+            body,
+        ))
+        .catch_unwind()
+        .await;
+        let cleanup = async {
+            self.pool
+                .get()
+                .await?
+                .execute(
+                    "delete from auth.users where id = any($1)",
+                    &[&self.users().to_vec()],
+                )
+                .await?;
+            anyhow::Ok(())
+        }
+        .await;
+        match outcome {
+            Ok(result) => result.and(cleanup),
+            Err(panic) => std::panic::resume_unwind(panic),
+        }
+    }
+}
+
+/// A tenant attach names a runtime of another project. The caller must be able
+/// to write to both projects: the tenant project and the runtime's own
+/// project. A caller who cannot write to the runtime's project is answered
+/// exactly as for a runtime id that does not exist, also when the runtime's
+/// provider is closed to the tenant project's organization, and a refused
+/// attach changes nothing on the host. An allowed attach leaves the host's
+/// origin alone as well: it reports that origin, applies no origin options
+/// and records no origin of its own.
+#[tokio::test]
+async fn tenant_attach_requires_write_access_to_the_host_runtimes_project() -> anyhow::Result<()> {
+    let fixture = TenantAttachFixture::setup("tenant-attach-authorization").await?;
+    fixture
+        .run(async {
+            let fixture = &fixture;
+            let host_origin_before = fixture.host_origin().await?;
+            let metadata = json!({ "source": "tenant-attach-test" });
+
+            let (missing_status, missing_body) = fixture
+                .attach(
+                    &fixture.user_token(fixture.outsider)?,
+                    fixture.other_org_project_id,
+                    Uuid::new_v4(),
+                    metadata.clone(),
+                )
+                .await?;
+            assert_eq!(missing_status, StatusCode::NOT_FOUND, "{missing_body}");
+            assert_eq!(
+                missing_body["code"],
+                json!(TENANT_RUNTIME_NOT_FOUND_CODE),
+                "{missing_body}"
+            );
+
+            // Callers who can write to the tenant project but not to the
+            // host project.
+            let host_outsiders = [
+                ("writer of the tenant project only", fixture.outsider),
+                ("viewer of the host project", fixture.host_viewer),
+            ];
+            for (case, user_id) in host_outsiders {
+                let (status, body) = fixture
+                    .attach(
+                        &fixture.user_token(user_id)?,
+                        fixture.other_org_project_id,
+                        fixture.runtime_id,
+                        metadata.clone(),
+                    )
+                    .await?;
+                assert_eq!(status, missing_status, "{case}: {body}");
+                assert_eq!(
+                    body, missing_body,
+                    "{case}: the same answer as a missing runtime"
+                );
+            }
+
+            // Allowed to write the host project, but not the tenant project.
+            let (status, body) = fixture
+                .attach(
+                    &fixture.user_token(fixture.host_writer)?,
+                    fixture.other_org_project_id,
+                    fixture.runtime_id,
+                    metadata.clone(),
+                )
+                .await?;
+            assert_eq!(
+                status,
+                StatusCode::FORBIDDEN,
+                "writer of the host project only: {body}"
+            );
+            assert_ne!(
+                body, missing_body,
+                "writer of the host project only: refused by the tenant project's check"
+            );
+
+            // Allowed to write both projects, but the tenant project's
+            // organization may not use the host runtime's provider.
+            fixture.set_runtime_provider(HOST_ORG_PROVIDER).await?;
+            let (status, body) = fixture
+                .attach(
+                    &fixture.user_token(fixture.cross_org_writer)?,
+                    fixture.other_org_project_id,
+                    fixture.runtime_id,
+                    metadata.clone(),
+                )
+                .await?;
+            assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+
+            // Host project access is checked before the provider: a caller
+            // who cannot write to the host project still gets the answer for
+            // a missing runtime, not the provider refusal.
+            for (case, user_id) in host_outsiders {
+                let (status, body) = fixture
+                    .attach(
+                        &fixture.user_token(user_id)?,
+                        fixture.other_org_project_id,
+                        fixture.runtime_id,
+                        metadata.clone(),
+                    )
+                    .await?;
+                assert_eq!(
+                    status, missing_status,
+                    "{case}, host organization's provider: {body}"
+                );
+                assert_eq!(
+                    body, missing_body,
+                    "{case}, host organization's provider: the same answer as a missing runtime"
+                );
+            }
+            fixture.set_runtime_provider(OPEN_PROVIDER).await?;
+
+            // The attach checks the authorized host again under its row lock.
+            let (status, Json(error)) = ensure_runtime_tenant(
+                &fixture.state,
+                fixture.same_org_tenant_project_id,
+                fixture.runtime_id,
+                fixture.other_org_project_id,
+                Some(metadata.clone()),
+                &TenantAttachFixture::user_context(fixture.host_writer),
+            )
+            .await
+            .expect_err("a runtime outside the authorized host project is refused");
+            assert_eq!(status, StatusCode::NOT_FOUND);
+            assert_eq!(error.code.as_deref(), Some(TENANT_RUNTIME_NOT_FOUND_CODE));
+
+            assert!(
+                fixture.tenant_leases().await?.is_empty(),
+                "a refused attach creates no lease"
+            );
+            assert_eq!(
+                fixture.host_origin().await?,
+                host_origin_before,
+                "a refused attach leaves the host's origin alone"
+            );
+
+            // With origin options too, which a tenant attach does not apply.
+            let mut with_origin_options = TenantAttachFixture::attach_request(
+                fixture.service_tenant_project_id,
+                fixture.runtime_id,
+                metadata.clone(),
+            );
+            with_origin_options["originMode"] = json!("tunnel");
+            with_origin_options["originProtocols"] = json!(["http", "ws"]);
+            with_origin_options["originMetadata"] = json!({ "owner": "tenant" });
+            for (case, bearer, request) in [
+                (
+                    "writer of both projects",
+                    fixture.user_token(fixture.host_writer)?,
+                    TenantAttachFixture::attach_request(
+                        fixture.same_org_tenant_project_id,
+                        fixture.runtime_id,
+                        metadata.clone(),
+                    ),
+                ),
+                (
+                    "service role",
+                    SERVICE_ROLE_TOKEN.to_string(),
+                    with_origin_options,
+                ),
+            ] {
+                let (status, body) = fixture.ensure(&bearer, request).await?;
+                assert_eq!(status, StatusCode::OK, "{case}: {body}");
+                assert_eq!(
+                    body["origin"],
+                    json!({
+                        "status": "online",
+                        "leaseId": fixture.shared_lease_id.to_string(),
+                        "mode": "hosted",
+                        "protocols": ["http"],
+                        "endpoint": "https://origin.test",
+                        "metadata": { "owner": "host" },
+                    }),
+                    "{case}: the host's origin as it is"
+                );
+                assert_eq!(body["scope"], json!("tenant"), "{case}: {body}");
+                assert_eq!(
+                    body["runtime_id"],
+                    json!(fixture.runtime_id.to_string()),
+                    "{case}: {body}"
+                );
+                assert_eq!(
+                    body["parentLeaseId"],
+                    json!(fixture.shared_lease_id.to_string()),
+                    "{case}: {body}"
+                );
+            }
+            let leases = fixture.tenant_leases().await?;
+            assert_eq!(leases.len(), 2, "{leases:?}");
+            for (tenant_project_id, (_, lease_project_id, parent_lease_id)) in [
+                fixture.same_org_tenant_project_id,
+                fixture.service_tenant_project_id,
+            ]
+            .into_iter()
+            .zip(leases)
+            {
+                assert_eq!(lease_project_id, tenant_project_id);
+                assert_eq!(parent_lease_id, Some(fixture.shared_lease_id));
+            }
+            assert_eq!(
+                fixture.host_origin().await?,
+                host_origin_before,
+                "an attach leaves the host's origin alone"
+            );
+            assert_eq!(
+                fixture.origin_instance_count().await?,
+                1,
+                "an attach records no origin of its own"
+            );
+
+            // Nor does it create one for a host that has none.
+            fixture
+                .pool
+                .get()
+                .await?
+                .execute(
+                    "delete from origin_instances where runtime_id = $1",
+                    &[&fixture.runtime_id],
+                )
+                .await?;
+            let (status, body) = fixture
+                .attach(
+                    &fixture.user_token(fixture.host_writer)?,
+                    fixture.same_org_tenant_project_id,
+                    fixture.runtime_id,
+                    metadata.clone(),
+                )
+                .await?;
+            assert_eq!(status, StatusCode::OK, "{body}");
+            assert!(body.get("origin").is_none(), "{body}");
+            assert_eq!(fixture.origin_instance_count().await?, 0);
+            Ok(())
+        })
+        .await
+}
+
+/// The endpoint authorizes a tenant attach in one transaction and attaches in
+/// the next. Host project access revoked in between refuses the attach: the
+/// attach checks it again after locking the runtime, and answers as for a
+/// runtime that does not exist.
+#[tokio::test]
+async fn tenant_attach_refuses_host_access_revoked_after_authorization() -> anyhow::Result<()> {
+    let fixture = TenantAttachFixture::setup("tenant-attach-revoked-host-access").await?;
+    fixture
+        .run(async {
+            let fixture = &fixture;
+            let context = TenantAttachFixture::user_context(fixture.cross_org_writer);
+
+            let host_project_id = {
+                let mut connection = fixture.pool.get().await?;
+                let transaction = connection.transaction().await?;
+                let tenant_project =
+                    load_project_record(&transaction, &fixture.other_org_project_id)
+                        .await
+                        .map_err(|(_, Json(error))| anyhow::anyhow!(error.message))?;
+                let host_project_id = authorize_tenant_host_runtime(
+                    &fixture.state,
+                    &transaction,
+                    &tenant_project,
+                    fixture.runtime_id,
+                    &context,
+                )
+                .await
+                .map_err(|(_, Json(error))| anyhow::anyhow!(error.message))?;
+                transaction.commit().await?;
+                host_project_id
+            };
+            assert_eq!(host_project_id, fixture.host_project_id);
+
+            fixture
+                .pool
+                .get()
+                .await?
+                .execute(
+                    "delete from project_memberships where project_id = $1 and user_id = $2",
+                    &[&fixture.host_project_id, &fixture.cross_org_writer],
+                )
+                .await?;
+
+            let (status, Json(error)) = ensure_runtime_tenant(
+                &fixture.state,
+                fixture.other_org_project_id,
+                fixture.runtime_id,
+                host_project_id,
+                Some(json!({ "source": "tenant-attach-test" })),
+                &context,
+            )
+            .await
+            .expect_err("host access revoked after authorization refuses the attach");
+            assert_eq!(status, StatusCode::NOT_FOUND);
+            assert_eq!(error.code.as_deref(), Some(TENANT_RUNTIME_NOT_FOUND_CODE));
+            assert_eq!(error.message, "runtime not found");
+            assert!(
+                fixture.tenant_leases().await?.is_empty(),
+                "a refused attach creates no lease"
+            );
+            Ok(())
+        })
+        .await
+}
+
+/// The attach checks host project access once it holds the runtime's row
+/// lock. Access revoked while the attach waits for that lock, held here by
+/// another transaction as a stop would hold it, refuses the attach once the
+/// lock is released.
+#[tokio::test]
+async fn tenant_attach_checks_host_access_after_waiting_for_the_runtime_lock() -> anyhow::Result<()>
+{
+    use tokio::time::{sleep, timeout};
+
+    let fixture = TenantAttachFixture::setup("tenant-attach-lock-wait").await?;
+    fixture
+        .run(async {
+            let fixture = &fixture;
+            let context = TenantAttachFixture::user_context(fixture.cross_org_writer);
+
+            let mut holder_connection = fixture.pool.get().await?;
+            let holder = holder_connection.transaction().await?;
+            let holder_pid: i32 = holder
+                .query_one("select pg_backend_pid()", &[])
+                .await?
+                .get(0);
+            holder
+                .query_one(
+                    "select id from runtimes where id = $1 for update",
+                    &[&fixture.runtime_id],
+                )
+                .await?;
+
+            let attach = ensure_runtime_tenant(
+                &fixture.state,
+                fixture.other_org_project_id,
+                fixture.runtime_id,
+                fixture.host_project_id,
+                Some(json!({ "source": "tenant-attach-test" })),
+                &context,
+            );
+            let revoke_while_the_attach_waits = async move {
+                // Not a timing assumption: wait until PostgreSQL reports a
+                // backend blocked by the holder, which only the attach can be.
+                let observer = fixture.pool.get().await?;
+                timeout(Duration::from_secs(10), async {
+                    loop {
+                        let blocked: i64 = observer
+                            .query_one(
+                                "select count(*)
+                                 from pg_stat_activity
+                                 where $1 = any(pg_blocking_pids(pid))",
+                                &[&holder_pid],
+                            )
+                            .await?
+                            .get(0);
+                        if blocked > 0 {
+                            return anyhow::Ok(());
+                        }
+                        sleep(Duration::from_millis(10)).await;
+                    }
+                })
+                .await
+                .map_err(|_| anyhow::anyhow!("the attach never waited for the runtime lock"))??;
+
+                observer
+                    .execute(
+                        "delete from project_memberships where project_id = $1 and user_id = $2",
+                        &[&fixture.host_project_id, &fixture.cross_org_writer],
+                    )
+                    .await?;
+                holder.rollback().await?;
+                anyhow::Ok(())
+            };
+            let (attached, revoked) = tokio::join!(attach, revoke_while_the_attach_waits);
+            revoked?;
+
+            let (status, Json(error)) = attached
+                .expect_err("host access revoked while the attach waited refuses the attach");
+            assert_eq!(status, StatusCode::NOT_FOUND);
+            assert_eq!(error.code.as_deref(), Some(TENANT_RUNTIME_NOT_FOUND_CODE));
+            assert!(
+                fixture.tenant_leases().await?.is_empty(),
+                "a refused attach creates no lease"
+            );
+            Ok(())
+        })
+        .await
+}
+
+/// A runtime whose project is deleted is answered as a runtime that does not
+/// exist, for a caller who could write to that project and for the service
+/// role alike.
+#[tokio::test]
+async fn tenant_attach_to_a_deleted_host_project_is_answered_as_a_missing_runtime(
+) -> anyhow::Result<()> {
+    let fixture = TenantAttachFixture::setup("tenant-attach-deleted-host").await?;
+    fixture
+        .run(async {
+            let fixture = &fixture;
+            let host_writer_token = fixture.user_token(fixture.host_writer)?;
+            let metadata = json!({ "source": "tenant-attach-test" });
+            let (missing_status, missing_body) = fixture
+                .attach(
+                    &host_writer_token,
+                    fixture.same_org_tenant_project_id,
+                    Uuid::new_v4(),
+                    metadata.clone(),
+                )
+                .await?;
+            assert_eq!(missing_status, StatusCode::NOT_FOUND, "{missing_body}");
+
+            // As project deletion marks it.
+            fixture
+                .pool
+                .get()
+                .await?
+                .execute(
+                    "update projects set status = 'deleted', updated_at = now() where id = $1",
+                    &[&fixture.host_project_id],
+                )
+                .await?;
+            for (case, bearer, tenant_project_id) in [
+                (
+                    "writer of both projects",
+                    host_writer_token.clone(),
+                    fixture.same_org_tenant_project_id,
+                ),
+                (
+                    "service role",
+                    SERVICE_ROLE_TOKEN.to_string(),
+                    fixture.service_tenant_project_id,
+                ),
+            ] {
+                let (status, body) = fixture
+                    .attach(
+                        &bearer,
+                        tenant_project_id,
+                        fixture.runtime_id,
+                        metadata.clone(),
+                    )
+                    .await?;
+                assert_eq!(status, missing_status, "{case}: {body}");
+                assert_eq!(
+                    body, missing_body,
+                    "{case}: the same answer as a missing runtime"
+                );
+            }
+            assert!(
+                fixture.tenant_leases().await?.is_empty(),
+                "a refused attach creates no lease"
+            );
+            Ok(())
+        })
+        .await
+}
+
+/// A tenant lease's metadata is the caller's description of the attachment:
+/// only its `source` and `label` strings are stored. Controller-owned keys,
+/// such as a launch attestation, and launch settings, such as a runtime image,
+/// are removed on the first attach and again on a re-attach, even when the
+/// attestation names the tenant lease's own id. A re-attach without metadata
+/// keeps what is stored.
+#[tokio::test]
+async fn tenant_lease_metadata_keeps_only_descriptive_strings_on_attach_and_reattach(
+) -> anyhow::Result<()> {
+    let fixture = TenantAttachFixture::setup("tenant-attach-metadata").await?;
+    fixture
+        .run(async {
+            let fixture = &fixture;
+            let token = fixture.user_token(fixture.host_writer)?;
+
+            let (status, body) = fixture
+                .attach(
+                    &token,
+                    fixture.same_org_tenant_project_id,
+                    fixture.runtime_id,
+                    json!({
+                        "source": "tenant-attach-test",
+                        "label": "first",
+                        "runtimeFlavor": "webdev",
+                        "runtimeAgentImage": "acme/runtime:one",
+                        "runtime_agent_image": "acme/runtime:one",
+                        "sizeId": "boost",
+                        "env": { "INSTAFY_ENABLE_BROWSER_SESSION": "1" },
+                        "_instafyManagedRuntimeLaunch": {
+                            "version": 1,
+                            "flavor": "webdev",
+                            "generation": Uuid::new_v4().to_string(),
+                        },
+                    }),
+                )
+                .await?;
+            assert_eq!(status, StatusCode::OK, "{body}");
+            let lease_id = body["leaseId"]
+                .as_str()
+                .and_then(|value| Uuid::parse_str(value).ok())
+                .ok_or_else(|| anyhow::anyhow!("no tenant lease id: {body}"))?;
+            assert_eq!(
+                fixture.lease_metadata(lease_id).await?,
+                Some(json!({ "source": "tenant-attach-test", "label": "first" })),
+                "first attach"
+            );
+
+            let (status, body) = fixture
+                .attach(
+                    &token,
+                    fixture.same_org_tenant_project_id,
+                    fixture.runtime_id,
+                    json!({
+                        "label": "second",
+                        "sizeId": "boost",
+                        "_instafyManagedRuntimeLaunch": {
+                            "version": 1,
+                            "flavor": "webdev",
+                            "generation": lease_id.to_string(),
+                        },
+                    }),
+                )
+                .await?;
+            assert_eq!(status, StatusCode::OK, "{body}");
+            assert_eq!(
+                body["leaseId"],
+                json!(lease_id.to_string()),
+                "a re-attach reuses the tenant lease: {body}"
+            );
+            assert_eq!(
+                fixture.lease_metadata(lease_id).await?,
+                Some(json!({ "label": "second" })),
+                "re-attach"
+            );
+
+            let (status, body) = fixture
+                .attach(
+                    &token,
+                    fixture.same_org_tenant_project_id,
+                    fixture.runtime_id,
+                    JsonValue::Null,
+                )
+                .await?;
+            assert_eq!(status, StatusCode::OK, "{body}");
+            assert_eq!(body["leaseId"], json!(lease_id.to_string()), "{body}");
+            assert_eq!(
+                fixture.lease_metadata(lease_id).await?,
+                Some(json!({ "label": "second" })),
+                "a re-attach without metadata keeps the stored metadata"
+            );
+            Ok(())
+        })
+        .await
+}
+
+/// A tenant lease ends with the shared lease it attached under: releasing the
+/// runtime's lease releases its tenant leases, and so does a failed launch.
+/// After the runtime relaunches under a new shared lease, a re-attach creates
+/// a tenant lease under that one. It does so even when a tenant lease under an
+/// earlier shared lease was left unreleased, as releases before this rule
+/// left them.
+#[tokio::test]
+async fn tenant_leases_end_with_their_shared_lease_and_follow_a_relaunch() -> anyhow::Result<()> {
+    let fixture = TenantAttachFixture::setup("tenant-attach-relaunch").await?;
+    fixture
+        .run(async {
+            let fixture = &fixture;
+            let token = fixture.user_token(fixture.host_writer)?;
+            let attach = || async {
+                let (status, body) = fixture
+                    .attach(
+                        &token,
+                        fixture.same_org_tenant_project_id,
+                        fixture.runtime_id,
+                        json!({ "source": "tenant-attach-test" }),
+                    )
+                    .await?;
+                anyhow::ensure!(status == StatusCode::OK, "{status}: {body}");
+                let lease_id = body["leaseId"]
+                    .as_str()
+                    .and_then(|value| Uuid::parse_str(value).ok())
+                    .ok_or_else(|| anyhow::anyhow!("no tenant lease id: {body}"))?;
+                let parent_lease_id = body["parentLeaseId"]
+                    .as_str()
+                    .and_then(|value| Uuid::parse_str(value).ok())
+                    .ok_or_else(|| anyhow::anyhow!("no parent lease id: {body}"))?;
+                anyhow::Ok((lease_id, parent_lease_id))
+            };
+
+            let (first_tenant_lease, parent) = attach().await?;
+            assert_eq!(parent, fixture.shared_lease_id);
+
+            // The host's runtime stops: its shared lease is released.
+            {
+                let mut connection = fixture.pool.get().await?;
+                let transaction = connection.transaction().await?;
+                mark_runtime_lease_released(
+                    &transaction,
+                    &fixture.runtime_id,
+                    &fixture.shared_lease_id,
+                    false,
+                )
+                .await
+                .map_err(|(_, Json(error))| anyhow::anyhow!(error.message))?;
+                transaction.commit().await?;
+            }
+            assert_eq!(
+                fixture.lease_state(first_tenant_lease).await?,
+                ("released".to_string(), true),
+                "released with its shared lease"
+            );
+
+            let second_shared_lease = fixture.relaunch_under_new_shared_lease().await?;
+            let (second_tenant_lease, parent) = attach().await?;
+            assert_ne!(second_tenant_lease, first_tenant_lease);
+            assert_eq!(parent, second_shared_lease);
+
+            // A shared lease released without its tenant leases, as releases
+            // did before tenant leases ended with their parent.
+            fixture
+                .pool
+                .get()
+                .await?
+                .execute(
+                    "update runtime_leases
+                     set status = 'released', released_at = now()
+                     where id = $1",
+                    &[&second_shared_lease],
+                )
+                .await?;
+            let third_shared_lease = fixture.relaunch_under_new_shared_lease().await?;
+            let (third_tenant_lease, parent) = attach().await?;
+            assert_ne!(
+                third_tenant_lease, second_tenant_lease,
+                "a tenant lease under an earlier shared lease is not reused"
+            );
+            assert_eq!(parent, third_shared_lease);
+
+            let leases = fixture.tenant_leases().await?;
+            assert_eq!(
+                leases,
+                vec![
+                    (
+                        first_tenant_lease,
+                        fixture.same_org_tenant_project_id,
+                        Some(fixture.shared_lease_id),
+                    ),
+                    (
+                        second_tenant_lease,
+                        fixture.same_org_tenant_project_id,
+                        Some(second_shared_lease),
+                    ),
+                    (
+                        third_tenant_lease,
+                        fixture.same_org_tenant_project_id,
+                        Some(third_shared_lease),
+                    ),
+                ]
+            );
+
+            // A failed launch of the runtime's lease ends its tenant leases
+            // as well.
+            assert!(
+                mark_runtime_launch_failed_if_current(
+                    &fixture.state,
+                    &fixture.host_project_id,
+                    &fixture.runtime_id,
+                    &third_shared_lease,
+                    OPEN_PROVIDER,
+                )
+                .await?,
+                "the third shared lease is the runtime's current launch"
+            );
+            assert_eq!(
+                fixture.lease_state(third_tenant_lease).await?,
+                ("released".to_string(), true),
+                "released with its failed shared lease"
+            );
+            Ok(())
+        })
+        .await
+}
+
+/// A requeue relaunch of a runtime with no live lease copies the metadata of
+/// the runtime's newest own launch. Tenant leases on the runtime are newer
+/// but launched nothing: neither another project's nor one that attached the
+/// runtime's own project, whose parent lease is gone.
+#[tokio::test]
+async fn requeue_metadata_ignores_newer_tenant_leases() -> anyhow::Result<()> {
+    let fixture = TenantAttachFixture::setup("tenant-requeue-metadata").await?;
+    fixture
+        .run(async {
+            let fixture = &fixture;
+            let connection = fixture.pool.get().await?;
+            connection
+                .execute(
+                    "update runtime_leases
+                     set status = 'released', released_at = now() - interval '30 minutes'
+                     where id = $1",
+                    &[&fixture.shared_lease_id],
+                )
+                .await?;
+            connection
+                .execute(
+                    "update runtimes set active_lease_id = null, status = 'stopped' where id = $1",
+                    &[&fixture.runtime_id],
+                )
+                .await?;
+            for (tenant_project_id, parent_lease_id, minutes_ago) in [
+                (
+                    fixture.same_org_tenant_project_id,
+                    Some(fixture.shared_lease_id),
+                    10,
+                ),
+                (fixture.host_project_id, None, 5),
+            ] {
+                connection
+                    .execute(
+                        "insert into runtime_leases
+                            (project_id, runtime_id, status, scope, parent_lease_id, metadata,
+                             requested_at)
+                         values ($1, $2, 'active', 'tenant', $3, $4,
+                                 now() - ($5::integer * interval '1 minute'))",
+                        &[
+                            &tenant_project_id,
+                            &fixture.runtime_id,
+                            &parent_lease_id,
+                            &PgJson(json!({ "source": "tenant", "sizeId": "boost" })),
+                            &minutes_ago,
+                        ],
+                    )
+                    .await?;
+            }
+
+            let runtime = {
+                let mut connection = fixture.pool.get().await?;
+                let transaction = connection.transaction().await?;
+                let runtime = fetch_runtime_for_update(&transaction, &fixture.runtime_id)
+                    .await
+                    .map_err(|(_, Json(error))| anyhow::anyhow!(error.message))?;
+                transaction.rollback().await?;
+                runtime
+            };
+            let metadata = load_runtime_requeue_metadata(&fixture.state, &runtime)
+                .await
+                .map_err(|(_, Json(error))| anyhow::anyhow!(error.message))?;
+            assert_eq!(
+                metadata,
+                Some(json!({ "source": "host", "sizeId": "standard" })),
+                "the runtime's own launch, not a tenant's"
+            );
+            Ok(())
+        })
+        .await
+}
+
+/// A tenant lease registers no runtime: `POST /runtime/register` answers it
+/// as a lease that does not exist, before taking any lock. A stop of the host
+/// runtime locks the runtime and then its tenant leases, so a registration
+/// holding a tenant lease while it waits for that runtime could deadlock with
+/// it. Here the registration is answered while another transaction holds the
+/// host runtime, as a stop does.
+#[tokio::test]
+async fn tenant_lease_registration_is_refused_before_any_lock() -> anyhow::Result<()> {
+    use tokio::time::timeout;
+
+    let fixture = TenantAttachFixture::setup("tenant-lease-register").await?;
+    fixture
+        .run(async {
+            let fixture = &fixture;
+            let (status, body) = fixture
+                .attach(
+                    &fixture.user_token(fixture.host_writer)?,
+                    fixture.same_org_tenant_project_id,
+                    fixture.runtime_id,
+                    json!({ "source": "tenant-attach-test" }),
+                )
+                .await?;
+            assert_eq!(status, StatusCode::OK, "{body}");
+            let tenant_lease_id = body["leaseId"]
+                .as_str()
+                .and_then(|value| Uuid::parse_str(value).ok())
+                .ok_or_else(|| anyhow::anyhow!("no tenant lease id: {body}"))?;
+            let tenant_lease_before = fixture.lease_state(tenant_lease_id).await?;
+
+            let (missing_status, missing_body) = fixture
+                .register(
+                    SERVICE_ROLE_TOKEN,
+                    fixture.same_org_tenant_project_id,
+                    Uuid::new_v4(),
+                )
+                .await?;
+            assert_eq!(missing_status, StatusCode::NOT_FOUND, "{missing_body}");
+
+            // The host runtime's row, locked and changed but not committed,
+            // as a stop leaves it before it ends the tenant leases.
+            let mut holder_connection = fixture.pool.get().await?;
+            let holder = holder_connection.transaction().await?;
+            holder
+                .execute(
+                    "update runtimes set updated_at = now() where id = $1",
+                    &[&fixture.runtime_id],
+                )
+                .await?;
+
+            let (status, body) = timeout(
+                Duration::from_secs(10),
+                fixture.register(
+                    SERVICE_ROLE_TOKEN,
+                    fixture.same_org_tenant_project_id,
+                    tenant_lease_id,
+                ),
+            )
+            .await
+            .map_err(|_| anyhow::anyhow!("the registration waited for the host runtime"))??;
+            holder.rollback().await?;
+            assert_eq!(status, missing_status, "{body}");
+            assert_eq!(
+                body, missing_body,
+                "the same answer as a lease that does not exist"
+            );
+            assert_eq!(
+                fixture.lease_state(tenant_lease_id).await?,
+                tenant_lease_before,
+                "a refused registration leaves the tenant lease as it is"
+            );
+            Ok(())
+        })
+        .await
+}
