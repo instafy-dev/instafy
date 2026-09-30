@@ -35,8 +35,10 @@ $$;
 revoke all on function public.user_agents_credential_owner_check()
   from public, anon, authenticated;
 
-drop trigger if exists user_agents_credential_owner on public.user_agents;
-create trigger user_agents_credential_owner
+-- CREATE OR REPLACE TRIGGER takes SHARE ROW EXCLUSIVE on user_agents, which
+-- blocks writes to it but not reads; a DROP TRIGGER would take ACCESS
+-- EXCLUSIVE even when the trigger does not exist.
+create or replace trigger user_agents_credential_owner
   before insert or update of credential_id, user_id on public.user_agents
   for each row
   execute function public.user_agents_credential_owner_check();
