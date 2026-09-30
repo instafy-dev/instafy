@@ -12,7 +12,7 @@ use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
-use runtime_agent::codex::{CodexClient, CodexConfig, CodexRunOptions};
+use runtime_agent::codex::{CodexClient, CodexConfig, CodexExecutionError, CodexRunOptions};
 use runtime_agent::job_cancel::JobCancelSignal;
 use serde_json::{Value, json};
 use uuid::Uuid;
@@ -21,6 +21,12 @@ const CHILD_MARKER: &str = "INSTAFY_PROXY_RETRY_TEST_CHILD";
 const API_KEY: &str = "inert-local-retry-test-key";
 const FINAL_TEXT: &str = "LOCAL_RETRY_OK";
 const STEP_TEXT: &str = "LOCAL_RETRY_STEP_DONE";
+const FINISHED_CALL_ID: &str = "call-local-finished";
+const CUT_OFF_CALL_ID: &str = "call-local-cut-off";
+const TOOL_CMD: &str = "printf x >> tool-count.txt; printf TOOL_APPLIED";
+/// Written by the command of the tool call the upstream finalized as incomplete, so the
+/// parent can see whether it ran.
+const CUT_OFF_CALL_MARKER: &str = "cut-off-call.txt";
 
 struct MockState {
     scenario: String,
@@ -33,11 +39,14 @@ fn sse(item: Value) -> Response {
     sse_with_end_turn(item, None)
 }
 
-fn sse_with_end_turn(item: Value, end_turn: Option<bool>) -> Response {
-    let usage = json!({"input_tokens":10,"output_tokens":5,"total_tokens":15,
+fn fixture_usage() -> Value {
+    json!({"input_tokens":10,"output_tokens":5,"total_tokens":15,
         "input_tokens_details":{"cached_tokens":0},
-        "output_tokens_details":{"reasoning_tokens":0}});
-    sse_with_usage(item, end_turn, Some(usage))
+        "output_tokens_details":{"reasoning_tokens":0}})
+}
+
+fn sse_with_end_turn(item: Value, end_turn: Option<bool>) -> Response {
+    sse_with_usage(item, end_turn, Some(fixture_usage()))
 }
 
 fn sse_with_usage(item: Value, end_turn: Option<bool>, usage: Option<Value>) -> Response {
@@ -75,6 +84,38 @@ fn sse_output(item: Option<Value>, end_turn: Option<bool>, usage: Option<Value>)
         .map(|event| format!("data: {event}\n\n"))
         .collect::<String>();
     ([("content-type", "text/event-stream")], body).into_response()
+}
+
+/// A response that streams `events` and is then stopped early for `reason` with
+/// `response.incomplete`. The provider has produced and billed it by then.
+fn sse_incomplete(events: Vec<Value>, reason: &str) -> Response {
+    let response_id = format!("resp-{}", Uuid::new_v4());
+    let created = json!({"type":"response.created","response":{"id":response_id,"status":"in_progress","model":"gpt-6-luna","output":[]}});
+    let incomplete = json!({"type":"response.incomplete","response":{"id":response_id,
+        "object":"response", "status":"incomplete", "model":"gpt-6-luna", "error":null,
+        "incomplete_details":{"reason":reason}, "usage":fixture_usage()}});
+    let body = std::iter::once(created)
+        .chain(events)
+        .chain(std::iter::once(incomplete))
+        .map(|event| format!("data: {event}\n\n"))
+        .collect::<String>();
+    ([("content-type", "text/event-stream")], body).into_response()
+}
+
+/// A completed reasoning item, which the managed models finish before every answer, then the
+/// start of an answer that the stop cuts off.
+fn reasoning_then_partial_answer() -> Vec<Value> {
+    vec![
+        json!({"type":"response.output_item.done","output_index":0,"item":{"type":"reasoning",
+            "id":"rs-local-incomplete",
+            "summary":[{"type":"summary_text","text":"Planning the answer."}],
+            "encrypted_content":"bG9jYWwtaW5jb21wbGV0ZS1yZWFzb25pbmc="}}),
+        json!({"type":"response.output_item.added","output_index":1,"item":{"type":"message",
+            "id":"msg-local-incomplete","role":"assistant","status":"in_progress",
+            "content":[{"type":"output_text","text":"A partial","annotations":[]}]}}),
+        json!({"type":"response.output_text.delta","item_id":"msg-local-incomplete",
+            "output_index":1,"content_index":0,"delta":" answer"}),
+    ]
 }
 
 /// The Instafy proxy's envelope for a retryable upstream rate limit. The proxy always sends a
@@ -221,29 +262,47 @@ async fn responses(
         "tool_once" => {
             let supplied_history = body["input"].to_string();
             if !supplied_history.contains("TOOL_APPLIED") {
-                let mut names = Vec::new();
-                tool_names(&body["tools"], &mut names);
-                for entry in body["input"].as_array().into_iter().flatten() {
-                    if entry["type"] == "additional_tools" {
-                        tool_names(&entry["tools"], &mut names);
-                    }
-                }
-                if names.iter().any(|name| name == "exec") {
-                    return sse(json!({"type":"custom_tool_call","id":"tool-local-retry",
-                        "call_id":"call-local-retry","name":"exec","status":"completed",
-                        "input":"const result = await tools.exec_command({cmd: \"printf x >> tool-count.txt; printf TOOL_APPLIED\", max_output_tokens: 1024}); text(result);"}));
-                }
-                if names.iter().any(|name| name == "exec_command") {
-                    return sse(json!({"type":"function_call","id":"tool-local-retry",
-                        "call_id":"call-local-retry","name":"exec_command","status":"completed",
-                        "arguments":json!({"cmd":"printf x >> tool-count.txt; printf TOOL_APPLIED","max_output_tokens":1024}).to_string()}));
-                }
-                state.errors.lock().unwrap().push(format!(
-                    "fixture needs an offered exec or exec_command tool; received names: {names:?}"
-                ));
-                return StatusCode::BAD_REQUEST.into_response();
+                return match workspace_command_call(&state, &body, "call-local-retry", TOOL_CMD) {
+                    Some(call) => sse(call),
+                    None => StatusCode::BAD_REQUEST.into_response(),
+                };
             }
             503
+        }
+        // The provider stops the answer after a finished reasoning item. A retry would send
+        // the same input again, plus that reasoning, under the same cap or filter.
+        "incomplete_max_output_tokens" => {
+            return sse_incomplete(reasoning_then_partial_answer(), "max_output_tokens");
+        }
+        "incomplete_content_filter" => {
+            return sse_incomplete(reasoning_then_partial_answer(), "content_filter");
+        }
+        // Parallel tool calls: the first finishes, and max_output_tokens cuts the second off,
+        // which the upstream then finalizes as incomplete. The retry is the continuation that
+        // hands the model the first call's output.
+        "incomplete_after_tool_call" => {
+            if ordinal > 1 {
+                return answer(FINAL_TEXT);
+            }
+            let cut_off_cmd = format!("printf x >> {CUT_OFF_CALL_MARKER}");
+            let (Some(finished), Some(mut cut_off)) = (
+                workspace_command_call(&state, &body, FINISHED_CALL_ID, TOOL_CMD),
+                workspace_command_call(&state, &body, CUT_OFF_CALL_ID, &cut_off_cmd),
+            ) else {
+                return StatusCode::BAD_REQUEST.into_response();
+            };
+            cut_off["status"] = json!("in_progress");
+            let added =
+                json!({"type":"response.output_item.added","output_index":1,"item":cut_off});
+            cut_off["status"] = json!("incomplete");
+            return sse_incomplete(
+                vec![
+                    json!({"type":"response.output_item.done","output_index":0,"item":finished}),
+                    added,
+                    json!({"type":"response.output_item.done","output_index":1,"item":cut_off}),
+                ],
+                "max_output_tokens",
+            );
         }
         other => {
             state
@@ -267,6 +326,42 @@ async fn responses(
         Json(json!({"error":{"message":"local scripted failure","type":"fixture_error","code":"fixture_error"}})),
     )
         .into_response()
+}
+
+/// A completed call of the command tool the request offers, code mode's `exec` or else
+/// `exec_command`, that runs `cmd` in the workspace. Records a fixture error when the request
+/// offers neither.
+fn workspace_command_call(
+    state: &MockState,
+    body: &Value,
+    call_id: &str,
+    cmd: &str,
+) -> Option<Value> {
+    let mut names = Vec::new();
+    tool_names(&body["tools"], &mut names);
+    for entry in body["input"].as_array().into_iter().flatten() {
+        if entry["type"] == "additional_tools" {
+            tool_names(&entry["tools"], &mut names);
+        }
+    }
+    let id = format!("tool-{call_id}");
+    if names.iter().any(|name| name == "exec") {
+        let input = format!(
+            "const result = await tools.exec_command({{cmd: {}, max_output_tokens: 1024}}); text(result);",
+            json!(cmd)
+        );
+        return Some(json!({"type":"custom_tool_call","id":id,
+            "call_id":call_id,"name":"exec","status":"completed","input":input}));
+    }
+    if names.iter().any(|name| name == "exec_command") {
+        return Some(json!({"type":"function_call","id":id,
+            "call_id":call_id,"name":"exec_command","status":"completed",
+            "arguments":json!({"cmd":cmd,"max_output_tokens":1024}).to_string()}));
+    }
+    state.errors.lock().unwrap().push(format!(
+        "fixture needs an offered exec or exec_command tool; received names: {names:?}"
+    ));
+    None
 }
 
 fn tool_names(value: &Value, output: &mut Vec<String>) {
@@ -446,6 +541,28 @@ async fn run_scenario(scenario: &str, expected_requests: usize) -> Result<()> {
             "recovery must retain the completed tool result in the same session"
         );
     }
+    if scenario == "incomplete_after_tool_call" {
+        assert_eq!(fs::read_to_string(workspace.join("tool-count.txt"))?, "x");
+        assert!(
+            !workspace.join(CUT_OFF_CALL_MARKER).exists(),
+            "a tool call the upstream finalized as incomplete must never run"
+        );
+        let continued = requests[1]["input"].as_array().context("request input")?;
+        assert!(
+            continued
+                .iter()
+                .any(|item| item["call_id"] == FINISHED_CALL_ID
+                    && item["type"]
+                        .as_str()
+                        .is_some_and(|kind| kind.ends_with("_call_output"))
+                    && item["output"].to_string().contains("TOOL_APPLIED")),
+            "the retry must continue with the finished call's output: {continued:?}"
+        );
+        assert!(
+            !requests[1]["input"].to_string().contains(CUT_OFF_CALL_ID),
+            "the cut-off call must not reach the history"
+        );
+    }
     Ok(())
 }
 
@@ -487,6 +604,21 @@ scenario_test!(
     completed_tool_is_not_replayed_after_stream_failure,
     "tool_once",
     3
+);
+scenario_test!(
+    incomplete_max_output_tokens_is_not_resent,
+    "incomplete_max_output_tokens",
+    1
+);
+scenario_test!(
+    incomplete_content_filter_is_not_resent,
+    "incomplete_content_filter",
+    1
+);
+scenario_test!(
+    incomplete_after_tool_call_continues_with_its_output,
+    "incomplete_after_tool_call",
+    2
 );
 scenario_test!(routing_failure_does_not_start_main_fallback, "routing", 2);
 scenario_test!(
@@ -563,11 +695,22 @@ async fn isolated_retry_child() -> Result<()> {
     }
     if matches!(
         scenario.as_str(),
-        "transient" | "transient_429" | "browser_step_429s"
+        "transient" | "transient_429" | "browser_step_429s" | "incomplete_after_tool_call"
     ) {
         assert_eq!(result?.final_json["summary"], FINAL_TEXT);
     } else {
         let error = result.expect_err("scripted failure must remain an error");
+        if let Some(reason) = scenario.strip_prefix("incomplete_") {
+            // The scenario names the reason the provider stopped the response, and the run
+            // must end with that reason rather than an exhausted stream retry.
+            let error = error
+                .downcast_ref::<CodexExecutionError>()
+                .context("an incomplete response ends the turn with a Codex error")?;
+            assert_eq!(
+                error.message,
+                format!("Incomplete response returned, reason: {reason}")
+            );
+        }
         let message = format!("{error:#}").to_ascii_lowercase();
         if scenario == "persistent_429" {
             // The final error must still say it was a rate limit so it can be classified.
@@ -583,7 +726,10 @@ async fn isolated_retry_child() -> Result<()> {
         if scenario == "timeout" {
             assert!(message.contains("timed out"), "{message}");
         }
-        if scenario.starts_with("terminal_") || scenario == "cancel" {
+        if scenario.starts_with("terminal_")
+            || scenario.starts_with("incomplete_")
+            || scenario == "cancel"
+        {
             // Keep the process alive beyond Codex's initial stream-retry backoff:
             // returning an error must not leave a scheduled request running behind it.
             tokio::time::sleep(Duration::from_millis(1200)).await;

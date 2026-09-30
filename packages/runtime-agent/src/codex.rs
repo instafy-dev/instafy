@@ -5577,6 +5577,26 @@ mod tests {
     }
 
     #[test]
+    fn should_retry_codex_run_does_not_replay_an_incomplete_response() {
+        // The provider stopped the response early and billed it. Unless a tool call finished
+        // first, Codex ends the turn with this error instead of sending the request again, and
+        // a whole-run replay would send the same input under the same cap or filter.
+        for reason in ["max_output_tokens", "content_filter", "unknown"] {
+            let message = format!("Incomplete response returned, reason: {reason}");
+            // After a finished tool call it stays a stream error that Codex retries as the
+            // continuation. A turn whose continuations keep stopping early ends when Codex's
+            // stream retries, or the browser lanes' own cap, run out.
+            for text in [
+                message.clone(),
+                format!("stream disconnected before completion: {message}"),
+                format!("Codex stream aborted after 5 retries (limit 5): {message}"),
+            ] {
+                assert!(!should_retry_codex_run(&text), "{text}");
+            }
+        }
+    }
+
+    #[test]
     fn stream_auth_errors_still_fail_fast() {
         assert!(should_terminate_codex_stream(Some(401), 0, 5));
         assert!(should_terminate_codex_stream(Some(403), 0, 5));
