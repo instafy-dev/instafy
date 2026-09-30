@@ -623,7 +623,6 @@ async fn spawn_stack_with_service_tier_endpoints(
         EnvGuard::set("CONTROLLER_INTERNAL_TOKEN", Some("internal")),
         EnvGuard::set("PROXY_CREDENTIAL_LEASE_TOKEN", Some(LEASE_BEARER)),
         EnvGuard::set("PROXY_SIGNING_SECRET", Some(SIGNING_SECRET)),
-        EnvGuard::set("PROXY_CREDIT_BURN_AMOUNT", None),
         EnvGuard::set("PROXY_REQUIRE_CONTROLLER_AUTH", None),
         EnvGuard::set(
             "PROXY_REQUIRE_CREDENTIAL_CLAIM",

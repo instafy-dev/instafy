@@ -326,11 +326,7 @@ mod tests {
         });
 
         let source = ControllerCredentialSource::new(
-            ControllerClient::new(
-                format!("http://{addr}"),
-                "service-token",
-                "credential-lease-token",
-            ),
+            ControllerClient::new(format!("http://{addr}"), "credential-lease-token"),
             Duration::from_secs(60),
         );
         let first = source
@@ -386,11 +382,7 @@ mod tests {
         });
 
         let source = ControllerCredentialSource::new(
-            ControllerClient::new(
-                format!("http://{addr}"),
-                "service-token",
-                "credential-lease-token",
-            ),
+            ControllerClient::new(format!("http://{addr}"), "credential-lease-token"),
             Duration::from_secs(60),
         );
         let _ = source
@@ -435,11 +427,7 @@ mod tests {
             let _ = axum::serve(listener, app).await;
         });
         let source = ControllerCredentialSource::new(
-            ControllerClient::new(
-                format!("http://{addr}"),
-                "service-token",
-                "credential-lease-token",
-            ),
+            ControllerClient::new(format!("http://{addr}"), "credential-lease-token"),
             Duration::from_secs(60),
         );
 

@@ -21,7 +21,6 @@ services:
       PROXY_CONTROLLER_BASE_URL: ${PROXY_CONTROLLER_BASE_URL:-http://host.docker.internal:80}
       CONTROLLER_INTERNAL_TOKEN: ${CONTROLLER_INTERNAL_TOKEN:-}
       PROXY_SIGNING_SECRET: ${PROXY_SIGNING_SECRET:-}
-      PROXY_CREDIT_BURN_AMOUNT: ${PROXY_CREDIT_BURN_AMOUNT:-}
     volumes:
       - ${PROXY_CODEX_VOLUME:-/opt/instafy/proxy-codex}:/root/.codex:ro
     extra_hosts:

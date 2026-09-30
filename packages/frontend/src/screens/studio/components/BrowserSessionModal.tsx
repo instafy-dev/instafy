@@ -2508,10 +2508,11 @@ export function BrowserSessionModal({
     </div>
   ) : null;
 
-  const sessionControls = !shouldCollapseDocked && projectId ? (
+  const renderSessionControls = (actions?: ReactNode) => !shouldCollapseDocked && projectId ? (
     <SharedBrowserSessionControl
       runtimeId={selectedSessionRuntimeId ?? chosenRuntimeId ?? resumeRuntimeId}
       resumeUrl={sessionResumeUrl}
+      actions={actions}
       open={sessionChooserOpen}
       busy={sessionChoices.scope === selectionScope && sessionChoices.loading}
       candidates={sessionChoices.scope === selectionScope ? sessionChoices.candidates : []}
@@ -2535,6 +2536,28 @@ export function BrowserSessionModal({
       {sessionChooserOpen ? <SharedBrowserProfileStatus projectId={projectId} runtimeId={selectedSessionRuntimeId} currentUserId={currentUserId} active /> : null}
     </SharedBrowserSessionControl>
   ) : null;
+
+  const renderCollaborationControls = (controls: ReactNode) => (
+    <SharedBrowserCollaborationControls
+      client={collaboration.client}
+      compact={sharedBrowserChrome?.compact ?? false}
+      localControlOwner={effectiveAgentControlOwner ?? controlOwner}
+      onGrantControl={(participantId) => {
+        collaboration.grantControl(participantId);
+      }}
+      onReleaseControl={() => {
+        collaboration.releaseControl();
+      }}
+      onRequestControl={() => {
+        collaboration.requestControl();
+      }}
+      onTakeControl={() => {
+        collaboration.takeControl();
+      }}
+    >
+      {controls}
+    </SharedBrowserCollaborationControls>
+  );
 
   const humanInputControls = !shouldCollapseDocked && humanInputIdentityKey
     ? <BrowserHumanInputStatus {...browserHumanInputOptions} state={browserHumanInputState} /> : null;
@@ -2579,7 +2602,7 @@ export function BrowserSessionModal({
           </div>
           <div className="flex flex-none items-center gap-1">
             {humanInputControls}
-            {sessionControls}
+            {renderSessionControls()}
             {!forceViewportFullscreenDocked ? (
               <BrowserExpandButton
                 expanded={fullscreen}
@@ -2606,41 +2629,28 @@ export function BrowserSessionModal({
           {...sharedBrowserChrome}
           controlOwner={effectiveAgentControlOwner ?? controlOwner}
           interactionEnabled={humanInputEnabled}
-          toolbarActions={
+          toolbarActions={(compactNavigation) => (
             <>
-              {humanInputControls}
-              <SharedBrowserCollaborationControls
-                client={collaboration.client}
-                compact={sharedBrowserChrome.compact ?? false}
-                localControlOwner={effectiveAgentControlOwner ?? controlOwner}
-                onGrantControl={(participantId) => {
-                  collaboration.grantControl(participantId);
-                }}
-                onReleaseControl={() => {
-                  collaboration.releaseControl();
-                }}
-                onRequestControl={() => {
-                  collaboration.requestControl();
-                }}
-                onTakeControl={() => {
-                  collaboration.takeControl();
-                }}
-              />
-              {sessionControls}
-              {!forceViewportFullscreenDocked ? (
-                <BrowserExpandButton
-                  expanded={fullscreen}
-                  onPress={toggleFullscreen}
-                />
+              {humanInputIdentityKey ? (
+                <BrowserHumanInputStatus {...browserHumanInputOptions} state={browserHumanInputState}
+                  renderControls={renderCollaborationControls} />
+              ) : renderCollaborationControls(null)}
+              {renderSessionControls(sharedBrowserChrome.compact ? <>
+                {compactNavigation}
+                {!forceViewportFullscreenDocked ? <BrowserExpandButton expanded={fullscreen} showLabel
+                  onPress={() => { setSessionChooserOpen(false); toggleFullscreen(); }} /> : null}
+              </> : null)}
+              {!projectId ? compactNavigation : null}
+              {!forceViewportFullscreenDocked && (!sharedBrowserChrome.compact || !projectId) ? (
+                <BrowserExpandButton expanded={fullscreen} onPress={toggleFullscreen} />
               ) : null}
             </>
-          }
+          )}
           toolbarLeading={toolbarLeading}
           toolbarStatus={
-            <BrowserSessionStatusPill
-              compact={sharedBrowserChrome.compact}
-              status={displayStatus}
-            />
+            <span className={sharedBrowserChrome.compact ? "sr-only" : undefined}>
+              <BrowserSessionStatusPill status={displayStatus} />
+            </span>
           }
         />
       ) : null}

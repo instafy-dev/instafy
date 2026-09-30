@@ -32,7 +32,8 @@ export type SharedBrowserChromeProps = {
   onClearError: () => void;
   toolbarLeading?: ReactNode;
   toolbarStatus?: ReactNode;
-  toolbarActions?: ReactNode;
+  /** Put compact history and page controls in the existing browser options menu. */
+  toolbarActions?: ReactNode | ((compactNavigation: ReactNode) => ReactNode);
   controlOwner?: SharedBrowserControlOwner;
   interactionEnabled?: boolean;
   controls?: {
@@ -164,6 +165,51 @@ export function SharedBrowserChrome({
     }
   };
 
+  const hasNavigationMenu = typeof toolbarActions === "function";
+  const historyControls = (
+    <span className={compact && !hasNavigationMenu ? "hidden" : "inline-flex items-center gap-0.5"}>
+      <ChromeButton
+        disabled={controlsDisabled || !controls.history || historyPage?.canGoBack === false}
+        label="Back"
+        onClick={() => activePage && onBack(activePage.id)}
+        testId="shared-browser-back"
+      >
+        <NavArrowLeft aria-hidden="true" className="h-4 w-4" />
+      </ChromeButton>
+      <ChromeButton
+        disabled={controlsDisabled || !controls.history || historyPage?.canGoForward === false}
+        label="Forward"
+        onClick={() => activePage && onForward(activePage.id)}
+        testId="shared-browser-forward"
+      >
+        <NavArrowRight aria-hidden="true" className="h-4 w-4" />
+      </ChromeButton>
+    </span>
+  );
+  const pageSelector = pages.length > 1 ? (
+    <select
+      aria-label="Shared browser tab"
+      className={`h-8 shrink-0 truncate rounded-md border border-slate-200 bg-white text-xs text-slate-700 outline-none focus:border-primary-400 focus:ring-2 focus:ring-primary-500/20 max-[540px]:h-10 pointer-coarse:h-11 dark:border-[color:var(--color-studio-dark-raised-control-border)] dark:bg-slate-950 dark:text-slate-200 ${compact ? hasNavigationMenu ? "min-w-0 flex-1 px-2" : "w-10 px-1" : "w-36 px-2"}`}
+      data-testid="shared-browser-page-select"
+      disabled={!resolved || busy || !controls.focusPage || !humanHasControl}
+      onChange={(event) => onFocusPage(event.target.value)}
+      title={activePage ? pageOptionLabel(activePage) : "Shared browser tab"}
+      value={activePage?.id ?? ""}
+    >
+      {pages.map((page) => (
+        <option key={page.id} value={page.id}>
+          {pageOptionLabel(page)}
+        </option>
+      ))}
+    </select>
+  ) : null;
+  const compactNavigation = compact ? (
+    <div className="flex min-w-0 items-center gap-2 px-1 py-1" aria-label="Browser navigation">
+      {historyControls}
+      {pageSelector}
+    </div>
+  ) : null;
+
   return (
     <div
       aria-busy={busy || undefined}
@@ -173,59 +219,27 @@ export function SharedBrowserChrome({
     >
       <BrowserChromeShell
         label="Shared browser controls"
+        compact={compact}
         leading={toolbarLeading}
         navigation={
           <div className="flex items-center gap-0.5">
-        <span className={compact ? "hidden" : "inline-flex items-center gap-0.5"}>
-          <ChromeButton
-            disabled={controlsDisabled || !controls.history || historyPage?.canGoBack === false}
-            label="Back"
-            onClick={() => activePage && onBack(activePage.id)}
-            testId="shared-browser-back"
-          >
-            <NavArrowLeft aria-hidden="true" className="h-4 w-4" />
-          </ChromeButton>
-          <ChromeButton
-            disabled={controlsDisabled || !controls.history || historyPage?.canGoForward === false}
-            label="Forward"
-            onClick={() => activePage && onForward(activePage.id)}
-            testId="shared-browser-forward"
-          >
-            <NavArrowRight aria-hidden="true" className="h-4 w-4" />
-          </ChromeButton>
-        </span>
-        <ChromeButton
-          disabled={controlsDisabled || !controls.reload}
-          label="Reload"
-          onClick={() => activePage && onReload(activePage.id)}
-          testId="shared-browser-reload"
-        >
-          <Refresh
-            aria-hidden="true"
-            className={`h-4 w-4 ${pendingAction === "reload" ? "animate-spin" : ""}`}
-          />
-        </ChromeButton>
+            {!compact || !hasNavigationMenu ? historyControls : null}
+            <ChromeButton
+              disabled={controlsDisabled || !controls.reload}
+              label="Reload"
+              onClick={() => activePage && onReload(activePage.id)}
+              testId="shared-browser-reload"
+            >
+              <Refresh
+                aria-hidden="true"
+                className={`h-4 w-4 ${pendingAction === "reload" ? "animate-spin" : ""}`}
+              />
+            </ChromeButton>
           </div>
         }
         address={
           <div className="flex min-w-0 items-center gap-1">
-            {pages.length > 1 ? (
-              <select
-                aria-label="Shared browser tab"
-                className={`h-8 shrink-0 truncate rounded-md border border-slate-200 bg-white text-xs text-slate-700 outline-none focus:border-primary-400 focus:ring-2 focus:ring-primary-500/20 max-[540px]:h-10 pointer-coarse:h-11 dark:border-[color:var(--color-studio-dark-raised-control-border)] dark:bg-slate-950 dark:text-slate-200 ${compact ? "w-10 px-1" : "w-36 px-2"}`}
-                data-testid="shared-browser-page-select"
-                disabled={!resolved || busy || !controls.focusPage || !humanHasControl}
-                onChange={(event) => onFocusPage(event.target.value)}
-                title={activePage ? pageOptionLabel(activePage) : "Shared browser tab"}
-                value={activePage?.id ?? ""}
-              >
-                {pages.map((page) => (
-                  <option key={page.id} value={page.id}>
-                    {pageOptionLabel(page)}
-                  </option>
-                ))}
-              </select>
-            ) : null}
+            {compact && hasNavigationMenu ? null : pageSelector}
             <div className="min-w-0 flex-1">
               <BrowserAddressField
                 ref={addressInputRef}
@@ -260,7 +274,7 @@ export function SharedBrowserChrome({
           </div>
         }
         status={toolbarStatus}
-        actions={toolbarActions}
+        actions={typeof toolbarActions === "function" ? toolbarActions(compactNavigation) : toolbarActions}
         feedback={displayedError}
         feedbackId={`${errorId}-error`}
         feedbackTestId="shared-browser-error"

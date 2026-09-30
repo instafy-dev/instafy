@@ -97,9 +97,12 @@ for (const layout of [
       }
     }, layout);
     expect(await page.evaluate(() => matchMedia("(pointer: coarse)").matches)).toBe(true);
+    const toggle = page.getByTestId("shared-browser-sessions-toggle");
+    await expect(toggle).toHaveAttribute("aria-expanded", "false");
+    await toggle.tap();
     await page.getByTestId("browser-session-fullscreen-toggle").tap();
     await expect(page.getByRole("dialog", { name: "Browser session", exact: true })).toBeVisible();
-    const toggle = page.getByTestId("shared-browser-sessions-toggle");
+    // Expansion closes the compact options menu before moving the browser.
     await expect(toggle).toHaveAttribute("aria-expanded", "false");
     await toggle.tap();
     await expect(toggle).toHaveAttribute("aria-expanded", "true");

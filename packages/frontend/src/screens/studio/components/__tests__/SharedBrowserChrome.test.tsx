@@ -312,7 +312,7 @@ describe("SharedBrowserChrome", () => {
     ).not.toBe("sr-only");
     expect(
       container.querySelector('[data-testid="browser-chrome-context-row"]')?.className,
-    ).toContain("max-[540px]:basis-full");
+    ).not.toContain("max-[540px]:basis-full");
     expect(select.className).not.toContain("hidden");
     expect(select.className).toContain("w-10");
     expect(select.title).toBe("First");
@@ -358,6 +358,63 @@ describe("SharedBrowserChrome", () => {
     ).toBe("Shared browser tab");
     expect(container.querySelector('[data-testid="browser-chrome-context-row"]')?.textContent)
       .toContain("Agent controls");
+  });
+
+  it("moves compact history and page selection into the supplied menu without losing their behavior", async () => {
+    const model = props({
+      compact: true,
+      pages: [
+        page({ id: "page-1", isActive: true, canGoBack: false, canGoForward: true }),
+        page({ id: "page-2", isActive: false }),
+      ],
+      toolbarActions: (navigation) => <div data-testid="compact-menu">{navigation}</div>,
+    });
+    await act(async () => root.render(<SharedBrowserChrome {...model} />));
+    const menu = container.querySelector('[data-testid="compact-menu"]')!;
+    const select = menu.querySelector<HTMLSelectElement>('[data-testid="shared-browser-page-select"]')!;
+    const back = menu.querySelector<HTMLButtonElement>('[data-testid="shared-browser-back"]')!;
+    const forward = menu.querySelector<HTMLButtonElement>('[data-testid="shared-browser-forward"]')!;
+    expect(select).not.toBeNull();
+    expect(back.disabled).toBe(true);
+    expect(forward.disabled).toBe(false);
+    expect(menu.querySelector('[data-testid="shared-browser-reload"]')).toBeNull();
+    expect(container.querySelectorAll('[data-testid="shared-browser-page-select"]')).toHaveLength(1);
+
+    await act(async () => {
+      back.click();
+      forward.click();
+      select.value = "page-2";
+      select.dispatchEvent(new Event("change", { bubbles: true }));
+    });
+    expect(model.onBack).not.toHaveBeenCalled();
+    expect(model.onForward).toHaveBeenCalledExactlyOnceWith("page-1");
+    expect(model.onFocusPage).toHaveBeenCalledExactlyOnceWith("page-2");
+
+    await act(async () => root.render(<SharedBrowserChrome {...model} pendingAction="reload" />));
+    expect(back.disabled).toBe(true);
+    expect(forward.disabled).toBe(true);
+    expect(select.disabled).toBe(true);
+    await act(async () => forward.click());
+    expect(model.onForward).toHaveBeenCalledTimes(1);
+
+    await act(async () => root.render(<SharedBrowserChrome {...model} interactionEnabled={false} />));
+    expect(back.disabled).toBe(true);
+    expect(forward.disabled).toBe(true);
+    expect(select.disabled).toBe(true);
+  });
+
+  it("leaves full-width navigation inline when a toolbar callback is supplied", async () => {
+    const renderActions = vi.fn(() => <button type="button">Options</button>);
+    await act(async () => root.render(<SharedBrowserChrome {...props({
+      pages: [page(), page({ id: "page-2", isActive: false })],
+      toolbarActions: renderActions,
+    })} />));
+    expect(renderActions).toHaveBeenCalledWith(null);
+    const context = container.querySelector('[data-testid="browser-chrome-context-row"]')!;
+    expect(context.querySelector('[data-testid="shared-browser-back"]')).toBeNull();
+    expect(context.querySelector('[data-testid="shared-browser-page-select"]')).toBeNull();
+    expect(container.querySelector('[data-testid="shared-browser-back"]')).not.toBeNull();
+    expect(container.querySelector('[data-testid="shared-browser-page-select"]')).not.toBeNull();
   });
 
   it("renders viewport controls while disabling individually unsupported actions", async () => {
