@@ -31,7 +31,7 @@ use codex_protocol::config_types::{
     EnvironmentVariablePattern, SandboxMode, ShellEnvironmentPolicy, TrustLevel, WebSearchMode,
 };
 use codex_protocol::error::Result as CodexResult;
-use codex_protocol::items::{AgentMessageContent, TurnItem};
+use codex_protocol::items::{AgentMessageContent, AgentMessageDelivery, TurnItem};
 use codex_protocol::models::{ContentItem, MessagePhase, ResponseItem};
 use codex_protocol::openai_models::ReasoningEffort;
 use codex_protocol::protocol::{
@@ -3467,7 +3467,9 @@ impl CodexEventStreamAdapter {
                         "text": text,
                     }
                 });
-                if let Some(phase) = message_phase_label(message.phase.as_ref()) {
+                if let Some(phase) =
+                    agent_message_phase_label(message.phase.as_ref(), message.delivery.as_ref())
+                {
                     value["item"]["phase"] = json!(phase);
                 }
                 vec![value]
@@ -3798,7 +3800,9 @@ impl CodexEventStreamAdapter {
                 "text": text,
             }
         });
-        if let Some(phase) = message_phase_label(message.phase.as_ref()) {
+        if let Some(phase) =
+            agent_message_phase_label(message.phase.as_ref(), message.delivery.as_ref())
+        {
             value["item"]["phase"] = json!(phase);
         }
         vec![value]
@@ -3985,6 +3989,25 @@ fn is_commentary_phase(phase: Option<&MessagePhase>) -> bool {
     matches!(phase, Some(MessagePhase::Commentary))
 }
 
+/// An asynchronously delivered message (`send_user_message_async`) reaches the
+/// user while the turn keeps running, so it is progress, never the final answer.
+fn is_commentary_agent_message(
+    phase: Option<&MessagePhase>,
+    delivery: Option<&AgentMessageDelivery>,
+) -> bool {
+    is_commentary_phase(phase) || matches!(delivery, Some(AgentMessageDelivery::Async))
+}
+
+fn agent_message_phase_label(
+    phase: Option<&MessagePhase>,
+    delivery: Option<&AgentMessageDelivery>,
+) -> Option<&'static str> {
+    if is_commentary_agent_message(phase, delivery) {
+        return message_phase_label(Some(&MessagePhase::Commentary));
+    }
+    message_phase_label(phase)
+}
+
 fn is_unstructured_turn_complete_candidate(
     requires_structured_final: bool,
     non_commentary_agent_message_seen: bool,
@@ -4003,7 +4026,7 @@ fn trimmed_text(text: &str) -> Option<String> {
 fn agent_message_event_text(
     message: &codex_protocol::protocol::AgentMessageEvent,
 ) -> Option<String> {
-    if is_commentary_phase(message.phase.as_ref()) {
+    if is_commentary_agent_message(message.phase.as_ref(), message.delivery.as_ref()) {
         return None;
     }
     trimmed_text(&message.message)
@@ -4026,7 +4049,7 @@ fn agent_message_text(message: &codex_protocol::items::AgentMessageItem) -> Opti
 }
 
 fn final_agent_message_text(message: &codex_protocol::items::AgentMessageItem) -> Option<String> {
-    if is_commentary_phase(message.phase.as_ref()) {
+    if is_commentary_agent_message(message.phase.as_ref(), message.delivery.as_ref()) {
         return None;
     }
     agent_message_text(message)
@@ -6578,6 +6601,72 @@ required = true
                 questions: None,
             }),
             None
+        );
+    }
+
+    #[test]
+    fn async_delivered_agent_messages_are_commentary_not_final_answers() {
+        // An async message reaches the user while the turn keeps running. It may
+        // carry no phase, or even a final-answer phase, and must still never be
+        // chosen as the job's final message.
+        for phase in [None, Some(MessagePhase::FinalAnswer)] {
+            let event = AgentMessageEvent {
+                message: "Still working on the migration.".to_string(),
+                phase: phase.clone(),
+                memory_citation: None,
+                delivery: Some(AgentMessageDelivery::Async),
+                questions: None,
+            };
+            assert_eq!(agent_message_event_text(&event), None);
+            let mut adapter = CodexEventStreamAdapter::default();
+            let projected = adapter.collect(&Event {
+                id: "evt_async_message".to_string(),
+                msg: EventMsg::AgentMessage(event),
+            });
+            assert_eq!(projected.len(), 1);
+            assert_eq!(projected[0]["item"]["phase"], "commentary");
+            assert_eq!(latest_completed_agent_message_from_events(&projected), None);
+
+            let item = codex_protocol::items::AgentMessageItem {
+                id: "agent_message_async".to_string(),
+                content: vec![AgentMessageContent::Text {
+                    text: "Still working on the migration.".to_string(),
+                }],
+                phase,
+                memory_citation: None,
+                delivery: Some(AgentMessageDelivery::Async),
+                questions: None,
+            };
+            assert_eq!(
+                final_agent_message_text_from_turn_item(&TurnItem::AgentMessage(item.clone())),
+                None
+            );
+            let mut adapter = CodexEventStreamAdapter::default();
+            let projected = adapter.collect(&Event {
+                id: "evt_async_item".to_string(),
+                msg: EventMsg::ItemCompleted(ItemCompletedEvent {
+                    thread_id: ThreadId::new(),
+                    turn_id: "turn_1".to_string(),
+                    item: TurnItem::AgentMessage(item),
+                    completed_at_ms: 0,
+                    started_at_ms: None,
+                }),
+            });
+            assert_eq!(projected[0]["item"]["phase"], "commentary");
+            assert_eq!(latest_completed_agent_message_from_events(&projected), None);
+        }
+
+        // An ordinary message without a delivery mode stays a final candidate.
+        assert_eq!(
+            agent_message_event_text(&AgentMessageEvent {
+                message: "Done.".to_string(),
+                phase: None,
+                memory_citation: None,
+                delivery: None,
+                questions: None,
+            })
+            .as_deref(),
+            Some("Done.")
         );
     }
 
