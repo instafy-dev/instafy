@@ -507,7 +507,9 @@ pub(crate) async fn create_default_agent_for_credential(
     }
 
     let agent_id = Uuid::new_v4();
-    let avatar_seed = credential_id.to_string();
+    // Credential-created agents take the agent id as their avatar seed, like
+    // every other new agent.
+    let avatar_seed = agent_id.to_string();
     let display_name = label
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty());

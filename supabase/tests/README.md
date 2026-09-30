@@ -57,6 +57,12 @@ that id before the check existed, that revoking it or clearing its default flag 
 refused and VALIDATE fails, and that deleting the row (which clears agent references
 to it) lets the check validate. The fixture runs in one transaction and rolls back.
 
+It also executes `agent_credential_owner.sql`. As the signed-in role and as the table
+owner, it checks that `user_agents_credential_owner` refuses an agent pinned to a
+credential its owner does not hold, on insert, on update and when the agent moves to
+another user, while owners still pin, switch and clear their own credentials and
+deleting a credential still clears pins to it. It also rolls back.
+
 To also run the real controller HTTP and mocked transport tests against a clean,
 fully migrated database in that same disposable cluster:
 

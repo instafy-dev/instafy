@@ -517,7 +517,9 @@ async fn resolve_agent_targets(
                             ua.avatar_seed as avatar_seed
                      from user_agents ua
                      left join user_credentials uc
-                       on uc.id = ua.credential_id and uc.revoked_at is null
+                       on uc.id = ua.credential_id
+                      and uc.user_id = ua.user_id
+                      and uc.revoked_at is null
                      left join user_agent_project_settings uaps
                        on uaps.user_id = ua.user_id
                       and uaps.agent_id = ua.id
@@ -2132,8 +2134,12 @@ pub(crate) async fn process_dispatch_prompt(
         }
         let provider_conversation_state = if supports_provider_state {
             if let Some(conversation_id) = request.conversation_id {
-                let expected_provider =
-                    load_target_credential_provider(&transaction, target.credential_id).await?;
+                let expected_provider = load_target_credential_provider(
+                    &transaction,
+                    context.user_id,
+                    target.credential_id,
+                )
+                .await?;
                 load_previous_provider_conversation_state(
                     &transaction,
                     &conversation_id,
@@ -4769,11 +4775,14 @@ fn merge_ai_access_metadata(
     JsonValue::Object(root)
 }
 
+/// The provider of a dispatch target's credential, which is always one the
+/// requesting user holds.
 async fn load_target_credential_provider(
     transaction: &Transaction<'_>,
+    user_id: Option<Uuid>,
     credential_id: Option<Uuid>,
 ) -> Result<Option<String>, (StatusCode, Json<ApiError>)> {
-    let Some(credential_id) = credential_id else {
+    let (Some(user_id), Some(credential_id)) = (user_id, credential_id) else {
         return Ok(None);
     };
 
@@ -4781,9 +4790,9 @@ async fn load_target_credential_provider(
         .query_opt(
             "select kind, metadata
              from user_credentials
-             where id = $1 and revoked_at is null
+             where id = $1 and user_id = $2 and revoked_at is null
              limit 1",
-            &[&credential_id],
+            &[&credential_id, &user_id],
         )
         .await
         .map_err(|error| {

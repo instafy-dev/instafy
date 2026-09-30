@@ -422,3 +422,173 @@ async fn dispatch_security_jobs_never_pin_the_reserved_credential_id() -> anyhow
     transaction.rollback().await?;
     Ok(())
 }
+
+/// Gives `user_id` an agent `handle` pinned to `credential_id`.
+async fn insert_agent_pin(
+    transaction: &Transaction<'_>,
+    user_id: &Uuid,
+    handle: &str,
+    credential_id: &Uuid,
+) -> anyhow::Result<()> {
+    transaction
+        .execute(
+            "insert into user_agents (id, user_id, credential_id, provider, handle, avatar_seed)
+             values ($1, $2, $3, 'openai', $4, $4)",
+            &[&Uuid::new_v4(), user_id, credential_id, &handle],
+        )
+        .await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn dispatch_security_agents_only_use_credentials_their_owner_holds() -> anyhow::Result<()> {
+    use crate::credentials::reserved_id_tests::{
+        api_error, insert_test_user, insert_user_credential_row,
+    };
+
+    let pool = require_origin_test_pool("dispatch agent credential owner").await?;
+    let mut connection = pool.get().await?;
+    let transaction = connection.transaction().await?;
+    // Model pins stored before user_agents_credential_owner existed: disable
+    // it inside this transaction only, as its first lock, and roll back, so
+    // nothing persists and no other session sees the change.
+    transaction
+        .batch_execute(
+            "set local lock_timeout = '5s';
+             alter table user_agents disable trigger user_agents_credential_owner;",
+        )
+        .await?;
+    let owner = Uuid::new_v4();
+    let other = Uuid::new_v4();
+    let project_id = Uuid::new_v4();
+    insert_test_user(&transaction, &owner).await?;
+    insert_test_user(&transaction, &other).await?;
+    let others_credential = insert_user_credential_row(&transaction, &other, true).await?;
+    insert_agent_pin(&transaction, &owner, "pinned", &others_credential).await?;
+
+    // A stored pin to a credential the owner does not hold is no pin: with no
+    // default of its own the agent runs on the managed lane ...
+    let targets = resolve_agent_targets(
+        &transaction,
+        &project_id,
+        Some(owner),
+        vec!["pinned".to_string()],
+        None,
+    )
+    .await
+    .map_err(api_error)?;
+    assert_eq!(targets.len(), 1);
+    assert_eq!(targets[0].credential_id, None);
+    // ... and the provider lookup reads only a credential the requester holds.
+    for user_id in [Some(owner), None] {
+        assert_eq!(
+            load_target_credential_provider(&transaction, user_id, Some(others_credential))
+                .await
+                .map_err(api_error)?,
+            None
+        );
+    }
+
+    // With a default of its own, the agent falls back to it, and an agent
+    // pinned to a credential its owner holds keeps that credential.
+    let own_default = insert_user_credential_row(&transaction, &owner, true).await?;
+    let own_pinned = insert_user_credential_row(&transaction, &owner, false).await?;
+    insert_agent_pin(&transaction, &owner, "ownpin", &own_pinned).await?;
+    let default_credential_id = credentials::load_default_credential_id(&transaction, Some(owner))
+        .await
+        .map_err(api_error)?;
+    assert_eq!(default_credential_id, Some(own_default));
+    let targets = resolve_agent_targets(
+        &transaction,
+        &project_id,
+        Some(owner),
+        vec!["pinned".to_string(), "ownpin".to_string()],
+        default_credential_id,
+    )
+    .await
+    .map_err(api_error)?;
+    assert_eq!(targets.len(), 2);
+    assert_eq!(targets[0].credential_id, Some(own_default));
+    assert_eq!(targets[1].credential_id, Some(own_pinned));
+    assert_eq!(
+        load_target_credential_provider(&transaction, Some(owner), Some(own_pinned))
+            .await
+            .map_err(api_error)?
+            .as_deref(),
+        Some("openai")
+    );
+
+    transaction.rollback().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn dispatch_security_schema_refuses_an_agent_pin_its_owner_does_not_hold(
+) -> anyhow::Result<()> {
+    use crate::credentials::reserved_id_tests::{insert_test_user, insert_user_credential_row};
+    use tokio_postgres::error::SqlState;
+
+    let pool = require_origin_test_pool("agent credential owner schema check").await?;
+    let mut connection = pool.get().await?;
+    let transaction = connection.transaction().await?;
+    let owner = Uuid::new_v4();
+    let other = Uuid::new_v4();
+    insert_test_user(&transaction, &owner).await?;
+    insert_test_user(&transaction, &other).await?;
+    let own = insert_user_credential_row(&transaction, &owner, true).await?;
+    let others_credential = insert_user_credential_row(&transaction, &other, true).await?;
+
+    insert_agent_pin(&transaction, &owner, "ownpin", &own).await?;
+    let error = insert_agent_pin(&transaction, &owner, "otherpin", &others_credential)
+        .await
+        .expect_err("an agent cannot pin a credential its owner does not hold");
+    let db_error = error
+        .downcast_ref::<tokio_postgres::Error>()
+        .and_then(tokio_postgres::Error::as_db_error)
+        .expect("database error");
+    assert_eq!(db_error.code(), &SqlState::FOREIGN_KEY_VIOLATION);
+    // The transaction is aborted and is rolled back on drop.
+    Ok(())
+}
+
+#[tokio::test]
+async fn dispatch_security_credential_seeded_agents_take_the_agent_id_as_avatar_seed(
+) -> anyhow::Result<()> {
+    use crate::credentials::reserved_id_tests::{
+        api_error, insert_test_user, insert_user_credential_row,
+    };
+
+    let pool = require_origin_test_pool("credential-seeded agent avatar seed").await?;
+    let mut connection = pool.get().await?;
+    let transaction = connection.transaction().await?;
+    let owner = Uuid::new_v4();
+    insert_test_user(&transaction, &owner).await?;
+    let credential_id = insert_user_credential_row(&transaction, &owner, true).await?;
+
+    let (agent_id, _handle) = ai_agents::create_default_agent_for_credential(
+        &transaction,
+        owner,
+        credential_id,
+        Some("Seeded"),
+        None,
+        None,
+        None,
+        "openai",
+    )
+    .await
+    .map_err(api_error)?;
+    let row = transaction
+        .query_one(
+            "select avatar_seed, credential_id from user_agents where id = $1",
+            &[&agent_id],
+        )
+        .await?;
+    assert_eq!(row.get::<_, String>("avatar_seed"), agent_id.to_string());
+    assert_eq!(
+        row.get::<_, Option<Uuid>>("credential_id"),
+        Some(credential_id)
+    );
+
+    transaction.rollback().await?;
+    Ok(())
+}
