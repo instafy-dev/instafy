@@ -134,6 +134,86 @@ async fn proxy_refunds_credits_on_failure() -> Result<()> {
 
 #[tokio::test]
 #[serial]
+async fn proxy_refuses_a_non_string_service_tier_before_burning_credits() -> Result<()> {
+    // A managed run whose service_tier is not a string, which codex never
+    // sends, is refused before the credit burn, so it neither charges nor
+    // refunds. A string tier the platform key does not serve is overridden
+    // to the default tier and charged like any other managed run.
+    let mut controller = spawn_controller().await?;
+    let openai = spawn_openai(OpenAiMode::Success).await?;
+
+    let env_guard = EnvGuard::set(&[
+        ("CONTROLLER_BASE_URL", format_http_base(&controller.addr())),
+        ("CONTROLLER_INTERNAL_TOKEN", "controller-secret".to_string()),
+        (
+            "PROXY_CREDENTIAL_LEASE_TOKEN",
+            "credential-lease-secret".to_string(),
+        ),
+        ("PROXY_SIGNING_SECRET", "test-signing".to_string()),
+        ("PROXY_CREDIT_BURN_AMOUNT", "5".to_string()),
+        ("CODEX_OPENAI_ENDPOINT", openai.endpoint()),
+    ]);
+
+    let credentials = Credentials::ApiKey {
+        key: "test-api-key".to_string(),
+        endpoint: None,
+        default_model: None,
+    };
+
+    let proxy = spawn_proxy(credentials).await?;
+
+    let send_with_tier = |service_tier: serde_json::Value| {
+        reqwest::Client::new()
+            .post(format!("http://{}/v1/chat/completions", proxy.addr))
+            .bearer_auth(issue_proxy_token("test-signing"))
+            .json(&json!({
+                "model": DEFAULT_MODEL,
+                "stream": false,
+                "service_tier": service_tier,
+                "messages": [{ "role": "user", "content": "Say hello to the controller test." }]
+            }))
+            .send()
+    };
+
+    let response = send_with_tier(json!(2))
+        .await
+        .context("failed to send proxy request")?;
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let body: serde_json::Value = response.json().await?;
+    assert_eq!(body["error"]["code"], json!("service_tier_not_allowed"));
+
+    assert!(
+        controller
+            .expect_event(Duration::from_millis(300))
+            .await
+            .is_none(),
+        "a refused tier burns no credits"
+    );
+
+    // "priority" on the same proxy runs on the default tier and is charged
+    // once, as before.
+    let response = send_with_tier(json!("priority"))
+        .await
+        .context("failed to send proxy request")?;
+    assert!(response.status().is_success());
+    let burn = controller
+        .expect_event(Duration::from_secs(2))
+        .await
+        .context("missing burn event")?;
+    assert_eq!(burn.action, "burn");
+    assert_eq!(burn.amount, 5);
+    assert!(controller.try_event().is_none(), "unexpected extra events");
+
+    proxy.shutdown().await;
+    controller.shutdown().await;
+    openai.shutdown().await;
+    drop(env_guard);
+
+    Ok(())
+}
+
+#[tokio::test]
+#[serial]
 async fn proxy_rejects_missing_auth_before_parsing_request_body() -> Result<()> {
     let mut controller = spawn_controller().await?;
     let env_guard = EnvGuard::set(&[

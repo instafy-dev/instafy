@@ -129,6 +129,34 @@ updated first: until both are, requests keep the model they ask for and every to
 included. This is separate from the key rollout order in the next paragraph. Static proxy
 credentials serving managed turns get the same pin from `PROXY_PINNED_MODEL`, as described above.
 
+The pricing envs are standard-tier rates, so the platform key also serves only OpenAI's standard
+service tier. `priority` costs about twice as much per token, `flex` and `scale` are priced apart,
+and a request that names no tier runs on the OpenAI project's own default tier, which the project's
+settings decide (`auto` follows it too). The proxy therefore sends every managed Responses and Chat
+Completions request to the OpenAI API with `service_tier: "default"` explicitly. A managed request
+that asks for any other string tier, such as `priority`, which codex's Fast mode sends, is
+overridden to `default` rather than refused, so a stray codex setting never fails a managed turn.
+The proxy logs each override when the request goes upstream, and counts it as
+`serviceTierOverrides` in the `platformLane` health object, next to `serviceTier`; a request that
+never gets there, refused for bad input, missing credits or a failed lease, or failing inside the
+proxy after its lease, is not counted. A tier that is not a string, which codex never sends, is
+refused with 400 `service_tier_not_allowed` before the proxy leases a credential, burns credits or
+contacts the provider. A static ChatGPT login serving managed turns sends the ChatGPT endpoint no
+tier, as before, since how that endpoint treats one is unverified; its overrides are counted and
+logged with no tier sent. The tier goes only to OpenAI's own API by default:
+`PROXY_PLATFORM_SERVICE_TIER_ENDPOINTS` is `openai` (hosts under `openai.com`), `all` (any endpoint
+that takes a tier, for an OpenAI-compatible provider that accepts `default`) or `none`, since such
+a provider may reject the field or its value. A request to an endpoint the setting leaves out goes
+with no tier, as before this rule, and its override is counted and logged the same way. The
+`serviceTier` health field says whether the lane's requests carry the tier; for the controller's
+managed lease, whose endpoint comes with each lease, it says what the setting implies. Speech and
+transcription refuse any tier but `default` with the same 400 instead of overriding it, since the
+proxy forwards audio bodies as sent and codex sends them no tier. This rule follows the lane, not
+the pin: it holds however the platform lane is served, pinned or not. A user's own key or ChatGPT
+login is sent no tier, as before this rule, whatever its request asks for. The rule needs only the
+proxy, so it can ship before any codex upgrade: today's runtime sends no tier, and every managed
+Responses and Chat Completions request to the OpenAI API now goes out as `default`.
+
 Roll the proxy out first. Setting `MANAGED_AI_OPENAI_API_KEY` is what makes the controller
 advertise managed AI and charge for managed turns, so every provider host must already run a
 proxy image built from this change (`RUNTIME_PROXY_IMAGE`) before the key goes on the
