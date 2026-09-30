@@ -24,12 +24,35 @@ const STEP_TEXT: &str = "LOCAL_RETRY_STEP_DONE";
 const FINISHED_CALL_ID: &str = "call-local-finished";
 const PARTIAL_TEXT: &str = "LOCAL_CUT_SHORT_PARTIAL";
 const TOOL_CMD: &str = "printf x >> tool-count.txt; printf TOOL_APPLIED";
+const PERSONAL_BROWSER_TOKEN: &str = "inert-local-personal-browser-token";
+/// Tools a bounded browser turn must never offer: shell, file, image, agent and user-input tools.
+const BOUNDED_BROWSER_FORBIDDEN_TOOLS: &[&str] = &[
+    "exec_command",
+    "write_stdin",
+    "shell",
+    "shell_command",
+    "local_shell",
+    "apply_patch",
+    "view_image",
+    "web_search",
+    "image_generation",
+    "spawn_agent",
+    "send_input",
+    "request_permissions",
+    "request_user_input",
+    "request_user_input_async",
+    "send_user_message_async",
+    "send_message_to_user_async",
+    "sleep",
+];
 
 struct MockState {
     scenario: String,
     request_ready: PathBuf,
     requests: Mutex<Vec<Value>>,
     errors: Mutex<Vec<String>>,
+    /// JSON-RPC methods the Personal Browser MCP endpoint received.
+    mcp_methods: Mutex<Vec<String>>,
 }
 
 fn sse(item: Value) -> Response {
@@ -319,6 +342,8 @@ async fn responses(
                 .to_string(),
             );
         }
+        // A bounded browser turn only needs its tool inventory recorded; the parent checks it.
+        "personal_browser_tools" => return answer(FINAL_TEXT),
         "tool_once" => {
             let supplied_history = body["input"].to_string();
             if !supplied_history.contains("TOOL_APPLIED") {
@@ -389,6 +414,68 @@ fn workspace_command_call(
     None
 }
 
+/// A minimal Personal Browser MCP endpoint: one read-only `snapshot` tool.
+async fn personal_browser_mcp(
+    State(state): State<Arc<MockState>>,
+    headers: HeaderMap,
+    Json(payload): Json<Value>,
+) -> Response {
+    if headers.get("authorization").and_then(|v| v.to_str().ok())
+        != Some(format!("Bearer {PERSONAL_BROWSER_TOKEN}").as_str())
+    {
+        state
+            .errors
+            .lock()
+            .unwrap()
+            .push("unexpected Personal Browser auth".into());
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    let id = payload.get("id").cloned().unwrap_or(Value::Null);
+    if let Some(method) = payload.get("method").and_then(Value::as_str) {
+        state.mcp_methods.lock().unwrap().push(method.to_string());
+    }
+    let result = match payload.get("method").and_then(Value::as_str) {
+        Some(method) if method.starts_with("notifications/") => {
+            return StatusCode::ACCEPTED.into_response();
+        }
+        Some("initialize") => json!({
+            "protocolVersion": "2025-06-18",
+            "capabilities": { "tools": { "listChanged": false } },
+            "serverInfo": { "name": "instafy-personal-browser", "version": "1.0.0" },
+        }),
+        Some("tools/list") => json!({ "tools": [{
+            "name": "snapshot",
+            "description": "Read the visible Personal Browser page.",
+            "inputSchema": { "type": "object", "properties": {}, "additionalProperties": false },
+        }]}),
+        _ => {
+            return Json(json!({ "jsonrpc": "2.0", "id": id,
+                "error": { "code": -32601, "message": "Method not found" } }))
+            .into_response();
+        }
+    };
+    Json(json!({ "jsonrpc": "2.0", "id": id, "result": result })).into_response()
+}
+
+/// Every tool name a request offers: top-level tools, code mode's `additional_tools`, and the
+/// nested tools a code mode `exec` description declares (as "### `name`" sections).
+fn offered_tool_names(request: &Value) -> Vec<String> {
+    let mut names = Vec::new();
+    tool_names(&request["tools"], &mut names);
+    for entry in request["input"].as_array().into_iter().flatten() {
+        if entry["type"] == "additional_tools" {
+            tool_names(&entry["tools"], &mut names);
+            let tools = entry["tools"].to_string();
+            for declaration in tools.split("### `").skip(1) {
+                if let Some((name, _)) = declaration.split_once('`') {
+                    names.push(name.to_string());
+                }
+            }
+        }
+    }
+    names
+}
+
 fn tool_names(value: &Value, output: &mut Vec<String>) {
     match value {
         Value::Array(items) => items.iter().for_each(|item| tool_names(item, output)),
@@ -424,11 +511,13 @@ async fn run_scenario(scenario: &str, expected_requests: usize) -> Result<()> {
         request_ready: temp.path().join("request-ready"),
         requests: Mutex::new(Vec::new()),
         errors: Mutex::new(Vec::new()),
+        mcp_methods: Mutex::new(Vec::new()),
     });
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
     let origin = format!("http://{}", listener.local_addr()?);
     let app = Router::new()
         .route("/v1/responses", post(responses))
+        .route("/mcp", post(personal_browser_mcp))
         .route(
             "/v1/models",
             get(|| async { Json(json!({"object":"list","data":[]})) }),
@@ -492,6 +581,20 @@ async fn run_scenario(scenario: &str, expected_requests: usize) -> Result<()> {
         .stdin(Stdio::null())
         .stdout(Stdio::from(output.try_clone()?))
         .stderr(Stdio::from(output));
+    if scenario == "personal_browser_tools" {
+        // The Personal Browser capability a desktop runtime receives, pointed at the mock.
+        command
+            .env("INSTAFY_PERSONAL_BROWSER_CONTROL_URL", &origin)
+            .env(
+                "INSTAFY_PERSONAL_BROWSER_CONTROL_TOKEN",
+                PERSONAL_BROWSER_TOKEN,
+            )
+            .env(
+                "INSTAFY_PERSONAL_BROWSER_PROJECT_ID",
+                "90000000-0000-4000-8000-000000000002",
+            )
+            .env("INSTAFY_RUNTIME_AGENT_BIN", std::env::current_exe()?);
+    }
     let mut child = command.spawn()?;
     let started = Instant::now();
     let status = loop {
@@ -570,6 +673,26 @@ async fn run_scenario(scenario: &str, expected_requests: usize) -> Result<()> {
             "the follow-up must continue with the finished call's output: {continued:?}"
         );
     }
+    if scenario == "personal_browser_tools" {
+        for request in requests.iter() {
+            let names = offered_tool_names(request);
+            for forbidden in BOUNDED_BROWSER_FORBIDDEN_TOOLS {
+                assert!(
+                    !names.iter().any(|name| name == forbidden),
+                    "a bounded browser turn offered {forbidden}: {names:?}"
+                );
+            }
+        }
+        // Upstream defers MCP tools behind tool search (or code mode's `ALL_TOOLS`), so the
+        // request need not name `snapshot`; the turn must still have connected and listed it.
+        let mcp_methods = state.mcp_methods.lock().unwrap();
+        for method in ["initialize", "tools/list"] {
+            assert!(
+                mcp_methods.iter().any(|seen| seen == method),
+                "the Personal Browser MCP server never received {method}: {mcp_methods:?}"
+            );
+        }
+    }
     if scenario == "tool_once" {
         assert_eq!(fs::read_to_string(workspace.join("tool-count.txt"))?, "x");
         assert!(
@@ -641,6 +764,11 @@ scenario_test!(
     incomplete_after_tool_call_continues_with_its_output,
     "incomplete_after_tool_call",
     2
+);
+scenario_test!(
+    bounded_browser_turn_offers_only_its_browser_tools,
+    "personal_browser_tools",
+    1
 );
 scenario_test!(terminal_400_is_not_retried, "terminal_400", 1);
 scenario_test!(terminal_401_is_not_retried, "terminal_401", 1);
@@ -719,7 +847,10 @@ async fn isolated_retry_child() -> Result<()> {
                 cancel_signal: Some(cancel),
                 // A browser session keeps Codex's default retries and the runtime's own
                 // stream-error cap instead of the bounded proxy policy.
-                expect_browser_session: scenario.starts_with("browser_step_429s"),
+                expect_browser_session: scenario.starts_with("browser_step_429s")
+                    || scenario == "personal_browser_tools",
+                personal_browser: scenario == "personal_browser_tools",
+                disable_shell_tool: scenario == "personal_browser_tools",
                 ..Default::default()
             },
         )
@@ -769,6 +900,7 @@ async fn isolated_retry_child() -> Result<()> {
             | "browser_step_429s"
             | "browser_step_429s_sse"
             | "incomplete_after_tool_call"
+            | "personal_browser_tools"
     ) {
         assert_eq!(result?.final_json["summary"], FINAL_TEXT);
     } else {

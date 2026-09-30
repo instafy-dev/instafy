@@ -7,9 +7,7 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow};
 use codex_config::{DEFAULT_MCP_SERVER_ENVIRONMENT_ID, McpServerConfig, McpServerTransportConfig};
-use codex_core::config::{
-    Config, ConfigBuilder, ConfigOverrides, ManagedFeatures, set_project_trust_level,
-};
+use codex_core::config::{Config, ConfigBuilder, ConfigOverrides, set_project_trust_level};
 use codex_core::test_support::EmptyUserInstructionsProvider;
 use codex_core::{
     CodexAppsToolsCache, CodexThread, NewThread, StartThreadOptions, ThreadManager,
@@ -703,6 +701,36 @@ impl<T> Drop for AbortTaskOnDrop<T> {
     }
 }
 
+/// Which base instructions a run uses. See [`runtime_base_instructions`].
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct RuntimeBaseInstructionsLane {
+    pub(crate) mcp: bool,
+    pub(crate) browser: bool,
+    pub(crate) plain_text_final: bool,
+    pub(crate) plain_text_write: bool,
+}
+
+/// Ordinary lanes replace the model prompt with the runtime's own contract;
+/// MCP and browser lanes keep the model's prompt. Either way the Codex policy
+/// appends Instafy's safety rules afterwards.
+pub(crate) fn runtime_base_instructions(
+    lane: RuntimeBaseInstructionsLane,
+    operator_override: Option<String>,
+) -> Option<String> {
+    if lane.mcp || lane.browser {
+        return None;
+    }
+    Some(operator_override.unwrap_or_else(|| {
+        if lane.plain_text_final && lane.plain_text_write {
+            PLAIN_WRITE_RUNTIME_BASE_INSTRUCTIONS.to_string()
+        } else if lane.plain_text_final {
+            PLAIN_FINAL_RUNTIME_BASE_INSTRUCTIONS.to_string()
+        } else {
+            STRUCTURED_RUNTIME_BASE_INSTRUCTIONS.to_string()
+        }
+    }))
+}
+
 async fn start_codex_thread(
     thread_manager: Arc<ThreadManager>,
     config: Config,
@@ -1076,19 +1104,15 @@ impl CodexClient {
             .map(|instructions| {
                 append_local_browser_developer_instructions(instructions, local_browser_mode)
             });
-        let base_instructions = if mcp_mode || browser_mode {
-            None
-        } else {
-            Some(optional_env("CODEX_BASE_INSTRUCTIONS").unwrap_or_else(|| {
-                if plain_text_final_mode && options.plain_text_write_mode {
-                    PLAIN_WRITE_RUNTIME_BASE_INSTRUCTIONS.to_string()
-                } else if plain_text_final_mode {
-                    PLAIN_FINAL_RUNTIME_BASE_INSTRUCTIONS.to_string()
-                } else {
-                    STRUCTURED_RUNTIME_BASE_INSTRUCTIONS.to_string()
-                }
-            }))
-        };
+        let base_instructions = runtime_base_instructions(
+            RuntimeBaseInstructionsLane {
+                mcp: mcp_mode,
+                browser: browser_mode,
+                plain_text_final: plain_text_final_mode,
+                plain_text_write: options.plain_text_write_mode,
+            },
+            optional_env("CODEX_BASE_INSTRUCTIONS"),
+        );
 
         let overrides = ConfigOverrides {
             model: optional_env("CODEX_MODEL"),
@@ -1239,7 +1263,12 @@ impl CodexClient {
                 "enabled Apps feature because MCP servers are configured"
             );
         }
-        apply_runtime_security_feature_overrides(&mut config.features);
+        // The loaded config is complete now (provider, MCP servers, model id). Pin billing,
+        // instructions and features before anything reads it.
+        crate::codex_policy::apply_runtime_codex_policy(
+            &mut config,
+            personal_browser_mode || shared_browser_mode,
+        )?;
         apply_bounded_browser_security_overrides(
             &mut config,
             personal_browser_mode || shared_browser_mode,
@@ -1304,6 +1333,14 @@ impl CodexClient {
         let auth_manager = AuthManager::shared_from_config(&config, true)
             .await
             .context("failed to initialize Codex auth manager")?;
+        let models_manager = build_models_manager(&config, auth_manager.clone());
+        let model_info = models_manager
+            .get_model_info(
+                config.model.as_deref().unwrap_or(DEFAULT_CODEX_MODEL),
+                &config.to_models_manager_config(),
+            )
+            .await;
+        crate::codex_policy::pin_instructions_for_resolved_model(&mut config, &model_info);
         // Fragile hook: runtime-agent embeds Codex as a library, so there is no Codex CLI
         // executable to back exec-server helper re-entry points. This and
         // `EmptyUserInstructionsProvider` come from Codex's test support; recheck both on
@@ -1318,7 +1355,7 @@ impl CodexClient {
         let thread_manager = Arc::new(ThreadManager::new(
             &config,
             auth_manager.clone(),
-            build_models_manager(&config, auth_manager.clone()),
+            models_manager,
             CodexAppsToolsCache::default(),
             SessionSource::Exec,
             environment_manager,
@@ -2971,35 +3008,12 @@ fn append_local_browser_developer_instructions(base: String, enabled: bool) -> S
     format!("{base}\n\n{LOCAL_BROWSER_DEVELOPER_INSTRUCTIONS}")
 }
 
-fn apply_runtime_security_feature_overrides(features: &mut ManagedFeatures) {
-    // Shell snapshots replay all exported env vars into files under CODEX_HOME. Runtime jobs carry
-    // proxy and controller tokens in env today, so embedded runtime-agent runs must keep this off.
-    if features.enabled(Feature::ShellSnapshot) {
-        match features.disable(Feature::ShellSnapshot) {
-            Ok(()) => tracing::info!("disabled Codex shell snapshots for runtime-agent run"),
-            Err(error) => tracing::warn!(
-                error = %error,
-                "failed to disable Codex shell snapshots for runtime-agent run"
-            ),
-        }
-    }
-    if features.enabled(Feature::Personality) {
-        match features.disable(Feature::Personality) {
-            Ok(()) => tracing::info!("disabled Codex personality feature for runtime-agent run"),
-            Err(error) => tracing::warn!(
-                error = %error,
-                "failed to disable Codex personality feature for runtime-agent run"
-            ),
-        }
-    }
-}
-
+/// The non-feature half of the bounded browser lane; `codex_policy` turns its features off.
 fn apply_bounded_browser_security_overrides(config: &mut Config, enabled: bool) -> Result<()> {
     if !enabled {
         return Ok(());
     }
 
-    disable_bounded_browser_features(&mut config.features)?;
     config
         .web_search_mode
         .set(WebSearchMode::Disabled)
@@ -3008,70 +3022,6 @@ fn apply_bounded_browser_security_overrides(config: &mut Config, enabled: bool) 
     config.include_skill_instructions = false;
     config.include_apps_instructions = false;
     Ok(())
-}
-
-fn disable_bounded_browser_features(features: &mut ManagedFeatures) -> Result<()> {
-    // These turns are a single browser capability lane. Page content is
-    // untrusted, so it must not be able to reach local files, child agents,
-    // another network tool, plugins, or image generation through prompt
-    // injection.
-    for feature in bounded_browser_disabled_features() {
-        features
-            .disable(feature)
-            .with_context(|| format!("failed to disable {feature:?} for bounded browser turn"))?;
-        if features.enabled(feature) {
-            return Err(anyhow!(
-                "bounded browser turn cannot start while {feature:?} is pinned enabled"
-            ));
-        }
-    }
-    Ok(())
-}
-
-fn bounded_browser_disabled_features() -> impl Iterator<Item = Feature> {
-    [
-        Feature::ShellTool,
-        Feature::ShellZshFork,
-        Feature::UnifiedExecZshFork,
-        Feature::ExecPermissionApprovals,
-        Feature::ApplyPatchStreamingEvents,
-        Feature::CodeModeOnly,
-        Feature::CodeMode,
-        Feature::CodeModeBufferedExec,
-        Feature::CodeModeHost,
-        Feature::SpawnCsv,
-        Feature::MultiAgentV2,
-        Feature::Collab,
-        Feature::CollaborationModes,
-        Feature::StandaloneWebSearch,
-        Feature::WebSearchCached,
-        Feature::WebSearchRequest,
-        Feature::ImageGeneration,
-        Feature::ToolSuggest,
-        Feature::Apps,
-        Feature::Plugins,
-        Feature::RequestPermissionsTool,
-        Feature::MemoryTool,
-        Feature::ExternalAgentMemoryImport,
-        Feature::Chronicle,
-        Feature::CodexHooks,
-        Feature::SkillMcpDependencyInstall,
-        Feature::ExecutorCapabilityDiscovery,
-        Feature::EnableMcpApps,
-        Feature::BrowserUse,
-        Feature::BrowserUseFullCdpAccess,
-        Feature::BrowserUseExternal,
-        Feature::ComputerUse,
-        Feature::RemotePlugin,
-        Feature::PluginSharing,
-        Feature::DefaultModeRequestUserInput,
-        Feature::Goals,
-        Feature::Artifact,
-        Feature::WorkspaceDependencies,
-        Feature::ToolCallMcpElicitation,
-        Feature::AuthElicitation,
-    ]
-    .into_iter()
 }
 
 fn turn_environment_selections(
@@ -4895,38 +4845,6 @@ mod tests {
             Some("http://proxy:8789/backend-api/")
         );
         unsafe { std::env::remove_var("PROXY_BASE_URL") };
-    }
-
-    #[test]
-    fn runtime_security_overrides_disable_shell_snapshot_feature() {
-        let mut features = ManagedFeatures::default();
-        features
-            .enable(Feature::ShellSnapshot)
-            .expect("enable shell snapshot");
-        features
-            .enable(Feature::Personality)
-            .expect("enable personality");
-        assert!(features.enabled(Feature::ShellSnapshot));
-        assert!(features.enabled(Feature::Personality));
-
-        apply_runtime_security_feature_overrides(&mut features);
-
-        assert!(!features.enabled(Feature::ShellSnapshot));
-        assert!(!features.enabled(Feature::Personality));
-    }
-
-    #[test]
-    fn bounded_browser_turn_disables_every_non_browser_capability_feature() {
-        let mut features = ManagedFeatures::default();
-        for feature in bounded_browser_disabled_features() {
-            features.enable(feature).expect("enable feature for test");
-        }
-
-        disable_bounded_browser_features(&mut features).expect("disable bounded-browser features");
-
-        for feature in bounded_browser_disabled_features() {
-            assert!(!features.enabled(feature), "{feature:?} remained enabled");
-        }
     }
 
     #[test]
