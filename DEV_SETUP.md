@@ -109,7 +109,10 @@ cargo build --manifest-path packages/runtime-agent/Cargo.toml --features code-mo
 ```
 
 Runtime images build and install the host the same way (`docker/runtime/Dockerfile`). The
-runtime-agent integration tests link a built host next to their test binaries automatically.
+runtime-agent integration tests link a built host next to their test binaries automatically; a
+`proxy_retry_budget` run for a code-mode-only model (the default `gpt-6-luna`, or whatever
+`INSTAFY_TEST_CODEX_MODEL` names) fails with this build command when the host is missing. CI
+builds the host and runs `proxy_retry_budget` for `gpt-6-luna`, `gpt-5.6-sol` and `gpt-5.5`.
 
 ### Mobile (Capacitor) push notifications
 

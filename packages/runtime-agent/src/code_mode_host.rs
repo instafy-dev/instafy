@@ -68,6 +68,17 @@ pub(crate) fn ensure_host_for_model(
     )
 }
 
+/// Whether Codex's bundled catalog marks `slug` code-mode-only, so it cannot run any tool
+/// without the host. Test harnesses use it to fail loudly when the host was not built.
+pub fn bundled_model_is_code_mode_only(slug: &str) -> Result<bool> {
+    let catalog = codex_models_manager::bundled_models_response()
+        .context("failed to load the bundled Codex model catalog")?;
+    Ok(catalog
+        .models
+        .iter()
+        .any(|model| model.slug == slug && model.tool_mode == Some(ToolMode::CodeModeOnly)))
+}
+
 /// The provider a thread manager uses, bound to the checked host path.
 pub(crate) fn session_provider(host: PathBuf) -> Arc<dyn CodeModeSessionProvider> {
     Arc::new(ProcessOwnedCodeModeSessionProvider::with_host_program(host))
@@ -150,6 +161,16 @@ mod tests {
             ensure_host_for_model(&missing_host, &model_info, &config)
                 .expect("an installed host lets the turn start");
             std::fs::remove_file(&missing_host).expect("remove placeholder");
+        }
+    }
+
+    #[test]
+    fn the_bundled_catalog_names_the_code_mode_only_models() {
+        for model in ["gpt-6-luna", "gpt-5.6-sol"] {
+            assert!(bundled_model_is_code_mode_only(model).unwrap(), "{model}");
+        }
+        for model in ["gpt-5.5", "not-a-catalog-model"] {
+            assert!(!bundled_model_is_code_mode_only(model).unwrap(), "{model}");
         }
     }
 

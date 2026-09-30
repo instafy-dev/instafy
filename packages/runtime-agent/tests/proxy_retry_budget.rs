@@ -502,8 +502,8 @@ fn test_model() -> String {
 /// Code-mode-only models, including the default gpt-6-luna, run every tool in
 /// `codex-code-mode-host`, which runtime-agent looks for beside its own executable. A test
 /// binary lives in `target/<profile>/deps`, so link the host that
-/// `cargo build --features code-mode-host -p codex-code-mode-host` left in `target/<profile>`.
-/// Without it those models fail closed, and the scenario output names the missing file.
+/// `cargo build --features code-mode-host -p runtime-agent -p codex-code-mode-host` left in
+/// `target/<profile>`. Without it, a code-mode-only model fails every scenario here, loudly.
 fn stage_code_mode_host_beside_test_binary() -> Result<()> {
     static STAGED: OnceLock<Result<(), String>> = OnceLock::new();
     STAGED
@@ -519,6 +519,13 @@ fn stage_code_mode_host_beside_test_binary() -> Result<()> {
                     .map(|profile| profile.join(name))
                     .filter(|built| built.is_file())
                 else {
+                    let model = test_model();
+                    if runtime_agent::code_mode_host::bundled_model_is_code_mode_only(&model)? {
+                        bail!(
+                            "{model} runs its tools only through {name}, which is not built in {}; build it with `cargo build --features code-mode-host -p runtime-agent -p codex-code-mode-host` (see DEV_SETUP.md) or set {TEST_MODEL_ENV}=gpt-5.5",
+                            deps.parent().unwrap_or(deps).display()
+                        );
+                    }
                     return Ok(());
                 };
                 let staged = deps.join(name);
