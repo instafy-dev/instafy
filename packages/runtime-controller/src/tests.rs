@@ -79,6 +79,8 @@ mod org_accent_tests;
 mod participation_billing_tests;
 #[path = "project_identity_tests.rs"]
 mod project_identity_tests;
+#[path = "self_hosted_platform_lane_tests.rs"]
+mod self_hosted_platform_lane_tests;
 
 #[path = "human_profile_http_tests.rs"]
 mod human_profile_http_tests;
@@ -11752,10 +11754,22 @@ async fn agent_lease_requires_signed_runtime_identity_before_claiming_private_jo
                 ],
             )
             .await?;
+        // The owner's own-key work: a private runtime never leases a
+        // platform AI job, whatever its identity.
+        let credential_id = Uuid::new_v4();
         connection
             .execute(
-                "insert into agent_jobs (id, project_id, conversation_id, status, payload)
-             values ($1, $2, $3, 'queued', $4)",
+                "insert into user_credentials (
+                     id, user_id, kind, label, nonce_b64, ciphertext_b64, metadata
+                 ) values ($1, $2, 'openai_api_key', 'Private lease', 'test-nonce',
+                     'test-ciphertext', '{}'::jsonb)",
+                &[&credential_id, &owner_id],
+            )
+            .await?;
+        connection
+            .execute(
+                "insert into agent_jobs (id, project_id, conversation_id, status, payload, credential_id)
+             values ($1, $2, $3, 'queued', $4, $5)",
                 &[
                     &job_id,
                     &project_id,
@@ -11764,6 +11778,7 @@ async fn agent_lease_requires_signed_runtime_identity_before_claiming_private_jo
                         "user_id": owner_id,
                         "prompt_text": "private-lease-prompt-marker",
                     })),
+                    &credential_id,
                 ],
             )
             .await?;
@@ -12502,11 +12517,23 @@ async fn shared_browser_internal_token_is_inert_for_workspace_write_routes() -> 
                 &[&run_id, &project_id],
             )
             .await?;
+        // Own-key work: a private runtime never leases a platform AI job.
+        let credential_id = Uuid::new_v4();
+        connection
+            .execute(
+                "insert into user_credentials (
+                     id, user_id, kind, label, nonce_b64, ciphertext_b64, metadata
+                 ) values ($1, $2, 'openai_api_key', 'Shared Browser', 'test-nonce',
+                     'test-ciphertext', '{}'::jsonb)",
+                &[&credential_id, &user_id],
+            )
+            .await?;
         connection
             .execute(
                 "insert into agent_jobs (
-                     id, project_id, run_id, status, payload, priority, target_runtime_id
-                 ) values ($1, $2, $3, 'queued', $4, 10, $5)",
+                     id, project_id, run_id, status, payload, priority, target_runtime_id,
+                     credential_id
+                 ) values ($1, $2, $3, 'queued', $4, 10, $5, $6)",
                 &[
                     &job_id,
                     &project_id,
@@ -12528,6 +12555,7 @@ async fn shared_browser_internal_token_is_inert_for_workspace_write_routes() -> 
                         }
                     })),
                     &runtime_id,
+                    &credential_id,
                 ],
             )
             .await?;
@@ -12744,6 +12772,7 @@ async fn lease_next_agent_job_leases_queued_work() -> anyhow::Result<()> {
                 session_id uuid,
                 conversation_id uuid,
                 intent text,
+                credential_id uuid,
                 status text NOT NULL,
                 outcome text,
                 payload jsonb NOT NULL,
@@ -12789,6 +12818,7 @@ async fn lease_next_agent_job_leases_queued_work() -> anyhow::Result<()> {
         false,
         None,
         None,
+        false,
     )
     .await
     .map_err(|error| controller_error("lease job", error))?;
@@ -12811,6 +12841,7 @@ async fn lease_next_agent_job_leases_queued_work() -> anyhow::Result<()> {
         false,
         None,
         None,
+        false,
     )
     .await
     .map_err(|error| controller_error("lease retry", error))?;
@@ -12839,6 +12870,7 @@ async fn lease_next_agent_job_can_filter_for_read_only_batches() -> anyhow::Resu
                 session_id uuid,
                 conversation_id uuid,
                 intent text,
+                credential_id uuid,
                 status text NOT NULL,
                 outcome text,
                 payload jsonb NOT NULL,
@@ -12908,6 +12940,7 @@ async fn lease_next_agent_job_can_filter_for_read_only_batches() -> anyhow::Resu
         false,
         None,
         None,
+        false,
     )
     .await
     .map_err(|error| controller_error("lease read-only job", error))?;
@@ -12946,6 +12979,7 @@ async fn lease_next_agent_job_scopes_read_only_batch_to_same_team_group() -> any
                 session_id uuid,
                 conversation_id uuid,
                 intent text,
+                credential_id uuid,
                 status text NOT NULL,
                 outcome text,
                 payload jsonb NOT NULL,
@@ -13013,6 +13047,7 @@ async fn lease_next_agent_job_scopes_read_only_batch_to_same_team_group() -> any
         true,
         None,
         Some(group_a.as_str()),
+        false,
     )
     .await
     .map_err(|error| controller_error("lease scoped read-only batch job", error))?;
@@ -13052,6 +13087,7 @@ async fn lease_next_agent_job_can_lease_runtime_spread_jobs_when_preference_pinn
                 session_id uuid,
                 conversation_id uuid,
                 intent text,
+                credential_id uuid,
                 status text NOT NULL,
                 outcome text,
                 payload jsonb NOT NULL,
@@ -13118,6 +13154,7 @@ async fn lease_next_agent_job_can_lease_runtime_spread_jobs_when_preference_pinn
         false,
         None,
         None,
+        false,
     )
     .await
     .map_err(|error| controller_error("lease spread job", error))?;
@@ -13157,6 +13194,7 @@ async fn lease_next_agent_job_never_spreads_personal_browser_work_off_target() -
                 session_id uuid,
                 conversation_id uuid,
                 intent text,
+                credential_id uuid,
                 status text NOT NULL,
                 outcome text,
                 payload jsonb NOT NULL,
@@ -13233,6 +13271,7 @@ async fn lease_next_agent_job_never_spreads_personal_browser_work_off_target() -
         false,
         None,
         None,
+        false,
     )
     .await
     .map_err(|error| controller_error("lease Personal Browser job off target", error))?;
@@ -13251,6 +13290,7 @@ async fn lease_next_agent_job_never_spreads_personal_browser_work_off_target() -
         false,
         None,
         None,
+        false,
     )
     .await
     .map_err(|error| controller_error("lease Personal Browser job for wrong owner", error))?;
@@ -13276,6 +13316,7 @@ async fn lease_next_agent_job_never_spreads_personal_browser_work_off_target() -
         false,
         None,
         None,
+        false,
     )
     .await
     .map_err(|error| controller_error("lease Personal Browser job on target", error))?;
@@ -13305,6 +13346,7 @@ async fn lease_next_agent_job_never_spreads_shared_browser_work_off_target() -> 
                 session_id uuid,
                 conversation_id uuid,
                 intent text,
+                credential_id uuid,
                 status text NOT NULL,
                 outcome text,
                 payload jsonb NOT NULL,
@@ -13362,6 +13404,7 @@ async fn lease_next_agent_job_never_spreads_shared_browser_work_off_target() -> 
         false,
         None,
         None,
+        false,
     )
     .await
     .map_err(|error| controller_error("lease Shared Browser job off target", error))?;
@@ -13380,6 +13423,7 @@ async fn lease_next_agent_job_never_spreads_shared_browser_work_off_target() -> 
         false,
         None,
         None,
+        false,
     )
     .await
     .map_err(|error| controller_error("lease Shared Browser job on target", error))?;
@@ -13411,6 +13455,7 @@ async fn lease_next_agent_job_scopes_grouped_runtime_spread_to_plan_runtimes() -
                 session_id uuid,
                 conversation_id uuid,
                 intent text,
+                credential_id uuid,
                 status text NOT NULL,
                 outcome text,
                 payload jsonb NOT NULL,
@@ -13512,6 +13557,7 @@ async fn lease_next_agent_job_scopes_grouped_runtime_spread_to_plan_runtimes() -
         false,
         None,
         None,
+        false,
     )
     .await
     .map_err(|error| controller_error("lease grouped spread job for stale runtime", error))?;
@@ -13530,6 +13576,7 @@ async fn lease_next_agent_job_scopes_grouped_runtime_spread_to_plan_runtimes() -
         false,
         None,
         None,
+        false,
     )
     .await
     .map_err(|error| controller_error("lease grouped spread job for plan runtime", error))?;
@@ -13559,6 +13606,7 @@ async fn lease_next_agent_job_yields_spread_group_to_unused_group_runtime() -> a
                 session_id uuid,
                 conversation_id uuid,
                 intent text,
+                credential_id uuid,
                 status text NOT NULL,
                 outcome text,
                 payload jsonb NOT NULL,
@@ -13651,6 +13699,7 @@ async fn lease_next_agent_job_yields_spread_group_to_unused_group_runtime() -> a
         false,
         None,
         None,
+        false,
     )
     .await
     .map_err(|error| controller_error("lease spread job for already-used parent", error))?;
@@ -13669,6 +13718,7 @@ async fn lease_next_agent_job_yields_spread_group_to_unused_group_runtime() -> a
         false,
         None,
         None,
+        false,
     )
     .await
     .map_err(|error| controller_error("lease spread job for unused group runtime", error))?;
@@ -13698,6 +13748,7 @@ async fn lease_next_agent_job_batches_exact_write_scoped_siblings() -> anyhow::R
                 session_id uuid,
                 conversation_id uuid,
                 intent text,
+                credential_id uuid,
                 status text NOT NULL,
                 outcome text,
                 payload jsonb NOT NULL,
@@ -13779,6 +13830,7 @@ async fn lease_next_agent_job_batches_exact_write_scoped_siblings() -> anyhow::R
         false,
         None,
         None,
+        false,
     )
     .await
     .map_err(|error| controller_error("lease first exact write job", error))?;
@@ -13796,6 +13848,7 @@ async fn lease_next_agent_job_batches_exact_write_scoped_siblings() -> anyhow::R
         true,
         None,
         Some(group_id.as_str()),
+        false,
     )
     .await
     .map_err(|error| controller_error("lease second exact write job", error))?;
@@ -13835,6 +13888,7 @@ async fn lease_next_agent_job_excludes_runtime_spread_jobs_from_secondary_batch_
                 session_id uuid,
                 conversation_id uuid,
                 intent text,
+                credential_id uuid,
                 status text NOT NULL,
                 outcome text,
                 payload jsonb NOT NULL,
@@ -13888,6 +13942,7 @@ async fn lease_next_agent_job_excludes_runtime_spread_jobs_from_secondary_batch_
         true,
         None,
         None,
+        false,
     )
     .await
     .map_err(|error| controller_error("lease spread secondary job", error))?;
@@ -13916,6 +13971,7 @@ async fn lease_next_agent_job_skips_runtime_spread_when_runtime_is_busy() -> any
                 session_id uuid,
                 conversation_id uuid,
                 intent text,
+                credential_id uuid,
                 status text NOT NULL,
                 outcome text,
                 payload jsonb NOT NULL,
@@ -13992,6 +14048,7 @@ async fn lease_next_agent_job_skips_runtime_spread_when_runtime_is_busy() -> any
         false,
         None,
         None,
+        false,
     )
     .await
     .map_err(|error| controller_error("lease spread job for busy runtime", error))?;

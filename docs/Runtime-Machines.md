@@ -196,10 +196,12 @@ for them (`runtime/limit_waits.rs`):
   are then dispatched as after any finished turn.
 - The wait ends when a live runtime (an unreleased lease or a recent
   heartbeat) would run the waiting work: a hosted runtime of the space, the
-  machine a job is pinned to, or, for unpinned work, a machine that leases
-  unpinned work for that job's user. A heartbeating desktop that never takes
-  work pinned to the hosted runtime, or only takes its owner's work, does not
-  end it, and the give-up still applies to that work. The `requested` row
+  machine a job is pinned to (unless that machine is private and the job is a
+  platform AI job, which it never takes), or, for unpinned work, a machine
+  that would lease it. A heartbeating desktop that never takes work pinned to
+  the hosted runtime, or only takes its owner's own-key work and terminal
+  commands (never a platform AI job), does not end it, and the give-up still
+  applies to that work. The `requested` row
   dispatch leaves behind does not count, and neither does a generation
   quarantined as `cleanup_pending`. A runtime preference held in one
   controller's memory is invisible to the sweep. A wait with no queued work is

@@ -38,6 +38,14 @@ with a NULL or empty key is never deduplicated. The concurrent case runs in the
 controller tests `credits::tests::concurrent_`, which need a fully migrated
 `TEST_DATABASE_URL`.
 
+`managed_ai_metering.sql` covers the managed-AI metering tables and the credit ledger's
+balance guard: overdraft rows, credits into a negative balance, ordinary debits still refused
+below zero, duplicate idempotency keys skipped without moving the balance, NULL-project keys,
+admission uniqueness, cascades, an index behind every foreign key of the metering tables, and
+browser-role privileges. The harness then posts one ledger key from 16 concurrent sessions and
+requires a single debit. The controller suite runs the same file inside a rolled-back
+transaction (`tests_ai_metering_schema`).
+
 To also run the real controller HTTP and mocked transport tests against a clean,
 fully migrated database in that same disposable cluster:
 

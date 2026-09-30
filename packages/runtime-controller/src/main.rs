@@ -17,6 +17,7 @@ mod agent;
 mod agent_contexts;
 mod agent_write_scopes;
 mod ai_agents;
+mod ai_metering;
 mod auth;
 mod automations;
 mod billing;
@@ -75,6 +76,8 @@ mod state;
 mod telemetry;
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod tests_ai_metering_schema;
 #[cfg(test)]
 mod tests_managed_ai_refund;
 #[cfg(test)]

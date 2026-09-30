@@ -166,9 +166,9 @@ impl ProxyCompletion {
 /// The model one upstream request is sent as. A lease the controller pinned
 /// (the managed lane, where the operator pays) goes out as its pinned model
 /// whatever the request names: the controller sets the runtime's CODEX_MODEL
-/// to the managed model only for jobs flagged managedAiUsed, so other jobs on
-/// the platform key (skill-mode ambient evaluations, service-role dispatches,
-/// a failed secrets fetch) would otherwise ask for the runtime default.
+/// to the managed model for every credential-less AI job, and the pin covers
+/// a job whose secrets fetch failed and any client that ignores that env, so
+/// neither can ask for the runtime default on the platform key.
 /// Without a pin the credential rules below apply unchanged.
 fn resolve_model_for_lease(requested_model: &str, leased: &LeasedCredentials) -> String {
     match leased.pinned_model() {
