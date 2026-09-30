@@ -480,7 +480,6 @@ fn offered_tool_names(request: &Value) -> Vec<String> {
     names
 }
 
-/// A proxy that must never be used: it records each connection and closes it unanswered.
 /// Collects every line of every string in a request. The prompt travels as `instructions`, or
 /// for a Responses Lite model (gpt-6-luna, gpt-5.6-sol) as a developer input item.
 fn request_text_lines(value: &Value, output: &mut Vec<String>) {
@@ -496,6 +495,7 @@ fn request_text_lines(value: &Value, output: &mut Vec<String>) {
     }
 }
 
+/// A proxy that must never be used: it records each connection and closes it unanswered.
 async fn start_poison_proxy() -> Result<(String, Arc<Mutex<usize>>, tokio::task::JoinHandle<()>)> {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
     let url = format!("http://{}", listener.local_addr()?);
