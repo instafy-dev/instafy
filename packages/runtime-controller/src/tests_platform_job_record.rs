@@ -697,18 +697,20 @@ async fn ambient_evaluation_record_carries_waiver_and_automation_does_not() -> a
 }
 
 /// A service-role dispatch for the owner, targeted at `runtime_id`: one job,
-/// on the platform key unless the owner has a default credential.
+/// on the platform key unless the owner has a default credential or the
+/// intent needs no AI.
 async fn dispatch_to_runtime(
     state: &AppState,
     team: &Team,
     runtime_id: &Uuid,
+    intent: &str,
 ) -> anyhow::Result<Uuid> {
     let conversation_id = Uuid::new_v4();
     let mut request = dispatch_request(
         team,
         &conversation_id,
         "Continue the plan.",
-        "feature",
+        intent,
         &["octo"],
         &[],
         "private",
@@ -724,12 +726,15 @@ async fn dispatch_to_runtime(
     Ok(only_job(&state.pool, &conversation_id).await?.job_id)
 }
 
-/// Leases one job as the runtime and returns it with its proxy token.
-async fn lease_one(
+/// Posts `body` to an agent endpoint as the runtime and returns the response
+/// body, which must be a success.
+async fn post_as_runtime(
     state: &AppState,
     team: &Team,
     runtime_id: &Uuid,
-) -> anyhow::Result<(Uuid, String)> {
+    path: &str,
+    body: JsonValue,
+) -> anyhow::Result<JsonValue> {
     let agent_token =
         crate::auth::issue_agent_token(&state.config, &team.project_id, runtime_id, None, None)
             .map_err(|error| controller_error("issue agent token", error))?
@@ -739,21 +744,36 @@ async fn lease_one(
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri("/agent/lease")
+                .uri(path)
                 .header(axum::http::header::CONTENT_TYPE, "application/json")
                 .header(
                     axum::http::header::AUTHORIZATION,
                     format!("Bearer {agent_token}"),
                 )
-                .body(Body::from(
-                    json!({ "max": 1, "lease_seconds": 120 }).to_string(),
-                ))?,
+                .body(Body::from(body.to_string()))?,
         )
         .await?;
     let status = response.status();
     let body: JsonValue =
         serde_json::from_slice(&to_bytes(response.into_body(), usize::MAX).await?)?;
-    anyhow::ensure!(status == StatusCode::OK, "lease returned {status}: {body}");
+    anyhow::ensure!(status == StatusCode::OK, "{path} returned {status}: {body}");
+    Ok(body)
+}
+
+/// Leases one job as the runtime and returns it with its proxy token.
+async fn lease_one(
+    state: &AppState,
+    team: &Team,
+    runtime_id: &Uuid,
+) -> anyhow::Result<(Uuid, String)> {
+    let body = post_as_runtime(
+        state,
+        team,
+        runtime_id,
+        "/agent/lease",
+        json!({ "max": 1, "lease_seconds": 120 }),
+    )
+    .await?;
     let job = &body["jobs"][0];
     let job_id = Uuid::parse_str(job["id"].as_str().unwrap_or_default())?;
     let token = job["proxy"]["token"]
@@ -777,6 +797,57 @@ async fn requeue(pool: &PgPool, job_id: &Uuid) -> anyhow::Result<()> {
         )
         .await?;
     Ok(())
+}
+
+/// Dispatches a platform job to `runtime_id`, leases it there and checks that
+/// its token is live.
+async fn lease_platform_job(
+    state: &AppState,
+    team: &Team,
+    runtime_id: &Uuid,
+) -> anyhow::Result<(Uuid, String)> {
+    let job_id = dispatch_to_runtime(state, team, runtime_id, "feature").await?;
+    let (leased, token) = lease_one(state, team, runtime_id).await?;
+    anyhow::ensure!(leased == job_id, "leased {leased}, dispatched {job_id}");
+    let live = verify(state, &token, ProxyJobTokenMode::Live).await?;
+    anyhow::ensure!(
+        live.as_ref().map(|token| token.job_id) == Ok(job_id),
+        "a freshly leased platform job's token is live: {live:?}"
+    );
+    Ok((job_id, token))
+}
+
+/// Finishes a leased job through `/agent/complete`, as its runtime does.
+async fn complete(
+    state: &AppState,
+    team: &Team,
+    runtime_id: &Uuid,
+    job_id: &Uuid,
+    outcome: &str,
+) -> anyhow::Result<()> {
+    post_as_runtime(
+        state,
+        team,
+        runtime_id,
+        "/agent/complete",
+        json!({ "job_id": job_id.to_string(), "outcome": outcome }),
+    )
+    .await?;
+    Ok(())
+}
+
+/// A job's status, lease attempts and leasing runtime.
+async fn lease_state(pool: &PgPool, job_id: &Uuid) -> anyhow::Result<(String, i32, Option<Uuid>)> {
+    let row = pool
+        .get()
+        .await?
+        .query_one(
+            "select status, lease_attempts, leased_by_runtime_id
+             from agent_jobs where id = $1",
+            &[job_id],
+        )
+        .await?;
+    Ok((row.get(0), row.get(1), row.get(2)))
 }
 
 async fn recorded_hashes(pool: &PgPool, job_id: &Uuid) -> anyhow::Result<Option<JsonValue>> {
@@ -829,9 +900,9 @@ async fn agent_lease_records_token_hash_per_attempt() -> anyhow::Result<()> {
     with_team("job token binding", |pool, team| async move {
         let runtime_id = team.add_hosted_runtime(&pool).await?;
         let state = build_test_state(pool.clone(), test_config("job-token-binding"));
-        let platform_job = dispatch_to_runtime(&state, &team, &runtime_id).await?;
+        let platform_job = dispatch_to_runtime(&state, &team, &runtime_id, "feature").await?;
         let credential_id = team.add_owner_default_credential(&pool).await?;
-        let byo_job = dispatch_to_runtime(&state, &team, &runtime_id).await?;
+        let byo_job = dispatch_to_runtime(&state, &team, &runtime_id, "feature").await?;
         assert_eq!(
             recorded_hashes(&pool, &platform_job).await?,
             Some(json!({}))
@@ -849,8 +920,8 @@ async fn agent_lease_records_token_hash_per_attempt() -> anyhow::Result<()> {
             Some(json!({ "1": proxy_token_sha256(&first_token) }))
         );
 
-        // A BYO job's token names its attempt too, but it has no record to
-        // bind it to.
+        // A BYO job's token names its attempt too, but the lease binds only
+        // platform jobs.
         let (leased, byo_token) = lease_one(&state, &team, &runtime_id).await?;
         assert_eq!(leased, byo_job);
         let claims = claims_of(&byo_token)?;
@@ -879,6 +950,185 @@ async fn agent_lease_records_token_hash_per_attempt() -> anyhow::Result<()> {
 }
 
 #[tokio::test]
+async fn agent_lease_binds_only_platform_jobs() -> anyhow::Result<()> {
+    with_team("job token binding scope", |pool, team| async move {
+        let runtime_id = team.add_hosted_runtime(&pool).await?;
+        let state = build_test_state(pool.clone(), test_config("job-token-binding-scope"));
+        let platform_job = dispatch_to_runtime(&state, &team, &runtime_id, "feature").await?;
+        let terminal_job =
+            dispatch_to_runtime(&state, &team, &runtime_id, "terminal_command").await?;
+        team.add_owner_default_credential(&pool).await?;
+        let byo_job = dispatch_to_runtime(&state, &team, &runtime_id, "feature").await?;
+
+        // Dispatch gives neither job a record. Give each one anyway, so a
+        // binding write to either would show.
+        for job_id in [&terminal_job, &byo_job] {
+            assert_eq!(recorded_hashes(&pool, job_id).await?, None);
+            pool.get()
+                .await?
+                .execute(
+                    "insert into ai_usage_jobs (job_id, org_id, project_id, billing_mode)
+                     values ($1, $2, $3, 'record_only')",
+                    &[job_id, &team.org_id, &team.project_id],
+                )
+                .await?;
+        }
+
+        // A platform lease binds its token.
+        let (leased, platform_token) = lease_one(&state, &team, &runtime_id).await?;
+        assert_eq!(leased, platform_job);
+        assert_eq!(
+            recorded_hashes(&pool, &platform_job).await?,
+            Some(json!({ "1": proxy_token_sha256(&platform_token) }))
+        );
+
+        // The terminal and BYO leases finish while another transaction holds
+        // a lock that blocks every statement on ai_usage_jobs, so neither
+        // issues any query there, let alone a binding write.
+        let mut locker = pool.get().await?;
+        let lock = locker.transaction().await?;
+        lock.execute("lock table ai_usage_jobs in access exclusive mode", &[])
+            .await?;
+        let leases = tokio::time::timeout(std::time::Duration::from_secs(15), async {
+            let terminal = lease_one(&state, &team, &runtime_id).await?;
+            let byo = lease_one(&state, &team, &runtime_id).await?;
+            anyhow::Ok([terminal, byo])
+        })
+        .await;
+        lock.rollback().await?;
+        let leases = leases
+            .map_err(|_| anyhow::anyhow!("a terminal or BYO lease waited on ai_usage_jobs"))??;
+
+        for ((leased, token), (case, job_id)) in leases
+            .iter()
+            .zip([("terminal", &terminal_job), ("BYO", &byo_job)])
+        {
+            assert_eq!(leased, job_id, "{case}");
+            // The claims stay on every job token.
+            let claims = claims_of(token)?;
+            assert_eq!(claims["job_id"], json!(job_id.to_string()), "{case}");
+            assert_eq!(claims["lease_attempt"], json!(1), "{case}");
+            assert_eq!(
+                recorded_hashes(&pool, job_id).await?,
+                Some(json!({})),
+                "{case}"
+            );
+        }
+        Ok(())
+    })
+    .await
+}
+
+#[tokio::test]
+async fn live_job_token_requires_the_job_still_leased_to_its_runtime() -> anyhow::Result<()> {
+    use ProxyJobTokenMode::{Live, Settle};
+    use ProxyJobTokenRejection::Unbound;
+
+    with_team("live job token lease", |pool, team| async move {
+        let runtime_id = team.add_hosted_runtime(&pool).await?;
+        let other_runtime_id = team.add_hosted_runtime(&pool).await?;
+        let state = build_test_state(pool.clone(), test_config("live-job-token-lease"));
+
+        // Four platform jobs, each leased once by the runtime.
+        let (canceled, canceled_token) = lease_platform_job(&state, &team, &runtime_id).await?;
+        let (completed, completed_token) = lease_platform_job(&state, &team, &runtime_id).await?;
+        let (requeued, requeued_token) = lease_platform_job(&state, &team, &runtime_id).await?;
+        let (moved, moved_token) = lease_platform_job(&state, &team, &runtime_id).await?;
+
+        complete(&state, &team, &runtime_id, &canceled, "canceled").await?;
+        complete(&state, &team, &runtime_id, &completed, "succeeded").await?;
+        requeue(&pool, &requeued).await?;
+        // No path moves a lease without a new attempt; this one is forced, so
+        // the runtime check is covered on its own.
+        pool.get()
+            .await?
+            .execute(
+                "update agent_jobs set leased_by_runtime_id = $2 where id = $1",
+                &[&moved, &other_runtime_id],
+            )
+            .await?;
+
+        for (case, job_id, token, status_after, leased_by_after) in [
+            (
+                "canceled",
+                &canceled,
+                &canceled_token,
+                "canceled",
+                Some(runtime_id),
+            ),
+            (
+                "completed",
+                &completed,
+                &completed_token,
+                "completed",
+                Some(runtime_id),
+            ),
+            (
+                "requeued, not re-leased",
+                &requeued,
+                &requeued_token,
+                "queued",
+                None,
+            ),
+            (
+                "leased elsewhere",
+                &moved,
+                &moved_token,
+                "leased",
+                Some(other_runtime_id),
+            ),
+        ] {
+            // None of these changes the attempt, so the token is still the
+            // current attempt's recorded token.
+            let (status, attempts, leased_by) = lease_state(&pool, job_id).await?;
+            assert_eq!(
+                (status.as_str(), attempts, leased_by),
+                (status_after, 1, leased_by_after),
+                "{case}"
+            );
+            assert_eq!(
+                recorded_hashes(&pool, job_id).await?,
+                Some(json!({ "1": proxy_token_sha256(token) })),
+                "{case}"
+            );
+            assert_eq!(verify(&state, token, Live).await?, Err(Unbound), "{case}");
+            let settled = verify(&state, token, Settle).await?;
+            assert_eq!(
+                settled.map(|t| (t.job_id, t.lease_attempt)),
+                Ok((*job_id, 1)),
+                "{case} still settles its own attempt"
+            );
+        }
+
+        // Re-leased to another runtime: the new token is live, the old one is
+        // not, and the old one still settles its own attempt.
+        pool.get()
+            .await?
+            .execute(
+                "update agent_jobs set target_runtime_id = $2 where id = $1",
+                &[&requeued, &other_runtime_id],
+            )
+            .await?;
+        let (leased_job, new_token) = lease_one(&state, &team, &other_runtime_id).await?;
+        assert_eq!(leased_job, requeued);
+        let live = verify(&state, &new_token, Live).await?;
+        assert_eq!(
+            live.map(|t| (t.runtime_id, t.lease_attempt)),
+            Ok((other_runtime_id, 2))
+        );
+        assert_eq!(verify(&state, &requeued_token, Live).await?, Err(Unbound));
+        assert_eq!(
+            verify(&state, &requeued_token, Settle)
+                .await?
+                .map(|t| t.lease_attempt),
+            Ok(1)
+        );
+        Ok(())
+    })
+    .await
+}
+
+#[tokio::test]
 async fn verify_proxy_job_token_rejects_forged_expired_wrong_audience_and_unbound(
 ) -> anyhow::Result<()> {
     use ProxyJobTokenMode::{Live, Settle};
@@ -887,9 +1137,9 @@ async fn verify_proxy_job_token_rejects_forged_expired_wrong_audience_and_unboun
     with_team("job token verification", |pool, team| async move {
         let runtime_id = team.add_hosted_runtime(&pool).await?;
         let state = build_test_state(pool.clone(), test_config("job-token-verification"));
-        let platform_job = dispatch_to_runtime(&state, &team, &runtime_id).await?;
+        let platform_job = dispatch_to_runtime(&state, &team, &runtime_id, "feature").await?;
         team.add_owner_default_credential(&pool).await?;
-        let byo_job = dispatch_to_runtime(&state, &team, &runtime_id).await?;
+        let byo_job = dispatch_to_runtime(&state, &team, &runtime_id, "feature").await?;
         let (_, token) = lease_one(&state, &team, &runtime_id).await?;
         let (leased, byo_token) = lease_one(&state, &team, &runtime_id).await?;
         assert_eq!(leased, byo_job);
@@ -948,6 +1198,22 @@ async fn verify_proxy_job_token_rejects_forged_expired_wrong_audience_and_unboun
             ("not a JWT", "not-a-token".to_string()),
         ] {
             assert_eq!(verify(&state, &forged, Live).await?, Err(Invalid), "{case}");
+        }
+        // `jsonwebtoken` validates exp, the audience and the issuer only when
+        // a token carries them, so a token without any of them is refused in
+        // both modes.
+        for (case, forged) in [
+            ("no audience", sign(&without("aud"), JOB_TOKEN_SECRET)),
+            ("no issuer", sign(&without("iss"), JOB_TOKEN_SECRET)),
+            ("no expiry", sign(&without("exp"), JOB_TOKEN_SECRET)),
+        ] {
+            for mode in [Live, Settle] {
+                assert_eq!(
+                    verify(&state, &forged, mode).await?,
+                    Err(Invalid),
+                    "{case} in {mode:?}"
+                );
+            }
         }
 
         // Signed with the real secret for the right job and attempt, but not
@@ -1015,7 +1281,7 @@ async fn settle_mode_accepts_expired_token_within_max_age_for_its_own_attempt() 
         let runtime_id = team.add_hosted_runtime(&pool).await?;
         let config = test_config("settle-job-token");
         let state = build_test_state(pool.clone(), config.clone());
-        let platform_job = dispatch_to_runtime(&state, &team, &runtime_id).await?;
+        let platform_job = dispatch_to_runtime(&state, &team, &runtime_id, "feature").await?;
 
         // The first attempt's lease mints a token that has already expired,
         // as a queued settle's token has by the time it lands.

@@ -915,7 +915,7 @@ pub(crate) async fn agent_lease(
                     extract_multi_agent_group_id_from_job_payload(&job.payload);
                 let (agent_handle, agent_display_name, agent_description) =
                     extract_agent_prompt_identity_from_job_payload(&job.payload);
-                // The token names this lease attempt, and a platform job's
+                // Every job token names this lease attempt. A platform job's
                 // record keeps its hash, so metering accepts only the token
                 // minted here for this attempt.
                 job.proxy = issue_proxy_envelope(
@@ -932,7 +932,15 @@ pub(crate) async fn agent_lease(
                     agent_display_name.as_deref(),
                     agent_description.as_deref(),
                 );
-                if let Some(proxy) = job.proxy.as_ref() {
+                // Bind only a platform job, by the predicate dispatch writes
+                // its record by (no credential, an intent that needs AI). BYO
+                // and terminal leases skip the write and never touch the
+                // metering table.
+                let platform_job = job.credential_id.is_none()
+                    && crate::dispatch::dispatch_requires_ai_access(
+                        job.intent.as_deref().unwrap_or_default(),
+                    );
+                if let Some(proxy) = job.proxy.as_ref().filter(|_| platform_job) {
                     crate::ai_metering::job_record::bind_job_token(
                         &transaction,
                         &job.id,

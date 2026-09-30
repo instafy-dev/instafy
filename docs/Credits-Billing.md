@@ -239,14 +239,29 @@ records which jobs run on the platform key and which tokens they hold:
   automations included. It is never read from the job payload, which a client or a later decline
   can change.
 - Every job token the job lease mints now names its job and lease attempt (`job_id`,
-  `lease_attempt`), and the lease records the token's SHA-256 in the platform job's row under that
-  attempt, in the lease transaction. The metering checks still to come (the managed-key lease and
-  the usage report) accept only a token recorded that way, so even a holder of the proxy signing
-  secret can use only tokens the controller minted for that job attempt. The controller's other
-  proxy tokens (the agent-login and runtime-register envelopes, and those for its own credential
-  checks, inline completions and conversation titles) carry neither claim. Proxies ignore both
-  claims for now and accept tokens with or without them, so the controller and the proxy can be
-  updated in either order.
+  `lease_attempt`). For a platform job, and only for one, the lease also records the token's
+  SHA-256 in the job's row under that attempt, in the lease transaction. BYO and terminal leases
+  write nothing there, so they never depend on the metering table. The metering checks still to
+  come (the managed-key lease and the usage report) accept only a token recorded that way, so even
+  a holder of the proxy signing secret can use only tokens the controller minted for that job
+  attempt. The controller's other proxy tokens (the agent-login and runtime-register envelopes,
+  and those for its own credential checks, inline completions and conversation titles) carry
+  neither claim. Proxies ignore both claims for now and accept tokens with or without them, so the
+  controller and the proxy can be updated in either order.
+- Those checks verify a job token in one of two modes. Both require a signature with the proxy
+  signing secret and the `aud` (`proxy`), `iss` (`runtime-controller`), `exp` and `iat` claims; a
+  token missing any of them is refused. The live mode, for the managed-key lease, also enforces
+  `exp` and requires that the job is still leased (`agent_jobs.status = 'leased'`) to the runtime
+  the token names and that the token is the one recorded for the job's current attempt. Cancel,
+  finish and requeue leave the attempt unchanged, so a token stops being live the moment its job
+  stops being leased, not when it expires. The settle mode, for the usage report, skips `exp`,
+  accepts a token issued within the last 24 hours and requires the token recorded for the attempt
+  it names, whatever the job's status now, so a finished job and a requeued job's earlier attempt
+  still bill.
+- The next step (the managed-key lease and the usage report) must keep two rules. The managed-key
+  lease requires a bound live token in every case, with no fallback for an unbound or legacy
+  token. A settle takes the job and lease attempt from the verified token, never from the report
+  body.
 
 ## Controller Endpoints
 - `GET /credits/status` — current team credit balance/limit.

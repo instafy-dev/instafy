@@ -670,14 +670,18 @@ pub(crate) const MANAGED_AI_SETTLE_MAX_AGE_SECONDS: i64 = 86_400;
 #[cfg_attr(not(test), allow(dead_code))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum ProxyJobTokenMode {
-    /// A managed-key lease: `exp` holds, with the proxy's leeway, and the
-    /// token is the one the lease minted for the job's current attempt.
+    /// A managed-key lease: `exp` holds, with the proxy's leeway, the job is
+    /// still leased (`agent_jobs.status = 'leased'`) to the runtime the token
+    /// names, and the token is the one the lease minted for the job's current
+    /// attempt. Cancel, finish and requeue leave `lease_attempts` alone, so
+    /// the attempt check alone would keep a finished job's token live until
+    /// it expires.
     Live,
     /// A usage settle: the token was issued within
     /// [`MANAGED_AI_SETTLE_MAX_AGE_SECONDS`] and is the one the lease minted
-    /// for the attempt it names. `exp` is not enforced, because a queued
-    /// settle may land after it and a requeued job's old attempt must still
-    /// bill.
+    /// for the attempt it names, whatever the job's status now. `exp` is not
+    /// enforced, because a queued settle may land after it, and a finished
+    /// job or a requeued job's old attempt must still bill.
     Settle,
 }
 
@@ -686,12 +690,14 @@ pub(crate) enum ProxyJobTokenMode {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum ProxyJobTokenRejection {
     /// Not a job token this controller signed, or too old for the mode: a
-    /// bad signature, audience or issuer, an expired live token, a settle
-    /// token issued too long ago, or a token without a job binding.
+    /// bad signature, a wrong or missing audience or issuer, a missing
+    /// `exp`, an expired live token, a settle token issued too long ago, or a
+    /// token without a job binding.
     Invalid,
     /// Signed, but the lease recorded no such token for the attempt: the job
     /// has no platform record, the attempt was never leased or, in `Live`,
-    /// a later attempt replaced it.
+    /// a later attempt replaced it or the job is no longer leased to the
+    /// token's runtime (canceled, finished or requeued).
     Unbound,
 }
 
@@ -742,6 +748,12 @@ fn decode_proxy_job_token(
     let mut validation = Validation::new(Algorithm::HS256);
     validation.set_audience(&["proxy"]);
     validation.set_issuer(&["runtime-controller"]);
+    // `jsonwebtoken` validates `exp`, `aud` and `iss` only when a token
+    // carries them and by default requires only `exp`, so a token without an
+    // audience or issuer would pass. Every proxy token the controller issues
+    // sets all three. `Settle` does not enforce `exp` but still requires it.
+    // `iat` is not a claim `jsonwebtoken` can require; it is checked below.
+    validation.set_required_spec_claims(&["exp", "aud", "iss"]);
     validation.leeway = PROXY_JOB_TOKEN_LEEWAY_SECONDS as u64;
     validation.validate_exp = mode == ProxyJobTokenMode::Live;
     let claims = decode::<ProxyJobTokenWireClaims>(
@@ -773,12 +785,19 @@ fn decode_proxy_job_token(
 }
 
 /// Verifies a job token the proxy presents for the platform lane. Beyond the
-/// signature, audience and age that [`ProxyJobTokenMode`] sets, the token
-/// must hash to what the job lease recorded in `ai_usage_jobs`: in `Live`
-/// for the job's current attempt, in `Settle` for the attempt the token
-/// names. So even a holder of the signing secret can use only tokens the
-/// controller minted for that job attempt. A job without a platform record
-/// (BYO, terminal commands) binds nothing, and its tokens are `Unbound`.
+/// signature, audience, issuer and age that [`ProxyJobTokenMode`] sets, the
+/// token must hash to what the job lease recorded in `ai_usage_jobs`: in
+/// `Live` for the current attempt of a job still leased to the token's
+/// runtime, in `Settle` for the attempt the token names. So even a holder of
+/// the signing secret can use only tokens the controller minted for that job
+/// attempt. A job without a platform record (BYO, terminal commands) binds
+/// nothing, and its tokens are `Unbound`.
+///
+/// The contract for its callers (metering C2):
+/// - The managed-key lease must require a bound `Live` token in every case.
+///   An unbound, legacy or unverifiable token never gets the managed key.
+/// - A settle must take `job_id` and `lease_attempt` from the returned
+///   [`VerifiedProxyJobToken`], never from the report body.
 ///
 /// The outer error is a database failure; the inner result is the verdict.
 #[cfg_attr(not(test), allow(dead_code))]
@@ -792,19 +811,33 @@ pub(crate) async fn verify_proxy_job_token(
         Ok(verified) => verified,
         Err(rejection) => return Ok(Err(rejection)),
     };
+    // The job lease sets `leased_by_runtime_id` to the leasing runtime and
+    // names the same runtime in the token's `runtime_id` claim, which every
+    // job token carries.
     let row = client
         .query_opt(
             "select t.token_sha256_by_attempt ->> $2 as own_sha256,
-                    t.token_sha256_by_attempt ->> j.lease_attempts::text as current_sha256
+                    t.token_sha256_by_attempt ->> j.lease_attempts::text as current_sha256,
+                    coalesce(
+                        j.status = 'leased' and j.leased_by_runtime_id = $3,
+                        false
+                    ) as leased_to_token_runtime
              from ai_usage_jobs t
              join agent_jobs j on j.id = t.job_id
              where t.job_id = $1",
-            &[&verified.job_id, &verified.lease_attempt.to_string()],
+            &[
+                &verified.job_id,
+                &verified.lease_attempt.to_string(),
+                &verified.runtime_id,
+            ],
         )
         .await
         .map_err(|error| internal_error(format!("failed to load job token binding: {error}")))?;
     let bound_sha256: Option<String> = row.and_then(|row| match mode {
-        ProxyJobTokenMode::Live => row.get("current_sha256"),
+        ProxyJobTokenMode::Live if row.get::<_, bool>("leased_to_token_runtime") => {
+            row.get("current_sha256")
+        }
+        ProxyJobTokenMode::Live => None,
         ProxyJobTokenMode::Settle => row.get("own_sha256"),
     });
     let bound = bound_sha256
@@ -1183,6 +1216,42 @@ mod tests {
                 Err(ProxyJobTokenRejection::Invalid),
                 "{mode:?}"
             );
+        }
+    }
+
+    #[test]
+    fn job_token_must_carry_audience_issuer_and_expiry() {
+        let mut config = base_app_config();
+        config.proxy_signing_secret = Some("proxy-secret".to_string());
+        let secret = proxy_signing_secret(&config).expect("proxy signing secret");
+        let now = Utc::now().timestamp();
+        let claims = proxy_token_claims(&config, &job_token_issued_at(&config, now, now + 1_800));
+        let decode_signed = |claims: &serde_json::Value, mode: ProxyJobTokenMode| {
+            let token = encode(
+                &Header::new(Algorithm::HS256),
+                claims,
+                &EncodingKey::from_secret(secret.as_bytes()),
+            )
+            .expect("sign job token");
+            decode_proxy_job_token(&config, &token, mode, now).map(|token| token.lease_attempt)
+        };
+
+        for mode in [ProxyJobTokenMode::Live, ProxyJobTokenMode::Settle] {
+            assert_eq!(decode_signed(&claims, mode), Ok(1), "{mode:?}");
+            // `jsonwebtoken` validates each only when present, so each must
+            // be required.
+            for claim in ["aud", "iss", "exp"] {
+                let mut without = claims.clone();
+                without
+                    .as_object_mut()
+                    .expect("claims object")
+                    .remove(claim);
+                assert_eq!(
+                    decode_signed(&without, mode),
+                    Err(ProxyJobTokenRejection::Invalid),
+                    "no {claim} in {mode:?}"
+                );
+            }
         }
     }
 

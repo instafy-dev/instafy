@@ -62,8 +62,10 @@ pub(crate) async fn insert_platform_job_record(
 /// in the lease transaction, which already holds the job row. Settle and the
 /// managed-key lease accept only a token recorded for its attempt, so even a
 /// holder of the signing secret can use only tokens the controller minted
-/// for that job. A job without a record has nothing to bind and is left
-/// alone.
+/// for that job. The lease calls it only for a platform job (no credential,
+/// an intent that needs AI), so BYO and terminal leases never write here. A
+/// platform job without a record, such as one in a project without an org,
+/// has nothing to bind and is left alone.
 pub(crate) async fn bind_job_token(
     transaction: &tokio_postgres::Transaction<'_>,
     job_id: &Uuid,
