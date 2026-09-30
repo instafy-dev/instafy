@@ -172,6 +172,7 @@ export function PersonalBrowserSurface({
     return () => setOverlayCount(count => count - 1);
   }, []);
   const [fullscreen, setFullscreen] = useState(false);
+  const [settingsOpen, setSettingsOpen] = useState(false);
   const expanded = active && fullscreen;
   const selectedApprovalMode = model.preferredApprovalMode;
   const [dismissedClearDataFeedbackKey, setDismissedClearDataFeedbackKey] =
@@ -467,7 +468,27 @@ export function PersonalBrowserSurface({
               )}
             </IconButton>
           ) : null}
-          <BrowserToolsPopover label="Browser settings" trigger={<IconButton aria-label="Browser settings" variant="ghost" radius="full" size="sm"><MoreHoriz className="h-4 w-4" aria-hidden="true" /></IconButton>}>
+          <BrowserToolsPopover label="Browser settings" isOpen={settingsOpen} onOpenChange={setSettingsOpen} trigger={<IconButton aria-label="Browser settings" variant="ghost" radius="full" size="sm"><MoreHoriz className="h-4 w-4" aria-hidden="true" /></IconButton>}>
+            {compactChrome ? (
+              <div className="flex items-center gap-1" role="group" aria-label="Page history">
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  isDisabled={!ready || humanInputLocked || !model.status?.canGoBack}
+                  onPress={() => { setSettingsOpen(false); void model.goBack(); }}
+                >
+                  <NavArrowLeft className="h-4 w-4" aria-hidden="true" />Back
+                </Button>
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  isDisabled={!ready || humanInputLocked || !model.status?.canGoForward}
+                  onPress={() => { setSettingsOpen(false); void model.goForward(); }}
+                >
+                  <NavArrowRight className="h-4 w-4" aria-hidden="true" />Forward
+                </Button>
+              </div>
+            ) : null}
             {routineApprovalAvailable ? (
               <div className="flex shrink-0 flex-wrap items-center gap-x-3 gap-y-1 border-b border-slate-200 px-3 py-2 text-xs dark:border-slate-800" data-browser-session-safe-zone="true">
                 <Checkbox
