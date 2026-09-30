@@ -3,7 +3,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
@@ -24,6 +24,10 @@ const STEP_TEXT: &str = "LOCAL_RETRY_STEP_DONE";
 const FINISHED_CALL_ID: &str = "call-local-finished";
 const PARTIAL_TEXT: &str = "LOCAL_CUT_SHORT_PARTIAL";
 const TOOL_CMD: &str = "printf x >> tool-count.txt; printf TOOL_APPLIED";
+/// Selects the Codex model the scenarios run; every Codex bump runs them for each model the
+/// runtime offers (for example gpt-6-luna, gpt-5.6-sol and gpt-5.5).
+const TEST_MODEL_ENV: &str = "INSTAFY_TEST_CODEX_MODEL";
+const DEFAULT_TEST_MODEL: &str = "gpt-6-luna";
 const PERSONAL_BROWSER_TOKEN: &str = "inert-local-personal-browser-token";
 /// Tools a bounded browser turn must never offer: shell, file, image, agent and user-input tools.
 const BOUNDED_BROWSER_FORBIDDEN_TOOLS: &[&str] = &[
@@ -476,6 +480,46 @@ fn offered_tool_names(request: &Value) -> Vec<String> {
     names
 }
 
+fn test_model() -> String {
+    std::env::var(TEST_MODEL_ENV).unwrap_or_else(|_| DEFAULT_TEST_MODEL.to_string())
+}
+
+/// Code-mode-only models, including the default gpt-6-luna, run every tool in
+/// `codex-code-mode-host`, which runtime-agent looks for beside its own executable. A test
+/// binary lives in `target/<profile>/deps`, so link the host that
+/// `cargo build --features code-mode-host -p codex-code-mode-host` left in `target/<profile>`.
+/// Without it those models fail closed, and the scenario output names the missing file.
+fn stage_code_mode_host_beside_test_binary() -> Result<()> {
+    static STAGED: OnceLock<Result<(), String>> = OnceLock::new();
+    STAGED
+        .get_or_init(|| {
+            let stage = || -> Result<()> {
+                let name = runtime_agent::code_mode_host::EXECUTABLE_NAME;
+                let test_binary = std::env::current_exe()?;
+                let deps = test_binary
+                    .parent()
+                    .context("test binary has no directory")?;
+                let Some(built) = deps
+                    .parent()
+                    .map(|profile| profile.join(name))
+                    .filter(|built| built.is_file())
+                else {
+                    return Ok(());
+                };
+                let staged = deps.join(name);
+                // Replace any earlier copy so a rebuilt host is the one under test.
+                let _ = fs::remove_file(&staged);
+                if fs::hard_link(&built, &staged).is_err() {
+                    fs::copy(&built, &staged)?;
+                }
+                Ok(())
+            };
+            stage().map_err(|error| format!("{error:#}"))
+        })
+        .clone()
+        .map_err(anyhow::Error::msg)
+}
+
 fn tool_names(value: &Value, output: &mut Vec<String>) {
     match value {
         Value::Array(items) => items.iter().for_each(|item| tool_names(item, output)),
@@ -515,6 +559,7 @@ async fn run_scenario(scenario: &str, expected_requests: usize) -> Result<()> {
     });
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
     let origin = format!("http://{}", listener.local_addr()?);
+    stage_code_mode_host_beside_test_binary()?;
     let app = Router::new()
         .route("/v1/responses", post(responses))
         .route("/mcp", post(personal_browser_mcp))
@@ -546,7 +591,7 @@ async fn run_scenario(scenario: &str, expected_requests: usize) -> Result<()> {
         .env("OPENAI_BASE_URL", format!("{origin}/v1"))
         .env("OPENAI_API_KEY", API_KEY)
         .env("CODEX_API_KEY", API_KEY)
-        .env("CODEX_MODEL", "gpt-6-luna")
+        .env("CODEX_MODEL", test_model())
         .env("CODEX_MODEL_PROVIDER", "openai")
         .env("CODEX_ENABLE_WEB_SEARCH", "false")
         .env("CODEX_RUNTIME_REASONING_EFFORT", "low")

@@ -1341,6 +1341,8 @@ impl CodexClient {
             )
             .await;
         crate::codex_policy::pin_instructions_for_resolved_model(&mut config, &model_info);
+        let code_mode_host = crate::code_mode_host::host_program()?;
+        crate::code_mode_host::ensure_host_for_model(&code_mode_host, &model_info, &config)?;
         // Fragile hook: runtime-agent embeds Codex as a library, so there is no Codex CLI
         // executable to back exec-server helper re-entry points. This and
         // `EmptyUserInstructionsProvider` come from Codex's test support; recheck both on
@@ -1352,23 +1354,28 @@ impl CodexClient {
             .await
             .context("failed to resolve Codex installation id")?;
         let turn_start_token_usage = TurnStartTokenUsage::default();
-        let thread_manager = Arc::new(ThreadManager::new(
-            &config,
-            auth_manager.clone(),
-            models_manager,
-            CodexAppsToolsCache::default(),
-            SessionSource::Exec,
-            environment_manager,
-            codex_extension_registry(&turn_start_token_usage),
-            Arc::new(EmptyUserInstructionsProvider),
-            None,
-            codex_core::passthrough_image_store(),
-            thread_store,
-            local_agent_graph_store_from_state_db(state_db.as_ref()),
-            installation_id,
-            None,
-            None,
-        ));
+        let thread_manager = Arc::new(
+            ThreadManager::new(
+                &config,
+                auth_manager.clone(),
+                models_manager,
+                CodexAppsToolsCache::default(),
+                SessionSource::Exec,
+                environment_manager,
+                codex_extension_registry(&turn_start_token_usage),
+                Arc::new(EmptyUserInstructionsProvider),
+                None,
+                codex_core::passthrough_image_store(),
+                thread_store,
+                local_agent_graph_store_from_state_db(state_db.as_ref()),
+                installation_id,
+                None,
+                None,
+            )
+            .with_code_mode_session_provider(crate::code_mode_host::session_provider(
+                code_mode_host,
+            )),
+        );
         let thread_mode_key = thread_mode_key(browser_mode);
         let mut active_thread_id = extract_thread_id_from_provider_state(
             options.provider_conversation_state.as_ref(),

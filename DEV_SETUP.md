@@ -96,6 +96,21 @@ pnpm --filter @instafy/desktop-runtime-agent build
 > If you rebuild the Rust agent with `--release`, the wrapper automatically falls back to the
 > release binary.
 
+Code-mode-only models (the default `gpt-5.6-sol` and `gpt-6-luna`) run every tool through
+`codex-code-mode-host`, which runtime-agent expects next to its own binary; without it those
+turns are refused with a message naming the missing file. The host links a sandboxed V8 build
+that only Codex publishes, so fetch it (checked against the checksums pinned in `codex/`) and
+build the host into the same target directory:
+
+```bash
+eval "$(scripts/fetch-rusty-v8.sh "$(rustc -vV | sed -n 's/^host: //p')" tmp/rusty-v8 | sed 's/^/export /')"
+cargo build --manifest-path packages/runtime-agent/Cargo.toml --features code-mode-host \
+  -p runtime-agent -p codex-code-mode-host
+```
+
+Runtime images build and install the host the same way (`docker/runtime/Dockerfile`). The
+runtime-agent integration tests link a built host next to their test binaries automatically.
+
 ### Mobile (Capacitor) push notifications
 
 When you add/update Capacitor plugins (for example `@capacitor/push-notifications`), resync the native projects:

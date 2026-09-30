@@ -11,8 +11,8 @@ use codex_arg0::arg0_dispatch;
 use codex_utils_absolute_path::AbsolutePathBuf;
 use codex_utils_path_uri::PathUri;
 use runtime_agent::{
-    agent::RuntimeAgent, config::Config, local_browser, personal_browser, process_hardening,
-    shared_browser,
+    agent::RuntimeAgent, code_mode_host, config::Config, local_browser, personal_browser,
+    process_hardening, shared_browser,
 };
 use tokio::signal;
 use tracing::{Level, error, info, warn};
@@ -228,6 +228,7 @@ async fn run_runtime_agent() -> Result<()> {
         lease_max_jobs = config.lease_max_jobs,
         "runtime agent configuration loaded"
     );
+    code_mode_host::report_startup_availability();
 
     let agent = RuntimeAgent::new(config);
     let shutdown = agent.shutdown_handle();

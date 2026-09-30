@@ -6,6 +6,7 @@ pub mod agent_executor;
 pub mod agent_tokens;
 pub mod browser_profile;
 pub mod cli_session;
+pub mod code_mode_host;
 pub mod codex;
 mod codex_policy;
 pub mod config;
