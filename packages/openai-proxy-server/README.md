@@ -167,6 +167,48 @@ provider service's: `PROXY_PINNED_MODEL` there, or else `MANAGED_AI_MODEL_ID`; a
 empty `PROXY_PINNED_MODEL` means no pin. That entry overrides the sidecar's env file, so a value
 in `proxy-credential-lease.env` has no effect.
 
+### Tool controls
+
+The proxy builds each upstream body itself. On the Responses wire API, to the OpenAI API (or an
+OpenAI-compatible Responses endpoint) and to a ChatGPT login's Codex endpoint, a `/v1/responses`
+request that lists `tools` sends them with its `tool_choice` (`auto` when absent) and
+`parallel_tool_calls` (`false` when absent). A request without `tools` sends the OpenAI API no
+tool control, and a ChatGPT login gets the proxy's default tools with `tool_choice: "auto"`. Codex
+sends the tools of a Responses Lite model, such as gpt-6-luna or gpt-5.6-sol, in an
+`additional_tools` input item and omits `tools`, so the request's own `tool_choice` is not
+forwarded on either path. An explicit empty `tools` array, by contrast, asks for a plain text
+completion, as `tool_choice: "none"` does, and goes upstream with no tools at all. A Chat
+Completions or Gemini Code Assist upstream is sent no client tools and no tool control. The
+request's `client_metadata` is never copied upstream.
+
+**Required tool call.** While the runtime's required execution gate is armed, codex adds
+`client_metadata["instafy.require_tool_call"] = "1"` to its model request. The proxy sends such a
+request upstream with `tool_choice: "required"`, to the OpenAI API and to the ChatGPT Codex
+endpoint alike, when all of these hold:
+
+- the key's value is exactly the string `"1"`;
+- the request goes upstream on the Responses wire API, which alone carries tool controls, not to
+  a Chat Completions or Gemini Code Assist endpoint;
+- the request offers tools: a non-empty `tools`, or an `additional_tools` input item with at least
+  one tool, counted after a pinned lease drops the tools it does not forward;
+- its `tool_choice` is `"auto"` or absent.
+
+A Responses Lite request then carries `tool_choice: "required"` although it has no `tools` (on a
+ChatGPT login, next to the proxy's default tools), and nothing else in the upstream body
+changes. Any other request, one whose key has another value included, goes upstream exactly as it
+would without the key: a request that chose `none`, `required` or a named tool keeps the controls
+above, so a Responses Lite request's own `required` is still not forwarded. The key applies on
+every lane whose requests use the Responses wire API, the platform lane and bring-your-own
+credentials alike, since the gate is codex's behaviour and not a billing rule. Each request that
+goes upstream with `required` logs one `required tool call sends tool_choice required` line with
+the route and the run id, never the request body. A request to a Chat Completions or Gemini Code
+Assist endpoint logs none, since it carries no tool control. The key itself never goes upstream,
+since no `client_metadata` does.
+
+The loopback tests prove only what the proxy sends. Whether OpenAI honours
+`tool_choice: "required"` when the tools arrive only in `additional_tools` cannot be shown with a
+mock upstream, so it is a staging check.
+
 ### Service tier
 
 The platform lane serves only OpenAI's standard tier, because managed AI credits are priced at
