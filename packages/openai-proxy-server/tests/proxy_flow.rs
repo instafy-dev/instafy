@@ -214,6 +214,8 @@ struct UpstreamStub {
     /// The `service_tier` of each request the model endpoint received
     /// (`None` when absent).
     service_tiers: Arc<Mutex<Vec<Option<Value>>>>,
+    /// The body of each request the model endpoint received, as sent.
+    bodies: Arc<Mutex<Vec<Value>>>,
     /// How many of the next model requests to reject as an expired token.
     expire_next: Arc<AtomicUsize>,
     /// Paths of the audio requests that reached the provider.
@@ -342,6 +344,7 @@ fn record_upstream_request(stub: &UpstreamStub, headers: &HeaderMap, payload: &V
         .lock()
         .expect("service tier log")
         .push(payload.get("service_tier").cloned());
+    stub.bodies.lock().expect("body log").push(payload.clone());
     authorization
 }
 
@@ -1482,6 +1485,591 @@ async fn pinned_lease_drops_web_search_from_the_proxy_default_tools() -> Result<
         }
     }
 
+    Ok(())
+}
+
+// --- required tool call ------------------------------------------------------
+//
+// While the runtime's required execution gate is armed, codex adds
+// `client_metadata["instafy.require_tool_call"] = "1"` to its model request.
+// The proxy sends such a request upstream with `tool_choice: "required"` when
+// it offers tools and leaves the choice to the model, and never forwards the
+// key. A request without the key keeps the tool controls main sends.
+
+const REQUIRE_TOOL_CALL_KEY: &str = "instafy.require_tool_call";
+
+/// Codex's tools for a code-mode-only model such as gpt-6-luna: the freeform
+/// `exec` and the `wait` function.
+fn code_mode_tools() -> Value {
+    json!([
+        {
+            "type": "custom",
+            "name": "exec",
+            "description": "Runs JavaScript in the code mode host.",
+            "format": { "type": "grammar", "syntax": "lark", "definition": "start: /(.|\\n)+/" }
+        },
+        {
+            "type": "function",
+            "name": "wait",
+            "description": "Waits for a running exec cell.",
+            "strict": false,
+            "parameters": { "type": "object", "properties": {} }
+        }
+    ])
+}
+
+/// A model request as codex sends it for a Responses Lite model such as
+/// gpt-6-luna: no `tools`, the tool list in an `additional_tools` input item
+/// ahead of the base instructions, `tool_choice: "auto"`, and codex's own
+/// `client_metadata`.
+fn luna_lite_request() -> Value {
+    json!({
+        "model": PINNED_MODEL,
+        "input": [
+            { "type": "additional_tools", "role": "developer", "tools": code_mode_tools() },
+            {
+                "type": "message",
+                "role": "developer",
+                "content": [{ "type": "input_text", "text": "You are Codex." }]
+            },
+            {
+                "type": "message",
+                "role": "user",
+                "content": [{ "type": "input_text", "text": CHAT_PROMPT }]
+            }
+        ],
+        "tool_choice": "auto",
+        "parallel_tool_calls": false,
+        "reasoning": { "effort": "medium", "context": "all_turns" },
+        "store": false,
+        "stream": true,
+        "include": ["reasoning.encrypted_content"],
+        "prompt_cache_key": "thread-1",
+        "client_metadata": {
+            "x-codex-installation-id": "installation-1",
+            "session_id": "session-1",
+            "thread_id": "thread-1",
+            "x-codex-window-id": "window-1",
+            "turn_id": "turn-1"
+        }
+    })
+}
+
+/// A model request as codex sends it for a model without Responses Lite:
+/// its tools in `tools`.
+fn top_level_tools_request() -> Value {
+    json!({
+        "model": "gpt-5.5",
+        "instructions": "You are Codex.",
+        "input": [{
+            "type": "message",
+            "role": "user",
+            "content": [{ "type": "input_text", "text": CHAT_PROMPT }]
+        }],
+        "tools": [{
+            "type": "function",
+            "name": "exec_command",
+            "description": "Runs a command.",
+            "strict": false,
+            "parameters": { "type": "object", "properties": {} }
+        }],
+        "tool_choice": "auto",
+        "parallel_tool_calls": true,
+        "stream": true,
+        "client_metadata": { "thread_id": "thread-1", "turn_id": "turn-1" }
+    })
+}
+
+/// `request` with `client_metadata[REQUIRE_TOOL_CALL_KEY]` set to `value`.
+fn with_require_tool_call(request: &Value, value: Value) -> Value {
+    let mut request = request.clone();
+    if !request["client_metadata"].is_object() {
+        request["client_metadata"] = json!({});
+    }
+    request["client_metadata"][REQUIRE_TOOL_CALL_KEY] = value;
+    request
+}
+
+/// `request` with its `tool_choice` set to `choice`, or removed for `None`.
+fn with_tool_choice(request: &Value, choice: Option<Value>) -> Value {
+    let mut request = request.clone();
+    let object = request.as_object_mut().expect("request object");
+    match choice {
+        Some(choice) => {
+            object.insert("tool_choice".to_string(), choice);
+        }
+        None => {
+            object.remove("tool_choice");
+        }
+    }
+    request
+}
+
+/// A lane a model request can take through the proxy.
+struct ToolControlLane {
+    name: &'static str,
+    proxy: StackProxy<'static>,
+    /// The credential the run's token names; `None` is the platform lane.
+    credential_id: Option<&'static str>,
+    /// Whether the lane's requests go to the ChatGPT Codex endpoint rather
+    /// than the OpenAI API.
+    chatgpt: bool,
+}
+
+/// Every lane: the platform lane on the controller's pinned lease, on a
+/// pinned static key and on a pinned static ChatGPT login, a user's own API
+/// key and ChatGPT login, and a standalone proxy. The gate is a codex
+/// behaviour, not a billing one, so the proxy honours it on each.
+fn tool_control_lanes() -> Vec<ToolControlLane> {
+    let lane = |name, proxy, credential_id, chatgpt| ToolControlLane {
+        name,
+        proxy,
+        credential_id,
+        chatgpt,
+    };
+    vec![
+        lane("pinned managed lease", StackProxy::Dynamic, None, false),
+        lane(
+            "pinned static key",
+            StackProxy::Static {
+                pinned_model: Some(PINNED_MODEL),
+            },
+            None,
+            false,
+        ),
+        lane(
+            "pinned static ChatGPT login",
+            StackProxy::StaticChatGpt {
+                pinned_model: Some(PINNED_MODEL),
+            },
+            None,
+            true,
+        ),
+        lane(
+            "own API key",
+            StackProxy::Dynamic,
+            Some(BYO_CREDENTIAL_ID),
+            false,
+        ),
+        lane(
+            "own ChatGPT login",
+            StackProxy::Dynamic,
+            Some(BYO_CHATGPT_CREDENTIAL_ID),
+            true,
+        ),
+        lane(
+            "standalone",
+            StackProxy::Standalone { pinned_model: None },
+            None,
+            false,
+        ),
+    ]
+}
+
+/// Sends each of `requests` to `/v1/responses` on `lane`'s stack and returns
+/// the body each one went upstream with, checking that none carries
+/// `client_metadata`.
+async fn upstream_bodies_on(lane: ToolControlLane, requests: &[Value]) -> Result<Vec<Value>> {
+    let name = lane.name;
+    let (proxy_addr, _controller, upstream, _env, _guards) = spawn_stack(
+        Some(MANAGED_STUB_KEY),
+        Some(PINNED_MODEL),
+        false,
+        lane.proxy,
+    )
+    .await?;
+    let token = proxy_token(Some(RUN_ID), lane.credential_id);
+    for request in requests {
+        let (status, text) =
+            post_through_proxy(proxy_addr, &token, "/v1/responses", request.clone()).await?;
+        assert_eq!(status, StatusCode::OK, "{name}: {text}");
+    }
+    let bodies = upstream.bodies.lock().expect("body log").clone();
+    assert_eq!(
+        bodies.len(),
+        requests.len(),
+        "{name}: one upstream request each"
+    );
+    for body in &bodies {
+        assert!(
+            body.get("client_metadata").is_none(),
+            "{name}: client_metadata stays in the proxy: {body}"
+        );
+        assert!(
+            !body.to_string().contains(REQUIRE_TOOL_CALL_KEY),
+            "{name}: the key goes nowhere upstream: {body}"
+        );
+    }
+    Ok(bodies)
+}
+
+/// The `additional_tools` item a forwarded body carries in its input.
+fn forwarded_additional_tools(body: &Value) -> Option<&Value> {
+    body["input"].as_array().and_then(|items| {
+        items
+            .iter()
+            .find(|item| item.get("type").and_then(Value::as_str) == Some("additional_tools"))
+    })
+}
+
+#[tokio::test]
+#[serial]
+async fn required_tool_call_sends_a_responses_lite_request_required_on_every_lane() -> Result<()> {
+    // Codex lists a Responses Lite model's tools in an `additional_tools`
+    // input item and leaves `tools` empty. Without the key the proxy sends
+    // such a request no tool control on the OpenAI API and `auto` with its
+    // default tools on the ChatGPT Codex endpoint, as main does. With the
+    // key it sends `required`, and only that changes.
+    let request = luna_lite_request();
+    for lane in tool_control_lanes() {
+        let (name, chatgpt) = (lane.name, lane.chatgpt);
+        let bodies = upstream_bodies_on(
+            lane,
+            &[
+                with_require_tool_call(&request, json!("1")),
+                request.clone(),
+            ],
+        )
+        .await?;
+        let (required, unchanged) = (&bodies[0], &bodies[1]);
+
+        if chatgpt {
+            assert_eq!(unchanged["tool_choice"], json!("auto"), "{name}");
+            assert!(
+                unchanged["tools"]
+                    .as_array()
+                    .is_some_and(|tools| !tools.is_empty()),
+                "{name}: the proxy's default tools: {unchanged}"
+            );
+        } else {
+            for key in ["tools", "tool_choice", "parallel_tool_calls"] {
+                assert!(unchanged.get(key).is_none(), "{name} {key}: {unchanged}");
+            }
+        }
+
+        assert_eq!(required["tool_choice"], json!("required"), "{name}");
+        assert_eq!(
+            forwarded_additional_tools(required),
+            Some(
+                &json!({ "type": "additional_tools", "role": "developer", "tools": code_mode_tools() })
+            ),
+            "{name}: the tools still ride in the input"
+        );
+        let mut as_main = required.clone();
+        if chatgpt {
+            as_main["tool_choice"] = json!("auto");
+        } else {
+            as_main
+                .as_object_mut()
+                .expect("body object")
+                .remove("tool_choice");
+        }
+        assert_eq!(&as_main, unchanged, "{name}: nothing else changes");
+    }
+
+    Ok(())
+}
+
+#[tokio::test]
+#[serial]
+async fn required_tool_call_sends_top_level_tools_required() -> Result<()> {
+    // A model without Responses Lite lists its tools in `tools`. The key
+    // turns an `auto` or absent `tool_choice` into `required`, and leaves
+    // the tools and `parallel_tool_calls` as they are.
+    for choice in [Some(json!("auto")), None] {
+        let request = with_tool_choice(&top_level_tools_request(), choice.clone());
+        for lane in tool_control_lanes() {
+            let name = format!("{} tool_choice={choice:?}", lane.name);
+            let bodies = upstream_bodies_on(
+                lane,
+                &[
+                    with_require_tool_call(&request, json!("1")),
+                    request.clone(),
+                ],
+            )
+            .await?;
+            let (required, unchanged) = (&bodies[0], &bodies[1]);
+            assert_eq!(unchanged["tool_choice"], json!("auto"), "{name}");
+            assert_eq!(required["tool_choice"], json!("required"), "{name}");
+            assert_eq!(required["tools"], request["tools"], "{name}");
+            assert_eq!(required["parallel_tool_calls"], json!(true), "{name}");
+            let mut as_main = required.clone();
+            as_main["tool_choice"] = json!("auto");
+            assert_eq!(&as_main, unchanged, "{name}: nothing else changes");
+        }
+    }
+
+    Ok(())
+}
+
+#[tokio::test]
+#[serial]
+async fn required_tool_call_leaves_other_requests_as_main_sends_them() -> Result<()> {
+    // Each request goes upstream with the key and without it, and the two
+    // bodies must match: the proxy strips the key and changes nothing else
+    // when the request offers no tools, already chose, or sets the key to
+    // anything but "1". A Responses Lite request's own `required` is not
+    // forwarded, with the key or without it.
+    let lite = luna_lite_request();
+    let top_level = top_level_tools_request();
+    let mut no_tools = top_level.clone();
+    no_tools
+        .as_object_mut()
+        .expect("request object")
+        .remove("tools");
+    let mut empty_tools = top_level.clone();
+    empty_tools["tools"] = json!([]);
+    let mut empty_additional_tools = lite.clone();
+    empty_additional_tools["input"][0]["tools"] = json!([]);
+    let function_choice = json!({ "type": "function", "name": "exec_command" });
+    let custom_choice = json!({ "type": "custom", "name": "exec" });
+
+    let one = json!("1");
+    let cases = vec![
+        ("no tools", no_tools, one.clone()),
+        ("empty tools", empty_tools, one.clone()),
+        (
+            "empty additional_tools",
+            empty_additional_tools,
+            one.clone(),
+        ),
+        (
+            "tools, tool_choice none",
+            with_tool_choice(&top_level, Some(json!("none"))),
+            one.clone(),
+        ),
+        (
+            "tools, tool_choice a function",
+            with_tool_choice(&top_level, Some(function_choice)),
+            one.clone(),
+        ),
+        (
+            "Lite, tool_choice none",
+            with_tool_choice(&lite, Some(json!("none"))),
+            one.clone(),
+        ),
+        (
+            "Lite, tool_choice a custom tool",
+            with_tool_choice(&lite, Some(custom_choice)),
+            one.clone(),
+        ),
+        (
+            "Lite, tool_choice required",
+            with_tool_choice(&lite, Some(json!("required"))),
+            one,
+        ),
+        ("Lite, key 0", lite.clone(), json!("0")),
+        ("Lite, key true", lite.clone(), json!("true")),
+        ("Lite, key empty", lite.clone(), json!("")),
+        ("Lite, key padded", lite.clone(), json!(" 1")),
+        ("Lite, key number", lite.clone(), json!(1)),
+        ("tools, key true", top_level.clone(), json!(true)),
+    ];
+    for lane in tool_control_lanes() {
+        let lane_name = lane.name;
+        let mut requests = Vec::new();
+        for (_, request, value) in &cases {
+            requests.push(with_require_tool_call(request, value.clone()));
+            requests.push(request.clone());
+        }
+        let bodies = upstream_bodies_on(lane, &requests).await?;
+        for ((case, request, _), pair) in cases.iter().zip(bodies.chunks(2)) {
+            let (with_key, without_key) = (&pair[0], &pair[1]);
+            assert_eq!(
+                with_key, without_key,
+                "{lane_name} {case}: only the key is stripped"
+            );
+            assert_ne!(
+                with_key.get("tool_choice"),
+                Some(&json!("required")),
+                "{lane_name} {case}: {request}"
+            );
+        }
+    }
+
+    Ok(())
+}
+
+#[tokio::test]
+#[serial]
+async fn required_tool_call_survives_a_lease_renewal() -> Result<()> {
+    // A lease renewal rebuilds the request from the client's original body,
+    // so the retry of a rejected attempt must still require a tool call.
+    let token = proxy_token(Some(RUN_ID), None);
+    let (proxy_addr, controller, upstream, _env, _guards) =
+        spawn_managed_stack(Some(MANAGED_STUB_KEY), Some(PINNED_MODEL), false).await?;
+    upstream.expire_next.store(1, Ordering::SeqCst);
+
+    let request = with_require_tool_call(&luna_lite_request(), json!("1"));
+    let (status, body) = post_through_proxy(proxy_addr, &token, "/v1/responses", request).await?;
+    assert_eq!(status, StatusCode::OK, "renewed request: {body}");
+    assert_eq!(
+        controller.leases.lock().expect("lease log").len(),
+        2,
+        "the initial lease and its renewal"
+    );
+    let bodies = upstream.bodies.lock().expect("body log").clone();
+    assert_eq!(bodies.len(), 2, "the rejected request and its retry");
+    for body in &bodies {
+        assert_eq!(body["tool_choice"], json!("required"), "{body}");
+        assert!(body.get("client_metadata").is_none(), "{body}");
+    }
+
+    Ok(())
+}
+
+#[tokio::test]
+#[serial]
+async fn required_tool_call_needs_a_tool_the_pin_keeps() -> Result<()> {
+    // A pinned lease drops hosted tools before the request goes upstream.
+    // A request that offered only those offers none upstream, so the key
+    // leaves it as main sends it rather than require a tool it cannot call.
+    let hosted_only = json!([{ "type": "web_search", "external_web_access": true }]);
+    let mut lite = luna_lite_request();
+    lite["input"][0]["tools"] = hosted_only.clone();
+    let mut top_level = top_level_tools_request();
+    top_level["tools"] = hosted_only;
+    for lane in tool_control_lanes()
+        .into_iter()
+        .filter(|lane| lane.credential_id.is_none() && lane.name != "standalone")
+    {
+        let name = lane.name;
+        let bodies = upstream_bodies_on(
+            lane,
+            &[
+                with_require_tool_call(&lite, json!("1")),
+                lite.clone(),
+                with_require_tool_call(&top_level, json!("1")),
+                top_level.clone(),
+            ],
+        )
+        .await?;
+        assert_eq!(
+            forwarded_additional_tools(&bodies[0]).map(|item| &item["tools"]),
+            Some(&json!([])),
+            "{name}: the pin drops the hosted tool"
+        );
+        assert_eq!(
+            bodies[0], bodies[1],
+            "{name}: Lite, only the key is stripped"
+        );
+        assert_eq!(
+            bodies[2], bodies[3],
+            "{name}: tools, only the key is stripped"
+        );
+        for body in &bodies {
+            assert_ne!(body.get("tool_choice"), Some(&json!("required")), "{name}");
+        }
+    }
+
+    Ok(())
+}
+
+/// Set in the child process of the test below to the model stub path its
+/// proxy's key names.
+const REQUIRED_TOOL_CALL_LOG_CHILD: &str = "PROXY_FLOW_REQUIRED_TOOL_CALL_LOG_CHILD";
+/// The line the proxy logs for each request it sends `tool_choice: "required"`.
+const REQUIRED_TOOL_CALL_LOG: &str = "[proxy] required tool call sends tool_choice required";
+
+/// A Chat Completions model endpoint, which answers with one message.
+async fn upstream_chat_completions_stub(
+    State(stub): State<UpstreamStub>,
+    headers: HeaderMap,
+    AxumJson(payload): AxumJson<Value>,
+) -> impl IntoResponse {
+    record_upstream_request(&stub, &headers, &payload);
+    AxumJson(json!({
+        "id": "chatcmpl-stub",
+        "model": payload["model"],
+        "choices": [{
+            "message": { "role": "assistant", "content": "ok" },
+            "finish_reason": "stop"
+        }]
+    }))
+}
+
+#[test]
+#[serial]
+fn required_tool_call_is_logged_only_where_it_goes_upstream() -> Result<()> {
+    if let Ok(upstream_path) = std::env::var(REQUIRED_TOOL_CALL_LOG_CHILD) {
+        return tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()?
+            .block_on(send_required_tool_calls_to(&upstream_path));
+    }
+    // The log line is the operator's evidence that `required` reached the
+    // provider. A Chat Completions request forwards no tool controls, so its
+    // proxy must not claim it sent one. Each wire API runs in a fresh child
+    // process, so its stderr holds only that proxy's log.
+    for (upstream_path, logged) in [("/v1/responses", 2), ("/v1/chat/completions", 0)] {
+        let output = std::process::Command::new(std::env::current_exe()?)
+            .env_clear()
+            .env(REQUIRED_TOOL_CALL_LOG_CHILD, upstream_path)
+            .args([
+                "--exact",
+                "required_tool_call_is_logged_only_where_it_goes_upstream",
+                "--nocapture",
+            ])
+            .output()?;
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        // A child that ran no test would log nothing and pass the count below.
+        assert!(
+            output.status.success() && stdout.contains("test result: ok. 1 passed"),
+            "{upstream_path}: {stdout}\n{stderr}"
+        );
+        assert_eq!(
+            stderr.matches(REQUIRED_TOOL_CALL_LOG).count(),
+            logged,
+            "{upstream_path}: {stdout}\n{stderr}"
+        );
+    }
+    Ok(())
+}
+
+/// The child side of the test above: a standalone proxy whose key names
+/// `upstream_path` on the model stub is sent a Responses Lite request and a
+/// top-level-tools request, both with the key.
+async fn send_required_tool_calls_to(upstream_path: &str) -> Result<()> {
+    let upstream = UpstreamStub::default();
+    let (upstream_addr, _upstream_guard) = spawn_router(
+        Router::new()
+            .route("/v1/responses", post(upstream_responses_stub))
+            .route("/v1/chat/completions", post(upstream_chat_completions_stub))
+            .with_state(upstream.clone()),
+    )
+    .await?;
+    let (proxy_addr, _proxy_guard) = spawn_proxy(Some(Credentials::ApiKey {
+        key: MANAGED_STUB_KEY.to_string(),
+        endpoint: Some(format!("http://{upstream_addr}{upstream_path}")),
+        default_model: None,
+    }))
+    .await?;
+    let token = proxy_token(Some(RUN_ID), None);
+    for request in [luna_lite_request(), top_level_tools_request()] {
+        let request = with_require_tool_call(&request, json!("1"));
+        let (status, text) =
+            post_through_proxy(proxy_addr, &token, "/v1/responses", request).await?;
+        assert_eq!(status, StatusCode::OK, "{upstream_path}: {text}");
+    }
+    let bodies = upstream.bodies.lock().expect("body log").clone();
+    assert_eq!(
+        bodies.len(),
+        2,
+        "{upstream_path}: one upstream request each"
+    );
+    let sends_required = upstream_path == "/v1/responses";
+    for body in &bodies {
+        assert_eq!(
+            body.get("tool_choice") == Some(&json!("required")),
+            sends_required,
+            "{upstream_path}: {body}"
+        );
+        assert!(
+            !body.to_string().contains(REQUIRE_TOOL_CALL_KEY),
+            "{upstream_path}: {body}"
+        );
+    }
     Ok(())
 }
 

@@ -26,6 +26,7 @@ use crate::auth::{Credentials, response_indicates_chatgpt_token_expired};
 use crate::client::{
     CodexClient, CodexCompletion, DEFAULT_INSTRUCTIONS, DEFAULT_MODEL, SendHook,
     ServiceTierEndpoints, conversation_id_enabled, normalize_reasoning_effort, sends_service_tier,
+    sends_tool_controls,
 };
 use crate::controller_integration::ControllerIntegration;
 use crate::credential_lease::LeasedCredentials;
@@ -533,6 +534,53 @@ fn input_items_for_pinned_lease(input_items: &[Value]) -> (Cow<'_, [Value]>, Vec
         filtered.map_or(Cow::Borrowed(input_items), Cow::Owned),
         dropped,
     )
+}
+
+/// The `client_metadata` key the runtime's required execution gate sets to
+/// `"1"` on a model request that must call a tool. The proxy builds the
+/// upstream body itself and copies no `client_metadata` into it, so neither
+/// this key nor the rest of the metadata goes upstream.
+const REQUIRE_TOOL_CALL_METADATA_KEY: &str = "instafy.require_tool_call";
+
+/// Whether the request's `client_metadata` asks for a required tool call:
+/// [`REQUIRE_TOOL_CALL_METADATA_KEY`] set to exactly `"1"`. Any other value
+/// is ignored.
+fn require_tool_call_requested(payload: &Value) -> bool {
+    payload
+        .get("client_metadata")
+        .and_then(|metadata| metadata.get(REQUIRE_TOOL_CALL_METADATA_KEY))
+        .and_then(Value::as_str)
+        == Some("1")
+}
+
+/// Whether a request that asked for a required tool call goes upstream with
+/// `tool_choice: "required"`. It must go out on `credentials` with tool
+/// controls ([`sends_tool_controls`]), so a Chat Completions or Gemini Code
+/// Assist request never does. It must offer tools, in `tools` or in the
+/// `additional_tools` input item where codex lists a Responses Lite model's
+/// tools, and leave the choice to the model, with `tool_choice` `"auto"` or
+/// absent. `tools` and `input_items` are the ones the request forwards, after
+/// a pinned lease filters them, so a request left with no tools is never
+/// told to call one. A request that did not ask keeps its tool controls as
+/// they are: a Responses Lite request's own `tool_choice` is not forwarded.
+fn required_tool_call_applies(
+    requested: bool,
+    credentials: &Credentials,
+    tools_enabled: bool,
+    tools: Option<&[Value]>,
+    input_items: &[Value],
+    tool_choice: Option<&Value>,
+) -> bool {
+    let offers_tools = tools.is_some_and(|tools| !tools.is_empty())
+        || input_items.iter().any(|item| {
+            item.get("type").and_then(Value::as_str) == Some("additional_tools")
+                && item
+                    .get("tools")
+                    .and_then(Value::as_array)
+                    .is_some_and(|tools| !tools.is_empty())
+        });
+    let model_chooses = tool_choice.is_none_or(|choice| choice.as_str() == Some("auto"));
+    requested && sends_tool_controls(credentials) && tools_enabled && offers_tools && model_chooses
 }
 
 fn requested_tool_names(tools: &[Value]) -> Vec<String> {
@@ -1350,9 +1398,14 @@ struct RemoteResponseControls<'a> {
     requested_tool_choice: Option<&'a Value>,
     requested_parallel_tool_calls: Option<bool>,
     requested_text_controls: Option<&'a Value>,
+    /// From [`require_tool_call_requested`]; [`required_tool_call_applies`]
+    /// decides whether it changes the `tool_choice` sent.
+    require_tool_call: bool,
 }
 
 struct RemoteCompletionOptions<'a> {
+    /// The proxy route the request came in on, as logged.
+    route: &'a str,
     requested_model: &'a str,
     payload: &'a Value,
     proxy_base_instructions: &'a str,
@@ -1373,12 +1426,15 @@ fn error_indicates_chatgpt_token_refreshable(error: &anyhow::Error) -> bool {
 
 /// Also returns the input items to send, which a pinned lease may filter.
 /// `log_lease_policy` is false when a lease renewal rebuilds the client for a
-/// request that already logged what its pinned lease changed.
+/// request that already logged what its pinned lease changed, and
+/// `log_required_tool_call` is false on every renewal, so a request logs its
+/// required tool call once.
 fn build_remote_completion_client<'i>(
     leased: LeasedCredentials,
     options: &RemoteCompletionOptions<'_>,
     input_items: &'i [Value],
     log_lease_policy: bool,
+    log_required_tool_call: bool,
 ) -> Result<(CodexClient, String, String, Cow<'i, [Value]>)> {
     let endpoint_for_error = format_endpoint_for_error(leased.credentials.endpoint());
     let upstream_model = resolve_model_for_lease(options.requested_model, &leased);
@@ -1428,6 +1484,17 @@ fn build_remote_completion_client<'i>(
         log_dropped_tools(&dropped_tools, run_id);
     }
     let creds = leased.credentials;
+    // Decided before the client takes the credentials; logged once it exists.
+    let required_tool_call = options.response_controls.as_ref().is_some_and(|controls| {
+        required_tool_call_applies(
+            controls.require_tool_call,
+            &creds,
+            !options.plain_text_completion,
+            requested_tools.as_deref(),
+            &input_items,
+            controls.requested_tool_choice,
+        )
+    });
     let instructions = build_proxy_instructions(
         options.proxy_base_instructions,
         options.claims,
@@ -1460,6 +1527,12 @@ fn build_remote_completion_client<'i>(
         });
     }
 
+    if required_tool_call && log_required_tool_call {
+        eprintln!(
+            "[proxy] required tool call sends tool_choice required {}",
+            json!({ "route": options.route, "runId": run_id })
+        );
+    }
     if let Some(controls) = options.response_controls.as_ref() {
         client = client
             .with_reasoning_effort(controls.reasoning_effort.map(str::to_string))
@@ -1468,7 +1541,8 @@ fn build_remote_completion_client<'i>(
                 controls.requested_tool_choice.cloned(),
                 controls.requested_parallel_tool_calls,
                 controls.requested_text_controls.cloned(),
-            );
+            )
+            .with_required_tool_call(required_tool_call);
     }
 
     if conversation_id_enabled() {
@@ -1506,7 +1580,7 @@ async fn complete_with_optional_controller_refresh(
 ) -> Result<(CodexCompletion, String)> {
     let first_lease_pinned = leased.pinned_model().is_some();
     let (client, upstream_model, endpoint_for_error, first_input) =
-        build_remote_completion_client(leased, options, input_items, true)?;
+        build_remote_completion_client(leased, options, input_items, true, true)?;
     let mut client = client.with_send_hook(send_hook);
 
     match client.complete_with_input(&first_input).await {
@@ -1539,6 +1613,7 @@ async fn complete_with_optional_controller_refresh(
                     options,
                     input_items,
                     !first_lease_pinned,
+                    false,
                 )?;
 
             return retry_client
@@ -1647,6 +1722,7 @@ async fn create_response(
 
     let reasoning_effort = requested_reasoning_effort(&payload);
     let completion_options = RemoteCompletionOptions {
+        route: "/v1/responses",
         requested_model: &model,
         payload: &payload,
         proxy_base_instructions,
@@ -1659,6 +1735,7 @@ async fn create_response(
             requested_tool_choice: requested_tool_choice.as_ref(),
             requested_parallel_tool_calls,
             requested_text_controls: requested_text_controls.as_ref(),
+            require_tool_call: require_tool_call_requested(&payload),
         }),
         service_tier: service_tier.upstream.as_ref(),
         service_tier_endpoints: state.service_tier_endpoints,
@@ -1742,6 +1819,7 @@ async fn create_chat_completion(
         .and_then(Value::as_str)
         .and_then(normalize_reasoning_effort);
     let completion_options = RemoteCompletionOptions {
+        route: "/v1/chat/completions",
         requested_model: &requested_model,
         payload: &payload,
         proxy_base_instructions,
@@ -1754,6 +1832,7 @@ async fn create_chat_completion(
             requested_tool_choice: None,
             requested_parallel_tool_calls: None,
             requested_text_controls: None,
+            require_tool_call: false,
         }),
         service_tier: service_tier.upstream.as_ref(),
         service_tier_endpoints: state.service_tier_endpoints,
@@ -4392,6 +4471,225 @@ mod tests {
                 ("tools", "unknown", "type"),
             ]
         );
+    }
+
+    #[test]
+    fn require_tool_call_is_requested_only_by_the_key_set_to_one() {
+        let with_metadata = |metadata: Value| json!({ "client_metadata": metadata });
+        assert!(require_tool_call_requested(&with_metadata(json!({
+            "thread_id": "thread-1",
+            "instafy.require_tool_call": "1",
+        }))));
+        for value in [
+            json!("0"),
+            json!("true"),
+            json!(""),
+            json!(" 1"),
+            json!(1),
+            json!(true),
+            Value::Null,
+        ] {
+            assert!(
+                !require_tool_call_requested(&with_metadata(
+                    json!({ "instafy.require_tool_call": value })
+                )),
+                "{value}"
+            );
+        }
+        assert!(!require_tool_call_requested(&json!({})));
+        assert!(!require_tool_call_requested(
+            &json!({ "client_metadata": "1" })
+        ));
+        // `metadata` is not `client_metadata`.
+        assert!(!require_tool_call_requested(&json!({
+            "metadata": { "instafy.require_tool_call": "1" }
+        })));
+    }
+
+    #[test]
+    fn required_tool_call_applies_to_offered_tools_left_to_the_model() {
+        let tool = json!({ "type": "function", "name": "exec_command", "parameters": {} });
+        let tools = [tool.clone()];
+        let message = json!({
+            "type": "message",
+            "role": "user",
+            "content": [{ "type": "input_text", "text": "hi" }]
+        });
+        let lite_input = [
+            json!({ "type": "additional_tools", "role": "developer", "tools": [tool] }),
+            message.clone(),
+        ];
+        let plain_input = [message.clone()];
+        let empty_lite_input = [
+            json!({ "type": "additional_tools", "role": "developer", "tools": [] }),
+            message.clone(),
+        ];
+        // `tool_search_output` carries tools the model already found, not
+        // the tools the request offers.
+        let tool_search_input = [
+            json!({
+                "type": "tool_search_output",
+                "execution": "client",
+                "tools": [{ "type": "function", "name": "found", "parameters": {} }]
+            }),
+            message,
+        ];
+        let auto = json!("auto");
+        let responses = api_key("https://api.openai.com/v1/responses", None);
+
+        // Tools offered in `tools` or in an `additional_tools` item, with
+        // the choice left to the model.
+        assert!(required_tool_call_applies(
+            true,
+            &responses,
+            true,
+            Some(&tools),
+            &plain_input,
+            Some(&auto)
+        ));
+        assert!(required_tool_call_applies(
+            true,
+            &responses,
+            true,
+            Some(&tools),
+            &plain_input,
+            None
+        ));
+        assert!(required_tool_call_applies(
+            true,
+            &responses,
+            true,
+            None,
+            &lite_input,
+            Some(&auto)
+        ));
+        assert!(required_tool_call_applies(
+            true,
+            &responses,
+            true,
+            Some(&[]),
+            &lite_input,
+            None
+        ));
+
+        // Not asked for, or a plain text completion.
+        assert!(!required_tool_call_applies(
+            false,
+            &responses,
+            true,
+            Some(&tools),
+            &lite_input,
+            Some(&auto)
+        ));
+        assert!(!required_tool_call_applies(
+            true,
+            &responses,
+            false,
+            Some(&tools),
+            &lite_input,
+            Some(&auto)
+        ));
+
+        // No tools offered.
+        for input in [&plain_input[..], &empty_lite_input, &tool_search_input] {
+            assert!(
+                !required_tool_call_applies(true, &responses, true, None, input, Some(&auto)),
+                "{input:?}"
+            );
+            assert!(
+                !required_tool_call_applies(true, &responses, true, Some(&[]), input, None),
+                "{input:?}"
+            );
+        }
+
+        // The request already chose.
+        for choice in [
+            json!("none"),
+            json!("required"),
+            json!("AUTO"),
+            json!({ "type": "function", "name": "exec_command" }),
+            Value::Null,
+        ] {
+            assert!(
+                !required_tool_call_applies(
+                    true,
+                    &responses,
+                    true,
+                    Some(&tools),
+                    &plain_input,
+                    Some(&choice)
+                ),
+                "{choice}"
+            );
+            assert!(
+                !required_tool_call_applies(
+                    true,
+                    &responses,
+                    true,
+                    None,
+                    &lite_input,
+                    Some(&choice)
+                ),
+                "{choice}"
+            );
+        }
+    }
+
+    #[test]
+    fn required_tool_call_applies_only_where_tool_controls_go_upstream() {
+        let tool = json!({ "type": "function", "name": "exec_command", "parameters": {} });
+        let tools = [tool.clone()];
+        let message = json!({
+            "type": "message",
+            "role": "user",
+            "content": [{ "type": "input_text", "text": "hi" }]
+        });
+        let lite_input = [
+            json!({ "type": "additional_tools", "role": "developer", "tools": [tool] }),
+            message.clone(),
+        ];
+        let plain_input = [message];
+        let auto = json!("auto");
+        let applies = |credentials: &Credentials| {
+            let top_level = required_tool_call_applies(
+                true,
+                credentials,
+                true,
+                Some(&tools),
+                &plain_input,
+                Some(&auto),
+            );
+            let lite = required_tool_call_applies(true, credentials, true, None, &lite_input, None);
+            assert_eq!(top_level, lite, "{}", credentials.endpoint());
+            top_level
+        };
+
+        // The Responses wire API carries tool controls: the OpenAI API, an
+        // OpenAI-compatible Responses endpoint and a ChatGPT login.
+        for endpoint in [
+            "https://api.openai.com/v1/responses",
+            "http://127.0.0.1:8080/v1/responses",
+        ] {
+            assert!(applies(&api_key(endpoint, None)), "{endpoint}");
+        }
+        assert!(applies(&chatgpt("gpt-6-luna")));
+
+        // A Chat Completions or Gemini Code Assist request forwards no tool
+        // controls, so the proxy neither requires a tool call there nor logs
+        // that it does.
+        for endpoint in [
+            "https://api.openai.com/v1/chat/completions",
+            "http://127.0.0.1:8080/v1/chat/completions",
+            "https://cloudcode-pa.googleapis.com/v1internal:generateContent",
+        ] {
+            assert!(!applies(&api_key(endpoint, None)), "{endpoint}");
+        }
+        assert!(!applies(&Credentials::GeminiCodeAssist {
+            access_token: "test".to_string(),
+            project_id: "project-1".to_string(),
+            endpoint: None,
+            default_model: None,
+        }));
     }
 
     #[test]
