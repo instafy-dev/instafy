@@ -167,8 +167,10 @@ jobs:
           || matrix.runner }}
     # Cache-hit cells normally finish in under 15 minutes, but observed cold
     # Rust rebuilds can approach an hour. Keep a bounded 75-minute path while
-    # still preventing a wedged BuildKit worker from consuming six hours.
-    timeout-minutes: 75
+    # still preventing a wedged BuildKit worker from consuming six hours. The
+    # extra 16 minutes cover the layer cache export's own bound, so a slow
+    # export cannot time out a cell that has already published its image.
+    timeout-minutes: 91
     permissions:
       contents: read
       packages: write
@@ -249,6 +251,7 @@ jobs:
           fi
 
       - name: Set up Docker Buildx
+        id: buildx
         uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
         with:
           version: v0.35.0
@@ -302,6 +305,10 @@ jobs:
       # target platforms. Scan each image before any registry login.
       # This exact local image is pushed after the gate; there is no post-scan
       # rebuild that could change bytes.
+      # The layer cache is only read here, anonymously, so this build needs no
+      # registry credentials; it is written after publication, below. The final
+      # stage (the matrix target) never comes from the cache, so its OS and npm
+      # packages are current when the scan runs.
       - name: Build audit image
         uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
         with:
@@ -316,8 +323,8 @@ jobs:
             org.opencontainers.image.source=https://github.com/instafy-dev/instafy
             org.opencontainers.image.revision=${{ needs.authorize.outputs.commit_sha }}
             org.opencontainers.image.version=${{ needs.authorize.outputs.commit_sha }}
-          cache-from: type=gha,scope=publish-runtime-agent-${{ matrix.flavor }}-${{ matrix.architecture }}
-          cache-to: type=gha,scope=publish-runtime-agent-${{ matrix.flavor }}-${{ matrix.architecture }},mode=max${{ runner.environment == 'self-hosted' && ',timeout=2m,ignore-error=true' || '' }}
+          cache-from: type=registry,ref=ghcr.io/instafy-dev/instafy-build-cache:publish-runtime-agent-${{ matrix.flavor }}-${{ matrix.architecture }}
+          no-cache-filters: ${{ matrix.target }}
           tags: instafy-runtime-audit:${{ matrix.flavor }}-${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.architecture }}
           load: true
           push: false
@@ -484,6 +491,49 @@ jobs:
           path: ${{ runner.temp }}/runtime-agent-arch-ref/${{ matrix.flavor }}-${{ matrix.architecture }}.json
           if-no-files-found: error
           retention-days: 7
+
+      # Write the layer cache only after this cell's image passed the gates and
+      # was pushed and recorded. This cache-only build repeats the audit build on
+      # the same builder with the same context, file, target, platform, build
+      # arguments and labels, so it resolves from this job's BuildKit state. It
+      # creates no image, tag or local copy and cannot change published bytes.
+      # A failed or slow export costs a later release a cold build, nothing more.
+      # ignore-error makes BuildKit report a failed cache write only in the
+      # progress log, so the step also warns when that log shows an error.
+      - name: Export the scanned build's layer cache
+        shell: bash
+        env:
+          BUILDER: ${{ steps.buildx.outputs.name }}
+          TARGET: ${{ matrix.target }}
+          PLATFORM: ${{ matrix.platform }}
+          RELEASE_COMMIT: ${{ needs.authorize.outputs.commit_sha }}
+          CACHE_REF: ghcr.io/instafy-dev/instafy-build-cache:publish-runtime-agent-${{ matrix.flavor }}-${{ matrix.architecture }}
+        run: |
+          set -euo pipefail
+          status=0
+          log="$(mktemp)"
+          trap 'rm -f "$log"' EXIT
+          timeout --kill-after=1m 15m docker buildx build \
+            --builder "$BUILDER" \
+            --progress=plain \
+            --platform "$PLATFORM" \
+            --file docker/runtime/Dockerfile \
+            --target "$TARGET" \
+            --build-arg BUILD_PROFILE=release \
+            --build-arg BUILD_ARTIFACT_DIR=release \
+            --label "org.opencontainers.image.source=https://github.com/instafy-dev/instafy" \
+            --label "org.opencontainers.image.revision=${RELEASE_COMMIT}" \
+            --label "org.opencontainers.image.version=${RELEASE_COMMIT}" \
+            --provenance=false \
+            --sbom=false \
+            --output type=cacheonly \
+            --cache-to "type=registry,ref=${CACHE_REF},mode=max,oci-mediatypes=true,image-manifest=true,ignore-error=true" \
+            . 2>&1 | tee "$log" || status=$?
+          if [[ "$status" != "0" ]]; then
+            echo "::warning::The layer cache export stopped with status ${status}. The published image is unaffected; the next release may build cold."
+          elif grep -Eq '^#[0-9]+ ERROR: ' "$log"; then
+            echo "::warning::The layer cache export reported an error (see the ERROR lines above). The published image is unaffected; the next release may build cold."
+          fi
 
   assemble-release-manifest:
     name: Assemble and seal the runtime release manifest

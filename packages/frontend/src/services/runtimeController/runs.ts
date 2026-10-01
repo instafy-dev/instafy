@@ -1,4 +1,4 @@
-import type { RunRecord } from "../../types";
+import type { RunRecord, RunRecordPatch } from "../../types";
 import {
   emitControllerAuthErrorForRequest,
   isControllerDocumentReloadPending,
@@ -284,6 +284,7 @@ export interface SubscribeControllerRunsParams {
   accessToken?: string | null;
   quietErrors?: boolean;
   onRun: (run: RunRecord, event: "INSERT" | "UPDATE") => void;
+  onRunPatch: (patch: RunRecordPatch) => void;
   onAccessDenied?: (denial: ControllerStreamAccessDenied) => void;
   onError?: (message: string) => void;
   onEvent?: (event: ControllerEventPayload) => void;
@@ -720,7 +721,12 @@ export function subscribeToRunsFromController(
           }
           try {
             const parsed = JSON.parse(event.data) as ControllerEventPayload;
-            handleControllerEvent(parsed, params.onRun, params.onEvent);
+            handleControllerEvent(
+              parsed,
+              params.onRun,
+              params.onRunPatch,
+              params.onEvent,
+            );
           } catch (parseError) {
             const message =
               parseError instanceof Error
@@ -829,6 +835,7 @@ export function subscribeToRunsFromController(
 function handleControllerEvent(
   event: ControllerEventPayload,
   onRun: (run: RunRecord, event: "INSERT" | "UPDATE") => void,
+  onRunPatch: (patch: RunRecordPatch) => void,
   onEvent?: (event: ControllerEventPayload) => void,
 ) {
   if (!event || typeof event !== "object") {
@@ -847,6 +854,36 @@ function handleControllerEvent(
 
   const data = (event.data ?? null) as RunEventData | null;
   let runRecord: RunRecord | null = null;
+
+  // Lifecycle events can intentionally contain only public status/progress.
+  // Missing fields (including redacted envelope IDs) are not snapshot clears.
+  if (!data?.run && event.run_id) {
+    const patch: RunRecordPatch = { id: event.run_id };
+    if (typeof event.project_id === "string") patch.projectId = event.project_id;
+    if (typeof event.session_id === "string") patch.sessionId = event.session_id;
+    if (typeof event.conversation_id === "string") {
+      patch.conversationId = event.conversation_id;
+    }
+    if (typeof event.timestamp === "string") patch.updatedAt = event.timestamp;
+    const status = normalizeRunStatus(
+      data?.runStatus ?? data?.finalStatus ?? data?.status,
+    );
+    if (status) patch.status = status;
+    if (typeof data?.percent === "number") patch.progress = data.percent;
+    if (typeof data?.stage === "string" || data?.stage === null) {
+      patch.progressStage = data.stage || null;
+    }
+    if (typeof data?.previewUrl === "string" || data?.previewUrl === null) {
+      patch.previewUrl = data.previewUrl || null;
+    }
+    if (typeof data?.message === "string" || data?.message === null) {
+      patch.lastMessage = data.message || null;
+    }
+    const jobId = getEventJobId(event, data);
+    if (jobId) patch.metadata = { jobId };
+    onRunPatch(patch);
+    return;
+  }
 
   if (data && data.run) {
     runRecord = mapRunSnapshotToRecord(data.run);
@@ -868,7 +905,7 @@ function handleControllerEvent(
         typeof statusOverride === "string" &&
         statusOverride.trim().length > 0
       ) {
-        runRecord.status = normalizeRunStatus(statusOverride, runRecord.status);
+        runRecord.status = normalizeRunStatus(statusOverride) ?? runRecord.status;
       }
       if (typeof data.previewUrl === "string") {
         runRecord.previewUrl = data.previewUrl;
@@ -879,28 +916,6 @@ function handleControllerEvent(
     }
   }
 
-  if (!runRecord && event.run_id) {
-    runRecord = {
-      id: event.run_id,
-      projectId: event.project_id ?? null,
-      sessionId: event.session_id ?? null,
-      conversationId: event.conversation_id ?? null,
-      promptId: null,
-      runType: "prompt",
-      status: normalizeRunStatus(
-        data?.runStatus ?? data?.finalStatus ?? data?.status,
-        "queued",
-      ),
-      progress: typeof data?.percent === "number" ? data.percent : 0,
-      progressStage: typeof data?.stage === "string" ? data.stage : null,
-      previewUrl: typeof data?.previewUrl === "string" ? data.previewUrl : null,
-      lastMessage: typeof data?.message === "string" ? data.message : null,
-      metadata: null,
-      createdAt: null,
-      updatedAt: event.timestamp ?? null,
-    };
-  }
-
   if (!runRecord) {
     return;
   }
@@ -909,25 +924,24 @@ function handleControllerEvent(
   // the subsequently assigned job UUID on the run event itself, so retain it
   // immediately even when an older controller snapshot has not embedded it in
   // run.metadata yet. Durable controller hydration carries the same field.
-  const authoritativeJobIdCandidates = [
-    event.job_id,
-    data?.jobId,
-    data?.job_id,
-  ];
-  const authoritativeJobId = authoritativeJobIdCandidates.find(
-    (candidate): candidate is string =>
-      typeof candidate === "string" && candidate.trim().length > 0,
-  );
+  const authoritativeJobId = getEventJobId(event, data);
   if (authoritativeJobId) {
     runRecord.metadata = {
       ...(runRecord.metadata ?? {}),
-      jobId: authoritativeJobId.trim(),
+      jobId: authoritativeJobId,
     };
   }
 
   const eventType: "INSERT" | "UPDATE" =
     kind === "run.queued" ? "INSERT" : "UPDATE";
   onRun(runRecord, eventType);
+}
+
+function getEventJobId(event: ControllerEventPayload, data: RunEventData | null) {
+  return [event.job_id, data?.jobId, data?.job_id].find(
+    (candidate): candidate is string =>
+      typeof candidate === "string" && candidate.trim().length > 0,
+  )?.trim();
 }
 
 function mapRunSnapshotToRecord(
@@ -952,7 +966,7 @@ function mapRunSnapshotToRecord(
     conversationId: snapshot.conversation_id ?? null,
     promptId: snapshot.prompt_id ?? null,
     runType: normalizeRunType(snapshot.run_type),
-    status: normalizeRunStatus(snapshot.status, "queued"),
+    status: normalizeRunStatus(snapshot.status) ?? "queued",
     progress: progressValue,
     progressStage: snapshot.progress_stage ?? null,
     previewUrl: snapshot.preview_url ?? null,
@@ -974,9 +988,8 @@ function normalizeRunType(
 
 function normalizeRunStatus(
   value: string | null | undefined,
-  fallback: RunRecord["status"],
-): RunRecord["status"] {
-  const normalized = (value ?? "").trim().toLowerCase();
+): RunRecord["status"] | undefined {
+  const normalized = typeof value === "string" ? value.trim().toLowerCase() : "";
   switch (normalized) {
     case "queued":
     case "in_progress":
@@ -990,7 +1003,7 @@ function normalizeRunStatus(
     case "completed":
       return "awaiting_approval";
     default:
-      return fallback;
+      return undefined;
   }
 }
 

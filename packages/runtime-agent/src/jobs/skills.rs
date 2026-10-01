@@ -6,7 +6,7 @@ use reqwest::Url;
 use serde::Deserialize;
 use serde_json::{Value as JsonValue, json};
 
-use super::{JobExecution, JobMessage, learn};
+use super::{CodexFileDescriptor, FileChangeDescriptor, JobExecution, JobMessage, learn};
 
 const SKILL_FILENAME: &str = "SKILL.md";
 const INSTAFY_COMPAT_MARKER: &str = "<!-- instafy-compat -->";
@@ -41,17 +41,28 @@ pub struct SkillImportRequest {
 }
 
 /// What the skills lane hands back to the job loop.
+///
+/// `files` is one checkpoint descriptor per file an import wrote. The job loop hands them to
+/// the protected checkpoint a model turn's files go through, so an installed skill reaches the
+/// space's canonical repository instead of living only on this machine's disk.
 #[derive(Debug)]
 pub enum SkillsLaneOutcome {
-    /// List, Help, Import without `--start`, Start with an unknown name: a finished execution.
+    /// List, Help, Start with an unknown name, a failed import: a finished execution.
     Execution(JobExecution),
+    /// Import without `--start`: the finished execution and the files the import wrote.
+    Installed {
+        execution: JobExecution,
+        files: Vec<CodexFileDescriptor>,
+    },
     /// Import with `--start`, or Start with a known name: the report to post (none for
-    /// `/skills start`) and the kickoff prompt for the model turn.
+    /// `/skills start`), the kickoff prompt for the model turn and the files the import wrote
+    /// (none for `/skills start`).
     Kickoff {
         report: Option<JobMessage>,
         artifacts: Vec<JsonValue>,
         names: Vec<String>,
         prompt: String,
+        files: Vec<CodexFileDescriptor>,
     },
 }
 
@@ -63,6 +74,14 @@ struct ImportedSkill {
     changed: bool,
     files_written: usize,
     compatibility: CompatibilityReport,
+    written_files: Vec<WrittenSkillFile>,
+}
+
+/// A file an import wrote, by workspace-relative path, and whether it replaced one.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct WrittenSkillFile {
+    path: String,
+    replaced: bool,
 }
 
 /// One skill ready to be written: every conflict is checked before any plan is written.
@@ -338,17 +357,26 @@ pub async fn resolve_skills_lane(
                         artifacts,
                         names,
                         prompt,
+                        files: checkpoint_files(&imported),
                     }
                 }
                 Err(error) => SkillsLaneOutcome::Execution(build_import_error_execution(&error)),
             }
         }
+        SkillsRequest::Import(import) => match import_skills(workspace_dir, &import).await {
+            Ok(imported) => SkillsLaneOutcome::Installed {
+                execution: build_import_execution(&imported, import.source.trim()),
+                files: checkpoint_files(&imported),
+            },
+            Err(error) => SkillsLaneOutcome::Execution(build_import_error_execution(&error)),
+        },
         SkillsRequest::Start { name } => match resolve_installed_skill(workspace_dir, &name) {
             Ok((name, path)) => SkillsLaneOutcome::Kickoff {
                 report: None,
                 artifacts: Vec::new(),
                 names: vec![name],
                 prompt: build_skill_start_prompt(None, &[path]),
+                files: Vec::new(),
             },
             Err(execution) => SkillsLaneOutcome::Execution(*execution),
         },
@@ -399,29 +427,57 @@ pub async fn build_skills_execution(request: SkillsRequest, workspace_dir: &Path
             Err(execution) => *execution,
         },
         SkillsRequest::Import(request) => match import_skills(workspace_dir, &request).await {
-            Ok(imported) => {
-                let source = request.source.trim();
-                let (report, artifacts) = build_import_report(&imported, source, false);
-                JobExecution {
-                    // The operator's copy: source, paths, file counts and any
-                    // compatibility report. The customer gets one sentence.
-                    summary: build_import_detail(&imported, source),
-                    suggested_replies: vec![
-                        "List skills".to_string(),
-                        "Run /learn to fold this into workspace memory".to_string(),
-                    ],
-                    provider: SKILLS_LANE_PROVIDER.to_string(),
-                    artifacts,
-                    credit_snapshot: None,
-                    provider_conversation_state: None,
-                    messages: Vec::new(),
-                    messages_streamed: false,
-                    final_messages: vec![report],
-                }
-            }
+            Ok(imported) => build_import_execution(&imported, request.source.trim()),
             Err(error) => build_import_error_execution(&error),
         },
     }
+}
+
+/// The finished execution for an import without `--start`.
+fn build_import_execution(imported: &[ImportedSkill], source: &str) -> JobExecution {
+    let (report, artifacts) = build_import_report(imported, source, false);
+    JobExecution {
+        // The operator's copy: source, paths, file counts and any
+        // compatibility report. The customer gets one sentence.
+        summary: build_import_detail(imported, source),
+        suggested_replies: vec![
+            "List skills".to_string(),
+            "Run /learn to fold this into workspace memory".to_string(),
+        ],
+        provider: SKILLS_LANE_PROVIDER.to_string(),
+        artifacts,
+        credit_snapshot: None,
+        provider_conversation_state: None,
+        messages: Vec::new(),
+        messages_streamed: false,
+        final_messages: vec![report],
+    }
+}
+
+/// One checkpoint descriptor per file the import wrote, in path order: `created` for a new
+/// file and `changed` for one it replaced. Files an `--overwrite` dropped are not listed, so
+/// the canonical repository keeps them until a later sync.
+fn checkpoint_files(imported: &[ImportedSkill]) -> Vec<CodexFileDescriptor> {
+    let mut written = imported
+        .iter()
+        .flat_map(|skill| skill.written_files.iter())
+        .collect::<Vec<&WrittenSkillFile>>();
+    written.sort_by(|a, b| a.path.cmp(&b.path));
+    written
+        .into_iter()
+        .map(|file| CodexFileDescriptor {
+            path: file.path.clone(),
+            workspace_path: file.path.clone(),
+            label: None,
+            description: None,
+            mime_type: None,
+            content: None,
+            content_base64: None,
+            change: FileChangeDescriptor::parse(json!({
+                "type": if file.replaced { "changed" } else { "created" }
+            })),
+        })
+        .collect()
 }
 
 fn build_import_error_execution(error: &anyhow::Error) -> JobExecution {
@@ -886,6 +942,7 @@ fn write_skill_plans(
     let mut imported = Vec::with_capacity(plans.len());
     for (plan, staged_dir) in plans.into_iter().zip(staged) {
         let name = plan.name.clone();
+        let written_files = written_skill_files(workspace_dir, &plan);
         if let Err(error) =
             move_staged_skill_into_place(&staging_root, &staged_dir, &plan, overwrite)
         {
@@ -906,6 +963,7 @@ fn write_skill_plans(
             workspace_dir,
             plan,
             resolved_source,
+            written_files,
         ));
     }
     fs::remove_dir_all(&staging_root).with_context(|| {
@@ -979,10 +1037,30 @@ fn move_staged_skill_into_place(
         .with_context(|| format!("failed to move skill into {}", target_dir.display()))
 }
 
+/// The workspace-relative path of every file a plan writes and whether a file is already
+/// there. Read before the plan moves into place.
+fn written_skill_files(workspace_dir: &Path, plan: &SkillWritePlan) -> Vec<WrittenSkillFile> {
+    plan.files
+        .keys()
+        .map(|relative_path| {
+            let destination = plan.target_dir.join(relative_path);
+            WrittenSkillFile {
+                path: destination
+                    .strip_prefix(workspace_dir)
+                    .unwrap_or(&destination)
+                    .to_string_lossy()
+                    .replace('\\', "/"),
+                replaced: destination.is_file(),
+            }
+        })
+        .collect()
+}
+
 fn imported_skill_for_plan(
     workspace_dir: &Path,
     plan: SkillWritePlan,
     resolved_source: &str,
+    written_files: Vec<WrittenSkillFile>,
 ) -> ImportedSkill {
     let target_file = plan.target_dir.join(SKILL_FILENAME);
     let relative_path = target_file
@@ -997,6 +1075,7 @@ fn imported_skill_for_plan(
         changed: plan.existed,
         files_written: plan.files.len(),
         compatibility: plan.compatibility,
+        written_files,
     }
 }
 
@@ -2455,6 +2534,7 @@ mod tests {
         );
     }
 
+    use super::super::CodexFileDescriptor;
     use super::{
         CompatibilityReport, ImportedSkill, MAX_IMPORTED_PACK_SKILLS,
         MAX_IMPORTED_SKILL_TOTAL_BYTES, SkillImportRequest, SkillSourceLayout, SkillsLaneOutcome,
@@ -2502,6 +2582,7 @@ mod tests {
             changed: false,
             files_written,
             compatibility: CompatibilityReport::default(),
+            written_files: Vec::new(),
         }
     }
 
@@ -3133,9 +3214,14 @@ mod tests {
                 artifacts,
                 names,
                 prompt,
+                files,
             } => {
                 assert!(report.is_none());
                 assert!(artifacts.is_empty());
+                assert!(
+                    files.is_empty(),
+                    "`/skills start` writes nothing to checkpoint"
+                );
                 assert_eq!(names, vec!["beta".to_string()]);
                 assert_eq!(
                     prompt,
@@ -3159,7 +3245,11 @@ mod tests {
         )
         .await
         {
-            SkillsLaneOutcome::Execution(execution) => {
+            SkillsLaneOutcome::Installed { execution, files } => {
+                assert_eq!(
+                    checkpoint_summary(&files),
+                    vec![(".agents/skills/solo-skill/SKILL.md", "created")]
+                );
                 assert!(
                     execution
                         .summary
@@ -3196,7 +3286,12 @@ mod tests {
                 artifacts,
                 names,
                 prompt,
+                files,
             } => {
+                assert_eq!(
+                    checkpoint_summary(&files),
+                    vec![(".agents/skills/solo-skill/SKILL.md", "created")]
+                );
                 let report = report.expect("report");
                 assert_eq!(report.message_type, None);
                 assert_eq!(
@@ -3241,6 +3336,129 @@ mod tests {
                     execution.final_messages[0].message_type.as_deref(),
                     Some("error")
                 );
+            }
+            other => panic!("expected error execution, got {other:?}"),
+        }
+    }
+
+    /// Each checkpoint descriptor as (workspace path, change type).
+    fn checkpoint_summary(files: &[CodexFileDescriptor]) -> Vec<(&str, &str)> {
+        files
+            .iter()
+            .map(|file| {
+                assert_eq!(file.path, file.workspace_path);
+                let change = file
+                    .change
+                    .as_ref()
+                    .and_then(|change| change.raw["type"].as_str())
+                    .unwrap_or("none");
+                (file.workspace_path.as_str(), change)
+            })
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn resolve_skills_lane_hands_every_imported_file_to_the_checkpoint() {
+        let workspace = tempdir().expect("workspace");
+        let source = pack_fixture_dir().display().to_string();
+        let installed = |outcome| match outcome {
+            SkillsLaneOutcome::Installed { files, .. } => files,
+            other => panic!("expected an installed import, got {other:?}"),
+        };
+
+        let files = installed(
+            resolve_skills_lane(
+                SkillsRequest::Import(import_request(&source, None, false)),
+                workspace.path(),
+            )
+            .await,
+        );
+        // Every file the pack import wrote, each a mutation the checkpoint uploads. The
+        // pack's README and LICENSE are not installed, so they are not listed.
+        assert_eq!(
+            checkpoint_summary(&files),
+            vec![
+                (".agents/skills/alpha/SKILL.md", "created"),
+                (".agents/skills/alpha/lib/helper.js", "created"),
+                (".agents/skills/beta/SKILL.md", "created"),
+                (".agents/skills/beta/package.json", "created"),
+                (".agents/skills/gamma/SKILL.md", "created"),
+            ]
+        );
+        assert!(files.iter().all(|file| !file.is_read_reference()));
+        for file in &files {
+            assert!(
+                workspace.path().join(&file.workspace_path).is_file(),
+                "{} must exist where the checkpoint reads it",
+                file.workspace_path
+            );
+        }
+
+        // Re-installing over the same folders replaces each file.
+        let overwrite = SkillImportRequest {
+            overwrite: true,
+            start: true,
+            ..import_request(&source, None, false)
+        };
+        match resolve_skills_lane(SkillsRequest::Import(overwrite), workspace.path()).await {
+            SkillsLaneOutcome::Kickoff { files, .. } => assert_eq!(
+                checkpoint_summary(&files),
+                vec![
+                    (".agents/skills/alpha/SKILL.md", "changed"),
+                    (".agents/skills/alpha/lib/helper.js", "changed"),
+                    (".agents/skills/beta/SKILL.md", "changed"),
+                    (".agents/skills/beta/package.json", "changed"),
+                    (".agents/skills/gamma/SKILL.md", "changed"),
+                ]
+            ),
+            other => panic!("expected kickoff, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn resolve_skills_lane_merging_into_a_folder_marks_only_existing_files_changed() {
+        let workspace = tempdir().expect("workspace");
+        let beta = workspace.path().join(".agents/skills/beta");
+        fs::create_dir_all(&beta).expect("beta dir");
+        fs::write(beta.join("package.json"), "{}\n").expect("existing file");
+        fs::write(beta.join("notes.txt"), "keep me\n").expect("stray file");
+
+        let source = pack_fixture_dir().display().to_string();
+        match resolve_skills_lane(
+            SkillsRequest::Import(import_request(&source, None, false)),
+            workspace.path(),
+        )
+        .await
+        {
+            SkillsLaneOutcome::Installed { files, .. } => {
+                let beta = checkpoint_summary(&files)
+                    .into_iter()
+                    .filter(|(path, _)| path.starts_with(".agents/skills/beta/"))
+                    .collect::<Vec<(&str, &str)>>();
+                // The stray file was not written, so it is not the import's to save.
+                assert_eq!(
+                    beta,
+                    vec![
+                        (".agents/skills/beta/SKILL.md", "created"),
+                        (".agents/skills/beta/package.json", "changed"),
+                    ]
+                );
+            }
+            other => panic!("expected an installed import, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn resolve_skills_lane_failed_import_has_nothing_to_checkpoint() {
+        let workspace = tempdir().expect("workspace");
+        match resolve_skills_lane(
+            SkillsRequest::Import(import_request("missing/nothing-here", None, false)),
+            workspace.path(),
+        )
+        .await
+        {
+            SkillsLaneOutcome::Execution(execution) => {
+                assert!(execution.summary.starts_with("Skill import failed: "));
             }
             other => panic!("expected error execution, got {other:?}"),
         }

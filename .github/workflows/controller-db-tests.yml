@@ -114,22 +114,24 @@ jobs:
           rustup default stable
 
       - name: Restore compiler cache without saving
-        if: runner.environment == 'self-hosted'
+        if: runner.environment == 'self-hosted' || github.ref != 'refs/heads/main'
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
-            ~/.cargo/registry
-            ~/.cargo/git
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
             packages/runtime-controller/target
           key: controller-db-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('packages/runtime-controller/Cargo.lock') }}
 
       - name: Cache controller Cargo dependencies and build
-        if: runner.environment == 'github-hosted'
+        if: runner.environment == 'github-hosted' && github.ref == 'refs/heads/main'
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
-            ~/.cargo/registry
-            ~/.cargo/git
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
             packages/runtime-controller/target
           key: controller-db-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('packages/runtime-controller/Cargo.lock') }}
 

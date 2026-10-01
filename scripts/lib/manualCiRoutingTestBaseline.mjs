@@ -35,8 +35,9 @@ export const MANUAL_CI_JOBS = [
 ];
 export const MANUAL_CI_BASELINES = {
   // The reviewed Build baseline additionally selects proxy_retry_budget and
-  // filtered read-reference integration tests; check-rust-ci binds their exact argv.
-  "build.yml": { sha256: "70548038c41bda43078074e7f84b7372d63798ae8cc76eb2bef8ee62e24d59f5" },
+  // filtered read-reference integration tests, builds the Codex code-mode host and
+  // runs proxy_retry_budget per model; check-rust-ci binds their exact argv.
+  "build.yml": { sha256: "a55051cd9c7efb2d4041b04ef926348d8eb97416c038b8cc6d18466979d733c1" },
   "browser-e2e.yml": { sha256: "5a227820568dfe71f344bd816f77fe41c4d1d8980041937792de09ab956c121b" },
   // The reviewed Auth and Controller DB baselines additionally trigger on the
   // GHCR image-mirror helper (and its lock/test for Auth, the serial-pull helper

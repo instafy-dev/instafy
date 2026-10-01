@@ -1839,8 +1839,8 @@ async fn required_tool_call_sends_top_level_tools_required() -> Result<()> {
 async fn required_tool_call_leaves_other_requests_as_main_sends_them() -> Result<()> {
     // Each request goes upstream with the key and without it, and the two
     // bodies must match: the proxy strips the key and changes nothing else
-    // when the request offers no tools, already chose, or sets the key to
-    // anything but "1". A Responses Lite request's own `required` is not
+    // when the request offers no tools, already chose, is a remote
+    // compaction, or sets the key to anything but "1". A Responses Lite request's own `required` is not
     // forwarded, with the key or without it.
     let lite = luna_lite_request();
     let top_level = top_level_tools_request();
@@ -1855,9 +1855,22 @@ async fn required_tool_call_leaves_other_requests_as_main_sends_them() -> Result
     empty_additional_tools["input"][0]["tools"] = json!([]);
     let function_choice = json!({ "type": "function", "name": "exec_command" });
     let custom_choice = json!({ "type": "custom", "name": "exec" });
+    // Codex's remote compaction request carries the turn's tools and ends
+    // its input with a `compaction_trigger` item. It must come back as a
+    // compaction, so a pending required tool call does not apply to it.
+    let compaction = |request: &Value| {
+        let mut request = request.clone();
+        request["input"]
+            .as_array_mut()
+            .expect("input items")
+            .push(json!({ "type": "compaction_trigger" }));
+        request
+    };
 
     let one = json!("1");
     let cases = vec![
+        ("Lite compaction", compaction(&lite), one.clone()),
+        ("tools compaction", compaction(&top_level), one.clone()),
         ("no tools", no_tools, one.clone()),
         ("empty tools", empty_tools, one.clone()),
         (
