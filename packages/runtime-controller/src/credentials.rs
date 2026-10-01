@@ -13,7 +13,7 @@ use serde_json::{json, Map as JsonMap, Value as JsonValue};
 use sha2::{Digest, Sha256};
 use subtle::ConstantTimeEq;
 use tokio::time::timeout;
-use tokio_postgres::{types::Json as PgJson, Transaction};
+use tokio_postgres::{types::Json as PgJson, GenericClient, Transaction};
 use uuid::Uuid;
 
 use crate::ai_agents;
@@ -647,6 +647,54 @@ pub(crate) fn is_managed_ai_credential_id(credential_id: &Uuid) -> bool {
     *credential_id == crate::config::managed_ai_credential_id()
 }
 
+/// A user credential id read from stored user data, with the managed lane's
+/// reserved id treated as absent. That id belongs to the platform credential
+/// and is never a user credential (`user_credentials_id_not_reserved`), so a
+/// row that carries it must not select a user lane: the caller falls back to
+/// the managed or no-credential path instead.
+pub(crate) fn usable_user_credential_id(credential_id: Option<Uuid>) -> Option<Uuid> {
+    let credential_id = credential_id?;
+    if is_managed_ai_credential_id(&credential_id) {
+        tracing::warn!(
+            "ignoring a user credential stored under the reserved managed credential id"
+        );
+        return None;
+    }
+    Some(credential_id)
+}
+
+pub(crate) struct OwnedCredential {
+    pub(crate) kind: String,
+    pub(crate) metadata: JsonValue,
+}
+
+/// A live credential the user owns, named by id where a client selects one
+/// of its own (test, default, agent pinning). The reserved managed id is
+/// never one of them, so it answers like an unknown id.
+pub(crate) async fn load_owned_live_credential(
+    client: &impl GenericClient,
+    user_id: &Uuid,
+    credential_id: &Uuid,
+) -> Result<Option<OwnedCredential>, (StatusCode, Json<ApiError>)> {
+    if is_managed_ai_credential_id(credential_id) {
+        return Ok(None);
+    }
+    let row = client
+        .query_opt(
+            "select kind, metadata
+             from user_credentials
+             where id = $1 and user_id = $2 and revoked_at is null
+             limit 1",
+            &[credential_id, user_id],
+        )
+        .await
+        .map_err(|error| internal_error(format!("failed to load credential: {error}")))?;
+    Ok(row.map(|row| OwnedCredential {
+        kind: row.get("kind"),
+        metadata: row.get::<_, PgJson<JsonValue>>("metadata").0,
+    }))
+}
+
 /// The lease material for the managed lane. Served straight from controller
 /// configuration: there is no `user_credentials` row, no ownership check and
 /// nothing to refresh. Callers guard this with the proxy lease bearer.
@@ -865,23 +913,11 @@ async fn test_my_credential(
 
     // Load metadata before probing so we can return helpful context without parsing secrets.
     // Importantly: avoid holding a DB transaction open while the proxy calls back into the controller.
-    let row = connection
-        .query_opt(
-            "select kind, metadata
-             from user_credentials
-             where id = $1 and user_id = $2 and revoked_at is null
-             limit 1",
-            &[&credential_id, &user_id],
-        )
-        .await
-        .map_err(|error| internal_error(format!("failed to load credential: {error}")))?;
-
-    let Some(row) = row else {
+    let Some(OwnedCredential { kind, metadata }) =
+        load_owned_live_credential(&*connection, &user_id, &credential_id).await?
+    else {
         return Err(not_found("credential not found"));
     };
-
-    let kind: String = row.get("kind");
-    let metadata: JsonValue = row.get::<_, PgJson<JsonValue>>("metadata").0;
 
     let meta = metadata.as_object();
     let provider = meta
@@ -1179,7 +1215,10 @@ async fn resolve_editor_completion_credential(
         return Ok(None);
     };
 
-    let credential_id: Uuid = row.get("id");
+    // Covers both the requested id and the default row.
+    let Some(credential_id) = usable_user_credential_id(Some(row.get("id"))) else {
+        return Ok(None);
+    };
     let kind: String = row.get("kind");
     let metadata: JsonValue = row.get::<_, PgJson<JsonValue>>("metadata").0;
     let provider = provider_for_credential(&kind, &metadata);
@@ -1215,6 +1254,7 @@ async fn complete_editor_inline_via_proxy(
         &synthetic_runtime_id,
         None,
         Some(&credential.credential_id),
+        None,
         Some("octo"),
         Some("Octo"),
         Some("Inline editor completion"),
@@ -1324,6 +1364,7 @@ async fn generate_conversation_title_via_proxy(
         &synthetic_runtime_id,
         None,
         Some(&credential.credential_id),
+        None,
         Some("octo"),
         Some("Octo"),
         Some("Conversation title"),
@@ -1585,6 +1626,7 @@ async fn probe_credential_via_proxy(
         &synthetic_runtime_id,
         None,
         Some(&credential_id),
+        None,
         Some("octo"),
         Some("Octo"),
         Some("Credential verification probe"),
@@ -1739,7 +1781,9 @@ pub(crate) async fn load_default_credential_id(
         .await
         .map_err(|error| internal_error(format!("failed to load default credential: {error}")))?;
 
-    Ok(row.map(|row| row.get::<_, Uuid>("id")))
+    Ok(usable_user_credential_id(
+        row.map(|row| row.get::<_, Uuid>("id")),
+    ))
 }
 
 async fn list_my_credentials(
@@ -1755,14 +1799,25 @@ async fn list_my_credentials(
         .await
         .map_err(|error| internal_error(format!("failed to get connection: {error}")))?;
 
-    let rows = connection
+    Ok(Json(load_credential_list(&*connection, &user_id).await?))
+}
+
+/// The user's credentials as `GET /me/credentials` lists them. A row under
+/// the reserved managed id is not a user credential and is never listed, so
+/// no client can select it.
+async fn load_credential_list(
+    client: &impl GenericClient,
+    user_id: &Uuid,
+) -> Result<Vec<CredentialListItem>, (StatusCode, Json<ApiError>)> {
+    let reserved_credential_id = crate::config::managed_ai_credential_id();
+    let rows = client
         .query(
             "select id, kind, label, metadata, is_default, subscription_usage, last_used_at, revoked_at, created_at, updated_at
              from user_credentials
-             where user_id = $1
+             where user_id = $1 and id <> $2
              order by created_at desc, id desc
              limit 200",
-            &[&user_id],
+            &[user_id, &reserved_credential_id],
         )
         .await
         .map_err(|error| internal_error(format!("failed to list credentials: {error}")))?;
@@ -1798,7 +1853,7 @@ async fn list_my_credentials(
         })
         .collect();
 
-    Ok(Json(items))
+    Ok(items)
 }
 
 async fn create_my_codex_credential(
@@ -1857,23 +1912,11 @@ async fn set_my_default_credential(
         .await
         .map_err(|error| internal_error(format!("failed to start transaction: {error}")))?;
 
-    let row = transaction
-        .query_opt(
-            "select id, kind, metadata
-             from user_credentials
-             where id = $1 and user_id = $2 and revoked_at is null
-             limit 1",
-            &[&credential_id, &user_id],
-        )
-        .await
-        .map_err(|error| internal_error(format!("failed to load credential: {error}")))?;
-
-    let Some(row) = row else {
+    let Some(OwnedCredential { kind, metadata }) =
+        load_owned_live_credential(&transaction, &user_id, &credential_id).await?
+    else {
         return Err(not_found("credential not found"));
     };
-
-    let kind: String = row.get("kind");
-    let metadata: JsonValue = row.get::<_, PgJson<JsonValue>>("metadata").0;
     let next_default_provider = provider_for_credential(&kind, &metadata);
 
     let previous_default_provider = transaction
@@ -2018,6 +2061,13 @@ async fn revoke_my_credential(
     let user_id = require_user_session(&context)?;
     let credential_id = Uuid::from_str(credential_id_raw.trim())
         .map_err(|_| bad_request("credentialId must be a valid UUID"))?;
+    // Never a user credential, like every other selection by id. A row
+    // stored under it before user_credentials_id_not_reserved existed cannot
+    // be updated past that check, so revoking could not clear it either; the
+    // check stays NOT VALID until such a row has been handled.
+    if is_managed_ai_credential_id(&credential_id) {
+        return Err(not_found("credential not found"));
+    }
 
     let connection = state
         .pool
@@ -2069,7 +2119,12 @@ async fn get_internal_credential(
 
     // The managed lane: a proxy that received a credential-less token leases
     // this fixed id. It is answered from controller configuration, before any
-    // database or ownership lookup, so BYOC credentials stay per-user scoped.
+    // database or ownership lookup, so BYOC credentials stay per-user scoped
+    // and no user_credentials row is ever served under it. A lease request
+    // names only the id, so the lane is decided when the token is minted:
+    // `auth::issue_proxy_envelope` never places this id in a credential
+    // claim, and every user-credential resolver treats a row under it as
+    // absent (`usable_user_credential_id`).
     if is_managed_ai_credential_id(&credential_id) {
         return managed_ai_internal_credential(&state.config).map(Json);
     }
@@ -3791,3 +3846,7 @@ mod session_identity_tests {
         assert_eq!(error.0, axum::http::StatusCode::UNAUTHORIZED);
     }
 }
+
+#[cfg(test)]
+#[path = "credentials_reserved_id_tests.rs"]
+pub(crate) mod reserved_id_tests;

@@ -21,6 +21,7 @@ use crate::agent_write_scopes::{
     apply_agent_write_scope_metadata, build_agent_write_scope_plan, AgentWriteScopeAssignment,
 };
 use crate::ai_agents;
+use crate::ai_metering::job_record::{insert_platform_job_record, PlatformJobRecord};
 use crate::auth::{authenticate_request, RequestContext};
 use crate::bug_reports::{record_system_bug_report, SystemBugReportInput};
 use crate::credentials;
@@ -516,7 +517,9 @@ async fn resolve_agent_targets(
                             ua.avatar_seed as avatar_seed
                      from user_agents ua
                      left join user_credentials uc
-                       on uc.id = ua.credential_id and uc.revoked_at is null
+                       on uc.id = ua.credential_id
+                      and uc.user_id = ua.user_id
+                      and uc.revoked_at is null
                      left join user_agent_project_settings uaps
                        on uaps.user_id = ua.user_id
                       and uaps.agent_id = ua.id
@@ -533,7 +536,7 @@ async fn resolve_agent_targets(
                 })?;
             if let Some(row) = row {
                 agent_id = row.get("agent_id");
-                credential_id = row.get("credential_id");
+                credential_id = credentials::usable_user_credential_id(row.get("credential_id"));
                 runtime_id = row.get("runtime_id");
                 display_name = row.get("display_name");
                 description = row.get("description");
@@ -556,7 +559,8 @@ async fn resolve_agent_targets(
             avatar_seed = Some("octo".to_string());
         }
 
-        let resolved_credential_id = credential_id.or(default_credential_id);
+        let resolved_credential_id =
+            credentials::usable_user_credential_id(credential_id.or(default_credential_id));
         targets.push(AgentTarget {
             handle,
             agent_id,
@@ -580,7 +584,7 @@ async fn resolve_agent_targets(
         targets.push(AgentTarget {
             handle: "octo".to_string(),
             agent_id,
-            credential_id: default_credential_id,
+            credential_id: credentials::usable_user_credential_id(default_credential_id),
             runtime_id: None,
             display_name,
             description,
@@ -2130,8 +2134,12 @@ pub(crate) async fn process_dispatch_prompt(
         }
         let provider_conversation_state = if supports_provider_state {
             if let Some(conversation_id) = request.conversation_id {
-                let expected_provider =
-                    load_target_credential_provider(&transaction, target.credential_id).await?;
+                let expected_provider = load_target_credential_provider(
+                    &transaction,
+                    context.user_id,
+                    target.credential_id,
+                )
+                .await?;
                 load_previous_provider_conversation_state(
                     &transaction,
                     &conversation_id,
@@ -2178,6 +2186,32 @@ pub(crate) async fn process_dispatch_prompt(
             // that one-to-one identity durable in the same transaction as the
             // enqueue so initial hydration and reconnect cannot lose it.
             persist_run_job_identity(&transaction, &project.id, run_id, &job_uuid).await?;
+            // A credential-less AI job runs on the platform key, service-role
+            // dispatches included, so it gets its platform job record here.
+            // The waiver follows this dispatch's own ambient decision, never
+            // the job payload.
+            let platform_org_id = project.org_id.filter(|_| {
+                dispatch_requires_ai_access(&request.intent) && target.credential_id.is_none()
+            });
+            if let Some(org_id) = platform_org_id {
+                let decline_waiver_units = if skill_mode_ambient_evaluation {
+                    state.config.managed_ai_decline_waiver_units
+                } else {
+                    0
+                };
+                insert_platform_job_record(
+                    &transaction,
+                    &PlatformJobRecord {
+                        job_id: job_uuid,
+                        org_id,
+                        project_id: project.id,
+                        run_id: *run_id,
+                        prompt_id,
+                        decline_waiver_units,
+                    },
+                )
+                .await?;
+            }
         }
         dispatches.push((
             *run_id,
@@ -4741,11 +4775,14 @@ fn merge_ai_access_metadata(
     JsonValue::Object(root)
 }
 
+/// The provider of a dispatch target's credential, which is always one the
+/// requesting user holds.
 async fn load_target_credential_provider(
     transaction: &Transaction<'_>,
+    user_id: Option<Uuid>,
     credential_id: Option<Uuid>,
 ) -> Result<Option<String>, (StatusCode, Json<ApiError>)> {
-    let Some(credential_id) = credential_id else {
+    let (Some(user_id), Some(credential_id)) = (user_id, credential_id) else {
         return Ok(None);
     };
 
@@ -4753,9 +4790,9 @@ async fn load_target_credential_provider(
         .query_opt(
             "select kind, metadata
              from user_credentials
-             where id = $1 and revoked_at is null
+             where id = $1 and user_id = $2 and revoked_at is null
              limit 1",
-            &[&credential_id],
+            &[&credential_id, &user_id],
         )
         .await
         .map_err(|error| {

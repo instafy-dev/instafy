@@ -250,6 +250,46 @@ under a lock on the team's balance row:
   moving the balance, also under `ON CONFLICT DO NOTHING` and between concurrent writers. Rows
   without a project are never deduplicated, as in the ledger's unique index.
 
+### Usage metering (record-only)
+The controller is starting to meter managed AI from the proxy's reports of exact upstream usage,
+beside the reserve-and-reconcile billing above, which still decides every charge. Today it only
+records which jobs run on the platform key and which tokens they hold:
+- Dispatch writes one `ai_usage_jobs` row for every platform job, in the transaction that enqueues
+  it: an agent job whose intent needs AI (not a `terminal_command`) and whose target has no
+  credential. Service-role dispatches such as plan workers, lead continuations and queued sends
+  without a user get one too. BYO jobs, including the BYO targets of a mixed dispatch, and
+  terminal commands get none, so they have no platform lane to meter.
+- The row is the job's billing identity and is written once. Its `billing_mode` is `record_only`:
+  nothing is posted to the ledger from it. Its `decline_waiver_units` is
+  `MANAGED_AI_DECLINE_WAIVER_UNITS` (default `2`) for a skill-mode ambient evaluation, as the
+  dispatch's own participation decision classified it, and `0` for every other job, scheduled
+  automations included. It is never read from the job payload, which a client or a later decline
+  can change.
+- Every job token the job lease mints now names its job and lease attempt (`job_id`,
+  `lease_attempt`). For a platform job, and only for one, the lease also records the token's
+  SHA-256 in the job's row under that attempt, in the lease transaction. BYO and terminal leases
+  write nothing there, so they never depend on the metering table. The metering checks still to
+  come (the managed-key lease and the usage report) accept only a token recorded that way, so even
+  a holder of the proxy signing secret can use only tokens the controller minted for that job
+  attempt. The controller's other proxy tokens (the agent-login and runtime-register envelopes,
+  and those for its own credential checks, inline completions and conversation titles) carry
+  neither claim. Proxies ignore both claims for now and accept tokens with or without them, so the
+  controller and the proxy can be updated in either order.
+- Those checks verify a job token in one of two modes. Both require a signature with the proxy
+  signing secret and the `aud` (`proxy`), `iss` (`runtime-controller`), `exp` and `iat` claims; a
+  token missing any of them is refused. The live mode, for the managed-key lease, also enforces
+  `exp` and requires that the job is still leased (`agent_jobs.status = 'leased'`) to the runtime
+  the token names and that the token is the one recorded for the job's current attempt. Cancel,
+  finish and requeue leave the attempt unchanged, so a token stops being live the moment its job
+  stops being leased, not when it expires. The settle mode, for the usage report, skips `exp`,
+  accepts a token issued within the last 24 hours and requires the token recorded for the attempt
+  it names, whatever the job's status now, so a finished job and a requeued job's earlier attempt
+  still bill.
+- The next step (the managed-key lease and the usage report) must keep two rules. The managed-key
+  lease requires a bound live token in every case, with no fallback for an unbound or legacy
+  token. A settle takes the job and lease attempt from the verified token, never from the report
+  body.
+
 ## Controller Endpoints
 - `GET /credits/status` — current team credit balance/limit.
 - `GET /credits/ledger` — recent burn/refill events.

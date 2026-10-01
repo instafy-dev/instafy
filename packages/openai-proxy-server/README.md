@@ -150,7 +150,10 @@ and forward client tools unchanged, hosted ones included.
 
 With controller integration, static proxy credentials (`OPENAI_API_KEY` or `auth.json`) serve
 the platform lane: managed runs, whose controller-signed job tokens carry a `run_id` and no
-`credential_id`. Set `PROXY_PINNED_MODEL` to the controller's `MANAGED_AI_MODEL_ID` and those
+`credential_id`. A job token also names the job and lease attempt it was minted for (`job_id`
+and `lease_attempt`) for the controller's usage metering; the proxy accepts tokens with or
+without them and does not use them yet.
+Set `PROXY_PINNED_MODEL` to the controller's `MANAGED_AI_MODEL_ID` and those
 runs get exactly the pinned-lease policy above. A controller-signed token with neither a
 `credential_id` nor a `run_id` (the agent-login and runtime-register session envelopes) is not a
 turn, and both backends refuse it with 401 `proxy token missing credential_id for BYOC request`
