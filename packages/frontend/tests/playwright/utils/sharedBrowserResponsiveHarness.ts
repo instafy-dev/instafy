@@ -21,6 +21,19 @@ export type SharedBrowserContentBox = {
   y: number;
 };
 
+export function sharedBrowserAddressControl(page: Page): Locator {
+  return page.getByTestId("shared-browser-chrome")
+    .getByTestId(/^shared-browser-address(?:-trigger)?$/);
+}
+
+export async function expectSharedBrowserAddressValue(page: Page, value: string, timeout = 60_000) {
+  const address = sharedBrowserAddressControl(page);
+  await expect(address).toBeVisible({ timeout });
+  await expect.poll(() => address.evaluate((element) =>
+    element instanceof HTMLInputElement ? element.value : element.textContent,
+  ), { timeout }).toBe(value);
+}
+
 function visibleBrowserSurface(page: Page): Locator {
   return sharedPixelSurface(page);
 }
@@ -167,7 +180,7 @@ export async function expectResponsiveSharedBrowserLayout(
   const minStageHeight = options.minStageHeight ?? 96;
   const modal = page.getByTestId("browser-session-modal");
   const chrome = modal.getByTestId("shared-browser-chrome");
-  const address = chrome.getByTestId("shared-browser-address");
+  const address = sharedBrowserAddressControl(page);
   const stage = modal.getByTestId("browser-session-stage");
   const composer = page.getByTestId("chat-composer-overlay");
 

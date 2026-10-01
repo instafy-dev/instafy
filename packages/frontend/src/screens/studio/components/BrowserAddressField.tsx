@@ -95,7 +95,7 @@ export const BrowserAddressField = forwardRef<HTMLInputElement, BrowserAddressFi
   if (desktop) return editor;
   return <>
     <Button slot={null} variant="outline" size="xs" radius="full"
-      className="h-11 w-full min-w-0 !justify-start px-3 text-left !text-base font-normal"
+      className="h-8 max-[540px]:h-10 pointer-coarse:h-11 w-full min-w-0 !justify-start px-3 text-left !text-base font-normal"
       aria-label="Address" aria-haspopup="dialog" aria-expanded={editing}
       data-testid={`${props.testIdPrefix}-address-trigger`} isDisabled={disabled}
       onPress={() => { originalValue.current = String(value ?? ""); setEditing(true); }}>
