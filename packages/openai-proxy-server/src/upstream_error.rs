@@ -1,9 +1,12 @@
 //! Typed upstream failures. Public responses never echo provider bodies, URLs or credentials.
 
 use std::fmt;
+use std::time::{Duration, SystemTime};
 
 use reqwest::StatusCode;
 use reqwest::header::{HeaderMap, HeaderValue, RETRY_AFTER};
+use serde_json::{Value, json};
+use uuid::Uuid;
 
 /// Delay a rate-limited client is told to wait when the provider gave no usable hint. It keeps
 /// the client-side retry from landing in the same provider window without stalling a turn.
@@ -13,9 +16,18 @@ use reqwest::header::{HeaderMap, HeaderValue, RETRY_AFTER};
 const DEFAULT_RATE_LIMIT_RETRY_AFTER_SECS: u64 = 5;
 /// Bounds for a delay the proxy derives from x-ratelimit-reset-* headers. Those headers report
 /// when a whole bucket refills, which can be minutes away, and the client sleeps for whatever
-/// it is given. A zero reset would send the retry straight back into the exhausted window.
+/// it is given. A zero reset would send the retry straight back into the exhausted window. A
+/// streamed rate limit keeps its wait within the same bounds.
 const MIN_DERIVED_RETRY_AFTER_SECS: u64 = 1;
 const MAX_DERIVED_RETRY_AFTER_SECS: u64 = 30;
+/// The provider's error code that codex reads, in a `response.failed` event, as a retryable rate
+/// limit. It waits the delay the message gives after "try again in" before it sends again.
+const STREAM_RATE_LIMIT_CODE: &str = "rate_limit_exceeded";
+/// Managed runtimes share one upstream key, so turns that hit the same limit get the same delay
+/// and would all retry at the same instant. A streamed rate limit asks each to wait up to this
+/// much longer, never shorter, within the 30 second bound. Codex spread an HTTP 429's retry the
+/// same way (`INSTAFY_RETRYABLE_429_MAX_JITTER_PERCENT` in codex-api/src/api_bridge.rs).
+const STREAM_RATE_LIMIT_MAX_JITTER_PERCENT: u32 = 20;
 /// Reset beyond which the exhausted bucket is not worth waiting for. A per-minute bucket is
 /// completely full again within about a minute, while a daily requests or tokens limit reports
 /// hours. The client's retries within a turn cover roughly five 30 second waits, so a bucket that
@@ -206,6 +218,102 @@ impl ErrorResponse {
             resets_at: None,
         }
     }
+
+    /// For a transient upstream rate limit, the `error` of the `response.failed` event a
+    /// streaming Responses request gets instead of an HTTP 429: code `rate_limit_exceeded`, and a
+    /// message that ends "Please try again in {d}s.", which codex retries after `d` seconds
+    /// within its stream retry budget. Upstream codex does not retry an HTTP 429 by itself (only
+    /// the pinned fork's own patch does), so the stream is what keeps a short rate limit from
+    /// ending the turn. `d` is the Retry-After this
+    /// response carries, the provider's own or the one the proxy derived, or 5 seconds, clamped
+    /// to 1-30 seconds and spread by up to 20% (see [`stream_retry_delay`]). The message keeps
+    /// this response's own words and code, which the Studio and the runtime match on.
+    ///
+    /// `None` for every other failure, a plan limit and a rate limit window too long to wait out
+    /// among them: those stay the HTTP error they are today.
+    pub(crate) fn stream_rate_limit_error(&self, now: SystemTime, jitter: f64) -> Option<Value> {
+        if self.status != StatusCode::TOO_MANY_REQUESTS
+            || self.code != "upstream_rate_limit"
+            || !self.retryable
+        {
+            return None;
+        }
+        let delay = stream_retry_delay(self.retry_after.as_ref(), now, jitter);
+        Some(json!({
+            "code": STREAM_RATE_LIMIT_CODE,
+            "message": format!(
+                "{} ({}, {}). Please try again in {}s.",
+                self.message.trim_end_matches('.'),
+                self.code,
+                self.status.as_u16(),
+                format_delay_seconds(delay),
+            ),
+        }))
+    }
+}
+
+/// The wait a streamed rate limit asks for. The Retry-After, whole seconds or an HTTP date, is
+/// clamped to 1-30 seconds; without a readable one the wait is 5 seconds. `jitter`, a sample
+/// from [0, 1], then spreads it by up to 20% so runtimes sharing a key do not all retry at once:
+/// below the 30 second bound the spread only lengthens the wait, into the room left under the
+/// bound; a Retry-After of 30 seconds or more is already cut short, so its spread goes below the
+/// bound instead of pinning every retry to exactly 30 seconds. This is how codex spread an HTTP
+/// 429's retry (`instafy_retryable_429_delay` in codex-api/src/api_bridge.rs).
+fn stream_retry_delay(retry_after: Option<&HeaderValue>, now: SystemTime, jitter: f64) -> Duration {
+    let asked = retry_after
+        .and_then(|value| retry_after_delay(value, now))
+        .unwrap_or(Duration::from_secs(DEFAULT_RATE_LIMIT_RETRY_AFTER_SECS));
+    let max = Duration::from_secs(MAX_DERIVED_RETRY_AFTER_SECS);
+    let requested = asked.clamp(Duration::from_secs(MIN_DERIVED_RETRY_AFTER_SECS), max);
+    let jitter = if jitter.is_finite() {
+        jitter.clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
+    let max_spread = requested * STREAM_RATE_LIMIT_MAX_JITTER_PERCENT / 100;
+    if asked >= max {
+        return max - max_spread.mul_f64(jitter);
+    }
+    let room = max_spread.min(max - requested);
+    requested + room.mul_f64(jitter)
+}
+
+/// A Retry-After the proxy forwards or derives, whole seconds or an HTTP date, as a delay from
+/// `now`. A date already past is no delay, and a partial second rounds up.
+fn retry_after_delay(value: &HeaderValue, now: SystemTime) -> Option<Duration> {
+    let value = value.to_str().ok()?.trim();
+    if !value.is_empty() && value.bytes().all(|ch| ch.is_ascii_digit()) {
+        return value.parse::<u64>().ok().map(Duration::from_secs);
+    }
+    let delay = httpdate::parse_http_date(value)
+        .ok()?
+        .duration_since(now)
+        .unwrap_or(Duration::ZERO);
+    Some(Duration::from_secs(
+        delay.as_secs() + u64::from(delay.subsec_nanos() > 0),
+    ))
+}
+
+/// `delay` in seconds, to the millisecond, the way codex reads it back from "try again in
+/// {d}s" (a number of seconds with an optional fraction): whole seconds without a fraction, and
+/// a fraction without trailing zeros. Codex then waits exactly the delay the message states.
+fn format_delay_seconds(delay: Duration) -> String {
+    let millis = (delay.as_secs_f64() * 1000.0).round() as u64;
+    let (secs, millis) = (millis / 1000, millis % 1000);
+    if millis == 0 {
+        return secs.to_string();
+    }
+    format!("{secs}.{millis:03}")
+        .trim_end_matches('0')
+        .to_string()
+}
+
+/// A uniform sample from [0, 1] for spreading retries. The leading bytes of a v4 UUID are
+/// random, and the proxy already makes v4 UUIDs, so the spread needs no new dependency.
+pub(crate) fn retry_jitter_sample() -> f64 {
+    let bytes = Uuid::new_v4().into_bytes();
+    let sample = u32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
+    f64::from(sample) / f64::from(u32::MAX)
 }
 
 pub(crate) fn classify(error: &anyhow::Error) -> ErrorResponse {
@@ -780,6 +888,175 @@ mod tests {
         let quota = stream("insufficient_quota");
         assert_eq!(quota.status, StatusCode::PAYMENT_REQUIRED);
         assert!(quota.retry_after.is_none());
+    }
+
+    /// The delay a streamed rate limit's message states, as codex reads it back: the number
+    /// after "try again in", in seconds.
+    fn stated_delay(error: &Value) -> String {
+        let message = error["message"].as_str().expect("message");
+        let prefix = "The upstream provider rate limit was reached (upstream_rate_limit, 429). \
+                      Please try again in ";
+        message
+            .strip_prefix(prefix)
+            .and_then(|rest| rest.strip_suffix("s."))
+            .unwrap_or_else(|| panic!("unexpected message: {message}"))
+            .to_owned()
+    }
+
+    #[test]
+    fn a_transient_rate_limit_streams_as_rate_limit_exceeded_with_its_wait() {
+        let now = SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000);
+        let error = classify_headers(StatusCode::TOO_MANY_REQUESTS, &[("retry-after", "7")])
+            .stream_rate_limit_error(now, 0.0)
+            .expect("a transient rate limit streams");
+        assert_eq!(
+            error,
+            json!({
+                "code": "rate_limit_exceeded",
+                "message": "The upstream provider rate limit was reached (upstream_rate_limit, 429). Please try again in 7s.",
+            })
+        );
+        // The Studio and the runtime recognise the proxy's rate limit by these words.
+        let message = error["message"].as_str().unwrap();
+        assert!(message.contains("upstream_rate_limit"));
+        assert!(message.contains("rate limit was reached"));
+    }
+
+    #[test]
+    fn a_streamed_rate_limit_wait_is_clamped_defaulted_and_spread_upwards() {
+        let now = SystemTime::UNIX_EPOCH + Duration::from_millis(1_700_000_000_400);
+        let date =
+            |secs: u64| httpdate::fmt_http_date(SystemTime::UNIX_EPOCH + Duration::from_secs(secs));
+        let in_ten_seconds = date(1_700_000_010);
+        let passed = date(1_699_999_000);
+        let delay = |pairs: &[(&'static str, &str)], jitter: f64| {
+            let mut headers = HeaderMap::new();
+            for &(name, value) in pairs {
+                headers.insert(name, HeaderValue::from_str(value).unwrap());
+            }
+            let classified = classify(
+                &UpstreamFailure::http_body(StatusCode::TOO_MANY_REQUESTS, &headers, "{}").into(),
+            );
+            stated_delay(&classified.stream_rate_limit_error(now, jitter).unwrap())
+        };
+        for (pairs, jitter, expected) in [
+            // The provider's Retry-After, spread by up to 20%.
+            (&[("retry-after", "7")][..], 0.0, "7"),
+            (&[("retry-after", "7")], 0.5, "7.7"),
+            (&[("retry-after", "7")], 1.0, "8.4"),
+            // No usable hint: 5 seconds.
+            (&[], 0.0, "5"),
+            (&[], 1.0, "6"),
+            (&[("retry-after", "private-credential")], 1.0, "6"),
+            // A delay the proxy derived from the bucket that ran out.
+            (&[("x-ratelimit-reset-tokens", "6s")], 1.0, "7.2"),
+            // Clamped to at least a second.
+            (&[("retry-after", "0")], 0.0, "1"),
+            (&[("retry-after", "0")], 1.0, "1.2"),
+            (&[("retry-after", passed.as_str())], 0.25, "1.05"),
+            // An HTTP date is a wait from now, a partial second rounded up.
+            (&[("retry-after", in_ten_seconds.as_str())], 0.0, "10"),
+            // The spread never takes a wait past 30 seconds.
+            (&[("retry-after", "29")], 0.5, "29.5"),
+            (&[("retry-after", "29")], 1.0, "30"),
+            // A wait of 30 seconds or more is cut to 30 and spreads below it.
+            (&[("retry-after", "30")], 0.0, "30"),
+            (&[("retry-after", "120")], 0.0, "30"),
+            (&[("retry-after", "120")], 0.5, "27"),
+            (&[("retry-after", "120")], 1.0, "24"),
+            // A sample outside [0, 1] is held to it.
+            (&[("retry-after", "7")], -1.0, "7"),
+            (&[("retry-after", "7")], 2.0, "8.4"),
+            (&[("retry-after", "7")], f64::NAN, "7"),
+            // Rounded to the millisecond, as codex reads it back.
+            (&[("retry-after", "7")], 1.0 / 3.0, "7.467"),
+        ] {
+            assert_eq!(delay(pairs, jitter), expected, "{pairs:?} {jitter}");
+        }
+        // A rate limit reported inside the upstream stream carries no headers.
+        let stream = classify(
+            &UpstreamFailure::Stream {
+                code: Some("rate_limit_exceeded".into()),
+                message: "private-token".into(),
+            }
+            .into(),
+        );
+        let error = stream.stream_rate_limit_error(now, 0.0).unwrap();
+        assert_eq!(stated_delay(&error), "5");
+        assert!(!error.to_string().contains("private-token"), "{error}");
+    }
+
+    #[test]
+    fn a_streamed_rate_limit_wait_stays_within_its_spread_for_any_sample() {
+        let now = SystemTime::UNIX_EPOCH;
+        for (retry_after, low, high) in [
+            ("1", 1.0, 1.2),
+            ("5", 5.0, 6.0),
+            ("26", 26.0, 30.0),
+            ("600", 24.0, 30.0),
+        ] {
+            let classified = classify_headers(
+                StatusCode::TOO_MANY_REQUESTS,
+                &[("retry-after", retry_after)],
+            );
+            for _ in 0..500 {
+                let sample = retry_jitter_sample();
+                assert!((0.0..=1.0).contains(&sample), "{sample}");
+                let error = classified.stream_rate_limit_error(now, sample).unwrap();
+                let stated = stated_delay(&error);
+                // Codex parses the stated number back into the wait it sleeps.
+                let seconds = stated.parse::<f64>().expect("a number of seconds");
+                assert!(
+                    (low..=high).contains(&seconds),
+                    "{retry_after}: {stated} not within {low}..={high}"
+                );
+                let (_, fraction) = stated.split_once('.').unwrap_or((stated.as_str(), ""));
+                assert!(fraction.len() <= 3 && !fraction.ends_with('0'), "{stated}");
+            }
+        }
+    }
+
+    #[test]
+    fn only_a_transient_rate_limit_streams() {
+        let now = SystemTime::UNIX_EPOCH;
+        let mut plan_headers = HeaderMap::new();
+        plan_headers.insert(RETRY_AFTER, HeaderValue::from_static("7"));
+        for failure in [
+            // A plan limit stays the terminal HTTP 429 it is today.
+            UpstreamFailure::http_body(
+                StatusCode::TOO_MANY_REQUESTS,
+                &plan_headers,
+                r#"{"error":{"type":"usage_limit_reached","resets_at":1900000000}}"#,
+            ),
+            UpstreamFailure::http_body(
+                StatusCode::TOO_MANY_REQUESTS,
+                &plan_headers,
+                r#"{"error":{"type":"usage_not_included"}}"#,
+            ),
+            UpstreamFailure::Stream {
+                code: Some("usage_limit_reached".into()),
+                message: "private-token".into(),
+            },
+            // So does a window too long to wait out, and quota exhaustion.
+            UpstreamFailure::RateLimitWindow {
+                resets_in_secs: 3_600,
+            },
+            UpstreamFailure::http_body(
+                StatusCode::TOO_MANY_REQUESTS,
+                &HeaderMap::new(),
+                r#"{"error":{"code":"insufficient_quota"}}"#,
+            ),
+            UpstreamFailure::http(StatusCode::SERVICE_UNAVAILABLE, &plan_headers, false),
+            UpstreamFailure::http(StatusCode::UNAUTHORIZED, &HeaderMap::new(), false),
+            UpstreamFailure::InvalidResponse,
+        ] {
+            let classified = classify(&anyhow::Error::new(failure));
+            assert!(
+                classified.stream_rate_limit_error(now, 0.5).is_none(),
+                "{:?}",
+                classified.code
+            );
+        }
     }
 
     #[test]

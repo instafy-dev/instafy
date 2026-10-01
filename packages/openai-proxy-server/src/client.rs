@@ -1382,6 +1382,7 @@ async fn read_chatgpt_stream(mut response: reqwest::Response) -> Result<Value> {
 
 fn read_chatgpt_stream_text(text: &str) -> Result<Value> {
     let mut completed: Option<Value> = None;
+    let mut incomplete: Option<Value> = None;
     let mut assistant_text_delta = String::new();
     let mut completed_output_items = Vec::new();
     let mut event_kind: Option<String> = None;
@@ -1394,6 +1395,7 @@ fn read_chatgpt_stream_text(text: &str) -> Result<Value> {
                 event_kind.as_deref(),
                 &data_lines,
                 &mut completed,
+                &mut incomplete,
                 &mut completed_output_items,
                 &mut assistant_text_delta,
             )? {
@@ -1419,35 +1421,56 @@ fn read_chatgpt_stream_text(text: &str) -> Result<Value> {
             event_kind.as_deref(),
             &data_lines,
             &mut completed,
+            &mut incomplete,
             &mut completed_output_items,
             &mut assistant_text_delta,
         )?;
     }
 
-    let mut completed =
-        completed.ok_or_else(|| anyhow!("stream ended without a response.completed event"))?;
-    backfill_chatgpt_completed_output(
-        &mut completed,
-        completed_output_items,
-        assistant_text_delta.trim_end_matches('\n'),
-    );
-    Ok(completed)
+    if let Some(mut completed) = completed {
+        backfill_chatgpt_completed_output(
+            &mut completed,
+            completed_output_items,
+            assistant_text_delta.trim_end_matches('\n'),
+        );
+        return Ok(completed);
+    }
+
+    // The upstream stopped the response early and has billed it. It is returned with
+    // `status: "incomplete"`, like the API's own response, for the proxy to decide what the
+    // client gets (see `incomplete_response`). Its output gets only the items the stream
+    // finished: an item that was only added, and text that only streamed as deltas, were cut
+    // off, so neither is backfilled.
+    let mut incomplete =
+        incomplete.ok_or_else(|| anyhow!("stream ended without a response.completed event"))?;
+    let finished_output_items = completed_output_items
+        .into_iter()
+        .filter(|streamed| streamed.done)
+        .collect();
+    backfill_chatgpt_completed_output(&mut incomplete, finished_output_items, "");
+    if let Value::Object(map) = &mut incomplete {
+        map.insert("status".to_string(), json!("incomplete"));
+    }
+    Ok(incomplete)
 }
 
 #[derive(Debug)]
 struct StreamedOutputItem {
     output_index: Option<usize>,
     item: Value,
+    /// Whether the item came from `response.output_item.done`, so the upstream finished it.
+    done: bool,
 }
 
 impl StreamedOutputItem {
-    fn from_event(event: &Value, item: Value) -> Self {
+    fn from_event(event: &Value, item: Value, done: bool) -> Self {
         Self {
             output_index: event
                 .get("output_index")
                 .and_then(Value::as_u64)
                 .and_then(|index| usize::try_from(index).ok()),
             item,
+            done,
         }
     }
 }
@@ -1456,6 +1479,7 @@ fn process_chatgpt_stream_event(
     event_kind: Option<&str>,
     data_lines: &[String],
     completed: &mut Option<Value>,
+    incomplete: &mut Option<Value>,
     completed_output_items: &mut Vec<StreamedOutputItem>,
     assistant_text_delta: &mut String,
 ) -> Result<bool> {
@@ -1521,19 +1545,27 @@ fn process_chatgpt_stream_event(
             if let Some(item) = event.get("item")
                 && response_item_has_assistant_output_text(item)
             {
-                completed_output_items.push(StreamedOutputItem::from_event(&event, item.clone()));
+                completed_output_items.push(StreamedOutputItem::from_event(
+                    &event,
+                    item.clone(),
+                    false,
+                ));
             }
         }
         "response.output_item.done" => {
             if let Some(item) = event.get("item")
                 && response_item_should_be_preserved(item)
             {
-                completed_output_items.push(StreamedOutputItem::from_event(&event, item.clone()));
+                completed_output_items.push(StreamedOutputItem::from_event(
+                    &event,
+                    item.clone(),
+                    true,
+                ));
             }
         }
         "message" => {
             if let Some(item) = chatgpt_message_event_to_response_item(&event) {
-                completed_output_items.push(StreamedOutputItem::from_event(&event, item));
+                completed_output_items.push(StreamedOutputItem::from_event(&event, item, false));
             }
         }
         "response.completed" => {
@@ -1541,6 +1573,16 @@ fn process_chatgpt_stream_event(
                 *completed = Some(response.clone());
             } else if event.get("id").is_some() && event.get("status").is_some() {
                 *completed = Some(event);
+            }
+        }
+        // The upstream stopped the response early, at `max_output_tokens` or by a content
+        // filter for example. It is still a response, with the usage it was billed for, not a
+        // stream failure.
+        "response.incomplete" => {
+            if let Some(response) = event.get("response") {
+                *incomplete = Some(response.clone());
+            } else if event.get("id").is_some() && event.get("status").is_some() {
+                *incomplete = Some(event);
             }
         }
         _ => {}
@@ -1891,12 +1933,14 @@ mod tests {
 
     fn drive_event(payload: &str) -> anyhow::Result<bool> {
         let mut completed = None;
+        let mut incomplete = None;
         let mut items = Vec::new();
         let mut delta = String::new();
         process_chatgpt_stream_event(
             None,
             &[payload.to_string()],
             &mut completed,
+            &mut incomplete,
             &mut items,
             &mut delta,
         )
@@ -2648,6 +2692,7 @@ mod tests {
             vec![StreamedOutputItem {
                 output_index: None,
                 item: done_item,
+                done: true,
             }],
             "delta fallback",
         );
@@ -2827,6 +2872,163 @@ data: [DONE]
         );
         assert_eq!(output[0]["id"], json!("tsc_1"));
         assert_eq!(output[1]["id"], json!("msg_1"));
+    }
+
+    #[test]
+    fn chatgpt_stream_returns_an_incomplete_response_with_only_its_finished_items() {
+        // A finished call, a second call the stop cut off and the upstream finalized as
+        // incomplete, then the start of an answer that never finished. The terminal event
+        // carries no output, as the backend's `response.completed` often does not either.
+        let stream = r#"event: response.output_item.done
+data: {"type":"response.output_item.done","item":{"id":"fc_1","type":"function_call","status":"completed","arguments":"{\"cmd\":\"pwd\"}","call_id":"call_1","name":"exec_command"},"output_index":0}
+
+event: response.output_item.added
+data: {"type":"response.output_item.added","item":{"id":"fc_2","type":"function_call","status":"in_progress","arguments":"","call_id":"call_2","name":"exec_command"},"output_index":1}
+
+event: response.output_item.done
+data: {"type":"response.output_item.done","item":{"id":"fc_2","type":"function_call","status":"incomplete","arguments":"{\"cmd\":\"rm","call_id":"call_2","name":"exec_command"},"output_index":1}
+
+event: response.output_item.added
+data: {"type":"response.output_item.added","item":{"id":"msg_1","type":"message","role":"assistant","status":"in_progress","content":[{"type":"output_text","text":"A partial"}]},"output_index":2}
+
+event: response.output_text.delta
+data: {"type":"response.output_text.delta","delta":" answer","output_index":2}
+
+event: response.incomplete
+data: {"type":"response.incomplete","response":{"id":"resp-cut","model":"gpt-6-luna","status":"incomplete","incomplete_details":{"reason":"max_output_tokens"},"output":[],"usage":{"input_tokens":40,"output_tokens":128,"total_tokens":168}}}
+
+data: [DONE]
+
+"#;
+
+        let raw = read_chatgpt_stream_text(stream).expect("an incomplete response is a response");
+        assert_eq!(
+            raw,
+            json!({
+                "id": "resp-cut", "model": "gpt-6-luna", "status": "incomplete",
+                "incomplete_details": {"reason": "max_output_tokens"},
+                "usage": {"input_tokens": 40, "output_tokens": 128, "total_tokens": 168},
+                "output": [
+                    {"id": "fc_1", "type": "function_call", "status": "completed",
+                        "arguments": "{\"cmd\":\"pwd\"}", "call_id": "call_1",
+                        "name": "exec_command"},
+                    // Kept as the upstream finalized it; the proxy drops it before a client
+                    // sees it.
+                    {"id": "fc_2", "type": "function_call", "status": "incomplete",
+                        "arguments": "{\"cmd\":\"rm", "call_id": "call_2",
+                        "name": "exec_command"},
+                ],
+            })
+        );
+    }
+
+    #[test]
+    fn chatgpt_stream_incomplete_keeps_the_output_it_reports_and_reads_a_named_event() {
+        let stream = r#"event: response.output_text.delta
+data: {"delta":"never finished"}
+
+event: response.incomplete
+data: {"response":{"id":"resp-filtered","status":"incomplete","incomplete_details":{"reason":"content_filter"},"output":[{"id":"rs_1","type":"reasoning","summary":[]}]}}
+
+"#;
+
+        let raw = read_chatgpt_stream_text(stream).expect("an incomplete response is a response");
+        assert_eq!(raw["status"], json!("incomplete"));
+        assert_eq!(
+            raw["output"],
+            json!([{"id": "rs_1", "type": "reasoning", "summary": []}])
+        );
+        let completion = parse_completion(raw).expect("completion should parse");
+        assert_eq!(
+            completion.text, None,
+            "deltas of a cut-off answer are dropped"
+        );
+    }
+
+    #[test]
+    fn chatgpt_stream_without_a_terminal_event_is_still_an_error() {
+        let stream = r#"event: response.output_text.delta
+data: {"delta":"truncated"}
+
+"#;
+        let error = read_chatgpt_stream_text(stream).expect_err("a truncated stream must fail");
+        assert!(
+            format!("{error:#}").contains("stream ended without a response.completed event"),
+            "{error:#}"
+        );
+    }
+
+    #[test]
+    fn chatgpt_stream_incomplete_is_incomplete_whatever_status_its_response_reports() {
+        // The event is what says the upstream stopped early. A response object without a status,
+        // or one still reporting `in_progress`, must not let the call the stop truncated through.
+        let finished_call = json!({"id": "fc_1", "type": "function_call", "status": "completed",
+            "arguments": "{\"cmd\":\"pwd\"}", "call_id": "call_1", "name": "exec_command"});
+        let cut_call = json!({"id": "fc_2", "type": "function_call", "status": "incomplete",
+            "arguments": "{\"cmd\":\"rm", "call_id": "call_2", "name": "exec_command"});
+        let usage = json!({"input_tokens": 40, "output_tokens": 128, "total_tokens": 168});
+        for status in [None, Some("in_progress")] {
+            let mut response = json!({"id": "resp-cut", "output": [], "usage": usage,
+                "incomplete_details": {"reason": "max_output_tokens"}});
+            if let Some(status) = status {
+                response["status"] = json!(status);
+            }
+            let stream = format!(
+                "event: response.output_item.done\ndata: {}\n\n\
+                 event: response.output_item.done\ndata: {}\n\n\
+                 event: response.incomplete\ndata: {}\n\n",
+                json!({"type": "response.output_item.done", "output_index": 0,
+                    "item": finished_call}),
+                json!({"type": "response.output_item.done", "output_index": 1,
+                    "item": cut_call}),
+                json!({"type": "response.incomplete", "response": response}),
+            );
+
+            let raw = read_chatgpt_stream_text(&stream).expect("an incomplete response");
+            assert_eq!(raw["status"], json!("incomplete"), "status {status:?}");
+            assert_eq!(
+                crate::incomplete_response::delivered_response(raw),
+                json!({
+                    "id": "resp-cut", "status": "completed", "usage": usage,
+                    "output": [finished_call],
+                }),
+                "status {status:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn chatgpt_stream_reads_a_flat_incomplete_event() {
+        // Like `response.completed`, the event may carry the response's fields itself instead
+        // of a `response` object.
+        let stream = r#"event: response.output_item.done
+data: {"type":"response.output_item.done","item":{"id":"msg_1","type":"message","role":"assistant","status":"incomplete","content":[{"type":"output_text","text":"A filtered"}]},"output_index":0}
+
+data: {"type":"response.incomplete","id":"resp-flat","status":"incomplete","incomplete_details":{"reason":"content_filter"},"output":[],"usage":{"input_tokens":40,"output_tokens":12,"total_tokens":52}}
+
+"#;
+
+        let raw = read_chatgpt_stream_text(stream).expect("an incomplete response is a response");
+        assert_eq!(raw["id"], json!("resp-flat"));
+        assert_eq!(raw["status"], json!("incomplete"));
+        // A filtered answer without a finished call completes with the text that arrived and the
+        // proxy's notice after it, keeping the usage. The flat event's own fields stay, `type`
+        // included.
+        assert_eq!(
+            crate::incomplete_response::delivered_response(raw),
+            json!({
+                "id": "resp-flat", "type": "response.incomplete", "status": "completed",
+                "usage": {"input_tokens": 40, "output_tokens": 12, "total_tokens": 52},
+                "output": [
+                    {"id": "msg_1", "type": "message", "role": "assistant",
+                        "status": "incomplete",
+                        "content": [{"type": "output_text", "text": "A filtered"},
+                            {"type": "output_text",
+                                "text": "\n\nThe response was cut off before it finished (reason: content_filter).",
+                                "annotations": []}]},
+                ],
+            })
+        );
     }
 
     #[test]
