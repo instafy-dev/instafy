@@ -1,4 +1,5 @@
 import { withoutManualCiRouting } from "./lib/manualCiRoutingTestBaseline.mjs";
+import { assertMainOnlySave, assertNoPullRequestCacheSave, cacheStepRuns, CACHE_REFS, withoutMainOnlyCaches } from "./lib/mainOnlyCacheTestBaseline.mjs";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import { createHash } from "node:crypto";
@@ -10,13 +11,16 @@ const root = path.resolve(import.meta.dirname, "..");
 const workflow = withoutManualCiRouting("browser-e2e.yml", fs.readFileSync(path.join(root, ".github/workflows/browser-e2e.yml"), "utf8"));
 const aggregateIf = "    if: ${{ always() && !(github.repository == 'instafy-dev/instafy' && github.event_name == 'push' && github.ref == 'refs/heads/main' && github.ref_protected == true && cancelled()) }}";
 // Only historical byte-reconstruction proofs use the former aggregate guard.
-const previousAggregateWorkflow = workflow.replace(aggregateIf, "    if: ${{ always() }}");
+// They start from the bytes before main-only saves, the shared compiler key and
+// trimmed cargo paths; the current policy is asserted directly below. Each proof
+// rebuilds it, so a cache-policy regression fails that proof, not the module.
+const previousAggregateWorkflow = () => withoutMainOnlyCaches("browser-e2e.yml", workflow).replace(aggregateIf, "    if: ${{ always() }}");
 const jobs = [
   { key: "shared-profile", label: "public-shared-browser-aggregate", name: "Shared Browser profile E2E", minutes: 5 },
   { key: "shared-profile-lifecycle", label: "public-shared-browser-profile", name: "Shared Browser profile lifecycle", minutes: 30, script: "browser-profile-e2e.mjs" },
   { key: "shared-studio", label: "public-shared-browser-studio", name: "Shared Browser Studio journey", minutes: 30, script: "shared-browser-studio-e2e.mjs" },
 ];
-const section = key => workflow.split(`\n  ${key}:\n`)[1].split(/\n  [\w-]+:\n/u)[0];
+const section = (key, text = workflow) => text.split(`\n  ${key}:\n`)[1].split(/\n  [\w-]+:\n/u)[0];
 const compilerSegmentTimeout = '        env:\n          SEGMENT_DOWNLOAD_TIMEOUT_MINS: "2"\n';
 const withoutCompilerSegmentTimeout = text => text.replaceAll(compilerSegmentTimeout, "");
 // Reconstruct only the removed standalone migration-image preparation for
@@ -39,16 +43,16 @@ function withStandaloneMigrationImagePreparation(text) {
   return text.replaceAll(compilerStep, cache + compilerStep)
     .replaceAll(startup, startup + "          node scripts/ensure-supabase-postgres-image.mjs\n");
 }
-function cacheStep(key, name) {
-  const text = section(key), marker = `      - name: ${name}\n`, start = text.indexOf(marker);
+function cacheStep(key, name, workflowText = workflow) {
+  const text = section(key, workflowText), marker = `      - name: ${name}\n`, start = text.indexOf(marker);
   assert.ok(start >= 0);
   const end = text.indexOf('\n      - name: ', start + marker.length);
   return text.slice(start, end < 0 ? text.length : end);
 }
 function withoutRestoreOnlyCaches(text) {
   for (const job of jobs.filter(job => job.script)) {
-    const restore = withoutCompilerSegmentTimeout(cacheStep(job.key, 'Restore compiler cache without saving'));
-    const hosted = cacheStep(job.key, 'Restore architecture-specific compiler cache');
+    const restore = withoutCompilerSegmentTimeout(cacheStep(job.key, 'Restore compiler cache without saving', text));
+    const hosted = cacheStep(job.key, 'Restore architecture-specific compiler cache', text);
     text = text.replace(restore + '\n', '').replace(hosted,
       hosted.replace("        if: runner.environment == 'github-hosted'\n", ''));
   }
@@ -161,7 +165,7 @@ test("only the two Shared startup steps select the browser-test profile; all pre
   }
   // Normalize only the explicit profile opt-ins. All commands, permissions,
   // selectors, timeouts, assertions, cleanup and aggregate bytes stay intact.
-  const original = withoutPersonalElectronPreparation(withoutRestoreOnlyCaches(withStandaloneMigrationImagePreparation(previousAggregateWorkflow))).replaceAll(selectedStartup, originalStartup);
+  const original = withoutPersonalElectronPreparation(withoutRestoreOnlyCaches(withStandaloneMigrationImagePreparation(previousAggregateWorkflow()))).replaceAll(selectedStartup, originalStartup);
   assert.equal(createHash("sha256").update(original).digest("hex"),
     "39492b8b3c32d931444180ac4e7e52d77b6aa8eed9937b55d6d5bad7ee8aa0ec");
 });
@@ -215,7 +219,7 @@ test("Shared startup omits only standalone migration-image preparation, retainin
   for (const job of jobs.filter(job => job.script)) {
     assert.ok(section(job.key).includes('SUPABASE_BROWSER_TEST: "1"\n        run: |\n          pnpm supabase:up\n'));
   }
-  assert.equal(createHash("sha256").update(withStandaloneMigrationImagePreparation(previousAggregateWorkflow)).digest("hex"),
+  assert.equal(createHash("sha256").update(withStandaloneMigrationImagePreparation(previousAggregateWorkflow())).digest("hex"),
     "48e8ed7ce8e931e7679290199102717cc65de943dcdc3eacf63b61eacacef2f1");
   // The standalone migration lane really consumes this cache; keep it there.
   const build = fs.readFileSync(path.join(root, ".github/workflows/build.yml"), "utf8");
@@ -223,51 +227,66 @@ test("Shared startup omits only standalone migration-image preparation, retainin
   assert.match(build, /run: node scripts\/ensure-supabase-postgres-image\.mjs/u);
   assert.match(build, /run: node scripts\/test-supabase-migrations-empty-db\.mjs/u);
 });
-test("Shared compiler caches isolate operating system, architecture and child targets without fallback keys", () => {
+test("both Shared children use one compiler cache isolated by operating system, architecture and lockfiles without fallback keys", () => {
+  const key = "key: shared-browser-cargo-v2-${{ runner.os }}-${{ runner.arch }}-public-shared-browser-${{ hashFiles('packages/*/Cargo.lock') }}";
+  const inputs = "        with:\n          path: |\n            ~/.cargo/registry/index\n            ~/.cargo/registry/cache\n"
+    + "            ~/.cargo/git/db\n            .cargo-target\n          " + key;
   for (const job of jobs.filter(job => job.script)) {
     const source = section(job.key);
-    assert.ok(source.includes(`key: shared-browser-cargo-v1-\${{ runner.os }}-\${{ runner.arch }}-${job.label}-\${{ hashFiles('packages/*/Cargo.lock') }}`));
-    assert.doesNotMatch(source, /restore-keys:|supabase-postgres-image-\$\{/u);
+    for (const name of ["Restore compiler cache without saving", "Restore architecture-specific compiler cache"]) {
+      // Identical inputs give the same cache version, so the profile child
+      // restores exactly what the Studio child saved from main.
+      assert.equal(cacheStep(job.key, name).split("        with:\n")[1].trimEnd(), inputs.split("        with:\n")[1]);
+    }
+    assert.doesNotMatch(source, /restore-keys:|supabase-postgres-image-\$\{|registry\/src|git\/checkouts/u);
   }
+  assert.equal(workflow.split(key).length - 1, 4);
 });
-test("only self-hosted Shared compiler restores bound segment waits without changing required work", () => {
+test("only the Shared restore-only compiler steps bound segment waits without changing required work", () => {
   assert.equal(workflow.split(compilerSegmentTimeout).length - 1, 2);
   assert.equal((workflow.match(/SEGMENT_DOWNLOAD_TIMEOUT_MINS/g) ?? []).length, 2);
   for (const job of jobs.filter(job => job.script)) {
     const restore = cacheStep(job.key, "Restore compiler cache without saving");
     const hosted = cacheStep(job.key, "Restore architecture-specific compiler cache");
-    assert.match(restore, /^        if: runner\.environment == 'self-hosted'$/mu);
+    // Every self-hosted run uses this step; Studio's also serves hosted non-main refs.
+    for (const ref of CACHE_REFS) assert.equal(cacheStepRuns(restore, "self-hosted", ref), true);
     assert.ok(restore.includes(compilerSegmentTimeout));
     assert.doesNotMatch(hosted, /SEGMENT_DOWNLOAD_TIMEOUT_MINS/u);
     assert.doesNotMatch(restore, /timeout-minutes:|continue-on-error|fail-on-cache-miss|lookup-only/u);
     assert.doesNotMatch(section(job.key), /cache-hit|continue-on-error/u);
   }
   // Exact merged baseline: both complete fixtures, migrations, cleanup, hosted
-  // restores, keys, paths, job budgets and aggregate remain byte-for-byte intact.
-  assert.equal(createHash("sha256").update(withoutCompilerSegmentTimeout(previousAggregateWorkflow)).digest("hex"),
+  // restores, job budgets and aggregate remain byte-for-byte intact; only the
+  // reversed main-only cache change differs.
+  assert.equal(createHash("sha256").update(withoutCompilerSegmentTimeout(previousAggregateWorkflow())).digest("hex"),
     "5c97291dd95421be8b8311413589a975c3fdc0c8dc831a3416f82c8b3bb441ff");
 });
-test('Shared self-hosted compiler caches restore only, preserving all other reviewed workflow bytes', () => {
+test('only the hosted Studio main run saves the Shared compiler cache; every other run restores only', () => {
+  const restoreOnly = /^        uses: actions\/cache\/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6\.1\.0$/mu;
   for (const job of jobs.filter(job => job.script)) {
     const restore = cacheStep(job.key, 'Restore compiler cache without saving');
     const hosted = cacheStep(job.key, 'Restore architecture-specific compiler cache');
-    assert.match(restore, /^        if: runner\.environment == 'self-hosted'$/mu);
-    assert.match(hosted, /^        if: runner\.environment == 'github-hosted'$/mu);
-    assert.match(restore, /^        uses: actions\/cache\/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6\.1\.0$/mu);
-    assert.match(hosted, /^        uses: actions\/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6\.1\.0$/mu);
+    assert.match(restore, restoreOnly);
     assert.equal(restore.split('        with:\n')[1].trimEnd(), hosted.split('        with:\n')[1].trimEnd());
-    for (const environment of ['self-hosted', 'github-hosted', '', 'unknown']) {
-      for (const [part, selected] of [[restore, 'self-hosted'], [hosted, 'github-hosted']]) {
-        assert.equal(vm.runInNewContext(part.match(/^        if: (.+)$/mu)[1], { runner: { environment } }, { timeout: 1000 }), environment === selected);
+    if (job.key === 'shared-studio') {
+      assert.match(hosted, /^        uses: actions\/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6\.1\.0$/mu);
+      assertMainOnlySave(restore, hosted, job.key);
+    } else {
+      // The profile child never saves: one restore-only step per runner type.
+      assert.match(hosted, restoreOnly);
+      for (const ref of CACHE_REFS) for (const environment of ['self-hosted', 'github-hosted', '', 'unknown']) {
+        assert.equal(cacheStepRuns(restore, environment, ref), environment === 'self-hosted');
+        assert.equal(cacheStepRuns(hosted, environment, ref), environment === 'github-hosted');
       }
     }
     assert.equal((section(job.key).match(/uses: actions\/cache(?:\/\w+)?@/gu) ?? []).length, 2);
     assert.doesNotMatch(section(job.key), /actions\/cache\/save@|continue-on-error|save-always|lookup-only/u);
   }
-  assert.equal((workflow.match(/uses: actions\/cache\/restore@/gu) ?? []).length, 2);
+  assert.equal((workflow.match(/uses: actions\/cache\/restore@/gu) ?? []).length, 3);
+  assert.equal(assertNoPullRequestCacheSave(workflow, 'browser-e2e.yml'), 1);
   // Complete browser-e2e.yml at combined source 2ef4dde, including image caches,
   // every fixture/assertion, strict aggregate and the ordinary browser lanes.
-  assert.equal(createHash('sha256').update(withoutPersonalElectronPreparation(withoutRestoreOnlyCaches(withStandaloneMigrationImagePreparation(previousAggregateWorkflow)))).digest('hex'),
+  assert.equal(createHash('sha256').update(withoutPersonalElectronPreparation(withoutRestoreOnlyCaches(withStandaloneMigrationImagePreparation(previousAggregateWorkflow())))).digest('hex'),
     '1e3cc8932d4cc78e1eb64ce389bd2b959362bb22bbaa92d155cf6743c5fd19c8');
 });
 function qualify(job, mutate = () => {}, badDaemon) {

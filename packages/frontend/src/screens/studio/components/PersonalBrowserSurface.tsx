@@ -1,5 +1,4 @@
 import {
-  FormEvent,
   type ReactNode,
   useCallback,
   useEffect,
@@ -20,6 +19,7 @@ import {
   Trash,
   MoreHoriz,
 } from "iconoir-react";
+import { normalizeBrowserAddress } from "./browserAddress";
 import { BrowserAddressField } from "./BrowserAddressField";
 import { Checkbox } from "../../../components/Checkbox";
 import { Button, IconButton } from "../../../components/Button";
@@ -139,6 +139,7 @@ export function PersonalBrowserSurface({
   model,
   transportSelector,
   humanInputIdentityKey,
+  historyUserId,
   onContinueAfterHumanInput,
   sharingControls,
 }: {
@@ -148,6 +149,7 @@ export function PersonalBrowserSurface({
   model: PersonalBrowserModel;
   transportSelector: ReactNode;
   humanInputIdentityKey?: string;
+  historyUserId?: string | null;
   onContinueAfterHumanInput?: (message: string, approvalMode: "ask" | "routine") => Promise<boolean>;
   sharingControls?: ReactNode;
 }) {
@@ -172,11 +174,13 @@ export function PersonalBrowserSurface({
     return () => setOverlayCount(count => count - 1);
   }, []);
   const [fullscreen, setFullscreen] = useState(false);
+  const [settingsOpen, setSettingsOpen] = useState(false);
   const expanded = active && fullscreen;
   const selectedApprovalMode = model.preferredApprovalMode;
   const [dismissedClearDataFeedbackKey, setDismissedClearDataFeedbackKey] =
     useState<string | null>(null);
   const ready = model.status?.state === "ready";
+  const humanInputLocked = model.status?.agentControlEnabled === true || model.status?.humanControlReady === false || model.status?.tabControlActive === true;
   const visible = active && model.available && ready;
   const ownerId = model.ownerId;
   const routineApprovalAvailable = model.status?.approvalModes?.includes("routine") === true;
@@ -276,18 +280,20 @@ export function PersonalBrowserSurface({
   }, [overlayCount, agentWorking]);
   useLayoutEffect(() => { setOverlayPreview(null); }, [ownerId]);
 
-  const handleNavigate = useCallback(
-    (event: FormEvent<HTMLFormElement>) => {
-      event.preventDefault();
-      if (model.status?.agentControlEnabled || model.status?.tabControlActive) {
-        return;
+  const navigateToAddress = useCallback(
+    (nextAddress: string) => {
+      if (!active || !ready || humanInputLocked) {
+        return false;
       }
-      void model.navigate(address);
+      setAddress(nextAddress);
+      model.clearNavigationError();
+      void model.navigate(nextAddress);
+      if (!normalizeBrowserAddress(nextAddress)) return false;
       addressInputRef.current?.blur();
+      return true;
     },
-    [address, model],
+    [active, ready, humanInputLocked, model],
   );
-
   const handleClearData = useCallback(() => {
     if (!window.confirm(
       "Clear your Personal Browser cookies and site data on this device? This signs you out of websites across all your projects on this device. It does not clear Shared Browser, your Instafy sign-in, or your other browsers. This cannot be undone.",
@@ -298,7 +304,6 @@ export function PersonalBrowserSurface({
   }, [model]);
 
   const browserStatus = personalBrowserStatus(model);
-  const humanInputLocked = model.status?.agentControlEnabled === true || model.status?.humanControlReady === false || model.status?.tabControlActive === true;
   const personalHumanInputRequest = model.status?.humanInputRequest;
   const ownsNativeStatus = Boolean(ownerId) && model.status?.ownerId === ownerId;
   const humanInputOptions = {
@@ -397,11 +402,17 @@ export function PersonalBrowserSurface({
             testIdPrefix="personal-browser"
             errorId={model.navigationError ? "personal-browser-address-error" : undefined}
             invalid={Boolean(model.navigationError)}
-            disabled={!ready || humanInputLocked}
+            disabled={!active || !ready || humanInputLocked}
             value={address}
-            onSubmit={handleNavigate}
-            onChange={(event) => {
-              setAddress(event.target.value);
+            historyUserId={historyUserId}
+            currentPage={active && ready && ownsNativeStatus && model.status ? {
+              url: model.status.url,
+              title: model.status.title,
+            } : null}
+            onNavigate={navigateToAddress}
+            errorMessage={model.navigationError}
+            onValueChange={(value) => {
+              setAddress(value);
               model.clearNavigationError();
             }}
             placeholder={
@@ -467,7 +478,27 @@ export function PersonalBrowserSurface({
               )}
             </IconButton>
           ) : null}
-          <BrowserToolsPopover label="Browser settings" trigger={<IconButton aria-label="Browser settings" variant="ghost" radius="full" size="sm"><MoreHoriz className="h-4 w-4" aria-hidden="true" /></IconButton>}>
+          <BrowserToolsPopover label="Browser settings" isOpen={settingsOpen} onOpenChange={setSettingsOpen} trigger={<IconButton aria-label="Browser settings" variant="ghost" radius="full" size="sm"><MoreHoriz className="h-4 w-4" aria-hidden="true" /></IconButton>}>
+            {compactChrome ? (
+              <div className="flex items-center gap-1" role="group" aria-label="Page history">
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  isDisabled={!ready || humanInputLocked || !model.status?.canGoBack}
+                  onPress={() => { setSettingsOpen(false); void model.goBack(); }}
+                >
+                  <NavArrowLeft className="h-4 w-4" aria-hidden="true" />Back
+                </Button>
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  isDisabled={!ready || humanInputLocked || !model.status?.canGoForward}
+                  onPress={() => { setSettingsOpen(false); void model.goForward(); }}
+                >
+                  <NavArrowRight className="h-4 w-4" aria-hidden="true" />Forward
+                </Button>
+              </div>
+            ) : null}
             {routineApprovalAvailable ? (
               <div className="flex shrink-0 flex-wrap items-center gap-x-3 gap-y-1 border-b border-slate-200 px-3 py-2 text-xs dark:border-slate-800" data-browser-session-safe-zone="true">
                 <Checkbox

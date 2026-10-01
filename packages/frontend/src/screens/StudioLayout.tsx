@@ -1354,9 +1354,12 @@ function StudioLayoutInner() {
 
   const handleSelectRecentConversation = useCallback((conversationId: string) => {
     if (!activeProjectId) return;
-    navigateToDestination({ kind: "conversation", projectId: activeProjectId, conversationId,
-      conversationControllerId: conversations.find(conversation => conversation.localId === conversationId)?.controllerId });
-  }, [activeProjectId, conversations, navigateToDestination]);
+    runStudioNavigation(() => {
+      requestHistoryPush();
+      setLeftDrawer(null);
+      openConversationTab(conversationId, { preview: true });
+    });
+  }, [activeProjectId, openConversationTab, requestHistoryPush, runStudioNavigation, setLeftDrawer]);
 
   const prepareWorkspaceForNewSession = useCallback((options?: { closeProjectLauncher?: boolean }) => {
     if (options?.closeProjectLauncher !== false) {
