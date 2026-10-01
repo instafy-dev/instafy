@@ -35,6 +35,28 @@ export function resolveWorkspaceEmptyState(input: {
   return input.conversationTabsReady || input.historyError ? "empty" : "hydrating";
 }
 
+/** A chat route that is still hydrating is about to open one of the space's
+ * chats, so the compact header names a chat and the frame may say it is
+ * loading them. Another route waiting with no tab (a settings link while the
+ * space's access is checked) is not waiting on chats and stays neutral. */
+export function isWorkspaceLoadingChats(emptyState: WorkspaceEmptyState, routedPanel: string): boolean {
+  return emptyState === "hydrating" && routedPanel === "chat";
+}
+
+export type TopbarLocation = Exclude<LeftDrawerPanel, "workspaces"> | "chat";
+
+/** What the compact header names in place of the active tab: the drawer laid
+ * over the workspace, else a chat that is still loading. The drawer wins, so
+ * opening Files mid-switch says "Files", not "Chat". The Spaces drawer is
+ * never laid over the workspace and names nothing. */
+export function resolveTopbarLocation(input: {
+  drawerOverlay: LeftDrawerPanel | null;
+  loadingChats: boolean;
+}): TopbarLocation | null {
+  if (input.drawerOverlay && input.drawerOverlay !== "workspaces") return input.drawerOverlay;
+  return input.loadingChats ? "chat" : null;
+}
+
 export function useStudioNavigationPosture() {
   const isLargeScreen = useStudioDesktopLayout();
   const touchLikeInput = useTouchLikeInput();
