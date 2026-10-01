@@ -126,8 +126,9 @@ export function assertMainOnlySave(restore, save, label) {
   }
 }
 
-// No pull request context, on any runner, can reach a step that saves an
-// Actions cache, and no step saves through the separate save action or inputs.
+// No pull request context, on any runner, can reach an actions/cache step that
+// saves, and no step saves through the separate save action or inputs. This
+// covers actions/cache only; setup-node `cache: pnpm` is outside this check.
 // pull_request_target and workflow_run run with a base-branch ref, so a ref
 // condition cannot exclude them; these workflows must not use either event.
 export function assertNoPullRequestCacheSave(workflow, label) {

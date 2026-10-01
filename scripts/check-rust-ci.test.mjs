@@ -304,7 +304,7 @@ test('Rust children save cargo caches only from hosted main; self-hosted runs an
     assert.ok(job(item.key).indexOf(restore) < job(item.key).indexOf(step(item.key, cargoStep)));
   }
   assert.equal((source.match(/uses: actions\/cache\/restore@/gu) ?? []).length, 11);
-  // Ten Rust saves plus the migration-image save; no pull request can reach one.
+  // Ten Rust saves plus the migration-image save; no pull request reaches an actions/cache step that saves.
   assert.equal(assertNoPullRequestCacheSave(source, 'build.yml'), 11);
 });
 

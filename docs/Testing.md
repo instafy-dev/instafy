@@ -439,11 +439,15 @@ checks pass. A cache miss still runs every command cold and must fit the same
 30-minute limit. GitHub-hosted children save only from `refs/heads/main` (pushes
 and manual dispatches); pull requests and other refs use the restore-only step
 and read main's entries, because PR-scoped entries would use the shared cache
-budget yet serve only that PR. The contracts lane's migration-image cache follows
-the same rule. Cargo caches hold only `~/.cargo/registry/index`,
+budget yet serve only that PR. Keys include every `packages/*/Cargo.lock` with
+no fallback, so a pull request that changes a lockfile compiles cold on each push
+until it merges. The contracts lane's migration-image cache is split by ref only:
+it saves from `refs/heads/main` on any runner, self-hosted included, and every
+other ref restores only. Cargo caches hold only `~/.cargo/registry/index`,
 `~/.cargo/registry/cache`, `~/.cargo/git/db` and the target directory; Cargo
 re-extracts crate sources and does not compare file times under `CARGO_HOME`,
-so restored targets stay fresh. An uncanceled Build never ignores a test
+so cached registry and git dependencies stay fresh, while workspace and path
+crates still rebuild. An uncanceled Build never ignores a test
 failure, child cancellation or aggregate failure.
 The existing unused-toolchain disk cleanup runs only on
 GitHub-hosted images, never against a self-hosted host or guest image.
