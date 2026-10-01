@@ -1,35 +1,13 @@
-use std::fmt;
 use std::time::Duration;
 
 use anyhow::{Result, bail};
-use prost::Message;
 use reqwest::Client;
-use runtime_contracts::{CreditEventRequest, CreditEventResponse};
 use serde::Deserialize;
-
-#[derive(Debug)]
-pub struct ControllerCreditsError {
-    pub status: reqwest::StatusCode,
-    pub body: String,
-}
-
-impl fmt::Display for ControllerCreditsError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            f,
-            "controller credits returned {}: {}",
-            self.status, self.body
-        )
-    }
-}
-
-impl std::error::Error for ControllerCreditsError {}
 
 #[derive(Clone)]
 pub struct ControllerClient {
     http: Client,
     base_url: String,
-    service_bearer: String,
     credential_lease_bearer: String,
 }
 
@@ -53,44 +31,12 @@ pub struct CredentialResponse {
 }
 
 impl ControllerClient {
-    pub fn new(
-        base_url: impl Into<String>,
-        service_bearer: impl Into<String>,
-        credential_lease_bearer: impl Into<String>,
-    ) -> Self {
+    pub fn new(base_url: impl Into<String>, credential_lease_bearer: impl Into<String>) -> Self {
         Self {
             http: Client::new(),
             base_url: base_url.into(),
-            service_bearer: service_bearer.into(),
             credential_lease_bearer: credential_lease_bearer.into(),
         }
-    }
-
-    pub async fn send_credit_event(
-        &self,
-        request: CreditEventRequest,
-    ) -> Result<CreditEventResponse> {
-        let mut body = Vec::new();
-        request.encode(&mut body)?;
-        let response = self
-            .http
-            .post(format!("{}/credits", self.base_url.trim_end_matches('/')))
-            .bearer_auth(&self.service_bearer)
-            .header("content-type", "application/x-protobuf")
-            .header("accept", "application/x-protobuf")
-            .body(body)
-            .send()
-            .await?;
-
-        if !response.status().is_success() {
-            let status = response.status();
-            let text = response.text().await.unwrap_or_default();
-            return Err(ControllerCreditsError { status, body: text }.into());
-        }
-
-        let bytes = response.bytes().await?;
-        let proto = CreditEventResponse::decode(bytes)?;
-        Ok(proto)
     }
 
     pub async fn verify_credential_lease_protocol(&self) -> Result<()> {
@@ -258,11 +204,7 @@ mod tests {
             let _ = axum::serve(listener, app).await;
         });
 
-        let client = ControllerClient::new(
-            format!("http://{addr}"),
-            "service-token",
-            "credential-lease-token",
-        );
+        let client = ControllerClient::new(format!("http://{addr}"), "credential-lease-token");
         client.verify_credential_lease_protocol().await?;
         let _ = client.fetch_credential("cred-123").await?;
         let _ = client.renew_credential_after_rejection("cred-123").await?;
@@ -294,11 +236,7 @@ mod tests {
         let server = tokio::spawn(async move {
             let _ = axum::serve(listener, app).await;
         });
-        let client = ControllerClient::new(
-            format!("http://{addr}"),
-            "service-token",
-            "credential-lease-token",
-        );
+        let client = ControllerClient::new(format!("http://{addr}"), "credential-lease-token");
         assert!(
             client
                 .verify_credential_lease_protocol()

@@ -46,6 +46,8 @@ mod routing_recovery;
 mod handoff;
 mod learn;
 mod mcp;
+#[cfg(test)]
+mod read_reference_tests;
 mod skill_declaration;
 mod skills;
 mod workspace_change_detection;
@@ -5948,6 +5950,7 @@ impl JobProcessor {
 
         drop(codex_guard);
         let mut outcome = extract_codex_outcome(&output.final_json)?;
+        outcome.read_files = normalize_codex_read_files(&workspace_dir, outcome.read_files);
         let clean_ambient_decline = clean_ambient_participation_decline(
             job,
             &output.final_json,
@@ -6519,6 +6522,8 @@ impl JobProcessor {
             let retry_safety_check_downgrade_warning =
                 extract_safety_check_downgrade_warning(&retry_raw_messages);
             let mut retry_outcome = extract_codex_outcome(&retry_output.final_json)?;
+            retry_outcome.read_files =
+                normalize_codex_read_files(&workspace_dir, retry_outcome.read_files);
             suppress_multi_agent_plan_actions_for_worker(job, &mut retry_outcome);
             let mut retry_codex_fallback_summary_kind =
                 classify_internal_codex_fallback_summary(&retry_outcome.summary);
@@ -6795,8 +6800,10 @@ impl JobProcessor {
                     // The tool-free pass only recovers prose; keep the file
                     // evidence the retry already produced.
                     let retry_files = std::mem::take(&mut retry_outcome.files);
+                    let retry_read_files = std::mem::take(&mut retry_outcome.read_files);
                     retry_outcome = finalization_outcome;
                     retry_outcome.files = retry_files;
+                    retry_outcome.read_files = retry_read_files;
                     retry_codex_fallback_summary_kind = None;
                     retry_artifacts.push(build_codex_run_log_artifact(
                         &finalization_output.events,
@@ -8212,6 +8219,14 @@ struct CodexFileDescriptor {
     change: Option<FileChangeDescriptor>,
 }
 
+impl CodexFileDescriptor {
+    fn is_read_reference(&self) -> bool {
+        self.change
+            .as_ref()
+            .is_some_and(|change| matches!(change.kind, FileChangeKind::Read))
+    }
+}
+
 #[derive(Debug, Clone)]
 struct CodexSuggestedSecret {
     name: String,
@@ -8286,6 +8301,8 @@ struct CodexOutcome {
     summary: String,
     suggested_replies: Vec<String>,
     files: Vec<CodexFileDescriptor>,
+    // Display references never enter materialization, write evidence or origin sync.
+    read_files: Vec<CodexFileDescriptor>,
     snippet: Option<String>,
     actions: Vec<CodexAction>,
 }
@@ -8336,6 +8353,7 @@ enum FileChangeKind {
     Created,
     Deleted,
     Changed,
+    Read,
     Other(String),
 }
 
@@ -8366,6 +8384,7 @@ impl FileChangeDescriptor {
                     match type_value.to_ascii_lowercase().as_str() {
                         "created" => kind = FileChangeKind::Created,
                         "deleted" => kind = FileChangeKind::Deleted,
+                        value if value.trim() == "read" => kind = FileChangeKind::Read,
                         "changed" => {
                             kind = FileChangeKind::Changed;
                             if let Some(entries) = map.get("lines").and_then(JsonValue::as_array) {
@@ -8380,6 +8399,7 @@ impl FileChangeDescriptor {
                 "created" => kind = FileChangeKind::Created,
                 "deleted" => kind = FileChangeKind::Deleted,
                 "changed" => kind = FileChangeKind::Changed,
+                value if value.trim() == "read" => kind = FileChangeKind::Read,
                 other => kind = FileChangeKind::Other(other.to_string()),
             },
             _ => {}
@@ -8433,10 +8453,15 @@ fn extract_codex_outcome(value: &JsonValue) -> Result<CodexOutcome> {
         .filter(|s| !s.trim().is_empty());
 
     let mut files = Vec::new();
+    let mut read_files = Vec::new();
     if let Some(entries) = value.get("files").and_then(JsonValue::as_array) {
         for entry in entries {
             if let Some(descriptor) = parse_file_descriptor(entry) {
-                files.push(descriptor);
+                if descriptor.is_read_reference() {
+                    read_files.push(descriptor);
+                } else {
+                    files.push(descriptor);
+                }
             }
         }
     }
@@ -8448,6 +8473,7 @@ fn extract_codex_outcome(value: &JsonValue) -> Result<CodexOutcome> {
         summary,
         suggested_replies,
         files,
+        read_files,
         snippet,
         actions,
     })
@@ -10483,6 +10509,14 @@ fn parse_file_descriptor(value: &JsonValue) -> Option<CodexFileDescriptor> {
 }
 
 fn extract_change_metadata(map: &JsonMap<String, JsonValue>) -> Option<FileChangeDescriptor> {
+    // An explicit read marker cannot be overridden by a contradictory write marker.
+    if let Some(read_type) = map
+        .get("type")
+        .and_then(JsonValue::as_str)
+        .filter(|value| value.trim().eq_ignore_ascii_case("read"))
+    {
+        return FileChangeDescriptor::parse(JsonValue::String(read_type.to_string()));
+    }
     if let Some(change_value) = map.get("change") {
         if let Some(descriptor) = FileChangeDescriptor::parse(change_value.clone()) {
             return Some(descriptor);
@@ -10506,6 +10540,25 @@ fn extract_change_metadata(map: &JsonMap<String, JsonValue>) -> Option<FileChang
     None
 }
 
+fn normalize_codex_read_files(
+    workspace_dir: &Path,
+    files: Vec<CodexFileDescriptor>,
+) -> Vec<CodexFileDescriptor> {
+    files
+        .into_iter()
+        .filter(|file| file.is_read_reference())
+        .filter_map(|mut file| {
+            let relative = sanitize_codex_workspace_path(workspace_dir, &file.workspace_path)?;
+            file.workspace_path = relative.to_string_lossy().to_string();
+            file.path = file.workspace_path.clone();
+            // The workspace remains authoritative; references carry no writable snapshot.
+            file.content = None;
+            file.content_base64 = None;
+            Some(file)
+        })
+        .collect()
+}
+
 fn normalize_codex_files(
     workspace_dir: &Path,
     files: Vec<CodexFileDescriptor>,
@@ -10514,6 +10567,9 @@ fn normalize_codex_files(
     let mut normalized = Vec::new();
 
     for mut file in files {
+        if file.is_read_reference() {
+            continue;
+        }
         let sanitized_rel = match sanitize_codex_workspace_path(workspace_dir, &file.workspace_path)
         {
             Some(value) if !value.as_os_str().is_empty() => value,
@@ -10652,6 +10708,7 @@ fn read_only_workspace_allows_coordination_files(job: &LeaseJob) -> bool {
 fn read_only_coordination_workspace_paths(files: &[CodexFileDescriptor]) -> HashSet<String> {
     files
         .iter()
+        .filter(|file| !file.is_read_reference())
         .map(|file| file.workspace_path.clone())
         .collect()
 }
@@ -14170,6 +14227,7 @@ fn infer_codex_files_from_git_status_delta(
                 FileChangeKind::Created => json!({ "type": "created" }),
                 FileChangeKind::Deleted => json!({ "type": "deleted" }),
                 FileChangeKind::Changed => json!({ "type": "changed" }),
+                FileChangeKind::Read => json!({ "type": "read" }),
                 FileChangeKind::Other(_) => json!({ "type": "changed" }),
             };
 
@@ -15297,6 +15355,7 @@ fn build_codex_artifacts(output: &CodexRunOutput, outcome: &CodexOutcome) -> Vec
     let file_entries: Vec<JsonValue> = outcome
         .files
         .iter()
+        .chain(outcome.read_files.iter())
         .map(|file| {
             let mut map = JsonMap::new();
             map.insert("path".to_string(), JsonValue::String(file.path.clone()));
@@ -15322,6 +15381,7 @@ fn build_codex_artifacts(output: &CodexRunOutput, outcome: &CodexOutcome) -> Vec
                     FileChangeKind::Created => "created",
                     FileChangeKind::Deleted => "deleted",
                     FileChangeKind::Changed => "changed",
+                    FileChangeKind::Read => "read",
                     FileChangeKind::Other(value) => value.as_str(),
                 };
                 map.insert(
@@ -20548,6 +20608,7 @@ mod tests {
             summary: "worker tried to spawn a nested plan".to_string(),
             suggested_replies: Vec::new(),
             files: Vec::new(),
+            read_files: Vec::new(),
             snippet: None,
             actions: vec![CodexAction::MultiAgentPlan {
                 plan: json!({"type": "multi_agent_plan"}),
@@ -23182,6 +23243,7 @@ mod tests {
             summary: "ok".to_string(),
             suggested_replies: Vec::new(),
             files: Vec::new(),
+            read_files: Vec::new(),
             snippet: None,
             actions: Vec::new(),
         };
@@ -24893,6 +24955,7 @@ mod tests {
             summary: "This needs a single owner before editing.".to_string(),
             suggested_replies: Vec::new(),
             files: Vec::new(),
+            read_files: Vec::new(),
             snippet: None,
             actions: vec![CodexAction::CoordinationRequired {
                 reason: "overlapping write scopes".to_string(),
@@ -24910,6 +24973,7 @@ mod tests {
             summary: "This has overlapping write-scope ownership, so coordination is required before editing.".to_string(),
             suggested_replies: Vec::new(),
             files: Vec::new(),
+            read_files: Vec::new(),
             snippet: None,
             actions: Vec::new(),
         };
@@ -25046,6 +25110,7 @@ mod tests {
             summary: "planned".to_string(),
             suggested_replies: Vec::new(),
             files: Vec::new(),
+            read_files: Vec::new(),
             snippet: None,
             actions: vec![CodexAction::MultiAgentPlan {
                 plan: json!({"mode": "read_only"}),
@@ -25062,6 +25127,7 @@ mod tests {
             summary: "no action".to_string(),
             suggested_replies: Vec::new(),
             files: Vec::new(),
+            read_files: Vec::new(),
             snippet: None,
             actions: Vec::new(),
         };
@@ -25307,6 +25373,7 @@ mod tests {
             summary: String::new(),
             suggested_replies: vec![],
             files: vec![],
+            read_files: vec![],
             snippet: None,
             actions,
         };

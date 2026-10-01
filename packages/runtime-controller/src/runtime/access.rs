@@ -103,6 +103,19 @@ pub(crate) fn provider_is_private_self_hosted_or_quarantined(
     )
 }
 
+/// Whether a private runtime that is the parent of a spread skill-authored
+/// plan leaves its workers only private runtimes: the plan's extra runtimes
+/// start on the parent's provider, so they are private when that provider
+/// is. Only the parent and those runtimes may lease the plan's spread workers.
+pub(crate) fn spread_plan_parent_is_private(
+    state: &AppState,
+    provider: &str,
+    capabilities: &JsonValue,
+) -> bool {
+    runtime_is_private_self_hosted(state, provider, capabilities)
+        && provider_is_private_self_hosted_or_quarantined(state, provider)
+}
+
 fn runtime_is_private_or_quarantined_for_provider_snapshot(
     provider: &str,
     capabilities: &JsonValue,

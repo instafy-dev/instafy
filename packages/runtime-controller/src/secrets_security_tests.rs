@@ -16,7 +16,7 @@ use crate::tests::{
 };
 use crate::tokens::{mint_scoped_token, ScopedTokenRequest};
 
-fn test_config() -> AppConfig {
+pub(super) fn test_config() -> AppConfig {
     build_app_config(
         test_origin_private_key(),
         test_origin_public_key(),
@@ -45,7 +45,7 @@ fn unbound_secret_token(config: &AppConfig, project_id: Uuid) -> anyhow::Result<
     .map_err(|(status, error)| anyhow::anyhow!("token mint failed: {status}: {}", error.0.message))
 }
 
-async fn request_secrets(
+pub(super) async fn request_secrets(
     app: &Router,
     token: &str,
     body: Value,

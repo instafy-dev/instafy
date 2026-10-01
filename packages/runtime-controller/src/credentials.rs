@@ -368,7 +368,62 @@ pub(crate) struct CredentialRequirementsResponse {
 pub(crate) struct ProxyCredentialRequirements {
     pub(crate) requires_user_credentials: bool,
     pub(crate) proxy_backend: String,
+    /// `platformLane` from the proxy's `/healthz`: `None` when the probe
+    /// failed or the proxy predates the report.
+    pub(crate) platform_lane: Option<ProxyPlatformLane>,
     pub(crate) error: Option<String>,
+}
+
+/// How a proxy serves the platform lane: managed turns, whose token carries
+/// a run id and no credential id, on the operator's key.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct ProxyPlatformLane {
+    pub(crate) served_by: ProxyPlatformLaneServedBy,
+    /// The model static credentials serve managed turns as
+    /// (`PROXY_PINNED_MODEL`); a controller lease brings its own pin.
+    #[serde(default)]
+    pub(crate) pinned_model: Option<String>,
+    /// `api_key`, `chatgpt` or `gemini_code_assist` when static credentials
+    /// serve the lane.
+    #[serde(default)]
+    pub(crate) static_credential_kind: Option<String>,
+    /// Credential-less tokens without a run id (session envelopes) are
+    /// refused instead of spending the operator's key.
+    #[serde(default)]
+    pub(crate) session_tokens_refused: bool,
+    #[serde(default)]
+    pub(crate) reports_usage: bool,
+    #[serde(default)]
+    pub(crate) controller_metering_protocol: Option<u32>,
+    #[serde(default)]
+    pub(crate) output_ceiling_source: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum ProxyPlatformLaneServedBy {
+    /// The controller's managed credential lease (a proxy without static
+    /// credentials).
+    ControllerLease,
+    /// The proxy's own static credentials.
+    Static,
+    /// The proxy refuses credential-less tokens.
+    Refused,
+    /// A value from a newer proxy.
+    #[serde(other)]
+    Unknown,
+}
+
+impl ProxyPlatformLaneServedBy {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::ControllerLease => "controller_lease",
+            Self::Static => "static",
+            Self::Refused => "refused",
+            Self::Unknown => "unknown",
+        }
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -451,6 +506,7 @@ pub(crate) async fn fetch_proxy_credential_requirements(
             return ProxyCredentialRequirements {
                 requires_user_credentials: true,
                 proxy_backend: "unknown".to_string(),
+                platform_lane: None,
                 error: Some(format!("proxy request failed: {error}")),
             };
         }
@@ -458,6 +514,7 @@ pub(crate) async fn fetch_proxy_credential_requirements(
             return ProxyCredentialRequirements {
                 requires_user_credentials: true,
                 proxy_backend: "unknown".to_string(),
+                platform_lane: None,
                 error: Some("proxy request timed out".to_string()),
             };
         }
@@ -469,6 +526,7 @@ pub(crate) async fn fetch_proxy_credential_requirements(
         return ProxyCredentialRequirements {
             requires_user_credentials: true,
             proxy_backend: "unknown".to_string(),
+            platform_lane: None,
             error: Some(format!("proxy returned {}", status.as_u16())),
         };
     }
@@ -482,10 +540,16 @@ pub(crate) async fn fetch_proxy_credential_requirements(
         .get("requiresCredential")
         .and_then(JsonValue::as_bool)
         .unwrap_or(true);
+    // A malformed report reads as none, like a proxy that predates it.
+    let platform_lane = payload
+        .get("platformLane")
+        .cloned()
+        .and_then(|lane| serde_json::from_value::<ProxyPlatformLane>(lane).ok());
 
     ProxyCredentialRequirements {
         requires_user_credentials,
         proxy_backend,
+        platform_lane,
         error: None,
     }
 }
@@ -540,7 +604,32 @@ pub(crate) async fn ensure_managed_ai_proxy_ready(
         );
     }
 
+    log_managed_ai_platform_lane(proxy_base_url, requirements.platform_lane.as_ref());
     Ok(())
+}
+
+/// Names at boot how the controller's own proxy serves managed turns, as its
+/// `/healthz` reports it, so an operator can see the key, pin and usage
+/// reporting behind them.
+fn log_managed_ai_platform_lane(proxy_base_url: &str, lane: Option<&ProxyPlatformLane>) {
+    let Some(lane) = lane else {
+        tracing::info!(
+            proxy = %proxy_base_url,
+            "managed AI proxy does not report its platform lane"
+        );
+        return;
+    };
+    tracing::info!(
+        proxy = %proxy_base_url,
+        served_by = lane.served_by.as_str(),
+        pinned_model = lane.pinned_model.as_deref(),
+        static_credential_kind = lane.static_credential_kind.as_deref(),
+        session_tokens_refused = lane.session_tokens_refused,
+        reports_usage = lane.reports_usage,
+        controller_metering_protocol = lane.controller_metering_protocol,
+        output_ceiling_source = lane.output_ceiling_source.as_deref(),
+        "managed AI proxy platform lane"
+    );
 }
 
 /// Whether the probed proxy can complete a managed-lane turn. A proxy with
@@ -588,10 +677,11 @@ fn managed_ai_internal_credential(
         provider: Some(PROVIDER_OPENAI.to_string()),
         upstream_endpoint: Some(default_endpoint_for_provider(PROVIDER_OPENAI).to_string()),
         default_model: Some(config.managed_ai_model_id.clone()),
-        // Jobs that reach this lease without managedAiUsed (skill-mode ambient
-        // evaluations, service-role dispatches, a failed secrets fetch) never
-        // get CODEX_MODEL set to the managed model, so the pin is what keeps
-        // them off the runtime default on the platform key.
+        // /agent/secrets sets CODEX_MODEL to the managed model for every
+        // credential-less AI job that fetches it, but a parallel write-scoped
+        // worker lane never fetches job secrets and a job whose fetch failed
+        // has none, so both still ask for the runtime's own model. The pin
+        // is what keeps them off that model on the platform key.
         pinned_model: Some(config.managed_ai_model_id.clone()),
         auth_mode: None,
         code_assist_project: None,
@@ -1125,6 +1215,7 @@ async fn complete_editor_inline_via_proxy(
         &synthetic_runtime_id,
         None,
         Some(&credential.credential_id),
+        None,
         Some("octo"),
         Some("Octo"),
         Some("Inline editor completion"),
@@ -1234,6 +1325,7 @@ async fn generate_conversation_title_via_proxy(
         &synthetic_runtime_id,
         None,
         Some(&credential.credential_id),
+        None,
         Some("octo"),
         Some("Octo"),
         Some("Conversation title"),
@@ -1495,6 +1587,7 @@ async fn probe_credential_via_proxy(
         &synthetic_runtime_id,
         None,
         Some(&credential_id),
+        None,
         Some("octo"),
         Some("Octo"),
         Some("Credential verification probe"),
@@ -3239,7 +3332,8 @@ mod credential_lease_contract_tests {
 mod requirement_tests {
     use super::{
         build_managed_ai_access_response, ensure_managed_ai_proxy_ready,
-        fetch_proxy_credential_requirements, ProxyCredentialRequirements,
+        fetch_proxy_credential_requirements, ProxyCredentialRequirements, ProxyPlatformLane,
+        ProxyPlatformLaneServedBy,
     };
     use crate::tests::{build_app_config, test_origin_private_key, test_origin_public_key};
 
@@ -3324,6 +3418,117 @@ mod requirement_tests {
     }
 
     #[tokio::test]
+    async fn proxy_requirements_parse_platform_lane() {
+        let static_lane = json!({
+            "servedBy": "static",
+            "pinnedModel": "gpt-6-luna",
+            "staticCredentialKind": "api_key",
+            "sessionTokensRefused": true,
+            "reportsUsage": false,
+            "controllerMeteringProtocol": null,
+            "outputCeilingSource": null,
+        });
+        let cases = [
+            (
+                json!({ "backend": "remote_static", "requiresCredential": false, "platformLane": static_lane }),
+                Some(ProxyPlatformLane {
+                    served_by: ProxyPlatformLaneServedBy::Static,
+                    pinned_model: Some("gpt-6-luna".to_string()),
+                    static_credential_kind: Some("api_key".to_string()),
+                    session_tokens_refused: true,
+                    reports_usage: false,
+                    controller_metering_protocol: None,
+                    output_ceiling_source: None,
+                }),
+            ),
+            (
+                json!({
+                    "backend": "remote_dynamic",
+                    "requiresCredential": true,
+                    "platformLane": {
+                        "servedBy": "controller_lease",
+                        "pinnedModel": null,
+                        "staticCredentialKind": null,
+                        "sessionTokensRefused": true,
+                        "reportsUsage": true,
+                        "controllerMeteringProtocol": 1,
+                        "outputCeilingSource": "controller_lease",
+                    }
+                }),
+                Some(ProxyPlatformLane {
+                    served_by: ProxyPlatformLaneServedBy::ControllerLease,
+                    pinned_model: None,
+                    static_credential_kind: None,
+                    session_tokens_refused: true,
+                    reports_usage: true,
+                    controller_metering_protocol: Some(1),
+                    output_ceiling_source: Some("controller_lease".to_string()),
+                }),
+            ),
+            // A value from a newer proxy, with the optional fields absent.
+            (
+                json!({ "backend": "remote_dynamic", "platformLane": { "servedBy": "elsewhere" } }),
+                Some(ProxyPlatformLane {
+                    served_by: ProxyPlatformLaneServedBy::Unknown,
+                    pinned_model: None,
+                    static_credential_kind: None,
+                    session_tokens_refused: false,
+                    reports_usage: false,
+                    controller_metering_protocol: None,
+                    output_ceiling_source: None,
+                }),
+            ),
+            // A proxy that predates the report, and a malformed one.
+            (json!({ "backend": "remote_static" }), None),
+            (
+                json!({ "backend": "remote_static", "platformLane": { "pinnedModel": "gpt-6-luna" } }),
+                None,
+            ),
+            (
+                json!({ "backend": "remote_static", "platformLane": "static" }),
+                None,
+            ),
+        ];
+
+        let client = reqwest::Client::new();
+        for (health, expected) in cases {
+            let server = MockServer::start_async().await;
+            let mock = server
+                .mock_async(|when, then| {
+                    when.method(GET).path("/healthz");
+                    then.status(200).json_body(health.clone());
+                })
+                .await;
+            let result = fetch_proxy_credential_requirements(
+                &client,
+                &server.base_url(),
+                std::time::Duration::from_secs(1),
+            )
+            .await;
+            mock.assert_async().await;
+            assert!(result.error.is_none(), "{health}");
+            assert_eq!(result.platform_lane, expected, "{health}");
+        }
+
+        // A failed probe reports no lane.
+        let server = MockServer::start_async().await;
+        server
+            .mock_async(|when, then| {
+                when.method(GET).path("/healthz");
+                then.status(503)
+                    .json_body(json!({ "platformLane": static_lane }));
+            })
+            .await;
+        let result = fetch_proxy_credential_requirements(
+            &client,
+            &server.base_url(),
+            std::time::Duration::from_secs(1),
+        )
+        .await;
+        assert!(result.platform_lane.is_none());
+    }
+
+    #[tokio::test]
     async fn proxy_requirements_fail_closed_on_timeout() {
         let app = Router::new().route(
             "/healthz",
@@ -3373,6 +3578,7 @@ mod requirement_tests {
             &ProxyCredentialRequirements {
                 requires_user_credentials: false,
                 proxy_backend: "codex".to_string(),
+                platform_lane: None,
                 error: None,
             },
             false,
@@ -3399,6 +3605,7 @@ mod requirement_tests {
             &ProxyCredentialRequirements {
                 requires_user_credentials: false,
                 proxy_backend: "codex".to_string(),
+                platform_lane: None,
                 error: None,
             },
             false,
@@ -3517,6 +3724,7 @@ mod requirement_tests {
         let dynamic_proxy = ProxyCredentialRequirements {
             requires_user_credentials: true,
             proxy_backend: "remote_dynamic".to_string(),
+            platform_lane: None,
             error: None,
         };
 
@@ -3533,6 +3741,7 @@ mod requirement_tests {
         let failing_proxy = ProxyCredentialRequirements {
             requires_user_credentials: true,
             proxy_backend: "remote_dynamic".to_string(),
+            platform_lane: None,
             error: Some("connection refused".to_string()),
         };
         let managed_ai = build_managed_ai_access_response(&config, &failing_proxy, false, 0);

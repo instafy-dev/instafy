@@ -462,4 +462,157 @@ describe("chatMessagePresentation", () => {
 
     expect(shouldDisplayChatMessage(leadReply)).toBe(true);
   });
+
+  describe("private runtime refusals written by the controller", () => {
+    const refusal = "Instafy AI runs on Instafy-hosted runtimes. Connect your own AI to use this runtime.";
+
+    function presentRootTranscript(messages: ChatMessage[]): ChatMessage[] {
+      const collapsedAll = collapseLifecycleMessages(messages);
+      const collapsedVisible = collapsedAll.filter((message) => shouldDisplayChatMessage(message));
+      return synthesizeAgentJobThreadMessages(collapsedAll, collapsedVisible);
+    }
+
+    function threadMessageIds(message: ChatMessage | undefined): string[] {
+      const threadMessages = (message?.metadata as Record<string, unknown> | null | undefined)?.threadMessages;
+      return Array.isArray(threadMessages) ? (threadMessages as ChatMessage[]).map((entry) => entry.id) : [];
+    }
+
+    const userMessage = createMessage({
+      id: "user-request",
+      role: "user",
+      content: "Split this review across a team.",
+      timestamp: 100,
+      metadata: { clientMessageId: "client-1" },
+    });
+    // The planning agent's plan, as /agent/message records it.
+    const planAnnouncement = createMessage({
+      id: "plan-announcement",
+      content: "Two scouts will read the README and the docs.",
+      timestamp: 200,
+      messageType: "multi_agent_plan",
+      metadata: {
+        source: "agent",
+        outcome: "in_progress",
+        kind: "update",
+        jobId: "plan-job-1",
+        messageType: "multi_agent_plan",
+        multiAgentPlan: {
+          mode: "read_only",
+          agents: [
+            { handle: "scout-a", prompt: "Read the README." },
+            { handle: "scout-b", prompt: "Read the docs folder." },
+          ],
+        },
+        details: {
+          mode: "read_only",
+          agents: [
+            { handle: "scout-a", prompt: "Read the README." },
+            { handle: "scout-b", prompt: "Read the docs folder." },
+          ],
+        },
+      },
+    });
+
+    it("shows a refused plan's announcement and the refusal", () => {
+      const planRefusal = createMessage({
+        id: "plan-refusal",
+        content: `The plan's agents could not start. ${refusal}`,
+        timestamp: 300,
+        messageType: "error",
+        metadata: {
+          source: "controller",
+          kind: "managed_ai_hosted_runtime_required",
+          outcome: "failed",
+          messageType: "error",
+          jobId: "plan-job-1",
+          runId: "plan-run-1",
+          errorMessage: `The plan's agents could not start. ${refusal}`,
+          agent: { handle: "planner" },
+          multiAgentPlan: { groupId: "group-1" },
+        },
+      });
+
+      const transcript = presentRootTranscript([userMessage, planAnnouncement, planRefusal]);
+
+      expect(transcript.map((message) => message.id)).toEqual([
+        "user-request",
+        "plan-announcement",
+        "agent-job-thread:plan-job-1",
+      ]);
+      expect(transcript[1]?.messageType).toBe("multi_agent_plan");
+      // The planning job's failed run, ending on the refusal.
+      expect(threadMessageIds(transcript[2])).toEqual(["plan-announcement", "plan-refusal"]);
+    });
+
+    it("shows a refused lead checkpoint in the root transcript", () => {
+      const workerResult = createMessage({
+        id: "worker-result",
+        content: "Read the README.",
+        timestamp: 300,
+        metadata: {
+          source: "agent",
+          outcome: "succeeded",
+          agent: { handle: "scout-a" },
+          jobId: "worker-job-1",
+          multiAgentPlan: { role: "worker", parentJobId: "plan-job-1", groupId: "group-1" },
+        },
+      });
+      const leadRefusal = createMessage({
+        id: "lead-refusal",
+        content: `@octo could not continue the plan. ${refusal}`,
+        timestamp: 400,
+        messageType: "error",
+        metadata: {
+          source: "controller",
+          kind: "managed_ai_hosted_runtime_required",
+          outcome: "failed",
+          messageType: "error",
+          errorMessage: `@octo could not continue the plan. ${refusal}`,
+          multiAgentPlan: {
+            groupId: "group-1",
+            role: "lead_continuation",
+            checkpointKind: "final",
+            triggerJobId: "worker-job-1",
+          },
+        },
+      });
+
+      const transcript = presentRootTranscript([userMessage, planAnnouncement, workerResult, leadRefusal]);
+
+      expect(transcript.map((message) => message.id)).toEqual([
+        "user-request",
+        "plan-announcement",
+        "lead-refusal",
+      ]);
+    });
+
+    it("shows the idle sweep's failure of a job no hosted runtime could take", () => {
+      // A plan worker that never started, failed by the sweep.
+      const sweepFailure = createMessage({
+        id: "sweep-failure",
+        content: refusal,
+        timestamp: 300,
+        messageType: "error",
+        metadata: {
+          source: "controller",
+          kind: "managed_ai_hosted_runtime_required",
+          outcome: "failed",
+          messageType: "error",
+          jobId: "worker-job-2",
+          runId: "worker-run-2",
+          errorMessage: refusal,
+          agent: { handle: "scout-b" },
+        },
+      });
+
+      const transcript = presentRootTranscript([userMessage, planAnnouncement, sweepFailure]);
+
+      expect(transcript.map((message) => message.id)).toEqual([
+        "user-request",
+        "plan-announcement",
+        "agent-job-thread:worker-job-2",
+      ]);
+      expect(threadMessageIds(transcript[2])).toEqual(["sweep-failure"]);
+    });
+  });
 });

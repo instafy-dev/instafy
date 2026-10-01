@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 
-import { act } from "react";
+import { act, type ComponentProps } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { SharedBrowserCollaborationControls } from "../SharedBrowserCollaborationControls";
@@ -9,19 +9,8 @@ import type {
   SharedBrowserCollaborationParticipant,
 } from "../sharedBrowserCollaboration";
 
-function participant(
-  id: string,
-  displayName: string,
-  canControl = true,
-): SharedBrowserCollaborationParticipant {
-  return {
-    id,
-    displayName,
-    color: id === "self" ? "#0ea5e9" : "#8b5cf6",
-    pageId: "page-1",
-    cursor: null,
-    canControl,
-  };
+function participant(id: string, displayName: string, canControl = true): SharedBrowserCollaborationParticipant {
+  return { id, displayName, color: id === "self" ? "#0ea5e9" : "#8b5cf6", pageId: "page-1", cursor: null, canControl };
 }
 
 function client(overrides: Partial<SharedBrowserCollaborationClientState> = {}) {
@@ -42,373 +31,224 @@ function client(overrides: Partial<SharedBrowserCollaborationClientState> = {}) 
 describe("SharedBrowserCollaborationControls", () => {
   let container: HTMLDivElement;
   let root: Root;
+  let props: ComponentProps<typeof SharedBrowserCollaborationControls>;
+  const find = <T extends HTMLElement = HTMLElement>(id: string) => document.querySelector<T>(`[data-testid="${id}"]`);
+  const action = () => find<HTMLButtonElement>("shared-browser-collaboration-control-action");
+  const status = () => find("shared-browser-collaboration-control-state");
+  const controller = () => find("shared-browser-controller-indicator");
+  const participantsList = () => document.querySelector<HTMLElement>('[aria-label="Browser participants"]')!;
+  const trigger = () => find<HTMLButtonElement>("shared-browser-collaboration-toggle")!;
+  const click = async (element: HTMLElement) => act(async () => { element.focus(); element.click(); });
+  const finishFocusRestoration = async () => act(async () => new Promise<void>(resolve => requestAnimationFrame(() => resolve())));
+  async function render(overrides: Partial<typeof props> = {}) {
+    props = { ...props, ...overrides };
+    await act(async () => root.render(<SharedBrowserCollaborationControls {...props} />));
+  }
+  async function openControls() {
+    await click(trigger());
+    expect(document.querySelector('[role="dialog"][aria-label="Browser participants and control"]')).not.toBeNull();
+  }
 
   beforeEach(() => {
     (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
     container = document.createElement("div");
     document.body.appendChild(container);
     root = createRoot(container);
+    vi.stubGlobal("CSS", { escape: (value: string) => value });
+    props = {
+      client: client(), compact: true, localControlOwner: { kind: "human" },
+      onGrantControl: vi.fn(), onReleaseControl: vi.fn(), onRequestControl: vi.fn(), onTakeControl: vi.fn(),
+    };
   });
 
   afterEach(async () => {
     await act(async () => root.unmount());
+    await finishFocusRestoration();
     container.remove();
+    vi.unstubAllGlobals();
     delete (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT;
   });
 
-  it("shows participants and lets the current driver release control", async () => {
-    const onReleaseControl = vi.fn();
-    await act(async () => {
-      root.render(
-        <SharedBrowserCollaborationControls
-          client={client()}
-          compact={false}
-          localControlOwner={{ kind: "human" }}
-          onGrantControl={vi.fn()}
-          onReleaseControl={onReleaseControl}
-          onRequestControl={vi.fn()}
-          onTakeControl={vi.fn()}
-        />,
-      );
-    });
-
-    expect(container.querySelector('[data-testid="shared-browser-participants"]')?.getAttribute("aria-label"))
-      .toContain("Taylor, Anna");
-    expect(
-      container.querySelector('[data-testid="shared-browser-participants"]')?.className,
-    ).not.toContain("max-[540px]:hidden");
-    expect(
-      container.querySelector('[data-testid="shared-browser-collaboration-control-state"]')
-        ?.textContent,
-    ).toContain("You control");
-    expect(
-      container.querySelector('[data-testid="shared-browser-collaboration-control-state"]')
-        ?.className,
-    ).not.toContain("max-[540px]:hidden");
-    const action = container.querySelector<HTMLButtonElement>(
-      '[data-testid="shared-browser-collaboration-control-action"]',
-    )!;
-    expect(action.dataset.action).toBe("release");
-    await act(async () => action.click());
-    expect(onReleaseControl).toHaveBeenCalledOnce();
+  it("keeps participants and release control inline on a wide surface", async () => {
+    await render({ compact: false, children: <button>Let AI continue</button> });
+    expect(find("shared-browser-participants")?.getAttribute("aria-label")).toContain("Taylor, Anna");
+    expect(status()?.textContent).toBe("You control");
+    expect(container.textContent).toContain("Let AI continue");
+    expect(action()?.dataset.action).toBe("release");
+    await click(action()!);
+    expect(props.onReleaseControl).toHaveBeenCalledOnce();
+    expect(trigger()).toBeNull();
   });
 
-  it("keeps compact collaboration controls named while reducing visible density", async () => {
-    const compactClient = client({
-      state: {
-        ...client().state!,
-        participants: [
-          participant("self", "Taylor"),
-          participant("peer", "Anna"),
-          participant("third", "Grace"),
-        ],
-      },
+  it("uses one compact presence button and reveals names, ownership, and actions on demand", async () => {
+    await render({
+      client: client({ state: { ...client().state!, participants: [participant("self", "Taylor"), participant("peer", "Anna"), participant("third", "Grace")] } }),
+      children: <button>Let AI continue</button>,
     });
-    await act(async () => {
-      root.render(
-        <SharedBrowserCollaborationControls
-          client={compactClient}
-          compact
-          localControlOwner={{ kind: "human" }}
-          onGrantControl={vi.fn()}
-          onReleaseControl={vi.fn()}
-          onRequestControl={vi.fn()}
-          onTakeControl={vi.fn()}
-        />,
-      );
-    });
+    expect(container.querySelectorAll("button")).toHaveLength(1);
+    expect(trigger().getAttribute("aria-label")).toContain("You control. Taylor, Anna, Grace");
+    expect(find("shared-browser-participants")?.textContent).toContain("+2");
+    expect(status()).toBeNull();
+    expect(action()).toBeNull();
+    expect(container.textContent).not.toContain("Let AI continue");
 
-    const participants = container.querySelector<HTMLElement>(
-      '[data-testid="shared-browser-participants"]',
-    )!;
-    expect(participants.getAttribute("aria-label")).toContain("Taylor, Anna, Grace");
-    expect(participants.className).toContain("flex");
-    expect(participants.querySelectorAll('[aria-hidden="true"]')).toHaveLength(2);
-    expect(participants.textContent).toContain("+2");
-    expect(
-      container.querySelector<HTMLElement>(
-        '[data-testid="shared-browser-collaboration-control-state"]',
-      )?.className,
-    ).toContain("max-w-24");
-    expect(
-      container.querySelector<HTMLElement>(
-        '[data-testid="shared-browser-collaboration-control-state"]',
-      )?.textContent,
-    ).toBe("You control");
-
-    const action = container.querySelector<HTMLButtonElement>(
-      '[data-testid="shared-browser-collaboration-control-action"]',
-    )!;
-    expect(action.textContent).toBe("Release");
-    expect(action.getAttribute("aria-label")).toBe("Release control");
-    expect(action.className).toContain("h-10");
+    await openControls();
+    expect(status()?.textContent).toBe("You control");
+    expect(status()?.classList.contains("sr-only")).toBe(true);
+    expect(controller()?.getAttribute("role")).toBe("img");
+    expect(controller()?.getAttribute("aria-label")).toBe("You control");
+    expect(controller()?.closest("li")?.dataset.participantId).toBe("self");
+    expect(document.querySelectorAll('[data-testid="shared-browser-controller-indicator"]')).toHaveLength(1);
+    expect(participantsList().compareDocumentPosition(action()!) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    const continueControl = Array.from(document.querySelectorAll("button")).find(button => button.textContent === "Let AI continue")!;
+    expect(participantsList().compareDocumentPosition(continueControl) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(document.querySelector('[aria-label="Browser participants"]')?.textContent).toContain("Taylor (you)AnnaGrace");
+    expect(document.body.textContent).toContain("Let AI continue");
+    expect(action()?.textContent).toBe("Release control");
+    await click(action()!);
+    expect(props.onReleaseControl).toHaveBeenCalledOnce();
   });
 
-  it("keeps compact agent and read-only ownership visible with long participant names", async () => {
-    const readOnlySelf = participant("self", "A very long local participant name", false);
-    const longNameClient = client({
-      state: {
-        ...client().state!,
-        participants: [
-          readOnlySelf,
-          participant("peer", "A teammate with an exceptionally long display name"),
-          participant("third", "Another teammate"),
-          participant("fourth", "Fourth teammate"),
-        ],
-        controlOwner: { kind: "human", participantId: "peer" },
-      },
-    });
+  it("closes with Escape and restores focus to the compact presence button", async () => {
+    await render();
+    const presence = trigger();
+    await openControls();
+    await act(async () => action()!.focus());
     await act(async () => {
-      root.render(
-        <SharedBrowserCollaborationControls
-          client={longNameClient}
-          compact
-          localControlOwner={{ kind: "agent", displayName: "Octo with a long agent name" }}
-          onGrantControl={vi.fn()}
-          onReleaseControl={vi.fn()}
-          onRequestControl={vi.fn()}
-          onTakeControl={vi.fn()}
-        />,
-      );
+      document.activeElement!.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true }));
+      document.activeElement!.dispatchEvent(new KeyboardEvent("keyup", { key: "Escape", bubbles: true, cancelable: true }));
     });
+    await finishFocusRestoration();
+    expect(action()).toBeNull();
+    expect(presence.getAttribute("aria-expanded")).toBe("false");
+    expect(document.activeElement).toBe(presence);
+  });
 
-    const participants = container.querySelector<HTMLElement>(
-      '[data-testid="shared-browser-participants"]',
-    )!;
-    const state = container.querySelector<HTMLElement>(
-      '[data-testid="shared-browser-collaboration-control-state"]',
-    )!;
-    expect(participants.getAttribute("aria-label")).toContain(
-      "A teammate with an exceptionally long display name",
-    );
-    expect(participants.textContent).toContain("+3");
-    expect(state.textContent).toContain("Octo with a long agent name controls");
-    expect(state.title).toBe("Octo with a long agent name controls");
-    expect(
-      container.querySelector('[data-testid="shared-browser-collaboration-control-action"]'),
-    ).toBeNull();
+  it("keeps complete long names in the popup while honoring the local agent lock", async () => {
+    const longName = "A teammate with an exceptionally long display name";
+    await render({
+      client: client({ state: { ...client().state!, participants: [participant("self", "Local reader", false), participant("peer", longName)], controlOwner: { kind: "human", participantId: "peer" } } }),
+      localControlOwner: { kind: "agent", displayName: "Octo with a long agent name" },
+    });
+    expect(trigger().getAttribute("aria-label")).toContain("Octo with a long agent name controls");
+    await openControls();
+    expect(document.querySelector('[aria-label="Browser participants"]')?.textContent).toContain(longName);
+    expect(status()?.textContent).toBe("Octo with a long agent name controls");
+    expect(status()?.classList.contains("sr-only")).toBe(true);
+    expect(controller()?.closest("li")?.dataset.controllerKind).toBe("agent");
+    expect(controller()?.getAttribute("aria-label")).toBe("Octo with a long agent name controls");
+    expect(document.querySelector('li[data-participant-id] [data-testid="shared-browser-controller-indicator"]')).toBeNull();
+    expect(action()).toBeNull();
   });
 
   it("shows the authoritative server agent instead of a stale local hint", async () => {
-    const serverAgentClient = client({
-      state: {
-        ...client().state!,
-        controlOwner: { kind: "agent", displayName: "Runtime Octo" },
-      },
+    await render({
+      client: client({ state: { ...client().state!, controlOwner: { kind: "agent", displayName: "Runtime Octo" } } }),
+      localControlOwner: { kind: "agent", displayName: "Queued agent" },
     });
-    await act(async () => {
-      root.render(
-        <SharedBrowserCollaborationControls
-          client={serverAgentClient}
-          compact={false}
-          localControlOwner={{ kind: "agent", displayName: "Queued agent" }}
-          onGrantControl={vi.fn()}
-          onReleaseControl={vi.fn()}
-          onRequestControl={vi.fn()}
-          onTakeControl={vi.fn()}
-        />,
-      );
-    });
-
-    expect(
-      container.querySelector('[data-testid="shared-browser-collaboration-control-state"]')
-        ?.textContent,
-    ).toBe("Runtime Octo controls");
-    expect(
-      container.querySelector('[data-testid="shared-browser-collaboration-control-action"]'),
-    ).toBeNull();
+    await openControls();
+    expect(status()?.textContent).toBe("Runtime Octo controls");
+    expect(controller()?.closest("li")?.textContent).toBe("Runtime Octo");
+    expect(controller()?.closest("li")?.dataset.controllerKind).toBe("agent");
+    expect(participantsList().textContent).not.toContain("Queued agent");
+    expect(action()).toBeNull();
   });
 
-  it("requests peer control and does not allow duplicate requests", async () => {
-    const onRequestControl = vi.fn();
-    const peerOwns = client({
-      state: {
-        ...client().state!,
-        controlOwner: { kind: "human", participantId: "peer" },
-      },
-    });
-    await act(async () => {
-      root.render(
-        <SharedBrowserCollaborationControls
-          client={peerOwns}
-          compact={false}
-          localControlOwner={{ kind: "human" }}
-          onGrantControl={vi.fn()}
-          onReleaseControl={vi.fn()}
-          onRequestControl={onRequestControl}
-          onTakeControl={vi.fn()}
-        />,
-      );
-    });
-    expect(container.textContent).toContain("Anna controls");
-    const action = container.querySelector<HTMLButtonElement>(
-      '[data-testid="shared-browser-collaboration-control-action"]',
-    )!;
-    expect(action.dataset.action).toBe("request");
-    await act(async () => action.click());
-    expect(onRequestControl).toHaveBeenCalledOnce();
+  it.each([true, false])("requests peer control with a clear label and disables duplicate requests (compact=%s)", async (compact) => {
+    const peerOwns = client({ state: { ...client().state!, controlOwner: { kind: "human", participantId: "peer" } } });
+    await render({ client: peerOwns, compact });
+    if (compact) await openControls();
+    expect(status()?.textContent).toBe("Anna controls");
+    if (compact) {
+      expect(controller()?.closest("li")?.dataset.participantId).toBe("peer");
+      expect(controller()?.getAttribute("aria-label")).toBe("Anna controls");
+    }
+    expect(action()?.textContent).toBe("Request control");
+    expect(action()?.getAttribute("aria-label")).toBe("Request control");
+    await click(action()!);
+    expect(props.onRequestControl).toHaveBeenCalledOnce();
 
-    await act(async () => {
-      root.render(
-        <SharedBrowserCollaborationControls
-          client={{ ...peerOwns, state: { ...peerOwns.state!, requests: ["self"] } }}
-          compact={false}
-          localControlOwner={{ kind: "human" }}
-          onGrantControl={vi.fn()}
-          onReleaseControl={vi.fn()}
-          onRequestControl={onRequestControl}
-          onTakeControl={vi.fn()}
-        />,
-      );
-    });
-    const pending = container.querySelector<HTMLButtonElement>(
-      '[data-testid="shared-browser-collaboration-control-action"]',
-    )!;
-    expect(pending.disabled).toBe(true);
-    expect(pending.textContent).toContain("Control requested");
+    await render({ client: { ...peerOwns, state: { ...peerOwns.state!, requests: ["self"] } } });
+    expect(action()?.disabled).toBe(true);
+    expect(action()?.textContent).toBe("Control requested");
+    await click(action()!);
+    expect(props.onRequestControl).toHaveBeenCalledOnce();
   });
 
-  it("offers a requested handoff to the current driver and blocks controls for an agent", async () => {
-    const onGrantControl = vi.fn();
+  it("surfaces an incoming request on the compact trigger and grants the requested participant", async () => {
     const requested = client({ state: { ...client().state!, requests: ["peer"] } });
-    await act(async () => {
-      root.render(
-        <SharedBrowserCollaborationControls
-          client={requested}
-          compact={false}
-          localControlOwner={{ kind: "human" }}
-          onGrantControl={onGrantControl}
-          onReleaseControl={vi.fn()}
-          onRequestControl={vi.fn()}
-          onTakeControl={vi.fn()}
-        />,
-      );
-    });
-    const grant = container.querySelector<HTMLButtonElement>(
-      '[data-testid="shared-browser-collaboration-control-action"]',
-    )!;
-    expect(grant.getAttribute("aria-label")).toBe("Give control to Anna");
-    await act(async () => grant.click());
-    expect(onGrantControl).toHaveBeenCalledWith("peer");
+    await render({ client: requested });
+    expect(find("shared-browser-control-requests")?.textContent).toBe("1");
+    expect(trigger().getAttribute("aria-label")).toContain("1 pending control request");
+    await openControls();
+    expect(action()?.textContent).toBe("Give control to Anna");
+    await click(action()!);
+    expect(props.onGrantControl).toHaveBeenCalledExactlyOnceWith("peer");
 
-    await act(async () => {
-      root.render(
-        <SharedBrowserCollaborationControls
-          client={requested}
-          compact
-          localControlOwner={{ kind: "human" }}
-          onGrantControl={onGrantControl}
-          onReleaseControl={vi.fn()}
-          onRequestControl={vi.fn()}
-          onTakeControl={vi.fn()}
-        />,
-      );
-    });
-    expect(
-      container.querySelector<HTMLButtonElement>(
-        '[data-testid="shared-browser-collaboration-control-action"]',
-      )?.textContent,
-    ).toBe("Give Anna");
-
-    await act(async () => {
-      root.render(
-        <SharedBrowserCollaborationControls
-          client={requested}
-          compact={false}
-          localControlOwner={{ kind: "agent", displayName: "Octo" }}
-          onGrantControl={onGrantControl}
-          onReleaseControl={vi.fn()}
-          onRequestControl={vi.fn()}
-          onTakeControl={vi.fn()}
-        />,
-      );
-    });
-    expect(container.textContent).toContain("Octo controls");
-    expect(
-      container.querySelector('[data-testid="shared-browser-collaboration-control-action"]'),
-    ).toBeNull();
+    await render({ localControlOwner: { kind: "agent", displayName: "Octo" } });
+    expect(status()?.textContent).toBe("Octo controls");
+    expect(action()).toBeNull();
   });
 
   it("hands control to the requested device even when both devices have the same account name", async () => {
-    const onGrantControl = vi.fn();
-    const onRequestControl = vi.fn();
-    const participants = [
-      participant("self", "Taylor"),
-      participant("second-device", "Taylor"),
-      participant("viewer", "Anna", false),
-    ];
-    const renderDevice = async (participantId: string, ownerId: string) => {
-      await act(async () => root.render(
-        <SharedBrowserCollaborationControls
-          client={client({
-            participantId,
-            state: {
-              revision: 1,
-              participants,
-              controlOwner: { kind: "human", participantId: ownerId },
-              requests: ownerId === "self" ? ["second-device"] : [],
-            },
-          })}
-          compact
-          localControlOwner={{ kind: "human" }}
-          onGrantControl={onGrantControl}
-          onReleaseControl={vi.fn()}
-          onRequestControl={onRequestControl}
-          onTakeControl={vi.fn()}
-        />,
-      ));
-    };
-    await renderDevice("self", "self");
-    expect(container.textContent).toContain("You control");
-    const grant = container.querySelector<HTMLButtonElement>(
-      '[data-testid="shared-browser-collaboration-control-action"]',
-    )!;
-    expect(grant.dataset.action).toBe("grant");
-    await act(async () => grant.click());
-    expect(onGrantControl).toHaveBeenCalledExactlyOnceWith("second-device");
-
-    await renderDevice("self", "second-device");
-    expect(container.textContent).not.toContain("You control");
-    expect(container.textContent).toContain("Taylor controls");
-    const request = container.querySelector<HTMLButtonElement>(
-      '[data-testid="shared-browser-collaboration-control-action"]',
-    )!;
-    expect(request.dataset.action).toBe("request");
-    await act(async () => request.click());
-    expect(onRequestControl).toHaveBeenCalledOnce();
-
-    await renderDevice("second-device", "second-device");
-    expect(container.textContent).toContain("You control");
-    expect(container.querySelector<HTMLElement>(
-      '[data-testid="shared-browser-collaboration-control-action"]',
-    )?.dataset.action).toBe("release");
+    const participants = [participant("self", "Taylor"), participant("second-device", "Taylor"), participant("viewer", "Anna", false)];
+    const deviceClient = (participantId: string, ownerId: string) => client({ participantId, state: {
+      revision: 1, participants, controlOwner: { kind: "human", participantId: ownerId }, requests: ownerId === "self" ? ["second-device"] : [],
+    } });
+    await render({ client: deviceClient("self", "self") });
+    await openControls();
+    expect(status()?.textContent).toBe("You control");
+    expect(controller()?.closest("li")?.dataset.participantId).toBe("self");
+    await click(action()!);
+    expect(props.onGrantControl).toHaveBeenCalledExactlyOnceWith("second-device");
+    await render({ client: deviceClient("self", "second-device") });
+    expect(status()?.textContent).toBe("Taylor controls");
+    expect(controller()?.closest("li")?.dataset.participantId).toBe("second-device");
+    expect(document.querySelector('li[data-participant-id="self"] [data-testid="shared-browser-controller-indicator"]')).toBeNull();
+    expect(document.querySelectorAll('[data-testid="shared-browser-controller-indicator"]')).toHaveLength(1);
+    expect(action()?.dataset.action).toBe("request");
+    await click(action()!);
+    expect(props.onRequestControl).toHaveBeenCalledOnce();
+    await render({ client: deviceClient("second-device", "second-device") });
+    expect(status()?.textContent).toBe("You control");
+    expect(controller()?.closest("li")?.dataset.participantId).toBe("second-device");
+    expect(controller()?.getAttribute("aria-label")).toBe("You control");
+    expect(action()?.dataset.action).toBe("release");
   });
 
   it.each([
-    { compact: false, ownerId: "peer" },
-    { compact: true, ownerId: "peer" },
-    { compact: false, ownerId: null },
-    { compact: true, ownerId: null },
+    { compact: false, ownerId: "peer" }, { compact: true, ownerId: "peer" },
+    { compact: false, ownerId: null }, { compact: true, ownerId: null },
   ])("keeps a read-only participant view-only (compact=$compact, owner=$ownerId)", async ({ compact, ownerId }) => {
-    await act(async () => root.render(
-      <SharedBrowserCollaborationControls
-        client={client({
-          state: {
-            revision: 1,
-            participants: [participant("self", "Anna", false), participant("peer", "Taylor")],
-            controlOwner: ownerId ? { kind: "human", participantId: ownerId } : null,
-            requests: [],
-          },
-        })}
-        compact={compact}
-        localControlOwner={{ kind: "human" }}
-        onGrantControl={vi.fn()}
-        onReleaseControl={vi.fn()}
-        onRequestControl={vi.fn()}
-        onTakeControl={vi.fn()}
-      />,
-    ));
-    expect(container.textContent).toContain(ownerId ? "Taylor controls" : "Control available");
-    expect(container.querySelector('[data-testid="shared-browser-collaboration-control-action"]')).toBeNull();
+    await render({ compact, client: client({ state: {
+      revision: 1, participants: [participant("self", "Anna", false), participant("peer", "Taylor")],
+      controlOwner: ownerId ? { kind: "human", participantId: ownerId } : null, requests: [],
+    } }) });
+    if (compact) await openControls();
+    expect(status()?.textContent).toBe(ownerId ? "Taylor controls" : "Control available");
+    expect(action()).toBeNull();
   });
+
+  it("allows an eligible participant to take available control", async () => {
+    await render({ client: client({ state: { ...client().state!, controlOwner: null } }) });
+    await openControls();
+    expect(action()?.textContent).toBe("Take control");
+    expect(status()?.textContent).toBe("Control available");
+    expect(status()?.classList.contains("sr-only")).toBe(false);
+    expect(controller()).toBeNull();
+    await click(action()!);
+    expect(props.onTakeControl).toHaveBeenCalledOnce();
+  });
+
+  it.each([
+    { state: null, label: "Control syncing…" },
+    { state: { ...client().state!, controlOwner: { kind: "human" as const, participantId: "not-yet-present" } }, label: "Teammate controls" },
+  ])("keeps $label readable when there is no matching controller row", async ({ state, label }) => {
+    await render({ client: client({ state }) });
+    await openControls();
+    expect(status()?.textContent).toBe(label);
+    expect(status()?.classList.contains("sr-only")).toBe(false);
+    expect(controller()).toBeNull();
+  });
+
 });

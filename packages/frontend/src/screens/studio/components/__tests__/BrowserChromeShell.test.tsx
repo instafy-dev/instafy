@@ -22,10 +22,11 @@ describe("BrowserChromeShell", () => {
     delete (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT;
   });
 
-  it("keeps all browser controls in one safe, non-wrapping toolbar", async () => {
+  it.each([false, true])("keeps controls in the same safe toolbar with compact=%s", async (compact) => {
     await act(async () => {
       root.render(
         <BrowserChromeShell
+          compact={compact}
           actions={<button type="button">Action</button>}
           address={<input aria-label="Address" />}
           label="Browser controls"
@@ -42,15 +43,13 @@ describe("BrowserChromeShell", () => {
     expect(toolbar?.getAttribute("data-browser-session-safe-zone")).toBe("true");
     expect(toolbar?.className).toContain("flex-nowrap");
     expect(toolbar?.className).toContain("overflow-hidden");
-    expect(toolbar?.className).toContain("max-[540px]:flex-wrap");
-    expect(toolbar?.className).toContain("max-[400px]:gap-0.5");
-    expect(toolbar?.className).toContain("max-[400px]:px-1");
-    expect(
-      container.querySelector('[data-testid="browser-chrome-status-slot"]')?.className,
-    ).not.toContain("max-[540px]:hidden");
-    expect(
-      container.querySelector('[data-testid="browser-chrome-context-row"]')?.className,
-    ).toContain("max-[540px]:basis-full");
+    // Compact callers supply their overflow menu, so they must not create a
+    // second context row. Existing full-control callers retain their fallback.
+    expect(toolbar?.classList.contains("max-[540px]:flex-wrap")).toBe(!compact);
+    const context = container.querySelector('[data-testid="browser-chrome-context-row"]');
+    expect(context?.classList.contains("max-[540px]:basis-full")).toBe(!compact);
+    expect(toolbar?.contains(container.querySelector('[aria-label="Address"]'))).toBe(true);
+    expect(toolbar?.contains(context)).toBe(true);
     expect(toolbar?.textContent).toContain("Transport");
     expect(toolbar?.textContent).toContain("Ready");
   });

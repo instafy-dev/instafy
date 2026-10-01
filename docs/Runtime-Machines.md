@@ -32,6 +32,53 @@ Per-size credits/hour are exposed in `/credits/policy` (`usage.runtimeSizes`).
 The frontend preference is per-project (`runtime/runtimeSizePreference.ts`,
 localStorage) with a picker in the runtime menu; it applies on next start.
 
+## Tenant leases
+
+`POST /runtime/ensure` with `scope: "tenant"` and a `runtimeId` attaches the
+request's project to a runtime whose active lease is `shared`. It launches
+nothing and is not billed; the runtime's own project keeps paying for it.
+
+- The caller needs write access to the tenant project and to the runtime's
+  own project, and the tenant project's organization must be allowed to use
+  the runtime's provider. Access to the runtime's project is checked again
+  when the attach locks the runtime. Access to the tenant project is checked
+  once, before the attach, as the `exclusive` and `shared` scopes check
+  their project.
+- Tenant refusals are uniform with each other: a runtime id that does not
+  exist, a runtime whose own project is missing or deleted, and a runtime
+  whose own project the caller cannot write to all get the same `404`
+  (`code: "runtime_not_found"`). This applies to `scope: "tenant"` only. The
+  `exclusive` and `shared` scopes and `POST /projects/:id/runtime/request`
+  answer a `runtimeId` as before, for example with `403` for a runtime of
+  another project.
+- Tenant lease metadata keeps only the string fields `source` and `label`,
+  whatever the provider. Every other key is dropped, on the first attach and
+  on re-attach: `_instafy`-prefixed keys and launch settings such as
+  `runtimeFlavor`, `sizeId`, `env` or `runtimeAgentImage` alike. A re-attach
+  without metadata under the same shared lease keeps the stored metadata. A
+  re-attach after a relaunch creates a new lease that holds only the metadata
+  it sends.
+- A tenant lease ends with the shared lease it attached under: releasing that
+  lease, as a stop does, or failing its launch releases the tenant leases in
+  the same transaction. A dispatch reconnect that forces a new lease ends
+  tenant attachments too: it stops the runtime and relaunches it under an
+  `exclusive` lease, which tenants cannot attach to. A re-attach reuses the
+  project's tenant lease only under the runtime's current shared lease; after
+  a relaunch it creates a new one. In an existing database, tenant leases
+  whose shared lease was released before this rule existed stay unreleased. No
+  migration closes them: the attach never reuses them, and no reader treats a
+  tenant lease as live.
+- The attach leaves the runtime's origin alone. The response's `origin` is
+  the host project's origin for its shared lease, as it is, or absent when
+  there is none; `originMode`, `originProtocols` and `originMetadata` are
+  ignored.
+- Launch-generation readers (requeue relaunch, dispatch reconnect, provider
+  route rotation, operator hosted hours) ignore tenant leases, and a
+  runtime's status shows only its own project's origin.
+- A tenant lease registers no runtime. `POST /runtime/register` answers a
+  tenant lease's id with the `404` for a lease that does not exist, before
+  it locks anything.
+
 ## Idle stop (pause/wake lifecycle)
 
 `RUNTIME_IDLE_STOP_SECONDS` (default 1800, 0 disables). A hosted runtime stops
@@ -149,10 +196,12 @@ for them (`runtime/limit_waits.rs`):
   are then dispatched as after any finished turn.
 - The wait ends when a live runtime (an unreleased lease or a recent
   heartbeat) would run the waiting work: a hosted runtime of the space, the
-  machine a job is pinned to, or, for unpinned work, a machine that leases
-  unpinned work for that job's user. A heartbeating desktop that never takes
-  work pinned to the hosted runtime, or only takes its owner's work, does not
-  end it, and the give-up still applies to that work. The `requested` row
+  machine a job is pinned to (unless that machine is private and the job is a
+  platform AI job, which it never takes), or, for unpinned work, a machine
+  that would lease it. A heartbeating desktop that never takes work pinned to
+  the hosted runtime, or only takes its owner's own-key work and terminal
+  commands (never a platform AI job), does not end it, and the give-up still
+  applies to that work. The `requested` row
   dispatch leaves behind does not count, and neither does a generation
   quarantined as `cleanup_pending`. A runtime preference held in one
   controller's memory is invisible to the sweep. A wait with no queued work is

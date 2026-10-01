@@ -238,6 +238,9 @@ async fn provider_route_is_in_use(
                 where btrim(lower(regexp_replace(btrim(r.provider), '[-_[:space:]]+', '_', 'g')), '_') = $1
                   and rl.released_at is null
                   and rl.status in ('pending', 'launching', 'active', 'cleanup_pending')
+                  -- A tenant lease attaches a project to a runtime launched
+                  -- under another lease; it holds nothing on the route.
+                  and rl.scope <> 'tenant'
             )",
             &[&provider_key],
         )
@@ -385,6 +388,79 @@ mod tests {
             .await
             .map_err(|(_, body)| anyhow::anyhow!(body.0.message))?;
         assert!(!route_in_use);
+
+        transaction.rollback().await?;
+        Ok(())
+    }
+
+    /// A tenant lease attaches another project to a runtime; the runtime's own
+    /// lease is what holds the route, and a tenant lease left unreleased after
+    /// it must not keep fencing rotation.
+    #[tokio::test]
+    async fn tenant_leases_do_not_fence_provider_route_rotation() -> anyhow::Result<()> {
+        let pool =
+            crate::tests::require_origin_test_pool("provider route tenant lease test").await?;
+        let mut connection = pool.get().await?;
+        let transaction = connection.transaction().await?;
+        let host_project_id = Uuid::new_v4();
+        let tenant_project_id = Uuid::new_v4();
+        let runtime_id = Uuid::new_v4();
+        let host_lease_id = Uuid::new_v4();
+        let provider_id = "route-guard-tenant-test";
+        let provider_key = crate::provider_identifiers::provider_id_key(provider_id);
+
+        transaction
+            .execute(
+                "insert into projects (id, project_type, status)
+                 values ($1, 'customer', 'active'), ($2, 'customer', 'active')",
+                &[&host_project_id, &tenant_project_id],
+            )
+            .await?;
+        transaction
+            .execute(
+                "insert into runtimes
+                    (id, project_id, provider, status, idle_ttl_seconds)
+                 values ($1, $2, $3, 'stopped', 600)",
+                &[&runtime_id, &host_project_id, &provider_id],
+            )
+            .await?;
+        transaction
+            .execute(
+                "insert into runtime_leases
+                    (id, project_id, runtime_id, status, scope, requested_at, released_at)
+                 values ($1, $2, $3, 'released', 'shared', now() - interval '1 hour', now())",
+                &[&host_lease_id, &host_project_id, &runtime_id],
+            )
+            .await?;
+        transaction
+            .execute(
+                "insert into runtime_leases
+                    (project_id, runtime_id, status, scope, parent_lease_id, requested_at)
+                 values ($1, $2, 'active', 'tenant', $3, now())",
+                &[&tenant_project_id, &runtime_id, &host_lease_id],
+            )
+            .await?;
+
+        let route_in_use = provider_route_is_in_use(&transaction, &provider_key)
+            .await
+            .map_err(|(_, body)| anyhow::anyhow!(body.0.message))?;
+        assert!(!route_in_use, "an unreleased tenant lease holds no route");
+
+        transaction
+            .execute(
+                "insert into runtime_leases
+                    (project_id, runtime_id, status, requested_at)
+                 values ($1, $2, 'active', now())",
+                &[&host_project_id, &runtime_id],
+            )
+            .await?;
+        let route_in_use = provider_route_is_in_use(&transaction, &provider_key)
+            .await
+            .map_err(|(_, body)| anyhow::anyhow!(body.0.message))?;
+        assert!(
+            route_in_use,
+            "the runtime's own lease still fences rotation"
+        );
 
         transaction.rollback().await?;
         Ok(())

@@ -1,21 +1,22 @@
 // @vitest-environment jsdom
-import { act } from "react";
+import { act, type ComponentProps } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { BrowserHumanInputControls } from "../BrowserHumanInputControls";
-import { BROWSER_HUMAN_INPUT_CONTINUE_PROMPT, type BrowserHumanInputOptions } from "../useBrowserHumanInput";
+import { SharedBrowserCollaborationControls } from "../SharedBrowserCollaborationControls";
+import { BROWSER_HUMAN_INPUT_CONTINUE_PROMPT } from "../useBrowserHumanInput";
 
 describe("BrowserHumanInputControls", () => {
   let container: HTMLDivElement;
   let root: Root;
-  let props: BrowserHumanInputOptions;
+  let props: ComponentProps<typeof BrowserHumanInputControls>;
   beforeEach(() => {
     (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
     container = document.createElement("div"); document.body.appendChild(container); root = createRoot(container);
     props = { identityKey: "user/project/conversation/shared/runtime/page", request: null, canTakeOver: true,
       humanControlConfirmed: false, onTakeOver: vi.fn(async () => true), onContinue: vi.fn(async () => true) };
   });
-  afterEach(async () => { await act(async () => root.unmount()); container.remove(); vi.useRealTimers(); });
+  afterEach(async () => { await act(async () => root.unmount()); container.remove(); vi.useRealTimers(); vi.unstubAllGlobals(); });
   const render = async () => { await act(async () => root.render(<BrowserHumanInputControls {...props} />)); };
   const click = async (testId: string) => {
     if (testId === "browser-human-input-takeover" && !document.querySelector('[data-testid="browser-human-input-takeover"]')) {
@@ -23,6 +24,62 @@ describe("BrowserHumanInputControls", () => {
     }
     await act(async () => document.querySelector<HTMLButtonElement>(`[data-testid="${testId}"]`)!.click());
   };
+
+  const compactControls: NonNullable<ComponentProps<typeof BrowserHumanInputControls>["renderControls"]> = (controls) => (
+    <SharedBrowserCollaborationControls compact localControlOwner={{ kind: "agent", displayName: "Octo" }}
+      client={{ connectionStatus: "connected", participantId: "self", error: null, state: {
+        revision: 1, controlOwner: { kind: "agent", displayName: "Octo" }, requests: [],
+        participants: [{ id: "self", displayName: "Taylor", color: "#0ea5e9", canControl: true, pageId: "page", cursor: null }],
+      } }} onGrantControl={vi.fn()} onReleaseControl={vi.fn()} onRequestControl={vi.fn()} onTakeControl={vi.fn()}>
+      {controls}
+    </SharedBrowserCollaborationControls>
+  );
+  const finishFocusRestoration = async () => act(async () => new Promise<void>(resolve => requestAnimationFrame(() => resolve())));
+
+  it("keeps a surface-triggered takeover dialog available while compact controls are closed", async () => {
+    vi.stubGlobal("CSS", { escape: (value: string) => value });
+    props.renderControls = compactControls;
+    await render();
+    const presence = container.querySelector<HTMLButtonElement>('[data-testid="shared-browser-collaboration-toggle"]')!;
+    expect(presence).not.toBeNull();
+    expect(document.querySelector('[data-testid="browser-human-input-request"]')).toBeNull();
+    await act(async () => presence.focus());
+    props.takeoverRequestId = "native-page-click";
+    await render();
+    expect(presence.getAttribute("aria-expanded")).toBe("false");
+    expect(document.querySelector('[role="dialog"][aria-label="Take over browser"]')).not.toBeNull();
+    expect(props.onTakeOver).not.toHaveBeenCalled();
+    await click("browser-human-input-cancel");
+    await finishFocusRestoration();
+    await finishFocusRestoration();
+    expect(document.querySelector('[role="dialog"]')).toBeNull();
+    expect(document.activeElement).toBe(presence);
+    expect(props.onTakeOver).not.toHaveBeenCalled();
+  });
+
+  it("can take over through compact controls and continue from the same menu", async () => {
+    vi.stubGlobal("CSS", { escape: (value: string) => value });
+    props.renderControls = compactControls;
+    await render();
+    await click("shared-browser-collaboration-toggle");
+    await click("browser-human-input-request");
+    expect(document.querySelector('[role="dialog"][aria-label="Take over browser"]')).not.toBeNull();
+    await click("browser-human-input-takeover");
+    expect(props.onTakeOver).toHaveBeenCalledOnce();
+    props.humanControlConfirmed = true;
+    await render();
+    await click("browser-human-input-continue");
+    expect(props.onContinue).toHaveBeenCalledExactlyOnceWith(BROWSER_HUMAN_INPUT_CONTINUE_PROMPT);
+  });
+
+  it("keeps the collaboration menu available when there are no human-input actions", async () => {
+    props.canTakeOver = false;
+    props.renderControls = compactControls;
+    await render();
+    expect(container.querySelector('[data-testid="shared-browser-collaboration-toggle"]')).not.toBeNull();
+    expect(container.querySelector('[data-testid="browser-human-input-controls"]')).toBeNull();
+    expect(document.querySelector('[role="dialog"]')).toBeNull();
+  });
 
   it("asks before taking over and leaves control untouched when dismissed", async () => {
     await render();

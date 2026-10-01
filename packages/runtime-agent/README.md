@@ -18,7 +18,7 @@ Rust binary that runs inside the hosted runtime container. Responsibilities:
 
 - The agent now embeds `codex-core` + `codex-exec` directly. We run conversations in-process, collect streaming events via the JSONL event processor, and surface the final assistant JSON without spawning the CLI.
 - Plan / approval flows are unimplemented placeholders and will be wired once Codex events feed into progress reporting.
-- Credits are still handled by the controller/proxy; the runtime will forward proxy metadata when those APIs land.
+- Credits are handled by the controller; the runtime will forward proxy metadata when those APIs land.
 
 ## Runtime images (base vs webdev)
 
@@ -68,7 +68,7 @@ updated when the human running the workflow explicitly requests it.
   - `RATHOLE_USE_SUBCOMMANDS` — set to `1` to force legacy `rathole client -c` CLI (defaults to auto-detect/new style).
   - Hosted runtime images include `rathole` in `/usr/local/bin` so self-hosted tunnels work out of the box.
 
-Proxy routing (burn/refund) still relies on the shared runtime proxy. Set the proxy variables documented in `docs/Architecture.md` to steer Codex traffic through it.
+Proxy routing still relies on the shared runtime proxy. Set the proxy variables documented in `docs/Architecture.md` to steer Codex traffic through it.
 
 Ordinary proxy-backed turns use one retry owner: Codex may recover a failed sampling step
 once in the same session (at most two requests to the proxy for that step). Nested HTTP retries and
@@ -96,6 +96,20 @@ retrieval and fresh workspace observations are tracked independently from succes
 receipts. The existing bounded recovery attempt preserves permissions and output format while
 retaining evidence from the first attempt. See [Execution Evidence and Recovery](../../docs/Multi-Agent-Evaluation.md#execution-evidence-and-recovery)
 for receipt limitations and compatibility behavior.
+
+## Structured file results
+
+Structured responses may include workspace files as read references using `change: "read"`,
+`change: { "type": "read" }`, or `type: "read"`. Read markers are case-insensitive and allow
+surrounding whitespace. An explicit read marker takes precedence over a conflicting write marker.
+The runtime keeps the sanitized reference in the file artifacts, discards its inline content,
+and never writes, deletes, moves, mirrors, or uploads a file because of that reference. References
+also do not satisfy required file-change evidence or exempt a path from read-only restoration.
+This applies to both the initial response and recovery responses.
+
+Existing created/changed/deleted descriptors and legacy inline-write descriptors retain their
+behavior. References do not change the controller's workspace permissions or the separate
+`metadata.writeScope` policy; routing expectations are not permission grants.
 
 ## Realistic browser-skill simulation (local Codex auth)
 

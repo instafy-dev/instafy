@@ -101,6 +101,7 @@ export function BrowserChromeShell({
   feedbackTone = "error",
   onDismissFeedback,
   busy = false,
+  compact = false,
   testId,
 }: {
   label: string;
@@ -115,6 +116,7 @@ export function BrowserChromeShell({
   feedbackTone?: "error" | "success";
   onDismissFeedback?: (() => void) | null;
   busy?: boolean;
+  compact?: boolean;
   testId?: string;
 }) {
   return (
@@ -122,29 +124,29 @@ export function BrowserChromeShell({
       <div
         aria-busy={busy || undefined}
         aria-label={label}
-        className="flex h-11 w-full min-w-0 flex-nowrap items-center gap-1 overflow-hidden border-b border-slate-200 bg-slate-50 px-2 max-[540px]:h-auto max-[540px]:flex-wrap max-[400px]:gap-0.5 max-[400px]:px-1 dark:border-[color:var(--color-studio-dark-divider)] dark:bg-[var(--color-studio-dark-panel-soft)]"
+        className={`flex w-full min-w-0 flex-nowrap items-center gap-1 overflow-hidden border-b border-slate-200 bg-slate-50 px-2 max-[400px]:px-1 dark:border-[color:var(--color-studio-dark-divider)] dark:bg-[var(--color-studio-dark-panel-soft)] ${compact ? "h-12 pointer-coarse:h-13" : "h-11 max-[540px]:h-auto max-[540px]:flex-wrap max-[400px]:gap-0.5"}`}
         data-testid={testId}
         data-browser-session-safe-zone="true"
         role="toolbar"
       >
         {leading ? <div className="flex shrink-0 items-center">{leading}</div> : null}
         <div className="flex shrink-0 items-center">{navigation}</div>
-        <div className="min-w-0 flex-1 max-[540px]:basis-24">{address}</div>
+        <div className={`min-w-0 flex-1 ${compact ? "" : "max-[540px]:basis-24"}`}>{address}</div>
         {status || actions ? (
           <div
-            className="flex shrink-0 items-center gap-1 max-[540px]:order-last max-[540px]:min-h-10 max-[540px]:w-full max-[540px]:basis-full max-[540px]:justify-between max-[540px]:border-t max-[540px]:border-slate-200/80 dark:max-[540px]:border-[color:var(--color-studio-dark-divider)]"
+            className={`flex shrink-0 items-center gap-1 ${compact ? "" : "max-[540px]:order-last max-[540px]:min-h-10 max-[540px]:w-full max-[540px]:basis-full max-[540px]:justify-between max-[540px]:border-t max-[540px]:border-slate-200/80 dark:max-[540px]:border-[color:var(--color-studio-dark-divider)]"}`}
             data-testid="browser-chrome-context-row"
           >
             {status ? (
               <div
-                className="flex shrink-0 items-center"
+                className={compact ? "contents" : "flex shrink-0 items-center"}
                 data-testid="browser-chrome-status-slot"
               >
                 {status}
               </div>
             ) : null}
             {actions ? (
-              <div className="flex min-w-0 shrink-0 items-center gap-0.5 max-[540px]:flex-1 max-[540px]:justify-end max-[540px]:overflow-hidden">
+              <div className={`flex min-w-0 shrink-0 items-center max-[540px]:flex-1 max-[540px]:justify-end max-[540px]:overflow-hidden ${compact ? "gap-1" : "gap-0.5"}`}>
                 {actions}
               </div>
             ) : null}

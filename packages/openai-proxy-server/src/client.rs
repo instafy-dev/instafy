@@ -2,8 +2,8 @@ use std::sync::OnceLock;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result, anyhow, bail};
-use reqwest::StatusCode;
 use reqwest::header::{ACCEPT, CONTENT_TYPE, HeaderMap, HeaderName, HeaderValue, USER_AGENT};
+use reqwest::{StatusCode, Url};
 use serde_json::{Map as JsonMap, Value, json};
 use uuid::Uuid;
 
@@ -36,6 +36,14 @@ pub struct CodexCompletion {
     pub rate_limits: Option<Value>,
 }
 
+/// A policy over the tools one upstream request carries. It gets the final
+/// `tools` list, which on a ChatGPT login that requested none is the default
+/// tool set this client adds, and returns the tools to send.
+pub(crate) type ToolFilter = Box<dyn Fn(&[Value]) -> Vec<Value> + Send + Sync>;
+
+/// Runs once, when a client first sends a request upstream.
+pub(crate) type SendHook = Box<dyn FnOnce() + Send + Sync>;
+
 pub struct CodexClient {
     http: reqwest::Client,
     credentials: Credentials,
@@ -47,8 +55,13 @@ pub struct CodexClient {
     tools_enabled: bool,
     requested_tools: Option<Vec<Value>>,
     requested_tool_choice: Option<Value>,
+    required_tool_call: bool,
     requested_parallel_tool_calls: Option<bool>,
     requested_text_controls: Option<Value>,
+    tool_filter: Option<ToolFilter>,
+    service_tier: Option<Value>,
+    service_tier_endpoints: ServiceTierEndpoints,
+    send_hook: Option<SendHook>,
     user_agent: String,
 }
 
@@ -72,6 +85,26 @@ enum UpstreamWireApi {
     Responses,
     ChatCompletions,
     GeminiCodeAssist,
+}
+
+/// The wire API every request with `credentials` goes upstream on.
+fn wire_api_for(credentials: &Credentials) -> UpstreamWireApi {
+    if credentials.is_chatgpt() {
+        UpstreamWireApi::Responses
+    } else if credentials.gemini_code_assist_project_id().is_some() {
+        UpstreamWireApi::GeminiCodeAssist
+    } else {
+        detect_upstream_wire_api(credentials.endpoint())
+    }
+}
+
+/// Whether requests with `credentials` go upstream with the tool controls a
+/// client is given, [`CodexClient::with_required_tool_call`] among them:
+/// only the Responses wire API carries them, to the OpenAI API or to a
+/// ChatGPT login's Codex endpoint. A Chat Completions or Gemini Code Assist
+/// request forwards no client tools and no `tool_choice`.
+pub(crate) fn sends_tool_controls(credentials: &Credentials) -> bool {
+    wire_api_for(credentials) == UpstreamWireApi::Responses
 }
 
 fn detect_upstream_wire_api(endpoint: &str) -> UpstreamWireApi {
@@ -136,8 +169,13 @@ impl CodexClient {
             tools_enabled: true,
             requested_tools: None,
             requested_tool_choice: None,
+            required_tool_call: false,
             requested_parallel_tool_calls: None,
             requested_text_controls: None,
+            tool_filter: None,
+            service_tier: None,
+            service_tier_endpoints: ServiceTierEndpoints::default(),
+            send_hook: None,
             user_agent: format!("openai-proxy-server/{}", env!("CARGO_PKG_VERSION")),
         })
     }
@@ -173,6 +211,49 @@ impl CodexClient {
         self.requested_tool_choice = tool_choice;
         self.requested_parallel_tool_calls = parallel_tool_calls;
         self.requested_text_controls = text_controls;
+        self
+    }
+
+    /// Sends `tool_choice: "required"` on the Responses paths, including a
+    /// Responses Lite request, whose tools ride in an `additional_tools`
+    /// input item and which otherwise gets no tool control of its own. The
+    /// proxy sets it only for a request that offers tools and leaves the
+    /// choice to the model.
+    pub(crate) fn with_required_tool_call(mut self, required: bool) -> Self {
+        self.required_tool_call = required;
+        self
+    }
+
+    /// Runs `filter` over the tools of every request this client sends, after
+    /// it adds its default tools, so the filter sees the list that goes
+    /// upstream.
+    pub(crate) fn with_tool_filter(
+        mut self,
+        filter: impl Fn(&[Value]) -> Vec<Value> + Send + Sync + 'static,
+    ) -> Self {
+        self.tool_filter = Some(Box::new(filter));
+        self
+    }
+
+    /// The `service_tier` every request this client sends carries when
+    /// `endpoints` names its upstream endpoint, see [`sends_service_tier`];
+    /// a ChatGPT login and Gemini Code Assist get none, and `None` sends
+    /// none.
+    pub(crate) fn with_service_tier(
+        mut self,
+        service_tier: Option<Value>,
+        endpoints: ServiceTierEndpoints,
+    ) -> Self {
+        self.service_tier = service_tier;
+        self.service_tier_endpoints = endpoints;
+        self
+    }
+
+    /// Runs `hook` once, as the first request this client sends goes to the
+    /// HTTP client, after the checks and payload building that can fail it
+    /// inside the proxy; a request that fails before then never runs it.
+    pub(crate) fn with_send_hook(mut self, hook: Option<SendHook>) -> Self {
+        self.send_hook = hook;
         self
     }
 
@@ -218,13 +299,7 @@ impl CodexClient {
         } else {
             None
         };
-        let upstream_wire_api = if self.credentials.is_chatgpt() {
-            UpstreamWireApi::Responses
-        } else if self.credentials.gemini_code_assist_project_id().is_some() {
-            UpstreamWireApi::GeminiCodeAssist
-        } else {
-            detect_upstream_wire_api(self.credentials.endpoint())
-        };
+        let upstream_wire_api = wire_api_for(&self.credentials);
         headers.insert(USER_AGENT, HeaderValue::from_str(&self.user_agent)?);
         headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
         if self.credentials.is_chatgpt() {
@@ -266,7 +341,7 @@ impl CodexClient {
         };
 
         let mut request_id_header: Option<String> = None;
-        let payload = if self.credentials.is_chatgpt() {
+        let mut payload = if self.credentials.is_chatgpt() {
             build_chatgpt_payload(
                 &self.model,
                 &self.instructions,
@@ -277,6 +352,7 @@ impl CodexClient {
                 self.tools_enabled,
                 self.requested_tools.as_deref(),
                 self.requested_tool_choice.as_ref(),
+                self.required_tool_call,
                 self.requested_parallel_tool_calls,
                 self.requested_text_controls.as_ref(),
             )
@@ -292,6 +368,7 @@ impl CodexClient {
                     self.tools_enabled,
                     self.requested_tools.as_deref(),
                     self.requested_tool_choice.as_ref(),
+                    self.required_tool_call,
                     self.requested_parallel_tool_calls,
                     self.requested_text_controls.as_ref(),
                 ),
@@ -314,6 +391,16 @@ impl CodexClient {
                 }
             }
         };
+        if let Some(filter) = self.tool_filter.as_deref() {
+            filter_payload_tools(&mut payload, filter);
+        }
+        set_payload_service_tier(
+            &mut payload,
+            &self.credentials,
+            upstream_wire_api,
+            self.service_tier.as_ref(),
+            self.service_tier_endpoints,
+        );
 
         if upstream_wire_api == UpstreamWireApi::GeminiCodeAssist {
             headers.insert(
@@ -349,6 +436,9 @@ impl CodexClient {
             self.credentials.endpoint().to_string()
         };
 
+        if let Some(send_hook) = self.send_hook.take() {
+            send_hook();
+        }
         let response = self
             .send_upstream_request_with_retry(request_url.as_str(), &headers, &payload)
             .await?;
@@ -479,6 +569,7 @@ fn build_openai_payload(
     tools_enabled: bool,
     requested_tools: Option<&[Value]>,
     requested_tool_choice: Option<&Value>,
+    required_tool_call: bool,
     requested_parallel_tool_calls: Option<bool>,
     requested_text_controls: Option<&Value>,
 ) -> Value {
@@ -508,11 +599,14 @@ fn build_openai_payload(
 
     if tools_enabled && let Some(tools) = requested_tools.filter(|tools| !tools.is_empty()) {
         payload["tools"] = Value::Array(tools.to_vec());
-        payload["tool_choice"] = requested_tool_choice
-            .cloned()
-            .unwrap_or_else(|| json!("auto"));
+        payload["tool_choice"] = tool_choice_to_send(requested_tool_choice, required_tool_call);
         payload["parallel_tool_calls"] =
             Value::Bool(requested_parallel_tool_calls.unwrap_or(false));
+    } else if tools_enabled && required_tool_call {
+        // Responses Lite: the tools ride in an `additional_tools` input item
+        // and `tools` is empty, so only a required tool call sends a tool
+        // control. The request's own `tool_choice` is not forwarded.
+        payload["tool_choice"] = json!("required");
     }
 
     if let Some(text_controls) = requested_text_controls
@@ -522,6 +616,19 @@ fn build_openai_payload(
     }
 
     payload
+}
+
+/// The `tool_choice` a request goes upstream with where the builders send
+/// one: `"required"` when the proxy requires a tool call, otherwise the
+/// requested choice, `"auto"` when there is none.
+fn tool_choice_to_send(requested_tool_choice: Option<&Value>, required_tool_call: bool) -> Value {
+    if required_tool_call {
+        json!("required")
+    } else {
+        requested_tool_choice
+            .cloned()
+            .unwrap_or_else(|| json!("auto"))
+    }
 }
 
 fn build_openai_chat_completions_payload(
@@ -711,6 +818,7 @@ fn build_chatgpt_payload(
     tools_enabled: bool,
     requested_tools: Option<&[Value]>,
     requested_tool_choice: Option<&Value>,
+    required_tool_call: bool,
     requested_parallel_tool_calls: Option<bool>,
     requested_text_controls: Option<&Value>,
 ) -> Value {
@@ -734,15 +842,16 @@ fn build_chatgpt_payload(
 
     if tools_enabled && let Some(tools) = requested_tools.filter(|tools| !tools.is_empty()) {
         payload["tools"] = Value::Array(tools.to_vec());
-        payload["tool_choice"] = requested_tool_choice
-            .cloned()
-            .unwrap_or_else(|| json!("auto"));
+        payload["tool_choice"] = tool_choice_to_send(requested_tool_choice, required_tool_call);
         payload["parallel_tool_calls"] =
             Value::Bool(requested_parallel_tool_calls.unwrap_or(false));
     } else if tools_enabled {
+        // The request's own `tool_choice` is not forwarded with the default
+        // tools; a Responses Lite request that requires a tool call, whose
+        // tools ride in an `additional_tools` input item, gets `"required"`.
         let tool_metadata = resolve_chatgpt_tools(model);
         payload["tools"] = Value::Array(tool_metadata.tools);
-        payload["tool_choice"] = Value::String("auto".to_string());
+        payload["tool_choice"] = tool_choice_to_send(None, required_tool_call);
         payload["parallel_tool_calls"] = Value::Bool(tool_metadata.parallel_tool_calls);
     }
 
@@ -970,6 +1079,135 @@ fn number_to_u64(value: &Value) -> Option<u64> {
         }
     }
     None
+}
+
+/// Runs a [`ToolFilter`] over the `tools` a built payload carries. A payload
+/// left with no tools also loses `tool_choice` and `parallel_tool_calls`, the
+/// shape the builders give a request that carries none.
+fn filter_payload_tools(
+    payload: &mut Value,
+    filter: &(dyn Fn(&[Value]) -> Vec<Value> + Send + Sync),
+) {
+    let Some(tools) = payload.get("tools").and_then(Value::as_array) else {
+        return;
+    };
+    let kept = filter(tools);
+    if !kept.is_empty() {
+        payload["tools"] = Value::Array(kept);
+    } else if let Some(payload) = payload.as_object_mut() {
+        for key in ["tools", "tool_choice", "parallel_tool_calls"] {
+            payload.remove(key);
+        }
+    }
+}
+
+/// Which upstream endpoints get the `service_tier` a client is given with
+/// [`CodexClient::with_service_tier`]: the proxy's
+/// `PROXY_PLATFORM_SERVICE_TIER_ENDPOINTS` setting.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) enum ServiceTierEndpoints {
+    /// `openai`, the default: only the OpenAI API, an endpoint whose host is
+    /// under `openai.com`, such as `api.openai.com`. An OpenAI-compatible
+    /// provider may reject the field or its value (Groq, for one, names its
+    /// tiers differently), so any other host gets none.
+    #[default]
+    OpenAi,
+    /// `all`: every endpoint that takes a tier, for an OpenAI-compatible
+    /// provider that accepts `default`.
+    All,
+    /// `none`: no endpoint.
+    Never,
+}
+
+impl ServiceTierEndpoints {
+    /// The environment variable the proxy reads the setting from.
+    pub(crate) const ENV: &'static str = "PROXY_PLATFORM_SERVICE_TIER_ENDPOINTS";
+
+    /// Reads the setting, ignoring case and surrounding whitespace; unset or
+    /// empty is `openai`. Any other value is an error, so the proxy refuses
+    /// to start rather than guess where the tier goes.
+    pub(crate) fn parse(raw: Option<&str>) -> Result<Self> {
+        let Some(raw) = raw
+            .map(|value| value.trim().to_ascii_lowercase())
+            .filter(|value| !value.is_empty())
+        else {
+            return Ok(Self::default());
+        };
+        match raw.as_str() {
+            "openai" => Ok(Self::OpenAi),
+            "all" => Ok(Self::All),
+            "none" => Ok(Self::Never),
+            _ => bail!("{} must be openai, all or none", Self::ENV),
+        }
+    }
+
+    /// Whether a request to `endpoint` gets the tier, when its credentials
+    /// and wire API take one.
+    fn include(self, endpoint: &str) -> bool {
+        match self {
+            Self::OpenAi => is_openai_api_endpoint(endpoint),
+            Self::All => true,
+            Self::Never => false,
+        }
+    }
+}
+
+/// Whether `endpoint` is the OpenAI API: its host, as the URL parser reads
+/// it, is a domain under `openai.com`, in any case, with or without a
+/// trailing dot. A userinfo, path, query or fragment that names an OpenAI
+/// host does not count, and neither does an IP address or a URL that does
+/// not parse.
+fn is_openai_api_endpoint(endpoint: &str) -> bool {
+    let Some(host) = Url::parse(endpoint)
+        .ok()
+        .and_then(|url| url.domain().map(str::to_ascii_lowercase))
+    else {
+        return false;
+    };
+    host.strip_suffix('.')
+        .unwrap_or(&host)
+        .ends_with(".openai.com")
+}
+
+/// Whether a request with `credentials` on `wire_api` takes a
+/// `service_tier`: only Responses and Chat Completions requests do, both at
+/// the top level, and only to an endpoint `endpoints` names. A ChatGPT login
+/// takes none: the proxy has never sent the ChatGPT Codex endpoint a tier,
+/// codex itself sends it no `default`, and how that endpoint treats one is
+/// unverified. A Gemini Code Assist request has no service tier either.
+fn takes_service_tier(
+    credentials: &Credentials,
+    wire_api: UpstreamWireApi,
+    endpoints: ServiceTierEndpoints,
+) -> bool {
+    !credentials.is_chatgpt()
+        && wire_api != UpstreamWireApi::GeminiCodeAssist
+        && endpoints.include(credentials.endpoint())
+}
+
+/// Whether requests with `credentials` carry the tier a client is given
+/// with [`CodexClient::with_service_tier`] under `endpoints`.
+pub(crate) fn sends_service_tier(
+    credentials: &Credentials,
+    endpoints: ServiceTierEndpoints,
+) -> bool {
+    takes_service_tier(credentials, wire_api_for(credentials), endpoints)
+}
+
+/// Puts `service_tier` on a payload that takes one, see
+/// [`takes_service_tier`].
+fn set_payload_service_tier(
+    payload: &mut Value,
+    credentials: &Credentials,
+    wire_api: UpstreamWireApi,
+    service_tier: Option<&Value>,
+    endpoints: ServiceTierEndpoints,
+) {
+    if let Some(service_tier) = service_tier
+        && takes_service_tier(credentials, wire_api, endpoints)
+    {
+        payload["service_tier"] = service_tier.clone();
+    }
 }
 
 struct ChatGptToolMetadata {
@@ -1825,6 +2063,7 @@ mod tests {
             true,
             None,
             None,
+            false,
             None,
             None,
         );
@@ -1853,6 +2092,7 @@ mod tests {
             false,
             None,
             None,
+            false,
             None,
             None,
         );
@@ -1895,6 +2135,7 @@ mod tests {
             true,
             Some(&tools),
             Some(&tool_choice),
+            false,
             Some(true),
             Some(&json!({"format": {"type": "text"}})),
         );
@@ -1939,6 +2180,7 @@ mod tests {
             true,
             Some(&tools),
             Some(&tool_choice),
+            false,
             Some(false),
             Some(&json!({"format": {"type": "text"}})),
         );
@@ -1948,6 +2190,404 @@ mod tests {
         assert_eq!(payload["parallel_tool_calls"], json!(false));
         assert_eq!(payload["text"], json!({"format": {"type": "text"}}));
         assert!(payload.get("client_metadata").is_none());
+    }
+
+    /// Codex's input for a Responses Lite model such as gpt-6-luna: the
+    /// tools ride in an `additional_tools` item and the request has no
+    /// `tools`.
+    fn responses_lite_input() -> Vec<Value> {
+        vec![
+            json!({
+                "type": "additional_tools",
+                "role": "developer",
+                "tools": [{ "type": "custom", "name": "exec" }]
+            }),
+            json!({
+                "type": "message",
+                "role": "user",
+                "content": [{"type": "input_text", "text": "Run the tests."}]
+            }),
+        ]
+    }
+
+    #[test]
+    fn openai_payload_requires_a_tool_call_on_a_responses_lite_request() {
+        let input = responses_lite_input();
+        let auto = json!("auto");
+        let build = |tools_enabled: bool, required_tool_call: bool| {
+            build_openai_payload(
+                "gpt-6-luna",
+                "",
+                &input,
+                None,
+                None,
+                Some("medium"),
+                tools_enabled,
+                None,
+                Some(&auto),
+                required_tool_call,
+                Some(false),
+                None,
+            )
+        };
+
+        // Without a required tool call, a request with no `tools` gets no
+        // tool control at all: its own `tool_choice` is not forwarded.
+        let unchanged = build(true, false);
+        for key in ["tools", "tool_choice", "parallel_tool_calls"] {
+            assert!(unchanged.get(key).is_none(), "{key}: {unchanged}");
+        }
+
+        // With one it gets `tool_choice: "required"` and nothing else.
+        let mut required = build(true, true);
+        assert_eq!(required["tool_choice"], json!("required"));
+        required
+            .as_object_mut()
+            .expect("payload object")
+            .remove("tool_choice");
+        assert_eq!(required, unchanged);
+
+        // A plain text completion sends no tool control either way.
+        let plain_text = build(false, true);
+        for key in ["tools", "tool_choice", "parallel_tool_calls"] {
+            assert!(plain_text.get(key).is_none(), "{key}: {plain_text}");
+        }
+    }
+
+    #[test]
+    fn chatgpt_payload_requires_a_tool_call_on_a_responses_lite_request() {
+        let input = responses_lite_input();
+        let auto = json!("auto");
+        let build = |tools_enabled: bool, required_tool_call: bool| {
+            build_chatgpt_payload(
+                "gpt-6-luna",
+                "",
+                &input,
+                None,
+                None,
+                Some("medium"),
+                tools_enabled,
+                None,
+                Some(&auto),
+                required_tool_call,
+                Some(false),
+                None,
+            )
+        };
+
+        // Without a required tool call, a request with no `tools` gets the
+        // default tools and `auto`.
+        let unchanged = build(true, false);
+        assert_eq!(unchanged["tool_choice"], json!("auto"));
+        assert!(
+            unchanged["tools"]
+                .as_array()
+                .is_some_and(|tools| !tools.is_empty()),
+            "{unchanged}"
+        );
+
+        // With one only the choice changes.
+        let mut required = build(true, true);
+        assert_eq!(required["tool_choice"], json!("required"));
+        required["tool_choice"] = json!("auto");
+        assert_eq!(required, unchanged);
+
+        let plain_text = build(false, true);
+        for key in ["tools", "tool_choice", "parallel_tool_calls"] {
+            assert!(plain_text.get(key).is_none(), "{key}: {plain_text}");
+        }
+    }
+
+    #[test]
+    fn payloads_with_tools_send_required_for_a_required_tool_call() {
+        let tools = vec![json!({ "type": "function", "name": "exec_command", "parameters": {} })];
+        let input = responses_lite_input();
+        let auto = json!("auto");
+        for chatgpt in [false, true] {
+            for requested_choice in [None, Some(&auto)] {
+                let build = |required_tool_call: bool| {
+                    let build_payload = if chatgpt {
+                        build_chatgpt_payload
+                    } else {
+                        build_openai_payload
+                    };
+                    build_payload(
+                        "gpt-5.5",
+                        "Use tools.",
+                        &input[1..],
+                        None,
+                        None,
+                        Some("medium"),
+                        true,
+                        Some(&tools),
+                        requested_choice,
+                        required_tool_call,
+                        Some(true),
+                        None,
+                    )
+                };
+                let context = format!("chatgpt={chatgpt} tool_choice={requested_choice:?}");
+                let unchanged = build(false);
+                assert_eq!(unchanged["tool_choice"], json!("auto"), "{context}");
+
+                let mut required = build(true);
+                assert_eq!(required["tool_choice"], json!("required"), "{context}");
+                assert_eq!(required["tools"], json!(tools), "{context}");
+                assert_eq!(required["parallel_tool_calls"], json!(true), "{context}");
+                required["tool_choice"] = json!("auto");
+                assert_eq!(required, unchanged, "{context}");
+            }
+        }
+    }
+
+    #[test]
+    fn tool_filter_runs_on_the_final_tools_and_clears_empty_tool_controls() {
+        let without_web_search = |tools: &[Value]| {
+            tools
+                .iter()
+                .filter(|tool| tool["type"] != "web_search")
+                .cloned()
+                .collect::<Vec<_>>()
+        };
+        let mut payload = json!({
+            "tools": [{ "type": "function", "name": "shell" }, { "type": "web_search" }],
+            "tool_choice": "auto",
+            "parallel_tool_calls": false,
+        });
+        filter_payload_tools(&mut payload, &without_web_search);
+        assert_eq!(
+            payload["tools"],
+            json!([{ "type": "function", "name": "shell" }])
+        );
+        assert_eq!(payload["tool_choice"], json!("auto"));
+
+        // A request left with no tools has the shape of one that sent none.
+        let mut payload = json!({
+            "tools": [{ "type": "web_search" }],
+            "tool_choice": "auto",
+            "parallel_tool_calls": false,
+            "input": [],
+        });
+        filter_payload_tools(&mut payload, &without_web_search);
+        assert_eq!(payload, json!({ "input": [] }));
+
+        // Nothing to filter on a payload without tools.
+        let mut payload = json!({ "messages": [] });
+        filter_payload_tools(&mut payload, &without_web_search);
+        assert_eq!(payload, json!({ "messages": [] }));
+    }
+
+    /// An API key that sends to `endpoint`.
+    fn api_key_at(endpoint: &str) -> Credentials {
+        Credentials::ApiKey {
+            key: "sk-test".to_string(),
+            endpoint: Some(endpoint.to_string()),
+            default_model: None,
+        }
+    }
+
+    const EVERY_SERVICE_TIER_SETTING: [ServiceTierEndpoints; 3] = [
+        ServiceTierEndpoints::OpenAi,
+        ServiceTierEndpoints::All,
+        ServiceTierEndpoints::Never,
+    ];
+
+    #[test]
+    fn service_tier_goes_only_on_payloads_that_take_one() {
+        use ServiceTierEndpoints::{All, Never, OpenAi};
+        let tier = json!("default");
+        let openai_api = api_key_at("https://api.openai.com/v1/responses");
+        // An OpenAI-compatible provider, which may reject a tier.
+        let compatible = api_key_at("https://api.groq.com/openai/v1/responses");
+        for wire_api in [UpstreamWireApi::Responses, UpstreamWireApi::ChatCompletions] {
+            for (credentials, endpoints, sent) in [
+                (&openai_api, OpenAi, true),
+                (&openai_api, All, true),
+                (&openai_api, Never, false),
+                (&compatible, OpenAi, false),
+                (&compatible, All, true),
+                (&compatible, Never, false),
+            ] {
+                let context = format!("{wire_api:?} {} {endpoints:?}", credentials.endpoint());
+                let mut payload = json!({ "model": "gpt-6-luna" });
+                set_payload_service_tier(
+                    &mut payload,
+                    credentials,
+                    wire_api,
+                    Some(&tier),
+                    endpoints,
+                );
+                let expected = if sent {
+                    json!({ "model": "gpt-6-luna", "service_tier": "default" })
+                } else {
+                    json!({ "model": "gpt-6-luna" })
+                };
+                assert_eq!(payload, expected, "{context}");
+
+                // No tier sends none, rather than an explicit null.
+                let mut payload = json!({ "model": "gpt-6-luna" });
+                set_payload_service_tier(&mut payload, credentials, wire_api, None, endpoints);
+                assert_eq!(payload, json!({ "model": "gpt-6-luna" }), "{context}");
+            }
+        }
+
+        // A ChatGPT login goes to the Codex endpoint on the Responses wire
+        // API, which is sent no tier, whatever the setting.
+        let chatgpt = Credentials::ChatGpt {
+            access_token: "chatgpt-test".to_string(),
+            refresh_token: None,
+            account_id: None,
+            default_model: None,
+            auth_path: None,
+        };
+        // Gemini Code Assist has no service tier.
+        let gemini = Credentials::GeminiCodeAssist {
+            access_token: "gemini-test".to_string(),
+            project_id: "project-1".to_string(),
+            endpoint: None,
+            default_model: None,
+        };
+        for endpoints in EVERY_SERVICE_TIER_SETTING {
+            let mut payload = json!({ "model": "gpt-6-luna" });
+            set_payload_service_tier(
+                &mut payload,
+                &chatgpt,
+                UpstreamWireApi::Responses,
+                Some(&tier),
+                endpoints,
+            );
+            assert_eq!(payload, json!({ "model": "gpt-6-luna" }), "{endpoints:?}");
+
+            for credentials in [&openai_api, &gemini] {
+                let mut payload = json!({ "model": "gemini-2.5-pro", "request": {} });
+                set_payload_service_tier(
+                    &mut payload,
+                    credentials,
+                    UpstreamWireApi::GeminiCodeAssist,
+                    Some(&tier),
+                    endpoints,
+                );
+                assert_eq!(
+                    payload,
+                    json!({ "model": "gemini-2.5-pro", "request": {} }),
+                    "{endpoints:?}"
+                );
+            }
+        }
+
+        // The same rule, read from the credentials alone, which the proxy's
+        // override log and health report use to say whether a tier goes
+        // upstream.
+        for endpoint in [
+            "https://api.openai.com/v1/responses",
+            "https://api.openai.com/v1/chat/completions",
+        ] {
+            let credentials = api_key_at(endpoint);
+            assert!(sends_service_tier(&credentials, OpenAi), "{endpoint}");
+            assert!(sends_service_tier(&credentials, All), "{endpoint}");
+            assert!(!sends_service_tier(&credentials, Never), "{endpoint}");
+        }
+        for endpoint in [
+            "https://api.groq.com/openai/v1/responses",
+            "http://127.0.0.1:8080/v1/chat/completions",
+        ] {
+            let credentials = api_key_at(endpoint);
+            assert!(!sends_service_tier(&credentials, OpenAi), "{endpoint}");
+            assert!(sends_service_tier(&credentials, All), "{endpoint}");
+            assert!(!sends_service_tier(&credentials, Never), "{endpoint}");
+        }
+        let gemini_endpoint =
+            api_key_at("https://cloudcode-pa.googleapis.com/v1internal:generateContent");
+        for credentials in [&chatgpt, &gemini, &gemini_endpoint] {
+            for endpoints in EVERY_SERVICE_TIER_SETTING {
+                assert!(
+                    !sends_service_tier(credentials, endpoints),
+                    "{} {endpoints:?}",
+                    credentials.endpoint()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn only_a_host_under_openai_com_is_the_openai_api() {
+        for endpoint in [
+            "https://api.openai.com/v1/responses",
+            "https://API.OPENAI.COM/v1/responses",
+            "https://Api.OpenAI.com/v1/chat/completions",
+            "https://eu.api.openai.com/v1/responses",
+            "https://api.openai.com./v1/responses",
+            "https://api.openai.com:443/v1/responses",
+            "http://api.openai.com/v1/responses",
+            " https://api.openai.com/v1/responses ",
+            // Userinfo is not the host: this request goes to OpenAI.
+            "https://evil.example@api.openai.com/v1/responses",
+        ] {
+            assert!(is_openai_api_endpoint(endpoint), "{endpoint:?}");
+        }
+        for endpoint in [
+            "https://openai.com.evil.example/v1/responses",
+            "https://api.openai.com.evil.example/v1/responses",
+            "https://api.openai.com%2eevil.example/v1/responses",
+            // Userinfo that names the OpenAI host, with and without a
+            // password, and a backslash that ends the host.
+            "https://api.openai.com@evil.example/",
+            "https://api.openai.com:443@evil.example/",
+            "https://evil.example\\@api.openai.com/v1/responses",
+            "https://evil.example/api.openai.com/v1/responses",
+            "https://evil.example/v1/responses?host=api.openai.com",
+            "https://evil.example/v1/responses#api.openai.com",
+            "https://evilopenai.com/v1/responses",
+            "https://api-openai.com/v1/responses",
+            "https://api.openai.co/v1/responses",
+            "http://localhost:8080/v1/responses",
+            "http://api.openai.com.localhost:8080/v1/responses",
+            "http://127.0.0.1:8080/api.openai.com/v1/responses",
+            "http://10.0.0.1/v1/responses",
+            "http://2130706433/v1/responses",
+            "http://[::1]:8080/v1/responses",
+            "api.openai.com/v1/responses",
+            "",
+        ] {
+            assert!(!is_openai_api_endpoint(endpoint), "{endpoint:?}");
+        }
+    }
+
+    #[test]
+    fn service_tier_endpoints_setting_takes_three_values() {
+        use ServiceTierEndpoints::{All, Never, OpenAi};
+        for (raw, expected) in [
+            (None, OpenAi),
+            (Some(""), OpenAi),
+            (Some("  "), OpenAi),
+            (Some("openai"), OpenAi),
+            (Some(" OpenAI "), OpenAi),
+            (Some("all"), All),
+            (Some("ALL"), All),
+            (Some("none"), Never),
+            (Some("None\n"), Never),
+        ] {
+            assert_eq!(
+                ServiceTierEndpoints::parse(raw).expect("a known value"),
+                expected,
+                "{raw:?}"
+            );
+        }
+        for raw in [
+            "open-ai",
+            "api.openai.com",
+            "default",
+            "true",
+            "off",
+            "openai,all",
+        ] {
+            let error = ServiceTierEndpoints::parse(Some(raw)).expect_err(raw);
+            assert_eq!(
+                error.to_string(),
+                "PROXY_PLATFORM_SERVICE_TIER_ENDPOINTS must be openai, all or none",
+                "{raw:?}"
+            );
+        }
     }
 
     #[test]

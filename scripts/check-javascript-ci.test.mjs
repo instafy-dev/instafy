@@ -61,10 +61,10 @@ function route(key, github, enabled = '') {
 // These are source-only cancellation regressions, not a GitHub scheduler test.
 // Keep them in this existing CI test entrypoint so no workflow command changes.
 const cancellationWorkflows = [
-  // Build includes the reviewed proxy_retry_budget selector, independently
-  // bound by check-rust-ci; all other baseline commands and authority are exact.
+  // Build includes the reviewed proxy_retry_budget and read-reference selectors,
+  // independently bound by check-rust-ci; other commands and authority are exact.
   { file: 'build.yml', text: source, keys: ['javascript', 'rust', 'rust-tests'],
-    previousHash: 'b581d0097bf59b2c46368096945443d46b9d7349c66646dd5608ee3f89825cad' },
+    previousHash: '3dbab268c4c1e73b83ac4820ff69ba1a6572bb3ea3d3a721bf3ee285104f2e77' },
   { file: 'browser-e2e.yml', text: withoutManualCiRouting('browser-e2e.yml', fs.readFileSync(path.join(root, '.github/workflows/browser-e2e.yml'), 'utf8')),
     keys: ['shared-profile'], previousHash: '71980384b6c935e2fbe90e48cd7526e8bbded8721611cea427ee0f9bd5da1115' },
 ];
@@ -124,7 +124,7 @@ function aggregateResult(text, github, isCancelled, results) {
   }
 }
 
-test('only four job if lines differ from the complete reviewed workflows plus the runtime retry test selector', () => {
+test('only four job if lines differ from the complete reviewed workflows plus the runtime retry and read-reference test selectors', () => {
   for (const workflow of cancellationWorkflows) {
     assert.equal(workflow.text.split(aggregateIf).length - 1, workflow.keys.length, workflow.file);
     for (const key of workflow.keys) {

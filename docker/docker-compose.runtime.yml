@@ -105,11 +105,12 @@ services:
       # falls back to MANAGED_AI_MODEL_ID; an empty PROXY_PINNED_MODEL is no
       # pin (see docker-compose.runtime.provider.yml).
       PROXY_PINNED_MODEL: ${PROXY_PINNED_MODEL-${MANAGED_AI_MODEL_ID:-}}
+      # openai (unset), all or none: see docker-compose.runtime.provider.yml.
+      PROXY_PLATFORM_SERVICE_TIER_ENDPOINTS: ${PROXY_PLATFORM_SERVICE_TIER_ENDPOINTS:-}
       CONTROLLER_BASE_URL: ${CONTROLLER_BASE_URL:-http://host.docker.internal:8788}
       CONTROLLER_INTERNAL_TOKEN: ${CONTROLLER_INTERNAL_TOKEN:-}
       PROXY_CREDENTIAL_LEASE_TOKEN: ${PROXY_CREDENTIAL_LEASE_TOKEN:-}
       PROXY_SIGNING_SECRET: ${PROXY_SIGNING_SECRET:-}
-      PROXY_CREDIT_BURN_AMOUNT: ${PROXY_CREDIT_BURN_AMOUNT:-}
     volumes:
       - ${PROXY_CODEX_VOLUME:-../tmp/proxy-codex}:/root/.codex
     extra_hosts:

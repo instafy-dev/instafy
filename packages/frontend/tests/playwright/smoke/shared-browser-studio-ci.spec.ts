@@ -180,6 +180,24 @@ async function openSharedBrowser(page: Page) {
   await expectBrowserReady(page);
 }
 
+async function expectHumanBrowserControl(page: Page) {
+  const collaboration = page.getByTestId("shared-browser-collaboration");
+  await expect(collaboration).toBeVisible();
+  const compactToggle = collaboration.getByTestId("shared-browser-collaboration-toggle");
+  // Compact chrome reports ownership on its trigger while the participant
+  // menu is closed. Opening that portal just to read status obscures the
+  // remote surface that this journey needs to drive next.
+  if (await compactToggle.count()) {
+    await expect(compactToggle).toHaveAccessibleName(
+      /^Browser participants and control: You control\./,
+      { timeout: 30_000 },
+    );
+  } else {
+    await expect(collaboration.getByTestId("shared-browser-collaboration-control-state"))
+      .toHaveText("You control", { timeout: 30_000 });
+  }
+}
+
 async function expectBrowserReady(page: Page) {
   const modal = page.getByTestId("browser-session-modal");
   await expect(modal).toBeVisible({ timeout: 60_000 });
@@ -201,8 +219,7 @@ async function expectBrowserReady(page: Page) {
   }, { timeout: 180_000 }).toContain("Ready");
   await expect(modal.getByTestId("browser-session-stage"))
     .toHaveAttribute("data-shared-browser-viewer", "cdp-screencast");
-  await expect(modal.getByTestId("shared-browser-collaboration-control-state"))
-    .toHaveText("You control", { timeout: 30_000 });
+  await expectHumanBrowserControl(page);
   await expect(modal.getByTestId("shared-browser-cdp-screencast")).toBeVisible();
   await expect(modal.getByTestId("shared-browser-cdp-screencast")).toHaveAttribute("data-input-enabled", "true");
   await expect(modal.getByTestId("shared-browser-address")).toBeEnabled();
@@ -250,8 +267,7 @@ async function clickRemoteInput(page: Page) {
   // Navigating the remote page can reconnect collaboration and its input
   // socket. Local canvas focus and control authority do not prove that the
   // replacement driver has sent its ready message, so wait for all three.
-  await expect(page.getByTestId("shared-browser-collaboration-control-state"))
-    .toHaveText("You control", { timeout: 30_000 });
+  await expectHumanBrowserControl(page);
   await expect(surface).toHaveAttribute("data-input-enabled", "true", { timeout: 30_000 });
   await expect(surface).toHaveAttribute("data-input-ready", "true", { timeout: 30_000 });
   const point = await surface.evaluate(element => {
