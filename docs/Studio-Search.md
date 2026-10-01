@@ -19,6 +19,10 @@ their latest message time, falling back to the chat's update or creation time.
 Files, settings and actions keep their navigation order; there is no relevance
 ranking yet.
 
+Selecting a chat in the sidebar's **Recent** list opens or focuses its workspace
+tab, including after the last tab was closed. Closing a tab keeps the chat and
+its draft available for reopening.
+
 The **All chats** drawer is for browsing and managing chats in the current space.
 Its **Filter by name** field filters the loaded chat titles, retaining thread
 context; it does not search message contents. The status menu switches between

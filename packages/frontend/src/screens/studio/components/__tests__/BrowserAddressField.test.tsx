@@ -1,0 +1,335 @@
+// @vitest-environment jsdom
+import { act, createRef, useState } from "react";
+import { createRoot, type Root } from "react-dom/client";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { BrowserAddressField } from "../BrowserAddressField";
+import { BrowserChromeShell } from "../BrowserChromeShell";
+import { BrowserToolsOverlayContext } from "../BrowserToolsPopover";
+
+const { clear, history } = vi.hoisted(() => ({
+  clear: vi.fn(),
+  history: [
+    { url: "https://en.wikipedia.org/wiki/Sea", title: "Sea - Encyclopedia", lastVisitedAt: 3 },
+    { url: "https://www.bbc.com/news", title: "BBC News", lastVisitedAt: 2 },
+    { url: "https://shop.example/cart", title: "Shopping cart", lastVisitedAt: 1 },
+  ],
+}));
+vi.mock("../browserAddressHistory", () => ({ useBrowserAddressHistory: () => ({ entries: history, clear }) }));
+
+let root: Root;
+let container: HTMLDivElement;
+const inputRef = createRef<HTMLInputElement>();
+const navigate = vi.fn();
+let desktop = true;
+const breakpointListeners = new Set<(event: MediaQueryListEvent) => void>();
+const released = vi.fn();
+const registerOverlay = vi.fn(() => released);
+function Fixture({ disabled = false, page }: { disabled?: boolean; page?: { url: string; title: string } }) {
+  const [value, setValue] = useState(page?.url ?? "");
+  return <BrowserToolsOverlayContext.Provider value={registerOverlay}>
+    <BrowserAddressField ref={inputRef} value={value} disabled={disabled} testIdPrefix="test-browser"
+      onValueChange={setValue} onNavigate={navigate} currentPage={page} />
+    <button>Outside</button>
+  </BrowserToolsOverlayContext.Provider>;
+}
+const input = () => inputRef.current!;
+async function type(value: string) {
+  await act(async () => {
+    input().focus();
+    Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!.call(input(), value);
+    input().dispatchEvent(new Event("input", { bubbles: true }));
+  });
+}
+async function key(key: string, isComposing = false) {
+  await act(async () => input().dispatchEvent(new KeyboardEvent("keydown", { key, isComposing, bubbles: true, cancelable: true })));
+}
+const options = () => [...document.querySelectorAll('[role="option"]')];
+
+beforeEach(async () => {
+  (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
+  vi.clearAllMocks();
+  navigate.mockReturnValue(true);
+  desktop = true;
+  breakpointListeners.clear();
+  vi.stubGlobal("matchMedia", () => ({
+    get matches() { return desktop; },
+    addEventListener: (_type: string, listener: (event: MediaQueryListEvent) => void) => breakpointListeners.add(listener),
+    removeEventListener: (_type: string, listener: (event: MediaQueryListEvent) => void) => breakpointListeners.delete(listener),
+  }));
+  vi.stubGlobal("ResizeObserver", class { observe() {} unobserve() {} disconnect() {} });
+  vi.stubGlobal("CSS", { ...CSS, escape: (value: string) => value.replace(/[^a-zA-Z0-9_-]/g, char => `\\${char}`) });
+  container = document.createElement("div"); document.body.append(container); root = createRoot(container);
+  await act(async () => root.render(<Fixture />));
+});
+afterEach(async () => {
+  await act(async () => root.unmount()); container.remove(); vi.restoreAllMocks(); vi.unstubAllGlobals();
+  delete (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT;
+});
+
+describe("BrowserAddressField", () => {
+  it("has one native input/form and shows recent sites on empty focus without taking input focus", async () => {
+    expect(container.querySelectorAll("input")).toHaveLength(1);
+    expect(container.querySelectorAll("form")).toHaveLength(1);
+    expect(container.querySelector("label")!.control).toBe(input());
+    await act(async () => input().focus());
+    expect(options()).toHaveLength(3);
+    expect(document.activeElement).toBe(input());
+    expect(input().getAttribute("aria-expanded")).toBe("true");
+    expect(registerOverlay).toHaveBeenCalledOnce();
+  });
+
+  it("shows site icons without a referrer and keeps a globe while loading or after failure", async () => {
+    await type("bbc");
+    const option = options()[0];
+    const icon = option.querySelector<HTMLImageElement>("img")!;
+    expect(icon.src).toBe("https://www.bbc.com/favicon.ico");
+    expect(icon.getAttribute("referrerpolicy")).toBe("no-referrer");
+    expect(icon.alt).toBe("");
+    expect(icon.parentElement!.getAttribute("aria-hidden")).toBe("true");
+    expect(icon.parentElement!.querySelector("svg")).not.toBeNull();
+    expect(icon.classList.contains("opacity-0")).toBe(true);
+    await act(async () => icon.dispatchEvent(new Event("load")));
+    expect(icon.parentElement!.querySelector("svg")).toBeNull();
+    expect(icon.classList.contains("opacity-0")).toBe(false);
+    await act(async () => icon.dispatchEvent(new Event("error")));
+    expect(icon.parentElement!.querySelector("svg")).not.toBeNull();
+    expect(icon.classList.contains("opacity-0")).toBe(true);
+    expect(navigate).not.toHaveBeenCalled();
+  });
+
+  it("fits compact suggestions to the toolbar width and returns to address anchoring when expanded", async () => {
+    let toolbarWidth = 320;
+    const observers: Array<{ callback: ResizeObserverCallback; targets: Set<Element> }> = [];
+    vi.stubGlobal("ResizeObserver", class {
+      targets = new Set<Element>();
+      constructor(public callback: ResizeObserverCallback) { observers.push(this); }
+      observe(target: Element) { this.targets.add(target); }
+      unobserve(target: Element) { this.targets.delete(target); }
+      disconnect() { this.targets.clear(); }
+    });
+    const originalBounds = HTMLElement.prototype.getBoundingClientRect;
+    vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockImplementation(function (this: HTMLElement) {
+      if (this.getAttribute("data-testid") !== "compact-browser-toolbar") return originalBounds.call(this);
+      return { x: 32, y: 64, left: 32, top: 64, right: 32 + toolbarWidth, bottom: 112,
+        width: toolbarWidth, height: 48, toJSON: () => ({}) };
+    });
+    const render = (compact: boolean) => root.render(
+      <BrowserChromeShell compact={compact} label="Browser controls" navigation={null}
+        address={<Fixture />} testId="compact-browser-toolbar" />,
+    );
+    await act(async () => render(true));
+    await type("");
+    const popup = () => document.querySelector<HTMLElement>('[data-studio-popover]')!;
+    expect(popup().style.width).toBe("304px");
+
+    const toolbar = container.querySelector<HTMLElement>('[data-testid="compact-browser-toolbar"]')!;
+    toolbarWidth = 400;
+    await act(async () => {
+      for (const observer of observers) {
+        if (observer.targets.has(toolbar)) {
+          const box = { inlineSize: toolbarWidth, blockSize: 48 };
+          observer.callback([{ target: toolbar, contentRect: toolbar.getBoundingClientRect(),
+            borderBoxSize: [box], contentBoxSize: [box], devicePixelContentBoxSize: [box] }],
+            observer as unknown as ResizeObserver);
+        }
+      }
+    });
+    expect(popup().style.width).toBe("384px");
+    const otherToolbarAction = [...toolbar.querySelectorAll("button")].find(button => button.textContent === "Outside")!;
+    await act(async () => otherToolbarAction.focus());
+    expect(document.querySelector('[data-studio-popover]')).toBeNull();
+    await act(async () => input().focus());
+
+    await act(async () => render(false));
+    expect(popup().style.width).toBe("");
+    expect(options()).toHaveLength(3);
+    expect(document.activeElement).toBe(input());
+  });
+
+  it("filters titles and addresses and returns to recent sites when cleared", async () => {
+    await type("ENCYCLOPEDIA");
+    expect(options()).toHaveLength(1);
+    expect(options()[0].textContent).toContain("wikipedia.org");
+    await type("bbc.com");
+    expect(options()).toHaveLength(1);
+    expect(options()[0].textContent).toContain("BBC News");
+    await type("");
+    expect(options()).toHaveLength(3);
+  });
+
+  it("navigates the arrow-selected suggestion once on Enter", async () => {
+    await type("bbc");
+    await key("ArrowDown");
+    await key("Enter");
+    expect(navigate).toHaveBeenCalledExactlyOnceWith("https://www.bbc.com/news");
+  });
+
+  it("navigates from an assistive-technology click without pointer events", async () => {
+    await type("bbc");
+    await act(async () => (options()[0] as HTMLElement).click());
+    expect(navigate).toHaveBeenCalledExactlyOnceWith("https://www.bbc.com/news");
+  });
+
+  it("submits typed text when no suggestion is selected even with matching options open", async () => {
+    await type("bbc.com");
+    expect(options()).toHaveLength(1);
+    await key("Enter");
+    expect(navigate).toHaveBeenCalledExactlyOnceWith("bbc.com");
+  });
+
+  it("does not navigate on Tab, Escape or composition confirmation", async () => {
+    await type("bbc");
+    await key("ArrowDown");
+    await key("Tab");
+    expect(navigate).not.toHaveBeenCalled();
+    await type("Sea");
+    await key("Enter", true);
+    expect(navigate).not.toHaveBeenCalled();
+    await key("Escape");
+    expect(input().getAttribute("aria-expanded")).toBe("false");
+    expect(released).toHaveBeenCalled();
+  });
+
+  it("closes suggestions when cleared and releases the native overlay", async () => {
+    await type("");
+    const button = [...document.querySelectorAll("button")].find(el => el.textContent === "Clear recent sites")!;
+    await act(async () => button.click());
+    expect(clear).toHaveBeenCalledOnce();
+    expect(input().getAttribute("aria-expanded")).toBe("false");
+    expect(released).toHaveBeenCalled();
+  });
+
+  it("disables both navigation entry points and closes an open list when authority is lost", async () => {
+    await type("");
+    await act(async () => root.render(<Fixture disabled />));
+    expect(input().disabled).toBe(true);
+    expect(container.querySelector<HTMLButtonElement>('[aria-label="Go"]')!.disabled).toBe(true);
+    expect(options()).toHaveLength(0);
+    expect(released).toHaveBeenCalled();
+    expect(navigate).not.toHaveBeenCalled();
+  });
+});
+
+
+describe("phone address editor", () => {
+  const open = async () => {
+    desktop = false;
+    await act(async () => root.render(<Fixture key="phone" />));
+    await act(async () => container.querySelector<HTMLButtonElement>('[data-testid="test-browser-address-trigger"]')!.click());
+  };
+  const dialog = () => document.querySelector('[role="dialog"]');
+
+  it("opens one focused input, keeps the page underneath inert and cancels without navigation", async () => {
+    await open();
+    expect(dialog()).not.toBeNull();
+    expect(document.querySelectorAll("input")).toHaveLength(1);
+    expect(document.activeElement).toBe(input());
+    expect(input().getAttribute("inputmode")).toBe("url");
+    for (const element of document.querySelectorAll('[aria-label="Back"], [aria-label="Go"], [role="listbox"]')) {
+      expect(element.closest('[aria-hidden="true"]')).toBeNull();
+    }
+    await type("unfinished.example");
+    await act(async () => document.querySelector<HTMLButtonElement>('[aria-label="Back"]')!.click());
+    expect(dialog()).toBeNull();
+    expect(container.querySelector('[data-testid="test-browser-address-trigger"]')!.textContent).toBe("Enter an address");
+    expect(navigate).not.toHaveBeenCalled();
+    expect(released).toHaveBeenCalled();
+  });
+
+  it("uses the same suggestion navigation and closes on success", async () => {
+    await open();
+    await type("bbc");
+    expect(options()).toHaveLength(1);
+    await act(async () => (options()[0] as HTMLElement).click());
+    expect(navigate).toHaveBeenCalledExactlyOnceWith("https://www.bbc.com/news");
+    expect(dialog()).toBeNull();
+  });
+
+  it("keeps the phone editor and selection mounted across rotation until Back", async () => {
+    await open();
+    await type("unfinished.example");
+    const originalInput = input();
+    const originalDialog = dialog();
+    await act(async () => originalInput.setSelectionRange(3, 9));
+    await act(async () => {
+      desktop = true;
+      for (const listener of breakpointListeners) {
+        listener({ matches: desktop } as MediaQueryListEvent);
+      }
+    });
+    expect(dialog()).toBe(originalDialog);
+    expect(input()).toBe(originalInput);
+    expect(document.activeElement).toBe(originalInput);
+    expect(input().value).toBe("unfinished.example");
+    expect([input().selectionStart, input().selectionEnd]).toEqual([3, 9]);
+    expect(navigate).not.toHaveBeenCalled();
+
+    await act(async () => document.querySelector<HTMLButtonElement>('[aria-label="Back"]')!.click());
+    expect(dialog()).toBeNull();
+    expect(input()).not.toBe(originalInput);
+    expect(input().value).toBe("");
+    expect(container.querySelector('[data-testid="test-browser-address-trigger"]')).toBeNull();
+    expect(navigate).not.toHaveBeenCalled();
+  });
+
+  it("keeps rejected input editable, then returns to the page after successful Go", async () => {
+    await open();
+    const originalInput = input();
+    navigate.mockReturnValue(false);
+    await type("not a domain");
+    await key("Enter");
+    expect(dialog()).not.toBeNull();
+    expect(input()).toBe(originalInput);
+    expect(input().value).toBe("not a domain");
+    expect(document.activeElement).toBe(originalInput);
+    navigate.mockReturnValue(true);
+    await type("example.com");
+    await act(async () => document.querySelector<HTMLButtonElement>('[aria-label="Go"]')!.click());
+    expect(navigate).toHaveBeenLastCalledWith("example.com");
+    expect(dialog()).toBeNull();
+  });
+
+  it("clears the draft without dismissing the editor and releases it if control is lost", async () => {
+    await open();
+    await type("bbc");
+    await act(async () => document.querySelector<HTMLButtonElement>('[aria-label="Clear address"]')!.click());
+    expect(input().value).toBe("");
+    expect(document.activeElement).toBe(input());
+    expect(options()).toHaveLength(3);
+    expect(dialog()).not.toBeNull();
+    expect(navigate).not.toHaveBeenCalled();
+    await act(async () => root.render(<Fixture key="phone" disabled />));
+    expect(dialog()).toBeNull();
+    expect(released).toHaveBeenCalled();
+    expect(container.querySelector<HTMLButtonElement>('[data-testid="test-browser-address-trigger"]')!.disabled).toBe(true);
+  });
+
+  it("keeps inline history actions accessible when focus leaves the address input", async () => {
+    await open();
+    const clearButton = [...document.querySelectorAll("button")].find(button => button.textContent === "Clear recent sites")!;
+    await act(async () => clearButton.focus());
+    expect(clearButton.isConnected).toBe(true);
+    expect(clearButton.closest('[aria-hidden="true"]')).toBeNull();
+    await act(async () => clearButton.click());
+    expect(clear).toHaveBeenCalledOnce();
+    expect(document.activeElement).toBe(input());
+    expect(dialog()).not.toBeNull();
+  });
+
+  it("restores the latest observed page when cancelling or losing control", async () => {
+    await open();
+    await type("unfinished.example");
+    const page = { url: "https://example.com/changed", title: "Changed page" };
+    await act(async () => root.render(<Fixture key="phone" page={page} />));
+    await act(async () => document.querySelector<HTMLButtonElement>('[aria-label="Back"]')!.click());
+    const trigger = container.querySelector<HTMLButtonElement>('[data-testid="test-browser-address-trigger"]')!;
+    expect(trigger.textContent).toBe(page.url);
+    await act(async () => trigger.click());
+    await type("another-draft.example");
+    await act(async () => root.render(<Fixture key="phone" page={page} disabled />));
+    expect(dialog()).toBeNull();
+    expect(trigger.textContent).toBe(page.url);
+    expect(navigate).not.toHaveBeenCalled();
+  });
+
+});
