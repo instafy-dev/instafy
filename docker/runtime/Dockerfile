@@ -13,10 +13,13 @@ ARG PNPM_VERSION=11.24.0
 # checksums are committed here until npm ships the fixes itself.
 ARG NPM_TAR_VERSION=7.5.22
 ARG NPM_TAR_SHA256=b792c2d1c7fc770910522ca1ffc29eee02ee38de4fa3a01e7832eb705879c6c6
-ARG BRACE_EXPANSION_VERSION=5.0.9
-ARG BRACE_EXPANSION_SHA256=5d06001fddd25cbee90c96db4dc5b7b57711b984c3141e28d10f143deb52dbaf
+ARG BRACE_EXPANSION_VERSION=5.0.12
+ARG BRACE_EXPANSION_SHA256=ef8448ec78f20b692f04fa6d01f39b5ab34c66404bea3429f5a39c6c9e0be8b4
 ARG IP_ADDRESS_VERSION=10.3.1
 ARG IP_ADDRESS_SHA256=ad1790063beea11a312c801df30d58e147de762f4f77787552376eb7424623e5
+# npm and pnpm each vendor undici (6.27.0 and 6.28.0); 6.28.1 fixes CVE-2026-19534.
+ARG UNDICI_VERSION=6.28.1
+ARG UNDICI_SHA256=e18191aac9c0ff43dac7fe9b10b7041a22d07addb7b66a6e8ac14a52a5b69b74
 # Rathole is used for self-hosted tunnel ingress. The crates.io release currently
 # depends on older `time` versions that fail to compile on newer Rust toolchains,
 # so we install a prebuilt release binary instead of `cargo install`.
@@ -36,6 +39,8 @@ ARG GZIP_MIN_VERSION=1.13-1+deb13u1
 ARG PCRE2_MIN_VERSION=10.46-1~deb13u2
 ARG SQLITE3_MIN_VERSION=3.46.1-7+deb13u2
 ARG WEBDEV_BASE=mcr.microsoft.com/playwright:v1.61.1-noble@sha256:5b8f294aff9041b7191c34a4bab3ac270157a28774d4b0660e9743297b697e48
+# The pinned Playwright base ships OpenSSL 3.0.13-0ubuntu3.11; 3.0.13-0ubuntu3.16 fixes CVE-2026-84782.
+ARG WEBDEV_OPENSSL_MIN_VERSION=3.0.13-0ubuntu3.16
 
 ########################
 # Runtime Node distribution
@@ -211,6 +216,8 @@ ARG BRACE_EXPANSION_VERSION
 ARG BRACE_EXPANSION_SHA256
 ARG IP_ADDRESS_VERSION
 ARG IP_ADDRESS_SHA256
+ARG UNDICI_VERSION
+ARG UNDICI_SHA256
 
 COPY --from=node-runtime /usr/local/ /usr/local/
 RUN test -n "${CHROMIUM_MIN_VERSION}" && \
@@ -282,6 +289,17 @@ RUN npm install -g "npm@${NPM_VERSION}" && \
     rm /tmp/ip-address.tgz && \
     unpatched="$(find /usr -type f -path '*/node_modules/npm/node_modules/ip-address/package.json' -exec grep -L "\"version\": \"${IP_ADDRESS_VERSION}\"" {} + 2>/dev/null || true)" && \
     if [ -n "$unpatched" ]; then echo "unpatched ip-address copies: $unpatched" >&2; exit 1; fi && \
+    curl --proto '=https' --tlsv1.2 --fail --location --silent --show-error \
+      "https://registry.npmjs.org/undici/-/undici-${UNDICI_VERSION}.tgz" \
+      --output /tmp/undici.tgz && \
+    printf '%s  %s\n' "${UNDICI_SHA256}" /tmp/undici.tgz | sha256sum --check --status && \
+    for un_dir in $(find /usr -type d \( -path '*/node_modules/npm/node_modules/undici' -o -path '*/node_modules/pnpm/dist/node_modules/undici' \) 2>/dev/null); do \
+      rm -rf "$un_dir" && mkdir -p "$un_dir" && \
+      tar -xzf /tmp/undici.tgz -C "$un_dir" --strip-components=1; \
+    done && \
+    rm /tmp/undici.tgz && \
+    unpatched="$(find /usr -type f \( -path '*/node_modules/npm/node_modules/undici/package.json' -o -path '*/node_modules/pnpm/dist/node_modules/undici/package.json' \) -exec grep -L "\"version\": \"${UNDICI_VERSION}\"" {} + 2>/dev/null || true)" && \
+    if [ -n "$unpatched" ]; then echo "unpatched undici copies: $unpatched" >&2; exit 1; fi && \
     rm -rf /root/.npm
 
 ARG BUILD_PROFILE=dev
@@ -366,13 +384,17 @@ ARG BRACE_EXPANSION_VERSION
 ARG BRACE_EXPANSION_SHA256
 ARG IP_ADDRESS_VERSION
 ARG IP_ADDRESS_SHA256
+ARG UNDICI_VERSION
+ARG UNDICI_SHA256
 # uBlock Origin Lite (Manifest V3) provides ad blocking on modern Chromium builds.
 # uBlock Origin itself is Manifest V2 which may be blocked/disabled in newer releases.
 ARG UBOLITE_VERSION=2026.301.2014
 ARG UBOLITE_SHA256_AMD64
 ARG UBOLITE_SHA256_ARM64
+ARG WEBDEV_OPENSSL_MIN_VERSION
 
-RUN apt-get update && \
+RUN test -n "${WEBDEV_OPENSSL_MIN_VERSION}" && \
+    apt-get update && \
     apt-get install -y --no-install-recommends \
       bash \
       bsdutils \
@@ -395,6 +417,10 @@ RUN apt-get update && \
       python3 \
       python3-pip \
       util-linux \
+      libssl3t64 \
+      openssl \
+    && dpkg --compare-versions "$(dpkg-query -W -f='${Version}' libssl3t64)" ge "${WEBDEV_OPENSSL_MIN_VERSION}" \
+    && dpkg --compare-versions "$(dpkg-query -W -f='${Version}' openssl)" ge "${WEBDEV_OPENSSL_MIN_VERSION}" \
     && rm -rf /var/lib/apt/lists/*
 
 RUN npm install -g "npm@${NPM_VERSION}" && \
@@ -434,6 +460,17 @@ RUN npm install -g "npm@${NPM_VERSION}" && \
     rm /tmp/ip-address.tgz && \
     unpatched="$(find /usr -type f -path '*/node_modules/npm/node_modules/ip-address/package.json' -exec grep -L "\"version\": \"${IP_ADDRESS_VERSION}\"" {} + 2>/dev/null || true)" && \
     if [ -n "$unpatched" ]; then echo "unpatched ip-address copies: $unpatched" >&2; exit 1; fi && \
+    curl --proto '=https' --tlsv1.2 --fail --location --silent --show-error \
+      "https://registry.npmjs.org/undici/-/undici-${UNDICI_VERSION}.tgz" \
+      --output /tmp/undici.tgz && \
+    printf '%s  %s\n' "${UNDICI_SHA256}" /tmp/undici.tgz | sha256sum --check --status && \
+    for un_dir in $(find /usr -type d \( -path '*/node_modules/npm/node_modules/undici' -o -path '*/node_modules/pnpm/dist/node_modules/undici' \) 2>/dev/null); do \
+      rm -rf "$un_dir" && mkdir -p "$un_dir" && \
+      tar -xzf /tmp/undici.tgz -C "$un_dir" --strip-components=1; \
+    done && \
+    rm /tmp/undici.tgz && \
+    unpatched="$(find /usr -type f \( -path '*/node_modules/npm/node_modules/undici/package.json' -o -path '*/node_modules/pnpm/dist/node_modules/undici/package.json' \) -exec grep -L "\"version\": \"${UNDICI_VERSION}\"" {} + 2>/dev/null || true)" && \
+    if [ -n "$unpatched" ]; then echo "unpatched undici copies: $unpatched" >&2; exit 1; fi && \
     rm -rf /root/.npm
 
 # Keep the headed browser usable for humans by shipping an ad blocker extension.

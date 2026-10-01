@@ -464,11 +464,13 @@ pub(crate) fn ensure_service_runtime_user_id_via_supabase(
 }
 
 /// Fixed id the proxy leases for the managed ("Instafy AI") lane. It is not
-/// a `user_credentials` row: the internal credential-lease route answers it
-/// from `AppConfig::managed_ai_openai_api_key` without any user lookup, and
-/// `agent_jobs.credential_id` (a foreign key to `user_credentials`) keeps
-/// `NULL` for managed jobs. The same string is a constant in the proxy
-/// (`openai_proxy_server::proxy::MANAGED_AI_CREDENTIAL_ID`); keep them equal.
+/// a `user_credentials` row, and the `user_credentials_id_not_reserved` check
+/// keeps any new or updated row from taking it: the internal credential-lease
+/// route answers it from `AppConfig::managed_ai_openai_api_key` without any
+/// user lookup, and `agent_jobs.credential_id` (a foreign key to
+/// `user_credentials`) keeps `NULL` for managed jobs. The same string is a
+/// constant in the proxy (`openai_proxy_server::proxy::MANAGED_AI_CREDENTIAL_ID`);
+/// keep them equal.
 pub const MANAGED_AI_CREDENTIAL_ID: &str = "4d414e41-4745-4441-8949-4e5354414659";
 
 pub fn managed_ai_credential_id() -> Uuid {
