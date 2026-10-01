@@ -342,7 +342,7 @@ import { resolveSharedBrowserViewerKind } from "./sharedBrowserViewer";
 import { LocalBrowserSharing, LocalBrowserTabPublisher } from "./LocalBrowserSharing";
 import { ConversationSurfaceLayout, type ConversationSurface } from "../../../workspace/ConversationSurfaceLayout";
 import { ConversationFileContext } from "../../../workspace/ConversationFileContext";
-import { closeConversationFile, conversationFileLabel, openConversationFile, selectConversationView } from "../../../workspace/conversationSurfaces";
+import { conversationSurfaceScope, closeConversationFile, conversationFileLabel, openConversationFile, selectConversationView } from "../../../workspace/conversationSurfaces";
 import type { OpenWorkspaceFileEventDetail } from "./useFilesPanelViewerState";
 import { FilesPanel } from "../StudioLazyPanels";
 import {
@@ -697,9 +697,8 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     refreshRuntimeStatuses,
     setSessionRuntimeOverride,
   });
-  const { conversationSurfaces } = useWorkspaceTabs();
-  const surfaceScope = currentUserId && activeProjectId && activeConversationId
-    ? JSON.stringify([currentUserId, activeProjectId, activeConversationId]) : null;
+  const { conversationWorkspace, conversationSurfaces, setConversationBrowser, openConversationTab: openSurfaceConversation } = useWorkspaceTabs();
+  const surfaceScope = conversationSurfaceScope(currentUserId, activeProjectId ?? null, activeConversationId);
   const { read: readSurfaces, update: updateSurfaces } = conversationSurfaces;
   const surfaces = readSurfaces(surfaceScope);
   const dirtyFilePaths = useWorkspaceStore(store => store.state.code.files
@@ -718,9 +717,9 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
   const hasResources = hasBrowserView || surfaces.files.length > 0;
   const resourceId = surfaces.resourceId === "browser" && !hasBrowserView
     ? surfaces.files[0]?.id ?? "browser" : surfaces.resourceId;
-  const activeSurfaceId = surfaces.activeId === "browser" && !hasBrowserView ? "chat" : surfaces.activeId;
+  const activeSurfaceId = conversationWorkspace && jobThread ? "chat" : surfaces.activeId === "browser" && !hasBrowserView ? "chat" : surfaces.activeId;
   const wideSurfaces = surfaceWidth >= 1024;
-  const splitSurfaces = wideSurfaces && surfaces.split && hasResources;
+  const splitSurfaces = !(conversationWorkspace && jobThread) && wideSurfaces && surfaces.split && hasResources;
   const browserVisible = hasBrowserView && resourceId === "browser" && (splitSurfaces || activeSurfaceId === "browser");
   const chatVisible = splitSurfaces || activeSurfaceId === "chat" || !hasResources;
   const [fileOpenRequest, setFileOpenRequest] = useState<OpenWorkspaceFileEventDetail | null>(null);
@@ -733,7 +732,9 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
       line: detail.line ?? undefined, markdownView: detail.markdownView,
     }));
     setFileOpenRequest({ ...detail, path, projectId: activeProjectId });
-  }, [activeProjectId, surfaceScope, updateSurfaces]);
+    // Run threads share the task's files; selecting one leaves the transcript view.
+    if (conversationWorkspace && jobThread && activeConversationId) openSurfaceConversation(activeConversationId);
+  }, [activeProjectId, activeConversationId, conversationWorkspace, jobThread, openSurfaceConversation, surfaceScope, updateSurfaces]);
   const selectedFile = surfaces.files.find(file => file.id === resourceId);
   const fileRequest = useMemo(() => selectedFile ? (
     fileOpenRequest?.path === selectedFile.path ? fileOpenRequest : {
@@ -749,8 +750,13 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
   const browserTransportPreferenceResolved = Boolean(browserTransportScopeKey && browserTransportPreferenceScope === browserTransportScopeKey);
   const [sharedBrowserActivated, setSharedBrowserActivated] = useState(false);
   const sharedBrowserActivationScopeRef = useRef<string | null>(null);
-  const browserPanelId = useId();
-  const chatPanelId = useId();
+  const generatedBrowserPanelId = useId();
+  const generatedChatPanelId = useId();
+  const browserPanelId = conversationWorkspace ? "conversation-workspace-browser" : generatedBrowserPanelId;
+  const chatPanelId = conversationWorkspace ? "conversation-workspace-chat" : generatedChatPanelId;
+  useEffect(() => {
+    if (conversationWorkspace) setConversationBrowser(surfaceScope, hasBrowserView, sharedBrowserApprovalPending);
+  }, [conversationWorkspace, setConversationBrowser, surfaceScope, hasBrowserView, sharedBrowserApprovalPending]);
   useLayoutEffect(() => {
     if (browserSessionOpen && browserSessionExpandRequestToken > 0) {
       setBrowserSubtab("browser");
@@ -765,6 +771,11 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     },
     [browserSessionOpen, handleToggleBrowserSession, setBrowserSubtab],
   );
+  useEffect(() => {
+    if (conversationWorkspace && !jobThread && surfaces.activeId === "browser" && hasHiddenBrowserSession && !browserSessionOpen) {
+      handleToggleBrowserSession();
+    }
+  }, [conversationWorkspace, jobThread, surfaces.activeId, hasHiddenBrowserSession, browserSessionOpen, handleToggleBrowserSession]);
   const handleBackToChat = useCallback(() => {
     setBrowserSubtab("chat");
   }, [setBrowserSubtab]);
@@ -5639,7 +5650,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     }] : []),
     ...surfaces.files.map(file => ({
       id: file.id, label: conversationFileLabel(file, surfaces.files), title: file.path,
-      panelId: `${chatPanelId}-file`, icon: <Page className="h-3.5 w-3.5" />, dirty: dirtyFiles.has(file.path),
+      panelId: conversationWorkspace ? "conversation-workspace-file" : `${chatPanelId}-file`, icon: <Page className="h-3.5 w-3.5" />, dirty: dirtyFiles.has(file.path),
       onClose: () => updateSurfaces(surfaceScope, state => closeConversationFile(state, file.id, hasBrowserView)),
     })),
   ];
@@ -5670,7 +5681,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
         header={
       <div
         className="px-3 pt-2 sm:px-4"
-        data-testid="chat-conversation-roster-row"
+        data-testid={conversationWorkspace && !jobThread ? "chat-sticky-speaker-row" : "chat-conversation-roster-row"}
       >
         {/* Constrain to the shared 56rem chat column so the roster's right
             edge lands on the message column, not the panel edge. The sticky
@@ -5680,11 +5691,13 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
             never shifts when the pill appears or disappears. */}
         <ChatColumn className="pointer-events-none flex items-center justify-between gap-2 [&>:last-child]:pointer-events-auto">
           <ChatSpeakerStickyOverlay ref={stickySpeakerOverlayRef} speaker={stickyChatSpeaker} />
-          <ConversationRoster
-            agents={conversationRosterAgents}
-            humans={conversationRosterHumans}
-            hasCredentialWarning={participantAgentsHaveCredentialWarning}
-          />
+          {!conversationWorkspace || jobThread ? (
+            <ConversationRoster
+              agents={conversationRosterAgents}
+              humans={conversationRosterHumans}
+              hasCredentialWarning={participantAgentsHaveCredentialWarning}
+            />
+          ) : null}
         </ChatColumn>
       </div>
         }
@@ -6002,7 +6015,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
         </div>
       ) : null}
     {surfaces.files.length > 0 ? (
-      <div id={`${chatPanelId}-file`} role="tabpanel" aria-label={selectedFile?.path ?? "File"} hidden={!selectedFile} className={selectedFile ? "h-full min-h-0" : "hidden"} style={!splitSurfaces ? { paddingBottom: composerOverlayHeight } : undefined}>
+      <div id={conversationWorkspace ? "conversation-workspace-file" : `${chatPanelId}-file`} role="tabpanel" aria-label={selectedFile?.path ?? "File"} hidden={!selectedFile} className={selectedFile ? "h-full min-h-0" : "hidden"} style={!splitSurfaces ? { paddingBottom: composerOverlayHeight } : undefined}>
         <FilesPanel previewOwnerId={`conversation:${surfaceScope}`} showExplorer={false} mobileView="viewer" embeddedOpenRequest={fileRequest} />
       </div>
     ) : null}
@@ -6018,6 +6031,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
       data-testid="chat-panel-root"
     >
       <ConversationSurfaceLayout
+        showTabs={!conversationWorkspace}
         chatPanelId={chatPanelId}
         activeId={activeSurfaceId} resourceId={resourceId}
         split={splitSurfaces} wide={wideSurfaces} ratio={surfaces.ratio}

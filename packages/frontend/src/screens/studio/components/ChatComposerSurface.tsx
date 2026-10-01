@@ -871,8 +871,8 @@ export function ChatComposerSurface({
       variant="ghost"
       size="md"
       radius="xl"
-      aria-label={mobileChatsNavigation ? composerNavigationLabel : "Open navigation and recent chats"}
-      title={mobileChatsNavigation ? composerNavigationLabel : "Open navigation and recent chats"}
+      aria-label={mobileChatsNavigation ? composerNavigationLabel : "Open navigation"}
+      title={mobileChatsNavigation ? composerNavigationLabel : "Open navigation"}
       aria-haspopup={mobileChatsNavigation ? undefined : "dialog"}
       data-testid="chat-composer-navigation-button"
       className={composerGhostActionClass}

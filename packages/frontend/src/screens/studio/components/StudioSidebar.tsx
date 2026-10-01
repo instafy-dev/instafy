@@ -77,6 +77,8 @@ export interface StudioSidebarProps {
   activePanel: StudioPanel;
   onSelect: (panel: StudioPanel) => void;
   collapsed: boolean;
+  /** Conversation workspaces use the full Chats explorer at every screen width. */
+  conversationWorkspace?: boolean;
   pinnedPanel?: StudioPanel | null;
   onOpenConversationHistory?: () => void;
   recentConversations?: ConversationState[];
@@ -116,6 +118,7 @@ export function StudioSidebar({
   activePanel,
   onSelect,
   collapsed,
+  conversationWorkspace = false,
   pinnedPanel,
   onOpenConversationHistory,
   recentConversations = [],
@@ -259,12 +262,13 @@ export function StudioSidebar({
     () => moreItems?.filter((item): item is StudioNavItem => Boolean(item)) ?? [],
     [moreItems],
   );
-  const hasRecentChats = !desktopRail && Boolean(onSelectConversation);
+  const usesChatExplorer = desktopRail || conversationWorkspace;
+  const hasRecentChats = !usesChatExplorer && Boolean(onSelectConversation);
   // External context already contains the space selector. Only compact
   // desktop navigation needs a second row for New chat below its toggle.
   const desktopHeaderRows = externalHeader ? showLabels ? 1 : 2 : pathHeader ? 1 : showLabels ? 2 : 3;
   const mobileHeaderRows = showLabels ? pathControls ? 1 : 2 : 4;
-  const fixedEntryCount = (desktopRail ? desktopHeaderRows : mobileHeaderRows) + items.length + (!desktopRail && onOpenConversationHistory && !hasRecentChats ? 1 : 0);
+  const fixedEntryCount = (desktopRail ? desktopHeaderRows : mobileHeaderRows) + items.length + (!usesChatExplorer && onOpenConversationHistory && !hasRecentChats ? 1 : 0);
   const recentChatsReservePx = hasRecentChats && showLabels && recentChatsExpanded
     ? Math.max(1, Math.min(recentConversations.length, SIDEBAR_RECENT_CHAT_LIMIT)) * 40 + 56
     : 0;
@@ -1314,10 +1318,11 @@ export function StudioSidebar({
               </li>
             );
           }
-          const togglesChatPane = desktopRail && item.id === "chat" && Boolean(onOpenConversationHistory);
-          const IconComponent = togglesChatPane ? ChatsIcon : item.icon;
-          const label = togglesChatPane ? "Chats" : item.label;
-          const isActive = togglesChatPane ? isConversationHistoryActive
+          const opensChatExplorer = usesChatExplorer && item.id === "chat" && Boolean(onOpenConversationHistory);
+          const togglesChatPane = desktopRail && opensChatExplorer;
+          const IconComponent = opensChatExplorer ? ChatsIcon : item.icon;
+          const label = opensChatExplorer ? "Chats" : item.label;
+          const isActive = opensChatExplorer ? isConversationHistoryActive
             : item.id === activePanel && !(item.id === "chat" && isConversationHistoryActive);
           const isPinned = pinnedPanel === item.id;
           const badgeCount = item.badge?.count ?? 0;
@@ -1327,12 +1332,12 @@ export function StudioSidebar({
             <Fragment key={item.id}>
               <li>
                 <Button
-                  onPress={() => runDestination(() => togglesChatPane ? onOpenConversationHistory?.() : onSelect(item.id))}
+                  onPress={() => runDestination(() => opensChatExplorer ? onOpenConversationHistory?.() : onSelect(item.id))}
                   variant="ghost"
                   size="sm"
                   radius="lg"
                   fullWidth
-                  data-testid={togglesChatPane ? "sidebar-nav-history" : `sidebar-nav-${item.id}`}
+                  data-testid={opensChatExplorer ? "sidebar-nav-history" : `sidebar-nav-${item.id}`}
                   className={[
                     "group/item relative py-1.5 transition focus-visible:ring-offset-0",
                     sidebarRowLayoutClass,
@@ -1385,7 +1390,7 @@ export function StudioSidebar({
                   ) : null}
                 </Button>
               </li>
-              {!desktopRail && item.id === "chat" && onOpenConversationHistory ? (
+              {!usesChatExplorer && item.id === "chat" && onOpenConversationHistory ? (
                 <li>
                   <Button
                     onPress={() => runDestination(onOpenConversationHistory)}

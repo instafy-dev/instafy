@@ -6,19 +6,19 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { StudioDesktopHeader } from "../StudioDesktopHeader";
 import { useStudioSearch } from "../useStudioSearch";
 
-function Harness({ docked = false }: { docked?: boolean }) {
+function Harness({ docked = false, homeOverview = false }: { docked?: boolean; homeOverview?: boolean }) {
   const [drawerHeader, setDrawerHeader] = useState<HTMLDivElement | null>(null);
   const [context, setContext] = useState<HTMLDivElement | null>(null);
   const trigger = useRef<HTMLButtonElement>(null);
   const search = useStudioSearch({
-    scopeKey: "viewer:team:space", org: { id: "team", name: "Team" },
-    space: { id: "space", name: "Space" }, records: [], returnFocusRef: trigger,
+    scopeKey: "viewer:team:space", org: homeOverview ? null : { id: "team", name: "Team" },
+    space: homeOverview ? null : { id: "space", name: "Space" }, records: [], returnFocusRef: trigger,
   });
   return <>
-    <StudioDesktopHeader contextRef={setContext} drawerWidth={docked ? 280 : 0} drawerHeaderRef={setDrawerHeader} searchTriggerRef={trigger} searchOpen={search.open} onSearch={search.openSearch}>
+    <StudioDesktopHeader homeOverview={homeOverview} contextRef={setContext} drawerWidth={docked ? 280 : 0} drawerHeaderRef={setDrawerHeader} searchTriggerRef={trigger} searchOpen={search.open} onSearch={search.openSearch}>
       <button data-testid="workspace-tab">Conversation</button>
     </StudioDesktopHeader>
-    {context ? createPortal(search.open ? search.renderControl() : <button>Choose space</button>, context) : null}
+    {context ? createPortal(search.open ? search.renderControl() : homeOverview ? null : <button>Choose space</button>, context) : null}
     {docked && drawerHeader ? createPortal(<button>Filter chats</button>, drawerHeader) : null}
     {search.results}
   </>;
@@ -67,6 +67,23 @@ describe("Single-row desktop search", () => {
     expect(document.activeElement).toBe(trigger());
     expect(container.querySelector('[data-testid="workspace-tab"]')).toBe(tab);
     expect(tab?.closest("[hidden]")).toBeNull();
+  });
+
+  it("gives Home one global title and search, retaining keyboard search and focus restoration", async () => {
+    await act(async () => root.render(<Harness homeOverview docked />));
+    expect(container.querySelector("h1")?.textContent).toBe("Home");
+    expect(container.querySelector('[data-testid="workspace-tab"]')).toBeNull();
+    expect(container.querySelector('[data-testid="studio-desktop-drawer-header"]')).toBeNull();
+    expect(container.textContent).not.toContain("Choose space");
+    await act(async () => trigger().focus());
+    await key({ key: "k", metaKey: true });
+    expect(document.activeElement).toBe(input());
+    expect(input().getAttribute("aria-label")).not.toContain("Space");
+    expect(container.querySelector("h1")).toBeNull();
+    await key({ key: "Escape" });
+    await act(async () => { await new Promise(resolve => requestAnimationFrame(resolve)); });
+    expect(document.activeElement).toBe(trigger());
+    expect(container.querySelectorAll("h1")).toHaveLength(1);
   });
 
   it("hides docked pane controls while search owns the header and restores them without remounting tabs", async () => {

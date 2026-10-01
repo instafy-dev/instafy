@@ -25,6 +25,9 @@ const mocks = vi.hoisted(() => ({
     retryActivity: vi.fn<() => Promise<boolean>>(),
   },
   conversations: [] as ConversationState[],
+  conversationWorkspace: false,
+  activeConversationId: null as string | null,
+  conversationsProjectKey: "project-personal",
   userId: "viewer",
   recentChatKeys: [] as string[],
   accessToken: "viewer-token",
@@ -61,6 +64,8 @@ vi.mock("../../../../projects/useProjects", () => ({
 vi.mock("../../../../conversations/ConversationsProvider", () => ({
   useConversations: () => ({
     conversations: mocks.conversations,
+    activeConversationId: mocks.activeConversationId,
+    projectKey: mocks.conversationsProjectKey,
     createConversation: vi.fn(),
     markConversationRead: mocks.markConversationRead,
     setConversationControllerId: vi.fn(),
@@ -71,7 +76,7 @@ vi.mock("../../../../providers/AuthProvider", () => ({
 }));
 vi.mock("../../../../status/useStatus", () => ({ useStatus: () => ({ showStatus: mocks.showStatus }) }));
 vi.mock("../../../../workspace/WorkspaceTabsProvider", () => ({
-  useWorkspaceTabs: () => ({ requestUrlPush: mocks.requestUrlPush, openConversationTab: mocks.openConversationTab }),
+  useWorkspaceTabs: () => ({ conversationWorkspace: mocks.conversationWorkspace, requestUrlPush: mocks.requestUrlPush, openConversationTab: mocks.openConversationTab }),
 }));
 vi.mock("../../workspaceControls", () => ({
   useWorkspaceControls: () => ({
@@ -180,6 +185,9 @@ describe("HomePanel activity states", () => {
     mocks.organizations.mockResolvedValue([{ id: "team-design", name: "Design review", slug: "design-review" }]);
     mocks.acknowledgeInbox.mockImplementation(async ({ notificationIds = [] }: { notificationIds?: string[] }) => ({ success: true, inboxAcknowledged: true, acknowledgedNotificationIds: notificationIds }));
     mocks.conversations = [];
+    mocks.conversationWorkspace = false;
+    mocks.activeConversationId = null;
+    mocks.conversationsProjectKey = "project-personal";
     mocks.userId = "viewer";
     mocks.recentChatKeys = [];
     mocks.accessToken = "viewer-token";
@@ -188,6 +196,21 @@ describe("HomePanel activity states", () => {
     container = document.createElement("div");
     document.body.appendChild(container);
     root = createRoot(container);
+  });
+
+  it("uses team branding on filters while keeping All teams neutral and preserving filter selection", async () => {
+    mocks.organizations.mockResolvedValue([{ id: "team-design", name: "Design review", slug: "design-review",
+      avatarUrl: "https://example.test/design.png", accentColor: "violet" }]);
+    await render();
+    const all = query("home-team-chip-all")!;
+    const team = query("home-team-chip-team-design")!;
+    expect(all.querySelector('[data-testid="org-identity"]')).toBeNull();
+    expect(team.querySelector("img")?.getAttribute("src")).toBe("https://example.test/design.png");
+    expect(team.querySelector('[data-testid="org-identity"]')?.getAttribute("aria-hidden")).toBe("true");
+    expect(query("home-team-chip-personal")?.querySelector('[data-testid="org-identity"]')?.textContent).toBe("P");
+    await act(async () => team.click());
+    expect(team.getAttribute("aria-pressed")).toBe("true");
+    expect(all.getAttribute("aria-pressed")).toBe("false");
   });
 
   it("offers distinct cross-team recent chats and opens their canonical destination", async () => {
@@ -207,6 +230,37 @@ describe("HomePanel activity states", () => {
     expect(mocks.navigate.mock.lastCall?.[0].search).toContain("conversationControllerId=other-chat");
     await act(async () => (query("home-team-chip-team-design") as HTMLButtonElement).click());
     expect(query("home-recent-chats")?.textContent).not.toContain("My space");
+  });
+
+  it("offers a scoped Continue working action that restores conversation views and follows team filters", async () => {
+    mocks.conversationWorkspace = true;
+    mocks.conversations = [localConversation({ unreadCount: 0, controllerId: "conversation-recent" })];
+    mocks.activeConversationId = "local-unread";
+    mocks.recentChatKeys = [JSON.stringify(["project-personal", "conversation-recent"])];
+    mocks.activity.activityItems = [activityItem()];
+    await render({}, true);
+    const resume = query("home-resume-conversation")!;
+    expect(resume.textContent).toContain("Local unread work");
+    expect(resume.textContent).toContain("Personal · My space");
+    expect(query("home-recent-chats")).toBeNull();
+    expect(query("home-team-chip-all")?.getAttribute("aria-pressed")).toBe("true");
+    await act(async () => resume.click());
+    expect(mocks.requestUrlPush).toHaveBeenCalledOnce();
+    expect(mocks.openConversationTab).toHaveBeenCalledWith("local-unread", { restoreWorkspace: true });
+    await act(async () => query("home-team-chip-team-design")!.click());
+    expect(query("home-continue-working")).toBeNull();
+  });
+
+  it.each(["different-space", "deleted", "missing", "removed-team", "access-blocked"])("omits unsafe or unavailable resume targets (%s)", async state => {
+    mocks.conversationWorkspace = true;
+    mocks.activeConversationId = "local-unread";
+    mocks.conversations = [localConversation({ lifecycleStatus: state === "deleted" ? "deleted" : "active" })];
+    if (state === "different-space") mocks.conversationsProjectKey = "other-space";
+    if (state === "missing") mocks.conversations = [];
+    if (state === "removed-team") mocks.projects[0].orgId = "removed-team";
+    await render({ canResumeConversation: state !== "access-blocked" }, true);
+    expect(query("home-continue-working")).toBeNull();
+    expect(mocks.openConversationTab).not.toHaveBeenCalled();
   });
 
   it("does not recreate a removed team's filter from cached space metadata", async () => {

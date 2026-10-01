@@ -3,7 +3,8 @@ import { Fragment, useCallback, useEffect, useMemo, useRef, useState, type React
 import { useNavigate } from "react-router-dom";
 import type { HomeNotifications } from "../../../notifications/useNotificationCenter";
 import { useStudioNavigation } from "../../../navigation/useStudioNavigation";
-import { ChatLines, Check, Clock, Group, Plus, WarningTriangle } from "iconoir-react";
+import { ChatLines, Check, Clock, Group, NavArrowRight, Plus, WarningTriangle } from "iconoir-react";
+import { OrgIdentity } from "../../../components/OrgIdentity";
 import { HumanAvatar } from "../../../components/HumanAvatar";
 import { AttentionBadge } from "../../../components/AttentionBadge";
 import { Button, IconButton } from "../../../components/Button";
@@ -71,6 +72,7 @@ function usablePreview(value: string | null | undefined): string | null {
 
 function TeamChip({
   label,
+  icon,
   count,
   selected,
   onPress,
@@ -81,6 +83,7 @@ function TeamChip({
   selected: boolean;
   onPress: () => void;
   testId: string;
+  icon?: ReactNode;
 }) {
   return (
     <button
@@ -97,6 +100,7 @@ function TeamChip({
           : "border-slate-200/70 text-slate-600 hover:bg-slate-100 dark:border-[color:var(--color-studio-dark-divider)] dark:text-slate-300 dark:hover:bg-[var(--color-studio-dark-active)]",
       ].join(" ")}
     >
+      {icon}
       {label}
       <AttentionBadge count={count} aria-hidden className="shrink-0" />
     </button>
@@ -218,6 +222,7 @@ function statusSubtitle(event: HomeFeedEvent, viewerUserId: string | null): stri
 }
 
 interface HomePanelProps {
+  canResumeConversation?: boolean;
   notifications?: HomeNotifications;
   supportReports?: HomeSupportReport[];
   supportLoading?: boolean;
@@ -228,17 +233,19 @@ interface HomePanelProps {
   refreshInbox?: (options?: { force?: boolean }) => Promise<NotificationInboxItem[]>;
 }
 
-export function HomePanel({ inboxItems: sharedInboxItems = [], refreshInbox, notifications, supportReports, supportLoading = false, supportError, refreshSupport, onOpenSupport }: HomePanelProps = {}) {
+export function HomePanel({ canResumeConversation = true, inboxItems: sharedInboxItems = [], refreshInbox, notifications, supportReports, supportLoading = false, supportError, refreshSupport, onOpenSupport }: HomePanelProps = {}) {
   const titleInNavigation = usePageTitleInNavigation();
   const { projectList, activeProjectId } = useProjects();
   const {
     conversations,
+    activeConversationId,
+    projectKey: conversationsProjectKey,
     createConversation,
     markConversationRead,
     setConversationControllerId,
   } = useConversations();
   const { showStatus } = useStatus();
-  const { openConversationTab } = useWorkspaceTabs();
+  const { conversationWorkspace, openConversationTab, requestUrlPush } = useWorkspaceTabs();
   const { userEmail, onStartNewProject, onStartNewConversation, onOpenOrgSettings } = useWorkspaceControls();
   const { user: authUser, session: authSession } = useAuth();
   const authIdentity = useRef({ userId: authUser?.id, token: authSession?.access_token });
@@ -273,7 +280,7 @@ export function HomePanel({ inboxItems: sharedInboxItems = [], refreshInbox, not
 
   // Membership, not spaces, decides which teams get a chip: a team you just
   // joined (or created) has no space yet but still belongs on Home.
-  const [membership, setMembership] = useState<{ userId: string; organizations: HomeFeedOrganizationRef[] } | null>(null);
+  const [membership, setMembership] = useState<{ userId: string; organizations: (HomeFeedOrganizationRef & { avatarUrl?: string | null; accentColor?: string | null })[] } | null>(null);
   const organizations = useMemo(() => membership?.userId === viewerUserId ? membership.organizations : [], [membership, viewerUserId]);
   const membershipsReady = membership !== null && membership.userId === viewerUserId;
   const homeProjects = useMemo(() => membershipsReady
@@ -287,7 +294,7 @@ export function HomePanel({ inboxItems: sharedInboxItems = [], refreshInbox, not
       .list()
       .then((orgs) => {
         if (!cancelled) {
-          setMembership({ userId: viewerUserId, organizations: orgs.map((org) => ({ id: org.id, name: org.name, slug: org.slug ?? null })) });
+          setMembership({ userId: viewerUserId, organizations: orgs.map((org) => ({ id: org.id, name: org.name, slug: org.slug ?? null, avatarUrl: org.avatarUrl, accentColor: org.accentColor })) });
         }
       })
       .catch(() => {
@@ -519,7 +526,16 @@ export function HomePanel({ inboxItems: sharedInboxItems = [], refreshInbox, not
   // Empty-state creation uses the same conversation action as the top bar.
   const startChat = onStartNewConversation ?? handleStartChat;
 
-  const showTeamChips = feed.teams.length > 1;
+  const showTeamChips = conversationWorkspace || feed.teams.length > 1;
+  const resumeConversation = conversationWorkspace && canResumeConversation && membershipsReady && currentProject &&
+    conversationsProjectKey === activeProjectId && homeProjects.some(project => project.id === activeProjectId) &&
+    (feed.teamFilter === HOME_TEAM_FILTER_ALL || feed.teamFilter === teamKeyForOrgId(currentProject.orgId))
+      ? conversations.find(conversation => conversation.localId === activeConversationId && conversation.lifecycleStatus === "active")
+      : null;
+  const resumeTeamName = currentProject?.orgId
+    ? organizations.find(team => team.id === currentProject.orgId)?.name ?? currentProject.orgName ?? "Team" : "Personal";
+  const visibleRecentChats = resumeConversation ? recentChats.filter(event => event.project.id !== activeProjectId ||
+    event.source.type !== "activity" || event.source.item.conversation?.id !== resumeConversation.controllerId) : recentChats;
   // All is cross-team even when the loaded page contains only one team's
   // activity. Keep the team and space together so each row identifies its scope.
   const showTeamOnRows = showTeamChips && feed.teamFilter === HOME_TEAM_FILTER_ALL;
@@ -659,16 +675,19 @@ export function HomePanel({ inboxItems: sharedInboxItems = [], refreshInbox, not
                 onPress={() => setTeamFilter(HOME_TEAM_FILTER_ALL)}
                 testId="home-team-chip-all"
               />
-              {feed.teams.map((team) => (
-                <TeamChip
+              {feed.teams.map((team) => {
+                const identity = organizations.find(org => org.id === team.key);
+                return <TeamChip
                   key={team.key}
                   label={team.name}
+                  icon={<OrgIdentity name={identity?.name ?? team.name} avatarUrl={identity?.avatarUrl}
+                    accentColor={identity?.accentColor} className="h-[18px] w-[18px] !rounded-md text-[8px]" />}
                   count={team.needsCount}
                   selected={feed.teamFilter === team.key}
                   onPress={() => setTeamFilter(team.key)}
                   testId={`home-team-chip-${team.key}`}
-                />
-              ))}
+                />;
+              })}
             </div>
           ) : (
             <Heading level={2} variant="subtitle">
@@ -676,6 +695,20 @@ export function HomePanel({ inboxItems: sharedInboxItems = [], refreshInbox, not
             </Heading>
           )}
         </header> : null}
+
+        {resumeConversation ? (
+          <section aria-label="Continue working" data-testid="home-continue-working">
+            <LaneHeader label="Continue working" />
+            <div className={ROW_HOVER_CLASS}>
+              <FeedRow title={resumeConversation.title} subtitle={`${resumeTeamName} · ${currentSpaceName}`}
+                icon={<ChatLines className="h-5 w-5" aria-hidden="true" />} iconClassName={ROW_ICON_CLASS}
+                end={<NavArrowRight className="h-4 w-4 text-slate-400" aria-hidden="true" />}
+                density="compact" surface="plain" verticalAlign="center" className="min-h-16 !rounded-none !bg-transparent"
+                onPress={() => { requestUrlPush(); openConversationTab(resumeConversation.localId, { restoreWorkspace: true }); }}
+                data-testid="home-resume-conversation" />
+            </div>
+          </section>
+        ) : null}
 
         {activityError ? (
           <div role="alert" className={`flex flex-wrap items-center gap-2 ${LANE_INSET_CLASS}`}>
@@ -691,7 +724,7 @@ export function HomePanel({ inboxItems: sharedInboxItems = [], refreshInbox, not
         {feed.isEmpty && !feedLoading && !moreHistory && !feedError ? (
           <section className="space-y-3" data-testid="home-empty">
             <Heading level={2} variant="subtitle">
-              Nothing here yet
+              {resumeConversation ? "No updates yet" : "Nothing here yet"}
             </Heading>
             <Text as="p" variant="body" tone="muted" className="max-w-prose">
               Replies, runs and changes from every space you belong to show up here.
@@ -770,10 +803,10 @@ export function HomePanel({ inboxItems: sharedInboxItems = [], refreshInbox, not
               </section>
             ) : null}
 
-            {recentChats.length > 0 ? (
+            {visibleRecentChats.length > 0 ? (
               <section data-testid="home-recent-chats">
                 <LaneHeader label="Recent chats" />
-                {recentChats.map((event, index) => (
+                {visibleRecentChats.map((event, index) => (
                   <div key={event.key} className={[ROW_HOVER_CLASS, index > 0 ? ROW_DIVIDER_CLASS : ""].join(" ")}>
                     <FeedRow title={event.title} subtitle={`${event.team.name} · ${event.project.name}`}
                       icon={<ChatLines className="h-4 w-4" aria-hidden="true" />} iconClassName={ROW_ICON_CLASS}

@@ -676,7 +676,7 @@ describe("ChatComposerSurface", () => {
     const navigation = layoutNodes().navigation;
     expect(layoutNodes().leading?.contains(navigation)).toBe(true);
     expect(layoutNodes().leading?.firstElementChild).toBe(navigation);
-    expect(navigation?.getAttribute("aria-label")).toBe("Open navigation and recent chats");
+    expect(navigation?.getAttribute("aria-label")).toBe("Open navigation");
     expect(navigation?.className.split(" ")).toContain("ghost");
     expect(navigation?.querySelector('[data-testid="chat-composer-navigation-badge"]')?.textContent).toBe("2");
     const navigationClass = navigation?.className;

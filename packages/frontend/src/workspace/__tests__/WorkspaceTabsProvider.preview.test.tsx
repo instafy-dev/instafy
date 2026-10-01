@@ -7,6 +7,7 @@ import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createInitialConversation, type ConversationState } from "../../conversations/conversationState";
 import type { StudioPanel } from "../../screens/studio/types";
+import { ConversationWorkspaceViews } from "../ConversationWorkspaceViews";
 import { WorkspaceTabsProvider, useWorkspaceTabs } from "../WorkspaceTabsProvider";
 import { getTabIdForConversation, getTabIdForJobThread, getTabIdForPanel } from "../workspaceTabFactories";
 import { loadPersistedWorkspaceTabs, persistWorkspaceTabsState } from "../workspaceTabPersistence";
@@ -56,12 +57,13 @@ describe("conversation preview tabs", () => {
   let root: Root;
   let container: HTMLDivElement;
   let api: ReturnType<typeof useWorkspaceTabs>;
+  let showViewBar = false;
   let draftStore: ReturnType<typeof useStudioDraftStore>;
 
   function Probe() {
     api = useWorkspaceTabs();
     draftStore = useStudioDraftStore();
-    return null;
+    return showViewBar ? <ConversationWorkspaceViews /> : null;
   }
   async function render(props: Omit<ComponentProps<typeof WorkspaceTabsProvider>, "children"> = {}) {
     await act(async () => root.render(<StudioDraftsProvider><WorkspaceTabsProvider {...props}><Probe /></WorkspaceTabsProvider></StudioDraftsProvider>));
@@ -75,6 +77,8 @@ describe("conversation preview tabs", () => {
 
   beforeEach(() => {
     (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
+    showViewBar = false;
+    vi.stubGlobal("ResizeObserver", class { observe() {} disconnect() {} });
     window.localStorage.clear();
     window.sessionStorage.clear();
     fixture.projectId = projectA;
@@ -94,8 +98,155 @@ describe("conversation preview tabs", () => {
   afterEach(async () => {
     await act(async () => root.unmount());
     container.remove();
+    vi.unstubAllGlobals();
     studioPerformance.clear();
     delete (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT;
+  });
+
+  it("shows one accessible view bar for this chat and returns from a run to its files", async () => {
+    showViewBar = true;
+    const props = { conversationWorkspaceUserId: "user-a" };
+    await render(props);
+    await act(async () => api.openFileTab({ id: "a.ts", path: "a.ts", label: "a.ts" }));
+    await act(async () => api.openJobThreadTab({ conversationId: "a", jobId: "run-a", title: "Implementation" }));
+    expect(container.querySelectorAll('[role="tablist"]')).toHaveLength(1);
+    expect(container.querySelector('[role="tab"][aria-selected="true"]')?.textContent).toBe("Implementation");
+    await act(async () => container.querySelector<HTMLButtonElement>('[data-testid="conversation-subtab-file:a.ts"]')?.click());
+    expect(api.activeTab).toMatchObject({ kind: "conversation", conversationId: "a" });
+    expect(container.querySelector('[role="tab"][aria-selected="true"]')?.textContent).toBe("a.ts");
+    await openPreview("b");
+    await render(props);
+    await act(async () => api.openFileTab({ id: "b.ts", path: "b.ts", label: "b.ts" }));
+    expect(container.textContent).not.toContain("Implementation");
+    expect(container.textContent).not.toContain("a.ts");
+    expect(container.querySelector('[role="tab"][aria-selected="true"]')?.textContent).toBe("b.ts");
+  });
+
+  it("restores each chat's review or run, while explicit chat navigation still opens Chat", async () => {
+    const props = { conversationWorkspaceUserId: "user-a" };
+    await render(props);
+    await act(async () => api.openGitReviewTab({ kind: "workingTree", title: "Launch review", entries: [] }));
+    const reviewId = api.activeTabId;
+    expect(api.activeTab).toMatchObject({ kind: "gitReview", workspaceOwner: { userId: "user-a", projectId: projectA, conversationId: "a" } });
+    await openPreview("b");
+    await render(props);
+    await act(async () => api.openJobThreadTab({ conversationId: "b", jobId: "run-b" }));
+    const runId = api.activeTabId;
+    await act(async () => api.openConversationTab("a", { restoreWorkspace: true }));
+    expect(api.activeTabId).toBe(reviewId);
+    expect(fixture.activeConversationId).toBe("a");
+    await act(async () => api.openPanelTab("settings"));
+    await act(async () => api.openConversationTab("b", { restoreWorkspace: true }));
+    expect(api.activeTabId).toBe(runId);
+    expect(fixture.activeConversationId).toBe("b");
+    await act(async () => api.openConversationTab("a"));
+    expect(api.activeTab).toMatchObject({ kind: "conversation", conversationId: "a" });
+  });
+
+  it("keeps the same diff and saved review separate between conversations", async () => {
+    const props = { conversationWorkspaceUserId: "user-a" };
+    const review = { kind: "savedVersion" as const, commit: "abc123", shortCommit: "abc123", title: "Changes", committedAt: "2026-09-30" };
+    await render(props);
+    await act(async () => api.openGitDiffTab({ path: "app.ts", commitRange: { base: "a", head: "b" } }));
+    const diffA = api.activeTabId;
+    expect(api.activeTab?.kind).toBe("gitDiff");
+    await act(async () => api.openGitReviewTab(review));
+    const reviewA = api.activeTabId;
+    await openPreview("b");
+    await render(props);
+    await act(async () => api.openGitDiffTab({ path: "app.ts" }));
+    expect(api.activeTabId).not.toBe(diffA);
+    expect(api.tabs.find(tab => tab.id === diffA)).toMatchObject({ commitRange: { base: "a", head: "b" } });
+    await act(async () => api.openGitReviewTab(review));
+    expect(api.activeTabId).not.toBe(reviewA);
+    expect(api.tabs.filter(tab => tab.kind === "gitReview")).toHaveLength(2);
+    await act(async () => api.closeTab(api.activeTabId!));
+    expect(api.activeTab).toMatchObject({ kind: "gitDiff", workspaceOwner: { conversationId: "b" } });
+    await act(async () => api.closeTab(api.activeTabId!));
+    expect(api.activeTab).toMatchObject({ kind: "conversation", conversationId: "b" });
+  });
+
+  it("parks views across spaces and rejects late review openers and foreign view IDs", async () => {
+    const props = { conversationWorkspaceUserId: "user-a" };
+    await render(props);
+    await act(async () => api.openJobThreadTab({ conversationId: "a", jobId: "run-a" }));
+    const runId = api.activeTabId;
+    const lateReview = api.openGitReviewTab;
+    fixture.projectId = projectB;
+    await render(props);
+    expect(api.tabs.some(tab => tab.id === runId)).toBe(false);
+    await act(async () => lateReview({ kind: "workingTree", entries: [] }));
+    fixture.projectKey = projectB;
+    fixture.conversations = [conversation("x")];
+    fixture.activeConversationId = "x";
+    await render(props);
+    await act(async () => api.focusTab(runId!));
+    expect(api.activeTab).toMatchObject({ conversationId: "x" });
+    expect(api.tabs.filter(tab => tab.workspaceOwner)).toHaveLength(0);
+    fixture.projectId = projectA;
+    fixture.projectKey = projectA;
+    fixture.conversations = [conversation("a"), conversation("b")];
+    fixture.activeConversationId = "a";
+    await render(props);
+    await act(async () => api.openConversationTab("a", { restoreWorkspace: true }));
+    expect(api.activeTabId).toBe(runId);
+    await render({ conversationWorkspaceUserId: "user-b" });
+    expect(api.tabs.some(tab => tab.id === runId)).toBe(false);
+    expect(api.activeTab?.workspaceOwner).toBeUndefined();
+  });
+
+  it("keeps file views with their conversation in the local workspace prototype", async () => {
+    const props = { conversationWorkspaceUserId: "user-a" };
+    await render(props);
+    await act(async () => api.openFileTab({ id: "a.ts", path: "src/a.ts", label: "a.ts" }));
+    const scopeA = JSON.stringify(["user-a", projectA, "a"]);
+    expect(api.conversationSurfaces.read(scopeA)).toMatchObject({ activeId: "file:src/a.ts", files: [{ path: "src/a.ts" }] });
+    expect(api.tabs.filter(tab => tab.kind === "file")).toHaveLength(0);
+    expect(api.activeTab).toMatchObject({ kind: "conversation", conversationId: "a" });
+
+    await openPreview("b");
+    await render(props);
+    await act(async () => api.openFileTab({ id: "b.ts", path: "src/b.ts", label: "b.ts" }));
+    expect(api.conversationSurfaces.read(JSON.stringify(["user-a", projectA, "b"])).files).toEqual([{ id: "file:src/b.ts", path: "src/b.ts" }]);
+    await act(async () => api.openPanelTab("settings"));
+    await openPreview("a");
+    await render(props);
+    expect(api.activeTab).toMatchObject({ kind: "conversation", conversationId: "a" });
+    expect(api.conversationSurfaces.read(scopeA).activeId).toBe("file:src/a.ts");
+    expect(api.conversationSurfaces.read(scopeA).files).toHaveLength(1);
+  });
+
+  it("does not assign a file to stale conversation history during a space switch", async () => {
+    const props = { conversationWorkspaceUserId: "user-a" };
+    await render(props);
+    fixture.projectId = projectB;
+    await render(props);
+    await act(async () => api.openFileTab({ id: "a.ts", path: "a.ts", label: "a.ts" }));
+    expect(api.conversationSurfaces.read(JSON.stringify(["user-a", projectB, "a"])).files).toEqual([]);
+    expect(api.tabs.filter(tab => tab.kind === "file")).toHaveLength(0);
+  });
+
+  it("ignores a file load completed after the user selected another chat", async () => {
+    const props = { conversationWorkspaceUserId: "user-a" };
+    await render(props);
+    const delayedOpen = api.openFileTab;
+    await openPreview("b");
+    await render(props);
+    await act(async () => delayedOpen({ id: "a.ts", path: "a.ts", label: "a.ts" }));
+    expect(api.activeTab).toMatchObject({ conversationId: "b" });
+    expect(api.conversationSurfaces.read(JSON.stringify(["user-a", projectA, "a"])).files).toEqual([]);
+    expect(api.conversationSurfaces.read(JSON.stringify(["user-a", projectA, "b"])).files).toEqual([]);
+  });
+
+  it("isolates the prototype's file references by account and space", async () => {
+    await render({ conversationWorkspaceUserId: "user-a" });
+    await act(async () => api.openFileTab({ id: "a.ts", path: "a.ts", label: "a.ts" }));
+    await render({ conversationWorkspaceUserId: "user-b" });
+    expect(api.conversationSurfaces.read(JSON.stringify(["user-b", projectA, "a"])).files).toEqual([]);
+    fixture.projectId = projectB;
+    fixture.projectKey = projectB;
+    await render({ conversationWorkspaceUserId: "user-a" });
+    expect(api.conversationSurfaces.read(JSON.stringify(["user-a", projectB, "a"])).files).toEqual([]);
   });
 
   it("reuses a utility preview independently of chat browsing and route replay", async () => {

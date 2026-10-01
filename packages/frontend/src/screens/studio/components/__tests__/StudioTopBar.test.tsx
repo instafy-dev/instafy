@@ -5,6 +5,7 @@ import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { WorkspaceTabsProps } from "../../../../workspace/WorkspaceTabs";
 import { StudioTopBar } from "../StudioTopBar";
+import { EMPTY_CHAT_PARTICIPANTS_SNAPSHOT, publishChatParticipants, setParticipantsDrawerOpen } from "../chatParticipantsStore";
 
 const mocks = vi.hoisted(() => ({
   toggleSidebar: vi.fn(),
@@ -28,6 +29,7 @@ const mocks = vi.hoisted(() => ({
   isLargeScreen: false,
   showChatActions: false,
   hasTabs: true,
+  conversationWorkspace: false,
   controllerProjectMissing: false,
   projectAccessBlocked: false,
   tab: { id: "conversation-1", kind: "conversation", conversationId: "conversation-1", title: "Draft chat" } as Record<string, string | boolean | undefined>,
@@ -61,6 +63,7 @@ vi.mock("../../../../projects/useProject", () => ({ useProject: () => ({ project
 vi.mock("../../../../runtime/useRuntime", () => ({ useRuntime: () => ({ runtime: { controllerProjectMissing: mocks.controllerProjectMissing } }) }));
 vi.mock("../../../../workspace/WorkspaceTabsProvider", () => ({
   useWorkspaceTabs: () => ({
+    conversationWorkspace: mocks.conversationWorkspace,
     tabs: mocks.hasTabs ? [mocks.tab] : [],
     activeTabId: mocks.hasTabs ? mocks.tab.id : null,
     focusTab: mocks.focusTab,
@@ -71,7 +74,7 @@ vi.mock("../../../../workspace/WorkspaceTabsProvider", () => ({
   }),
 }));
 vi.mock("../../../../conversations/ConversationsProvider", () => ({
-  useConversations: () => ({ conversations: mocks.conversations }),
+  useConversations: () => ({ conversations: mocks.conversations, activeConversationId: "conversation-1" }),
 }));
 vi.mock("../StudioNewChatButton", () => ({
   StudioNewChatButton: ({ testId }: { testId?: string }) => <button data-testid={testId} aria-label="New chat" />,
@@ -91,9 +94,12 @@ describe("StudioTopBar navigation", () => {
   let root: Root;
 
   beforeEach(() => {
+    publishChatParticipants(EMPTY_CHAT_PARTICIPANTS_SNAPSHOT);
+    setParticipantsDrawerOpen(false);
     mocks.isLargeScreen = false;
     mocks.showChatActions = false;
     mocks.hasTabs = true;
+    mocks.conversationWorkspace = false;
     mocks.controllerProjectMissing = false;
     mocks.projectAccessBlocked = false;
     mocks.navigationPage = "workspace";
@@ -113,8 +119,54 @@ describe("StudioTopBar navigation", () => {
   afterEach(async () => {
     await act(async () => root.unmount());
     container.remove();
+    publishChatParticipants(EMPTY_CHAT_PARTICIPANTS_SNAPSHOT);
+    setParticipantsDrawerOpen(false);
     vi.clearAllMocks();
     delete (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT;
+  });
+
+  it("uses a task title and removes conversation tab controls in the prototype", async () => {
+    mocks.isLargeScreen = true;
+    mocks.conversationWorkspace = true;
+    await act(async () => root.render(<StudioTopBar inlineDesktop newChatInSidebar />));
+    expect(container.querySelector('[data-testid="conversation-workspace-title"]')?.textContent).toBe("Draft chat");
+    expect(container.querySelector('[data-testid="workspace-tabs"]')).toBeNull();
+    expect(container.querySelector('[data-testid="topbar-tab-overflow"]')).toBeNull();
+  });
+
+  it("opens participants from the conversation header and never carries members into another chat or tool", async () => {
+    mocks.isLargeScreen = true;
+    mocks.conversationWorkspace = true;
+    mocks.conversations = [{ localId: "conversation-1", controllerId: "controller-1", title: "Draft chat" }];
+    publishChatParticipants({ ...EMPTY_CHAT_PARTICIPANTS_SNAPSHOT, conversationId: "controller-1",
+      humans: [{ userId: "user-1", label: "Alex", isSelf: true }] });
+    await act(async () => root.render(<StudioTopBar inlineDesktop newChatInSidebar />));
+    const trigger = container.querySelector<HTMLButtonElement>('[data-testid="conversation-roster"]')!;
+    expect(trigger.getAttribute("aria-label")).toBe("Conversation members (1)");
+    expect(trigger.closest('[role="navigation"]')).not.toBeNull();
+    await act(async () => trigger.click());
+    expect(trigger.getAttribute("aria-expanded")).toBe("true");
+
+    mocks.conversations = [{ localId: "conversation-1", controllerId: "controller-2", title: "Other chat" }];
+    await act(async () => root.render(<StudioTopBar inlineDesktop newChatInSidebar />));
+    expect(container.querySelector('[data-testid="conversation-roster"]')?.getAttribute("aria-label")).toBe("Open participants");
+    expect(container.querySelector('[data-testid="chat-avatar-human"]')).toBeNull();
+
+    mocks.tab = { id: "settings", kind: "panel", panel: "settings", title: "Settings" };
+    await act(async () => root.render(<StudioTopBar inlineDesktop newChatInSidebar />));
+    expect(container.querySelector('[data-testid="conversation-roster"]')).toBeNull();
+  });
+
+  it("returns from a shared tool to the selected task", async () => {
+    mocks.isLargeScreen = true;
+    mocks.conversationWorkspace = true;
+    mocks.tab = { id: "settings", kind: "panel", panel: "settings", title: "Settings" };
+    await act(async () => root.render(<StudioTopBar inlineDesktop newChatInSidebar />));
+    const back = container.querySelector<HTMLButtonElement>('[aria-label="Return to Draft chat"]');
+    expect(back).not.toBeNull();
+    await act(async () => back!.click());
+    expect(mocks.openConversationTab).toHaveBeenCalledWith("conversation-1", { restoreWorkspace: true });
+    expect(mocks.requestUrlPush).toHaveBeenCalled();
   });
 
   it("embeds desktop tabs without nesting headers or repeating the native inset", async () => {

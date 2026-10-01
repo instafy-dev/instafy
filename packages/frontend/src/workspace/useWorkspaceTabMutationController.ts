@@ -1,3 +1,4 @@
+import { conversationSurfaceScope } from "./conversationSurfaces";
 import { useStudioDraftStore } from "./StudioDrafts";
 import { useCallback, type MutableRefObject, type ReactNode } from "react";
 import type { StudioPanel } from "../screens/studio/types";
@@ -15,6 +16,8 @@ import {
 } from "./workspaceTabPersistence";
 
 interface UseWorkspaceTabMutationControllerArgs {
+  lastConversationViewRef?: MutableRefObject<Map<string, string>>;
+  conversationWorkspaceUserId?: string | null;
   activeConversationId: string | null;
   selectConversation: (conversationId: string) => void;
   markConversationRead: (conversationId: string) => void;
@@ -35,6 +38,8 @@ interface UseWorkspaceTabMutationControllerArgs {
 }
 
 export function useWorkspaceTabMutationController({
+  lastConversationViewRef,
+  conversationWorkspaceUserId = null,
   activeConversationId,
   selectConversation,
   markConversationRead,
@@ -59,6 +64,12 @@ export function useWorkspaceTabMutationController({
       nextTab: WorkspaceTabState,
       options?: { syncPanel?: boolean; syncConversation?: boolean; restorePanel?: boolean },
     ) => {
+      const owner = nextTab.workspaceOwner;
+      if (owner && (owner.userId !== conversationWorkspaceUserId || owner.projectId !== workspaceProjectId)) return;
+      const conversationId = owner?.conversationId ??
+        (nextTab.kind === "conversation" || nextTab.kind === "jobThread" ? nextTab.conversationId : null);
+      const scope = conversationSurfaceScope(conversationWorkspaceUserId, workspaceProjectId, conversationId);
+      if (scope && options?.syncConversation !== false && options?.syncPanel !== false) lastConversationViewRef?.current.set(scope, nextTab.id);
       if (nextTab.id !== activeTabIdRef.current &&
           (nextTab.kind === "conversation" || nextTab.kind === "jobThread") && workspaceProjectId) {
         studioPerformance.beginConversation(workspaceProjectId, nextTab.conversationId);
@@ -81,10 +92,9 @@ export function useWorkspaceTabMutationController({
       }
 
       if (
-        (nextTab.kind === "conversation" || nextTab.kind === "jobThread") &&
+        conversationId &&
         options?.syncConversation !== false
       ) {
-        const conversationId = nextTab.conversationId;
         activeConversationIdRef.current = conversationId;
         if (activeConversationId !== conversationId) {
           selectConversation(conversationId);
@@ -93,7 +103,7 @@ export function useWorkspaceTabMutationController({
       }
 
       let panelToSync: StudioPanel | null = null;
-      if (nextTab.kind === "conversation" || nextTab.kind === "jobThread") {
+      if (owner || nextTab.kind === "conversation" || nextTab.kind === "jobThread") {
         panelToSync = "chat";
       } else if (nextTab.kind === "explorer") {
         panelToSync = "code";
@@ -111,6 +121,8 @@ export function useWorkspaceTabMutationController({
     },
     [
       activeConversationId,
+      conversationWorkspaceUserId,
+      lastConversationViewRef,
       activeConversationIdRef,
       activeTabIdRef,
       markConversationRead,
@@ -223,7 +235,11 @@ export function useWorkspaceTabMutationController({
       const nextTabs = currentTabs.filter((tab) => tab.id !== tabId);
       commitTabs(nextTabs);
       if (isClosingActiveTab) {
-        const fallback = nextTabs[nextTabs.length - 1] ?? nextTabs[0] ?? null;
+        const owner = target.workspaceOwner;
+        const siblings = owner ? nextTabs.filter(tab => tab.workspaceOwner?.userId === owner.userId &&
+          tab.workspaceOwner?.projectId === owner.projectId && tab.workspaceOwner?.conversationId === owner.conversationId) : nextTabs;
+        const fallback = siblings[siblings.length - 1] ?? (owner
+          ? nextTabs.find(tab => tab.kind === "conversation" && tab.conversationId === owner.conversationId) : nextTabs[0]) ?? null;
         if (fallback) {
           setActiveTabInternal(fallback, { restorePanel: true });
         } else {

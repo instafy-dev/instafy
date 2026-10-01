@@ -49,7 +49,7 @@ export function ConversationHistoryTab({
     setConversationTitle,
     remoteConversationHistoryResolved,
   } = useConversations();
-  const { tabs, closeTab, keepTabOpen, openConversationTab, requestUrlPush } = useWorkspaceTabs();
+  const { conversationWorkspace, tabs, closeTab, keepTabOpen, openConversationTab, requestUrlPush } = useWorkspaceTabs();
   const { showStatus } = useStatus();
   const isLargeScreen = useStudioDesktopLayout();
   const compactDrawer = isLargeScreen;
@@ -612,7 +612,7 @@ export function ConversationHistoryTab({
                 if (shouldPush) {
                   requestUrlPush();
                 }
-                openConversationTab(conversation.localId, { preview: true });
+                openConversationTab(conversation.localId, { preview: true, restoreWorkspace: conversationWorkspace });
                 if (!isLargeScreen) {
                   onRequestClose?.();
                 }
@@ -752,12 +752,12 @@ export function ConversationHistoryTab({
                                 }
                               }}
                             >
-                              {openConversationTabs.previewIds.has(conversation.localId) ? (
+                              {!conversationWorkspace && openConversationTabs.previewIds.has(conversation.localId) ? (
                                 <StudioMenuItem id="keep-open" data-testid="conversation-history-menu-keep-open">
                                   <MenuItemContent start={<Pin aria-hidden="true" />}>Keep open</MenuItemContent>
                                 </StudioMenuItem>
                               ) : null}
-                              {isOpen ? (
+                              {!conversationWorkspace && isOpen ? (
                                 <StudioMenuItem id="close-tab" data-testid="conversation-history-menu-close-tab">
                                   <MenuItemContent start={<Xmark aria-hidden="true" />}>Close tab</MenuItemContent>
                                 </StudioMenuItem>

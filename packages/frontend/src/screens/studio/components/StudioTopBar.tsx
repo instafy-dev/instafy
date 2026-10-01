@@ -3,6 +3,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { desktopTitleBarFree } from "../../../lib/desktopShell";
 import { DialogTrigger } from "react-aria-components";
 import {
+  ChatLines,
   Cube,
   Clock,
   MoreHoriz,
@@ -55,6 +56,8 @@ import {
 import { useWorkspaceControls } from "../workspaceControls";
 import { useStudioNavigationPosture } from "../useStudioNavigationPosture";
 import { StudioNewChatButton } from "./StudioNewChatButton";
+import { ConversationRoster } from "./ConversationRoster";
+import { EMPTY_CHAT_PARTICIPANTS_SNAPSHOT, useChatParticipantsSnapshot } from "./chatParticipantsStore";
 
 const COMPACT_TAB_SELECTOR_CLASS =
   "h-10 min-w-0 justify-between gap-2 rounded-xl !border-transparent !bg-slate-100 px-2.5 !text-slate-950 hover:!bg-slate-100 data-[hovered]:!bg-slate-100 focus-visible:ring-primary-600 focus-visible:ring-offset-white max-[375px]:min-h-11 dark:!bg-white/[0.06] dark:!text-slate-50 dark:hover:!bg-white/[0.09] dark:data-[hovered]:!bg-white/[0.09] dark:focus-visible:ring-primary-400 dark:focus-visible:ring-offset-[var(--color-studio-dark-rail)]";
@@ -100,8 +103,9 @@ export function StudioTopBar({ mobileNavigation, mobilePageHeader, newChatInSide
   const [desktopSpeechTunnelStatus, setDesktopSpeechTunnelStatus] = useState<DesktopSpeechTunnelBridgeStatus | null>(null);
   const [desktopVoiceStatusLoading, setDesktopVoiceStatusLoading] = useState(false);
 
-  const { tabs: workspaceTabs, activeTabId, focusTab, closeTab, keepTabOpen, requestUrlPush, openConversationTab } = useWorkspaceTabs();
-  const { conversations } = useConversations();
+  const { conversationWorkspace, tabs: workspaceTabs, activeTabId, focusTab, closeTab, keepTabOpen, requestUrlPush, openConversationTab } = useWorkspaceTabs();
+  const { conversations, activeConversationId } = useConversations();
+  const participantsSnapshot = useChatParticipantsSnapshot();
   const { runtime } = useRuntime();
   const controllerProjectMissing = runtime.controllerProjectMissing || projectAccessBlocked;
   const shouldShowNewChat = !newChatInSidebar && showChatActions && Boolean(onStartNewConversation);
@@ -129,6 +133,8 @@ export function StudioTopBar({ mobileNavigation, mobilePageHeader, newChatInSide
     }
     return conversations.find((conversation) => conversation.localId === activeWorkspaceTab.conversationId) ?? null;
   }, [activeWorkspaceTab, conversations]);
+  const returnConversation = conversationWorkspace && activeWorkspaceTab?.kind !== "conversation" && !activeWorkspaceTab?.workspaceOwner
+    ? conversations.find(conversation => conversation.localId === activeConversationId && conversation.lifecycleStatus !== "deleted") : null;
   const parentConversation = useMemo(() => {
     const parentId = activeConversation?.parentConversationId?.trim() ?? "";
     if (!parentId) {
@@ -136,7 +142,24 @@ export function StudioTopBar({ mobileNavigation, mobilePageHeader, newChatInSide
     }
     return conversations.find((conversation) => conversation.controllerId === parentId || conversation.localId === parentId) ?? null;
   }, [activeConversation?.parentConversationId, conversations]);
-  const topbarLocationTitle = topbarLocationOverride?.title ?? activeWorkspaceTab?.title ?? "Space";
+  const workConversation = conversationWorkspace && activeWorkspaceTab?.workspaceOwner
+    ? conversations.find(conversation => conversation.localId === activeWorkspaceTab.workspaceOwner?.conversationId) : null;
+  const topbarLocationTitle = topbarLocationOverride?.title ?? workConversation?.title ?? activeWorkspaceTab?.title ?? "Space";
+  // ChatPanel owns the live roster. Do not briefly show the previous chat's
+  // members while it publishes the newly selected conversation's snapshot.
+  const headerParticipants = participantsSnapshot.conversationId === (activeConversation?.controllerId ?? null)
+    ? participantsSnapshot : EMPTY_CHAT_PARTICIPANTS_SNAPSHOT;
+  const participantsControl = conversationWorkspace && activeConversation && !controllerProjectMissing && !isGlobalPage &&
+    (isLargeScreen || (!mobilePageHeader && !topbarLocationOverride)) ? (
+      <ConversationRoster
+        humans={headerParticipants.humans}
+        agents={headerParticipants.agents}
+        hasCredentialWarning={headerParticipants.agents.some(agent =>
+          agent.credentialState === "missing" || agent.credentialState === "revoked" || agent.credentialState === "none")}
+        placement="header"
+        maxAvatars={isLargeScreen ? 3 : 2}
+      />
+    ) : null;
   const handleOpenParentConversation = useCallback(() => {
     if (!parentConversation) {
       return;
@@ -290,7 +313,7 @@ export function StudioTopBar({ mobileNavigation, mobilePageHeader, newChatInSide
     </StudioDialogPopover>
   );
 
-  const useDesktopTabChrome = isLargeScreen && !controllerProjectMissing;
+  const useDesktopTabChrome = isLargeScreen && !controllerProjectMissing && !conversationWorkspace;
   // Only the integrated macOS layout: elsewhere the header keeps the inset
   // (a real notch on iOS) and the shell keeps owning the drag strip.
   const titleBarFree = useDesktopTabChrome && desktopTitleBarFree();
@@ -473,7 +496,16 @@ export function StudioTopBar({ mobileNavigation, mobilePageHeader, newChatInSide
         <div className={`flex items-center gap-2 px-4 sm:px-5 ${inlineDesktop ? "h-12" : "py-2"}`}>
           <StudioHistoryControls />
           {parentConversationButton}
-          <div className="min-w-0 flex-1">{projectNameLabel}</div>
+          <div className="min-w-0 flex-1">{conversationWorkspace ? (
+            <h1 className="flex min-w-0 items-center gap-2 text-sm font-semibold text-slate-900 dark:text-slate-100" data-testid="conversation-workspace-title">
+              <span aria-hidden="true">{workConversation ? <ChatLines className="h-5 w-5" /> : activeWorkspaceTab?.icon}</span><span className="truncate">{topbarLocationTitle}</span>
+            </h1>
+          ) : projectNameLabel}</div>
+          {participantsControl}
+          {returnConversation ? <Button variant="ghost" size="sm" className="min-w-0 max-w-60 gap-1.5"
+            aria-label={`Return to ${returnConversation.title}`} onPress={() => { requestUrlPush(); openConversationTab(returnConversation.localId, { restoreWorkspace: true }); }}>
+            <NavArrowLeft className="h-4 w-4 shrink-0" aria-hidden="true" /><span className="truncate">{returnConversation.title}</span>
+          </Button> : null}
           {shouldShowNewChat ? <StudioNewChatButton /> : null}
         </div>
       ) : isGlobalPage ? (
@@ -569,7 +601,7 @@ export function StudioTopBar({ mobileNavigation, mobilePageHeader, newChatInSide
               onOpenPicker={onToggleSidebar ?? mobileNavigation.onOpenPicker}
               title={mobilePageHeader?.title ?? topbarLocationTitle}
               titleIcon={mobilePageHeader ? undefined : topbarLocationOverride ? topbarLocationOverride.icon : activeWorkspaceTab?.icon}
-              primaryActions={mobilePageHeader?.actions}
+              primaryActions={mobilePageHeader?.actions ?? participantsControl}
               pageMenuActions={mobilePageHeader?.menuActions}
               spaceName={resolvedProjectName}
               showSpaceName={!contextHeaderAbove}
@@ -614,6 +646,7 @@ export function StudioTopBar({ mobileNavigation, mobilePageHeader, newChatInSide
             </span>
           </Button>
           <div className="flex shrink-0 items-center">
+            {participantsControl}
             {parentConversationButton}
             {workspaceTabs.length > 0 && !controllerProjectMissing ? (
               <DialogTrigger

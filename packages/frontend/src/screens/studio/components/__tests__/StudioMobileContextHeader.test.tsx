@@ -103,6 +103,20 @@ describe("StudioMobileContextHeader", () => {
     expect(props.onSwitchTeam).not.toHaveBeenCalled();
   });
 
+  it("gives Home one row with global navigation, search and the account menu", async () => {
+    await render({ ...props, homeOverview: true });
+    expect(container.querySelectorAll("h1")).toHaveLength(1);
+    expect(container.querySelector("h1")?.textContent).toBe("Home");
+    expect(container.querySelector('[aria-label="Team and space"]')).toBeNull();
+    expect(container.querySelector('[data-testid="sidebar-space-button"]')).toBeNull();
+    await click("home-browse-navigation");
+    expect(props.onSwitchTeam).toHaveBeenCalledOnce();
+    await click("studio-mobile-search-trigger");
+    expect(props.onSearch).toHaveBeenCalledOnce();
+    await click("topbar-profile-button");
+    expect(document.querySelector('[data-testid="profile-account-sheet"]')).not.toBeNull();
+  });
+
   it("uses the same Support and sign-out actions in the compact account sheet", async () => {
     await render();
     await click("topbar-profile-button");

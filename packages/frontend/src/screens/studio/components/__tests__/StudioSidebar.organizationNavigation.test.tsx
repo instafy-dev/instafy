@@ -230,6 +230,36 @@ describe("StudioSidebar organization navigation", () => {
     expect(container.querySelector('[data-testid="sidebar-recent-chats-list"]')).toBeNull();
   });
 
+  it.each([false, true])("opens the full Chats destination in compact conversation workspaces (touch=%s)", async touch => {
+    fixture.desktop = false;
+    fixture.touchLikeInput = touch;
+    const onOpenConversationHistory = vi.fn();
+    const onSelectConversation = vi.fn();
+    const props: Partial<ComponentProps<typeof StudioSidebar>> = {
+      conversationWorkspace: true, mobileOverlay: true, navigationHeaderExternal: true,
+      onOpenConversationHistory, onSelectConversation,
+      recentConversations: [{ ...createInitialConversation({ localId: "recent-chat" }), title: "Recent conversation" }],
+    };
+    await render(props);
+    const chats = () => container.querySelector('[data-testid="sidebar-nav-history"]');
+    expect(container.querySelectorAll('[data-testid="sidebar-nav-history"]')).toHaveLength(1);
+    expect(chats()?.getAttribute("aria-label")).toBe("Chats");
+    expect(chats()?.hasAttribute("aria-expanded")).toBe(false);
+    expect(chats()?.hasAttribute("aria-current")).toBe(false);
+    expect(container.querySelector('[data-testid="sidebar-recent-chats-list"]')).toBeNull();
+    expect(container.querySelector('[data-testid="sidebar-browse-all-chats"]')).toBeNull();
+    expect(container.querySelector('[data-testid="sidebar-nav-chat"]')).toBeNull();
+    await click("sidebar-nav-history");
+    expect(onRequestClose).toHaveBeenCalledOnce();
+    expect(onOpenConversationHistory).toHaveBeenCalledOnce();
+    expect(onSelect).not.toHaveBeenCalled();
+    expect(onSelectConversation).not.toHaveBeenCalled();
+    expect(document.querySelector('[data-testid="sidebar-recent-chats-popover"]')).toBeNull();
+    await render({ ...props, isConversationHistoryActive: true });
+    expect(chats()?.getAttribute("aria-current")).toBe("page");
+    expect(chats()?.hasAttribute("aria-expanded")).toBe(false);
+  });
+
   it.each([
     ["home", "space-a"],
     ["home", null],

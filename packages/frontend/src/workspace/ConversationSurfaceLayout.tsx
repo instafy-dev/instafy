@@ -92,8 +92,9 @@ export function ConversationSurfaceTabs({
 }
 
 export function ConversationSurfaceLayout({
-  chat, content, onRatioChange, onRatioPreview, ...tabs
+  chat, content, onRatioChange, onRatioPreview, showTabs = true, ...tabs
 }: ConversationSurfaceTabsProps & {
+  showTabs?: boolean;
   chat: ReactNode;
   content: ReactNode;
   onRatioChange: (ratio: number) => void;
@@ -105,7 +106,7 @@ export function ConversationSurfaceLayout({
     onRatioPreview?.(ratio);
   }, [onRatioPreview]);
   return <div ref={root} className="flex min-h-0 flex-1 flex-col" data-testid="conversation-surface-layout" data-layout={tabs.split ? "split" : "single"} style={{ "--conversation-resource-ratio": tabs.ratio } as CSSProperties}>
-    <ConversationSurfaceTabs {...tabs} />
+    {showTabs ? <ConversationSurfaceTabs {...tabs} /> : null}
     <div className="min-h-0 flex-1">
       <ResizablePanels main={chat} side={content} mode={tabs.split ? "split" : tabs.activeId === "chat" || !tabs.resources.length ? "main" : "side"} ratio={tabs.ratio} minRatio={0.35} maxRatio={0.7} onRatioChange={onRatioChange} onRatioPreview={previewRatio} />
     </div>

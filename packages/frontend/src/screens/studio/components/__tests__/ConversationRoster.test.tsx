@@ -132,6 +132,19 @@ describe("ConversationRoster", () => {
     expect(container.querySelector('[data-testid="conversation-roster-warning"]')).toBeNull();
   });
 
+  it("retains credential warnings and a usable target in a compact header", async () => {
+    await act(async () => root.render(
+      <ConversationRoster humans={[human("user-self", "Taylor", true)]}
+        agents={[agent("octo", "Octo", "octo"), agent("scout", "Scout", "scout")]}
+        placement="header" maxAvatars={2} hasCredentialWarning />,
+    ));
+    const trigger = container.querySelector<HTMLButtonElement>('[data-testid="conversation-roster"]')!;
+    expect(trigger.title).toBe("Participants");
+    expect(trigger.className).toContain("!min-h-11");
+    expect(container.querySelector('[data-testid="conversation-roster-overflow"]')?.textContent).toBe("+1");
+    expect(container.querySelector('[data-testid="conversation-roster-warning"]')).not.toBeNull();
+  });
+
   it("renders each agent with its own avatar seed", async () => {
     await renderRoster(
       [human("user-self", "Taylor", true)],

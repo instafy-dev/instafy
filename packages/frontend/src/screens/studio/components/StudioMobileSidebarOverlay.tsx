@@ -122,7 +122,7 @@ export function StudioMobileSidebarOverlay({
           paddingLeft: "var(--instafy-safe-area-inset-left)",
         }}
       >
-        <Dialog aria-label="Navigation and recent chats" className="h-full outline-none">
+        <Dialog aria-label="Navigation" className="h-full outline-none">
           <div ref={controlsRef} className="relative h-full min-h-0" style={style} data-testid="mobile-sidebar-controls">
             {children}
           </div>

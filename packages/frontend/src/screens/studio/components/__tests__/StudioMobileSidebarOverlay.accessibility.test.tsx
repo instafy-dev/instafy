@@ -50,7 +50,7 @@ describe("StudioMobileSidebarOverlay accessibility", () => {
   it("moves focus into a named modal and hides the chat behind it from assistive technology", async () => {
     await open();
     const dialog = document.querySelector('[role="dialog"]');
-    expect(dialog?.getAttribute("aria-label")).toBe("Navigation and recent chats");
+    expect(dialog?.getAttribute("aria-label")).toBe("Navigation");
     expect(dialog?.contains(document.activeElement)).toBe(true);
     expect(container.getAttribute("aria-hidden")).toBe("true");
     // The viewport observer must attach after the semantic modal portal mounts.

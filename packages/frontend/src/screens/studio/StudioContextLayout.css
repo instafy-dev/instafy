@@ -56,6 +56,7 @@
 .studio-desktop-tabbar [data-workspace-tab-trigger] { max-width: 240px; }
 .studio-context-header .studio-desktop-search-trigger { flex: none; height: 36px; width: 32px; min-width: 32px; padding: 0; }
 .studio-context-header [hidden] { display: none; }
+.studio-context-header[data-home-overview="true"] .studio-desktop-context-column { width: 100%; }
 .studio-context-header[data-search-open="true"] .studio-desktop-context-column { width: 100%; max-width: 940px; }
 .studio-context-header[data-search-open="true"] .studio-context-slot { flex: 1; }
 .studio-context-layout[data-wide="true"] [data-testid="sidebar-context-navigation"],

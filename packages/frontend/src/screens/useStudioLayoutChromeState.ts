@@ -51,6 +51,7 @@ function clampLeftDrawerWidth(value: number): number {
 }
 
 interface UseStudioLayoutChromeStateParams {
+  conversationWorkspace?: boolean;
   isLargeScreen: boolean;
   scopeKey?: string | null;
 }
@@ -63,6 +64,7 @@ export function shouldDismissLeftDrawerForKeydown(
 
 export function useStudioLayoutChromeState({
   isLargeScreen,
+  conversationWorkspace = false,
   scopeKey = null,
 }: UseStudioLayoutChromeStateParams) {
   const { mobileSidebarOpen, setMobileSidebarOpen, mobileSidebarNavigation, runAfterSidebarClose } =
@@ -98,19 +100,21 @@ export function useStudioLayoutChromeState({
   }, [isLargeScreen, prepareSidebarToggleFocus, setMobileSidebarOpen, setSidebarCollapsed]);
   const [mobileGitReviewSheet, setMobileGitReviewSheet] = useState<WorkspaceGitReviewSource | null>(null);
   const [sourceControlOpenRequest, setSourceControlOpenRequest] = useState<SourceControlOpenRequest | null>(null);
+  const drawerWidthStorageName = conversationWorkspace ? "instafy.conversationWorkspace.drawerWidth" : LEFT_DRAWER_WIDTH_STORAGE_NAME;
+  const defaultDrawerWidth = conversationWorkspace ? 280 : LEFT_DRAWER_DEFAULT_WIDTH;
   const [leftDrawerWidth, setLeftDrawerWidth] = useState<number>(() => {
     if (typeof window === "undefined") {
-      return LEFT_DRAWER_DEFAULT_WIDTH;
+      return defaultDrawerWidth;
     }
     try {
-      const stored = window.localStorage.getItem(LEFT_DRAWER_WIDTH_STORAGE_NAME);
+      const stored = window.localStorage.getItem(drawerWidthStorageName);
       if (!stored) {
-        return LEFT_DRAWER_DEFAULT_WIDTH;
+        return defaultDrawerWidth;
       }
       const parsed = Number.parseInt(stored, 10);
       return clampLeftDrawerWidth(parsed);
     } catch {
-      return LEFT_DRAWER_DEFAULT_WIDTH;
+      return defaultDrawerWidth;
     }
   });
   const [leftDrawerResizing, setLeftDrawerResizing] = useState(false);
@@ -136,13 +140,13 @@ export function useStudioLayoutChromeState({
     }
     try {
       window.localStorage.setItem(
-        LEFT_DRAWER_WIDTH_STORAGE_NAME,
+        drawerWidthStorageName,
         String(clampLeftDrawerWidth(leftDrawerWidth)),
       );
     } catch {
       // ignore storage failures
     }
-  }, [leftDrawerWidth]);
+  }, [drawerWidthStorageName, leftDrawerWidth]);
 
   const stopLeftDrawerResize = useCallback(() => {
     leftDrawerResizeRef.current = null;

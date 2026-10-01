@@ -1,3 +1,4 @@
+import { ConversationWorkspaceViews } from "../workspace/ConversationWorkspaceViews";
 import { chatListDestination } from "../navigation/studioNavigation";
 import { DEFAULT_HOME_LIST_STATE, StudioListNavigationProvider, useStudioListNavigation } from "../navigation/StudioListNavigation";
 import { StudioDraftsProvider, StudioDraftPanel } from "../workspace/StudioDrafts";
@@ -179,11 +180,19 @@ export function StudioLayout() {
   const { user } = useAuth();
   const location = useLocation();
   const restorePanelDestination = useStudioNavigation();
+  const conversationWorkspaceEnabled = import.meta.env.DEV && (
+    import.meta.env.VITE_DEV_CONVERSATION_WORKSPACE === "1" ||
+    new URLSearchParams(location.search).get("conversationWorkspace") === "1"
+  );
   return (
     <StudioDraftsProvider key={user?.id ?? "signed-out"}>
       <StudioDraftNavigationGuard>
         <StudioStartupGate>
-          <WorkspaceTabsProvider locationSearch={location.search} onRestorePanelDestination={restorePanelDestination}>
+          <WorkspaceTabsProvider
+            conversationWorkspaceUserId={conversationWorkspaceEnabled ? user?.id : null}
+            locationSearch={location.search}
+            onRestorePanelDestination={restorePanelDestination}
+          >
               <StudioLayoutInner />
           </WorkspaceTabsProvider>
         </StudioStartupGate>
@@ -232,6 +241,7 @@ function StudioLayoutInner() {
   } = useWorkspaceUi();
   const [projectLauncherPreferredOrgId, setProjectLauncherPreferredOrgId] = useState<string | null>(null);
   const {
+    conversationWorkspace,
     tabs: workspaceTabs,
     conversationTabsReady,
     openPanelTab,
@@ -289,6 +299,7 @@ function StudioLayoutInner() {
     getStudioWorkspaceOwnerKey({ effectiveRuntimeId, localWorkspace, desktopOrigin }));
   const activeProjectOrgKey = activeProjectSummary?.orgId ?? "personal";
   const navigationScope = resolveTeamNavigationScope(location.search, activeProjectOrgKey);
+  const homeOverview = conversationWorkspace && navigationScope.page === "home";
   const searchRoute = new URLSearchParams(location.search);
   const searchKey = JSON.stringify([currentUserId, getStudioVisitKey(location), navigationScope.orgKey, activeProjectId, navigationScope.page, navigationScope.page === "home" ? homeListState.teamFilter : null,
     ...["conversationId", "conversationControllerId", "jobId", "panel", "settingsTab", "settingsOrgId", "settingsCategory"].map(key => searchRoute.get(key))]);
@@ -792,7 +803,7 @@ function StudioLayoutInner() {
     sidebarCollapsed,
     sourceControlOpenRequest,
     setSourceControlOpenRequest,
-  } = useStudioLayoutChromeState({ isLargeScreen, scopeKey: currentUserId ? `${currentUserId}:${activeProjectId ?? "no-project"}` : null });
+  } = useStudioLayoutChromeState({ isLargeScreen, conversationWorkspace, scopeKey: currentUserId ? `${currentUserId}:${activeProjectId ?? "no-project"}` : null });
   useEffect(() => {
     if (mobileSidebarNavigation.error) showStatus(mobileSidebarNavigation.error, "error", 5000);
   }, [mobileSidebarNavigation.error, showStatus]);
@@ -1872,7 +1883,7 @@ function StudioLayoutInner() {
       const scroller = (
         <StudioPanelScrollContainer identity={panelScrollIdentity} ready={panelScrollReady} className="flex-1 overflow-y-auto" data-testid="studio-panel-scroll">
           {activeWorkspaceTab.panel === "home" ? (
-            <HomePanel inboxItems={homeAttentionInboxItems} refreshInbox={refreshHomeAttentionCount} notifications={notificationCenter} supportReports={bugReportController.supportUnreadReports} supportLoading={bugReportController.supportNotificationsLoading} supportError={bugReportController.supportNotificationsError} refreshSupport={() => bugReportController.refreshSupportNotifications(false)} onOpenSupport={bugReportController.onOpenBugReportInbox} />
+            <HomePanel canResumeConversation={projectReadyForWorkspace && !controllerProjectMissing} inboxItems={homeAttentionInboxItems} refreshInbox={refreshHomeAttentionCount} notifications={notificationCenter} supportReports={bugReportController.supportUnreadReports} supportLoading={bugReportController.supportNotificationsLoading} supportError={bugReportController.supportNotificationsError} refreshSupport={() => bugReportController.refreshSupportNotifications(false)} onOpenSupport={bugReportController.onOpenBugReportInbox} />
           ) : activeWorkspaceTab.panel === "team" ? (
             <TeamPanel organizationId={navigationScope.orgKey === "personal" ? null : navigationScope.orgKey} />
           ) : activeWorkspaceTab.panel === "credits" ? (
@@ -1951,8 +1962,9 @@ function StudioLayoutInner() {
   ) : (
     <div className="flex h-full min-h-0 min-w-0 flex-1 flex-col overflow-hidden bg-white text-slate-700 shadow-sm dark:bg-[var(--color-studio-dark-panel)] dark:text-slate-200">
       {workspaceTabsElement}
+      {conversationWorkspace ? <ConversationWorkspaceViews /> : null}
       <div className="flex-1 overflow-hidden">
-        <div key={activeWorkspaceTab?.id ?? "empty"} className="h-full">
+        <div key={activeWorkspaceTab?.id ?? "empty"} className="h-full" id={activeWorkspaceTab?.workspaceOwner ? "conversation-workspace-resource" : undefined} role={activeWorkspaceTab?.workspaceOwner ? "tabpanel" : undefined} aria-label={activeWorkspaceTab?.workspaceOwner ? activeWorkspaceTab.title : undefined}>
           {workspaceContent}
         </div>
       </div>
@@ -2016,7 +2028,7 @@ function StudioLayoutInner() {
   const mobileContextHeader = (overlay = false) => <StudioMobileContextHeader
     teamName={activeTeamName} teamAvatarUrl={activeTeamAvatarUrl} accentColor={selectedTeamMetadata?.accentColor} teamId={navigationScope.orgKey}
     projects={projectList} activeProjectId={activeProjectId} attentionCounts={homeAttentionByProject}
-    homeActive={contextHomeActive} homeAttentionCount={homeAttentionCount} searchRef={overlay ? overlaySearchTriggerRef : mobileSearchTriggerRef}
+    homeActive={contextHomeActive} homeOverview={homeOverview && !overlay} homeAttentionCount={homeAttentionCount} searchRef={overlay ? overlaySearchTriggerRef : mobileSearchTriggerRef}
     onHome={handleOpenHome} onSearch={search.openSearch} onProfile={handleOpenProfileSettings}
     onSupport={() => runStudioNavigation(bugReportController.onOpenBugReportInbox)}
     onSignOut={() => runStudioNavigation(() => { void handleSignOut(); })}
@@ -2035,12 +2047,13 @@ function StudioLayoutInner() {
 
   return (
     <StudioNavigationProvider value={runStudioNavigation}>
-    <PageTitleInNavigationContext.Provider value={isLargeScreen ? null : mobilePageTitle}>
+    <PageTitleInNavigationContext.Provider value={homeOverview ? "Home" : isLargeScreen ? null : mobilePageTitle}>
     <StudioListNavigationProvider value={listNavigation}>
     <StudioSearchReturnProvider value={{ originToken: searchHistory.originToken, returnToResults: () => runStudioNavigation(searchHistory.returnToResults) }}>
     <ControllerNoticeActionsProvider value={controllerNoticeActionsValue}>
       <div
         className="studio-context-layout relative flex h-screen min-h-screen overflow-hidden bg-slate-50 dark:bg-[var(--color-studio-dark-canvas)]"
+        data-conversation-workspace={conversationWorkspace}
         data-search-open={search.open}
         data-wide={isLargeScreen}
         data-titlebar-free={desktopTitleBarFree()}
@@ -2112,18 +2125,19 @@ function StudioLayoutInner() {
           {isLargeScreen ? <StudioDesktopHeader contextRef={setDesktopContextTarget} searchTriggerRef={desktopSearchTriggerRef}
             searchOpen={search.open} onSearch={search.openSearch}
             drawerHeaderRef={setDesktopDrawerHeaderTarget} drawerWidth={leftDrawer ? leftDrawerWidth : 0}
-            navigationCollapsed={sidebarCollapsed} navigationHidden={globalNavigationContext}>
+            navigationCollapsed={sidebarCollapsed} navigationHidden={globalNavigationContext} homeOverview={homeOverview}>
             <StudioTopBar newChatInSidebar inlineDesktop />
           </StudioDesktopHeader> : null}
           {isLargeScreen ? (
               <StudioSidebar
+                conversationWorkspace={conversationWorkspace}
                 navigationPresentation="path"
                 navigationHeaderExternal
                 compactContextHeader={!search.open}
                 navigationHeaderPortalTarget={desktopContextTarget}
                 renderNavigationHeader={context => search.open
                   ? search.renderControl(false, <StudioSearchContext scope={search.scope} context={context} onBroaden={search.changeScope} />)
-                  : <div className="studio-desktop-context" role="group" aria-label="Team and space">
+                  : homeOverview ? null : <div className="studio-desktop-context" role="group" aria-label="Team and space">
                     {context.team}<span className="studio-desktop-context-separator" aria-hidden="true">/</span>{context.space}
                   </div>}
                 onNavigationHeaderAction={() => search.closeSearch(false)}
@@ -2221,7 +2235,7 @@ function StudioLayoutInner() {
             inert={search.open || showMobileLeftDrawerOverlay || undefined}
           >
             {!isLargeScreen && !hideMobileContextWhileTyping ? mobileContextHeader() : null}
-            {!isLargeScreen ? navigationScope.page === "workspace" ? shouldShowFilesWorkspace && filesMobileView === "tree" ? null : <StudioTopBar contextHeaderAbove mobileNavigation={mobileTopbarNavigation} mobilePageHeader={!showMobileLeftDrawerOverlay && filesMobileView === "tree" ? mobileDrawerPageHeader : undefined} /> : <div className={`flex min-h-14 shrink-0 items-center gap-2 border-b border-slate-200/70 bg-slate-50 px-1 py-1 ${DARK_RAIL_SURFACE_CLASS}`}>
+            {!isLargeScreen && !homeOverview ? navigationScope.page === "workspace" ? shouldShowFilesWorkspace && filesMobileView === "tree" ? null : <StudioTopBar contextHeaderAbove mobileNavigation={mobileTopbarNavigation} mobilePageHeader={!showMobileLeftDrawerOverlay && filesMobileView === "tree" ? mobileDrawerPageHeader : undefined} /> : <div className={`flex min-h-14 shrink-0 items-center gap-2 border-b border-slate-200/70 bg-slate-50 px-1 py-1 ${DARK_RAIL_SURFACE_CLASS}`}>
               <IconButton variant="ghost" aria-label="Open navigation" data-testid="topbar-sidebar-toggle" onPress={handleToggleSidebar} className="!min-h-12 !min-w-12"><SidebarExpand className="h-[18px] w-[18px]" aria-hidden="true" /></IconButton>
               <MobileStudioHistoryControls history={mobileHistory} />
               <h1 className="min-w-0 flex-1 truncate text-sm font-semibold text-slate-700 dark:text-slate-200">{mobilePageTitle}</h1>
@@ -2268,6 +2282,7 @@ function StudioLayoutInner() {
               </div>
               <div className="min-h-0 flex-1">
               <StudioSidebar
+                conversationWorkspace={conversationWorkspace}
                 navigationPresentation="path"
                 workspaceSwitcherInitialMode={mobilePickerMode}
                 navigationHeaderExternal
