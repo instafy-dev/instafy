@@ -1,3 +1,4 @@
+import { returnToConversation } from "../utils/conversationNavigation.js";
 import { test, expect, type Page } from "@playwright/test";
 import {
   clearRuntimePreference,
@@ -116,7 +117,7 @@ test.describe("Bench: /learn optimizer enforces memory budgets (opt-in)", () => 
       throw new Error("Project id missing for learn budgets bench.");
     }
 
-    await page.getByTestId("sidebar-nav-chat").click();
+    await returnToConversation(page);
     await clearRuntimePreference(page, { projectId, source: "bench:learn-budgets" }).catch(() => {});
     await ensureHostedRuntimeReady(page, projectId);
 

@@ -113,7 +113,7 @@ declare global {
 
 export function WorkspaceTabsProvider({ children, locationSearch, onRestorePanelDestination, conversationWorkspaceUserId = null }: {
   children: ReactNode;
-  /** Local navigation prototype; omitted by the normal shell. */
+  /** Authenticated owner of conversation views; null only before sign-in resolves. */
   conversationWorkspaceUserId?: string | null;
   locationSearch?: string;
   onRestorePanelDestination?: (destination: WorkspacePanelDestination, options?: StudioNavigationOptions) => void;

@@ -50,9 +50,7 @@ import { StudioSidebarTeamMenu } from "./StudioSidebarTeamMenu";
 import { StudioSidebarWorkspaceSwitcher } from "./StudioSidebarWorkspaceSwitcher";
 import { StudioSidebarWorkspacePanel } from "./StudioSidebarWorkspacePanel";
 import { StudioOrganizationRail } from "./StudioOrganizationRail";
-import { SIDEBAR_RECENT_CHAT_LIMIT, StudioRecentChats } from "./StudioRecentChats";
 import { SIDEBAR_RECENT_SPACE_LIMIT, StudioRecentSpaces } from "./StudioRecentSpaces";
-import type { ConversationState } from "../../../conversations/conversationState";
 import {
   normalizeSidebarOrgUser,
   readCachedControllerOrgs,
@@ -77,14 +75,8 @@ export interface StudioSidebarProps {
   activePanel: StudioPanel;
   onSelect: (panel: StudioPanel) => void;
   collapsed: boolean;
-  /** Conversation workspaces use the full Chats explorer at every screen width. */
-  conversationWorkspace?: boolean;
   pinnedPanel?: StudioPanel | null;
   onOpenConversationHistory?: () => void;
-  recentConversations?: ConversationState[];
-  activeConversationId?: string | null;
-  openConversationIds?: ReadonlySet<string>;
-  onSelectConversation?: (id: string) => void;
   isConversationHistoryActive?: boolean;
   workspaceSwitcherOpen: boolean;
   /** Scope for directory entry points owned by the surrounding mobile header. */
@@ -118,13 +110,8 @@ export function StudioSidebar({
   activePanel,
   onSelect,
   collapsed,
-  conversationWorkspace = false,
   pinnedPanel,
   onOpenConversationHistory,
-  recentConversations = [],
-  activeConversationId,
-  openConversationIds,
-  onSelectConversation,
   isConversationHistoryActive = false,
   workspaceSwitcherOpen: desktopWorkspaceSwitcherOpen,
   workspaceSwitcherInitialMode = "teams-and-spaces",
@@ -202,7 +189,6 @@ export function StudioSidebar({
       action();
     }
   }, [onRequestClose, runSidebarAction]);
-  const [recentChatsExpanded, setRecentChatsExpanded] = useState(true);
   const [recentSpacesExpanded, setRecentSpacesExpanded] = useState(true);
   const projectRecency = useProjectRecency(userEmail);
   const navRef = useRef<HTMLElement | null>(null);
@@ -262,16 +248,11 @@ export function StudioSidebar({
     () => moreItems?.filter((item): item is StudioNavItem => Boolean(item)) ?? [],
     [moreItems],
   );
-  const usesChatExplorer = desktopRail || conversationWorkspace;
-  const hasRecentChats = !usesChatExplorer && Boolean(onSelectConversation);
   // External context already contains the space selector. Only compact
   // desktop navigation needs a second row for New chat below its toggle.
   const desktopHeaderRows = externalHeader ? showLabels ? 1 : 2 : pathHeader ? 1 : showLabels ? 2 : 3;
   const mobileHeaderRows = showLabels ? pathControls ? 1 : 2 : 4;
-  const fixedEntryCount = (desktopRail ? desktopHeaderRows : mobileHeaderRows) + items.length + (!usesChatExplorer && onOpenConversationHistory && !hasRecentChats ? 1 : 0);
-  const recentChatsReservePx = hasRecentChats && showLabels && recentChatsExpanded
-    ? Math.max(1, Math.min(recentConversations.length, SIDEBAR_RECENT_CHAT_LIMIT)) * 40 + 56
-    : 0;
+  const fixedEntryCount = (desktopRail ? desktopHeaderRows : mobileHeaderRows) + items.length;
   // Reserve the bounded two-row space grid before placing secondary tools.
   const recentSpacesReservePx = showLabels && !pathControls && recentSpacesExpanded
     ? Math.ceil(SIDEBAR_RECENT_SPACE_LIMIT / 3) * 96 + 48
@@ -283,7 +264,7 @@ export function StudioSidebar({
       ? Math.max(
           0,
           Math.floor(
-            (navHeight - effectiveFooterReservePx - estimatedChromeReservePx - recentChatsReservePx - recentSpacesReservePx - fixedEntryCount * estimatedRowHeightPx) /
+            (navHeight - effectiveFooterReservePx - estimatedChromeReservePx - recentSpacesReservePx - fixedEntryCount * estimatedRowHeightPx) /
               estimatedRowHeightPx,
           ),
         )
@@ -360,11 +341,6 @@ export function StudioSidebar({
     return [`panel:${activePanel}`];
   }, [activePanel, collapsedMoreItems]);
 
-  useEffect(() => {
-    if (!isLargeScreen && sidebarOpen) {
-      setRecentChatsExpanded(true);
-    }
-  }, [isLargeScreen, sidebarOpen]);
 
   useEffect(() => {
     // Resizing the rail can move secondary tools between inline rows and
@@ -1297,28 +1273,7 @@ export function StudioSidebar({
           </li> : null}
           {selectedTeamHasActiveSpace ? <>
           {items.map((item) => {
-          if (item.id === "chat" && hasRecentChats && onSelectConversation) {
-            return (
-              <li key={item.id}>
-                <StudioRecentChats
-                  key={JSON.stringify([activeTeamUserKey, activeProjectId])}
-                  conversations={recentConversations}
-                  activeConversationId={activeConversationId}
-                  openConversationIds={openConversationIds}
-                  onSelectConversation={(id) => runDestination(() => onSelectConversation(id))}
-                  onBrowseAll={onOpenConversationHistory ? () => runDestination(onOpenConversationHistory) : undefined}
-                  isHistoryActive={isConversationHistoryActive}
-                  collapsed={!showLabels}
-                  expanded={recentChatsExpanded}
-                  onExpandedChange={setRecentChatsExpanded}
-                  active={activePanel === "chat" || isConversationHistoryActive}
-                  rowClassName={`${sidebarRowLayoutClass} ${getSidebarRowToneClass((!showLabels || !recentChatsExpanded) && (activePanel === "chat" || isConversationHistoryActive))}`}
-                  iconClassName={getSidebarNavIconClass(activePanel === "chat" || isConversationHistoryActive)}
-                />
-              </li>
-            );
-          }
-          const opensChatExplorer = usesChatExplorer && item.id === "chat" && Boolean(onOpenConversationHistory);
+          const opensChatExplorer = item.id === "chat" && Boolean(onOpenConversationHistory);
           const togglesChatPane = desktopRail && opensChatExplorer;
           const IconComponent = opensChatExplorer ? ChatsIcon : item.icon;
           const label = opensChatExplorer ? "Chats" : item.label;
@@ -1390,35 +1345,6 @@ export function StudioSidebar({
                   ) : null}
                 </Button>
               </li>
-              {!usesChatExplorer && item.id === "chat" && onOpenConversationHistory ? (
-                <li>
-                  <Button
-                    onPress={() => runDestination(onOpenConversationHistory)}
-                    variant="ghost"
-                    size="sm"
-                    radius="lg"
-                    fullWidth
-                    data-testid="sidebar-nav-history"
-                    className={[
-                      "group/item relative py-1.5 transition focus-visible:ring-offset-0",
-                      sidebarRowLayoutClass,
-                      getSidebarRowToneClass(isConversationHistoryActive),
-                    ].join(" ")}
-                    aria-current={isConversationHistoryActive ? "page" : undefined}
-                    aria-label="Open chats"
-                    title={showLabels ? undefined : "Open chats"}
-                  >
-                    <span className={getSidebarNavIconClass(isConversationHistoryActive)}>
-                      <ChatsIcon className="text-base" aria-hidden="true" />
-                    </span>
-                    {showLabels ? (
-                      <span className="flex flex-1 items-center justify-between gap-2 text-sm font-medium text-slate-700 dark:text-slate-200">
-                        <span>Chats</span>
-                      </span>
-                    ) : null}
-                  </Button>
-                </li>
-              ) : null}
             </Fragment>
           );
         })}

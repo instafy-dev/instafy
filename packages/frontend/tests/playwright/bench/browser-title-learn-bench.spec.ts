@@ -1,3 +1,4 @@
+import { returnToConversation } from "../utils/conversationNavigation.js";
 import { test, expect, type Page } from "@playwright/test";
 import {
   clearRuntimePreference,
@@ -183,7 +184,7 @@ test.describe("Bench: /learn improves simple browser title read (opt-in)", () =>
 	      throw new Error("Project id missing for browser title bench.");
 	    }
 
-    await page.getByTestId("sidebar-nav-chat").click();
+    await returnToConversation(page);
     await clearRuntimePreference(page, { projectId, source: "bench:browser-title" }).catch(() => {});
     await ensureHostedRuntimeReady(page, projectId);
 

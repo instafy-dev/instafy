@@ -1,3 +1,4 @@
+import { returnToConversation } from "../utils/conversationNavigation.js";
 import { test, expect, type Page } from "@playwright/test";
 import {
   clearRuntimePreference,
@@ -223,7 +224,7 @@ test.describe("Bench: /learn improves BBC first-article open (opt-in)", () => {
       throw new Error("Project id missing for BBC bench.");
     }
 
-    await page.getByTestId("sidebar-nav-chat").click();
+    await returnToConversation(page);
     await clearRuntimePreference(page, { projectId, source: "bench:bbc" }).catch(() => {});
     await ensureHostedRuntimeReady(page, projectId);
 

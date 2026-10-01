@@ -1,3 +1,4 @@
+import { returnToConversation } from "../utils/conversationNavigation.js";
 import { _electron as electron, expect, type Page } from "@playwright/test";
 import { openTeamDirectory } from "../utils/sidebar.js";
 import { createRequire } from "node:module";
@@ -41,8 +42,8 @@ import {
   waitForOpenInputSocket,
   type CollaborationSocketProbeSnapshot,
 } from "../utils/sharedBrowserCollaborationHarness.js";
-import {
 import { chooseOption } from "../utils/select.js";
+import {
   expectParticipantPointerAtNormalizedPoint,
   expectResponsiveSharedBrowserLayout,
   expectSharedBrowserContentGeometryConverged,
@@ -153,14 +154,11 @@ async function focusConversation(page: Page) {
   if (await dismissIntro.isVisible().catch(() => false)) {
     await dismissIntro.click();
   }
-  const conversationTab = page
-    .getByTestId("workspace-tabs")
-    .getByRole("button", { name: /Conversation/i })
-    .first();
+  const conversationTab = page.getByRole("button", { name: /^Return to / }).or(page.getByTestId("home-resume-conversation"));
   if (await conversationTab.isVisible().catch(() => false)) {
     await conversationTab.click();
   } else {
-    await page.getByTestId("sidebar-nav-chat").click();
+    await returnToConversation(page);
   }
   await expect(page.getByTestId("chat-input")).toBeVisible({ timeout: 60_000 });
 }

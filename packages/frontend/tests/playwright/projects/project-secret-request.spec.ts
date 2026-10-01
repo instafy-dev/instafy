@@ -1,3 +1,5 @@
+import { returnToConversation, activeConversationId as resolveActiveConversationLocalId } from "../utils/conversationNavigation.js";
+import { openSecretsPanel } from "../utils/sidebar.js";
 import { test, expect, type Page } from "@playwright/test";
 import { randomUUID } from "node:crypto";
 import {
@@ -11,21 +13,6 @@ import { clickQueuedSendNowIfAvailable } from "../utils/chatUi.js";
 import { ensureProjectCreditsReadyInUi } from "../utils/projectCredits.js";
 import { disableAssistantIfPossible } from "../utils/runtimeAi.js";
 
-function conversationTabButtons(page: Page) {
-  return page.locator('[data-testid="workspace-tabs"] [data-tab-kind="conversation"]');
-}
-
-async function resolveActiveConversationLocalId(page: Page): Promise<string> {
-  const tabs = conversationTabButtons(page);
-  await expect(tabs).toHaveCount(1);
-  const tabId = await tabs.first().getAttribute("data-tab-id");
-  if (!tabId) {
-    throw new Error("Conversation tab missing data-tab-id.");
-  }
-  return tabId.startsWith("workspace-conversation-")
-    ? tabId.replace("workspace-conversation-", "")
-    : tabId;
-}
 
 async function createBlankControllerConversationId(params: {
   page: Page;
@@ -127,7 +114,7 @@ test.describe("Secret request cards", () => {
     }
 
     await clearRuntimePreference(page, { projectId, source: "project-secret-request" }).catch(() => {});
-    await page.getByTestId("sidebar-nav-chat").click();
+    await returnToConversation(page);
     await disableAssistantIfPossible(page);
     await expectActiveConversationRoutingState(page, {
       assistantEnabled: false,
@@ -250,16 +237,12 @@ test.describe("Secret request cards", () => {
     // Secret requests return to chat after saving so the user can continue the flow.
     await expect.poll(() => new URL(page.url()).searchParams.get("panel")).toBeNull();
 
-    // Ensure the secret is visible in the secrets list (panel tab stays open).
-    const secretsTab = page.locator('[data-tab-id="workspace-tab-secrets"]');
-    await secretsTab.scrollIntoViewIfNeeded();
-    await secretsTab.click();
+    // Reopen Secrets from navigation; panels no longer accumulate as chat tabs.
+    await openSecretsPanel(page);
     await expect.poll(() => new URL(page.url()).searchParams.get("panel")).toBe("secrets");
     await expect(page.getByTestId("project-secrets-card")).toContainText("CLOUDFLARE_API_TOKEN", { timeout: 30_000 });
 
-    const conversationTab = page.locator(`[data-tab-id="workspace-conversation-${conversationLocalId}"]`);
-    await conversationTab.scrollIntoViewIfNeeded();
-    await conversationTab.click();
+    await returnToConversation(page);
     await expect.poll(() => new URL(page.url()).searchParams.get("panel")).toBeNull();
 
     await expect(page.getByTestId("secret-request-card")).toBeVisible();
@@ -268,8 +251,7 @@ test.describe("Secret request cards", () => {
     const sendQueue = page.getByTestId("chat-send-queue");
     const chatInput = page.getByTestId("chat-input");
     await ensureProjectCreditsReadyInUi(page, projectId);
-    await conversationTab.scrollIntoViewIfNeeded();
-    await conversationTab.click();
+    await returnToConversation(page);
     await expect.poll(() => new URL(page.url()).searchParams.get("panel")).toBeNull();
     await page.getByTestId("chat-input").fill(suggestedReply);
     await expect(page.getByTestId("chat-send-button")).toBeEnabled({ timeout: 15_000 });

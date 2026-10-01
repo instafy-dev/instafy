@@ -76,7 +76,6 @@ import { StudioSidebar } from "../StudioSidebar";
 import { StudioSearchContext } from "../StudioSearchContext";
 import { useStudioSearch } from "../useStudioSearch";
 import { recordProjectOpened } from "../../../../projects/projectRecency";
-import { createInitialConversation } from "../../../../conversations/conversationState";
 import { usesGlobalNavigationContext } from "../../teamNavigation";
 
 describe("StudioSidebar organization navigation", () => {
@@ -128,7 +127,6 @@ describe("StudioSidebar organization navigation", () => {
   const secondaryNavigationProps = (): Partial<ComponentProps<typeof StudioSidebar>> => ({
     mobileOverlay: true,
     navigationHeaderExternal: true,
-    onSelectConversation: vi.fn(),
     items: [
       { id: "chat", label: "Chats" }, { id: "automations", label: "Automations" },
       { id: "code", label: "Files" }, { id: "sourceControl", label: "Changes" },
@@ -194,11 +192,9 @@ describe("StudioSidebar organization navigation", () => {
 
   it.each([false, true])("opens Chats directly without desktop recent-list UI (collapsed=%s)", async collapsed => {
     const onOpenConversationHistory = vi.fn();
-    const onSelectConversation = vi.fn();
     const props: Partial<ComponentProps<typeof StudioSidebar>> = {
-      collapsed, onOpenConversationHistory, onSelectConversation,
+      collapsed, onOpenConversationHistory,
       items: [{ id: "chat", label: "Assistant", icon: () => <span />, accent: "" }],
-      recentConversations: [{ ...createInitialConversation({ localId: "recent-chat" }), title: "Recent conversation" }],
     };
     await render(props);
     const chats = () => container.querySelector('[data-testid="sidebar-nav-history"]');
@@ -216,29 +212,15 @@ describe("StudioSidebar organization navigation", () => {
     await click("sidebar-nav-history");
     expect(onOpenConversationHistory).toHaveBeenCalledTimes(2);
     expect(onSelect).not.toHaveBeenCalled();
-    expect(onSelectConversation).not.toHaveBeenCalled();
-  });
-
-  it("retains recent chats in the mobile navigation drawer", async () => {
-    fixture.desktop = false;
-    await render({ mobileOverlay: true, onSelectConversation: vi.fn(), onOpenConversationHistory: vi.fn(),
-      recentConversations: [{ ...createInitialConversation({ localId: "recent-chat" }), title: "Recent conversation" }],
-    });
-    expect(container.querySelector('[data-testid="sidebar-recent-chat-recent-chat"]')).not.toBeNull();
-    expect(container.querySelector('[data-testid="sidebar-browse-all-chats"]')).not.toBeNull();
-    await click("sidebar-nav-history");
-    expect(container.querySelector('[data-testid="sidebar-recent-chats-list"]')).toBeNull();
   });
 
   it.each([false, true])("opens the full Chats destination in compact conversation workspaces (touch=%s)", async touch => {
     fixture.desktop = false;
     fixture.touchLikeInput = touch;
     const onOpenConversationHistory = vi.fn();
-    const onSelectConversation = vi.fn();
     const props: Partial<ComponentProps<typeof StudioSidebar>> = {
-      conversationWorkspace: true, mobileOverlay: true, navigationHeaderExternal: true,
-      onOpenConversationHistory, onSelectConversation,
-      recentConversations: [{ ...createInitialConversation({ localId: "recent-chat" }), title: "Recent conversation" }],
+      mobileOverlay: true, navigationHeaderExternal: true,
+      onOpenConversationHistory,
     };
     await render(props);
     const chats = () => container.querySelector('[data-testid="sidebar-nav-history"]');
@@ -253,7 +235,6 @@ describe("StudioSidebar organization navigation", () => {
     expect(onRequestClose).toHaveBeenCalledOnce();
     expect(onOpenConversationHistory).toHaveBeenCalledOnce();
     expect(onSelect).not.toHaveBeenCalled();
-    expect(onSelectConversation).not.toHaveBeenCalled();
     expect(document.querySelector('[data-testid="sidebar-recent-chats-popover"]')).toBeNull();
     await render({ ...props, isConversationHistoryActive: true });
     expect(chats()?.getAttribute("aria-current")).toBe("page");
@@ -581,7 +562,7 @@ describe("StudioSidebar organization navigation", () => {
 
   it.each([true, false])("keeps the path above chats and preserves the existing space destination (desktop=%s)", async (desktop) => {
     fixture.desktop = desktop;
-    await render({ navigationPresentation: "path", mobileOverlay: !desktop, onSelectConversation: vi.fn() });
+    await render({ navigationPresentation: "path", mobileOverlay: !desktop });
     const header = container.querySelector('[data-testid="sidebar-team-header"]')!;
     const path = header.querySelector('[data-testid="sidebar-navigation-path"]')!;
     expect(path).not.toBeNull();
@@ -754,7 +735,6 @@ describe("StudioSidebar organization navigation", () => {
     const onBrowseAll = vi.fn();
     const props: Partial<ComponentProps<typeof StudioSidebar>> = {
       collapsed: true,
-      onSelectConversation: vi.fn(),
       onOpenConversationHistory: onBrowseAll,
       items: [
         { id: "chat", label: "Chats", icon: () => <span />, accent: "" },
@@ -958,7 +938,7 @@ describe("StudioSidebar organization navigation", () => {
   it("returns from More to its persistent trigger before resuming mobile navigation", async () => {
     fixture.desktop = false;
     const navigation = { view: "root", openView: vi.fn(), back: vi.fn() };
-    const props = { mobileOverlay: true, mobileNavigation: navigation as never, onSelectConversation: vi.fn(),
+    const props = { mobileOverlay: true, mobileNavigation: navigation as never,
       moreItems: [{ id: "secrets" as const, label: "Secrets", icon: () => <span />, accent: "" }],
     };
     await render(props);
@@ -991,7 +971,7 @@ describe("StudioSidebar organization navigation", () => {
 
   it("keeps only overflowing mobile tools in More and reallocates them after a height change", async () => {
     fixture.desktop = false;
-    const resize = mockSidebarHeight(580);
+    const resize = mockSidebarHeight(484);
     await render(secondaryNavigationProps());
     expect(visibleSecondaryIds()).toEqual(["extensions"]);
     expect(container.querySelector('[data-testid="sidebar-context-scroll"]')?.classList.contains("overflow-y-auto")).toBe(true);
@@ -1002,14 +982,14 @@ describe("StudioSidebar organization navigation", () => {
     await resize(1067);
     expect(visibleSecondaryIds()).toEqual(["extensions", "secrets", "skills", "ai", "machines", "credits"]);
     expect(container.querySelector('[data-testid="sidebar-nav-more"]')).toBeNull();
-    await resize(580);
+    await resize(484);
     expect(visibleSecondaryIds()).toEqual(["extensions"]);
     expect(container.querySelector('[data-testid="sidebar-nav-more"]')).not.toBeNull();
   });
 
   it("keeps an open mobile More view stable during resize and returns focus to its newly inline tools", async () => {
     fixture.desktop = false;
-    const resize = mockSidebarHeight(580);
+    const resize = mockSidebarHeight(484);
     const navigation = { view: "sidebar", openView: vi.fn(), back: vi.fn() };
     const props = { ...secondaryNavigationProps(), mobileNavigation: navigation as never };
     await render(props);

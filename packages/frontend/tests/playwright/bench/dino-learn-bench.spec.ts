@@ -1,3 +1,5 @@
+import { createPublicChatFromTopBar } from "../utils/chatUi.js";
+import { returnToConversation } from "../utils/conversationNavigation.js";
 import { test, expect, type Page } from "@playwright/test";
 import {
   clearRuntimePreference,
@@ -289,7 +291,7 @@ test.describe("Bench: /learn improves Dino game automation (opt-in)", () => {
     if (!projectId) {
       throw new Error("Project id missing for dino bench.");
     }
-    await page.getByTestId("sidebar-nav-chat").click();
+    await returnToConversation(page);
     await clearRuntimePreference(page, { projectId, source: "bench:dino" }).catch(() => {});
     await ensureHostedRuntimeReady(page, projectId);
 
@@ -366,7 +368,7 @@ test.describe("Bench: /learn improves Dino game automation (opt-in)", () => {
     }
 
     // New conversation for after-learn run.
-    await page.getByTestId("chat-new-conversation").click();
+    await createPublicChatFromTopBar(page);
     const after = await runDinoAttempt(page, projectId, 2, attemptPrompt(2), budgetSec);
 
     const attempts: DinoAttemptResult[] = [before, after];
@@ -440,7 +442,7 @@ test.describe("Bench: /learn improves Dino game automation (opt-in)", () => {
     if (!projectId) {
       throw new Error("Project id missing for dino bench.");
     }
-    await page.getByTestId("sidebar-nav-chat").click();
+    await returnToConversation(page);
     await clearRuntimePreference(page, { projectId, source: "bench:dino-max" }).catch(() => {});
     await ensureHostedRuntimeReady(page, projectId);
 
@@ -515,7 +517,7 @@ test.describe("Bench: /learn improves Dino game automation (opt-in)", () => {
       learnError = error instanceof Error ? error.message : String(error);
     }
 
-    await page.getByTestId("chat-new-conversation").click();
+    await createPublicChatFromTopBar(page);
     const after = await runDinoAttempt(page, projectId, 2, attemptPrompt(2), budgetSec);
 
     const attempts: DinoAttemptResult[] = [before, after];

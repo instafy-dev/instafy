@@ -1,3 +1,4 @@
+import { returnToConversation } from "../utils/conversationNavigation.js";
 import { test, expect, type Page } from "@playwright/test";
 import {
   clearRuntimePreference,
@@ -68,7 +69,7 @@ test.describe("Bench suite: multiple /learn tasks in one workspace (opt-in)", ()
       throw new Error("Project id missing for learn suite bench.");
     }
 
-    await page.getByTestId("sidebar-nav-chat").click();
+    await returnToConversation(page);
     await clearRuntimePreference(page, { projectId, source: "bench:learn-suite" }).catch(() => {});
     await ensureHostedRuntimeReady(page, projectId);
 

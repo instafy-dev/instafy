@@ -1,3 +1,4 @@
+import { returnToConversation } from "../utils/conversationNavigation.js";
 import { test, expect, type Page } from "@playwright/test";
 import {
   clearRuntimePreference,
@@ -81,7 +82,7 @@ test.describe("Bench: /learn improves deterministic fixture-site navigation (opt
     const projectId = await prepareStudio(page);
     if (!projectId) throw new Error("Project id missing for fixture-news bench.");
 
-    await page.getByTestId("sidebar-nav-chat").click();
+    await returnToConversation(page);
     await clearRuntimePreference(page, { projectId, source: "bench:fixture-news" }).catch(() => {});
     await ensureHostedRuntimeReady(page, projectId);
     await selectPrimaryAgentModel(page, BENCH_MODEL);

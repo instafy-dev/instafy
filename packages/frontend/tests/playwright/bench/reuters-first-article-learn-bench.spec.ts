@@ -1,3 +1,5 @@
+import { activeConversationId, returnToConversation } from "../utils/conversationNavigation.js";
+import { createPublicChatFromTopBar } from "../utils/chatUi.js";
 import { test, expect, type Page } from "@playwright/test";
 import {
   clearRuntimePreference,
@@ -28,51 +30,9 @@ async function ensureHostedRuntimeReady(page: Page, projectId: string) {
 }
 
 async function openNewConversation(page: Page) {
-  const tabs = page.locator('[data-testid="workspace-tabs"] [data-tab-kind="conversation"]');
-  const previousCount = await tabs.count().catch(() => 0);
-  const previousUrl = page.url();
-
-  await page.getByTestId("chat-new-conversation").click();
-
-  // Creating a new conversation is async: depending on layout state we might
-  // not get a full navigation, but we should at least see either:
-  // - a new conversation tab, or
-  // - a URL change (conversationId/controllerId changes)
-  await expect
-    .poll(
-      async () => {
-        const currentUrl = page.url();
-        const urlChanged = currentUrl !== previousUrl;
-
-        const tabCount = await tabs.count().catch(() => previousCount);
-        const countChanged = previousCount > 0 ? tabCount === previousCount + 1 : tabCount > previousCount;
-
-        let conversationChanged = false;
-        try {
-          const prev = new URL(previousUrl);
-          const next = new URL(currentUrl);
-          const prevKey = `${prev.searchParams.get("conversationId") ?? ""}:${prev.searchParams.get("conversationControllerId") ?? ""}`;
-          const nextKey = `${next.searchParams.get("conversationId") ?? ""}:${next.searchParams.get("conversationControllerId") ?? ""}`;
-          conversationChanged = prevKey !== nextKey && nextKey !== ":";
-        } catch {
-          conversationChanged = false;
-        }
-
-        return urlChanged || countChanged || conversationChanged;
-      },
-      { timeout: 60_000 },
-    )
-    .toBeTruthy();
-
-  if (previousCount > 0) {
-    await expect(tabs).toHaveCount(previousCount + 1, { timeout: 60_000 });
-  }
-
-  // Ensure the new conversation is the active one before sending the next prompt.
-  if (await tabs.last().isVisible().catch(() => false)) {
-    await expect(tabs.last()).toHaveAttribute("aria-current", "page", { timeout: 60_000 }).catch(() => {});
-  }
-
+  const previous = await activeConversationId(page);
+  await createPublicChatFromTopBar(page);
+  await expect.poll(() => new URL(page.url()).searchParams.get("conversationId")).not.toBe(previous);
   await expect(page.getByTestId("chat-input")).toBeVisible({ timeout: 60_000 });
   await expect(page.getByTestId("chat-send-button")).toBeEnabled({ timeout: 60_000 });
 }
@@ -528,7 +488,7 @@ test.describe("Bench: /learn improves Reuters first-article open (opt-in)", () =
       throw new Error("Project id missing for Reuters bench.");
     }
 
-    await page.getByTestId("sidebar-nav-chat").click();
+    await returnToConversation(page);
     await clearRuntimePreference(page, { projectId, source: "bench:reuters" }).catch(() => {});
     await ensureHostedRuntimeReady(page, projectId);
 

@@ -23,6 +23,8 @@ import {
 } from "../components/listRowStyles";
 import { DARK_DIVIDER_BORDER_CLASS } from "../theme/darkSurfaces";
 import { controllerClient } from "../sdk/instafy";
+import { useStartConversationThread } from "./useStartConversationThread";
+import { useWorkspaceUi } from "./useWorkspace";
 import { useWorkspaceTabs } from "./WorkspaceTabsProvider";
 import { useStatus } from "../status/useStatus";
 import { useStudioDesktopLayout } from "../screens/studio/useStudioDesktopLayout";
@@ -51,7 +53,11 @@ export function ConversationHistoryTab({
   } = useConversations();
   const { conversationWorkspace, tabs, closeTab, keepTabOpen, openConversationTab, requestUrlPush } = useWorkspaceTabs();
   const { showStatus } = useStatus();
+  const { requestConversationInvite } = useWorkspaceUi();
   const isLargeScreen = useStudioDesktopLayout();
+  const startThread = useStartConversationThread(() => {
+    if (!isLargeScreen) onRequestClose?.();
+  });
   const compactDrawer = isLargeScreen;
   const externalHeader = isLargeScreen && !!headerPortalTarget;
   const collapsibleSearch = !isLargeScreen || externalHeader;
@@ -687,6 +693,7 @@ export function ConversationHistoryTab({
                   onPress={() => openConversation()}
                   isDisabled={isDeleted}
                   data-testid="conversation-history-item"
+                  data-conversation-id={conversation.localId}
                   aria-current={isActive ? "page" : undefined}
                   titleClassName={isDeleted ? "!font-normal line-through !text-slate-400 dark:!text-slate-500" : pickerListRowTextClassName(isActive)}
                   end={
@@ -732,7 +739,14 @@ export function ConversationHistoryTab({
                               aria-label="Conversation actions"
                               onAction={(key) => {
                                 const action = String(key);
-                                if (action === "keep-open") {
+                                if (action === "new-thread") {
+                                  void startThread(conversation.localId);
+                                } else if (action === "invite") {
+                                  requestUrlPush();
+                                  openConversationTab(conversation.localId);
+                                  requestConversationInvite(conversation.localId);
+                                  if (!isLargeScreen) onRequestClose?.();
+                                } else if (action === "keep-open") {
                                   const tabId = openConversationTabs.tabIdByConversationId.get(conversation.localId);
                                   if (tabId) keepTabOpen(tabId);
                                 } else if (action === "close-tab") {
@@ -752,6 +766,16 @@ export function ConversationHistoryTab({
                                 }
                               }}
                             >
+                              {conversation.lifecycleStatus !== "deleted" ? (
+                                <StudioMenuItem id="new-thread" data-testid="conversation-history-menu-new-thread">
+                                  <MenuItemContent>New thread</MenuItemContent>
+                                </StudioMenuItem>
+                              ) : null}
+                              {conversation.visibility === "private" && conversation.lifecycleStatus !== "deleted" ? (
+                                <StudioMenuItem id="invite" data-testid="conversation-history-menu-invite">
+                                  <MenuItemContent>Invite teammate…</MenuItemContent>
+                                </StudioMenuItem>
+                              ) : null}
                               {!conversationWorkspace && openConversationTabs.previewIds.has(conversation.localId) ? (
                                 <StudioMenuItem id="keep-open" data-testid="conversation-history-menu-keep-open">
                                   <MenuItemContent start={<Pin aria-hidden="true" />}>Keep open</MenuItemContent>

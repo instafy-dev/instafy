@@ -195,7 +195,7 @@ describe("conversation preview tabs", () => {
     expect(api.activeTab?.workspaceOwner).toBeUndefined();
   });
 
-  it("keeps file views with their conversation in the local workspace prototype", async () => {
+  it("keeps file views with their conversation across navigation", async () => {
     const props = { conversationWorkspaceUserId: "user-a" };
     await render(props);
     await act(async () => api.openFileTab({ id: "a.ts", path: "src/a.ts", label: "a.ts" }));
@@ -238,7 +238,7 @@ describe("conversation preview tabs", () => {
     expect(api.conversationSurfaces.read(JSON.stringify(["user-a", projectA, "b"])).files).toEqual([]);
   });
 
-  it("isolates the prototype's file references by account and space", async () => {
+  it("isolates file references by account and space", async () => {
     await render({ conversationWorkspaceUserId: "user-a" });
     await act(async () => api.openFileTab({ id: "a.ts", path: "a.ts", label: "a.ts" }));
     await render({ conversationWorkspaceUserId: "user-b" });

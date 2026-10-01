@@ -1,3 +1,4 @@
+import { returnToConversation } from "../utils/conversationNavigation.js";
 import { test, expect, type Page } from "@playwright/test";
 import {
   clearRuntimePreference,
@@ -120,7 +121,7 @@ test.describe("Bench suite: /learn interference check (opt-in)", () => {
     const projectId = await prepareStudio(page);
     if (!projectId) throw new Error("Project id missing for learn interference bench.");
 
-    await page.getByTestId("sidebar-nav-chat").click();
+    await returnToConversation(page);
     await clearRuntimePreference(page, { projectId, source: "bench:learn-interference" }).catch(() => {});
     await ensureHostedRuntimeReady(page, projectId);
 

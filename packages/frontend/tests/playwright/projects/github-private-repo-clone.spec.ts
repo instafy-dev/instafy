@@ -1,3 +1,4 @@
+import { returnToConversation, activeConversationId as resolveActiveConversationLocalId } from "../utils/conversationNavigation.js";
 import { fileExplorerAction } from "../utils/filesExplorer.js";
 import { test, expect, type Page } from "@playwright/test";
 import { randomUUID } from "node:crypto";
@@ -25,21 +26,6 @@ type InstafyE2EWindow = Window & {
   __INSTAFY_E2E__?: InstafyE2EBridge;
 };
 
-function conversationTabButtons(page: Page) {
-  return page.locator('[data-testid="workspace-tabs"] [data-tab-kind="conversation"]');
-}
-
-async function resolveActiveConversationLocalId(page: Page): Promise<string> {
-  const tabs = conversationTabButtons(page);
-  await expect(tabs).toHaveCount(1);
-  const tabId = await tabs.first().getAttribute("data-tab-id");
-  if (!tabId) {
-    throw new Error("Conversation tab missing data-tab-id.");
-  }
-  return tabId.startsWith("workspace-conversation-")
-    ? tabId.replace("workspace-conversation-", "")
-    : tabId;
-}
 
 async function createBlankControllerConversationId(params: {
   page: Page;
@@ -126,7 +112,7 @@ test.describe("GitHub private repo clone (secrets)", () => {
       throw new Error("Active project id missing for GitHub private repo clone test.");
     }
 
-    await page.getByTestId("sidebar-nav-chat").click();
+    await returnToConversation(page);
 
     await expect
       .poll(

@@ -1,3 +1,4 @@
+import { returnToConversation } from "../utils/conversationNavigation.js";
 import { test, expect, type Locator, type Page } from "@playwright/test";
 import { ensureRealDefaultCodexCredentialWhenRequired, prepareStudio } from "../utils/harness.js";
 import { openSidebarSecondaryItem } from "../utils/sidebar.js";
@@ -76,7 +77,7 @@ test.describe("AI Manager (@octo flavor)", () => {
       return;
     }
     try {
-      await page.getByTestId("sidebar-nav-chat").click();
+      await returnToConversation(page);
       let previousCount = await assistantBubbles(page).count();
       let seenEmojiSuffix = false;
 

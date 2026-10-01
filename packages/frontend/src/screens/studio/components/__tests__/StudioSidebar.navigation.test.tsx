@@ -48,7 +48,6 @@ vi.mock("../StudioSidebarWorkspaceSwitcher", () => ({
 
 const chatSearch = `?projectId=11111111-1111-4111-8111-111111111111&conversationId=chat-a`;
 const workspaceSearch = `${chatSearch}&workspaceTab=workspaces`;
-const noop = () => {};
 const Icon = () => null;
 const items: ComponentProps<typeof StudioSidebar>["items"] = [];
 const moreItems: ComponentProps<typeof StudioSidebar>["moreItems"] = [{ id: "settings", label: "Settings", icon: Icon, accent: "" }];
@@ -81,7 +80,6 @@ function Harness({ teamNavigation = false }: { teamNavigation?: boolean }) {
         mobileNavigation={sidebar.mobileSidebarOpen ? sidebar.mobileSidebarNavigation : undefined}
         runSidebarAction={sidebar.runAfterSidebarClose}
         onSelect={panel => navigation({ kind: "panel", panel })}
-        onSelectConversation={noop}
         workspaceSwitcherOpen={workspaceOpen} workspaceSwitcherPortalTarget={null}
         onWorkspaceSwitcherOpenChange={open => {
           mocks.workspaceChange(open);

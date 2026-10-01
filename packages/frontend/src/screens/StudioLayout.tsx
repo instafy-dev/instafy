@@ -122,7 +122,6 @@ import { WorkspaceTabsProvider, useWorkspaceTabs } from "../workspace/WorkspaceT
 import type { WorkspaceGitReviewSource } from "../workspace/gitReviewTypes";
 import { ConversationHistoryTab } from "../workspace/ConversationHistoryTab";
 import { useWorkspaceActivity } from "../workspace/useWorkspaceActivity";
-import { useRecentConversations } from "../workspace/useRecentConversations";
 import { WorkspaceControlsProvider } from "./studio/workspaceControls";
 import {
   buildHomeAttentionEntries,
@@ -180,16 +179,12 @@ export function StudioLayout() {
   const { user } = useAuth();
   const location = useLocation();
   const restorePanelDestination = useStudioNavigation();
-  const conversationWorkspaceEnabled = import.meta.env.DEV && (
-    import.meta.env.VITE_DEV_CONVERSATION_WORKSPACE === "1" ||
-    new URLSearchParams(location.search).get("conversationWorkspace") === "1"
-  );
   return (
     <StudioDraftsProvider key={user?.id ?? "signed-out"}>
       <StudioDraftNavigationGuard>
         <StudioStartupGate>
           <WorkspaceTabsProvider
-            conversationWorkspaceUserId={conversationWorkspaceEnabled ? user?.id : null}
+            conversationWorkspaceUserId={user?.id ?? null}
             locationSearch={location.search}
             onRestorePanelDestination={restorePanelDestination}
           >
@@ -332,7 +327,6 @@ function StudioLayoutInner() {
     projectKey: conversationsProjectKey,
     conversations,
     activeConversationId,
-    remoteConversationHistoryResolved,
     remoteConversationHistoryError,
     retryRemoteConversationHistory,
     createConversation,
@@ -823,27 +817,6 @@ function StudioLayoutInner() {
     enabled: routeOwnedMobileWorkspaceDrawer,
     history: mobileHistory,
   });
-  // Search temporarily covers the workspace; it does not end the current chat
-  // visit or discard an established blank chat from recents.
-  const retainedChatId = isChatSurfaceVisible && leftDrawer !== "history"
-    ? (activeWorkspaceTab?.kind === "conversation" || activeWorkspaceTab?.kind === "jobThread"
-      ? activeWorkspaceTab.conversationId
-      : activeConversationId)
-    : null;
-  const visibleChatId = searchHidesWorkspace ? null : retainedChatId;
-  const recentConversations = useRecentConversations({
-    conversations,
-    activeConversationId: retainedChatId,
-    userId: currentUserId,
-    projectKey: conversationsProjectKey,
-    // The local guest fallback has no authenticated remote history to wait for.
-    historyResolved: remoteConversationHistoryResolved || !auth.session,
-  });
-  const openConversationIds = useMemo(() => new Set(
-    workspaceTabs.flatMap((tab) => tab.kind === "conversation"
-      ? [tab.conversationId]
-      : []),
-  ), [workspaceTabs]);
   const {
     settingsTab,
     settingsOrgId,
@@ -1369,12 +1342,6 @@ function StudioLayoutInner() {
     }
     setMobileSidebarOpen(true);
   }, [isLargeScreen, leftDrawer, listNavigation, navigateToDestination, requestHistoryPush, runStudioNavigation, searchHistory, setLeftDrawer, setMobileSidebarOpen, setSidebarCollapsed, showTouchBottomDock]);
-
-  const handleSelectRecentConversation = useCallback((conversationId: string) => {
-    if (!activeProjectId) return;
-    navigateToDestination({ kind: "conversation", projectId: activeProjectId, conversationId,
-      conversationControllerId: conversations.find(conversation => conversation.localId === conversationId)?.controllerId });
-  }, [activeProjectId, conversations, navigateToDestination]);
 
   const prepareWorkspaceForNewSession = useCallback((options?: { closeProjectLauncher?: boolean }) => {
     if (options?.closeProjectLauncher !== false) {
@@ -2130,7 +2097,6 @@ function StudioLayoutInner() {
           </StudioDesktopHeader> : null}
           {isLargeScreen ? (
               <StudioSidebar
-                conversationWorkspace={conversationWorkspace}
                 navigationPresentation="path"
                 navigationHeaderExternal
                 compactContextHeader={!search.open}
@@ -2153,10 +2119,6 @@ function StudioLayoutInner() {
                 onActiveTeamChange={handleActiveTeamChange}
                 hideContext={globalNavigationContext}
                 onOpenConversationHistory={handleOpenConversationHistory}
-                recentConversations={recentConversations}
-                activeConversationId={visibleChatId}
-                openConversationIds={openConversationIds}
-                onSelectConversation={handleSelectRecentConversation}
                 isConversationHistoryActive={isConversationHistoryActive}
                 workspaceSwitcherOpen={leftDrawer === "workspaces"}
                 onWorkspaceSwitcherOpenChange={handleWorkspaceSwitcherOpenChange}
@@ -2282,7 +2244,6 @@ function StudioLayoutInner() {
               </div>
               <div className="min-h-0 flex-1">
               <StudioSidebar
-                conversationWorkspace={conversationWorkspace}
                 navigationPresentation="path"
                 workspaceSwitcherInitialMode={mobilePickerMode}
                 navigationHeaderExternal
@@ -2307,10 +2268,6 @@ function StudioLayoutInner() {
                 workspaceSwitcherOpen={leftDrawer === "workspaces"}
                 onWorkspaceSwitcherOpenChange={handleWorkspaceSwitcherOpenChange}
                 workspaceSwitcherPortalTarget={workspaceSwitcherPortalTarget}
-                recentConversations={recentConversations}
-                activeConversationId={visibleChatId}
-                openConversationIds={openConversationIds}
-                onSelectConversation={handleSelectRecentConversation}
                 collapsed={false}
               />
               </div></div>

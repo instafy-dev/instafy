@@ -17,6 +17,8 @@ const mocks = vi.hoisted(() => ({
   closeTab: vi.fn(),
   keepTabOpen: vi.fn(),
   preview: false,
+  startThread: vi.fn(),
+  requestConversationInvite: vi.fn(),
   openConversationTab: vi.fn(),
   requestUrlPush: vi.fn(),
   showStatus: vi.fn(),
@@ -31,6 +33,8 @@ vi.mock("../WorkspaceTabsProvider", () => ({
     tabs: [{ id: "tab-a", kind: "conversation", conversationId: "a", preview: mocks.preview }],
   }),
 }));
+vi.mock("../useStartConversationThread", () => ({ useStartConversationThread: () => mocks.startThread }));
+vi.mock("../useWorkspace", () => ({ useWorkspaceUi: () => mocks }));
 vi.mock("../../status/useStatus", () => ({ useStatus: () => mocks }));
 vi.mock("../../sdk/instafy", () => ({ controllerClient: { conversations: { updateMetadata: vi.fn() } } }));
 
@@ -124,6 +128,20 @@ describe("ConversationHistoryTab", () => {
     expect(mocks.requestUrlPush).toHaveBeenCalledTimes(1);
     expect(mocks.openConversationTab).toHaveBeenCalledWith("b", { preview: true });
     expect(onRequestClose).toHaveBeenCalledTimes(width < 900 ? 1 : 0);
+  });
+
+  it("keeps thread creation and private invitations reachable in each chat menu", async () => {
+    mocks.conversations = [conversation("a", { visibility: "private" }), conversation("b")];
+    await render();
+    await click('[data-testid="conversation-history-menu-a"]');
+    await click('[data-testid="conversation-history-menu-new-thread"]');
+    expect(mocks.startThread).toHaveBeenCalledWith("a");
+    await click('[data-testid="conversation-history-menu-a"]');
+    await click('[data-testid="conversation-history-menu-invite"]');
+    expect(mocks.openConversationTab).toHaveBeenCalledWith("a");
+    expect(mocks.requestConversationInvite).toHaveBeenCalledWith("a");
+    await click('[data-testid="conversation-history-menu-b"]');
+    expect(document.querySelector('[data-testid="conversation-history-menu-invite"]')).toBeNull();
   });
 
   function DockedHistory({ portaled = true, onClose = () => {}, onNewChat = () => {} }: {

@@ -1,3 +1,4 @@
+import { activeConversationId, returnToConversation } from "../utils/conversationNavigation.js";
 import { test, expect, type Page } from "@playwright/test";
 import {
   clearRuntimePreference,
@@ -84,24 +85,13 @@ function buildExpectedSkillImportLine(params: {
     .join(" ");
 }
 
-async function countConversationTabs(page: Page): Promise<number> {
-  return page
-    .getByTestId("workspace-tabs")
-    .locator("[data-tab-kind='conversation']")
-    .count()
-    .catch(() => 0);
-}
-
-// Every skills send lands as the user's own one-line message in the
-// conversation that was already active: no new conversation, no tab switch.
-// Callers run with an existing active conversation, so the tab count is a
-// valid invariant here.
+// Importing a skill sends into the existing chat and preserves its identity.
 async function expectSkillImportTaskConversation(
   page: Page,
   params: {
     expectedSource: string;
     expectedSkillName?: string;
-    tabCountBefore: number;
+    conversationIdBefore: string;
   },
 ): Promise<void> {
   const expectedLine = buildExpectedSkillImportLine(params);
@@ -110,7 +100,7 @@ async function expectSkillImportTaskConversation(
       timeout: 90_000,
     })
     .toContain(expectedLine);
-  expect(await countConversationTabs(page)).toBe(params.tabCountBefore);
+  expect(await activeConversationId(page)).toBe(params.conversationIdBefore);
 }
 
 function parseSkillCount(summaryText: string): number {
@@ -139,11 +129,11 @@ test.describe("Skills command", () => {
     // Guest sessions have no AI access in the BYOC stack; onboard the
     // canonical local Codex login so the AI-targeted send is actually enabled.
     await ensureRealDefaultCodexCredentialWhenRequired(page);
-    await page.getByTestId("sidebar-nav-chat").click();
+    await returnToConversation(page);
     await clearRuntimePreference(page, { projectId, source: "skills-import" }).catch(() => {});
     await ensureHostedRuntimeReady(page, projectId);
     await ensureProjectCreditsReadyInUi(page, projectId);
-    await page.getByTestId("sidebar-nav-chat").click();
+    await returnToConversation(page);
 
     const fixturePath = "playwright/skill-import-fixture/SKILL.md";
     const fixtureContent = [
@@ -212,7 +202,7 @@ test.describe("Skills command", () => {
     // Guest sessions have no AI access in the BYOC stack; onboard the
     // canonical local Codex login so the AI-targeted send is actually enabled.
     await ensureRealDefaultCodexCredentialWhenRequired(page);
-    await page.getByTestId("sidebar-nav-chat").click();
+    await returnToConversation(page);
     await clearRuntimePreference(page, { projectId, source: "skills-uninstall" }).catch(() => {});
     await ensureHostedRuntimeReady(page, projectId);
 
@@ -271,11 +261,11 @@ test.describe("Skills command", () => {
     // canonical local Codex login so the AI-targeted send is actually enabled.
     await ensureRealDefaultCodexCredentialWhenRequired(page);
 
-    await page.getByTestId("sidebar-nav-chat").click();
+    await returnToConversation(page);
     await clearRuntimePreference(page, { projectId, source: "skills-discovery" }).catch(() => {});
     await ensureHostedRuntimeReady(page, projectId);
     await ensureProjectCreditsReadyInUi(page, projectId);
-    await page.getByTestId("sidebar-nav-chat").click();
+    await returnToConversation(page);
 
     await page.route("**/projects/*/skills/discover**", async (route) => {
       const requestUrl = new URL(route.request().url());
@@ -346,15 +336,15 @@ test.describe("Skills command", () => {
     await page.getByTestId("skills-discovery-search").click();
     const installButton = page.getByTestId("skills-discovery-install-github:community:playwright-skill");
     await expect(installButton).toBeVisible({ timeout: 60_000 });
-    const tabCountBeforeInstall = await countConversationTabs(page);
+    const conversationBeforeInstall = await activeConversationId(page);
     await installButton.click();
     // Settings stays put: the line lands in the active chat; the panel does not switch.
     await expect(page.getByTestId("skills-panel")).toBeVisible();
-    await page.getByTestId("sidebar-nav-chat").click();
+    await returnToConversation(page);
     await expectSkillImportTaskConversation(page, {
       expectedSource: "https://github.com/lackeyjb/playwright-skill/tree/main/skills/playwright-skill",
       expectedSkillName: "playwright-skill",
-      tabCountBefore: tabCountBeforeInstall,
+      conversationIdBefore: conversationBeforeInstall,
     });
 
     await expect
@@ -493,11 +483,11 @@ test.describe("Skills command", () => {
     // Guest sessions have no AI access in the BYOC stack; onboard the
     // canonical local Codex login so the AI-targeted send is actually enabled.
     await ensureRealDefaultCodexCredentialWhenRequired(page);
-    await page.getByTestId("sidebar-nav-chat").click();
+    await returnToConversation(page);
     await clearRuntimePreference(page, { projectId, source: "skills-discovery-whatsapp" }).catch(() => {});
     await ensureHostedRuntimeReady(page, projectId);
     await ensureProjectCreditsReadyInUi(page, projectId);
-    await page.getByTestId("sidebar-nav-chat").click();
+    await returnToConversation(page);
 
     await openSkillsDiscoverTab(page);
     await expect(page.getByTestId("skills-discovery-query")).toHaveValue("");
@@ -519,14 +509,14 @@ test.describe("Skills command", () => {
 
     const firstInstallButton = firstDiscoveryCard.getByRole("button", { name: "Install" });
     await expect(firstInstallButton).toBeVisible({ timeout: 60_000 });
-    const tabCountBeforeInstall = await countConversationTabs(page);
+    const conversationBeforeInstall = await activeConversationId(page);
     await firstInstallButton.click();
     await expect(page.getByTestId("skills-panel")).toBeVisible();
-    await page.getByTestId("sidebar-nav-chat").click();
+    await returnToConversation(page);
     await expectSkillImportTaskConversation(page, {
       expectedSource: "https://github.com/openclaw/skills/tree/main/whatsapp-concierge/SKILL.md",
       expectedSkillName: "whatsapp-concierge",
-      tabCountBefore: tabCountBeforeInstall,
+      conversationIdBefore: conversationBeforeInstall,
     });
 
     const installedSkillContent = [
@@ -584,11 +574,11 @@ test.describe("Skills command", () => {
     }
     // `--start` continues into a model turn, so the AI lane must be ready.
     await ensureRealDefaultCodexCredentialWhenRequired(page);
-    await page.getByTestId("sidebar-nav-chat").click();
+    await returnToConversation(page);
     await clearRuntimePreference(page, { projectId, source: "skills-connect" }).catch(() => {});
     await ensureHostedRuntimeReady(page, projectId);
     await ensureProjectCreditsReadyInUi(page, projectId);
-    await page.getByTestId("sidebar-nav-chat").click();
+    await returnToConversation(page);
 
     const fixturePath = "playwright/skill-import-fixture/SKILL.md";
     const fixtureContent = [
@@ -606,7 +596,7 @@ test.describe("Skills command", () => {
 
     const userBubbles = page.getByTestId("chat-bubble-user");
     const userBubbleCountBefore = await userBubbles.count();
-    const tabCountBefore = await countConversationTabs(page);
+    const conversationIdBefore = await activeConversationId(page);
 
     await page.getByTestId("composer-action-menu-trigger").click();
     await page.getByTestId("composer-action-menu-connect").click();
@@ -675,7 +665,7 @@ test.describe("Skills command", () => {
       )
       .toContain("# Playwright imported skill");
 
-    expect(await countConversationTabs(page)).toBe(tabCountBefore);
+    expect(await activeConversationId(page)).toBe(conversationIdBefore);
   });
 
   test("Browse all tools searches by keyword and Escape sends nothing", async ({ page }) => {
@@ -685,7 +675,7 @@ test.describe("Skills command", () => {
     if (!projectId) {
       throw new Error("Project id missing for browse tools test.");
     }
-    await page.getByTestId("sidebar-nav-chat").click();
+    await returnToConversation(page);
 
     const userBubbles = page.getByTestId("chat-bubble-user");
     const userBubbleCountBefore = await userBubbles.count();
@@ -735,7 +725,7 @@ test.describe("Skills command", () => {
     if (!projectId) {
       throw new Error("Project id missing for GitHub import test.");
     }
-    await page.getByTestId("sidebar-nav-chat").click();
+    await returnToConversation(page);
 
     const userBubbles = page.getByTestId("chat-bubble-user");
     const userBubbleCountBefore = await userBubbles.count();
@@ -761,7 +751,7 @@ test.describe("Skills command", () => {
     if (!projectId) {
       throw new Error("Project id missing for card chip test.");
     }
-    await page.getByTestId("sidebar-nav-chat").click();
+    await returnToConversation(page);
 
     const userBubbles = page.getByTestId("chat-bubble-user");
     const userBubbleCountBefore = await userBubbles.count();
@@ -845,11 +835,11 @@ test.describe("Skills command", () => {
       throw new Error("Project id missing for live GitHub discovery test.");
     }
 
-    await page.getByTestId("sidebar-nav-chat").click();
+    await returnToConversation(page);
     await clearRuntimePreference(page, { projectId, source: "skills-discovery-live-github" }).catch(() => {});
     await ensureHostedRuntimeReady(page, projectId);
     await ensureProjectCreditsReadyInUi(page, projectId);
-    await page.getByTestId("sidebar-nav-chat").click();
+    await returnToConversation(page);
 
     await openSkillsDiscoverTab(page);
     await page.getByTestId("skills-discovery-query").fill("Nice-Wolf-Studio agent-discord-skills");

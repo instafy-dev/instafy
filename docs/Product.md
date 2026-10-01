@@ -290,25 +290,24 @@ new messages.
 
 ## Conversation views
 
-In this development layout, Home has a global header with its title and Search, without the
+Home has a global header with its title and Search, without the
 last space's breadcrumb or a conversation return button. Mobile keeps the account menu and
 an explicit team/space browser in the same row. Team filters live in Home and still determine
 search scope, starting at All teams. Continue working offers the current accessible chat with
 its team and space, restores its conversation views, and follows the selected team filter.
 
-A local development version is available with `conversationWorkspace=1` in the Studio URL,
-or `VITE_DEV_CONVERSATION_WORKSPACE=1` when starting the frontend to keep it enabled across
-navigation (add `workspaceTab=history` to start with the Chats explorer open). It replaces the desktop
-conversation tab strip with the selected chat's title. Participant avatars sit beside that title
+Studio shows the selected chat's title instead of a desktop conversation tab strip.
+Participant avatars sit beside that title
 and open the existing participants panel; compact headers show fewer avatars with a count for
 the remaining members. Select tasks in Chats; one view bar holds
 that chat's files, Browser, Git reviews, diffs and run threads. Files opened from the explorer or
 search join the selected conversation's views. Selecting a chat from Chats, or returning from a
 shared tool such as Settings, restores its last selected view. Explicit conversation, message,
 run and review links still select their requested destination rather than a remembered view.
-In this mode, the sidebar has one **Chats** entry at every width, with no inline recent list or
+The sidebar has one **Chats** entry at every width, with no inline recent list or
 **Browse all chats** step. On compact screens it dismisses navigation and opens the full Chats
-destination; on desktop it toggles the docked explorer.
+destination; on desktop it toggles the docked explorer. Each chat menu retains New thread,
+Rename, lifecycle actions and, for private chats, Invite teammate.
 
 Open reviews and runs are retained across chat and space switching for the lifetime of the
 Studio session, scoped to the signed-in user and space. Closing an active review or run returns
@@ -316,16 +315,13 @@ to a view in the same chat. File references and layout preferences retain their 
 account/project/conversation session storage; editor drafts remain workspace-owned. A reload
 can reopen a review or run via its URL, but does not yet restore the whole work-view set.
 
-The desktop layout keeps the 224px navigation column so the team/space picker remains readable,
+The expanded desktop navigation is 224px wide so the team/space picker remains readable,
 with a resizable Chats/Files/Changes pane
 starting at 280px. Its saved pane width is separate from the existing navigation's preference.
-Removing the query flag and the development environment setting restores the existing navigation.
-Production builds ignore both opt-ins and reject development settings in the build environment.
 This changes how work is organized, not runtime ownership: it creates no isolated runtimes,
-Git branches or copies of files. Live runtime/browser behavior and mobile layout still need
-hands-on verification before enabling this model by default.
+Git branches or copies of files.
 
-Workspace tabs select conversations. Within a conversation, Browser and workspace files opened
+Within a conversation, Browser and workspace files opened
 from messages share a resource pane. With at least 1024 CSS pixels available to the conversation,
 Chat and its existing composer stay alongside that pane. A keyboard-accessible divider adjusts
 the width; **Show one view** switches back to tabs. Narrow layouts use the same views as tabs,

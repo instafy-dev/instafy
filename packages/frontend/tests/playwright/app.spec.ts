@@ -1,3 +1,4 @@
+import { activeConversationId, openChats, selectConversation } from "./utils/conversationNavigation.js";
 import { test, expect } from "@playwright/test";
 import {
   prepareStudio,
@@ -28,91 +29,6 @@ interface InstafyWindow extends Window {
   __INSTAFY_STORE__?: {
     getState?: () => StudioStoreSnapshot;
   };
-}
-
-async function conversationTabIds(page: import("@playwright/test").Page): Promise<string[]> {
-  return page.locator('[data-testid="workspace-tabs"] [data-tab-kind="conversation"]').evaluateAll((nodes) =>
-    nodes
-      .map((node) => (node instanceof HTMLElement ? node.dataset.tabId ?? "" : ""))
-      .filter((value) => value.trim().length > 0)
-  );
-}
-
-async function dragTab(page: import("@playwright/test").Page, source: import("@playwright/test").Locator, target: import("@playwright/test").Locator) {
-  const sourceBox = await source.boundingBox();
-  const targetBox = await target.boundingBox();
-  if (!sourceBox || !targetBox) {
-    throw new Error("Unable to measure workspace tab bounds.");
-  }
-  const sourceX = sourceBox.x + sourceBox.width / 2;
-  const sourceY = sourceBox.y + sourceBox.height / 2;
-  const targetX = targetBox.x + Math.min(targetBox.width * 0.3, 24);
-  const targetY = targetBox.y + targetBox.height / 2;
-
-  await page.mouse.move(sourceX, sourceY);
-  await page.mouse.down();
-  await page.mouse.move(sourceX + 12, sourceY, { steps: 4 });
-  await page.mouse.move(targetX, targetY, { steps: 14 });
-  await page.mouse.up();
-}
-
-async function captureActiveWorkspaceTabSequence(
-  page: import("@playwright/test").Page,
-  action: () => Promise<void>,
-): Promise<string[]> {
-  await page.evaluate(() => {
-    const transitions: string[] = [];
-    const collect = () => {
-      const tabs = Array.from(document.querySelectorAll("[data-testid='workspace-tabs'] [data-tab-id]"));
-      const active =
-        tabs.find((node) => node.getAttribute("aria-current") === "page")?.textContent?.trim() ?? null;
-      if (active) {
-        transitions.push(active);
-      }
-    };
-
-    collect();
-    (window as typeof window & { __workspaceTabObserver?: MutationObserver }).__workspaceTabObserver?.disconnect();
-
-    const observer = new MutationObserver(() => collect());
-    observer.observe(document.body, {
-      subtree: true,
-      childList: true,
-      attributes: true,
-      attributeFilter: ["aria-current", "class"],
-    });
-
-    (
-      window as typeof window & {
-        __workspaceTabTransitions?: string[];
-        __workspaceTabObserver?: MutationObserver;
-      }
-    ).__workspaceTabTransitions = transitions;
-    (
-      window as typeof window & {
-        __workspaceTabTransitions?: string[];
-        __workspaceTabObserver?: MutationObserver;
-      }
-    ).__workspaceTabObserver = observer;
-  });
-
-  await action();
-  await page.waitForTimeout(500);
-
-  return await page.evaluate(() => {
-    const state = window as typeof window & {
-      __workspaceTabTransitions?: string[];
-      __workspaceTabObserver?: MutationObserver;
-    };
-    state.__workspaceTabObserver?.disconnect();
-    const deduped: string[] = [];
-    for (const value of state.__workspaceTabTransitions ?? []) {
-      if (deduped[deduped.length - 1] !== value) {
-        deduped.push(value);
-      }
-    }
-    return deduped;
-  });
 }
 
 test.beforeEach(async ({ page }) => {
@@ -406,11 +322,7 @@ test.afterEach(async ({ page }) => {
 
     await Promise.all([
       page.waitForURL((url) => url.searchParams.get("panel") === "secrets", { timeout: 15_000 }),
-      page
-        .getByTestId("workspace-tabs")
-        .getByRole("button", { name: /Secrets/ })
-        .first()
-        .click(),
+      openSecretsPanel(page),
     ]);
     await expect(page.getByTestId("secrets-panel")).toBeVisible();
 
@@ -421,37 +333,26 @@ test.afterEach(async ({ page }) => {
     await expect(page.getByTestId("credits-balance-row")).toBeVisible({ timeout: 15_000 });
   });
 
-  loadsStudioTest("conversation tabs do not flicker through panel tabs", async ({ page }) => {
+  loadsStudioTest("Home and panels return to the current chat without accumulating tabs", async ({ page }) => {
     test.setTimeout(60_000);
     await page.goto("/studio");
-
     await expect(page.getByTestId("chat-input")).toBeVisible({ timeout: 30_000 });
-
-    const conversationTab = page.locator('[data-testid="workspace-tabs"] [data-tab-kind="conversation"]').first();
-    const conversationTitle = ((await conversationTab.textContent()) ?? "").trim();
-    expect(conversationTitle).not.toHaveLength(0);
+    const title = page.getByTestId("conversation-workspace-title");
+    const conversationTitle = (await title.innerText()).trim();
+    const conversationId = await activeConversationId(page);
 
     await page.getByTestId("sidebar-home-button").click();
-    await expect(page.getByTestId("workspace-tabs").locator('[data-tab-id="workspace-tab-home"]')).toHaveAttribute(
-      "aria-current",
-      "page",
-    );
-
-    const homeSequence = await captureActiveWorkspaceTabSequence(page, async () => {
-      await conversationTab.click();
-    });
-    expect(homeSequence).toEqual(["Home", conversationTitle]);
+    await expect(page.getByTestId("studio-home-title")).toHaveText("Home");
+    await expect(page.getByRole("button", { name: "Close Home", exact: true })).toHaveCount(0);
+    await page.getByTestId("home-resume-conversation").click();
+    await expect(title).toHaveText(conversationTitle);
+    expect(await activeConversationId(page)).toBe(conversationId);
 
     await openSecretsPanel(page);
-    await expect(page.getByTestId("secrets-panel")).toBeVisible();
-    await expect(
-      page.getByTestId("workspace-tabs").locator('[data-tab-id="workspace-tab-secrets"]'),
-    ).toHaveAttribute("aria-current", "page");
-
-    const secretsSequence = await captureActiveWorkspaceTabSequence(page, async () => {
-      await conversationTab.click();
-    });
-    expect(secretsSequence).toEqual(["Secrets", conversationTitle]);
+    await expect(title).toHaveText("Secrets");
+    await page.getByRole("button", { name: `Return to ${conversationTitle}`, exact: true }).click();
+    await expect(title).toHaveText(conversationTitle);
+    await expect(page.getByTestId("workspace-tabs")).toHaveCount(0);
   });
 
   loadsStudioTest("new chat menu anchors from the plus button start edge", async ({ page }) => {
@@ -459,13 +360,7 @@ test.afterEach(async ({ page }) => {
     await page.goto("/studio");
 
     await expect(page.getByTestId("chat-input")).toBeVisible({ timeout: 30_000 });
-    await page.getByTestId("sidebar-home-button").click();
-    await expect(page.getByTestId("workspace-tabs").locator('[data-tab-id="workspace-tab-home"]')).toHaveAttribute(
-      "aria-current",
-      "page",
-    );
-
-    const trigger = page.getByTestId("chat-new-conversation");
+    const trigger = page.getByTestId("sidebar-new-chat");
     await trigger.click();
 
     const popover = page.getByTestId("chat-new-chat-menu-popover");
@@ -483,55 +378,28 @@ test.afterEach(async ({ page }) => {
     await expect
       .poll(() =>
         page.evaluate(() => {
-          const button = document.querySelector('[data-testid="chat-new-conversation"]');
+          const button = document.querySelector('[data-testid="sidebar-new-chat"]');
           return button ? button.matches(":focus-visible") : false;
         }),
       )
       .toBe(false);
   });
 
-  loadsStudioTest("home tab can be closed and reopened", async ({ page }) => {
-    test.setTimeout(60_000);
-    await page.goto("/studio");
-
-    await expect(page.getByTestId("chat-input")).toBeVisible({ timeout: 30_000 });
-    await page.getByTestId("sidebar-home-button").click();
-
-    const homeTab = page.getByTestId("workspace-tabs").locator('[data-tab-id="workspace-tab-home"]');
-    await expect(homeTab).toHaveAttribute("aria-current", "page");
-    const closeHomeButton = page.getByRole("button", { name: "Close Home", exact: true });
-    await expect(closeHomeButton).toBeVisible();
-
-    await closeHomeButton.click();
-    await expect(homeTab).toHaveCount(0);
-
-    await page.getByTestId("sidebar-home-button").click();
-    await expect(homeTab).toHaveCount(1);
-    await expect(homeTab).toHaveAttribute("aria-current", "page");
-  });
-
-  loadsStudioTest("conversation tabs can be reordered in the desktop tab strip", async ({ page }) => {
+  loadsStudioTest("switches chats through the explorer without creating global tabs", async ({ page }) => {
     test.setTimeout(60_000);
     await page.goto("/studio");
     await expect(page.getByTestId("chat-input")).toBeVisible({ timeout: 30_000 });
-
+    const first = await activeConversationId(page);
     await createPublicChatFromTopBar(page);
+    const second = await activeConversationId(page);
     await createPublicChatFromTopBar(page);
-
-    const conversationTabs = page.locator('[data-testid="workspace-tabs"] [data-tab-kind="conversation"]');
-    await expect(conversationTabs).toHaveCount(3);
-    await expect.poll(() => conversationTabIds(page)).toHaveLength(3);
-    const orderedTabIds = await conversationTabIds(page);
-    expect(new Set(orderedTabIds).size).toBe(3);
-
-    await dragTab(page, conversationTabs.nth(2), conversationTabs.nth(0));
-
-    await expect.poll(() => conversationTabIds(page)).toEqual([
-      orderedTabIds[2],
-      orderedTabIds[0],
-      orderedTabIds[1],
-    ]);
+    const third = await activeConversationId(page);
+    expect(new Set([first, second, third]).size).toBe(3);
+    await openChats(page);
+    await expect(page.getByTestId("conversation-history-item")).toHaveCount(3);
+    await selectConversation(page, first);
+    await expect(page.getByTestId("conversation-history-item").filter({ hasText: "Conversation 1" })).toHaveAttribute("aria-current", "page");
+    await selectConversation(page, third);
+    await expect(page.getByTestId("workspace-tabs")).toHaveCount(0);
   });
-
-
 });
