@@ -132,6 +132,7 @@ import {
   type StickyChatSpeaker,
 } from "./chatSpeakerMarker";
 import { ChatColumn } from "./ChatColumn";
+import { ChatLoadingPill } from "./ChatLoadingPill";
 import { ChatMessageContextToolbar } from "./ChatMessageContextToolbar";
 import { ChatMessageHistoryControls } from "./ChatMessageHistoryControls";
 import { useStudioSearchReturn } from "./StudioSearchReturnContext";
@@ -5762,12 +5763,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
               </ChatBubbleRow>
             ) : null}
             {(messageTargetActive || !shouldShowGettingStarted) && isInitialHistoryLoading && !initialHistoryError && !remoteConversationHistoryError ? (
-              <div className="flex justify-center px-2 py-1" role="status">
-                <div className="inline-flex items-center gap-3 rounded-2xl border border-slate-200/70 bg-white/85 px-4 py-3 text-sm font-medium text-slate-600 shadow-sm dark:border-[color:var(--color-studio-dark-panel-border)] dark:bg-[var(--color-studio-dark-panel-soft)] dark:text-slate-300">
-                  <Spinner aria-hidden="true" tone="slate" size="sm" />
-                  <span>Loading messages…</span>
-                </div>
-              </div>
+              <ChatLoadingPill>Loading messages…</ChatLoadingPill>
             ) : null}
             {displayedHistoryError || remoteConversationHistoryError ? (
               <div className="flex justify-center px-2 py-1" role="alert" data-testid="chat-history-error">
@@ -5935,6 +5931,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
                   run.metadata?.browserTransport === "desktop-personal" &&
                   (run.status === "in_progress" || run.status === "queued"))}
                 compactChrome={compactBrowserBar}
+                historyUserId={currentUserId}
                 model={personalBrowser}
                 sharingControls={activeProjectId && currentUserId ? (
                   <LocalBrowserTabPublisher

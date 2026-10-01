@@ -1,5 +1,6 @@
 import { withoutManualCiRouting } from "./lib/manualCiRoutingTestBaseline.mjs";
 import { ADDED_BUILD_CONTRACT_TESTS, addedBuildContractTestLine, withoutAddedBuildContractTests } from "./lib/buildContractTestsBaseline.mjs";
+import { cacheStepRuns, CACHE_REFS, withoutMainOnlyCaches } from "./lib/mainOnlyCacheTestBaseline.mjs";
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import fs from 'node:fs';
@@ -61,10 +62,12 @@ function route(key, github, enabled = '') {
 // These are source-only cancellation regressions, not a GitHub scheduler test.
 // Keep them in this existing CI test entrypoint so no workflow command changes.
 const cancellationWorkflows = [
-  // Build includes the reviewed proxy_retry_budget and read-reference selectors,
-  // independently bound by check-rust-ci; other commands and authority are exact.
+  // Build includes the reviewed proxy_retry_budget and read-reference selectors, the
+  // code-mode host build and the per-model proxy_retry_budget runs, independently
+  // bound by check-rust-ci; other commands and authority are exact.
+  // Both hashes are taken after reversing the main-only cache change exactly.
   { file: 'build.yml', text: source, keys: ['javascript', 'rust', 'rust-tests'],
-    previousHash: '3dbab268c4c1e73b83ac4820ff69ba1a6572bb3ea3d3a721bf3ee285104f2e77' },
+    previousHash: '9de0757d8928879677f46f8cc5a288c354dcb170067231d12a0fe286b703912f' },
   { file: 'browser-e2e.yml', text: withoutManualCiRouting('browser-e2e.yml', fs.readFileSync(path.join(root, '.github/workflows/browser-e2e.yml'), 'utf8')),
     keys: ['shared-profile'], previousHash: '71980384b6c935e2fbe90e48cd7526e8bbded8721611cea427ee0f9bd5da1115' },
 ];
@@ -124,7 +127,7 @@ function aggregateResult(text, github, isCancelled, results) {
   }
 }
 
-test('only four job if lines differ from the complete reviewed workflows plus the runtime retry and read-reference test selectors', () => {
+test('only four job if lines differ from the complete reviewed workflows plus the runtime retry and read-reference test selectors and main-only caches', () => {
   for (const workflow of cancellationWorkflows) {
     assert.equal(workflow.text.split(aggregateIf).length - 1, workflow.keys.length, workflow.file);
     for (const key of workflow.keys) {
@@ -133,7 +136,7 @@ test('only four job if lines differ from the complete reviewed workflows plus th
     }
     // The old guard is reconstructed literally; all routes, needs, inline gates,
     // permissions, concurrency, timeouts and step-level always cleanup stay exact.
-    const original = workflow.text.replaceAll(aggregateIf, '    if: ${{ always() }}');
+    const original = withoutMainOnlyCaches(workflow.file, workflow.text).replaceAll(aggregateIf, '    if: ${{ always() }}');
     assert.equal(createHash('sha256').update(original).digest('hex'), workflow.previousHash, workflow.file);
   }
 });
@@ -301,6 +304,29 @@ test('all original migration and contract checks remain together including the r
   }
   assert.match(text, /supabase-postgres-image-\$\{\{ runner\.os \}\}-\$\{\{ runner\.arch \}\}-/u);
   assert.ok(text.indexOf('Ensure Supabase Postgres image') < text.indexOf('Apply public migrations to an empty database'));
+});
+
+test('the migration-image cache saves only from main, and every other ref restores the same entry first', () => {
+  const pin = '55cc8345863c7cc4c66a329aec7e433d2d1c52a9';
+  const restore = step('javascript-contracts', 'Restore Supabase Postgres image cache without saving');
+  const save = step('javascript-contracts', 'Restore Supabase Postgres image cache');
+  assert.ok(restore.includes(`        uses: actions/cache/restore@${pin} # v6.1.0\n`));
+  assert.ok(save.includes(`        uses: actions/cache@${pin} # v6.1.0\n`));
+  // The same path and key address the same entry. Only the ref decides whether
+  // this lane saves, so self-hosted main pushes keep their existing save.
+  assert.equal(restore.split('        with:\n')[1], save.split('        with:\n')[1]);
+  assert.match(save, /^          path: ~\/\.instafy-image-cache\n          key: supabase-postgres-image-/mu);
+  for (const environment of ['self-hosted', 'github-hosted', '', 'unknown']) {
+    for (const ref of CACHE_REFS) {
+      const saves = cacheStepRuns(save, environment, ref);
+      assert.equal(saves, ref === 'refs/heads/main', `${environment} ${ref}`);
+      assert.equal(cacheStepRuns(restore, environment, ref), !saves, `${environment} ${ref}`);
+    }
+  }
+  const text = job('javascript-contracts');
+  assert.ok(text.indexOf(restore) < text.indexOf(save));
+  assert.ok(text.indexOf(save) < text.indexOf('      - name: Ensure Supabase Postgres image\n'));
+  assert.equal((text.match(/uses: actions\/cache(?:\/\w+)?@/gu) ?? []).length, 2);
 });
 
 test('contract tests added after the reviewed inventory run once, in the hosted contracts step', () => {

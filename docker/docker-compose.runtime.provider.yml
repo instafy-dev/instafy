@@ -124,6 +124,15 @@ services:
       ORIGIN_SKIP_AUTH: ${ORIGIN_SKIP_AUTH:-0}
       ORIGIN_ENABLE_PRESENCE_HEARTBEAT: ${ORIGIN_ENABLE_PRESENCE_HEARTBEAT:-1}
       ORIGIN_INTERNAL_TOKEN: ${ORIGIN_INTERNAL_TOKEN:-dev-internal-token}
+      # The space's canonical git remote. The controller derives it from its
+      # GIT_REMOTE_BASE_URL and passes it in the launch metadata. Without it
+      # the workspace exists only on this node's disk and is lost when the
+      # node is replaced. Unset or empty means no remote.
+      # With a remote, a workspace that already has files but no
+      # .instafy/.git stops the runtime from starting, so roll this file out
+      # only to fresh nodes or empty workspaces (docs/Runtime-Machines.md,
+      # "Workspace durability").
+      ORIGIN_GIT_REMOTE_URL: ${ORIGIN_GIT_REMOTE_URL:-}
       ORIGIN_PROTOCOLS: ${ORIGIN_PROTOCOLS:-http}
       ORIGIN_MODE: ${ORIGIN_MODE:-hosted}
       ORIGIN_DEVICE_ID: ${ORIGIN_DEVICE_ID:-runtime-hosted}
@@ -139,8 +148,9 @@ services:
       proxy:
         condition: service_healthy
     working_dir: /workspace
-    # Give the agent time to push its final workspace checkpoint (WIP flush in
-    # the origin server's shutdown path) before SIGKILL.
+    # Reserved for the origin server's shutdown flush (a final workspace
+    # checkpoint before SIGKILL). The flush cannot push yet: see the known gap
+    # in docs/Runtime-Machines.md, "Workspace durability".
     stop_grace_period: 45s
     tty: true
     stdin_open: true

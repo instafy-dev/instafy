@@ -6,6 +6,7 @@ import {
   resolveControllerRequestContext,
   runtimeControllerEnabled,
 } from "./core";
+import { createControllerReadBudget } from "./readBudget";
 
 export interface FetchRuntimeStatusParams {
   projectId: string;
@@ -63,34 +64,35 @@ export async function fetchRuntimeStatus(
     return null;
   }
 
-  const requestContext = await resolveControllerRequestContext(
-    params.accessToken ?? null,
-  );
-  const accessToken = requestContext.accessToken;
-  if (!accessToken) {
-    return null;
-  }
-
+  const budget = createControllerReadBudget(params.signal);
   try {
-    const response = await fetch(
+    const requestContext = await budget.wait(() => resolveControllerRequestContext(
+      params.accessToken ?? null,
+    ));
+    const accessToken = requestContext.accessToken;
+    if (!accessToken) {
+      return null;
+    }
+
+    const response = await budget.wait(() => fetch(
       `${requestContext.baseUrl}/projects/${encodeURIComponent(params.projectId)}/runtime/status`,
       {
-        signal: params.signal,
+        signal: budget.signal,
         headers: { authorization: `Bearer ${accessToken}` },
       },
-    );
+    ));
 
     if (!response.ok) {
       throw new Error(
-        await readControllerError(
+        await budget.wait(() => readControllerError(
           response,
           "fetch runtime status failed",
           requestContext,
-        ),
+        )),
       );
     }
 
-    const payload = (await response.json()) as {
+    const payload = (await budget.wait(() => response.json())) as {
       runtimes?: ControllerRuntimeStatusEntry[];
       preferredRuntimeId?: string | null;
     };
@@ -137,6 +139,8 @@ export async function fetchRuntimeStatus(
     }
     console.warn("[runtime-controller] fetchRuntimeStatus error:", message);
     return null;
+  } finally {
+    budget.dispose();
   }
 }
 

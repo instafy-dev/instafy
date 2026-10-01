@@ -3,7 +3,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
@@ -24,12 +24,39 @@ const STEP_TEXT: &str = "LOCAL_RETRY_STEP_DONE";
 const FINISHED_CALL_ID: &str = "call-local-finished";
 const PARTIAL_TEXT: &str = "LOCAL_CUT_SHORT_PARTIAL";
 const TOOL_CMD: &str = "printf x >> tool-count.txt; printf TOOL_APPLIED";
+/// Selects the Codex model the scenarios run; every Codex bump runs them for each model the
+/// runtime offers (for example gpt-6-luna, gpt-5.6-sol and gpt-5.5).
+const TEST_MODEL_ENV: &str = "INSTAFY_TEST_CODEX_MODEL";
+const DEFAULT_TEST_MODEL: &str = "gpt-6-luna";
+const PERSONAL_BROWSER_TOKEN: &str = "inert-local-personal-browser-token";
+/// Tools a bounded browser turn must never offer: shell, file, image, agent and user-input tools.
+const BOUNDED_BROWSER_FORBIDDEN_TOOLS: &[&str] = &[
+    "exec_command",
+    "write_stdin",
+    "shell",
+    "shell_command",
+    "local_shell",
+    "apply_patch",
+    "view_image",
+    "web_search",
+    "image_generation",
+    "spawn_agent",
+    "send_input",
+    "request_permissions",
+    "request_user_input",
+    "request_user_input_async",
+    "send_user_message_async",
+    "send_message_to_user_async",
+    "sleep",
+];
 
 struct MockState {
     scenario: String,
     request_ready: PathBuf,
     requests: Mutex<Vec<Value>>,
     errors: Mutex<Vec<String>>,
+    /// JSON-RPC methods the Personal Browser MCP endpoint received.
+    mcp_methods: Mutex<Vec<String>>,
 }
 
 fn sse(item: Value) -> Response {
@@ -83,8 +110,10 @@ fn sse_output(item: Option<Value>, end_turn: Option<bool>, usage: Option<Value>)
     ([("content-type", "text/event-stream")], body).into_response()
 }
 
-/// The Instafy proxy's envelope for a retryable upstream rate limit. The proxy always sends a
-/// Retry-After with it; one second keeps the scheduled retry short.
+/// The Instafy proxy's envelope for a retryable upstream rate limit, which it still sends as an
+/// HTTP 429 to a request that does not stream. The proxy always sends a Retry-After with it.
+/// Codex never retries an HTTP 429 (`retry_429` is off for every provider), so the proxy streams
+/// a transient rate limit to codex as `proxy_stream_rate_limit` instead.
 fn proxy_rate_limit() -> Response {
     let body = json!({"error":{"message":"The upstream provider rate limit was reached.",
         "type":"upstream_error", "code":"upstream_rate_limit", "retryable":true}});
@@ -219,17 +248,16 @@ async fn responses(
         return (StatusCode::BAD_REQUEST, "local fixture request ceiling").into_response();
     }
     let code = match state.scenario.as_str() {
-        "transient" | "transient_429" | "transient_429_sse" if ordinal > 1 => {
+        "transient" | "transient_429_sse" if ordinal > 1 => {
             return answer(FINAL_TEXT);
         }
-        "transient_429" | "persistent_429" => return proxy_rate_limit(),
+        "http_429" => return proxy_rate_limit(),
         "transient_429_sse" | "persistent_429_sse" => return proxy_stream_rate_limit(),
         "usage_limit_429" => return proxy_usage_limit(),
         // Two sampling requests in one browser-lane turn, each throttled once and recovered.
-        "browser_step_429s" | "browser_step_429s_sse" => {
+        "browser_step_429s_sse" => {
             return match ordinal {
-                1 | 3 if state.scenario.ends_with("_sse") => proxy_stream_rate_limit(),
-                1 | 3 => proxy_rate_limit(),
+                1 | 3 => proxy_stream_rate_limit(),
                 2 => continue_turn(STEP_TEXT),
                 _ => answer(FINAL_TEXT),
             };
@@ -319,6 +347,8 @@ async fn responses(
                 .to_string(),
             );
         }
+        // A bounded browser turn only needs its tool inventory recorded; the parent checks it.
+        "personal_browser_tools" | "personal_browser_behind_proxy" => return answer(FINAL_TEXT),
         "tool_once" => {
             let supplied_history = body["input"].to_string();
             if !supplied_history.contains("TOOL_APPLIED") {
@@ -389,6 +419,145 @@ fn workspace_command_call(
     None
 }
 
+/// A minimal Personal Browser MCP endpoint: one read-only `snapshot` tool.
+async fn personal_browser_mcp(
+    State(state): State<Arc<MockState>>,
+    headers: HeaderMap,
+    Json(payload): Json<Value>,
+) -> Response {
+    if headers.get("authorization").and_then(|v| v.to_str().ok())
+        != Some(format!("Bearer {PERSONAL_BROWSER_TOKEN}").as_str())
+    {
+        state
+            .errors
+            .lock()
+            .unwrap()
+            .push("unexpected Personal Browser auth".into());
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    let id = payload.get("id").cloned().unwrap_or(Value::Null);
+    if let Some(method) = payload.get("method").and_then(Value::as_str) {
+        state.mcp_methods.lock().unwrap().push(method.to_string());
+    }
+    let result = match payload.get("method").and_then(Value::as_str) {
+        Some(method) if method.starts_with("notifications/") => {
+            return StatusCode::ACCEPTED.into_response();
+        }
+        Some("initialize") => json!({
+            "protocolVersion": "2025-06-18",
+            "capabilities": { "tools": { "listChanged": false } },
+            "serverInfo": { "name": "instafy-personal-browser", "version": "1.0.0" },
+        }),
+        Some("tools/list") => json!({ "tools": [{
+            "name": "snapshot",
+            "description": "Read the visible Personal Browser page.",
+            "inputSchema": { "type": "object", "properties": {}, "additionalProperties": false },
+        }]}),
+        _ => {
+            return Json(json!({ "jsonrpc": "2.0", "id": id,
+                "error": { "code": -32601, "message": "Method not found" } }))
+            .into_response();
+        }
+    };
+    Json(json!({ "jsonrpc": "2.0", "id": id, "result": result })).into_response()
+}
+
+/// Every tool name a request offers: top-level tools, code mode's `additional_tools`, and the
+/// nested tools a code mode `exec` description declares (as "### `name`" sections).
+fn offered_tool_names(request: &Value) -> Vec<String> {
+    let mut names = Vec::new();
+    tool_names(&request["tools"], &mut names);
+    for entry in request["input"].as_array().into_iter().flatten() {
+        if entry["type"] == "additional_tools" {
+            tool_names(&entry["tools"], &mut names);
+            let tools = entry["tools"].to_string();
+            for declaration in tools.split("### `").skip(1) {
+                if let Some((name, _)) = declaration.split_once('`') {
+                    names.push(name.to_string());
+                }
+            }
+        }
+    }
+    names
+}
+
+/// Collects every line of every string in a request. The prompt travels as `instructions`, or
+/// for a Responses Lite model (gpt-6-luna, gpt-5.6-sol) as a developer input item.
+fn request_text_lines(value: &Value, output: &mut Vec<String>) {
+    match value {
+        Value::String(text) => output.extend(text.lines().map(str::to_string)),
+        Value::Array(items) => items
+            .iter()
+            .for_each(|item| request_text_lines(item, output)),
+        Value::Object(fields) => fields
+            .values()
+            .for_each(|field| request_text_lines(field, output)),
+        _ => {}
+    }
+}
+
+/// A proxy that must never be used: it records each connection and closes it unanswered.
+async fn start_poison_proxy() -> Result<(String, Arc<Mutex<usize>>, tokio::task::JoinHandle<()>)> {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+    let url = format!("http://{}", listener.local_addr()?);
+    let connections = Arc::new(Mutex::new(0));
+    let counted = Arc::clone(&connections);
+    let task = tokio::spawn(async move {
+        while let Ok((stream, _)) = listener.accept().await {
+            *counted.lock().unwrap() += 1;
+            drop(stream);
+        }
+    });
+    Ok((url, connections, task))
+}
+
+fn test_model() -> String {
+    std::env::var(TEST_MODEL_ENV).unwrap_or_else(|_| DEFAULT_TEST_MODEL.to_string())
+}
+
+/// Code-mode-only models, including the default gpt-6-luna, run every tool in
+/// `codex-code-mode-host`, which runtime-agent looks for beside its own executable. A test
+/// binary lives in `target/<profile>/deps`, so link the host that
+/// `cargo build --features code-mode-host -p runtime-agent -p codex-code-mode-host` left in
+/// `target/<profile>`. Without it, a code-mode-only model fails every scenario here, loudly.
+fn stage_code_mode_host_beside_test_binary() -> Result<()> {
+    static STAGED: OnceLock<Result<(), String>> = OnceLock::new();
+    STAGED
+        .get_or_init(|| {
+            let stage = || -> Result<()> {
+                let name = runtime_agent::code_mode_host::EXECUTABLE_NAME;
+                let test_binary = std::env::current_exe()?;
+                let deps = test_binary
+                    .parent()
+                    .context("test binary has no directory")?;
+                let Some(built) = deps
+                    .parent()
+                    .map(|profile| profile.join(name))
+                    .filter(|built| built.is_file())
+                else {
+                    let model = test_model();
+                    if runtime_agent::code_mode_host::bundled_model_is_code_mode_only(&model)? {
+                        bail!(
+                            "{model} runs its tools only through {name}, which is not built in {}; build it with `cargo build --features code-mode-host -p runtime-agent -p codex-code-mode-host` (see DEV_SETUP.md) or set {TEST_MODEL_ENV}=gpt-5.5",
+                            deps.parent().unwrap_or(deps).display()
+                        );
+                    }
+                    return Ok(());
+                };
+                let staged = deps.join(name);
+                // Replace any earlier copy so a rebuilt host is the one under test.
+                let _ = fs::remove_file(&staged);
+                if fs::hard_link(&built, &staged).is_err() {
+                    fs::copy(&built, &staged)?;
+                }
+                Ok(())
+            };
+            stage().map_err(|error| format!("{error:#}"))
+        })
+        .clone()
+        .map_err(anyhow::Error::msg)
+}
+
 fn tool_names(value: &Value, output: &mut Vec<String>) {
     match value {
         Value::Array(items) => items.iter().for_each(|item| tool_names(item, output)),
@@ -424,17 +593,29 @@ async fn run_scenario(scenario: &str, expected_requests: usize) -> Result<()> {
         request_ready: temp.path().join("request-ready"),
         requests: Mutex::new(Vec::new()),
         errors: Mutex::new(Vec::new()),
+        mcp_methods: Mutex::new(Vec::new()),
     });
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
     let origin = format!("http://{}", listener.local_addr()?);
+    stage_code_mode_host_beside_test_binary()?;
     let app = Router::new()
         .route("/v1/responses", post(responses))
+        .route("/mcp", post(personal_browser_mcp))
         .route(
             "/v1/models",
             get(|| async { Json(json!({"object":"list","data":[]})) }),
         )
         .with_state(state.clone());
     let server = tokio::spawn(async move { axum::serve(listener, app).await });
+    // An unreachable proxy: a loopback port nothing listens on.
+    let model_origin = if scenario == "proxy_unreachable" {
+        let closed = std::net::TcpListener::bind("127.0.0.1:0")?;
+        let origin = format!("http://{}", closed.local_addr()?);
+        drop(closed);
+        origin
+    } else {
+        origin.clone()
+    };
     let output_path = temp.path().join("child.log");
     let output = fs::File::create(&output_path)?;
     let mut command = Command::new(std::env::current_exe()?);
@@ -454,10 +635,10 @@ async fn run_scenario(scenario: &str, expected_requests: usize) -> Result<()> {
         .env("CODEX_AUTH_PATH", codex_home.join("auth.json"))
         .env("TMPDIR", &scratch)
         .env("LANG", "C.UTF-8")
-        .env("OPENAI_BASE_URL", format!("{origin}/v1"))
+        .env("OPENAI_BASE_URL", format!("{model_origin}/v1"))
         .env("OPENAI_API_KEY", API_KEY)
         .env("CODEX_API_KEY", API_KEY)
-        .env("CODEX_MODEL", "gpt-6-luna")
+        .env("CODEX_MODEL", test_model())
         .env("CODEX_MODEL_PROVIDER", "openai")
         .env("CODEX_ENABLE_WEB_SEARCH", "false")
         .env("CODEX_RUNTIME_REASONING_EFFORT", "low")
@@ -492,6 +673,51 @@ async fn run_scenario(scenario: &str, expected_requests: usize) -> Result<()> {
         .stdin(Stdio::null())
         .stdout(Stdio::from(output.try_clone()?))
         .stderr(Stdio::from(output));
+    let personal_browser_scenario = matches!(
+        scenario,
+        "personal_browser_tools" | "personal_browser_behind_proxy" | "personal_browser_proxied"
+    );
+    let poison_proxy = if matches!(
+        scenario,
+        "personal_browser_behind_proxy" | "personal_browser_proxied"
+    ) {
+        let (url, connections, task) = start_poison_proxy().await?;
+        // Every proxy variable reqwest and curl read, as a corporate proxy setup exports them.
+        for key in [
+            "HTTP_PROXY",
+            "HTTPS_PROXY",
+            "ALL_PROXY",
+            "http_proxy",
+            "https_proxy",
+            "all_proxy",
+        ] {
+            command.env(key, &url);
+        }
+        if scenario == "personal_browser_behind_proxy" {
+            // What runtime-agent's main() merges into its own environment at start-up.
+            let no_proxy = runtime_agent::loopback_proxy::merge_loopback_no_proxy(None);
+            command
+                .env("NO_PROXY", &no_proxy)
+                .env("no_proxy", &no_proxy);
+        }
+        Some((connections, task))
+    } else {
+        None
+    };
+    if personal_browser_scenario {
+        // The Personal Browser capability a desktop runtime receives, pointed at the mock.
+        command
+            .env("INSTAFY_PERSONAL_BROWSER_CONTROL_URL", &origin)
+            .env(
+                "INSTAFY_PERSONAL_BROWSER_CONTROL_TOKEN",
+                PERSONAL_BROWSER_TOKEN,
+            )
+            .env(
+                "INSTAFY_PERSONAL_BROWSER_PROJECT_ID",
+                "90000000-0000-4000-8000-000000000002",
+            )
+            .env("INSTAFY_RUNTIME_AGENT_BIN", std::env::current_exe()?);
+    }
     let mut child = command.spawn()?;
     let started = Instant::now();
     let status = loop {
@@ -508,6 +734,14 @@ async fn run_scenario(scenario: &str, expected_requests: usize) -> Result<()> {
     };
     server.abort();
     let diagnostics = fs::read_to_string(output_path)?;
+    if let Some((connections, task)) = poison_proxy {
+        task.abort();
+        assert_eq!(
+            *connections.lock().unwrap(),
+            0,
+            "{scenario}: loopback traffic reached the ambient proxy: {diagnostics}"
+        );
+    }
     assert!(status.success(), "{scenario} child failed: {diagnostics}");
     assert_eq!(
         *state.errors.lock().unwrap(),
@@ -520,6 +754,27 @@ async fn run_scenario(scenario: &str, expected_requests: usize) -> Result<()> {
         expected_requests,
         "{scenario}: {diagnostics}"
     );
+    // Every lane's prompt reaches the model with Instafy's Destructive Actions section exactly
+    // once (a model's own copy counts) and without Codex's app, plugin and skill sections.
+    for request in requests.iter() {
+        let mut lines = Vec::new();
+        request_text_lines(request, &mut lines);
+        let model = test_model();
+        let destructive = lines
+            .iter()
+            .filter(|line| line.eq_ignore_ascii_case("# Destructive Actions"))
+            .count();
+        assert_eq!(
+            destructive, 1,
+            "{scenario} on {model}: Destructive Actions sections"
+        );
+        for removed in ["# Apps (Connectors)", "# Plugins", "# Using skills"] {
+            assert!(
+                !lines.iter().any(|line| line == removed),
+                "{scenario} on {model}: `{removed}` reached the model"
+            );
+        }
+    }
     if scenario == "routing" {
         assert!(
             requests.iter().all(|r| r
@@ -539,9 +794,14 @@ async fn run_scenario(scenario: &str, expected_requests: usize) -> Result<()> {
                 .pointer("/text/format/schema/properties/requiresContextLookup")
                 .is_none()
         );
-        assert_ne!(
-            requests[1]["tool_choice"], "required",
-            "the ambient participation decision must permit a tool-free decline"
+        // Codex always sends `tool_choice: "auto"`; the proxy would require a tool call only
+        // for a request that carries the required execution gate's metadata key.
+        assert!(
+            requests[1]
+                .pointer("/client_metadata/instafy.require_tool_call")
+                .is_none(),
+            "the ambient participation decision must permit a tool-free decline: {}",
+            requests[1]["client_metadata"]
         );
         let main_input = requests[1]["input"].to_string();
         assert!(main_input.contains("Earlier human context for the local decline fixture."));
@@ -570,8 +830,53 @@ async fn run_scenario(scenario: &str, expected_requests: usize) -> Result<()> {
             "the follow-up must continue with the finished call's output: {continued:?}"
         );
     }
+    if scenario == "personal_browser_proxied" {
+        assert!(
+            state.mcp_methods.lock().unwrap().is_empty(),
+            "a refused Personal Browser turn must not reach the broker"
+        );
+    }
+    if matches!(
+        scenario,
+        "personal_browser_tools" | "personal_browser_behind_proxy"
+    ) {
+        for request in requests.iter() {
+            let names = offered_tool_names(request);
+            for forbidden in BOUNDED_BROWSER_FORBIDDEN_TOOLS {
+                assert!(
+                    !names.iter().any(|name| name == forbidden),
+                    "a bounded browser turn offered {forbidden}: {names:?}"
+                );
+            }
+        }
+        // Upstream defers MCP tools behind tool search (or code mode's `ALL_TOOLS`), so the
+        // request need not name `snapshot`; the turn must still have connected and listed it.
+        let mcp_methods = state.mcp_methods.lock().unwrap();
+        for method in ["initialize", "tools/list"] {
+            assert!(
+                mcp_methods.iter().any(|seen| seen == method),
+                "the Personal Browser MCP server never received {method}: {mcp_methods:?}"
+            );
+        }
+    }
     if scenario == "tool_once" {
         assert_eq!(fs::read_to_string(workspace.join("tool-count.txt"))?, "x");
+        // What the Instafy proxy turns into `tool_choice: "required"` for direct-tool requests.
+        let requires_tool = |request: &Value| {
+            request.pointer("/client_metadata/instafy.require_tool_call") == Some(&json!("1"))
+        };
+        assert!(
+            requires_tool(&requests[0]),
+            "the first request must require a tool call: {}",
+            requests[0]["client_metadata"]
+        );
+        assert!(
+            requests
+                .iter()
+                .skip(1)
+                .all(|request| !requires_tool(request)),
+            "the executed tool must release the requirement"
+        );
         assert!(
             requests
                 .iter()
@@ -598,18 +903,9 @@ scenario_test!(
     2
 );
 scenario_test!(transient_503_recovers_in_same_session, "transient", 2);
-scenario_test!(transient_429_recovers_in_same_session, "transient_429", 2);
-scenario_test!(
-    persistent_429_is_bounded_and_reports_the_rate_limit,
-    "persistent_429",
-    2
-);
+// Codex never retries an HTTP 429, and the runtime does not restart the run for one.
+scenario_test!(http_429_is_not_retried, "http_429", 1);
 scenario_test!(plan_usage_limit_429_is_not_retried, "usage_limit_429", 1);
-scenario_test!(
-    browser_turn_recovered_429s_do_not_accumulate_across_steps,
-    "browser_step_429s",
-    4
-);
 // The shapes the proxy streams in place of a transient 429, which codex retries by itself.
 scenario_test!(
     transient_streamed_429_recovers_in_same_session,
@@ -642,11 +938,32 @@ scenario_test!(
     "incomplete_after_tool_call",
     2
 );
+scenario_test!(
+    bounded_browser_turn_offers_only_its_browser_tools,
+    "personal_browser_tools",
+    1
+);
+// The Personal Browser bearer must never reach an ambient proxy (HTTP_PROXY, ALL_PROXY, ...).
+scenario_test!(
+    personal_browser_turn_bypasses_an_ambient_proxy_for_loopback,
+    "personal_browser_behind_proxy",
+    1
+);
+scenario_test!(
+    personal_browser_turn_is_refused_when_a_proxy_would_see_its_bearer,
+    "personal_browser_proxied",
+    0
+);
 scenario_test!(terminal_400_is_not_retried, "terminal_400", 1);
 scenario_test!(terminal_401_is_not_retried, "terminal_401", 1);
 scenario_test!(terminal_402_is_not_retried, "terminal_402", 1);
 scenario_test!(terminal_403_is_not_retried, "terminal_403", 1);
 scenario_test!(terminal_424_is_not_retried, "terminal_424", 1);
+scenario_test!(
+    unreachable_proxy_fails_fast_with_the_connection_error,
+    "proxy_unreachable",
+    0
+);
 scenario_test!(cancellation_does_not_restart_the_run, "cancel", 1);
 scenario_test!(timeout_does_not_restart_the_run, "timeout", 1);
 scenario_test!(
@@ -670,6 +987,55 @@ scenario_test!(
     "retry_usage",
     3
 );
+
+/// The real Shared Browser MCP entry point records its process group before it serves, and only
+/// when it leads that group, so the runtime can prove it gone before releasing the browser.
+#[cfg(unix)]
+#[test]
+fn shared_browser_mcp_records_its_own_process_group_before_serving() -> Result<()> {
+    use std::os::unix::process::CommandExt;
+    let registry = tempfile::tempdir()?;
+    let launch = |own_group: bool| -> Result<(u32, std::process::Output)> {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_runtime-agent"));
+        command
+            .arg("shared-browser-mcp")
+            .env_clear()
+            .env("PATH", "/usr/bin:/bin")
+            .env("INSTAFY_ENABLE_BROWSER_SESSION", "1")
+            .env(
+                runtime_agent::mcp_process_groups::REGISTRY_ENV,
+                registry.path(),
+            )
+            // Closed stdin ends the MCP session right after start-up.
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped());
+        if own_group {
+            // How Codex launches every MCP server.
+            command.process_group(0);
+        }
+        let child = command.spawn()?;
+        let pid = child.id();
+        Ok((pid, child.wait_with_output()?))
+    };
+
+    let (pid, output) = launch(false)?;
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("must lead its own process group"),
+        "{stderr}"
+    );
+    assert!(!registry.path().join(pid.to_string()).exists());
+
+    let (pid, output) = launch(true)?;
+    assert!(
+        registry.path().join(pid.to_string()).is_file(),
+        "the MCP did not record group {pid}: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    Ok(())
+}
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "Child entrypoint; outer tests supply an isolated environment and loopback proxy"]
@@ -695,6 +1061,7 @@ async fn isolated_retry_child() -> Result<()> {
     if scenario == "per_turn_usage" {
         return run_per_turn_usage_jobs(&client).await;
     }
+    let personal_browser = scenario.starts_with("personal_browser_");
     let cancel = JobCancelSignal::new();
     let cancel_on_request = scenario == "cancel";
     let signal = cancel.clone();
@@ -708,6 +1075,7 @@ async fn isolated_retry_child() -> Result<()> {
             signal.cancel();
         })
     });
+    let started = Instant::now();
     let result = client
         .execute_with_options(
             "Run the supplied local diagnostic and finish with its result.",
@@ -719,7 +1087,12 @@ async fn isolated_retry_child() -> Result<()> {
                 cancel_signal: Some(cancel),
                 // A browser session keeps Codex's default retries and the runtime's own
                 // stream-error cap instead of the bounded proxy policy.
-                expect_browser_session: scenario.starts_with("browser_step_429s"),
+                expect_browser_session: scenario.starts_with("browser_step_429s")
+                    || personal_browser,
+                personal_browser,
+                disable_shell_tool: personal_browser,
+                // The first request must require a tool; once the tool runs, the next may not.
+                require_first_tool_call: scenario == "tool_once",
                 ..Default::default()
             },
         )
@@ -764,26 +1137,52 @@ async fn isolated_retry_child() -> Result<()> {
     } else if matches!(
         scenario.as_str(),
         "transient"
-            | "transient_429"
             | "transient_429_sse"
-            | "browser_step_429s"
             | "browser_step_429s_sse"
             | "incomplete_after_tool_call"
+            | "personal_browser_tools"
+            | "personal_browser_behind_proxy"
     ) {
         assert_eq!(result?.final_json["summary"], FINAL_TEXT);
     } else {
         let error = result.expect_err("scripted failure must remain an error");
         let message = format!("{error:#}").to_ascii_lowercase();
-        if scenario.starts_with("persistent_429") {
+        if scenario == "persistent_429_sse" {
             // The final error must still say it was a rate limit so it can be classified.
             assert!(message.contains("429"), "{message}");
             assert!(message.contains("rate limit was reached"), "{message}");
         }
+        if scenario == "http_429" {
+            // Codex names the status it stopped on, in the words the Studio classifies as a
+            // rate limit.
+            assert!(
+                message.contains("exceeded retry limit, last status: 429"),
+                "{message}"
+            );
+        }
         if scenario == "usage_limit_429" {
             assert!(message.contains("usage limit"), "{message}");
         }
+        if scenario == "personal_browser_proxied" {
+            assert!(
+                message.contains("refusing the personal browser turn"),
+                "{message}"
+            );
+            assert!(message.contains("no_proxy"), "{message}");
+            assert!(!message.contains(PERSONAL_BROWSER_TOKEN), "{message}");
+        }
         if scenario == "cancel" {
             assert!(message.contains("lease lost"), "{message}");
+        }
+        if scenario == "proxy_unreachable" {
+            // The bounded budget (one stream retry), not the 20 s run timeout, ends the run.
+            assert!(!message.contains("timed out"), "{message}");
+            assert!(message.contains("error sending request"), "{message}");
+            assert!(
+                started.elapsed() < Duration::from_secs(10),
+                "an unreachable proxy held the run for {:?}: {message}",
+                started.elapsed()
+            );
         }
         if scenario == "timeout" {
             assert!(message.contains("timed out"), "{message}");

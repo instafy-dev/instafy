@@ -12,7 +12,7 @@ use crate::upstream_error::{self, ToolControlRejection, UpstreamFailure};
 
 const APPLY_PATCH_GRAMMAR: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
-    "/../../codex/codex-rs/core/src/tools/handlers/apply_patch.lark"
+    "/../../codex/codex-rs/core/assets/tools/apply_patch.lark"
 ));
 
 /// Last-resort model for requests that carry no model AND resolve against a

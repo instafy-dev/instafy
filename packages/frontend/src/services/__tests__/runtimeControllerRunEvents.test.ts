@@ -1,6 +1,8 @@
 // @vitest-environment jsdom
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import type { RunRecord, RunRecordPatch } from "../../types";
+import { createInitialRuntimeStoreState, runtimeReducer } from "../../runtime/runtimeStore";
 
 const getSessionMock = vi.hoisted(() => vi.fn());
 const fetchMock = vi.hoisted(() => vi.fn());
@@ -114,6 +116,7 @@ describe("runtime controller run event streaming", () => {
       projectId: "11111111-1111-4111-8111-111111111111",
       quietErrors: true,
       onRun: vi.fn(),
+      onRunPatch: vi.fn(),
     });
 
     await vi.advanceTimersByTimeAsync(0);
@@ -161,6 +164,7 @@ describe("runtime controller run event streaming", () => {
         accessToken: "caller-supplied-fixed-token",
         quietErrors: true,
         onRun: vi.fn(),
+        onRunPatch: vi.fn(),
         onAccessDenied,
         onError,
       });
@@ -232,6 +236,7 @@ describe("runtime controller run event streaming", () => {
         projectId: "11111111-1111-4111-8111-111111111111",
         quietErrors: true,
         onRun: vi.fn(),
+        onRunPatch: vi.fn(),
         onAccessDenied,
         onError,
       });
@@ -300,6 +305,7 @@ describe("runtime controller run event streaming", () => {
       projectId: "11111111-1111-4111-8111-111111111111",
       quietErrors: true,
       onRun: vi.fn(),
+      onRunPatch: vi.fn(),
       onAccessDenied,
       onError,
       onOpen,
@@ -363,6 +369,7 @@ describe("runtime controller run event streaming", () => {
       projectId: "11111111-1111-4111-8111-111111111111",
       quietErrors: true,
       onRun: vi.fn(),
+      onRunPatch: vi.fn(),
       onAccessDenied,
       onError,
     });
@@ -407,6 +414,7 @@ describe("runtime controller run event streaming", () => {
       projectId: "11111111-1111-4111-8111-111111111111",
       quietErrors: true,
       onRun: vi.fn(),
+      onRunPatch: vi.fn(),
       onError,
       onOpen,
     });
@@ -433,6 +441,7 @@ describe("runtime controller run event streaming", () => {
       projectId: "11111111-1111-4111-8111-111111111111",
       quietErrors: true,
       onRun,
+      onRunPatch: vi.fn(),
     });
 
     await vi.waitFor(() => expect(streamingRequests).toHaveLength(1));
@@ -485,6 +494,87 @@ describe("runtime controller run event streaming", () => {
     unsubscribe();
   });
 
+  it.each(["build", "editor"] as const)(
+    "applies sparse lifecycle events without erasing a hydrated %s run",
+    async (runType) => {
+      const { subscribeToRunsFromController } = await import("../runtimeController/runs");
+      const hydrated: RunRecord = {
+        id: "22222222-2222-4222-8222-222222222222",
+        projectId: "11111111-1111-4111-8111-111111111111",
+        sessionId: "session-1",
+        conversationId: "conversation-1",
+        promptId: "prompt-1",
+        runType,
+        status: "in_progress",
+        progress: 0.5,
+        progressStage: "working",
+        previewUrl: "https://preview.example.test",
+        lastMessage: "Still working",
+        metadata: { agent: { handle: "octo" }, jobId: "job-1", custom: true },
+        createdAt: "2026-10-01T12:00:00.000Z",
+        updatedAt: "2026-10-01T12:01:00.000Z",
+      };
+      let state = runtimeReducer(createInitialRuntimeStoreState(), {
+        type: "upsertRun", run: hydrated,
+      });
+      const onRun = vi.fn((run: RunRecord) => {
+        state = runtimeReducer(state, { type: "upsertRun", run });
+      });
+      const onRunPatch = vi.fn((patch: RunRecordPatch) => {
+        state = runtimeReducer(state, { type: "patchRun", patch });
+      });
+      const unsubscribe = subscribeToRunsFromController({
+        projectId: hydrated.projectId!, quietErrors: true, onRun, onRunPatch,
+      });
+      await vi.waitFor(() => expect(streamingRequests).toHaveLength(1));
+      const timestamp = "2026-10-01T12:02:00.000Z";
+      streamingRequests[0].write(`data: ${JSON.stringify({
+        kind: "run.completed",
+        project_id: hydrated.projectId,
+        conversation_id: hydrated.conversationId,
+        session_id: null,
+        job_id: null,
+        run_id: hydrated.id,
+        timestamp,
+        data: { status: "success", percent: 1 },
+      })}\n\n`);
+      await vi.waitFor(() => expect(state.runs[hydrated.id].status).toBe("success"));
+      expect(onRun).not.toHaveBeenCalled();
+      expect(onRunPatch).toHaveBeenCalledOnce();
+      expect(state.runs[hydrated.id]).toEqual({
+        ...hydrated, status: "success", progress: 1, updatedAt: timestamp,
+      });
+      expect(state.latestRunIds).toEqual({ [runType]: hydrated.id });
+
+      // An older controller can send a job association or preview without status.
+      streamingRequests[0].write(`data: ${JSON.stringify({
+        kind: "run.preview", run_id: hydrated.id, job_id: "job-2",
+        data: { previewUrl: null },
+      })}\n\n`);
+      await vi.waitFor(() => expect(onRunPatch).toHaveBeenCalledTimes(2));
+      expect(state.runs[hydrated.id]).toEqual({
+        ...hydrated, status: "success", progress: 1, updatedAt: timestamp,
+        previewUrl: null, metadata: { ...hydrated.metadata, jobId: "job-2" },
+      });
+
+      // Full snapshots still own all fields, including explicit nulls.
+      streamingRequests[0].write(`data: ${JSON.stringify({
+        kind: "run.completed", run_id: hydrated.id,
+        data: { run: {
+          id: hydrated.id, run_type: runType, status: "success", progress: 1,
+          metadata: null, progress_stage: null, preview_url: null,
+          last_message: null, session_id: null, prompt_id: null,
+        } },
+      })}\n\n`);
+      await vi.waitFor(() => expect(onRun).toHaveBeenCalledOnce());
+      expect(state.runs[hydrated.id]).toMatchObject({
+        runType, metadata: null, progressStage: null, previewUrl: null,
+        lastMessage: null, sessionId: null, promptId: null,
+      });
+      unsubscribe();
+    },
+  );
+
   it("authenticates with a header and parses chunked multiline CRLF events", async () => {
     const { subscribeToRunsFromController } = await import(
       "../runtimeController/runs"
@@ -495,6 +585,7 @@ describe("runtime controller run event streaming", () => {
       projectId: "11111111-1111-4111-8111-111111111111",
       quietErrors: true,
       onRun: vi.fn(),
+      onRunPatch: vi.fn(),
       onEvent,
       onOpen,
     });
@@ -547,6 +638,7 @@ describe("runtime controller run event streaming", () => {
       projectId: "11111111-1111-4111-8111-111111111111",
       quietErrors: true,
       onRun,
+      onRunPatch: vi.fn(),
       onEvent,
       onOpen,
     });
@@ -587,6 +679,7 @@ describe("runtime controller run event streaming", () => {
       projectId: "11111111-1111-4111-8111-111111111111",
       quietErrors: true,
       onRun: vi.fn(),
+      onRunPatch: vi.fn(),
       onError,
       onEvent,
     });
@@ -620,6 +713,7 @@ describe("runtime controller run event streaming", () => {
       projectId: "11111111-1111-4111-8111-111111111111",
       quietErrors: true,
       onRun: vi.fn(),
+      onRunPatch: vi.fn(),
       onError,
       onEvent,
     });
@@ -660,6 +754,7 @@ describe("runtime controller run event streaming", () => {
       projectId: "11111111-1111-4111-8111-111111111111",
       quietErrors: true,
       onRun: vi.fn(),
+      onRunPatch: vi.fn(),
       onError,
       onEvent,
     });
@@ -699,6 +794,7 @@ describe("runtime controller run event streaming", () => {
       projectId: "11111111-1111-4111-8111-111111111111",
       quietErrors: true,
       onRun: vi.fn(),
+      onRunPatch: vi.fn(),
       onError,
       onEvent,
       onOpen,
@@ -752,6 +848,7 @@ describe("runtime controller run event streaming", () => {
       projectId: "11111111-1111-4111-8111-111111111111",
       quietErrors: true,
       onRun: vi.fn(),
+      onRunPatch: vi.fn(),
       onError,
       onEvent,
       onOpen,
@@ -789,6 +886,7 @@ describe("runtime controller run event streaming", () => {
       projectId: "11111111-1111-4111-8111-111111111111",
       quietErrors: true,
       onRun: vi.fn(),
+      onRunPatch: vi.fn(),
       onError,
       onEvent,
     });
@@ -821,6 +919,7 @@ describe("runtime controller run event streaming", () => {
       projectId: "11111111-1111-4111-8111-111111111111",
       quietErrors: true,
       onRun: vi.fn(),
+      onRunPatch: vi.fn(),
       onError,
       onEvent,
     });
@@ -858,6 +957,7 @@ describe("runtime controller run event streaming", () => {
       projectId: "11111111-1111-4111-8111-111111111111",
       quietErrors: true,
       onRun: vi.fn(),
+      onRunPatch: vi.fn(),
       onError,
       onEvent,
     });
@@ -910,6 +1010,7 @@ describe("runtime controller run event streaming", () => {
       projectId: "11111111-1111-4111-8111-111111111111",
       quietErrors: true,
       onRun: vi.fn(),
+      onRunPatch: vi.fn(),
       onError,
     });
 
@@ -955,6 +1056,7 @@ describe("runtime controller run event streaming", () => {
       projectId: "11111111-1111-4111-8111-111111111111",
       quietErrors: true,
       onRun: vi.fn(),
+      onRunPatch: vi.fn(),
     });
 
     unsubscribe();
