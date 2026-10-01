@@ -9115,6 +9115,12 @@ async fn event_stream_hides_private_runtime_lifecycle_from_project_teammates() -
         return Ok(());
     };
 
+    ensure_conversation_event_test_tables(&pool).await?;
+
+    let conversation_id = Uuid::new_v4();
+    let private_conversation_id = Uuid::new_v4();
+    let run_id = Uuid::new_v4();
+    let private_run_id = Uuid::new_v4();
     let owner_user_id = Uuid::new_v4();
     let teammate_user_id = Uuid::new_v4();
     let org_id = Uuid::new_v4();
@@ -9160,6 +9166,34 @@ async fn event_stream_hides_private_runtime_lifecycle_from_project_teammates() -
                 "insert into project_memberships (project_id, user_id, role)
                  values ($1, $2, 'builder')",
                 &[&project_id, &teammate_user_id],
+            )
+            .await?;
+        connection
+            .execute(
+                "insert into conversations (id, project_id, created_by, metadata, visibility)
+                 values ($1, $3, $4, '{}'::jsonb, 'public'),
+                        ($2, $3, $4, '{}'::jsonb, 'private')",
+                &[
+                    &conversation_id,
+                    &private_conversation_id,
+                    &project_id,
+                    &owner_user_id,
+                ],
+            )
+            .await?;
+        connection
+            .execute(
+                "insert into runs (id, project_id, conversation_id, run_type, status, metadata)
+                 values ($1, $3, $4, 'prompt', 'queued', $6),
+                        ($2, $3, $5, 'prompt', 'queued', $6)",
+                &[
+                    &run_id,
+                    &private_run_id,
+                    &project_id,
+                    &conversation_id,
+                    &private_conversation_id,
+                    &PgJson(json!({ "runtimeId": private_runtime_id, "private": "private-run-metadata" })),
+                ],
             )
             .await?;
         connection
@@ -9440,7 +9474,127 @@ async fn event_stream_hides_private_runtime_lifecycle_from_project_teammates() -
     assert!(!owner_payload.contains("forged-tunnel-reference"));
     assert!(!owner_payload.contains("unbound-spoofed-hosted-origin"));
 
+    // A shared conversation keeps its lifecycle even when the worker belongs
+    // only to its sender. The authoritative run, not arbitrary event data,
+    // determines the projected status (including a late progress event).
+    for (kind, status, progress) in [
+        ("run.queued", "queued", 0.0),
+        ("run.progress", "in_progress", 20.0),
+        ("run.completed", "success", 100.0),
+        ("run.progress", "success", 100.0),
+    ] {
+        pool.get()
+            .await?
+            .execute(
+                "update runs set status = $2, progress = $3,
+             progress_stage = 'private-stage', last_message = 'private-message',
+             preview_url = 'https://private-preview.invalid' where id = $1",
+                &[&run_id, &status, &progress],
+            )
+            .await?;
+        let event = crate::state::ControllerEvent {
+            kind: kind.to_string(),
+            project_id: Some(project_id),
+            session_id: Some(Uuid::new_v4()),
+            conversation_id: Some(conversation_id),
+            run_id: Some(run_id),
+            job_id: Some(Uuid::new_v4()),
+            channel: Some("private-route".to_string()),
+            channels: vec!["private-route".to_string()],
+            target_user_id: None,
+            data: json!({
+                "status": "queued",
+                "percent": { "secret": "private-nested-progress" },
+                "stage": "private-stage",
+                "message": "private-message",
+                "leaseMetrics": { "leasedByRuntimeId": private_runtime_id },
+                "run": { "metadata": { "secret": "private-metadata" } },
+            }),
+            timestamp: Utc::now(),
+        };
+        state.events.publish(event.clone());
+        publish_controller_event(
+            &state.events,
+            "runtime.login",
+            Some(project_id),
+            None,
+            None,
+            None,
+            json!({ "runtimeId": managed_runtime_id, "marker": "lifecycle-sentinel" }),
+        );
+        for (is_owner, stream) in [(true, &mut owner_events), (false, &mut teammate_events)] {
+            let chunk = timeout(std::time::Duration::from_secs(10), stream.next())
+                .await?
+                .ok_or_else(|| anyhow::anyhow!("lifecycle stream ended"))??;
+            let text = std::str::from_utf8(&chunk)?;
+            let payload: serde_json::Value = serde_json::from_str(
+                text.lines()
+                    .find_map(|line| line.strip_prefix("data:"))
+                    .unwrap_or(""),
+            )?;
+            assert_eq!(
+                payload["kind"], kind,
+                "missing lifecycle status for owner={is_owner}"
+            );
+            if is_owner {
+                assert_eq!(payload, serde_json::to_value(&event)?);
+            } else {
+                assert_eq!(payload["run_id"], json!(run_id));
+                assert_eq!(payload["project_id"], json!(project_id));
+                assert_eq!(payload["conversation_id"], json!(conversation_id));
+                assert_eq!(payload["data"]["status"], status);
+                assert_eq!(payload["data"]["percent"], progress);
+                assert_eq!(payload["data"].as_object().unwrap().len(), 2);
+                assert!(payload["session_id"].is_null());
+                assert!(payload["job_id"].is_null());
+                assert!(payload["channel"].is_null());
+                assert!(payload["channels"].is_null());
+                assert!(!text.contains("private-"));
+                assert!(!text.contains(&private_runtime_id.to_string()));
+            }
+            let sentinel = timeout(std::time::Duration::from_secs(10), stream.next())
+                .await?
+                .ok_or_else(|| anyhow::anyhow!("sentinel stream ended"))??;
+            assert!(std::str::from_utf8(&sentinel)?.contains("lifecycle-sentinel"));
+        }
+    }
     drop(owner_events);
+
+    // The projection cannot bypass a private conversation, substitute a run
+    // from that conversation, manufacture a run, or broaden a targeted event.
+    for (event_conversation, event_run, target_user) in [
+        (private_conversation_id, private_run_id, None),
+        (conversation_id, private_run_id, None),
+        (conversation_id, Uuid::new_v4(), None),
+        (conversation_id, run_id, Some(owner_user_id)),
+    ] {
+        state.events.publish(crate::state::ControllerEvent {
+            kind: "run.completed".to_string(),
+            project_id: Some(project_id),
+            session_id: None,
+            conversation_id: Some(event_conversation),
+            run_id: Some(event_run),
+            job_id: None,
+            channel: None,
+            channels: Vec::new(),
+            target_user_id: target_user,
+            data: json!({ "runtimeId": private_runtime_id, "marker": "private-forbidden-run" }),
+            timestamp: Utc::now(),
+        });
+    }
+    publish_controller_event(
+        &state.events,
+        "runtime.login",
+        Some(project_id),
+        None,
+        None,
+        None,
+        json!({ "runtimeId": managed_runtime_id, "marker": "negative-controls-sentinel" }),
+    );
+    let sentinel = timeout(std::time::Duration::from_secs(10), teammate_events.next())
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("negative controls stream ended"))??;
+    assert!(std::str::from_utf8(&sentinel)?.contains("negative-controls-sentinel"));
     drop(teammate_events);
     cleanup_origin_project(&pool, &project_id).await?;
     cleanup_org(&pool, &org_id).await?;
