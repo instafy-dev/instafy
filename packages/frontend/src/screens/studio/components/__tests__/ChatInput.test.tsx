@@ -4,6 +4,7 @@ import { act, createRef } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ChatInput, type ChatInputHandle } from "../chat-input/ChatInput";
+import { $getRoot, getNearestEditorFromDOMNode, HISTORY_PUSH_TAG, UNDO_COMMAND } from "lexical";
 import {
   CHAT_INPUT_CONTROL_HEIGHT_CLASS,
   CHAT_INPUT_LINE_HEIGHT_PX,
@@ -329,6 +330,56 @@ describe("ChatInput", () => {
     expect(placeholder).toBeDefined();
     for (const token of CHAT_INPUT_OVERLAY_TOP_CLASS.split(/\s+/)) {
       expect(placeholder?.className.split(/\s+/)).toContain(token);
+    }
+  });
+
+  it("expands the same editor without losing its selection or undo history", async () => {
+    // Lexical measures the Selection's own Range, which jsdom creates without
+    // calling document.createRange. Supply only the missing geometry API.
+    const rectDescriptor = Object.getOwnPropertyDescriptor(Range.prototype, "getBoundingClientRect");
+    Object.defineProperty(Range.prototype, "getBoundingClientRect", {
+      configurable: true,
+      value: () => new DOMRect(),
+    });
+    try {
+      const onChange = vi.fn();
+      const render = async (expanded: boolean) => act(async () => {
+        root.render(<ChatInput value="Draft" editorState={null} placeholder="Write a message"
+          agentHandles={[]} onChange={onChange} onKeyDown={vi.fn()} compactViewport expanded={expanded} />);
+      });
+      await render(false);
+      const input = container.querySelector<HTMLElement>('[data-testid="chat-input"]')!;
+      const editor = getNearestEditorFromDOMNode(input)!;
+      await act(async () => {
+        input.focus();
+        editor.update(() => $getRoot().selectEnd().insertText(" addition"), { tag: HISTORY_PUSH_TAG });
+      });
+      expect(input.textContent).toBe("Draft addition");
+      const selection = window.getSelection();
+      expect(selection?.rangeCount).toBe(1);
+      expect(input.contains(selection!.anchorNode)).toBe(true);
+      expect(selection?.anchorOffset).toBe("Draft addition".length);
+      expect(document.activeElement).toBe(input);
+      const anchorNode = selection?.anchorNode;
+      const anchorOffset = selection?.anchorOffset;
+      await render(true);
+      expect(container.querySelector('[data-testid="chat-input"]')).toBe(input);
+      expect(getNearestEditorFromDOMNode(input)).toBe(editor);
+      expect(input.style.maxHeight).toBe("");
+      expect(selection?.anchorNode).toBe(anchorNode);
+      expect(selection?.anchorOffset).toBe(anchorOffset);
+      expect(document.activeElement).toBe(input);
+      await render(false);
+      expect(container.querySelector('[data-testid="chat-input"]')).toBe(input);
+      expect(input.style.maxHeight).not.toBe("");
+      expect(selection?.anchorNode).toBe(anchorNode);
+      expect(selection?.anchorOffset).toBe(anchorOffset);
+      expect(document.activeElement).toBe(input);
+      await act(async () => { editor.dispatchCommand(UNDO_COMMAND, undefined); });
+      expect(input.textContent).toBe("Draft");
+    } finally {
+      if (rectDescriptor) Object.defineProperty(Range.prototype, "getBoundingClientRect", rectDescriptor);
+      else Reflect.deleteProperty(Range.prototype, "getBoundingClientRect");
     }
   });
 

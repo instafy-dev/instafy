@@ -3,7 +3,7 @@ import { NavArrowLeft } from "iconoir-react";
 import { useVisualViewportBounds } from "../../hooks/useVisualViewportBounds";
 import { useNativeBackButtonAction } from "../../native/useNativeBackButtonAction";
 import { IconButton } from "../Button";
-import { StudioDialogModal } from "./StudioModal";
+import { StudioDialogModal, type StudioDialogAppearance } from "./StudioModal";
 
 interface MobileFocusDialogProps {
   isOpen: boolean;
@@ -14,12 +14,13 @@ interface MobileFocusDialogProps {
   children: ReactNode;
   dismissLabel?: string;
   closeDisabled?: boolean;
+  appearance?: StudioDialogAppearance;
   "data-testid"?: string;
 }
 
 /** A focused phone task: stable header controls above a keyboard-aware scroll area. */
 export function MobileFocusDialog({
-  isOpen, onOpenChange, dialogAriaLabel, header, dialogRef, children, dismissLabel = "Close", closeDisabled = false,
+  isOpen, onOpenChange, dialogAriaLabel, header, dialogRef, children, dismissLabel = "Close", closeDisabled = false, appearance,
   "data-testid": testId,
 }: MobileFocusDialogProps) {
   const bounds = useVisualViewportBounds(isOpen);
@@ -31,6 +32,7 @@ export function MobileFocusDialog({
     isOpen={isOpen} onOpenChange={(open) => { if (open || !closeDisabled) onOpenChange(open); }}
     isDismissable={!closeDisabled} isKeyboardDismissDisabled={closeDisabled}
     dialogRef={dialogRef} dialogAriaLabel={dialogAriaLabel} data-testid={testId}
+    appearance={appearance}
     className="!p-0"
     modalClassName="!max-w-none !rounded-none !border-0 !shadow-none overflow-hidden"
     modalStyle={{ position: "absolute", top: bounds.top, left: bounds.left, width: bounds.width, height: bounds.height,

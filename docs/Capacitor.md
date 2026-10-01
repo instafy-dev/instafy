@@ -245,6 +245,15 @@ stay mounted as the software keyboard changes the available space. The navigatio
 shares the viewport observer without changing its sheet layout. The dialog uses the existing
 native Back coordinator and React Aria focus restoration; a pending save can block dismissal
 without letting Back navigate the underlying screen. This does not change native keyboard policy.
+Invite and AI connection forms use this surface below the small breakpoint while retaining
+their desktop dialogs. Invite Back dismisses an open QR first; connection Back returns to
+the provider picker before closing, and pending verification blocks dismissal.
+
+The composer's **Expand draft** action fills the chat pane with the existing editor;
+**Collapse draft**, Escape, or Android Back returns to the compact composer. The
+same Lexical editor, undo history and attachments remain mounted. Open composer
+menus and dialogs handle Back before draft expansion. This changes the pane layout,
+not the keyboard or the message-send behavior.
 
 The mobile sidebar paints to every screen edge, with safe-area padding around its controls.
 While this drawer is open, iOS temporarily overlays its status bar on the WebView; closing the

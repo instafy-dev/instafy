@@ -8,6 +8,8 @@ import {
   StudioDialogHeader,
 } from "../../../components/aria/StudioDialogLayout";
 import { StudioDialogModal } from "../../../components/aria/StudioModal";
+import { MobileFocusDialog } from "../../../components/aria/MobileFocusDialog";
+import { useBreakpoint } from "../../../hooks/useBreakpoint";
 import { useNativeBackButtonAction } from "../../../native/useNativeBackButtonAction";
 import type { ControllerProjectMember } from "../../../sdk/instafy";
 import type { PreparedEmailInvite } from "../../../sharing/preparedEmailInvite";
@@ -65,6 +67,7 @@ export function ComposerInviteModal({
   sharingPermissionsLoading,
   onOpenProjectSettings = null,
 }: ComposerInviteModalProps) {
+  const isDesktop = useBreakpoint("sm");
   const [qrState, setQrState] = useState<ComposerInviteQrState>(null);
   const closeQr = useCallback(() => setQrState(null), []);
   const closeAccessQr = useCallback(() => {
@@ -107,7 +110,7 @@ export function ComposerInviteModal({
     }
     onOpenChange(false);
   }, [closeQr, onOpenChange, qrState]);
-  useNativeBackButtonAction(isOpen, handleNativeBack);
+  useNativeBackButtonAction(isOpen && (isDesktop || qrState !== null), handleNativeBack);
 
   useEffect(() => {
     closeQr();
@@ -123,9 +126,64 @@ export function ComposerInviteModal({
   const qrViewModel =
     qrState?.kind === "device" ? deviceHandoff.qr : accessInvites.qr;
 
+  const body = (
+    <StudioDialogBody className={isDesktop
+      ? "studio-dark-scrollbar min-h-0 flex-1 touch-pan-y overflow-y-auto overscroll-contain scroll-pb-24 pt-3"
+      : "pt-3"}>
+      <div className="mx-auto w-full max-w-[24rem] space-y-3.5">
+        <section className="space-y-3.5">
+          <ComposerInviteDeviceHandoff {...deviceHandoff.sectionProps} />
+
+          <StudioDialogDivider />
+
+          <ComposerInviteProjectAccessSection {...accessInvites.sectionProps} />
+
+          {canInviteIntoChat && canWriteProject ? (
+            <>
+              <StudioDialogDivider />
+              <ComposerInvitePrivateChatSection
+                conversationReady={Boolean(activeConversationControllerId)}
+                loading={inviteParticipantsLoading}
+                members={mentionableUsers}
+                participantIdSet={inviteParticipantIdSet}
+                busyUserId={inviteParticipantBusyUserId}
+                onInvite={(member) => void onInviteTeammate(member)}
+              />
+            </>
+          ) : null}
+
+          {onOpenProjectSettings ? (
+            <>
+              <StudioDialogDivider />
+              <div className="flex justify-end">
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="sm"
+                  radius="full"
+                  onPress={() => {
+                    onOpenChange(false);
+                    onOpenProjectSettings();
+                  }}
+                  className="gap-2"
+                  data-testid="composer-invite-open-settings"
+                >
+                  <Text as="span" variant="bodyStrong" tone="inherit" className="text-sm">
+                    Space settings
+                  </Text>
+                  <Settings className="h-4 w-4 text-current" aria-hidden="true" />
+                </Button>
+              </div>
+            </>
+          ) : null}
+        </section>
+      </div>
+    </StudioDialogBody>
+  );
+
   return (
     <>
-      <StudioDialogModal
+      {isDesktop ? <StudioDialogModal
         isOpen={isOpen && qrState === null}
         onOpenChange={onOpenChange}
         isDismissable
@@ -147,57 +205,19 @@ export function ComposerInviteModal({
           titleClassName="text-slate-50"
         />
 
-        <StudioDialogBody className="studio-dark-scrollbar min-h-0 flex-1 touch-pan-y overflow-y-auto overscroll-contain scroll-pb-24 pt-3">
-          <div className="mx-auto w-full max-w-[24rem] space-y-3.5">
-            <section className="space-y-3.5">
-              <ComposerInviteDeviceHandoff {...deviceHandoff.sectionProps} />
-
-              <StudioDialogDivider />
-
-              <ComposerInviteProjectAccessSection {...accessInvites.sectionProps} />
-
-              {canInviteIntoChat && canWriteProject ? (
-                <>
-                  <StudioDialogDivider />
-                  <ComposerInvitePrivateChatSection
-                    conversationReady={Boolean(activeConversationControllerId)}
-                    loading={inviteParticipantsLoading}
-                    members={mentionableUsers}
-                    participantIdSet={inviteParticipantIdSet}
-                    busyUserId={inviteParticipantBusyUserId}
-                    onInvite={(member) => void onInviteTeammate(member)}
-                  />
-                </>
-              ) : null}
-
-              {onOpenProjectSettings ? (
-                <>
-                  <StudioDialogDivider />
-                  <div className="flex justify-end">
-                    <Button
-                      type="button"
-                      variant="ghost"
-                      size="sm"
-                      radius="full"
-                      onPress={() => {
-                        onOpenChange(false);
-                        onOpenProjectSettings();
-                      }}
-                      className="gap-2"
-                      data-testid="composer-invite-open-settings"
-                    >
-                      <Text as="span" variant="bodyStrong" tone="inherit" className="text-sm">
-                        Space settings
-                      </Text>
-                      <Settings className="h-4 w-4 text-current" aria-hidden="true" />
-                    </Button>
-                  </div>
-                </>
-              ) : null}
-            </section>
-          </div>
-        </StudioDialogBody>
-      </StudioDialogModal>
+        {body}
+      </StudioDialogModal> : qrState === null ? (
+        <MobileFocusDialog
+          isOpen={isOpen}
+          onOpenChange={onOpenChange}
+          appearance="dark"
+          dialogAriaLabel="Invite"
+          dismissLabel="Close invite modal"
+          data-testid="chat-invite-modal"
+        >
+          {body}
+        </MobileFocusDialog>
+      ) : null}
 
       <ComposerInviteQrModal
         role={qrRole}

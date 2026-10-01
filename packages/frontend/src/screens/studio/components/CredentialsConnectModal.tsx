@@ -19,6 +19,8 @@ import {
   StudioDialogHeader,
 } from "../../../components/aria/StudioDialogLayout";
 import { StudioDialogModal } from "../../../components/aria/StudioModal";
+import { MobileFocusDialog } from "../../../components/aria/MobileFocusDialog";
+import { useBreakpoint } from "../../../hooks/useBreakpoint";
 import type { DeviceAuthProvider } from "../../../sdk/instafy";
 import { openExternalUrl } from "../../../utils/openExternalUrl";
 import { CredentialsConnectionChoices, getCodexConnectionChoice } from "./CredentialsConnectionChoices";
@@ -154,6 +156,7 @@ export function CredentialsConnectModal({
   onUploadFile,
   onConnectApiKey,
 }: CredentialsConnectModalProps) {
+  const isDesktop = useBreakpoint("sm");
   const [nowMs, setNowMs] = useState(() => Date.now());
   const [copiedDeviceCode, setCopiedDeviceCode] = useState(false);
   const [copyDeviceCodeFailed, setCopyDeviceCodeFailed] = useState(false);
@@ -273,7 +276,520 @@ export function CredentialsConnectModal({
     }
     onBack();
   }, [connectModalStep, modalBusy, onBack, onClose]);
-  useNativeBackButtonAction(connectModalOpen, handleNativeBack);
+  useNativeBackButtonAction(connectModalOpen && isDesktop, handleNativeBack);
+
+  const body = (
+    <StudioDialogBody className={isDesktop
+      ? "min-h-0 flex-1 touch-pan-y space-y-3 overflow-y-auto overscroll-contain"
+      : "space-y-3"}>
+      {connectModalStep === "picker" ? (
+        <div className="space-y-2">
+          <CredentialsConnectionChoices
+            canUseDesktopConnect={canUseDesktopConnect}
+            desktopCodexAuthJsonStatus={desktopCodexAuthJsonStatus}
+            isDisabled={!canManageAiConnections}
+            onChoose={onStepChange}
+          />
+
+          {!canManageAiConnections ? (
+            <Text variant="caption" tone="muted" className="mt-2">
+              Sign in and configure the runtime controller to add connections.
+            </Text>
+          ) : null}
+        </div>
+      ) : connectModalStep === "codex" ? (
+        <div className="space-y-3" data-testid="credentials-codex-card">
+          {deviceAuthError ? (
+            <div className="rounded-xl border border-rose-200 bg-rose-50 p-3 text-xs text-rose-700 dark:border-rose-500/30 dark:bg-rose-500/10 dark:text-rose-200">
+              {deviceAuthError}
+            </div>
+          ) : null}
+
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <Text variant="bodyStrong" tone="secondary">
+              {codexChoiceTitle}
+            </Text>
+            {canUseDesktopConnect ? (
+              <Button
+                onPress={shouldPromptForAuthJsonUpload ? onTriggerUpload : onConnectCodex}
+                isDisabled={!canManageAiConnections || modalBusy || deviceAuthSession !== null}
+                variant="outline"
+                size="xs"
+                radius="full"
+                data-testid="credentials-connect-codex"
+              >
+                {connectPending ? "Connecting…" : connectButtonLabel}
+              </Button>
+            ) : null}
+          </div>
+
+          {codexDeviceAuthSession ? (
+            <div className="rounded-xl border border-slate-200 bg-slate-50 p-3 text-xs text-slate-600 dark:border-slate-800 dark:bg-slate-900/40 dark:text-slate-300">
+              <div className="font-semibold text-slate-700 dark:text-slate-100">Device login</div>
+              <div className="mt-1">Open the OpenAI login page and enter this one-time code:</div>
+              <div className="mt-3 flex flex-wrap items-center gap-2">
+                <code className="min-w-0 break-all rounded-lg bg-white px-3 py-2 text-base font-semibold tracking-widest text-slate-800 ring-1 ring-slate-200 dark:bg-slate-950 dark:text-slate-100 dark:ring-slate-700">
+                  {codexDeviceAuthSession.userCode}
+                </code>
+                <Button
+                  onPress={() => void handleCopyText(codexDeviceAuthSession.userCode)}
+                  variant="outline"
+                  size="sm"
+                  radius="full"
+                  isDisabled={modalBusy}
+                  aria-label="Copy device code"
+                >
+                  {copiedDeviceCode ? "Copied" : "Copy"}
+                </Button>
+              </div>
+              {copyDeviceCodeFailed ? (
+                <div className="mt-2 text-xs text-rose-600 dark:text-rose-400">
+                  Copy was blocked. Press and hold the code to copy it manually.
+                </div>
+              ) : null}
+              <div className="mt-3 grid gap-2 sm:grid-cols-[minmax(0,1fr)_auto]">
+                <Button
+                  onPress={() => void openExternalUrl(codexDeviceAuthSession.verificationUrl)}
+                  variant="primary"
+                  size="sm"
+                  radius="full"
+                  isDisabled={modalBusy}
+                  fullWidth
+                >
+                  Open {deviceLoginHost}
+                </Button>
+                <Button
+                  onPress={onCancelDeviceAuthSession}
+                  variant="ghost"
+                  size="sm"
+                  radius="full"
+                  isDisabled={modalBusy}
+                >
+                  Cancel
+                </Button>
+              </div>
+              <div className="mt-2 flex items-center gap-2 text-xs text-slate-500 dark:text-slate-300">
+                {codexDeviceAuthSession.status === "pending" ? (
+                  <>
+                    <Spinner aria-hidden="true" tone="slate" size="xs" />
+                    {deviceAuthCompleting ? (
+                      <span>Login complete — checking the connection…</span>
+                    ) : (
+                      <span>
+                        Waiting for login{deviceCodeExpiresIn ? ` · code expires in ${deviceCodeExpiresIn}` : "…"}
+                      </span>
+                    )}
+                  </>
+                ) : codexDeviceAuthSession.status === "failed" ? (
+                  <span className="text-rose-600 dark:text-rose-400">
+                    {codexDeviceAuthSession.error ?? "Device login failed."}
+                  </span>
+                ) : null}
+              </div>
+              <div className="mt-2 text-[11px] leading-relaxed text-slate-500 dark:text-slate-400">
+                Only enter this code at <span className="font-semibold">{deviceLoginHost}</span>. Instafy will
+                never ask you to paste your ChatGPT password here.
+              </div>
+              {codexDeviceAuthSession.status === "failed" ? (
+                <div className="mt-2 flex flex-wrap items-center gap-2">
+                  <Button
+                    onPress={() => onBeginDeviceAuth("codex")}
+                    variant="primary"
+                    size="xs"
+                    radius="full"
+                    isDisabled={modalBusy}
+                  >
+                    Try again
+                  </Button>
+                  <Button
+                    onPress={onCancelDeviceAuthSession}
+                    variant="ghost"
+                    size="xs"
+                    radius="full"
+                    isDisabled={modalBusy}
+                  >
+                    Back
+                  </Button>
+                </div>
+              ) : null}
+            </div>
+          ) : canUseDesktopConnect ? (
+            <div className="rounded-xl border border-slate-200 bg-slate-50 p-3 text-xs text-slate-600 dark:border-slate-800 dark:bg-slate-900/40 dark:text-slate-300">
+              {desktopCodexAuthJsonStatus?.exists ? (
+                <>
+                  <div className="font-semibold text-slate-700 dark:text-slate-100">
+                    Desktop found your local Codex login.
+                  </div>
+                  <div className="mt-1">~/.codex/auth.json</div>
+                  <div className="mt-1">
+                    Click once to import it into your Instafy AI connections.
+                  </div>
+                </>
+              ) : shouldPromptForAuthJsonUpload ? (
+                <>
+                  <div className="font-semibold text-slate-700 dark:text-slate-100">
+                    No default Codex login found.
+                  </div>
+                  <div className="mt-1">
+                    Desktop only checks ~/.codex/auth.json. If Codex uses your system keychain or
+                    a custom CODEX_HOME, use browser login instead.
+                  </div>
+                </>
+              ) : (
+                <>
+                  <div className="font-semibold text-slate-700 dark:text-slate-100">
+                    Use your local Codex login.
+                  </div>
+                  <div className="mt-1">
+                    Desktop will import ~/.codex/auth.json when you continue.
+                  </div>
+                </>
+              )}
+            </div>
+          ) : (
+            <ChatGptDeviceCodePrerequisite
+              busy={connectPending}
+              containerTestId="credentials-chatgpt-device-prerequisite"
+              continueTestId="credentials-connect-codex"
+              disabled={!canManageAiConnections}
+              helpTestId="credentials-chatgpt-device-code-help"
+              onContinue={() => onBeginDeviceAuth("codex")}
+            />
+          )}
+
+          {canUseDesktopConnect && !codexDeviceAuthSession ? (
+            <div className="space-y-2">
+              <div className="flex justify-end">
+                <Button
+                  onPress={() =>
+                    setShowDesktopDeviceCodePrerequisite((current) => !current)
+                  }
+                  variant="ghost"
+                  size="xs"
+                  radius="full"
+                  aria-controls="credentials-chatgpt-device-prerequisite"
+                  aria-expanded={showDesktopDeviceCodePrerequisite}
+                  data-testid="credentials-connect-codex-browser-toggle"
+                >
+                  {showDesktopDeviceCodePrerequisite
+                    ? "Hide browser login"
+                    : "Use browser login instead"}
+                </Button>
+              </div>
+              {showDesktopDeviceCodePrerequisite ? (
+                <ChatGptDeviceCodePrerequisite
+                  busy={connectPending}
+                  containerId="credentials-chatgpt-device-prerequisite"
+                  containerTestId="credentials-chatgpt-device-prerequisite"
+                  continueTestId="credentials-connect-codex-browser"
+                  disabled={!canManageAiConnections}
+                  helpTestId="credentials-chatgpt-device-code-help"
+                  onContinue={() => onBeginDeviceAuth("codex")}
+                />
+              ) : null}
+            </div>
+          ) : null}
+
+          <CodexAdvancedConnectionOptions
+            allowAuthJsonImport={allowAuthJsonImport}
+            expanded={showAdvanced}
+            label={labelDraft}
+            onExpandedChange={onShowAdvancedChange}
+            onLabelChange={onLabelDraftChange}
+            onChooseAuthJson={onTriggerUpload}
+            canDevSeed={canDevSeedCodex}
+            busy={modalBusy}
+            onDevSeed={onDevSeedCodex}
+          />
+
+          {allowAuthJsonImport ? (
+            <input
+              ref={fileInputRef}
+              type="file"
+              accept="application/json,.json"
+              className="hidden"
+              data-testid="credentials-codex-auth-json-input"
+              onChange={(event) => onUploadFile(event)}
+            />
+          ) : null}
+        </div>
+      ) : connectModalStep === "openai" ? (
+        <div className="space-y-3" data-testid="credentials-openai-card">
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <div className="flex min-w-0 items-center gap-2">
+              <Text variant="bodyStrong" tone="secondary">
+                OpenAI API key
+              </Text>
+              <ApiKeyHelpLink provider="openai" />
+            </div>
+            <Button
+              onPress={() => void handleConnectApiKeyAndClose("openai")}
+              isDisabled={
+                !canManageAiConnections ||
+                connectPending ||
+                apiKeyPendingProvider !== null ||
+                !openaiApiKeyDraft.trim()
+              }
+              variant="outline"
+              size="xs"
+              radius="full"
+              data-testid="credentials-openai-connect"
+            >
+              {apiKeyPendingProvider === "openai" ? "Connecting…" : "Connect & test"}
+            </Button>
+          </div>
+
+          <div className="grid gap-2 md:grid-cols-2">
+            <Field label="API key" htmlFor="credentials-openai-api-key">
+              <Input
+                id="credentials-openai-api-key"
+                value={openaiApiKeyDraft}
+                onChange={(event) => onOpenaiApiKeyDraftChange(event.target.value)}
+                placeholder="Paste key"
+                size="sm"
+                radius="xl"
+                type={apiKeyInputType}
+                style={apiKeyInputStyle}
+                autoComplete="off"
+                autoCapitalize="none"
+                autoCorrect="off"
+                spellCheck={false}
+                data-lpignore="true"
+                data-bwignore="true"
+                data-1p-ignore="true"
+                data-testid="credentials-openai-api-key-input"
+                disabled={
+                  !canManageAiConnections ||
+                  connectPending ||
+                  apiKeyPendingProvider !== null
+                }
+              />
+            </Field>
+            <Field label="Label (optional)" htmlFor="credentials-openai-label">
+              <Input
+                id="credentials-openai-label"
+                value={openaiLabelDraft}
+                onChange={(event) => onOpenaiLabelDraftChange(event.target.value)}
+                placeholder="OpenAI"
+                size="sm"
+                radius="xl"
+                autoComplete="off"
+                data-testid="credentials-openai-label-input"
+                disabled={
+                  !canManageAiConnections ||
+                  connectPending ||
+                  apiKeyPendingProvider !== null
+                }
+              />
+            </Field>
+          </div>
+
+          <Text variant="caption" tone="muted" className="text-xs">
+            Note: hosted runs may send prompt context (including file snippets) to OpenAI.
+          </Text>
+        </div>
+      ) : connectModalStep === "deepseek" ? (
+        <div className="space-y-3" data-testid="credentials-deepseek-card">
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <div className="flex min-w-0 items-center gap-2">
+              <Text variant="bodyStrong" tone="secondary">
+                DeepSeek API key
+              </Text>
+              <ApiKeyHelpLink provider="deepseek" />
+            </div>
+            <Button
+              onPress={() => void handleConnectApiKeyAndClose("deepseek")}
+              isDisabled={
+                !canManageAiConnections || connectPending || apiKeyPendingProvider !== null || !deepseekApiKeyDraft.trim()
+              }
+              variant="outline"
+              size="xs"
+              radius="full"
+              data-testid="credentials-deepseek-connect"
+            >
+              {apiKeyPendingProvider === "deepseek" ? "Connecting…" : "Connect & test"}
+            </Button>
+          </div>
+
+          <div className="grid gap-2 md:grid-cols-2">
+            <Field label="API key" htmlFor="credentials-deepseek-api-key">
+              <Input
+                id="credentials-deepseek-api-key"
+                value={deepseekApiKeyDraft}
+                onChange={(event) => onDeepseekApiKeyDraftChange(event.target.value)}
+                placeholder="Paste key"
+                size="sm"
+                radius="xl"
+                type={apiKeyInputType}
+                style={apiKeyInputStyle}
+                autoComplete="off"
+                autoCapitalize="none"
+                autoCorrect="off"
+                spellCheck={false}
+                data-lpignore="true"
+                data-bwignore="true"
+                data-1p-ignore="true"
+                data-testid="credentials-deepseek-api-key-input"
+                disabled={!canManageAiConnections || connectPending || apiKeyPendingProvider !== null}
+              />
+            </Field>
+            <Field label="Label (optional)" htmlFor="credentials-deepseek-label">
+              <Input
+                id="credentials-deepseek-label"
+                value={deepseekLabelDraft}
+                onChange={(event) => onDeepseekLabelDraftChange(event.target.value)}
+                placeholder="DeepSeek"
+                size="sm"
+                radius="xl"
+                autoComplete="off"
+                data-testid="credentials-deepseek-label-input"
+                disabled={!canManageAiConnections || connectPending || apiKeyPendingProvider !== null}
+              />
+            </Field>
+          </div>
+
+          <Text variant="caption" tone="muted" className="text-xs">
+            Note: hosted runs may send prompt context (including file snippets) to DeepSeek.
+          </Text>
+        </div>
+      ) : connectModalStep === "zai" ? (
+        <div className="space-y-3" data-testid="credentials-zai-card">
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <div className="flex min-w-0 items-center gap-2">
+              <Text variant="bodyStrong" tone="secondary">
+                z.ai API key
+              </Text>
+              <ApiKeyHelpLink provider="zai" />
+            </div>
+            <Button
+              onPress={() => void handleConnectApiKeyAndClose("zai")}
+              isDisabled={!canManageAiConnections || connectPending || apiKeyPendingProvider !== null || !zaiApiKeyDraft.trim()}
+              variant="outline"
+              size="xs"
+              radius="full"
+              data-testid="credentials-zai-connect"
+            >
+              {apiKeyPendingProvider === "zai" ? "Connecting…" : "Connect & test"}
+            </Button>
+          </div>
+
+          <div className="grid gap-2 md:grid-cols-2">
+            <Field label="API key" htmlFor="credentials-zai-api-key">
+              <Input
+                id="credentials-zai-api-key"
+                value={zaiApiKeyDraft}
+                onChange={(event) => onZaiApiKeyDraftChange(event.target.value)}
+                placeholder="Paste key"
+                size="sm"
+                radius="xl"
+                type={apiKeyInputType}
+                style={apiKeyInputStyle}
+                autoComplete="off"
+                autoCapitalize="none"
+                autoCorrect="off"
+                spellCheck={false}
+                data-lpignore="true"
+                data-bwignore="true"
+                data-1p-ignore="true"
+                data-testid="credentials-zai-api-key-input"
+                disabled={!canManageAiConnections || connectPending || apiKeyPendingProvider !== null}
+              />
+            </Field>
+            <Field label="Label (optional)" htmlFor="credentials-zai-label">
+              <Input
+                id="credentials-zai-label"
+                value={zaiLabelDraft}
+                onChange={(event) => onZaiLabelDraftChange(event.target.value)}
+                placeholder="z.ai"
+                size="sm"
+                radius="xl"
+                autoComplete="off"
+                data-testid="credentials-zai-label-input"
+                disabled={!canManageAiConnections || connectPending || apiKeyPendingProvider !== null}
+              />
+            </Field>
+          </div>
+
+          <Text variant="caption" tone="muted" className="text-xs">
+            Note: hosted runs may send prompt context (including file snippets) to z.ai.
+          </Text>
+        </div>
+      ) : connectModalStep === "gemini" ? (
+        <div className="space-y-3" data-testid="credentials-gemini-card">
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <Text variant="bodyStrong" tone="secondary">
+              Gemini API key
+            </Text>
+            <ApiKeyHelpLink provider="gemini" />
+          </div>
+
+          <div className="flex flex-col gap-2 sm:flex-row sm:items-end">
+            <Field label="API key" htmlFor="credentials-gemini-api-key" className="flex-1">
+              <Input
+                id="credentials-gemini-api-key"
+                value={geminiApiKeyDraft}
+                onChange={(event) => onGeminiApiKeyDraftChange(event.target.value)}
+                placeholder="Paste key"
+                size="sm"
+                radius="xl"
+                type={apiKeyInputType}
+                style={apiKeyInputStyle}
+                autoComplete="off"
+                autoCapitalize="none"
+                autoCorrect="off"
+                spellCheck={false}
+                data-lpignore="true"
+                data-bwignore="true"
+                data-1p-ignore="true"
+                data-testid="credentials-gemini-api-key-input"
+                disabled={
+                  !canManageAiConnections ||
+                  connectPending ||
+                  apiKeyPendingProvider !== null
+                }
+                className="min-w-0"
+              />
+            </Field>
+            <Button
+              onPress={() => void handleConnectApiKeyAndClose("gemini")}
+              isDisabled={
+                !canManageAiConnections ||
+                connectPending ||
+                apiKeyPendingProvider !== null ||
+                !geminiApiKeyDraft.trim()
+              }
+              variant="outline"
+              size="sm"
+              radius="full"
+              data-testid="credentials-gemini-connect"
+              className="self-start sm:self-auto"
+            >
+              {apiKeyPendingProvider === "gemini" ? "Connecting..." : "Connect"}
+            </Button>
+          </div>
+        </div>
+      ) : null}
+    </StudioDialogBody>
+  );
+
+  if (!isDesktop) {
+    return (
+      <MobileFocusDialog
+        isOpen={connectModalOpen}
+        onOpenChange={(open) => { if (!open) handleNativeBack(); }}
+        closeDisabled={modalBusy}
+        dismissLabel={connectModalStep === "picker" ? "Close" : "Back"}
+        dialogAriaLabel="Add AI connection"
+        data-testid="credentials-connect-modal"
+        header={<>
+          <h2 className="text-base font-semibold">Add AI connection</h2>
+          <Text variant="caption" tone="muted">Saved to your profile for hosted runs.</Text>
+        </>}
+      >
+        {body}
+      </MobileFocusDialog>
+    );
+  }
 
   return (
     <StudioDialogModal
@@ -312,495 +828,7 @@ export function CredentialsConnectModal({
         closeLabel="Close"
       />
 
-      <StudioDialogBody className="min-h-0 flex-1 touch-pan-y space-y-3 overflow-y-auto overscroll-contain">
-        {connectModalStep === "picker" ? (
-          <div className="space-y-2">
-            <CredentialsConnectionChoices
-              canUseDesktopConnect={canUseDesktopConnect}
-              desktopCodexAuthJsonStatus={desktopCodexAuthJsonStatus}
-              isDisabled={!canManageAiConnections}
-              onChoose={onStepChange}
-            />
-
-            {!canManageAiConnections ? (
-              <Text variant="caption" tone="muted" className="mt-2">
-                Sign in and configure the runtime controller to add connections.
-              </Text>
-            ) : null}
-          </div>
-        ) : connectModalStep === "codex" ? (
-          <div className="space-y-3" data-testid="credentials-codex-card">
-            {deviceAuthError ? (
-              <div className="rounded-xl border border-rose-200 bg-rose-50 p-3 text-xs text-rose-700 dark:border-rose-500/30 dark:bg-rose-500/10 dark:text-rose-200">
-                {deviceAuthError}
-              </div>
-            ) : null}
-
-            <div className="flex flex-wrap items-center justify-between gap-2">
-              <Text variant="bodyStrong" tone="secondary">
-                {codexChoiceTitle}
-              </Text>
-              {canUseDesktopConnect ? (
-                <Button
-                  onPress={shouldPromptForAuthJsonUpload ? onTriggerUpload : onConnectCodex}
-                  isDisabled={!canManageAiConnections || modalBusy || deviceAuthSession !== null}
-                  variant="outline"
-                  size="xs"
-                  radius="full"
-                  data-testid="credentials-connect-codex"
-                >
-                  {connectPending ? "Connecting…" : connectButtonLabel}
-                </Button>
-              ) : null}
-            </div>
-
-            {codexDeviceAuthSession ? (
-              <div className="rounded-xl border border-slate-200 bg-slate-50 p-3 text-xs text-slate-600 dark:border-slate-800 dark:bg-slate-900/40 dark:text-slate-300">
-                <div className="font-semibold text-slate-700 dark:text-slate-100">Device login</div>
-                <div className="mt-1">Open the OpenAI login page and enter this one-time code:</div>
-                <div className="mt-3 flex flex-wrap items-center gap-2">
-                  <code className="min-w-0 break-all rounded-lg bg-white px-3 py-2 text-base font-semibold tracking-widest text-slate-800 ring-1 ring-slate-200 dark:bg-slate-950 dark:text-slate-100 dark:ring-slate-700">
-                    {codexDeviceAuthSession.userCode}
-                  </code>
-                  <Button
-                    onPress={() => void handleCopyText(codexDeviceAuthSession.userCode)}
-                    variant="outline"
-                    size="sm"
-                    radius="full"
-                    isDisabled={modalBusy}
-                    aria-label="Copy device code"
-                  >
-                    {copiedDeviceCode ? "Copied" : "Copy"}
-                  </Button>
-                </div>
-                {copyDeviceCodeFailed ? (
-                  <div className="mt-2 text-xs text-rose-600 dark:text-rose-400">
-                    Copy was blocked. Press and hold the code to copy it manually.
-                  </div>
-                ) : null}
-                <div className="mt-3 grid gap-2 sm:grid-cols-[minmax(0,1fr)_auto]">
-                  <Button
-                    onPress={() => void openExternalUrl(codexDeviceAuthSession.verificationUrl)}
-                    variant="primary"
-                    size="sm"
-                    radius="full"
-                    isDisabled={modalBusy}
-                    fullWidth
-                  >
-                    Open {deviceLoginHost}
-                  </Button>
-                  <Button
-                    onPress={onCancelDeviceAuthSession}
-                    variant="ghost"
-                    size="sm"
-                    radius="full"
-                    isDisabled={modalBusy}
-                  >
-                    Cancel
-                  </Button>
-                </div>
-                <div className="mt-2 flex items-center gap-2 text-xs text-slate-500 dark:text-slate-300">
-                  {codexDeviceAuthSession.status === "pending" ? (
-                    <>
-                      <Spinner aria-hidden="true" tone="slate" size="xs" />
-                      {deviceAuthCompleting ? (
-                        <span>Login complete — checking the connection…</span>
-                      ) : (
-                        <span>
-                          Waiting for login{deviceCodeExpiresIn ? ` · code expires in ${deviceCodeExpiresIn}` : "…"}
-                        </span>
-                      )}
-                    </>
-                  ) : codexDeviceAuthSession.status === "failed" ? (
-                    <span className="text-rose-600 dark:text-rose-400">
-                      {codexDeviceAuthSession.error ?? "Device login failed."}
-                    </span>
-                  ) : null}
-                </div>
-                <div className="mt-2 text-[11px] leading-relaxed text-slate-500 dark:text-slate-400">
-                  Only enter this code at <span className="font-semibold">{deviceLoginHost}</span>. Instafy will
-                  never ask you to paste your ChatGPT password here.
-                </div>
-                {codexDeviceAuthSession.status === "failed" ? (
-                  <div className="mt-2 flex flex-wrap items-center gap-2">
-                    <Button
-                      onPress={() => onBeginDeviceAuth("codex")}
-                      variant="primary"
-                      size="xs"
-                      radius="full"
-                      isDisabled={modalBusy}
-                    >
-                      Try again
-                    </Button>
-                    <Button
-                      onPress={onCancelDeviceAuthSession}
-                      variant="ghost"
-                      size="xs"
-                      radius="full"
-                      isDisabled={modalBusy}
-                    >
-                      Back
-                    </Button>
-                  </div>
-                ) : null}
-              </div>
-            ) : canUseDesktopConnect ? (
-              <div className="rounded-xl border border-slate-200 bg-slate-50 p-3 text-xs text-slate-600 dark:border-slate-800 dark:bg-slate-900/40 dark:text-slate-300">
-                {desktopCodexAuthJsonStatus?.exists ? (
-                  <>
-                    <div className="font-semibold text-slate-700 dark:text-slate-100">
-                      Desktop found your local Codex login.
-                    </div>
-                    <div className="mt-1">~/.codex/auth.json</div>
-                    <div className="mt-1">
-                      Click once to import it into your Instafy AI connections.
-                    </div>
-                  </>
-                ) : shouldPromptForAuthJsonUpload ? (
-                  <>
-                    <div className="font-semibold text-slate-700 dark:text-slate-100">
-                      No default Codex login found.
-                    </div>
-                    <div className="mt-1">
-                      Desktop only checks ~/.codex/auth.json. If Codex uses your system keychain or
-                      a custom CODEX_HOME, use browser login instead.
-                    </div>
-                  </>
-                ) : (
-                  <>
-                    <div className="font-semibold text-slate-700 dark:text-slate-100">
-                      Use your local Codex login.
-                    </div>
-                    <div className="mt-1">
-                      Desktop will import ~/.codex/auth.json when you continue.
-                    </div>
-                  </>
-                )}
-              </div>
-            ) : (
-              <ChatGptDeviceCodePrerequisite
-                busy={connectPending}
-                containerTestId="credentials-chatgpt-device-prerequisite"
-                continueTestId="credentials-connect-codex"
-                disabled={!canManageAiConnections}
-                helpTestId="credentials-chatgpt-device-code-help"
-                onContinue={() => onBeginDeviceAuth("codex")}
-              />
-            )}
-
-            {canUseDesktopConnect && !codexDeviceAuthSession ? (
-              <div className="space-y-2">
-                <div className="flex justify-end">
-                  <Button
-                    onPress={() =>
-                      setShowDesktopDeviceCodePrerequisite((current) => !current)
-                    }
-                    variant="ghost"
-                    size="xs"
-                    radius="full"
-                    aria-controls="credentials-chatgpt-device-prerequisite"
-                    aria-expanded={showDesktopDeviceCodePrerequisite}
-                    data-testid="credentials-connect-codex-browser-toggle"
-                  >
-                    {showDesktopDeviceCodePrerequisite
-                      ? "Hide browser login"
-                      : "Use browser login instead"}
-                  </Button>
-                </div>
-                {showDesktopDeviceCodePrerequisite ? (
-                  <ChatGptDeviceCodePrerequisite
-                    busy={connectPending}
-                    containerId="credentials-chatgpt-device-prerequisite"
-                    containerTestId="credentials-chatgpt-device-prerequisite"
-                    continueTestId="credentials-connect-codex-browser"
-                    disabled={!canManageAiConnections}
-                    helpTestId="credentials-chatgpt-device-code-help"
-                    onContinue={() => onBeginDeviceAuth("codex")}
-                  />
-                ) : null}
-              </div>
-            ) : null}
-
-            <CodexAdvancedConnectionOptions
-              allowAuthJsonImport={allowAuthJsonImport}
-              expanded={showAdvanced}
-              label={labelDraft}
-              onExpandedChange={onShowAdvancedChange}
-              onLabelChange={onLabelDraftChange}
-              onChooseAuthJson={onTriggerUpload}
-              canDevSeed={canDevSeedCodex}
-              busy={modalBusy}
-              onDevSeed={onDevSeedCodex}
-            />
-
-            {allowAuthJsonImport ? (
-              <input
-                ref={fileInputRef}
-                type="file"
-                accept="application/json,.json"
-                className="hidden"
-                data-testid="credentials-codex-auth-json-input"
-                onChange={(event) => onUploadFile(event)}
-              />
-            ) : null}
-          </div>
-        ) : connectModalStep === "openai" ? (
-          <div className="space-y-3" data-testid="credentials-openai-card">
-            <div className="flex flex-wrap items-center justify-between gap-2">
-              <div className="flex min-w-0 items-center gap-2">
-                <Text variant="bodyStrong" tone="secondary">
-                  OpenAI API key
-                </Text>
-                <ApiKeyHelpLink provider="openai" />
-              </div>
-              <Button
-                onPress={() => void handleConnectApiKeyAndClose("openai")}
-                isDisabled={
-                  !canManageAiConnections ||
-                  connectPending ||
-                  apiKeyPendingProvider !== null ||
-                  !openaiApiKeyDraft.trim()
-                }
-                variant="outline"
-                size="xs"
-                radius="full"
-                data-testid="credentials-openai-connect"
-              >
-                {apiKeyPendingProvider === "openai" ? "Connecting…" : "Connect & test"}
-              </Button>
-            </div>
-
-            <div className="grid gap-2 md:grid-cols-2">
-              <Field label="API key" htmlFor="credentials-openai-api-key">
-                <Input
-                  id="credentials-openai-api-key"
-                  value={openaiApiKeyDraft}
-                  onChange={(event) => onOpenaiApiKeyDraftChange(event.target.value)}
-                  placeholder="Paste key"
-                  size="sm"
-                  radius="xl"
-                  type={apiKeyInputType}
-                  style={apiKeyInputStyle}
-                  autoComplete="off"
-                  autoCapitalize="none"
-                  autoCorrect="off"
-                  spellCheck={false}
-                  data-lpignore="true"
-                  data-bwignore="true"
-                  data-1p-ignore="true"
-                  data-testid="credentials-openai-api-key-input"
-                  disabled={
-                    !canManageAiConnections ||
-                    connectPending ||
-                    apiKeyPendingProvider !== null
-                  }
-                />
-              </Field>
-              <Field label="Label (optional)" htmlFor="credentials-openai-label">
-                <Input
-                  id="credentials-openai-label"
-                  value={openaiLabelDraft}
-                  onChange={(event) => onOpenaiLabelDraftChange(event.target.value)}
-                  placeholder="OpenAI"
-                  size="sm"
-                  radius="xl"
-                  autoComplete="off"
-                  data-testid="credentials-openai-label-input"
-                  disabled={
-                    !canManageAiConnections ||
-                    connectPending ||
-                    apiKeyPendingProvider !== null
-                  }
-                />
-              </Field>
-            </div>
-
-            <Text variant="caption" tone="muted" className="text-xs">
-              Note: hosted runs may send prompt context (including file snippets) to OpenAI.
-            </Text>
-          </div>
-        ) : connectModalStep === "deepseek" ? (
-          <div className="space-y-3" data-testid="credentials-deepseek-card">
-            <div className="flex flex-wrap items-center justify-between gap-2">
-              <div className="flex min-w-0 items-center gap-2">
-                <Text variant="bodyStrong" tone="secondary">
-                  DeepSeek API key
-                </Text>
-                <ApiKeyHelpLink provider="deepseek" />
-              </div>
-              <Button
-                onPress={() => void handleConnectApiKeyAndClose("deepseek")}
-                isDisabled={
-                  !canManageAiConnections || connectPending || apiKeyPendingProvider !== null || !deepseekApiKeyDraft.trim()
-                }
-                variant="outline"
-                size="xs"
-                radius="full"
-                data-testid="credentials-deepseek-connect"
-              >
-                {apiKeyPendingProvider === "deepseek" ? "Connecting…" : "Connect & test"}
-              </Button>
-            </div>
-
-            <div className="grid gap-2 md:grid-cols-2">
-              <Field label="API key" htmlFor="credentials-deepseek-api-key">
-                <Input
-                  id="credentials-deepseek-api-key"
-                  value={deepseekApiKeyDraft}
-                  onChange={(event) => onDeepseekApiKeyDraftChange(event.target.value)}
-                  placeholder="Paste key"
-                  size="sm"
-                  radius="xl"
-                  type={apiKeyInputType}
-                  style={apiKeyInputStyle}
-                  autoComplete="off"
-                  autoCapitalize="none"
-                  autoCorrect="off"
-                  spellCheck={false}
-                  data-lpignore="true"
-                  data-bwignore="true"
-                  data-1p-ignore="true"
-                  data-testid="credentials-deepseek-api-key-input"
-                  disabled={!canManageAiConnections || connectPending || apiKeyPendingProvider !== null}
-                />
-              </Field>
-              <Field label="Label (optional)" htmlFor="credentials-deepseek-label">
-                <Input
-                  id="credentials-deepseek-label"
-                  value={deepseekLabelDraft}
-                  onChange={(event) => onDeepseekLabelDraftChange(event.target.value)}
-                  placeholder="DeepSeek"
-                  size="sm"
-                  radius="xl"
-                  autoComplete="off"
-                  data-testid="credentials-deepseek-label-input"
-                  disabled={!canManageAiConnections || connectPending || apiKeyPendingProvider !== null}
-                />
-              </Field>
-            </div>
-
-            <Text variant="caption" tone="muted" className="text-xs">
-              Note: hosted runs may send prompt context (including file snippets) to DeepSeek.
-            </Text>
-          </div>
-        ) : connectModalStep === "zai" ? (
-          <div className="space-y-3" data-testid="credentials-zai-card">
-            <div className="flex flex-wrap items-center justify-between gap-2">
-              <div className="flex min-w-0 items-center gap-2">
-                <Text variant="bodyStrong" tone="secondary">
-                  z.ai API key
-                </Text>
-                <ApiKeyHelpLink provider="zai" />
-              </div>
-              <Button
-                onPress={() => void handleConnectApiKeyAndClose("zai")}
-                isDisabled={!canManageAiConnections || connectPending || apiKeyPendingProvider !== null || !zaiApiKeyDraft.trim()}
-                variant="outline"
-                size="xs"
-                radius="full"
-                data-testid="credentials-zai-connect"
-              >
-                {apiKeyPendingProvider === "zai" ? "Connecting…" : "Connect & test"}
-              </Button>
-            </div>
-
-            <div className="grid gap-2 md:grid-cols-2">
-              <Field label="API key" htmlFor="credentials-zai-api-key">
-                <Input
-                  id="credentials-zai-api-key"
-                  value={zaiApiKeyDraft}
-                  onChange={(event) => onZaiApiKeyDraftChange(event.target.value)}
-                  placeholder="Paste key"
-                  size="sm"
-                  radius="xl"
-                  type={apiKeyInputType}
-                  style={apiKeyInputStyle}
-                  autoComplete="off"
-                  autoCapitalize="none"
-                  autoCorrect="off"
-                  spellCheck={false}
-                  data-lpignore="true"
-                  data-bwignore="true"
-                  data-1p-ignore="true"
-                  data-testid="credentials-zai-api-key-input"
-                  disabled={!canManageAiConnections || connectPending || apiKeyPendingProvider !== null}
-                />
-              </Field>
-              <Field label="Label (optional)" htmlFor="credentials-zai-label">
-                <Input
-                  id="credentials-zai-label"
-                  value={zaiLabelDraft}
-                  onChange={(event) => onZaiLabelDraftChange(event.target.value)}
-                  placeholder="z.ai"
-                  size="sm"
-                  radius="xl"
-                  autoComplete="off"
-                  data-testid="credentials-zai-label-input"
-                  disabled={!canManageAiConnections || connectPending || apiKeyPendingProvider !== null}
-                />
-              </Field>
-            </div>
-
-            <Text variant="caption" tone="muted" className="text-xs">
-              Note: hosted runs may send prompt context (including file snippets) to z.ai.
-            </Text>
-          </div>
-        ) : connectModalStep === "gemini" ? (
-          <div className="space-y-3" data-testid="credentials-gemini-card">
-            <div className="flex flex-wrap items-center justify-between gap-2">
-              <Text variant="bodyStrong" tone="secondary">
-                Gemini API key
-              </Text>
-              <ApiKeyHelpLink provider="gemini" />
-            </div>
-
-            <div className="flex flex-col gap-2 sm:flex-row sm:items-end">
-              <Field label="API key" htmlFor="credentials-gemini-api-key" className="flex-1">
-                <Input
-                  id="credentials-gemini-api-key"
-                  value={geminiApiKeyDraft}
-                  onChange={(event) => onGeminiApiKeyDraftChange(event.target.value)}
-                  placeholder="Paste key"
-                  size="sm"
-                  radius="xl"
-                  type={apiKeyInputType}
-                  style={apiKeyInputStyle}
-                  autoComplete="off"
-                  autoCapitalize="none"
-                  autoCorrect="off"
-                  spellCheck={false}
-                  data-lpignore="true"
-                  data-bwignore="true"
-                  data-1p-ignore="true"
-                  data-testid="credentials-gemini-api-key-input"
-                  disabled={
-                    !canManageAiConnections ||
-                    connectPending ||
-                    apiKeyPendingProvider !== null
-                  }
-                  className="min-w-0"
-                />
-              </Field>
-              <Button
-                onPress={() => void handleConnectApiKeyAndClose("gemini")}
-                isDisabled={
-                  !canManageAiConnections ||
-                  connectPending ||
-                  apiKeyPendingProvider !== null ||
-                  !geminiApiKeyDraft.trim()
-                }
-                variant="outline"
-                size="sm"
-                radius="full"
-                data-testid="credentials-gemini-connect"
-                className="self-start sm:self-auto"
-              >
-                {apiKeyPendingProvider === "gemini" ? "Connecting..." : "Connect"}
-              </Button>
-            </div>
-          </div>
-        ) : null}
-      </StudioDialogBody>
+      {body}
     </StudioDialogModal>
   );
 }
