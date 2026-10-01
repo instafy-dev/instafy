@@ -800,17 +800,14 @@ async fn process_claimed_wait(
             // Nothing can replay it, so nothing will start this work: say so
             // in the conversation rather than leave it queued forever.
             warn!(%project_id, %error, "unreadable hosted runtime limit wait; failing its work");
-            report.refused_jobs += fail_waiting_jobs(
+            refuse_waiting_jobs(
                 state,
                 policy,
                 &claim,
-                WaitingJobsFailure::Refused {
-                    message: LIMIT_WAIT_REFUSED_FALLBACK_MESSAGE,
-                },
+                LIMIT_WAIT_REFUSED_FALLBACK_MESSAGE,
+                report,
             )
             .await?;
-            finish_wait(state, project_id, claim.claim_token).await?;
-            report.finished_waits += 1;
             return Ok(());
         }
     };
@@ -865,15 +862,7 @@ async fn process_claimed_wait(
                     "hosted runtime limit wait ended: the launch was refused for another reason"
                 );
                 let message = refusal_message(api_error);
-                report.refused_jobs += fail_waiting_jobs(
-                    state,
-                    policy,
-                    &claim,
-                    WaitingJobsFailure::Refused { message: &message },
-                )
-                .await?;
-                finish_wait(state, project_id, claim.claim_token).await?;
-                report.finished_waits += 1;
+                refuse_waiting_jobs(state, policy, &claim, &message, report).await?;
                 return Ok(());
             }
             let delay = policy.retry_delay(claim.attempts + 1);
@@ -992,7 +981,33 @@ async fn finish_wait(
     Ok(())
 }
 
+/// End a wait whose launch was refused for a reason waiting cannot fix, or
+/// that cannot be replayed at all: fail every job still waiting with
+/// `message`, then drop the wait. Failing a plan's last waiting worker runs
+/// its lead checkpoint (`sweeps::publish_failed_queued_jobs`), which queues
+/// the lead in this space. With the wait gone nothing would start that lead
+/// or give up on it, so a second pass fails it with the same reason. A lead
+/// is no plan's worker, so failing it queues nothing more.
+async fn refuse_waiting_jobs(
+    state: &AppState,
+    policy: &LimitWaitPolicy,
+    claim: &ClaimedWait,
+    message: &str,
+    report: &mut LimitWaitSweepReport,
+) -> AnyResult<()> {
+    let refused = WaitingJobsFailure::Refused { message };
+    let failed = fail_waiting_jobs(state, policy, claim, refused).await?;
+    report.refused_jobs += failed;
+    if failed > 0 {
+        report.refused_jobs += fail_waiting_jobs(state, policy, claim, refused).await?;
+    }
+    finish_wait(state, claim.project_id, claim.claim_token).await?;
+    report.finished_waits += 1;
+    Ok(())
+}
+
 /// Why the sweep fails a space's waiting jobs.
+#[derive(Clone, Copy)]
 enum WaitingJobsFailure<'a> {
     /// The jobs that waited the whole give-up window on the limit.
     GaveUp,
