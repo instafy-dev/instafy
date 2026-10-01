@@ -30,6 +30,7 @@ use crate::client::{
 };
 use crate::controller_integration::ControllerIntegration;
 use crate::credential_lease::LeasedCredentials;
+use crate::incomplete_response;
 use crate::proxy_auth::ProxyClaims;
 use crate::upstream_error::{self, ToolControlRejection, UpstreamFailure};
 
@@ -1816,6 +1817,11 @@ async fn create_response(
         required_tool_call_fallbacks: &state.required_tool_call_fallbacks,
     };
 
+    let stream_requested = payload
+        .get("stream")
+        .and_then(Value::as_bool)
+        .unwrap_or(true);
+
     let LaneLease {
         leased,
         controller_credential_id,
@@ -1846,18 +1852,35 @@ async fn create_response(
             ProxyCompletion::Remote(response)
         }
         Err(error) => {
-            let error = error.context(format!(
+            let error = AppError::upstream(error.context(format!(
                 "upstream request failed (credential_source={}, requested_model={})",
                 credential_source, model,
-            ));
-            return Err(AppError::upstream(error));
+            )));
+            // Upstream codex does not retry an HTTP 429 by itself (only the pinned fork's own
+            // patch does), but it retries a stream that fails with `rate_limit_exceeded` after
+            // the wait the message names, within its stream retry budget. A transient rate limit
+            // on a streaming request is therefore answered that way; a plan limit, and a request
+            // that does not stream, keep the HTTP error.
+            if stream_requested
+                && let Some(rate_limit) = error.upstream.as_ref().and_then(|upstream| {
+                    upstream.stream_rate_limit_error(
+                        SystemTime::now(),
+                        upstream_error::retry_jitter_sample(),
+                    )
+                })
+            {
+                eprintln!(
+                    "[proxy] upstream rate limit streamed as response.failed {}",
+                    json!({
+                        "runId": run_id_from_claims(claims.as_ref()),
+                        "message": rate_limit["message"],
+                    })
+                );
+                return stream_failed_response(json!({"status": "failed", "error": rate_limit}));
+            }
+            return Err(error);
         }
     };
-
-    let stream_requested = payload
-        .get("stream")
-        .and_then(Value::as_bool)
-        .unwrap_or(true);
 
     if stream_requested {
         let ProxyCompletion::Remote(remote) = completion;
@@ -2466,7 +2489,7 @@ async fn build_remote_chat_response(
                         "role": "assistant",
                         "content": assistant_text
                     },
-                    "finish_reason": "stop"
+                    "finish_reason": chat_finish_reason(&completion.raw)
                 }
             ],
             "usage": usage
@@ -2482,10 +2505,30 @@ async fn build_remote_chat_response(
     stream_responses_from_value(completion.raw)
 }
 
-fn stream_responses_from_value(mut completed_response: Value) -> Result<Response, AppError> {
-    let debug_stream = std::env::var("PROXY_DEBUG_STREAM").as_deref() == Ok("1");
-    let mut debug_events = Vec::new();
+/// A Chat Completions `finish_reason` for an upstream Responses body. A response the upstream
+/// stopped early keeps the text it has, as Chat Completions does, and says why:
+/// `content_filter` for a filtered one and `length` for any other reason.
+fn chat_finish_reason(raw: &Value) -> &'static str {
+    if raw.get("status").and_then(Value::as_str) != Some("incomplete") {
+        return "stop";
+    }
+    match raw
+        .pointer("/incomplete_details/reason")
+        .and_then(Value::as_str)
+    {
+        Some("content_filter") => "content_filter",
+        _ => "length",
+    }
+}
 
+/// Streams an upstream Responses body to the client as the Responses events codex reads. A
+/// response the upstream stopped early is first reduced to what the client may see, see
+/// [`incomplete_response`].
+fn stream_responses_from_value(response: Value) -> Result<Response, AppError> {
+    stream_completed_response(incomplete_response::delivered_response(response))
+}
+
+fn stream_completed_response(mut completed_response: Value) -> Result<Response, AppError> {
     if let Value::Object(ref mut map) = completed_response {
         map.entry("status".to_string())
             .or_insert_with(|| Value::String("completed".to_string()));
@@ -2501,91 +2544,77 @@ fn stream_responses_from_value(mut completed_response: Value) -> Result<Response
         );
     }
 
-    let created_event = json!({
+    events.push(json!({
         "type": "response.created",
         "response": created_response,
-    });
-    if debug_stream {
-        debug_events.push(created_event.clone());
-    }
-    events.push(
-        Event::default()
-            .json_data(created_event)
-            .map_err(AppError::internal)?,
-    );
+    }));
 
     if let Some(output_items) = completed_response.get("output").cloned() {
         if let Value::Array(items) = output_items {
             for item in items {
-                let added_event = json!({
+                events.push(json!({
                     "type": "response.output_item.added",
                     "item": item,
-                });
-                if debug_stream {
-                    debug_events.push(added_event.clone());
-                }
-                events.push(
-                    Event::default()
-                        .json_data(added_event)
-                        .map_err(AppError::internal)?,
-                );
+                }));
 
                 if let Some(text) = collect_output_text_from_item(&item) {
-                    let delta_event = json!({
+                    events.push(json!({
                         "type": "response.output_text.delta",
                         "delta": text,
-                    });
-                    if debug_stream {
-                        debug_events.push(delta_event.clone());
-                    }
-                    events.push(
-                        Event::default()
-                            .json_data(delta_event)
-                            .map_err(AppError::internal)?,
-                    );
+                    }));
                 }
 
-                let done_event = json!({
+                events.push(json!({
                     "type": "response.output_item.done",
                     "item": item,
-                });
-                if debug_stream {
-                    debug_events.push(done_event.clone());
-                }
-                events.push(
-                    Event::default()
-                        .json_data(done_event)
-                        .map_err(AppError::internal)?,
-                );
+                }));
             }
         }
     }
 
-    let completed_event = json!({
+    events.push(json!({
         "type": "response.completed",
         "response": completed_response,
-    });
-    if debug_stream {
-        debug_events.push(completed_event.clone());
-    }
-    events.push(
-        Event::default()
-            .json_data(completed_event)
-            .map_err(AppError::internal)?,
-    );
+    }));
 
-    events.push(Event::default().data("[DONE]"));
-    if debug_stream {
-        debug_events.push(json!({"type": "done"}));
-        for event in debug_events {
+    sse_response(events)
+}
+
+/// Streams `failed_response`, which carries the `error`, as `response.failed`. It answers a
+/// request the upstream refused, which never created a response to announce first.
+fn stream_failed_response(failed_response: Value) -> Result<Response, AppError> {
+    sse_response(vec![json!({
+        "type": "response.failed",
+        "response": failed_response,
+    })])
+}
+
+/// Answers with `events` as server-sent events followed by `[DONE]`, and logs each one when
+/// `PROXY_DEBUG_STREAM=1`.
+fn sse_response(events: Vec<Value>) -> Result<Response, AppError> {
+    let mut sse_events = Vec::with_capacity(events.len() + 1);
+    for event in &events {
+        sse_events.push(
+            Event::default()
+                .json_data(event)
+                .map_err(AppError::internal)?,
+        );
+    }
+    sse_events.push(Event::default().data("[DONE]"));
+
+    if std::env::var("PROXY_DEBUG_STREAM").as_deref() == Ok("1") {
+        for event in events
+            .iter()
+            .chain(std::iter::once(&json!({"type": "done"})))
+        {
             eprintln!(
                 "[proxy] stream event: {}",
-                serde_json::to_string(&event).unwrap_or_else(|_| "<invalid>".into())
+                serde_json::to_string(event).unwrap_or_else(|_| "<invalid>".into())
             );
         }
     }
 
-    let stream = stream::iter(events.into_iter().map(Ok::<Event, Infallible>));
+    let stream = stream::iter(sse_events.into_iter().map(Ok::<Event, Infallible>));
     Ok(Sse::new(stream).into_response())
 }
 
