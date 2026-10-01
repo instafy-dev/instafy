@@ -313,12 +313,12 @@ test("runtime downloads verify architecture-bound checksums before extraction", 
   );
   assert.equal(
     [...source.matchAll(/sha256sum --check --status/gu)].length,
-    9,
+    11,
     "runtime and webdev downloads must each verify their archive",
   );
   assert.equal(
     [...source.matchAll(/curl --proto '=https' --tlsv1\.2/gu)].length,
-    9,
+    11,
     "runtime release downloads must enforce HTTPS and TLS 1.2+",
   );
 
@@ -338,12 +338,12 @@ test("runtime downloads verify architecture-bound checksums before extraction", 
   );
   assert.equal(
     argumentDefaults(source).get("BRACE_EXPANSION_VERSION"),
-    "5.0.9",
+    "5.0.12",
   );
   assertPinnedChecksumArgument(
     source,
     "BRACE_EXPANSION_SHA256",
-    "5d06001fddd25cbee90c96db4dc5b7b57711b984c3141e28d10f143deb52dbaf",
+    "ef8448ec78f20b692f04fa6d01f39b5ab34c66404bea3429f5a39c6c9e0be8b4",
     relativePath,
   );
   assert.equal(argumentDefaults(source).get("IP_ADDRESS_VERSION"), "10.3.1");
@@ -351,6 +351,14 @@ test("runtime downloads verify architecture-bound checksums before extraction", 
     source,
     "IP_ADDRESS_SHA256",
     "ad1790063beea11a312c801df30d58e147de762f4f77787552376eb7424623e5",
+    relativePath,
+  );
+  // npm vendors undici 6.27.0 and pnpm's dist vendors 6.28.0 (CVE-2026-19534).
+  assert.equal(argumentDefaults(source).get("UNDICI_VERSION"), "6.28.1");
+  assertPinnedChecksumArgument(
+    source,
+    "UNDICI_SHA256",
+    "e18191aac9c0ff43dac7fe9b10b7041a22d07addb7b66a6e8ac14a52a5b69b74",
     relativePath,
   );
   // Patch EVERY npm installation in the image, not one hardcoded prefix: the
@@ -392,6 +400,26 @@ test("runtime downloads verify architecture-bound checksums before extraction", 
     /tar -xzf \/tmp\/ip-address\.tgz -C \/usr\/local/u,
     "the patch must not target a single hardcoded npm prefix",
   );
+  assert.equal(
+    [...source.matchAll(
+      /for un_dir in \$\(find \/usr -type d \\\( -path '\*\/node_modules\/npm\/node_modules\/undici' -o -path '\*\/node_modules\/pnpm\/dist\/node_modules\/undici' \\\)/gu,
+    )].length,
+    2,
+    "both runtime flavors must patch the undici vendored by every npm root and by pnpm",
+  );
+  // The Playwright base's OpenSSL must be upgraded to a fixed Ubuntu build.
+  assert.equal(
+    argumentDefaults(source).get("WEBDEV_OPENSSL_MIN_VERSION"),
+    "3.0.13-0ubuntu3.16",
+  );
+  const webdevStage = source.slice(source.indexOf("FROM ${WEBDEV_BASE} AS runtime-webdev"));
+  for (const pkg of ["libssl3t64", "openssl"]) {
+    assert.match(
+      webdevStage,
+      new RegExp(`dpkg-query -W -f='\\$\\{Version\\}' ${pkg}\\)" ge "\\$\\{WEBDEV_OPENSSL_MIN_VERSION\\}"`, "u"),
+      `webdev must verify ${pkg} reaches the fixed OpenSSL build`,
+    );
+  }
   // Each flavor fails the build if any vendored copy is left unpatched.
   assert.equal(
     [...source.matchAll(/unpatched npm tar copies/gu)].length,
@@ -405,6 +433,11 @@ test("runtime downloads verify architecture-bound checksums before extraction", 
   );
   assert.equal(
     [...source.matchAll(/unpatched ip-address copies/gu)].length,
+    2,
+    "both runtime flavors must fail closed on a remaining vulnerable copy",
+  );
+  assert.equal(
+    [...source.matchAll(/unpatched undici copies/gu)].length,
     2,
     "both runtime flavors must fail closed on a remaining vulnerable copy",
   );
