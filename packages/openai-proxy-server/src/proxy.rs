@@ -24,15 +24,15 @@ use uuid::Uuid;
 
 use crate::auth::{Credentials, response_indicates_chatgpt_token_expired};
 use crate::client::{
-    CodexClient, CodexCompletion, DEFAULT_INSTRUCTIONS, DEFAULT_MODEL, SendHook,
-    ServiceTierEndpoints, conversation_id_enabled, normalize_reasoning_effort, sends_service_tier,
-    sends_tool_controls,
+    CodexClient, CodexCompletion, DEFAULT_INSTRUCTIONS, DEFAULT_MODEL,
+    RequiredToolCallFallbackHook, SendHook, ServiceTierEndpoints, conversation_id_enabled,
+    is_additional_tools_item, normalize_reasoning_effort, sends_service_tier, sends_tool_controls,
 };
 use crate::controller_integration::ControllerIntegration;
 use crate::credential_lease::LeasedCredentials;
 use crate::incomplete_response;
 use crate::proxy_auth::ProxyClaims;
-use crate::upstream_error::{self, UpstreamFailure};
+use crate::upstream_error::{self, ToolControlRejection, UpstreamFailure};
 
 const MAX_PROXY_REQUEST_BYTES: usize = 25 * 1024 * 1024;
 const PUBLIC_PROXY_LANE_HEADER: &str = "x-instafy-proxy-lane";
@@ -129,6 +129,10 @@ struct ProxyState {
     /// `PROXY_PLATFORM_SERVICE_TIER_ENDPOINTS`: which upstream endpoints the
     /// platform lane's tier goes to.
     service_tier_endpoints: ServiceTierEndpoints,
+    /// Requests on any lane that the proxy sent upstream again without the
+    /// `tool_choice: "required"` it set, after upstream refused that choice,
+    /// since it started. Shared by every clone of the state, as above.
+    required_tool_call_fallbacks: Arc<AtomicU64>,
 }
 
 struct AuthenticatedProxyClaims(Option<ProxyClaims>);
@@ -574,7 +578,7 @@ fn required_tool_call_applies(
 ) -> bool {
     let offers_tools = tools.is_some_and(|tools| !tools.is_empty())
         || input_items.iter().any(|item| {
-            item.get("type").and_then(Value::as_str) == Some("additional_tools")
+            is_additional_tools_item(item)
                 && item
                     .get("tools")
                     .and_then(Value::as_array)
@@ -1068,6 +1072,7 @@ where
         require_credential_claim,
         service_tier_overrides: Arc::new(AtomicU64::new(0)),
         service_tier_endpoints,
+        required_tool_call_fallbacks: Arc::new(AtomicU64::new(0)),
     };
 
     let app = Router::new()
@@ -1110,6 +1115,7 @@ async fn healthz(State(state): State<ProxyState>) -> impl IntoResponse {
         "authenticationRequired": state.controller.is_some(),
         "credentialClaimRequired": state.require_credential_claim,
         "platformLane": state.platform_lane_report(),
+        "requiredToolCallFallbacks": state.required_tool_call_fallbacks.load(Ordering::Relaxed),
     }))
 }
 
@@ -1142,6 +1148,7 @@ async fn readyz(State(state): State<ProxyState>) -> impl IntoResponse {
         "authenticationRequired": state.controller.is_some(),
         "credentialClaimRequired": state.require_credential_claim,
         "platformLane": state.platform_lane_report(),
+        "requiredToolCallFallbacks": state.required_tool_call_fallbacks.load(Ordering::Relaxed),
         })),
     )
 }
@@ -1419,23 +1426,67 @@ struct RemoteCompletionOptions<'a> {
     service_tier: Option<&'a Value>,
     /// Which upstream endpoints get `service_tier`, from [`ProxyState`].
     service_tier_endpoints: ServiceTierEndpoints,
+    /// `requiredToolCallFallbacks`, from [`ProxyState`].
+    required_tool_call_fallbacks: &'a Arc<AtomicU64>,
 }
 
 fn error_indicates_chatgpt_token_refreshable(error: &anyhow::Error) -> bool {
     upstream_error::refreshable_auth(error)
 }
 
+/// Which attempt at a request a client is built for, as far as its required
+/// tool call goes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RequiredToolCallAttempt {
+    /// The first attempt: it sends `tool_choice: "required"` where
+    /// [`required_tool_call_applies`] and logs that it does.
+    First,
+    /// A lease renewal's retry after an attempt that kept `required`: it
+    /// sends it again, and does not log it again.
+    Renewal,
+    /// A lease renewal's retry after upstream refused `required` and the
+    /// first attempt fell back: it sends the tool controls the request would
+    /// have without the key, as the fallback did.
+    RenewalAfterFallback,
+}
+
+/// What the client of a request that goes upstream with the
+/// `tool_choice: "required"` the proxy set runs if upstream refuses that
+/// choice and it falls back: one `requiredToolCallFallbacks` and one log line
+/// with the route, the run id, and the upstream error's code and `param`,
+/// never its message or the request body.
+fn required_tool_call_fallback_hook(
+    route: &str,
+    run_id: Option<&str>,
+    fallbacks: Arc<AtomicU64>,
+) -> RequiredToolCallFallbackHook {
+    let route = route.to_string();
+    let run_id = run_id.map(str::to_string);
+    Box::new(move |rejection: &ToolControlRejection| {
+        fallbacks.fetch_add(1, Ordering::Relaxed);
+        eprintln!(
+            "[proxy] required tool call falls back to the request's own tool choice {}",
+            json!({
+                "route": route,
+                "runId": run_id,
+                "upstreamErrorCode": rejection.code,
+                "upstreamErrorParam": rejection.param,
+            })
+        );
+    })
+}
+
 /// Also returns the input items to send, which a pinned lease may filter.
 /// `log_lease_policy` is false when a lease renewal rebuilds the client for a
 /// request that already logged what its pinned lease changed, and
-/// `log_required_tool_call` is false on every renewal, so a request logs its
-/// required tool call once.
+/// `required_tool_call_attempt` says whether the request may still send, and
+/// log, a required tool call.
 fn build_remote_completion_client<'i>(
     leased: LeasedCredentials,
     options: &RemoteCompletionOptions<'_>,
     input_items: &'i [Value],
     log_lease_policy: bool,
-    log_required_tool_call: bool,
+    required_tool_call_attempt: RequiredToolCallAttempt,
 ) -> Result<(CodexClient, String, String, Cow<'i, [Value]>)> {
     let endpoint_for_error = format_endpoint_for_error(leased.credentials.endpoint());
     let upstream_model = resolve_model_for_lease(options.requested_model, &leased);
@@ -1486,16 +1537,18 @@ fn build_remote_completion_client<'i>(
     }
     let creds = leased.credentials;
     // Decided before the client takes the credentials; logged once it exists.
-    let required_tool_call = options.response_controls.as_ref().is_some_and(|controls| {
-        required_tool_call_applies(
-            controls.require_tool_call,
-            &creds,
-            !options.plain_text_completion,
-            requested_tools.as_deref(),
-            &input_items,
-            controls.requested_tool_choice,
-        )
-    });
+    let required_tool_call = required_tool_call_attempt
+        != RequiredToolCallAttempt::RenewalAfterFallback
+        && options.response_controls.as_ref().is_some_and(|controls| {
+            required_tool_call_applies(
+                controls.require_tool_call,
+                &creds,
+                !options.plain_text_completion,
+                requested_tools.as_deref(),
+                &input_items,
+                controls.requested_tool_choice,
+            )
+        });
     let instructions = build_proxy_instructions(
         options.proxy_base_instructions,
         options.claims,
@@ -1516,8 +1569,9 @@ fn build_remote_completion_client<'i>(
     if pinned {
         // A ChatGPT login whose request keeps no tools gets the client's
         // default tools, web search among them with CODEX_ENABLE_WEB_SEARCH,
-        // after the filter above. The pin runs again on the list the request
-        // finally carries; tools it already kept pass unchanged.
+        // after the filter above, unless it is a Responses Lite request. The
+        // pin runs again on the list the request finally carries; tools it
+        // already kept pass unchanged.
         let run_id = run_id.map(str::to_string);
         client = client.with_tool_filter(move |tools| {
             let (kept, dropped) = tools_for_pinned_lease(tools, "tools");
@@ -1528,7 +1582,7 @@ fn build_remote_completion_client<'i>(
         });
     }
 
-    if required_tool_call && log_required_tool_call {
+    if required_tool_call && required_tool_call_attempt == RequiredToolCallAttempt::First {
         eprintln!(
             "[proxy] required tool call sends tool_choice required {}",
             json!({ "route": options.route, "runId": run_id })
@@ -1543,7 +1597,14 @@ fn build_remote_completion_client<'i>(
                 controls.requested_parallel_tool_calls,
                 controls.requested_text_controls.cloned(),
             )
-            .with_required_tool_call(required_tool_call);
+            .with_required_tool_call(required_tool_call)
+            .with_required_tool_call_fallback(required_tool_call.then(|| {
+                required_tool_call_fallback_hook(
+                    options.route,
+                    run_id,
+                    options.required_tool_call_fallbacks.clone(),
+                )
+            }));
     }
 
     if conversation_id_enabled() {
@@ -1570,7 +1631,10 @@ fn build_remote_completion_client<'i>(
 }
 
 /// `send_hook` runs when the first attempt goes upstream; a lease renewal's
-/// retry follows an upstream rejection, so it does not run it again.
+/// retry follows an upstream rejection, so it does not run it again. Nor
+/// does the client's own retry after upstream refused the required tool call
+/// it set, which also keeps the lease; a lease renewal after that retry
+/// sends no required tool call either.
 async fn complete_with_optional_controller_refresh(
     leased: LeasedCredentials,
     options: &RemoteCompletionOptions<'_>,
@@ -1580,8 +1644,13 @@ async fn complete_with_optional_controller_refresh(
     send_hook: Option<SendHook>,
 ) -> Result<(CodexCompletion, String)> {
     let first_lease_pinned = leased.pinned_model().is_some();
-    let (client, upstream_model, endpoint_for_error, first_input) =
-        build_remote_completion_client(leased, options, input_items, true, true)?;
+    let (client, upstream_model, endpoint_for_error, first_input) = build_remote_completion_client(
+        leased,
+        options,
+        input_items,
+        true,
+        RequiredToolCallAttempt::First,
+    )?;
     let mut client = client.with_send_hook(send_hook);
 
     match client.complete_with_input(&first_input).await {
@@ -1608,13 +1677,18 @@ async fn complete_with_optional_controller_refresh(
                 .context(UpstreamFailure::CredentialRefresh)?;
             // The renewed lease carries the controller's pin again; the first
             // attempt already logged it unless that lease had none.
+            let required_tool_call_attempt = if client.required_tool_call_refused() {
+                RequiredToolCallAttempt::RenewalAfterFallback
+            } else {
+                RequiredToolCallAttempt::Renewal
+            };
             let (mut retry_client, retry_model, retry_endpoint, retry_input) =
                 build_remote_completion_client(
                     refreshed,
                     options,
                     input_items,
                     !first_lease_pinned,
-                    false,
+                    required_tool_call_attempt,
                 )?;
 
             return retry_client
@@ -1740,6 +1814,7 @@ async fn create_response(
         }),
         service_tier: service_tier.upstream.as_ref(),
         service_tier_endpoints: state.service_tier_endpoints,
+        required_tool_call_fallbacks: &state.required_tool_call_fallbacks,
     };
 
     let stream_requested = payload
@@ -1859,6 +1934,7 @@ async fn create_chat_completion(
         }),
         service_tier: service_tier.upstream.as_ref(),
         service_tier_endpoints: state.service_tier_endpoints,
+        required_tool_call_fallbacks: &state.required_tool_call_fallbacks,
     };
 
     let LaneLease {
@@ -3617,6 +3693,7 @@ mod tests {
             require_credential_claim: false,
             service_tier_overrides: Arc::new(AtomicU64::new(0)),
             service_tier_endpoints: ServiceTierEndpoints::default(),
+            required_tool_call_fallbacks: Arc::new(AtomicU64::new(0)),
         }
     }
 

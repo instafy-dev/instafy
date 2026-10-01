@@ -67,6 +67,9 @@ not a per-device tab selection or a saved browsing-history record. If a runtime
 has ended, profile recovery and its limitations below still apply.
 Local resume preferences are scoped to the signed-in account, space and conversation;
 an account switch does not inherit another account's saved session choice.
+Runtime-status reads use a single ten-second deadline across credentials, request
+and response body, so a stalled read can settle and discovery or session refresh
+can be retried. This is a read deadline, not a limit on runtime startup time.
 
 ## One browser shell, three pixel transports
 
@@ -86,6 +89,10 @@ Personal and Shared Browser use one `BrowserAddressField` and the common Instafy
 and settings. Navigation state, permissions and control ownership stay in each
 browser controller; the shared components supply consistent themes, keyboard focus
 and touch targets.
+In compact Personal Browser panes, **Browser settings** keeps **Back** and
+**Forward** available when they are hidden from the toolbar. Choosing a history
+action closes the menu and restores the native page; control and history
+availability checks are the same as on the wide toolbar.
 
 ```text
 Studio Shared Browser shell
@@ -436,12 +443,11 @@ authority is revoked. RFB remains the final
 noVNC fallback and uses noVNC's own input path; the app-owned mobile keyboard
 bridge is intentionally not shown there.
 
-Below 540px the browser bar keeps navigation/address controls on the first row
-and adds a compact context strip for connection state, participants, the
-current human/agent controller, and request/grant actions. Important narrow
+Shared Browser uses its compact toolbar at pane widths up to 900px, including
+narrow panes inside a wide desktop window. The address and participant controls
+stay on one row; history and expansion are in **Browser options**. Narrow-screen
 targets are at least 40px, with 44px coarse-pointer variants where applicable.
-The extra row deliberately trades about 40px of stage height for visible
-ownership and safe touch control.
+Personal Browser retains a separate controls row at narrow viewport widths.
 
 ## Enabling the ladder
 

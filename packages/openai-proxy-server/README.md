@@ -176,13 +176,20 @@ The proxy builds each upstream body itself. On the Responses wire API, to the Op
 OpenAI-compatible Responses endpoint) and to a ChatGPT login's Codex endpoint, a `/v1/responses`
 request that lists `tools` sends them with its `tool_choice` (`auto` when absent) and
 `parallel_tool_calls` (`false` when absent). A request without `tools` sends the OpenAI API no
-tool control, and a ChatGPT login gets the proxy's default tools with `tool_choice: "auto"`. Codex
-sends the tools of a Responses Lite model, such as gpt-6-luna or gpt-5.6-sol, in an
-`additional_tools` input item and omits `tools`, so the request's own `tool_choice` is not
-forwarded on either path. An explicit empty `tools` array, by contrast, asks for a plain text
-completion, as `tool_choice: "none"` does, and goes upstream with no tools at all. A Chat
-Completions or Gemini Code Assist upstream is sent no client tools and no tool control. The
-request's `client_metadata` is never copied upstream.
+tool control, and a ChatGPT login gets the proxy's default tools (`shell`, `apply_patch`,
+`update_plan` and `view_image`, which the `CODEX_*` tool flags can change) with
+`tool_choice: "auto"` and `parallel_tool_calls: false`. Codex sends the tools of a Responses Lite
+model, such as gpt-6-luna or gpt-5.6-sol, in an `additional_tools` input item and omits `tools`,
+so the request's own `tool_choice` is not forwarded on either path. The OpenAI API does get such a
+request's own `parallel_tool_calls` when the request sends a boolean, as codex does (`false` for
+these models), since the API's own default is `true`; a request that sends none, or a value that
+is not a boolean, gets none, as before. The runtime offers such a model only the tools in that
+item, so a ChatGPT login sends a request that carries the item none of the default tools: no
+`tools` at all, with `tool_choice: "auto"` and `parallel_tool_calls: false`, even when a pinned
+lease dropped every tool in the item. An explicit
+empty `tools` array, by contrast, asks for a plain text completion, as `tool_choice: "none"` does,
+and goes upstream with no tools at all. A Chat Completions or Gemini Code Assist upstream is sent
+no client tools and no tool control. The request's `client_metadata` is never copied upstream.
 
 **Required tool call.** While the runtime's required execution gate is armed, codex adds
 `client_metadata["instafy.require_tool_call"] = "1"` to its model request. The proxy sends such a
@@ -196,21 +203,50 @@ endpoint alike, when all of these hold:
   one tool, counted after a pinned lease drops the tools it does not forward;
 - its `tool_choice` is `"auto"` or absent.
 
-A Responses Lite request then carries `tool_choice: "required"` although it has no `tools` (on a
-ChatGPT login, next to the proxy's default tools), and nothing else in the upstream body
-changes. Any other request, one whose key has another value included, goes upstream exactly as it
-would without the key: a request that chose `none`, `required` or a named tool keeps the controls
-above, so a Responses Lite request's own `required` is still not forwarded. The key applies on
-every lane whose requests use the Responses wire API, the platform lane and bring-your-own
-credentials alike, since the gate is codex's behaviour and not a billing rule. Each request that
-goes upstream with `required` logs one `required tool call sends tool_choice required` line with
-the route and the run id, never the request body. A request to a Chat Completions or Gemini Code
-Assist endpoint logs none, since it carries no tool control. The key itself never goes upstream,
-since no `client_metadata` does.
+A Responses Lite request then carries `tool_choice: "required"` although it has no `tools`, on a
+ChatGPT login as well, and nothing else in the upstream body changes. Any other request, one
+whose key has another value included, goes upstream exactly as it would without the key: a
+request that chose `none`, `required` or a named tool keeps the controls above, so a Responses
+Lite request's own `required` is still not forwarded. The key applies on every lane whose
+requests use the Responses wire API, the platform lane and bring-your-own credentials alike,
+since the gate is codex's behaviour and not a billing rule. Each request that goes upstream with
+`required` logs one `required tool call sends tool_choice required` line with the route and the
+run id, never the request body. A request to a Chat Completions or Gemini Code Assist endpoint
+logs none, since it carries no tool control. The key itself never goes upstream, since no
+`client_metadata` does.
+
+**When upstream refuses `required`.** Whether OpenAI accepts `tool_choice: "required"` for a
+request whose tools arrive only in `additional_tools` is unverified, so the proxy falls back
+rather than fail every such turn. When a request goes upstream with the `required` the proxy set
+and the upstream, the OpenAI API or the ChatGPT Codex endpoint, answers 400 with an error that
+blames the tool controls, the proxy sends the same request once more, on the same lease and
+credential, exactly as it would have gone without the key: with `tool_choice: "auto"` when it
+lists `tools`, and, for a Responses Lite request, with no `tool_choice` to the OpenAI API and
+`auto` to a ChatGPT login. The error blames the tool controls when the body is an
+OpenAI error object whose `param` is `tool_choice` or `tools`, or, when it names no `param`, whose
+code (`error.code`, or `error.type` without one) is set and whose `message` names the tool choice
+(`tool_choice` or `tool choice`). Nothing else falls back: not a 400 whose `param` names another
+parameter, whatever its message says, nor one without an `error` object (such as a
+`{"detail": ...}` body), nor any other status, nor an error a stream reports after it has
+started, nor any request whose `required` the proxy did not set, one that chose `required` itself
+included. Those go back to the client after one attempt, as before. If the retry fails too, its
+failure goes back as any failure does.
+
+Each fallback logs one `required tool call falls back to the request's own tool choice` line with
+the route, the run id, the upstream error's code (at most 64 characters) and its `param`, never
+its message or the request body, and adds one to `requiredToolCallFallbacks` in the
+[health report](#platform-lane-health-report). The retry belongs to the same request: it counts
+no second service tier override, logs no second `required tool call sends tool_choice required`
+line, and a lease renewal that follows it sends no `required` either.
 
 The loopback tests prove only what the proxy sends. Whether OpenAI honours
 `tool_choice: "required"` when the tools arrive only in `additional_tools` cannot be shown with a
-mock upstream, so it is a staging check.
+mock upstream, so it is a staging check. So is whether the ChatGPT Codex endpoint serves a
+Responses Lite request that has no `tools` and `tool_choice: "auto"`: codex sends it that shape
+when codex itself holds the ChatGPT login, but the proxy's requests have not been tried there. On
+staging, a `requiredToolCallFallbacks` above `0`, with the log lines that name the error, shows
+that the upstream refuses `required`; a refusal in a shape the proxy does not match still fails
+the turn, as it did before the fallback.
 
 ### Service tier
 
@@ -291,6 +327,12 @@ and logs it.
 | `reportsUsage` | Whether the proxy reports platform-lane usage to the controller; `false` today |
 | `controllerMeteringProtocol` | The controller's usage metering protocol as the proxy last read it; `null` today |
 | `outputCeilingSource` | Where the output token ceiling sent upstream comes from; `null` today, no ceiling is sent |
+
+Next to `platformLane`, both endpoints carry one more top-level field:
+
+| Field | Meaning |
+| --- | --- |
+| `requiredToolCallFallbacks` | How many requests since the proxy started went upstream again without the `tool_choice: "required"` the proxy set, after the upstream refused it with a 400 that blames the tool controls (see [When upstream refuses `required`](#tool-controls)). It counts every lane, bring-your-own credentials included, since the required tool call applies on each, and a request counts once, when it falls back, however many attempts it takes. It only grows, and `0` is what a proxy whose upstream accepts `required` reports |
 
 ### Upstream failures and retries
 

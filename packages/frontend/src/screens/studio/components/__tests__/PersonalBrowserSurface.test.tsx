@@ -262,6 +262,52 @@ describe("PersonalBrowserSurface", () => {
     expect(model.close).not.toHaveBeenCalled();
   });
 
+  it.each([
+    ["Back", "goBack"],
+    ["Forward", "goForward"],
+  ] as const)("keeps compact %s available in settings and restores the native page after navigation", async (label, method) => {
+    const model = createModel();
+    model.status = { ...model.status!, agentControlEnabled: false, canGoForward: true };
+    const setBounds = vi.fn(async (bounds: InstafyDesktopPersonalBrowserBounds) => ({
+      ...model.status!,
+      ...(bounds.occluded ? { previewDataUrl: "data:image/jpeg;base64,AQID" } : {}),
+    }));
+    window.instafyDesktop = { notify: vi.fn(), personalBrowserSetBounds: setBounds };
+    await act(async () => root.render(<PersonalBrowserSurface active compactChrome model={model} transportSelector={null} />));
+    expect(container.querySelector('[aria-label="Back"]')).toBeNull();
+    await act(async () => document.querySelector<HTMLButtonElement>('[aria-label="Browser settings"]')!.click());
+    const history = document.querySelector('[role="group"][aria-label="Page history"]')!;
+    const button = Array.from(history.querySelectorAll("button")).find(candidate => candidate.textContent === label)!;
+    expect(button.disabled).toBe(false);
+    expect(setBounds.mock.calls.at(-1)?.[0].occluded).toBe(true);
+    await act(async () => button.click());
+    expect(model[method]).toHaveBeenCalledOnce();
+    expect(document.querySelector('[role="dialog"][aria-label="Browser settings"]')).toBeNull();
+    expect(document.querySelector('[data-testid="personal-browser-overlay-preview"]')).toBeNull();
+    expect(setBounds.mock.calls.at(-1)?.[0].occluded).toBe(false);
+    expect(model.close).not.toHaveBeenCalled();
+    expect(model.setAgentControlEnabled).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["no history", { canGoBack: false, canGoForward: false }],
+    ["opening", { state: "opening" as const }],
+    ["agent control", { agentControlEnabled: true }],
+    ["pending human control", { humanControlReady: false }],
+    ["participant control", { tabControlActive: true }],
+  ])("disables compact history during %s", async (_label, status) => {
+    const model = createModel();
+    model.status = { ...model.status!, agentControlEnabled: false, canGoForward: true, ...status };
+    await act(async () => root.render(<PersonalBrowserSurface active compactChrome model={model} transportSelector={null} />));
+    await act(async () => document.querySelector<HTMLButtonElement>('[aria-label="Browser settings"]')!.click());
+    const buttons = Array.from(document.querySelectorAll<HTMLButtonElement>('[role="group"][aria-label="Page history"] button'));
+    expect(buttons).toHaveLength(2);
+    expect(buttons.every(button => button.disabled)).toBe(true);
+    await act(async () => buttons.forEach(button => button.click()));
+    expect(model.goBack).not.toHaveBeenCalled();
+    expect(model.goForward).not.toHaveBeenCalled();
+  });
+
   it("offers routine permission before Resume only on a supporting native host", async () => {
     const model = createModel();
     model.status = { ...model.status!, agentControlEnabled: false, approvalMode: "ask", approvalModes: ["ask", "routine"] };
