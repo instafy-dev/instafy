@@ -1,6 +1,6 @@
 import { useConversationFileOpener } from "../../../workspace/ConversationFileContext";
 import { useCallback, useEffect, useId, useMemo, useState } from "react";
-import { Eye, NavArrowRight, OpenNewWindow, Undo } from "iconoir-react";
+import { Eye, NavArrowRight, OpenNewWindow, Undo, WarningTriangle } from "iconoir-react";
 import { IconButton } from "../../../components/Button";
 import { useStatus } from "../../../status/useStatus";
 import { controllerClient } from "../../../sdk/instafy";
@@ -13,6 +13,7 @@ import type {
   ChatMessageFileChange,
   ChatMessageFileChangeType,
   ChatMessageFileLineRange,
+  ChatMessageUnsavedReason,
 } from "../types";
 import { truncateMultiline } from "./chatContentHelpers";
 import { REQUEST_MESSAGE_UNDO_EVENT, type MessageUndoRequestDetail } from "./messageUndoRequest";
@@ -89,6 +90,10 @@ const chipBaseClass =
 export const summaryToggleClass = `${chipBaseClass} -ml-1.5 border-transparent px-1.5 font-medium text-slate-700 hover:bg-slate-100 hover:text-slate-900 dark:text-slate-200 dark:hover:bg-white/[0.07]`;
 const actionChipClass = `${chipBaseClass} border-transparent font-medium text-slate-600 hover:bg-slate-100 hover:text-slate-800 dark:text-slate-300 dark:hover:bg-white/[0.07] dark:hover:text-slate-100`;
 const actionUndoChipClass = `${chipBaseClass} border-transparent font-medium text-slate-600 hover:bg-rose-50 hover:text-rose-700 dark:text-slate-300 dark:hover:bg-rose-400/[0.08] dark:hover:text-rose-200`;
+// The save state reads as glyph + words, not a pill; it is a button only so
+// touch and keyboard users can open the reason the hover title gives.
+const unsavedStateClass =
+  "inline-flex h-7 shrink-0 items-center gap-1 rounded-full px-1.5 text-xs font-medium text-secondary-700 transition hover:bg-secondary-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-primary-400 focus-visible:ring-offset-2 focus-visible:ring-offset-white dark:text-secondary-200 dark:hover:bg-secondary-400/[0.08] dark:focus-visible:ring-primary-300/80 dark:focus-visible:ring-offset-slate-950";
 const chipFileClass = `${chipBaseClass} border-slate-200/70 bg-white/75 font-mono text-slate-700 hover:border-slate-400/70 hover:bg-slate-100 hover:text-slate-900 dark:border-white/[0.09] dark:bg-white/[0.045] dark:text-slate-200 dark:hover:border-white/[0.16] dark:hover:bg-white/[0.10]`;
 const chipFileActiveClass = `${chipBaseClass} border-primary-300/70 bg-primary-50/70 font-mono text-primary-800 hover:border-primary-300 hover:bg-primary-50 dark:border-primary-300/50 dark:bg-primary-300/[0.16] dark:text-primary-200 dark:hover:bg-primary-300/[0.20]`;
 const chipFileRevertedClass = `${chipBaseClass} border-slate-200/70 bg-transparent font-mono text-slate-500 hover:border-slate-300 hover:bg-slate-50 dark:border-white/[0.07] dark:text-slate-400 dark:hover:bg-white/[0.05]`;
@@ -241,6 +246,16 @@ function resolveChangeSetVerb(entries: ResolvedChatFileChange[]): string {
   return "Edited";
 }
 
+// Plain-words reason behind the "Not saved" state. Hosted spaces keep unsaved
+// changes only on the machine running them, which can be replaced. The state
+// is a snapshot of the turn's own save, so the words describe that turn and
+// stay true after a later Save version.
+function describeUnsavedChanges(reason: ChatMessageUnsavedReason): string {
+  return reason === "auto_save_off"
+    ? "Auto-save was off when this turn ran. Until you save a version, these changes are only on this space's machine and could be lost when it restarts."
+    : "Saving failed when this turn ran. Until you save a version, these changes are only on this space's machine and could be lost when it restarts.";
+}
+
 function buildSyntheticDiffPreview(
   path: string,
   contentText: string,
@@ -282,6 +297,7 @@ export function ChatFileChangeList({
   files,
   projectId,
   commitRange,
+  unsavedReason,
   messageId,
   messageTimestamp,
 }: {
@@ -290,6 +306,9 @@ export function ChatFileChangeList({
   // The run's base..head commits: pins diffs to what that run changed (real
   // edit diffs on snapshot-history origins, stable after later edits).
   commitRange?: ChatMessageCommitRange | null;
+  // Set when the run's save failed or auto-save was off: the changes exist
+  // only on the space's machine, so the rail says "Not saved".
+  unsavedReason?: ChatMessageUnsavedReason | null;
   // Identity of the chat message these changes belong to. When present, the
   // Undo chip becomes a conversational affordance (#165): it asks the agent to
   // undo that message's change instead of silently reverting files. Without it
@@ -314,6 +333,7 @@ export function ChatFileChangeList({
   const [railExpanded, setRailExpanded] = useState(
     () => resolveUniqueChatFileChanges(files).length <= MAX_FILES_EXPANDED_BY_DEFAULT,
   );
+  const [unsavedNoteOpen, setUnsavedNoteOpen] = useState(false);
   const cardIdBase = useId();
 
   const resolvedFiles = useMemo(() => resolveUniqueChatFileChanges(files), [files]);
@@ -382,6 +402,10 @@ export function ChatFileChangeList({
     }
     return `${resolveChangeSetVerb(pendingEntries)} ${formatFileCount(pendingCount)}`;
   })();
+
+  // Reverted files have nothing left to save, so the state follows the actions.
+  const unsavedNote = unsavedReason && pendingCount > 0 ? describeUnsavedChanges(unsavedReason) : null;
+  const unsavedNoteId = `${cardIdBase}-unsaved`;
 
   // A single file needs no summary/toggle chip — the file chip carries everything.
   const showSummaryToggle = totalCount > 1;
@@ -841,6 +865,21 @@ export function ChatFileChangeList({
           })}
           </span>
 
+        {unsavedNote ? (
+          <button
+            type="button"
+            className={unsavedStateClass}
+            onClick={() => setUnsavedNoteOpen((open) => !open)}
+            aria-expanded={unsavedNoteOpen}
+            aria-controls={unsavedNoteId}
+            title={unsavedNote}
+            data-testid="chat-file-change-unsaved"
+          >
+            <WarningTriangle className="h-3 w-3 shrink-0" aria-hidden="true" />
+            <span>Not saved</span>
+          </button>
+        ) : null}
+
         {pendingCount > 0 ? (
           <>
             <span
@@ -851,6 +890,7 @@ export function ChatFileChangeList({
               type="button"
               className={actionChipClass}
               onClick={handleReview}
+              aria-describedby={unsavedNote ? unsavedNoteId : undefined}
               data-testid="chat-file-change-review"
             >
               <Eye className="h-3 w-3 shrink-0 opacity-70" aria-hidden="true" />
@@ -887,6 +927,19 @@ export function ChatFileChangeList({
           </>
         ) : null}
       </div>
+
+      {/* Hover shows the reason as a title; a tap or Enter on Not saved shows it
+          here for touch and keyboard users. Screen readers always get it, via
+          described-by on Review changes. */}
+      {unsavedNote ? (
+        <p
+          id={unsavedNoteId}
+          className={unsavedNoteOpen ? "mt-1 text-xs text-slate-600 dark:text-slate-300" : "sr-only"}
+          data-testid="chat-file-change-unsaved-note"
+        >
+          {unsavedNote}
+        </p>
+      ) : null}
 
       {resolvedFiles.map(({ file, workspacePath, displayLabel }, index) => {
         if (!railExpanded || !expandedDiffByPath[workspacePath]) {
