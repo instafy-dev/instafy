@@ -730,7 +730,14 @@ pub(crate) fn spawn_plan_group_checkpoints_after_cancellation(state: AppState, j
     });
 }
 
-async fn checkpoint_plan_groups_for_jobs(
+/// Run the final lead checkpoint of each plan group with a worker among
+/// `job_ids`, jobs that just ended without reporting a completion (canceled,
+/// or failed by a controller sweep before any runtime ran them). It fires once
+/// the group has no live worker left; jobs that are not a plan's workers are
+/// skipped. It is `checkpoint_plan_group`'s checkpoint, so a group's lead is
+/// dispatched at most once however many of its workers end, together or
+/// across calls.
+pub(crate) async fn checkpoint_plan_groups_for_jobs(
     state: &AppState,
     job_ids: &[Uuid],
 ) -> Result<(), (StatusCode, Json<ApiError>)> {
@@ -748,7 +755,7 @@ async fn checkpoint_plan_groups_for_jobs(
             &[&ids],
         )
         .await
-        .map_err(|error| internal_error(format!("failed to load canceled jobs: {error}")))?;
+        .map_err(|error| internal_error(format!("failed to load ended plan jobs: {error}")))?;
     drop(connection);
 
     let mut seen_groups = HashSet::new();
@@ -786,8 +793,9 @@ async fn checkpoint_plan_groups_for_jobs(
         let project_id: Uuid = row.get("project_id");
         let job_id: Uuid = row.get("id");
 
-        // A canceled lane never triggers the early wake; this only fires the
-        // final checkpoint when the cancellation made the group all-terminal.
+        // A canceled lane, or one a sweep failed before it started, never
+        // triggers the early wake; this only fires the final checkpoint once
+        // the group is all-terminal.
         if let Err((status, Json(api_error))) = checkpoint_plan_group(
             state,
             project_id,
@@ -805,7 +813,7 @@ async fn checkpoint_plan_groups_for_jobs(
                 job_id = %job_id,
                 status = status.as_u16(),
                 error = %api_error.message,
-                "failed to checkpoint plan group after cancellation"
+                "failed to checkpoint plan group after its worker ended"
             );
         }
     }

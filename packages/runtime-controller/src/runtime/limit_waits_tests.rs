@@ -2625,3 +2625,286 @@ async fn a_lapsed_claim_cannot_touch_the_claim_that_replaced_it() -> anyhow::Res
     })
     .await
 }
+
+/// The lead continuation jobs queued in `conversation_id`.
+async fn lead_jobs(pool: &crate::config::PgPool, conversation_id: Uuid) -> anyhow::Result<i64> {
+    Ok(pool
+        .get()
+        .await?
+        .query_one(
+            "select count(*)::bigint from agent_jobs
+             where conversation_id = $1
+               and payload #>> '{metadata,multiAgentPlan,role}' = 'lead_continuation'",
+            &[&conversation_id],
+        )
+        .await?
+        .get(0))
+}
+
+/// Queue two waiting workers of one multi-agent plan in a new conversation of
+/// `user_id` in `project_id`, each with the run dispatch creates for it.
+/// Returns the conversation and the workers.
+async fn queue_plan_workers(
+    pool: &crate::config::PgPool,
+    project_id: Uuid,
+    user_id: Uuid,
+) -> anyhow::Result<(Uuid, Vec<Uuid>)> {
+    let conversation_id = Uuid::new_v4();
+    let group_id = Uuid::new_v4();
+    let connection = pool.get().await?;
+    connection
+        .execute(
+            "insert into conversations (id, project_id, created_by, metadata, visibility)
+             values ($1, $2, $3, '{}'::jsonb, 'private')",
+            &[&conversation_id, &project_id, &user_id],
+        )
+        .await?;
+    let mut workers = Vec::new();
+    for handle in ["scout-a", "scout-b"] {
+        let job_id = Uuid::new_v4();
+        let run_id = Uuid::new_v4();
+        connection
+            .execute(
+                "insert into runs (id, project_id, conversation_id, run_type, status)
+                 values ($1, $2, $3, 'prompt', 'queued')",
+                &[&run_id, &project_id, &conversation_id],
+            )
+            .await?;
+        connection
+            .execute(
+                "insert into agent_jobs
+                    (id, project_id, run_id, conversation_id, status, intent, payload)
+                 values ($1, $2, $3, $4, 'queued', 'feature', $5)",
+                &[
+                    &job_id,
+                    &project_id,
+                    &run_id,
+                    &conversation_id,
+                    &PgJson(json!({
+                        "project_id": project_id,
+                        "conversation_id": conversation_id,
+                        "user_id": user_id,
+                        "prompt_text": "Read the docs folder.",
+                        "metadata": {
+                            "agent": { "handle": handle },
+                            "multiAgentPlan": {
+                                "groupId": group_id,
+                                "role": "worker",
+                                "lead": { "leadHandle": "octo" }
+                            }
+                        }
+                    })),
+                ],
+            )
+            .await?;
+        workers.push(job_id);
+    }
+    Ok((conversation_id, workers))
+}
+
+/// Giving up on a plan's workers ends them without a completion report, so it
+/// runs the lead checkpoint a canceled plan gets: not while another worker
+/// still waits within the window, and once the last one is given up on. The
+/// lead is queued in the space, where it waits on the limit like any work,
+/// and a later tick queues no second one.
+#[tokio::test]
+async fn giving_up_on_a_plans_last_waiting_worker_wakes_its_lead() -> anyhow::Result<()> {
+    use futures_util::FutureExt;
+
+    let fixture = setup("limit-wait-plan-lead", 1, 10).await?;
+    let user_id = Uuid::new_v4();
+    crate::tests::ensure_test_user(&fixture.pool, &user_id).await?;
+    let body = crate::tests::with_shared_db_fixture(fixture.shared_db_fixture(), async {
+        let waiting = fixture.waiting();
+        fixture.refuse(waiting).await?;
+        let (conversation_id, workers) =
+            queue_plan_workers(&fixture.pool, waiting, user_id).await?;
+        let connection = fixture.pool.get().await?;
+        // The first worker has waited out the window; the second is younger.
+        connection
+            .execute(
+                "update agent_jobs set created_at = now() - interval '31 minutes' where id = $1",
+                &[&workers[0]],
+            )
+            .await?;
+        connection
+            .execute(
+                "update hosted_runtime_limit_waits
+                 set first_refused_at = now() - interval '31 minutes'
+                 where project_id = $1",
+                &[&waiting],
+            )
+            .await?;
+        drop(connection);
+
+        let report = sweep_hosted_runtime_limit_waits(&fixture.state, &policy()).await?;
+        assert_eq!(report.expired_jobs, 1, "{report:?}");
+        assert_eq!(fixture.job_state(workers[0]).await?.0, "failed");
+        assert_eq!(fixture.job_state(workers[1]).await?.0, "queued");
+        assert_eq!(
+            lead_jobs(&fixture.pool, conversation_id).await?,
+            0,
+            "the lead waits for the worker still waiting"
+        );
+
+        fixture
+            .pool
+            .get()
+            .await?
+            .execute(
+                "update agent_jobs set created_at = now() - interval '31 minutes' where id = $1",
+                &[&workers[1]],
+            )
+            .await?;
+        for _ in 0..2 {
+            sweep_hosted_runtime_limit_waits(&fixture.state, &policy()).await?;
+        }
+        assert_eq!(fixture.job_state(workers[1]).await?.0, "failed");
+        assert_eq!(
+            lead_jobs(&fixture.pool, conversation_id).await?,
+            1,
+            "one lead for the plan"
+        );
+        // The lead is the space's only waiting work now, so the space keeps
+        // waiting on the limit for it.
+        assert_eq!(count_waiting_jobs(&fixture.state, &waiting).await?, 1);
+        assert!(fixture.wait_row(waiting).await?.is_some());
+        Ok(())
+    });
+    let outcome = std::panic::AssertUnwindSafe(body).catch_unwind().await;
+    let cleanup = async {
+        fixture
+            .pool
+            .get()
+            .await?
+            .execute("delete from auth.users where id = $1", &[&user_id])
+            .await?;
+        anyhow::Ok(())
+    }
+    .await;
+    match outcome {
+        Ok(result) => result.and(cleanup),
+        Err(panic) => std::panic::resume_unwind(panic),
+    }
+}
+
+/// The status and error of each lead continuation job in `conversation_id`.
+async fn lead_job_states(
+    pool: &crate::config::PgPool,
+    conversation_id: Uuid,
+) -> anyhow::Result<Vec<(String, Option<String>)>> {
+    Ok(pool
+        .get()
+        .await?
+        .query(
+            "select status, error_message from agent_jobs
+             where conversation_id = $1
+               and payload #>> '{metadata,multiAgentPlan,role}' = 'lead_continuation'",
+            &[&conversation_id],
+        )
+        .await?
+        .into_iter()
+        .map(|row| (row.get("status"), row.get("error_message")))
+        .collect())
+}
+
+/// A launch refused for good fails every waiting job, and failing a plan's
+/// last waiting workers runs its lead checkpoint, which queues the lead. The
+/// refusal ends the wait, so nothing would start that lead or give up on it:
+/// it fails with the same reason in the same tick instead of staying queued
+/// with its reserve held. Both refused branches: a recorded request nothing
+/// can replay, and a replay refused for a reason waiting cannot fix.
+#[tokio::test]
+async fn a_refused_launch_also_fails_the_lead_its_plan_workers_woke() -> anyhow::Result<()> {
+    use futures_util::FutureExt;
+
+    let fixture = setup("limit-wait-plan-lead-refused", 2, 10).await?;
+    let user_id = Uuid::new_v4();
+    crate::tests::ensure_test_user(&fixture.pool, &user_id).await?;
+    let body = crate::tests::with_shared_db_fixture(fixture.shared_db_fixture(), async {
+        let unreadable = fixture.waiting_project_ids[0];
+        let provider_gone = fixture.waiting_project_ids[1];
+        let mut plans = Vec::new();
+        for project_id in [unreadable, provider_gone] {
+            fixture.refuse(project_id).await?;
+            let (conversation_id, workers) =
+                queue_plan_workers(&fixture.pool, project_id, user_id).await?;
+            plans.push((project_id, conversation_id, workers));
+            fixture.make_due(project_id).await?;
+        }
+        let connection = fixture.pool.get().await?;
+        connection
+            .execute(
+                "update hosted_runtime_limit_waits set ensure_request = '{}'::jsonb
+                 where project_id = $1",
+                &[&unreadable],
+            )
+            .await?;
+        connection
+            .execute(
+                "update hosted_runtime_limit_waits
+                 set ensure_request = jsonb_set(ensure_request, '{provider}', '\"instafy_cloud_gone\"')
+                 where project_id = $1",
+                &[&provider_gone],
+            )
+            .await?;
+        drop(connection);
+
+        let report = sweep_hosted_runtime_limit_waits(&fixture.state, &policy()).await?;
+        for (project_id, conversation_id, workers) in &plans {
+            for worker in workers {
+                assert_eq!(fixture.job_state(*worker).await?.0, "failed");
+            }
+            assert_eq!(
+                lead_job_states(&fixture.pool, *conversation_id).await?,
+                vec![(
+                    "failed".to_string(),
+                    Some(LIMIT_WAIT_REFUSED_FALLBACK_MESSAGE.to_string())
+                )],
+                "the plan's one lead fails with the refusal"
+            );
+            assert!(fixture.wait_row(*project_id).await?.is_none());
+            assert_eq!(
+                count_waiting_jobs(&fixture.state, project_id).await?,
+                0,
+                "work left queued behind a wait that is over"
+            );
+        }
+        // Per space: its two workers, then the lead their failure woke.
+        assert_eq!(
+            (
+                report.claimed,
+                report.attempted,
+                report.refused_jobs,
+                report.finished_waits
+            ),
+            (2, 1, 6, 2),
+            "{report:?}"
+        );
+
+        // Nothing is left for a later tick, and no second lead is queued.
+        for _ in 0..2 {
+            let report = sweep_hosted_runtime_limit_waits(&fixture.state, &policy()).await?;
+            assert_eq!(report, LimitWaitSweepReport::default());
+        }
+        for (_, conversation_id, _) in &plans {
+            assert_eq!(lead_jobs(&fixture.pool, *conversation_id).await?, 1);
+        }
+        Ok(())
+    });
+    let outcome = std::panic::AssertUnwindSafe(body).catch_unwind().await;
+    let cleanup = async {
+        fixture
+            .pool
+            .get()
+            .await?
+            .execute("delete from auth.users where id = $1", &[&user_id])
+            .await?;
+        anyhow::Ok(())
+    }
+    .await;
+    match outcome {
+        Ok(result) => result.and(cleanup),
+        Err(panic) => std::panic::resume_unwind(panic),
+    }
+}
