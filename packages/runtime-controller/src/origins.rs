@@ -1577,6 +1577,12 @@ async fn register_runtime_bound_origin(
             ))
         })?;
 
+    // Stop/removal retains an origin instance as a released identity tombstone.
+    // An owner-authorized successor of the same unleased private runtime may
+    // reactivate only its canonical binding; managed/leased allocations must
+    // still be explicitly allocated by the controller. Owner, generation and
+    // live-runtime checks above also apply to this recovery path.
+    let can_reactivate_private_origin = is_private_self_hosted && active_lease_id.is_none();
     let candidate = transaction
         .query_opt(
             "select id, origin_id, mode
@@ -1584,11 +1590,18 @@ async fn register_runtime_bound_origin(
              where project_id = $1
                and runtime_id = $2
                and lease_id is not distinct from $3
-               and status <> 'released'
-             order by updated_at desc
+               and (status <> 'released'
+                    or ($4::boolean and lease_id is null
+                        and id = $2 and origin_id = $2))
+             order by (status = 'released'), updated_at desc
              limit 1
              for update",
-            &[project_id, &runtime_id, &active_lease_id],
+            &[
+                project_id,
+                &runtime_id,
+                &active_lease_id,
+                &can_reactivate_private_origin,
+            ],
         )
         .await
         .map_err(|error| {
