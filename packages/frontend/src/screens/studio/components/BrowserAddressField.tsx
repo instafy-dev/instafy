@@ -48,8 +48,8 @@ export const BrowserAddressField = forwardRef<HTMLInputElement, BrowserAddressFi
   historyUserId, currentPage, onValueChange, onNavigate, value, disabled, onBlur, ...props
 }, ref) {
   const { entries, clear } = useBrowserAddressHistory(historyUserId, currentPage);
-  const desktop = useBreakpoint("sm");
   const [editing, setEditing] = useState(false);
+  const desktop = useBreakpoint("sm", { freeze: editing });
   const originalValue = useRef("");
   const navigateSelection = useRef(false);
   const [pendingNavigation, setPendingNavigation] = useState<string | null>(null);

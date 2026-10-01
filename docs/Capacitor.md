@@ -245,6 +245,9 @@ stay mounted as the software keyboard changes the available space. The navigatio
 shares the viewport observer without changing its sheet layout. The dialog uses the existing
 native Back coordinator and React Aria focus restoration; a pending save can block dismissal
 without letting Back navigate the underlying screen. This does not change native keyboard policy.
+Address, agent profile, Invite and AI connection editors keep their chosen presentation
+through rotation while open, preserving drafts and focus. Closing and reopening chooses
+the presentation for the current viewport.
 Invite and AI connection forms use this surface below the small breakpoint while retaining
 their desktop dialogs. Invite Back dismisses an open QR first; connection Back returns to
 the provider picker before closing, and pending verification blocks dismissal.

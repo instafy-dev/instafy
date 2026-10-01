@@ -103,7 +103,7 @@ export function AgentProfileModal({
   onSave,
   saveLabel,
 }: AgentProfileModalProps) {
-  const isDesktop = useBreakpoint("sm");
+  const isDesktop = useBreakpoint("sm", { freeze: isOpen });
   const [photoError, setPhotoError] = useState<string | null>(null);
   const [previewUrl, setPreviewUrl] = useState<string | null>(null);
   useEffect(() => {

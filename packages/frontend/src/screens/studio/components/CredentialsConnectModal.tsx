@@ -156,7 +156,7 @@ export function CredentialsConnectModal({
   onUploadFile,
   onConnectApiKey,
 }: CredentialsConnectModalProps) {
-  const isDesktop = useBreakpoint("sm");
+  const isDesktop = useBreakpoint("sm", { freeze: connectModalOpen });
   const [nowMs, setNowMs] = useState(() => Date.now());
   const [copiedDeviceCode, setCopiedDeviceCode] = useState(false);
   const [copyDeviceCodeFailed, setCopyDeviceCodeFailed] = useState(false);

@@ -67,7 +67,7 @@ export function ComposerInviteModal({
   sharingPermissionsLoading,
   onOpenProjectSettings = null,
 }: ComposerInviteModalProps) {
-  const isDesktop = useBreakpoint("sm");
+  const isDesktop = useBreakpoint("sm", { freeze: isOpen });
   const [qrState, setQrState] = useState<ComposerInviteQrState>(null);
   const closeQr = useCallback(() => setQrState(null), []);
   const closeAccessQr = useCallback(() => {

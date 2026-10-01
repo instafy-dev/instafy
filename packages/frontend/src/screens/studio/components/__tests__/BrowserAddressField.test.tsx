@@ -21,6 +21,7 @@ let container: HTMLDivElement;
 const inputRef = createRef<HTMLInputElement>();
 const navigate = vi.fn();
 let desktop = true;
+const breakpointListeners = new Set<(event: MediaQueryListEvent) => void>();
 const released = vi.fn();
 const registerOverlay = vi.fn(() => released);
 function Fixture({ disabled = false, page }: { disabled?: boolean; page?: { url: string; title: string } }) {
@@ -49,7 +50,12 @@ beforeEach(async () => {
   vi.clearAllMocks();
   navigate.mockReturnValue(true);
   desktop = true;
-  vi.stubGlobal("matchMedia", () => ({ matches: desktop, addEventListener: vi.fn(), removeEventListener: vi.fn() }));
+  breakpointListeners.clear();
+  vi.stubGlobal("matchMedia", () => ({
+    get matches() { return desktop; },
+    addEventListener: (_type: string, listener: (event: MediaQueryListEvent) => void) => breakpointListeners.add(listener),
+    removeEventListener: (_type: string, listener: (event: MediaQueryListEvent) => void) => breakpointListeners.delete(listener),
+  }));
   vi.stubGlobal("ResizeObserver", class { observe() {} unobserve() {} disconnect() {} });
   vi.stubGlobal("CSS", { ...CSS, escape: (value: string) => value.replace(/[^a-zA-Z0-9_-]/g, char => `\\${char}`) });
   container = document.createElement("div"); document.body.append(container); root = createRoot(container);
@@ -237,6 +243,33 @@ describe("phone address editor", () => {
     await act(async () => (options()[0] as HTMLElement).click());
     expect(navigate).toHaveBeenCalledExactlyOnceWith("https://www.bbc.com/news");
     expect(dialog()).toBeNull();
+  });
+
+  it("keeps the phone editor and selection mounted across rotation until Back", async () => {
+    await open();
+    await type("unfinished.example");
+    const originalInput = input();
+    const originalDialog = dialog();
+    await act(async () => originalInput.setSelectionRange(3, 9));
+    await act(async () => {
+      desktop = true;
+      for (const listener of breakpointListeners) {
+        listener({ matches: desktop } as MediaQueryListEvent);
+      }
+    });
+    expect(dialog()).toBe(originalDialog);
+    expect(input()).toBe(originalInput);
+    expect(document.activeElement).toBe(originalInput);
+    expect(input().value).toBe("unfinished.example");
+    expect([input().selectionStart, input().selectionEnd]).toEqual([3, 9]);
+    expect(navigate).not.toHaveBeenCalled();
+
+    await act(async () => document.querySelector<HTMLButtonElement>('[aria-label="Back"]')!.click());
+    expect(dialog()).toBeNull();
+    expect(input()).not.toBe(originalInput);
+    expect(input().value).toBe("");
+    expect(container.querySelector('[data-testid="test-browser-address-trigger"]')).toBeNull();
+    expect(navigate).not.toHaveBeenCalled();
   });
 
   it("keeps rejected input editable, then returns to the page after successful Go", async () => {
