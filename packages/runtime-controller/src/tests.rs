@@ -13178,8 +13178,7 @@ async fn lease_next_agent_job_can_lease_runtime_spread_jobs_when_preference_pinn
 }
 
 #[tokio::test]
-async fn lease_next_agent_job_never_spreads_personal_browser_work_off_target() -> anyhow::Result<()>
-{
+async fn lease_next_agent_job_isolates_personal_browser_runtimes_and_jobs() -> anyhow::Result<()> {
     let Some((mut client, connection_handle)) = connect_test_db().await? else {
         eprintln!("skipping Personal Browser lease test: TEST_DATABASE_URL not set");
         return Ok(());
@@ -13219,6 +13218,7 @@ async fn lease_next_agent_job_never_spreads_personal_browser_work_off_target() -
     let project_id = Uuid::new_v4();
     let personal_runtime_id = Uuid::new_v4();
     let other_runtime_id = Uuid::new_v4();
+    let general_runtime_id = Uuid::new_v4();
     let owner_user_id = Uuid::new_v4();
     let teammate_user_id = Uuid::new_v4();
     let job_id = Uuid::new_v4();
@@ -13253,10 +13253,145 @@ async fn lease_next_agent_job_never_spreads_personal_browser_work_off_target() -
 
     client
         .execute(
+            "INSERT INTO runtimes (id, project_id, provider, status, capabilities)
+             VALUES ($1, $2, 'self-hosted', 'ready', $3)",
+            &[
+                &general_runtime_id,
+                &project_id,
+                &PgJson(json!({
+                    "_instafySelfHostedAccess": { "ownerUserId": owner_user_id.to_string() },
+                    "agent": true,
+                })),
+            ],
+        )
+        .await?;
+
+    // Starting a browser-only runtime must not consume an older ordinary job
+    // from its owner, even with an exact legacy target or spread metadata.
+    // Use BYO credentials so the private-runtime platform-lane filter cannot
+    // accidentally make this capability regression pass.
+    let credential_id = Uuid::new_v4();
+    for capability in [
+        json!({ "personalBrowser": { "enabled": true, "ownerUserId": owner_user_id.to_string() } }),
+        json!({ "personal_browser": { "enabled": true, "owner_user_id": owner_user_id.to_string() } }),
+    ] {
+        client
+            .execute(
+                "UPDATE runtimes SET capabilities = $2 WHERE id = $1",
+                &[&personal_runtime_id, &PgJson(capability)],
+            )
+            .await?;
+        for (name, metadata, target, intent, general_can_lease) in [
+            ("ordinary untargeted", json!({}), None, "prompt", true),
+            (
+                "ordinary targeted",
+                json!({}),
+                Some(personal_runtime_id),
+                "prompt",
+                false,
+            ),
+            (
+                "ordinary spread",
+                json!({ "runtimeRouting": { "strategy": "spread" } }),
+                Some(personal_runtime_id),
+                "prompt",
+                true,
+            ),
+            (
+                "wrong browser transport",
+                json!({ "browserTransport": "shared" }),
+                Some(personal_runtime_id),
+                "prompt",
+                false,
+            ),
+            (
+                "terminal command",
+                json!({}),
+                None,
+                "terminal_command",
+                true,
+            ),
+        ] {
+            let ordinary_job_id = Uuid::new_v4();
+            let ordinary_payload = PgJson(json!({
+                "prompt_text": name,
+                "user_id": owner_user_id.to_string(),
+                "metadata": metadata,
+            }));
+            client
+                .execute(
+                    "INSERT INTO agent_jobs (
+                         id, project_id, status, payload, target_runtime_id, credential_id, intent
+                     ) VALUES ($1, $2, 'queued', $3, $4, $5, $6)",
+                    &[
+                        &ordinary_job_id,
+                        &project_id,
+                        &ordinary_payload,
+                        &target,
+                        &credential_id,
+                        &intent,
+                    ],
+                )
+                .await?;
+
+            let transaction = client.transaction().await?;
+            let leased = agent::lease_next_agent_job(
+                &transaction,
+                &project_id,
+                Some(&personal_runtime_id),
+                120,
+                true,
+                false,
+                false,
+                false,
+                None,
+                None,
+                true,
+            )
+            .await
+            .map_err(|error| controller_error("lease incompatible Personal Browser job", error))?;
+            assert!(leased.is_none(), "Personal Browser must not lease {name}");
+            let row = transaction
+                .query_one(
+                    "SELECT status, lease_attempts FROM agent_jobs WHERE id = $1",
+                    &[&ordinary_job_id],
+                )
+                .await?;
+            assert_eq!(row.get::<_, String>("status"), "queued");
+            assert_eq!(row.get::<_, i32>("lease_attempts"), 0);
+            let general_lease = agent::lease_next_agent_job(
+                &transaction,
+                &project_id,
+                Some(&general_runtime_id),
+                120,
+                true,
+                false,
+                false,
+                false,
+                None,
+                None,
+                true,
+            )
+            .await
+            .map_err(|error| controller_error("lease ordinary job on general runtime", error))?;
+            assert_eq!(
+                general_lease.map(|job| job.id),
+                general_can_lease.then_some(ordinary_job_id),
+                "{name}"
+            );
+            transaction.commit().await?;
+            client
+                .execute("DELETE FROM agent_jobs WHERE id = $1", &[&ordinary_job_id])
+                .await?;
+        }
+    }
+
+    client
+        .execute(
             "INSERT INTO agent_jobs (
-                 id, project_id, conversation_id, status, payload, priority, target_runtime_id
-             ) VALUES ($1, $2, NULL, 'queued', $3, 10, $4)",
-            &[&job_id, &project_id, &payload, &personal_runtime_id],
+                 id, project_id, conversation_id, status, payload, priority, target_runtime_id, credential_id
+             ) VALUES ($1, $2, NULL, 'queued', $3, 10, $4, $5)",
+            &[&job_id, &project_id, &payload, &personal_runtime_id, &credential_id],
         )
         .await?;
 
@@ -13272,7 +13407,7 @@ async fn lease_next_agent_job_never_spreads_personal_browser_work_off_target() -
         false,
         None,
         None,
-        false,
+        true,
     )
     .await
     .map_err(|error| controller_error("lease Personal Browser job off target", error))?;
@@ -13291,7 +13426,7 @@ async fn lease_next_agent_job_never_spreads_personal_browser_work_off_target() -
         false,
         None,
         None,
-        false,
+        true,
     )
     .await
     .map_err(|error| controller_error("lease Personal Browser job for wrong owner", error))?;
@@ -13317,7 +13452,7 @@ async fn lease_next_agent_job_never_spreads_personal_browser_work_off_target() -
         false,
         None,
         None,
-        false,
+        true,
     )
     .await
     .map_err(|error| controller_error("lease Personal Browser job on target", error))?;
