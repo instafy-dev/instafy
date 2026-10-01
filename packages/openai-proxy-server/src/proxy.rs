@@ -566,8 +566,12 @@ fn require_tool_call_requested(payload: &Value) -> bool {
 /// tools, and leave the choice to the model, with `tool_choice` `"auto"` or
 /// absent. `tools` and `input_items` are the ones the request forwards, after
 /// a pinned lease filters them, so a request left with no tools is never
-/// told to call one. A request that did not ask keeps its tool controls as
-/// they are: a Responses Lite request's own `tool_choice` is not forwarded.
+/// told to call one. A remote compaction request, whose input carries a
+/// `compaction_trigger` item, never is either: codex sends it with the turn's
+/// tools while the thread's required tool call is still pending, but it must
+/// come back as a compaction item, and a tool call fails it. A request that did not
+/// ask keeps its tool controls as they are: a Responses Lite request's own
+/// `tool_choice` is not forwarded.
 fn required_tool_call_applies(
     requested: bool,
     credentials: &Credentials,
@@ -585,7 +589,19 @@ fn required_tool_call_applies(
                     .is_some_and(|tools| !tools.is_empty())
         });
     let model_chooses = tool_choice.is_none_or(|choice| choice.as_str() == Some("auto"));
-    requested && sends_tool_controls(credentials) && tools_enabled && offers_tools && model_chooses
+    let compaction = input_items.iter().any(is_compaction_trigger_item);
+    requested
+        && sends_tool_controls(credentials)
+        && tools_enabled
+        && offers_tools
+        && model_chooses
+        && !compaction
+}
+
+/// Whether `item` is the `compaction_trigger` input item that marks codex's
+/// remote compaction request.
+fn is_compaction_trigger_item(item: &Value) -> bool {
+    item.get("type").and_then(Value::as_str) == Some("compaction_trigger")
 }
 
 fn requested_tool_names(tools: &[Value]) -> Vec<String> {
@@ -4693,6 +4709,31 @@ mod tests {
             false,
             Some(&tools),
             &lite_input,
+            Some(&auto)
+        ));
+
+        // A remote compaction request, with its tools in either place.
+        let compaction_trigger = json!({ "type": "compaction_trigger" });
+        let lite_compaction = [
+            lite_input[0].clone(),
+            lite_input[1].clone(),
+            compaction_trigger.clone(),
+        ];
+        let plain_compaction = [plain_input[0].clone(), compaction_trigger];
+        assert!(!required_tool_call_applies(
+            true,
+            &responses,
+            true,
+            None,
+            &lite_compaction,
+            Some(&auto)
+        ));
+        assert!(!required_tool_call_applies(
+            true,
+            &responses,
+            true,
+            Some(&tools),
+            &plain_compaction,
             Some(&auto)
         ));
 

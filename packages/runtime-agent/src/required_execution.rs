@@ -5,8 +5,9 @@
 //! (rust-v0.159) always sends `tool_choice: "auto"` and offers no hook to change it, so the
 //! runtime arms this gate for the turn's thread instead. While it is armed, every generation
 //! request of that thread carries `client_metadata["instafy.require_tool_call"] = "1"`; the
-//! Instafy proxy turns that into `tool_choice: "required"` when the request offers top-level
-//! tools. The first execution tool the thread starts disarms it (a top-level code-mode `exec`
+//! Instafy proxy turns that into `tool_choice: "required"` when the request offers tools (in
+//! top-level `tools`, or in a Responses Lite `additional_tools` input item) and is not a remote
+//! compaction request. The first execution tool the thread starts disarms it (a top-level code-mode `exec`
 //! counts, `wait` does not), and so does the end of the turn.
 
 use std::collections::HashSet;

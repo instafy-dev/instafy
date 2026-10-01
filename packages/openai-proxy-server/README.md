@@ -201,7 +201,10 @@ endpoint alike, when all of these hold:
   a Chat Completions or Gemini Code Assist endpoint;
 - the request offers tools: a non-empty `tools`, or an `additional_tools` input item with at least
   one tool, counted after a pinned lease drops the tools it does not forward;
-- its `tool_choice` is `"auto"` or absent.
+- its `tool_choice` is `"auto"` or absent;
+- it is not a remote compaction request, whose input carries a `compaction_trigger` item. Codex
+  sends that request with the turn's tools while a required tool call is still pending, but it
+  must come back as a compaction item, and a tool call would fail it.
 
 A Responses Lite request then carries `tool_choice: "required"` although it has no `tools`, on a
 ChatGPT login as well, and nothing else in the upstream body changes. Any other request, one
