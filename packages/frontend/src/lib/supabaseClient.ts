@@ -5,7 +5,7 @@ import {
   dropOtherAccountLinkAfterSignOut,
   holdOtherAccountLink,
 } from "../auth/otherAccountLink";
-import { resolveSupabaseFlowType } from "../auth/pkce";
+import { passwordRecoveryCallbackUrl, resolveSupabaseFlowType } from "../auth/pkce";
 import {
   decideWebSessionAddress,
   type OwnAccountLink,
@@ -130,6 +130,17 @@ if (typeof window !== "undefined") {
     }
     ownAccountLink = decision.ownAccountLink;
     holdOtherAccountLink(decision.otherAccountLink);
+  }
+}
+
+// The SDK can consume the hash and emit PASSWORD_RECOVERY before React mounts.
+// Preserve that intent in the route first, including callbacks sent to site_url.
+// Only a client that reads its address consumes a callback: signed out, on the
+// web. Signed in, decideWebSessionAddress has already decided where a link goes.
+if (typeof window !== "undefined" && hasSupabaseConfig && readsAddress) {
+  const recoveryUrl = passwordRecoveryCallbackUrl(window.location.href);
+  if (recoveryUrl && recoveryUrl !== window.location.href) {
+    replaceAddress(recoveryUrl);
   }
 }
 
