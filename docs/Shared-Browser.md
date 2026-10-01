@@ -210,9 +210,18 @@ the visible Shared Browser and dispatches this contract:
 }
 ```
 
-The composer blocks the send until that runtime is resolved. Before any job is
-written, the controller requires the explicit `runtimeId`, rejects conflicting
-transport/runtime aliases, and canonicalizes the request to one agent, exact
+The composer blocks the send until that runtime is resolved and a page is
+selected. Before any job is written, the controller requires the explicit
+`runtimeId` and one `browserPageId` in the runtime's CDP target id shape (1 to
+256 bytes of letters, digits, `-` and `_`). A request without one is refused
+with `400` and code `shared_browser_page_required` instead of becoming a run
+that fails on the runtime. An older Studio tab, or a send-queue entry it
+created, can omit the page id, and a page the composer inferred from chat
+history before the live pages loaded carries its URL as the id. The refusal
+asks the person to refresh Studio and write the message again, because "Send
+now" on a failed queue entry resends the same stored request. The controller
+also rejects conflicting
+transport/runtime/page aliases, and canonicalizes the request to one agent, exact
 runtime routing, a read-only workspace scope, browser execution only, and no
 runtime spread or multi-agent plan. If a browser-bound model response still
 emits a plan action, the controller rejects it before any sibling job or runtime
