@@ -72,6 +72,10 @@ Stop everything with `pnpm runtime:down`, which tears down the controller stack.
   `RUNTIME_PROXY_IMAGE=<registry>/<organization>/instafy-openai-proxy-server@sha256:<digest>`.
   `docker/docker-compose.runtime.provider.yml` intentionally has no mutable
   fallback image for either service.
+- `docker/docker-compose.runtime.provider.yml` forwards `ORIGIN_GIT_REMOTE_URL` into the runtime.
+  When the controller sets `GIT_REMOTE_BASE_URL`, a runtime whose workspace already has files
+  but no `.instafy/.git` then fails to start. Roll the file out only to fresh nodes or empty
+  workspaces; see [Workspace durability](../docs/Runtime-Machines.md#workspace-durability).
 - Local development remains source-built through
   `docker/docker-compose.runtime.yml` and its
   `instafy-runtime-agent:webdev-local` tag.

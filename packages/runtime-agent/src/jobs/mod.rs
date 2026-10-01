@@ -608,6 +608,65 @@ fn skills_kickoff_artifacts(kickoff: Option<&SkillsKickoff>) -> Vec<JsonValue> {
         .unwrap_or_default()
 }
 
+/// The lane name a skills lane checkpoint records on its `origin/apply` artifact.
+const SKILLS_IMPORT_LANE: &str = "skills/import";
+
+/// What the job does after the skills lane ran.
+enum SkillsLaneStep {
+    /// The lane finished the job.
+    Finished(JobExecution),
+    /// A model turn runs next with this prompt, and the kickoff joins its execution.
+    Kickoff {
+        prompt: String,
+        kickoff: SkillsKickoff,
+    },
+}
+
+/// Settle the skills lane's outcome. A kickoff's import report is streamed first. The files an
+/// import wrote, with or without `--start`, then go to the protected checkpoint, and its
+/// artifacts join the lane's own.
+async fn settle_skills_lane_outcome(
+    outcome: skills::SkillsLaneOutcome,
+    checkpoint: workspace_commit::LaneCheckpoint<'_>,
+) -> SkillsLaneStep {
+    match outcome {
+        skills::SkillsLaneOutcome::Execution(execution) => SkillsLaneStep::Finished(execution),
+        skills::SkillsLaneOutcome::Installed {
+            mut execution,
+            files,
+        } => {
+            execution
+                .artifacts
+                .extend(workspace_commit::checkpoint_lane_files(checkpoint, &files).await);
+            SkillsLaneStep::Finished(execution)
+        }
+        skills::SkillsLaneOutcome::Kickoff {
+            report,
+            mut artifacts,
+            names,
+            prompt,
+            files,
+        } => {
+            let mut messages = Vec::new();
+            if let Some(report) = report {
+                if let Some(sender) = checkpoint.progress_sender.as_ref() {
+                    let _ = sender.send(report.clone());
+                }
+                messages.push(report);
+            }
+            artifacts.extend(workspace_commit::checkpoint_lane_files(checkpoint, &files).await);
+            SkillsLaneStep::Kickoff {
+                prompt,
+                kickoff: SkillsKickoff {
+                    messages,
+                    artifacts,
+                    names,
+                },
+            }
+        }
+    }
+}
+
 async fn run_agents_memory_snapshot(
     workspace_dir: &Path,
     progress_sender: Option<JobMessageSender>,
@@ -5414,27 +5473,33 @@ impl JobProcessor {
 
         let mut skills_kickoff: Option<SkillsKickoff> = None;
         if let Some(request) = skills_request {
-            match skills::resolve_skills_lane(request, &workspace_dir).await {
-                skills::SkillsLaneOutcome::Execution(execution) => return Ok(execution),
-                skills::SkillsLaneOutcome::Kickoff {
-                    report,
-                    artifacts,
-                    names,
-                    prompt,
-                } => {
-                    let mut lane_messages = Vec::new();
-                    if let Some(report) = report {
-                        if let Some(progress) = progress_sender.as_ref() {
-                            let _ = progress.sender.send(report.clone());
-                        }
-                        lane_messages.push(report);
-                    }
+            // An installed skill takes the protected checkpoint a model turn's files take,
+            // behind the same gates, so it reaches the canonical repository.
+            let lane_checkpoint = workspace_commit::LaneCheckpoint {
+                lane: SKILLS_IMPORT_LANE,
+                commit_to_workspace,
+                read_only_workspace: metadata_requests_read_only_workspace(
+                    job.payload.get("metadata"),
+                ),
+                controller_base_url: &self.config.controller_base_url,
+                workspace_token: workspace_token.as_deref(),
+                project_id,
+                runtime_id: registration.runtime_id,
+                job_id: job.id,
+                run_id: job.run_id,
+                workspace_dir: &workspace_dir,
+                auto_sync_after_apply_override,
+                progress_sender: progress_sender
+                    .as_ref()
+                    .map(|progress| progress.sender.clone()),
+                local_origin: self.local_origin_sync(),
+            };
+            let outcome = skills::resolve_skills_lane(request, &workspace_dir).await;
+            match settle_skills_lane_outcome(outcome, lane_checkpoint).await {
+                SkillsLaneStep::Finished(execution) => return Ok(execution),
+                SkillsLaneStep::Kickoff { prompt, kickoff } => {
                     prompt_override = Some(prompt);
-                    skills_kickoff = Some(SkillsKickoff {
-                        messages: lane_messages,
-                        artifacts,
-                        names,
-                    });
+                    skills_kickoff = Some(kickoff);
                 }
             }
         }

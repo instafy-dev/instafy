@@ -478,6 +478,140 @@ pub(crate) async fn commit_to_hosted_origin(
     Ok(Some(commit_result))
 }
 
+/// Where a command lane's checkpoint goes and the gates it must pass: the same job-level
+/// inputs a model turn hands to `commit_to_hosted_origin`.
+pub(crate) struct LaneCheckpoint<'a> {
+    /// The command lane that wrote the files, such as `skills/import`. Recorded on the
+    /// `origin/apply` artifact so a reader can tell the lane's checkpoint from a model turn's.
+    pub(crate) lane: &'static str,
+    pub(crate) commit_to_workspace: bool,
+    /// The job's write scope is read-only (`read_only`, `readonly` or
+    /// `coordination_required`). A model turn keeps only coordination files then, and a
+    /// lane's files are never coordination files, so the lane skips its checkpoint.
+    pub(crate) read_only_workspace: bool,
+    pub(crate) controller_base_url: &'a Url,
+    /// The verified workspace token, bound to this job's run. It does not prove the run may
+    /// write: a job without the separate workspace token falls back to its controller token.
+    /// The controller checks write permission again when the checkpoint asks for a lease.
+    pub(crate) workspace_token: Option<&'a str>,
+    pub(crate) project_id: Uuid,
+    pub(crate) runtime_id: Uuid,
+    pub(crate) job_id: Uuid,
+    pub(crate) run_id: Option<Uuid>,
+    pub(crate) workspace_dir: &'a Path,
+    pub(crate) auto_sync_after_apply_override: Option<bool>,
+    pub(crate) progress_sender: Option<JobMessageSender>,
+    pub(crate) local_origin: Option<LocalOriginSync>,
+}
+
+/// Hand files a command lane wrote itself, such as a skill folder from `/skills import`, to
+/// the protected checkpoint a model turn's files go through, behind the same gates: the job
+/// commits to the workspace, its write scope is not read-only and it has a verified
+/// workspace token for its run. The controller then decides whether the run may write.
+/// Returns the artifacts that record the outcome, in the shape a model turn records, with
+/// the lane named on the `origin/apply` artifact.
+///
+/// Unlike a model turn, a checkpoint error does not fail the job: the lane's files are
+/// already in place, so the error is recorded as an `origin/apply-error` artifact. A space
+/// without a git remote is not an error here either: the origin applies the files and the
+/// failed save is recorded as `gitSyncStatus: "failed"`, as it is for a model turn.
+pub(crate) async fn checkpoint_lane_files(
+    checkpoint: LaneCheckpoint<'_>,
+    files: &[CodexFileDescriptor],
+) -> Vec<JsonValue> {
+    if !checkpoint.commit_to_workspace || files.is_empty() {
+        return Vec::new();
+    }
+    if checkpoint.read_only_workspace {
+        return vec![json!({
+            "kind": "origin/apply-skipped",
+            "metadata": { "reason": "read_only_workspace" }
+        })];
+    }
+    let Some(token) = checkpoint.workspace_token else {
+        return vec![json!({
+            "kind": "origin/apply-skipped",
+            "metadata": { "reason": "missing_controller_token" }
+        })];
+    };
+
+    if let Some(sender) = checkpoint.progress_sender.as_ref() {
+        let _ = sender.send(JobMessage {
+            content: "Syncing workspace changes…".to_string(),
+            message_type: Some("status".to_string()),
+            metadata: Some(json!({
+                "kind": "workspace_commit",
+                "status": "started",
+            })),
+        });
+    }
+
+    match commit_to_hosted_origin(
+        checkpoint.controller_base_url,
+        token,
+        checkpoint.project_id,
+        checkpoint.runtime_id,
+        checkpoint.job_id,
+        checkpoint.run_id,
+        checkpoint.workspace_dir,
+        files,
+        checkpoint.auto_sync_after_apply_override,
+        checkpoint.progress_sender.clone(),
+        checkpoint.local_origin,
+    )
+    .await
+    {
+        Ok(Some(result)) => {
+            let (status_message, status_code) = super::workspace_commit_status(&result);
+            let git_sync_status = super::workspace_commit_git_sync_status(&result);
+            if let Some(sender) = checkpoint.progress_sender.as_ref() {
+                let _ = sender.send(JobMessage {
+                    content: status_message.to_string(),
+                    message_type: Some("status".to_string()),
+                    metadata: Some(json!({
+                        "kind": "workspace_commit",
+                        "status": status_code,
+                        "gitSyncStatus": git_sync_status,
+                        "gitSyncAttempted": result.git_sync_attempted,
+                        "gitSyncError": result.git_sync_error,
+                    })),
+                });
+            }
+            vec![json!({
+                "kind": "origin/apply",
+                "metadata": {
+                    "originId": result.origin_id.to_string(),
+                    "endpoint": result.origin_endpoint,
+                    "mode": result.origin_mode,
+                    "leaseId": result.lease_id.to_string(),
+                    "rev": result.apply_rev,
+                    "baseRev": result.apply_base_rev,
+                    "gitRev": result.git_rev,
+                    "gitBaseRev": result.git_base_rev,
+                    "gitSyncStatus": git_sync_status,
+                    "gitSyncAttempted": result.git_sync_attempted,
+                    "gitSyncError": result.git_sync_error,
+                    "paths": result.paths,
+                    "lane": checkpoint.lane,
+                }
+            })]
+        }
+        Ok(None) => Vec::new(),
+        Err(error) => {
+            warn!(
+                ?error,
+                project_id = %checkpoint.project_id,
+                job_id = %checkpoint.job_id,
+                "command lane workspace checkpoint failed; the files stay on this machine"
+            );
+            vec![json!({
+                "kind": "origin/apply-error",
+                "metadata": { "error": error.to_string() }
+            })]
+        }
+    }
+}
+
 async fn acquire_workspace_lease(
     client: &reqwest::Client,
     controller_base_url: &Url,
@@ -939,8 +1073,17 @@ mod tests {
     use anyhow::{Context, Result, ensure};
     use uuid::Uuid;
 
-    use super::super::{CodexFileDescriptor, FileChangeDescriptor, FileChangeKind};
-    use super::{commit_to_hosted_origin, resolve_origin_sync_endpoint};
+    use super::super::skills::{
+        SkillImportRequest, SkillsLaneOutcome, SkillsRequest, resolve_skills_lane,
+    };
+    use super::super::{
+        CodexFileDescriptor, FileChangeDescriptor, FileChangeKind, SkillsLaneStep,
+        settle_skills_lane_outcome,
+    };
+    use super::{
+        LaneCheckpoint, checkpoint_lane_files, commit_to_hosted_origin,
+        resolve_origin_sync_endpoint,
+    };
     use crate::origin::LocalOriginSync;
 
     fn changed_file_descriptor(path: &str) -> CodexFileDescriptor {
@@ -1307,6 +1450,343 @@ mod tests {
         );
         ensure!(local_apply_hits.load(Ordering::SeqCst) == 0);
         ensure!(token_mints.load(Ordering::SeqCst) == 1);
+        Ok(())
+    }
+
+    /// Write a one-file skill folder inside `workspace` and return the `/skills import`
+    /// request that installs it, with or without `--start`.
+    fn solo_skill_import(workspace: &std::path::Path, start: bool) -> SkillsRequest {
+        let source = workspace.join("incoming/solo-skill");
+        std::fs::create_dir_all(&source).unwrap();
+        std::fs::write(source.join("SKILL.md"), "# Solo\n\nOne skill.\n").unwrap();
+        SkillsRequest::Import(SkillImportRequest {
+            source: "incoming/solo-skill".to_string(),
+            skill_name: None,
+            overwrite: false,
+            start,
+        })
+    }
+
+    /// Install a one-file skill from a folder inside `workspace` with `/skills import` and
+    /// return the checkpoint descriptors the lane hands back.
+    async fn import_solo_skill(workspace: &std::path::Path) -> Vec<CodexFileDescriptor> {
+        match resolve_skills_lane(solo_skill_import(workspace, false), workspace).await {
+            SkillsLaneOutcome::Installed { files, .. } => files,
+            other => panic!("expected an installed import, got {other:?}"),
+        }
+    }
+
+    fn lane_checkpoint<'a>(
+        controller_base_url: &'a reqwest::Url,
+        workspace_token: Option<&'a str>,
+        workspace: &'a std::path::Path,
+    ) -> LaneCheckpoint<'a> {
+        LaneCheckpoint {
+            lane: "skills/import",
+            commit_to_workspace: true,
+            read_only_workspace: false,
+            controller_base_url,
+            workspace_token,
+            project_id: Uuid::new_v4(),
+            runtime_id: Uuid::new_v4(),
+            job_id: Uuid::new_v4(),
+            run_id: Some(Uuid::new_v4()),
+            workspace_dir: workspace,
+            auto_sync_after_apply_override: Some(true),
+            progress_sender: None,
+            local_origin: None,
+        }
+    }
+
+    /// Controller stand-in that refuses everything, counting requests.
+    async fn spawn_refusing_controller() -> (reqwest::Url, Arc<AtomicUsize>) {
+        let requests = Arc::new(AtomicUsize::new(0));
+        let requests_for_handler = Arc::clone(&requests);
+        let app = Router::new().fallback(move || {
+            let requests = Arc::clone(&requests_for_handler);
+            async move {
+                requests.fetch_add(1, Ordering::SeqCst);
+                AxumStatusCode::BAD_REQUEST
+            }
+        });
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        (
+            reqwest::Url::parse(&format!("http://{address}/")).unwrap(),
+            requests,
+        )
+    }
+
+    #[tokio::test]
+    async fn lane_checkpoint_respects_the_model_turn_gates() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let files = import_solo_skill(temp.path()).await;
+        ensure!(!files.is_empty());
+        let (controller, requests) = spawn_refusing_controller().await;
+
+        // A job that does not commit to the workspace records nothing.
+        let mut no_commit = lane_checkpoint(&controller, Some("workspace-token"), temp.path());
+        no_commit.commit_to_workspace = false;
+        ensure!(checkpoint_lane_files(no_commit, &files).await.is_empty());
+
+        // Nothing written, nothing to record.
+        let empty = lane_checkpoint(&controller, Some("workspace-token"), temp.path());
+        ensure!(checkpoint_lane_files(empty, &[]).await.is_empty());
+
+        // No verified workspace token (no run): the files stay local and the skip is
+        // recorded exactly as a model turn records it.
+        let artifacts =
+            checkpoint_lane_files(lane_checkpoint(&controller, None, temp.path()), &files).await;
+        ensure!(
+            artifacts
+                == vec![serde_json::json!({
+                    "kind": "origin/apply-skipped",
+                    "metadata": { "reason": "missing_controller_token" }
+                })],
+            "unexpected artifacts: {artifacts:?}"
+        );
+
+        // A read-only job keeps its files local even with a token: its controller token
+        // still verifies, so the write-scope check is the runtime's gate, as it is for a
+        // model turn, which keeps only coordination files then.
+        let mut read_only = lane_checkpoint(&controller, Some("workspace-token"), temp.path());
+        read_only.read_only_workspace = true;
+        let artifacts = checkpoint_lane_files(read_only, &files).await;
+        ensure!(
+            artifacts
+                == vec![serde_json::json!({
+                    "kind": "origin/apply-skipped",
+                    "metadata": { "reason": "read_only_workspace" }
+                })],
+            "unexpected artifacts: {artifacts:?}"
+        );
+        ensure!(
+            requests.load(Ordering::SeqCst) == 0,
+            "a gated checkpoint must not reach the controller"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn lane_checkpoint_uploads_an_imported_skill_and_records_a_space_without_a_remote()
+    -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let files = import_solo_skill(temp.path()).await;
+
+        // An origin with no git remote applies the files and refuses the save, as
+        // origin-http-server answers `/git/sync` when ORIGIN_GIT_REMOTE_URL is unset.
+        let apply_bodies = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let bodies_for_handler = Arc::clone(&apply_bodies);
+        let app = Router::new()
+            .route(
+                "/apply",
+                post(move |body: axum::body::Bytes| {
+                    let bodies = Arc::clone(&bodies_for_handler);
+                    async move {
+                        bodies.lock().unwrap().push(body.to_vec());
+                        (AxumStatusCode::OK, r#"{"rev":"applyrev","baseRev":"base"}"#)
+                    }
+                }),
+            )
+            .route(
+                "/git/sync",
+                post(|| async {
+                    (
+                        AxumStatusCode::BAD_REQUEST,
+                        r#"{"error":"git remote is not configured for this project"}"#,
+                    )
+                }),
+            );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+        let origin_address = listener.local_addr()?;
+        let server = tokio::spawn(async move { axum::serve(listener, app).await });
+        let (controller_address, token_mints) =
+            spawn_stub_controller(Uuid::new_v4(), format!("http://{origin_address}")).await;
+        let controller = reqwest::Url::parse(&format!("http://{controller_address}/"))?;
+
+        let artifacts = checkpoint_lane_files(
+            lane_checkpoint(&controller, Some("workspace-token"), temp.path()),
+            &files,
+        )
+        .await;
+        server.abort();
+
+        ensure!(token_mints.load(Ordering::SeqCst) == 1);
+        let bodies = apply_bodies.lock().unwrap();
+        ensure!(bodies.len() == 1, "the skill must be applied exactly once");
+        let skill_path = b".agents/skills/solo-skill/SKILL.md";
+        ensure!(
+            bodies[0]
+                .windows(skill_path.len())
+                .any(|part| part == skill_path),
+            "the apply upload must carry the installed SKILL.md"
+        );
+        ensure!(artifacts.len() == 1, "unexpected artifacts: {artifacts:?}");
+        let metadata = &artifacts[0]["metadata"];
+        ensure!(artifacts[0]["kind"] == "origin/apply");
+        ensure!(metadata["paths"] == serde_json::json!([".agents/skills/solo-skill/SKILL.md"]));
+        ensure!(metadata["lane"] == "skills/import", "{metadata}");
+        ensure!(metadata["rev"] == "applyrev");
+        ensure!(metadata["gitSyncAttempted"] == true);
+        ensure!(metadata["gitSyncStatus"] == "failed");
+        ensure!(
+            metadata["gitSyncError"]
+                .as_str()
+                .is_some_and(|error| error.contains("git remote is not configured")),
+            "the failed save must be recorded: {metadata}"
+        );
+        ensure!(
+            temp.path()
+                .join(".agents/skills/solo-skill/SKILL.md")
+                .is_file()
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn lane_checkpoint_saves_an_imported_skill_when_the_space_has_a_remote() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let files = import_solo_skill(temp.path()).await;
+        let (origin_address, apply_hits) = spawn_origin_server("applyrev").await;
+        let (controller_address, _) =
+            spawn_stub_controller(Uuid::new_v4(), format!("http://{origin_address}")).await;
+        let controller = reqwest::Url::parse(&format!("http://{controller_address}/"))?;
+
+        let artifacts = checkpoint_lane_files(
+            lane_checkpoint(&controller, Some("workspace-token"), temp.path()),
+            &files,
+        )
+        .await;
+
+        ensure!(apply_hits.load(Ordering::SeqCst) == 1);
+        ensure!(artifacts.len() == 1, "unexpected artifacts: {artifacts:?}");
+        let metadata = &artifacts[0]["metadata"];
+        ensure!(metadata["gitSyncStatus"] == "synced", "{metadata}");
+        ensure!(metadata["gitRev"] == "gitrev");
+        ensure!(metadata["gitBaseRev"] == "gitbase");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn lane_checkpoint_errors_are_recorded_without_failing_the_import() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let files = import_solo_skill(temp.path()).await;
+        let (controller, requests) = spawn_refusing_controller().await;
+
+        let artifacts = checkpoint_lane_files(
+            lane_checkpoint(&controller, Some("workspace-token"), temp.path()),
+            &files,
+        )
+        .await;
+
+        ensure!(requests.load(Ordering::SeqCst) >= 1);
+        ensure!(artifacts.len() == 1, "unexpected artifacts: {artifacts:?}");
+        ensure!(artifacts[0]["kind"] == "origin/apply-error");
+        ensure!(artifacts[0]["metadata"]["error"].is_string());
+        ensure!(
+            temp.path()
+                .join(".agents/skills/solo-skill/SKILL.md")
+                .is_file(),
+            "the installed skill stays in place"
+        );
+        Ok(())
+    }
+
+    /// The `origin/apply` artifacts in `artifacts`, each as its paths.
+    fn origin_apply_paths(artifacts: &[serde_json::Value]) -> Vec<serde_json::Value> {
+        artifacts
+            .iter()
+            .filter(|artifact| artifact["kind"] == "origin/apply")
+            .map(|artifact| artifact["metadata"]["paths"].clone())
+            .collect()
+    }
+
+    // `run_apply_job` hands the skills lane's outcome to `settle_skills_lane_outcome`; these
+    // check that an import's files reach the checkpoint on both of its paths.
+    #[tokio::test]
+    async fn skills_lane_checkpoints_a_plain_import_before_it_finishes() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let (origin_address, apply_hits) = spawn_origin_server("applyrev").await;
+        let (controller_address, _) =
+            spawn_stub_controller(Uuid::new_v4(), format!("http://{origin_address}")).await;
+        let controller = reqwest::Url::parse(&format!("http://{controller_address}/"))?;
+
+        let outcome = resolve_skills_lane(solo_skill_import(temp.path(), false), temp.path()).await;
+        let step = settle_skills_lane_outcome(
+            outcome,
+            lane_checkpoint(&controller, Some("workspace-token"), temp.path()),
+        )
+        .await;
+
+        let SkillsLaneStep::Finished(execution) = step else {
+            anyhow::bail!("a plain import finishes the job");
+        };
+        ensure!(apply_hits.load(Ordering::SeqCst) == 1);
+        ensure!(
+            execution
+                .artifacts
+                .iter()
+                .any(|artifact| artifact["kind"] == "skills/import"),
+            "the import report stays: {:?}",
+            execution.artifacts
+        );
+        ensure!(
+            origin_apply_paths(&execution.artifacts)
+                == vec![serde_json::json!([".agents/skills/solo-skill/SKILL.md"])],
+            "unexpected artifacts: {:?}",
+            execution.artifacts
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn skills_lane_checkpoints_a_started_import_after_streaming_its_report() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let (origin_address, apply_hits) = spawn_origin_server("applyrev").await;
+        let (controller_address, _) =
+            spawn_stub_controller(Uuid::new_v4(), format!("http://{origin_address}")).await;
+        let controller = reqwest::Url::parse(&format!("http://{controller_address}/"))?;
+        let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+        let mut checkpoint = lane_checkpoint(&controller, Some("workspace-token"), temp.path());
+        checkpoint.progress_sender = Some(sender);
+
+        let outcome = resolve_skills_lane(solo_skill_import(temp.path(), true), temp.path()).await;
+        let step = settle_skills_lane_outcome(outcome, checkpoint).await;
+
+        let SkillsLaneStep::Kickoff { prompt, kickoff } = step else {
+            anyhow::bail!("a `--start` import hands off to a model turn");
+        };
+        ensure!(!prompt.is_empty());
+        ensure!(kickoff.names == vec!["solo-skill".to_string()]);
+        ensure!(
+            kickoff.messages.len() == 1,
+            "the import report joins the turn"
+        );
+        ensure!(apply_hits.load(Ordering::SeqCst) == 1);
+        ensure!(
+            origin_apply_paths(&kickoff.artifacts)
+                == vec![serde_json::json!([".agents/skills/solo-skill/SKILL.md"])],
+            "unexpected artifacts: {:?}",
+            kickoff.artifacts
+        );
+
+        // The report streams before the checkpoint's own status lines.
+        let mut streamed = Vec::new();
+        while let Ok(message) = receiver.try_recv() {
+            streamed.push(message);
+        }
+        ensure!(streamed.len() >= 2, "unexpected stream: {streamed:?}");
+        ensure!(streamed[0].content == kickoff.messages[0].content);
+        ensure!(
+            streamed[1]
+                .metadata
+                .as_ref()
+                .is_some_and(|metadata| metadata["kind"] == "workspace_commit"),
+            "unexpected stream: {streamed:?}"
+        );
         Ok(())
     }
 
