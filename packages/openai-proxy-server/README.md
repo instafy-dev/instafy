@@ -357,9 +357,9 @@ whose `error.type` is the provider's `usage_limit_reached` or `usage_not_include
 reports it as a usage limit, with a positive integer `error.resets_at` (Unix seconds) when the
 provider gave one. Raw provider messages, response bodies, credentials, and endpoint URLs are
 not echoed. Valid `Retry-After` seconds or HTTP dates are forwarded for 429 and 503 with the
-provider's value and no bound of the proxy's own (Codex reads it only on a retryable 429 and
-clamps that wait to 1-30 seconds); other
-header values are discarded. Every retryable 429 carries a `Retry-After`. When the provider
+provider's value and no bound of the proxy's own (Codex itself does not retry an HTTP 429, so
+the header matters to other clients and to the streamed wait below); other header values are
+discarded. Every retryable 429 carries a `Retry-After`. When the provider
 sends no usable one, the proxy derives it from the rate-limit bucket that refused the request,
 using OpenAI's `x-ratelimit-remaining-*` and `x-ratelimit-reset-*` headers (reset durations such
 as `6s` or `1m2.5s` are rounded up to whole seconds):
@@ -371,8 +371,7 @@ as `6s` or `1m2.5s` are rounded up to whole seconds):
   the two resets.
 
 A derived delay is clamped to 1-30 seconds. With no usable reset, and for an in-stream
-`rate_limit_exceeded`, which carries no headers, the proxy uses 5 seconds, the same fallback
-Codex applies to a retryable 429 without `Retry-After`. Reset headers are time until a bucket
+`rate_limit_exceeded`, which carries no headers, the proxy uses 5 seconds. Reset headers are time until a bucket
 is completely full, and a per-minute bucket is full again within about a minute. When a bucket
 at 0 needs more than five minutes to refill, as with a daily requests or tokens limit, the
 turn's retries (roughly five waits of up to 30 seconds) cannot outlast it: the proxy answers a

@@ -80,10 +80,11 @@ and the runtime's legacy `CODEX_MAX_STREAM_RETRIES` observer do not expand this 
 The bound applies per failed sampling step, not to the total requests in a successful tool
 conversation. Browser execution retains its existing retry and shutdown policy, except that its
 `CODEX_MAX_STREAM_RETRIES` observer counts only stream errors since the last completed response,
-so a long turn that recovers from occasional rate limits is not aborted. A retryable proxy 429
-waits for its `Retry-After` and is retried inside the turn; when those retries run out, the run
-is not restarted. A proxy 429 marked not retryable, such as a plan limit or a rate-limit window
-measured in hours, ends the turn without waiting. A retry in progress is reported as a
+so a long turn that recovers from occasional rate limits is not aborted. A transient upstream
+rate limit reaches Codex as a streamed `rate_limit_exceeded` failure, which Codex waits out and
+retries inside the turn; when those retries run out, the run is not restarted. Codex does not
+retry an HTTP 429 at all, so a proxy 429, such as a plan limit, a rate-limit window measured in
+hours or a rate limit on a request that does not stream, ends the turn without waiting. A retry in progress is reported as a
 `Retrying:` status message (kind `codex_stream_retry`), which the Studio shows as calm progress
 while the message keeps the cause, and only a failure that ends the turn is reported as an error.
 

@@ -9,10 +9,9 @@ use serde_json::{Value, json};
 use uuid::Uuid;
 
 /// Delay a rate-limited client is told to wait when the provider gave no usable hint. It keeps
-/// the client-side retry from landing in the same provider window without stalling a turn.
-/// Codex waits the same when a retryable 429 carries no Retry-After
-/// (`INSTAFY_RETRYABLE_429_DEFAULT_DELAY` in codex/codex-rs/codex-api/src/api_bridge.rs), and
-/// because this default always fills that gap, change both together.
+/// the client-side retry from landing in the same provider window without stalling a turn. It is
+/// the `Retry-After` of a retryable 429 that had none, and the base wait of a streamed rate limit
+/// without one (see [`stream_retry_delay`]).
 const DEFAULT_RATE_LIMIT_RETRY_AFTER_SECS: u64 = 5;
 /// Bounds for a delay the proxy derives from x-ratelimit-reset-* headers. Those headers report
 /// when a whole bucket refills, which can be minutes away, and the client sleeps for whatever
@@ -25,8 +24,7 @@ const MAX_DERIVED_RETRY_AFTER_SECS: u64 = 30;
 const STREAM_RATE_LIMIT_CODE: &str = "rate_limit_exceeded";
 /// Managed runtimes share one upstream key, so turns that hit the same limit get the same delay
 /// and would all retry at the same instant. A streamed rate limit asks each to wait up to this
-/// much longer, never shorter, within the 30 second bound. Codex spread an HTTP 429's retry the
-/// same way (`INSTAFY_RETRYABLE_429_MAX_JITTER_PERCENT` in codex-api/src/api_bridge.rs).
+/// much longer, never shorter, within the 30 second bound.
 const STREAM_RATE_LIMIT_MAX_JITTER_PERCENT: u32 = 20;
 /// Reset beyond which the exhausted bucket is not worth waiting for. A per-minute bucket is
 /// completely full again within about a minute, while a daily requests or tokens limit reports
@@ -335,8 +333,7 @@ impl ErrorResponse {
 /// from [0, 1], then spreads it by up to 20% so runtimes sharing a key do not all retry at once:
 /// below the 30 second bound the spread only lengthens the wait, into the room left under the
 /// bound; a Retry-After of 30 seconds or more is already cut short, so its spread goes below the
-/// bound instead of pinning every retry to exactly 30 seconds. This is how codex spread an HTTP
-/// 429's retry (`instafy_retryable_429_delay` in codex-api/src/api_bridge.rs).
+/// bound instead of pinning every retry to exactly 30 seconds.
 fn stream_retry_delay(retry_after: Option<&HeaderValue>, now: SystemTime, jitter: f64) -> Duration {
     let asked = retry_after
         .and_then(|value| retry_after_delay(value, now))
