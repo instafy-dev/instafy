@@ -3594,6 +3594,14 @@ pub(crate) async fn enqueue_agent_job_record(
     credential_id: Option<Uuid>,
     provider_conversation_state: Option<&JsonValue>,
 ) -> Result<Option<Uuid>, (StatusCode, Json<ApiError>)> {
+    // A job pins a user credential or none (the managed lane); the reserved
+    // managed id is never a user credential.
+    if credential_id
+        .as_ref()
+        .is_some_and(crate::credentials::is_managed_ai_credential_id)
+    {
+        return Err(not_found("credential not found"));
+    }
     let payload_json = build_agent_job_payload(
         project,
         context,
