@@ -171,6 +171,61 @@ test("every service is scanned before registry login and publication", () => {
   );
 });
 
+test("published controller startup runs by digest before its record can be sealed", () => {
+  const source = readWorkflow();
+  assertOrdered(
+    source,
+    "- name: Checkout exact protected-main commit",
+    "- name: Build the isolated controller startup fixture",
+    'go build -trimpath -o "$RUNNER_TEMP/controller-startup-smoke" .',
+    "- name: Login to GHCR after the gate passes",
+    "- name: Push the scanned image and record its digest",
+    "- name: Verify the published controller startup by digest",
+    'docker pull --platform linux/amd64 "$immutable_ref"',
+    "docker logout ghcr.io",
+    'node scripts/controller-image-smoke.mjs controller.json "$RELEASE_COMMIT"',
+    "- name: Retain controller startup evidence",
+    "- name: Upload immutable image record",
+    "  manifest:",
+    "- name: Validate and seal the manifest",
+  );
+  for (const name of [
+    "Set up Go for the controller image fixture",
+    "Build the isolated controller startup fixture",
+    "Verify the published controller startup by digest",
+  ]) {
+    assert.ok(source.includes(`- name: ${name}\n        if: \${{ matrix.key == 'controller' }}`));
+  }
+  const start = source.indexOf("      - name: Verify the published controller startup by digest\n");
+  const end = source.indexOf("      - name: Upload immutable image record\n", start);
+  const check = source.slice(start, end);
+  assert.match(check, /set -euo pipefail/u);
+  assert.match(check, /instafy-runtime-controller@sha256:\[0-9a-f\]\{64\}/u);
+  assert.doesNotMatch(check, /continue-on-error|\|\| true|:latest|secrets\./u);
+  assert.match(check, /always\(\).*matrix\.key == 'controller'/u);
+  assert.match(check, /name: controller-startup-smoke/u);
+  assert.match(check, /retention-days: 90/u);
+  assert.match(source, /CGO_ENABLED: "0"/u);
+  assert.match(source, /GOOS: linux\n          GOARCH: amd64/u);
+  assert.match(source, /GOTOOLCHAIN: local\n          GOPROXY: "off"\n          GOSUMDB: "off"/u);
+  // Preserve the existing job token and approval boundary; this fixture adds no
+  // PAT, production credential, deployment permission or separate approval.
+  assert.equal([...source.matchAll(/environment: ghcr-release/gu)].length, 1);
+  assert.equal([...source.matchAll(/password: \$\{\{ secrets\.GITHUB_TOKEN \}\}/gu)].length, 1);
+  assert.doesNotMatch(source, /packages: delete|deployments: write|id-token: write/u);
+  for (const relative of ["scripts/controller-image-smoke.mjs", "scripts/controller-startup-smoke/main.go"]) {
+    assert.ok(fs.statSync(path.join(repositoryRoot, relative)).isFile());
+  }
+});
+
+test("public PR CI exercises controller fixture and runner contracts without registry access", () => {
+  const source = fs.readFileSync(path.join(repositoryRoot, ".github/workflows/build.yml"), "utf8");
+  assert.match(source, /scripts\/controller-image-smoke\.test\.mjs \\/u);
+  assert.match(source, /working-directory: scripts\/controller-startup-smoke/u);
+  assert.match(source, /go test -race -count=1 \.\/\.\.\./u);
+  assert.doesNotMatch(source, /packages: (read|write)|docker login|secrets\.GITHUB_TOKEN/u);
+});
+
 test("both image workflows parse the tagged digest line emitted by docker push", () => {
   const realisticPushOutput = [
     "The push refers to repository [ghcr.io/instafy-dev/instafy-runtime-agent]",
