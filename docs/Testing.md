@@ -267,13 +267,13 @@ with an actual target compiler build and execution before enrollment; a builder
 label or `buildx inspect` alone is insufficient. Do not restart the Docker VM or
 change system-wide emulation while image jobs are active.
 
-Self-hosted image jobs give the optional GitHub cache export two minutes and
-ignore cache-export errors only. Compilation, image loading, security scans,
-registry pushes and manifest checks still fail closed. Hosted jobs retain their
-existing cache settings. Builders remain ephemeral: retaining Docker volumes
-would violate the current BUILD runner's clean-daemon admission check. This
-bound limits upload delays; it does not establish a persistent local cache or
-guarantee a warm build after an interrupted export.
+Image builders remain ephemeral on every runner: retaining Docker volumes would
+violate the current BUILD runner's clean-daemon admission check. The runtime
+publisher keeps its layer cache in a registry package instead (see
+[Runtime image layer cache](#runtime-image-layer-cache)). Its export runs the same
+way on hosted and BUILD runners, is bounded by a shell timeout and only warns when
+it fails. Compilation, image loading, security scans, registry pushes and manifest
+checks still fail closed. The services publisher uses no layer cache.
 
 Before enabling this route, an operator must deliberately enroll this repository
 and these three exact `@refs/heads/main` workflow refs in the BUILD group's
@@ -529,6 +529,81 @@ Automation browser cleanup:
 For the full-stack suites, run the local stack first:
 - `pnpm stack:up`
 - `pnpm stack:down` when finished.
+
+## Runtime image layer cache
+
+The runtime-agent publisher keeps one BuildKit layer cache per flavor and
+architecture in a dedicated GHCR package, `ghcr.io/instafy-dev/instafy-build-cache`,
+tagged `publish-runtime-agent-<flavor>-<architecture>`. It is never written to the
+release package. It replaced the GitHub Actions cache: one release's `mode=max`
+export is about 10 GiB, more than the repository's Actions cache holds, so every
+release evicted its own entries along with the CI caches. This reverses the
+earlier rule that the publisher would never use a registry cache.
+
+- The audit build reads the cache (`cache-from: type=registry`) before any
+  registry login. The read is anonymous, so it only hits once the package is
+  public; until then the build runs cold and nothing fails. The final stage, the
+  matrix target, is always rebuilt (`no-cache-filters`), so the OS and npm
+  packages the scan sees are current; the builder stages, including the
+  cargo-chef dependency build, come from the cache.
+- Nothing writes the cache until the image has passed the scan and, for webdev,
+  the Shared Browser check, and has been pushed and recorded. A final step then
+  repeats the audit build on the same builder with `--output type=cacheonly` and
+  `--cache-to type=registry,...,mode=max,ignore-error=true`. It creates no image,
+  tag or local copy, so it cannot change the published bytes. A shell `timeout`
+  bounds it to 15 minutes (16 with the kill grace), and the job's
+  `timeout-minutes` includes that bound, so a slow export cannot time out a cell
+  that has already published. A failed or timed-out build only logs a warning.
+  With `ignore-error=true` a failed cache write does not fail the build; BuildKit
+  reports it as an `ERROR` line in the plain progress log, and the step also turns
+  that into a warning. Either way the next release may build cold.
+- The production services publisher uses no layer cache. Its former Actions-cache
+  flags never took effect (a plain `run:` step has no Actions cache token), and a
+  public cache would expose the layers of its private images.
+
+One-time setup: the first export creates the package with `GITHUB_TOKEN`. If it is
+not public, an organization owner sets its visibility to Public in the package
+settings. This is irreversible; the cached layers are built from public source. The
+owner also limits the package's Actions access to this repository and reviews who
+else has write or admin access to it. Check the package's "Inherit access from
+source repository" setting: while it is on, everyone with write access to this
+repository can also write the package. For Actions-only writes, turn it off and
+grant this repository's Actions write access explicitly.
+
+Trust boundary: an Actions cache scoped to `main` could only be written by runs on
+`main`. A registry tag can be overwritten by any workflow run of this repository,
+on any branch, that requests `packages: write`, and by anyone with write or admin
+access to the package (including repository writers while access is inherited).
+Fork pull request runs receive a read-only token and cannot write it. A
+`pull_request_target` workflow would run with this repository's token, so no
+workflow triggered by pull requests may request `packages: write`; a test in
+`scripts/check-production-image-inputs.test.mjs` enforces that. A release build
+reuses whatever cached layers match its build steps, and the image scan would not
+detect layers placed there by such a writer. Treat write access to this package
+like write access to the release workflow.
+
+To reset a suspect cache:
+
+1. First review the package's write and admin access and any workflow that holds
+   `packages: write`, and remove whatever allowed the suspect write, so the cache
+   cannot be written again before the reset.
+2. Delete the package's versions in its settings. GitHub refuses to delete a
+   version of a public package that has more than 5,000 downloads; in that case,
+   move the cache to a new tag in a reviewed pull request (updating the tests that
+   pin the reference), so the old tag is never read again.
+3. The next release builds cold and exports a fresh cache.
+4. The scan cannot clear a release built from a suspect cache, so rebuild and
+   republish every runtime release whose build read the cache after the suspect
+   write.
+
+A merely broken cache only needs step 2. Deleting the whole package also works,
+but the one-time setup must then be repeated. Each export leaves the previous
+cache manifest untagged, and deleting untagged versions is safe.
+
+`node --test scripts/check-production-image-inputs.test.mjs scripts/check-image-build-routing.test.mjs`
+covers the read-before-login and export-after-publication order, the exact
+cache-only command (run against a stub `docker`), the final-stage filter and the
+reconstruction of the previously reviewed workflow bytes.
 
 ## Supabase CI image mirror
 
