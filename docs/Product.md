@@ -22,6 +22,8 @@ Code errors appear beside the code field, with expired or invalid codes explaini
 request another. Resend confirmation stays beside **Resend email**, above the alternative
 sign-in action, and reminds users to use the latest email.
 Password recovery confirmation appears directly below **Forgot password?**.
+Valid password-recovery callbacks open the reset form even when the auth server returns them
+to the homepage. Recovery intent is preserved before the auth client consumes the callback.
 
 Pending route and authentication handoffs use a neutral full-screen loading surface: one Octo
 swimming above “Getting things ready…”, without a wordmark. The canonical animation stops for
