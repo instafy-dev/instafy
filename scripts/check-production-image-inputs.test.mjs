@@ -261,7 +261,7 @@ test("provider service pins the complete Docker CLI toolchain", () => {
     source,
     /^FROM alpine:3\.23@sha256:fd791d74b68913cbb027c6546007b3f0d3bc45125f797758156952bc2d6daf40$/mu,
   );
-  assert.equal(argumentDefaults(source).get("OPENSSL_VERSION"), "3.5.8-r0");
+  assert.equal(argumentDefaults(source).get("OPENSSL_VERSION"), "3.5.9-r0");
   assert.equal(argumentDefaults(source).get("DOCKER_CLI_VERSION"), "29.5.2-r0");
   assert.equal(argumentDefaults(source).get("DOCKER_BUILDX_VERSION"), "0.30.1-r6");
   assert.equal(argumentDefaults(source).get("DOCKER_COMPOSE_VERSION"), "2.40.3-r6");
