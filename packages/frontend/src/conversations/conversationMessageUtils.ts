@@ -583,6 +583,11 @@ export function extractWorkspaceCommitRangeFromMetadata(
     if (!artifactMetadata) {
       continue;
     }
+    // A command lane's own save, such as the skill files `/skills import --start`
+    // saves before the turn, is not the range of this message's file changes.
+    if (typeof artifactMetadata["lane"] === "string") {
+      continue;
+    }
     const gitPair = {
       base: gitRevString(artifactMetadata["gitBaseRev"]),
       head: gitRevString(artifactMetadata["gitRev"]),

@@ -877,6 +877,21 @@ describe("extractWorkspaceCommitRangeFromMetadata", () => {
     ).toBeNull();
   });
 
+  it("ignores a command lane's save when the turn's own save made no commit", () => {
+    const range = extractWorkspaceCommitRangeFromMetadata({
+      artifacts: [
+        // `/skills import --start` saves the skill files before the model turn.
+        {
+          kind: "origin/apply",
+          metadata: { gitRev: head, gitBaseRev: base, lane: "skills/import" },
+        },
+        { kind: "origin/apply", metadata: { gitRev: head, gitBaseRev: head } },
+      ],
+    });
+
+    expect(range).toBeNull();
+  });
+
   it("stays paired with the files list that wins a duplicate-message merge", () => {
     const file = {
       path: "notes.txt",

@@ -4,7 +4,9 @@ import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
+  isWorkspaceLoadingChats,
   resolveMobileOverviewSection,
+  resolveTopbarLocation,
   resolveWorkspaceEmptyState,
   useStudioNavigationPosture,
 } from "../useStudioNavigationPosture";
@@ -137,5 +139,36 @@ describe("resolveWorkspaceEmptyState", () => {
     expect(resolveWorkspaceEmptyState({ ...base, hasActiveTab: true, historyError: true })).toBeNull();
     expect(resolveWorkspaceEmptyState({ ...base, projectAccessBlocked: true })).toBeNull();
     expect(resolveWorkspaceEmptyState({ ...base, historyError: true, projectAccessBlocked: true })).toBeNull();
+  });
+});
+
+describe("isWorkspaceLoadingChats", () => {
+  it("names a chat route still hydrating as loading the space's chats", () => {
+    expect(isWorkspaceLoadingChats("hydrating", "chat")).toBe(true);
+  });
+
+  it("stays neutral for other routes and once the space has settled", () => {
+    expect(isWorkspaceLoadingChats("hydrating", "secrets")).toBe(false);
+    expect(isWorkspaceLoadingChats("hydrating", "settings")).toBe(false);
+    expect(isWorkspaceLoadingChats("empty", "chat")).toBe(false);
+    expect(isWorkspaceLoadingChats(null, "chat")).toBe(false);
+  });
+});
+
+describe("resolveTopbarLocation", () => {
+  it("names a chat while a chat route is still loading the space's chats", () => {
+    expect(resolveTopbarLocation({ drawerOverlay: null, loadingChats: true })).toBe("chat");
+    expect(resolveTopbarLocation({ drawerOverlay: "workspaces", loadingChats: true })).toBe("chat");
+  });
+
+  it("lets an open drawer name itself over a loading chat", () => {
+    expect(resolveTopbarLocation({ drawerOverlay: "files", loadingChats: true })).toBe("files");
+    expect(resolveTopbarLocation({ drawerOverlay: "history", loadingChats: true })).toBe("history");
+    expect(resolveTopbarLocation({ drawerOverlay: "sourceControl", loadingChats: false })).toBe("sourceControl");
+  });
+
+  it("leaves the header to the active tab or the space otherwise", () => {
+    expect(resolveTopbarLocation({ drawerOverlay: null, loadingChats: false })).toBeNull();
+    expect(resolveTopbarLocation({ drawerOverlay: "workspaces", loadingChats: false })).toBeNull();
   });
 });

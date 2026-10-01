@@ -762,7 +762,7 @@ fn rejected_observation(program: &str, argv: &[&str]) -> bool {
     false
 }
 fn known_safe(argv: &[&str]) -> bool {
-    codex_shell_command::is_safe_command::is_known_safe_command(
+    super::known_safe_command::is_known_safe_command(
         &argv.iter().map(|s| (*s).to_owned()).collect::<Vec<_>>(),
     )
 }

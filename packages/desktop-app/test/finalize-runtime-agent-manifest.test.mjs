@@ -30,23 +30,27 @@ test("finalizes the manifest over the exact post-sign runtime bytes", (t) => {
   );
   fs.mkdirSync(directory, { recursive: true });
   const executablePath = path.join(directory, "runtime-agent");
+  const hostPath = path.join(directory, "codex-code-mode-host");
   const manifestPath = path.join(directory, "runtime-agent-manifest.json");
   fs.writeFileSync(executablePath, "unsigned bytes", { mode: 0o755 });
+  fs.writeFileSync(hostPath, "unsigned host bytes", { mode: 0o755 });
   fs.writeFileSync(
     manifestPath,
     JSON.stringify({
-      schemaVersion: 2,
+      schemaVersion: 3,
       filename: "runtime-agent",
       platform: "darwin",
       arch: "arm64",
       sizeBytes: 1,
       sha256: "0".repeat(64),
+      codeModeHost: { filename: "codex-code-mode-host", sizeBytes: 1, sha256: "0".repeat(64) },
       sourceSha: "a".repeat(40),
     }),
   );
 
   finalizeRuntimeAgentManifest(context);
   fs.writeFileSync(executablePath, "signed bytes", { mode: 0o755 });
+  fs.writeFileSync(hostPath, "signed host bytes", { mode: 0o755 });
   const finalized = finalizeRuntimeAgentManifest(context).manifest;
 
   assert.equal(finalized.sourceSha, "a".repeat(40));
@@ -55,7 +59,16 @@ test("finalizes the manifest over the exact post-sign runtime bytes", (t) => {
     finalized.sha256,
     createHash("sha256").update("signed bytes").digest("hex"),
   );
+  assert.deepEqual(finalized.codeModeHost, {
+    filename: "codex-code-mode-host",
+    sizeBytes: Buffer.byteLength("signed host bytes"),
+    sha256: createHash("sha256").update("signed host bytes").digest("hex"),
+  });
   assert.deepEqual(JSON.parse(fs.readFileSync(manifestPath, "utf8")), finalized);
+
+  // A package that lost the host must not be finalized.
+  fs.rmSync(hostPath);
+  assert.throws(() => finalizeRuntimeAgentManifest(context), /codex-code-mode-host|ENOENT/);
 });
 
 test("finalizes the Windows runtime in the signed app directory before NSIS packing", (t) => {
@@ -71,15 +84,17 @@ test("finalizes the Windows runtime in the signed app directory before NSIS pack
   const executablePath = path.join(directory, "runtime-agent.exe");
   const manifestPath = path.join(directory, "runtime-agent-manifest.json");
   fs.writeFileSync(executablePath, "authenticode-signed bytes");
+  fs.writeFileSync(path.join(directory, "codex-code-mode-host.exe"), "authenticode-signed host");
   fs.writeFileSync(
     manifestPath,
     JSON.stringify({
-      schemaVersion: 2,
+      schemaVersion: 3,
       filename: "runtime-agent.exe",
       platform: "win32",
       arch: "x64",
       sizeBytes: 1,
       sha256: "0".repeat(64),
+      codeModeHost: { filename: "codex-code-mode-host.exe", sizeBytes: 1, sha256: "0".repeat(64) },
       sourceSha: "b".repeat(40),
     }),
   );
@@ -89,5 +104,9 @@ test("finalizes the Windows runtime in the signed app directory before NSIS pack
   assert.equal(
     finalized.sha256,
     createHash("sha256").update("authenticode-signed bytes").digest("hex"),
+  );
+  assert.equal(
+    finalized.codeModeHost.sha256,
+    createHash("sha256").update("authenticode-signed host").digest("hex"),
   );
 });

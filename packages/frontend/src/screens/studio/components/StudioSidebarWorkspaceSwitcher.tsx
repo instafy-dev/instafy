@@ -6,6 +6,7 @@ import { SearchInput } from "../../../components/SearchInput";
 import { SidebarMenuSection } from "../../../components/SidebarMenuSection";
 import { StudioMenu, StudioMenuItem } from "../../../components/aria/StudioMenu";
 import { Text } from "../../../components/Text";
+import { LoadingStatus } from "../../../components/LoadingStatus";
 import {
   DRAWER_ICON_BUTTON_TONE_CLASS,
   DRAWER_LIST_ROW_TEXT_CLASS,
@@ -57,6 +58,9 @@ type StudioSidebarWorkspaceSwitcherProps = {
   pendingOrgKey?: string | null;
   projectsError?: string | null;
   projectsRefreshing?: boolean;
+  /** The account's space list has not arrived yet: the rows are only the
+   * spaces this browser already knows, so the list must not read as final. */
+  projectsLoading?: boolean;
   onRetryProjects?: () => void;
   onWorkspaceOrgChange: (orgKey: string) => void;
   onOpenOrgSettings?: () => void;
@@ -91,6 +95,7 @@ export function StudioSidebarWorkspaceSwitcher({
   pendingOrgKey = null,
   projectsError = null,
   projectsRefreshing = false,
+  projectsLoading = false,
   onRetryProjects,
   onWorkspaceOrgChange,
   onOpenOrgSettings,
@@ -346,9 +351,11 @@ export function StudioSidebarWorkspaceSwitcher({
       </SidebarMenuSection>
 
       {!currentOrgProject && switcherProjects.length === 0 ? (
-        <Text as="p" variant="body" tone="muted" className="mt-2 px-3.5">
-          {trimmedWorkspaceProjectQuery.length > 0 ? "No matching spaces." : "No spaces yet."}
-        </Text>
+        projectsLoading ? null : (
+          <Text as="p" variant="body" tone="muted" className="mt-2 px-3.5">
+            {trimmedWorkspaceProjectQuery.length > 0 ? "No matching spaces." : "No spaces yet."}
+          </Text>
+        )
       ) : (
         <>
           <StudioMenu
@@ -377,6 +384,13 @@ export function StudioSidebarWorkspaceSwitcher({
           ) : null}
         </>
       )}
+      {projectsLoading ? (
+        <div className="mt-2 px-3.5">
+          <LoadingStatus size="xs" data-testid="sidebar-project-discovery-loading">
+            Loading spaces…
+          </LoadingStatus>
+        </div>
+      ) : null}
     </>
   );
 }

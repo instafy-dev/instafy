@@ -88,6 +88,23 @@ function inputEvent(contents, input) {
   return { get prevented() { return prevented; } };
 }
 
+test("inactive page resizes and reveal do not steal composer focus", () => {
+  const owner = new FakeOwner();
+  const contents = new FakeWebContents();
+  const shield = new PersonalBrowserInputShield({ createView: () => new FakeView(), onEmergencyEscape: () => {} });
+  shield.attach(owner, contents);
+  shield.sync(false, true, { x: 0, y: 0, width: 800, height: 500 });
+  shield.sync(false, false, { x: 0, y: 0, width: 800, height: 1 });
+  shield.sync(false, true, { x: 0, y: 0, width: 800, height: 350 });
+  assert.equal(contents.focusCount, 0);
+  shield.sync(true, true, { x: 0, y: 0, width: 800, height: 350 });
+  shield.sync(false, true, { x: 0, y: 0, width: 800, height: 350 });
+  assert.equal(contents.focusCount, 1, "explicit handoff still returns focus to the page");
+  shield.sync(false, true, { x: 0, y: 0, width: 800, height: 500 });
+  assert.equal(contents.focusCount, 1, "later layout updates retain the user's focus");
+  shield.destroy();
+});
+
 test("native Personal Browser shield sits above the page and blocks human input until Escape", async () => {
   const owner = new FakeOwner();
   const protectedContents = new FakeWebContents();

@@ -361,20 +361,22 @@ jobs:
           SEGMENT_DOWNLOAD_TIMEOUT_MINS: "2"
         with:
           path: |
-            ~/.cargo/registry
-            ~/.cargo/git
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
             .cargo-target
-          key: shared-browser-cargo-v1-${{ runner.os }}-${{ runner.arch }}-public-shared-browser-profile-${{ hashFiles('packages/*/Cargo.lock') }}
+          key: shared-browser-cargo-v2-${{ runner.os }}-${{ runner.arch }}-public-shared-browser-${{ hashFiles('packages/*/Cargo.lock') }}
 
       - name: Restore architecture-specific compiler cache
         if: runner.environment == 'github-hosted'
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
-            ~/.cargo/registry
-            ~/.cargo/git
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
             .cargo-target
-          key: shared-browser-cargo-v1-${{ runner.os }}-${{ runner.arch }}-public-shared-browser-profile-${{ hashFiles('packages/*/Cargo.lock') }}
+          key: shared-browser-cargo-v2-${{ runner.os }}-${{ runner.arch }}-public-shared-browser-${{ hashFiles('packages/*/Cargo.lock') }}
       - name: Start disposable migrated Supabase and local authentication
         env:
           SUPABASE_BROWSER_TEST: "1"
@@ -507,26 +509,28 @@ jobs:
           done
           pkg-config --exists libcap openssl
       - name: Restore compiler cache without saving
-        if: runner.environment == 'self-hosted'
+        if: runner.environment == 'self-hosted' || github.ref != 'refs/heads/main'
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         env:
           SEGMENT_DOWNLOAD_TIMEOUT_MINS: "2"
         with:
           path: |
-            ~/.cargo/registry
-            ~/.cargo/git
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
             .cargo-target
-          key: shared-browser-cargo-v1-${{ runner.os }}-${{ runner.arch }}-public-shared-browser-studio-${{ hashFiles('packages/*/Cargo.lock') }}
+          key: shared-browser-cargo-v2-${{ runner.os }}-${{ runner.arch }}-public-shared-browser-${{ hashFiles('packages/*/Cargo.lock') }}
 
       - name: Restore architecture-specific compiler cache
-        if: runner.environment == 'github-hosted'
+        if: runner.environment == 'github-hosted' && github.ref == 'refs/heads/main'
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
-            ~/.cargo/registry
-            ~/.cargo/git
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
             .cargo-target
-          key: shared-browser-cargo-v1-${{ runner.os }}-${{ runner.arch }}-public-shared-browser-studio-${{ hashFiles('packages/*/Cargo.lock') }}
+          key: shared-browser-cargo-v2-${{ runner.os }}-${{ runner.arch }}-public-shared-browser-${{ hashFiles('packages/*/Cargo.lock') }}
       - name: Start disposable migrated Supabase and local authentication
         env:
           SUPABASE_BROWSER_TEST: "1"
