@@ -20,6 +20,9 @@ packages/frontend
 codex/*
 !codex/codex-rs/
 !codex/codex-rs/**
+!codex/third_party/v8/
+!codex/third_party/v8/**
+!scripts/fetch-rusty-v8.sh
 
 # Allow Rust workspace sources for controller/agent images.
 !Cargo.toml

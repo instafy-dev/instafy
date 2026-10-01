@@ -932,3 +932,104 @@ test("a webdev image must start the Shared Browser before it is published", () =
   assert.doesNotMatch(pr, /secrets\./u);
   assert.match(pr, /runtime-image-browser-smoke\.sh "\$IMAGE" docker\/runtime\/entrypoint\.sh/u);
 });
+
+const fetchRustyV8 = path.join(repositoryRoot, "scripts/fetch-rusty-v8.sh");
+const checksumsName = "rusty_v8_ptrcomp_sandbox_release_x86_64-unknown-linux-gnu.sha256";
+
+function rustyV8Fixture({ lock, manifest }) {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "fetch-rusty-v8-"));
+  const lockfile = path.join(root, "Cargo.lock");
+  fs.writeFileSync(lockfile, lock);
+  const codexDir = path.join(root, "codex");
+  fs.mkdirSync(path.join(codexDir, "third_party/v8"), { recursive: true });
+  if (manifest !== undefined) {
+    fs.writeFileSync(
+      path.join(codexDir, "third_party/v8/rusty_v8_150_4_0_release_manifests.sha256"),
+      manifest,
+    );
+  }
+  return { root, lockfile, codexDir, output: path.join(root, "out") };
+}
+
+// Every case below fails before the first download, so no test touches the network.
+function runFetchRustyV8(args, { lockfile, codexDir }) {
+  const result = spawnSync("bash", [fetchRustyV8, ...args], {
+    encoding: "utf8",
+    env: { PATH: process.env.PATH, RUSTY_V8_LOCKFILE: lockfile, CODEX_DIR: codexDir },
+    timeout: 10_000,
+  });
+  return { status: result.status, stdout: result.stdout, stderr: result.stderr };
+}
+
+const lockWith = (...versions) =>
+  versions.map((version) => `[[package]]\nname = "v8"\nversion = "${version}"\n`).join("\n");
+
+test("fetch-rusty-v8 rejects a malformed target before reading anything", () => {
+  const paths = rustyV8Fixture({ lock: lockWith("150.4.0"), manifest: "" });
+  const result = runFetchRustyV8(["x86_64; rm -rf /", paths.output], paths);
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /invalid Rust target triple/u);
+  assert.equal(fs.existsSync(paths.output), false);
+});
+
+test("fetch-rusty-v8 needs exactly one locked v8 version", () => {
+  for (const [lock, message] of [
+    ["", /no v8 package/u],
+    [lockWith("150.4.0", "149.2.0"), /more than one v8 version/u],
+  ]) {
+    const paths = rustyV8Fixture({ lock, manifest: "" });
+    const result = runFetchRustyV8(["x86_64-unknown-linux-gnu", paths.output], paths);
+    assert.equal(result.status, 1);
+    assert.match(result.stderr, message);
+  }
+});
+
+test("fetch-rusty-v8 refuses a v8 version the codex checkout pins no checksums for", () => {
+  const paths = rustyV8Fixture({ lock: lockWith("150.4.0"), manifest: undefined });
+  const result = runFetchRustyV8(["x86_64-unknown-linux-gnu", paths.output], paths);
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /missing pinned checksum manifest/u);
+});
+
+test("fetch-rusty-v8 refuses a target the pinned manifest does not list, before any download", () => {
+  const paths = rustyV8Fixture({
+    lock: lockWith("150.4.0"),
+    manifest: `${"0".repeat(64)}  ${checksumsName}\n`,
+  });
+  const result = runFetchRustyV8(["aarch64-unknown-linux-musl", paths.output], paths);
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /pins no checksum for rusty_v8_ptrcomp_sandbox_release_aarch64-unknown-linux-musl\.sha256/u);
+  assert.equal(fs.existsSync(paths.output), false);
+});
+
+test("the checked-in codex checkout pins the locked v8 version for both runtime image architectures", () => {
+  const lock = fs.readFileSync(path.join(repositoryRoot, "packages/runtime-agent/Cargo.lock"), "utf8");
+  const versions = [...lock.matchAll(/^name = "v8"\nversion = "([^"]+)"$/gmu)].map((match) => match[1]);
+  assert.equal(versions.length, 1, `one locked v8 version, found ${versions}`);
+  const manifest = path.join(
+    repositoryRoot,
+    `codex/third_party/v8/rusty_v8_${versions[0].replaceAll(".", "_")}_release_manifests.sha256`,
+  );
+  const pinned = fs.readFileSync(manifest, "utf8");
+  for (const target of ["x86_64-unknown-linux-gnu", "aarch64-unknown-linux-gnu"]) {
+    assert.match(pinned, new RegExp(`^[0-9a-f]{64}  rusty_v8_ptrcomp_sandbox_release_${target}\\.sha256$`, "mu"));
+  }
+});
+
+test("runtime images build the code-mode host with its V8 and install it beside runtime-agent", () => {
+  const dockerfile = fs.readFileSync(path.join(repositoryRoot, "docker/runtime/Dockerfile"), "utf8");
+  assert.match(dockerfile, /^COPY codex\/third_party\/v8\/ codex\/third_party\/v8\/$/mu);
+  assert.match(dockerfile, /^RUN \/src\/scripts\/fetch-rusty-v8\.sh "\$\(rustc -vV \| sed -n 's\/\^host: \/\/p'\)" \/opt\/rusty_v8$/mu);
+  assert.match(dockerfile, /cargo chef cook --features code-mode-host /u);
+  assert.match(dockerfile, /--features code-mode-host -p runtime-agent -p codex-code-mode-host --locked/u);
+  // The binary export and both runtime flavors carry the host next to runtime-agent.
+  assert.equal(
+    [...dockerfile.matchAll(/^COPY --from=builder \S+\/codex-code-mode-host \/usr\/local\/bin\/codex-code-mode-host$/gmu)].length,
+    2,
+  );
+  assert.match(dockerfile, /^COPY --from=builder \S+\/codex-code-mode-host \/codex-code-mode-host$/mu);
+  const ignore = fs.readFileSync(path.join(repositoryRoot, ".dockerignore"), "utf8").split("\n");
+  for (const entry of ["!codex/third_party/v8/**", "!scripts/fetch-rusty-v8.sh"]) {
+    assert.ok(ignore.includes(entry), entry);
+  }
+});

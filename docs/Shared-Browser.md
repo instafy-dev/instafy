@@ -175,10 +175,17 @@ a strict, mode-0600 heartbeat marker under the protected runtime directory
 the turn. The origin publishes the agent as the control owner, rejects every
 human mutation, preserves the previous live human driver, and restores that
 driver only when the job guard explicitly removes the marker after Codex and
-its tool tasks have fully shut down. `ShutdownComplete` is accepted only after
-shutdown has gated new task installation, serialized any overlapping guardian
-abort, disabled pending-work restart, aborted and joined the active turn, and
-confirmed that both active and retired MCP process groups are gone. A
+its tool tasks have fully shut down. Codex reports `ShutdownComplete` after it
+has aborted the turn and signalled its MCP servers, but it does not wait for
+those processes to exit. Runtime-agent therefore gives each run a
+process-group registry: the Shared Browser MCP refuses to serve unless it leads
+its own process group and has recorded that group with an exclusive create.
+After `ShutdownComplete` the runtime seals the registry (so a late MCP cannot
+register or serve), sends SIGKILL to every recorded group (active or retired,
+including the `node` controller, which shares its MCP's group), reaps its own
+exited children, and polls until each group is gone. It never kills its own
+group, and a group that is still present about two seconds later (EPERM counts
+as present) fails the confirmation. A
 passed heartbeat deadline is diagnostic, not proof that execution stopped, so
 expired, unreadable, or malformed marker state remains agent-owned and
 fail-closed. A heartbeat write failure, lease loss, external cancellation, or

@@ -7,6 +7,9 @@ license = "AGPL-3.0-only"
 [dependencies]
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal", "time", "fs", "process", "io-util", "io-std"] }
 reqwest = { version = "0.11", features = ["json", "multipart"] }
+# The proxy matcher reqwest 0.12 (Codex's HTTP client) uses, to prove loopback bypasses it.
+hyper-util = { version = "0.1.20", default-features = false, features = ["client-proxy", "client-proxy-system"] }
+http = "1"
 runtime-contracts = { path = "../runtime-contracts" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -16,6 +19,7 @@ anyhow = "1"
 uuid = { version = "1", features = ["serde", "v4"] }
 thiserror = "1"
 codex-core = { path = "../../codex/codex-rs/core" }
+codex-code-mode = { path = "../../codex/codex-rs/code-mode" }
 codex-config = { path = "../../codex/codex-rs/config" }
 codex-extension-api = { path = "../../codex/codex-rs/ext/extension-api" }
 codex-exec-server = { path = "../../codex/codex-rs/exec-server" }
@@ -36,6 +40,11 @@ tempfile = "3"
 once_cell = "1"
 codex-arg0 = { path = "../../codex/codex-rs/arg0" }
 codex-apply-patch = { path = "../../codex/codex-rs/apply-patch" }
+# Code-mode-only models (gpt-6-luna, gpt-5.6-sol) run their `exec` cells in this
+# out-of-process V8 host, which must sit next to the runtime-agent binary. Its V8
+# build needs Codex's pinned rusty_v8 artifacts, so ordinary builds leave it out;
+# image and desktop builds enable `code-mode-host` and build `-p codex-code-mode-host`.
+codex-code-mode-host = { path = "../../codex/codex-rs/code-mode-host", optional = true }
 origin-http-server = { path = "../origin-http-server" }
 jsonwebtoken = { version = "9", default-features = false, features = ["use_pem"] }
 chrono = { version = "0.4", default-features = false, features = ["clock", "serde"] }
@@ -44,11 +53,14 @@ zip = { version = "1", default-features = false, features = ["deflate"] }
 unicode-normalization = "0.1"
 rmcp = { version = "1.7.0", default-features = false, features = ["server", "transport-async-rw"] }
 
-[target.'cfg(target_os = "linux")'.dependencies]
+[target.'cfg(unix)'.dependencies]
 libc = "0.2"
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security", "Win32_System_JobObjects", "Win32_System_Threading"] }
+
+[features]
+code-mode-host = ["dep:codex-code-mode-host"]
 
 [lib]
 name = "runtime_agent"

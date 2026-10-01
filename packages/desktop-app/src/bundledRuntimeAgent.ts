@@ -5,15 +5,34 @@ import path from "node:path";
 export const BUNDLED_RUNTIME_AGENT_DIRECTORY = "runtime-agent";
 export const BUNDLED_RUNTIME_AGENT_MANIFEST = "runtime-agent-manifest.json";
 
-type RuntimeAgentManifest = {
-  schemaVersion: 2;
+type BundledBinary = {
   filename: string;
-  platform: NodeJS.Platform;
-  arch: string;
   sizeBytes: number;
   sha256: string;
+};
+
+type RuntimeAgentManifest = BundledBinary & {
+  schemaVersion: 3;
+  platform: NodeJS.Platform;
+  arch: string;
+  // Code-mode-only models (the default) run every tool in this host, which
+  // runtime-agent requires next to its own binary.
+  codeModeHost: BundledBinary;
   sourceSha: string;
 };
+
+function isBundledBinary(value: unknown): boolean {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const binary = value as Partial<BundledBinary>;
+  return (
+    typeof binary.filename === "string" &&
+    /^[a-zA-Z0-9._-]+$/.test(binary.filename) &&
+    Number.isSafeInteger(binary.sizeBytes) &&
+    (binary.sizeBytes ?? 0) > 0 &&
+    typeof binary.sha256 === "string" &&
+    /^[a-f0-9]{64}$/.test(binary.sha256)
+  );
+}
 
 function requireManifest(value: unknown): RuntimeAgentManifest {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
@@ -21,15 +40,11 @@ function requireManifest(value: unknown): RuntimeAgentManifest {
   }
   const manifest = value as Partial<RuntimeAgentManifest>;
   if (
-    manifest.schemaVersion !== 2 ||
-    typeof manifest.filename !== "string" ||
-    !/^[a-zA-Z0-9._-]+$/.test(manifest.filename) ||
+    manifest.schemaVersion !== 3 ||
+    !isBundledBinary(manifest) ||
+    !isBundledBinary(manifest.codeModeHost) ||
     typeof manifest.platform !== "string" ||
     typeof manifest.arch !== "string" ||
-    !Number.isSafeInteger(manifest.sizeBytes) ||
-    (manifest.sizeBytes ?? 0) <= 0 ||
-    typeof manifest.sha256 !== "string" ||
-    !/^[a-f0-9]{64}$/.test(manifest.sha256) ||
     typeof manifest.sourceSha !== "string" ||
     !/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/.test(manifest.sourceSha)
   ) {
@@ -79,30 +94,42 @@ export async function resolveVerifiedBundledRuntimeAgent(options: {
     throw new Error("Packaged Personal Browser runtime manifest is not valid JSON.");
   }
   const manifest = requireManifest(parsed);
-  const expectedFilename = platform === "win32" ? "runtime-agent.exe" : "runtime-agent";
+  const suffix = platform === "win32" ? ".exe" : "";
   if (
     manifest.platform !== platform ||
     manifest.arch !== arch ||
-    manifest.filename !== expectedFilename
+    manifest.filename !== `runtime-agent${suffix}` ||
+    manifest.codeModeHost.filename !== `codex-code-mode-host${suffix}`
   ) {
     throw new Error(
       `Packaged Personal Browser runtime targets ${manifest.platform}/${manifest.arch}, not ${platform}/${arch}.`,
     );
   }
 
-  const executablePath = path.join(bundleDir, manifest.filename);
-  const executableStats = await fs.promises.lstat(executablePath).catch(() => null);
-  if (!executableStats?.isFile() || executableStats.isSymbolicLink()) {
-    throw new Error("Packaged Personal Browser runtime executable is missing or unsafe.");
-  }
-  if (executableStats.size !== manifest.sizeBytes) {
-    throw new Error("Packaged Personal Browser runtime executable size does not match its manifest.");
-  }
-  if (platform !== "win32" && (executableStats.mode & 0o111) === 0) {
-    throw new Error("Packaged Personal Browser runtime executable is not executable.");
-  }
-  if ((await sha256File(executablePath)) !== manifest.sha256) {
-    throw new Error("Packaged Personal Browser runtime executable failed checksum verification.");
-  }
+  const executablePath = await verifyBundledBinary(bundleDir, manifest, platform, "executable");
+  await verifyBundledBinary(bundleDir, manifest.codeModeHost, platform, "code-mode host");
   return executablePath;
+}
+
+async function verifyBundledBinary(
+  bundleDir: string,
+  binary: BundledBinary,
+  platform: NodeJS.Platform,
+  label: string,
+): Promise<string> {
+  const binaryPath = path.join(bundleDir, binary.filename);
+  const stats = await fs.promises.lstat(binaryPath).catch(() => null);
+  if (!stats?.isFile() || stats.isSymbolicLink()) {
+    throw new Error(`Packaged Personal Browser runtime ${label} is missing or unsafe.`);
+  }
+  if (stats.size !== binary.sizeBytes) {
+    throw new Error(`Packaged Personal Browser runtime ${label} size does not match its manifest.`);
+  }
+  if (platform !== "win32" && (stats.mode & 0o111) === 0) {
+    throw new Error(`Packaged Personal Browser runtime ${label} is not executable.`);
+  }
+  if ((await sha256File(binaryPath)) !== binary.sha256) {
+    throw new Error(`Packaged Personal Browser runtime ${label} failed checksum verification.`);
+  }
+  return binaryPath;
 }

@@ -252,6 +252,8 @@ The MCP endpoint rejects unauthenticated callers, arbitrary tools, unknown argum
 
 The Rust client also disables proxy discovery for this loopback request so `HTTP_PROXY`, `HTTPS_PROXY`, or system proxy configuration cannot receive the bearer or project header.
 
+Codex's own MCP transport, which carries the model's Personal Browser tool calls, uses the default proxy handling of its HTTP client: `HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY` and the macOS or Windows system proxy, with no built-in loopback exemption. The desktop launcher and runtime-agent's own start-up therefore add `localhost,127.0.0.1,::1` to both `NO_PROXY` and `no_proxy`, keeping any entries the user already had. Before it registers the MCP server, a Personal turn checks the broker URL against that same proxy configuration and refuses to start if a proxy would still receive it.
+
 This is intentionally higher-level than CDP. The agent receives structured page evidence and bounded actions, not a general debugging socket into Electron.
 
 ## Shared Browser fallback

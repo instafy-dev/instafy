@@ -40,6 +40,7 @@ mod browser_request;
 mod card_text;
 mod conversation_context;
 mod git_sync;
+mod known_safe_command;
 mod routing_evidence;
 mod routing_recovery;
 
@@ -25937,6 +25938,8 @@ mod tests {
                 message: "The page is updated.".to_string(),
                 phase: None,
                 memory_citation: None,
+                delivery: None,
+                questions: None,
             }),
         ]);
         assert!(
@@ -26004,6 +26007,8 @@ mod tests {
                 message: "The order form is filled in.".to_string(),
                 phase: None,
                 memory_citation: None,
+                delivery: None,
+                questions: None,
             }),
         ]
         .into_iter()
@@ -26245,6 +26250,7 @@ mod tests {
             output_tokens: output,
             reasoning_output_tokens: 0,
             total_tokens: input + output,
+            codex_rollout_budget_units: None,
         };
         let turn_start = TurnStartTokenUsage::default();
         start_test_turn(
