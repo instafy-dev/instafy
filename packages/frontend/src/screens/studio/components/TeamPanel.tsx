@@ -7,6 +7,7 @@ import { Input } from "../../../components/Input";
 import { Select } from "../../../components/Select";
 import { Text } from "../../../components/Text";
 import { SpaceIdentity } from "../../../components/SpaceIdentity";
+import { getOrgInitials } from "../../../org/orgNaming";
 import { useOrgMembers } from "../../../org/useOrgMembers";
 import { useProjects } from "../../../projects/useProjects";
 import { useAuth } from "../../../providers/AuthProvider";
@@ -99,7 +100,7 @@ export function TeamPanel({ organizationId: requestedOrganizationId }: TeamPanel
           <>
             <div className="flex flex-wrap items-center gap-3">
               {organization.avatarUrl ? <img src={organization.avatarUrl} alt="" className="h-12 w-12 rounded-xl object-cover" />
-                : <span className="flex h-12 w-12 shrink-0 items-center justify-center rounded-xl bg-slate-200 text-lg font-semibold dark:bg-slate-700">{organization.name.slice(0, 1).toUpperCase()}</span>}
+                : <span aria-hidden="true" data-testid="team-panel-initials" className="flex h-12 w-12 shrink-0 items-center justify-center rounded-xl bg-slate-200 text-lg font-semibold dark:bg-slate-700">{getOrgInitials(organization.name)}</span>}
               <div className="min-w-0 flex-1">
                 {requestedOrganizationId !== undefined ? <h2 className="break-words text-base font-semibold">{organization.name}</h2> : <Select aria-label="Team" value={organization.id} onChange={(event) => setSelection({ userId: user?.id ?? "", id: event.target.value })}>
                   {organizations.map((org) => <option key={org.id} value={org.id}>{org.name}</option>)}

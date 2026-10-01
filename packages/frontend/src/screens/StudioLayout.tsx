@@ -138,7 +138,7 @@ import { useAutoDesktopSpeechTunnel } from "../desktop/voiceTunnel/useAutoDeskto
 import { useStudioLayoutChromeState } from "./useStudioLayoutChromeState";
 import { useStudioLayoutWorkspaceRouting } from "./useStudioLayoutWorkspaceRouting";
 import { useStudioGitStatusBadge } from "./useStudioGitStatusBadge";
-import { canRememberTeamWorkspace, resolveStudioSearchContext, resolveTeamNavigationScope, usesGlobalNavigationContext } from "./studio/teamNavigation";
+import { canRememberTeamWorkspace, resolveActiveTeamName, resolveStudioSearchContext, resolveTeamNavigationScope, usesGlobalNavigationContext } from "./studio/teamNavigation";
 import { readCachedControllerOrgs } from "./studio/components/sidebarOrgSnapshot";
 import { StudioPanelPerformance } from "../telemetry/StudioPanelPerformance";
 
@@ -298,9 +298,8 @@ function StudioLayoutInner() {
   }, [currentUserId]);
   const selectedTeamMetadata = navigationTeam?.userId === currentUserId && navigationTeam.key === navigationScope.orgKey
     ? navigationTeam : readCachedControllerOrgs(user?.email).find((org) => org.id === navigationScope.orgKey);
-  const activeTeamName = navigationScope.orgKey === "personal" ? "Personal"
-    : selectedTeamMetadata?.name
-      ?? (navigationScope.orgKey === activeProjectOrgKey ? activeProjectSummary?.orgName : null) ?? "Team";
+  const activeTeamName = resolveActiveTeamName(navigationScope.orgKey, selectedTeamMetadata?.name,
+    { orgKey: activeProjectOrgKey, orgName: activeProjectSummary?.orgName });
   const activeTeamAvatarUrl = navigationScope.orgKey === "personal" ? null : selectedTeamMetadata?.avatarUrl ?? null;
   const teamReturnRoutes = useRef<{ userId: string | null; routes: Map<string, string> }>({ userId: currentUserId, routes: new Map() });
   if (teamReturnRoutes.current.userId !== currentUserId) {

@@ -1,9 +1,28 @@
 import { describe, expect, it } from "vitest";
 import { buildStudioDestinationSearch } from "../../../navigation/studioNavigation";
-import { canRememberTeamWorkspace, resolveStudioSearchContext, resolveTeamNavigationScope, usesGlobalNavigationContext } from "../teamNavigation";
+import { canRememberTeamWorkspace, resolveActiveTeamName, resolveStudioSearchContext, resolveTeamNavigationScope, usesGlobalNavigationContext } from "../teamNavigation";
 
 const teamA = "11111111-1111-4111-8111-111111111111";
 const teamB = "22222222-2222-4222-8222-222222222222";
+
+describe("visible team name", () => {
+  it.each(["Personal team", "Personal", "Personal organization"])(
+    "names the personal team Personal in a space even when the cached name is %s",
+    (stored) => {
+      expect(resolveActiveTeamName(teamA, stored, { orgKey: teamA, orgName: "Personal team" })).toBe("Personal");
+      expect(resolveActiveTeamName(teamA, undefined, { orgKey: teamA, orgName: stored })).toBe("Personal");
+    },
+  );
+  it("keeps every other team's own name", () => {
+    expect(resolveActiveTeamName(teamA, " Research team ", null)).toBe("Research team");
+    expect(resolveActiveTeamName(teamA, undefined, { orgKey: teamA, orgName: "Workshop" })).toBe("Workshop");
+  });
+  it("names the personal page Personal and an unknown team Team", () => {
+    expect(resolveActiveTeamName("personal", "Personal team", null)).toBe("Personal");
+    expect(resolveActiveTeamName(teamB, undefined, { orgKey: teamA, orgName: "Workshop" })).toBe("Team");
+    expect(resolveActiveTeamName(teamA, undefined, { orgKey: teamA, orgName: null })).toBe("Team");
+  });
+});
 
 describe("search working context", () => {
   const project = { id: "space-a", name: "Autofix", orgId: teamA };
