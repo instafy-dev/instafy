@@ -116,7 +116,7 @@ async fn events_stream(
             let _permit = &permit;
             let _watch = &watch;
             match result {
-                Ok(event) => {
+                Ok(mut event) => {
                     if !filters.matches(&event) {
                         return None;
                     }
@@ -135,7 +135,7 @@ async fn events_stream(
                     // can immediately fail closed and refetch authoritative
                     // capabilities.
                     if !is_targeted_access_invalidation(&event, &context) {
-                        if let Err((status, Json(error))) = ensure_event_delivery_access(
+                        match ensure_event_delivery_access(
                             &state,
                             filters.project_id,
                             filters.session_id,
@@ -145,23 +145,27 @@ async fn events_stream(
                         )
                         .await
                         {
-                            if status.is_server_error() {
-                                warn!(
-                                    %status,
-                                    conversation_id = ?event.conversation_id,
-                                    project_id = %filters.project_id,
-                                    error = %error.message,
-                                    "failed to authorize controller event; dropping it"
-                                );
-                            } else {
-                                debug!(
-                                    %status,
-                                    conversation_id = ?event.conversation_id,
-                                    project_id = %filters.project_id,
-                                    "controller event is not visible to subscriber; dropping it"
-                                );
+                            Ok(Some(projected)) => event = projected,
+                            Ok(None) => {}
+                            Err((status, Json(error))) => {
+                                if status.is_server_error() {
+                                    warn!(
+                                        %status,
+                                        conversation_id = ?event.conversation_id,
+                                        project_id = %filters.project_id,
+                                        error = %error.message,
+                                        "failed to authorize controller event; dropping it"
+                                    );
+                                } else {
+                                    debug!(
+                                        %status,
+                                        conversation_id = ?event.conversation_id,
+                                        project_id = %filters.project_id,
+                                        "controller event is not visible to subscriber; dropping it"
+                                    );
+                                }
+                                return None;
                             }
-                            return None;
                         }
                     }
                     match SseEvent::default().json_data(&event) {
@@ -311,6 +315,7 @@ pub(crate) async fn ensure_event_access(
         context,
     )
     .await
+    .map(|_| ())
 }
 
 async fn ensure_event_delivery_access(
@@ -320,7 +325,7 @@ async fn ensure_event_delivery_access(
     conversation_id: Option<uuid::Uuid>,
     event: &ControllerEvent,
     context: &RequestContext,
-) -> Result<(), (StatusCode, Json<ApiError>)> {
+) -> Result<Option<ControllerEvent>, (StatusCode, Json<ApiError>)> {
     ensure_event_access_inner(
         state,
         project_id,
@@ -339,13 +344,13 @@ async fn ensure_event_access_inner(
     conversation_id: Option<uuid::Uuid>,
     event: Option<&ControllerEvent>,
     context: &RequestContext,
-) -> Result<(), (StatusCode, Json<ApiError>)> {
+) -> Result<Option<ControllerEvent>, (StatusCode, Json<ApiError>)> {
     let mut connection = state
         .pool
         .get()
         .await
         .map_err(|error| database_unavailable("Conversation event access", error))?;
-    let transaction = connection
+    let mut transaction = connection
         .transaction()
         .await
         .map_err(|error| database_unavailable("Controller event access", error))?;
@@ -361,9 +366,28 @@ async fn ensure_event_access_inner(
         ensure_conversation_access(&transaction, &conversation, context).await?;
     }
 
+    let mut projected = None;
     if let Some(event) = event {
-        private_runtime_visibility::ensure_visible(state, &transaction, project_id, event, context)
-            .await?;
+        if let Err(error) = private_runtime_visibility::ensure_visible(
+            state,
+            &transaction,
+            project_id,
+            event,
+            context,
+        )
+        .await
+        {
+            // Runtime privacy must not strand a conversation's run as queued.
+            // Only this payload-level denial can use a basic lifecycle view;
+            // project/conversation denials and database failures still fail closed.
+            if error.0 != StatusCode::FORBIDDEN {
+                return Err(error);
+            }
+            projected = project_run_lifecycle(&mut transaction, project_id, event).await?;
+            if projected.is_none() {
+                return Err(error);
+            }
+        }
         ensure_org_roster_signal_visible(&transaction, &project, event, context).await?;
     }
 
@@ -371,7 +395,48 @@ async fn ensure_event_access_inner(
         .commit()
         .await
         .map_err(|error| database_unavailable("Controller event access", error))?;
-    Ok(())
+    Ok(projected)
+}
+
+async fn project_run_lifecycle(
+    transaction: &mut tokio_postgres::Transaction<'_>,
+    project_id: uuid::Uuid,
+    event: &ControllerEvent,
+) -> Result<Option<ControllerEvent>, (StatusCode, Json<ApiError>)> {
+    if !matches!(
+        event.kind.as_str(),
+        "run.queued" | "run.progress" | "run.completed"
+    ) {
+        return Ok(None);
+    }
+    let (Some(run_id), Some(conversation_id)) = (event.run_id, event.conversation_id) else {
+        return Ok(None);
+    };
+    let Some(run) = crate::runs::load_run_snapshot(transaction, &run_id).await? else {
+        return Ok(None);
+    };
+    if event.project_id != Some(project_id)
+        || run.project_id != Some(project_id)
+        || run.conversation_id != Some(conversation_id)
+    {
+        return Ok(None);
+    }
+
+    // Read current status rather than replaying a stale progress payload after
+    // completion. Never copy free-form data or routing from the original event.
+    Ok(Some(ControllerEvent {
+        kind: event.kind.clone(),
+        project_id: Some(project_id),
+        conversation_id: Some(conversation_id),
+        run_id: Some(run_id),
+        session_id: None,
+        job_id: None,
+        channel: None,
+        channels: Vec::new(),
+        target_user_id: None,
+        data: serde_json::json!({ "status": run.status, "percent": run.progress }),
+        timestamp: run.updated_at,
+    }))
 }
 
 /// An org roster change reaches only subscribers who can read the org

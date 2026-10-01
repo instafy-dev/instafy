@@ -1,4 +1,4 @@
-import type { RunRecord, RuntimeState } from "../types";
+import type { RunRecord, RunRecordPatch, RuntimeState } from "../types";
 import {
   cloneRuntimeState,
   createDefaultRuntimeState,
@@ -47,6 +47,7 @@ export type RuntimeAction =
       latestRunIds: RuntimeStoreState["latestRunIds"];
     }
   | { type: "upsertRun"; run: RunRecord }
+  | { type: "patchRun"; patch: RunRecordPatch }
   | { type: "removeRun"; runId: string }
   | { type: "markRunLeased"; runId: string }
   | { type: "clearRunLease"; runId: string }
@@ -284,6 +285,31 @@ export function runtimeReducer(
         leasedRunIds: {},
         pendingConversationMessages: state.pendingConversationMessages,
       };
+    case "patchRun": {
+      const existing = state.runs[action.patch.id];
+      const run: RunRecord = {
+        ...(existing ?? {
+          projectId: null,
+          sessionId: null,
+          conversationId: null,
+          promptId: null,
+          runType: "prompt",
+          status: "queued",
+          progress: 0,
+          progressStage: null,
+          previewUrl: null,
+          lastMessage: null,
+          metadata: null,
+          createdAt: null,
+          updatedAt: null,
+        }),
+        ...action.patch,
+      };
+      if (action.patch.metadata) {
+        run.metadata = { ...existing?.metadata, ...action.patch.metadata };
+      }
+      return runtimeReducer(state, { type: "upsertRun", run });
+    }
     case "upsertRun": {
       const nextRuns = { ...state.runs };
       const existing = nextRuns[action.run.id] ?? null;

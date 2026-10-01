@@ -3677,7 +3677,8 @@ pub(crate) async fn lease_next_agent_job(
     let batch_conversation_uuid: Option<Uuid> = batch_conversation_id.cloned();
     let batch_multi_agent_group: Option<String> = batch_multi_agent_group_id.map(str::to_string);
     // Personal Browser jobs may carry inherited spread metadata, but their
-    // explicit desktop runtime remains an exact device boundary.
+    // explicit desktop runtime remains an exact device boundary. Conversely,
+    // a browser-only runtime must leave ordinary queued jobs for general workers.
     //
     // `exclude_platform_ai_jobs` ($10) skips the platform lane: an AI job whose
     // target has no credential. BYO jobs and terminal commands stay leasable.
@@ -3772,6 +3773,19 @@ pub(crate) async fn lease_next_agent_job(
                                       and rl.metadata #>> '{groupId}' = multi_agent_group_id
                                 )
                             )
+                        )
+                      )
+                  and (
+                        browser_transport = 'desktop-personal'
+                        or not exists (
+                            select 1
+                            from runtimes browser_runtime
+                            where browser_runtime.id = $2
+                              and browser_runtime.project_id = $1
+                              and (
+                                  browser_runtime.capabilities ? 'personalBrowser'
+                                  or browser_runtime.capabilities ? 'personal_browser'
+                              )
                         )
                       )
                   and not exists (
