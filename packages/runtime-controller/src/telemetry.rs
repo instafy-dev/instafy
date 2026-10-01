@@ -517,7 +517,7 @@ fn build_system_issue_from_telemetry(
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .unwrap_or("Runtime telemetry error");
-    if is_expected_provider_limit(message) {
+    if is_expected_provider_limit(message) || is_expected_model_outcome(message) {
         return None;
     }
     let upstream_ai_failure = is_upstream_ai_failure(message);
@@ -595,6 +595,16 @@ fn is_expected_provider_limit(message: &str) -> bool {
         // usage window, and a plan that does not include Codex at all.
         || normalized.contains("you've hit your usage limit")
         || normalized.contains("to use codex with your chatgpt plan")
+}
+
+/// A model request that ended the way the model and the provider decided, not a fault in the
+/// system: the provider stopped the answer early, at its output limit or by a content filter,
+/// and billed it. Codex reports that as `Incomplete response returned, reason: <reason>`, and the
+/// Studio explains it to the user.
+fn is_expected_model_outcome(message: &str) -> bool {
+    message
+        .to_ascii_lowercase()
+        .contains("incomplete response returned, reason:")
 }
 
 fn is_reconnectable_credential_failure(message: &str) -> bool {
@@ -1001,6 +1011,45 @@ mod tests {
             )
             .is_none());
         }
+    }
+
+    #[test]
+    fn telemetry_system_issue_ignores_answers_the_provider_cut_short() {
+        for message in [
+            "Incomplete response returned, reason: max_output_tokens",
+            "Incomplete response returned, reason: content_filter",
+            "stream disconnected before completion: Incomplete response returned, reason: unknown",
+            "Codex stream aborted after 5 retries (limit 5): stream disconnected before completion: Incomplete response returned, reason: max_output_tokens",
+        ] {
+            assert!(
+                build_system_issue_from_telemetry(
+                    "telemetry.error",
+                    "error",
+                    Some(message),
+                    None,
+                    None,
+                    None,
+                    None,
+                    &JsonValue::Null,
+                )
+                .is_none(),
+                "{message}"
+            );
+        }
+
+        // Only Codex's own report is an expected outcome.
+        let input = build_system_issue_from_telemetry(
+            "telemetry.error",
+            "error",
+            Some("workspace sync wrote an incomplete response file"),
+            None,
+            None,
+            None,
+            None,
+            &JsonValue::Null,
+        )
+        .expect("an unrelated failure is still filed");
+        assert_eq!(input.priority, "high");
     }
 
     #[test]

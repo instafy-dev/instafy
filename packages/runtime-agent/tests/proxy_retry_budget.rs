@@ -21,6 +21,9 @@ const CHILD_MARKER: &str = "INSTAFY_PROXY_RETRY_TEST_CHILD";
 const API_KEY: &str = "inert-local-retry-test-key";
 const FINAL_TEXT: &str = "LOCAL_RETRY_OK";
 const STEP_TEXT: &str = "LOCAL_RETRY_STEP_DONE";
+const FINISHED_CALL_ID: &str = "call-local-finished";
+const PARTIAL_TEXT: &str = "LOCAL_CUT_SHORT_PARTIAL";
+const TOOL_CMD: &str = "printf x >> tool-count.txt; printf TOOL_APPLIED";
 
 struct MockState {
     scenario: String,
@@ -33,11 +36,14 @@ fn sse(item: Value) -> Response {
     sse_with_end_turn(item, None)
 }
 
-fn sse_with_end_turn(item: Value, end_turn: Option<bool>) -> Response {
-    let usage = json!({"input_tokens":10,"output_tokens":5,"total_tokens":15,
+fn fixture_usage() -> Value {
+    json!({"input_tokens":10,"output_tokens":5,"total_tokens":15,
         "input_tokens_details":{"cached_tokens":0},
-        "output_tokens_details":{"reasoning_tokens":0}});
-    sse_with_usage(item, end_turn, Some(usage))
+        "output_tokens_details":{"reasoning_tokens":0}})
+}
+
+fn sse_with_end_turn(item: Value, end_turn: Option<bool>) -> Response {
+    sse_with_usage(item, end_turn, Some(fixture_usage()))
 }
 
 fn sse_with_usage(item: Value, end_turn: Option<bool>, usage: Option<Value>) -> Response {
@@ -88,6 +94,78 @@ fn proxy_rate_limit() -> Response {
         Json(body),
     )
         .into_response()
+}
+
+/// What the proxy streams instead of that 429 when the request streams, as every codex request
+/// does: one `response.failed` with code `rate_limit_exceeded` whose message names the wait.
+/// The proxy never asks for less than a second, which keeps the scheduled retry short.
+fn proxy_stream_rate_limit() -> Response {
+    let failed = json!({"type":"response.failed","response":{"status":"failed","error":{
+        "code":"rate_limit_exceeded",
+        "message":"The upstream provider rate limit was reached (upstream_rate_limit, 429). Please try again in 1s."}}});
+    sse_events(vec![failed])
+}
+
+/// The events of one proxy stream, which it ends with `[DONE]`.
+fn sse_events(events: Vec<Value>) -> Response {
+    let body = events
+        .into_iter()
+        .map(|event| format!("data: {event}\n\n"))
+        .chain(std::iter::once("data: [DONE]\n\n".to_string()))
+        .collect::<String>();
+    ([("content-type", "text/event-stream")], body).into_response()
+}
+
+/// The notice the proxy adds to a response the upstream stopped early, for `reason`, when no
+/// tool call finished.
+fn cut_short_notice(reason: &str) -> String {
+    format!("The response was cut off before it finished (reason: {reason}).")
+}
+
+/// What the proxy streams for a response the upstream stopped early, for `reason`, with no
+/// finished tool call: a completed response with the reasoning item the upstream finished and
+/// the answer the stop cut off, with the text that arrived and then the proxy's notice of the
+/// stop as a part of its own, keeping the upstream usage.
+fn proxy_cut_short_with_notice(reason: &str) -> Response {
+    proxy_cut_short_completed(
+        &format!("resp-{}", Uuid::new_v4()),
+        vec![
+            json!({"type":"reasoning","id":"rs-local-cut","summary":[]}),
+            json!({"type":"message","id":"msg-local-cut","role":"assistant",
+                "status":"incomplete","phase":"final_answer",
+                "content":[{"type":"output_text","text":PARTIAL_TEXT,"annotations":[]},
+                    {"type":"output_text","text":format!("\n\n{}", cut_short_notice(reason)),
+                        "annotations":[]}]}),
+        ],
+    )
+}
+
+/// What the proxy streams for a response the upstream stopped early: a completed response with
+/// the items the proxy keeps, keeping the upstream usage. An item with text streams it as one
+/// delta, its text parts joined by a line break.
+fn proxy_cut_short_completed(response_id: &str, items: Vec<Value>) -> Response {
+    let response = json!({"id":response_id, "object":"response",
+        "model":"gpt-6-luna", "output":items.clone(), "usage":fixture_usage()});
+    let mut created = response.clone();
+    created["status"] = json!("in_progress");
+    let mut completed = response;
+    completed["status"] = json!("completed");
+    let mut events = vec![json!({"type":"response.created","response":created})];
+    for item in items {
+        events.push(json!({"type":"response.output_item.added","item":item}));
+        let text = item["content"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|part| part["text"].as_str())
+            .collect::<Vec<_>>();
+        if !text.is_empty() {
+            events.push(json!({"type":"response.output_text.delta","delta":text.join("\n")}));
+        }
+        events.push(json!({"type":"response.output_item.done","item":item}));
+    }
+    events.push(json!({"type":"response.completed","response":completed}));
+    sse_events(events)
 }
 
 /// The proxy's envelope for an exhausted ChatGPT plan window, which resets in hours.
@@ -141,15 +219,38 @@ async fn responses(
         return (StatusCode::BAD_REQUEST, "local fixture request ceiling").into_response();
     }
     let code = match state.scenario.as_str() {
-        "transient" | "transient_429" if ordinal > 1 => return answer(FINAL_TEXT),
+        "transient" | "transient_429" | "transient_429_sse" if ordinal > 1 => {
+            return answer(FINAL_TEXT);
+        }
         "transient_429" | "persistent_429" => return proxy_rate_limit(),
+        "transient_429_sse" | "persistent_429_sse" => return proxy_stream_rate_limit(),
         "usage_limit_429" => return proxy_usage_limit(),
         // Two sampling requests in one browser-lane turn, each throttled once and recovered.
-        "browser_step_429s" => {
+        "browser_step_429s" | "browser_step_429s_sse" => {
             return match ordinal {
+                1 | 3 if state.scenario.ends_with("_sse") => proxy_stream_rate_limit(),
                 1 | 3 => proxy_rate_limit(),
                 2 => continue_turn(STEP_TEXT),
                 _ => answer(FINAL_TEXT),
+            };
+        }
+        // The upstream stopped the answer after a finished reasoning item. A re-send would send
+        // the same input again under the same cap or filter, so the proxy completes the response
+        // with the text that arrived and a notice, and codex ends the turn normally.
+        "incomplete_max_output_tokens" => return proxy_cut_short_with_notice("max_output_tokens"),
+        "incomplete_content_filter" => return proxy_cut_short_with_notice("content_filter"),
+        // Parallel tool calls: the first finished, and max_output_tokens cut the second off. The
+        // proxy passes on the finished one as a completed response, and codex continues with its
+        // output on the next request.
+        "incomplete_after_tool_call" => {
+            if ordinal > 1 {
+                return answer(FINAL_TEXT);
+            }
+            return match workspace_command_call(&state, &body, FINISHED_CALL_ID, TOOL_CMD) {
+                Some(call) => {
+                    proxy_cut_short_completed(&format!("resp-{}", Uuid::new_v4()), vec![call])
+                }
+                None => StatusCode::BAD_REQUEST.into_response(),
             };
         }
         // Four jobs on one thread, 50k input tokens per turn. The second job's first step
@@ -221,27 +322,10 @@ async fn responses(
         "tool_once" => {
             let supplied_history = body["input"].to_string();
             if !supplied_history.contains("TOOL_APPLIED") {
-                let mut names = Vec::new();
-                tool_names(&body["tools"], &mut names);
-                for entry in body["input"].as_array().into_iter().flatten() {
-                    if entry["type"] == "additional_tools" {
-                        tool_names(&entry["tools"], &mut names);
-                    }
-                }
-                if names.iter().any(|name| name == "exec") {
-                    return sse(json!({"type":"custom_tool_call","id":"tool-local-retry",
-                        "call_id":"call-local-retry","name":"exec","status":"completed",
-                        "input":"const result = await tools.exec_command({cmd: \"printf x >> tool-count.txt; printf TOOL_APPLIED\", max_output_tokens: 1024}); text(result);"}));
-                }
-                if names.iter().any(|name| name == "exec_command") {
-                    return sse(json!({"type":"function_call","id":"tool-local-retry",
-                        "call_id":"call-local-retry","name":"exec_command","status":"completed",
-                        "arguments":json!({"cmd":"printf x >> tool-count.txt; printf TOOL_APPLIED","max_output_tokens":1024}).to_string()}));
-                }
-                state.errors.lock().unwrap().push(format!(
-                    "fixture needs an offered exec or exec_command tool; received names: {names:?}"
-                ));
-                return StatusCode::BAD_REQUEST.into_response();
+                return match workspace_command_call(&state, &body, "call-local-retry", TOOL_CMD) {
+                    Some(call) => sse(call),
+                    None => StatusCode::BAD_REQUEST.into_response(),
+                };
             }
             503
         }
@@ -267,6 +351,42 @@ async fn responses(
         Json(json!({"error":{"message":"local scripted failure","type":"fixture_error","code":"fixture_error"}})),
     )
         .into_response()
+}
+
+/// A completed call of the command tool the request offers, code mode's `exec` or else
+/// `exec_command`, that runs `cmd` in the workspace. Records a fixture error when the request
+/// offers neither.
+fn workspace_command_call(
+    state: &MockState,
+    body: &Value,
+    call_id: &str,
+    cmd: &str,
+) -> Option<Value> {
+    let mut names = Vec::new();
+    tool_names(&body["tools"], &mut names);
+    for entry in body["input"].as_array().into_iter().flatten() {
+        if entry["type"] == "additional_tools" {
+            tool_names(&entry["tools"], &mut names);
+        }
+    }
+    let id = format!("tool-{call_id}");
+    if names.iter().any(|name| name == "exec") {
+        let input = format!(
+            "const result = await tools.exec_command({{cmd: {}, max_output_tokens: 1024}}); text(result);",
+            json!(cmd)
+        );
+        return Some(json!({"type":"custom_tool_call","id":id,
+            "call_id":call_id,"name":"exec","status":"completed","input":input}));
+    }
+    if names.iter().any(|name| name == "exec_command") {
+        return Some(json!({"type":"function_call","id":id,
+            "call_id":call_id,"name":"exec_command","status":"completed",
+            "arguments":json!({"cmd":cmd,"max_output_tokens":1024}).to_string()}));
+    }
+    state.errors.lock().unwrap().push(format!(
+        "fixture needs an offered exec or exec_command tool; received names: {names:?}"
+    ));
+    None
 }
 
 fn tool_names(value: &Value, output: &mut Vec<String>) {
@@ -347,7 +467,7 @@ async fn run_scenario(scenario: &str, expected_requests: usize) -> Result<()> {
         // error per sampling request, so counting across the whole turn aborts on the second.
         .env(
             "CODEX_MAX_STREAM_RETRIES",
-            if scenario == "browser_step_429s" {
+            if scenario.starts_with("browser_step_429s") {
                 "1"
             } else {
                 "5"
@@ -427,13 +547,27 @@ async fn run_scenario(scenario: &str, expected_requests: usize) -> Result<()> {
         assert!(main_input.contains("Earlier human context for the local decline fixture."));
         assert!(main_input.contains("NO_RESPONSE"));
     }
-    if scenario == "browser_step_429s" {
+    if scenario.starts_with("browser_step_429s") {
         assert!(
             requests
                 .iter()
                 .skip(2)
                 .all(|r| r["input"].to_string().contains(STEP_TEXT)),
             "the second step must continue the same session rather than replay the turn"
+        );
+    }
+    if scenario == "incomplete_after_tool_call" {
+        assert_eq!(fs::read_to_string(workspace.join("tool-count.txt"))?, "x");
+        let continued = requests[1]["input"].as_array().context("request input")?;
+        assert!(
+            continued
+                .iter()
+                .any(|item| item["call_id"] == FINISHED_CALL_ID
+                    && item["type"]
+                        .as_str()
+                        .is_some_and(|kind| kind.ends_with("_call_output"))
+                    && item["output"].to_string().contains("TOOL_APPLIED")),
+            "the follow-up must continue with the finished call's output: {continued:?}"
         );
     }
     if scenario == "tool_once" {
@@ -475,6 +609,38 @@ scenario_test!(
     browser_turn_recovered_429s_do_not_accumulate_across_steps,
     "browser_step_429s",
     4
+);
+// The shapes the proxy streams in place of a transient 429, which codex retries by itself.
+scenario_test!(
+    transient_streamed_429_recovers_in_same_session,
+    "transient_429_sse",
+    2
+);
+scenario_test!(
+    persistent_streamed_429_is_bounded_and_reports_the_rate_limit,
+    "persistent_429_sse",
+    2
+);
+scenario_test!(
+    browser_turn_recovered_streamed_429s_do_not_accumulate_across_steps,
+    "browser_step_429s_sse",
+    4
+);
+// The shapes the proxy streams for a response the upstream stopped early.
+scenario_test!(
+    incomplete_max_output_tokens_is_not_resent,
+    "incomplete_max_output_tokens",
+    1
+);
+scenario_test!(
+    incomplete_content_filter_is_not_resent,
+    "incomplete_content_filter",
+    1
+);
+scenario_test!(
+    incomplete_after_tool_call_continues_with_its_output,
+    "incomplete_after_tool_call",
+    2
 );
 scenario_test!(terminal_400_is_not_retried, "terminal_400", 1);
 scenario_test!(terminal_401_is_not_retried, "terminal_401", 1);
@@ -553,7 +719,7 @@ async fn isolated_retry_child() -> Result<()> {
                 cancel_signal: Some(cancel),
                 // A browser session keeps Codex's default retries and the runtime's own
                 // stream-error cap instead of the bounded proxy policy.
-                expect_browser_session: scenario == "browser_step_429s",
+                expect_browser_session: scenario.starts_with("browser_step_429s"),
                 ..Default::default()
             },
         )
@@ -561,15 +727,54 @@ async fn isolated_retry_child() -> Result<()> {
     if let Some(task) = canceller {
         task.abort();
     }
-    if matches!(
+    if let Some(reason) = scenario
+        .strip_prefix("incomplete_")
+        .filter(|reason| *reason != "after_tool_call")
+    {
+        // The turn ends normally, its final answer the text that arrived and then the proxy's
+        // notice, and reports its usage as any completed turn does, so the controller reconciles
+        // it on its tokens.
+        let output = result.context("a cut-short answer must end the turn normally")?;
+        let answer = format!("{PARTIAL_TEXT}\n\n{}", cut_short_notice(reason));
+        assert_eq!(output.final_json["summary"], answer);
+        let agent_messages = output
+            .events
+            .iter()
+            .filter(|event| {
+                event["type"] == "item.completed" && event["item"]["type"] == "agent_message"
+            })
+            .filter_map(|event| event["item"]["text"].as_str())
+            .collect::<Vec<_>>();
+        assert!(
+            !agent_messages.is_empty() && agent_messages.iter().all(|text| *text == answer),
+            "one answer, the text that arrived and then the notice: {agent_messages:?}"
+        );
+        let completed = output
+            .events
+            .iter()
+            .filter(|event| event["type"] == "turn.completed")
+            .collect::<Vec<_>>();
+        assert_eq!(completed.len(), 1, "{completed:?}");
+        assert_eq!(completed[0]["usageScope"], "turn", "{completed:?}");
+        assert_eq!(completed[0]["usage"]["input_tokens"], 10, "{completed:?}");
+        assert_eq!(completed[0]["usage"]["output_tokens"], 5, "{completed:?}");
+        // Keep the process alive beyond Codex's initial stream-retry backoff: nothing may be
+        // sent again after the turn ended.
+        tokio::time::sleep(Duration::from_millis(1200)).await;
+    } else if matches!(
         scenario.as_str(),
-        "transient" | "transient_429" | "browser_step_429s"
+        "transient"
+            | "transient_429"
+            | "transient_429_sse"
+            | "browser_step_429s"
+            | "browser_step_429s_sse"
+            | "incomplete_after_tool_call"
     ) {
         assert_eq!(result?.final_json["summary"], FINAL_TEXT);
     } else {
         let error = result.expect_err("scripted failure must remain an error");
         let message = format!("{error:#}").to_ascii_lowercase();
-        if scenario == "persistent_429" {
+        if scenario.starts_with("persistent_429") {
             // The final error must still say it was a rate limit so it can be classified.
             assert!(message.contains("429"), "{message}");
             assert!(message.contains("rate limit was reached"), "{message}");
