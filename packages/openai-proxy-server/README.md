@@ -379,8 +379,8 @@ the turn with a rate-limit error instead of waiting out its retry budget. When n
 stays retryable.
 
 A streaming `/v1/responses` request, which is how Codex sends every request, gets a transient
-rate limit as a stream failure instead. Upstream Codex does not retry an HTTP 429 by itself
-(only the pinned fork's own patch does), but it does retry a stream that fails with
+rate limit as a stream failure instead. Codex does not retry an HTTP 429 by itself (its
+`retry_429` is off for every provider), but it does retry a stream that fails with
 `rate_limit_exceeded`, after the wait the failure's message names and within its stream retry
 budget. The proxy therefore answers HTTP 200 with one server-sent `response.failed` event, then
 `[DONE]`:

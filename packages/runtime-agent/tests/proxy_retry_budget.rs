@@ -110,8 +110,10 @@ fn sse_output(item: Option<Value>, end_turn: Option<bool>, usage: Option<Value>)
     ([("content-type", "text/event-stream")], body).into_response()
 }
 
-/// The Instafy proxy's envelope for a retryable upstream rate limit. The proxy always sends a
-/// Retry-After with it; one second keeps the scheduled retry short.
+/// The Instafy proxy's envelope for a retryable upstream rate limit, which it still sends as an
+/// HTTP 429 to a request that does not stream. The proxy always sends a Retry-After with it.
+/// Codex never retries an HTTP 429 (`retry_429` is off for every provider), so the proxy streams
+/// a transient rate limit to codex as `proxy_stream_rate_limit` instead.
 fn proxy_rate_limit() -> Response {
     let body = json!({"error":{"message":"The upstream provider rate limit was reached.",
         "type":"upstream_error", "code":"upstream_rate_limit", "retryable":true}});
@@ -246,17 +248,16 @@ async fn responses(
         return (StatusCode::BAD_REQUEST, "local fixture request ceiling").into_response();
     }
     let code = match state.scenario.as_str() {
-        "transient" | "transient_429" | "transient_429_sse" if ordinal > 1 => {
+        "transient" | "transient_429_sse" if ordinal > 1 => {
             return answer(FINAL_TEXT);
         }
-        "transient_429" | "persistent_429" => return proxy_rate_limit(),
+        "http_429" => return proxy_rate_limit(),
         "transient_429_sse" | "persistent_429_sse" => return proxy_stream_rate_limit(),
         "usage_limit_429" => return proxy_usage_limit(),
         // Two sampling requests in one browser-lane turn, each throttled once and recovered.
-        "browser_step_429s" | "browser_step_429s_sse" => {
+        "browser_step_429s_sse" => {
             return match ordinal {
-                1 | 3 if state.scenario.ends_with("_sse") => proxy_stream_rate_limit(),
-                1 | 3 => proxy_rate_limit(),
+                1 | 3 => proxy_stream_rate_limit(),
                 2 => continue_turn(STEP_TEXT),
                 _ => answer(FINAL_TEXT),
             };
@@ -897,18 +898,9 @@ scenario_test!(
     2
 );
 scenario_test!(transient_503_recovers_in_same_session, "transient", 2);
-scenario_test!(transient_429_recovers_in_same_session, "transient_429", 2);
-scenario_test!(
-    persistent_429_is_bounded_and_reports_the_rate_limit,
-    "persistent_429",
-    2
-);
+// Codex never retries an HTTP 429, and the runtime does not restart the run for one.
+scenario_test!(http_429_is_not_retried, "http_429", 1);
 scenario_test!(plan_usage_limit_429_is_not_retried, "usage_limit_429", 1);
-scenario_test!(
-    browser_turn_recovered_429s_do_not_accumulate_across_steps,
-    "browser_step_429s",
-    4
-);
 // The shapes the proxy streams in place of a transient 429, which codex retries by itself.
 scenario_test!(
     transient_streamed_429_recovers_in_same_session,
@@ -1140,9 +1132,7 @@ async fn isolated_retry_child() -> Result<()> {
     } else if matches!(
         scenario.as_str(),
         "transient"
-            | "transient_429"
             | "transient_429_sse"
-            | "browser_step_429s"
             | "browser_step_429s_sse"
             | "incomplete_after_tool_call"
             | "personal_browser_tools"
@@ -1152,10 +1142,14 @@ async fn isolated_retry_child() -> Result<()> {
     } else {
         let error = result.expect_err("scripted failure must remain an error");
         let message = format!("{error:#}").to_ascii_lowercase();
-        if scenario.starts_with("persistent_429") {
+        if scenario == "persistent_429_sse" {
             // The final error must still say it was a rate limit so it can be classified.
             assert!(message.contains("429"), "{message}");
             assert!(message.contains("rate limit was reached"), "{message}");
+        }
+        if scenario == "http_429" {
+            // Codex names the status it stopped on.
+            assert!(message.contains("429"), "{message}");
         }
         if scenario == "usage_limit_429" {
             assert!(message.contains("usage limit"), "{message}");

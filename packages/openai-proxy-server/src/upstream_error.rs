@@ -300,8 +300,8 @@ impl ErrorResponse {
     /// For a transient upstream rate limit, the `error` of the `response.failed` event a
     /// streaming Responses request gets instead of an HTTP 429: code `rate_limit_exceeded`, and a
     /// message that ends "Please try again in {d}s.", which codex retries after `d` seconds
-    /// within its stream retry budget. Upstream codex does not retry an HTTP 429 by itself (only
-    /// the pinned fork's own patch does), so the stream is what keeps a short rate limit from
+    /// within its stream retry budget. Codex does not retry an HTTP 429 by itself (its
+    /// `retry_429` is off for every provider), so the stream is what keeps a short rate limit from
     /// ending the turn. `d` is the Retry-After this
     /// response carries, the provider's own or the one the proxy derived, or 5 seconds, clamped
     /// to 1-30 seconds and spread by up to 20% (see [`stream_retry_delay`]). The message keeps

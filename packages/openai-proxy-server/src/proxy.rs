@@ -1856,8 +1856,8 @@ async fn create_response(
                 "upstream request failed (credential_source={}, requested_model={})",
                 credential_source, model,
             )));
-            // Upstream codex does not retry an HTTP 429 by itself (only the pinned fork's own
-            // patch does), but it retries a stream that fails with `rate_limit_exceeded` after
+            // Codex does not retry an HTTP 429 by itself (its `retry_429` is off for every
+            // provider), but it retries a stream that fails with `rate_limit_exceeded` after
             // the wait the message names, within its stream retry budget. A transient rate limit
             // on a streaming request is therefore answered that way; a plan limit, and a request
             // that does not stream, keep the HTTP error.
