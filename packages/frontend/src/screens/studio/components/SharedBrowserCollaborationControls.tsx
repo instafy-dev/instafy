@@ -1,4 +1,4 @@
-import type { ReactNode } from "react";
+import { useRef, type ReactNode } from "react";
 import { CursorPointer, Group } from "iconoir-react";
 import { Dialog, DialogTrigger } from "react-aria-components";
 import { StudioPopover } from "../../../components/aria/StudioPopover";
@@ -48,6 +48,7 @@ export function SharedBrowserCollaborationControls({
   onTakeControl: () => void;
   children?: ReactNode;
 }) {
+  const dialogRef = useRef<HTMLDivElement | null>(null);
   const state = client.state;
   const participants = state?.participants ?? [];
   const self = collaborationSelfParticipant(client);
@@ -192,7 +193,12 @@ export function SharedBrowserCollaborationControls({
       data-action={action.kind}
       data-testid="shared-browser-collaboration-control-action"
       isDisabled={action.disabled}
-      onPress={action.run}
+      onPress={() => {
+        // A pending request disables this button. Keep keyboard focus inside
+        // the popup before the native disabled state removes button focus.
+        if (compact && action.kind === "request") dialogRef.current?.focus();
+        action.run();
+      }}
       title={action.label}
       type="button"
     >
@@ -236,7 +242,7 @@ export function SharedBrowserCollaborationControls({
             className="w-72 max-w-[calc(100vw-1.5rem)] p-3"
             data-browser-session-safe-zone="true"
           >
-            <Dialog aria-label="Browser participants and control" className="outline-none">
+            <Dialog ref={dialogRef} aria-label="Browser participants and control" className="outline-none">
               {participants.length || agentDisplayName ? (
                 <ul aria-label="Browser participants" className="space-y-2 text-xs">
                   {participants.map((participant) => (

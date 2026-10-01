@@ -342,6 +342,27 @@ describe("conversation preview tabs", () => {
     expect(previews()).toEqual([]);
   });
 
+  it("reopens the last closed chat explicitly without creating another conversation or losing its draft", async () => {
+    const existing = conversation("a", { draft: "Keep this shopping list" });
+    fixture.conversations = [existing];
+    save(["a"]);
+    await render();
+    await act(async () => api.closeTab(getTabIdForConversation("a")));
+    await render();
+    expect(ids()).toEqual([]);
+    expect(api.activeTab).toBeNull();
+
+    // Recent and All chats use this explicit opener. Selection alone cannot
+    // materialize a tab after the user deliberately closed the last one.
+    await openPreview("a");
+    await openPreview("a");
+    expect(ids()).toEqual(["a"]);
+    expect(api.activeTab).toMatchObject({ kind: "conversation", conversationId: "a" });
+    expect(fixture.conversations).toEqual([existing]);
+    expect(fixture.conversations[0].draft).toBe("Keep this shopping list");
+    expect(fixture.createConversation).not.toHaveBeenCalled();
+  });
+
   it("selects an inactive Machines tab and reorders it without changing the selection", async () => {
     save(["a"]);
     await render();

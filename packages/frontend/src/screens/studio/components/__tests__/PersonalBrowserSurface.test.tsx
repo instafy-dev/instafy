@@ -71,6 +71,9 @@ describe("PersonalBrowserSurface", () => {
 
   beforeEach(() => {
     (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
+    vi.stubGlobal("matchMedia", () => ({ matches: true, addEventListener: vi.fn(), removeEventListener: vi.fn() }));
+    window.localStorage.clear();
+    vi.stubGlobal("CSS", { escape: (value: string) => value.replace(/[^a-zA-Z0-9_-]/g, "\\$&") });
     container = document.createElement("div");
     document.body.appendChild(container);
     root = createRoot(container);
@@ -103,9 +106,11 @@ describe("PersonalBrowserSurface", () => {
 
   afterEach(async () => {
     await act(async () => root.unmount());
+    vi.unstubAllGlobals();
     vi.restoreAllMocks();
     container.remove();
     delete window.instafyDesktop;
+    window.localStorage.clear();
     if (originalResizeObserver) {
       globalThis.ResizeObserver = originalResizeObserver;
     } else {
@@ -257,6 +262,52 @@ describe("PersonalBrowserSurface", () => {
     expect(model.close).not.toHaveBeenCalled();
   });
 
+  it.each([
+    ["Back", "goBack"],
+    ["Forward", "goForward"],
+  ] as const)("keeps compact %s available in settings and restores the native page after navigation", async (label, method) => {
+    const model = createModel();
+    model.status = { ...model.status!, agentControlEnabled: false, canGoForward: true };
+    const setBounds = vi.fn(async (bounds: InstafyDesktopPersonalBrowserBounds) => ({
+      ...model.status!,
+      ...(bounds.occluded ? { previewDataUrl: "data:image/jpeg;base64,AQID" } : {}),
+    }));
+    window.instafyDesktop = { notify: vi.fn(), personalBrowserSetBounds: setBounds };
+    await act(async () => root.render(<PersonalBrowserSurface active compactChrome model={model} transportSelector={null} />));
+    expect(container.querySelector('[aria-label="Back"]')).toBeNull();
+    await act(async () => document.querySelector<HTMLButtonElement>('[aria-label="Browser settings"]')!.click());
+    const history = document.querySelector('[role="group"][aria-label="Page history"]')!;
+    const button = Array.from(history.querySelectorAll("button")).find(candidate => candidate.textContent === label)!;
+    expect(button.disabled).toBe(false);
+    expect(setBounds.mock.calls.at(-1)?.[0].occluded).toBe(true);
+    await act(async () => button.click());
+    expect(model[method]).toHaveBeenCalledOnce();
+    expect(document.querySelector('[role="dialog"][aria-label="Browser settings"]')).toBeNull();
+    expect(document.querySelector('[data-testid="personal-browser-overlay-preview"]')).toBeNull();
+    expect(setBounds.mock.calls.at(-1)?.[0].occluded).toBe(false);
+    expect(model.close).not.toHaveBeenCalled();
+    expect(model.setAgentControlEnabled).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["no history", { canGoBack: false, canGoForward: false }],
+    ["opening", { state: "opening" as const }],
+    ["agent control", { agentControlEnabled: true }],
+    ["pending human control", { humanControlReady: false }],
+    ["participant control", { tabControlActive: true }],
+  ])("disables compact history during %s", async (_label, status) => {
+    const model = createModel();
+    model.status = { ...model.status!, agentControlEnabled: false, canGoForward: true, ...status };
+    await act(async () => root.render(<PersonalBrowserSurface active compactChrome model={model} transportSelector={null} />));
+    await act(async () => document.querySelector<HTMLButtonElement>('[aria-label="Browser settings"]')!.click());
+    const buttons = Array.from(document.querySelectorAll<HTMLButtonElement>('[role="group"][aria-label="Page history"] button'));
+    expect(buttons).toHaveLength(2);
+    expect(buttons.every(button => button.disabled)).toBe(true);
+    await act(async () => buttons.forEach(button => button.click()));
+    expect(model.goBack).not.toHaveBeenCalled();
+    expect(model.goForward).not.toHaveBeenCalled();
+  });
+
   it("offers routine permission before Resume only on a supporting native host", async () => {
     const model = createModel();
     model.status = { ...model.status!, agentControlEnabled: false, approvalMode: "ask", approvalModes: ["ask", "routine"] };
@@ -378,6 +429,8 @@ describe("PersonalBrowserSurface", () => {
     const go = document.querySelector<HTMLButtonElement>(
       '[data-testid="personal-browser-go"]',
     )!;
+    expect(container.querySelectorAll('[data-testid="personal-browser-address"]')).toHaveLength(1);
+    expect(container.querySelectorAll('[data-testid="personal-browser-address-form"]')).toHaveLength(1);
     expect(go.classList.contains("pointer-coarse:min-h-11")).toBe(true);
     expect(go.classList.contains("pointer-coarse:min-w-11")).toBe(true);
 
@@ -389,7 +442,76 @@ describe("PersonalBrowserSurface", () => {
     await act(async () => go.click());
 
     expect(model.navigate).toHaveBeenCalledWith("https://instafy.dev/docs");
+    expect(address.value).toBe("https://instafy.dev/docs");
     expect(document.activeElement).not.toBe(address);
+  });
+
+  it("opens a remembered address through the native navigation model", async () => {
+    localStorage.setItem("instafy:browser-address-history:v1:reader", JSON.stringify([
+      { url: "https://remembered.example/article", title: "Remembered article", lastVisitedAt: 1 },
+    ]));
+    const model = createModel();
+    model.status = { ...model.status!, agentControlEnabled: false };
+    await act(async () => root.render(
+      <PersonalBrowserSurface active historyUserId="reader" model={model} transportSelector={null} />,
+    ));
+    const input = container.querySelector<HTMLInputElement>('[data-testid="personal-browser-address"]')!;
+    await act(async () => {
+      input.focus();
+      setInputValue(input, "remembered");
+    });
+    await act(async () => input.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true, cancelable: true })));
+    await act(async () => input.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true })));
+    expect(model.navigate).toHaveBeenCalledExactlyOnceWith("https://remembered.example/article");
+    expect(model.clearNavigationError).toHaveBeenCalled();
+    expect(input.value).toBe("https://remembered.example/article");
+  });
+
+  it("records only the active owned page and never saves an address draft", async () => {
+    const historyKey = "instafy:browser-address-history:v1:reader";
+    const model = createModel();
+    model.status = { ...model.status!, agentControlEnabled: false, title: "Example page" };
+    const render = (active: boolean) => root.render(
+      <PersonalBrowserSurface active={active} historyUserId="reader" model={model} transportSelector={null} />,
+    );
+    await act(async () => render(false));
+    expect(localStorage.getItem(historyKey)).toBeNull();
+    model.ownerId = null;
+    await act(async () => render(true));
+    expect(localStorage.getItem(historyKey)).toBeNull();
+    model.ownerId = "owner-1";
+    model.status.state = "opening";
+    await act(async () => render(true));
+    expect(localStorage.getItem(historyKey)).toBeNull();
+    model.status.state = "ready";
+    await act(async () => render(true));
+    const saved = JSON.parse(localStorage.getItem(historyKey)!);
+    expect(saved).toEqual([{ url: "https://example.com/", title: "Example page", lastVisitedAt: expect.any(Number) }]);
+    await act(async () => {
+      const input = container.querySelector<HTMLInputElement>('[data-testid="personal-browser-address"]')!;
+      input.focus();
+      setInputValue(input, "https://not-visited.example/");
+    });
+    expect(JSON.parse(localStorage.getItem(historyKey)!)).toEqual(saved);
+  });
+
+  it.each([
+    ["inactive", false, { agentControlEnabled: false }],
+    ["opening", true, { state: "opening", agentControlEnabled: false }],
+    ["agent owned", true, { agentControlEnabled: true }],
+    ["participant owned", true, { agentControlEnabled: false, tabControlActive: true }],
+    ["handoff pending", true, { agentControlEnabled: false, humanControlReady: false }],
+  ] as const)("guards direct address submissions while %s", async (_name, active, status) => {
+    const model = createModel();
+    model.status = { ...model.status!, ...status };
+    await act(async () => root.render(
+      <PersonalBrowserSurface active={active} model={model} transportSelector={null} />,
+    ));
+    await act(async () => {
+      container.querySelector<HTMLFormElement>('[data-testid="personal-browser-address-form"]')!
+        .dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+    });
+    expect(model.navigate).not.toHaveBeenCalled();
   });
 
   it("locks human navigation controls while agent control owns the native view", async () => {

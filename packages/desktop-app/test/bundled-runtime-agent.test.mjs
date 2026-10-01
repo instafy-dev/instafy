@@ -14,25 +14,35 @@ const { resolveVerifiedBundledRuntimeAgent } = await import(
 async function fixture() {
   const resourcesPath = await fs.promises.mkdtemp(path.join(os.tmpdir(), "instafy-bundled-runtime-"));
   const directory = path.join(resourcesPath, "runtime-agent");
-  const filename = process.platform === "win32" ? "runtime-agent.exe" : "runtime-agent";
+  const suffix = process.platform === "win32" ? ".exe" : "";
+  const filename = `runtime-agent${suffix}`;
+  const hostFilename = `codex-code-mode-host${suffix}`;
   const executablePath = path.join(directory, filename);
+  const hostPath = path.join(directory, hostFilename);
   await fs.promises.mkdir(directory, { recursive: true });
   await fs.promises.writeFile(executablePath, "verified runtime fixture", { mode: 0o755 });
-  const contents = await fs.promises.readFile(executablePath);
+  await fs.promises.writeFile(hostPath, "verified code-mode host fixture", { mode: 0o755 });
+  const describe = async (file) => {
+    const contents = await fs.promises.readFile(file);
+    return {
+      sizeBytes: contents.byteLength,
+      sha256: createHash("sha256").update(contents).digest("hex"),
+    };
+  };
   const manifest = {
-    schemaVersion: 2,
+    schemaVersion: 3,
     filename,
     platform: process.platform,
     arch: process.arch,
-    sizeBytes: contents.byteLength,
-    sha256: createHash("sha256").update(contents).digest("hex"),
+    ...(await describe(executablePath)),
+    codeModeHost: { filename: hostFilename, ...(await describe(hostPath)) },
     sourceSha: "a".repeat(40),
   };
   await fs.promises.writeFile(
     path.join(directory, "runtime-agent-manifest.json"),
     JSON.stringify(manifest),
   );
-  return { resourcesPath, executablePath, manifest };
+  return { resourcesPath, executablePath, hostPath, manifest };
 }
 
 test("resolves only the platform-matched checksum-verified bundled runtime", async (t) => {
@@ -85,4 +95,36 @@ test("rejects tampered, mismatched, and symlinked bundled runtimes", async (t) =
       /missing or unsafe/,
     );
   }
+});
+
+test("rejects a bundle whose code-mode host is missing, tampered, or not listed", async (t) => {
+  const missing = await fixture();
+  t.after(() => fs.rmSync(missing.resourcesPath, { recursive: true, force: true }));
+  await fs.promises.unlink(missing.hostPath);
+  await assert.rejects(
+    resolveVerifiedBundledRuntimeAgent({ resourcesPath: missing.resourcesPath }),
+    /code-mode host is missing or unsafe/,
+  );
+
+  const tampered = await fixture();
+  t.after(() => fs.rmSync(tampered.resourcesPath, { recursive: true, force: true }));
+  const hostBytes = await fs.promises.readFile(tampered.hostPath);
+  hostBytes[0] ^= 0xff;
+  await fs.promises.writeFile(tampered.hostPath, hostBytes);
+  await assert.rejects(
+    resolveVerifiedBundledRuntimeAgent({ resourcesPath: tampered.resourcesPath }),
+    /code-mode host failed checksum verification/,
+  );
+
+  const unlisted = await fixture();
+  t.after(() => fs.rmSync(unlisted.resourcesPath, { recursive: true, force: true }));
+  const { codeModeHost: _host, ...withoutHost } = unlisted.manifest;
+  await fs.promises.writeFile(
+    path.join(unlisted.resourcesPath, "runtime-agent", "runtime-agent-manifest.json"),
+    JSON.stringify({ ...withoutHost, schemaVersion: 2 }),
+  );
+  await assert.rejects(
+    resolveVerifiedBundledRuntimeAgent({ resourcesPath: unlisted.resourcesPath }),
+    /manifest is invalid/,
+  );
 });

@@ -249,11 +249,15 @@ export class PersonalBrowserInputShield {
 
   private syncView() {
     if (!this.active) {
+      const wasShowing = this.showing;
       this.showing = false;
       if (this.shieldView) {
         this.shieldView.setVisible(false);
       }
-      if (this.visible && this.protectedContents && !this.protectedContents.isDestroyed()) {
+      // Return focus when handing control back, not on every bounds update.
+      // Resizing the browser while typing (including collapsing a draft) must
+      // leave the composer's current selection and keyboard focus alone.
+      if (wasShowing && this.visible && this.protectedContents && !this.protectedContents.isDestroyed()) {
         this.protectedContents.focus();
       }
       return;

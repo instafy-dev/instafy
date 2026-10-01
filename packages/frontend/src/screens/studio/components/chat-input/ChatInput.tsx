@@ -59,6 +59,7 @@ type ChatInputProps = {
   // Narrow (< sm) viewports cap growth at fewer lines; the composer passes the
   // same JS breakpoint it uses for its own layout so both agree.
   compactViewport?: boolean;
+  expanded?: boolean;
   readOnly?: boolean;
   onReadOnlyKeyDown?: () => void;
 };
@@ -118,6 +119,7 @@ function ChatInputEditor(
     recordingIndicatorLabel,
     compact,
     compactViewport = false,
+    expanded = false,
     readOnly = false,
     onReadOnlyKeyDown,
   }: ChatInputProps,
@@ -139,12 +141,14 @@ function ChatInputEditor(
   // items-end) centres on the controls (see chatInputGrowth.ts). The
   // Browser-session condensed bar (compact) keeps its own tighter box. The
   // overlays sit on the first line, so they carry the same top offset.
-  const editorBoxClass = compact
+  const editorBoxClass = expanded
+    ? `h-full min-h-0 ${CHAT_INPUT_VERTICAL_PADDING_CLASS}`
+    : compact
     ? "min-h-7 max-h-24 py-0.5"
     : `${CHAT_INPUT_CONTROL_HEIGHT_CLASS} ${CHAT_INPUT_VERTICAL_PADDING_CLASS}`;
   const overlayTopClass = compact ? "top-1 sm:top-0.5" : CHAT_INPUT_OVERLAY_TOP_CLASS;
   const overlayPaddingClass = compact ? "py-1 sm:py-0.5" : CHAT_INPUT_VERTICAL_PADDING_CLASS;
-  const maxHeightPx = compact ? null : resolveChatInputMaxHeightPx({ compactViewport, coarsePointer });
+  const maxHeightPx = expanded || compact ? null : resolveChatInputMaxHeightPx({ compactViewport, coarsePointer });
   const showGhostSuggestion = !showRecordingIndicator && Boolean(ghostSuggestionRemainder && ghostSuggestionRemainder.length > 0);
   const displayedGhostSuggestionRemainder = showGhostSuggestion
     ? formatGhostSuggestionRemainderForDisplay(ghostSuggestionRemainder ?? "")
@@ -303,7 +307,7 @@ function ChatInputEditor(
   );
 
   return (
-    <div className="relative">
+    <div className={expanded ? "relative h-full min-h-0" : "relative"}>
       {showGhostSuggestion ? (
         <div
           aria-hidden="true"
@@ -398,6 +402,7 @@ export const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function Ch
     recordingIndicatorLabel,
     compact,
     compactViewport,
+    expanded,
     readOnly,
     onReadOnlyKeyDown,
   },
@@ -442,6 +447,7 @@ export const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function Ch
         recordingIndicatorLabel={recordingIndicatorLabel}
         compact={compact}
         compactViewport={compactViewport}
+        expanded={expanded}
         readOnly={readOnly}
         onReadOnlyKeyDown={onReadOnlyKeyDown}
       />

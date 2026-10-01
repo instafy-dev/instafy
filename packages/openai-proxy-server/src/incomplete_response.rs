@@ -187,9 +187,8 @@ fn is_commentary(item: &Value) -> bool {
 
 /// Whether codex runs `item` as a tool call and records an output for it, which gives its next
 /// request new model input: a function or custom tool call, or a tool search with a `call_id`
-/// that the client executes. These are the items `is_tool_call_core_runs` in codex's
-/// `codex-api/src/sse/responses.rs` (the fork's codex#4) lists, the ones
-/// `ToolRouter::build_tool_call` turns into a call. A reasoning item or a message is only the
+/// that the client executes. These are the items codex's `ToolRouter::build_tool_call`
+/// (`core/src/tools/router.rs`) turns into a call. A reasoning item or a message is only the
 /// model's own output, and a re-send after it would most likely stop the same way; a local shell
 /// call and a tool search the server ran are not calls codex runs.
 fn is_tool_call_codex_runs(item: &Value) -> bool {

@@ -19,7 +19,7 @@ import {
   sharedPixelSurface,
   waitForOpenInputSocket,
 } from "../utils/sharedBrowserCollaborationHarness.js";
-import { expectResponsiveSharedBrowserLayout } from "../utils/sharedBrowserResponsiveHarness.js";
+import { expectResponsiveSharedBrowserLayout, expectSharedBrowserAddressValue } from "../utils/sharedBrowserResponsiveHarness.js";
 
 const ENABLED =
   (process.env.PLAYWRIGHT_SHARED_BROWSER_RESPONSIVE ?? "").trim() === "1";
@@ -189,7 +189,7 @@ test.describe("Shared Browser responsive continuity", () => {
         page.locator('[data-responsive-session-instance="original"]'),
       ).toBeVisible();
       await expect(page.getByTestId("browser-session-modal")).toHaveCount(1);
-      await expect(address).toHaveValue("https://example.com/");
+      await expectSharedBrowserAddressValue(page, "https://example.com/");
       await expect(page.getByTestId("conversation-subtab-browser")).toHaveAttribute(
         "aria-selected",
         "true",
@@ -214,7 +214,7 @@ test.describe("Shared Browser responsive continuity", () => {
         await expect(
           page.locator('[data-responsive-session-instance="original"]'),
         ).toBeVisible();
-        await expect(address).toHaveValue("https://example.com/");
+        await expectSharedBrowserAddressValue(page, "https://example.com/");
       }
     }
 

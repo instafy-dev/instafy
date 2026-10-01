@@ -416,7 +416,7 @@ describe("useRuntimeControllerSync controller access results", () => {
     });
   });
 
-  it("orders reconnect snapshots against stream updates received in flight", async () => {
+  it.each(["snapshot", "patch"])("orders reconnect snapshots against a %s received in flight", async (eventShape) => {
     const reconciliation = deferred<FetchControllerRunsResult>();
     const dependencies = createHookDependencies();
     const staleSnapshot = runRecord();
@@ -466,7 +466,16 @@ describe("useRuntimeControllerSync controller access results", () => {
     );
 
     await act(async () => {
-      subscription?.onRun(liveCompletion, "UPDATE");
+      if (eventShape === "patch") {
+        subscription?.onRunPatch({
+          id: liveCompletion.id,
+          status: liveCompletion.status,
+          progress: liveCompletion.progress,
+          updatedAt: liveCompletion.updatedAt,
+        });
+      } else {
+        subscription?.onRun(liveCompletion, "UPDATE");
+      }
       subscription?.onRun(liveProgress, "UPDATE");
       reconciliation.resolve(
         fetchResult({ runs: [staleSnapshot, authoritativeCompletion] }),
@@ -474,8 +483,20 @@ describe("useRuntimeControllerSync controller access results", () => {
       await reconciliation.promise;
     });
 
-    expect(dependencies.upsertRun).toHaveBeenCalledTimes(3);
-    expect(dependencies.upsertRun).toHaveBeenCalledWith(liveCompletion);
+    expect(dependencies.upsertRun).toHaveBeenCalledTimes(eventShape === "patch" ? 2 : 3);
+    if (eventShape === "patch") {
+      expect(dependencies.dispatch).toHaveBeenCalledWith({
+        type: "patchRun",
+        patch: {
+          id: liveCompletion.id,
+          status: liveCompletion.status,
+          progress: liveCompletion.progress,
+          updatedAt: liveCompletion.updatedAt,
+        },
+      });
+    } else {
+      expect(dependencies.upsertRun).toHaveBeenCalledWith(liveCompletion);
+    }
     expect(dependencies.upsertRun).toHaveBeenCalledWith(liveProgress);
     expect(dependencies.upsertRun).toHaveBeenCalledWith(authoritativeCompletion);
     expect(dependencies.upsertRun).not.toHaveBeenCalledWith(staleSnapshot);

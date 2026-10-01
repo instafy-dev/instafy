@@ -57,6 +57,12 @@ pub(crate) const INTERNAL_CREDENTIAL_ENV_KEYS: &[&str] = &[
     "TOKEN_SIGNING_KEY",
     "ACL_HOOK_TOKEN",
     "EVENT_HOOK_TOKEN",
+    // Codex workload identity. When present, Codex exchanges this identity for
+    // OpenAI credentials directly, which would route model traffic around the
+    // Instafy proxy's per-job key.
+    "OPENAI_FEDERATION_RULE_ID",
+    "OPENAI_IDENTITY_TOKEN_FILE",
+    "OPENAI_WORKLOAD_IDENTITY_CONTEXT",
 ];
 
 /// Credentials the parent runtime must retain for in-process features but a
@@ -233,6 +239,25 @@ mod tests {
         ] {
             assert!(is_internal_credential_env_key(key), "{key}");
             assert!(is_model_child_excluded_env_key(key), "{key}");
+        }
+    }
+
+    #[test]
+    fn codex_workload_identity_keys_are_internal_credentials() {
+        // A job scrubs these before Codex initializes its auth manager, so a
+        // runtime environment cannot switch Codex onto workload identity.
+        for key in codex_protocol::shell_environment::NON_INHERITABLE_ENV_VARS
+            .iter()
+            .filter(|key| key.starts_with("OPENAI_"))
+        {
+            assert!(is_internal_credential_env_key(key), "{key}");
+            assert!(is_model_child_excluded_env_key(key), "{key}");
+        }
+        for key in [
+            codex_protocol::shell_environment::OPENAI_FEDERATION_RULE_ID_ENV_VAR,
+            codex_protocol::shell_environment::OPENAI_IDENTITY_TOKEN_FILE_ENV_VAR,
+        ] {
+            assert!(is_internal_credential_env_key(key), "{key}");
         }
     }
 

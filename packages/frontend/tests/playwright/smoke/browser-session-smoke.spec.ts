@@ -161,7 +161,7 @@ test.describe("Browser session smoke", () => {
         const [chromeFits, composerBox, addressBox] = await Promise.all([
           localChrome.evaluate((element) => element.scrollWidth <= element.clientWidth),
           page.getByTestId("chat-composer-overlay").boundingBox(),
-          localChrome.getByTestId("shared-browser-address").boundingBox(),
+          localChrome.getByTestId("shared-browser-address-trigger").boundingBox(),
         ]);
         return {
           addressUsable: (addressBox?.width ?? 0) >= 96,

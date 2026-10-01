@@ -5931,6 +5931,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
                   run.metadata?.browserTransport === "desktop-personal" &&
                   (run.status === "in_progress" || run.status === "queued"))}
                 compactChrome={compactBrowserBar}
+                historyUserId={currentUserId}
                 model={personalBrowser}
                 sharingControls={activeProjectId && currentUserId ? (
                   <LocalBrowserTabPublisher

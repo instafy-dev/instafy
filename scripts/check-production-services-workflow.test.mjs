@@ -134,11 +134,13 @@ test("image publication bounds every BuildKit matrix cell", () => {
 
   for (const [name, section, timeoutMinutes] of [
     ["production service", serviceSection, 30],
-    ["runtime agent", runtimeSection, 75],
+    // 75 minutes for build, scan and push plus the layer cache export's
+    // 16-minute bound (timeout and kill grace) after publication.
+    ["runtime agent", runtimeSection, 91],
   ]) {
     assert.match(
       section,
-      new RegExp(`timeout-minutes: ${timeoutMinutes}`, "u"),
+      new RegExp(`^    timeout-minutes: ${timeoutMinutes}$`, "mu"),
       `${name} build timeout`,
     );
     assert.equal(

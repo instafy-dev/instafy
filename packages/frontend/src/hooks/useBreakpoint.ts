@@ -10,7 +10,10 @@ const BREAKPOINT_VALUES: Record<BreakpointKey, number> = {
   "2xl": 1536
 };
 
-export function useBreakpoint(minBreakpoint: BreakpointKey): boolean {
+export function useBreakpoint(
+  minBreakpoint: BreakpointKey,
+  { freeze = false }: { freeze?: boolean } = {},
+): boolean {
   const minWidth = BREAKPOINT_VALUES[minBreakpoint];
   // matchMedia can be absent (jsdom, stripped-down webviews); fall back to
   // "not matched" — the mobile-first presentation — instead of throwing.
@@ -22,7 +25,9 @@ export function useBreakpoint(minBreakpoint: BreakpointKey): boolean {
   const [matches, setMatches] = useState<boolean>(getMatches);
 
   useEffect(() => {
-    if (!canMatch()) {
+    // Keep an open editor's presentation mounted across rotation. Once it
+    // closes, re-read the viewport before the next editing session.
+    if (freeze || !canMatch()) {
       return;
     }
     const mediaQuery = window.matchMedia(`(min-width: ${minWidth}px)`);
@@ -38,7 +43,7 @@ export function useBreakpoint(minBreakpoint: BreakpointKey): boolean {
 
     mediaQuery.addListener(handleChange);
     return () => mediaQuery.removeListener(handleChange);
-  }, [minWidth]);
+  }, [minWidth, freeze]);
 
   return matches;
 }
