@@ -61,6 +61,18 @@ type PendingControl = LoginOAuthProvider | "submit" | "forgot" | "startOtp" | "r
 const INVALID_CREDENTIALS_MESSAGE =
   "That email and password don't match. New here, or no password yet? We'll email you a code.";
 
+const INVALID_OTP_MESSAGE =
+  "That code has expired or isn't valid. Select Resend email to get a new one.";
+
+function isInvalidOtp(error: unknown): boolean {
+  if (!error || typeof error !== "object") return false;
+  if ("code" in error && typeof error.code === "string") {
+    return error.code === "otp_expired";
+  }
+  // Older auth servers may omit the machine-readable code.
+  return "message" in error && error.message === "Token has expired or is invalid";
+}
+
 function isInvalidCredentials(error: unknown): boolean {
   if (!error || typeof error !== "object") return false;
   if ("code" in error && typeof error.code === "string") {
@@ -282,6 +294,7 @@ export function LoginPage() {
   );
   const [email, setEmail] = useState("");
   const [otpCode, setOtpCode] = useState("");
+  const [invalidOtp, setInvalidOtp] = useState(false);
   const [password, setPassword] = useState("");
   const [passwordConfirm, setPasswordConfirm] = useState("");
   const [passwordVisible, setPasswordVisible] = useState(false);
@@ -471,6 +484,7 @@ export function LoginPage() {
     resetNativeAuthState();
     setError(null);
     setInvalidCredentials(false);
+    setInvalidOtp(false);
     setMessage(null);
     setAwaitingBrowser(null);
     setPendingControl(null);
@@ -675,7 +689,11 @@ export function LoginPage() {
         finishLogin();
       }
     } catch (err) {
-      const details = err instanceof Error ? err.message : "Unable to verify code.";
+      const invalid = isInvalidOtp(err);
+      setInvalidOtp(invalid);
+      const details = invalid
+        ? INVALID_OTP_MESSAGE
+        : err instanceof Error ? err.message : "Unable to verify code.";
       setError(details);
     } finally {
       setPendingControl(null);
@@ -692,7 +710,8 @@ export function LoginPage() {
     try {
       await sendEmailOtp(nextEmail);
       setOtpCode("");
-      setMessage("Resent the verification email.");
+      setMessage("New code sent. Use the latest email.");
+      otpRef.current?.focus();
     } catch (err) {
       const details = err instanceof Error ? err.message : "Unable to resend code.";
       setError(details);
@@ -1138,9 +1157,14 @@ export function LoginPage() {
                 id="otp"
                 aria-describedby={error ? "login-error" : undefined}
                 value={otpCode}
-                onChange={(event) => setOtpCode(event.target.value)}
+                onChange={(event) => {
+                  setOtpCode(event.target.value);
+                  setError(null);
+                  setInvalidOtp(false);
+                }}
                 required
                 aria-label="Verification code"
+                aria-invalid={invalidOtp || undefined}
                 radius="full"
                 size="lg"
                 placeholder="Enter the code"
@@ -1162,18 +1186,25 @@ export function LoginPage() {
             </Button>
           </form>
 
-          <Button
-            onPress={handleResendOtp}
-            isPending={pendingControl === "resend"}
-            isDisabled={isBlocked("resend")}
-            variant="text"
-            tone="neutral"
-            size="sm"
-            radius="full"
-            fullWidth
-          >
-            Resend email
-          </Button>
+          <div className="space-y-2">
+            <Button
+              onPress={handleResendOtp}
+              isPending={pendingControl === "resend"}
+              isDisabled={isBlocked("resend")}
+              variant="text"
+              tone="neutral"
+              size="sm"
+              radius="full"
+              fullWidth
+            >
+              Resend email
+            </Button>
+            {message ? (
+              <Text role="status" tone="muted" className="text-center" data-testid="login-message">
+                {message}
+              </Text>
+            ) : null}
+          </div>
 
           <OrDivider compact={compact} />
 
@@ -1488,7 +1519,7 @@ export function LoginPage() {
             <div className={compact ? "mt-3" : "mt-6"}>
               {renderBody()}
 
-              {message ? (
+              {message && step !== "otp" ? (
                 <InlineNotice tone="success" role="status" className="mt-6" data-testid="login-message">
                   {message}
                 </InlineNotice>
