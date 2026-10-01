@@ -133,8 +133,8 @@ RUN cargo chef prepare --recipe-path /src/recipe.json
 # The recipe stubs only runtime-agent itself: cargo-chef keeps the out-of-tree
 # path crates (runtime-contracts, origin-http-server, codex-rs) as real sources,
 # so this layer is keyed on them too. target/ is deliberately NOT a cache mount
-# here: exported layer caches (the publisher's type=gha, mode=max) keep image
-# layers but never cache mounts, so only a layer carries the compiled
+# here: exported layer caches (the publisher's registry cache, mode=max) keep
+# image layers but never cache mounts, so only a layer carries the compiled
 # dependencies to a fresh runner.
 FROM ${RUST_IMAGE} AS builder-deps
 ARG BUILD_PROFILE=dev
@@ -197,6 +197,10 @@ COPY --from=builder /src/build-artifacts/${BUILD_ARTIFACT_DIR}/codex-linux-sandb
 ########################
 # Runtime image
 ########################
+# The runtime publisher rebuilds this stage and runtime-webdev on every release
+# instead of taking them from its layer cache, so the OS and npm packages they
+# install are current when the image is scanned. Keep compilation in the builder
+# stages, whose layers the cache keeps.
 FROM ${RUNTIME_BASE} AS runtime
 
 ARG CHROMIUM_MIN_VERSION
