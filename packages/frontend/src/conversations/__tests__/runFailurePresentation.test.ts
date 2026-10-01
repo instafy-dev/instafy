@@ -30,6 +30,13 @@ const PROVIDER_INSUFFICIENT_QUOTA =
   'backend responded with 429 Too Many Requests: {"error":{"type":"insufficient_quota","code":"insufficient_quota"}}';
 const PROVIDER_USAGE_LIMIT_REACHED =
   'backend responded with 429 Too Many Requests: {"error":{"type":"usage_limit_reached"}}';
+// The proxy streams a transient 429 as a failure that names its wait, and Codex
+// reports it this way once its retries run out.
+const PROXY_STREAMED_RATE_LIMIT =
+  "stream disconnected before completion: The upstream provider rate limit was reached (upstream_rate_limit, 429). Please try again in 5.5s.";
+// Codex's own message when the provider stopped the answer early and the
+// response did not come through the Instafy proxy, which completes it instead.
+const RESPONSE_INCOMPLETE = (reason: string) => `Incomplete response returned, reason: ${reason}`;
 
 function createMessage(overrides: Partial<ChatMessage>): ChatMessage {
   return {
@@ -100,6 +107,7 @@ describe("classifyRunFailureText", () => {
         'backend responded with 429 Too Many Requests: {"error":{"type":"rate_limit_error","message":"Rate limit reached"}}',
       ),
     ).toBe("provider_rate_limited");
+    expect(classifyRunFailureText(PROXY_STREAMED_RATE_LIMIT)).toBe("provider_rate_limited");
     // A retry limit on another status is not a rate limit.
     expect(
       classifyRunFailureText("exceeded retry limit, last status: 500 Internal Server Error"),
@@ -137,6 +145,16 @@ describe("classifyRunFailureText", () => {
         'exceeded retry limit, last status: 429 Too Many Requests: {"error":{"code":"quota_exceeded"}}',
       ),
     ).toBeNull();
+  });
+
+  it("classifies an answer the provider stopped early", () => {
+    for (const reason of ["max_output_tokens", "content_filter", "unknown"]) {
+      expect(classifyRunFailureText(RESPONSE_INCOMPLETE(reason))).toBe("response_incomplete");
+    }
+    expect(
+      classifyRunFailureText(`Codex run failed: ${RESPONSE_INCOMPLETE("max_output_tokens")}`),
+    ).toBe("response_incomplete");
+    expect(classifyRunFailureText("The response was incomplete.")).toBeNull();
   });
 
   it("returns null for unrelated text", () => {
@@ -188,6 +206,8 @@ describe("isAutoRetryEligibleFailureKind", () => {
     expect(isAutoRetryEligibleFailureKind("needs_ai")).toBe(false);
     // Resending at once would hit the same provider limit again.
     expect(isAutoRetryEligibleFailureKind("provider_rate_limited")).toBe(false);
+    // The provider billed the cut-short answer; the same request would stop the same way.
+    expect(isAutoRetryEligibleFailureKind("response_incomplete")).toBe(false);
     expect(isAutoRetryEligibleFailureKind("generic")).toBe(false);
     expect(isAutoRetryEligibleFailureKind(null)).toBe(false);
     expect(isAutoRetryEligibleFailureKind(undefined)).toBe(false);
@@ -338,6 +358,36 @@ describe("resolveRunFailurePresentation", () => {
     // The Studio cannot tell a short throttle from a spent plan window, so the
     // copy must not promise that a retry soon will work.
     expect(presentation?.friendlyText).not.toMatch(/in a minute/i);
+  });
+
+  it("says why the provider stopped an answer early instead of the Codex text", () => {
+    const failed = (content: string) =>
+      resolveRunFailurePresentation({
+        metadata: { source: "agent", outcome: "failed", messageType: "error", jobId: "job-1" },
+        content,
+      });
+    expect(failed(RESPONSE_INCOMPLETE("max_output_tokens"))).toEqual({
+      kind: "response_incomplete",
+      friendlyText:
+        "The answer hit the model's length limit before it was finished, so this turn stopped. Try asking for less at once, or split the request into smaller steps.",
+      rawText: RESPONSE_INCOMPLETE("max_output_tokens"),
+    });
+    expect(failed(RESPONSE_INCOMPLETE("content_filter"))?.friendlyText).toBe(
+      "The AI provider's content filter stopped this answer before it was finished, so this turn stopped. Try rephrasing the request.",
+    );
+    // A reason the copy does not name, or none, still reads as a stopped answer.
+    for (const reason of ["unknown", "interrupted", ""]) {
+      expect(failed(RESPONSE_INCOMPLETE(reason))?.friendlyText).toBe(
+        "The AI provider stopped the answer before it was finished, so this turn stopped. Try again, or ask for less at once.",
+      );
+    }
+    // The error bubble opts in with assumeFailed when the metadata lacks an outcome.
+    expect(
+      resolveRunFailurePresentation({
+        content: RESPONSE_INCOMPLETE("content_filter"),
+        assumeFailed: true,
+      })?.kind,
+    ).toBe("response_incomplete");
   });
 
   it("keeps the raw quota reason for a 429 that names an exhausted quota or plan limit", () => {
