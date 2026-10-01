@@ -48,7 +48,13 @@ const SIGNING_SECRET: &str = "proxy-signing-test";
 /// runtime register) carry no run_id.
 const RUN_ID: &str = "44444444-4444-4444-8444-444444444444";
 
+// A live call on the developer's own login (OPENAI_API_KEY, or the Codex
+// auth.json), so it runs only when asked: `cargo test -- --ignored`. Serial,
+// because the stack tests point the upstream endpoints at their own model
+// stub while they run; beside one, this request went to that stub instead.
 #[tokio::test]
+#[ignore = "requires a real OpenAI key or Codex login and calls the provider"]
+#[serial]
 async fn proxy_chat_completion_smoke() -> Result<()> {
     let credentials = match auth::load_credentials(None) {
         Ok(creds) => creds,
