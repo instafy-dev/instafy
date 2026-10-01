@@ -17,6 +17,7 @@ import { StudioPanelScrollContainer, buildStudioPanelScrollIdentity } from "../n
 import { resolveSettingsRoute } from "./studio/settingsRoute";
 import { getStudioVisitKey } from "../navigation/studioVisit";
 import { useStudioHistory } from "../navigation/useStudioHistory";
+import { useHomeReturn } from "../navigation/useHomeReturn";
 import { useRouteOwnedWorkspaceDrawer } from "./useRouteOwnedWorkspaceDrawer";
 import { ChatLines, Clock, Coins, Cpu, Cube, GitBranch, Globe, Group, Lock, Page, Puzzle, Search, SidebarExpand, User, Xmark } from "iconoir-react";
 import { fetchCreditPolicy } from "../credits/creditService";
@@ -295,6 +296,7 @@ function StudioLayoutInner() {
   const activeProjectOrgKey = activeProjectSummary?.orgId ?? "personal";
   const navigationScope = resolveTeamNavigationScope(location.search, activeProjectOrgKey);
   const homeOverview = conversationWorkspace && navigationScope.page === "home";
+  const homeReturn = useHomeReturn(currentUserId, homeOverview);
   const searchRoute = new URLSearchParams(location.search);
   const searchKey = JSON.stringify([currentUserId, getStudioVisitKey(location), navigationScope.orgKey, activeProjectId, navigationScope.page, navigationScope.page === "home" ? homeListState.teamFilter : null,
     ...["conversationId", "conversationControllerId", "jobId", "panel", "settingsTab", "settingsOrgId", "settingsCategory"].map(key => searchRoute.get(key))]);
@@ -810,6 +812,7 @@ function StudioLayoutInner() {
     });
   }, [consumeUrlNavigation, runAfterSidebarClose]);
   const navigateToDestination = useStudioNavigation(runStudioNavigation);
+  const handleHomeReturn = homeReturn.canReturn ? () => runStudioNavigation(homeReturn.returnToPrevious) : undefined;
   // A workspace URL opened on desktop keeps the same visit on a phone. It
   // does not become a second, synthetic sidebar-history branch on resize.
   const routeOwnedMobileWorkspaceDrawer = !isLargeScreen && leftDrawer === "workspaces" && !mobileSidebarOpen;
@@ -1995,7 +1998,7 @@ function StudioLayoutInner() {
   const mobileContextHeader = (overlay = false) => <StudioMobileContextHeader
     teamName={activeTeamName} teamAvatarUrl={activeTeamAvatarUrl} accentColor={selectedTeamMetadata?.accentColor} teamId={navigationScope.orgKey}
     projects={projectList} activeProjectId={activeProjectId} attentionCounts={homeAttentionByProject}
-    homeActive={contextHomeActive} homeOverview={homeOverview && !overlay} homeAttentionCount={homeAttentionCount} searchRef={overlay ? overlaySearchTriggerRef : mobileSearchTriggerRef}
+    homeActive={contextHomeActive} homeOverview={homeOverview && !overlay} onHomeReturn={handleHomeReturn} homeAttentionCount={homeAttentionCount} searchRef={overlay ? overlaySearchTriggerRef : mobileSearchTriggerRef}
     onHome={handleOpenHome} onSearch={search.openSearch} onProfile={handleOpenProfileSettings}
     onSupport={() => runStudioNavigation(bugReportController.onOpenBugReportInbox)}
     onSignOut={() => runStudioNavigation(() => { void handleSignOut(); })}
@@ -2092,7 +2095,7 @@ function StudioLayoutInner() {
           {isLargeScreen ? <StudioDesktopHeader contextRef={setDesktopContextTarget} searchTriggerRef={desktopSearchTriggerRef}
             searchOpen={search.open} onSearch={search.openSearch}
             drawerHeaderRef={setDesktopDrawerHeaderTarget} drawerWidth={leftDrawer ? leftDrawerWidth : 0}
-            navigationCollapsed={sidebarCollapsed} navigationHidden={globalNavigationContext} homeOverview={homeOverview}>
+            navigationCollapsed={sidebarCollapsed} navigationHidden={globalNavigationContext} homeOverview={homeOverview} onHomeReturn={handleHomeReturn}>
             <StudioTopBar newChatInSidebar inlineDesktop />
           </StudioDesktopHeader> : null}
           {isLargeScreen ? (

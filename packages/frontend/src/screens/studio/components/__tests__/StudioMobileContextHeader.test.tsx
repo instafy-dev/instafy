@@ -109,12 +109,28 @@ describe("StudioMobileContextHeader", () => {
     expect(container.querySelector("h1")?.textContent).toBe("Home");
     expect(container.querySelector('[aria-label="Team and space"]')).toBeNull();
     expect(container.querySelector('[data-testid="sidebar-space-button"]')).toBeNull();
+    expect(container.querySelector('[data-testid="home-return-navigation"]')).toBeNull();
     await click("home-browse-navigation");
     expect(props.onSwitchTeam).toHaveBeenCalledOnce();
     await click("studio-mobile-search-trigger");
     expect(props.onSearch).toHaveBeenCalledOnce();
     await click("topbar-profile-button");
     expect(document.querySelector('[data-testid="profile-account-sheet"]')).not.toBeNull();
+  });
+
+  it("separates returning from Home from browsing teams and spaces", async () => {
+    const onHomeReturn = vi.fn();
+    await render({ ...props, homeOverview: true, onHomeReturn });
+    expect(button("home-return-navigation").getAttribute("aria-label")).toBe("Back to previous page");
+    expect(button("home-browse-navigation").getAttribute("aria-label")).toBe("Browse teams and spaces");
+    await click("home-return-navigation");
+    expect(onHomeReturn).toHaveBeenCalledOnce();
+    expect(props.onSwitchTeam).not.toHaveBeenCalled();
+    await click("home-browse-navigation");
+    expect(props.onSwitchTeam).toHaveBeenCalledOnce();
+    expect(onHomeReturn).toHaveBeenCalledOnce();
+    await render({ ...props, homeOverview: false });
+    expect(container.querySelector('[data-testid="home-return-navigation"]')).toBeNull();
   });
 
   it("uses the same Support and sign-out actions in the compact account sheet", async () => {

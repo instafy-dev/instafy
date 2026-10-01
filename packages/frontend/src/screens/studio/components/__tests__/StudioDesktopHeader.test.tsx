@@ -6,7 +6,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { StudioDesktopHeader } from "../StudioDesktopHeader";
 import { useStudioSearch } from "../useStudioSearch";
 
-function Harness({ docked = false, homeOverview = false }: { docked?: boolean; homeOverview?: boolean }) {
+function Harness({ docked = false, homeOverview = false, onHomeReturn }: { docked?: boolean; homeOverview?: boolean; onHomeReturn?: () => void }) {
   const [drawerHeader, setDrawerHeader] = useState<HTMLDivElement | null>(null);
   const [context, setContext] = useState<HTMLDivElement | null>(null);
   const trigger = useRef<HTMLButtonElement>(null);
@@ -15,7 +15,7 @@ function Harness({ docked = false, homeOverview = false }: { docked?: boolean; h
     space: homeOverview ? null : { id: "space", name: "Space" }, records: [], returnFocusRef: trigger,
   });
   return <>
-    <StudioDesktopHeader homeOverview={homeOverview} contextRef={setContext} drawerWidth={docked ? 280 : 0} drawerHeaderRef={setDrawerHeader} searchTriggerRef={trigger} searchOpen={search.open} onSearch={search.openSearch}>
+    <StudioDesktopHeader homeOverview={homeOverview} onHomeReturn={onHomeReturn} contextRef={setContext} drawerWidth={docked ? 280 : 0} drawerHeaderRef={setDrawerHeader} searchTriggerRef={trigger} searchOpen={search.open} onSearch={search.openSearch}>
       <button data-testid="workspace-tab">Conversation</button>
     </StudioDesktopHeader>
     {context ? createPortal(search.open ? search.renderControl() : homeOverview ? null : <button>Choose space</button>, context) : null}
@@ -84,6 +84,19 @@ describe("Single-row desktop search", () => {
     await act(async () => { await new Promise(resolve => requestAnimationFrame(resolve)); });
     expect(document.activeElement).toBe(trigger());
     expect(container.querySelectorAll("h1")).toHaveLength(1);
+  });
+
+  it("offers an independent Home return action only when an origin exists", async () => {
+    await act(async () => root.render(<Harness homeOverview />));
+    expect(container.querySelector('[data-testid="home-return-navigation"]')).toBeNull();
+    const onHomeReturn = vi.fn();
+    await act(async () => root.render(<Harness homeOverview onHomeReturn={onHomeReturn} />));
+    await act(async () => container.querySelector<HTMLButtonElement>('[data-testid="home-return-navigation"]')!.click());
+    expect(onHomeReturn).toHaveBeenCalledOnce();
+    await act(async () => trigger().click());
+    expect(container.querySelector('[data-testid="home-return-navigation"]')).toBeNull();
+    await key({ key: "Escape" });
+    expect(container.querySelector('[data-testid="home-return-navigation"]')).not.toBeNull();
   });
 
   it("hides docked pane controls while search owns the header and restores them without remounting tabs", async () => {

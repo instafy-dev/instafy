@@ -1,15 +1,16 @@
 import { useEffect, type ReactNode, type Ref } from "react";
-import { HomeSimple, Search } from "iconoir-react";
-import { Button } from "../../../components/Button";
+import { HomeSimple, NavArrowLeft, Search } from "iconoir-react";
+import { Button, IconButton } from "../../../components/Button";
 
 /** Desktop navigation shares one row. Search temporarily expands into that row. */
-export function StudioDesktopHeader({ contextRef, drawerHeaderRef, drawerWidth = 0, navigationCollapsed = false, navigationHidden = false, homeOverview = false, searchTriggerRef, searchOpen, onSearch, children }: {
+export function StudioDesktopHeader({ contextRef, drawerHeaderRef, drawerWidth = 0, navigationCollapsed = false, navigationHidden = false, homeOverview = false, onHomeReturn, searchTriggerRef, searchOpen, onSearch, children }: {
   contextRef: Ref<HTMLDivElement>;
   drawerHeaderRef?: Ref<HTMLDivElement>;
   drawerWidth?: number;
   navigationCollapsed?: boolean;
   navigationHidden?: boolean;
   homeOverview?: boolean;
+  onHomeReturn?: () => void;
   searchTriggerRef: Ref<HTMLButtonElement>;
   searchOpen: boolean;
   onSearch: () => void;
@@ -31,6 +32,11 @@ export function StudioDesktopHeader({ contextRef, drawerHeaderRef, drawerWidth =
     data-navigation-collapsed={navigationCollapsed} data-navigation-hidden={navigationHidden}
     style={{ "--studio-drawer-width": `${drawerWidth}px` } as React.CSSProperties}>
     <div className="studio-desktop-context-column">
+      {homeOverview && !searchOpen && onHomeReturn ? <IconButton variant="ghost" radius="lg" onPress={onHomeReturn}
+        className="!min-h-11 !min-w-11 shrink-0"
+        aria-label="Back to previous page" title="Back to previous page" data-testid="home-return-navigation">
+        <NavArrowLeft className="h-5 w-5" aria-hidden="true" />
+      </IconButton> : null}
       {homeOverview && !searchOpen ? <h1 className="flex min-w-0 items-center gap-2 px-3 text-sm font-semibold" data-testid="studio-home-title">
         <HomeSimple className="h-5 w-5" aria-hidden="true" />Home
       </h1> : null}

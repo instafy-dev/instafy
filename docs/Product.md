@@ -291,8 +291,10 @@ new messages.
 ## Conversation views
 
 Home has a global header with its title and Search, without the
-last space's breadcrumb or a conversation return button. Mobile keeps the account menu and
-an explicit team/space browser in the same row. Team filters live in Home and still determine
+last space's breadcrumb. When reached from elsewhere in the signed-in session, a back arrow
+returns to that exact page and history visit, including after changing Home filters. A direct
+Home launch has no return arrow. Mobile keeps the account menu and a separate grid button for
+browsing teams and spaces in the same row. Team filters live in Home and still determine
 search scope, starting at All teams. Continue working offers the current accessible chat with
 its team and space, restores its conversation views, and follows the selected team filter.
 
