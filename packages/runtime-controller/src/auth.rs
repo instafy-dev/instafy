@@ -609,6 +609,14 @@ pub(crate) fn issue_proxy_envelope(
 ) -> Option<ProxyEnvelopePayload> {
     const DEFAULT_PROXY_BASE_URL: &str = "http://proxy:8789";
 
+    // The managed lane's id is reserved for the platform credential and is
+    // never a user credential claim. Mint nothing rather than dropping the
+    // claim: a credential-less job token is a managed-lane token.
+    if credential_id.is_some_and(crate::credentials::is_managed_ai_credential_id) {
+        tracing::warn!("refusing to mint a proxy token for the reserved managed credential id");
+        return None;
+    }
+
     let secret = proxy_signing_secret(config)?;
     let base_url = config
         .proxy_base_url

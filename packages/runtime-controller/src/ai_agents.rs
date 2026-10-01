@@ -8,7 +8,6 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
 use tokio_postgres::error::SqlState;
-use tokio_postgres::types::Json as PgJson;
 use tokio_postgres::Transaction;
 use uuid::Uuid;
 
@@ -16,6 +15,7 @@ use crate::active_job_auth::{
     authorize_active_job_if_scoped, ActiveJobAuthorization, ActiveJobProjectAccess,
 };
 use crate::auth::{authenticate_request, require_user_session, RequestContext};
+use crate::credentials;
 use crate::projects::{
     ensure_project_access, ensure_project_read_access, ensure_project_write_access,
     load_project_record,
@@ -288,32 +288,23 @@ fn normalize_optional_reasoning_effort(value: Option<String>) -> Option<String> 
         .filter(|entry| matches!(entry.as_str(), "minimal" | "low" | "medium" | "high"))
 }
 
-async fn resolve_agent_provider_for_credential(
+/// Every credential an agent create or update selects passes through here,
+/// so an agent can only pin a live credential its owner holds.
+pub(crate) async fn resolve_agent_provider_for_credential(
     transaction: &Transaction<'_>,
     user_id: &Uuid,
     credential_id: &Uuid,
 ) -> Result<String, (StatusCode, Json<ApiError>)> {
-    let row = transaction
-        .query_opt(
-            "select kind, metadata
-             from user_credentials
-             where id = $1 and user_id = $2 and revoked_at is null
-             limit 1",
-            &[credential_id, user_id],
-        )
-        .await
-        .map_err(|error| internal_error(format!("failed to load credential metadata: {error}")))?;
-
-    let Some(row) = row else {
+    let Some(credentials::OwnedCredential { kind, metadata }) =
+        credentials::load_owned_live_credential(transaction, user_id, credential_id).await?
+    else {
         return Err(not_found("credential not found"));
     };
 
-    let kind: String = row.get("kind");
     if kind == "codex_auth_json" {
         return Ok(PROVIDER_OPENAI.to_string());
     }
 
-    let metadata: JsonValue = row.get::<_, PgJson<JsonValue>>("metadata").0;
     let provider_hint = metadata
         .as_object()
         .and_then(|map| map.get("provider"))
@@ -516,7 +507,9 @@ pub(crate) async fn create_default_agent_for_credential(
     }
 
     let agent_id = Uuid::new_v4();
-    let avatar_seed = credential_id.to_string();
+    // Credential-created agents take the agent id as their avatar seed, like
+    // every other new agent.
+    let avatar_seed = agent_id.to_string();
     let display_name = label
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty());
