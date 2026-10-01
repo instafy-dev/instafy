@@ -187,13 +187,14 @@ test('only self-hosted Rust children install the fixed missing native packages w
   for(const item of aggregates)assert.doesNotMatch(job(item.key),/apt-get|Install scoped Rust native prerequisites/u);
 });
 
-test('the full reviewed five check and seven test commands and working directories are hash-bound', () => {
+test('the full reviewed five check and nine test commands and working directories are hash-bound', () => {
   // Exact normalized command order + working-directory from build.yml at f20002b,
-  // plus the reviewed runtime-agent proxy_retry_budget and read-reference selectors.
+  // plus the reviewed runtime-agent proxy_retry_budget and read-reference selectors
+  // and the proxy_retry_budget runs for gpt-5.6-sol and gpt-5.5.
   // Commands are literal steps, not a matrix/shell fragment that can drop a crate.
   for (const [list, stepName, hash, expectedCount] of [
     [checks, 'Check public Rust package', '555d7092d19a4cc330abb80fa5dc6c1a8785b916a0119adcc2fdfc2741e678ff', 5],
-    [suites, 'Run database-free Rust test suite', '5faef3f01f2a1f32c04863191a1eb6a517e70bc30611787bcc08fd4004fb9870', 7],
+    [suites, 'Run database-free Rust test suite', '33a7ea9059bf7898dfd6915acf32b8939589b844ec4fbef175436990d34f6d70', 9],
   ]) {
     const inventory = list.flatMap(item => {
       const part = step(item.key, stepName);
@@ -242,17 +243,21 @@ test('only the runtime-agent Cargo step defaults self-hosted Linux linking, with
   assert.ok(step('rust-test-agent', 'Install scoped Rust native prerequisites').includes('ld.lld --version'));
 });
 
-test('actual runtime-agent Bash defaults only unset flags on self-hosted Linux and preserves all three Cargo invocations', () => {
+test('actual runtime-agent Bash defaults only unset flags on self-hosted Linux and preserves every Cargo invocation and test model', () => {
   const script = step('rust-test-agent', 'Run database-free Rust test suite').split('        run: |\n')[1]
     .trimEnd().split('\n').map(line => line.slice(10)).join('\n');
   const expression = "${{ runner.environment == 'self-hosted' && runner.os == 'Linux' }}";
   assert.equal(script.split(expression).length, 2);
+  // proxy_retry_budget runs once per model the runtime offers; an empty model is the
+  // harness default (gpt-6-luna).
   const commands = [
-    ['test', '--manifest-path', 'packages/runtime-agent/Cargo.toml', '--no-run'],
-    ['test', '--manifest-path', 'packages/runtime-agent/Cargo.toml', '--lib', '--test', 'controller_client', '--test', 'proxy_retry_budget', '--', '--test-threads=1'],
-    ['test', '--manifest-path', 'packages/runtime-agent/Cargo.toml', '--test', 'proxy_integration', 'codex_read_reference_', '--', '--test-threads=1'],
+    ['', 'test', '--manifest-path', 'packages/runtime-agent/Cargo.toml', '--no-run'],
+    ['', 'test', '--manifest-path', 'packages/runtime-agent/Cargo.toml', '--lib', '--test', 'controller_client', '--test', 'proxy_retry_budget', '--', '--test-threads=1'],
+    ['gpt-5.6-sol', 'test', '--manifest-path', 'packages/runtime-agent/Cargo.toml', '--test', 'proxy_retry_budget', '--', '--test-threads=1'],
+    ['gpt-5.5', 'test', '--manifest-path', 'packages/runtime-agent/Cargo.toml', '--test', 'proxy_retry_budget', '--', '--test-threads=1'],
+    ['', 'test', '--manifest-path', 'packages/runtime-agent/Cargo.toml', '--test', 'proxy_integration', 'codex_read_reference_', '--', '--test-threads=1'],
   ];
-  const fixture = `cargo() { printf 'CALL\\0%s\\0%s\\0' "\${RUSTFLAGS+x}" "\${RUSTFLAGS-}"; printf '%s\\0' "$@"; return "\${CARGO_FIXTURE_STATUS:-0}"; }\n`;
+  const fixture = `cargo() { printf 'CALL\\0%s\\0%s\\0%s\\0' "\${RUSTFLAGS+x}" "\${RUSTFLAGS-}" "\${INSTAFY_TEST_CODEX_MODEL-}"; printf '%s\\0' "$@"; return "\${CARGO_FIXTURE_STATUS:-0}"; }\n`;
   for (const environment of ['self-hosted', 'github-hosted', '', 'unknown']) for (const os of ['Linux', 'macOS', 'Windows', '']) {
     const selected = vm.runInNewContext("runner.environment == 'self-hosted' && runner.os == 'Linux'", { runner: { environment, os } });
     for (const flags of [undefined, '', '-C opt-level=1', '  -C target-cpu=native  ', '$(false);\nINERT_CHOICE']) {
@@ -261,7 +266,7 @@ test('actual runtime-agent Bash defaults only unset flags on self-hosted Linux a
       assert.equal(result.status,0);assert.equal(result.stderr.toString(),'');
       const expected = flags === undefined && selected ? '-C link-arg=-fuse-ld=lld' : flags;
       const tokens = result.stdout.toString().split('\0');tokens.pop();
-      assert.deepEqual(tokens, commands.flatMap(args => ['CALL', expected === undefined ? '' : 'x', expected ?? '', ...args]));
+      assert.deepEqual(tokens, commands.flatMap(([model, ...args]) => ['CALL', expected === undefined ? '' : 'x', expected ?? '', model, ...args]));
       assert.deepEqual(env, { PATH: '/usr/bin:/bin', ...(flags === undefined ? {} : { RUSTFLAGS: flags }) });
     }
   }
@@ -270,6 +275,25 @@ test('actual runtime-agent Bash defaults only unset flags on self-hosted Linux a
   });
   assert.equal(failed.status,7);assert.equal(failed.stderr.toString(),'');
   assert.equal(failed.stdout.toString().split('CALL').length,2);
+});
+
+test('runtime-agent tests get a checksum-verified code-mode host and run proxy_retry_budget for every runtime model', () => {
+  const text = job('rust-test-agent');
+  const host = step('rust-test-agent', 'Build the Codex code-mode host');
+  assert.ok(text.indexOf('Build the Codex code-mode host') < text.indexOf('Run database-free Rust test suite'));
+  assert.ok(text.indexOf('Set up stable Rust') < text.indexOf('Build the Codex code-mode host'));
+  assert.doesNotMatch(host, /^        (?:if|continue-on-error|env):|GITHUB_ENV|GITHUB_OUTPUT|\|\| true/mu);
+  const run = host.split('        run: |\n')[1].trimEnd().split('\n').map(line => line.slice(10));
+  assert.deepEqual(run, [
+    `eval "$(scripts/fetch-rusty-v8.sh "$(rustc -vV | sed -n 's/^host: //p')" "$RUNNER_TEMP/rusty-v8" | sed 's/^/export /')"`,
+    'cargo build --manifest-path packages/runtime-agent/Cargo.toml --features code-mode-host -p runtime-agent -p codex-code-mode-host',
+    'test -x "$CARGO_TARGET_DIR/debug/codex-code-mode-host"',
+  ]);
+  assert.ok(fs.existsSync(path.join(root, 'scripts', 'fetch-rusty-v8.sh')));
+  const suite = step('rust-test-agent', 'Run database-free Rust test suite');
+  for (const model of ['gpt-5.6-sol', 'gpt-5.5']) {
+    assert.ok(suite.includes(`          INSTAFY_TEST_CODEX_MODEL=${model} cargo test --manifest-path packages/runtime-agent/Cargo.toml --test proxy_retry_budget -- --test-threads=1\n`), model);
+  }
 });
 
 test('cargo caches cannot cross OS, CPU architecture, crate lane or lockfile inventory', () => {
@@ -323,10 +347,11 @@ test('the restore-only mitigation preserves every other byte of the reviewed Bui
       hosted.replace("        if: runner.environment == 'github-hosted'\n", ''));
   }
   // Full build.yml at the reviewed combined source 2ef4dde, plus only the reviewed
-  // proxy_retry_budget and read-reference selectors: retains all functional commands, aggregate guards,
+  // proxy_retry_budget and read-reference selectors, the code-mode host build and the
+  // per-model proxy_retry_budget runs: retains all functional commands, aggregate guards,
   // routing, permissions and other jobs.
   assert.equal(createHash('sha256').update(normalized).digest('hex'),
-    '2e24a805b71e93726e4a43a5cd42db94ddeafbf6b1303740aa99bf7cdcd60c9b');
+    '8cbf3656bec54d9fe835e2d5e69440293f5b9a9dcbf0e8e5d06d97a548c87369');
 });
 
 test('actual inline runner qualification rejects wrong native identity, ambient private env and missing compilers', () => {

@@ -7,19 +7,17 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow};
 use codex_config::{DEFAULT_MCP_SERVER_ENVIRONMENT_ID, McpServerConfig, McpServerTransportConfig};
-use codex_core::config::{
-    Config, ConfigBuilder, ConfigOverrides, ManagedFeatures, set_project_trust_level,
-};
+use codex_core::config::{Config, ConfigBuilder, ConfigOverrides, set_project_trust_level};
 use codex_core::test_support::EmptyUserInstructionsProvider;
 use codex_core::{
-    CodexAppsToolsCache, CodexThread, NewThread, SteerInputError, ThreadManager,
+    CodexAppsToolsCache, CodexThread, NewThread, StartThreadOptions, ThreadManager,
     build_models_manager, init_state_db, local_agent_graph_store_from_state_db,
     resolve_installation_id, thread_store_from_config,
 };
 use codex_exec_server::{EnvironmentManager, LOCAL_ENVIRONMENT_ID, LOCAL_FS};
 use codex_extension_api::{
-    ExtensionFuture, ExtensionRegistry, ExtensionRegistryBuilder, TurnLifecycleContributor,
-    TurnStartInput,
+    ExtensionData, ExtensionFuture, ExtensionRegistry, ExtensionRegistryBuilder,
+    TurnLifecycleContributor, TurnStartInput, TurnStartPhase,
 };
 use codex_features::Feature;
 use codex_git_utils::resolve_root_git_project_for_trust;
@@ -31,13 +29,17 @@ use codex_protocol::config_types::{
     EnvironmentVariablePattern, SandboxMode, ShellEnvironmentPolicy, TrustLevel, WebSearchMode,
 };
 use codex_protocol::error::Result as CodexResult;
-use codex_protocol::items::{AgentMessageContent, TurnItem};
+use codex_protocol::items::{AgentMessageContent, AgentMessageDelivery, TurnItem};
 use codex_protocol::models::{ContentItem, MessagePhase, ResponseItem};
 use codex_protocol::openai_models::ReasoningEffort;
 use codex_protocol::protocol::{
-    AskForApproval, CodexErrorInfo, Event, EventMsg, McpServerRefreshConfig, Op, SandboxPolicy,
-    SessionSource, StreamErrorEvent, ThreadSettingsOverrides, TokenUsage, TurnEnvironmentSelection,
-    TurnEnvironmentSelections,
+    AskForApproval, CodexErrorInfo, EnvironmentConfigState, Event, EventMsg, Op, SandboxPolicy,
+    SessionSource, StreamErrorEvent, ThreadHistoryMode, ThreadSettingsOverrides, TokenUsage,
+    TurnEnvironmentSelection, TurnEnvironmentSelections,
+};
+use codex_protocol::turn_input::{
+    NotSubmittedReason, StartIfIdleSubmission, SteerSubmission, TurnInput, TurnInputRequest,
+    TurnStartOptions,
 };
 use codex_protocol::user_input::UserInput;
 use codex_utils_absolute_path::AbsolutePathBuf;
@@ -50,6 +52,7 @@ use tokio::time::timeout;
 use crate::active_turn_input::{
     ActiveTurnInputCommand, ActiveTurnInputOutcome, ActiveTurnInputReceiver,
 };
+use crate::required_execution::RequiredExecutionGate;
 
 use crate::job_cancel::JobCancelSignal;
 use crate::model_environment::{
@@ -699,11 +702,53 @@ impl<T> Drop for AbortTaskOnDrop<T> {
     }
 }
 
+/// Which base instructions a run uses. See [`runtime_base_instructions`].
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct RuntimeBaseInstructionsLane {
+    pub(crate) mcp: bool,
+    pub(crate) browser: bool,
+    pub(crate) plain_text_final: bool,
+    pub(crate) plain_text_write: bool,
+}
+
+/// Ordinary lanes (and team plan workers) replace the model prompt with the
+/// runtime's own non-interactive automation contract; MCP and browser lanes keep
+/// the model's Codex prompt, minus its Codex-product sections. Either way the
+/// Codex policy appends Instafy's Destructive Actions section afterwards.
+pub(crate) fn runtime_base_instructions(
+    lane: RuntimeBaseInstructionsLane,
+    operator_override: Option<String>,
+) -> Option<String> {
+    if lane.mcp || lane.browser {
+        return None;
+    }
+    Some(operator_override.unwrap_or_else(|| {
+        if lane.plain_text_final && lane.plain_text_write {
+            PLAIN_WRITE_RUNTIME_BASE_INSTRUCTIONS.to_string()
+        } else if lane.plain_text_final {
+            PLAIN_FINAL_RUNTIME_BASE_INSTRUCTIONS.to_string()
+        } else {
+            STRUCTURED_RUNTIME_BASE_INSTRUCTIONS.to_string()
+        }
+    }))
+}
+
 async fn start_codex_thread(
     thread_manager: Arc<ThreadManager>,
     config: Config,
 ) -> CodexResult<NewThread> {
-    run_on_fresh_task(async move { thread_manager.start_thread(config).await }).await
+    run_on_fresh_task(async move {
+        thread_manager
+            .start_thread(StartThreadOptions {
+                // Kept for resume, not for old rollouts: runtime-agent restores a thread from its
+                // rollout path, which only Legacy history supports. Paginated resume goes through
+                // the thread store by id and is a separate change.
+                history_mode: Some(ThreadHistoryMode::Legacy),
+                ..StartThreadOptions::new(config)
+            })
+            .await
+    })
+    .await
 }
 
 async fn resume_codex_thread(
@@ -714,7 +759,13 @@ async fn resume_codex_thread(
 ) -> CodexResult<NewThread> {
     run_on_fresh_task(async move {
         thread_manager
-            .resume_thread_from_rollout(config, rollout_path, auth_manager, None, false)
+            .resume_legacy_thread_from_rollout(
+                config,
+                rollout_path,
+                auth_manager,
+                None,
+                Default::default(),
+            )
             .await
     })
     .await
@@ -1055,19 +1106,15 @@ impl CodexClient {
             .map(|instructions| {
                 append_local_browser_developer_instructions(instructions, local_browser_mode)
             });
-        let base_instructions = if mcp_mode || browser_mode {
-            None
-        } else {
-            Some(optional_env("CODEX_BASE_INSTRUCTIONS").unwrap_or_else(|| {
-                if plain_text_final_mode && options.plain_text_write_mode {
-                    PLAIN_WRITE_RUNTIME_BASE_INSTRUCTIONS.to_string()
-                } else if plain_text_final_mode {
-                    PLAIN_FINAL_RUNTIME_BASE_INSTRUCTIONS.to_string()
-                } else {
-                    STRUCTURED_RUNTIME_BASE_INSTRUCTIONS.to_string()
-                }
-            }))
-        };
+        let base_instructions = runtime_base_instructions(
+            RuntimeBaseInstructionsLane {
+                mcp: mcp_mode,
+                browser: browser_mode,
+                plain_text_final: plain_text_final_mode,
+                plain_text_write: options.plain_text_write_mode,
+            },
+            optional_env("CODEX_BASE_INSTRUCTIONS"),
+        );
 
         let overrides = ConfigOverrides {
             model: optional_env("CODEX_MODEL"),
@@ -1186,7 +1233,7 @@ impl CodexClient {
         let bounded_proxy_retries = uses_bounded_proxy_retries(&options);
         apply_runtime_proxy_model_provider_overrides(&mut config, bounded_proxy_retries);
         scope_runtime_model_shell_environment(&mut config.permissions.shell_environment_policy);
-        install_browser_mcp_servers(
+        let mut shared_browser_process_groups = install_browser_mcp_servers(
             &mut config,
             options.personal_browser,
             options.shared_browser,
@@ -1218,7 +1265,12 @@ impl CodexClient {
                 "enabled Apps feature because MCP servers are configured"
             );
         }
-        apply_runtime_security_feature_overrides(&mut config.features);
+        // The loaded config is complete now (provider, MCP servers, model id). Pin billing,
+        // instructions and features before anything reads it.
+        crate::codex_policy::apply_runtime_codex_policy(
+            &mut config,
+            personal_browser_mode || shared_browser_mode,
+        )?;
         apply_bounded_browser_security_overrides(
             &mut config,
             personal_browser_mode || shared_browser_mode,
@@ -1279,9 +1331,24 @@ impl CodexClient {
                 config.codex_home.display()
             )
         })?;
-        let auth_manager = AuthManager::shared_from_config(&config, true).await;
-        // runtime-agent embeds Codex as a library, so there is no Codex CLI executable
-        // available to back exec-server helper re-entry points here.
+        ensure_no_codex_workload_identity()?;
+        let auth_manager = AuthManager::shared_from_config(&config, true)
+            .await
+            .context("failed to initialize Codex auth manager")?;
+        let models_manager = build_models_manager(&config, auth_manager.clone());
+        let model_info = models_manager
+            .get_model_info(
+                config.model.as_deref().unwrap_or(DEFAULT_CODEX_MODEL),
+                &config.to_models_manager_config(),
+            )
+            .await;
+        crate::codex_policy::pin_instructions_for_resolved_model(&mut config, &model_info);
+        let code_mode_host = crate::code_mode_host::host_program()?;
+        crate::code_mode_host::ensure_host_for_model(&code_mode_host, &model_info, &config)?;
+        // Fragile hook: runtime-agent embeds Codex as a library, so there is no Codex CLI
+        // executable to back exec-server helper re-entry points. This and
+        // `EmptyUserInstructionsProvider` come from Codex's test support; recheck both on
+        // every Codex bump.
         let environment_manager = Arc::new(EnvironmentManager::default_for_tests());
         let state_db = init_state_db(&config).await;
         let thread_store = thread_store_from_config(&config, state_db.clone());
@@ -1289,22 +1356,29 @@ impl CodexClient {
             .await
             .context("failed to resolve Codex installation id")?;
         let turn_start_token_usage = TurnStartTokenUsage::default();
-        let thread_manager = Arc::new(ThreadManager::new(
-            &config,
-            auth_manager.clone(),
-            build_models_manager(&config, auth_manager.clone()),
-            CodexAppsToolsCache::default(),
-            SessionSource::Exec,
-            environment_manager,
-            codex_extension_registry(&turn_start_token_usage),
-            Arc::new(EmptyUserInstructionsProvider),
-            None,
-            thread_store,
-            local_agent_graph_store_from_state_db(state_db.as_ref()),
-            installation_id,
-            None,
-            None,
-        ));
+        let required_execution = RequiredExecutionGate::default();
+        let thread_manager = Arc::new(
+            ThreadManager::new(
+                &config,
+                auth_manager.clone(),
+                models_manager,
+                CodexAppsToolsCache::default(),
+                SessionSource::Exec,
+                environment_manager,
+                codex_extension_registry(&turn_start_token_usage, &required_execution),
+                Arc::new(EmptyUserInstructionsProvider),
+                None,
+                codex_core::passthrough_image_store(),
+                thread_store,
+                local_agent_graph_store_from_state_db(state_db.as_ref()),
+                installation_id,
+                None,
+                None,
+            )
+            .with_code_mode_session_provider(crate::code_mode_host::session_provider(
+                code_mode_host,
+            )),
+        );
         let thread_mode_key = thread_mode_key(browser_mode);
         let mut active_thread_id = extract_thread_id_from_provider_state(
             options.provider_conversation_state.as_ref(),
@@ -1471,36 +1545,8 @@ impl CodexClient {
             personal_browser_mode,
             !config.mcp_servers.is_empty(),
         ) {
-            let mcp_servers = serde_json::to_value(&*config.mcp_servers).unwrap_or_else(|err| {
-                tracing::warn!(error = %err, "failed to serialize MCP server config for refresh");
-                json!({})
-            });
-            let mcp_oauth_credentials_store_mode = serde_json::to_value(
-                config.mcp_oauth_credentials_store_mode,
-            )
-            .unwrap_or_else(|err| {
-                tracing::warn!(
-                    error = %err,
-                    "failed to serialize MCP OAuth store mode for refresh"
-                );
-                JsonValue::Null
-            });
-            let auth_keyring_backend_kind =
-                serde_json::to_value(config.auth_keyring_backend_kind()).unwrap_or_else(|err| {
-                    tracing::warn!(
-                        error = %err,
-                        "failed to serialize MCP auth keyring backend kind for refresh"
-                    );
-                    JsonValue::Null
-                });
             conversation
-                .submit(Op::RefreshMcpServers {
-                    config: McpServerRefreshConfig {
-                        mcp_servers,
-                        mcp_oauth_credentials_store_mode,
-                        auth_keyring_backend_kind,
-                    },
-                })
+                .submit(Op::RefreshMcpServers)
                 .await
                 .context("failed to request MCP server refresh before MCP-focused turn")?;
         }
@@ -1532,21 +1578,23 @@ impl CodexClient {
 
         let requires_structured_final = final_output_json_schema.is_some();
 
+        // Kept for proxy log readability; the gate below is what makes the proxy require a tool.
         let responsesapi_client_metadata = options.require_first_tool_call.then(|| {
             HashMap::from([(
                 CODEX_REQUIRED_TOOL_METADATA_KEY.to_string(),
                 CODEX_REQUIRED_TOOL_COMMAND_ONCE.to_string(),
             )])
         });
+        if options.require_first_tool_call {
+            let thread_id = active_thread_id
+                .as_ref()
+                .context("a turn that must execute a tool has no Codex thread id")?;
+            required_execution.arm(&thread_id.to_string());
+        }
 
         let bounded_browser_mode = personal_browser_mode || shared_browser_mode;
-        let active_turn_id = conversation
-            .submit(Op::UserInput {
-                items,
-                final_output_json_schema,
-                additional_context: Default::default(),
-                responsesapi_client_metadata,
-                thread_settings: ThreadSettingsOverrides {
+        let request = TurnInputRequest::user_input(items)
+            .with_thread_settings(ThreadSettingsOverrides {
                     // Browser-bound turns deliberately select no execution
                     // environment. MCP tools do not require one, while every
                     // filesystem, image, patch, and shell tool does. Ordinary
@@ -1568,10 +1616,24 @@ impl CodexClient {
                     service_tier: None,
                     collaboration_mode: None,
                     personality: default_personality,
-                },
+                    runtime_workspace_roots: None,
+                    disabled_plugin_ids: None,
             })
+            .on_start(TurnStartOptions {
+                final_output_json_schema,
+                ..Default::default()
+            })
+            .with_responses_metadata(responsesapi_client_metadata);
+        let active_turn_id = match conversation
+            .start_turn_if_idle(request)
             .await
-            .context("failed to submit prompt to Codex")?;
+            .context("failed to submit prompt to Codex")?
+        {
+            StartIfIdleSubmission::Started { turn_id } => turn_id,
+            StartIfIdleSubmission::NotSubmitted { reason } => {
+                return Err(anyhow!("Codex declined the runtime prompt: {reason:?}"));
+            }
+        };
 
         let mut last_agent_message: Option<String> = None;
         let mut last_agent_message_event: Option<String> = None;
@@ -1824,6 +1886,14 @@ impl CodexClient {
                 ));
             };
             confirm_shared_browser_shutdown(&conversation).await?;
+            // Codex reports ShutdownComplete after only signalling its MCP processes. Authority
+            // returns to the human once every recorded MCP process group is proven gone.
+            shared_browser_process_groups
+                .take()
+                .context("Shared Browser execution lost its MCP process-group registry")?
+                .terminate_and_confirm()
+                .await
+                .context("Shared Browser MCP processes could not be confirmed gone")?;
             shutdown_confirmation.confirm_shared_browser_shutdown();
         }
 
@@ -1858,34 +1928,46 @@ async fn apply_active_turn_input(conversation: &CodexThread, command: ActiveTurn
         text: command.content.clone(),
         text_elements: Vec::new(),
     }];
+    let request = TurnInputRequest::new(TurnInput::UserInput {
+        content: items,
+        client_id: Some(command_id.to_string()),
+    });
+    let rejected = |message: &str| ActiveTurnInputOutcome::Rejected {
+        error_message: message.to_string(),
+    };
     let outcome = match conversation
-        .steer_input(
-            items,
-            Default::default(),
-            Some(&command.expected_turn_id),
-            Some(command_id.to_string()),
-            None,
-        )
+        .steer_turn(request, command.expected_turn_id.clone())
         .await
     {
-        Ok(codex_turn_id) => ActiveTurnInputOutcome::Applied { codex_turn_id },
-        Err(error) => {
-            let error_message = match error {
-                SteerInputError::NoActiveTurn(_) => "Codex turn completed before input submission",
-                SteerInputError::ExpectedTurnMismatch { .. } => {
-                    "Codex active turn changed before input submission"
-                }
-                SteerInputError::ActiveTurnNotSteerable { .. } => {
-                    "Codex active turn does not accept steering input"
-                }
-                SteerInputError::EmptyInput => "Codex rejected empty steering input",
-            };
-            ActiveTurnInputOutcome::Rejected {
-                error_message: error_message.to_string(),
-            }
-        }
+        Ok(SteerSubmission::Steered { turn_id }) => ActiveTurnInputOutcome::Applied {
+            codex_turn_id: turn_id,
+        },
+        Ok(SteerSubmission::NotSubmitted { reason }) => rejected(steer_rejection_message(&reason)),
+        Err(error) => rejected(&format!("Codex could not accept steering input: {error}")),
     };
     command.acknowledge(outcome);
+}
+
+/// Every reason is listed so a new upstream reason fails the build instead of
+/// silently sharing a generic message.
+fn steer_rejection_message(reason: &NotSubmittedReason) -> &'static str {
+    match reason {
+        NotSubmittedReason::NoActiveTurn => "Codex turn completed before input submission",
+        NotSubmittedReason::ExpectedTurnMismatch { .. } => {
+            "Codex active turn changed before input submission"
+        }
+        NotSubmittedReason::ActiveTurnNotSteerable { .. }
+        | NotSubmittedReason::ActiveTurnOutputSchemaMismatch => {
+            "Codex active turn does not accept steering input"
+        }
+        NotSubmittedReason::EmptyInput => "Codex rejected empty steering input",
+        NotSubmittedReason::Superseded => "Codex superseded the turn before input submission",
+        NotSubmittedReason::ServerDraining => "Codex is shutting down and accepts no new input",
+        // Reasons that only `start_turn_if_idle` reports.
+        NotSubmittedReason::NotIdle
+        | NotSubmittedReason::PendingTriggerTurn
+        | NotSubmittedReason::PlanMode => "Codex did not accept steering input",
+    }
 }
 
 async fn confirm_shared_browser_shutdown(conversation: &CodexThread) -> Result<()> {
@@ -2623,6 +2705,7 @@ fn scope_browser_capabilities_from_shell_environment(policy: &mut ShellEnvironme
     }
 }
 
+/// Returns the process-group registry of the Shared Browser MCP when this turn installs it.
 fn install_browser_mcp_servers(
     config: &mut Config,
     personal_enabled: bool,
@@ -2630,7 +2713,7 @@ fn install_browser_mcp_servers(
     shared_page_id: Option<&str>,
     local_browser: Option<&crate::local_browser::LocalBrowserConfig>,
     workspace: &Path,
-) -> Result<()> {
+) -> Result<Option<crate::mcp_process_groups::McpProcessGroupRegistry>> {
     if personal_enabled && shared_enabled {
         return Err(anyhow!(
             "Personal Browser and Shared Browser cannot be enabled in the same Codex turn"
@@ -2659,6 +2742,10 @@ fn install_browser_mcp_servers(
     if personal_enabled {
         let (url, project_id, token) = crate::personal_browser::mcp_registration_from_process()
             .context("failed to prepare Personal Browser MCP registration")?;
+        // Codex sends the bearer below with its default proxy handling. Refuse the turn rather
+        // than let an ambient or system proxy receive it.
+        crate::loopback_proxy::ensure_no_proxy_intercepts(&url)
+            .context("refusing the Personal Browser turn")?;
         servers.insert(
             PERSONAL_BROWSER_MCP_SERVER_NAME.to_string(),
             browser_mcp_server_config(McpServerTransportConfig::StreamableHttp {
@@ -2669,10 +2756,12 @@ fn install_browser_mcp_servers(
                     ("x-instafy-project-id".to_string(), project_id),
                 ])),
                 env_http_headers: None,
+                http_headers_helper: None,
             }),
         );
     }
 
+    let mut shared_browser_process_groups = None;
     if shared_enabled {
         let page_id = crate::shared_browser::validate_page_id(
             shared_page_id
@@ -2714,6 +2803,15 @@ fn install_browser_mcp_servers(
                 ));
             }
         }
+        let process_groups = crate::mcp_process_groups::McpProcessGroupRegistry::create()?;
+        environment.insert(
+            crate::mcp_process_groups::REGISTRY_ENV.to_string(),
+            process_groups
+                .registration_dir()
+                .to_string_lossy()
+                .into_owned(),
+        );
+        shared_browser_process_groups = Some(process_groups);
         servers.insert(
             SHARED_BROWSER_MCP_SERVER_NAME.to_string(),
             browser_mcp_server_config(McpServerTransportConfig::Stdio {
@@ -2758,7 +2856,7 @@ fn install_browser_mcp_servers(
         .mcp_servers
         .set(servers)
         .context("failed to install the bounded browser MCP server set")?;
-    Ok(())
+    Ok(shared_browser_process_groups)
 }
 
 fn local_browser_mcp_server_config(transport: McpServerTransportConfig) -> McpServerConfig {
@@ -2769,6 +2867,9 @@ fn local_browser_mcp_server_config(transport: McpServerTransportConfig) -> McpSe
         enabled: true,
         required: true,
         supports_parallel_tool_calls: false,
+        startup_readiness: Default::default(),
+        tool_input_schema_max_bytes: None,
+        omit_tools_from: None,
         disabled_reason: None,
         startup_timeout_sec: Some(Duration::from_secs(10)),
         tool_timeout_sec: Some(Duration::from_secs(90)),
@@ -2790,6 +2891,9 @@ fn browser_mcp_server_config(transport: McpServerTransportConfig) -> McpServerCo
         enabled: true,
         required: true,
         supports_parallel_tool_calls: false,
+        startup_readiness: Default::default(),
+        tool_input_schema_max_bytes: None,
+        omit_tools_from: None,
         disabled_reason: None,
         startup_timeout_sec: Some(Duration::from_secs(10)),
         tool_timeout_sec: Some(Duration::from_secs(40)),
@@ -2837,6 +2941,19 @@ fn validate_bounded_browser_mcp_server_set(
             "bounded browser MCP server must not carry an additional disabled-tool policy"
         ));
     }
+    // A header helper is a command Codex runs to mint request headers. The browser capability
+    // is carried only in the in-memory bearer header, never produced by a subprocess.
+    if matches!(
+        &server.transport,
+        McpServerTransportConfig::StreamableHttp {
+            http_headers_helper: Some(_),
+            ..
+        }
+    ) {
+        return Err(anyhow!(
+            "bounded browser MCP server must not run an HTTP header helper"
+        ));
+    }
     Ok(())
 }
 
@@ -2853,6 +2970,7 @@ pub fn personal_browser_capability_contract() -> Result<JsonValue> {
         bearer_token_env_var: None,
         http_headers: None,
         env_http_headers: None,
+        http_headers_helper: None,
     });
     let servers = HashMap::from([(PERSONAL_BROWSER_MCP_SERVER_NAME.to_string(), server)]);
     validate_bounded_browser_mcp_server_set(&servers, PERSONAL_BROWSER_MCP_SERVER_NAME)?;
@@ -2878,6 +2996,23 @@ pub fn personal_browser_capability_contract() -> Result<JsonValue> {
         "projectMcpServersAllowed": false,
         "localExecutionEnvironmentCount": environment_count,
     }))
+}
+
+/// Codex switches to workload identity when these are set and exchanges them for
+/// OpenAI credentials itself, which would send model traffic around the Instafy
+/// proxy. Jobs scrub them (see `model_environment`); refuse anything that did not.
+fn ensure_no_codex_workload_identity() -> Result<()> {
+    for key in [
+        codex_protocol::shell_environment::OPENAI_FEDERATION_RULE_ID_ENV_VAR,
+        codex_protocol::shell_environment::OPENAI_IDENTITY_TOKEN_FILE_ENV_VAR,
+    ] {
+        if std::env::var_os(key).is_some() {
+            return Err(anyhow!(
+                "{key} is set; runtime-agent routes all model traffic through the Instafy proxy and does not use Codex workload identity"
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn should_refresh_mcp_servers(
@@ -2913,35 +3048,12 @@ fn append_local_browser_developer_instructions(base: String, enabled: bool) -> S
     format!("{base}\n\n{LOCAL_BROWSER_DEVELOPER_INSTRUCTIONS}")
 }
 
-fn apply_runtime_security_feature_overrides(features: &mut ManagedFeatures) {
-    // Shell snapshots replay all exported env vars into files under CODEX_HOME. Runtime jobs carry
-    // proxy and controller tokens in env today, so embedded runtime-agent runs must keep this off.
-    if features.enabled(Feature::ShellSnapshot) {
-        match features.disable(Feature::ShellSnapshot) {
-            Ok(()) => tracing::info!("disabled Codex shell snapshots for runtime-agent run"),
-            Err(error) => tracing::warn!(
-                error = %error,
-                "failed to disable Codex shell snapshots for runtime-agent run"
-            ),
-        }
-    }
-    if features.enabled(Feature::Personality) {
-        match features.disable(Feature::Personality) {
-            Ok(()) => tracing::info!("disabled Codex personality feature for runtime-agent run"),
-            Err(error) => tracing::warn!(
-                error = %error,
-                "failed to disable Codex personality feature for runtime-agent run"
-            ),
-        }
-    }
-}
-
+/// The non-feature half of the bounded browser lane; `codex_policy` turns its features off.
 fn apply_bounded_browser_security_overrides(config: &mut Config, enabled: bool) -> Result<()> {
     if !enabled {
         return Ok(());
     }
 
-    disable_bounded_browser_features(&mut config.features)?;
     config
         .web_search_mode
         .set(WebSearchMode::Disabled)
@@ -2950,71 +3062,6 @@ fn apply_bounded_browser_security_overrides(config: &mut Config, enabled: bool) 
     config.include_skill_instructions = false;
     config.include_apps_instructions = false;
     Ok(())
-}
-
-fn disable_bounded_browser_features(features: &mut ManagedFeatures) -> Result<()> {
-    // These turns are a single browser capability lane. Page content is
-    // untrusted, so it must not be able to reach local files, child agents,
-    // another network tool, plugins, or image generation through prompt
-    // injection.
-    for feature in bounded_browser_disabled_features() {
-        features
-            .disable(feature)
-            .with_context(|| format!("failed to disable {feature:?} for bounded browser turn"))?;
-        if features.enabled(feature) {
-            return Err(anyhow!(
-                "bounded browser turn cannot start while {feature:?} is pinned enabled"
-            ));
-        }
-    }
-    Ok(())
-}
-
-fn bounded_browser_disabled_features() -> impl Iterator<Item = Feature> {
-    [
-        Feature::ShellTool,
-        Feature::UnifiedExec,
-        Feature::ShellZshFork,
-        Feature::UnifiedExecZshFork,
-        Feature::ExecPermissionApprovals,
-        Feature::ApplyPatchStreamingEvents,
-        Feature::CodeModeOnly,
-        Feature::CodeMode,
-        Feature::CodeModeBufferedExec,
-        Feature::CodeModeHost,
-        Feature::SpawnCsv,
-        Feature::MultiAgentV2,
-        Feature::Collab,
-        Feature::CollaborationModes,
-        Feature::StandaloneWebSearch,
-        Feature::WebSearchCached,
-        Feature::WebSearchRequest,
-        Feature::ImageGeneration,
-        Feature::ToolSuggest,
-        Feature::Apps,
-        Feature::Plugins,
-        Feature::RequestPermissionsTool,
-        Feature::MemoryTool,
-        Feature::ExternalAgentMemoryImport,
-        Feature::Chronicle,
-        Feature::CodexHooks,
-        Feature::SkillMcpDependencyInstall,
-        Feature::ExecutorCapabilityDiscovery,
-        Feature::EnableMcpApps,
-        Feature::BrowserUse,
-        Feature::BrowserUseFullCdpAccess,
-        Feature::BrowserUseExternal,
-        Feature::ComputerUse,
-        Feature::RemotePlugin,
-        Feature::PluginSharing,
-        Feature::DefaultModeRequestUserInput,
-        Feature::Goals,
-        Feature::Artifact,
-        Feature::WorkspaceDependencies,
-        Feature::ToolCallMcpElicitation,
-        Feature::AuthElicitation,
-    ]
-    .into_iter()
 }
 
 fn turn_environment_selections(
@@ -3028,6 +3075,7 @@ fn turn_environment_selections(
             environment_id: LOCAL_ENVIRONMENT_ID.to_string(),
             cwd: PathUri::from_abs_path(&default_cwd),
             workspace_roots: vec![PathUri::from_abs_path(&default_cwd)],
+            config: EnvironmentConfigState::FromThread,
         }]
     };
     TurnEnvironmentSelections::new(default_cwd, environments)
@@ -3252,22 +3300,40 @@ impl TurnStartTokenUsage {
 struct TurnStartTokenUsageRecorder(TurnStartTokenUsage);
 
 impl TurnLifecycleContributor for TurnStartTokenUsageRecorder {
+    /// Codex passes the baseline only before task registration; the later
+    /// regular-task phase receives none. Pinned explicitly so a new upstream
+    /// default cannot silently drop every turn's baseline (and its billing).
+    fn turn_start_phase(&self, _thread_store: &ExtensionData) -> TurnStartPhase {
+        TurnStartPhase::BeforeTaskRegistration
+    }
+
     fn on_turn_start<'a>(&'a self, input: TurnStartInput<'a>) -> ExtensionFuture<'a, ()> {
-        self.0
-            .record(input.turn_id, input.token_usage_at_turn_start);
+        match input.token_usage_at_turn_start {
+            Some(usage) => self.0.record(input.turn_id, usage),
+            None => tracing::warn!(
+                turn_id = input.turn_id,
+                "Codex started a turn without its token usage baseline"
+            ),
+        }
         Box::pin(async {})
     }
 }
 
 /// The extension registry a run hands Codex. It records each turn's baseline into
-/// `turn_start_token_usage`, which the run's `CodexEventStreamAdapter` reads.
+/// `turn_start_token_usage`, which the run's `CodexEventStreamAdapter` reads, and enforces
+/// `required_execution` on the threads the run arms.
 fn codex_extension_registry(
     turn_start_token_usage: &TurnStartTokenUsage,
+    required_execution: &RequiredExecutionGate,
 ) -> Arc<ExtensionRegistry<Config>> {
     let mut extensions = ExtensionRegistryBuilder::new();
     extensions.turn_lifecycle_contributor(Arc::new(TurnStartTokenUsageRecorder(
         turn_start_token_usage.clone(),
     )));
+    let gate = Arc::new(required_execution.clone());
+    extensions.model_request_contributor(gate.clone());
+    extensions.tool_lifecycle_contributor(gate.clone());
+    extensions.turn_lifecycle_contributor(gate);
     Arc::new(extensions.build())
 }
 
@@ -3292,13 +3358,14 @@ pub(crate) async fn start_test_turn(
             developer_instructions: None,
         },
     };
-    let registry = codex_extension_registry(turn_start_token_usage);
+    let registry =
+        codex_extension_registry(turn_start_token_usage, &RequiredExecutionGate::default());
     for contributor in registry.turn_lifecycle_contributors() {
         contributor
             .on_turn_start(TurnStartInput {
                 turn_id,
                 collaboration_mode: &collaboration_mode,
-                token_usage_at_turn_start: total,
+                token_usage_at_turn_start: Some(total),
                 session_store: &session_store,
                 thread_store: &thread_store,
                 turn_store: &turn_store,
@@ -3324,6 +3391,7 @@ fn token_usage_since(total: &TokenUsage, start: &TokenUsage) -> TokenUsage {
             start.reasoning_output_tokens,
         ),
         total_tokens: since(total.total_tokens, start.total_tokens),
+        codex_rollout_budget_units: None,
     }
 }
 
@@ -3396,7 +3464,9 @@ impl CodexEventStreamAdapter {
                         "text": text,
                     }
                 });
-                if let Some(phase) = message_phase_label(message.phase.as_ref()) {
+                if let Some(phase) =
+                    agent_message_phase_label(message.phase.as_ref(), message.delivery.as_ref())
+                {
                     value["item"]["phase"] = json!(phase);
                 }
                 vec![value]
@@ -3727,7 +3797,9 @@ impl CodexEventStreamAdapter {
                 "text": text,
             }
         });
-        if let Some(phase) = message_phase_label(message.phase.as_ref()) {
+        if let Some(phase) =
+            agent_message_phase_label(message.phase.as_ref(), message.delivery.as_ref())
+        {
             value["item"]["phase"] = json!(phase);
         }
         vec![value]
@@ -3914,6 +3986,25 @@ fn is_commentary_phase(phase: Option<&MessagePhase>) -> bool {
     matches!(phase, Some(MessagePhase::Commentary))
 }
 
+/// An asynchronously delivered message (`send_user_message_async`) reaches the
+/// user while the turn keeps running, so it is progress, never the final answer.
+fn is_commentary_agent_message(
+    phase: Option<&MessagePhase>,
+    delivery: Option<&AgentMessageDelivery>,
+) -> bool {
+    is_commentary_phase(phase) || matches!(delivery, Some(AgentMessageDelivery::Async))
+}
+
+fn agent_message_phase_label(
+    phase: Option<&MessagePhase>,
+    delivery: Option<&AgentMessageDelivery>,
+) -> Option<&'static str> {
+    if is_commentary_agent_message(phase, delivery) {
+        return message_phase_label(Some(&MessagePhase::Commentary));
+    }
+    message_phase_label(phase)
+}
+
 fn is_unstructured_turn_complete_candidate(
     requires_structured_final: bool,
     non_commentary_agent_message_seen: bool,
@@ -3932,7 +4023,7 @@ fn trimmed_text(text: &str) -> Option<String> {
 fn agent_message_event_text(
     message: &codex_protocol::protocol::AgentMessageEvent,
 ) -> Option<String> {
-    if is_commentary_phase(message.phase.as_ref()) {
+    if is_commentary_agent_message(message.phase.as_ref(), message.delivery.as_ref()) {
         return None;
     }
     trimmed_text(&message.message)
@@ -3955,7 +4046,7 @@ fn agent_message_text(message: &codex_protocol::items::AgentMessageItem) -> Opti
 }
 
 fn final_agent_message_text(message: &codex_protocol::items::AgentMessageItem) -> Option<String> {
-    if is_commentary_phase(message.phase.as_ref()) {
+    if is_commentary_agent_message(message.phase.as_ref(), message.delivery.as_ref()) {
         return None;
     }
     agent_message_text(message)
@@ -4610,6 +4701,50 @@ mod tests {
         assert_eq!(fresh_policy.exclude.len(), 20);
     }
 
+    #[tokio::test]
+    async fn run_registry_requires_execution_on_armed_threads_until_the_turn_stops() {
+        use codex_extension_api::{ModelRequestInput, ModelRequestKind, TurnStopInput};
+        let gate = RequiredExecutionGate::default();
+        let registry = codex_extension_registry(&TurnStartTokenUsage::default(), &gate);
+        gate.arm("thread-a");
+        let mut metadata = None;
+        for contributor in registry.model_request_contributors() {
+            assert!(
+                contributor
+                    .request(ModelRequestInput {
+                        kind: ModelRequestKind::Generation,
+                        thread_id: "thread-a",
+                        client_metadata: &mut metadata,
+                        model: "gpt-5.5",
+                    })
+                    .is_none()
+            );
+        }
+        assert_eq!(
+            metadata
+                .as_ref()
+                .and_then(|metadata| metadata
+                    .get(crate::required_execution::REQUIRE_TOOL_CALL_METADATA_KEY))
+                .map(String::as_str),
+            Some("1")
+        );
+        assert_eq!(registry.tool_lifecycle_contributors().len(), 1);
+
+        let session_store = codex_extension_api::ExtensionData::new("session");
+        let thread_store = codex_extension_api::ExtensionData::new("thread-a");
+        let turn_store = codex_extension_api::ExtensionData::new("turn-1");
+        for contributor in registry.turn_lifecycle_contributors() {
+            contributor
+                .on_turn_stop(TurnStopInput {
+                    session_store: &session_store,
+                    thread_store: &thread_store,
+                    turn_store: &turn_store,
+                })
+                .await;
+        }
+        assert!(!gate.is_armed("thread-a"));
+    }
+
     #[test]
     fn personal_browser_mcp_config_is_never_serialized_for_refresh() {
         assert!(!should_refresh_mcp_servers(true, true, true));
@@ -4647,6 +4782,7 @@ mod tests {
                 bearer_token_env_var: None,
                 http_headers: None,
                 env_http_headers: None,
+                http_headers_helper: None,
             })
         };
         let servers = HashMap::from([
@@ -4659,6 +4795,24 @@ mod tests {
                 .expect_err("additional MCP server must fail closed")
                 .to_string();
         assert!(error.contains("exactly one MCP server"));
+    }
+
+    #[test]
+    fn bounded_browser_contract_rejects_an_http_header_helper() {
+        let server = browser_mcp_server_config(McpServerTransportConfig::StreamableHttp {
+            url: "http://127.0.0.1/contract-only".to_string(),
+            bearer_token_env_var: None,
+            http_headers: None,
+            env_http_headers: None,
+            http_headers_helper: Some("print-browser-headers".to_string()),
+        });
+        let servers = HashMap::from([(PERSONAL_BROWSER_MCP_SERVER_NAME.to_string(), server)]);
+
+        let error =
+            validate_bounded_browser_mcp_server_set(&servers, PERSONAL_BROWSER_MCP_SERVER_NAME)
+                .expect_err("a header helper must fail closed")
+                .to_string();
+        assert!(error.contains("HTTP header helper"), "{error}");
     }
 
     #[test]
@@ -4782,38 +4936,6 @@ mod tests {
             Some("http://proxy:8789/backend-api/")
         );
         unsafe { std::env::remove_var("PROXY_BASE_URL") };
-    }
-
-    #[test]
-    fn runtime_security_overrides_disable_shell_snapshot_feature() {
-        let mut features = ManagedFeatures::default();
-        features
-            .enable(Feature::ShellSnapshot)
-            .expect("enable shell snapshot");
-        features
-            .enable(Feature::Personality)
-            .expect("enable personality");
-        assert!(features.enabled(Feature::ShellSnapshot));
-        assert!(features.enabled(Feature::Personality));
-
-        apply_runtime_security_feature_overrides(&mut features);
-
-        assert!(!features.enabled(Feature::ShellSnapshot));
-        assert!(!features.enabled(Feature::Personality));
-    }
-
-    #[test]
-    fn bounded_browser_turn_disables_every_non_browser_capability_feature() {
-        let mut features = ManagedFeatures::default();
-        for feature in bounded_browser_disabled_features() {
-            features.enable(feature).expect("enable feature for test");
-        }
-
-        disable_bounded_browser_features(&mut features).expect("disable bounded-browser features");
-
-        for feature in bounded_browser_disabled_features() {
-            assert!(!features.enabled(feature), "{feature:?} remained enabled");
-        }
     }
 
     #[test]
@@ -5899,6 +6021,8 @@ required = true
                 parsed_cmd: Vec::new(),
                 source: ExecCommandSource::Agent,
                 interaction_input: None,
+                plugin_id: None,
+                script_path: None,
             }),
         });
         assert_eq!(started.len(), 1);
@@ -5938,6 +6062,8 @@ required = true
                 duration: Duration::from_millis(25),
                 formatted_output: "README.md".to_string(),
                 status: ExecCommandStatus::Completed,
+                plugin_id: None,
+                script_path: None,
             }),
         });
         assert_eq!(completed.len(), 1);
@@ -5979,6 +6105,8 @@ required = true
                 duration: Duration::from_millis(1),
                 formatted_output: "{}".into(),
                 status: ExecCommandStatus::Completed,
+                plugin_id: None,
+                script_path: None,
             }),
         });
         assert_eq!(events.len(), 1);
@@ -6025,6 +6153,9 @@ required = true
                     is_error: Some(true),
                     meta: None,
                 }),
+                mcp_app_ui: None,
+                read_only_hint: None,
+                turn_id: "turn-1".to_string(),
             }),
         };
 
@@ -6251,6 +6382,8 @@ required = true
                 parsed_cmd: Vec::new(),
                 source: ExecCommandSource::Agent,
                 interaction_input: None,
+                plugin_id: None,
+                script_path: None,
             }),
         });
         let _ = adapter.collect(&Event {
@@ -6283,6 +6416,8 @@ required = true
                 duration: Duration::from_millis(25),
                 formatted_output: String::new(),
                 status: ExecCommandStatus::Completed,
+                plugin_id: None,
+                script_path: None,
             }),
         });
 
@@ -6369,8 +6504,11 @@ required = true
                     }],
                     phase: None,
                     memory_citation: None,
+                    delivery: None,
+                    questions: None,
                 }),
                 completed_at_ms: 0,
+                started_at_ms: None,
             }),
         });
 
@@ -6414,8 +6552,11 @@ required = true
                     }],
                     phase: Some(MessagePhase::Commentary),
                     memory_citation: None,
+                    delivery: None,
+                    questions: None,
                 }),
                 completed_at_ms: 0,
+                started_at_ms: None,
             }),
         });
 
@@ -6433,6 +6574,8 @@ required = true
                     }],
                     phase: Some(MessagePhase::Commentary),
                     memory_citation: None,
+                    delivery: None,
+                    questions: None,
                 },
             )),
             None
@@ -6449,6 +6592,8 @@ required = true
                 message: "I am checking the project files.".to_string(),
                 phase: Some(MessagePhase::Commentary),
                 memory_citation: None,
+                delivery: None,
+                questions: None,
             }),
         });
 
@@ -6461,8 +6606,76 @@ required = true
                 message: "I am checking the project files.".to_string(),
                 phase: Some(MessagePhase::Commentary),
                 memory_citation: None,
+                delivery: None,
+                questions: None,
             }),
             None
+        );
+    }
+
+    #[test]
+    fn async_delivered_agent_messages_are_commentary_not_final_answers() {
+        // An async message reaches the user while the turn keeps running. It may
+        // carry no phase, or even a final-answer phase, and must still never be
+        // chosen as the job's final message.
+        for phase in [None, Some(MessagePhase::FinalAnswer)] {
+            let event = AgentMessageEvent {
+                message: "Still working on the migration.".to_string(),
+                phase: phase.clone(),
+                memory_citation: None,
+                delivery: Some(AgentMessageDelivery::Async),
+                questions: None,
+            };
+            assert_eq!(agent_message_event_text(&event), None);
+            let mut adapter = CodexEventStreamAdapter::default();
+            let projected = adapter.collect(&Event {
+                id: "evt_async_message".to_string(),
+                msg: EventMsg::AgentMessage(event),
+            });
+            assert_eq!(projected.len(), 1);
+            assert_eq!(projected[0]["item"]["phase"], "commentary");
+            assert_eq!(latest_completed_agent_message_from_events(&projected), None);
+
+            let item = codex_protocol::items::AgentMessageItem {
+                id: "agent_message_async".to_string(),
+                content: vec![AgentMessageContent::Text {
+                    text: "Still working on the migration.".to_string(),
+                }],
+                phase,
+                memory_citation: None,
+                delivery: Some(AgentMessageDelivery::Async),
+                questions: None,
+            };
+            assert_eq!(
+                final_agent_message_text_from_turn_item(&TurnItem::AgentMessage(item.clone())),
+                None
+            );
+            let mut adapter = CodexEventStreamAdapter::default();
+            let projected = adapter.collect(&Event {
+                id: "evt_async_item".to_string(),
+                msg: EventMsg::ItemCompleted(ItemCompletedEvent {
+                    thread_id: ThreadId::new(),
+                    turn_id: "turn_1".to_string(),
+                    item: TurnItem::AgentMessage(item),
+                    completed_at_ms: 0,
+                    started_at_ms: None,
+                }),
+            });
+            assert_eq!(projected[0]["item"]["phase"], "commentary");
+            assert_eq!(latest_completed_agent_message_from_events(&projected), None);
+        }
+
+        // An ordinary message without a delivery mode stays a final candidate.
+        assert_eq!(
+            agent_message_event_text(&AgentMessageEvent {
+                message: "Done.".to_string(),
+                phase: None,
+                memory_citation: None,
+                delivery: None,
+                questions: None,
+            })
+            .as_deref(),
+            Some("Done.")
         );
     }
 
@@ -6559,6 +6772,7 @@ required = true
             output_tokens: output,
             reasoning_output_tokens: output / 4,
             total_tokens: input + output,
+            codex_rollout_budget_units: None,
         }
     }
 
@@ -6594,6 +6808,25 @@ required = true
     /// Starts a turn on the main thread through the registry a run hands Codex.
     async fn start_turn(turn_start: &TurnStartTokenUsage, turn_id: &str, total: &TokenUsage) {
         start_test_turn(turn_start, "thread-main", turn_id, total).await;
+    }
+
+    #[test]
+    fn turn_start_usage_recorder_runs_in_the_phase_that_carries_the_baseline() {
+        // Codex hands `token_usage_at_turn_start` only to contributors scheduled
+        // before task registration. Every per-turn usage row depends on it.
+        let registry = codex_extension_registry(
+            &TurnStartTokenUsage::default(),
+            &RequiredExecutionGate::default(),
+        );
+        let thread_store = ExtensionData::new("thread-main");
+        let contributors = registry.turn_lifecycle_contributors();
+        assert!(!contributors.is_empty());
+        for contributor in contributors {
+            assert_eq!(
+                contributor.turn_start_phase(&thread_store),
+                TurnStartPhase::BeforeTaskRegistration
+            );
+        }
     }
 
     fn only_turn_completed(adapter: &mut CodexEventStreamAdapter, events: &[Event]) -> JsonValue {
@@ -6653,6 +6886,7 @@ required = true
                     spend_control_reached: None,
                     plan_type: None,
                     rate_limit_reached_type: None,
+                    normal_model_slug: None,
                 }),
             }),
         };

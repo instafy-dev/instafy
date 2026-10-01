@@ -201,7 +201,10 @@ endpoint alike, when all of these hold:
   a Chat Completions or Gemini Code Assist endpoint;
 - the request offers tools: a non-empty `tools`, or an `additional_tools` input item with at least
   one tool, counted after a pinned lease drops the tools it does not forward;
-- its `tool_choice` is `"auto"` or absent.
+- its `tool_choice` is `"auto"` or absent;
+- it is not a remote compaction request, whose input carries a `compaction_trigger` item. Codex
+  sends that request with the turn's tools while a required tool call is still pending, but it
+  must come back as a compaction item, and a tool call would fail it.
 
 A Responses Lite request then carries `tool_choice: "required"` although it has no `tools`, on a
 ChatGPT login as well, and nothing else in the upstream body changes. Any other request, one
@@ -354,9 +357,9 @@ whose `error.type` is the provider's `usage_limit_reached` or `usage_not_include
 reports it as a usage limit, with a positive integer `error.resets_at` (Unix seconds) when the
 provider gave one. Raw provider messages, response bodies, credentials, and endpoint URLs are
 not echoed. Valid `Retry-After` seconds or HTTP dates are forwarded for 429 and 503 with the
-provider's value and no bound of the proxy's own (Codex reads it only on a retryable 429 and
-clamps that wait to 1-30 seconds); other
-header values are discarded. Every retryable 429 carries a `Retry-After`. When the provider
+provider's value and no bound of the proxy's own (Codex itself does not retry an HTTP 429, so
+the header matters to other clients and to the streamed wait below); other header values are
+discarded. Every retryable 429 carries a `Retry-After`. When the provider
 sends no usable one, the proxy derives it from the rate-limit bucket that refused the request,
 using OpenAI's `x-ratelimit-remaining-*` and `x-ratelimit-reset-*` headers (reset durations such
 as `6s` or `1m2.5s` are rounded up to whole seconds):
@@ -368,8 +371,7 @@ as `6s` or `1m2.5s` are rounded up to whole seconds):
   the two resets.
 
 A derived delay is clamped to 1-30 seconds. With no usable reset, and for an in-stream
-`rate_limit_exceeded`, which carries no headers, the proxy uses 5 seconds, the same fallback
-Codex applies to a retryable 429 without `Retry-After`. Reset headers are time until a bucket
+`rate_limit_exceeded`, which carries no headers, the proxy uses 5 seconds. Reset headers are time until a bucket
 is completely full, and a per-minute bucket is full again within about a minute. When a bucket
 at 0 needs more than five minutes to refill, as with a daily requests or tokens limit, the
 turn's retries (roughly five waits of up to 30 seconds) cannot outlast it: the proxy answers a
@@ -379,8 +381,8 @@ the turn with a rate-limit error instead of waiting out its retry budget. When n
 stays retryable.
 
 A streaming `/v1/responses` request, which is how Codex sends every request, gets a transient
-rate limit as a stream failure instead. Upstream Codex does not retry an HTTP 429 by itself
-(only the pinned fork's own patch does), but it does retry a stream that fails with
+rate limit as a stream failure instead. Codex does not retry an HTTP 429 by itself (its
+`retry_429` is off for every provider), but it does retry a stream that fails with
 `rate_limit_exceeded`, after the wait the failure's message names and within its stream retry
 budget. The proxy therefore answers HTTP 200 with one server-sent `response.failed` event, then
 `[DONE]`:

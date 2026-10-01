@@ -7,6 +7,7 @@ import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
+  applyLoopbackNoProxy,
   applyProtectedDesktopRuntimeEnv,
   buildPersonalBrowserRuntimeEnv,
   buildRuntimeTokenRequestBody,
@@ -17,6 +18,7 @@ import {
   type DesktopRuntimeChildStopTarget,
   hasProjectWorkspaceContent,
   resolveAuthoritativeRuntimeId,
+  mergeLoopbackNoProxy,
   resolveWindowsTaskkillPath,
   runDesktopRuntimeExitFinalizer,
   shouldEnableProjectOrigin,
@@ -434,6 +436,36 @@ describe("desktop runtime identity and Personal Browser capabilities", () => {
 
     expect(applyProtectedDesktopRuntimeEnv(env, { projectId: PROJECT_ID })).toEqual({
       SAFE_VALUE: "kept",
+      NO_PROXY: "localhost,127.0.0.1,::1",
+      no_proxy: "localhost,127.0.0.1,::1",
+    });
+  });
+
+  it("keeps loopback traffic, and the Personal Browser bearer, off an inherited proxy", () => {
+    const env: NodeJS.ProcessEnv = {
+      HTTPS_PROXY: "http://proxy.corp.example:3128",
+      NO_PROXY: "corp.example, LOCALHOST",
+    };
+    applyProtectedDesktopRuntimeEnv(env, {
+      projectId: PROJECT_ID,
+      personalBrowser: { controlUrl: "http://127.0.0.1:43127", token: "desktop-grant" },
+    });
+    expect(env.HTTPS_PROXY).toBe("http://proxy.corp.example:3128");
+    expect(env.NO_PROXY).toBe("corp.example,LOCALHOST,127.0.0.1,::1");
+    // curl-style readers fall back to NO_PROXY when no_proxy is unset.
+    expect(env.no_proxy).toBe("corp.example,LOCALHOST,127.0.0.1,::1");
+  });
+
+  it("merges loopback into each NO_PROXY spelling without dropping the other's entries", () => {
+    expect(mergeLoopbackNoProxy(undefined)).toBe("localhost,127.0.0.1,::1");
+    expect(mergeLoopbackNoProxy("127.0.0.1,::1,localhost")).toBe("127.0.0.1,::1,localhost");
+    expect(applyLoopbackNoProxy({ no_proxy: "lower.example" })).toEqual({
+      NO_PROXY: "lower.example,localhost,127.0.0.1,::1",
+      no_proxy: "lower.example,localhost,127.0.0.1,::1",
+    });
+    expect(applyLoopbackNoProxy({ NO_PROXY: "a.example", no_proxy: "b.example" })).toEqual({
+      NO_PROXY: "a.example,localhost,127.0.0.1,::1",
+      no_proxy: "b.example,localhost,127.0.0.1,::1",
     });
   });
 
