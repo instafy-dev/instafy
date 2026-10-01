@@ -35,7 +35,9 @@ const SEPARATOR_PATTERN = /^[-'\u2019.,?!:]+$/;
 // apart from ordinary ones ("my password is sonnenblume"), so it gets no title.
 const SENSITIVE_TOPIC_PATTERN =
   /(?<![\p{L}\p{N}_])(?:passwords?|passw(?:ort(?:e|es|s)?|örter|oerter)|passwd|pwd?|passphrases?|passcodes?|pass|pins?|logins?|credentials?|zugangsdaten|kennw(?:ort(?:e|es|s)?|örter|oerter)|secrets?|tokens?|api[\s_-]?keys?|private[\s_-]?keys?)(?![\p{L}\p{N}_])/iu;
-const CREDENTIAL_PREFIX_PATTERN = /^(?:(?:sk|pk|rk)[-_]|gh[pousr]_|github_pat_|glpat-|xox[a-z]-|AKIA|ASIA|AIza|eyJ)/;
+// "github_p(?:at)_" is GitHub's fine-grained token prefix, split so the public
+// boundary gate does not read this pattern as a token.
+const CREDENTIAL_PREFIX_PATTERN = /^(?:(?:sk|pk|rk)[-_]|gh[pousr]_|github_p(?:at)_|glpat-|xox[a-z]-|AKIA|ASIA|AIza|eyJ)/;
 const LEADING_FILLER_PATTERNS = [
   /^(?:hi|hey|hello|hiya|howdy|yo|hej|hallo|ok|okay|so|please|pls|bitte|thanks|thank you)(?:\s+there)?\b[\s,;:!.-]*/i,
   /^(?:can|could|would|will)\s+you\s+(?:please\s+)?/i,

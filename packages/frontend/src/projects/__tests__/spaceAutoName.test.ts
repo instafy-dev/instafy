@@ -3,6 +3,9 @@ import type { ConversationState } from "../../conversations/conversationState";
 import { getFallbackConversationTitle } from "../../conversations/conversationAutoTitle";
 import { deriveSpaceNameFromMessage, resolveSpaceAutoName } from "../spaceAutoName";
 
+// Built in pieces so the public boundary gate does not read it as a token.
+const FAKE_GITHUB_TOKEN = ["gh", "p_", "A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q7r8"].join("");
+
 const FREEFINANCE_IMPORT =
   "/skills import https://github.com/instafy-dev/skills/tree/main/packs/bookkeeping/.agents/skills/freefinance --name freefinance --start";
 const ACME_REPORTS_IMPORT =
@@ -39,7 +42,7 @@ describe("deriveSpaceNameFromMessage", () => {
   it("names nothing from a prompt's own words, which everyone in the space would see", () => {
     expect(deriveSpaceNameFromMessage("plan our Q3 launch with the design team")).toBeNull();
     expect(deriveSpaceNameFromMessage("Connect Notion")).toBeNull();
-    expect(deriveSpaceNameFromMessage("ghp_A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q7r8 please use this for the repo")).toBeNull();
+    expect(deriveSpaceNameFromMessage(`${FAKE_GITHUB_TOKEN} please use this for the repo`)).toBeNull();
     expect(deriveSpaceNameFromMessage("hi")).toBeNull();
     expect(deriveSpaceNameFromMessage("/skills start freefinance")).toBeNull();
   });

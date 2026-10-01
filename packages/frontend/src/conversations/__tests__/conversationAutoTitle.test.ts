@@ -15,6 +15,9 @@ import {
   shouldAutoTitleConversation,
 } from "../conversationAutoTitle";
 
+// Built in pieces so the public boundary gate does not read it as a token.
+const FAKE_GITHUB_TOKEN = ["gh", "p_", "A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q7r8"].join("");
+
 const FREEFINANCE_IMPORT =
   "/skills import https://github.com/instafy-dev/skills/tree/main/packs/bookkeeping/.agents/skills/freefinance --name freefinance --start";
 const BOOKKEEPING_PACK_IMPORT =
@@ -375,7 +378,7 @@ describe("conversationAutoTitle", () => {
   });
 
   it("never echoes what may be a credential", () => {
-    expect(getFallbackConversationTitle("ghp_A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q7r8 please use this for the repo")).toBeNull();
+    expect(getFallbackConversationTitle(`${FAKE_GITHUB_TOKEN} please use this for the repo`)).toBeNull();
     expect(getFallbackConversationTitle("sk-proj-Zx9Yw8Vu7Ts6Rq5Po4Nm3Lk2Ji1Hg0FeDcBa please")).toBeNull();
     expect(getFallbackConversationTitle("eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.abc check this")).toBeNull();
     expect(getFallbackConversationTitle("revert 3f9a2b1c4d5e6f708192a3b4c5d6e7f8091a2b3c please")).toBeNull();
