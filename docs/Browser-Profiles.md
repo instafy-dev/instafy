@@ -59,6 +59,22 @@ profile, but not the open page or unsaved form contents; the agent may need to
 navigate back using the conversation context. Site-specific carts and login
 expiry still follow the site's behavior.
 
+## Remembering addresses
+
+The existing address bar in both **This device** and **Workspace** suggests
+recent sites. Focus an empty field or clear it to see recent visits; type to
+filter by page title or address. Select a suggestion to open it, or enter a new
+address as usual. Arrow keys select suggestions, Enter opens the selection,
+Tab completes it without navigating, and Escape dismisses the list.
+
+Studio remembers up to 100 observed page addresses and titles locally for your
+Instafy account, and shows up to eight matches. Both browser locations use this
+list. Draft addresses and unconfirmed navigation commands are not recorded.
+History is not synced to other devices or shared with other participants.
+**Clear recent sites** in the suggestions removes this list without clearing
+cookies or site data. Clearing a browser profile does not clear this list.
+Address recall does not restore open tabs or unsaved page contents.
+
 ## What survives a change?
 
 - **Personal, another project on the same device:** the same user's profile is

@@ -139,6 +139,7 @@ export function PersonalBrowserSurface({
   model,
   transportSelector,
   humanInputIdentityKey,
+  historyUserId,
   onContinueAfterHumanInput,
   sharingControls,
 }: {
@@ -148,6 +149,7 @@ export function PersonalBrowserSurface({
   model: PersonalBrowserModel;
   transportSelector: ReactNode;
   humanInputIdentityKey?: string;
+  historyUserId?: string | null;
   onContinueAfterHumanInput?: (message: string, approvalMode: "ask" | "routine") => Promise<boolean>;
   sharingControls?: ReactNode;
 }) {
@@ -177,6 +179,7 @@ export function PersonalBrowserSurface({
   const [dismissedClearDataFeedbackKey, setDismissedClearDataFeedbackKey] =
     useState<string | null>(null);
   const ready = model.status?.state === "ready";
+  const humanInputLocked = model.status?.agentControlEnabled === true || model.status?.humanControlReady === false || model.status?.tabControlActive === true;
   const visible = active && model.available && ready;
   const ownerId = model.ownerId;
   const routineApprovalAvailable = model.status?.approvalModes?.includes("routine") === true;
@@ -276,17 +279,22 @@ export function PersonalBrowserSurface({
   }, [overlayCount, agentWorking]);
   useLayoutEffect(() => { setOverlayPreview(null); }, [ownerId]);
 
-  const handleNavigate = useCallback(
-    (event: FormEvent<HTMLFormElement>) => {
-      event.preventDefault();
-      if (model.status?.agentControlEnabled || model.status?.tabControlActive) {
+  const navigateToAddress = useCallback(
+    (nextAddress: string) => {
+      if (!active || !ready || humanInputLocked) {
         return;
       }
-      void model.navigate(address);
+      setAddress(nextAddress);
+      model.clearNavigationError();
+      void model.navigate(nextAddress);
       addressInputRef.current?.blur();
     },
-    [address, model],
+    [active, ready, humanInputLocked, model],
   );
+  const handleNavigate = (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    navigateToAddress(address);
+  };
 
   const handleClearData = useCallback(() => {
     if (!window.confirm(
@@ -298,7 +306,6 @@ export function PersonalBrowserSurface({
   }, [model]);
 
   const browserStatus = personalBrowserStatus(model);
-  const humanInputLocked = model.status?.agentControlEnabled === true || model.status?.humanControlReady === false || model.status?.tabControlActive === true;
   const personalHumanInputRequest = model.status?.humanInputRequest;
   const ownsNativeStatus = Boolean(ownerId) && model.status?.ownerId === ownerId;
   const humanInputOptions = {
@@ -399,9 +406,15 @@ export function PersonalBrowserSurface({
             invalid={Boolean(model.navigationError)}
             disabled={!ready || humanInputLocked}
             value={address}
+            historyUserId={historyUserId}
+            currentPage={active && ready && ownsNativeStatus && model.status ? {
+              url: model.status.url,
+              title: model.status.title,
+            } : null}
+            onNavigateSuggestion={navigateToAddress}
             onSubmit={handleNavigate}
-            onChange={(event) => {
-              setAddress(event.target.value);
+            onValueChange={(value) => {
+              setAddress(value);
               model.clearNavigationError();
             }}
             placeholder={
