@@ -292,7 +292,13 @@ describe("LoginPage pending state", () => {
     await act(async () => resolveSend());
     const message = container.querySelector('[data-testid="login-message"]');
     expect(message?.getAttribute("role")).toBe("status");
-    expect(message?.textContent).toContain("Resent the verification email.");
+    expect(message?.textContent).toBe("New code sent. Use the latest email.");
+    expect(container.querySelectorAll('[data-testid="login-message"]')).toHaveLength(1);
+    expect(message?.childElementCount).toBe(0);
+    expect(resend?.nextElementSibling).toBe(message);
+    const passwordAlternative = buttonByText("Continue with password");
+    expect(passwordAlternative).toBeDefined();
+    expect(message!.compareDocumentPosition(passwordAlternative!) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
 
     await typeInto(container.querySelector("#otp") as HTMLInputElement, "123456");
     const form = (container.querySelector("#otp") as HTMLInputElement).form as HTMLFormElement;

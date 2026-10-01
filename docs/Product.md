@@ -18,6 +18,9 @@ code sign-in as the primary alternative. Existing users can also use that code p
 recovery remains available through **Forgot password?**. Returning users who use **Create account**
 can also set a password after verifying their email. Reloading during the optional password step
 continues the already authenticated session without requiring a password.
+Code errors appear beside the code field, with expired or invalid codes explaining how to
+request another. Resend confirmation stays beside **Resend email**, above the alternative
+sign-in action, and reminds users to use the latest email.
 
 Pending route and authentication handoffs use a neutral full-screen loading surface: one Octo
 swimming above “Getting things ready…”, without a wordmark. The canonical animation stops for
