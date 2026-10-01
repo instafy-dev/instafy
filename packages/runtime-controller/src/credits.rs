@@ -2414,7 +2414,8 @@ mod tests {
 	                    metadata jsonb,
 	                    created_at timestamptz NOT NULL DEFAULT now(),
 	                    created_by uuid,
-	                    idempotency_key text
+	                    idempotency_key text,
+	                    allow_overdraft boolean NOT NULL DEFAULT false
 	                );
 	                CREATE UNIQUE INDEX org_credit_ledger_idempotency_unique
 	                    ON org_credit_ledger(org_id, project_id, idempotency_key)
@@ -2450,7 +2451,7 @@ mod tests {
 
                     current_balance := coalesce(current_balance, 0) + NEW.delta;
 
-                    IF current_balance < 0 THEN
+                    IF NEW.delta < 0 AND current_balance < 0 AND NOT NEW.allow_overdraft THEN
                         RAISE EXCEPTION 'Insufficient credits for org %', NEW.org_id;
                     END IF;
 

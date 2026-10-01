@@ -21,6 +21,7 @@ use crate::agent_write_scopes::{
     apply_agent_write_scope_metadata, build_agent_write_scope_plan, AgentWriteScopeAssignment,
 };
 use crate::ai_agents;
+use crate::ai_metering::job_record::{insert_platform_job_record, PlatformJobRecord};
 use crate::auth::{authenticate_request, RequestContext};
 use crate::bug_reports::{record_system_bug_report, SystemBugReportInput};
 use crate::credentials;
@@ -684,8 +685,206 @@ fn managed_ai_gate_message(managed_ai: &credentials::ManagedAiAccessResponse) ->
     "Connect your own AI to continue. This request needs a personal AI connection.".to_string()
 }
 
-fn dispatch_requires_ai_access(intent: &str) -> bool {
+pub(crate) fn dispatch_requires_ai_access(intent: &str) -> bool {
     !intent.trim().eq_ignore_ascii_case("terminal_command")
+}
+
+/// Refusal for a dispatch whose platform job would run on a private
+/// self-hosted runtime (a desktop or a self-hosted machine), which never
+/// leases platform jobs (see `lease_next_agent_job`).
+pub(crate) const MANAGED_AI_SELF_HOSTED_RUNTIME_MESSAGE: &str =
+    "Instafy AI runs on Instafy-hosted runtimes. Connect your own AI to use this runtime.";
+
+/// Error code of that refusal, so callers can tell it from other failures.
+pub(crate) const MANAGED_AI_HOSTED_RUNTIME_REQUIRED_CODE: &str =
+    "managed_ai_hosted_runtime_required";
+
+/// The refusal of a dispatch whose platform runs `private_runs` (run and
+/// runtime, see [`platform_runs_on_private_self_hosted_runtimes`]) would have
+/// only private runtimes to run on.
+fn managed_ai_hosted_runtime_refusal(
+    private_runs: &[(Uuid, Uuid)],
+) -> (StatusCode, Json<ApiError>) {
+    let mut runtime_ids: Vec<Uuid> = Vec::new();
+    for (_, runtime_id) in private_runs {
+        if !runtime_ids.contains(runtime_id) {
+            runtime_ids.push(*runtime_id);
+        }
+    }
+    (
+        StatusCode::BAD_REQUEST,
+        Json(ApiError::with_details(
+            MANAGED_AI_SELF_HOSTED_RUNTIME_MESSAGE,
+            MANAGED_AI_HOSTED_RUNTIME_REQUIRED_CODE,
+            json!({ "runtimeIds": runtime_ids }),
+        )),
+    )
+}
+
+/// Whether `error` is the refusal of a platform AI dispatch to a private
+/// self-hosted runtime.
+pub(crate) fn is_managed_ai_hosted_runtime_refusal(error: &(StatusCode, Json<ApiError>)) -> bool {
+    error.1 .0.code.as_deref() == Some(MANAGED_AI_HOSTED_RUNTIME_REQUIRED_CODE)
+}
+
+/// Why a managed participant of an ambient evaluation was not dispatched.
+/// Its run is closed with the code as `metadata.managedAiSkipped.reason`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ManagedAiSkipReason {
+    /// Its job would run on a private self-hosted runtime.
+    SelfHostedRuntime,
+}
+
+impl ManagedAiSkipReason {
+    fn code(self) -> &'static str {
+        match self {
+            Self::SelfHostedRuntime => "self_hosted_runtime",
+        }
+    }
+
+    fn message(self) -> &'static str {
+        match self {
+            Self::SelfHostedRuntime => MANAGED_AI_SELF_HOSTED_RUNTIME_MESSAGE,
+        }
+    }
+}
+
+/// The parent runtime (`multiAgentPlan.parentRuntimeId`) of a spread worker of
+/// a skill-authored plan. Such a worker is not pinned, but
+/// `lease_next_agent_job` lets only that runtime, or a runtime leased for the
+/// plan's group, take it.
+fn spread_plan_parent_runtime_id(metadata: &JsonValue) -> Option<Uuid> {
+    if metadata_uses_personal_browser(metadata)
+        || metadata_uses_shared_browser(metadata)
+        || !metadata_allows_runtime_spread(metadata)
+    {
+        return None;
+    }
+    let plan = metadata.get("multiAgentPlan")?;
+    plan.get("groupId")
+        .and_then(JsonValue::as_str)
+        .filter(|group_id| !group_id.is_empty())?;
+    plan.get("parentRuntimeId")
+        .and_then(JsonValue::as_str)
+        .and_then(|runtime_id| Uuid::parse_str(runtime_id.trim()).ok())
+}
+
+/// Runs of the credential-less targets (the platform lane) whose job would
+/// have only private self-hosted runtimes to run on, with the runtime that
+/// decides it, in dispatch order. Callers pass only AI dispatches.
+///
+/// That is a job pinned to a private runtime, or a spread worker of a plan
+/// whose parent runtime is private and whose extra runtimes would be too
+/// ([`runtime::spread_plan_parent_is_private`]). Any other unpinned job is
+/// not listed: the lease keeps it off private runtimes, and a hosted runtime
+/// takes it. Neither is a job pinned to `unpinned_runtime_id`, the runtime
+/// this dispatch unpins its queued jobs from once they are queued
+/// ([`dispatch_unpins_jobs_from_its_runtime`]).
+async fn platform_runs_on_private_self_hosted_runtimes(
+    state: &AppState,
+    transaction: &Transaction<'_>,
+    project_id: &Uuid,
+    metadata: &JsonValue,
+    agent_runs: &[(Uuid, AgentTarget)],
+    preferred_runtime_id: Option<Uuid>,
+    unpinned_runtime_id: Option<Uuid>,
+) -> Result<Vec<(Uuid, Uuid)>, (StatusCode, Json<ApiError>)> {
+    // Per runtime: whether it is private, and whether it is as the parent of
+    // a spread plan.
+    let mut privacy_by_runtime: HashMap<Uuid, (bool, bool)> = HashMap::new();
+    let mut private_runs = Vec::new();
+    for (run_id, target) in agent_runs {
+        if target.credential_id.is_some() {
+            continue;
+        }
+        let (runtime_id, spread_plan_parent) =
+            match target_runtime_for_agent_job(metadata, target.runtime_id, preferred_runtime_id) {
+                Some(runtime_id) if Some(runtime_id) == unpinned_runtime_id => continue,
+                Some(runtime_id) => (runtime_id, false),
+                None => match spread_plan_parent_runtime_id(metadata) {
+                    Some(runtime_id) => (runtime_id, true),
+                    None => continue,
+                },
+            };
+        let (runtime_private, spread_parent_private) = match privacy_by_runtime.get(&runtime_id) {
+            Some(privacy) => *privacy,
+            None => {
+                let row = transaction
+                    .query_opt(
+                        "select provider, capabilities
+                         from runtimes
+                         where project_id = $1 and id = $2",
+                        &[project_id, &runtime_id],
+                    )
+                    .await
+                    .map_err(|error| {
+                        internal_error(format!("failed to load managed AI target runtime: {error}"))
+                    })?;
+                let privacy = row.map_or((false, false), |row| {
+                    let provider = row.get::<_, String>("provider");
+                    let capabilities = row.get::<_, JsonValue>("capabilities");
+                    (
+                        runtime::runtime_is_private_self_hosted(state, &provider, &capabilities),
+                        runtime::spread_plan_parent_is_private(state, &provider, &capabilities),
+                    )
+                });
+                privacy_by_runtime.insert(runtime_id, privacy);
+                privacy
+            }
+        };
+        let is_private = if spread_plan_parent {
+            spread_parent_private
+        } else {
+            runtime_private
+        };
+        if is_private {
+            private_runs.push((*run_id, runtime_id));
+        }
+    }
+    Ok(private_runs)
+}
+
+/// Close the already-inserted run of a managed ambient participant that is
+/// not dispatched. It gets no job and, as for every ambient turn, nothing is
+/// written to the conversation on the agent's behalf: the reason stays on the
+/// run.
+async fn skip_managed_ai_ambient_participant(
+    transaction: &Transaction<'_>,
+    project_id: &Uuid,
+    run_id: &Uuid,
+    reason: ManagedAiSkipReason,
+) -> Result<(), (StatusCode, Json<ApiError>)> {
+    let updated = transaction
+        .execute(
+            "update runs
+             set status = 'canceled',
+                 progress_stage = null,
+                 last_message = $3,
+                 metadata =
+                     (case
+                        when jsonb_typeof(metadata) = 'object' then metadata
+                        else '{}'::jsonb
+                      end)
+                     || jsonb_build_object(
+                         'managedAiSkipped',
+                         jsonb_build_object('reason', $4::text)
+                     ),
+                 updated_at = now()
+             where id = $1
+               and project_id = $2
+               and status = 'queued'",
+            &[run_id, project_id, &reason.message(), &reason.code()],
+        )
+        .await
+        .map_err(|error| {
+            internal_error(format!("failed to close skipped managed AI run: {error}"))
+        })?;
+    if updated != 1 {
+        return Err(internal_error(
+            "skipped managed AI participant has no queued run",
+        ));
+    }
+    Ok(())
 }
 
 #[instrument(skip(state, headers, payload))]
@@ -1505,15 +1704,71 @@ pub(crate) async fn process_dispatch_prompt(
     // the Codex/provider lane is entered. They must remain usable when the
     // assistant is disabled or the user has not connected an AI credential,
     // and must not consume an included-AI prompt or credit.
-    let uses_managed_ai = dispatch_requires_ai_access(&request.intent)
-        && !context.is_service_role
+    let platform_lane_ai_dispatch = dispatch_requires_ai_access(&request.intent)
         && agent_runs
             .iter()
             .any(|(_, target)| target.credential_id.is_none());
+    let uses_managed_ai = platform_lane_ai_dispatch && !context.is_service_role;
+
+    // The runtime alert below unpins this dispatch's queued jobs from its
+    // runtime when that runtime is not dispatch-ready, and another runtime
+    // then takes them. Set to that runtime when the alert will.
+    let unpinned_runtime_id = match runtime_id {
+        Some(runtime_id) if platform_lane_ai_dispatch => dispatch_unpins_jobs_from_its_runtime(
+            &transaction,
+            &project.id,
+            runtime_record.as_ref(),
+            strict_browser_runtime_id,
+        )
+        .await?
+        .then_some(runtime_id),
+        _ => None,
+    };
+
+    // A desktop or self-hosted machine never leases a platform job, and no
+    // other runtime leases a job pinned to one (or a spread plan worker whose
+    // plan has only private runtimes), so such a job would stay queued
+    // forever. Refuse it here, before the proxy check, the daily count
+    // and the reserve, so the refusal spends no credit and no daily prompt.
+    // A ready private runtime, an agent's own pin to a runtime other than
+    // this dispatch's, and a spread plan are refused. A job pinned to this
+    // dispatch's runtime while that runtime is not dispatch-ready (a stopped
+    // desktop, say) is not: the alert below unpins it and a hosted runtime
+    // answers, as before this refusal existed. Such a platform job is queued
+    // unpinned in this transaction ([`queued_job_runtime_id`]), so no restart,
+    // failed read or heartbeat between the commit and the alert can leave it
+    // pinned to a runtime that never leases it.
+    // Service-role dispatches (plan workers, lead continuations, queued sends
+    // with no user) have no managed gate and are refused whatever
+    // MANAGED_AI_ENABLED says, because the lease rule does not depend on it;
+    // their callers record the failure. A user's dispatch with managed AI off
+    // gets the gate's own "unavailable" refusal below instead, since the
+    // credential-less lane is then not Instafy AI. Ambient participants are
+    // skipped rather than refused (below), by the same rule.
+    if platform_lane_ai_dispatch
+        && !skill_mode_ambient_evaluation
+        && (context.is_service_role || state.config.managed_ai_enabled)
+    {
+        let private_runs = platform_runs_on_private_self_hosted_runtimes(
+            state,
+            &transaction,
+            &project.id,
+            &request.metadata,
+            &agent_runs,
+            runtime_id,
+            unpinned_runtime_id,
+        )
+        .await?;
+        if !private_runs.is_empty() {
+            return Err(managed_ai_hosted_runtime_refusal(&private_runs));
+        }
+    }
 
     // Set when this dispatch wrote the managed-AI reserve burn, so the org's
     // viewers get credits.updated once the dispatch transaction commits.
     let mut managed_ai_credit_org_id: Option<Uuid> = None;
+    // Managed ambient participants that get no job; their runs are closed.
+    let mut managed_ai_skipped_runs: Vec<(Uuid, ManagedAiSkipReason)> = Vec::new();
     if uses_managed_ai && skill_mode_ambient_evaluation {
         // Deferred billing: ambient evaluations are free unless the agent
         // actually speaks. The flat prompt burn (and the managedAiUsed
@@ -1522,6 +1777,25 @@ pub(crate) async fn process_dispatch_prompt(
         // turn (NO_RESPONSE sentinel) burns nothing. The availability gate is
         // deferred with it: erroring here would reject the human's own chat
         // message, which these ambient turns must never do.
+        //
+        // For the same reason a managed participant whose job would run on a
+        // private self-hosted runtime is skipped rather than refused. The
+        // human's message and every BYO participant still go ahead.
+        for (run_id, _) in platform_runs_on_private_self_hosted_runtimes(
+            state,
+            &transaction,
+            &project.id,
+            &request.metadata,
+            &agent_runs,
+            runtime_id,
+            unpinned_runtime_id,
+        )
+        .await?
+        {
+            let reason = ManagedAiSkipReason::SelfHostedRuntime;
+            skip_managed_ai_ambient_participant(&transaction, &project.id, &run_id, reason).await?;
+            managed_ai_skipped_runs.push((run_id, reason));
+        }
         let map = ensure_object(&mut request.metadata);
         map.insert(
             "aiAccessMode".to_string(),
@@ -1783,6 +2057,9 @@ pub(crate) async fn process_dispatch_prompt(
         .unwrap_or(false);
 
     let mut job_ids: Vec<Uuid> = Vec::new();
+    // Platform jobs queued unpinned from `unpinned_runtime_id`; the runtime
+    // alert reports them as retargeted with the jobs it unpins itself.
+    let mut unpinned_job_ids: Vec<Uuid> = Vec::new();
     let mut primary_job_id: Option<Uuid> = None;
     let mut dispatches: Vec<(Uuid, Option<Uuid>, Option<JsonValue>, Option<JsonValue>)> =
         Vec::new();
@@ -1791,11 +2068,26 @@ pub(crate) async fn process_dispatch_prompt(
     // agent's delivered turn can name the peers that are also evaluating it
     // (the wrapper excludes the agent itself). Job-payload-only: the persisted
     // human message keeps only the server-authored participation marker.
+    let is_managed_ai_skipped = |run_id: &Uuid| {
+        managed_ai_skipped_runs
+            .iter()
+            .any(|(skipped, _)| skipped == run_id)
+    };
     let ambient_ai_participants = skill_mode_ambient_evaluation
-        .then(|| build_ambient_ai_participants(&agent_runs))
+        .then(|| {
+            let evaluating_runs: Vec<(Uuid, AgentTarget)> = agent_runs
+                .iter()
+                .filter(|(run_id, _)| !is_managed_ai_skipped(run_id))
+                .cloned()
+                .collect();
+            build_ambient_ai_participants(&evaluating_runs)
+        })
         .filter(|value| value.as_array().is_some_and(|list| !list.is_empty()));
 
     for (run_id, target) in agent_runs.iter() {
+        if is_managed_ai_skipped(run_id) {
+            continue;
+        }
         let mut agent_request = request.clone();
         apply_agent_prompt_segment(&mut agent_request, &prompt_segments, target);
         inject_agent_target_metadata(&mut agent_request.metadata, target);
@@ -1867,6 +2159,8 @@ pub(crate) async fn process_dispatch_prompt(
             metadata_uses_personal_browser(&agent_request.metadata),
         )
         .await?;
+        let queued_runtime_id =
+            queued_job_runtime_id(target_runtime_id, target.credential_id, unpinned_runtime_id);
         let job_id = agent::enqueue_agent_job_record(
             &transaction,
             &project,
@@ -1874,7 +2168,7 @@ pub(crate) async fn process_dispatch_prompt(
             &agent_request,
             run_id,
             &prompt_id,
-            target_runtime_id,
+            queued_runtime_id,
             target.credential_id,
             provider_conversation_state.as_ref(),
         )
@@ -1885,6 +2179,32 @@ pub(crate) async fn process_dispatch_prompt(
             // that one-to-one identity durable in the same transaction as the
             // enqueue so initial hydration and reconnect cannot lose it.
             persist_run_job_identity(&transaction, &project.id, run_id, &job_uuid).await?;
+            // A credential-less AI job runs on the platform key, service-role
+            // dispatches included, so it gets its platform job record here.
+            // The waiver follows this dispatch's own ambient decision, never
+            // the job payload.
+            let platform_org_id = project.org_id.filter(|_| {
+                dispatch_requires_ai_access(&request.intent) && target.credential_id.is_none()
+            });
+            if let Some(org_id) = platform_org_id {
+                let decline_waiver_units = if skill_mode_ambient_evaluation {
+                    state.config.managed_ai_decline_waiver_units
+                } else {
+                    0
+                };
+                insert_platform_job_record(
+                    &transaction,
+                    &PlatformJobRecord {
+                        job_id: job_uuid,
+                        org_id,
+                        project_id: project.id,
+                        run_id: *run_id,
+                        prompt_id,
+                        decline_waiver_units,
+                    },
+                )
+                .await?;
+            }
         }
         dispatches.push((
             *run_id,
@@ -1903,6 +2223,9 @@ pub(crate) async fn process_dispatch_prompt(
                 primary_job_id = Some(job_uuid);
             }
             job_ids.push(job_uuid);
+            if queued_runtime_id != target_runtime_id {
+                unpinned_job_ids.push(job_uuid);
+            }
         }
     }
 
@@ -1975,6 +2298,46 @@ pub(crate) async fn process_dispatch_prompt(
         );
     }
 
+    // A skipped participant's run was never queued. Settle it for clients that
+    // already hold its id from this response, as a cancellation does.
+    for (run_id, reason) in managed_ai_skipped_runs.iter() {
+        let (event_session, run_payload) =
+            match runs::load_run_snapshot(&mut *connection, run_id).await {
+                Ok(Some(snapshot)) => (
+                    snapshot.session_id.or(request.session_id),
+                    runs::run_snapshot_to_json(&snapshot),
+                ),
+                Ok(None) => (request.session_id, JsonValue::Null),
+                Err((status, Json(api_error))) => {
+                    warn!(
+                        run_id = %run_id,
+                        status = status.as_u16(),
+                        error = %api_error.message,
+                        "failed to load skipped managed AI run snapshot"
+                    );
+                    (request.session_id, JsonValue::Null)
+                }
+            };
+        publish_controller_event_with_conversation(
+            &state.events,
+            "run.completed",
+            Some(project.id),
+            event_session,
+            request.conversation_id,
+            Some(*run_id),
+            None,
+            json!({
+                "outcome": "canceled",
+                "finalStatus": "canceled",
+                "runStatus": "canceled",
+                "summary": reason.message(),
+                "errorMessage": null,
+                "managedAiSkipped": { "reason": reason.code() },
+                "run": run_payload,
+            }),
+        );
+    }
+
     if request.conversation_is_new {
         let conversation_metadata = conversation
             .metadata
@@ -2029,34 +2392,13 @@ pub(crate) async fn process_dispatch_prompt(
             .await
         {
             Ok(candidate_opt) => {
-                let status_viable = matches!(record.status.as_str(), "ready" | "running");
-                let candidate_recent_strict = candidate_opt
-                    .as_ref()
-                    .map(|candidate| {
-                        candidate
-                            .last_seen_at
-                            .map(|last_seen| {
-                                Utc::now().signed_duration_since(last_seen).num_seconds()
-                                    <= DISPATCHABLE_RUNTIME_HEARTBEAT_MAX_AGE_SECONDS
-                            })
-                            .unwrap_or(false)
-                    })
-                    .unwrap_or(false);
-                if !(status_viable && candidate_recent_strict) {
+                // The same readiness the private runtime refusal above read,
+                // so the jobs it let through are the ones unpinned here.
+                if let Some(detail) =
+                    runtime_not_dispatch_ready_detail(record, candidate_opt.as_ref(), Utc::now())
+                {
                     runtime_alert_reason = Some("runtime_not_ready");
-                    let mut detail_parts = Vec::new();
-                    detail_parts.push(format!("status={}", record.status));
-                    if let Some(candidate) = candidate_opt.as_ref() {
-                        let last_seen = candidate
-                            .last_seen_at
-                            .map(|value| value.to_rfc3339())
-                            .unwrap_or_else(|| "unknown".to_string());
-                        detail_parts.push(format!("lastSeen={}", last_seen));
-                    }
-                    runtime_alert_detail = Some(detail_parts.join(", "));
-                } else if !runtime::runtime_supports_agent_and_origin(&record.capabilities) {
-                    runtime_alert_reason = Some("runtime_not_ready");
-                    runtime_alert_detail = Some("agent/origin capabilities missing".to_string());
+                    runtime_alert_detail = Some(detail);
                 }
             }
             Err((status, Json(api_error))) => {
@@ -2083,7 +2425,7 @@ pub(crate) async fn process_dispatch_prompt(
         let detail_message = runtime_alert_detail
             .as_deref()
             .filter(|value| !value.is_empty());
-        let mut retargeted_job_ids: Vec<Uuid> = Vec::new();
+        let mut retargeted_job_ids: Vec<Uuid> = unpinned_job_ids.clone();
         let mut cleared_runtime_preference = false;
         let mut reconnect_metadata: Option<JsonValue> = None;
         if should_retarget_unavailable_runtime(reason, strict_browser_runtime_id) {
@@ -3608,6 +3950,95 @@ fn should_retarget_unavailable_runtime(
 ) -> bool {
     matches!(reason, "runtime_not_ready" | "runtime_unavailable")
         && strict_browser_runtime_id.is_none()
+}
+
+/// Why the dispatch's runtime `record` cannot run its queued jobs now, as the
+/// detail of a `runtime_not_ready` alert, or `None` when it is dispatch-ready:
+/// its status is ready or running, its last heartbeat (`candidate`, its row)
+/// is at most [`DISPATCHABLE_RUNTIME_HEARTBEAT_MAX_AGE_SECONDS`] old, and it
+/// has the agent and origin capabilities.
+fn runtime_not_dispatch_ready_detail(
+    record: &runtime::RuntimeRecord,
+    candidate: Option<&workspace::RuntimeCandidate>,
+    now: DateTime<Utc>,
+) -> Option<String> {
+    let status_viable = matches!(record.status.as_str(), "ready" | "running");
+    let candidate_recent_strict = candidate
+        .and_then(|candidate| candidate.last_seen_at)
+        .is_some_and(|last_seen| {
+            now.signed_duration_since(last_seen).num_seconds()
+                <= DISPATCHABLE_RUNTIME_HEARTBEAT_MAX_AGE_SECONDS
+        });
+    if !(status_viable && candidate_recent_strict) {
+        let mut detail_parts = Vec::new();
+        detail_parts.push(format!("status={}", record.status));
+        if let Some(candidate) = candidate {
+            let last_seen = candidate
+                .last_seen_at
+                .map(|value| value.to_rfc3339())
+                .unwrap_or_else(|| "unknown".to_string());
+            detail_parts.push(format!("lastSeen={}", last_seen));
+        }
+        return Some(detail_parts.join(", "));
+    }
+    if !runtime::runtime_supports_agent_and_origin(&record.capabilities) {
+        return Some("agent/origin capabilities missing".to_string());
+    }
+    None
+}
+
+/// The runtime a job for `target_runtime_id` is queued pinned to. A platform
+/// job (no `credential_id`) for `unpinned_runtime_id`, the dispatch's runtime
+/// when [`dispatch_unpins_jobs_from_its_runtime`] says the alert unpins its
+/// jobs, is queued unpinned instead, in the dispatch's own transaction: were
+/// it committed pinned and unpinned only by the alert after the commit, a
+/// restart, a failed runtime read or a heartbeat in between would leave it
+/// pinned to a runtime that never leases it. Every other job keeps its
+/// target, and the alert still unpins it as before.
+fn queued_job_runtime_id(
+    target_runtime_id: Option<Uuid>,
+    credential_id: Option<Uuid>,
+    unpinned_runtime_id: Option<Uuid>,
+) -> Option<Uuid> {
+    if credential_id.is_none()
+        && target_runtime_id.is_some()
+        && target_runtime_id == unpinned_runtime_id
+    {
+        None
+    } else {
+        target_runtime_id
+    }
+}
+
+/// Whether this dispatch's runtime alert will unpin its queued jobs from its
+/// runtime once they are queued, so that another runtime takes them: the
+/// runtime has no record (`runtime_record`, `runtime_unavailable`) or is not
+/// dispatch-ready ([`runtime_not_dispatch_ready_detail`],
+/// `runtime_not_ready`), and the dispatch has no strict browser target
+/// ([`should_retarget_unavailable_runtime`]). Read in the dispatch's
+/// transaction, as the alert reads it once that commits.
+async fn dispatch_unpins_jobs_from_its_runtime(
+    transaction: &Transaction<'_>,
+    project_id: &Uuid,
+    runtime_record: Option<&runtime::RuntimeRecord>,
+    strict_browser_runtime_id: Option<Uuid>,
+) -> Result<bool, (StatusCode, Json<ApiError>)> {
+    let reason = match runtime_record {
+        Some(record) => {
+            let candidate =
+                workspace::fetch_runtime_candidate_with_client(transaction, project_id, &record.id)
+                    .await?;
+            if runtime_not_dispatch_ready_detail(record, candidate.as_ref(), Utc::now()).is_none() {
+                return Ok(false);
+            }
+            "runtime_not_ready"
+        }
+        None => "runtime_unavailable",
+    };
+    Ok(should_retarget_unavailable_runtime(
+        reason,
+        strict_browser_runtime_id,
+    ))
 }
 
 /// The runtime's live lease generation, read after the dispatch reconnect
@@ -5233,6 +5664,41 @@ mod tests {
                 "strategy": "reuse"
             }
         })));
+    }
+
+    #[test]
+    fn platform_jobs_for_a_runtime_the_dispatch_unpins_are_queued_unpinned() {
+        let stopped_desktop = Uuid::new_v4();
+        let other_runtime = Uuid::new_v4();
+        let credential = Uuid::new_v4();
+
+        // A platform job for the runtime this dispatch unpins from.
+        assert_eq!(
+            queued_job_runtime_id(Some(stopped_desktop), None, Some(stopped_desktop)),
+            None
+        );
+        // An own-key job keeps its pin; the alert unpins it after commit.
+        assert_eq!(
+            queued_job_runtime_id(
+                Some(stopped_desktop),
+                Some(credential),
+                Some(stopped_desktop)
+            ),
+            Some(stopped_desktop)
+        );
+        // A pin to another runtime, or a dispatch that unpins nothing.
+        assert_eq!(
+            queued_job_runtime_id(Some(other_runtime), None, Some(stopped_desktop)),
+            Some(other_runtime)
+        );
+        assert_eq!(
+            queued_job_runtime_id(Some(stopped_desktop), None, None),
+            Some(stopped_desktop)
+        );
+        assert_eq!(
+            queued_job_runtime_id(None, None, Some(stopped_desktop)),
+            None
+        );
     }
 
     #[test]

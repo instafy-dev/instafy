@@ -15,15 +15,13 @@ ARG BUILD_ARTIFACT_DIR=release
 FROM ${RUST_IMAGE} AS chef
 ARG CARGO_CHEF_VERSION=0.1.77
 RUN apt-get update && apt-get install -y --no-install-recommends \
-      build-essential pkg-config libssl-dev protobuf-compiler ca-certificates \
+      build-essential pkg-config libssl-dev ca-certificates \
       clang lld \
     && rm -rf /var/lib/apt/lists/*
 RUN cargo install cargo-chef --version "${CARGO_CHEF_VERSION}" --locked
 WORKDIR /src
 COPY packages/openai-proxy-server/ packages/openai-proxy-server/
-COPY packages/runtime-contracts/ packages/runtime-contracts/
 COPY codex/codex-rs/ codex/codex-rs/
-COPY proto/ proto/
 WORKDIR /src/packages/openai-proxy-server
 RUN cargo chef prepare --recipe-path /src/recipe.json
 
@@ -33,7 +31,7 @@ RUN cargo chef prepare --recipe-path /src/recipe.json
 FROM ${RUST_IMAGE} AS builder-deps
 ARG BUILD_PROFILE=release
 RUN apt-get update && apt-get install -y --no-install-recommends \
-      build-essential pkg-config libssl-dev protobuf-compiler ca-certificates \
+      build-essential pkg-config libssl-dev ca-certificates \
       clang lld \
     && rm -rf /var/lib/apt/lists/*
 ENV CARGO_HOME=/usr/local/cargo \
@@ -52,16 +50,14 @@ FROM ${RUST_IMAGE} AS builder
 ARG BUILD_PROFILE=release
 ARG BUILD_ARTIFACT_DIR=release
 RUN apt-get update && apt-get install -y --no-install-recommends \
-      build-essential pkg-config libssl-dev protobuf-compiler ca-certificates \
+      build-essential pkg-config libssl-dev ca-certificates \
       clang lld \
     && rm -rf /var/lib/apt/lists/*
 ENV CARGO_HOME=/usr/local/cargo \
     RUSTFLAGS="-C link-arg=-fuse-ld=lld"
 WORKDIR /src
 COPY packages/openai-proxy-server/ packages/openai-proxy-server/
-COPY packages/runtime-contracts/ packages/runtime-contracts/
 COPY codex/codex-rs/ codex/codex-rs/
-COPY proto/ proto/
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/usr/local/cargo/git \
     --mount=type=cache,target=/src/target \
