@@ -358,7 +358,15 @@ jobs:
       # intermittently. The tarball is keyed on the file that carries the
       # digest pin: bumping the digest invalidates the cache instead of
       # loading the old image.
+      - name: Restore Supabase Postgres image cache without saving
+        if: github.ref != 'refs/heads/main'
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.instafy-image-cache
+          key: supabase-postgres-image-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('scripts/test-supabase-migrations-empty-db.mjs') }}
+
       - name: Restore Supabase Postgres image cache
+        if: github.ref == 'refs/heads/main'
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ~/.instafy-image-cache
@@ -845,22 +853,24 @@ jobs:
           rustup default stable
 
       - name: Restore cargo cache without saving
-        if: runner.environment == 'self-hosted'
+        if: runner.environment == 'self-hosted' || github.ref != 'refs/heads/main'
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
-            ~/.cargo/registry
-            ~/.cargo/git
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
             .cargo-target
           key: rust-ci-v3-${{ runner.os }}-${{ runner.arch }}-public-rust-check-controller-${{ hashFiles('packages/*/Cargo.lock') }}
 
       - name: Restore cargo cache
-        if: runner.environment == 'github-hosted'
+        if: runner.environment == 'github-hosted' && github.ref == 'refs/heads/main'
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
-            ~/.cargo/registry
-            ~/.cargo/git
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
             .cargo-target
           key: rust-ci-v3-${{ runner.os }}-${{ runner.arch }}-public-rust-check-controller-${{ hashFiles('packages/*/Cargo.lock') }}
 
@@ -956,22 +966,24 @@ jobs:
           rustup default stable
 
       - name: Restore cargo cache without saving
-        if: runner.environment == 'self-hosted'
+        if: runner.environment == 'self-hosted' || github.ref != 'refs/heads/main'
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
-            ~/.cargo/registry
-            ~/.cargo/git
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
             .cargo-target
           key: rust-ci-v3-${{ runner.os }}-${{ runner.arch }}-public-rust-check-agent-${{ hashFiles('packages/*/Cargo.lock') }}
 
       - name: Restore cargo cache
-        if: runner.environment == 'github-hosted'
+        if: runner.environment == 'github-hosted' && github.ref == 'refs/heads/main'
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
-            ~/.cargo/registry
-            ~/.cargo/git
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
             .cargo-target
           key: rust-ci-v3-${{ runner.os }}-${{ runner.arch }}-public-rust-check-agent-${{ hashFiles('packages/*/Cargo.lock') }}
 
@@ -1067,22 +1079,24 @@ jobs:
           rustup default stable
 
       - name: Restore cargo cache without saving
-        if: runner.environment == 'self-hosted'
+        if: runner.environment == 'self-hosted' || github.ref != 'refs/heads/main'
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
-            ~/.cargo/registry
-            ~/.cargo/git
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
             .cargo-target
           key: rust-ci-v3-${{ runner.os }}-${{ runner.arch }}-public-rust-check-git-${{ hashFiles('packages/*/Cargo.lock') }}
 
       - name: Restore cargo cache
-        if: runner.environment == 'github-hosted'
+        if: runner.environment == 'github-hosted' && github.ref == 'refs/heads/main'
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
-            ~/.cargo/registry
-            ~/.cargo/git
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
             .cargo-target
           key: rust-ci-v3-${{ runner.os }}-${{ runner.arch }}-public-rust-check-git-${{ hashFiles('packages/*/Cargo.lock') }}
 
@@ -1178,22 +1192,24 @@ jobs:
           rustup default stable
 
       - name: Restore cargo cache without saving
-        if: runner.environment == 'self-hosted'
+        if: runner.environment == 'self-hosted' || github.ref != 'refs/heads/main'
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
-            ~/.cargo/registry
-            ~/.cargo/git
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
             .cargo-target
           key: rust-ci-v3-${{ runner.os }}-${{ runner.arch }}-public-rust-check-provider-${{ hashFiles('packages/*/Cargo.lock') }}
 
       - name: Restore cargo cache
-        if: runner.environment == 'github-hosted'
+        if: runner.environment == 'github-hosted' && github.ref == 'refs/heads/main'
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
-            ~/.cargo/registry
-            ~/.cargo/git
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
             .cargo-target
           key: rust-ci-v3-${{ runner.os }}-${{ runner.arch }}-public-rust-check-provider-${{ hashFiles('packages/*/Cargo.lock') }}
 
@@ -1289,22 +1305,24 @@ jobs:
           rustup default stable
 
       - name: Restore cargo cache without saving
-        if: runner.environment == 'self-hosted'
+        if: runner.environment == 'self-hosted' || github.ref != 'refs/heads/main'
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
-            ~/.cargo/registry
-            ~/.cargo/git
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
             .cargo-target
           key: rust-ci-v3-${{ runner.os }}-${{ runner.arch }}-public-rust-check-tunnel-${{ hashFiles('packages/*/Cargo.lock') }}
 
       - name: Restore cargo cache
-        if: runner.environment == 'github-hosted'
+        if: runner.environment == 'github-hosted' && github.ref == 'refs/heads/main'
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
-            ~/.cargo/registry
-            ~/.cargo/git
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
             .cargo-target
           key: rust-ci-v3-${{ runner.os }}-${{ runner.arch }}-public-rust-check-tunnel-${{ hashFiles('packages/*/Cargo.lock') }}
 
@@ -1578,22 +1596,24 @@ jobs:
           df -h /
 
       - name: Restore cargo cache without saving
-        if: runner.environment == 'self-hosted'
+        if: runner.environment == 'self-hosted' || github.ref != 'refs/heads/main'
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
-            ~/.cargo/registry
-            ~/.cargo/git
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
             .cargo-target
           key: rust-ci-v3-${{ runner.os }}-${{ runner.arch }}-public-rust-test-contracts-${{ hashFiles('packages/*/Cargo.lock') }}
 
       - name: Restore cargo cache
-        if: runner.environment == 'github-hosted'
+        if: runner.environment == 'github-hosted' && github.ref == 'refs/heads/main'
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
-            ~/.cargo/registry
-            ~/.cargo/git
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
             .cargo-target
           key: rust-ci-v3-${{ runner.os }}-${{ runner.arch }}-public-rust-test-contracts-${{ hashFiles('packages/*/Cargo.lock') }}
 
@@ -1713,22 +1733,24 @@ jobs:
           df -h /
 
       - name: Restore cargo cache without saving
-        if: runner.environment == 'self-hosted'
+        if: runner.environment == 'self-hosted' || github.ref != 'refs/heads/main'
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
-            ~/.cargo/registry
-            ~/.cargo/git
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
             .cargo-target
           key: rust-ci-v3-${{ runner.os }}-${{ runner.arch }}-public-rust-test-agent-${{ hashFiles('packages/*/Cargo.lock') }}
 
       - name: Restore cargo cache
-        if: runner.environment == 'github-hosted'
+        if: runner.environment == 'github-hosted' && github.ref == 'refs/heads/main'
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
-            ~/.cargo/registry
-            ~/.cargo/git
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
             .cargo-target
           key: rust-ci-v3-${{ runner.os }}-${{ runner.arch }}-public-rust-test-agent-${{ hashFiles('packages/*/Cargo.lock') }}
 
@@ -1853,22 +1875,24 @@ jobs:
           df -h /
 
       - name: Restore cargo cache without saving
-        if: runner.environment == 'self-hosted'
+        if: runner.environment == 'self-hosted' || github.ref != 'refs/heads/main'
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
-            ~/.cargo/registry
-            ~/.cargo/git
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
             .cargo-target
           key: rust-ci-v3-${{ runner.os }}-${{ runner.arch }}-public-rust-test-proxy-${{ hashFiles('packages/*/Cargo.lock') }}
 
       - name: Restore cargo cache
-        if: runner.environment == 'github-hosted'
+        if: runner.environment == 'github-hosted' && github.ref == 'refs/heads/main'
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
-            ~/.cargo/registry
-            ~/.cargo/git
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
             .cargo-target
           key: rust-ci-v3-${{ runner.os }}-${{ runner.arch }}-public-rust-test-proxy-${{ hashFiles('packages/*/Cargo.lock') }}
 
@@ -1988,22 +2012,24 @@ jobs:
           df -h /
 
       - name: Restore cargo cache without saving
-        if: runner.environment == 'self-hosted'
+        if: runner.environment == 'self-hosted' || github.ref != 'refs/heads/main'
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
-            ~/.cargo/registry
-            ~/.cargo/git
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
             .cargo-target
           key: rust-ci-v3-${{ runner.os }}-${{ runner.arch }}-public-rust-test-origin-${{ hashFiles('packages/*/Cargo.lock') }}
 
       - name: Restore cargo cache
-        if: runner.environment == 'github-hosted'
+        if: runner.environment == 'github-hosted' && github.ref == 'refs/heads/main'
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
-            ~/.cargo/registry
-            ~/.cargo/git
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
             .cargo-target
           key: rust-ci-v3-${{ runner.os }}-${{ runner.arch }}-public-rust-test-origin-${{ hashFiles('packages/*/Cargo.lock') }}
 
@@ -2123,22 +2149,24 @@ jobs:
           df -h /
 
       - name: Restore cargo cache without saving
-        if: runner.environment == 'self-hosted'
+        if: runner.environment == 'self-hosted' || github.ref != 'refs/heads/main'
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
-            ~/.cargo/registry
-            ~/.cargo/git
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
             .cargo-target
           key: rust-ci-v3-${{ runner.os }}-${{ runner.arch }}-public-rust-test-git-${{ hashFiles('packages/*/Cargo.lock') }}
 
       - name: Restore cargo cache
-        if: runner.environment == 'github-hosted'
+        if: runner.environment == 'github-hosted' && github.ref == 'refs/heads/main'
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
-            ~/.cargo/registry
-            ~/.cargo/git
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
             .cargo-target
           key: rust-ci-v3-${{ runner.os }}-${{ runner.arch }}-public-rust-test-git-${{ hashFiles('packages/*/Cargo.lock') }}
 

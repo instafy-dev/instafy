@@ -1,5 +1,6 @@
 import { withoutManualCiRouting } from "./lib/manualCiRoutingTestBaseline.mjs";
 import { withoutAddedBuildContractTests } from "./lib/buildContractTestsBaseline.mjs";
+import { assertMainOnlySave, assertNoPullRequestCacheSave, withoutMainOnlyCaches } from "./lib/mainOnlyCacheTestBaseline.mjs";
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
@@ -34,13 +35,13 @@ const aggregates = [
   { key: 'rust-tests', label: 'public-rust-test-aggregate', name: 'Rust tests', children: suites },
 ];
 const children = [...checks, ...suites], jobs = [...aggregates, ...children];
-function job(key) {
-  const start = source.indexOf(`\n  ${key}:\n`);
+function job(key, text = source) {
+  const start = text.indexOf(`\n  ${key}:\n`);
   assert.ok(start >= 0, `missing Rust job ${key}`);
-  return source.slice(start + 1).split(/\n  [\w-]+:\n/u)[0];
+  return text.slice(start + 1).split(/\n  [\w-]+:\n/u)[0];
 }
-function step(key, name) {
-  const text = job(key), marker = `      - name: ${name}\n`, start = text.indexOf(marker);
+function step(key, name, workflow = source) {
+  const text = job(key, workflow), marker = `      - name: ${name}\n`, start = text.indexOf(marker);
   assert.ok(start >= 0, `missing ${key}/${name}`);
   const end = text.indexOf('\n      - name: ', start + marker.length);
   return text.slice(start, end < 0 ? text.length : end);
@@ -276,44 +277,48 @@ test('cargo caches cannot cross OS, CPU architecture, crate lane or lockfile inv
     for (const name of ['Restore cargo cache', 'Restore cargo cache without saving']) {
       const cache = step(item.key, name);
       assert.ok(cache.includes(`key: rust-ci-v3-\${{ runner.os }}-\${{ runner.arch }}-${item.label}-\${{ hashFiles('packages/*/Cargo.lock') }}`));
-      assert.match(cache, /~\/\.cargo\/registry\n            ~\/\.cargo\/git\n            \.cargo-target/u);
+      // Downloaded crates, the sparse index and git databases only: Cargo
+      // re-extracts sources under CARGO_HOME, whose mtimes it does not compare.
+      assert.ok(cache.includes('          path: |\n            ~/.cargo/registry/index\n            ~/.cargo/registry/cache\n'
+        + '            ~/.cargo/git/db\n            .cargo-target\n          key: '));
+      assert.doesNotMatch(cache, /registry\/src|git\/checkouts|~\/\.cargo\/(?:registry|git)\n/u);
       assert.doesNotMatch(cache, /restore-keys:|rust-tests-v2|enableCrossOsArchive/u);
     }
   }
 });
 
-test('only self-hosted Rust children use restore-only caches while hosted saves remain intact', () => {
+test('Rust children save cargo caches only from hosted main; self-hosted runs and other refs restore only', () => {
   const pin = '55cc8345863c7cc4c66a329aec7e433d2d1c52a9';
   for (const item of children) {
     const restore = step(item.key, 'Restore cargo cache without saving');
     const hosted = step(item.key, 'Restore cargo cache');
-    assert.match(restore, /^        if: runner\.environment == 'self-hosted'$/mu);
-    assert.match(hosted, /^        if: runner\.environment == 'github-hosted'$/mu);
     assert.ok(restore.includes(`        uses: actions/cache/restore@${pin} # v6.1.0\n`));
     assert.ok(hosted.includes(`        uses: actions/cache@${pin} # v6.1.0\n`));
+    // Same key and paths (the cache version derives from the paths), so PRs
+    // restore exactly the entry main saved.
     assert.equal(restore.split('        with:\n')[1], hosted.split('        with:\n')[1]);
     assert.equal((job(item.key).match(/uses: actions\/cache(?:\/\w+)?@/gu) ?? []).length, 2);
     assert.doesNotMatch(job(item.key), /actions\/cache\/save@|continue-on-error|save-always|lookup-only/u);
-    const enabled = (text, environment) => vm.runInNewContext(
-      text.match(/^        if: (.+)$/mu)[1], { runner: { environment } }, { timeout: 1000 });
-    for (const environment of ['self-hosted', 'github-hosted', '', 'unknown']) {
-      assert.equal(enabled(restore, environment), environment === 'self-hosted');
-      assert.equal(enabled(hosted, environment), environment === 'github-hosted');
-    }
+    assertMainOnlySave(restore, hosted, item.key);
     const cargoStep = item.key.startsWith('rust-check-') ? 'Check public Rust package' : 'Run database-free Rust test suite';
     assert.ok(job(item.key).indexOf(restore) < job(item.key).indexOf(step(item.key, cargoStep)));
   }
-  assert.equal((source.match(/uses: actions\/cache\/restore@/gu) ?? []).length, 10);
+  assert.equal((source.match(/uses: actions\/cache\/restore@/gu) ?? []).length, 11);
+  // Ten Rust saves plus the migration-image save; no pull request can reach one.
+  assert.equal(assertNoPullRequestCacheSave(source, 'build.yml'), 11);
 });
 
 test('the restore-only mitigation preserves every other byte of the reviewed Build workflow', () => {
   assert.equal((source.match(/ -o DPkg::Lock::Timeout=120/g) ?? []).length,10);
-  // Undo only the separately tested cancelled-main aggregate guards as well.
-  let normalized = source.replaceAll(aggregateIf, '    if: ${{ always() }}')
+  // Start from the bytes before main-only saves and trimmed cargo paths (their
+  // finite inverse is exact), then undo the separately tested cancelled-main
+  // aggregate guards as well.
+  const reviewed = withoutMainOnlyCaches('build.yml', source);
+  let normalized = reviewed.replaceAll(aggregateIf, '    if: ${{ always() }}')
     .replaceAll(' -o DPkg::Lock::Timeout=120','').replace(agentLinkerDefault, '');
   for (const item of children) {
-    const restore = step(item.key, 'Restore cargo cache without saving');
-    const hosted = step(item.key, 'Restore cargo cache');
+    const restore = step(item.key, 'Restore cargo cache without saving', reviewed);
+    const hosted = step(item.key, 'Restore cargo cache', reviewed);
     normalized = normalized.replace(restore + '\n', '').replace(hosted,
       hosted.replace("        if: runner.environment == 'github-hosted'\n", ''));
   }
