@@ -4276,8 +4276,12 @@ fn should_persist_runtime_alert_conversation_message(
 /// A reconnect refused by the team's hosted runtime limit is a wait, not a
 /// failed startup: the queued request sends by itself once one of the team's
 /// runtimes stops. The Studio already words it this way from the reconnect
-/// code, but the stored content is what the CLI, history and the agent's own
-/// context read, so it has to say the same thing.
+/// code, but the stored content is what the CLI and the conversation history
+/// read, so it has to say the same thing. The agent's leased history leaves
+/// these dispatch alerts out (`should_include_message_in_agent_history`): the
+/// jobs they held back run only once a runtime leases them, so the alert is
+/// stale by the time an agent could read it. A scheduled run's launch failure
+/// is not one of them and stays.
 fn runtime_alert_message(
     reason: &str,
     terminal_alert: bool,
@@ -4328,7 +4332,7 @@ fn runtime_alert_fallback_message(reason: &str, terminal_alert: bool) -> &'stati
     }
 }
 
-fn build_runtime_alert_conversation_metadata(
+pub(crate) fn build_runtime_alert_conversation_metadata(
     details: JsonValue,
     primary_agent_metadata: Option<JsonValue>,
 ) -> JsonValue {
