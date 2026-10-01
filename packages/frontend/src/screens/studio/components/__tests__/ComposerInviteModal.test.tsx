@@ -261,6 +261,26 @@ describe("ComposerInviteModal", () => {
     );
   });
 
+  it.each([false, true])(
+    "labels the access-granting link as an invitation (ready: %s)",
+    async (ready) => {
+      if (ready) {
+        mocks.inviteLinks = [
+          { acceptPath: "/invite?token=example", id: "link-1", role: "builder" },
+        ];
+      }
+      await act(async () => root.render(<ComposerInviteModal {...createProps()} />));
+
+      const copyButton = document.querySelector<HTMLElement>(
+        '[data-testid="composer-invite-copy-link"]',
+      );
+      const linkRow = copyButton?.parentElement?.parentElement;
+      expect(linkRow?.querySelector("p")?.textContent).toBe("Invite link");
+      expect(linkRow?.textContent).toContain(ready ? "Ready" : "Create");
+      expect(copyButton?.textContent).toBe("Copy");
+    },
+  );
+
   it("shows visible confirmation after copying an edit-access link", async () => {
     mocks.createLink.mockResolvedValue({
       link: {
