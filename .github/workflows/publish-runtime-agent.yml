@@ -167,8 +167,10 @@ jobs:
           || matrix.runner }}
     # Cache-hit cells normally finish in under 15 minutes, but observed cold
     # Rust rebuilds can approach an hour. Keep a bounded 75-minute path while
-    # still preventing a wedged BuildKit worker from consuming six hours.
-    timeout-minutes: 75
+    # still preventing a wedged BuildKit worker from consuming six hours. The
+    # extra 16 minutes cover the layer cache export's own bound, so a slow
+    # export cannot time out a cell that has already published its image.
+    timeout-minutes: 91
     permissions:
       contents: read
       packages: write
@@ -496,6 +498,8 @@ jobs:
       # arguments and labels, so it resolves from this job's BuildKit state. It
       # creates no image, tag or local copy and cannot change published bytes.
       # A failed or slow export costs a later release a cold build, nothing more.
+      # ignore-error makes BuildKit report a failed cache write only in the
+      # progress log, so the step also warns when that log shows an error.
       - name: Export the scanned build's layer cache
         shell: bash
         env:
@@ -507,8 +511,11 @@ jobs:
         run: |
           set -euo pipefail
           status=0
+          log="$(mktemp)"
+          trap 'rm -f "$log"' EXIT
           timeout --kill-after=1m 15m docker buildx build \
             --builder "$BUILDER" \
+            --progress=plain \
             --platform "$PLATFORM" \
             --file docker/runtime/Dockerfile \
             --target "$TARGET" \
@@ -521,9 +528,11 @@ jobs:
             --sbom=false \
             --output type=cacheonly \
             --cache-to "type=registry,ref=${CACHE_REF},mode=max,oci-mediatypes=true,image-manifest=true,ignore-error=true" \
-            . || status=$?
+            . 2>&1 | tee "$log" || status=$?
           if [[ "$status" != "0" ]]; then
             echo "::warning::The layer cache export stopped with status ${status}. The published image is unaffected; the next release may build cold."
+          elif grep -Eq '^#[0-9]+ ERROR: ' "$log"; then
+            echo "::warning::The layer cache export reported an error (see the ERROR lines above). The published image is unaffected; the next release may build cold."
           fi
 
   assemble-release-manifest:

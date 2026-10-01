@@ -64,6 +64,8 @@ const runtimeLayerCacheExport = `      # Write the layer cache only after this c
       # arguments and labels, so it resolves from this job's BuildKit state. It
       # creates no image, tag or local copy and cannot change published bytes.
       # A failed or slow export costs a later release a cold build, nothing more.
+      # ignore-error makes BuildKit report a failed cache write only in the
+      # progress log, so the step also warns when that log shows an error.
       - name: Export the scanned build's layer cache
         shell: bash
         env:
@@ -75,8 +77,11 @@ const runtimeLayerCacheExport = `      # Write the layer cache only after this c
         run: |
           set -euo pipefail
           status=0
+          log="$(mktemp)"
+          trap 'rm -f "$log"' EXIT
           timeout --kill-after=1m 15m docker buildx build \\
             --builder "$BUILDER" \\
+            --progress=plain \\
             --platform "$PLATFORM" \\
             --file docker/runtime/Dockerfile \\
             --target "$TARGET" \\
@@ -89,9 +94,11 @@ const runtimeLayerCacheExport = `      # Write the layer cache only after this c
             --sbom=false \\
             --output type=cacheonly \\
             --cache-to "type=registry,ref=\${CACHE_REF},mode=max,oci-mediatypes=true,image-manifest=true,ignore-error=true" \\
-            . || status=$?
+            . 2>&1 | tee "$log" || status=$?
           if [[ "$status" != "0" ]]; then
             echo "::warning::The layer cache export stopped with status \${status}. The published image is unaffected; the next release may build cold."
+          elif grep -Eq '^#[0-9]+ ERROR: ' "$log"; then
+            echo "::warning::The layer cache export reported an error (see the ERROR lines above). The published image is unaffected; the next release may build cold."
           fi
 `;
 const registryLayerCacheDeltas = {
@@ -102,6 +109,8 @@ const registryLayerCacheDeltas = {
       '            --label "org.opencontainers.image.revision=${RELEASE_COMMIT}" \\\n            --cache-from "type=gha,scope=production-${CACHE_KEY}" \\\n            --cache-to "type=gha,scope=production-${CACHE_KEY},mode=max${CACHE_EXPORT_OPTIONS}" \\\n            --load \\\n'],
   ],
   "publish-runtime-agent.yml": [
+    ["    # still preventing a wedged BuildKit worker from consuming six hours. The\n    # extra 16 minutes cover the layer cache export's own bound, so a slow\n    # export cannot time out a cell that has already published its image.\n    timeout-minutes: 91\n",
+      "    # still preventing a wedged BuildKit worker from consuming six hours.\n    timeout-minutes: 75\n"],
     ["      - name: Set up Docker Buildx\n        id: buildx\n", "      - name: Set up Docker Buildx\n"],
     ["      # rebuild that could change bytes.\n      # The layer cache is only read here, anonymously, so this build needs no\n      # registry credentials; it is written after publication, below. The final\n      # stage (the matrix target) never comes from the cache, so its OS and npm\n      # packages are current when the scan runs.\n",
       "      # rebuild that could change bytes.\n"],

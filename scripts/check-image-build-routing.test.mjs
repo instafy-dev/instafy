@@ -184,6 +184,15 @@ test("the runtime cache export is bounded and optional on every runner, without 
   assert.match(exported, /ignore-error=true/u);
   assert.match(exported, /\|\| status=\$\?\n          if \[\[ "\$status" != "0" \]\]; then\n            echo "::warning::/u);
   assert.doesNotMatch(runtime.slice(runtime.indexOf("      - name: Build audit image\n")), /runner\.environment/u);
+  // The export runs after the cell has published, so its whole bound (timeout
+  // plus kill grace) is added to the job budget: a slow export must end in a
+  // warning, never in a job timeout that fails the release after the push.
+  const [, minutes, grace] = exported.match(/timeout --kill-after=(\d+)m (\d+)m docker buildx build/u).map(Number);
+  const job = runtime.slice(runtime.indexOf("\n  build-scan-push:\n"), runtime.indexOf("\n  assemble-release-manifest:\n"));
+  assert.deepEqual([...job.matchAll(/^    timeout-minutes: (\d+)$/gmu)].map((match) => Number(match[1])), [75 + minutes + grace]);
+  assert.match(exported, /--progress=plain/u);
+  assert.match(exported, /2>&1 \| tee "\$log" \|\| status=\$\?\n/u);
+  assert.match(exported, /elif grep -Eq '\^#\[0-9\]\+ ERROR: ' "\$log"; then\n            echo "::warning::/u);
   for (const file of files.slice(0, 2)) {
     assert.doesNotMatch(read(file), /keep-state:|cleanup: false|continue-on-error:/u);
     assert.notEqual(reconstruct(file, read(file).replace("--exit-code 1", "--exit-code 0")),

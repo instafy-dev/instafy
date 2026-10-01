@@ -86,11 +86,11 @@ function assertPinnedChecksumArgument(source, name, expected, relativePath) {
   assert.equal(actual, expected, `${relativePath} has an unexpected ${name}`);
 }
 
-// One workflow step, from its name line to the next step or job.
+// One workflow step, from its name line to the next step (of any form) or job.
 function workflowStep(source, name) {
   const start = source.indexOf(`      - name: ${name}\n`);
   assert.ok(start >= 0, `workflow is missing step ${name}`);
-  const next = source.slice(start + 1).search(/\n(?:      - name: |  [\w-]+:\n)/u);
+  const next = source.slice(start + 1).search(/\n(?:      - |  [\w-]+:\n)/u);
   return next < 0 ? source.slice(start) : source.slice(start, start + next + 2);
 }
 
@@ -558,9 +558,11 @@ test("runtime Rust dependencies compile into a layer the publisher's layer cache
   // written only after the scanned image is pushed and recorded.
   // Trust boundary: unlike an Actions cache scoped to main, the tag can be
   // overwritten by any workflow run of this repository, on any branch, that
-  // holds packages: write, and by package administrators. Fork pull requests
-  // and pull_request_target runs cannot write it. The image scan would not
-  // detect layers seeded that way; docs/Testing.md describes how to reset it.
+  // holds packages: write, and by package administrators. Fork pull request
+  // runs get a read-only token; a pull_request_target workflow would run with
+  // this repository's token, so the next test keeps every pull-request-triggered
+  // workflow without packages: write. The image scan would not detect layers
+  // seeded that way; docs/Testing.md describes how to reset it.
   const workflow = read(".github/workflows/publish-runtime-agent.yml");
   const services = read(".github/workflows/publish-production-services.yml");
   const cacheRef =
@@ -594,6 +596,29 @@ test("runtime Rust dependencies compile into a layer the publisher's layer cache
     [cacheRef, "${CACHE_REF}"],
   );
   assert.doesNotMatch(workflow, /instafy-runtime-agent:[^\s"]*cache|ref=ghcr\.io\/instafy-dev\/instafy-runtime-agent/u);
+});
+
+test("no pull-request-triggered workflow can write packages, including the layer cache", () => {
+  // The cache's trust boundary relies on this: a pull_request_target workflow
+  // runs with this repository's token, and any workflow that requested
+  // packages: write could overwrite the cache tag.
+  const directory = path.join(repositoryRoot, ".github/workflows");
+  const writers = [];
+  for (const file of fs.readdirSync(directory).filter((name) => /\.ya?ml$/u.test(name)).sort()) {
+    const source = read(`.github/workflows/${file}`);
+    const trigger = source.match(/^(?:on|"on"):(.*\n(?:(?:[ #].*)?\n)*)/mu);
+    assert.ok(trigger, `${file} has no top-level on:`);
+    const canWrite = /\bpackages: write\b|\bwrite-all\b/u.test(source);
+    if (canWrite) writers.push(file);
+    if (/\bpull_request(?:_target)?\b/u.test(trigger[1])) {
+      assert.ok(!canWrite, `${file} runs for pull requests and must not request packages: write`);
+    }
+  }
+  assert.deepEqual(writers, [
+    "mirror-supabase-images.yml",
+    "publish-production-services.yml",
+    "publish-runtime-agent.yml",
+  ]);
 });
 
 test("each release rebuilds its final stage while the layer cache keeps the compiled builders", () => {
@@ -689,6 +714,15 @@ test("runtime publication scans each native architecture before registry login",
   // Nothing before login writes to a registry: no push, cache export or
   // credential-bearing step.
   assert.doesNotMatch(beforeLogin, /cache-to|--push\b|push: true|docker push|docker\/login-action/u);
+  // The build job holds no credential before login, so the registry cache read
+  // stays anonymous. (The authorize job reads the API with its own token.)
+  const jobStart = source.indexOf("\n  build-scan-push:\n");
+  assert.ok(jobStart > 0 && jobStart < login);
+  assert.doesNotMatch(
+    source.slice(jobStart, login),
+    /docker login|secrets\.|github\.token|GITHUB_TOKEN|registry-auth|DOCKER_AUTH_CONFIG|DOCKER_CONFIG|credHelpers|credsStore/u,
+    "no build-scan-push step before Login to GHCR may hold or configure a credential",
+  );
   const afterLogin = source.slice(login);
   assert.doesNotMatch(
     afterLogin,
@@ -772,6 +806,7 @@ test("the layer cache export repeats the scanned build exactly and can only warn
   const expected = [
     "buildx", "build",
     "--builder", values.BUILDER,
+    "--progress=plain",
     "--platform", values.PLATFORM,
     "--file", input("file"),
     "--target", values.TARGET,
@@ -797,12 +832,19 @@ test("the layer cache export repeats the scanned build exactly and can only warn
     fs.writeFileSync(path.join(bin, "timeout"),
       '#!/bin/sh\nprintf \'%s\\n\' "$@" > "$FAKE_LOG.timeout"\nshift 2\nexec "$@"\n', { mode: 0o755 });
     fs.writeFileSync(path.join(bin, "docker"),
-      '#!/bin/sh\nfor arg in "$@"; do printf \'%s\\n\' "$arg"; done > "$FAKE_LOG.docker"\nexit "$FAKE_DOCKER_STATUS"\n',
+      '#!/bin/sh\nfor arg in "$@"; do printf \'%s\\n\' "$arg"; done > "$FAKE_LOG.docker"\n' +
+        'printf \'%s\' "$FAKE_DOCKER_PROGRESS" >&2\nexit "$FAKE_DOCKER_STATUS"\n',
       { mode: 0o755 });
-    const run = (status) => {
+    const run = (status, progress = "") => {
       const result = spawnSync("bash", ["-c", script], {
         encoding: "utf8",
-        env: { ...values, PATH: `${bin}:${process.env.PATH}`, FAKE_LOG: log, FAKE_DOCKER_STATUS: String(status) },
+        env: {
+          ...values,
+          PATH: `${bin}:${process.env.PATH}`,
+          FAKE_LOG: log,
+          FAKE_DOCKER_STATUS: String(status),
+          FAKE_DOCKER_PROGRESS: progress,
+        },
       });
       return {
         status: result.status,
@@ -822,6 +864,16 @@ test("the layer cache export repeats the scanned build exactly and can only warn
       assert.equal(failed.status, 0, `export status ${status} must not fail the job`);
       assert.match(failed.stdout, new RegExp(`^::warning::.*status ${status}\\b`, "mu"));
     }
+    // ignore-error=true lets the build succeed when only the cache write
+    // failed; BuildKit then reports it as an ERROR line in the plain progress
+    // log, and the step must still warn.
+    const clean = run(0, "#14 exporting cache to registry\n#14 DONE 2.1s\n");
+    assert.equal(clean.status, 0);
+    assert.doesNotMatch(clean.stdout, /::warning::/u);
+    const denied = run(0, "#14 exporting cache to registry\n#14 ERROR: failed to push: denied\n");
+    assert.equal(denied.status, 0);
+    assert.match(denied.stdout, /^#14 ERROR: failed to push: denied$/mu, "the progress log stays in the step log");
+    assert.match(denied.stdout, /^::warning::The layer cache export reported an error\b/mu);
   } finally {
     fs.rmSync(bin, { recursive: true, force: true });
   }
