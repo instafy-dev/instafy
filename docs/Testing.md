@@ -421,7 +421,7 @@ pull requests and manual runs retain always-run, fail-closed aggregation.
 | Rust check runtime provider | Provider service `cargo check --locked --tests` | `public-rust-check-provider` |
 | Rust check tunnel broker | Tunnel workspace `cargo check --locked --tests` | `public-rust-check-tunnel` |
 | Rust test runtime contracts | Complete runtime-contracts suite | `public-rust-test-contracts` |
-| Rust test runtime agent | Agent `--no-run`, followed by `--lib --test controller_client -- --test-threads=1` | `public-rust-test-agent` |
+| Rust test runtime agent | Codex code-mode host build, then agent `--no-run`, `--lib --test controller_client --test proxy_retry_budget`, `proxy_retry_budget` again with `INSTAFY_TEST_CODEX_MODEL` set to `gpt-5.6-sol` and to `gpt-5.5`, and `proxy_integration codex_read_reference_`, each with `--test-threads=1` | `public-rust-test-agent` |
 | Rust test OpenAI proxy | Complete openai-proxy-server suite | `public-rust-test-proxy` |
 | Rust test origin server | Complete origin-http-server suite | `public-rust-test-origin` |
 | Rust test git service | Complete git-service suite | `public-rust-test-git` |
@@ -452,7 +452,7 @@ failure, child cancellation or aggregate failure.
 The existing unused-toolchain disk cleanup runs only on
 GitHub-hosted images, never against a self-hosted host or guest image.
 
-Only the self-hosted Linux `Rust test runtime agent` Cargo step defaults unset
+Only the self-hosted Linux `Rust test runtime agent` Cargo test step defaults unset
 `RUSTFLAGS` to `-C link-arg=-fuse-ld=lld`; its scoped prerequisites already install
 and verify `lld`. Explicit flags, including an empty opt-out, are preserved.
 Hosted and non-Linux execution and other Rust children are unchanged. The default
