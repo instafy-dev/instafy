@@ -6,6 +6,7 @@ import { Input, type InputProps } from "../../../components/Input";
 import { StudioPopover } from "../../../components/aria/StudioPopover";
 import { StudioListBox, StudioListBoxItem } from "../../../components/aria/StudioListBox";
 import { BrowserToolsOverlayContext } from "./BrowserToolsPopover";
+import { BrowserAddressMenuAnchorContext } from "./BrowserChromeShell";
 import { useBrowserAddressHistory, type BrowserAddressHistoryEntry } from "./browserAddressHistory";
 
 type BrowserAddressFieldProps = Pick<InputProps, "value" | "placeholder" | "disabled" | "onBlur"> & {
@@ -82,17 +83,22 @@ const AddressControls = forwardRef<HTMLInputElement, Pick<BrowserAddressFieldPro
   const id = useId();
   const state = useContext(ComboBoxStateContext);
   const registerOverlay = useContext(BrowserToolsOverlayContext);
+  const menuAnchor = useContext(BrowserAddressMenuAnchorContext);
   const open = Boolean(state?.isOpen && entries.length && !inputProps.disabled);
   useLayoutEffect(() => open ? registerOverlay?.() : undefined, [open, registerOverlay]);
 
   const menu = <StudioPopover isNonModal isOpen={open} placement="bottom start" offset={2}
-    className="@container/address-suggestions z-[90] w-[max(var(--trigger-width),18rem)] max-w-[calc(100vw-1.5rem)] p-1"
+    triggerRef={menuAnchor?.ref}
+    crossOffset={menuAnchor ? 8 : 0}
+    containerPadding={8}
+    style={menuAnchor && menuAnchor.width > 0 ? { width: Math.max(0, menuAnchor.width - 16) } : undefined}
+    className="@container/address-suggestions z-[90] w-[max(var(--trigger-width),18rem)] max-w-[calc(100vw-1rem)] p-1"
     data-browser-session-safe-zone="true">
     <StudioListBox<BrowserAddressHistoryEntry> aria-label="Recent sites"
       onPointerDownCapture={() => { navigateSelection.current = true; }}
       onClickCapture={() => { navigateSelection.current = true; }}>
       {entry => <StudioListBoxItem id={entry.url} textValue={entry.url}
-        className="min-h-11 !justify-start gap-3 overflow-hidden">
+        className="min-h-11 @[28rem]/address-suggestions:pointer-fine:min-h-8 !justify-start gap-2 overflow-hidden">
         <Clock aria-hidden="true" className="h-4 w-4 shrink-0 text-slate-400" />
         <div className="flex min-w-0 flex-1 flex-col @[28rem]/address-suggestions:flex-row @[28rem]/address-suggestions:items-baseline @[28rem]/address-suggestions:gap-2">
           <Text slot="label" className="min-w-0 truncate leading-4 @[28rem]/address-suggestions:max-w-[60%] @[28rem]/address-suggestions:shrink-0">{entry.title || new URL(entry.url).hostname}</Text>
@@ -100,10 +106,12 @@ const AddressControls = forwardRef<HTMLInputElement, Pick<BrowserAddressFieldPro
         </div>
       </StudioListBoxItem>}
     </StudioListBox>
-    <Button slot={null} size="xs" variant="ghost" className="mt-0.5 w-full justify-end text-slate-500 dark:text-slate-400"
-      onPress={() => { navigateSelection.current = false; clear(); state?.close(); }}>
-      Clear recent sites
-    </Button>
+    <div className="flex justify-end">
+      <Button slot={null} size="xs" variant="ghost" className="px-2.5 text-slate-500 dark:text-slate-400"
+        onPress={() => { navigateSelection.current = false; clear(); state?.close(); }}>
+        Clear recent sites
+      </Button>
+    </div>
   </StudioPopover>;
 
   // React Aria builds the option collection before mounting its state provider.

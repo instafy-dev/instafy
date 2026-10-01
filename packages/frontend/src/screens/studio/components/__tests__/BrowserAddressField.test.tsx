@@ -3,6 +3,7 @@ import { act, createRef, useState } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { BrowserAddressField } from "../BrowserAddressField";
+import { BrowserChromeShell } from "../BrowserChromeShell";
 import { BrowserToolsOverlayContext } from "../BrowserToolsPopover";
 
 const { clear, history } = vi.hoisted(() => ({
@@ -67,6 +68,55 @@ describe("BrowserAddressField", () => {
     expect(document.activeElement).toBe(input());
     expect(input().getAttribute("aria-expanded")).toBe("true");
     expect(registerOverlay).toHaveBeenCalledOnce();
+  });
+
+  it("fits compact suggestions to the toolbar width and returns to address anchoring when expanded", async () => {
+    let toolbarWidth = 320;
+    const observers: Array<{ callback: ResizeObserverCallback; targets: Set<Element> }> = [];
+    vi.stubGlobal("ResizeObserver", class {
+      targets = new Set<Element>();
+      constructor(public callback: ResizeObserverCallback) { observers.push(this); }
+      observe(target: Element) { this.targets.add(target); }
+      unobserve(target: Element) { this.targets.delete(target); }
+      disconnect() { this.targets.clear(); }
+    });
+    const originalBounds = HTMLElement.prototype.getBoundingClientRect;
+    vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockImplementation(function (this: HTMLElement) {
+      if (this.getAttribute("data-testid") !== "compact-browser-toolbar") return originalBounds.call(this);
+      return { x: 32, y: 64, left: 32, top: 64, right: 32 + toolbarWidth, bottom: 112,
+        width: toolbarWidth, height: 48, toJSON: () => ({}) };
+    });
+    const render = (compact: boolean) => root.render(
+      <BrowserChromeShell compact={compact} label="Browser controls" navigation={null}
+        address={<Fixture />} testId="compact-browser-toolbar" />,
+    );
+    await act(async () => render(true));
+    await type("");
+    const popup = () => document.querySelector<HTMLElement>('[data-studio-popover]')!;
+    expect(popup().style.width).toBe("304px");
+
+    const toolbar = container.querySelector<HTMLElement>('[data-testid="compact-browser-toolbar"]')!;
+    toolbarWidth = 400;
+    await act(async () => {
+      for (const observer of observers) {
+        if (observer.targets.has(toolbar)) {
+          const box = { inlineSize: toolbarWidth, blockSize: 48 };
+          observer.callback([{ target: toolbar, contentRect: toolbar.getBoundingClientRect(),
+            borderBoxSize: [box], contentBoxSize: [box], devicePixelContentBoxSize: [box] }],
+            observer as unknown as ResizeObserver);
+        }
+      }
+    });
+    expect(popup().style.width).toBe("384px");
+    const otherToolbarAction = [...toolbar.querySelectorAll("button")].find(button => button.textContent === "Outside")!;
+    await act(async () => otherToolbarAction.focus());
+    expect(document.querySelector('[data-studio-popover]')).toBeNull();
+    await act(async () => input().focus());
+
+    await act(async () => render(false));
+    expect(popup().style.width).toBe("");
+    expect(options()).toHaveLength(3);
+    expect(document.activeElement).toBe(input());
   });
 
   it("filters titles and addresses and returns to recent sites when cleared", async () => {
