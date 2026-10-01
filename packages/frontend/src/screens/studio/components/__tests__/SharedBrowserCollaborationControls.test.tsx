@@ -167,12 +167,25 @@ describe("SharedBrowserCollaborationControls", () => {
     expect(action()?.getAttribute("aria-label")).toBe("Request control");
     await click(action()!);
     expect(props.onRequestControl).toHaveBeenCalledOnce();
+    const dialog = compact ? document.querySelector('[role="dialog"][aria-label="Browser participants and control"]') : null;
+    if (compact) expect(document.activeElement).toBe(dialog);
 
     await render({ client: { ...peerOwns, state: { ...peerOwns.state!, requests: ["self"] } } });
     expect(action()?.disabled).toBe(true);
     expect(action()?.textContent).toBe("Control requested");
     await click(action()!);
     expect(props.onRequestControl).toHaveBeenCalledOnce();
+    if (compact) {
+      expect(document.activeElement).toBe(dialog);
+      await act(async () => {
+        document.activeElement!.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true }));
+        document.activeElement!.dispatchEvent(new KeyboardEvent("keyup", { key: "Escape", bubbles: true, cancelable: true }));
+      });
+      await finishFocusRestoration();
+      expect(action()).toBeNull();
+      expect(trigger().getAttribute("aria-expanded")).toBe("false");
+      expect(document.activeElement).toBe(trigger());
+    }
   });
 
   it("surfaces an incoming request on the compact trigger and grants the requested participant", async () => {
