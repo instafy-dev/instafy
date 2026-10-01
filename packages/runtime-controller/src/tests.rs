@@ -21711,6 +21711,7 @@ async fn dispatch_prompt_persists_canonical_shared_browser_authority() -> anyhow
             "browserTransport": "shared",
             "browserConsentVersion": 1,
             "browserRuntimeId": runtime_id,
+            "browserPageId": "PAGE_target-1",
             "runtimeExpectations": {
                 "workspaceFileChanges": false,
                 "commandExecution": false,
@@ -21824,6 +21825,7 @@ async fn dispatch_prompt_persists_canonical_shared_browser_authority() -> anyhow
     assert_eq!(metadata["browserTransport"], "shared");
     assert_eq!(metadata["browserConsentVersion"], 1);
     assert_eq!(metadata["browserRuntimeId"], runtime_id.to_string());
+    assert_eq!(metadata["browserPageId"], "PAGE_target-1");
     assert_eq!(metadata["writeIntent"], false);
     assert_eq!(metadata["writeScope"]["mode"], "read_only");
     assert_eq!(metadata["writeScope"]["ownedPaths"], json!([]));
