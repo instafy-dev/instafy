@@ -1,5 +1,7 @@
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 
@@ -82,6 +84,14 @@ function assertPinnedChecksumArgument(source, name, expected, relativePath) {
     `${relativePath} must give ${name} a full SHA-256 default`,
   );
   assert.equal(actual, expected, `${relativePath} has an unexpected ${name}`);
+}
+
+// One workflow step, from its name line to the next step or job.
+function workflowStep(source, name) {
+  const start = source.indexOf(`      - name: ${name}\n`);
+  assert.ok(start >= 0, `workflow is missing step ${name}`);
+  const next = source.slice(start + 1).search(/\n(?:      - name: |  [\w-]+:\n)/u);
+  return next < 0 ? source.slice(start) : source.slice(start, start + next + 2);
 }
 
 function assertOrdered(source, label, ...needles) {
@@ -539,14 +549,79 @@ test("runtime Rust dependencies compile into a layer the publisher's layer cache
   );
   assert.ok(build[0].includes("--mount=type=cache,target=/src/packages/runtime-agent/target,from=builder-deps,"));
 
-  // One GitHub Actions cache per image and architecture cell, never a registry
-  // cache that would need a login before the pre-push scan.
+  // One registry layer cache per image and architecture cell, in a dedicated
+  // package that is never the release package. This deliberately reverses the
+  // earlier "never a registry cache" rule (#409): one release's mode=max export
+  // does not fit the repository's GitHub Actions cache, so it evicted itself
+  // and every CI cache. The build before the scan only reads the cache,
+  // anonymously, so the scan still precedes any registry login; the cache is
+  // written only after the scanned image is pushed and recorded.
+  // Trust boundary: unlike an Actions cache scoped to main, the tag can be
+  // overwritten by any workflow run of this repository, on any branch, that
+  // holds packages: write, and by package administrators. Fork pull requests
+  // and pull_request_target runs cannot write it. The image scan would not
+  // detect layers seeded that way; docs/Testing.md describes how to reset it.
   const workflow = read(".github/workflows/publish-runtime-agent.yml");
-  const scope = "scope=publish-runtime-agent-${{ matrix.flavor }}-${{ matrix.architecture }}";
-  assert.ok(workflow.includes(`          cache-from: type=gha,${scope}\n`));
-  assert.ok(workflow.includes(`          cache-to: type=gha,${scope},mode=max`));
-  assert.equal([...workflow.matchAll(/^\s+cache-(?:from|to):/gmu)].length, 2);
-  assert.doesNotMatch(workflow, /type=registry/u);
+  const services = read(".github/workflows/publish-production-services.yml");
+  const cacheRef =
+    "ghcr.io/instafy-dev/instafy-build-cache:publish-runtime-agent-${{ matrix.flavor }}-${{ matrix.architecture }}";
+  // Services build without a layer cache: their Actions-cache flags were inert,
+  // and a registry cache would publish their private image layers.
+  for (const source of [workflow, services]) assert.doesNotMatch(source, /type=gha/u);
+  assert.doesNotMatch(services, /cache-(?:from|to)\b|type=registry/u);
+
+  const login = workflow.indexOf("      - name: Login to GHCR\n");
+  const audit = workflowStep(workflow, "Build audit image");
+  const exported = workflowStep(workflow, "Export the scanned build's layer cache");
+  assert.ok(login > 0 && workflow.indexOf(audit) < login && workflow.indexOf(exported) > login);
+  assert.deepEqual(
+    [...workflow.matchAll(/(?:^|\s)(--)?cache-(from|to)\b/gmu)].map((match) => `${match[1] ?? ""}cache-${match[2]}`),
+    ["cache-from", "--cache-to"],
+    "one cache read in the audit build and one cache write in the export, nothing else",
+  );
+  const cacheFrom = `          cache-from: type=registry,ref=${cacheRef}\n`;
+  assert.equal(workflow.split(cacheFrom).length, 2);
+  assert.ok(audit.includes(cacheFrom), "the cache is read only by the build before the scan");
+  assert.ok(exported.includes(`          CACHE_REF: ${cacheRef}\n`));
+  assert.ok(
+    exported.includes(
+      '--cache-to "type=registry,ref=${CACHE_REF},mode=max,oci-mediatypes=true,image-manifest=true,ignore-error=true"',
+    ),
+    "the export keeps every intermediate layer (mode=max) and never fails a release",
+  );
+  assert.deepEqual(
+    [...workflow.matchAll(/type=registry,ref=([^,"\n]+)/gu)].map((match) => match[1]),
+    [cacheRef, "${CACHE_REF}"],
+  );
+  assert.doesNotMatch(workflow, /instafy-runtime-agent:[^\s"]*cache|ref=ghcr\.io\/instafy-dev\/instafy-runtime-agent/u);
+});
+
+test("each release rebuilds its final stage while the layer cache keeps the compiled builders", () => {
+  // A persistent cache would keep a final stage's apt and npm layers until
+  // their inputs change. The scan ignores unfixed findings, so a fix published
+  // upstream would then fail every release until the cache was reset. Filter
+  // only the final stage: the builder stages (the cargo-chef cook above all)
+  // are what the cache is for.
+  const workflow = read(".github/workflows/publish-runtime-agent.yml");
+  const audit = workflowStep(workflow, "Build audit image");
+  assert.match(audit, /^          target: \$\{\{ matrix\.target \}\}$/mu);
+  assert.match(audit, /^          no-cache-filters: \$\{\{ matrix\.target \}\}$/mu);
+  assert.match(workflowStep(workflow, "Scan audit image"), /--ignore-unfixed/u);
+  const targets = [...new Set([...workflow.matchAll(/^            target: (\S+)$/gmu)].map((match) => match[1]))];
+  assert.deepEqual(targets, ["runtime", "runtime-webdev"]);
+
+  const dockerfile = read("docker/runtime/Dockerfile");
+  const stageNames = new Set(
+    [...dockerfile.matchAll(/^FROM(?: --platform=\S+)? \S+ AS (\S+)$/gmu)].map((match) => match[1]),
+  );
+  for (const target of targets) {
+    const stage = dockerfileStage(dockerfile, target);
+    const base = stage.match(/^FROM(?: --platform=\S+)? (\S+) AS /u)[1];
+    assert.ok(!stageNames.has(base), `${target} must not build on another stage the filter would also rebuild`);
+    assert.match(stage, /apt-get install/u, `${target} installs the OS packages the scan must see current`);
+    assert.match(stage, /npm install -g/u, `${target} installs the npm packages the scan must see current`);
+    assert.doesNotMatch(stage, /\bcargo (?:build|chef)\b|\bgo build\b/u, `${target} must not compile`);
+  }
 });
 
 test("runtime publication scans each native architecture before registry login", () => {
@@ -611,12 +686,37 @@ test("runtime publication scans each native architecture before registry login",
     "tar -xzf",
     'test "$(trivy --version',
   );
+  // Nothing before login writes to a registry: no push, cache export or
+  // credential-bearing step.
+  assert.doesNotMatch(beforeLogin, /cache-to|--push\b|push: true|docker push|docker\/login-action/u);
   const afterLogin = source.slice(login);
   assert.doesNotMatch(
     afterLogin,
     /docker\/build-push-action/u,
     "publication must not rebuild after the scan gate",
   );
+  // The only build after login is the layer cache export, and it runs only
+  // once the scanned image is pushed and its record uploaded. It writes cache
+  // blobs and nothing else: no image output, push, load or tag.
+  assertOrdered(
+    afterLogin,
+    "runtime cache export",
+    "- name: Push scanned image and record its digest",
+    "- name: Upload immutable architecture record",
+    "- name: Export the scanned build's layer cache",
+    "\n  assemble-release-manifest:\n",
+  );
+  const exported = workflowStep(source, "Export the scanned build's layer cache");
+  assert.equal([...afterLogin.matchAll(/docker buildx build/gu)].length, 1);
+  assert.match(exported, /docker buildx build/u);
+  assert.equal([...exported.matchAll(/--output\b/gu)].length, 1);
+  assert.match(exported, /^            --output type=cacheonly \\$/mu);
+  assert.doesNotMatch(
+    exported,
+    /--push\b|--load\b|--tag\b|(?:^|\s)-[to]\s|push=true|type=(?:image|docker|oci|local|tar)\b|no-cache/mu,
+    "the cache export must not produce, push or load an image, or rebuild a filtered stage",
+  );
+  assert.doesNotMatch(exported, /continue-on-error|^\s+if:/mu);
   assert.doesNotMatch(
     source,
     /docker save/u,
@@ -627,6 +727,104 @@ test("runtime publication scans each native architecture before registry login",
   assert.match(afterLogin, /--metadata-file "\$metadata"/u);
   assert.match(afterLogin, /\.\["containerimage\.descriptor"\]\.digest/u);
   assert.match(afterLogin, /\["linux\/amd64","linux\/arm64"\]/u);
+});
+
+test("the layer cache export repeats the scanned build exactly and can only warn", () => {
+  const workflow = read(".github/workflows/publish-runtime-agent.yml");
+  const audit = workflowStep(workflow, "Build audit image");
+  const exported = workflowStep(workflow, "Export the scanned build's layer cache");
+  const input = (name) => audit.match(new RegExp(`^          ${name}: (.+)$`, "mu"))?.[1];
+  const block = (name) =>
+    audit.match(new RegExp(`^          ${name}: \\|\\n((?:            .+\\n)+)`, "mu"))[1]
+      .split("\n").filter(Boolean).map((line) => line.trim());
+  const env = Object.fromEntries(
+    exported.match(/^        env:\n((?:          [A-Z_]+: .+\n)+)/mu)[1]
+      .split("\n").filter(Boolean).map((line) => line.trim().split(/: (.*)/u).slice(0, 2)),
+  );
+  // The export uses the builder that holds this job's BuildKit state, and the
+  // same target and platform as the audit build.
+  const buildx = workflowStep(workflow, "Set up Docker Buildx");
+  assert.ok(workflow.indexOf(buildx) < workflow.indexOf(audit));
+  assert.match(buildx, /^        id: buildx$/mu);
+  assert.doesNotMatch(buildx, /^          use: false$/mu);
+  assert.equal(input("builder"), undefined, "the audit build uses the builder selected by setup-buildx");
+  assert.deepEqual(env, {
+    BUILDER: "${{ steps.buildx.outputs.name }}",
+    TARGET: input("target"),
+    PLATFORM: input("platforms"),
+    RELEASE_COMMIT: "${{ needs.authorize.outputs.commit_sha }}",
+    CACHE_REF:
+      "ghcr.io/instafy-dev/instafy-build-cache:publish-runtime-agent-${{ matrix.flavor }}-${{ matrix.architecture }}",
+  });
+  assert.equal(input("provenance"), "false");
+  assert.equal(input("sbom"), "false");
+
+  const script = exported.match(/^        run: \|\n((?:(?:          .*)?\n)+)/mu)[1].replace(/^ {10}/gmu, "");
+  // The stubs below must shadow the real tools; an absolute path would not.
+  assert.doesNotMatch(script, /\/(?:docker|timeout)\b/u);
+  const values = {
+    BUILDER: "builder-under-test",
+    TARGET: "runtime-webdev",
+    PLATFORM: "linux/arm64",
+    RELEASE_COMMIT: "a".repeat(40),
+    CACHE_REF: "ghcr.io/instafy-dev/instafy-build-cache:publish-runtime-agent-webdev-arm64",
+  };
+  const expected = [
+    "buildx", "build",
+    "--builder", values.BUILDER,
+    "--platform", values.PLATFORM,
+    "--file", input("file"),
+    "--target", values.TARGET,
+    ...block("build-args").flatMap((arg) => ["--build-arg", arg]),
+    ...block("labels").flatMap((label) => [
+      "--label",
+      label.replaceAll("${{ needs.authorize.outputs.commit_sha }}", values.RELEASE_COMMIT),
+    ]),
+    "--provenance=false",
+    "--sbom=false",
+    "--output", "type=cacheonly",
+    "--cache-to",
+    `type=registry,ref=${values.CACHE_REF},mode=max,oci-mediatypes=true,image-manifest=true,ignore-error=true`,
+    input("context"),
+  ];
+  assert.equal(input("context"), ".");
+
+  const bin = fs.mkdtempSync(path.join(os.tmpdir(), "instafy-cache-export-"));
+  try {
+    const log = path.join(bin, "log");
+    // timeout records its own options and runs the command it bounds; docker
+    // records its argv and exits with the requested status.
+    fs.writeFileSync(path.join(bin, "timeout"),
+      '#!/bin/sh\nprintf \'%s\\n\' "$@" > "$FAKE_LOG.timeout"\nshift 2\nexec "$@"\n', { mode: 0o755 });
+    fs.writeFileSync(path.join(bin, "docker"),
+      '#!/bin/sh\nfor arg in "$@"; do printf \'%s\\n\' "$arg"; done > "$FAKE_LOG.docker"\nexit "$FAKE_DOCKER_STATUS"\n',
+      { mode: 0o755 });
+    const run = (status) => {
+      const result = spawnSync("bash", ["-c", script], {
+        encoding: "utf8",
+        env: { ...values, PATH: `${bin}:${process.env.PATH}`, FAKE_LOG: log, FAKE_DOCKER_STATUS: String(status) },
+      });
+      return {
+        status: result.status,
+        stdout: result.stdout,
+        timeout: fs.readFileSync(`${log}.timeout`, "utf8").split("\n").filter(Boolean),
+        docker: fs.readFileSync(`${log}.docker`, "utf8").split("\n").slice(0, -1),
+      };
+    };
+    const ok = run(0);
+    assert.equal(ok.status, 0);
+    assert.doesNotMatch(ok.stdout, /::warning::/u);
+    assert.deepEqual(ok.docker, expected);
+    assert.deepEqual(ok.timeout.slice(0, 5), ["--kill-after=1m", "15m", "docker", "buildx", "build"]);
+    // A failed export or an expired bound (124/137) never fails the release.
+    for (const status of [1, 124, 137]) {
+      const failed = run(status);
+      assert.equal(failed.status, 0, `export status ${status} must not fail the job`);
+      assert.match(failed.stdout, new RegExp(`^::warning::.*status ${status}\\b`, "mu"));
+    }
+  } finally {
+    fs.rmSync(bin, { recursive: true, force: true });
+  }
 });
 
 test("the runtime entrypoint finds Playwright's Chromium in either build layout", async () => {
