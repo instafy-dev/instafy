@@ -29,6 +29,7 @@ import { useProjects } from "../../../projects/useProjects";
 import { useMergedControllerProjects } from "../../../projects/useMergedControllerProjects";
 import { mostRecentProjectId } from "../../../projects/projectRecency";
 import { useProjectRecency } from "../../../projects/useProjectRecency";
+import { spaceDisplayName } from "../../../projects/spaceName";
 import { DARK_RAIL_SURFACE_CLASS } from "../../../theme/darkSurfaces";
 import { useWorkspaceControls } from "../workspaceControls";
 import type { StudioNavItem, StudioPanel } from "../types";
@@ -688,7 +689,7 @@ export function StudioSidebar({
       needle.length === 0
         ? activeOrgProjects
         : activeOrgProjects.filter((project) => {
-            const name = (project.name || "Untitled space").toLowerCase();
+            const name = spaceDisplayName(project.name).toLowerCase();
             return name.includes(needle) || project.id.toLowerCase().includes(needle);
           });
     // Spaces needing attention first, then most recently opened; never-opened
@@ -703,7 +704,7 @@ export function StudioSidebar({
       if (recencyDelta !== 0) {
         return recencyDelta;
       }
-      return (a.name || "Untitled space").localeCompare(b.name || "Untitled space");
+      return spaceDisplayName(a.name).localeCompare(spaceDisplayName(b.name));
     });
   }, [activeOrgProjects, homeAttentionByProject, projectRecency, workspaceProjectQuery]);
   const currentOrgProject = useMemo(
@@ -870,7 +871,7 @@ export function StudioSidebar({
     const targetId =
       mostRecentProjectId(orgProjects.map((project) => project.id), projectRecency) ??
       [...orgProjects].sort((a, b) =>
-        (a.name || "Untitled space").localeCompare(b.name || "Untitled space"),
+        spaceDisplayName(a.name).localeCompare(spaceDisplayName(b.name)),
       )[0].id;
     resetWorkspaceSwitcher();
     runDestination(() => performProjectSwitch(targetId));

@@ -36,7 +36,10 @@ import {
   type ConversationsState,
 } from "./conversationState";
 import { isUuid } from "./conversationMessageUtils";
-import { controllerConversationHasRemoteMessages } from "./conversationRemoteHistory";
+import {
+  CONTROLLER_CONVERSATION_LIST_LIMIT,
+  controllerConversationHasRemoteMessages,
+} from "./conversationRemoteHistory";
 
 const CONTROLLER_CONVERSATION_BACKFILL_INTERVAL_MS = 30_000;
 // A hydration that fails outright (no session token yet, controller hiccup)
@@ -224,7 +227,7 @@ export function useConversationControllerSync({
         try {
           remoteConversations = await fetchProjectConversationsFromController({
             projectId,
-            limit: 50,
+            limit: CONTROLLER_CONVERSATION_LIST_LIMIT,
             signal: abortController.signal,
           });
         } catch {
@@ -375,6 +378,13 @@ export function useConversationControllerSync({
               type: "SET_TITLE",
               id: conversation.localId,
               title: titleFromMetadata,
+            });
+          }
+          if (conversation.remoteSummaryPending) {
+            dispatch({
+              type: "SET_REMOTE_SUMMARY_PENDING",
+              id: conversation.localId,
+              pending: false,
             });
           }
           if (conversation.visibility !== visibility) {

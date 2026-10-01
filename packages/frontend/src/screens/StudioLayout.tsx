@@ -94,6 +94,8 @@ import { useWorkspaceUi } from "../workspace/useWorkspace";
 import { useStatus } from "../status/useStatus";
 import { useProject } from "../projects/useProject";
 import { useProjects } from "../projects/useProjects";
+import { useSpaceAutoName } from "../projects/useSpaceAutoName";
+import { createControllerSpace } from "../projects/createControllerSpace";
 import { useCredits } from "../credits/useCredits";
 import {
   clearControllerAccessTokenOverride,
@@ -1387,6 +1389,7 @@ function StudioLayoutInner() {
   );
 
   usePromptBootstrap(handlePromptBootstrapResult);
+  useSpaceAutoName();
 
   const createFreshConversation = useCallback(() => {
     requestHistoryPush();
@@ -1468,17 +1471,7 @@ function StudioLayoutInner() {
       projectName?: string,
       org?: { orgId?: string | null; orgSlug?: string | null; orgName?: string | null }
     ) => {
-      const resolvedName =
-        typeof projectName === "string" && projectName.trim().length > 0
-          ? projectName.trim()
-          : "Untitled Space";
-      const projectInfo = await controllerClient.projects.create({
-        projectType: "customer",
-        projectName: resolvedName,
-        orgId: org?.orgId ?? null,
-        orgSlug: org?.orgSlug ?? null,
-        orgName: org?.orgName ?? null
-      }).catch(() => null);
+      const { projectInfo, projectName: resolvedName } = await createControllerSpace(projectName, org);
       if (!projectInfo?.projectId || !isUUID(projectInfo.projectId)) {
         showStatus("Unable to start a new space right now.", "error", 4000);
         throw new Error("project-create-failed");
@@ -1506,17 +1499,7 @@ function StudioLayoutInner() {
       org: { orgId?: string | null; orgSlug?: string | null; orgName?: string | null },
       github: { repo: string; ref?: string | null; githubDeviceAuthSessionId?: string | null },
     ): Promise<{ success: boolean; error?: string | null }> => {
-      const resolvedName =
-        typeof projectName === "string" && projectName.trim().length > 0
-          ? projectName.trim()
-          : "Untitled Space";
-      const projectInfo = await controllerClient.projects.create({
-        projectType: "customer",
-        projectName: resolvedName,
-        orgId: org?.orgId ?? null,
-        orgSlug: org?.orgSlug ?? null,
-        orgName: org?.orgName ?? null
-      }).catch(() => null);
+      const { projectInfo, projectName: resolvedName } = await createControllerSpace(projectName, org);
       if (!projectInfo?.projectId || !isUUID(projectInfo.projectId)) {
         return { success: false, error: "Unable to start a new space right now." };
       }

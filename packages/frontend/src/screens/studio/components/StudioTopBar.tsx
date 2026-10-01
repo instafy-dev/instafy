@@ -28,6 +28,7 @@ import type { StudioHistory } from "../../../navigation/useStudioHistory";
 import { useNativeBackButtonAction } from "../../../native/useNativeBackButtonAction";
 import { useProject } from "../../../projects/useProject";
 import { useProjects } from "../../../projects/useProjects";
+import { spaceDisplayName } from "../../../projects/spaceName";
 import { useRuntime } from "../../../runtime/useRuntime";
 import { WorkspaceTabs } from "../../../workspace/WorkspaceTabs";
 import { useWorkspaceTabs } from "../../../workspace/WorkspaceTabsProvider";
@@ -294,7 +295,7 @@ export function StudioTopBar({ mobileNavigation, newChatInSidebar = false, conte
   // (a real notch on iOS) and the shell keeps owning the drag strip.
   const titleBarFree = useDesktopTabChrome && desktopTitleBarFree();
   const hasDesktopTabs = useDesktopTabChrome && workspaceTabs.length > 0;
-  const resolvedProjectName = activeProjectName || "Untitled Space";
+  const resolvedProjectName = spaceDisplayName(activeProjectName);
   const resolvedTeamName = activeTeamName?.trim() || "Team & spaces";
   const projectNameText = (
     <Text as="span" variant="bodyStrong" tone="primary" className="truncate">

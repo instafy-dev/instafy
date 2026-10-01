@@ -330,6 +330,22 @@ export function findConnectorForSecret(
   return null;
 }
 
+/**
+ * The first-party connector a `/skills import` line installs, for naming a
+ * chat or an untitled space after it. Keyed on the import URL alone: a
+ * `--name notion` is chosen by whoever wrote the line, so a link to any other
+ * pack could otherwise borrow Notion's name.
+ */
+export function findConnectorForSkillImport(source: string): SkillConnector | null {
+  const normalizedSource = source.trim().replace(/\/+$/, "").toLowerCase();
+  for (const connector of PRODUCT_CONNECTORS) {
+    if (connector.kind === "skill" && connector.source.toLowerCase() === normalizedSource) {
+      return connector;
+    }
+  }
+  return null;
+}
+
 export function buildConnectorImportMessage(connector: SkillConnector): string {
   return buildSkillImportMessage({
     source: connector.source,

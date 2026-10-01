@@ -5,6 +5,7 @@ import { useProjectState } from "./ProjectStateProvider";
 import { controllerClient } from "../sdk/instafy";
 import { getOrgDisplayName } from "../org/orgNaming";
 import { writePendingProjectSwitch } from "../screens/pendingProjectSwitch";
+import { spaceDisplayName } from "./spaceName";
 
 export interface ProjectListItem extends ProjectIdentity {
   id: string;
@@ -29,7 +30,7 @@ export function useProjects() {
   const projectList = useMemo<ProjectListItem[]>(() => {
     return Object.entries(projects).map(([id, state]) => ({
       id,
-      name: state.metadata.projectName ?? "Untitled Space",
+      name: spaceDisplayName(state.metadata.projectName),
       projectIcon: state.metadata.projectIcon,
       projectColor: state.metadata.projectColor,
       projectAvatarUrl: state.metadata.projectAvatarUrl,

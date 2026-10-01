@@ -46,6 +46,25 @@ describe("mergeControllerProjects", () => {
     ]);
   });
 
+  it("lets a real controller name replace a cached placeholder", () => {
+    // Older builds cached "Untitled Space" locally; the controller name wins.
+    const local = createLocalProject({ name: "Untitled Space" });
+    expect(mergeControllerProjects([local], [{ projectId: local.id, projectName: "FreeFinance", orgId: local.orgId }])[0])
+      .toMatchObject({ name: "FreeFinance", isRemoteOnly: false });
+  });
+
+  it("shows one spelling when neither side has a real name", () => {
+    for (const localName of ["Untitled Space", "Untitled space", "Untitled Instafy Project", ""]) {
+      const local = createLocalProject({ name: localName });
+      for (const projectName of [null, "", "Untitled Space"]) {
+        expect(mergeControllerProjects([local], [{ projectId: local.id, projectName, orgId: local.orgId }])[0].name)
+          .toBe("Untitled space");
+      }
+    }
+    expect(mergeControllerProjects([], [{ projectId: "77777777-7777-7777-7777-777777777777", projectName: null, orgId: null }])[0].name)
+      .toBe("Untitled space");
+  });
+
   it("keeps local names while backfilling controller org metadata", () => {
     const merged = mergeControllerProjects(
       [

@@ -2,6 +2,7 @@ import { useCallback, useRef } from "react";
 import { useProjectState } from "../projects/ProjectStateProvider";
 import { useConversation } from "../conversations/useConversation";
 import { controllerClient } from "../sdk/instafy";
+import { deriveSpaceNameFromMessage } from "../projects/spaceAutoName";
 
 export type SubmitPromptStatus = "skipped" | "success" | "error";
 
@@ -28,12 +29,15 @@ export function usePromptActions() {
       }
 
       try {
-        const projectInfo = await createControllerProject({ projectType: "customer" });
+        // The space is new, so naming it from the prompt overwrites nothing.
+        const projectName = deriveSpaceNameFromMessage(prompt) ?? undefined;
+        const projectInfo = await createControllerProject({ projectType: "customer", projectName });
         if (!projectInfo?.projectId) {
           return { status: "error", error: new Error("Unable to create project") };
         }
         createProject({
           projectId: projectInfo.projectId,
+          projectName: projectInfo.projectName ?? projectName,
           orgId: projectInfo.orgId ?? null,
           orgName: projectInfo.orgName ?? null
         });

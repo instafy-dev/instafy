@@ -6,6 +6,7 @@ import {
   deriveSkillSourceLabel,
   humanizeSkillName,
   normalizeSkillName,
+  parseSkillImportMessage,
 } from "../skillCommands";
 
 describe("buildSkillImportMessage", () => {
@@ -67,6 +68,26 @@ describe("buildSkillImportMessage", () => {
 
   it("throws when the source is empty", () => {
     expect(() => buildSkillImportMessage({ source: "   " })).toThrow();
+  });
+});
+
+describe("parseSkillImportMessage", () => {
+  it("reads back every line buildSkillImportMessage writes", () => {
+    const source = "https://github.com/owner/repo/tree/main/skills/playwright-review";
+    expect(parseSkillImportMessage(buildSkillImportMessage({ source, skillName: "Playwright Review", overwrite: true, start: true })))
+      .toEqual({ source, skillName: "playwright-review" });
+    expect(parseSkillImportMessage(buildSkillImportMessage({ source, start: true }))).toEqual({ source, skillName: null });
+  });
+
+  it("accepts typed lines with flags in any order and rejects other commands", () => {
+    expect(parseSkillImportMessage("  /Skills IMPORT ./skills/acme --start --name acme_reports ")).toEqual({
+      source: "./skills/acme",
+      skillName: "acme-reports",
+    });
+    expect(parseSkillImportMessage("/skills import --start")).toBeNull();
+    expect(parseSkillImportMessage("/skills import")).toBeNull();
+    expect(parseSkillImportMessage("/skills start acme")).toBeNull();
+    expect(parseSkillImportMessage("please /skills import ./skills/acme")).toBeNull();
   });
 });
 

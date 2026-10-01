@@ -8,6 +8,7 @@ import {
 } from "../sdk/instafy";
 import type { ProjectListItem } from "./useProjects";
 import { PROJECT_ACCESS_REFRESH_EVENT } from "./projectAccessEvents";
+import { isUntitledSpaceName, UNTITLED_SPACE_NAME } from "./spaceName";
 
 const runtimeControllerEnabled = controllerClient.core.enabled;
 const DISCOVERY_RETRY_DELAYS_MS = [1_000, 2_000, 4_000] as const;
@@ -40,12 +41,12 @@ export function mergeControllerProjects(
   remoteProjects.forEach((project) => {
     const local = localById.get(project.projectId);
     const existing = byId.get(project.projectId);
-    const remoteName =
-      typeof project.projectName === "string" && project.projectName.trim().length > 0
-        ? project.projectName.trim()
-        : null;
+    // A cached placeholder must not hide a real name from the controller, and
+    // `existing` can be the local entry itself, so every candidate skips one.
     const name =
-      local?.name ?? remoteName ?? existing?.name ?? "Untitled space";
+      [local?.name, project.projectName, existing?.name]
+        .find((candidate) => !isUntitledSpaceName(candidate))
+        ?.trim() ?? UNTITLED_SPACE_NAME;
     const orgName = getOrgDisplayName(project.orgName ?? local?.orgName ?? existing?.orgName);
     const orgId = project.orgId ?? local?.orgId ?? existing?.orgId ?? null;
     byId.set(project.projectId, {
