@@ -66,6 +66,8 @@ recent sites. Focus an empty field or clear it to see recent visits; type to
 filter by page title or address. Select a suggestion to open it, or enter a new
 address as usual. Arrow keys select suggestions, Enter opens the selection,
 Tab completes it without navigating, and Escape dismisses the list.
+Suggestions show site icons with a globe fallback. Icons load directly from the
+site's `/favicon.ico` without a referrer; no third-party favicon service is used.
 
 On phone widths, tapping the address opens a full-screen editor with the same
 suggestions. **Back** cancels editing, **Clear address** shows recent visits,

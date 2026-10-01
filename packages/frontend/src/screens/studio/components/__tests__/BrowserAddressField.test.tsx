@@ -72,6 +72,25 @@ describe("BrowserAddressField", () => {
     expect(registerOverlay).toHaveBeenCalledOnce();
   });
 
+  it("shows site icons without a referrer and keeps a globe while loading or after failure", async () => {
+    await type("bbc");
+    const option = options()[0];
+    const icon = option.querySelector<HTMLImageElement>("img")!;
+    expect(icon.src).toBe("https://www.bbc.com/favicon.ico");
+    expect(icon.getAttribute("referrerpolicy")).toBe("no-referrer");
+    expect(icon.alt).toBe("");
+    expect(icon.parentElement!.getAttribute("aria-hidden")).toBe("true");
+    expect(icon.parentElement!.querySelector("svg")).not.toBeNull();
+    expect(icon.classList.contains("opacity-0")).toBe(true);
+    await act(async () => icon.dispatchEvent(new Event("load")));
+    expect(icon.parentElement!.querySelector("svg")).toBeNull();
+    expect(icon.classList.contains("opacity-0")).toBe(false);
+    await act(async () => icon.dispatchEvent(new Event("error")));
+    expect(icon.parentElement!.querySelector("svg")).not.toBeNull();
+    expect(icon.classList.contains("opacity-0")).toBe(true);
+    expect(navigate).not.toHaveBeenCalled();
+  });
+
   it("fits compact suggestions to the toolbar width and returns to address anchoring when expanded", async () => {
     let toolbarWidth = 320;
     const observers: Array<{ callback: ResizeObserverCallback; targets: Set<Element> }> = [];

@@ -1,6 +1,6 @@
 import { forwardRef, useContext, useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { ComboBox, ComboBoxStateContext, InputContext, PopoverContext, Text, useContextProps } from "react-aria-components";
-import { Clock, NavArrowRight, Xmark } from "iconoir-react";
+import { Globe, NavArrowRight, Xmark } from "iconoir-react";
 import { Button, IconButton } from "../../../components/Button";
 import { Input, type InputProps } from "../../../components/Input";
 import { MobileFocusDialog } from "../../../components/aria/MobileFocusDialog";
@@ -28,6 +28,21 @@ const AddressInput = forwardRef<HTMLInputElement, InputProps>(function AddressIn
   const [inputProps, inputRef] = useContextProps(props, ref, InputContext);
   return <Input {...inputProps} ref={inputRef} />;
 });
+
+function AddressSiteIcon({ url }: { url: string }) {
+  const menu = useContext(ComboBoxStateContext);
+  // History contains validated HTTP(S) addresses. Contact only that site's
+  // conventional icon path, without sharing the page path or a referrer.
+  const src = `${new URL(url).origin}/favicon.ico`;
+  const [loadedSrc, setLoadedSrc] = useState<string | null>(null);
+  const loaded = loadedSrc === src;
+  return <span aria-hidden="true" className="relative h-4 w-4 shrink-0">
+    {!loaded && <Globe className="h-4 w-4 text-slate-400" />}
+    {menu?.isOpen && <img src={src} alt="" loading="lazy" referrerPolicy="no-referrer"
+      className={`absolute inset-0 h-4 w-4 object-contain ${loaded ? "" : "opacity-0"}`}
+      onLoad={() => setLoadedSrc(src)} onError={() => setLoadedSrc(null)} />}
+  </span>;
+}
 
 export const BrowserAddressField = forwardRef<HTMLInputElement, BrowserAddressFieldProps>(function BrowserAddressField({
   historyUserId, currentPage, onValueChange, onNavigate, value, disabled, onBlur, ...props
@@ -136,7 +151,7 @@ const AddressControls = forwardRef<HTMLInputElement, Pick<BrowserAddressFieldPro
       onClickCapture={() => { navigateSelection.current = true; }}>
       {entry => <StudioListBoxItem id={entry.url} textValue={entry.url}
         className="min-h-11 @[28rem]/address-suggestions:pointer-fine:min-h-8 !justify-start gap-2 overflow-hidden">
-        <Clock aria-hidden="true" className="h-4 w-4 shrink-0 text-slate-400" />
+        <AddressSiteIcon url={entry.url} />
         <div className="flex min-w-0 flex-1 flex-col @[28rem]/address-suggestions:flex-row @[28rem]/address-suggestions:items-baseline @[28rem]/address-suggestions:gap-2">
           <Text slot="label" className="min-w-0 truncate leading-4 @[28rem]/address-suggestions:max-w-[60%] @[28rem]/address-suggestions:shrink-0">{entry.title || new URL(entry.url).hostname}</Text>
           <Text slot="description" title={entry.url} className="min-w-0 truncate text-xs leading-4 text-slate-500 dark:text-slate-400">{entry.url.replace(/^https?:\/\//, "")}</Text>
