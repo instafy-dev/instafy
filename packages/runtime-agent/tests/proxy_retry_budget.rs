@@ -794,9 +794,14 @@ async fn run_scenario(scenario: &str, expected_requests: usize) -> Result<()> {
                 .pointer("/text/format/schema/properties/requiresContextLookup")
                 .is_none()
         );
-        assert_ne!(
-            requests[1]["tool_choice"], "required",
-            "the ambient participation decision must permit a tool-free decline"
+        // Codex always sends `tool_choice: "auto"`; the proxy would require a tool call only
+        // for a request that carries the required execution gate's metadata key.
+        assert!(
+            requests[1]
+                .pointer("/client_metadata/instafy.require_tool_call")
+                .is_none(),
+            "the ambient participation decision must permit a tool-free decline: {}",
+            requests[1]["client_metadata"]
         );
         let main_input = requests[1]["input"].to_string();
         assert!(main_input.contains("Earlier human context for the local decline fixture."));
@@ -1148,8 +1153,12 @@ async fn isolated_retry_child() -> Result<()> {
             assert!(message.contains("rate limit was reached"), "{message}");
         }
         if scenario == "http_429" {
-            // Codex names the status it stopped on.
-            assert!(message.contains("429"), "{message}");
+            // Codex names the status it stopped on, in the words the Studio classifies as a
+            // rate limit.
+            assert!(
+                message.contains("exceeded retry limit, last status: 429"),
+                "{message}"
+            );
         }
         if scenario == "usage_limit_429" {
             assert!(message.contains("usage limit"), "{message}");
