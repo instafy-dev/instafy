@@ -8,7 +8,7 @@ use serde_json::{Map as JsonMap, Value, json};
 use uuid::Uuid;
 
 use crate::auth::{Credentials, response_indicates_chatgpt_token_expired};
-use crate::upstream_error::UpstreamFailure;
+use crate::upstream_error::{self, ToolControlRejection, UpstreamFailure};
 
 const APPLY_PATCH_GRAMMAR: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
@@ -38,11 +38,16 @@ pub struct CodexCompletion {
 
 /// A policy over the tools one upstream request carries. It gets the final
 /// `tools` list, which on a ChatGPT login that requested none is the default
-/// tool set this client adds, and returns the tools to send.
+/// tool set this client adds (a Responses Lite request gets none), and
+/// returns the tools to send.
 pub(crate) type ToolFilter = Box<dyn Fn(&[Value]) -> Vec<Value> + Send + Sync>;
 
 /// Runs once, when a client first sends a request upstream.
 pub(crate) type SendHook = Box<dyn FnOnce() + Send + Sync>;
+
+/// Runs once, when a client sends a request again without the
+/// `tool_choice: "required"` it set, after upstream refused that choice.
+pub(crate) type RequiredToolCallFallbackHook = Box<dyn FnOnce(&ToolControlRejection) + Send + Sync>;
 
 pub struct CodexClient {
     http: reqwest::Client,
@@ -56,6 +61,8 @@ pub struct CodexClient {
     requested_tools: Option<Vec<Value>>,
     requested_tool_choice: Option<Value>,
     required_tool_call: bool,
+    required_tool_call_fallback: Option<RequiredToolCallFallbackHook>,
+    required_tool_call_refused: bool,
     requested_parallel_tool_calls: Option<bool>,
     requested_text_controls: Option<Value>,
     tool_filter: Option<ToolFilter>,
@@ -105,6 +112,14 @@ fn wire_api_for(credentials: &Credentials) -> UpstreamWireApi {
 /// request forwards no client tools and no `tool_choice`.
 pub(crate) fn sends_tool_controls(credentials: &Credentials) -> bool {
     wire_api_for(credentials) == UpstreamWireApi::Responses
+}
+
+/// Whether `item` is the `additional_tools` input item in which codex lists
+/// the tools of a Responses Lite model, such as gpt-6-luna, whose request
+/// carries no `tools`. It marks the Lite shape whatever tools it holds, none
+/// included, as when a pinned lease dropped them all.
+pub(crate) fn is_additional_tools_item(item: &Value) -> bool {
+    item.get("type").and_then(Value::as_str) == Some("additional_tools")
 }
 
 fn detect_upstream_wire_api(endpoint: &str) -> UpstreamWireApi {
@@ -170,6 +185,8 @@ impl CodexClient {
             requested_tools: None,
             requested_tool_choice: None,
             required_tool_call: false,
+            required_tool_call_fallback: None,
+            required_tool_call_refused: false,
             requested_parallel_tool_calls: None,
             requested_text_controls: None,
             tool_filter: None,
@@ -216,12 +233,32 @@ impl CodexClient {
 
     /// Sends `tool_choice: "required"` on the Responses paths, including a
     /// Responses Lite request, whose tools ride in an `additional_tools`
-    /// input item and which otherwise gets no tool control of its own. The
+    /// input item and whose own `tool_choice` is otherwise not forwarded. The
     /// proxy sets it only for a request that offers tools and leaves the
     /// choice to the model.
     pub(crate) fn with_required_tool_call(mut self, required: bool) -> Self {
         self.required_tool_call = required;
         self
+    }
+
+    /// Runs `hook` when a request that went upstream with the
+    /// `tool_choice: "required"` this client set gets a 400 that blames the
+    /// tool controls ([`upstream_error::tool_control_rejection`]). The client
+    /// then sends the request once more, on the same credentials, as it would
+    /// have without the required tool call, and returns what that attempt
+    /// gets. No other request is sent again, and the hook runs at most once.
+    pub(crate) fn with_required_tool_call_fallback(
+        mut self,
+        hook: Option<RequiredToolCallFallbackHook>,
+    ) -> Self {
+        self.required_tool_call_fallback = hook;
+        self
+    }
+
+    /// Whether upstream refused the `tool_choice: "required"` this client
+    /// set, so it sent the request again without it.
+    pub(crate) fn required_tool_call_refused(&self) -> bool {
+        self.required_tool_call_refused
     }
 
     /// Runs `filter` over the tools of every request this client sends, after
@@ -334,73 +371,12 @@ impl CodexClient {
             }
         }
 
-        let previous_response_id = if allow_conversation {
-            self.previous_response_id.as_deref()
-        } else {
-            None
-        };
-
-        let mut request_id_header: Option<String> = None;
-        let mut payload = if self.credentials.is_chatgpt() {
-            build_chatgpt_payload(
-                &self.model,
-                &self.instructions,
-                input_items,
-                conversation_id_for_request.as_deref(),
-                previous_response_id,
-                self.reasoning_effort.as_deref(),
-                self.tools_enabled,
-                self.requested_tools.as_deref(),
-                self.requested_tool_choice.as_ref(),
-                self.required_tool_call,
-                self.requested_parallel_tool_calls,
-                self.requested_text_controls.as_ref(),
-            )
-        } else {
-            match upstream_wire_api {
-                UpstreamWireApi::Responses => build_openai_payload(
-                    &self.model,
-                    &self.instructions,
-                    input_items,
-                    conversation_id_for_request.as_deref(),
-                    self.previous_response_id.as_deref(),
-                    self.reasoning_effort.as_deref(),
-                    self.tools_enabled,
-                    self.requested_tools.as_deref(),
-                    self.requested_tool_choice.as_ref(),
-                    self.required_tool_call,
-                    self.requested_parallel_tool_calls,
-                    self.requested_text_controls.as_ref(),
-                ),
-                UpstreamWireApi::ChatCompletions => build_openai_chat_completions_payload(
-                    &self.model,
-                    &self.instructions,
-                    input_items,
-                    self.reasoning_effort.as_deref(),
-                )?,
-                UpstreamWireApi::GeminiCodeAssist => {
-                    let (payload, request_id) = build_gemini_code_assist_payload(
-                        &self.model,
-                        &self.instructions,
-                        input_items,
-                        self.credentials.gemini_code_assist_project_id(),
-                        conversation_id_for_request.as_deref(),
-                    )?;
-                    request_id_header = Some(request_id);
-                    payload
-                }
-            }
-        };
-        if let Some(filter) = self.tool_filter.as_deref() {
-            filter_payload_tools(&mut payload, filter);
-        }
-        set_payload_service_tier(
-            &mut payload,
-            &self.credentials,
+        let (payload, request_id_header) = self.upstream_payload(
+            input_items,
+            conversation_id_for_request.as_deref(),
             upstream_wire_api,
-            self.service_tier.as_ref(),
-            self.service_tier_endpoints,
-        );
+            self.required_tool_call,
+        )?;
 
         if upstream_wire_api == UpstreamWireApi::GeminiCodeAssist {
             headers.insert(
@@ -421,14 +397,7 @@ impl CodexClient {
             }
         }
 
-        if std::env::var("CODEX_DEBUG_HTTP").as_deref() == Ok("1") {
-            eprintln!(
-                "--> POST {}\nHeaders: {:?}\nBody: {}",
-                self.credentials.endpoint(),
-                headers,
-                serde_json::to_string_pretty(&payload).unwrap_or_default()
-            );
-        }
+        debug_http_request(self.credentials.endpoint(), &headers, &payload);
 
         let request_url = if upstream_wire_api == UpstreamWireApi::GeminiCodeAssist {
             gemini_code_assist_request_url(self.credentials.endpoint())
@@ -439,9 +408,41 @@ impl CodexClient {
         if let Some(send_hook) = self.send_hook.take() {
             send_hook();
         }
-        let response = self
+        let response = match self
             .send_upstream_request_with_retry(request_url.as_str(), &headers, &payload)
-            .await?;
+            .await
+        {
+            Ok(response) => response,
+            Err(error) => {
+                // Only a `required` this client set itself falls back: a
+                // request that chose `required` keeps its own failure.
+                let rejection = if self.required_tool_call
+                    && payload.get("tool_choice").and_then(Value::as_str) == Some("required")
+                {
+                    upstream_error::tool_control_rejection(&error).cloned()
+                } else {
+                    None
+                };
+                let Some(rejection) = rejection else {
+                    return Err(error);
+                };
+                let (fallback, _) = self.upstream_payload(
+                    input_items,
+                    conversation_id_for_request.as_deref(),
+                    upstream_wire_api,
+                    false,
+                )?;
+                self.required_tool_call = false;
+                self.required_tool_call_refused = true;
+                if let Some(hook) = self.required_tool_call_fallback.take() {
+                    hook(&rejection);
+                }
+                debug_http_request(self.credentials.endpoint(), &headers, &fallback);
+                // A second failure goes back as any failure does.
+                self.send_upstream_request_with_retry(request_url.as_str(), &headers, &fallback)
+                    .await?
+            }
+        };
 
         // Capture the subscription-usage snapshot from OpenAI's `x-codex-*`
         // rate-limit headers before the body is consumed below. This is the
@@ -483,6 +484,87 @@ impl CodexClient {
         };
         completion.rate_limits = rate_limits;
         Ok(completion)
+    }
+
+    /// The body one request goes upstream with on `upstream_wire_api`, after
+    /// the tool filter and the service tier, with `tool_choice: "required"`
+    /// where the builders send a tool control and `required_tool_call` holds.
+    /// Also returns the request id a Gemini Code Assist request carries.
+    fn upstream_payload(
+        &self,
+        input_items: &[Value],
+        conversation_id: Option<&str>,
+        upstream_wire_api: UpstreamWireApi,
+        required_tool_call: bool,
+    ) -> Result<(Value, Option<String>)> {
+        let previous_response_id = if conversation_id_enabled() {
+            self.previous_response_id.as_deref()
+        } else {
+            None
+        };
+
+        let mut request_id_header: Option<String> = None;
+        let mut payload = if self.credentials.is_chatgpt() {
+            build_chatgpt_payload(
+                &self.model,
+                &self.instructions,
+                input_items,
+                conversation_id,
+                previous_response_id,
+                self.reasoning_effort.as_deref(),
+                self.tools_enabled,
+                self.requested_tools.as_deref(),
+                self.requested_tool_choice.as_ref(),
+                required_tool_call,
+                self.requested_parallel_tool_calls,
+                self.requested_text_controls.as_ref(),
+            )
+        } else {
+            match upstream_wire_api {
+                UpstreamWireApi::Responses => build_openai_payload(
+                    &self.model,
+                    &self.instructions,
+                    input_items,
+                    conversation_id,
+                    self.previous_response_id.as_deref(),
+                    self.reasoning_effort.as_deref(),
+                    self.tools_enabled,
+                    self.requested_tools.as_deref(),
+                    self.requested_tool_choice.as_ref(),
+                    required_tool_call,
+                    self.requested_parallel_tool_calls,
+                    self.requested_text_controls.as_ref(),
+                ),
+                UpstreamWireApi::ChatCompletions => build_openai_chat_completions_payload(
+                    &self.model,
+                    &self.instructions,
+                    input_items,
+                    self.reasoning_effort.as_deref(),
+                )?,
+                UpstreamWireApi::GeminiCodeAssist => {
+                    let (payload, request_id) = build_gemini_code_assist_payload(
+                        &self.model,
+                        &self.instructions,
+                        input_items,
+                        self.credentials.gemini_code_assist_project_id(),
+                        conversation_id,
+                    )?;
+                    request_id_header = Some(request_id);
+                    payload
+                }
+            }
+        };
+        if let Some(filter) = self.tool_filter.as_deref() {
+            filter_payload_tools(&mut payload, filter);
+        }
+        set_payload_service_tier(
+            &mut payload,
+            &self.credentials,
+            upstream_wire_api,
+            self.service_tier.as_ref(),
+            self.service_tier_endpoints,
+        );
+        Ok((payload, request_id_header))
     }
 
     async fn send_upstream_request_with_retry(
@@ -559,6 +641,18 @@ impl CodexClient {
     }
 }
 
+/// Prints a request about to go upstream when `CODEX_DEBUG_HTTP=1`.
+fn debug_http_request(endpoint: &str, headers: &HeaderMap, payload: &Value) {
+    if std::env::var("CODEX_DEBUG_HTTP").as_deref() == Ok("1") {
+        eprintln!(
+            "--> POST {}\nHeaders: {:?}\nBody: {}",
+            endpoint,
+            headers,
+            serde_json::to_string_pretty(payload).unwrap_or_default()
+        );
+    }
+}
+
 fn build_openai_payload(
     model: &str,
     instructions: &str,
@@ -602,11 +696,20 @@ fn build_openai_payload(
         payload["tool_choice"] = tool_choice_to_send(requested_tool_choice, required_tool_call);
         payload["parallel_tool_calls"] =
             Value::Bool(requested_parallel_tool_calls.unwrap_or(false));
-    } else if tools_enabled && required_tool_call {
+    } else if tools_enabled {
         // Responses Lite: the tools ride in an `additional_tools` input item
         // and `tools` is empty, so only a required tool call sends a tool
-        // control. The request's own `tool_choice` is not forwarded.
-        payload["tool_choice"] = json!("required");
+        // choice. The request's own `tool_choice` is not forwarded. Its own
+        // `parallel_tool_calls` is, when it sent a boolean: codex sends such a
+        // model `false`, and the OpenAI API's default is `true`.
+        if required_tool_call {
+            payload["tool_choice"] = json!("required");
+        }
+        if let Some(parallel_tool_calls) = requested_parallel_tool_calls
+            && input_items.iter().any(is_additional_tools_item)
+        {
+            payload["parallel_tool_calls"] = Value::Bool(parallel_tool_calls);
+        }
     }
 
     if let Some(text_controls) = requested_text_controls
@@ -849,8 +952,13 @@ fn build_chatgpt_payload(
         // The request's own `tool_choice` is not forwarded with the default
         // tools; a Responses Lite request that requires a tool call, whose
         // tools ride in an `additional_tools` input item, gets `"required"`.
+        // A Responses Lite request gets none of the default tools: the
+        // runtime offers the model only the tools in its item, even one a
+        // pinned lease left empty, never these. Its tool controls stay.
         let tool_metadata = resolve_chatgpt_tools(model);
-        payload["tools"] = Value::Array(tool_metadata.tools);
+        if !input_items.iter().any(is_additional_tools_item) {
+            payload["tools"] = Value::Array(tool_metadata.tools);
+        }
         payload["tool_choice"] = tool_choice_to_send(None, required_tool_call);
         payload["parallel_tool_calls"] = Value::Bool(tool_metadata.parallel_tool_calls);
     }
@@ -2275,12 +2383,14 @@ mod tests {
             )
         };
 
-        // Without a required tool call, a request with no `tools` gets no
-        // tool control at all: its own `tool_choice` is not forwarded.
+        // Without a required tool call, a Responses Lite request gets no
+        // `tools` and no `tool_choice`: its own choice is not forwarded. Its
+        // own `parallel_tool_calls` is.
         let unchanged = build(true, false);
-        for key in ["tools", "tool_choice", "parallel_tool_calls"] {
+        for key in ["tools", "tool_choice"] {
             assert!(unchanged.get(key).is_none(), "{key}: {unchanged}");
         }
+        assert_eq!(unchanged["parallel_tool_calls"], json!(false));
 
         // With one it gets `tool_choice: "required"` and nothing else.
         let mut required = build(true, true);
@@ -2295,6 +2405,85 @@ mod tests {
         let plain_text = build(false, true);
         for key in ["tools", "tool_choice", "parallel_tool_calls"] {
             assert!(plain_text.get(key).is_none(), "{key}: {plain_text}");
+        }
+    }
+
+    #[test]
+    fn openai_payload_forwards_parallel_tool_calls_only_for_a_responses_lite_request() {
+        let lite = responses_lite_input();
+        // A pinned lease that drops every tool in the item leaves it empty.
+        let mut emptied = lite.clone();
+        emptied[0]["tools"] = json!([]);
+        let plain = &lite[1..];
+        let own_tools = [json!({ "type": "function", "name": "exec_command", "parameters": {} })];
+        let auto = json!("auto");
+        let build = |input: &[Value],
+                     tools_enabled: bool,
+                     tools: Option<&[Value]>,
+                     parallel_tool_calls: Option<bool>| {
+            build_openai_payload(
+                "gpt-6-luna",
+                "",
+                input,
+                None,
+                None,
+                Some("medium"),
+                tools_enabled,
+                tools,
+                Some(&auto),
+                false,
+                parallel_tool_calls,
+                None,
+            )
+        };
+
+        // A Responses Lite request sends the boolean it was given, and only
+        // that: no `tools` and no `tool_choice`.
+        for input in [&lite[..], &emptied[..]] {
+            for parallel_tool_calls in [false, true] {
+                let payload = build(input, true, None, Some(parallel_tool_calls));
+                assert_eq!(
+                    payload["parallel_tool_calls"],
+                    json!(parallel_tool_calls),
+                    "{payload}"
+                );
+                let mut without = payload.clone();
+                without
+                    .as_object_mut()
+                    .expect("payload object")
+                    .remove("parallel_tool_calls");
+                assert_eq!(without, build(input, true, None, None), "{payload}");
+            }
+            let unsent = build(input, true, None, None);
+            for key in ["tools", "tool_choice", "parallel_tool_calls"] {
+                assert!(unsent.get(key).is_none(), "{key}: {unsent}");
+            }
+        }
+
+        // Every other request is sent as before: no tool control without
+        // tools or for a plain text completion, and its own tool controls,
+        // `false` when absent, with tools of its own.
+        for parallel_tool_calls in [None, Some(false), Some(true)] {
+            let context = format!("parallel_tool_calls={parallel_tool_calls:?}");
+            for payload in [
+                build(plain, true, None, parallel_tool_calls),
+                build(&lite, false, None, parallel_tool_calls),
+                build(plain, false, None, parallel_tool_calls),
+            ] {
+                for key in ["tools", "tool_choice", "parallel_tool_calls"] {
+                    assert!(payload.get(key).is_none(), "{context} {key}: {payload}");
+                }
+            }
+            for input in [&lite[..], plain] {
+                let payload = build(input, true, Some(&own_tools), parallel_tool_calls);
+                assert_eq!(payload["tools"], json!(own_tools), "{context}");
+                assert_eq!(payload["tool_choice"], json!("auto"), "{context}");
+                assert_eq!(
+                    payload["parallel_tool_calls"],
+                    json!(parallel_tool_calls.unwrap_or(false)),
+                    "{context}"
+                );
+            }
         }
     }
 
@@ -2319,16 +2508,13 @@ mod tests {
             )
         };
 
-        // Without a required tool call, a request with no `tools` gets the
-        // default tools and `auto`.
+        // Without a required tool call, a Responses Lite request gets `auto`
+        // and none of the default tools, and its tools stay in the input.
         let unchanged = build(true, false);
         assert_eq!(unchanged["tool_choice"], json!("auto"));
-        assert!(
-            unchanged["tools"]
-                .as_array()
-                .is_some_and(|tools| !tools.is_empty()),
-            "{unchanged}"
-        );
+        assert_eq!(unchanged["parallel_tool_calls"], json!(false));
+        assert!(unchanged.get("tools").is_none(), "{unchanged}");
+        assert_eq!(unchanged["input"], json!(input));
 
         // With one only the choice changes.
         let mut required = build(true, true);
@@ -2339,6 +2525,68 @@ mod tests {
         let plain_text = build(false, true);
         for key in ["tools", "tool_choice", "parallel_tool_calls"] {
             assert!(plain_text.get(key).is_none(), "{key}: {plain_text}");
+        }
+    }
+
+    #[test]
+    fn chatgpt_payload_adds_default_tools_only_without_an_additional_tools_item() {
+        let lite = responses_lite_input();
+        // A pinned lease that drops every tool in the item leaves it empty.
+        let mut emptied = lite.clone();
+        emptied[0]["tools"] = json!([]);
+        let plain = &lite[1..];
+        let own_tools = [json!({ "type": "function", "name": "exec_command", "parameters": {} })];
+        let auto = json!("auto");
+        let build = |input: &[Value], tools: Option<&[Value]>, required_tool_call: bool| {
+            build_chatgpt_payload(
+                "gpt-6-luna",
+                "",
+                input,
+                None,
+                None,
+                Some("medium"),
+                true,
+                tools,
+                Some(&auto),
+                required_tool_call,
+                Some(true),
+                None,
+            )
+        };
+
+        // A Responses Lite request, whether or not it requires a tool call
+        // and even when the pin left its item empty, gets none of the default
+        // tools. Its item and its tool controls stay as they were.
+        for (name, input, required_tool_call, tool_choice) in [
+            ("Lite", &lite[..], false, "auto"),
+            ("Lite, required tool call", &lite[..], true, "required"),
+            ("Lite, emptied item", &emptied[..], false, "auto"),
+        ] {
+            let payload = build(input, None, required_tool_call);
+            assert!(payload.get("tools").is_none(), "{name}: {payload}");
+            assert_eq!(payload["input"], json!(input), "{name}");
+            assert_eq!(payload["tool_choice"], json!(tool_choice), "{name}");
+            assert_eq!(payload["parallel_tool_calls"], json!(false), "{name}");
+        }
+
+        // A request without the item and without tools gets the default
+        // tools with `auto`, as before.
+        let defaults = resolve_chatgpt_tools("gpt-6-luna").tools;
+        assert!(defaults.iter().any(|tool| tool["name"] == "shell"));
+        let payload = build(plain, None, false);
+        assert_eq!(payload["tools"], json!(defaults));
+        assert_eq!(payload["tool_choice"], json!("auto"));
+        assert_eq!(payload["parallel_tool_calls"], json!(false));
+        assert_eq!(payload["input"], json!(plain));
+
+        // A request with tools of its own sends them and its own controls,
+        // with the item or without it.
+        for input in [&lite[..], plain] {
+            let payload = build(input, Some(&own_tools), false);
+            assert_eq!(payload["tools"], json!(own_tools), "{input:?}");
+            assert_eq!(payload["tool_choice"], json!("auto"), "{input:?}");
+            assert_eq!(payload["parallel_tool_calls"], json!(true), "{input:?}");
+            assert_eq!(payload["input"], json!(input), "{input:?}");
         }
     }
 
@@ -2419,6 +2667,98 @@ mod tests {
         let mut payload = json!({ "messages": [] });
         filter_payload_tools(&mut payload, &without_web_search);
         assert_eq!(payload, json!({ "messages": [] }));
+    }
+
+    #[tokio::test]
+    async fn client_falls_back_only_from_a_required_tool_choice_it_sent() {
+        use axum::{Json, Router, extract::State, routing::post};
+        use std::sync::{Arc, Mutex};
+
+        // The model endpoint refuses every request as OpenAI might refuse
+        // `required`, blaming `tool_choice`.
+        type Bodies = Arc<Mutex<Vec<Value>>>;
+        let bodies = Bodies::default();
+        let app = Router::new()
+            .route(
+                "/v1/responses",
+                post(
+                    |State(bodies): State<Bodies>, Json(body): Json<Value>| async move {
+                        bodies.lock().unwrap().push(body);
+                        let refusal = json!({ "error": {
+                            "message": "private-token",
+                            "type": "invalid_request_error",
+                            "param": "tool_choice",
+                            "code": null
+                        } });
+                        (StatusCode::BAD_REQUEST, Json(refusal))
+                    },
+                ),
+            )
+            .with_state(bodies.clone());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = format!("http://{}/v1/responses", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+        let tools = vec![json!({ "type": "function", "name": "exec_command", "parameters": {} })];
+        let input = [json!({
+            "type": "message",
+            "role": "user",
+            "content": [{ "type": "input_text", "text": "Run the tests." }]
+        })];
+        let fallbacks = Arc::new(Mutex::new(Vec::new()));
+        let client = |required_tool_call: bool, tool_choice: Option<Value>| {
+            let fallbacks = fallbacks.clone();
+            CodexClient::new(api_key_at(&endpoint))
+                .unwrap()
+                .with_response_controls(Some(tools.clone()), tool_choice, None, None)
+                .with_required_tool_call(required_tool_call)
+                .with_required_tool_call_fallback(Some(Box::new(
+                    move |rejection: &ToolControlRejection| {
+                        fallbacks.lock().unwrap().push(rejection.clone());
+                    },
+                )))
+        };
+        let sent_since = |from: usize| bodies.lock().unwrap()[from..].to_vec();
+
+        // A `required` the client set goes once more without it, on the same
+        // client, and the retry's failure is the one returned.
+        let mut set_by_client = client(true, Some(json!("auto")));
+        let error = set_by_client
+            .complete_with_input(&input)
+            .await
+            .expect_err("refused twice");
+        assert!(upstream_error::tool_control_rejection(&error).is_some());
+        let attempts = sent_since(0);
+        assert_eq!(attempts.len(), 2, "one retry");
+        assert_eq!(attempts[0]["tool_choice"], json!("required"));
+        assert_eq!(attempts[1]["tool_choice"], json!("auto"));
+        assert!(set_by_client.required_tool_call_refused());
+        assert_eq!(
+            fallbacks.lock().unwrap().clone(),
+            vec![ToolControlRejection {
+                param: Some("tool_choice"),
+                code: Some("invalid_request_error".to_string()),
+            }]
+        );
+
+        // A request's own `required`, and a required tool call whose body a
+        // tool filter left without tools, and so without `required`, are
+        // sent once.
+        let mut chosen_by_request = client(false, Some(json!("required")));
+        let mut filtered = client(true, None).with_tool_filter(|_| Vec::new());
+        for request in [&mut chosen_by_request, &mut filtered] {
+            request
+                .complete_with_input(&input)
+                .await
+                .expect_err("refused");
+            assert!(!request.required_tool_call_refused());
+        }
+        let attempts = sent_since(2);
+        assert_eq!(attempts.len(), 2, "no retry");
+        assert_eq!(attempts[0]["tool_choice"], json!("required"));
+        assert!(attempts[1].get("tool_choice").is_none(), "{}", attempts[1]);
+        assert_eq!(fallbacks.lock().unwrap().len(), 1);
+        server.abort();
     }
 
     /// An API key that sends to `endpoint`.
