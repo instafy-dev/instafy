@@ -1,6 +1,6 @@
 import { forwardRef, useContext, useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type FormEventHandler } from "react";
 import { ComboBox, ComboBoxStateContext, InputContext, Text, useContextProps } from "react-aria-components";
-import { NavArrowRight } from "iconoir-react";
+import { Clock, NavArrowRight } from "iconoir-react";
 import { Button, IconButton } from "../../../components/Button";
 import { Input, type InputProps } from "../../../components/Input";
 import { StudioPopover } from "../../../components/aria/StudioPopover";
@@ -85,20 +85,22 @@ const AddressControls = forwardRef<HTMLInputElement, Pick<BrowserAddressFieldPro
   const open = Boolean(state?.isOpen && entries.length && !inputProps.disabled);
   useLayoutEffect(() => open ? registerOverlay?.() : undefined, [open, registerOverlay]);
 
-  const menu = <StudioPopover isNonModal isOpen={open} placement="bottom start" offset={6}
-    className="z-[90] w-[max(var(--trigger-width),18rem)] max-w-[calc(100vw-1.5rem)] p-1"
+  const menu = <StudioPopover isNonModal isOpen={open} placement="bottom start" offset={2}
+    className="@container/address-suggestions z-[90] w-[max(var(--trigger-width),18rem)] max-w-[calc(100vw-1.5rem)] p-1"
     data-browser-session-safe-zone="true">
-    <div className="px-2.5 py-1 text-xs text-slate-500 dark:text-slate-400">Recent sites</div>
     <StudioListBox<BrowserAddressHistoryEntry> aria-label="Recent sites"
       onPointerDownCapture={() => { navigateSelection.current = true; }}
       onClickCapture={() => { navigateSelection.current = true; }}>
       {entry => <StudioListBoxItem id={entry.url} textValue={entry.url}
-        className="min-h-11 flex-col !items-start !justify-center gap-0.5 overflow-hidden">
-        <Text slot="label" className="w-full truncate">{entry.title || new URL(entry.url).hostname}</Text>
-        <Text slot="description" className="w-full truncate text-xs text-slate-500 dark:text-slate-400">{entry.url}</Text>
+        className="min-h-11 !justify-start gap-3 overflow-hidden">
+        <Clock aria-hidden="true" className="h-4 w-4 shrink-0 text-slate-400" />
+        <div className="flex min-w-0 flex-1 flex-col @[28rem]/address-suggestions:flex-row @[28rem]/address-suggestions:items-baseline @[28rem]/address-suggestions:gap-2">
+          <Text slot="label" className="min-w-0 truncate leading-4 @[28rem]/address-suggestions:max-w-[60%] @[28rem]/address-suggestions:shrink-0">{entry.title || new URL(entry.url).hostname}</Text>
+          <Text slot="description" title={entry.url} className="min-w-0 truncate text-xs leading-4 text-slate-500 dark:text-slate-400">{entry.url.replace(/^https?:\/\//, "")}</Text>
+        </div>
       </StudioListBoxItem>}
     </StudioListBox>
-    <Button slot={null} size="xs" variant="ghost" className="mt-1 w-full justify-end"
+    <Button slot={null} size="xs" variant="ghost" className="mt-0.5 w-full justify-end text-slate-500 dark:text-slate-400"
       onPress={() => { navigateSelection.current = false; clear(); state?.close(); }}>
       Clear recent sites
     </Button>
