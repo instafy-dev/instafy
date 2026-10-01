@@ -10,6 +10,7 @@ use jsonwebtoken::errors::ErrorKind as JwtErrorKind;
 use jsonwebtoken::{decode, decode_header, encode, Algorithm, EncodingKey, Header, Validation};
 use runtime_contracts::ProxyEnvelopePayload;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use subtle::ConstantTimeEq;
 use tracing::info;
 use uuid::Uuid;
@@ -528,6 +529,15 @@ pub(crate) fn router() -> Router<AppState> {
     Router::new().route("/auth/session", post(create_controller_session))
 }
 
+/// Binds a proxy token to one lease attempt of one agent job. Only the job
+/// lease mints a bound token; session envelopes and credential probes pass
+/// none.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct ProxyJobBinding {
+    pub(crate) job_id: Uuid,
+    pub(crate) lease_attempt: i32,
+}
+
 #[derive(Serialize)]
 struct ProxyTokenClaims {
     aud: &'static str,
@@ -539,6 +549,10 @@ struct ProxyTokenClaims {
     run_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     credential_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    job_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    lease_attempt: Option<i32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     agent_handle: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -557,19 +571,10 @@ fn clamp_claim_text(value: Option<&str>, max_len: usize) -> Option<String> {
     Some(trimmed.chars().take(max_len).collect::<String>())
 }
 
-pub(crate) fn issue_proxy_envelope(
-    config: &AppConfig,
-    project_id: &Uuid,
-    runtime_id: &Uuid,
-    run_id: Option<&Uuid>,
-    credential_id: Option<&Uuid>,
-    agent_handle: Option<&str>,
-    agent_display_name: Option<&str>,
-    agent_description: Option<&str>,
-) -> Option<ProxyEnvelopePayload> {
-    const DEFAULT_PROXY_BASE_URL: &str = "http://proxy:8789";
-
-    let secret: Cow<'_, str> = config
+/// The HS256 secret proxy tokens are signed with, shared with the proxy
+/// (`openai-proxy-server` derives the same fallback in `proxy_auth.rs`).
+fn proxy_signing_secret(config: &AppConfig) -> Option<Cow<'_, str>> {
+    config
         .proxy_signing_secret
         .as_deref()
         .map(str::trim)
@@ -582,7 +587,37 @@ pub(crate) fn issue_proxy_envelope(
                 .map(str::trim)
                 .filter(|value| !value.is_empty())
                 .map(|token| Cow::Owned(format!("instafy-proxy-signing:{token}")))
-        })?;
+        })
+}
+
+/// The lowercase hex sha256 of a proxy token, as the job lease records it in
+/// `ai_usage_jobs.token_sha256_by_attempt`.
+pub(crate) fn proxy_token_sha256(token: &str) -> String {
+    hex::encode(Sha256::digest(token.as_bytes()))
+}
+
+pub(crate) fn issue_proxy_envelope(
+    config: &AppConfig,
+    project_id: &Uuid,
+    runtime_id: &Uuid,
+    run_id: Option<&Uuid>,
+    credential_id: Option<&Uuid>,
+    job_binding: Option<ProxyJobBinding>,
+    agent_handle: Option<&str>,
+    agent_display_name: Option<&str>,
+    agent_description: Option<&str>,
+) -> Option<ProxyEnvelopePayload> {
+    const DEFAULT_PROXY_BASE_URL: &str = "http://proxy:8789";
+
+    // The managed lane's id is reserved for the platform credential and is
+    // never a user credential claim. Mint nothing rather than dropping the
+    // claim: a credential-less job token is a managed-lane token.
+    if credential_id.is_some_and(crate::credentials::is_managed_ai_credential_id) {
+        tracing::warn!("refusing to mint a proxy token for the reserved managed credential id");
+        return None;
+    }
+
+    let secret = proxy_signing_secret(config)?;
     let base_url = config
         .proxy_base_url
         .as_deref()
@@ -601,6 +636,8 @@ pub(crate) fn issue_proxy_envelope(
         runtime_id: runtime_id.to_string(),
         run_id: run_id.map(|value| value.to_string()),
         credential_id: credential_id.map(|value| value.to_string()),
+        job_id: job_binding.map(|binding| binding.job_id.to_string()),
+        lease_attempt: job_binding.map(|binding| binding.lease_attempt),
         agent_handle: clamp_claim_text(agent_handle, 32),
         agent_display_name: clamp_claim_text(agent_display_name, 80),
         agent_description: clamp_claim_text(agent_description, 600),
@@ -620,6 +657,203 @@ pub(crate) fn issue_proxy_envelope(
         token,
         exp,
     ))
+}
+
+// Nothing verifies a job token outside the tests until the managed-key
+// lease check and the settle endpoint land, hence the dead-code allowances
+// on the items below.
+
+/// Leeway on a live job token's `exp`, the same as the proxy's (the
+/// `jsonwebtoken` default it validates with).
+#[cfg_attr(not(test), allow(dead_code))]
+const PROXY_JOB_TOKEN_LEEWAY_SECONDS: i64 = 60;
+
+/// How long after issue a settle may still present a job token
+/// (`MANAGED_AI_SETTLE_MAX_AGE_SECONDS`).
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) const MANAGED_AI_SETTLE_MAX_AGE_SECONDS: i64 = 86_400;
+
+/// Which checks [`verify_proxy_job_token`] runs on a job token's age and
+/// binding.
+#[cfg_attr(not(test), allow(dead_code))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ProxyJobTokenMode {
+    /// A managed-key lease: `exp` holds, with the proxy's leeway, the job is
+    /// still leased (`agent_jobs.status = 'leased'`) to the runtime the token
+    /// names, and the token is the one the lease minted for the job's current
+    /// attempt. Cancel, finish and requeue leave `lease_attempts` alone, so
+    /// the attempt check alone would keep a finished job's token live until
+    /// it expires.
+    Live,
+    /// A usage settle: the token was issued within
+    /// [`MANAGED_AI_SETTLE_MAX_AGE_SECONDS`] and is the one the lease minted
+    /// for the attempt it names, whatever the job's status now. `exp` is not
+    /// enforced, because a queued settle may land after it, and a finished
+    /// job or a requeued job's old attempt must still bill.
+    Settle,
+}
+
+/// Why [`verify_proxy_job_token`] refused a token.
+#[cfg_attr(not(test), allow(dead_code))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ProxyJobTokenRejection {
+    /// Not a job token this controller signed, or too old for the mode: a
+    /// bad signature, a wrong or missing audience or issuer, a missing
+    /// `exp`, an expired live token, a settle token issued too long ago, or a
+    /// token without a job binding.
+    Invalid,
+    /// Signed, but the lease recorded no such token for the attempt: the job
+    /// has no platform record, the attempt was never leased or, in `Live`,
+    /// a later attempt replaced it or the job is no longer leased to the
+    /// token's runtime (canceled, finished or requeued).
+    Unbound,
+}
+
+/// A job token that passed [`verify_proxy_job_token`].
+#[cfg_attr(not(test), allow(dead_code))]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct VerifiedProxyJobToken {
+    pub(crate) project_id: Uuid,
+    pub(crate) runtime_id: Uuid,
+    pub(crate) run_id: Option<Uuid>,
+    pub(crate) credential_id: Option<Uuid>,
+    pub(crate) job_id: Uuid,
+    pub(crate) lease_attempt: i32,
+    /// [`proxy_token_sha256`] of the token.
+    pub(crate) token_sha256: String,
+}
+
+#[cfg_attr(not(test), allow(dead_code))]
+#[derive(Deserialize)]
+struct ProxyJobTokenWireClaims {
+    project_id: String,
+    runtime_id: String,
+    #[serde(default)]
+    run_id: Option<String>,
+    #[serde(default)]
+    credential_id: Option<String>,
+    #[serde(default)]
+    job_id: Option<String>,
+    #[serde(default)]
+    lease_attempt: Option<i32>,
+    #[serde(default)]
+    iat: Option<i64>,
+}
+
+/// The signature, audience, issuer, age and job-binding claims of a job
+/// token, without the database. `now` is Unix seconds; `Live` checks `exp`
+/// against the clock `jsonwebtoken` reads.
+#[cfg_attr(not(test), allow(dead_code))]
+fn decode_proxy_job_token(
+    config: &AppConfig,
+    token: &str,
+    mode: ProxyJobTokenMode,
+    now: i64,
+) -> Result<VerifiedProxyJobToken, ProxyJobTokenRejection> {
+    use ProxyJobTokenRejection::Invalid;
+
+    let secret = proxy_signing_secret(config).ok_or(Invalid)?;
+    let mut validation = Validation::new(Algorithm::HS256);
+    validation.set_audience(&["proxy"]);
+    validation.set_issuer(&["runtime-controller"]);
+    // `jsonwebtoken` validates `exp`, `aud` and `iss` only when a token
+    // carries them and by default requires only `exp`, so a token without an
+    // audience or issuer would pass. Every proxy token the controller issues
+    // sets all three. `Settle` does not enforce `exp` but still requires it.
+    // `iat` is not a claim `jsonwebtoken` can require; it is checked below.
+    validation.set_required_spec_claims(&["exp", "aud", "iss"]);
+    validation.leeway = PROXY_JOB_TOKEN_LEEWAY_SECONDS as u64;
+    validation.validate_exp = mode == ProxyJobTokenMode::Live;
+    let claims = decode::<ProxyJobTokenWireClaims>(
+        token,
+        &jsonwebtoken::DecodingKey::from_secret(secret.as_bytes()),
+        &validation,
+    )
+    .map_err(|_| Invalid)?
+    .claims;
+
+    let issued_at = claims.iat.ok_or(Invalid)?;
+    if issued_at > now + PROXY_JOB_TOKEN_LEEWAY_SECONDS {
+        return Err(Invalid);
+    }
+    if mode == ProxyJobTokenMode::Settle && now - issued_at > MANAGED_AI_SETTLE_MAX_AGE_SECONDS {
+        return Err(Invalid);
+    }
+    let parse = |value: &str| Uuid::from_str(value).map_err(|_| Invalid);
+    let parse_optional = |value: Option<&str>| value.map(parse).transpose();
+    Ok(VerifiedProxyJobToken {
+        project_id: parse(&claims.project_id)?,
+        runtime_id: parse(&claims.runtime_id)?,
+        run_id: parse_optional(claims.run_id.as_deref())?,
+        credential_id: parse_optional(claims.credential_id.as_deref())?,
+        job_id: parse_optional(claims.job_id.as_deref())?.ok_or(Invalid)?,
+        lease_attempt: claims.lease_attempt.ok_or(Invalid)?,
+        token_sha256: proxy_token_sha256(token),
+    })
+}
+
+/// Verifies a job token the proxy presents for the platform lane. Beyond the
+/// signature, audience, issuer and age that [`ProxyJobTokenMode`] sets, the
+/// token must hash to what the job lease recorded in `ai_usage_jobs`: in
+/// `Live` for the current attempt of a job still leased to the token's
+/// runtime, in `Settle` for the attempt the token names. So even a holder of
+/// the signing secret can use only tokens the controller minted for that job
+/// attempt. A job without a platform record (BYO, terminal commands) binds
+/// nothing, and its tokens are `Unbound`.
+///
+/// The contract for its callers (metering C2):
+/// - The managed-key lease must require a bound `Live` token in every case.
+///   An unbound, legacy or unverifiable token never gets the managed key.
+/// - A settle must take `job_id` and `lease_attempt` from the returned
+///   [`VerifiedProxyJobToken`], never from the report body.
+///
+/// The outer error is a database failure; the inner result is the verdict.
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) async fn verify_proxy_job_token(
+    client: &impl tokio_postgres::GenericClient,
+    config: &AppConfig,
+    token: &str,
+    mode: ProxyJobTokenMode,
+) -> Result<Result<VerifiedProxyJobToken, ProxyJobTokenRejection>, (StatusCode, Json<ApiError>)> {
+    let verified = match decode_proxy_job_token(config, token, mode, Utc::now().timestamp()) {
+        Ok(verified) => verified,
+        Err(rejection) => return Ok(Err(rejection)),
+    };
+    // The job lease sets `leased_by_runtime_id` to the leasing runtime and
+    // names the same runtime in the token's `runtime_id` claim, which every
+    // job token carries.
+    let row = client
+        .query_opt(
+            "select t.token_sha256_by_attempt ->> $2 as own_sha256,
+                    t.token_sha256_by_attempt ->> j.lease_attempts::text as current_sha256,
+                    coalesce(
+                        j.status = 'leased' and j.leased_by_runtime_id = $3,
+                        false
+                    ) as leased_to_token_runtime
+             from ai_usage_jobs t
+             join agent_jobs j on j.id = t.job_id
+             where t.job_id = $1",
+            &[
+                &verified.job_id,
+                &verified.lease_attempt.to_string(),
+                &verified.runtime_id,
+            ],
+        )
+        .await
+        .map_err(|error| internal_error(format!("failed to load job token binding: {error}")))?;
+    let bound_sha256: Option<String> = row.and_then(|row| match mode {
+        ProxyJobTokenMode::Live if row.get::<_, bool>("leased_to_token_runtime") => {
+            row.get("current_sha256")
+        }
+        ProxyJobTokenMode::Live => None,
+        ProxyJobTokenMode::Settle => row.get("own_sha256"),
+    });
+    let bound = bound_sha256
+        .is_some_and(|bound| bool::from(bound.as_bytes().ct_eq(verified.token_sha256.as_bytes())));
+    if !bound {
+        return Ok(Err(ProxyJobTokenRejection::Unbound));
+    }
+    Ok(Ok(verified))
 }
 
 #[cfg(test)]
@@ -749,6 +983,7 @@ mod tests {
             managed_ai_label: "Instafy AI".to_string(),
             managed_ai_credit_burn_amount: 1,
             managed_ai_daily_prompt_limit: 20,
+            managed_ai_decline_waiver_units: 2,
             managed_ai_model_id: default_managed_ai_model_id().to_string(),
             managed_ai_model_label: default_managed_ai_model_label().to_string(),
             managed_ai_input_usd_micros_per_1k: DEFAULT_MANAGED_AI_INPUT_USD_MICROS_PER_1K,
@@ -824,6 +1059,7 @@ mod tests {
             None,
             None,
             None,
+            None,
         )
         .expect("proxy envelope should be issued");
         let expires_at = chrono::DateTime::parse_from_rfc3339(
@@ -837,6 +1073,194 @@ mod tests {
             (1790..=1810).contains(&lifetime),
             "proxy envelope lifetime should cover a long Codex run, got {lifetime}s"
         );
+    }
+
+    fn proxy_token_claims(config: &AppConfig, token: &str) -> serde_json::Value {
+        let secret = proxy_signing_secret(config).expect("proxy signing secret");
+        let mut validation = Validation::new(Algorithm::HS256);
+        validation.set_audience(&["proxy"]);
+        validation.validate_exp = false;
+        decode::<serde_json::Value>(
+            token,
+            &DecodingKey::from_secret(secret.as_bytes()),
+            &validation,
+        )
+        .expect("controller-signed proxy token")
+        .claims
+    }
+
+    #[test]
+    fn issue_proxy_envelope_carries_job_binding() {
+        let mut config = base_app_config();
+        config.proxy_signing_secret = Some("proxy-secret".to_string());
+        let project_id = Uuid::new_v4();
+        let runtime_id = Uuid::new_v4();
+        let run_id = Uuid::new_v4();
+        let job_id = Uuid::new_v4();
+        let issue = |binding: Option<ProxyJobBinding>| {
+            issue_proxy_envelope(
+                &config,
+                &project_id,
+                &runtime_id,
+                Some(&run_id),
+                None,
+                binding,
+                Some("octo"),
+                None,
+                None,
+            )
+            .expect("proxy envelope should be issued")
+            .token
+        };
+
+        let bound = proxy_token_claims(
+            &config,
+            &issue(Some(ProxyJobBinding {
+                job_id,
+                lease_attempt: 3,
+            })),
+        );
+        assert_eq!(bound["job_id"], json!(job_id.to_string()));
+        assert_eq!(bound["lease_attempt"], json!(3));
+        assert_eq!(bound["run_id"], json!(run_id.to_string()));
+        assert!(bound.get("credential_id").is_none());
+
+        // Every other issuer keeps today's claims, so older proxies see no
+        // change.
+        let unbound = proxy_token_claims(&config, &issue(None));
+        assert!(unbound.get("job_id").is_none(), "{unbound}");
+        assert!(unbound.get("lease_attempt").is_none(), "{unbound}");
+        assert_eq!(unbound["run_id"], json!(run_id.to_string()));
+    }
+
+    #[test]
+    fn proxy_token_sha256_is_lowercase_hex_of_the_token_bytes() {
+        assert_eq!(
+            proxy_token_sha256("abc"),
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
+    }
+
+    /// A job token with the given issue time, signed with `config`'s secret.
+    fn job_token_issued_at(config: &AppConfig, issued_at: i64, exp: i64) -> String {
+        let claims = ProxyTokenClaims {
+            aud: "proxy",
+            iss: "runtime-controller",
+            sub: "proxy:project:runtime".to_string(),
+            project_id: Uuid::new_v4().to_string(),
+            runtime_id: Uuid::new_v4().to_string(),
+            run_id: None,
+            credential_id: None,
+            job_id: Some(Uuid::new_v4().to_string()),
+            lease_attempt: Some(1),
+            agent_handle: None,
+            agent_display_name: None,
+            agent_description: None,
+            iat: issued_at,
+            exp,
+        };
+        let secret = proxy_signing_secret(config).expect("proxy signing secret");
+        encode(
+            &Header::new(Algorithm::HS256),
+            &claims,
+            &EncodingKey::from_secret(secret.as_bytes()),
+        )
+        .expect("sign job token")
+    }
+
+    #[test]
+    fn job_token_age_is_bounded_by_mode() {
+        let mut config = base_app_config();
+        config.proxy_signing_secret = Some("proxy-secret".to_string());
+        let now = Utc::now().timestamp();
+        let decode_at = |issued_at: i64, exp: i64, mode: ProxyJobTokenMode| {
+            decode_proxy_job_token(
+                &config,
+                &job_token_issued_at(&config, issued_at, exp),
+                mode,
+                now,
+            )
+            .map(|token| token.lease_attempt)
+        };
+
+        // Live enforces exp with the proxy's 60 s leeway and nothing else.
+        assert_eq!(decode_at(now, now + 1_800, ProxyJobTokenMode::Live), Ok(1));
+        assert_eq!(
+            decode_at(now - 1_830, now - 30, ProxyJobTokenMode::Live),
+            Ok(1)
+        );
+        assert_eq!(
+            decode_at(now - 1_900, now - 100, ProxyJobTokenMode::Live),
+            Err(ProxyJobTokenRejection::Invalid)
+        );
+
+        // Settle ignores exp and bounds the issue time instead.
+        let max_age = MANAGED_AI_SETTLE_MAX_AGE_SECONDS;
+        assert_eq!(
+            decode_at(now - 1_900, now - 100, ProxyJobTokenMode::Settle),
+            Ok(1)
+        );
+        assert_eq!(
+            decode_at(
+                now - max_age,
+                now - max_age + 1_800,
+                ProxyJobTokenMode::Settle
+            ),
+            Ok(1)
+        );
+        assert_eq!(
+            decode_at(
+                now - max_age - 1,
+                now - max_age + 1_799,
+                ProxyJobTokenMode::Settle
+            ),
+            Err(ProxyJobTokenRejection::Invalid)
+        );
+
+        // A token from the future is refused in both modes.
+        for mode in [ProxyJobTokenMode::Live, ProxyJobTokenMode::Settle] {
+            assert_eq!(
+                decode_at(now + 120, now + 1_920, mode),
+                Err(ProxyJobTokenRejection::Invalid),
+                "{mode:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn job_token_must_carry_audience_issuer_and_expiry() {
+        let mut config = base_app_config();
+        config.proxy_signing_secret = Some("proxy-secret".to_string());
+        let secret = proxy_signing_secret(&config).expect("proxy signing secret");
+        let now = Utc::now().timestamp();
+        let claims = proxy_token_claims(&config, &job_token_issued_at(&config, now, now + 1_800));
+        let decode_signed = |claims: &serde_json::Value, mode: ProxyJobTokenMode| {
+            let token = encode(
+                &Header::new(Algorithm::HS256),
+                claims,
+                &EncodingKey::from_secret(secret.as_bytes()),
+            )
+            .expect("sign job token");
+            decode_proxy_job_token(&config, &token, mode, now).map(|token| token.lease_attempt)
+        };
+
+        for mode in [ProxyJobTokenMode::Live, ProxyJobTokenMode::Settle] {
+            assert_eq!(decode_signed(&claims, mode), Ok(1), "{mode:?}");
+            // `jsonwebtoken` validates each only when present, so each must
+            // be required.
+            for claim in ["aud", "iss", "exp"] {
+                let mut without = claims.clone();
+                without
+                    .as_object_mut()
+                    .expect("claims object")
+                    .remove(claim);
+                assert_eq!(
+                    decode_signed(&without, mode),
+                    Err(ProxyJobTokenRejection::Invalid),
+                    "no {claim} in {mode:?}"
+                );
+            }
+        }
     }
 
     fn header_with_token(token: &str) -> HeaderMap {

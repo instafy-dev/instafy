@@ -104,6 +104,7 @@ returns a surfaced upstream error instead of silently pretending the backend is 
 | `CONTROLLER_INTERNAL_TOKEN` | Required with controller integration; the proxy derives its token signing secret from it when `PROXY_SIGNING_SECRET` is unset | `None` |
 | `PROXY_CREDENTIAL_LEASE_TOKEN` | Dedicated bearer used only for controller credential leases | `None` |
 | `PROXY_PINNED_MODEL` | The only model static credentials serve managed runs as (set it to the controller's `MANAGED_AI_MODEL_ID`); see [Model selection](#model-selection) | `None` |
+| `PROXY_PLATFORM_SERVICE_TIER_ENDPOINTS` | Which upstream endpoints get the platform lane's `service_tier: "default"`: `openai` (only hosts under `openai.com`), `all` (any endpoint that takes a tier) or `none`; any other value stops the proxy at startup. See [Service tier](#service-tier) | `openai` |
 | `CODEX_PROXY_CHATGPT_ENDPOINT` | Upstream ChatGPT Codex Responses endpoint | `https://chatgpt.com/backend-api/codex/responses` |
 
 `CODEX_OPENAI_ENDPOINT` can also point at an OpenAI-compatible Chat Completions endpoint (e.g. `.../chat/completions`). When it does, the proxy will call that upstream endpoint and adapt the result into an OpenAI Responses-shaped payload for downstream callers.
@@ -149,7 +150,10 @@ and forward client tools unchanged, hosted ones included.
 
 With controller integration, static proxy credentials (`OPENAI_API_KEY` or `auth.json`) serve
 the platform lane: managed runs, whose controller-signed job tokens carry a `run_id` and no
-`credential_id`. Set `PROXY_PINNED_MODEL` to the controller's `MANAGED_AI_MODEL_ID` and those
+`credential_id`. A job token also names the job and lease attempt it was minted for (`job_id`
+and `lease_attempt`) for the controller's usage metering; the proxy accepts tokens with or
+without them and does not use them yet.
+Set `PROXY_PINNED_MODEL` to the controller's `MANAGED_AI_MODEL_ID` and those
 runs get exactly the pinned-lease policy above. A controller-signed token with neither a
 `credential_id` nor a `run_id` (the agent-login and runtime-register session envelopes) is not a
 turn, and both backends refuse it with 401 `proxy token missing credential_id for BYOC request`
@@ -166,6 +170,110 @@ provider service's: `PROXY_PINNED_MODEL` there, or else `MANAGED_AI_MODEL_ID`; a
 empty `PROXY_PINNED_MODEL` means no pin. That entry overrides the sidecar's env file, so a value
 in `proxy-credential-lease.env` has no effect.
 
+### Tool controls
+
+The proxy builds each upstream body itself. On the Responses wire API, to the OpenAI API (or an
+OpenAI-compatible Responses endpoint) and to a ChatGPT login's Codex endpoint, a `/v1/responses`
+request that lists `tools` sends them with its `tool_choice` (`auto` when absent) and
+`parallel_tool_calls` (`false` when absent). A request without `tools` sends the OpenAI API no
+tool control, and a ChatGPT login gets the proxy's default tools with `tool_choice: "auto"`. Codex
+sends the tools of a Responses Lite model, such as gpt-6-luna or gpt-5.6-sol, in an
+`additional_tools` input item and omits `tools`, so the request's own `tool_choice` is not
+forwarded on either path. An explicit empty `tools` array, by contrast, asks for a plain text
+completion, as `tool_choice: "none"` does, and goes upstream with no tools at all. A Chat
+Completions or Gemini Code Assist upstream is sent no client tools and no tool control. The
+request's `client_metadata` is never copied upstream.
+
+**Required tool call.** While the runtime's required execution gate is armed, codex adds
+`client_metadata["instafy.require_tool_call"] = "1"` to its model request. The proxy sends such a
+request upstream with `tool_choice: "required"`, to the OpenAI API and to the ChatGPT Codex
+endpoint alike, when all of these hold:
+
+- the key's value is exactly the string `"1"`;
+- the request goes upstream on the Responses wire API, which alone carries tool controls, not to
+  a Chat Completions or Gemini Code Assist endpoint;
+- the request offers tools: a non-empty `tools`, or an `additional_tools` input item with at least
+  one tool, counted after a pinned lease drops the tools it does not forward;
+- its `tool_choice` is `"auto"` or absent.
+
+A Responses Lite request then carries `tool_choice: "required"` although it has no `tools` (on a
+ChatGPT login, next to the proxy's default tools), and nothing else in the upstream body
+changes. Any other request, one whose key has another value included, goes upstream exactly as it
+would without the key: a request that chose `none`, `required` or a named tool keeps the controls
+above, so a Responses Lite request's own `required` is still not forwarded. The key applies on
+every lane whose requests use the Responses wire API, the platform lane and bring-your-own
+credentials alike, since the gate is codex's behaviour and not a billing rule. Each request that
+goes upstream with `required` logs one `required tool call sends tool_choice required` line with
+the route and the run id, never the request body. A request to a Chat Completions or Gemini Code
+Assist endpoint logs none, since it carries no tool control. The key itself never goes upstream,
+since no `client_metadata` does.
+
+The loopback tests prove only what the proxy sends. Whether OpenAI honours
+`tool_choice: "required"` when the tools arrive only in `additional_tools` cannot be shown with a
+mock upstream, so it is a staging check.
+
+### Service tier
+
+The platform lane serves only OpenAI's standard tier, because managed AI credits are priced at
+the standard tier's rates: `priority` costs about twice as much per token, and `flex` and `scale`
+are priced apart too. Every Responses and Chat Completions request on the platform lane that goes
+to the OpenAI API (an API key, from the controller's managed lease or the proxy's static
+credentials) goes upstream with `service_tier: "default"`. A request without a tier would
+otherwise run on the OpenAI project's own default tier, which the project's settings decide. The
+rule follows the lane, not the pin: an unpinned platform lane gets it too, since the tier
+multiplies the price of whatever model runs on the operator's key.
+
+`PROXY_PLATFORM_SERVICE_TIER_ENDPOINTS` says which upstream endpoints get that tier. The
+default, `openai`, sends it only when the endpoint's host is `api.openai.com` or another host
+under `openai.com`: the proxy parses the endpoint URL and compares its host, in any case, so a
+path, query, userinfo or IP address that names OpenAI does not count. An OpenAI-compatible
+provider set with `CODEX_OPENAI_ENDPOINT`, or a managed lease whose endpoint is not OpenAI, may
+reject the field or its value (Groq, for one, names its tiers differently), so any other host
+gets no tier, as before the platform lane sent one. `all` sends it to any endpoint that takes
+one, for an OpenAI-compatible provider that accepts `default`, and `none` sends it to none. Any
+other value stops the proxy at startup with an error that names the setting. The setting decides
+only where the tier goes: the overrides and refusals below apply under all three, and a request
+sent no tier drops the one it asked for.
+
+A platform-lane model request that asks for any other string tier (`auto`, which follows that
+project default, `priority`, which codex's Fast mode sends, `flex`, `scale`, a differently cased
+or padded `default`, an empty string, or anything else) is overridden rather than refused: it goes
+upstream as `default`, or with no tier where none is sent, so a stray codex setting or agent role
+never fails a managed turn. Each override logs one
+`platform lane overrides the requested service tier` line with the route, the run id, the tier
+sent (`serviceTier`) and at most the first 32 characters of the requested tier, never the request
+body, and adds one to `serviceTierOverrides` in the health report below. Both happen when the
+proxy hands the request to its upstream HTTP client, once per request however many attempts it
+takes, so a request that then fails to connect is still counted; one refused for bad input or a
+failed lease, or failing inside the proxy before that point, is neither logged nor counted. An explicit `null` counts as no tier. Codex never sends
+a tier that is not a string, so a number, boolean, object or array is refused with 400 before any
+lease or upstream request. The refusal's `error.type` is `invalid_request_error`, its
+`error.code` is `service_tier_not_allowed`, and its message says the platform key serves only the
+default tier.
+
+A static ChatGPT login serving the platform lane sends the ChatGPT Codex endpoint no tier,
+whatever the setting: the proxy never sent it one, codex itself sends it no `default`, and how
+that endpoint treats one is unverified. Its overrides are still counted and logged, with
+`serviceTier` `null` in the log line, since the requested tier is dropped rather than replaced.
+Gemini Code Assist requests have no service tier, so none is sent on them either, and their
+overrides are logged the same way, as are those of an endpoint the setting sends no tier.
+
+Bring-your-own lanes (a user's API key or ChatGPT login) send no `service_tier`, whatever the
+request asks for, as the proxy always has: it builds the upstream body itself and never copied the
+tier into it. Dropping it there is not an override and is not counted. In standalone mode, without
+a controller, no token marks a managed run and the proxy sends no tier either.
+
+Speech and transcription refuse instead of override. They forward the client's own body, so an
+override would mean rewriting it, a multipart form included, and codex sends no tier to either,
+so a refusal there costs no managed turn. OpenAI documents no service tier for audio, so the proxy
+adds none to them. On the platform lane a speech request whose JSON names any `service_tier` but
+`default`, or a transcription form in which the proxy's own form reader finds a `service_tier` field
+other than `default`, gets the same
+coded 400 before any lease or upstream request, pinned or not, and counts no override. A
+platform-lane audio request with no tier, `null` or `default` goes upstream exactly as sent. On a
+bring-your-own lane and in standalone mode the audio body goes as sent, tier included, as before.
+A pinned platform lease still refuses both routes, as above.
+
 ### Platform lane health report
 
 `/healthz` and `/readyz` carry a `platformLane` object that says how the proxy serves managed runs
@@ -178,6 +286,8 @@ and logs it.
 | `pinnedModel` | The model static credentials serve managed runs as (`PROXY_PINNED_MODEL`). `null` for a controller lease, which carries its own pin, and in standalone mode, where no token marks a managed run |
 | `staticCredentialKind` | `api_key`, `chatgpt` or `gemini_code_assist` when `servedBy` is `static`, else `null` |
 | `sessionTokensRefused` | `true` with controller integration: credential-less tokens without a `run_id` get 401 |
+| `serviceTier` | The `service_tier` platform-lane Responses and Chat Completions requests go upstream with (see [Service tier](#service-tier)), by the rule the requests follow: `default` when static credentials and their endpoint carry it, and `null` for a static ChatGPT login, Gemini Code Assist, an endpoint `PROXY_PLATFORM_SERVICE_TIER_ENDPOINTS` does not name (with the default `openai`, a host not under `openai.com`), when `servedBy` is `refused`, and in standalone mode. A controller lease names its endpoint only per lease, so for `controller_lease` the field says what the setting implies for the controller's OpenAI API key: `default` unless the setting is `none`. A lease whose endpoint is not an OpenAI host still gets no tier under `openai`, which each override's log line shows |
+| `serviceTierOverrides` | How many platform-lane Responses and Chat Completions requests since the proxy started went upstream without the string tier they asked for: replaced with `default`, or dropped where no tier is sent (a ChatGPT login, Gemini Code Assist, or an endpoint the setting does not name). A request counts when it goes upstream, once however many attempts it takes; one that never gets there (refused for bad input, no credits or a failed lease, or failing inside the proxy after its lease) does not. It only grows, and stays `0` without a platform lane |
 | `reportsUsage` | Whether the proxy reports platform-lane usage to the controller; `false` today |
 | `controllerMeteringProtocol` | The controller's usage metering protocol as the proxy last read it; `null` today |
 | `outputCeilingSource` | Where the output token ceiling sent upstream comes from; `null` today, no ceiling is sent |

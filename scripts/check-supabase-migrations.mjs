@@ -19,6 +19,170 @@ const LEGACY_PUBLIC_MIGRATION_COUNT = 64;
 const LEGACY_PUBLIC_MIGRATION_SET_SHA256 =
   "7835727c4a5699afdfb2a193487b41606f7a873cad164941b8d4e4788b56645d";
 
+// The first words of the statements that end or open a transaction. Each
+// migration runs in the one transaction its runner opens and commits, and the
+// empty-database test reads the locks a migration holds before that commit.
+const TRANSACTION_CONTROL = new Set([
+  "abort",
+  "begin",
+  "commit",
+  "end",
+  "rollback",
+  "start",
+]);
+const ROUTINE_KINDS = new Set(["function", "procedure"]);
+const IDENTIFIER = /[A-Za-z_\u{80}-\u{10FFFF}][A-Za-z0-9_$\u{80}-\u{10FFFF}]*/uy;
+// psql reads a digit and the letters, digits and dots right after it as one
+// token, such as 1e or 0x1f, so the e of 1e'...' does not open an E'...'
+// string.
+const NUMBER = /[0-9][A-Za-z0-9_$.\u{80}-\u{10FFFF}]*/uy;
+const DOLLAR_QUOTE = /\$(?:[A-Za-z_\u{80}-\u{10FFFF}][A-Za-z0-9_\u{80}-\u{10FFFF}]*)?\$/uy;
+const META_COMMAND = /\\[^\s\\]*/uy;
+const STANDARD_CONFORMING_STRINGS = /standard_conforming_strings/iu;
+// The server rejects SQL that is not valid UTF-8. Read as a string the usual
+// way, invalid bytes become U+FFFD, which the server accepts, so the
+// empty-database test, which passes a migration to psql as a string, would
+// apply such a migration. ignoreBOM keeps a leading byte order mark, as that
+// way does, so that validatePublicMigrationTrack can reject it: psql passes it
+// to the server as part of the first statement of a --command, where it is a
+// syntax error.
+const STRICT_UTF8 = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true });
+const BYTE_ORDER_MARK = "\ufeff";
+
+function matchAt(pattern, text, index) {
+  pattern.lastIndex = index;
+  return pattern.exec(text)?.[0] ?? null;
+}
+
+// The end of the quoted string or identifier that opens at `index`. A doubled
+// quote stands for itself, and an E'...' string also escapes with a backslash.
+function quotedEnd(sql, index, backslashEscapes) {
+  const quote = sql[index];
+  let cursor = index + 1;
+  while (cursor < sql.length) {
+    if (backslashEscapes && sql[cursor] === "\\") {
+      cursor += 2;
+    } else if (sql[cursor] === quote) {
+      if (sql[cursor + 1] !== quote) {
+        return cursor + 1;
+      }
+      cursor += 2;
+    } else {
+      cursor += 1;
+    }
+  }
+  return sql.length;
+}
+
+// The first word of every top-level statement in `sql`, lowercased, the words
+// of each such statement, and every psql meta-command in it. Comments,
+// quoted strings and identifiers, and dollar-quoted bodies such as a DO block
+// or a function body are skipped, so the BEGIN and END inside them do not
+// count. A statement's words are its names and keywords, lowercased, its
+// numbers, and each '...' string or "..." identifier whole, quotes included;
+// its operators and punctuation are left out. Statements split the way psql
+// splits them: a semicolon inside parentheses, or inside the BEGIN ATOMIC body
+// of a CREATE FUNCTION or PROCEDURE, does not end one. psql runs a backslash
+// anywhere else, at the start of a line or after a query, as a meta-command
+// that takes the rest of the line.
+function scanTopLevel(sql) {
+  const keywords = [];
+  const metaCommands = [];
+  const statements = [];
+  let words = [];
+  let parenDepth = 0;
+  let beginDepth = 0;
+  let index = 0;
+  while (index < sql.length) {
+    const char = sql[index];
+    const identifier = matchAt(IDENTIFIER, sql, index);
+    const dollarQuote = identifier ? null : matchAt(DOLLAR_QUOTE, sql, index);
+    const number = identifier || dollarQuote ? null : matchAt(NUMBER, sql, index);
+    if (sql.startsWith("--", index)) {
+      const lineEnd = sql.indexOf("\n", index);
+      index = lineEnd === -1 ? sql.length : lineEnd + 1;
+    } else if (sql.startsWith("/*", index)) {
+      let depth = 0;
+      do {
+        if (sql.startsWith("/*", index)) {
+          depth += 1;
+          index += 2;
+        } else if (sql.startsWith("*/", index)) {
+          depth -= 1;
+          index += 2;
+        } else {
+          index += 1;
+        }
+      } while (depth > 0 && index < sql.length);
+    } else if (dollarQuote) {
+      const close = sql.indexOf(dollarQuote, index + dollarQuote.length);
+      index = close === -1 ? sql.length : close + dollarQuote.length;
+    } else if (number) {
+      index += number.length;
+      words.push(number);
+    } else if (identifier) {
+      const word = identifier.toLowerCase();
+      index += identifier.length;
+      if (sql[index] === "'" && word === "e") {
+        index = quotedEnd(sql, index, true);
+        continue;
+      }
+      if (words.length === 0) {
+        keywords.push(word);
+      }
+      words.push(word);
+      const [create, second, third, fourth] = words;
+      const routine =
+        create === "create" &&
+        (ROUTINE_KINDS.has(second) ||
+          (second === "or" && third === "replace" && ROUTINE_KINDS.has(fourth)));
+      if (routine && parenDepth === 0) {
+        if (word === "begin" || (word === "case" && beginDepth > 0)) {
+          beginDepth += 1;
+        } else if (word === "end" && beginDepth > 0) {
+          beginDepth -= 1;
+        }
+      }
+    } else if (char === "'" || char === '"') {
+      const end = quotedEnd(sql, index, false);
+      words.push(sql.slice(index, end));
+      index = end;
+    } else if (char === "\\") {
+      metaCommands.push(matchAt(META_COMMAND, sql, index));
+      const lineEnd = sql.indexOf("\n", index);
+      index = lineEnd === -1 ? sql.length : lineEnd + 1;
+    } else {
+      if (char === "(") {
+        parenDepth += 1;
+      } else if (char === ")") {
+        parenDepth = Math.max(0, parenDepth - 1);
+      } else if (char === ";" && parenDepth === 0 && beginDepth === 0) {
+        if (words.length > 0) {
+          statements.push(words);
+        }
+        words = [];
+      }
+      index += 1;
+    }
+  }
+  if (words.length > 0) {
+    statements.push(words);
+  }
+  return { keywords, metaCommands, statements };
+}
+
+function topLevelStatementKeywords(sql) {
+  return scanTopLevel(sql).keywords;
+}
+
+function topLevelStatements(sql) {
+  return scanTopLevel(sql).statements;
+}
+
+function topLevelMetaCommands(sql) {
+  return scanTopLevel(sql).metaCommands;
+}
+
 function migrationVersion(fileName) {
   const match = MIGRATION_NAME.exec(fileName);
   if (!match) {
@@ -59,8 +223,44 @@ function validatePublicMigrationTrack(directory = DEFAULT_MIGRATIONS) {
       throw new Error(`duplicate public migration version: ${version}`);
     }
     versions.add(version.toString());
-    if (readFileSync(path.join(directory, entry.name)).length === 0) {
+    const source = readFileSync(path.join(directory, entry.name));
+    if (source.length === 0) {
       throw new Error(`public migration is empty: ${entry.name}`);
+    }
+    let sql;
+    try {
+      sql = STRICT_UTF8.decode(source);
+    } catch {
+      throw new Error(`public migration ${entry.name} is not valid UTF-8`);
+    }
+    if (sql.startsWith(BYTE_ORDER_MARK)) {
+      throw new Error(
+        `public migration ${entry.name} starts with a byte order mark; save it as UTF-8 without a BOM`,
+      );
+    }
+    const { keywords, metaCommands } = scanTopLevel(sql);
+    const control = keywords.find((keyword) => TRANSACTION_CONTROL.has(keyword));
+    if (control) {
+      throw new Error(
+        `public migration ${entry.name} has a top-level ${control.toUpperCase()}; it must run in the one transaction its runner opens and commits`,
+      );
+    }
+    // supabase db push sends a migration to the server as plain SQL, where a
+    // meta-command is a syntax error, and the empty-database test sends one
+    // after the lane boundary the same way. Only psql reading the file as a
+    // script runs one, where it could print or hide output that test reads.
+    if (metaCommands.length > 0) {
+      throw new Error(
+        `public migration ${entry.name} has the psql meta-command ${metaCommands[0]}; a migration must be plain SQL`,
+      );
+    }
+    // With standard_conforming_strings off, a backslash escapes a quote in a
+    // plain '...' string, and this scan, which reads such a string the
+    // default way, could then take a meta-command for part of a string.
+    if (STANDARD_CONFORMING_STRINGS.test(sql)) {
+      throw new Error(
+        `public migration ${entry.name} mentions standard_conforming_strings; a migration must keep the server's default string syntax`,
+      );
     }
     if (version > LANE_BOUNDARY && version % 2n !== 0n) {
       throw new Error(
@@ -128,5 +328,8 @@ export {
   MIGRATION_NAME,
   migrationVersion,
   publicMigrationSetSha256,
+  topLevelMetaCommands,
+  topLevelStatementKeywords,
+  topLevelStatements,
   validatePublicMigrationTrack,
 };

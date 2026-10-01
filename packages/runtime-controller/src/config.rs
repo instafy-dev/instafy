@@ -69,6 +69,20 @@ fn database_pool_size_from_values(
         .unwrap_or(if dev_mode_hint { 12 } else { 4 })
 }
 
+/// A declined skill-mode ambient evaluation is free up to this many units
+/// unless `MANAGED_AI_DECLINE_WAIVER_UNITS` says otherwise.
+const DEFAULT_MANAGED_AI_DECLINE_WAIVER_UNITS: i32 = 2;
+
+/// `MANAGED_AI_DECLINE_WAIVER_UNITS`: the units of a declined skill-mode
+/// ambient evaluation that are not charged while it records no answer.
+/// Unset, malformed or negative means the default.
+fn managed_ai_decline_waiver_units(configured: Option<&str>) -> i32 {
+    configured
+        .and_then(|raw| raw.trim().parse::<i32>().ok())
+        .filter(|value| *value >= 0)
+        .unwrap_or(DEFAULT_MANAGED_AI_DECLINE_WAIVER_UNITS)
+}
+
 /// `SUPABASE_JWKS_ON_DEMAND_INTERVAL_SECONDS`: how soon after a JWKS fetch a
 /// request with an unknown key id may cause another. Anything under the floor
 /// means the default: the interval is what keeps such requests from turning
@@ -450,11 +464,13 @@ pub(crate) fn ensure_service_runtime_user_id_via_supabase(
 }
 
 /// Fixed id the proxy leases for the managed ("Instafy AI") lane. It is not
-/// a `user_credentials` row: the internal credential-lease route answers it
-/// from `AppConfig::managed_ai_openai_api_key` without any user lookup, and
-/// `agent_jobs.credential_id` (a foreign key to `user_credentials`) keeps
-/// `NULL` for managed jobs. The same string is a constant in the proxy
-/// (`openai_proxy_server::proxy::MANAGED_AI_CREDENTIAL_ID`); keep them equal.
+/// a `user_credentials` row, and the `user_credentials_id_not_reserved` check
+/// keeps any new or updated row from taking it: the internal credential-lease
+/// route answers it from `AppConfig::managed_ai_openai_api_key` without any
+/// user lookup, and `agent_jobs.credential_id` (a foreign key to
+/// `user_credentials`) keeps `NULL` for managed jobs. The same string is a
+/// constant in the proxy (`openai_proxy_server::proxy::MANAGED_AI_CREDENTIAL_ID`);
+/// keep them equal.
 pub const MANAGED_AI_CREDENTIAL_ID: &str = "4d414e41-4745-4441-8949-4e5354414659";
 
 pub fn managed_ai_credential_id() -> Uuid {
@@ -529,6 +545,9 @@ pub struct AppConfig {
     pub managed_ai_label: String,
     pub managed_ai_credit_burn_amount: i32,
     pub managed_ai_daily_prompt_limit: i32,
+    /// `decline_waiver_units` of a skill-mode ambient evaluation's platform
+    /// job record (`MANAGED_AI_DECLINE_WAIVER_UNITS`, default 2).
+    pub managed_ai_decline_waiver_units: i32,
     pub managed_ai_model_id: String,
     pub managed_ai_model_label: String,
     pub managed_ai_input_usd_micros_per_1k: i64,
@@ -1084,6 +1103,11 @@ impl AppConfig {
             .ok()
             .and_then(|raw| raw.parse::<i32>().ok())
             .unwrap_or(20);
+        let managed_ai_decline_waiver_units = managed_ai_decline_waiver_units(
+            std::env::var("MANAGED_AI_DECLINE_WAIVER_UNITS")
+                .ok()
+                .as_deref(),
+        );
         // Managed "Instafy AI" tier (operator-paid): model and list prices default
         // to Luna. BYO credential defaults live in credentials.rs and stay on Sol.
         let managed_ai_model_id = read_first_env(&["MANAGED_AI_MODEL_ID"])
@@ -1345,6 +1369,7 @@ impl AppConfig {
             managed_ai_label,
             managed_ai_credit_burn_amount,
             managed_ai_daily_prompt_limit,
+            managed_ai_decline_waiver_units,
             managed_ai_model_id,
             managed_ai_model_label,
             managed_ai_input_usd_micros_per_1k,
@@ -1500,7 +1525,8 @@ impl StripeConfig {
 #[cfg(test)]
 mod tests {
     use super::{
-        database_pool_size_from_values, jwks_on_demand_interval_seconds, normalize_public_app_url,
+        database_pool_size_from_values, jwks_on_demand_interval_seconds,
+        managed_ai_decline_waiver_units, normalize_public_app_url,
         parse_browser_profile_persist_project_ids, published_development_key_warning,
         resolve_credential_encryption_key, resolve_credential_key_ring, resolve_user_token_secret,
         CredentialEncryptionKey, DEV_USER_TOKEN_SECRET,
@@ -1822,6 +1848,20 @@ mod tests {
                 database_pool_size_from_values(Some(configured), Some("true")),
                 12,
                 "expected {configured:?} to use the development fallback"
+            );
+        }
+    }
+
+    #[test]
+    fn managed_ai_decline_waiver_defaults_to_two_units_and_rejects_negatives() {
+        assert_eq!(managed_ai_decline_waiver_units(None), 2);
+        assert_eq!(managed_ai_decline_waiver_units(Some(" 5 ")), 5);
+        assert_eq!(managed_ai_decline_waiver_units(Some("0")), 0);
+        for malformed in ["", "-1", "two", "2.5"] {
+            assert_eq!(
+                managed_ai_decline_waiver_units(Some(malformed)),
+                2,
+                "{malformed}"
             );
         }
     }

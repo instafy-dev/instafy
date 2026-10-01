@@ -22,7 +22,8 @@ use crate::active_job_auth::{
     authorize_active_job_if_scoped, ActiveJobAuthorization, ActiveJobProjectAccess,
 };
 use crate::auth::{
-    authenticate_request, issue_agent_token_for_runtime, issue_proxy_envelope, RequestContext,
+    authenticate_request, issue_agent_token_for_runtime, issue_proxy_envelope, ProxyJobBinding,
+    RequestContext,
 };
 use crate::conversations::{
     ensure_conversation_access, load_conversation_record, map_conversation_message_row,
@@ -696,6 +697,7 @@ pub(crate) async fn agent_login(
         None,
         None,
         None,
+        None,
     );
 
     info!(
@@ -913,16 +915,40 @@ pub(crate) async fn agent_lease(
                     extract_multi_agent_group_id_from_job_payload(&job.payload);
                 let (agent_handle, agent_display_name, agent_description) =
                     extract_agent_prompt_identity_from_job_payload(&job.payload);
+                // Every job token names this lease attempt. A platform job's
+                // record keeps its hash, so metering accepts only the token
+                // minted here for this attempt.
                 job.proxy = issue_proxy_envelope(
                     &state.config,
                     &project_id,
                     &runtime_id,
                     job.run_id.as_ref(),
                     job.credential_id.as_ref(),
+                    Some(ProxyJobBinding {
+                        job_id: job.id,
+                        lease_attempt: job.lease_attempts,
+                    }),
                     agent_handle.as_deref(),
                     agent_display_name.as_deref(),
                     agent_description.as_deref(),
                 );
+                // Bind only a platform job, by the predicate dispatch writes
+                // its record by (no credential, an intent that needs AI). BYO
+                // and terminal leases skip the write and never touch the
+                // metering table.
+                let platform_job = job.credential_id.is_none()
+                    && crate::dispatch::dispatch_requires_ai_access(
+                        job.intent.as_deref().unwrap_or_default(),
+                    );
+                if let Some(proxy) = job.proxy.as_ref().filter(|_| platform_job) {
+                    crate::ai_metering::job_record::bind_job_token(
+                        &transaction,
+                        &job.id,
+                        job.lease_attempts,
+                        &proxy.token,
+                    )
+                    .await?;
+                }
                 jobs.push(job);
                 if jobs.len() == 1 {
                     if is_runtime_spread_job {
@@ -3568,6 +3594,14 @@ pub(crate) async fn enqueue_agent_job_record(
     credential_id: Option<Uuid>,
     provider_conversation_state: Option<&JsonValue>,
 ) -> Result<Option<Uuid>, (StatusCode, Json<ApiError>)> {
+    // A job pins a user credential or none (the managed lane); the reserved
+    // managed id is never a user credential.
+    if credential_id
+        .as_ref()
+        .is_some_and(crate::credentials::is_managed_ai_credential_id)
+    {
+        return Err(not_found("credential not found"));
+    }
     let payload_json = build_agent_job_payload(
         project,
         context,

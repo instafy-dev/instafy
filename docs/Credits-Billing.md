@@ -187,6 +187,33 @@ updated first: until both are, requests keep the model they ask for and every to
 included. This is separate from the key rollout order in the next paragraph. Static proxy
 credentials serving managed turns get the same pin from `PROXY_PINNED_MODEL`, as described above.
 
+The pricing envs are standard-tier rates, so the platform key also serves only OpenAI's standard
+service tier. `priority` costs about twice as much per token, `flex` and `scale` are priced apart,
+and a request that names no tier runs on the OpenAI project's own default tier, which the project's
+settings decide (`auto` follows it too). The proxy therefore sends every managed Responses and Chat
+Completions request to the OpenAI API with `service_tier: "default"` explicitly. A managed request
+that asks for any other string tier, such as `priority`, which codex's Fast mode sends, is
+overridden to `default` rather than refused, so a stray codex setting never fails a managed turn.
+The proxy logs each override when it hands the request to its upstream HTTP client, and counts it
+as `serviceTierOverrides` in the `platformLane` health object, next to `serviceTier`; a request
+refused before that, for bad input or a failed lease, is not counted. A tier that is not a string,
+which codex never sends, is refused with 400 `service_tier_not_allowed` before the proxy leases a
+credential or contacts the provider. A static ChatGPT login serving managed turns sends the ChatGPT endpoint no
+tier, as before, since how that endpoint treats one is unverified; its overrides are counted and
+logged with no tier sent. The tier goes only to OpenAI's own API by default:
+`PROXY_PLATFORM_SERVICE_TIER_ENDPOINTS` is `openai` (hosts under `openai.com`), `all` (any endpoint
+that takes a tier, for an OpenAI-compatible provider that accepts `default`) or `none`, since such
+a provider may reject the field or its value. A request to an endpoint the setting leaves out goes
+with no tier, as before this rule, and its override is counted and logged the same way. The
+`serviceTier` health field says whether the lane's requests carry the tier; for the controller's
+managed lease, whose endpoint comes with each lease, it says what the setting implies. Speech and
+transcription refuse any tier but `default` with the same 400 instead of overriding it, since the
+proxy forwards audio bodies as sent and codex sends them no tier. This rule follows the lane, not
+the pin: it holds however the platform lane is served, pinned or not. A user's own key or ChatGPT
+login is sent no tier, as before this rule, whatever its request asks for. The rule needs only the
+proxy, so it can ship before any codex upgrade: today's runtime sends no tier, and every managed
+Responses and Chat Completions request to the OpenAI API now goes out as `default`.
+
 Roll the proxy out first. Setting `MANAGED_AI_OPENAI_API_KEY` is what makes the controller
 advertise managed AI and charge for managed turns, so every provider host must already run a
 proxy image built from this change (`RUNTIME_PROXY_IMAGE`) before the key goes on the
@@ -214,6 +241,56 @@ Starter guidance with the current defaults:
 - managed AI has a soft cap of 20 prompts/day by default
 - tunnels and hosted runtimes burn from the same pool, so heavy infra usage reduces how much managed AI remains that day
 - the balance resets once per day in UTC; there is no carry-over
+
+### Ledger guard
+Every `org_credit_ledger` insert moves the team balance through the ledger's balance trigger,
+under a lock on the team's balance row:
+- A debit that would leave the balance below zero is refused unless the row sets
+  `allow_overdraft`. No controller path sets it today.
+- A credit is always applied, including one that leaves a negative balance still negative.
+- A row whose idempotency key the team already has for the same project is skipped without
+  moving the balance, also under `ON CONFLICT DO NOTHING` and between concurrent writers. Rows
+  without a project are never deduplicated, as in the ledger's unique index.
+
+### Usage metering (record-only)
+The controller is starting to meter managed AI from the proxy's reports of exact upstream usage,
+beside the reserve-and-reconcile billing above, which still decides every charge. Today it only
+records which jobs run on the platform key and which tokens they hold:
+- Dispatch writes one `ai_usage_jobs` row for every platform job, in the transaction that enqueues
+  it: an agent job whose intent needs AI (not a `terminal_command`) and whose target has no
+  credential. Service-role dispatches such as plan workers, lead continuations and queued sends
+  without a user get one too. BYO jobs, including the BYO targets of a mixed dispatch, and
+  terminal commands get none, so they have no platform lane to meter.
+- The row is the job's billing identity and is written once. Its `billing_mode` is `record_only`:
+  nothing is posted to the ledger from it. Its `decline_waiver_units` is
+  `MANAGED_AI_DECLINE_WAIVER_UNITS` (default `2`) for a skill-mode ambient evaluation, as the
+  dispatch's own participation decision classified it, and `0` for every other job, scheduled
+  automations included. It is never read from the job payload, which a client or a later decline
+  can change.
+- Every job token the job lease mints now names its job and lease attempt (`job_id`,
+  `lease_attempt`). For a platform job, and only for one, the lease also records the token's
+  SHA-256 in the job's row under that attempt, in the lease transaction. BYO and terminal leases
+  write nothing there, so they never depend on the metering table. The metering checks still to
+  come (the managed-key lease and the usage report) accept only a token recorded that way, so even
+  a holder of the proxy signing secret can use only tokens the controller minted for that job
+  attempt. The controller's other proxy tokens (the agent-login and runtime-register envelopes,
+  and those for its own credential checks, inline completions and conversation titles) carry
+  neither claim. Proxies ignore both claims for now and accept tokens with or without them, so the
+  controller and the proxy can be updated in either order.
+- Those checks verify a job token in one of two modes. Both require a signature with the proxy
+  signing secret and the `aud` (`proxy`), `iss` (`runtime-controller`), `exp` and `iat` claims; a
+  token missing any of them is refused. The live mode, for the managed-key lease, also enforces
+  `exp` and requires that the job is still leased (`agent_jobs.status = 'leased'`) to the runtime
+  the token names and that the token is the one recorded for the job's current attempt. Cancel,
+  finish and requeue leave the attempt unchanged, so a token stops being live the moment its job
+  stops being leased, not when it expires. The settle mode, for the usage report, skips `exp`,
+  accepts a token issued within the last 24 hours and requires the token recorded for the attempt
+  it names, whatever the job's status now, so a finished job and a requeued job's earlier attempt
+  still bill.
+- The next step (the managed-key lease and the usage report) must keep two rules. The managed-key
+  lease requires a bound live token in every case, with no fallback for an unbound or legacy
+  token. A settle takes the job and lease attempt from the verified token, never from the report
+  body.
 
 ## Controller Endpoints
 - `GET /credits/status` — current team credit balance/limit.
