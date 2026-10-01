@@ -1,5 +1,4 @@
 import {
-  FormEvent,
   type ReactNode,
   useCallback,
   useEffect,
@@ -20,6 +19,7 @@ import {
   Trash,
   MoreHoriz,
 } from "iconoir-react";
+import { normalizeBrowserAddress } from "./browserAddress";
 import { BrowserAddressField } from "./BrowserAddressField";
 import { Checkbox } from "../../../components/Checkbox";
 import { Button, IconButton } from "../../../components/Button";
@@ -282,20 +282,17 @@ export function PersonalBrowserSurface({
   const navigateToAddress = useCallback(
     (nextAddress: string) => {
       if (!active || !ready || humanInputLocked) {
-        return;
+        return false;
       }
       setAddress(nextAddress);
       model.clearNavigationError();
       void model.navigate(nextAddress);
+      if (!normalizeBrowserAddress(nextAddress)) return false;
       addressInputRef.current?.blur();
+      return true;
     },
     [active, ready, humanInputLocked, model],
   );
-  const handleNavigate = (event: FormEvent<HTMLFormElement>) => {
-    event.preventDefault();
-    navigateToAddress(address);
-  };
-
   const handleClearData = useCallback(() => {
     if (!window.confirm(
       "Clear your Personal Browser cookies and site data on this device? This signs you out of websites across all your projects on this device. It does not clear Shared Browser, your Instafy sign-in, or your other browsers. This cannot be undone.",
@@ -404,15 +401,15 @@ export function PersonalBrowserSurface({
             testIdPrefix="personal-browser"
             errorId={model.navigationError ? "personal-browser-address-error" : undefined}
             invalid={Boolean(model.navigationError)}
-            disabled={!ready || humanInputLocked}
+            disabled={!active || !ready || humanInputLocked}
             value={address}
             historyUserId={historyUserId}
             currentPage={active && ready && ownsNativeStatus && model.status ? {
               url: model.status.url,
               title: model.status.title,
             } : null}
-            onNavigateSuggestion={navigateToAddress}
-            onSubmit={handleNavigate}
+            onNavigate={navigateToAddress}
+            errorMessage={model.navigationError}
             onValueChange={(value) => {
               setAddress(value);
               model.clearNavigationError();

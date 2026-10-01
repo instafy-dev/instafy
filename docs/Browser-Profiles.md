@@ -67,6 +67,12 @@ filter by page title or address. Select a suggestion to open it, or enter a new
 address as usual. Arrow keys select suggestions, Enter opens the selection,
 Tab completes it without navigating, and Escape dismisses the list.
 
+On phone widths, tapping the address opens a full-screen editor with the same
+suggestions. **Back** cancels editing, **Clear address** shows recent visits,
+and **Go** or a suggestion opens the page and closes the editor. Invalid
+addresses stay editable. The header and suggestions fit above the on-screen
+keyboard. Desktop keeps the dropdown even inside a narrow browser pane.
+
 Studio remembers up to 100 observed page addresses and titles locally for your
 Instafy account, and shows up to eight matches. Both browser locations use this
 list. Draft addresses and unconfirmed navigation commands are not recorded.

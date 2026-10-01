@@ -1,5 +1,4 @@
 import {
-  type FormEvent,
   type ReactNode,
   useCallback,
   useEffect,
@@ -145,12 +144,12 @@ export function SharedBrowserChrome({
 
   const navigateToAddress = useCallback((nextAddress: string) => {
     if (!activePage || controlsDisabled || !controls.navigate) {
-      return;
+      return false;
     }
     const normalizedAddress = normalizeSharedBrowserAddress(nextAddress);
     if (!normalizedAddress) {
       setAddressError("Enter an http:// or https:// address.");
-      return;
+      return false;
     }
     setAddressError(null);
     if (error) {
@@ -160,12 +159,8 @@ export function SharedBrowserChrome({
     submittedAddressRef.current = normalizedAddress;
     onNavigate(activePage.id, normalizedAddress);
     addressInputRef.current?.blur();
+    return true;
   }, [activePage, controlsDisabled, controls.navigate, error, onClearError, onNavigate]);
-
-  const handleSubmit = (event: FormEvent<HTMLFormElement>) => {
-    event.preventDefault();
-    navigateToAddress(addressDraft);
-  };
 
   const clearDisplayedError = () => {
     setAddressError(null);
@@ -255,13 +250,13 @@ export function SharedBrowserChrome({
                 testIdPrefix="shared-browser"
                 errorId={displayedError ? `${errorId}-error` : undefined}
                 invalid={Boolean(displayedError)}
-                disabled={controlsDisabled || !controls.navigate}
+                disabled={!historyActive || controlsDisabled || !controls.navigate}
                 value={addressDraft}
                 historyUserId={historyUserId}
                 currentPage={resolved && historyActive ? activePage : null}
-                onNavigateSuggestion={navigateToAddress}
+                onNavigate={navigateToAddress}
+                errorMessage={displayedError}
                 placeholder={resolved ? "Enter an address" : "Connecting to Shared Browser…"}
-                onSubmit={handleSubmit}
                 onBlur={(event) => {
                   const nextFocus = event.relatedTarget;
                   if (

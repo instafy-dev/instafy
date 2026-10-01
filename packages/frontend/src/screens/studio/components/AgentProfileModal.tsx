@@ -13,6 +13,8 @@ import { Text } from "../../../components/Text";
 import { StudioDialogHeader } from "../../../components/aria/StudioDialogLayout";
 import { Textarea } from "../../../components/Textarea";
 import { StudioDialogModal } from "../../../components/aria/StudioModal";
+import { MobileFocusDialog } from "../../../components/aria/MobileFocusDialog";
+import { useBreakpoint } from "../../../hooks/useBreakpoint";
 import type { ControllerCredentialListItem } from "../../../sdk/instafy";
 import { resolveAgentAvatarImageSrc } from "../../../utils/agentAvatar";
 import type { AiModelOption, AiProviderId } from "../../../utils/aiProviderModels";
@@ -101,6 +103,7 @@ export function AgentProfileModal({
   onSave,
   saveLabel,
 }: AgentProfileModalProps) {
+  const isDesktop = useBreakpoint("sm");
   const [photoError, setPhotoError] = useState<string | null>(null);
   const [previewUrl, setPreviewUrl] = useState<string | null>(null);
   useEffect(() => {
@@ -126,31 +129,11 @@ export function AgentProfileModal({
     avatarSeed: avatarImageUrl,
   });
 
-  return (
-    <StudioDialogModal
-      isOpen={isOpen}
-      onOpenChange={(open) => {
-        if (!open && !pending) {
-          onClose();
-        }
-      }}
-      isDismissable={!pending}
-      isKeyboardDismissDisabled={pending}
-      dialogAriaLabel={title}
-      modalClassName="max-h-[calc(100dvh-2rem)] overflow-hidden"
-      dialogClassName="flex max-h-[calc(100dvh-2rem)] min-h-0 flex-col"
-      data-testid="agent-profile-modal"
-    >
-      <StudioDialogHeader
-        title={title}
-        description={subtitle}
-        onClose={onClose}
-        closeButtonDisabled={pending}
-        closeLabel="Close"
-        className="shrink-0"
-      />
-
-      <div className="min-h-0 flex-1 overflow-y-auto px-5 py-4">
+  const onOpenChange = (open: boolean) => {
+    if (!open && !pending) onClose();
+  };
+  const form = <>
+      <div className={isDesktop ? "min-h-0 flex-1 overflow-y-auto px-5 py-4" : "px-4 py-4"}>
         <SettingsFormLayout>
           <SettingsIdentityRow>
             <IdentityPhotoButton
@@ -249,6 +232,7 @@ export function AgentProfileModal({
             {showModelPicker ? (
               <Field label="Model">
                 <ModelMenuSelect
+                  presentation={isDesktop ? "menu" : "inline"}
                   value={modelId}
                   options={modelOptions ?? []}
                   disabled={pending}
@@ -280,11 +264,46 @@ export function AgentProfileModal({
         </SettingsFormLayout>
       </div>
 
-      <div className="shrink-0 px-5 pb-4">
+      <div className={isDesktop ? "shrink-0 px-5 pb-4" : "px-4 pb-4"}>
         <SettingsFormActions saveLabel={effectiveSaveLabel} saving={pending}
           disabled={!dirty || (handleRequired && !handle.trim()) || Array.from(bio).length > PROFILE_BIO_MAX_LENGTH}
           onSave={onSave} onCancel={onClose} saveTestId="agent-profile-save" />
       </div>
+  </>;
+
+  if (!isDesktop) {
+    return <MobileFocusDialog isOpen={isOpen} onOpenChange={onOpenChange}
+      dialogAriaLabel={title} closeDisabled={pending} dismissLabel="Close"
+      data-testid="agent-profile-modal"
+      header={<div>
+        <Text as="h2" variant="bodyStrong" tone="primary">{title}</Text>
+        {subtitle ? <Text as="p" variant="caption" tone="muted">{subtitle}</Text> : null}
+      </div>}
+    >
+      {form}
+    </MobileFocusDialog>;
+  }
+
+  return (
+    <StudioDialogModal
+      isOpen={isOpen}
+      onOpenChange={onOpenChange}
+      isDismissable={!pending}
+      isKeyboardDismissDisabled={pending}
+      dialogAriaLabel={title}
+      modalClassName="max-h-[calc(100dvh-2rem)] overflow-hidden"
+      dialogClassName="flex max-h-[calc(100dvh-2rem)] min-h-0 flex-col"
+      data-testid="agent-profile-modal"
+    >
+      <StudioDialogHeader
+        title={title}
+        description={subtitle}
+        onClose={onClose}
+        closeButtonDisabled={pending}
+        closeLabel="Close"
+        className="shrink-0"
+      />
+      {form}
     </StudioDialogModal>
   );
 }

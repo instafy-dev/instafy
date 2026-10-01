@@ -238,6 +238,14 @@ that chat has no destination bar before/during/after typing and that all three o
 share the same destinations. Browser viewport
 simulation cannot replace those checks or establish physical one-hand comfort.
 
+Focused phone tasks use the shared `MobileFocusDialog` surface: a single header with Back
+and the task's controls, followed by a scrollable body. Its content follows visual-viewport
+resize and scroll events while the backdrop still covers the screen; input nodes and drafts
+stay mounted as the software keyboard changes the available space. The navigation picker
+shares the viewport observer without changing its sheet layout. The dialog uses the existing
+native Back coordinator and React Aria focus restoration; a pending save can block dismissal
+without letting Back navigate the underlying screen. This does not change native keyboard policy.
+
 The mobile sidebar paints to every screen edge, with safe-area padding around its controls.
 While this drawer is open, iOS temporarily overlays its status bar on the WebView; closing the
 drawer restores its previous status-bar overlay mode (normally non-overlay). Android and the
