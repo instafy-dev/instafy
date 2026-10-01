@@ -83,4 +83,51 @@ describe("useChatSubmitDispatch", () => {
       }),
     );
   });
+  it("leaves the composer, staged images, focus and scroll alone for an automatic send", async () => {
+    // A failed run's automatic retry fires while the person may be writing the
+    // next message (with a screenshot attached) or reading further up.
+    const onSubmit = vi.fn(async () => undefined);
+    const latestInputValueRef = { current: "Build me a landing page" };
+    const options: HookOptions = {
+      activeConversationId: "conversation-1",
+      clearInputEditor: vi.fn(),
+      clearImageAttachments: vi.fn(),
+      focusInput: vi.fn(),
+      isChatInputFocused: vi.fn(() => true),
+      latestInputValueRef,
+      mentionableAgentHandles: ["octo"],
+      onInputChange: vi.fn(),
+      onSubmit,
+      scrollToBottom: vi.fn(),
+      setSendingAttachment: vi.fn(),
+      shouldAutoScrollRef: { current: false },
+    };
+    const resultRef: MutableRefObject<HookResult | null> = { current: null };
+    await act(async () => {
+      root.render(<Harness options={options} resultRef={resultRef} />);
+    });
+
+    await act(async () => {
+      await resultRef.current?.performSubmit({
+        message: "Build me a landing page",
+        editorState: null,
+        imageFiles: [],
+        metadata: { retryOfMessageId: "failure-1" },
+        automatic: true,
+      });
+    });
+
+    expect(onSubmit).toHaveBeenCalledTimes(1);
+    expect(options.clearImageAttachments).not.toHaveBeenCalled();
+    expect(options.scrollToBottom).not.toHaveBeenCalled();
+    expect(options.shouldAutoScrollRef.current).toBe(false);
+    expect(options.focusInput).not.toHaveBeenCalled();
+    // Even a draft that matches the resent text is the person's to keep.
+    expect(options.onInputChange).not.toHaveBeenCalled();
+    expect(options.clearInputEditor).not.toHaveBeenCalled();
+    expect(latestInputValueRef.current).toBe("Build me a landing page");
+    // The send still counts as in flight while it goes out.
+    expect(options.setSendingAttachment).toHaveBeenNthCalledWith(1, true);
+    expect(options.setSendingAttachment).toHaveBeenLastCalledWith(false);
+  });
 });

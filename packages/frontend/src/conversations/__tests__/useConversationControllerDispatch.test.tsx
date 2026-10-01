@@ -138,7 +138,7 @@ describe("useConversationControllerDispatch write expectations", () => {
         undefined,
         intent,
       );
-      expect(result).toEqual({ ok: true });
+      expect(result).toEqual({ ok: true, runIds: ["run-1"], jobIds: [] });
     });
     expect(sendMessageMock).toHaveBeenCalledTimes(1);
     return sendMessageMock.mock.calls[0][0] as Record<string, unknown>;
@@ -152,6 +152,28 @@ describe("useConversationControllerDispatch write expectations", () => {
     const metadata = sent.metadata as Record<string, unknown>;
     expect(metadata.writeIntent).toBe(true);
     expect(metadata.runtimeExpectations).toBeUndefined();
+  });
+
+  it("reports the runs and jobs the controller started for the prompt", async () => {
+    sendMessageMock.mockResolvedValue({
+      runId: "run-1",
+      runIds: ["run-1", "run-2"],
+      jobId: "job-1",
+      jobIds: ["job-1", "job-2"],
+      status: "queued",
+    });
+    let result: unknown = null;
+    await act(async () => {
+      result = await api!.sendPromptToController("conversation-local", "hello", null);
+    });
+    expect(result).toEqual({ ok: true, runIds: ["run-1", "run-2"], jobIds: ["job-1", "job-2"] });
+
+    // A prompt the controller only recorded, or put in its send queue, started none.
+    sendMessageMock.mockResolvedValue({ jobId: null, status: "recorded" });
+    await act(async () => {
+      result = await api!.sendPromptToController("conversation-local", "hello", null);
+    });
+    expect(result).toEqual({ ok: true, runIds: [], jobIds: [] });
   });
 
   it("keeps terminal_command dispatch metadata untouched", async () => {

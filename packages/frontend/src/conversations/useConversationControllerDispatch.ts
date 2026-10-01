@@ -356,22 +356,21 @@ export function useConversationControllerDispatch({
         }
       }
       try {
-        const resolveRunIds = (response: {
-          runId?: string | null;
-          runIds?: string[] | null;
-        }) => {
-          const ids = Array.isArray(response.runIds)
-            ? response.runIds.filter(
+        const resolveIds = (many: unknown, one: unknown) => {
+          const ids = Array.isArray(many)
+            ? many.filter(
                 (entry): entry is string => typeof entry === "string" && entry.length > 0,
               )
             : [];
           if (ids.length > 0) {
             return ids;
           }
-          return typeof response.runId === "string" && response.runId.length > 0
-            ? [response.runId]
-            : [];
+          return typeof one === "string" && one.length > 0 ? [one] : [];
         };
+        const resolveRunIds = (response: {
+          runId?: string | null;
+          runIds?: string[] | null;
+        }) => resolveIds(response.runIds, response.runId);
 
         const controllerId = await ensureControllerConversationId(projectId, conversation);
         if (!controllerId) {
@@ -412,7 +411,14 @@ export function useConversationControllerDispatch({
           }
           linkRunToConversation(runId, conversation.localId);
         });
-        return { ok: true };
+        // The runs this prompt started (none when the controller only
+        // recorded it or put it in its send queue). Failed-run retries use
+        // them to tell which prompt a failure belongs to.
+        return {
+          ok: true,
+          runIds: resolveRunIds(response),
+          jobIds: resolveIds(response.jobIds, response.jobId),
+        };
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
         const conversationState =
