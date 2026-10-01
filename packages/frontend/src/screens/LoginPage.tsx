@@ -918,6 +918,11 @@ export function LoginPage() {
                 >
                   Forgot password?
                 </Button>
+                {message ? (
+                  <Text role="status" tone="muted" className="mt-2" data-testid="login-message">
+                    {message}
+                  </Text>
+                ) : null}
               </div>
             </div>
 
@@ -1336,7 +1341,7 @@ export function LoginPage() {
             <div className="mt-6">
               {renderBody()}
 
-              {message && step !== "otp" ? (
+              {message && step !== "otp" && step !== "password" ? (
                 <InlineNotice tone="success" role="status" className="mt-6" data-testid="login-message">
                   {message}
                 </InlineNotice>

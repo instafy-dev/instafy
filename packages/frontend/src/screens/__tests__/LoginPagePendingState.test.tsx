@@ -170,7 +170,7 @@ describe("LoginPage pending state", () => {
     expect(remove.disabled).toBe(true);
   });
 
-  it("spins only the forgot-password control, then announces the outcome", async () => {
+  it("spins only the forgot-password control, then announces the outcome beside it", async () => {
     let resolveReset: () => void = () => {};
     auth.sendPasswordResetEmail.mockImplementation(
       () => new Promise<void>((resolve) => { resolveReset = resolve; }),
@@ -190,8 +190,15 @@ describe("LoginPage pending state", () => {
 
     await act(async () => resolveReset());
     const message = container.querySelector('[data-testid="login-message"]');
+    expect(container.querySelectorAll('[data-testid="login-message"]')).toHaveLength(1);
     expect(message?.getAttribute("role")).toBe("status");
-    expect(message?.textContent).toContain("Password reset email sent");
+    expect(message?.textContent).toBe(
+      "Password reset email sent to dev@example.com. Open the link to set a new password.",
+    );
+    expect(message?.childElementCount).toBe(0);
+    expect(forgot?.nextElementSibling).toBe(message);
+    expect(message?.closest("form")).toBe(submit.form);
+    expect(message!.compareDocumentPosition(submit) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
     expect(buttonByText("Forgot password?")?.getAttribute("data-pending")).toBeNull();
   });
 
