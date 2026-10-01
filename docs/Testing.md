@@ -436,9 +436,19 @@ or old-lock fallback. Self-hosted Rust compile/test children restore these cache
 with the pinned restore-only action; they do not upload caches in a post-job step.
 This keeps an optional large cache save from exhausting the job after its Cargo
 checks pass. A cache miss still runs every command cold and must fit the same
-30-minute limit. GitHub-hosted children retain the original restore/save action,
-keys and paths. An uncanceled Build never ignores a test failure, child
-cancellation or aggregate failure.
+30-minute limit. GitHub-hosted children save only from `refs/heads/main` (pushes
+and manual dispatches); pull requests and other refs use the restore-only step
+and read main's entries, because PR-scoped entries would use the shared cache
+budget yet serve only that PR. Keys include every `packages/*/Cargo.lock` with
+no fallback, so a pull request that changes a lockfile compiles cold on each push
+until it merges. The contracts lane's migration-image cache is split by ref only:
+it saves from `refs/heads/main` on any runner, self-hosted included, and every
+other ref restores only. Cargo caches hold only `~/.cargo/registry/index`,
+`~/.cargo/registry/cache`, `~/.cargo/git/db` and the target directory; Cargo
+re-extracts crate sources and does not compare file times under `CARGO_HOME`,
+so cached registry and git dependencies stay fresh, while workspace and path
+crates still rebuild. An uncanceled Build never ignores a test
+failure, child cancellation or aggregate failure.
 The existing unused-toolchain disk cleanup runs only on
 GitHub-hosted images, never against a self-hosted host or guest image.
 
@@ -490,10 +500,11 @@ is not that qualification; never reduce the test selection or ignore a timeout
 to make a job green. No database, provider, signing or release credentials are
 introduced by this lane.
 
-The same restore-only compiler-cache policy applies to the two self-hosted
-Shared Browser children and Controller database tests. Their hosted compiler
-caches and pnpm caches are unchanged. Shared Browser no longer restores the
-standalone migration-image cache (see below). Cache restoration
+The same compiler-cache policy applies to the Shared Browser children and
+Controller database tests: self-hosted runs and refs other than `main` restore
+only, and only hosted `main` runs save; the Shared Browser profile child never
+saves (see below). Their pnpm caches are unchanged. Shared Browser no longer
+restores the standalone migration-image cache (see below). Cache restoration
 is an optimization, not evidence that a cold workload has passed.
 
 Disable the Rust switch to restore hosted selection for new runs; already
@@ -853,18 +864,21 @@ stack teardown. The profile-only script still permits a separately provisioned
 migrated loopback database; the signed-in Studio journey needs real local
 GoTrue. No fixture command, scenario, receipt, cleanup or safety check is
 replaced by the aggregate. Only the same fixed credential-free receipt paths
-are uploaded, separately per child. Compiler cache keys include the
-operating system and architecture; compiler targets are child-specific with
-no old-lock or cross-architecture fallback.
+are uploaded, separately per child. Both children use one compiler cache key,
+which includes the operating system, architecture and every workspace Cargo
+lockfile, with no old-lock or cross-architecture fallback. Only the Studio child
+saves it, from hosted `main`; the profile child restores that entry and never
+saves.
 
-The two self-hosted compiler restores set `SEGMENT_DOWNLOAD_TIMEOUT_MINS=2`.
+The two restore-only compiler steps used by self-hosted runs set
+`SEGMENT_DOWNLOAD_TIMEOUT_MINS=2`; the Studio step also serves hosted runs
+outside `main`.
 For the pinned action's Azure SDK downloader, this limits each 128 MiB segment
 to two minutes of wall time, even if bytes are arriving. It is not a total
 restore/job or inactivity timeout; legacy/non-Azure download paths do not use
 this setting. A segment timeout aborts that download and continues as a cache
 miss; migrations, compilation and both full fixtures still run. The 30-minute
-job limit remains, so cold compilation must fit it. Hosted restores, cache keys
-and paths are unchanged. See the
+job limit remains, so cold compilation must fit it. See the
 [cache action's timeout guidance](https://github.com/actions/cache/blob/55cc8345863c7cc4c66a329aec7e433d2d1c52a9/tips-and-workarounds.md#cache-segment-restore-timeout).
 
 The children use `pnpm supabase:up` to prepare their actual CLI-selected images

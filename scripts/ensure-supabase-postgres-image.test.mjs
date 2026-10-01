@@ -44,16 +44,22 @@ test("the build workflow ensures the image before running migrations", () => {
   );
   // The cache restore must come first, then the ensure step, then the
   // migration test that does the implicit docker run. Out of order, the
-  // ensure step pulls from ECR every run and the flake returns.
-  const cacheIndex = workflow.indexOf("supabase-postgres-image");
+  // ensure step pulls from ECR every run and the flake returns. Main saves
+  // the cache and every other ref restores it, so both steps come first.
+  const cacheIndexes = [
+    "      - name: Restore Supabase Postgres image cache without saving\n",
+    "      - name: Restore Supabase Postgres image cache\n",
+  ].map((step) => workflow.indexOf(step));
   const ensureIndex = workflow.indexOf("scripts/ensure-supabase-postgres-image.mjs");
   const migrateIndex = workflow.indexOf(
     "run: node scripts/test-supabase-migrations-empty-db.mjs",
   );
-  assert.ok(cacheIndex > -1, "build.yml must restore the postgres image cache");
+  for (const cacheIndex of cacheIndexes) {
+    assert.ok(cacheIndex > -1, "build.yml must restore the postgres image cache");
+    assert.ok(cacheIndex < ensureIndex, "cache restore must precede the ensure step");
+  }
   assert.ok(ensureIndex > -1, "build.yml must run the ensure script");
   assert.ok(migrateIndex > -1, "build.yml must still run the migration test");
-  assert.ok(cacheIndex < ensureIndex, "cache restore must precede the ensure step");
   assert.ok(ensureIndex < migrateIndex, "ensure must precede the migration test");
   // The cache key binds the runner platform as well as the digest-bearing file:
   // an AMD64 tarball must not be reused on the independently native ARM64 lane.
