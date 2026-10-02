@@ -23,6 +23,8 @@ services:
       GIT_REPO_ROOT: /var/lib/instafy-git/repos
       GIT_AUTO_INIT: ${GIT_AUTO_INIT:-1}
       GIT_DEFAULT_BRANCH: ${GIT_DEFAULT_BRANCH:-main}
+      GIT_MAX_BLOB_BYTES: ${GIT_MAX_BLOB_BYTES:-20971520}
+      GIT_MAX_PUSH_BYTES: ${GIT_MAX_PUSH_BYTES:-1073741824}
       GIT_AUDIENCE: ${GIT_AUDIENCE:-git}
       GIT_JWKS_URL: ${GIT_JWKS_URL:-http://host.docker.internal:8788/.well-known/jwks.json}
       GIT_EVENTS_WEBHOOK_URL: ${GIT_EVENTS_WEBHOOK_URL:-http://host.docker.internal:8788/git/hooks/events}

@@ -15,14 +15,16 @@ compile once. Production continues to build and deploy three separate minimal
 images from their dedicated Dockerfiles.
 
 ## Repository policy (git-shard)
-`git-shard` writes one shared `update` hook to `<GIT_REPO_ROOT>/.instafy-hooks/` at startup and runs
-every `git http-backend` with `core.hooksPath` pointing there, so requests never write hook files
-or repository config, and hooks inside a repository are ignored. The policy covers:
-- Fast-forward-only `main`
+`git-shard` writes shared `update` and `post-receive` hooks to `<GIT_REPO_ROOT>/.instafy-hooks/` at
+startup and runs every `git http-backend` with `core.hooksPath` pointing there, so requests never
+write hook files or repository config, and hooks inside a repository are ignored. It refuses to
+start if the hooks cannot run or git ignores the command-scope configuration. The policy covers:
+- Fast-forward-only `main`, with letter-case variants of its name refused
 - Deny common churn paths (like `node_modules/`, from `REPO_POLICY_DENY_PATTERNS` in `src/policy.rs`)
-- Per-blob size caps, checked against the full change for merges and new branches
+- Per-blob size caps, checked on the net change between the old and new tip, merges included
 - Object checks (`receive.fsckObjects`) and a push size bound (`GIT_MAX_PUSH_BYTES`)
-- Salvage refs (`refs/instafy/salvage/**`) that no push can change
+- Salvage refs (`refs/instafy/salvage/**`, any letter case) that no push can change
+- Only recovery refs (`refs/instafy/recovery/<origin id>/<name>`) may be created under `refs/instafy/`
 
 See `GIT_MAX_BLOB_BYTES`, `GIT_DENY_PATHS`, `GIT_MAX_PUSH_BYTES` and `GIT_POLICY_DISABLED` in
 `docs/Git-Service.md`. `tests/shard_push_policy.rs` runs the real `git-shard` binary against a git
