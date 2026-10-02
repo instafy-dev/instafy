@@ -1,9 +1,8 @@
-use std::collections::{BTreeMap, BTreeSet};
-use std::path::Path;
-use std::process::Command;
+use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::{anyhow, bail, Context, Result};
 use axum::http::{Method, Uri};
 use serde::Serialize;
 use uuid::Uuid;
@@ -42,59 +41,86 @@ pub fn is_receive_pack_request(method: &Method, uri: &Uri) -> bool {
     uri.path().to_ascii_lowercase().contains("git-receive-pack")
 }
 
-pub fn snapshot_refs(repo_path: &Path) -> Result<BTreeMap<String, String>> {
-    let repo_str = repo_path
-        .to_str()
-        .ok_or_else(|| anyhow!("repo path is not valid utf-8"))?;
+/// Directory under the shard's repo root that holds one report file per push
+/// in flight (see [`crate::policy::PUSH_REPORT_ENV`]). Its name does not end
+/// in `.git`, so no Smart HTTP request can address it.
+pub const PUSH_REPORTS_DIR_NAME: &str = ".instafy-push-reports";
 
-    let output = Command::new("git")
-        .args(["-C", repo_str, "show-ref", "--heads", "--tags"])
-        .output()
-        .with_context(|| format!("failed to read refs for {:?}", repo_path))?;
-
-    if !output.status.success() {
-        // `git show-ref` exits with status 1 when there are no refs; that's not an error here.
-        if output.status.code() == Some(1) {
-            let stdout_trimmed = String::from_utf8_lossy(&output.stdout).trim().to_string();
-            let stderr_trimmed = String::from_utf8_lossy(&output.stderr).trim().to_string();
-            if stdout_trimmed.is_empty()
-                && (stderr_trimmed.is_empty() || stderr_trimmed.contains("No references"))
+/// Create the push report directory and remove reports an earlier process
+/// left behind. Returns its absolute path.
+pub fn prepare_push_reports_dir(repo_root: &Path) -> Result<PathBuf> {
+    let dir = repo_root.join(PUSH_REPORTS_DIR_NAME);
+    match std::fs::symlink_metadata(&dir) {
+        Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_dir() => {
+            bail!("push report path {dir:?} must be a real directory");
+        }
+        Ok(_) => {
+            for entry in
+                std::fs::read_dir(&dir).with_context(|| format!("failed to list {dir:?}"))?
             {
-                return Ok(BTreeMap::new());
+                let path = entry
+                    .with_context(|| format!("failed to list {dir:?}"))?
+                    .path();
+                std::fs::remove_file(&path)
+                    .with_context(|| format!("failed to remove stale push report {path:?}"))?;
             }
         }
-
-        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-        return Err(anyhow!("git show-ref failed: {stderr}"));
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            std::fs::create_dir_all(&dir).with_context(|| format!("failed to create {dir:?}"))?;
+        }
+        Err(error) => {
+            return Err(error).with_context(|| format!("failed to inspect {dir:?}"));
+        }
     }
-
-    parse_show_ref_output(&output.stdout)
+    dir.canonicalize()
+        .with_context(|| format!("failed to resolve {dir:?}"))
 }
 
-pub fn diff_refs(
-    before: &BTreeMap<String, String>,
-    after: &BTreeMap<String, String>,
-) -> Vec<GitPushRefUpdate> {
-    let mut keys = BTreeSet::new();
-    keys.extend(before.keys().cloned());
-    keys.extend(after.keys().cloned());
-
-    let mut updates = Vec::new();
-    for ref_name in keys {
-        let old_rev = before.get(&ref_name).cloned();
-        let new_rev = after.get(&ref_name).cloned();
-        if old_rev == new_rev {
+/// Turn the `<old> <new> <ref>` lines `post-receive` wrote for one push into
+/// the event's updates: branches and tags only, sorted by name. These are the
+/// updates that push made, so overlapping pushes never see each other's. A
+/// created ref has no old revision and a deleted ref has no new one.
+pub fn parse_push_report(report: &[u8]) -> Result<Vec<GitPushRefUpdate>> {
+    let text = std::str::from_utf8(report).context("push report is not utf-8")?;
+    let mut updates = BTreeMap::new();
+    for line in text.lines() {
+        let mut fields = line.split(' ');
+        let (Some(old_rev), Some(new_rev), Some(ref_name), None) =
+            (fields.next(), fields.next(), fields.next(), fields.next())
+        else {
+            bail!("invalid push report line: {line:?}");
+        };
+        if !is_object_id(old_rev) || !is_object_id(new_rev) || !ref_name.starts_with("refs/") {
+            bail!("invalid push report line: {line:?}");
+        }
+        if !ref_name.starts_with("refs/heads/") && !ref_name.starts_with("refs/tags/") {
             continue;
         }
-        updates.push(GitPushRefUpdate {
-            ref_name,
-            old_rev,
-            deleted: new_rev.is_none(),
-            new_rev,
-        });
+        let old_rev = (!is_zero_object_id(old_rev)).then(|| old_rev.to_string());
+        let new_rev = (!is_zero_object_id(new_rev)).then(|| new_rev.to_string());
+        updates.insert(
+            ref_name.to_string(),
+            GitPushRefUpdate {
+                ref_name: ref_name.to_string(),
+                old_rev,
+                deleted: new_rev.is_none(),
+                new_rev,
+            },
+        );
     }
+    Ok(updates.into_values().collect())
+}
 
-    updates
+/// A SHA-1 or SHA-256 object id in lower-case hex.
+fn is_object_id(value: &str) -> bool {
+    matches!(value.len(), 40 | 64)
+        && value
+            .bytes()
+            .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
+}
+
+fn is_zero_object_id(value: &str) -> bool {
+    value.bytes().all(|byte| byte == b'0')
 }
 
 pub fn build_push_event_payload(
@@ -156,25 +182,6 @@ pub async fn dispatch_push_event(
     Ok(())
 }
 
-fn parse_show_ref_output(stdout: &[u8]) -> Result<BTreeMap<String, String>> {
-    let mut refs = BTreeMap::new();
-    let text = String::from_utf8(stdout.to_vec()).context("git show-ref returned non-utf8")?;
-    for line in text.lines() {
-        let trimmed = line.trim();
-        if trimmed.is_empty() {
-            continue;
-        }
-        let mut parts = trimmed.split_whitespace();
-        let rev = parts.next().unwrap_or_default().trim();
-        let ref_name = parts.next().unwrap_or_default().trim();
-        if rev.is_empty() || ref_name.is_empty() {
-            return Err(anyhow!("invalid show-ref line: {trimmed}"));
-        }
-        refs.insert(ref_name.to_string(), rev.to_string());
-    }
-    Ok(refs)
-}
-
 fn now_unix_ms() -> u64 {
     let now = SystemTime::now();
     now.duration_since(UNIX_EPOCH)
@@ -184,67 +191,62 @@ fn now_unix_ms() -> u64 {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::BTreeMap;
-
-    use super::{build_push_event_payload, diff_refs, parse_show_ref_output};
+    use super::{build_push_event_payload, parse_push_report};
 
     #[test]
-    fn parse_show_ref_output_extracts_refs() {
-        let refs = parse_show_ref_output(
-            b"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa refs/heads/main\nbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb refs/tags/v1\n",
-        )
-        .expect("parse refs");
-
-        assert_eq!(
-            refs.get("refs/heads/main").map(String::as_str),
-            Some("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+    fn push_report_lists_creates_updates_and_deletes_of_branches_and_tags() {
+        let zero = "0".repeat(40);
+        let (a, b, c) = ("a".repeat(40), "b".repeat(40), "c".repeat(40));
+        let report = format!(
+            "{a} {c} refs/heads/main\n\
+             {zero} {b} refs/tags/v1\n\
+             {b} {zero} refs/heads/old\n\
+             {zero} {a} refs/instafy/recovery/x/y\n"
         );
+        let updates = parse_push_report(report.as_bytes()).expect("parse report");
+        let summary = updates
+            .iter()
+            .map(|update| {
+                (
+                    update.ref_name.as_str(),
+                    update.old_rev.as_deref(),
+                    update.new_rev.as_deref(),
+                    update.deleted,
+                )
+            })
+            .collect::<Vec<_>>();
         assert_eq!(
-            refs.get("refs/tags/v1").map(String::as_str),
-            Some("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")
+            summary,
+            vec![
+                ("refs/heads/main", Some(a.as_str()), Some(c.as_str()), false),
+                ("refs/heads/old", Some(b.as_str()), None, true),
+                ("refs/tags/v1", None, Some(b.as_str()), false),
+            ]
         );
+        assert!(parse_push_report(b"").expect("empty report").is_empty());
     }
 
     #[test]
-    fn diff_refs_marks_creates_updates_and_deletes() {
-        let before = BTreeMap::from([
-            (
-                "refs/heads/main".to_string(),
-                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string(),
-            ),
-            (
-                "refs/heads/old".to_string(),
-                "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".to_string(),
-            ),
-        ]);
-        let after = BTreeMap::from([
-            (
-                "refs/heads/main".to_string(),
-                "cccccccccccccccccccccccccccccccccccccccc".to_string(),
-            ),
-            (
-                "refs/heads/new".to_string(),
-                "dddddddddddddddddddddddddddddddddddddddd".to_string(),
-            ),
-        ]);
+    fn push_report_accepts_sha256_and_refuses_malformed_lines() {
+        let (old, new) = ("1".repeat(64), "2".repeat(64));
+        let updates = parse_push_report(format!("{old} {new} refs/heads/main\n").as_bytes())
+            .expect("sha-256 report");
+        assert_eq!(updates.len(), 1);
 
-        let updates = diff_refs(&before, &after);
-        assert_eq!(updates.len(), 3);
-        assert!(updates
-            .iter()
-            .any(|update| update.ref_name == "refs/heads/new"
-                && update.old_rev.is_none()
-                && update.new_rev.as_deref() == Some("dddddddddddddddddddddddddddddddddddddddd")));
-        assert!(updates
-            .iter()
-            .any(|update| update.ref_name == "refs/heads/old"
-                && update.deleted
-                && update.new_rev.is_none()));
-        assert!(updates
-            .iter()
-            .any(|update| update.ref_name == "refs/heads/main"
-                && update.old_rev.as_deref() == Some("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
-                && update.new_rev.as_deref() == Some("cccccccccccccccccccccccccccccccccccccccc")));
+        let a = "a".repeat(40);
+        for line in [
+            format!("{a} {a}"),
+            format!("{a} {a} refs/heads/main extra"),
+            format!("{a} xyz refs/heads/main"),
+            format!("{} {a} refs/heads/main", "A".repeat(40)),
+            format!("{a} {a} heads/main"),
+        ] {
+            assert!(
+                parse_push_report(format!("{line}\n").as_bytes()).is_err(),
+                "{line:?} was accepted"
+            );
+        }
+        assert!(parse_push_report(b"\xff\n").is_err());
     }
 
     #[test]
@@ -264,5 +266,23 @@ mod tests {
         assert_eq!(payload.repo, "not-a-uuid.git");
         assert!(payload.project_id.is_none());
         assert_eq!(payload.kind, "git.push.received");
+    }
+
+    #[test]
+    fn push_reports_dir_is_created_and_cleared() {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "instafy-git-push-reports-{}-{nanos}",
+            std::process::id()
+        ));
+        let dir = super::prepare_push_reports_dir(&root).expect("create dir");
+        assert!(dir.is_absolute());
+        std::fs::write(dir.join("stale.push"), b"x").unwrap();
+        assert_eq!(super::prepare_push_reports_dir(&root).expect("reuse"), dir);
+        assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 0);
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

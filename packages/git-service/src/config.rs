@@ -110,9 +110,34 @@ pub struct GitShardConfig {
     pub repo_root: PathBuf,
     pub auto_init: bool,
     pub default_branch: String,
+    /// Largest pack one push may send (`receive.maxInputSize`).
+    pub max_push_bytes: u64,
     pub jwks_url: Url,
     pub audience: String,
     pub events_webhook: Option<GitEventsWebhookConfig>,
+}
+
+/// Default for `GIT_MAX_PUSH_BYTES`: 1 GiB, the controller's largest import
+/// archive.
+pub const DEFAULT_GIT_MAX_PUSH_BYTES: u64 = 1024 * 1024 * 1024;
+
+/// `GIT_MAX_PUSH_BYTES`: unset or blank means the default. Anything else must
+/// be a positive whole number of bytes; zero would mean "no limit" to git, and
+/// a value such as `512M` is refused rather than silently replaced.
+fn parse_max_push_bytes(value: Option<String>) -> Result<u64> {
+    let Some(value) = value.map(|value| value.trim().to_string()) else {
+        return Ok(DEFAULT_GIT_MAX_PUSH_BYTES);
+    };
+    if value.is_empty() {
+        return Ok(DEFAULT_GIT_MAX_PUSH_BYTES);
+    }
+    value
+        .parse::<u64>()
+        .ok()
+        .filter(|bytes| *bytes > 0)
+        .ok_or_else(|| {
+            anyhow::anyhow!("GIT_MAX_PUSH_BYTES={value} must be a positive number of bytes")
+        })
 }
 
 #[derive(Clone, Debug)]
@@ -141,6 +166,7 @@ impl GitShardConfig {
         );
         let default_branch =
             std::env::var("GIT_DEFAULT_BRANCH").unwrap_or_else(|_| "main".to_string());
+        let max_push_bytes = parse_max_push_bytes(std::env::var("GIT_MAX_PUSH_BYTES").ok())?;
         let jwks_url_raw = std::env::var("GIT_JWKS_URL").unwrap_or_else(|_| {
             "http://host.docker.internal:8788/.well-known/jwks.json".to_string()
         });
@@ -177,9 +203,37 @@ impl GitShardConfig {
             repo_root,
             auto_init,
             default_branch,
+            max_push_bytes,
             jwks_url,
             audience,
             events_webhook,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{parse_max_push_bytes, DEFAULT_GIT_MAX_PUSH_BYTES};
+
+    #[test]
+    fn max_push_bytes_defaults_when_unset_and_refuses_bad_values() {
+        assert_eq!(
+            parse_max_push_bytes(None).unwrap(),
+            DEFAULT_GIT_MAX_PUSH_BYTES
+        );
+        assert_eq!(
+            parse_max_push_bytes(Some("  ".to_string())).unwrap(),
+            DEFAULT_GIT_MAX_PUSH_BYTES
+        );
+        assert_eq!(
+            parse_max_push_bytes(Some(" 16384 ".to_string())).unwrap(),
+            16384
+        );
+        for value in ["0", "512M", "-1", "1.5"] {
+            assert!(
+                parse_max_push_bytes(Some(value.to_string())).is_err(),
+                "{value} was accepted"
+            );
+        }
     }
 }

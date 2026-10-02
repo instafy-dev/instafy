@@ -3,6 +3,11 @@ use axum::http::Method;
 pub use runtime_contracts::GIT_DELETE_SCOPE;
 use uuid::Uuid;
 
+/// Header names under this prefix carry assertions between Git Edge and a Git
+/// Shard, such as [`GIT_DELETE_RESULT_HEADER`]. Git Edge drops every request
+/// header in this namespace, so a shard never receives one a client wrote.
+pub const GIT_SERVICE_HEADER_PREFIX: &str = "x-instafy-git-";
+
 pub const GIT_DELETE_RESULT_HEADER: &str = "x-instafy-git-delete-result";
 pub const GIT_DELETE_RESULT_DELETED: &str = "deleted-v1";
 pub const GIT_DELETE_RESULT_ABSENT: &str = "absent-v1";
@@ -87,6 +92,12 @@ pub fn required_scope(
     Ok("git.read")
 }
 
+/// Whether a client request header may pass through Git Edge to a shard.
+pub fn is_forwardable_request_header(name: &str) -> bool {
+    let name = name.to_ascii_lowercase();
+    name != "host" && !name.starts_with(GIT_SERVICE_HEADER_PREFIX)
+}
+
 pub fn pick_shard_index(repo_name: &str, shard_count: usize) -> usize {
     if shard_count <= 1 {
         return 0;
@@ -149,6 +160,37 @@ mod tests {
         let path = format!("/{PROJECT_ID}.git");
         assert!(required_scope(&Method::DELETE, &path, Some("")).is_err());
         assert!(required_scope(&Method::DELETE, &path, Some("force=1")).is_err());
+    }
+
+    #[test]
+    fn edge_drops_host_and_reserved_git_service_request_headers() {
+        for dropped in [
+            "host",
+            "Host",
+            GIT_DELETE_RESULT_HEADER,
+            "X-Instafy-Git-Delete-Result",
+            "x-instafy-git-salvage-claim",
+            "x-instafy-git-",
+        ] {
+            assert!(
+                !is_forwardable_request_header(dropped),
+                "{dropped} reached the shard"
+            );
+        }
+        for forwarded in [
+            "authorization",
+            "content-type",
+            "content-length",
+            "content-encoding",
+            "git-protocol",
+            "x-instafy-hook-token",
+            "x-instafy-gitx",
+        ] {
+            assert!(
+                is_forwardable_request_header(forwarded),
+                "{forwarded} was dropped"
+            );
+        }
     }
 
     #[test]

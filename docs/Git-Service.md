@@ -34,18 +34,79 @@ We implement git transport as **Git Smart HTTP** by wrapping git’s own backend
   - `PATH_INFO=/.../<repo>.git/git-upload-pack` (or `git-receive-pack`)
   - `REQUEST_METHOD`, `QUERY_STRING`, `CONTENT_TYPE`, `CONTENT_LENGTH`, `REMOTE_USER` (optional)
   - streams request body → stdin, streams stdout → HTTP response
-- `git-shard` also owns **server-side policy** via hooks/config:
+- `git-shard` also owns **server-side policy** (see [Repository policy](#repository-policy)):
   - `main` is **fast-forward only** (reject non-FF / force pushes)
   - blob/path limits (deny common churn like `node_modules/`, cap per-blob size)
+  - object checks on every push, a push size bound, and protected salvage refs
   - optional `git.push.received` webhook emission (`GIT_EVENTS_WEBHOOK_URL`)
 
 This avoids re-implementing git protocol and keeps correctness high.
 
-### Repo hygiene knobs
-Policy runs on the `git-shard` via a server-side `hooks/update` script (runs for every pushed ref):
+### Repository policy
+At startup `git-shard` writes an `update` and a `post-receive` hook to
+`<GIT_REPO_ROOT>/.instafy-hooks/`. It writes each to a temporary file and renames it into place, so
+a push never runs a partial script. Every request then runs `git http-backend` with command-scope
+configuration (`GIT_CONFIG_COUNT`, git 2.31 or later), which outranks every config file:
+
+- `core.hooksPath` points at the shared hooks directory. A repository's own `hooks/` directory or
+  `core.hooksPath` setting is never used, so hooks that older shards wrote into each repository
+  are inert.
+- `http.receivepack=true` enables pushes without writing repository config.
+- `receive.fsckObjects=true` and `transfer.fsckObjects=true` check every received object. A
+  malformed object, a tree entry named `..` or `.git` (including case and filesystem aliases), or
+  an unsafe `.gitmodules` refuses the whole push before any ref moves, and none of its objects
+  are kept.
+- `receive.maxInputSize` bounds the pack a single push may send (`GIT_MAX_PUSH_BYTES`).
+
+Requests never write hook files, change repository config or run `git config`. Before it serves,
+the shard checks that the hooks can execute and that its `git` applies the command-scope
+configuration; it refuses to start otherwise, because git would silently accept every push
+unchecked (for example on a `noexec` repo root, or with git older than 2.31). The built-in deny list
+is `REPO_POLICY_DENY_PATTERNS` in `packages/git-service/src/policy.rs`. The hook is rendered from
+it, and other packages can import the same list instead of copying it. The hook also refuses
+deleting a denied path, so the list holds build output and caches, not file patterns such as
+secrets.
+
+The hook checks every pushed ref:
+
+- **Letter case.** On a case-insensitive filesystem (macOS, or a bind mount of one)
+  `refs/heads/MAIN` and `refs/heads/main` are the same file, so protected names are compared in
+  lower case. In a repository git marked `core.ignorecase` when it created it, ref names must also
+  be ASCII, because some other letters fold onto ASCII ones there.
+- **Salvage refs** (`refs/instafy/salvage` and everything under it, in any letter case) hold work
+  recovered from retired workspaces and may be the only copy of it. A push may not create, move or
+  delete them. Only the shard can set the hook environment that would allow it, never from a
+  request header, and no request sets it yet. This check and the ASCII rule run before
+  `GIT_POLICY_DISABLED`.
+- **`main`** is fast-forward only and cannot be deleted. A name that differs from it only in letter
+  case is refused.
+- **`refs/instafy/`** holds only recovery refs, `refs/instafy/recovery/<origin id>/<name>` with a
+  lower-case UUID and a name of `[0-9A-Za-z._-]`. A push may create or move nothing else there, so
+  a stray ref such as `refs/instafy/recovery` cannot block them.
+- **Other refs**, recovery refs included, may be deleted by any client allowed to push
+  (`git.write`).
+- **Every ref points to a commit**, directly or through an annotated tag.
+- **Paths and sizes** are checked on the net change between the new tip and what the repository
+  already accepted: the ref's old value, else the current `main`, else the empty tree. That covers
+  everything a merge or several new commits bring in, but earlier commits are not walked one by
+  one: a path or blob that one new commit adds and a later one removes is not checked. Paths are
+  read in raw form, so unusual file names are checked exactly as stored.
+
+Knobs:
 - `GIT_MAX_BLOB_BYTES` (default `20971520` = 20 MiB): reject large blobs (helps avoid accidental binary/caches as canonical)
 - `GIT_DENY_PATHS` (optional, comma-separated glob patterns): additional blocked paths (e.g. `*/vendor/*,*.zip`)
-- `GIT_POLICY_DISABLED=1`: disable checks (local-only debugging; unsafe)
+- `GIT_MAX_PUSH_BYTES` (default `1073741824` = 1 GiB): largest pack one push may send. Any value
+  other than a positive whole number of bytes stops the shard from starting.
+- `GIT_POLICY_DISABLED=1`: disable the hook's checks except salvage ref protection and the ASCII ref-name rule (local-only debugging; unsafe). Object checks and the push size bound stay on.
+
+Upgrades: deploy shards before Git Edge and the controller. Once a shard runs this policy, do not
+roll it back to an older shard image: older shards rewrite per-repository hooks on each request
+and run without object checks or salvage ref protection.
+
+Behaviour that changed with the shared policy: a ref must point to a commit (or an annotated tag
+of one), malformed objects that older git versions wrote are refused by the object checks, a push
+may send at most `GIT_MAX_PUSH_BYTES`, and refs under `refs/instafy/` other than recovery refs
+cannot be created.
 
 ### Push event hooks
 `git-shard` can emit best-effort JSON webhooks after successful `git-receive-pack` requests:
@@ -54,6 +115,13 @@ Policy runs on the `git-shard` via a server-side `hooks/update` script (runs for
 - `GIT_EVENTS_WEBHOOK_TIMEOUT_MS` (default `3000`): request timeout per event.
 
 Payload schema is `instafy.git-service.event.v1` with `kind=git.push.received`, repo name, optional `projectId`, `defaultBranch`, and the pushed ref updates. Controller can consume these via `/git/hooks/events` and fan out `workspace.commit` SSE events so Studio refreshes quickly after external pushes.
+
+For each push the shard names a fresh report file under `<GIT_REPO_ROOT>/.instafy-push-reports/`
+in the hook environment. The shared `post-receive` hook appends the refs that push updated, and the
+shard builds the event once `git receive-pack` has exited. An event lists the push's own updates to
+branches and tags, so pushes that overlap in time never show up in each other's events. Each
+update carries `refName`, `oldRev` (absent for a created ref), `newRev` (absent for a deleted ref)
+and `deleted`. A refused push updates no ref and sends no event.
 
 ## Load balancing + sharding (how it actually scales)
 ### Load balancing
@@ -146,6 +214,10 @@ acknowledgement/status into `502 Bad Gateway`. This prevents an older shard's or
 `404` from being mistaken for deletion during a rolling upgrade. Cleanup automation must require
 the exact header/status pair; an initial cleanup normally observes `deleted-v1`, and a second exact
 `DELETE` provides readback proof as `404` plus `absent-v1`.
+
+Request headers whose names start with `X-Instafy-Git-` are reserved for messages between Git
+Edge and Git Shard. Git Edge drops every client-supplied header in that namespace before it
+proxies a request.
 
 The route has no compatibility variants: a query string, trailing slash, Smart HTTP subpath,
 non-canonical UUID, or different HTTP method does not authorize deletion. The private shard repeats
