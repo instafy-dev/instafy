@@ -80,3 +80,46 @@ See [CLI](CLI.md) for `instafy recommendations list` and `submit`, and
 [Automations](Automations.md) for existing scheduling. Adaptive triggers, automatic archival,
 shared team recommendations, and explicit grants for cross-private-chat review are outside this
 first version.
+
+## Live recommendation quality check
+
+The opt-in runtime integration test `space_review_live` runs the actual job processor, bundled
+skill, and built CLI against a disposable local controller. Model requests go through a local
+Instafy proxy. The proxy owns the upstream access token; the runtime receives only a dummy proxy
+key and its scoped controller job token. The probe does not refresh the operator's login.
+
+Prepare a migrated, isolated PostgreSQL database and controller, synthetic source conversations,
+and an active leased job in the user's private review chat. Write a private (`0600`) JSON manifest
+outside the runtime workspace with `controllerUrl` (literal `http://127.0.0.1:<port>`), `runtimeId`,
+the complete `LeaseJob` as `job`, and expected `minimumNew`/`maximumNew` recommendation counts.
+The job's signed controller token must match its user, project, runtime lease, run, and active
+database job. The fixture owner creates and cleans up this data; the probe never seeds a hosted
+database or grants wider access.
+
+Build the exact checkout's CLI, then run the ignored test explicitly in a process with a clean
+environment and a disposable home directory:
+
+```bash
+pnpm --filter @instafy/cli build
+RUN_LIVE_SPACE_REVIEW=1 \
+SPACE_REVIEW_LIVE_FIXTURE=/absolute/private/fixture.json \
+SPACE_REVIEW_LIVE_REPORT=/absolute/private/new-report.json \
+SPACE_REVIEW_LIVE_NODE=/absolute/path/to/node \
+SPACE_REVIEW_LIVE_PROXY_AUTH_PATH=/absolute/private/proxy-auth.json \
+cargo test --manifest-path packages/runtime-agent/Cargo.toml --locked \
+  --test space_review_live -- --ignored --nocapture
+```
+
+The report is created with mode `0600`; reuse is refused. It includes model output, recommendations
+before and after, and a workspace file inventory, with supplied tokens redacted. The default model
+is `gpt-5.5`; `SPACE_REVIEW_LIVE_MODEL` selects another supported model. Code-mode-only models also
+need the matching `codex-code-mode-host` described in [Developer setup](../DEV_SETUP.md).
+
+Evaluate an empty space (no invented finding), an active space (unfinished work alongside completed
+distractions), and stale conversations (useful follow-ups or unresolved decisions). Accept and
+dismiss proposals through a human session, then run another job in the same private review chat.
+The probe requires a completed model turn with positive token usage, checks proposal-count bounds,
+and verifies unchanged terminal records. A reviewer must also inspect
+the sources, usefulness, semantic duplicates, privacy coverage, and absence of unrequested actions;
+count checks alone do not establish recommendation quality. Missing live prerequisites fail the
+explicit run, while ordinary test runs report this test as ignored.

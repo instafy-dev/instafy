@@ -29,7 +29,7 @@ If listing prior recommendations fails, explain the limitation and stop before s
 - Read proposed, accepted and dismissed outcomes. Reuse the same stable key for the same action; do not rename or reword accepted or dismissed work to bring it back. Compare meaning as well as keys. An accepted action is already chosen and may still be an unsent draft; do not infer execution or completion and do not submit it again. The controller preserves terminal outcomes on an existing key.
 - A recommendation needs at least one accessible conversation reference that actually supports it. Prefer an exact message ID when returned by the CLI. Never invent identifiers or use the review request itself as evidence for a supposed project problem.
 - Write a short title, explain why the next action matters now, and supply a self-contained prompt the person can choose to send. Preserve the original scope and uncertainty; do not turn a recommendation into authorization for external changes.
-- Zero recommendations is a valid result. If the space has no substantive context, offer one small starter in chat, such as describing the desired outcome and adding a relevant file. Do not persist a fabricated finding.
+- Zero recommendations is a valid result. If the space has no substantive context, put one short, direct starter question in your final chat summary, such as "What would you like to accomplish in this space?" Do not leave that question only in a suggested-reply chip, and do not persist a fabricated finding.
 
 ## Submit grounded recommendations
 
@@ -53,4 +53,4 @@ Replace the example with observed evidence. `messageId` is optional; `conversati
 
 Inspect each response: an accepted or dismissed result means the earlier decision was kept, not that a new suggestion was created. On an uncertain submission result, list again and match the stable key before retrying once. Report remaining failures plainly. Do not accept/dismiss items on the person's behalf, start another chat or job, create an automation, change settings, install tools, contact others or execute the proposed action as part of this review.
 
-Finish with a concise account of what you found, the recommendations actually saved, and any meaningful limit on the review. The person chooses the next action in Studio.
+Finish with a concise account of what you found, the recommendations actually saved, and any meaningful limit on the review. Omit unrelated workspace or Git diagnostics. If you include suggested replies, each must be a short user message that makes sense to send as-is and stays under 160 characters; the starter question still belongs in the final chat summary. The person chooses the next action in Studio.
