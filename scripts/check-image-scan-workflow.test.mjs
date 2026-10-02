@@ -110,6 +110,29 @@ function timeout(section) {
   return values[0];
 }
 
+function strategy(section) {
+  const block = section.match(/^    strategy:\n((?: {6}.*\n)+?)(?= {6}matrix:\n)/mu)?.[1];
+  assert.ok(block, "job has a strategy");
+  return block.split("\n").filter((line) => line && !/^\s+#/u.test(line));
+}
+
+// The source paths, relative to the repository, of every dependency manifest
+// or lockfile a Dockerfile copies from its build context.
+const dependencyManifest = /^(?:package\.json|pnpm-lock\.yaml|pnpm-workspace\.yaml|Cargo\.toml|Cargo\.lock|go\.mod|go\.sum)$/u;
+function copiedManifests(dockerfile, context) {
+  const sources = [];
+  for (const line of read(dockerfile).split("\n")) {
+    if (!/^(?:COPY|ADD)\s/u.test(line) || /--from=/u.test(line)) continue;
+    assert.doesNotMatch(line, /^\S+\s+\[/u, `${dockerfile}: JSON-form ${line} is not parsed here`);
+    const words = line.split(/\s+/u).slice(1).filter((word) => !word.startsWith("--"));
+    for (const source of words.slice(0, -1)) {
+      const file = path.posix.join(context, source.replace(/\*$/u, ""));
+      if (dependencyManifest.test(path.posix.basename(file))) sources.push(file);
+    }
+  }
+  return sources;
+}
+
 // The trivy command with its image argument normalized; the rest is compared
 // byte for byte.
 function gate(text) {
@@ -130,9 +153,10 @@ function triggers() {
 }
 
 function pathFilter() {
-  const block = triggers().match(/^ {2}pull_request:\n {4}paths:\n((?: {6}- .*\n)+)/mu)?.[1];
+  const block = triggers().match(/^ {2}pull_request:\n {4}paths:\n((?: {6}(?:- |# ).*\n)+)/mu)?.[1];
   assert.ok(block, "pull requests run only for image inputs");
-  return block.split("\n").filter(Boolean).map((line) => line.match(/^ {6}- "([^"]+)"$/u)[1]);
+  return block.split("\n").filter((line) => line && !line.startsWith("      #"))
+    .map((line) => line.match(/^ {6}- "([^"]+)"$/u)[1]);
 }
 
 function glob(pattern) {
@@ -186,6 +210,10 @@ test("no step logs in, pushes, tags a registry reference, writes a cache or hold
 
 test("permissions are read-only except one issue writer that pull requests never reach", () => {
   assert.match(scanSource, /^permissions: \{\}$/mu);
+  // Exactly these three jobs, so no other job can carry a permission or a token.
+  const jobKeys = [...scanSource.slice(scanSource.indexOf("\njobs:\n")).matchAll(/^ {2}([^\s#][^:]*):/gmu)].map((match) => match[1]);
+  assert.deepEqual(jobKeys, ["runtime", "services", "report"]);
+  assert.equal((scanSource.match(/:\s*write\b/gu) ?? []).length, 1, "issues: write is the only write scope");
   assert.deepEqual(permissions(scan.runtime), { contents: "read" });
   assert.deepEqual(permissions(scan.services), { contents: "read" });
   assert.deepEqual(permissions(scan.report), { actions: "read", contents: "read", issues: "write" });
@@ -233,6 +261,17 @@ test("triggers are nightly, manual and pull requests that change image inputs", 
     assert.ok(filtered(dockerfile), dockerfile);
     for (const match of read(dockerfile).matchAll(/^COPY (?!--from)(scripts\/\S+)/gmu)) assert.ok(filtered(match[1]), match[1]);
   }
+  // Every dependency manifest and lockfile a published Dockerfile copies,
+  // including the runtime CLI's npm dependencies that ship in the image.
+  const builds = [{ dockerfile: "docker/runtime/Dockerfile", context: "." },
+    ...matrix(publisher.services).map(({ dockerfile, context: buildContext }) => ({ dockerfile, context: buildContext }))];
+  const manifests = builds.flatMap(({ dockerfile, context: buildContext }) => copiedManifests(dockerfile, buildContext));
+  for (const required of ["pnpm-lock.yaml", "packages/instafy-cli/package.json", "packages/runtime-agent/Cargo.lock",
+    "packages/tunnel-broker/Cargo.lock"]) assert.ok(manifests.includes(required), required);
+  for (const manifest of manifests) {
+    assert.ok(fs.existsSync(path.join(root, manifest)), manifest);
+    assert.ok(filtered(manifest), `${manifest} is copied into an image build`);
+  }
   for (const match of scanSource.slice(scanSource.indexOf("\njobs:\n")).matchAll(/\bscripts\/[\w./-]+\.(?:sh|mjs)\b/gu)) {
     assert.ok(filtered(match[0]), match[0]);
   }
@@ -251,6 +290,8 @@ test("cells equal the publishers' matrices and run on the same hosted runners", 
   assert.deepEqual(matrix(scan.services), matrix(publisher.services));
   assert.equal(matrix(scan.services).length, 7);
   for (const section of [scan.runtime, scan.services]) assert.match(section, /^ {6}fail-fast: false$/mu);
+  assert.deepEqual(strategy(scan.runtime), strategy(publisher.runtime));
+  assert.deepEqual(strategy(scan.services), strategy(publisher.services));
 
   assert.match(scan.runtime, /^ {4}runs-on: \$\{\{ matrix\.runner \}\}$/mu);
   assert.match(publisher.runtime, /\|\| matrix\.runner \}\}\n/u);
@@ -370,6 +411,11 @@ test("steps run in the publisher's order and every action is a publisher's exact
       assert.match(step(section, name), /^        if: always\(\)$/mu, name);
     }
   }
+  // Every cell builds and scans; no step condition can skip one for a cell.
+  for (const [section, names] of [[scan.runtime, ["Install pinned Trivy", "Build audit image", "Scan audit image"]],
+    [scan.services, ["Install pinned Trivy", "Build amd64 image", "Scan amd64 image"]]]) {
+    for (const name of names) assert.doesNotMatch(step(section, name), /^        if:/mu, name);
+  }
   assert.equal(withInputs(step(scan.report, "Checkout"))["persist-credentials"], "false");
 
   const pins = (source) => new Set([...source.matchAll(/^\s+uses: ([^\s#]+)/gmu)].map((match) => match[1]));
@@ -392,7 +438,7 @@ test("failure records flow from each cell to the report through one artifact pre
     assert.equal(summary.SCAN_OUTCOME, "${{ steps.scan.outcome }}");
     assert.equal(runLine(step(section, "Summarize this image")), "node scripts/image-scan-report.mjs cell");
     const upload = withInputs(step(section, "Upload the failure record"));
-    assert.deepEqual(upload, { name: `image-scan-result-${prefix}`, path: "${{ runner.temp }}/image-scan-result/",
+    assert.deepEqual(upload, { name: `image-scan-result-${prefix}-attempt-\${{ github.run_attempt }}`, path: "${{ runner.temp }}/image-scan-result/",
       "if-no-files-found": "ignore", "retention-days": "7" });
     for (const id of ["build", "scan"]) assert.match(section, new RegExp(`^        id: ${id}$`, "mu"));
   }
@@ -400,7 +446,8 @@ test("failure records flow from each cell to the report through one artifact pre
   assert.equal(env(step(scan.runtime, "Summarize this image")).SMOKE_REQUIRED, "${{ matrix.flavor == 'webdev' }}");
   assert.match(scan.runtime, /^        id: smoke$/mu);
   const download = withInputs(step(scan.report, "Download the failure records"));
-  assert.deepEqual(download, { pattern: "image-scan-result-*", path: "${{ runner.temp }}/image-scan-results", "merge-multiple": "true" });
+  // Only the current attempt's records, so a cell that passes on a re-run is not reported again.
+  assert.deepEqual(download, { pattern: "image-scan-result-*-attempt-${{ github.run_attempt }}", path: "${{ runner.temp }}/image-scan-results", "merge-multiple": "true" });
   assert.equal(env(step(scan.report, "Open, update or close the tracking issue")).RESULT_DIR, "${{ runner.temp }}/image-scan-results");
   assert.ok(runBlock(step(scan.report, "Open, update or close the tracking issue")).includes(`title="${ISSUE_TITLE}"`));
 });
@@ -542,8 +589,16 @@ test("the issue body links each failed job and bounds its findings", () => {
   assert.match(body, /15 more findings are in the job log\./u);
   assert.match(body, /https:\/\/github\.com\/instafy-dev\/instafy\/blob\/main\/docs\/Testing\.md#nightly-image-scan/u);
 
-  const huge = Array.from({ length: 600 }, (_, index) => ({ ...record, image: `image-${index}-${"x".repeat(150)}` }));
-  assert.ok(issueBody({ repositoryUrl: "r", runUrl: "u", sha: "s", jobs: jobsFixture, results: huge }).length < ISSUE_BODY_LIMIT);
+  // Truncation keeps whole cell sections, so every code span stays closed.
+  const huge = Array.from({ length: 600 }, (_, index) => ({ ...record, image: `image-${index}-${"x".repeat(150)}`,
+    findings: record.findings.map((row) => ({ ...row, package: "@npmcli/arborist" })) }));
+  const truncated = issueBody({ repositoryUrl: "r", runUrl: "u", sha: "s", jobs: jobsFixture, results: huge });
+  assert.ok(truncated.length < ISSUE_BODY_LIMIT);
+  const shown = (truncated.match(/^### Image scan failed: image-\d+-/gmu) ?? []).length;
+  assert.ok(shown > 0 && shown < huge.length);
+  assert.match(truncated, new RegExp(`^${huge.length - shown} more failed images are not shown here;`, "mu"));
+  for (const line of truncated.split("\n")) assert.equal((line.match(/`/gu) ?? []).length % 2, 0, line);
+  assert.doesNotMatch(truncated.replace(/`[^`\n]*`/gu, ""), /@npmcli/u, "a scope never sits outside a code span");
   assert.match(issueBody({ repositoryUrl: "r", runUrl: "u", sha: "s", jobs: { jobs: [] }, results: [] }), /job list was unavailable/u);
 
   const comment = issueComment({ runUrl: "https://github.com/instafy-dev/instafy/actions/runs/9", sha: "b".repeat(40), jobs: jobsFixture });

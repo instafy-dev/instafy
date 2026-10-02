@@ -26,7 +26,25 @@ on:
       - ".dockerignore"
       - "packages/runtime-controller/Dockerfile"
       - "packages/tunnel-broker/Dockerfile"
+      # Dependency manifests and lockfiles the Dockerfiles copy: the runtime
+      # image ships the CLI's production node_modules, and every lockfile can
+      # break a frozen install.
+      - "package.json"
+      - "pnpm-lock.yaml"
+      - "pnpm-workspace.yaml"
+      - "packages/instafy-cli/package.json"
+      - "packages/instafy-sdk/package.json"
+      - "packages/provider-client/package.json"
+      - "packages/provider-contract/package.json"
+      - "packages/runtime-agent/Cargo.toml"
       - "packages/runtime-agent/Cargo.lock"
+      - "packages/runtime-provider-core/Cargo.toml"
+      - "packages/runtime-provider-service/Cargo.toml"
+      - "packages/runtime-provider-service/Cargo.lock"
+      - "packages/tunnel-broker/Cargo.toml"
+      - "packages/tunnel-broker/Cargo.lock"
+      - "packages/tunnel-broker/crates/tunnel-broker/Cargo.toml"
+      - "packages/tunnel-broker/crates/tunnel-broker-types/Cargo.toml"
       - "packages/browser-egress-proxy/go.mod"
       - "packages/browser-webrtc-sender/go.mod"
       - "packages/browser-webrtc-sender/go.sum"
@@ -244,7 +262,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          name: image-scan-result-runtime-${{ matrix.flavor }}-${{ matrix.architecture }}
+          name: image-scan-result-runtime-${{ matrix.flavor }}-${{ matrix.architecture }}-attempt-${{ github.run_attempt }}
           path: ${{ runner.temp }}/image-scan-result/
           if-no-files-found: ignore
           retention-days: 7
@@ -258,7 +276,9 @@ jobs:
     permissions:
       contents: read
     strategy:
+      # The publisher's strategy: every cell reports, two at a time.
       fail-fast: false
+      max-parallel: 2
       matrix:
         include:
           - key: controller
@@ -400,7 +420,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          name: image-scan-result-service-${{ matrix.key }}
+          name: image-scan-result-service-${{ matrix.key }}-attempt-${{ github.run_attempt }}
           path: ${{ runner.temp }}/image-scan-result/
           if-no-files-found: ignore
           retention-days: 7
@@ -431,10 +451,12 @@ jobs:
           persist-credentials: false
           ref: ${{ github.sha }}
 
+      # Only this attempt's records: after "Re-run failed jobs", a cell that
+      # failed earlier and passes now must not be reported again.
       - name: Download the failure records
         uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
         with:
-          pattern: image-scan-result-*
+          pattern: image-scan-result-*-attempt-${{ github.run_attempt }}
           path: ${{ runner.temp }}/image-scan-results
           merge-multiple: true
 

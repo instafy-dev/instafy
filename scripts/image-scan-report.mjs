@@ -11,7 +11,8 @@
 // cell reads CELL_IMAGE, CELL_SOURCE, CELL_TARGET, CELL_PLATFORM, BUILD_OUTCOME,
 // SCAN_OUTCOME, SMOKE_OUTCOME, SMOKE_REQUIRED, FINDINGS_FILE and RESULT_FILE.
 // It appends to GITHUB_STEP_SUMMARY and, for a failed cell only, writes a JSON
-// record to RESULT_FILE. issue and comment read REPOSITORY_URL, RUN_URL and
+// record to RESULT_FILE; the workflow names each record's artifact after the
+// run attempt so the report reads only the current attempt's failures. issue and comment read REPOSITORY_URL, RUN_URL and
 // SOURCE_SHA, plus the run's jobs as listed by the Actions API.
 
 import fs from "node:fs";
@@ -202,9 +203,17 @@ export function issueBody({ repositoryUrl, runUrl, sha, jobs, results }) {
     `Each job's summary names the image and lists every finding. What to do: [Nightly image scan](${repositoryUrl}/blob/main/docs/Testing.md#nightly-image-scan).`,
     "This issue is updated by each failing scheduled or manual run on `main` and closed by the next passing one.",
   ].join("\n");
-  let sections = results.map((result) => `\n${cellMarkdown(result, ISSUE_ROW_LIMIT, 3)}`).join("");
+  // Whole cell sections only: cutting inside one could leave a code span open
+  // and let a scanner value render as Markdown or a mention.
   const budget = ISSUE_BODY_LIMIT - lines.join("\n").length - footer.length - 200;
-  if (sections.length > budget) sections = `${sections.slice(0, Math.max(0, budget))}\n\nFindings are truncated here; the job summaries have all of them.\n`;
+  let sections = "";
+  let omitted = 0;
+  for (const result of results) {
+    const section = `\n${cellMarkdown(result, ISSUE_ROW_LIMIT, 3)}`;
+    if (omitted === 0 && sections.length + section.length <= budget) sections += section;
+    else omitted += 1;
+  }
+  if (omitted) sections += `\n${omitted} more failed ${omitted === 1 ? "image is" : "images are"} not shown here; the job summaries list every finding.\n`;
   return `${lines.join("\n")}\n${sections}${footer}\n`;
 }
 

@@ -548,7 +548,8 @@ protected-main publishers release, so a broken input surfaces before a release
 rather than during one. It covers the four runtime cells of
 `publish-runtime-agent.yml` (base and webdev, amd64 on `ubuntu-24.04` and arm64
 on `ubuntu-24.04-arm`) and the seven services of
-`publish-production-services.yml` (amd64). Each cell uses the publisher's
+`publish-production-services.yml` (amd64, two at a time as the publisher
+builds them). Each cell uses the publisher's
 Dockerfile, target, platform and build arguments, the same pinned Trivy binary
 and the same blocking scan: vulnerabilities and secrets, HIGH and CRITICAL,
 fixed versions only, no ignore file. Webdev cells also run the Shared Browser
@@ -560,9 +561,13 @@ Nothing is published: no step logs in to a registry, pushes, tags a registry
 reference or writes a cache, and images stay in the runner's Docker engine.
 The workflow runs at 03:17 UTC every night, on manual dispatch, and on pull
 requests that change Dockerfiles, `docker/**`, `.dockerignore`, the files those
-builds pin (the runtime agent's `Cargo.lock`, the browser helpers' Go modules,
-the `codex` submodule, `scripts/fetch-rusty-v8.sh`), the Shared Browser smoke,
-either publisher, or this workflow and its tests. Pull request runs get a
+builds pin, the Shared Browser smoke, either publisher, or this workflow and its
+tests. The pinned files are every dependency manifest and lockfile a Dockerfile
+copies (the root `package.json`, `pnpm-lock.yaml` and `pnpm-workspace.yaml` and
+the CLI package manifests, whose production dependencies ship in the runtime
+image; the Rust `Cargo.toml`/`Cargo.lock` files; the browser helpers' Go
+modules), the `codex` submodule and `scripts/fetch-rusty-v8.sh`. Other source
+changes to the copied packages are left to the nightly run. Pull request runs get a
 read-only token and report only in their checks. Every cell runs to the end
 (`fail-fast: false`), and each cell's job summary names its image and platform,
 the check that failed and, for a failed scan, every finding with its package,
@@ -589,7 +594,8 @@ When it fails:
    repository serves.
 4. A failure on **one architecture only**, such as a Debian security update
    that reached amd64 hours before arm64, usually clears on its own. Dispatch
-   the workflow again later; do not release that image until it passes.
+   the workflow again later, or re-run its failed jobs; the issue then lists
+   only that attempt's failures. Do not release that image until it passes.
 5. Never make the scan pass by weakening it. The flags, the empty ignore file
    and the pinned Trivy must stay identical to the publishers';
    `scripts/check-image-scan-workflow.test.mjs` derives them from the publisher
