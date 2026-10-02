@@ -197,6 +197,7 @@ export function useAgentJobThreadPreviewState({
   }, [threadMessages]);
   const latestFiles = latestFileMessage?.files ?? null;
   const latestCommitRange = latestFileMessage?.commitRange ?? null;
+  const latestUnsavedReason = latestFileMessage?.unsavedReason ?? null;
 
   const hasSupersedingConversationMessage = useMemo(() => {
     const activeMessages = activeConversation?.messages ?? [];
@@ -941,6 +942,7 @@ export function useAgentJobThreadPreviewState({
     runningPreviewHasOverflow,
     latestFiles,
     latestCommitRange,
+    latestUnsavedReason,
     latestFilesMessageId: latestFileMessage?.id ?? null,
     latestFilesMessageTimestamp: latestFileMessage?.timestamp ?? null,
     isRunning,
