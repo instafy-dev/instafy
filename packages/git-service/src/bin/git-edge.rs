@@ -16,8 +16,9 @@ use git_service::auth::{extract_token, TokenValidator};
 use git_service::config::{GitEdgeConfig, GitEdgeRoutingMode};
 use git_service::error::ServiceError;
 use git_service::routing::{
-    parse_repo_segment, pick_shard_index, required_scope, GIT_DELETE_RESULT_ABSENT,
-    GIT_DELETE_RESULT_DELETED, GIT_DELETE_RESULT_HEADER, GIT_DELETE_SCOPE,
+    is_forwardable_request_header, parse_repo_segment, pick_shard_index, required_scope,
+    GIT_DELETE_RESULT_ABSENT, GIT_DELETE_RESULT_DELETED, GIT_DELETE_RESULT_HEADER,
+    GIT_DELETE_SCOPE,
 };
 
 #[derive(Clone)]
@@ -253,7 +254,8 @@ async fn proxy_request(
     let mut req = client.request(reqwest_method, upstream);
 
     for (name, value) in headers.iter() {
-        if name == axum::http::header::HOST || name.as_str() == GIT_DELETE_RESULT_HEADER {
+        // Reserved edge-to-shard headers are never taken from the client.
+        if !is_forwardable_request_header(name.as_str()) {
             continue;
         }
         let Ok(value_str) = value.to_str() else {

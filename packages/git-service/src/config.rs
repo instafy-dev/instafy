@@ -110,10 +110,16 @@ pub struct GitShardConfig {
     pub repo_root: PathBuf,
     pub auto_init: bool,
     pub default_branch: String,
+    /// Largest pack one push may send (`receive.maxInputSize`).
+    pub max_push_bytes: u64,
     pub jwks_url: Url,
     pub audience: String,
     pub events_webhook: Option<GitEventsWebhookConfig>,
 }
+
+/// Default for `GIT_MAX_PUSH_BYTES`: 1 GiB, the controller's largest import
+/// archive.
+pub const DEFAULT_GIT_MAX_PUSH_BYTES: u64 = 1024 * 1024 * 1024;
 
 #[derive(Clone, Debug)]
 pub struct GitEventsWebhookConfig {
@@ -141,6 +147,12 @@ impl GitShardConfig {
         );
         let default_branch =
             std::env::var("GIT_DEFAULT_BRANCH").unwrap_or_else(|_| "main".to_string());
+        // Zero would mean "no limit" to git, so it falls back to the default.
+        let max_push_bytes = std::env::var("GIT_MAX_PUSH_BYTES")
+            .ok()
+            .and_then(|value| value.trim().parse::<u64>().ok())
+            .filter(|value| *value > 0)
+            .unwrap_or(DEFAULT_GIT_MAX_PUSH_BYTES);
         let jwks_url_raw = std::env::var("GIT_JWKS_URL").unwrap_or_else(|_| {
             "http://host.docker.internal:8788/.well-known/jwks.json".to_string()
         });
@@ -177,6 +189,7 @@ impl GitShardConfig {
             repo_root,
             auto_init,
             default_branch,
+            max_push_bytes,
             jwks_url,
             audience,
             events_webhook,

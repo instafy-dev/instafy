@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -7,6 +8,7 @@ use axum::extract::{Request, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::routing::{any, get};
 use axum::Router;
+use tokio::sync::oneshot;
 use tracing::{debug, info, warn};
 
 use git_service::auth::{extract_token, TokenValidator};
@@ -16,7 +18,10 @@ use git_service::events::{
     build_push_event_payload, diff_refs, dispatch_push_event, is_receive_pack_request,
     snapshot_refs,
 };
-use git_service::git_http_backend::run_git_http_backend;
+use git_service::git_http_backend::{
+    run_git_http_backend, GitHttpBackendOptions, GitHttpBackendResponse,
+};
+use git_service::policy::install_shared_hooks;
 use git_service::repo::{delete_bare_repo, ensure_repo_exists};
 use git_service::routing::{
     is_exact_repo_root_delete, parse_repo_segment, GIT_DELETE_RESULT_ABSENT,
@@ -29,6 +34,8 @@ use runtime_contracts::{
 #[derive(Clone)]
 struct AppState {
     config: Arc<GitShardConfig>,
+    /// Shared hooks directory written once at startup (`core.hooksPath`).
+    hooks_dir: Arc<str>,
     webhook_http: reqwest::Client,
     delete_validator: TokenValidator,
 }
@@ -43,6 +50,14 @@ async fn main() -> anyhow::Result<()> {
 
     let config = Arc::new(GitShardConfig::from_env()?);
     tokio::fs::create_dir_all(&config.repo_root).await?;
+    // Push policy is installed once per process. Requests only point
+    // `git http-backend` at it, and hooks inside repositories are ignored.
+    let hooks_dir = install_shared_hooks(&config.repo_root, &config.default_branch)?;
+    info!(hooks_dir = %hooks_dir.display(), "installed shared push policy");
+    let hooks_dir: Arc<str> = hooks_dir
+        .to_str()
+        .ok_or_else(|| anyhow::anyhow!("shared hooks dir is not valid utf-8"))?
+        .into();
 
     let bind_host = config.bind_host.clone();
     let bind_port = config.bind_port;
@@ -54,6 +69,7 @@ async fn main() -> anyhow::Result<()> {
     let delete_validator = TokenValidator::new(http.clone(), config.jwks_url.clone());
     let app_state = AppState {
         config,
+        hooks_dir,
         webhook_http: http,
         delete_validator,
     };
@@ -110,51 +126,74 @@ async fn handle_git(
         .to_str()
         .ok_or_else(|| ServiceError::internal("repo root is not valid utf-8"))?
         .to_string();
+    let options = GitHttpBackendOptions {
+        repo_root: &repo_root,
+        hooks_dir: &state.hooks_dir,
+        max_push_bytes: state.config.max_push_bytes,
+    };
 
-    let response =
-        run_git_http_backend(&repo_root, &parts.method, &parts.uri, &parts.headers, body).await;
-
-    if let Err(error) = &response {
-        warn!(?error, "git-shard request failed");
-    }
-
-    if track_push_event
-        && response
-            .as_ref()
-            .map(|resp| resp.status().is_success())
-            .unwrap_or(false)
-    {
-        let refs_after = capture_refs_snapshot(&state.config.repo_root.join(&repo_dir)).await;
-        if let (Some(before), Some(after), Some(webhook)) =
-            (refs_before, refs_after, state.config.events_webhook.clone())
-        {
-            let updates = diff_refs(&before, &after);
-            if let Some(payload) =
-                build_push_event_payload(&repo_dir, &state.config.default_branch, updates)
-            {
-                let client = state.webhook_http.clone();
-                tokio::spawn(async move {
-                    if let Err(error) = dispatch_push_event(&client, &webhook, &payload).await {
-                        warn!(
-                            ?error,
-                            repo = %payload.repo,
-                            project_id = ?payload.project_id,
-                            "git push webhook dispatch failed"
-                        );
-                    } else {
-                        debug!(
-                            repo = %payload.repo,
-                            project_id = ?payload.project_id,
-                            updates = payload.updates.len(),
-                            "git push webhook dispatched"
-                        );
-                    }
-                });
-            }
+    let backend =
+        run_git_http_backend(&options, &parts.method, &parts.uri, &parts.headers, body).await;
+    let GitHttpBackendResponse { response, finished } = match backend {
+        Ok(backend) => backend,
+        Err(error) => {
+            warn!(?error, "git-shard request failed");
+            return Err(error);
         }
+    };
+
+    if let Some(refs_before) = refs_before.filter(|_| response.status().is_success()) {
+        dispatch_push_event_after_exit(&state, repo_dir, refs_before, finished);
     }
 
-    response
+    Ok(response)
+}
+
+/// Report a push's ref updates once `git receive-pack` has exited.
+///
+/// `git http-backend` sends the response headers before receive-pack updates
+/// any ref, so a snapshot taken then can miss the push or part of it. After
+/// the exit every accepted update is on disk, and the event carries each ref's
+/// old and new revision.
+fn dispatch_push_event_after_exit(
+    state: &AppState,
+    repo_dir: String,
+    refs_before: BTreeMap<String, String>,
+    finished: oneshot::Receiver<()>,
+) {
+    let Some(webhook) = state.config.events_webhook.clone() else {
+        return;
+    };
+    let repo_path = state.config.repo_root.join(&repo_dir);
+    let default_branch = state.config.default_branch.clone();
+    let client = state.webhook_http.clone();
+    tokio::spawn(async move {
+        // The sender is dropped without a value only if the backend wait task
+        // is gone; the refs on disk are still the best record of the push.
+        let _ = finished.await;
+        let Some(refs_after) = capture_refs_snapshot(&repo_path).await else {
+            return;
+        };
+        let updates = diff_refs(&refs_before, &refs_after);
+        let Some(payload) = build_push_event_payload(&repo_dir, &default_branch, updates) else {
+            return;
+        };
+        if let Err(error) = dispatch_push_event(&client, &webhook, &payload).await {
+            warn!(
+                ?error,
+                repo = %payload.repo,
+                project_id = ?payload.project_id,
+                "git push webhook dispatch failed"
+            );
+        } else {
+            debug!(
+                repo = %payload.repo,
+                project_id = ?payload.project_id,
+                updates = payload.updates.len(),
+                "git push webhook dispatched"
+            );
+        }
+    });
 }
 
 async fn authorize_repository_delete(
@@ -245,9 +284,7 @@ fn repository_delete_response(
     response
 }
 
-async fn capture_refs_snapshot(
-    repo_path: &PathBuf,
-) -> Option<std::collections::BTreeMap<String, String>> {
+async fn capture_refs_snapshot(repo_path: &PathBuf) -> Option<BTreeMap<String, String>> {
     let repo_path_for_log = repo_path.clone();
     let repo_path_for_task = repo_path.clone();
     match tokio::task::spawn_blocking(move || snapshot_refs(&repo_path_for_task)).await {
@@ -283,13 +320,17 @@ mod tests {
             repo_root,
             auto_init,
             default_branch: "main".to_string(),
+            max_push_bytes: git_service::config::DEFAULT_GIT_MAX_PUSH_BYTES,
             jwks_url: reqwest::Url::parse("http://127.0.0.1/jwks").unwrap(),
             audience: "git".to_string(),
             events_webhook: None,
         });
+        let hooks_dir = install_shared_hooks(&config.repo_root, &config.default_branch)
+            .expect("install shared hooks");
         let http = reqwest::Client::new();
         AppState {
             delete_validator: TokenValidator::new(http.clone(), config.jwks_url.clone()),
+            hooks_dir: hooks_dir.to_str().expect("utf-8 hooks dir").into(),
             config,
             webhook_http: http,
         }

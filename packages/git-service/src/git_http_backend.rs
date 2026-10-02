@@ -8,27 +8,82 @@ use bytes::Bytes;
 use futures_util::{stream, StreamExt, TryStreamExt};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::process::Command;
+use tokio::sync::oneshot;
 use tokio_util::io::ReaderStream;
 use tracing::warn;
 
 use crate::error::ServiceError;
+use crate::policy::SALVAGE_PUSH_ENV;
 
 const MAX_HEADER_BYTES: usize = 64 * 1024;
 
+/// Where and how one `git http-backend` request runs.
+pub struct GitHttpBackendOptions<'a> {
+    /// `GIT_PROJECT_ROOT`: the directory holding the bare repositories.
+    pub repo_root: &'a str,
+    /// Absolute shared hooks directory, passed as `core.hooksPath`.
+    pub hooks_dir: &'a str,
+    /// Largest pack a push may send, passed as `receive.maxInputSize`.
+    pub max_push_bytes: u64,
+}
+
+pub struct GitHttpBackendResponse {
+    pub response: Response,
+    /// Resolves once `git http-backend` (and the `git receive-pack` or
+    /// `git upload-pack` it runs) has exited. Every ref update of a push is
+    /// done by then, and the response body has been fully produced.
+    pub finished: oneshot::Receiver<()>,
+}
+
+/// Command-scope Git configuration for every `git http-backend` run.
+///
+/// It is passed as `GIT_CONFIG_COUNT` entries (git 2.31+), which outrank every
+/// config file, so a repository's own `core.hooksPath`, `hooks/` directory or
+/// receive settings are never used, and nothing is written to repository
+/// config.
+fn backend_config(options: &GitHttpBackendOptions<'_>) -> Vec<(&'static str, String)> {
+    vec![
+        ("core.hooksPath", options.hooks_dir.to_string()),
+        ("http.receivepack", "true".to_string()),
+        // Reject malformed objects, including trees with `..` or `.git`
+        // entries and unsafe `.gitmodules`, before any ref moves. A rejected
+        // pack is discarded with its quarantine directory.
+        ("receive.fsckObjects", "true".to_string()),
+        ("transfer.fsckObjects", "true".to_string()),
+        ("receive.maxInputSize", options.max_push_bytes.to_string()),
+    ]
+}
+
 pub async fn run_git_http_backend(
-    repo_root: &str,
+    options: &GitHttpBackendOptions<'_>,
     method: &Method,
     uri: &Uri,
     headers: &HeaderMap,
     body: Body,
-) -> Result<Response, ServiceError> {
+) -> Result<GitHttpBackendResponse, ServiceError> {
     let path = uri.path();
     let query = uri.query().unwrap_or("");
 
-    let mut child = Command::new("git")
+    let mut command = Command::new("git");
+    command
         .arg("http-backend")
-        .env("GIT_PROJECT_ROOT", repo_root)
+        .env("GIT_PROJECT_ROOT", options.repo_root)
         .env("GIT_HTTP_EXPORT_ALL", "1")
+        // `-c` style parameters are read after GIT_CONFIG_COUNT and would win,
+        // so an inherited value could replace the shared hooks directory.
+        .env_remove("GIT_CONFIG_PARAMETERS")
+        // Hook environment comes only from the shard. Request headers are
+        // never turned into environment variables, and no request sets the
+        // salvage flag, so an inherited value is dropped too.
+        .env_remove(SALVAGE_PUSH_ENV);
+    let config = backend_config(options);
+    command.env("GIT_CONFIG_COUNT", config.len().to_string());
+    for (index, (key, value)) in config.iter().enumerate() {
+        command
+            .env(format!("GIT_CONFIG_KEY_{index}"), key)
+            .env(format!("GIT_CONFIG_VALUE_{index}"), value);
+    }
+    let mut child = command
         .env("PATH_INFO", path)
         .env("REQUEST_METHOD", method.as_str())
         .env("QUERY_STRING", query)
@@ -87,6 +142,8 @@ pub async fn run_git_http_backend(
 
     let (status, headers_out, response_body) = parse_cgi_response(stdout).await?;
 
+    let (finished_tx, finished) = oneshot::channel();
+
     tokio::spawn(async move {
         match child.wait().await {
             Ok(status) => {
@@ -96,12 +153,13 @@ pub async fn run_git_http_backend(
             }
             Err(error) => warn!(?error, "git http-backend wait failed"),
         }
+        let _ = finished_tx.send(());
     });
 
     let mut response = Response::new(response_body);
     *response.status_mut() = status;
     *response.headers_mut() = headers_out;
-    Ok(response)
+    Ok(GitHttpBackendResponse { response, finished })
 }
 
 fn header_to_str(headers: &HeaderMap, key: axum::http::header::HeaderName) -> Option<&str> {
@@ -198,4 +256,31 @@ fn find_header_delimiter(buf: &[u8]) -> Option<(usize, usize)> {
         return Some((pos, 2));
     }
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn backend_config_pins_hooks_object_checks_and_push_size() {
+        let options = GitHttpBackendOptions {
+            repo_root: "/var/lib/instafy-git/repos",
+            hooks_dir: "/var/lib/instafy-git/repos/.instafy-hooks",
+            max_push_bytes: 4096,
+        };
+        assert_eq!(
+            backend_config(&options),
+            vec![
+                (
+                    "core.hooksPath",
+                    "/var/lib/instafy-git/repos/.instafy-hooks".to_string()
+                ),
+                ("http.receivepack", "true".to_string()),
+                ("receive.fsckObjects", "true".to_string()),
+                ("transfer.fsckObjects", "true".to_string()),
+                ("receive.maxInputSize", "4096".to_string()),
+            ]
+        );
+    }
 }

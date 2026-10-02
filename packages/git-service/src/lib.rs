@@ -4,5 +4,6 @@ pub mod error;
 pub mod events;
 pub mod git_http_backend;
 pub mod jwks;
+pub mod policy;
 pub mod repo;
 pub mod routing;
