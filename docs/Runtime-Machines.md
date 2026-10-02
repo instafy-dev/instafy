@@ -321,14 +321,28 @@ loses only work that never reached the remote:
   recovery ref (`refs/instafy/recovery/<origin id>/<name>`); work that cannot
   be pushed at all goes to one as well. See
   [the origin server](../packages/origin-http-server/README.md#publishing-workspace-runtimes-and-desktop).
-- **A stop never publishes dirty files.** On a graceful stop of a hosted
-  runtime, `flush_workspace_before_shutdown` parks files no turn saved on a
-  local recovery ref (`refs/instafy/local-recovery/<name>`), without network
-  or credentials, and leaves finished local commits on the branch. The next
+- **A stop never publishes dirty files.** Before the controller stops a
+  provider-managed runtime (idle reaper, credit stop, a user's Stop or
+  removal, ensure replacement, the sweeps), and before it fences the runtime,
+  it calls the hosted origin's `POST /git/flush` and waits at most 25 seconds.
+  The flush publishes finished local commits by merge, parks files no turn
+  saved on a recovery ref, and pushes it. When a job is running on the runtime,
+  or was cancelled in the last minute, the request says `turnActive` and that
+  turn's local commits are parked too instead of reaching `main`. The origin
+  gets `git.write` with a 60-second `fs.write` token the controller mints for
+  the holder of the project's workspace lease (taking a short lease for the
+  project owner when nobody holds one); the runtime's machine token still
+  cannot mint `git.write`. The response's `unpushedRefs` and
+  `unpushedRefNames` list what is still only on the node, and the outcome is
+  recorded as a `workspace_flush` runtime event. The flush is best effort: a
+  failure is logged and the stop goes on.
+- On the process's own graceful stop of a hosted runtime,
+  `flush_workspace_before_shutdown` parks files no turn saved on a local
+  recovery ref (`refs/instafy/local-recovery/<name>`), without network or
+  credentials, and leaves finished local commits on the branch. The next
   publish or pre-turn refresh with `git.write` pushes the ref and publishes the
-  commits. `POST /git/flush` does the same with the caller's write access and
-  pushes the refs at once. Work parked only locally is lost if the node is
-  replaced before that push. Desktop folders are left as they are.
+  commits. Work parked only locally is lost if the node is replaced before
+  that push. Desktop folders are never flushed.
 - Residual exposure: a hard node loss mid-run (the in-flight run's work), work
   parked locally whose push has not happened yet, and gitignored files.
 

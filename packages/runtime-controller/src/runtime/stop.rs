@@ -164,6 +164,129 @@ enum StopAuth {
     User(RequestContext),
 }
 
+/// The request that asked for a stop: `/runtime/stop` or `/runtime/remove`.
+#[derive(Clone, Copy)]
+enum StopRequestKind {
+    Stop,
+    Remove,
+}
+
+/// The access check `/runtime/stop` and `/runtime/remove` make on the locked
+/// runtime row. The pre-stop flush makes it too, so nobody can make the
+/// origin of a runtime they may not stop flush its workspace.
+async fn authorize_runtime_stop_request(
+    state: &AppState,
+    transaction: &Transaction<'_>,
+    auth: &StopAuth,
+    runtime: &RuntimeDetails,
+    kind: StopRequestKind,
+) -> Result<(), (StatusCode, Json<ApiError>)> {
+    match auth {
+        StopAuth::Agent(context) => {
+            if runtime.project_id != context.project_id {
+                return Err(unauthorized(match kind {
+                    StopRequestKind::Stop => "agent cannot stop runtime from different project",
+                    StopRequestKind::Remove => "agent cannot remove runtime from different project",
+                }));
+            }
+            ensure_agent_token_matches_runtime_lease_for_stop(
+                state,
+                transaction,
+                context,
+                &runtime.id,
+            )
+            .await?;
+        }
+        StopAuth::User(context) => {
+            // `/runtime/stop` is also the narrow provider-cleanup control
+            // plane used after DELETE /projects/:id has made the project
+            // inaccessible to normal users. A directly authenticated service
+            // role may finish releasing that exact runtime without reopening
+            // generic access to tombstoned projects. User requests retain the
+            // usual project write check, and a removal always checks it.
+            if matches!(kind, StopRequestKind::Remove) || !context.is_service_role {
+                let project = load_project_record(transaction, &runtime.project_id).await?;
+                ensure_project_write_access(transaction, &project, context, None).await?;
+            }
+            super::access::ensure_self_hosted_runtime_access(
+                state,
+                &runtime.provider,
+                &runtime.capabilities,
+                context.user_id,
+                context.is_service_role,
+            )?;
+        }
+    }
+    Ok(())
+}
+
+/// Before a stop fences a hosted runtime, ask its origin to keep the
+/// workspace's work (see [`super::pre_stop_flush`]). Planned in a short
+/// transaction of its own that checks what the stop itself checks first (the
+/// caller's access, a live provider-managed generation, the skip
+/// preconditions), so a refused or skipped stop flushes nothing. Holds no
+/// connection while the origin works, and never fails the stop.
+async fn flush_workspace_before_stop(
+    state: &AppState,
+    runtime_id: &Uuid,
+    options: &StopOptions,
+    request: Option<(&StopAuth, StopRequestKind)>,
+) {
+    match plan_workspace_flush_before_stop(state, runtime_id, options, request).await {
+        Ok(Some(target)) => {
+            super::pre_stop_flush::flush(state, target).await;
+        }
+        Ok(None) => {}
+        Err((status, body)) => info!(
+            runtime_id = %runtime_id,
+            %status,
+            error = %body.0.message,
+            "no pre-stop workspace flush for this stop"
+        ),
+    }
+}
+
+async fn plan_workspace_flush_before_stop(
+    state: &AppState,
+    runtime_id: &Uuid,
+    options: &StopOptions,
+    request: Option<(&StopAuth, StopRequestKind)>,
+) -> Result<Option<super::pre_stop_flush::PreStopFlushTarget>, (StatusCode, Json<ApiError>)> {
+    let mut connection = state.pool.get().await.map_err(|error| {
+        internal_error(format!("failed to get flush planning connection: {error}"))
+    })?;
+    let transaction = connection.transaction().await.map_err(|error| {
+        internal_error(format!(
+            "failed to start flush planning transaction: {error}"
+        ))
+    })?;
+    let runtime = fetch_runtime_for_update(&transaction, runtime_id).await?;
+    if let Some((auth, kind)) = request {
+        authorize_runtime_stop_request(state, &transaction, auth, &runtime, kind).await?;
+    }
+    let live = matches!(runtime.status.as_str(), "ready" | "running" | "draining");
+    let target = match runtime.active_lease_id {
+        Some(lease_id) if live && runtime_requires_provider_release(state, &runtime) => {
+            let lease = fetch_runtime_lease_for_update(&transaction, &lease_id).await?;
+            if lease.status != "active"
+                || lease.released_at.is_some()
+                || preflight_runtime_stop(&transaction, &runtime, options)
+                    .await?
+                    .is_some()
+            {
+                None
+            } else {
+                super::pre_stop_flush::find_target(&transaction, &runtime, &lease_id).await?
+            }
+        }
+        _ => None,
+    };
+    transaction.rollback().await.map_err(|error| {
+        internal_error(format!("failed to end flush planning transaction: {error}"))
+    })?;
+    Ok(target)
+}
+
 #[derive(Debug)]
 pub(super) struct SafeRuntimeStop {
     pub(super) runtime: RuntimeDetails,
@@ -341,6 +464,10 @@ pub(super) async fn stop_runtime_safely(
     runtime_id: &Uuid,
     options: StopOptions,
 ) -> Result<SafeRuntimeStop, (StatusCode, Json<ApiError>)> {
+    // Before the quarantine below fences the runtime: after it, the origin
+    // can no longer save anything to canonical.
+    flush_workspace_before_stop(state, runtime_id, &options, None).await;
+
     let mut connection = state
         .pool
         .get()
@@ -494,6 +621,31 @@ pub(super) async fn stop_runtime_safely(
     })
 }
 
+/// The identity a `/runtime/stop` caller expects the runtime to have.
+fn expected_runtime_identity(
+    expected_project_id: Option<&str>,
+    expected_provider: Option<&str>,
+    expected_display_name: Option<&str>,
+) -> Result<Option<RuntimeIdentityExpectation>, (StatusCode, Json<ApiError>)> {
+    let expected_project_id = expected_project_id
+        .map(|value| {
+            Uuid::from_str(value.trim())
+                .map_err(|_| bad_request("expected_project_id must be a valid UUID"))
+        })
+        .transpose()?;
+    if expected_project_id.is_none()
+        && expected_provider.is_none()
+        && expected_display_name.is_none()
+    {
+        return Ok(None);
+    }
+    Ok(Some(RuntimeIdentityExpectation {
+        project_id: expected_project_id,
+        provider: expected_provider.map(str::to_string),
+        display_name: expected_display_name.map(str::to_string),
+    }))
+}
+
 pub(crate) async fn runtime_stop(
     axum::extract::State(state): axum::extract::State<AppState>,
     headers: HeaderMap,
@@ -533,6 +685,30 @@ pub(crate) async fn runtime_stop(
             }
         };
 
+    // Before this stop fences the runtime, let a hosted origin keep its
+    // workspace's work. A stop the checks below refuse flushes nothing.
+    if let Ok(expected_identity) = expected_runtime_identity(
+        expected_project_id.as_deref(),
+        expected_provider.as_deref(),
+        expected_display_name.as_deref(),
+    ) {
+        let flush_options = StopOptions {
+            source: "runtime_stop",
+            reason: reason.clone(),
+            skip_if_active_jobs,
+            require_idle_timeout: false,
+            allow_cleanup_pending_release: false,
+            expected_identity,
+        };
+        flush_workspace_before_stop(
+            &state,
+            &runtime_id,
+            &flush_options,
+            Some((&auth_context, StopRequestKind::Stop)),
+        )
+        .await;
+    }
+
     let mut connection = state
         .pool
         .get()
@@ -545,60 +721,20 @@ pub(crate) async fn runtime_stop(
 
     let runtime = fetch_runtime_for_update(&transaction, &runtime_id).await?;
 
-    match &auth_context {
-        StopAuth::Agent(context) => {
-            if runtime.project_id != context.project_id {
-                return Err(unauthorized(
-                    "agent cannot stop runtime from different project",
-                ));
-            }
-            ensure_agent_token_matches_runtime_lease_for_stop(
-                &state,
-                &transaction,
-                context,
-                &runtime.id,
-            )
-            .await?;
-        }
-        StopAuth::User(context) => {
-            // This endpoint is the narrow provider-cleanup control plane used
-            // after DELETE /projects/:id has made the project inaccessible to
-            // normal users. A directly authenticated service role may finish
-            // releasing that exact runtime without reopening generic access to
-            // tombstoned projects. User requests retain the usual project
-            // write check.
-            if !context.is_service_role {
-                let project = load_project_record(&transaction, &runtime.project_id).await?;
-                ensure_project_write_access(&transaction, &project, context, None).await?;
-            }
-            super::access::ensure_self_hosted_runtime_access(
-                &state,
-                &runtime.provider,
-                &runtime.capabilities,
-                context.user_id,
-                context.is_service_role,
-            )?;
-        }
-    }
+    authorize_runtime_stop_request(
+        &state,
+        &transaction,
+        &auth_context,
+        &runtime,
+        StopRequestKind::Stop,
+    )
+    .await?;
 
-    let expected_project_id = expected_project_id
-        .map(|value| {
-            Uuid::from_str(value.trim())
-                .map_err(|_| bad_request("expected_project_id must be a valid UUID"))
-        })
-        .transpose()?;
-    let expected_identity = if expected_project_id.is_some()
-        || expected_provider.is_some()
-        || expected_display_name.is_some()
-    {
-        Some(RuntimeIdentityExpectation {
-            project_id: expected_project_id,
-            provider: expected_provider,
-            display_name: expected_display_name,
-        })
-    } else {
-        None
-    };
+    let expected_identity = expected_runtime_identity(
+        expected_project_id.as_deref(),
+        expected_provider.as_deref(),
+        expected_display_name.as_deref(),
+    )?;
     let strict_terminal_release_retry = require_provider_release
         && should_skip_stop_for_terminal_runtime(&runtime)
         && expected_identity
@@ -847,6 +983,27 @@ pub(crate) async fn stop_runtime_for_project(
     reason: Option<String>,
     source: &'static str,
 ) -> Result<RuntimeStopResponse, (StatusCode, Json<ApiError>)> {
+    // Before the quarantine below fences the runtime. Only a runtime of this
+    // project, which is all this stop accepts, is flushed.
+    flush_workspace_before_stop(
+        state,
+        runtime_id,
+        &StopOptions {
+            source,
+            reason: reason.clone(),
+            skip_if_active_jobs: false,
+            require_idle_timeout: false,
+            allow_cleanup_pending_release: false,
+            expected_identity: Some(RuntimeIdentityExpectation {
+                project_id: Some(*project_id),
+                provider: None,
+                display_name: None,
+            }),
+        },
+        None,
+    )
+    .await;
+
     let mut connection = state
         .pool
         .get()
@@ -1201,6 +1358,23 @@ pub(crate) async fn runtime_remove(
             }
         };
 
+    // Before this removal fences the runtime, let a hosted origin keep its
+    // workspace's work. A removal the checks below refuse flushes nothing.
+    flush_workspace_before_stop(
+        &state,
+        &runtime_id,
+        &StopOptions {
+            source: "runtime_remove",
+            reason: reason.clone(),
+            skip_if_active_jobs: false,
+            require_idle_timeout: false,
+            allow_cleanup_pending_release: false,
+            expected_identity: None,
+        },
+        Some((&auth_context, StopRequestKind::Remove)),
+    )
+    .await;
+
     let mut connection = state
         .pool
         .get()
@@ -1213,33 +1387,14 @@ pub(crate) async fn runtime_remove(
 
     let runtime = fetch_runtime_for_update(&transaction, &runtime_id).await?;
 
-    match &auth_context {
-        StopAuth::Agent(context) => {
-            if runtime.project_id != context.project_id {
-                return Err(unauthorized(
-                    "agent cannot remove runtime from different project",
-                ));
-            }
-            ensure_agent_token_matches_runtime_lease_for_stop(
-                &state,
-                &transaction,
-                context,
-                &runtime.id,
-            )
-            .await?;
-        }
-        StopAuth::User(context) => {
-            let project = load_project_record(&transaction, &runtime.project_id).await?;
-            ensure_project_write_access(&transaction, &project, context, None).await?;
-            super::access::ensure_self_hosted_runtime_access(
-                &state,
-                &runtime.provider,
-                &runtime.capabilities,
-                context.user_id,
-                context.is_service_role,
-            )?;
-        }
-    }
+    authorize_runtime_stop_request(
+        &state,
+        &transaction,
+        &auth_context,
+        &runtime,
+        StopRequestKind::Remove,
+    )
+    .await?;
 
     if provider_runtime_missing_release_generation(&state, &runtime) {
         return Err((

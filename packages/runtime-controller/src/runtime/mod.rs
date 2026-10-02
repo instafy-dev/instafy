@@ -9,6 +9,7 @@ mod ensure;
 mod lease;
 mod limit_waits;
 mod managed;
+mod pre_stop_flush;
 mod provider;
 mod register;
 pub(crate) mod sizes;

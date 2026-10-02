@@ -1,0 +1,781 @@
+//! Database-backed tests of the pre-stop flush: a real controller state on
+//! the shared test database, a stand-in runtime origin and a stand-in
+//! provider. The stand-in origin does what the real one does with the
+//! controller's token: it checks the workspace lease and mints `git.write`
+//! through the controller's own routes.
+
+use std::sync::{Arc, Mutex};
+
+use axum::body::{to_bytes, Body};
+use axum::extract::State;
+use axum::http::{HeaderMap, HeaderValue, Request, StatusCode};
+use axum::Json;
+use serde_json::{json, Value as JsonValue};
+use tower::ServiceExt as _;
+use uuid::Uuid;
+
+use crate::config::{PgPool, RuntimeProviderConfig};
+use crate::tests::{
+    build_app_config, build_test_state, ensure_test_user, spawn_aborting, test_origin_private_key,
+    test_origin_public_key, with_shared_db_fixture, AbortingTask, SharedDbFixture,
+};
+use crate::tokens::{decode_scoped_token, mint_scoped_token, ScopedTokenRequest};
+use crate::AppState;
+
+/// What the stand-in origin saw when the controller called `/git/flush`.
+#[derive(Debug, Clone)]
+struct FlushCall {
+    bearer: String,
+    body: JsonValue,
+    /// Database state at that moment.
+    runtime_status: String,
+    runtime_lease_status: String,
+    job_statuses: Vec<String>,
+    /// The origin's lease check and git token requests, answered by the
+    /// controller's own routes.
+    lease_check: StatusCode,
+    lease: JsonValue,
+    git_write: StatusCode,
+    machine_git_write: StatusCode,
+}
+
+#[derive(Clone)]
+struct OriginStub {
+    state: AppState,
+    pool: PgPool,
+    project_id: Uuid,
+    runtime_id: Uuid,
+    runtime_lease_id: Uuid,
+    machine_token: String,
+    response: JsonValue,
+    calls: Arc<Mutex<Vec<FlushCall>>>,
+    order: Arc<Mutex<Vec<&'static str>>>,
+}
+
+async fn send(state: &AppState, request: Request<Body>) -> (StatusCode, JsonValue) {
+    let response = crate::origins::router()
+        .with_state(state.clone())
+        .oneshot(request)
+        .await
+        .expect("controller route");
+    let status = response.status();
+    let body = to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("controller body");
+    (
+        status,
+        serde_json::from_slice(&body).unwrap_or(JsonValue::Null),
+    )
+}
+
+fn git_token_request(project_id: Uuid, bearer: &str) -> Request<Body> {
+    Request::builder()
+        .method("POST")
+        .uri(format!("/projects/{project_id}/git/access_token"))
+        .header("authorization", format!("Bearer {bearer}"))
+        .header("content-type", "application/json")
+        .body(Body::from(
+            json!({ "scopes": ["git.read", "git.write"], "ttlSeconds": 60 }).to_string(),
+        ))
+        .expect("git token request")
+}
+
+async fn handle_flush(
+    State(stub): State<OriginStub>,
+    headers: HeaderMap,
+    Json(body): Json<JsonValue>,
+) -> Json<JsonValue> {
+    stub.order.lock().unwrap().push("flush");
+    let bearer = headers
+        .get("authorization")
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.strip_prefix("Bearer "))
+        .unwrap_or_default()
+        .to_string();
+    let (runtime_status, runtime_lease_status, job_statuses) = {
+        let connection = stub.pool.get().await.expect("stub connection");
+        let row = connection
+            .query_one(
+                "select r.status as runtime_status, l.status as lease_status
+                 from runtimes r
+                 join runtime_leases l on l.id = $2
+                 where r.id = $1",
+                &[&stub.runtime_id, &stub.runtime_lease_id],
+            )
+            .await
+            .expect("runtime state");
+        let jobs = connection
+            .query(
+                "select status from agent_jobs where project_id = $1",
+                &[&stub.project_id],
+            )
+            .await
+            .expect("job state");
+        (
+            row.get::<_, String>("runtime_status"),
+            row.get::<_, String>("lease_status"),
+            jobs.iter()
+                .map(|row| row.get::<_, String>("status"))
+                .collect(),
+        )
+    };
+    let (lease_check, lease) = send(
+        &stub.state,
+        Request::builder()
+            .method("GET")
+            .uri(format!("/projects/{}/lease", stub.project_id))
+            .header("authorization", format!("Bearer {bearer}"))
+            .body(Body::empty())
+            .expect("lease request"),
+    )
+    .await;
+    let (git_write, _) = send(&stub.state, git_token_request(stub.project_id, &bearer)).await;
+    let (machine_git_write, _) = send(
+        &stub.state,
+        git_token_request(stub.project_id, &stub.machine_token),
+    )
+    .await;
+    stub.calls.lock().unwrap().push(FlushCall {
+        bearer,
+        body,
+        runtime_status,
+        runtime_lease_status,
+        job_statuses,
+        lease_check,
+        lease,
+        git_write,
+        machine_git_write,
+    });
+    Json(stub.response.clone())
+}
+
+struct Fixture {
+    pool: PgPool,
+    state: AppState,
+    owner_user_id: Uuid,
+    project_id: Uuid,
+    runtime_id: Uuid,
+    runtime_lease_id: Uuid,
+    origin_id: Uuid,
+    calls: Arc<Mutex<Vec<FlushCall>>>,
+    order: Arc<Mutex<Vec<&'static str>>>,
+    _provider: AbortingTask<()>,
+    _origin: AbortingTask<()>,
+}
+
+impl Fixture {
+    /// A ready provider-managed runtime with an online hosted origin for
+    /// `project_id`, owned by `owner_user_id`. The origin answers every flush
+    /// with `response`.
+    async fn new(
+        pool: PgPool,
+        project_id: Uuid,
+        owner_user_id: Uuid,
+        response: JsonValue,
+    ) -> anyhow::Result<Self> {
+        let order = Arc::new(Mutex::new(Vec::new()));
+        let provider_app = axum::Router::new().route(
+            "/runtime/release",
+            axum::routing::post({
+                let order = order.clone();
+                move || {
+                    let order = order.clone();
+                    async move {
+                        order.lock().unwrap().push("release");
+                        StatusCode::NO_CONTENT
+                    }
+                }
+            }),
+        );
+        let provider_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+        let provider_address = provider_listener.local_addr()?;
+        let provider = spawn_aborting(async move {
+            axum::serve(provider_listener, provider_app)
+                .await
+                .expect("serve stand-in provider");
+        });
+
+        let provider_id = "pre_stop_flush_test";
+        let mut config = build_app_config(
+            test_origin_private_key(),
+            test_origin_public_key(),
+            "pre-stop-flush",
+        );
+        config.runtime_providers = vec![RuntimeProviderConfig {
+            id: provider_id.to_string(),
+            display_name: "Stand-in provider".to_string(),
+            kind: "test".to_string(),
+            owner_org_id: None,
+            allowed_org_ids: vec![],
+            endpoint: Some(format!("http://{provider_address}")),
+            auth_token: None,
+            metadata: None,
+        }];
+        let state = build_test_state(pool.clone(), config);
+
+        let runtime_id = Uuid::new_v4();
+        let runtime_lease_id = Uuid::new_v4();
+        let origin_id = Uuid::new_v4();
+        let machine_token = mint_scoped_token(
+            &state.config,
+            ScopedTokenRequest {
+                audience: project_id.to_string(),
+                subject: owner_user_id.to_string(),
+                project_id: project_id.to_string(),
+                origin_id: None,
+                runtime_id: Some(runtime_id.to_string()),
+                protocol: None,
+                scopes: vec![
+                    crate::runtime::RUNTIME_TOKEN_GIT_MINT_SCOPE.to_string(),
+                    crate::runtime::RUNTIME_TOKEN_WORKSPACE_LEASE_READ_SCOPE.to_string(),
+                ],
+                lease_id: Some(runtime_lease_id.to_string()),
+                run_id: None,
+                prefer_runtime: None,
+                ttl_seconds: Some(300),
+            },
+        )
+        .map_err(|(_, body)| anyhow::anyhow!("mint machine token: {}", body.0.message))?
+        .token;
+
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let origin_app = axum::Router::new()
+            .route("/git/flush", axum::routing::post(handle_flush))
+            .with_state(OriginStub {
+                state: state.clone(),
+                pool: pool.clone(),
+                project_id,
+                runtime_id,
+                runtime_lease_id,
+                machine_token,
+                response,
+                calls: calls.clone(),
+                order: order.clone(),
+            });
+        let origin_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+        let origin_endpoint = format!("http://{}", origin_listener.local_addr()?);
+        let origin = spawn_aborting(async move {
+            axum::serve(origin_listener, origin_app)
+                .await
+                .expect("serve stand-in origin");
+        });
+
+        ensure_test_user(&pool, &owner_user_id).await?;
+        let connection = pool.get().await?;
+        connection
+            .execute(
+                "insert into projects (id, project_type, status, owner_user_id)
+                 values ($1, 'customer', 'active', $2)",
+                &[&project_id, &owner_user_id],
+            )
+            .await?;
+        connection
+            .execute(
+                "insert into runtimes
+                    (id, project_id, provider, status, endpoint_url,
+                     idle_ttl_seconds, last_seen_at)
+                 values ($1, $2, $3, 'ready', 'http://runtime.test', 600, now())",
+                &[&runtime_id, &project_id, &provider_id],
+            )
+            .await?;
+        connection
+            .execute(
+                "insert into runtime_leases
+                    (id, project_id, runtime_id, status, requested_at, launched_at)
+                 values ($1, $2, $3, 'active', now(), now())",
+                &[&runtime_lease_id, &project_id, &runtime_id],
+            )
+            .await?;
+        connection
+            .execute(
+                "update runtimes set active_lease_id = $2 where id = $1",
+                &[&runtime_id, &runtime_lease_id],
+            )
+            .await?;
+        connection
+            .execute(
+                "insert into workspace_origins (id, project_id, mode, endpoint, protocols)
+                 values ($1, $2, 'hosted', $3, array['http']::text[])",
+                &[&origin_id, &project_id, &origin_endpoint],
+            )
+            .await?;
+        connection
+            .execute(
+                "insert into origin_instances
+                    (project_id, runtime_id, lease_id, origin_id, required,
+                     mode, status, endpoint, protocols, metadata)
+                 values ($1, $2, $3, $4, true, 'hosted', 'online', $5,
+                         array['http']::text[], '{}'::jsonb)",
+                &[
+                    &project_id,
+                    &runtime_id,
+                    &runtime_lease_id,
+                    &origin_id,
+                    &origin_endpoint,
+                ],
+            )
+            .await?;
+        drop(connection);
+
+        Ok(Self {
+            pool,
+            state,
+            owner_user_id,
+            project_id,
+            runtime_id,
+            runtime_lease_id,
+            origin_id,
+            calls,
+            order,
+            _provider: provider,
+            _origin: origin,
+        })
+    }
+
+    fn flush_calls(&self) -> Vec<FlushCall> {
+        self.calls.lock().unwrap().clone()
+    }
+
+    fn order(&self) -> Vec<&'static str> {
+        self.order.lock().unwrap().clone()
+    }
+
+    async fn insert_leased_job(&self) -> anyhow::Result<Uuid> {
+        let job_id = Uuid::new_v4();
+        self.pool
+            .get()
+            .await?
+            .execute(
+                "insert into agent_jobs
+                    (id, project_id, status, payload, leased_by_runtime_id,
+                     leased_at, lease_expires_at)
+                 values ($1, $2, 'leased', '{}'::jsonb, $3, now(),
+                         now() + interval '5 minutes')",
+                &[&job_id, &self.project_id, &self.runtime_id],
+            )
+            .await?;
+        Ok(job_id)
+    }
+
+    async fn runtime_state(&self) -> anyhow::Result<(String, Option<Uuid>, String)> {
+        let row = self
+            .pool
+            .get()
+            .await?
+            .query_one(
+                "select r.status as runtime_status, r.active_lease_id,
+                        l.status as lease_status
+                 from runtimes r
+                 join runtime_leases l on l.id = $2
+                 where r.id = $1",
+                &[&self.runtime_id, &self.runtime_lease_id],
+            )
+            .await?;
+        Ok((
+            row.get("runtime_status"),
+            row.get("active_lease_id"),
+            row.get("lease_status"),
+        ))
+    }
+
+    async fn flush_events(&self) -> anyhow::Result<Vec<JsonValue>> {
+        Ok(self
+            .pool
+            .get()
+            .await?
+            .query(
+                "select data from runtime_events
+                 where runtime_id = $1 and kind = 'workspace_flush'
+                 order by id",
+                &[&self.runtime_id],
+            )
+            .await?
+            .iter()
+            .map(|row| row.get("data"))
+            .collect())
+    }
+
+    /// The workspace leases of the project, as (id, user, runtime, status).
+    async fn workspace_leases(
+        &self,
+    ) -> anyhow::Result<Vec<(Uuid, Option<Uuid>, Option<Uuid>, String)>> {
+        Ok(self
+            .pool
+            .get()
+            .await?
+            .query(
+                "select id, user_id, runtime_id, status from workspace_leases
+                 where project_id = $1
+                 order by created_at",
+                &[&self.project_id],
+            )
+            .await?
+            .iter()
+            .map(|row| {
+                (
+                    row.get("id"),
+                    row.get("user_id"),
+                    row.get("runtime_id"),
+                    row.get("status"),
+                )
+            })
+            .collect())
+    }
+}
+
+async fn delete_users(users: &[Uuid]) -> anyhow::Result<()> {
+    let url = std::env::var("TEST_DATABASE_URL")?;
+    let (client, connection) = tokio_postgres::connect(&url, tokio_postgres::NoTls).await?;
+    let driver = tokio::spawn(connection);
+    client
+        .execute("delete from auth.users where id = any($1)", &[&users])
+        .await?;
+    drop(client);
+    let _ = driver.await;
+    Ok(())
+}
+
+/// The idle reaper, a credit stop or an ensure replacement, mid-turn and with
+/// no workspace lease: the controller takes a lease for the owner, mints an
+/// fs.write token for it, and calls `/git/flush` with `turnActive` before
+/// the quarantine. The origin can mint git.write with that token, while the
+/// runtime's machine token still cannot.
+#[tokio::test]
+async fn safe_stop_flushes_the_workspace_before_the_quarantine() -> anyhow::Result<()> {
+    let pool = crate::tests::require_origin_test_pool("pre-stop flush safe stop test").await?;
+    let project_id = Uuid::new_v4();
+    let owner_user_id = Uuid::new_v4();
+    let fixture = SharedDbFixture {
+        projects: vec![project_id],
+        ..Default::default()
+    };
+    let result = with_shared_db_fixture(fixture, async {
+        let fx = Fixture::new(
+            pool.clone(),
+            project_id,
+            owner_user_id,
+            json!({
+                "recoveryRefs": [{ "name": "20261002T120000Z-unsaved-0123456789ab" }],
+                "unpushedRefs": 0,
+                "unpushedRefNames": [],
+                "parkedCommits": 1,
+            }),
+        )
+        .await?;
+        fx.insert_leased_job().await?;
+
+        let stopped = super::super::stop::stop_runtime_safely(
+            &fx.state,
+            &fx.runtime_id,
+            super::super::stop::StopOptions {
+                source: "pre_stop_flush_test",
+                reason: Some("credits_exhausted".to_string()),
+                skip_if_active_jobs: false,
+                require_idle_timeout: false,
+                allow_cleanup_pending_release: false,
+                expected_identity: None,
+            },
+        )
+        .await
+        .map_err(|(status, body)| anyhow::anyhow!("{status}: {}", body.0.message))?;
+        assert!(stopped.outcome.status_changed);
+
+        assert_eq!(fx.order(), vec!["flush", "release"]);
+        let calls = fx.flush_calls();
+        assert_eq!(calls.len(), 1, "{calls:?}");
+        let call = &calls[0];
+        assert_eq!(call.body, json!({ "turnActive": true }));
+        // Before the quarantine: nothing is fenced yet and the turn's job is
+        // still leased.
+        assert_eq!(call.runtime_status, "ready");
+        assert_eq!(call.runtime_lease_status, "active");
+        assert_eq!(call.job_statuses, vec!["leased".to_string()]);
+
+        let claims = decode_scoped_token(&fx.state.config, &call.bearer, "flush token")
+            .map_err(|(_, body)| anyhow::anyhow!("decode flush token: {}", body.0.message))?;
+        assert_eq!(claims.scopes, vec!["fs.write".to_string()]);
+        assert_eq!(claims.aud, fx.origin_id.to_string());
+        assert_eq!(claims.sub, fx.owner_user_id.to_string());
+        assert_eq!(claims.project_id, fx.project_id.to_string());
+        assert_eq!(claims.origin_id, Some(fx.origin_id.to_string()));
+        assert_eq!(claims.runtime_id, Some(fx.runtime_id.to_string()));
+        assert_eq!(claims.protocol.as_deref(), Some("http"));
+        assert!(claims.run_id.is_none());
+        assert!(claims.exp - claims.iat <= 60, "{claims:?}");
+
+        let leases = fx.workspace_leases().await?;
+        assert_eq!(leases.len(), 1, "{leases:?}");
+        let (lease_id, lease_user, lease_runtime, lease_status) = &leases[0];
+        assert_eq!(claims.lease_id, Some(lease_id.to_string()));
+        assert_eq!(*lease_user, Some(fx.owner_user_id));
+        assert_eq!(*lease_runtime, Some(fx.runtime_id));
+        assert_eq!(
+            lease_status, "released",
+            "the flush's own lease is released"
+        );
+
+        assert_eq!(call.lease_check, StatusCode::OK);
+        assert_eq!(call.lease["lease"]["leaseId"], json!(lease_id));
+        assert_eq!(
+            call.git_write,
+            StatusCode::OK,
+            "the lease holder mints git.write"
+        );
+        assert_eq!(
+            call.machine_git_write,
+            StatusCode::FORBIDDEN,
+            "a machine token still cannot mint git.write"
+        );
+
+        let (runtime_status, active_lease, lease_status) = fx.runtime_state().await?;
+        assert_eq!(runtime_status, "stopped");
+        assert!(active_lease.is_none());
+        assert_eq!(lease_status, "released");
+        let jobs = fx
+            .pool
+            .get()
+            .await?
+            .query(
+                "select status from agent_jobs where project_id = $1",
+                &[&fx.project_id],
+            )
+            .await?;
+        assert_eq!(jobs[0].get::<_, String>("status"), "queued");
+
+        assert_eq!(
+            fx.flush_events().await?,
+            vec![json!({
+                "status": "saved",
+                "turnActive": true,
+                "unpushedRefs": 0,
+                "recoveryRefs": 1,
+                "parkedCommits": 1,
+            })]
+        );
+        Ok(())
+    })
+    .await;
+    delete_users(&[owner_user_id]).await?;
+    result
+}
+
+/// A user's Stop: the flush runs under the workspace lease the user already
+/// holds (and leaves it alone), with no turn running. Work the origin could
+/// not push is reported as kept locally.
+#[tokio::test]
+async fn user_stop_flushes_under_the_existing_workspace_lease() -> anyhow::Result<()> {
+    let pool = crate::tests::require_origin_test_pool("pre-stop flush user stop test").await?;
+    let project_id = Uuid::new_v4();
+    let owner_user_id = Uuid::new_v4();
+    let fixture = SharedDbFixture {
+        projects: vec![project_id],
+        ..Default::default()
+    };
+    let result = with_shared_db_fixture(fixture, async {
+        let fx = Fixture::new(
+            pool.clone(),
+            project_id,
+            owner_user_id,
+            json!({
+                "recoveryRefs": [],
+                "unpushedRefs": 2,
+                "unpushedRefNames": ["a-unsaved-1", "b-stale-2"],
+                "parkedCommits": 0,
+                "publish": { "gitSyncStatus": "published" },
+            }),
+        )
+        .await?;
+        let held = match crate::origins::acquire_lease(
+            &fx.pool,
+            &fx.project_id,
+            Some(&fx.owner_user_id),
+            Some(&fx.runtime_id),
+            300,
+            None,
+        )
+        .await?
+        {
+            crate::origins::LeaseAcquireOutcome::Granted(lease) => lease.id,
+            other => anyhow::bail!("expected a new workspace lease, got {other:?}"),
+        };
+
+        let user_token = crate::auth::issue_controller_token(&fx.state.config, &fx.owner_user_id)
+            .map_err(|(_, body)| anyhow::anyhow!("issue user token: {}", body.0.message))?
+            .token;
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            axum::http::header::AUTHORIZATION,
+            HeaderValue::from_str(&format!("Bearer {user_token}"))?,
+        );
+        let payload: super::super::stop::RuntimeStopPayload = serde_json::from_value(json!({
+            "runtime_id": fx.runtime_id,
+            "reason": "user_stop",
+        }))?;
+        let (status, Json(response)) =
+            super::super::stop::runtime_stop(State(fx.state.clone()), headers, axum::Json(payload))
+                .await
+                .map_err(|(status, body)| anyhow::anyhow!("{status}: {}", body.0.message))?;
+        assert_eq!(status, StatusCode::OK, "{response:?}");
+        assert!(response.status_changed);
+
+        assert_eq!(fx.order(), vec!["flush", "release"]);
+        let calls = fx.flush_calls();
+        assert_eq!(calls.len(), 1, "{calls:?}");
+        let call = &calls[0];
+        assert_eq!(call.body, json!({ "turnActive": false }));
+        assert_eq!(call.runtime_status, "ready");
+        let claims = decode_scoped_token(&fx.state.config, &call.bearer, "flush token")
+            .map_err(|(_, body)| anyhow::anyhow!("decode flush token: {}", body.0.message))?;
+        assert_eq!(claims.scopes, vec!["fs.write".to_string()]);
+        assert_eq!(claims.lease_id, Some(held.to_string()));
+        assert_eq!(claims.sub, fx.owner_user_id.to_string());
+        assert_eq!(claims.runtime_id, Some(fx.runtime_id.to_string()));
+        assert_eq!(call.git_write, StatusCode::OK);
+        assert_eq!(call.machine_git_write, StatusCode::FORBIDDEN);
+
+        let leases = fx.workspace_leases().await?;
+        assert_eq!(leases.len(), 1, "no lease of its own: {leases:?}");
+        assert_eq!(leases[0].0, held);
+        assert_eq!(leases[0].3, "active", "the holder's lease is left alone");
+
+        assert_eq!(
+            fx.flush_events().await?,
+            vec![json!({
+                "status": "kept_locally",
+                "turnActive": false,
+                "unpushedRefs": 2,
+                "recoveryRefs": 0,
+                "parkedCommits": 0,
+                "gitSyncStatus": "published",
+            })]
+        );
+        assert_eq!(fx.runtime_state().await?.0, "stopped");
+        Ok(())
+    })
+    .await;
+    delete_users(&[owner_user_id]).await?;
+    result
+}
+
+/// Someone who may not stop the runtime cannot make its origin flush, and a
+/// stop the preconditions skip flushes nothing either.
+#[tokio::test]
+async fn refused_or_skipped_stops_do_not_flush() -> anyhow::Result<()> {
+    let pool = crate::tests::require_origin_test_pool("pre-stop flush refusal test").await?;
+    let project_id = Uuid::new_v4();
+    let owner_user_id = Uuid::new_v4();
+    let stranger_user_id = Uuid::new_v4();
+    let fixture = SharedDbFixture {
+        projects: vec![project_id],
+        ..Default::default()
+    };
+    let result = with_shared_db_fixture(fixture, async {
+        let fx = Fixture::new(
+            pool.clone(),
+            project_id,
+            owner_user_id,
+            json!({ "unpushedRefs": 0 }),
+        )
+        .await?;
+        ensure_test_user(&fx.pool, &stranger_user_id).await?;
+
+        let stranger_token =
+            crate::auth::issue_controller_token(&fx.state.config, &stranger_user_id)
+                .map_err(|(_, body)| anyhow::anyhow!("issue user token: {}", body.0.message))?
+                .token;
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            axum::http::header::AUTHORIZATION,
+            HeaderValue::from_str(&format!("Bearer {stranger_token}"))?,
+        );
+        let payload: super::super::stop::RuntimeStopPayload = serde_json::from_value(json!({
+            "runtime_id": fx.runtime_id,
+            "reason": "user_stop",
+        }))?;
+        let refused =
+            super::super::stop::runtime_stop(State(fx.state.clone()), headers, axum::Json(payload))
+                .await;
+        assert!(refused.is_err(), "a stranger stopped the runtime");
+
+        fx.insert_leased_job().await?;
+        let skipped = super::super::stop::stop_runtime_safely(
+            &fx.state,
+            &fx.runtime_id,
+            super::super::stop::StopOptions {
+                source: "pre_stop_flush_test",
+                reason: Some("idle".to_string()),
+                skip_if_active_jobs: true,
+                require_idle_timeout: false,
+                allow_cleanup_pending_release: false,
+                expected_identity: None,
+            },
+        )
+        .await
+        .map_err(|(status, body)| anyhow::anyhow!("{status}: {}", body.0.message))?;
+        assert_eq!(skipped.outcome.skip_reason.as_deref(), Some("active_jobs"));
+
+        assert!(fx.flush_calls().is_empty(), "{:?}", fx.flush_calls());
+        assert!(fx.order().is_empty());
+        assert!(fx.workspace_leases().await?.is_empty());
+        assert!(fx.flush_events().await?.is_empty());
+        assert_eq!(fx.runtime_state().await?.0, "ready");
+        Ok(())
+    })
+    .await;
+    delete_users(&[owner_user_id, stranger_user_id]).await?;
+    result
+}
+
+/// An origin that cannot flush (an older runtime without the route, here a
+/// 404) never holds up the stop.
+#[tokio::test]
+async fn a_failed_flush_does_not_hold_up_the_stop() -> anyhow::Result<()> {
+    let pool = crate::tests::require_origin_test_pool("pre-stop flush failure test").await?;
+    let project_id = Uuid::new_v4();
+    let owner_user_id = Uuid::new_v4();
+    let fixture = SharedDbFixture {
+        projects: vec![project_id],
+        ..Default::default()
+    };
+    let result = with_shared_db_fixture(fixture, async {
+        let fx = Fixture::new(pool.clone(), project_id, owner_user_id, json!({})).await?;
+        // Point the origin at a path without the route.
+        fx.pool
+            .get()
+            .await?
+            .execute(
+                "update workspace_origins set endpoint = endpoint || '/legacy' where id = $1",
+                &[&fx.origin_id],
+            )
+            .await?;
+        let stopped = super::super::stop::stop_runtime_safely(
+            &fx.state,
+            &fx.runtime_id,
+            super::super::stop::StopOptions {
+                source: "pre_stop_flush_test",
+                reason: Some("idle".to_string()),
+                skip_if_active_jobs: true,
+                require_idle_timeout: false,
+                allow_cleanup_pending_release: false,
+                expected_identity: None,
+            },
+        )
+        .await
+        .map_err(|(status, body)| anyhow::anyhow!("{status}: {}", body.0.message))?;
+        assert!(stopped.outcome.status_changed);
+        assert!(fx.flush_calls().is_empty());
+        assert_eq!(fx.order(), vec!["release"]);
+        assert_eq!(
+            fx.flush_events().await?,
+            vec![json!({ "status": "failed", "turnActive": false })]
+        );
+        let leases = fx.workspace_leases().await?;
+        assert_eq!(leases.len(), 1, "{leases:?}");
+        assert_eq!(leases[0].3, "released");
+        assert_eq!(fx.runtime_state().await?.0, "stopped");
+        Ok(())
+    })
+    .await;
+    delete_users(&[owner_user_id]).await?;
+    result
+}

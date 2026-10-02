@@ -1767,7 +1767,7 @@ async fn register_runtime_bound_origin(
     Ok(origin)
 }
 
-fn lease_from_row(row: &Row) -> WorkspaceLeaseRecord {
+pub(crate) fn lease_from_row(row: &Row) -> WorkspaceLeaseRecord {
     WorkspaceLeaseRecord {
         id: row.get("id"),
         project_id: row.get("project_id"),
