@@ -11,6 +11,7 @@ pub mod error;
 pub mod git;
 pub mod git_tokens;
 pub mod jwks;
+mod network_git;
 pub mod paths;
 pub mod routes;
 mod safe_fs;

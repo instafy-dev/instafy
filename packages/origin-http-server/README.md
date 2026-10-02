@@ -28,6 +28,7 @@ In this mode:
 - `POST /apply` applies file changes to the workspace (no git operations).
 - `POST /git/sync` stages non-reserved dirty paths, creates a commit (caller-provided message), then pushes (fast-forward-only with a fetch/rebase retry loop).
 - Reserved paths like `.git/` and `.instafy/origin-staging/` are hidden from the filesystem API and rejected for applies.
+- Network git commands are bounded: a transfer below 1000 bytes/s for 60 seconds fails, and a command still running after 10 minutes is stopped with its whole process group (`src/network_git.rs`).
 
 ## Follow-ups
 - Add integration tests that spin the server with a temporary workspace and hit each endpoint (especially multipart apply + delete scenarios).

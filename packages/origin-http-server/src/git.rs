@@ -19,6 +19,7 @@ use uuid::Uuid;
 
 use crate::config::ServerConfig;
 use crate::error::OriginError;
+use crate::network_git::{bound_http_transfer_speed, network_git_limits, output_within_deadline};
 use crate::paths::is_reserved_path;
 use crate::untrusted_git::list_untrusted_worktree_status;
 use crate::workspace_fs::{WorkspaceDir, WorkspaceEntryKind};
@@ -100,6 +101,9 @@ fn server_git_command() -> Command {
             "-c",
             "push.recurseSubmodules=no",
         ]);
+    // Without a transfer-speed floor a stalled fetch or push waits forever
+    // while the caller holds the workspace locks.
+    bound_http_transfer_speed(&mut command, network_git_limits());
     command
 }
 
@@ -481,10 +485,14 @@ fn run_git(workspace_root: &Path, args: &[&str], bearer_token: Option<&str>) -> 
         let header = format!("http.extraHeader=Authorization: Bearer {token}");
         command.args(["-c", header.as_str()]);
     }
-    command
-        .args(args)
-        .output()
-        .with_context(|| format!("failed to run git command {:?}", args))
+    command.args(args);
+    let output = if is_network_git_command(args) {
+        let operation = args.first().copied().unwrap_or_default();
+        output_within_deadline(&mut command, operation, network_git_limits().deadline)
+    } else {
+        command.output().map_err(anyhow::Error::from)
+    };
+    output.with_context(|| format!("failed to run git command {:?}", args))
 }
 
 fn run_git_ok(workspace_root: &Path, args: &[&str], bearer_token: Option<&str>) -> Result<Output> {
@@ -583,10 +591,14 @@ fn has_tracked_worktree_changes(workspace_root: &Path, bearer_token: Option<&str
     Ok(!String::from_utf8_lossy(&output.stdout).trim().is_empty())
 }
 
+/// Commands that can contact a remote. They are retried on transient HTTP
+/// errors and run under the network deadline. `remote` is included because
+/// some of its subcommands contact the remote; its local forms finish long
+/// before the deadline could apply.
 fn is_network_git_command(args: &[&str]) -> bool {
     matches!(
         args.first().copied().unwrap_or_default(),
-        "fetch" | "pull" | "push" | "ls-remote" | "remote"
+        "fetch" | "pull" | "push" | "ls-remote" | "clone" | "remote"
     )
 }
 
@@ -5904,5 +5916,325 @@ done < <(git diff-tree --no-commit-id --name-status -r "${diff_args[@]}")
             args,
             String::from_utf8_lossy(&output.stderr).trim()
         );
+    }
+
+    use crate::network_git::{NetworkGitLimits, NetworkGitLimitsOverride};
+    use std::io::Read as _;
+    use std::net::{SocketAddr, TcpListener, TcpStream};
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::mpsc;
+    use std::time::Instant;
+
+    /// Upper bound asserted for a stalled network command under the
+    /// second-scale test limits. Generous for slow CI; an unbounded command
+    /// would never return.
+    const STALL_BOUND: Duration = Duration::from_secs(30);
+
+    #[derive(Clone, Copy, Debug)]
+    enum StallMode {
+        /// Accept the connection and never send a byte.
+        Silent,
+        /// Send the headers of a git advertisement, then nothing.
+        HeadersThenSilent,
+    }
+
+    enum StallEvent {
+        Request(String),
+        Closed,
+    }
+
+    /// A git HTTP remote that accepts connections and then stops making
+    /// progress, like a load balancer whose backend hung.
+    struct StalledRemote {
+        url: String,
+        address: SocketAddr,
+        events: mpsc::Receiver<StallEvent>,
+        stop: Arc<AtomicBool>,
+    }
+
+    impl StalledRemote {
+        fn start(mode: StallMode) -> anyhow::Result<Self> {
+            let listener = TcpListener::bind("127.0.0.1:0")?;
+            let address = listener.local_addr()?;
+            let (sender, events) = mpsc::channel();
+            let stop = Arc::new(AtomicBool::new(false));
+            let stop_accepting = stop.clone();
+            std::thread::spawn(move || {
+                for stream in listener.incoming() {
+                    if stop_accepting.load(Ordering::SeqCst) {
+                        break;
+                    }
+                    let Ok(stream) = stream else { break };
+                    let sender = sender.clone();
+                    std::thread::spawn(move || hold_stalled_connection(stream, mode, sender));
+                }
+            });
+            Ok(Self {
+                url: format!("http://{address}/stalled.git"),
+                address,
+                events,
+                stop,
+            })
+        }
+
+        /// The request line of the next connection, proving the command
+        /// reached this listener rather than failing early or using a proxy.
+        /// Closes of earlier connections are skipped.
+        fn next_request(&self) -> anyhow::Result<String> {
+            loop {
+                if let StallEvent::Request(line) =
+                    self.events.recv_timeout(Duration::from_secs(5))?
+                {
+                    return Ok(line);
+                }
+            }
+        }
+
+        fn wait_for_close(&self, timeout: Duration) -> anyhow::Result<()> {
+            match self.events.recv_timeout(timeout) {
+                Ok(StallEvent::Closed) => Ok(()),
+                Ok(StallEvent::Request(line)) => anyhow::bail!("unexpected request {line:?}"),
+                Err(error) => anyhow::bail!("stalled connection was never closed: {error}"),
+            }
+        }
+    }
+
+    impl Drop for StalledRemote {
+        fn drop(&mut self) {
+            self.stop.store(true, Ordering::SeqCst);
+            // Wake the accept loop so its thread exits.
+            let _ = TcpStream::connect(self.address);
+        }
+    }
+
+    fn hold_stalled_connection(
+        mut stream: TcpStream,
+        mode: StallMode,
+        events: mpsc::Sender<StallEvent>,
+    ) {
+        let mut request = Vec::new();
+        let mut buffer = [0_u8; 4096];
+        while !request.windows(4).any(|window| window == b"\r\n\r\n") {
+            match stream.read(&mut buffer) {
+                Ok(0) | Err(_) => {
+                    let _ = events.send(StallEvent::Closed);
+                    return;
+                }
+                Ok(read) => request.extend_from_slice(&buffer[..read]),
+            }
+        }
+        let request_line = String::from_utf8_lossy(&request)
+            .lines()
+            .next()
+            .unwrap_or_default()
+            .to_string();
+        let _ = events.send(StallEvent::Request(request_line));
+        if let StallMode::HeadersThenSilent = mode {
+            let _ = stream.write_all(
+                b"HTTP/1.1 200 OK\r\n\
+                  Content-Type: application/x-git-upload-pack-advertisement\r\n\
+                  Cache-Control: no-cache\r\n\
+                  Transfer-Encoding: chunked\r\n\r\n",
+            );
+        }
+        // Never answer; only notice when the client goes away.
+        while matches!(stream.read(&mut buffer), Ok(read) if read > 0) {}
+        let _ = events.send(StallEvent::Closed);
+    }
+
+    /// A workspace checked out from a seeded local remote, as the origin
+    /// server leaves it after its first sync.
+    fn checked_out_workspace(root: &Path) -> anyhow::Result<(PathBuf, ServerConfig)> {
+        let remote_dir = root.join("remote.git");
+        seed_remote_with_readme(root, &remote_dir)?;
+        let workspace_dir = root.join("workspace");
+        fs::create_dir_all(&workspace_dir)?;
+        let config = revert_test_config(&workspace_dir, &remote_dir)?;
+        ensure_git_checkout(&config, None)?;
+        Ok((workspace_dir, config))
+    }
+
+    #[test]
+    fn server_git_commands_pin_the_http_low_speed_bound() -> anyhow::Result<()> {
+        let command = server_git_command();
+        let args: Vec<String> = command
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect();
+        assert!(
+            args.windows(2)
+                .any(|pair| pair == ["-c", "http.lowSpeedLimit=1000"]),
+            "{args:?}"
+        );
+        assert!(
+            args.windows(2)
+                .any(|pair| pair == ["-c", "http.lowSpeedTime=60"]),
+            "{args:?}"
+        );
+        // Git reads these variables after every config source, so they are
+        // pinned rather than inherited from the server's environment.
+        let envs: HashMap<String, Option<String>> = command
+            .get_envs()
+            .map(|(key, value)| {
+                (
+                    key.to_string_lossy().into_owned(),
+                    value.map(|value| value.to_string_lossy().into_owned()),
+                )
+            })
+            .collect();
+        assert_eq!(
+            envs.get("GIT_HTTP_LOW_SPEED_LIMIT"),
+            Some(&Some("1000".to_string()))
+        );
+        assert_eq!(
+            envs.get("GIT_HTTP_LOW_SPEED_TIME"),
+            Some(&Some("60".to_string()))
+        );
+
+        let outside_any_repo = tempdir()?;
+        for (key, expected) in [("http.lowSpeedLimit", "1000"), ("http.lowSpeedTime", "60")] {
+            let output = server_git_command()
+                .current_dir(outside_any_repo.path())
+                .args(["config", "--get", key])
+                .output()?;
+            assert!(output.status.success(), "git config --get {key} failed");
+            assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), expected);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn network_git_fails_fast_when_the_remote_stops_responding() -> anyhow::Result<()> {
+        let sandbox = tempdir()?;
+        let (workspace_dir, mut config) = checked_out_workspace(sandbox.path())?;
+        // A one-second low-speed window with a deadline beyond STALL_BOUND:
+        // only curl's low-speed check can end these in time, and a regression
+        // still fails at the deadline instead of hanging the suite.
+        let _limits = NetworkGitLimitsOverride::set(NetworkGitLimits {
+            low_speed_bytes_per_second: 1_000,
+            low_speed_seconds: 1,
+            deadline: STALL_BOUND * 2,
+        });
+
+        // The workspace refresh path: re-point the remote, then fetch.
+        for mode in [StallMode::Silent, StallMode::HeadersThenSilent] {
+            let remote = StalledRemote::start(mode)?;
+            config.git_remote_url = Some(remote.url.clone());
+            let started = Instant::now();
+            let error = ensure_git_checkout(&config, None)
+                .expect_err("a fetch from a stalled remote must fail");
+            let elapsed = started.elapsed();
+            assert!(elapsed < STALL_BOUND, "{mode:?} fetch took {elapsed:?}");
+            assert!(
+                error.to_string().contains("Operation too slow"),
+                "{mode:?}: {error}"
+            );
+            assert_eq!(
+                remote.next_request()?,
+                "GET /stalled.git/info/refs?service=git-upload-pack HTTP/1.1"
+            );
+        }
+
+        // Pushing agent commits and probing the remote use the same runner.
+        let remote = StalledRemote::start(StallMode::Silent)?;
+        run_git_ok(
+            &workspace_dir,
+            &["remote", "set-url", "origin", remote.url.as_str()],
+            None,
+        )?;
+        for (args, service) in [
+            (
+                vec!["push", "origin", "HEAD:refs/heads/main"],
+                "git-receive-pack",
+            ),
+            (vec!["ls-remote", "--heads", "origin"], "git-upload-pack"),
+        ] {
+            let started = Instant::now();
+            let output = super::run_git(&workspace_dir, &args, None)?;
+            let elapsed = started.elapsed();
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            assert!(!output.status.success(), "{args:?} succeeded");
+            assert!(elapsed < STALL_BOUND, "{args:?} took {elapsed:?}");
+            assert!(stderr.contains("Operation too slow"), "{args:?}: {stderr}");
+            assert_eq!(
+                remote.next_request()?,
+                format!("GET /stalled.git/info/refs?service={service} HTTP/1.1")
+            );
+        }
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn network_git_deadline_stops_the_transport_holding_the_connection() -> anyhow::Result<()> {
+        let sandbox = tempdir()?;
+        let (_workspace_dir, mut config) = checked_out_workspace(sandbox.path())?;
+        let remote = StalledRemote::start(StallMode::Silent)?;
+        config.git_remote_url = Some(remote.url.clone());
+        // A low-speed window beyond STALL_BOUND stands in for the phases curl
+        // does not police (connecting, a trickling peer): only the process
+        // deadline can end this fetch in time.
+        let _limits = NetworkGitLimitsOverride::set(NetworkGitLimits {
+            low_speed_bytes_per_second: 1_000,
+            low_speed_seconds: 2 * STALL_BOUND.as_secs() as u32,
+            deadline: Duration::from_secs(1),
+        });
+
+        let started = Instant::now();
+        let error =
+            ensure_git_checkout(&config, None).expect_err("a stalled fetch must be stopped");
+        let elapsed = started.elapsed();
+        assert!(elapsed < STALL_BOUND, "fetch took {elapsed:?}");
+        assert!(
+            error
+                .to_string()
+                .contains("git fetch did not finish within 1s and was stopped"),
+            "{error}"
+        );
+        assert_eq!(
+            remote.next_request()?,
+            "GET /stalled.git/info/refs?service=git-upload-pack HTTP/1.1"
+        );
+        // The socket belongs to git's transport helper, not the top-level git
+        // process, so it closes only if the whole process group was stopped.
+        remote.wait_for_close(Duration::from_secs(10))?;
+        Ok(())
+    }
+
+    #[test]
+    fn local_git_commands_never_run_under_the_network_deadline() -> anyhow::Result<()> {
+        let sandbox = tempdir()?;
+        let (workspace_dir, _config) = checked_out_workspace(sandbox.path())?;
+        fs::write(workspace_dir.join("README.md"), "changed\n")?;
+        // An already-expired deadline stops every command that runs under it.
+        let _limits = NetworkGitLimitsOverride::set(NetworkGitLimits {
+            deadline: Duration::ZERO,
+            ..NetworkGitLimits::DEFAULT
+        });
+
+        for args in [
+            vec!["status", "--porcelain"],
+            vec!["diff", "--", "README.md"],
+            vec!["add", "README.md"],
+            vec!["commit", "-m", "local change"],
+            vec!["rev-parse", "HEAD"],
+        ] {
+            let output = super::run_git(&workspace_dir, &args, None)?;
+            assert!(
+                output.status.success(),
+                "{args:?}: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+
+        let fetch = super::run_git(&workspace_dir, &["fetch", "origin"], None)?;
+        assert!(!fetch.status.success());
+        assert!(
+            String::from_utf8_lossy(&fetch.stderr)
+                .contains("git fetch did not finish within 0ns and was stopped"),
+            "{}",
+            String::from_utf8_lossy(&fetch.stderr)
+        );
+        Ok(())
     }
 }
