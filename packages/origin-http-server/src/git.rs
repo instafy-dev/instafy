@@ -5847,10 +5847,14 @@ done < <(git diff-tree --no-commit-id --name-status -r "${diff_args[@]}")
                     // Never send anything more.
                 }
                 Ok(_) => {}
+                // A read interrupted by a signal (frequent on a loaded or
+                // emulated host) is not the client going away.
                 Err(error)
                     if matches!(
                         error.kind(),
-                        std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                        std::io::ErrorKind::WouldBlock
+                            | std::io::ErrorKind::TimedOut
+                            | std::io::ErrorKind::Interrupted
                     ) => {}
                 Err(_) => return,
             }

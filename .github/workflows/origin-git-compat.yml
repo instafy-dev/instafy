@@ -1,0 +1,83 @@
+name: Origin Git Compatibility
+
+# Workspace runtimes publish with whatever git their image ships. Ubuntu 22.04
+# ships git 2.34.1, the oldest git the origin server supports, so the origin
+# server's git tests (publish, merge, recovery refs, refresh, flush and the
+# static checks that every git spawn goes through server_git_command without
+# post-2.34 options) run against exactly that git here.
+
+on:
+  pull_request:
+    paths:
+      - ".github/workflows/origin-git-compat.yml"
+      - "scripts/check-origin-git-compat-ci.test.mjs"
+      - "packages/origin-http-server/**"
+      - "packages/git-service/**"
+  push:
+    branches:
+      - main
+    paths:
+      - ".github/workflows/origin-git-compat.yml"
+      - "scripts/check-origin-git-compat-ci.test.mjs"
+      - "packages/origin-http-server/**"
+      - "packages/git-service/**"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: origin-git-compat-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  origin-git-2-34:
+    name: Origin server on git 2.34.1
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    container:
+      image: ubuntu:22.04@sha256:b8b6ee6aa931ecd9d0d952abc34dc0e5f7c6a30c6bb71b079fe399fde0329c02
+    env:
+      CARGO_PROFILE_DEV_DEBUG: "0"
+      CARGO_TERM_COLOR: never
+      DEBIAN_FRONTEND: noninteractive
+      RUSTUP_INIT_VERSION: "1.28.2"
+      RUSTUP_INIT_SHA256: "20a06e644b0d9bd2fbdbfd52d42540bdde820ea7df86e92e533c073da0cdd43c"
+
+    steps:
+      - name: Install Ubuntu's git and build tools
+        shell: bash
+        run: |
+          set -euo pipefail
+          apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 update
+          apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 install --yes --no-install-recommends \
+            ca-certificates curl git gcc libc6-dev make pkg-config libssl-dev
+          test "$(git --version)" = "git version 2.34.1"
+
+      - name: Checkout repository
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - name: Install the pinned Rust installer
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl --proto '=https' --tlsv1.2 -fsSL --retry 3 -o "$RUNNER_TEMP/rustup-init" \
+            "https://static.rust-lang.org/rustup/archive/${RUSTUP_INIT_VERSION}/x86_64-unknown-linux-gnu/rustup-init"
+          echo "${RUSTUP_INIT_SHA256}  $RUNNER_TEMP/rustup-init" | sha256sum -c -
+          chmod +x "$RUNNER_TEMP/rustup-init"
+          "$RUNNER_TEMP/rustup-init" -y --no-modify-path --profile minimal --default-toolchain stable
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+
+      # The suite runs many git processes in parallel. One older test of the
+      # import baseline commit (commit_apply_locally, outside the publish
+      # path) does not pass on git 2.34 yet; it is skipped by exact name.
+      - name: Test the origin server against git 2.34.1
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git --version)" = "git version 2.34.1"
+          ulimit -n "$(ulimit -Hn)"
+          cargo test --locked --manifest-path packages/origin-http-server/Cargo.toml -- --skip git::tests::commit_apply_locally_commits_only_applied_and_deleted_paths --exact
