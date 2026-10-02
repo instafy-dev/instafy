@@ -50,6 +50,11 @@ mod save_report;
 mod handoff;
 mod learn;
 mod mcp;
+mod project_preferences;
+#[cfg(test)]
+mod project_preferences_auth_tests;
+#[cfg(test)]
+mod project_preferences_tests;
 #[cfg(test)]
 mod read_reference_tests;
 mod skill_declaration;
@@ -63,6 +68,7 @@ use self::conversation_context::{
     build_prompt_conversation_context, enrich_prompt_context_metrics, estimate_prompt_token_count,
     format_conversation_history, parse_conversation_history, provider_state_claims_restored_thread,
 };
+use self::project_preferences::ProjectPreferencesSnapshot;
 use self::workspace_change_detection::GitStatusEntry;
 
 const PROJECT_MEMORY_MAX_TOTAL_BYTES: usize = 50_000;
@@ -1731,9 +1737,19 @@ fn select_learned_block_candidates(
         .collect()
 }
 
+#[cfg(test)]
 fn format_project_memory_snapshot(
     workspace_dir: &Path,
     prompt_text: &str,
+) -> Option<ProjectMemorySnapshot> {
+    let preferences = ProjectPreferencesSnapshot::load(workspace_dir);
+    format_project_memory_snapshot_with_preferences(workspace_dir, prompt_text, &preferences)
+}
+
+fn format_project_memory_snapshot_with_preferences(
+    workspace_dir: &Path,
+    prompt_text: &str,
+    preferences: &ProjectPreferencesSnapshot,
 ) -> Option<ProjectMemorySnapshot> {
     let mut remaining = PROJECT_MEMORY_MAX_TOTAL_BYTES;
     if remaining == 0 {
@@ -1776,7 +1792,24 @@ fn format_project_memory_snapshot(
     };
 
     append_file("AGENTS.md", &agents_doc_path, &mut remaining, &mut out);
-    append_file("INSTAFY.md", &instafy_path, &mut remaining, &mut out);
+    // Use the same read as the narrow preference snapshot. Do not project a
+    // second copy (or a partially read/invalid preference) into broad memory.
+    if let Some(memory) = preferences.memory_without_preferences() {
+        let budget = PROJECT_MEMORY_MAX_FILE_BYTES.min(remaining);
+        let mut end = memory.len().min(budget);
+        while !memory.is_char_boundary(end) {
+            end -= 1;
+        }
+        if end > 0 {
+            out.push_str("\n## INSTAFY.md (INSTAFY.md)\n```markdown\n");
+            out.push_str(memory[..end].trim_end());
+            out.push_str("\n```\n");
+            if end < memory.len() {
+                out.push_str("[truncated]\n");
+            }
+            remaining = remaining.saturating_sub(end);
+        }
+    }
 
     let normalized_prompt = prompt_text.trim().to_ascii_lowercase();
     let is_learn = normalized_prompt.starts_with("/learn");
@@ -3011,6 +3044,34 @@ fn append_prompt_section(
     }
     record_prompt_section_metric(section_metrics, name, text);
     prompt.push_str(text);
+}
+
+// Preference text remains project-supplied data in the user prompt. This helper
+// records only bounded delivery metadata, never preference content in metrics.
+fn with_project_preferences(
+    prompt: String,
+    project_id: &Uuid,
+    preferences: &ProjectPreferencesSnapshot,
+    metrics: &mut JsonValue,
+) -> String {
+    let section = preferences.render(project_id);
+    if !metrics.is_object() {
+        *metrics = json!({});
+    }
+    metrics["projectPreferences"] = preferences.metrics();
+    if !metrics["promptSections"].is_object() {
+        metrics["promptSections"] = json!({});
+    }
+    record_prompt_section_metric(
+        metrics["promptSections"]
+            .as_object_mut()
+            .expect("section metrics object"),
+        "projectPreferences",
+        &section,
+    );
+    let prompt = format!("{section}{prompt}");
+    enrich_prompt_context_metrics(metrics, &prompt);
+    prompt
 }
 
 fn record_prompt_section_metric(
@@ -4480,6 +4541,11 @@ impl JobProcessor {
             bail!("lease lost before parallel write-scoped worker execution");
         }
 
+        // Parallel workers use per-job proxy configuration and must not mutate
+        // process-wide credentials, but still validate the same job scope before
+        // loading any project context or workspace content.
+        self.verified_controller_claims(registration, job).await?;
+
         let proxy_envelope = job.proxy.as_ref().or(registration.proxy.as_ref());
         let proxy_config = direct_worker_proxy_config(proxy_envelope)?;
         let project_id = self.project_id_for_job(job)?;
@@ -4505,6 +4571,7 @@ impl JobProcessor {
                 &project_context_cards,
                 None,
                 None,
+                &ProjectPreferencesSnapshot::load(&workspace_dir),
             )
             .await?;
         annotate_prompt_context_final_output_mode(
@@ -4556,9 +4623,38 @@ impl JobProcessor {
         registration: &Registration,
         job: &LeaseJob,
     ) -> Result<ControllerTokenGuard> {
+        let Some(claims) = self.verified_controller_claims(registration, job).await? else {
+            return Ok(ControllerTokenGuard::empty());
+        };
+        let token = job
+            .controller_token
+            .as_deref()
+            .expect("verified claims require a controller token");
+        let expected_project = self.project_id_for_job(job)?;
+        let fallback_expiry =
+            DateTime::<Utc>::from_timestamp(claims.exp, 0).map(|dt| dt.to_rfc3339());
+        let expires_ref = match job.controller_token_expires_at.as_ref() {
+            Some(existing) => Some(existing.as_str()),
+            None => fallback_expiry.as_deref(),
+        };
+
+        Ok(ControllerTokenGuard::new(
+            token,
+            &claims.scopes,
+            expires_ref,
+            Some(&expected_project),
+            job.conversation_id.as_ref(),
+        ))
+    }
+
+    async fn verified_controller_claims(
+        &self,
+        registration: &Registration,
+        job: &LeaseJob,
+    ) -> Result<Option<runtime_contracts::AccessTokenClaims>> {
         let token = match job.controller_token.as_deref() {
             Some(token) => token,
-            None => return Ok(ControllerTokenGuard::empty()),
+            None => return Ok(None),
         };
 
         let runtime_audience = registration.runtime_id.to_string();
@@ -4614,20 +4710,7 @@ impl JobProcessor {
             }
         }
 
-        let fallback_expiry =
-            DateTime::<Utc>::from_timestamp(claims.exp, 0).map(|dt| dt.to_rfc3339());
-        let expires_ref = match job.controller_token_expires_at.as_ref() {
-            Some(existing) => Some(existing.as_str()),
-            None => fallback_expiry.as_deref(),
-        };
-
-        Ok(ControllerTokenGuard::new(
-            token,
-            &claims.scopes,
-            expires_ref,
-            Some(&expected_project),
-            job.conversation_id.as_ref(),
-        ))
+        Ok(Some(claims))
     }
 
     async fn verified_workspace_token(
@@ -6027,15 +6110,13 @@ impl JobProcessor {
                 || expects_generic_mcp_tool_execution,
         );
 
+        let project_preferences = ProjectPreferencesSnapshot::load(&workspace_dir);
         // The turn's chat attachments stay on disk until it returns.
         let (mut prompt, loaded_learned_blocks, mut prompt_context, _turn_attachments) =
             if expects_generic_mcp_tool_execution {
-                (
-                    self.build_mcp_task_prompt(prompt_text)?,
-                    Vec::new(),
-                    JsonValue::Null,
-                    None,
-                )
+                let (prompt, metrics) =
+                    self.build_mcp_task_prompt(&project_id, prompt_text, &project_preferences)?;
+                (prompt, Vec::new(), metrics, None)
             } else {
                 let (prompt, loaded_learned_blocks, prompt_context, attachments) = self
                     .build_turn_prompt(
@@ -6047,6 +6128,7 @@ impl JobProcessor {
                         &project_context_cards,
                         scoped_worker_path_observation.as_ref(),
                         routing_pre_observation.as_ref(),
+                        &project_preferences,
                     )
                     .await?;
                 (
@@ -6611,6 +6693,12 @@ impl JobProcessor {
                     observed_command_execution,
                     output_provider_conversation_state.as_ref(),
                 );
+            // Remove only the exact prefix we composed, never marker-like text
+            // from a user's request. Every retry receives a fresh snapshot.
+            let preference_prefix = project_preferences.render(&project_id);
+            let prompt = prompt
+                .strip_prefix(&preference_prefix)
+                .context("runtime prompt missing its project preference prefix")?;
             let mut retry_prompt = if personal_browser_execution_missing {
                 format!(
                     "{prompt}\n\nIMPORTANT PERSONAL BROWSER RETRY REQUIREMENT:\n\
@@ -6632,8 +6720,8 @@ impl JobProcessor {
                 )
             } else if command_execution_missing {
                 evidence_recovery_plan.map_or_else(
-                    || prompt.clone(),
-                    |plan| plan.feedback(&prompt, observed_evidence, &evidence_receipts),
+                    || prompt.to_string(),
+                    |plan| plan.feedback(prompt, observed_evidence, &evidence_receipts),
                 )
             } else if generic_mcp_tool_execution_missing {
                 format!(
@@ -6708,7 +6796,7 @@ impl JobProcessor {
                     "{prompt}\n\nIMPORTANT (this overrides the final-response format instructions above): The latest user request requires creating/editing/deleting workspace files, but you returned an empty `files` array and no new changes were detected on disk. You MUST either (1) use the `apply_patch` tool to actually create/edit/delete the files, or (2) include the full post-change contents inline in the JSON `files` array using either `content` (UTF-8) or `contentBase64` (base64-encoded bytes) so the runtime can write them. Inline `files` entries are an executable write path and do not require `exec_command` or `shell`.\n\nExample `files` entry:\n{{ \"path\": \"hello.txt\", \"workspacePath\": \"hello.txt\", \"change\": {{ \"type\": \"created\" }}, \"content\": \"hello\\n\" }}\n\nRetry the latest user request now."
                 )
             } else {
-                prompt.clone()
+                prompt.to_string()
             };
             let mut retry_codex_run_options = codex_run_options.clone();
             if retry_team_planning_on_provider_thread {
@@ -6739,7 +6827,13 @@ impl JobProcessor {
                 &mut retry_prompt,
                 &mut retry_prompt_context,
             );
-            enrich_prompt_context_metrics(&mut retry_prompt_context, &retry_prompt);
+            let retry_preferences = ProjectPreferencesSnapshot::load(&workspace_dir);
+            let retry_prompt = with_project_preferences(
+                retry_prompt,
+                &project_id,
+                &retry_preferences,
+                &mut retry_prompt_context,
+            );
             update_prompt_context_require_first_tool_call(
                 &mut retry_prompt_context,
                 retry_codex_run_options.require_first_tool_call,
@@ -7120,10 +7214,16 @@ impl JobProcessor {
                     prompt_text,
                     &retry_outcome.summary,
                 );
-                let mut finalization_prompt_context = retry_prompt_context.clone();
+                let mut finalization_prompt_context = json!({ "promptMode": "finalization" });
                 ensure_ambient_participation_prompt_context(
                     job,
                     &mut finalization_prompt,
+                    &mut finalization_prompt_context,
+                );
+                let finalization_prompt = with_project_preferences(
+                    finalization_prompt,
+                    &project_id,
+                    &ProjectPreferencesSnapshot::load(&workspace_dir),
                     &mut finalization_prompt_context,
                 );
                 let mut finalization_options = codex_run_options.clone();
@@ -7135,6 +7235,11 @@ impl JobProcessor {
                 finalization_options.suppress_contextual_instructions = true;
                 finalization_options.persist_conversation_thread = false;
                 finalization_options.provider_conversation_state = None;
+                annotate_prompt_context_codex_context_strategy(
+                    &mut finalization_prompt_context,
+                    Some("finalization"),
+                    finalization_options.require_first_tool_call,
+                );
 
                 let codex_guard = CODEX_EXECUTION_LOCK.lock().await;
                 let _client_timezone_guard =
@@ -7143,6 +7248,11 @@ impl JobProcessor {
                     .execute_with_options(&finalization_prompt, None, finalization_options)
                     .await?;
                 drop(codex_guard);
+
+                retry_artifacts.push(build_codex_prompt_context_artifact(
+                    &finalization_prompt_context,
+                    Some(3),
+                ));
 
                 let mut finalization_outcome =
                     extract_codex_outcome(&finalization_output.final_json)?;
@@ -7507,6 +7617,7 @@ impl JobProcessor {
                         "changedPaths": result.changed_paths,
                         "instafyBytesBefore": result.instafy_bytes_before,
                         "instafyBytesAfter": result.instafy_bytes_after,
+                        "instafySkipReason": result.instafy_skip_reason,
                         "learnedIndexBytesBefore": result.learned_index_bytes_before,
                         "learnedIndexBytesAfter": result.learned_index_bytes_after,
                         "blocksTotal": result.blocks_total,
@@ -7628,8 +7739,20 @@ impl JobProcessor {
         })
     }
 
-    fn build_mcp_task_prompt(&self, prompt_text: &str) -> Result<String> {
-        Self::build_mcp_task_prompt_text(prompt_text)
+    fn build_mcp_task_prompt(
+        &self,
+        project_id: &Uuid,
+        prompt_text: &str,
+        preferences: &ProjectPreferencesSnapshot,
+    ) -> Result<(String, JsonValue)> {
+        let mut metrics = json!({ "promptMode": "mcp" });
+        let prompt = with_project_preferences(
+            Self::build_mcp_task_prompt_text(prompt_text)?,
+            project_id,
+            preferences,
+            &mut metrics,
+        );
+        Ok((prompt, metrics))
     }
 
     pub fn build_mcp_task_prompt_text(prompt_text: &str) -> Result<String> {
@@ -7682,6 +7805,7 @@ impl JobProcessor {
         project_context_cards: &[PromptContextCard],
         scoped_worker_path_observation: Option<&ScopedWorkerPathObservation>,
         routing_pre_observation: Option<&RoutingPreObservation>,
+        preferences: &ProjectPreferencesSnapshot,
     ) -> Result<(
         String,
         Vec<LoadedLearnedBlock>,
@@ -7695,7 +7819,7 @@ impl JobProcessor {
             workspace_dir,
         )
         .await;
-        let (prompt, loaded_learned_blocks, prompt_context) = self.build_prompt_with_text(
+        let (prompt, loaded_learned_blocks, prompt_context) = self.build_prompt_with_preferences(
             project_id,
             job,
             workspace_dir,
@@ -7705,6 +7829,7 @@ impl JobProcessor {
             project_context_cards,
             scoped_worker_path_observation,
             routing_pre_observation,
+            preferences,
         )?;
         Ok((prompt, loaded_learned_blocks, prompt_context, attachments))
     }
@@ -7720,6 +7845,34 @@ impl JobProcessor {
         project_context_cards: &[PromptContextCard],
         scoped_worker_path_observation: Option<&ScopedWorkerPathObservation>,
         routing_pre_observation: Option<&RoutingPreObservation>,
+    ) -> Result<(String, Vec<LoadedLearnedBlock>, JsonValue)> {
+        let preferences = ProjectPreferencesSnapshot::load(workspace_dir);
+        self.build_prompt_with_preferences(
+            project_id,
+            job,
+            workspace_dir,
+            prompt_text,
+            include_workspace_memory,
+            provider_conversation_state,
+            project_context_cards,
+            scoped_worker_path_observation,
+            routing_pre_observation,
+            &preferences,
+        )
+    }
+
+    fn build_prompt_with_preferences(
+        &self,
+        project_id: &Uuid,
+        job: &LeaseJob,
+        workspace_dir: &Path,
+        prompt_text: &str,
+        include_workspace_memory: bool,
+        provider_conversation_state: Option<&JsonValue>,
+        project_context_cards: &[PromptContextCard],
+        scoped_worker_path_observation: Option<&ScopedWorkerPathObservation>,
+        routing_pre_observation: Option<&RoutingPreObservation>,
+        preferences: &ProjectPreferencesSnapshot,
     ) -> Result<(String, Vec<LoadedLearnedBlock>, JsonValue)> {
         let trimmed_prompt = prompt_text.trim();
         if trimmed_prompt.is_empty() {
@@ -7815,7 +7968,7 @@ impl JobProcessor {
                 "omittedTurns": 0,
                 "totalTurns": 0,
             });
-            enrich_prompt_context_metrics(&mut metrics, &prompt);
+            let prompt = with_project_preferences(prompt, project_id, preferences, &mut metrics);
             tracing::info!(
                 prompt_mode = "scoped_worker_preobserved",
                 estimated_prompt_tokens = estimate_prompt_token_count(&prompt),
@@ -7942,7 +8095,11 @@ Avoid creating dependency caches or stores in the canonical workspace root when 
                 "\nWorkspace memory snapshot skipped for this cross-chat context recovery turn. Use relevant context cards and bounded Instafy CLI conversation lookup instead of loading broad project memory.\n",
             );
         } else if include_workspace_memory && !stateful_thread_restored {
-            if let Some(snapshot) = format_project_memory_snapshot(workspace_dir, trimmed_prompt) {
+            if let Some(snapshot) = format_project_memory_snapshot_with_preferences(
+                workspace_dir,
+                trimmed_prompt,
+                preferences,
+            ) {
                 append_prompt_section(
                     &mut prompt,
                     &mut prompt_section_metrics,
@@ -8516,7 +8673,6 @@ Avoid creating dependency caches or stores in the canonical workspace root when 
         }
 
         ensure_ambient_participation_context(job, &mut prompt, &mut prompt_section_metrics);
-        enrich_prompt_context_metrics(&mut conversation_context.metrics, &prompt);
         if let Some(metrics) = conversation_context.metrics.as_object_mut() {
             metrics.insert(
                 "promptMode".to_string(),
@@ -8545,6 +8701,12 @@ Avoid creating dependency caches or stores in the canonical workspace root when 
                 );
             }
         }
+        let prompt = with_project_preferences(
+            prompt,
+            project_id,
+            preferences,
+            &mut conversation_context.metrics,
+        );
         tracing::info!(
             prompt_mode = if stateful_thread_restored {
                 "stateful_compact"
@@ -16934,7 +17096,7 @@ mod tests {
         }
     }
 
-    fn test_lease_job(intent: Option<&str>, payload: JsonValue) -> LeaseJob {
+    pub(super) fn test_lease_job(intent: Option<&str>, payload: JsonValue) -> LeaseJob {
         LeaseJob {
             id: Uuid::new_v4(),
             intent: intent.map(|value| value.to_string()),
@@ -16971,7 +17133,7 @@ mod tests {
         }
     }
 
-    fn test_job_processor(workspace_root: &Path) -> JobProcessor {
+    pub(super) fn test_job_processor(workspace_root: &Path) -> JobProcessor {
         JobProcessor::new(Arc::new(Config {
             controller_base_url: reqwest::Url::parse("http://127.0.0.1:8788").unwrap(),
             controller_jwks_url: reqwest::Url::parse("http://127.0.0.1:8788/.well-known/jwks.json")
@@ -17004,7 +17166,7 @@ mod tests {
         }))
     }
 
-    fn test_registration_with_proxy() -> Registration {
+    pub(super) fn test_registration_with_proxy() -> Registration {
         Registration {
             runtime_id: Uuid::new_v4(),
             agent_token: "agent-token".to_string(),
@@ -17311,6 +17473,7 @@ mod tests {
                 &[],
                 None,
                 None,
+                &ProjectPreferencesSnapshot::load(&workspace),
             )
             .await
             .expect("turn prompt");
@@ -17408,6 +17571,7 @@ mod tests {
                 &[],
                 None,
                 None,
+                &ProjectPreferencesSnapshot::load(&workspace),
             )
             .await
             .expect("first prompt");
@@ -17426,6 +17590,7 @@ mod tests {
                 &[],
                 None,
                 None,
+                &ProjectPreferencesSnapshot::load(&workspace),
             )
             .await
             .expect("second prompt");
@@ -20042,13 +20207,16 @@ mod tests {
         let workspace_path = tmp.path().to_string_lossy();
         let prompt_text = prompt.replace(workspace_path.as_ref(), "");
         let prompt_tokens = estimate_prompt_token_count(&prompt_text);
-        // The budget was 1,350 with the path included. The secret-rejection
-        // block added about 100 tokens, because follow-up turns are where a
-        // rejected value gets reported. The shared chat-reference contract adds
-        // up to 125 tokens, including for threads begun before a runtime upgrade.
-        // Raise it again only on purpose.
+        // Preserve main's 1,550-token compact budget, including its shared
+        // chat-reference contract; allow at most 75 more for preferences.
+        let preference_section = ProjectPreferencesSnapshot::load(tmp.path()).render(&project_id);
+        assert!(estimate_prompt_token_count(&preference_section) <= 75);
         assert!(
-            prompt_tokens < 1_550,
+            estimate_prompt_token_count(prompt_text.strip_prefix(&preference_section).unwrap())
+                < 1_550
+        );
+        assert!(
+            prompt_tokens < 1_625,
             "compact restored prompt was unexpectedly large: {prompt_tokens} estimated tokens, {} chars without the workspace path",
             prompt_text.len()
         );

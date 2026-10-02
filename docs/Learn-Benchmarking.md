@@ -5,6 +5,7 @@ This document is the entry point for anyone working on Instafy's `/learn` flow, 
 Read this before changing:
 
 - `packages/runtime-agent/src/jobs/learn.rs`
+- `packages/runtime-agent/src/jobs/learn/memory_optimizer.rs`
 - `packages/runtime-agent/src/jobs/mod.rs`
 - `packages/frontend/tests/playwright/bench/README.md`
 
@@ -112,6 +113,13 @@ It currently does three important things:
 1. Rewrites the learned index so the active routing surface stays small.
 2. Archives lower-value blocks instead of keeping them all active.
 3. Demotes replay-style memory that looks like copied commands or one-off execution logs.
+
+The optimizer also caps ordinary `INSTAFY.md` memory at 10,000 bytes, including its overflow
+notice, while keeping the explicit [project preferences](Project-Preferences.md) section whole.
+It reads at most 64 KiB and skips unavailable or ambiguous sources instead of partially applying
+defaults. A skipped source remains untouched, with the reason recorded in the optimizer artifact.
+This bound replaces the former unbounded source read; files above 64 KiB require an explicit edit
+before trimming can resume.
 
 The optimizer should act like downward pressure, not like a second agent inventing new behavior.
 
