@@ -47,6 +47,7 @@ import {
   agentsList,
 } from "./agents.js";
 import { chatPrompt } from "./chat.js";
+import { recommendationsList, recommendationsSubmit } from "./recommendations.js";
 import { grepConversationMessages, showConversationContext } from "./conversation-grep.js";
 import {
   createConversation,
@@ -828,6 +829,32 @@ providersProbeCommand
       process.exit(1);
     }
   });
+
+const recommendationsCommand = program
+  .command("recommendations")
+  .description("Inspect and propose grounded next actions for a space");
+failWithGroupHelp(recommendationsCommand);
+
+for (const operation of ["list", "submit"] as const) {
+  const command = recommendationsCommand.command(operation)
+    .description(operation === "list" ? "List recommendations, including accepted and dismissed outcomes" : "Submit one recommendation from JSON");
+  addSpaceOption(command, "Space UUID (defaults to .instafy/space.json or SPACE_ID)");
+  addServerUrlOptions(command);
+  addAccessTokenOptions(command, "Instafy access token");
+  command.option("--json", "Output JSON");
+  if (operation === "list") command.option("--limit <count>", "Maximum recommendations (1–200, default: 100)", Number);
+  else command.requiredOption("--file <path>", "JSON proposal file inside the active workspace, or - for stdin (64 KiB maximum)");
+  command.action(async (opts) => {
+    try {
+      const common = { project: resolveSpaceIdOption(opts), controllerUrl: opts.serverUrl, accessToken: opts.accessToken, json: opts.json };
+      if (operation === "list") await recommendationsList({ ...common, limit: opts.limit });
+      else await recommendationsSubmit({ ...common, file: opts.file });
+    } catch (error) {
+      console.error(kleur.red(String(error)));
+      process.exit(1);
+    }
+  });
+}
 
 const agentsCommand = program
   .command("agents")

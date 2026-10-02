@@ -857,6 +857,10 @@ const DIAGNOSTICS_TEMPLATE: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/../runtime-agent/assets/instafy/.agents/skills/instafy-diagnostics/SKILL.md"
 ));
+const SPACE_REVIEW_TEMPLATE: &str = include_str!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../runtime-agent/assets/instafy/.agents/skills/instafy-space-review/SKILL.md"
+));
 const DIAGNOSTICS_OPENAI_TEMPLATE: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/../runtime-agent/assets/instafy/.agents/skills/instafy-diagnostics/agents/openai.yaml"
@@ -897,7 +901,7 @@ const PROJECT_MEMORY_MANAGED_DEFAULTS_STATE_PATH: &str =
     ".agents/.instafy-managed-defaults-state.json";
 const PROJECT_MEMORY_ASSETS_ROOT_ENV: &str = "INSTAFY_PROJECT_MEMORY_ASSETS_ROOT";
 
-const PROJECT_MEMORY_TEMPLATE_FILES: [ProjectMemoryTemplateFile; 26] = [
+const PROJECT_MEMORY_TEMPLATE_FILES: [ProjectMemoryTemplateFile; 27] = [
     ProjectMemoryTemplateFile {
         path: "INSTAFY.md",
         asset_relative_path: "INSTAFY.md",
@@ -982,6 +986,11 @@ const PROJECT_MEMORY_TEMPLATE_FILES: [ProjectMemoryTemplateFile; 26] = [
         path: ".agents/skills/instafy-diagnostics/SKILL.md",
         asset_relative_path: ".agents/skills/instafy-diagnostics/SKILL.md",
         fallback_content: DIAGNOSTICS_TEMPLATE,
+    },
+    ProjectMemoryTemplateFile {
+        path: ".agents/skills/instafy-space-review/SKILL.md",
+        asset_relative_path: ".agents/skills/instafy-space-review/SKILL.md",
+        fallback_content: SPACE_REVIEW_TEMPLATE,
     },
     ProjectMemoryTemplateFile {
         path: ".agents/skills/instafy-diagnostics/agents/openai.yaml",
@@ -6286,9 +6295,10 @@ pub(crate) async fn upsert_org(
 mod project_access_tests {
     use super::ProjectUpdateRequest;
     use super::{
-        invitation_accept_urls, OrgInvitationResponse, OrgInvitationSummary, ProjectAccess,
-        ProjectRole, CLAUDE_DOC_TEMPLATE, DIAGNOSTICS_OPENAI_TEMPLATE, DIAGNOSTICS_TEMPLATE,
-        GROUP_PARTICIPATION_TEMPLATE, PROJECT_MEMORY_TEMPLATE_FILES,
+        invitation_accept_urls, load_project_memory_template_content, OrgInvitationResponse,
+        OrgInvitationSummary, ProjectAccess, ProjectRole, CLAUDE_DOC_TEMPLATE,
+        DIAGNOSTICS_OPENAI_TEMPLATE, DIAGNOSTICS_TEMPLATE, GROUP_PARTICIPATION_TEMPLATE,
+        PROJECT_MEMORY_TEMPLATE_FILES, SPACE_REVIEW_TEMPLATE,
     };
     use serde_json::json;
     use uuid::Uuid;
@@ -6345,6 +6355,19 @@ mod project_access_tests {
         assert!(template.fallback_content.contains("always_include: true"));
         assert!(template.fallback_content.contains("targetMessageId"));
         assert!(template.fallback_content.contains("do not call tools"));
+    }
+
+    #[test]
+    fn managed_defaults_include_space_review() {
+        let template = PROJECT_MEMORY_TEMPLATE_FILES
+            .iter()
+            .find(|template| template.path == ".agents/skills/instafy-space-review/SKILL.md")
+            .expect("space review managed default");
+        assert_eq!(template.fallback_content, SPACE_REVIEW_TEMPLATE);
+        assert_eq!(
+            load_project_memory_template_content(template),
+            SPACE_REVIEW_TEMPLATE
+        );
     }
 
     #[test]

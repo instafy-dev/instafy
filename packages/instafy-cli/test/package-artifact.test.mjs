@@ -135,6 +135,11 @@ test("npm artifact installs and runs without workspace dependencies", () => {
     assert.match(installedHelp, /Usage: instafy/);
     assert.match(installedHelp, /diagnostics/);
     assert.match(installedHelp, /support/);
+    assert.match(installedHelp, /recommendations/);
+    assert.match(
+      run(process.execPath, [installedCli, "recommendations", "submit", "--help"], installDirectory),
+      /--file <path>/,
+    );
     assert.match(
       run(process.execPath, [installedCli, "diagnostics", "--help"], installDirectory),
       /runtime-events/,
