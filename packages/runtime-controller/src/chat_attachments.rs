@@ -36,8 +36,14 @@ const HISTORY_USER_MESSAGES: usize = 10;
 const MAX_DOWNLOADS_PER_JOB: usize = 20;
 const STORAGE_REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 const STORAGE_PROBE_TIMEOUT: Duration = Duration::from_secs(3);
+/// How long a bucket probe's answer stands before the next page load checks
+/// again in the background: long after the bucket answered, short otherwise.
 const STORAGE_PRESENT_CACHE: Duration = Duration::from_secs(600);
 const STORAGE_ABSENT_CACHE: Duration = Duration::from_secs(60);
+/// After the bucket last answered, how long an unreachable Storage (a 5xx, a
+/// 429, a timeout or a transport error) still counts as present. Longer than
+/// that, it is an outage and uploads would fail anyway.
+const STORAGE_OUTAGE_GRACE: Duration = Duration::from_secs(900);
 const PURGE_PAGE_SIZE: usize = 1000;
 const PURGE_MAX_PAGES: usize = 100;
 const MAX_DESCRIBED_NAME_CHARS: usize = 120;
@@ -560,48 +566,271 @@ impl AttachmentsMode {
     }
 }
 
-static MODE_CACHE: Lazy<Mutex<HashMap<String, (Instant, AttachmentsMode)>>> =
+/// What one probe of the bucket showed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum BucketProbe {
+    /// The bucket answered.
+    Present,
+    /// Storage answered that it has no such bucket, or refused the key.
+    Missing,
+    /// No answer: a 5xx, a 429, a timeout or a transport error.
+    Unreachable,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct ModeEntry {
+    mode: AttachmentsMode,
+    checked_at: Instant,
+    /// When the bucket last answered.
+    present_at: Option<Instant>,
+    /// A background probe is under way, so no other request starts one.
+    refreshing: bool,
+}
+
+impl ModeEntry {
+    fn is_fresh(&self) -> bool {
+        let fresh_for = match self.mode {
+            AttachmentsMode::Storage if self.present_at == Some(self.checked_at) => {
+                STORAGE_PRESENT_CACHE
+            }
+            _ => STORAGE_ABSENT_CACHE,
+        };
+        self.checked_at.elapsed() < fresh_for
+    }
+}
+
+static MODE_CACHE: Lazy<Mutex<HashMap<String, ModeEntry>>> =
     Lazy::new(|| Mutex::new(HashMap::new()));
 
-/// Probes the bucket with the service role, and remembers the answer for a
-/// while so a page load does not wait on Storage.
+/// Probes the bucket with the service role. Only the first page load after a
+/// start waits on Storage: later ones get the remembered answer at once, and a
+/// stale one is refreshed in the background by a single probe. Storage that is
+/// briefly unreachable keeps a recent `storage`, so a hiccup does not turn
+/// uploads off; `none` comes from a missing key, a missing bucket, or Storage
+/// that has not answered for a while.
 pub(crate) async fn attachments_mode(access: Option<&StorageAccess>) -> AttachmentsMode {
     let Some(access) = access else {
         return AttachmentsMode::None;
     };
-    if let Some((checked_at, mode)) = MODE_CACHE
-        .lock()
-        .ok()
-        .and_then(|cache| cache.get(&access.base_url).copied())
-    {
-        let fresh_for = match mode {
-            AttachmentsMode::Storage => STORAGE_PRESENT_CACHE,
-            AttachmentsMode::None => STORAGE_ABSENT_CACHE,
-        };
-        if checked_at.elapsed() < fresh_for {
-            return mode;
+    let cached = MODE_CACHE.lock().ok().and_then(|mut cache| {
+        let entry = cache.get_mut(&access.base_url)?;
+        if !entry.is_fresh() && !entry.refreshing {
+            entry.refreshing = true;
+            let access = access.clone();
+            let previous = *entry;
+            tokio::spawn(async move {
+                let entry = refresh_mode(&access, Some(previous), STORAGE_PROBE_TIMEOUT).await;
+                store_mode(&access.base_url, entry);
+            });
         }
+        Some(entry.mode)
+    });
+    if let Some(mode) = cached {
+        return mode;
     }
-    let mode = match access
+    let entry = refresh_mode(access, None, STORAGE_PROBE_TIMEOUT).await;
+    store_mode(&access.base_url, entry);
+    entry.mode
+}
+
+fn store_mode(base_url: &str, entry: ModeEntry) {
+    if let Ok(mut cache) = MODE_CACHE.lock() {
+        cache.insert(base_url.to_string(), entry);
+    }
+}
+
+async fn refresh_mode(
+    access: &StorageAccess,
+    previous: Option<ModeEntry>,
+    timeout: Duration,
+) -> ModeEntry {
+    let probe = probe_bucket(access, timeout).await;
+    let now = Instant::now();
+    let present_at = match probe {
+        BucketProbe::Present => Some(now),
+        BucketProbe::Missing => None,
+        BucketProbe::Unreachable => previous.and_then(|entry| entry.present_at),
+    };
+    let mode = mode_after_probe(probe, present_at, now);
+    // Only Storage that has answered before is worth a warning; an install
+    // without it would otherwise log this every minute.
+    if probe == BucketProbe::Unreachable && present_at.is_some() {
+        warn!(
+            reported = mode.as_str(),
+            "Supabase Storage did not answer the chat attachments bucket probe"
+        );
+    }
+    ModeEntry {
+        mode,
+        checked_at: now,
+        present_at,
+        refreshing: false,
+    }
+}
+
+/// `present_at` is when the bucket last answered, this probe included.
+fn mode_after_probe(
+    probe: BucketProbe,
+    present_at: Option<Instant>,
+    now: Instant,
+) -> AttachmentsMode {
+    match probe {
+        BucketProbe::Present => AttachmentsMode::Storage,
+        BucketProbe::Missing => AttachmentsMode::None,
+        BucketProbe::Unreachable
+            if present_at.is_some_and(|at| now.duration_since(at) < STORAGE_OUTAGE_GRACE) =>
+        {
+            AttachmentsMode::Storage
+        }
+        BucketProbe::Unreachable => AttachmentsMode::None,
+    }
+}
+
+async fn probe_bucket(access: &StorageAccess, timeout: Duration) -> BucketProbe {
+    match access
         .request(reqwest::Method::GET, &format!("/bucket/{BUCKET}"))
-        .timeout(STORAGE_PROBE_TIMEOUT)
+        .timeout(timeout)
         .send()
         .await
     {
-        Ok(response) if response.status().is_success() => AttachmentsMode::Storage,
-        Ok(_) | Err(_) => AttachmentsMode::None,
-    };
-    if let Ok(mut cache) = MODE_CACHE.lock() {
-        cache.insert(access.base_url.clone(), (Instant::now(), mode));
+        Ok(response) if response.status().is_success() => BucketProbe::Present,
+        Ok(response)
+            if response.status().is_server_error()
+                || response.status() == reqwest::StatusCode::TOO_MANY_REQUESTS
+                || response.status() == reqwest::StatusCode::REQUEST_TIMEOUT =>
+        {
+            BucketProbe::Unreachable
+        }
+        Ok(_) => BucketProbe::Missing,
+        Err(_) => BucketProbe::Unreachable,
     }
-    mode
+}
+
+/// A stateful Storage bucket for purge tests.
+#[cfg(test)]
+pub(crate) mod fake_storage {
+    use std::sync::{Arc, Mutex};
+
+    use axum::extract::State;
+    use axum::http::{HeaderMap, StatusCode};
+    use axum::response::{IntoResponse, Response};
+    use serde_json::{json, Value as JsonValue};
+
+    /// Lists at most two names per page, whatever the limit asked for, and
+    /// deletes what it is told to. Requests without the service-role key in
+    /// both headers are refused.
+    #[derive(Clone)]
+    pub(crate) struct FakeBucket {
+        key: String,
+        objects: Arc<Mutex<Vec<String>>>,
+        lists: Arc<Mutex<Vec<String>>>,
+        deletes: Arc<Mutex<usize>>,
+    }
+
+    impl FakeBucket {
+        pub(crate) fn new(key: &str, objects: Vec<String>) -> Self {
+            Self {
+                key: key.to_string(),
+                objects: Arc::new(Mutex::new(objects)),
+                lists: Arc::new(Mutex::new(Vec::new())),
+                deletes: Arc::new(Mutex::new(0)),
+            }
+        }
+
+        pub(crate) fn objects(&self) -> Vec<String> {
+            self.objects.lock().unwrap().clone()
+        }
+
+        /// How many list requests arrived.
+        pub(crate) fn lists(&self) -> usize {
+            self.lists.lock().unwrap().len()
+        }
+
+        /// The prefixes the list requests asked for, in order.
+        pub(crate) fn listed_prefixes(&self) -> Vec<String> {
+            self.lists.lock().unwrap().clone()
+        }
+
+        pub(crate) fn deletes(&self) -> usize {
+            *self.deletes.lock().unwrap()
+        }
+
+        /// Serves the bucket on a loopback port and returns its base URL.
+        pub(crate) async fn serve(&self) -> (String, tokio::task::JoinHandle<()>) {
+            let app = axum::Router::new()
+                .route(
+                    "/storage/v1/object/list/chat-attachments",
+                    axum::routing::post(list),
+                )
+                .route(
+                    "/storage/v1/object/chat-attachments",
+                    axum::routing::delete(delete),
+                )
+                .with_state(self.clone());
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let base_url = format!("http://{}", listener.local_addr().unwrap());
+            let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+            (base_url, server)
+        }
+
+        fn authorized(&self, headers: &HeaderMap) -> bool {
+            headers.get("apikey").and_then(|value| value.to_str().ok()) == Some(self.key.as_str())
+                && headers
+                    .get("authorization")
+                    .and_then(|value| value.to_str().ok())
+                    == Some(format!("Bearer {}", self.key).as_str())
+        }
+    }
+
+    async fn list(
+        State(bucket): State<FakeBucket>,
+        headers: HeaderMap,
+        axum::Json(body): axum::Json<JsonValue>,
+    ) -> Response {
+        if !bucket.authorized(&headers) {
+            return StatusCode::UNAUTHORIZED.into_response();
+        }
+        let prefix = body["prefix"].as_str().unwrap_or_default().to_string();
+        bucket.lists.lock().unwrap().push(prefix.clone());
+        let page: Vec<JsonValue> = bucket
+            .objects
+            .lock()
+            .unwrap()
+            .iter()
+            .filter_map(|name| name.strip_prefix(&prefix))
+            .take(2)
+            .map(|name| json!({ "name": name, "id": name }))
+            .collect();
+        axum::Json(JsonValue::Array(page)).into_response()
+    }
+
+    async fn delete(
+        State(bucket): State<FakeBucket>,
+        headers: HeaderMap,
+        axum::Json(body): axum::Json<JsonValue>,
+    ) -> Response {
+        if !bucket.authorized(&headers) {
+            return StatusCode::UNAUTHORIZED.into_response();
+        }
+        *bucket.deletes.lock().unwrap() += 1;
+        let doomed: Vec<String> = body["prefixes"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|value| value.as_str().map(str::to_string))
+            .collect();
+        let mut objects = bucket.objects.lock().unwrap();
+        let before = objects.len();
+        objects.retain(|name| !doomed.contains(name));
+        let removed = before - objects.len();
+        axum::Json(JsonValue::Array(vec![json!({}); removed])).into_response()
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use httpmock::prelude::*;
-    use std::sync::Arc;
 
     const PROJECT: &str = "11111111-1111-4111-8111-111111111111";
     const OTHER_PROJECT: &str = "22222222-2222-4222-8222-222222222222";
@@ -896,98 +1125,22 @@ mod tests {
         assert_eq!(payload, json!({ "prompt_text": "hi" }));
     }
 
-    /// A bucket that lists at most two names per page, whatever the limit
-    /// asked for, and deletes what it is told to.
-    #[derive(Clone, Default)]
-    struct FakeBucket {
-        objects: Arc<Mutex<Vec<String>>>,
-        lists: Arc<Mutex<usize>>,
-        deletes: Arc<Mutex<usize>>,
-    }
-
-    fn authorized(headers: &axum::http::HeaderMap) -> bool {
-        headers.get("apikey").and_then(|value| value.to_str().ok()) == Some(KEY)
-            && headers
-                .get("authorization")
-                .and_then(|value| value.to_str().ok())
-                == Some(format!("Bearer {KEY}").as_str())
-    }
-
-    async fn fake_list(
-        axum::extract::State(bucket): axum::extract::State<FakeBucket>,
-        headers: axum::http::HeaderMap,
-        axum::Json(body): axum::Json<JsonValue>,
-    ) -> axum::response::Response {
-        use axum::response::IntoResponse;
-        if !authorized(&headers) {
-            return axum::http::StatusCode::UNAUTHORIZED.into_response();
-        }
-        *bucket.lists.lock().unwrap() += 1;
-        let prefix = body["prefix"].as_str().unwrap_or_default().to_string();
-        let page: Vec<JsonValue> = bucket
-            .objects
-            .lock()
-            .unwrap()
-            .iter()
-            .filter_map(|name| name.strip_prefix(&prefix))
-            .take(2)
-            .map(|name| json!({ "name": name, "id": name }))
-            .collect();
-        axum::Json(JsonValue::Array(page)).into_response()
-    }
-
-    async fn fake_delete(
-        axum::extract::State(bucket): axum::extract::State<FakeBucket>,
-        headers: axum::http::HeaderMap,
-        axum::Json(body): axum::Json<JsonValue>,
-    ) -> axum::response::Response {
-        use axum::response::IntoResponse;
-        if !authorized(&headers) {
-            return axum::http::StatusCode::UNAUTHORIZED.into_response();
-        }
-        *bucket.deletes.lock().unwrap() += 1;
-        let doomed: Vec<String> = body["prefixes"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .filter_map(|value| value.as_str().map(str::to_string))
-            .collect();
-        let mut objects = bucket.objects.lock().unwrap();
-        let before = objects.len();
-        objects.retain(|name| !doomed.contains(name));
-        let removed = before - objects.len();
-        axum::Json(JsonValue::Array(vec![json!({}); removed])).into_response()
-    }
-
     #[tokio::test]
     async fn purge_lists_and_deletes_the_space_prefix_page_by_page() {
-        let bucket = FakeBucket::default();
         let mut objects: Vec<String> = (1..=5)
             .map(|n| object(PROJECT, &format!("6a000000-0000-4000-8000-{n:012}"), "png"))
             .collect();
         let other = object(OTHER_PROJECT, "6a000000-0000-4000-8000-000000000009", "png");
         objects.insert(2, other.clone());
-        *bucket.objects.lock().unwrap() = objects;
-        let app = axum::Router::new()
-            .route(
-                "/storage/v1/object/list/chat-attachments",
-                axum::routing::post(fake_list),
-            )
-            .route(
-                "/storage/v1/object/chat-attachments",
-                axum::routing::delete(fake_delete),
-            )
-            .with_state(bucket.clone());
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let base_url = format!("http://{}", listener.local_addr().unwrap());
-        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let bucket = fake_storage::FakeBucket::new(KEY, objects);
+        let (base_url, server) = bucket.serve().await;
 
         let storage = StorageAccess::new(reqwest::Client::new(), &base_url, KEY);
         assert_eq!(purge_project_attachments(&storage, &project()).await, Ok(5));
-        assert_eq!(*bucket.objects.lock().unwrap(), vec![other]);
+        assert_eq!(bucket.objects(), vec![other]);
         // Pages of two, two and one, then the empty page that ends the purge.
-        assert_eq!(*bucket.lists.lock().unwrap(), 4);
-        assert_eq!(*bucket.deletes.lock().unwrap(), 3);
+        assert_eq!(bucket.lists(), 4);
+        assert_eq!(bucket.deletes(), 3);
         server.abort();
     }
 
@@ -1064,5 +1217,154 @@ mod tests {
         );
         assert_eq!(AttachmentsMode::Storage.as_str(), "storage");
         assert_eq!(AttachmentsMode::None.as_str(), "none");
+    }
+
+    async fn probe_answering(status: u16, delay: Duration) -> BucketProbe {
+        let server = MockServer::start_async().await;
+        server
+            .mock_async(|when, then| {
+                when.method(GET).path("/storage/v1/bucket/chat-attachments");
+                then.status(status).delay(delay).body("{}");
+            })
+            .await;
+        probe_bucket(&access(&server), Duration::from_millis(300)).await
+    }
+
+    #[tokio::test]
+    async fn only_a_definite_answer_reports_the_bucket_missing() {
+        assert_eq!(
+            probe_answering(200, Duration::ZERO).await,
+            BucketProbe::Present
+        );
+        for status in [400, 401, 403, 404] {
+            assert_eq!(
+                probe_answering(status, Duration::ZERO).await,
+                BucketProbe::Missing,
+                "{status}"
+            );
+        }
+        for status in [408, 429, 500, 502, 503] {
+            assert_eq!(
+                probe_answering(status, Duration::ZERO).await,
+                BucketProbe::Unreachable,
+                "{status}"
+            );
+        }
+        assert_eq!(
+            probe_answering(200, Duration::from_secs(2)).await,
+            BucketProbe::Unreachable
+        );
+        let closed = StorageAccess::new(reqwest::Client::new(), "http://127.0.0.1:9", KEY);
+        assert_eq!(
+            probe_bucket(&closed, Duration::from_millis(300)).await,
+            BucketProbe::Unreachable
+        );
+    }
+
+    #[test]
+    fn unreachable_storage_keeps_a_recent_answer_and_then_reports_none() {
+        let now = Instant::now();
+        let later = now + STORAGE_OUTAGE_GRACE + Duration::from_secs(1);
+        assert_eq!(
+            mode_after_probe(
+                BucketProbe::Unreachable,
+                Some(now),
+                now + Duration::from_secs(5)
+            ),
+            AttachmentsMode::Storage
+        );
+        assert_eq!(
+            mode_after_probe(BucketProbe::Unreachable, Some(now), later),
+            AttachmentsMode::None
+        );
+        // Never answered since the start: an install without Storage.
+        assert_eq!(
+            mode_after_probe(BucketProbe::Unreachable, None, now),
+            AttachmentsMode::None
+        );
+        assert_eq!(
+            mode_after_probe(BucketProbe::Missing, Some(now), now),
+            AttachmentsMode::None
+        );
+    }
+
+    #[tokio::test]
+    async fn a_failed_probe_after_a_good_one_keeps_storage() {
+        let server = MockServer::start_async().await;
+        let ok = server
+            .mock_async(|when, then| {
+                when.method(GET).path("/storage/v1/bucket/chat-attachments");
+                then.status(200).body("{}");
+            })
+            .await;
+        let storage = access(&server);
+        let first = refresh_mode(&storage, None, Duration::from_millis(300)).await;
+        assert_eq!(first.mode, AttachmentsMode::Storage);
+        assert!(first.is_fresh());
+        ok.delete_async().await;
+
+        server
+            .mock_async(|when, then| {
+                when.method(GET).path("/storage/v1/bucket/chat-attachments");
+                then.status(500).body("upstream error");
+            })
+            .await;
+        let after_error = refresh_mode(&storage, Some(first), Duration::from_millis(300)).await;
+        assert_eq!(after_error.mode, AttachmentsMode::Storage);
+        assert_eq!(after_error.present_at, first.present_at);
+        // A kept answer is checked again after a minute, not ten.
+        assert_ne!(after_error.present_at, Some(after_error.checked_at));
+
+        // Without an earlier answer the same error reports none.
+        let cold = refresh_mode(&storage, None, Duration::from_millis(300)).await;
+        assert_eq!(cold.mode, AttachmentsMode::None);
+    }
+
+    #[tokio::test]
+    async fn a_stale_answer_is_served_at_once_and_refreshed_by_one_background_probe() {
+        let server = MockServer::start_async().await;
+        let probe = server
+            .mock_async(|when, then| {
+                when.method(GET).path("/storage/v1/bucket/chat-attachments");
+                then.status(200)
+                    .delay(Duration::from_millis(500))
+                    .body("{}");
+            })
+            .await;
+        let storage = access(&server);
+        let stale = Instant::now()
+            .checked_sub(STORAGE_ABSENT_CACHE + Duration::from_secs(1))
+            .expect("the clock has run for more than a minute");
+        store_mode(
+            &storage.base_url,
+            ModeEntry {
+                mode: AttachmentsMode::None,
+                checked_at: stale,
+                present_at: None,
+                refreshing: false,
+            },
+        );
+
+        let started = Instant::now();
+        for _ in 0..3 {
+            assert_eq!(
+                attachments_mode(Some(&storage)).await,
+                AttachmentsMode::None
+            );
+        }
+        assert!(
+            started.elapsed() < Duration::from_millis(400),
+            "a page load waited on the probe"
+        );
+
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while attachments_mode(Some(&storage)).await != AttachmentsMode::Storage {
+            assert!(
+                Instant::now() < deadline,
+                "the background probe never landed"
+            );
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        probe.assert_hits_async(1).await;
     }
 }

@@ -719,7 +719,8 @@ struct ProjectSummary {
     last_activity_at: Option<String>,
     /// `storage` when chat attachments can be uploaded to the private bucket
     /// and handed to runtimes, `none` on an install without Storage or a
-    /// service-role key. Only the single-space summary reports it.
+    /// service-role key, or whose Storage has not answered for a while. Only
+    /// the single-space summary reports it.
     #[serde(skip_serializing_if = "Option::is_none")]
     attachments: Option<&'static str>,
 }
@@ -1851,6 +1852,8 @@ async fn get_project_summary(
             "failed to finalize project summary transaction: {error}"
         ))
     })?;
+    // The pool slot goes back before the first Storage probe after a start.
+    drop(connection);
 
     let storage =
         crate::chat_attachments::StorageAccess::from_config(&state.http_client, &state.config);

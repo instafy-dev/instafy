@@ -1,6 +1,7 @@
-//! The agent lease route's chat attachment downloads, on the migrated
-//! database: which runtimes receive signed URLs, for which objects, and that
-//! a job row cannot supply URLs of its own.
+//! Chat attachments through the controller's routes, on the migrated
+//! database: which runtimes the agent lease route gives signed URLs, for which
+//! objects, that a job row cannot supply URLs of its own, and that deleting a
+//! space purges its prefix.
 
 use axum::body::{to_bytes, Body};
 use axum::http::{Request, StatusCode};
@@ -11,6 +12,7 @@ use tokio_postgres::types::Json as PgJson;
 use tower::ServiceExt;
 use uuid::Uuid;
 
+use crate::chat_attachments::fake_storage::FakeBucket;
 use crate::config::{PgPool, RuntimeProviderConfig};
 use crate::tests::{
     build_app_config, build_test_state, ensure_test_user, require_origin_test_pool,
@@ -285,6 +287,107 @@ async fn lease_signs_own_space_attachments_only_for_runtimes_that_download_them(
         Ok(())
     })
     .await;
+    let user_cleanup = pool
+        .get()
+        .await?
+        .execute(
+            "delete from auth.users where id = $1",
+            &[&space.owner_user_id],
+        )
+        .await;
+    result.and(user_cleanup.map(|_| ()).map_err(anyhow::Error::from))
+}
+
+#[tokio::test]
+async fn delete_project_purges_the_space_prefix_after_the_delete_commits() -> anyhow::Result<()> {
+    let pool = require_origin_test_pool("delete_project_purges_the_space_prefix").await?;
+    let space = Space {
+        org_id: Uuid::new_v4(),
+        project_id: Uuid::new_v4(),
+        owner_user_id: Uuid::new_v4(),
+        conversation_id: Uuid::new_v4(),
+    };
+    let own = |n: u32| format!("{}/6a000000-0000-4000-8000-{n:012}.png", space.project_id);
+    let other_space = format!(
+        "{}/6a000000-0000-4000-8000-000000000009.png",
+        Uuid::new_v4()
+    );
+    let bucket = FakeBucket::new(
+        SERVICE_ROLE_KEY,
+        vec![own(1), other_space.clone(), own(2), own(3)],
+    );
+    let (storage_url, storage_server) = bucket.serve().await;
+
+    let mut config = build_app_config(
+        test_origin_private_key(),
+        test_origin_public_key(),
+        "chat-attachment-purge",
+    );
+    config._supabase_project_url = storage_url;
+    config.supabase_service_role_key = Some(SERVICE_ROLE_KEY.to_string());
+    let state = build_test_state(pool.clone(), config);
+
+    let fixture = SharedDbFixture {
+        organizations: vec![space.org_id],
+        projects: vec![space.project_id],
+    };
+    let body_pool = pool.clone();
+    let result = with_shared_db_fixture(fixture, async {
+        let pool = body_pool;
+        seed_space(&pool, &space, json!([])).await?;
+        let response = crate::projects::router()
+            .with_state(state.clone())
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri(format!("/projects/{}", space.project_id))
+                    .header(
+                        axum::http::header::AUTHORIZATION,
+                        format!("Bearer {SERVICE_ROLE_KEY}"),
+                    )
+                    .body(Body::empty())?,
+            )
+            .await?;
+        anyhow::ensure!(
+            response.status() == StatusCode::NO_CONTENT,
+            "delete returned {}",
+            response.status()
+        );
+        let status: String = pool
+            .get()
+            .await?
+            .query_one(
+                "select status from projects where id = $1",
+                &[&space.project_id],
+            )
+            .await?
+            .get(0);
+        anyhow::ensure!(status == "deleted", "the space is {status}");
+
+        // The purge runs in the background after the response.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while bucket.objects() != vec![other_space.clone()] {
+            anyhow::ensure!(
+                std::time::Instant::now() < deadline,
+                "the space's attachments were not purged: {:?}",
+                bucket.objects()
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+        let prefix = format!("{}/", space.project_id);
+        anyhow::ensure!(
+            bucket
+                .listed_prefixes()
+                .iter()
+                .all(|listed| *listed == prefix),
+            "listed another prefix: {:?}",
+            bucket.listed_prefixes()
+        );
+        anyhow::ensure!(bucket.deletes() == 2, "deletes: {}", bucket.deletes());
+        Ok(())
+    })
+    .await;
+    storage_server.abort();
     let user_cleanup = pool
         .get()
         .await?
