@@ -7,6 +7,11 @@ name: Publish images after protected main
 # the completion of that exact push Build then starts a pass that publishes, and
 # the six-hour schedule reconciles anything left. A successful coordinator is
 # not publication proof: consumers require sealed child manifests.
+#
+# A third, best-effort lane publishes the arm64 runtime images and multi-arch
+# tags (publish-runtime-agent-multiarch.yml) once the amd64 production runtime
+# manifest is sealed. It runs last, retries a failed commit up to a cap, and can
+# only warn: it never fails a pass or changes the production lanes.
 on:
   push:
     branches:
@@ -83,7 +88,9 @@ jobs:
           && (github.event_name == 'schedule' || inputs.commit_sha == github.sha)
           && fromJSON('{"group":"org/instafy-trusted-build","labels":["self-hosted","Linux","X64","instafy-build"]}')
           || 'ubuntu-24.04' }}
-    timeout-minutes: 5
+    # Five minutes for the production steps, plus the arm64 lane's own
+    # two-minute step bound.
+    timeout-minutes: 7
 
     steps:
       - name: Qualify isolated protected-main control runner
@@ -376,6 +383,7 @@ jobs:
           fi
           echo "services_publish=$services_publish" >> "$GITHUB_OUTPUT"
           echo "runtime_publish=$runtime_publish" >> "$GITHUB_OUTPUT"
+          echo "runtime_fresh=$runtime_fresh" >> "$GITHUB_OUTPUT"
           echo "pending=$pending" >> "$GITHUB_OUTPUT"
           if [[ "$pending" == "true" ]]; then
             echo "publish=false" >> "$GITHUB_OUTPUT"
@@ -435,7 +443,7 @@ jobs:
             runtime="$(
               dispatch \
                 publish-runtime-agent.yml \
-                "{\"commit_sha\":\"${RELEASE_COMMIT}\",\"update_channel_tags\":false}"
+                "{\"commit_sha\":\"${RELEASE_COMMIT}\"}"
             )"
             runtime_run_id="$(jq -er '.workflow_run_id' <<<"$runtime")"
             runtime_url="$(jq -er '.html_url' <<<"$runtime")"
@@ -505,3 +513,161 @@ jobs:
             echo "- Public core: \`$RELEASE_COMMIT\`"
             echo "- Both exact manifests remain live for at least 14 days, so no image was rebuilt or pushed."
           } >> "$GITHUB_STEP_SUMMARY"
+
+      # The best-effort arm64 lane. Every production decision above is final
+      # before this step starts, and nothing here feeds back into it: the lane
+      # writes only multiarch_* outputs and runs in a subshell, and its script
+      # always ends with status 0. The runner also bounds the step to two
+      # minutes and lets the job continue past it, so a stalled API call cannot
+      # fail a pass either: arm64 can warn but never fail a pass or block a
+      # release. It acts only in a pass that found the production runtime
+      # manifest sealed for this exact current main, and dispatches again after
+      # a failure until the commit has reached the retry cap.
+      - name: Reconcile the best-effort arm64 lane without blocking production
+        if: >-
+          steps.recheck.outputs.current == 'true' &&
+          steps.freshness.outputs.runtime_fresh == 'true'
+        id: multiarch
+        timeout-minutes: 2
+        continue-on-error: true
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_COMMIT: ${{ steps.source.outputs.commit_sha }}
+        run: |
+          # Actions starts this shell with errexit; this outer part never exits
+          # early. Only the subshell below fails fast, and its status is reported.
+          set +e
+          set -o pipefail
+          lane_workflow=publish-runtime-agent-multiarch.yml
+          lane_artifact=runtime-agent-multiarch-manifest
+          production_workflow=publish-runtime-agent.yml
+          retry_cap=4
+          stuck_after_seconds=$(( 6 * 60 * 60 ))
+          {
+            echo "### Best-effort arm64 lane"
+            echo
+          } >> "$GITHUB_STEP_SUMMARY"
+          (
+            set -euo pipefail
+            finish() {
+              echo "multiarch_state=$1" >> "$GITHUB_OUTPUT"
+              echo "- $2" >> "$GITHUB_STEP_SUMMARY"
+              exit 0
+            }
+            now_epoch="$(date -u +%s)"
+            minimum_expiry_epoch="$(( now_epoch + 14 * 24 * 60 * 60 ))"
+            runs="$(gh api --method GET \
+              -H 'Accept: application/vnd.github+json' \
+              -H 'X-GitHub-Api-Version: 2026-03-10' \
+              "repos/${GITHUB_REPOSITORY}/actions/workflows/${lane_workflow}/runs" \
+              -f head_sha="$RELEASE_COMMIT" \
+              -f per_page=100)"
+            jq -e --arg sha "$RELEASE_COMMIT" --arg path ".github/workflows/${lane_workflow}" '
+              (.total_count | type) == "number" and
+              .total_count == (.workflow_runs | length) and .total_count <= 100 and
+              ([.workflow_runs[].id] | unique | length) == .total_count and
+              all(.workflow_runs[];
+                (.id | type) == "number" and .id > 0 and .id == (.id | floor) and
+                .repository.full_name == "instafy-dev/instafy" and .path == $path and
+                .head_sha == $sha and .head_branch == "main" and .event == "workflow_dispatch" and
+                (.status | IN("completed", "queued", "in_progress", "waiting", "pending", "requested")))
+            ' <<<"$runs" >/dev/null
+            if jq -e 'any(.workflow_runs[]; .status != "completed")' <<<"$runs" >/dev/null; then
+              # An approval that nobody gives, or a queue behind another
+              # commit's run, would otherwise stay silent for days.
+              oldest_active="$(jq -r '
+                [.workflow_runs[] | select(.status != "completed") | .created_at | strings] |
+                sort | first // empty
+              ' <<<"$runs")"
+              if [[ -n "$oldest_active" ]]; then
+                active_since="$(date -u -d "$oldest_active" +%s)"
+                if (( now_epoch - active_since >= stuck_after_seconds )); then
+                  echo "::warning::A ${lane_workflow} run for ${RELEASE_COMMIT} has been active since ${oldest_active}; it may be waiting for ghcr-release approval or queued behind another run. Production publication is unaffected."
+                fi
+              fi
+              finish pending "A ${lane_workflow} run for \`${RELEASE_COMMIT}\` is still active; none was dispatched."
+            fi
+            sealed_runs="$(jq -r '.workflow_runs[] | select(.conclusion == "success") | .id' <<<"$runs")"
+            if [[ -n "$sealed_runs" ]]; then
+              while read -r run_id; do
+                artifacts="$(gh api --method GET \
+                  -H 'Accept: application/vnd.github+json' \
+                  -H 'X-GitHub-Api-Version: 2026-03-10' \
+                  "repos/${GITHUB_REPOSITORY}/actions/runs/${run_id}/artifacts" \
+                  -f per_page=100)"
+                jq -e '(.total_count | type) == "number" and
+                  .total_count == (.artifacts | length) and .total_count <= 100' <<<"$artifacts" >/dev/null
+                matches="$(jq -c --arg name "$lane_artifact" '[.artifacts[] | select(.name == $name)]' <<<"$artifacts")"
+                if jq -e '
+                    length == 1 and
+                    .[0].expired == false and
+                    (.[0].digest | type) == "string" and
+                    (.[0].digest | test("^sha256:[0-9a-f]{64}$")) and
+                    (.[0].expires_at | type) == "string"
+                  ' <<<"$matches" >/dev/null &&
+                   [[ "$(date -u -d "$(jq -er '.[0].expires_at' <<<"$matches")" +%s)" -ge "$minimum_expiry_epoch" ]]; then
+                  finish fresh "Multi-arch images for \`${RELEASE_COMMIT}\` are sealed (run ${run_id})."
+                fi
+              done <<<"$sealed_runs"
+              echo "::warning::A sealed ${lane_workflow} run for ${RELEASE_COMMIT} has no fresh ${lane_artifact}; it cannot be repeated automatically. Production publication is unaffected."
+              finish stale "Sealed, but its ${lane_artifact} is missing or expiring; not repeated. Production publication is unaffected."
+            fi
+            failed="$(jq -er '[.workflow_runs[] | select(.conclusion != "success")] | length' <<<"$runs")"
+            if (( failed >= retry_cap )); then
+              echo "::warning::arm64 lane exhausted for ${RELEASE_COMMIT} after ${failed} failed runs (cap ${retry_cap}); production unaffected; dispatch ${lane_workflow} manually once the cause is fixed."
+              finish exhausted "arm64 lane exhausted for \`${RELEASE_COMMIT}\`; production unaffected; dispatch \`${lane_workflow}\` manually."
+            fi
+            # The arm64 workflow binds only to exactly one successful
+            # first-attempt production run, as release consumers do. A seal
+            # from any other attempt (for example after re-running failed jobs)
+            # can never bind, so it is reported instead of spending the cap.
+            production_runs="$(gh api --method GET \
+              -H 'Accept: application/vnd.github+json' \
+              -H 'X-GitHub-Api-Version: 2026-03-10' \
+              "repos/${GITHUB_REPOSITORY}/actions/workflows/${production_workflow}/runs" \
+              -f head_sha="$RELEASE_COMMIT" \
+              -f per_page=100)"
+            jq -e '(.total_count | type) == "number" and
+              .total_count == (.workflow_runs | length) and .total_count <= 100' <<<"$production_runs" >/dev/null
+            bindable="$(jq -er --arg sha "$RELEASE_COMMIT" --arg path ".github/workflows/${production_workflow}" '
+              [.workflow_runs[] | select(
+                .repository.full_name == "instafy-dev/instafy" and .path == $path and
+                .event == "workflow_dispatch" and .head_branch == "main" and .head_sha == $sha and
+                .status == "completed" and .conclusion == "success" and .run_attempt == 1
+              )] | length
+            ' <<<"$production_runs")"
+            if [[ "$bindable" != "1" ]]; then
+              echo "::warning::The sealed ${production_workflow} release for ${RELEASE_COMMIT} is not exactly one successful first-attempt run, so the arm64 lane cannot bind to it; none was dispatched. Production publication is unaffected."
+              finish unbindable "Not dispatched: the production runtime release for \`${RELEASE_COMMIT}\` is not exactly one successful first-attempt run."
+            fi
+            current_main="$(gh api -H 'X-GitHub-Api-Version: 2026-03-10' \
+              "repos/${GITHUB_REPOSITORY}/commits/main" --jq .sha)"
+            if [[ "$current_main" != "$RELEASE_COMMIT" ]]; then
+              finish deferred "Protected main advanced before dispatch; the newer commit's passes own its arm64 lane."
+            fi
+            receipt="$(gh api \
+              --method POST \
+              -H 'Accept: application/vnd.github+json' \
+              -H 'X-GitHub-Api-Version: 2026-03-10' \
+              "repos/${GITHUB_REPOSITORY}/actions/workflows/${lane_workflow}/dispatches" \
+              --input - <<JSON
+          {"ref":"main","inputs":{"commit_sha":"${RELEASE_COMMIT}","update_channel_tags":false}}
+          JSON
+            )"
+            run_id="$(jq -er '.workflow_run_id' <<<"$receipt")"
+            run_url="$(jq -er '.html_url' <<<"$receipt")"
+            if [[ ! "$run_id" =~ ^[1-9][0-9]*$ ]]; then
+              echo "GitHub did not return an exact arm64 lane run ID." >&2
+              exit 1
+            fi
+            echo "multiarch_run_id=$run_id" >> "$GITHUB_OUTPUT"
+            finish dispatched "Dispatched attempt $(( failed + 1 )) of ${retry_cap}: [run ${run_id}](${run_url}), not yet verified."
+          )
+          status=$?
+          if [[ "$status" != "0" ]]; then
+            echo "::warning::The arm64 lane could not be reconciled in this pass (status ${status}). Production publication is unaffected; the next pass retries."
+            echo "multiarch_state=error" >> "$GITHUB_OUTPUT"
+            echo "- Not reconciled in this pass (status ${status}); production publication is unaffected." >> "$GITHUB_STEP_SUMMARY"
+          fi
+          exit 0

@@ -28,7 +28,10 @@ const escapeRegExp = (value) => value.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&");
 const root = path.resolve(import.meta.dirname, "..");
 const read = (file) => fs.readFileSync(path.join(root, file), "utf8");
 const scanSource = read(".github/workflows/image-scan.yml");
+// The runtime image has two publishers: the production release builds amd64,
+// and the multi-arch lane builds arm64. The scan covers the cells of both.
 const runtimeSource = read(".github/workflows/publish-runtime-agent.yml");
+const multiarchSource = read(".github/workflows/publish-runtime-agent-multiarch.yml");
 const servicesSource = read(".github/workflows/publish-production-services.yml");
 
 function job(source, key) {
@@ -39,7 +42,9 @@ function job(source, key) {
 }
 
 const scan = { runtime: job(scanSource, "runtime"), services: job(scanSource, "services"), report: job(scanSource, "report") };
-const publisher = { runtime: job(runtimeSource, "build-scan-push"), services: job(servicesSource, "publish") };
+const publisher = { runtime: job(runtimeSource, "build-scan-push"), arm64: job(multiarchSource, "build-scan-push-arm64"),
+  services: job(servicesSource, "publish") };
+const runtimePublishers = [publisher.runtime, publisher.arm64];
 
 function steps(section) {
   return section.split(/(?=^      - )/mu).slice(1);
@@ -196,6 +201,7 @@ test("no step logs in, pushes, tags a registry reference, writes a cache or hold
     /docker\/login-action|docker login|docker push|--push\b|push: true|cache-to|type=gha|imagetools|docker tag\b|--output[= ]type=(?:registry|image)|registry-auth|DOCKER_AUTH_CONFIG|packages:|write-all|secrets\./u);
   // The only registry reference is the anonymous read of the publisher's layer cache.
   const cacheFrom = withInputs(step(publisher.runtime, "Build audit image"))["cache-from"];
+  assert.equal(withInputs(step(publisher.arm64, "Build audit image"))["cache-from"], cacheFrom);
   assert.deepEqual(scanSource.split("\n").filter((line) => /(?:^|[\s=:,"'])ghcr\.io\//u.test(line)),
     [`          cache-from: ${cacheFrom}`]);
   // Images exist only in the runner's engine, under a local name with no registry or namespace.
@@ -255,8 +261,10 @@ test("triggers are nightly, manual and pull requests that change image inputs", 
 
   const paths = pathFilter();
   for (const required of ["docker/**", ".github/workflows/image-scan.yml", ".github/workflows/publish-runtime-agent.yml",
-    ".github/workflows/publish-production-services.yml", "scripts/check-production-image-inputs.test.mjs",
-    "scripts/check-image-scan-workflow.test.mjs"]) assert.ok(paths.includes(required), required);
+    ".github/workflows/publish-runtime-agent-multiarch.yml", ".github/workflows/publish-production-services.yml",
+    "scripts/check-production-image-inputs.test.mjs", "scripts/check-image-scan-workflow.test.mjs"]) {
+    assert.ok(paths.includes(required), required);
+  }
   // Every published Dockerfile, every script a Dockerfile copies, and every
   // script this workflow runs is a pull-request input.
   const dockerfiles = ["docker/runtime/Dockerfile", ...matrix(publisher.services).map((cell) => cell.dockerfile)];
@@ -287,17 +295,26 @@ test("triggers are nightly, manual and pull requests that change image inputs", 
 });
 
 test("cells equal the publishers' matrices and run on the same hosted runners", () => {
-  const runtimeCells = matrix(publisher.runtime).map(({ tag_prefix: _unused, ...cell }) => cell);
-  assert.deepEqual(matrix(scan.runtime), runtimeCells);
-  assert.equal(runtimeCells.length, 4);
+  const cells = (section) => matrix(section).map(({ tag_prefix: _unused, ...cell }) => cell);
+  const ordered = (list) => [...list].sort((a, b) =>
+    `${a.flavor}-${a.architecture}`.localeCompare(`${b.flavor}-${b.architecture}`));
+  const amd64 = cells(publisher.runtime);
+  const arm64 = cells(publisher.arm64);
+  // The production publisher owns exactly the amd64 cells and the multi-arch
+  // lane exactly the arm64 cells; together they are the four scanned cells.
+  assert.deepEqual(amd64.map((cell) => `${cell.flavor}-${cell.architecture}`), ["base-amd64", "webdev-amd64"]);
+  assert.deepEqual(arm64.map((cell) => `${cell.flavor}-${cell.architecture}`), ["base-arm64", "webdev-arm64"]);
+  assert.deepEqual(ordered(matrix(scan.runtime)), ordered([...amd64, ...arm64]));
+  assert.equal(matrix(scan.runtime).length, 4);
   assert.deepEqual(matrix(scan.services), matrix(publisher.services));
   assert.equal(matrix(scan.services).length, 7);
   for (const section of [scan.runtime, scan.services]) assert.match(section, /^ {6}fail-fast: false$/mu);
-  assert.deepEqual(strategy(scan.runtime), strategy(publisher.runtime));
+  for (const section of runtimePublishers) assert.deepEqual(strategy(scan.runtime), strategy(section));
   assert.deepEqual(strategy(scan.services), strategy(publisher.services));
 
   assert.match(scan.runtime, /^ {4}runs-on: \$\{\{ matrix\.runner \}\}$/mu);
   assert.match(publisher.runtime, /\|\| matrix\.runner \}\}\n/u);
+  assert.match(publisher.arm64, /^ {4}runs-on: \$\{\{ matrix\.runner \}\}$/mu);
   const serviceFallback = publisher.services.match(/\|\| '([\w.-]+)' \}\}\n/u)?.[1];
   assert.ok(serviceFallback);
   assert.match(scan.services, new RegExp(`^ {4}runs-on: ${escapeRegExp(serviceFallback)}$`, "mu"));
@@ -305,10 +322,12 @@ test("cells equal the publishers' matrices and run on the same hosted runners", 
   assert.doesNotMatch(scanSource, /self-hosted|vars\.|instafy-trusted-build|instafy-ci-/u);
   for (const cell of matrix(scan.runtime)) assert.match(cell.runner, /^ubuntu-24\.04(?:-arm)?$/u);
 
-  // The publisher's bound minus the cache export it adds after publication.
-  const exported = step(publisher.runtime, "Export the scanned build's layer cache");
-  const [, grace, minutes] = exported.match(/timeout --kill-after=(\d+)m (\d+)m docker buildx build/u).map(Number);
-  assert.equal(timeout(scan.runtime), timeout(publisher.runtime) - minutes - grace);
+  // The publishers' bound minus the cache export they add after publication.
+  for (const section of runtimePublishers) {
+    const exported = step(section, "Export the scanned build's layer cache");
+    const [, grace, minutes] = exported.match(/timeout --kill-after=(\d+)m (\d+)m docker buildx build/u).map(Number);
+    assert.equal(timeout(scan.runtime), timeout(section) - minutes - grace);
+  }
   assert.equal(timeout(scan.services), timeout(publisher.services));
 });
 
@@ -321,6 +340,10 @@ test("the same pinned Trivy runs the same blocking scan as each publisher", () =
     TRIVY_ASSET: "${{ matrix.trivy_asset }}",
     TRIVY_SHA256: "${{ matrix.trivy_sha256 }}",
   });
+  // The hosted-only multi-arch lane installs Trivy exactly as the scan does.
+  const arm64Install = step(publisher.arm64, "Install pinned Trivy");
+  assert.equal(runBlock(arm64Install), runBlock(runtimeInstall));
+  assert.deepEqual(env(arm64Install), env(runtimeInstall));
   const servicesInstall = step(scan.services, "Install pinned Trivy");
   const publisherServicesInstall = step(publisher.services, "Install pinned Trivy");
   assert.equal(runBlock(servicesInstall), runBlock(publisherServicesInstall));
@@ -330,7 +353,7 @@ test("the same pinned Trivy runs the same blocking scan as each publisher", () =
 
   const runtimeGate = step(scan.runtime, "Scan audit image");
   const servicesGate = step(scan.services, "Scan amd64 image");
-  assert.equal(gate(runtimeGate), gate(step(publisher.runtime, "Scan audit image")));
+  for (const section of runtimePublishers) assert.equal(gate(runtimeGate), gate(step(section, "Scan audit image")));
   assert.equal(gate(servicesGate), gate(step(publisher.services, "Scan amd64 release candidate")));
   for (const text of [runtimeGate, servicesGate]) {
     const flags = trivyFlags(runBlock(text));
@@ -360,14 +383,16 @@ test("the same pinned Trivy runs the same blocking scan as each publisher", () =
 
 test("each cell builds the publisher's exact Dockerfile, target, platform and arguments", () => {
   const ours = withInputs(step(scan.runtime, "Build audit image"));
-  const theirs = withInputs(step(publisher.runtime, "Build audit image"));
-  assert.deepEqual(Object.keys(ours).sort(), Object.keys(theirs).sort());
-  for (const key of Object.keys(theirs)) {
-    if (key === "tags") continue;
-    const expected = key === "labels"
-      ? theirs.labels.map((label) => label.replace("${{ needs.authorize.outputs.commit_sha }}", "${{ github.sha }}"))
-      : theirs[key];
-    assert.deepEqual(ours[key], expected, key);
+  for (const section of runtimePublishers) {
+    const theirs = withInputs(step(section, "Build audit image"));
+    assert.deepEqual(Object.keys(ours).sort(), Object.keys(theirs).sort());
+    for (const key of Object.keys(theirs)) {
+      if (key === "tags") continue;
+      const expected = key === "labels"
+        ? theirs.labels.map((label) => label.replace("${{ needs.authorize.outputs.commit_sha }}", "${{ github.sha }}"))
+        : theirs[key];
+      assert.deepEqual(ours[key], expected, key);
+    }
   }
   assert.match(step(scan.runtime, "Build audit image"), /^        uses: docker\/build-push-action@[0-9a-f]{40} # v6$/mu);
 
@@ -384,18 +409,21 @@ test("each cell builds the publisher's exact Dockerfile, target, platform and ar
 
   // The webdev cells run the same Shared Browser gate that publication requires.
   const smoke = step(scan.runtime, "Prove the webdev image starts the Shared Browser");
-  assert.equal(runLine(smoke), runLine(step(publisher.runtime, "Prove the webdev image starts the Shared Browser")));
+  for (const section of runtimePublishers) {
+    assert.equal(runLine(smoke), runLine(step(section, "Prove the webdev image starts the Shared Browser")));
+  }
   assert.match(smoke, /^        if: \$\{\{ !cancelled\(\) && matrix\.flavor == 'webdev' && steps\.build\.outcome == 'success' \}\}$/mu);
 
-  // Disk preparation matches the publisher on hosted runners.
-  assert.equal(runBlock(step(scan.runtime, "Reclaim hosted-runner disk for the audited image")),
-    runBlock(step(publisher.runtime, "Reclaim hosted-runner disk for the audited image")));
+  // Disk preparation matches the publishers on hosted runners.
   const disk = runBlock(step(scan.runtime, "Require sufficient free disk for the audited image"));
-  const publisherDisk = runBlock(step(publisher.runtime, "Require sufficient free disk for the audited image"));
-  for (const line of publisherDisk.split("\n").filter((value) => !value.includes("::error::"))) assert.ok(disk.includes(line), line);
-
   const buildx = (section) => withInputs(step(section, "Set up Docker Buildx")).version;
-  assert.equal(buildx(scan.runtime), buildx(publisher.runtime));
+  for (const section of runtimePublishers) {
+    assert.equal(runBlock(step(scan.runtime, "Reclaim hosted-runner disk for the audited image")),
+      runBlock(step(section, "Reclaim hosted-runner disk for the audited image")));
+    const publisherDisk = runBlock(step(section, "Require sufficient free disk for the audited image"));
+    for (const line of publisherDisk.split("\n").filter((value) => !value.includes("::error::"))) assert.ok(disk.includes(line), line);
+    assert.equal(buildx(scan.runtime), buildx(section));
+  }
   assert.equal(buildx(scan.services), buildx(publisher.services));
 });
 
@@ -422,7 +450,7 @@ test("steps run in the publisher's order and every action is a publisher's exact
   assert.equal(withInputs(step(scan.report, "Checkout"))["persist-credentials"], "false");
 
   const pins = (source) => new Set([...source.matchAll(/^\s+uses: ([^\s#]+)/gmu)].map((match) => match[1]));
-  const published = new Set([...pins(runtimeSource), ...pins(servicesSource)]);
+  const published = new Set([...pins(runtimeSource), ...pins(multiarchSource), ...pins(servicesSource)]);
   for (const action of pins(scanSource)) {
     assert.match(action, /@[0-9a-f]{40}$/u);
     assert.ok(published.has(action), `${action} must reuse a publisher's exact pin`);

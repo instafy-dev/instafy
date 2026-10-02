@@ -7,6 +7,7 @@ import "./check-image-coordinator.test.mjs";
 import "./check-public-control-ci.test.mjs";
 import "./check-image-build-routing.test.mjs";
 import "./check-image-scan-workflow.test.mjs";
+import "./check-runtime-multiarch-workflow.test.mjs";
 
 const repositoryRoot = path.resolve(import.meta.dirname, "..");
 const workflowRoot = path.join(repositoryRoot, ".github", "workflows");
@@ -71,7 +72,8 @@ test("protected main reconciles exact image publication without occupying a wait
   assert.match(source, /actions: write/u);
   assert.match(source, /contents: read/u);
   assert.match(source, /cancel-in-progress: false/u);
-  assert.match(source, /timeout-minutes: 5/u);
+  // Five minutes for the production steps plus the arm64 lane's own two-minute step bound.
+  assert.match(source, /^    timeout-minutes: 7$/mu);
   assert.doesNotMatch(source, /\bsleep\b|\bdeadline\b|wait_for_run/u);
   assert.match(source, /steps\.ci\.outputs\.ready == 'true'/u);
   assert.match(source, /steps\.freshness\.outputs\.pending == 'false'/u);
@@ -118,7 +120,18 @@ test("protected main reconciles exact image publication without occupying a wait
     /if \[\[ "\$PUBLISH_RUNTIME" == "true" \]\]; then\n\s+runtime="\$\([\s\S]*?publish-runtime-agent\.yml/u,
   );
   assert.match(source, /Report fresh immutable manifests/u);
-  assert.match(source, /\\"update_channel_tags\\":false/u);
+  // The amd64 production publisher no longer moves channel tags; only the
+  // best-effort arm64 lane is dispatched with them explicitly off.
+  assert.doesNotMatch(dispatch, /update_channel_tags/u);
+  const lane = source.slice(source.indexOf(
+    "      - name: Reconcile the best-effort arm64 lane without blocking production\n",
+  ));
+  assert.match(lane, /\{"ref":"main","inputs":\{"commit_sha":"\$\{RELEASE_COMMIT\}","update_channel_tags":false\}\}/u);
+  assert.equal([...source.matchAll(/update_channel_tags/gu)].length, 1);
+  assert.equal([...lane.matchAll(/publish-runtime-agent-multiarch\.yml/gu)].length, 1);
+  assert.equal([...source.matchAll(/publish-runtime-agent-multiarch\.yml/gu)].length, 2, "the lane and the header");
+  assert.match(lane, /^          retry_cap=4$/mu);
+  assert.match(lane, /runtime-agent-multiarch-manifest/u);
   assert.doesNotMatch(source, /\bsecrets\./u);
   assert.doesNotMatch(source, /^\s+pull_request_target:/mu);
   // The one privileged trigger the owner allowed here (2026-09-26): completion
@@ -140,10 +153,21 @@ test("protected main reconciles exact image publication without occupying a wait
     [...source.matchAll(/publish-production-services\.yml/gu)].length,
     2,
   );
+  // The freshness read, the dispatch, and the arm64 lane's read-only check of
+  // the production run it must bind to.
   assert.equal(
     [...source.matchAll(/publish-runtime-agent\.yml/gu)].length,
-    2,
+    3,
   );
+  const laneStep = source.slice(source.indexOf(
+    "      - name: Reconcile the best-effort arm64 lane without blocking production\n",
+  ));
+  assert.match(laneStep, /^          production_workflow=publish-runtime-agent\.yml$/mu);
+  assert.deepEqual([...laneStep.matchAll(/^.*\$\{production_workflow\}.*$/gmu)].map((match) => match[0].trim()), [
+    '"repos/${GITHUB_REPOSITORY}/actions/workflows/${production_workflow}/runs" \\',
+    'bindable="$(jq -er --arg sha "$RELEASE_COMMIT" --arg path ".github/workflows/${production_workflow}" \'',
+    'echo "::warning::The sealed ${production_workflow} release for ${RELEASE_COMMIT} is not exactly one successful first-attempt run, so the arm64 lane cannot bind to it; none was dispatched. Production publication is unaffected."',
+  ]);
   assertOrdered(
     source,
     "Authorize the exact current protected-main commit",
@@ -152,6 +176,8 @@ test("protected main reconciles exact image publication without occupying a wait
     "Reconcile exact publishers and manifest freshness",
     "Dispatch missing immutable image publishers without waiting",
     "Report requested immutable image publication",
+    "Report fresh immutable manifests",
+    "Reconcile the best-effort arm64 lane without blocking production",
   );
 });
 
@@ -289,6 +315,16 @@ test("runtime images publish only exact protected main from a fixed namespace", 
   assert.match(authorize, /actions\/workflows\/\$\{RELEASE_WORKFLOW\}\/runs/u);
   assert.match(authorize, /\.conclusion == "success"/u);
   assert.doesNotMatch(authorize, /packages: write/u);
+  // The channel-tag input stays declared so existing dispatchers remain valid,
+  // but this amd64-only release refuses it: channel tags must point at a
+  // multi-arch index, which only publish-runtime-agent-multiarch.yml creates.
+  assert.match(dispatchInputs, /\n      update_channel_tags:\n[\s\S]*type: boolean\n        default: false\n/u);
+  assert.match(authorize, /UPDATE_CHANNEL_TAGS: \$\{\{ inputs\.update_channel_tags \}\}/u);
+  assert.match(
+    authorize,
+    /if \[\[ "\$UPDATE_CHANNEL_TAGS" == "true" \]\]; then\n\s+echo "::error::[^"\n]*publish-runtime-agent-multiarch\.yml[^"\n]*"\n\s+exit 1\n/u,
+  );
+  assert.equal([...source.matchAll(/inputs\.update_channel_tags/gu)].length, 1);
 
   // Exactly one protected-environment approval gates the whole release.
   assert.equal(
@@ -301,24 +337,23 @@ test("runtime images publish only exact protected main from a fixed namespace", 
   assert.match(approval, /permissions: \{\}/u);
   assert.doesNotMatch(approval, /packages: write/u);
 
-  // Hosted native cells remain the fallback. BUILD's two-platform daemon is
-  // qualified separately; this workflow does not install emulation or binfmt.
+  // Production is amd64 only: two native hosted cells (BUILD's daemon is
+  // qualified separately), no emulation, and no arm64 cell, runner or scanner.
   assert.doesNotMatch(source, /setup-qemu/u);
   assert.doesNotMatch(source, /binfmt/u);
   assert.match(publish, /- release-approval/u);
   assert.match(publish, /\|\| matrix\.runner \}\}/u);
-  assert.match(publish, /runner: ubuntu-24\.04\n/u);
-  assert.match(publish, /runner: ubuntu-24\.04-arm\n/u);
-  assert.match(publish, /trivy_asset: Linux-64bit/u);
-  assert.match(publish, /trivy_asset: Linux-ARM64/u);
-  assert.match(
-    publish,
-    /trivy_sha256: "bbb64b9695866ce4a7a8f5c9592002c5961cab378577fa3f8a040df362b9b2ea"/u,
+  assert.equal([...publish.matchAll(/^            runner: ubuntu-24\.04$/gmu)].length, 2);
+  assert.equal([...publish.matchAll(/^            architecture: amd64$/gmu)].length, 2);
+  assert.equal([...publish.matchAll(/^            trivy_asset: Linux-64bit$/gmu)].length, 2);
+  assert.equal(
+    [...publish.matchAll(/^            trivy_sha256: "bbb64b9695866ce4a7a8f5c9592002c5961cab378577fa3f8a040df362b9b2ea"$/gmu)].length,
+    2,
   );
-  assert.match(
-    publish,
-    /trivy_sha256: "2ca2c023109c2db6b2b77366b6717291452d4531167377d95c79547f0c8e3467"/u,
-  );
+  assert.doesNotMatch(source, /ubuntu-24\.04-arm|linux\/arm64|Linux-ARM64|architecture: arm64|2ca2c023109c2db6b2b77366b6717291452d4531167377d95c79547f0c8e3467/u);
+  assert.match(publish, /if \[\[ "\$ARCHITECTURE" != "amd64" \]\]; then/u);
+  assert.match(publish, /ARCHITECTURE !== "amd64"/u);
+  assert.match(publish, /-linux-amd64\$\/;/u);
   assert.doesNotMatch(publish, /environment:/u);
   assert.match(publish, /packages: write/u);
   assert.match(publish, /IMAGE_NAMESPACE: instafy-dev/u);
@@ -341,32 +376,137 @@ test("runtime images publish only exact protected main from a fixed namespace", 
     /name: runtime-agent-arch-ref-\$\{\{ matrix\.flavor \}\}-\$\{\{ matrix\.architecture \}\}/u,
   );
 
-  // The downstream job assembles multiarch manifests from immutable digests,
-  // so it is a publishing job: registry write via the workflow token only.
+  // The manifest names the scanned amd64 images themselves. This job only
+  // reads the registry: no index, commit tag or channel tag is created here.
   assert.match(manifest, /needs:[\s\S]*- build-scan-push/u);
-  assert.match(manifest, /packages: write/u);
-  assert.doesNotMatch(manifest, /environment:/u);
-  assert.match(manifest, /- name: Validate exactly two architectures per flavor/u);
-  assert.match(manifest, /name: runtime-agent-release-manifest/u);
+  assert.match(manifest, /permissions:\n      contents: read\n      packages: read\n/u);
+  assert.doesNotMatch(manifest, /packages: write|environment:|imagetools create|channel_tag|UPDATE_CHANNEL_TAGS|:latest/u);
+  assert.match(manifest, /- name: Validate exactly one amd64 record per flavor/u);
+  assert.match(manifest, /const expected = flavors\.map\(\(flavor\) => `\$\{flavor\}-amd64\.json`\);/u);
+  assert.match(manifest, /name: runtime-agent-release-manifest\n/u);
+  assert.match(manifest, /retention-days: 90/u);
   assert.match(manifest, /coreCommit: EXPECTED_CORE_COMMIT/u);
+  assert.match(
+    manifest,
+    /const manifest = \{\n\s+schemaVersion: 1,\n\s+coreCommit: EXPECTED_CORE_COMMIT,\n\s+images,\n\s+\};/u,
+    "the sealed production manifest keeps the exact v1 shape its consumers read",
+  );
   assert.match(
     manifest,
     /ghcr\\\.io\\\/instafy-dev\\\/instafy-runtime-agent@sha256:/u,
   );
-  assert.match(manifest, /\["linux\/amd64","linux\/arm64"\]/u);
+  assert.match(manifest, /\] == \["linux\/amd64"\]/u);
+  assert.match(manifest, /\.os == "linux" and \.architecture == "amd64"/u);
   assertOrdered(
     manifest,
     "- name: Download immutable architecture records",
-    "- name: Validate exactly two architectures per flavor",
+    "- name: Validate exactly one amd64 record per flavor",
     "- name: Login to GHCR",
-    "- name: Assemble commit-SHA multiarch manifests from immutable digests",
+    "- name: Verify each flavor resolves only to the scanned linux/amd64 image",
     "- name: Aggregate exact release manifest",
     "- name: Upload runtime-agent release manifest",
   );
-  // Channel tags move only on explicit request.
-  assertOrdered(
-    manifest,
-    'if [[ "$UPDATE_CHANNEL_TAGS" == "true" ]]',
-    '--tag "$channel_tag"',
+  assert.doesNotMatch(source, /release_tag=|\$\{image\}:\$\{tag_prefix\}\$\{EXPECTED_CORE_COMMIT\}"/u);
+});
+
+test("the arm64 lane is a separate, hosted, exact-commit publisher bound to the sealed production release", () => {
+  const source = readWorkflow("publish-runtime-agent-multiarch.yml");
+  const production = readWorkflow("publish-runtime-agent.yml");
+  const authorize = jobSection(source, "authorize", "bind-production-manifest");
+  const bind = jobSection(source, "bind-production-manifest", "release-approval");
+  const approval = jobSection(source, "release-approval", "build-scan-push-arm64");
+  const publish = jobSection(source, "build-scan-push-arm64", "assemble-multiarch");
+  const assemble = jobSection(source, "assemble-multiarch");
+
+  // Manual or coordinator dispatch only; no new privileged trigger.
+  const trigger = source.slice(source.indexOf("\non:\n") + 1, source.indexOf("\npermissions:\n"));
+  assert.match(trigger, /^on:\n  workflow_dispatch:\n    inputs:\n      commit_sha:\n/u);
+  assert.match(trigger, /\n      update_channel_tags:\n[\s\S]*type: boolean\n        default: false\n$/u);
+  assert.doesNotMatch(trigger, /workflow_run|pull_request|push:|schedule:|repository_dispatch|workflow_call/u);
+  assert.match(source, /\npermissions:\n  contents: read\n\nconcurrency:\n  group: publish-runtime-agent-multiarch-\$\{\{ github\.ref \}\}\n  cancel-in-progress: false\n/u);
+  assert.deepEqual([...source.matchAll(/^  ([\w-]+):\n    name:/gmu)].map((match) => match[1]),
+    ["authorize", "bind-production-manifest", "release-approval", "build-scan-push-arm64", "assemble-multiarch"]);
+
+  // GitHub-hosted runners only, the workflow token only.
+  assert.deepEqual([...source.matchAll(/^    runs-on: (.+)$/gmu)].map((match) => match[1]),
+    ["ubuntu-latest", "ubuntu-latest", "ubuntu-latest", "${{ matrix.runner }}", "ubuntu-latest"]);
+  assert.doesNotMatch(source, /self-hosted|vars\.|instafy-trusted-build|instafy-ci-|driver-opts|setup-qemu|binfmt|continue-on-error/u);
+  assert.deepEqual([...source.matchAll(/\bsecrets\.(\w+)/gu)].map((match) => match[1]), ["GITHUB_TOKEN", "GITHUB_TOKEN"]);
+  assert.deepEqual([...source.matchAll(/^    permissions:\n((?:      .+\n)+)|^    permissions: \{\}$/gmu)].map((match) => (match[1] ?? "{}").trim().split(/\n\s*/u)), [
+    ["actions: read", "contents: read"], ["actions: read", "contents: read"], ["{}"],
+    ["contents: read", "packages: write"], ["contents: read", "packages: write"],
+  ]);
+
+  // The same exact-current-main binding and its own once-per-commit seal.
+  assert.equal(
+    authorize.slice(authorize.indexOf("      - name: Bind release to current protected main\n")),
+    jobSection(production, "authorize", "release-approval")
+      .slice(jobSection(production, "authorize", "release-approval").indexOf("      - name: Bind release to current protected main\n"))
+      .replace("          UPDATE_CHANNEL_TAGS: ${{ inputs.update_channel_tags }}\n", "")
+      .replace(/          if \[\[ "\$UPDATE_CHANNEL_TAGS" == "true" \]\]; then\n.*\n.*\n          fi\n/u, "")
+      .replace("RELEASE_WORKFLOW: publish-runtime-agent.yml", "RELEASE_WORKFLOW: publish-runtime-agent-multiarch.yml"),
   );
+
+  // Bound to exactly one sealed first-attempt production run and its manifest,
+  // before the approval and before anything is built.
+  assert.match(bind, /^    needs: authorize$/mu);
+  assert.match(bind, /PRODUCTION_WORKFLOW: publish-runtime-agent\.yml\n/u);
+  assert.match(bind, /PRODUCTION_ARTIFACT: runtime-agent-release-manifest\n/u);
+  assert.match(bind, /\.run_attempt == 1/u);
+  assert.doesNotMatch(bind, /event=|status=success/u);
+  assert.match(approval, /^    needs:\n      - authorize\n      - bind-production-manifest\n/mu);
+  assert.equal([...source.matchAll(/environment: ghcr-release/gu)].length, 1);
+  assert.match(approval, /environment: ghcr-release/u);
+  assert.match(publish, /^    needs:\n      - authorize\n      - release-approval\n/mu);
+
+  // Native arm64 cells only: build, scan and smoke before login, then push.
+  assert.equal([...publish.matchAll(/^            runner: ubuntu-24\.04-arm$/gmu)].length, 2);
+  assert.equal([...publish.matchAll(/^            architecture: arm64$/gmu)].length, 2);
+  assert.equal([...publish.matchAll(/^            trivy_asset: Linux-ARM64$/gmu)].length, 2);
+  assert.equal(
+    [...publish.matchAll(/^            trivy_sha256: "2ca2c023109c2db6b2b77366b6717291452d4531167377d95c79547f0c8e3467"$/gmu)].length,
+    2,
+  );
+  assert.doesNotMatch(publish, /architecture: amd64|platform: linux\/amd64/u);
+  assertOrdered(
+    publish,
+    "- name: Build audit image",
+    "- name: Scan audit image",
+    "- name: Prove the webdev image starts the Shared Browser",
+    "- name: Login to GHCR",
+    "- name: Push scanned image and record its digest",
+    "- name: Upload immutable architecture record",
+    "- name: Export the scanned build's layer cache",
+  );
+  assert.match(publish, /if \[\[ "\$ARCHITECTURE" != "arm64" \]\]; then/u);
+  assert.match(publish, /-linux-arm64\$\/;/u);
+
+  // The assemble re-scans the reused amd64 digests anonymously, then joins
+  // exactly those and this run's arm64 digests into the commit indexes.
+  assert.match(assemble, /^    needs:\n      - authorize\n      - bind-production-manifest\n      - build-scan-push-arm64\n/mu);
+  assertOrdered(
+    assemble,
+    "- name: Install pinned Trivy",
+    "- name: Re-scan the sealed amd64 images from the registry",
+    "- name: Download immutable architecture records",
+    "- name: Validate exactly one arm64 record per flavor",
+    "- name: Login to GHCR",
+    "- name: Assemble commit-SHA multiarch manifests from immutable digests",
+    "- name: Aggregate exact multi-arch manifest",
+    "- name: Upload runtime-agent multi-arch manifest",
+  );
+  assert.match(assemble, /\["linux\/amd64","linux\/arm64"\]/u);
+  assert.match(assemble, /does not join exactly the sealed amd64 image and this run's arm64 image/u);
+  assertOrdered(assemble, 'if [[ "$UPDATE_CHANNEL_TAGS" == "true" ]]', '--tag "$channel_tag"');
+  assert.match(assemble, /UPDATE_CHANNEL_TAGS: \$\{\{ inputs\.update_channel_tags \}\}/u);
+
+  // Its artifact can never be mistaken for the production manifest.
+  const uploads = [...source.matchAll(/uses: actions\/upload-artifact@\S+ # v4\.6\.2\n        with:\n          name: (.+)\n/gu)]
+    .map((match) => match[1]);
+  assert.deepEqual(uploads, [
+    "runtime-agent-arch-ref-${{ matrix.flavor }}-${{ matrix.architecture }}",
+    "runtime-agent-multiarch-manifest",
+  ]);
+  assert.match(assemble, /name: runtime-agent-multiarch-manifest\n[\s\S]*retention-days: 90/u);
+  assert.match(assemble, /kind: "runtime-agent-multiarch"/u);
 });

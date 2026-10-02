@@ -1,5 +1,12 @@
 name: Publish runtime-agent images
 
+# The production runtime release. It builds, scans and publishes the base and
+# webdev images for linux/amd64 only, and seals runtime-agent-release-manifest
+# with their scanned single-platform digests. Every production host is amd64,
+# so arm64 never gates a release: publish-runtime-agent-multiarch.yml adds the
+# arm64 images, the multi-arch commit tags and the channel tags afterwards,
+# bound to this run's sealed manifest.
+
 on:
   workflow_dispatch:
     inputs:
@@ -7,8 +14,11 @@ on:
         description: "Full commit SHA; must equal current protected main"
         required: true
         type: string
+      # Kept so existing dispatchers stay valid. This publisher creates no
+      # multi-arch index, so it refuses true: the channel tags move only in
+      # publish-runtime-agent-multiarch.yml.
       update_channel_tags:
-        description: "Also move the mutable latest/webdev convenience tags"
+        description: "Must stay false; channel tags move in publish-runtime-agent-multiarch.yml"
         required: false
         type: boolean
         default: false
@@ -48,10 +58,15 @@ jobs:
         shell: bash
         env:
           REQUESTED_COMMIT: ${{ inputs.commit_sha }}
+          UPDATE_CHANNEL_TAGS: ${{ inputs.update_channel_tags }}
         run: |
           set -euo pipefail
           if [[ "$GITHUB_REPOSITORY" != "instafy-dev/instafy" ]]; then
             echo "::error::Runtime images may be published only from instafy-dev/instafy."
+            exit 1
+          fi
+          if [[ "$UPDATE_CHANNEL_TAGS" == "true" ]]; then
+            echo "::error::This publisher releases amd64 images only and no longer moves the latest/webdev channel tags. Dispatch publish-runtime-agent-multiarch.yml with update_channel_tags=true once this release is sealed."
             exit 1
           fi
           if [[ "$GITHUB_REF" != "refs/heads/main" ]]; then
@@ -144,7 +159,7 @@ jobs:
             echo "### ghcr-release approval"
             echo
             echo "- Approved runtime-agent release for public core \`${RELEASE_COMMIT}\`."
-            echo "- This single approval covers every flavor/architecture cell below."
+            echo "- This single approval covers both amd64 flavor cells below."
           } >> "$GITHUB_STEP_SUMMARY"
 
   build-scan-push:
@@ -175,9 +190,10 @@ jobs:
       contents: read
       packages: write
     strategy:
-      # fail-fast off: a failing cell must not cancel siblings mid-push and
-      # strand arch tags; the assemble job's exact-fileset validation is the
+      # fail-fast off: a failing cell must not cancel its sibling mid-push and
+      # strand an arch tag; the assemble job's exact-fileset validation is the
       # single aggregation gate (matches the production-services choice).
+      # Only amd64: the arm64 cells run in publish-runtime-agent-multiarch.yml.
       fail-fast: false
       matrix:
         include:
@@ -189,14 +205,6 @@ jobs:
             runner: ubuntu-24.04
             trivy_asset: Linux-64bit
             trivy_sha256: "bbb64b9695866ce4a7a8f5c9592002c5961cab378577fa3f8a040df362b9b2ea"
-          - flavor: base
-            target: runtime
-            tag_prefix: ""
-            architecture: arm64
-            platform: linux/arm64
-            runner: ubuntu-24.04-arm
-            trivy_asset: Linux-ARM64
-            trivy_sha256: "2ca2c023109c2db6b2b77366b6717291452d4531167377d95c79547f0c8e3467"
           - flavor: webdev
             target: runtime-webdev
             tag_prefix: "webdev-"
@@ -205,14 +213,6 @@ jobs:
             runner: ubuntu-24.04
             trivy_asset: Linux-64bit
             trivy_sha256: "bbb64b9695866ce4a7a8f5c9592002c5961cab378577fa3f8a040df362b9b2ea"
-          - flavor: webdev
-            target: runtime-webdev
-            tag_prefix: "webdev-"
-            architecture: arm64
-            platform: linux/arm64
-            runner: ubuntu-24.04-arm
-            trivy_asset: Linux-ARM64
-            trivy_sha256: "2ca2c023109c2db6b2b77366b6717291452d4531167377d95c79547f0c8e3467"
 
     steps:
       - name: Checkout exact protected-main commit
@@ -274,8 +274,8 @@ jobs:
             echo "::error::The fixed image namespace must be a lowercase GHCR namespace."
             exit 1
           fi
-          if [[ "$ARCHITECTURE" != "amd64" && "$ARCHITECTURE" != "arm64" ]]; then
-            echo "::error::Unexpected build architecture."
+          if [[ "$ARCHITECTURE" != "amd64" ]]; then
+            echo "::error::The production runtime publisher builds amd64 only."
             exit 1
           fi
 
@@ -301,8 +301,8 @@ jobs:
           sudo install -m 0755 "$RUNNER_TEMP/trivy" /usr/local/bin/trivy
           test "$(trivy --version | awk 'NR == 1 { print $2 }')" = "$TRIVY_VERSION"
 
-      # Hosted cells build natively; the trusted BUILD daemon must support both
-      # target platforms. Scan each image before any registry login.
+      # Hosted cells build natively; the trusted BUILD daemon must support the
+      # amd64 target platform. Scan each image before any registry login.
       # This exact local image is pushed after the gate; there is no post-scan
       # rebuild that could change bytes.
       # The layer cache is only read here, anonymously, so this build needs no
@@ -451,10 +451,10 @@ jobs:
           const refPattern =
             /^ghcr\.io\/instafy-dev\/instafy-runtime-agent@sha256:[0-9a-f]{64}$/;
           const tagPattern =
-            /^ghcr\.io\/instafy-dev\/instafy-runtime-agent:(webdev-)?[0-9a-f]{40}-linux-(amd64|arm64)$/;
+            /^ghcr\.io\/instafy-dev\/instafy-runtime-agent:(webdev-)?[0-9a-f]{40}-linux-amd64$/;
           if (
             !["base", "webdev"].includes(FLAVOR) ||
-            !["amd64", "arm64"].includes(ARCHITECTURE) ||
+            ARCHITECTURE !== "amd64" ||
             PLATFORM !== `linux/${ARCHITECTURE}` ||
             !/^[0-9a-f]{40}$/.test(RELEASE_COMMIT) ||
             !refPattern.test(IMMUTABLE_REF) ||
@@ -553,9 +553,10 @@ jobs:
           && inputs.commit_sha == github.sha
           && fromJSON('{"group":"org/instafy-trusted-build","labels":["self-hosted","Linux","X64","instafy-build"]}')
           || 'ubuntu-latest' }}
+    # Only reads the registry: this job creates no tag or index.
     permissions:
       contents: read
-      packages: write
+      packages: read
 
     steps:
       - name: Set up Docker Buildx
@@ -570,7 +571,7 @@ jobs:
           path: ${{ runner.temp }}/runtime-agent-arch-refs
           merge-multiple: true
 
-      - name: Validate exactly two architectures per flavor
+      - name: Validate exactly one amd64 record per flavor
         env:
           EXPECTED_CORE_COMMIT: ${{ needs.authorize.outputs.commit_sha }}
           RELEASE_REF_DIR: ${{ runner.temp }}/runtime-agent-arch-refs
@@ -587,57 +588,47 @@ jobs:
           const refPattern =
             /^ghcr\.io\/instafy-dev\/instafy-runtime-agent@sha256:[0-9a-f]{64}$/;
           const flavors = ["base", "webdev"];
-          const architectures = ["amd64", "arm64"];
-          const expected = flavors.flatMap((flavor) =>
-            architectures.map((architecture) => `${flavor}-${architecture}.json`),
-          );
+          const expected = flavors.map((flavor) => `${flavor}-amd64.json`);
           const actual = fs.readdirSync(RELEASE_REF_DIR).sort();
           if (actual.join("\0") !== [...expected].sort().join("\0")) {
             throw new Error(
-              `Expected exactly two architectures per flavor, found: ${actual.join(", ")}`,
+              `Expected exactly one amd64 record per flavor, found: ${actual.join(", ")}`,
             );
           }
+          const refs = {};
           for (const flavor of flavors) {
-            const refs = {};
-            for (const architecture of architectures) {
-              const filename = path.join(
-                RELEASE_REF_DIR,
-                `${flavor}-${architecture}.json`,
-              );
-              const record = JSON.parse(fs.readFileSync(filename, "utf8"));
-              const keys = Object.keys(record).sort();
-              const expectedKeys = [
-                "archTag",
-                "architecture",
-                "coreCommit",
-                "flavor",
-                "immutableRef",
-                "platform",
-                "schemaVersion",
-              ];
-              const tagPrefix = flavor === "webdev" ? "webdev-" : "";
-              const expectedTag =
-                "ghcr.io/instafy-dev/instafy-runtime-agent:" +
-                `${tagPrefix}${EXPECTED_CORE_COMMIT}-linux-${architecture}`;
-              if (
-                keys.join("\0") !== expectedKeys.join("\0") ||
-                record.schemaVersion !== 1 ||
-                record.coreCommit !== EXPECTED_CORE_COMMIT ||
-                record.flavor !== flavor ||
-                record.architecture !== architecture ||
-                record.platform !== `linux/${architecture}` ||
-                record.archTag !== expectedTag ||
-                !refPattern.test(record.immutableRef)
-              ) {
-                throw new Error(`Invalid ${flavor}/${architecture} release record.`);
-              }
-              refs[architecture] = record.immutableRef;
+            const filename = path.join(RELEASE_REF_DIR, `${flavor}-amd64.json`);
+            const record = JSON.parse(fs.readFileSync(filename, "utf8"));
+            const keys = Object.keys(record).sort();
+            const expectedKeys = [
+              "archTag",
+              "architecture",
+              "coreCommit",
+              "flavor",
+              "immutableRef",
+              "platform",
+              "schemaVersion",
+            ];
+            const tagPrefix = flavor === "webdev" ? "webdev-" : "";
+            const expectedTag =
+              "ghcr.io/instafy-dev/instafy-runtime-agent:" +
+              `${tagPrefix}${EXPECTED_CORE_COMMIT}-linux-amd64`;
+            if (
+              keys.join("\0") !== expectedKeys.join("\0") ||
+              record.schemaVersion !== 1 ||
+              record.coreCommit !== EXPECTED_CORE_COMMIT ||
+              record.flavor !== flavor ||
+              record.architecture !== "amd64" ||
+              record.platform !== "linux/amd64" ||
+              record.archTag !== expectedTag ||
+              !refPattern.test(record.immutableRef)
+            ) {
+              throw new Error(`Invalid ${flavor}/amd64 release record.`);
             }
-            if (refs.amd64 === refs.arm64) {
-              throw new Error(
-                `${flavor}: amd64 and arm64 images must have distinct digests.`,
-              );
-            }
+            refs[flavor] = record.immutableRef;
+          }
+          if (refs.base === refs.webdev) {
+            throw new Error("Base and webdev runtime images must have distinct digests.");
           }
           NODE
 
@@ -648,46 +639,28 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Assemble commit-SHA multiarch manifests from immutable digests
-        id: assemble
+      # The release manifest names the scanned amd64 images themselves; no
+      # index is created here. A docker push normally yields a single image
+      # manifest, and a one-platform index is accepted too, so long as the only
+      # platform it can resolve to is linux/amd64.
+      - name: Verify each flavor resolves only to the scanned linux/amd64 image
         shell: bash
         env:
           EXPECTED_CORE_COMMIT: ${{ needs.authorize.outputs.commit_sha }}
           RELEASE_REF_DIR: ${{ runner.temp }}/runtime-agent-arch-refs
           RELEASE_MANIFEST_DIR: ${{ runner.temp }}/runtime-agent-release-manifest
-          UPDATE_CHANNEL_TAGS: ${{ inputs.update_channel_tags }}
         run: |
           set -euo pipefail
-          image="ghcr.io/instafy-dev/instafy-runtime-agent"
           mkdir -p "$RELEASE_MANIFEST_DIR"
           for flavor in base webdev; do
-            if [[ "$flavor" == "webdev" ]]; then
-              tag_prefix="webdev-"
-              channel_tag="${image}:webdev"
-            else
-              tag_prefix=""
-              channel_tag="${image}:latest"
-            fi
-            amd64_ref="$(jq -er '.immutableRef' "$RELEASE_REF_DIR/${flavor}-amd64.json")"
-            arm64_ref="$(jq -er '.immutableRef' "$RELEASE_REF_DIR/${flavor}-arm64.json")"
-            release_tag="${image}:${tag_prefix}${EXPECTED_CORE_COMMIT}"
-            metadata="$RUNNER_TEMP/${flavor}-manifest-metadata.json"
-            docker buildx imagetools create \
-              --metadata-file "$metadata" \
-              --tag "$release_tag" \
-              "$amd64_ref" \
-              "$arm64_ref"
-            digest="$(jq -er '.["containerimage.descriptor"].digest' "$metadata")"
-            if [[ ! "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]; then
-              echo "::error::Manifest assembly did not return a valid immutable digest."
-              exit 1
-            fi
-            immutable_image="${image}@${digest}"
+            immutable_image="$(jq -er '.immutableRef' "$RELEASE_REF_DIR/${flavor}-amd64.json")"
+            arch_tag="$(jq -er '.archTag' "$RELEASE_REF_DIR/${flavor}-amd64.json")"
             raw_manifest="$RUNNER_TEMP/${flavor}-manifest.json"
-            # Manifest creation can win the race with GHCR's digest read path.
+            image_config="$RUNNER_TEMP/${flavor}-image-config.json"
             registry_visible=false
             for attempt in 1 2 3 4 5 6; do
-              if docker buildx imagetools inspect "$immutable_image" --raw > "$raw_manifest"; then
+              if docker buildx imagetools inspect "$immutable_image" --raw > "$raw_manifest" &&
+                docker buildx imagetools inspect "$immutable_image" --format '{{json .Image}}' > "$image_config"; then
                 registry_visible=true
                 break
               fi
@@ -698,25 +671,34 @@ jobs:
               fi
             done
             if [[ "$registry_visible" != "true" ]]; then
-              echo "::error::GHCR did not expose the assembled immutable manifest within the bounded visibility window."
+              echo "::error::GHCR did not expose the ${flavor} release image within the bounded visibility window."
               exit 1
             fi
-            platforms="$(
-              jq -c '
-                [.manifests[].platform |
-                  select(.os != "unknown" and .architecture != "unknown") |
-                  "\(.os)/\(.architecture)"
-                ] | sort
-              ' "$raw_manifest"
-            )"
-            if [[ "$platforms" != '["linux/amd64","linux/arm64"]' ]]; then
-              echo "::error::Assembled ${flavor} manifest has unexpected platforms: ${platforms}."
+            if ! jq -e '
+                if (.manifests | type) == "array" then
+                  [.manifests[].platform |
+                    select(.os != "unknown" and .architecture != "unknown") |
+                    "\(.os)/\(.architecture)"
+                  ] == ["linux/amd64"]
+                else
+                  .mediaType == "application/vnd.oci.image.manifest.v1+json" or
+                  .mediaType == "application/vnd.docker.distribution.manifest.v2+json"
+                end
+              ' "$raw_manifest" >/dev/null; then
+              echo "::error::The ${flavor} release image is not a single linux/amd64 image."
               exit 1
             fi
-            if [[ "$UPDATE_CHANNEL_TAGS" == "true" ]]; then
-              docker buildx imagetools create \
-                --tag "$channel_tag" \
-                "$immutable_image"
+            if ! jq -e '
+                if has("architecture") then
+                  .os == "linux" and .architecture == "amd64"
+                else
+                  keys == ["linux/amd64"] and
+                  .["linux/amd64"].os == "linux" and
+                  .["linux/amd64"].architecture == "amd64"
+                end
+              ' "$image_config" >/dev/null; then
+              echo "::error::The ${flavor} release image configuration is not linux/amd64."
+              exit 1
             fi
             jq -n \
               --arg coreCommit "$EXPECTED_CORE_COMMIT" \
@@ -731,9 +713,9 @@ jobs:
             {
               echo "### ${flavor} runtime-agent"
               echo
-              echo "- Release tag: \`${release_tag}\`"
+              echo "- Architecture tag: \`${arch_tag}\`"
               echo "- Immutable image: \`${immutable_image}\`"
-              echo "- Platforms: \`linux/amd64\`, \`linux/arm64\`"
+              echo "- Platform: \`linux/amd64\` (multi-arch tags come from publish-runtime-agent-multiarch.yml)"
             } >> "$GITHUB_STEP_SUMMARY"
           done
 
