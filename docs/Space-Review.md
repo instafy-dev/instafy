@@ -87,7 +87,9 @@ and at most one delivery per active run.
 Apply the ordered additive migrations before the controller rollout, including
 `20261002120000_space_recommendations.sql` and
 `20261002121000_recommendation_conversation_delivery.sql`, followed by
-`20261002122000_quiet_space_review_automations.sql`. Deploy the matching bundled runtime
+`20261002122000_quiet_space_review_automations.sql` and
+`20261002181040_quiet_space_review_conversations.sql`. Automation and conversation changes
+commit separately to preserve the migration lock-order boundary. Deploy the matching bundled runtime
 skill and CLI for conversation delivery. Existing runtime workspaces upgrade exact recognized
 previous bundled review skills, including the prior quiet-review template; customized copies
 are preserved and need a deliberate local update.

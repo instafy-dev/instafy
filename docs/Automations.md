@@ -37,9 +37,11 @@ creates no chat. Delivered topics and legacy accepted/dismissed choices are reta
 repetition, including when a delivered chat is archived or deleted. Runs and errors remain
 observable in Automations. This mode does not widen the runtime's private conversation access.
 
-Apply the ordered migration `20261002122000_quiet_space_review_automations.sql` together with the
-preceding recommendation delivery migration before deploying the matching controller, runtime
-skill and CLI. Existing prompt automations retain their mode and defaults.
+Apply `20261002122000_quiet_space_review_automations.sql`, then
+`20261002181040_quiet_space_review_conversations.sql`, after the preceding recommendation
+delivery migration and before deploying the matching controller, runtime skill and CLI. The
+separate transactions release automation locks before altering conversations. Existing prompt
+automations retain their mode and defaults.
 
 ## Schedules and threads
 
