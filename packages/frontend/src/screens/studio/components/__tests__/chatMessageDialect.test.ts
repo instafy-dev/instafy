@@ -448,6 +448,58 @@ describe("chatMessageDialect", () => {
     ]);
   });
 
+  it("turns a markdown link to a workspace file into one file reference, with or without code formatting", () => {
+    for (const line of [
+      "Created [`qa-notes.md`](`qa-notes.md`).",
+      "Created [qa-notes.md](qa-notes.md).",
+      "Created [`qa-notes.md`](qa-notes.md).",
+      "Created [the QA notes](qa-notes.md).",
+    ]) {
+      expect(tokenizeChatLine(line)).toEqual([
+        { type: "text", value: "Created " },
+        { type: "workspace-file", value: { path: "qa-notes.md", raw: "qa-notes.md", line: null } },
+        { type: "text", value: "." },
+      ]);
+    }
+    expect(tokenizeChatLine("See [notes](`docs/qa-notes.md#L12`)")).toEqual([
+      { type: "text", value: "See " },
+      { type: "workspace-file", value: { path: "docs/qa-notes.md", raw: "docs/qa-notes.md#L12", line: 12 } },
+    ]);
+    expect(tokenizeChatLine("See [notes](docs/qa-notes.md:12)")).toEqual([
+      { type: "text", value: "See " },
+      { type: "workspace-file", value: { path: "docs/qa-notes.md", raw: "docs/qa-notes.md:12", line: 12 } },
+    ]);
+  });
+
+  it("does not let a markdown file link swallow an earlier bracket", () => {
+    expect(tokenizeChatLine("[x] Created [qa-notes.md](qa-notes.md).")).toEqual([
+      { type: "text", value: "[x] Created " },
+      { type: "workspace-file", value: { path: "qa-notes.md", raw: "qa-notes.md", line: null } },
+      { type: "text", value: "." },
+    ]);
+  });
+
+  it("keeps a web link whose label has balanced brackets as one link", () => {
+    expect(tokenizeChatLine("Use [`arr[0]`](https://x.com/a) now")).toEqual([
+      { type: "text", value: "Use " },
+      { type: "link", value: { url: "https://x.com/a", label: "`arr[0]`" } },
+      { type: "text", value: " now" },
+    ]);
+    expect(tokenizeChatLine("See [see [1]](https://x.com) now")).toEqual([
+      { type: "text", value: "See " },
+      { type: "link", value: { url: "https://x.com", label: "see [1]" } },
+      { type: "text", value: " now" },
+    ]);
+  });
+
+  it("keeps a markdown link to a non-web, non-file destination unpressable", () => {
+    expect(
+      tokenizeChatLine("Try [this](javascript:alert(1)) instead.").some(
+        (token) => token.type === "link" || token.type === "workspace-file",
+      ),
+    ).toBe(false);
+  });
+
   it("parses workspace file extensions that share prefixes with shorter extensions", () => {
     expect(tokenizeChatLine("Inspect `packages/rpc/package.json:7` and docs/guide.markdown:2.")).toEqual([
       { type: "text", value: "Inspect " },

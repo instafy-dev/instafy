@@ -4,6 +4,7 @@ import type { ChatMessage } from "../../screens/studio/types";
 import { shouldDisplayChatMessage } from "../../screens/studio/components/chatMessagePresentation";
 import { resolveThreadRunStatusFromMessages } from "../../screens/studio/components/threadPreviewHelpers";
 import {
+  extractUnsavedReasonFromMetadata,
   extractWorkspaceCommitRangeFromMetadata,
   mapControllerMessageToChat,
   mergeAndSortMessages,
@@ -948,5 +949,167 @@ describe("extractWorkspaceCommitRangeFromMetadata", () => {
     });
 
     expect(mapped.commitRange).toEqual({ base, head });
+  });
+});
+
+describe("extractUnsavedReasonFromMetadata", () => {
+  // Shape the runtime writes after /apply + /git/sync
+  // (runtime-agent jobs/mod.rs, workspace_commit_git_sync_status).
+  function originApply(gitSyncStatus: string, extra: Record<string, unknown> = {}) {
+    return {
+      kind: "origin/apply",
+      metadata: {
+        originId: "origin-1",
+        rev: null,
+        baseRev: null,
+        gitRev: null,
+        gitBaseRev: null,
+        gitSyncStatus,
+        gitSyncAttempted: gitSyncStatus !== "disabled",
+        gitSyncError: gitSyncStatus === "failed" ? "git remote is not configured for this project" : null,
+        paths: [],
+        ...extra,
+      },
+    };
+  }
+
+  it("reports a failed save", () => {
+    expect(extractUnsavedReasonFromMetadata({ artifacts: [originApply("failed")] })).toBe("save_failed");
+  });
+
+  it("reports auto-save being off, the runtime's manual_required outcome", () => {
+    expect(extractUnsavedReasonFromMetadata({ artifacts: [originApply("disabled")] })).toBe("auto_save_off");
+  });
+
+  // The runtime's gitSyncError when the origin refuses paths kept out of
+  // history (origin-http-server commit_and_push_paths).
+  function historyExclusionError(...paths: string[]) {
+    return `origin git sync failed (400 Bad Request): {"error":"path is excluded from space history: ${paths.join(", ")}"}`;
+  }
+
+  it("stays quiet for saved runs, intentional history exclusions and runs that never saved", () => {
+    expect(extractUnsavedReasonFromMetadata({ artifacts: [originApply("synced")] })).toBeNull();
+    expect(
+      extractUnsavedReasonFromMetadata({
+        artifacts: [
+          originApply("skipped", {
+            gitSyncError: historyExclusionError("tmp/scratch.md", "node_modules/.cache/x.json"),
+            paths: ["node_modules/.cache/x.json", "tmp/scratch.md"],
+          }),
+        ],
+      }),
+    ).toBeNull();
+    expect(
+      extractUnsavedReasonFromMetadata({
+        artifacts: [{ kind: "origin/apply-skipped", metadata: { reason: "missing_controller_token" } }],
+      }),
+    ).toBeNull();
+    expect(
+      extractUnsavedReasonFromMetadata({
+        artifacts: [{ kind: "apply/files", files: [{ path: "notes.txt" }] }],
+      }),
+    ).toBeNull();
+    expect(extractUnsavedReasonFromMetadata({})).toBeNull();
+    expect(extractUnsavedReasonFromMetadata(null)).toBeNull();
+  });
+
+  it("reports a skipped save as failed when real files rode in the refused request", () => {
+    // The origin refuses the whole /git/sync when any path is excluded from
+    // history, so profile.json was never saved even though the runtime calls
+    // the outcome "skipped".
+    expect(
+      extractUnsavedReasonFromMetadata({
+        artifacts: [
+          originApply("skipped", {
+            gitSyncError: historyExclusionError("tmp/scratch.md"),
+            paths: ["bookkeeping/profile.json", "tmp/scratch.md"],
+          }),
+        ],
+      }),
+    ).toBe("save_failed");
+    // A real file whose name ends like an excluded one is still a real file.
+    expect(
+      extractUnsavedReasonFromMetadata({
+        artifacts: [
+          originApply("skipped", {
+            gitSyncError: historyExclusionError("tmp/notes.md"),
+            paths: ["notes.md", "tmp/notes.md"],
+          }),
+        ],
+      }),
+    ).toBe("save_failed");
+    // Without the origin's list there is no evidence against the runtime's label.
+    expect(
+      extractUnsavedReasonFromMetadata({
+        artifacts: [originApply("skipped", { gitSyncError: null, paths: ["bookkeeping/profile.json"] })],
+      }),
+    ).toBeNull();
+  });
+
+  it("treats hosted and EFS origins as at risk but not a Desktop folder", () => {
+    expect(
+      extractUnsavedReasonFromMetadata({ artifacts: [originApply("failed", { mode: "hosted" })] }),
+    ).toBe("save_failed");
+    expect(
+      extractUnsavedReasonFromMetadata({ artifacts: [originApply("disabled", { mode: "efs" })] }),
+    ).toBe("auto_save_off");
+    expect(
+      extractUnsavedReasonFromMetadata({ artifacts: [originApply("failed", { mode: "desktop" })] }),
+    ).toBeNull();
+  });
+
+  it("follows the newest apply artifact when a retried run appends another", () => {
+    expect(
+      extractUnsavedReasonFromMetadata({ artifacts: [originApply("failed"), originApply("synced")] }),
+    ).toBeNull();
+    expect(
+      extractUnsavedReasonFromMetadata({ artifacts: [originApply("synced"), originApply("failed")] }),
+    ).toBe("save_failed");
+  });
+
+  it("is attached to mapped chat messages alongside files", () => {
+    const mapped = mapControllerMessageToChat({
+      id: "13131313-1313-1313-1313-131313131313",
+      conversationId: "44444444-4444-4444-4444-444444444444",
+      projectId: "55555555-5555-5555-5555-555555555555",
+      sessionId: null,
+      createdBy: null,
+      promptId: null,
+      runId: null,
+      role: "assistant",
+      content: "Saved your profile.",
+      metadata: {
+        artifacts: [
+          {
+            kind: "apply/files",
+            files: [{ path: "bookkeeping/profile.json", change: { type: "changed" } }],
+          },
+          originApply("failed"),
+        ],
+      },
+      createdAt: "2026-09-26T16:00:00.000Z",
+    });
+
+    expect(mapped.files?.map((file) => file.path)).toEqual(["bookkeeping/profile.json"]);
+    expect(mapped.unsavedReason).toBe("save_failed");
+  });
+
+  it("stays paired with the files list that wins a duplicate-message merge", () => {
+    const file = {
+      path: "notes.txt",
+      workspacePath: "notes.txt",
+      label: "notes.txt",
+      changeType: "changed" as const,
+      lineRanges: [],
+    };
+    const existing = createMessage({ id: "m", timestamp: 1, files: [file], unsavedReason: "save_failed" });
+
+    // A later copy with its own files describes its own save.
+    const incomingWithFiles = createMessage({ id: "m", timestamp: 2, files: [file], unsavedReason: null });
+    expect(mergeAndSortMessages([existing, incomingWithFiles])[0]?.unsavedReason).toBeNull();
+
+    // A copy without files keeps the existing files and their save state.
+    const incomingWithoutFiles = createMessage({ id: "m", timestamp: 2, files: null, unsavedReason: null });
+    expect(mergeAndSortMessages([existing, incomingWithoutFiles])[0]?.unsavedReason).toBe("save_failed");
   });
 });
