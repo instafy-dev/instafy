@@ -6,14 +6,15 @@
 //! puts `attachment_downloads: [{name, url, sizeBytes}]` in the job payload.
 //! Before the turn each one is downloaded to `.instafy/attachments/<name>`,
 //! which is reserved: it is never published, and a `.gitignore` keeps it out
-//! of every git status. The prompt then lists only the files that are there,
-//! and says the others are unavailable.
+//! of every git status. The prompt then lists only the attachments this lease
+//! signed whose file is there, and says the others are unavailable.
 //!
 //! A signed URL is a bearer credential: it is never logged, and a failure is
 //! reported by attachment name only. Writes go through descriptor-relative,
 //! no-follow handles, so a symlink planted under `.instafy/` cannot redirect
 //! one out of the workspace.
 
+use std::collections::HashSet;
 use std::io;
 use std::path::Path;
 use std::time::Duration;
@@ -30,6 +31,10 @@ const EXTENSIONS: [&str; 6] = ["png", "jpg", "webp", "gif", "txt", "md"];
 const MAX_ATTACHMENT_BYTES: u64 = 20 * 1024 * 1024;
 const DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(30);
 const MAX_DOWNLOADS: usize = 20;
+/// The controller signs the Storage attachments of the turn's message and of
+/// the conversation's last this-many user messages. Older ones are not offered
+/// to the agent at all.
+pub(super) const HISTORY_USER_MESSAGES: usize = 10;
 
 #[derive(Clone, Copy, Debug)]
 pub(super) struct DownloadLimits {
@@ -85,6 +90,24 @@ pub(super) fn attachment_is_available(workspace_dir: &Path, name: &str) -> bool 
         && WorkspaceDir::open(workspace_dir)
             .and_then(|workspace| workspace.entry_kind(&attachment_relative_path(name)))
             .is_ok_and(|kind| kind == WorkspaceEntryKind::File)
+}
+
+/// The attachment names this lease signed. After the pre-turn download, a
+/// signed name whose file is on disk is exactly a download that succeeded or
+/// a file that was already there. One the controller did not sign this time
+/// (deleted by its uploader, outside the recent turns, or no Storage) is
+/// unavailable, even when an earlier turn left its file behind.
+pub(super) fn leased_attachment_names(payload: &JsonValue) -> HashSet<String> {
+    payload
+        .get(DOWNLOADS_PAYLOAD_KEY)
+        .and_then(JsonValue::as_array)
+        .into_iter()
+        .flatten()
+        .take(MAX_DOWNLOADS)
+        .filter_map(|entry| entry.get("name").and_then(JsonValue::as_str))
+        .filter(|name| file_name_is_valid(name))
+        .map(str::to_string)
+        .collect()
 }
 
 /// One signed download. No `Debug`: the URL must not reach a log.
@@ -570,11 +593,16 @@ mod tests {
         }
     }
 
-    fn prompt_section(attachments: JsonValue, workspace: &Path) -> Option<String> {
+    fn prompt_section(
+        attachments: JsonValue,
+        workspace: &Path,
+        leased: &[String],
+    ) -> Option<String> {
         super::super::format_image_attachment_section_from_attachments(
             attachments.as_array().unwrap(),
             workspace,
             &Uuid::parse_str(PROJECT).unwrap(),
+            &leased.iter().cloned().collect(),
         )
     }
 
@@ -585,6 +613,7 @@ mod tests {
             json!([{ "kind": "image", "workspacePath": "chat-upload-1-photo.png",
                 "fileName": "photo.png", "mimeType": "image/png", "sizeBytes": 10 }]),
             workspace.path(),
+            &[],
         )
         .unwrap();
         assert_eq!(
@@ -611,6 +640,8 @@ mod tests {
         // The same file name under another space: present on disk, but the
         // controller never signs it, so it is not this message's attachment.
         std::fs::write(dir.join(name(3, "png")), b"png").unwrap();
+        // Signed, but its download failed: name(4) is not on disk.
+        let leased = [name(1, "png"), name(2, "md"), name(4, "png")];
         let section = prompt_section(
             json!([
                 { "kind": "image", "storagePath": format!("{PROJECT}/{}", name(1, "png")),
@@ -625,6 +656,7 @@ mod tests {
                 { "kind": "file", "storagePath": format!("{PROJECT}/../{}", name(5, "md")) },
             ]),
             workspace.path(),
+            &leased,
         )
         .unwrap();
         assert!(
@@ -650,12 +682,53 @@ mod tests {
     }
 
     #[test]
+    fn a_file_an_earlier_turn_left_is_unavailable_unless_this_lease_signed_it() {
+        // The uploader deleted the object, or the controller has no Storage:
+        // nothing was signed, so the copy on disk is not offered to the agent.
+        let workspace = tempfile::tempdir().unwrap();
+        let dir = workspace.path().join(ATTACHMENTS_DIR);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join(name(1, "png")), b"png").unwrap();
+        let attachments = json!([{ "kind": "image",
+            "storagePath": format!("{PROJECT}/{}", name(1, "png")), "fileName": "deleted.png" }]);
+
+        let section = prompt_section(attachments.clone(), workspace.path(), &[]).unwrap();
+        assert!(!section.contains(&name(1, "png")), "{section}");
+        assert!(!section.contains("view_image"), "{section}");
+        assert!(
+            section.contains("not available in this workspace:\n- deleted.png\n"),
+            "{section}"
+        );
+
+        let section = prompt_section(attachments, workspace.path(), &[name(1, "png")]).unwrap();
+        assert!(section.contains(&format!(
+            "- workspacePath: .instafy/attachments/{} (fileName: deleted.png)\n",
+            name(1, "png")
+        )));
+    }
+
+    #[test]
+    fn leased_names_are_the_valid_names_of_the_payloads_downloads() {
+        let payload = json!({ DOWNLOADS_PAYLOAD_KEY: [
+            { "name": name(1, "png"), "url": "https://storage.invalid/a" },
+            { "name": "../escape.png", "url": "https://storage.invalid/b" },
+            { "url": "https://storage.invalid/c" },
+            { "name": name(2, "md") },
+        ]});
+        let mut leased: Vec<String> = leased_attachment_names(&payload).into_iter().collect();
+        leased.sort();
+        assert_eq!(leased, vec![name(1, "png"), name(2, "md")]);
+        assert!(leased_attachment_names(&json!({ "prompt_text": "hi" })).is_empty());
+    }
+
+    #[test]
     fn nothing_downloaded_means_no_path_and_no_view_image_instruction() {
         let workspace = tempfile::tempdir().unwrap();
         let section = prompt_section(
             json!([{ "kind": "image", "storagePath": format!("{PROJECT}/{}", name(1, "png")),
                 "fileName": "photo.png" }]),
             workspace.path(),
+            &[name(1, "png")],
         )
         .unwrap();
         assert_eq!(
@@ -693,6 +766,32 @@ mod tests {
                 format!("{PROJECT}/{}", name(2, "txt")),
             ]
         );
+    }
+
+    #[test]
+    fn history_offers_storage_attachments_only_from_the_signed_user_messages() {
+        let mut history = vec![json!({ "role": "user", "metadata": { "attachments": [
+            { "kind": "image", "workspacePath": "chat-upload-old.png" },
+        ]}})];
+        // Twelve user messages with a Storage attachment each, oldest first.
+        for n in 1..=12 {
+            history.push(json!({ "role": "user", "metadata": { "attachments": [
+                { "kind": "image", "storagePath": format!("{PROJECT}/{}", name(n, "png")) },
+            ]}}));
+        }
+        // An assistant row is never a user's attachment.
+        history.push(json!({ "role": "assistant", "metadata": { "attachments": [
+            { "kind": "image", "storagePath": format!("{PROJECT}/{}", name(99, "png")) },
+        ]}}));
+        let collected =
+            super::super::collect_image_attachments_from_history(Some(&JsonValue::Array(history)));
+        let keys: Vec<String> = collected
+            .iter()
+            .filter_map(|entry| super::super::attachment_identity(entry.as_object().unwrap()))
+            .collect();
+        let mut expected = vec!["chat-upload-old.png".to_string()];
+        expected.extend((3..=12).map(|n| format!("{PROJECT}/{}", name(n, "png"))));
+        assert_eq!(keys, expected);
     }
 
     #[cfg(unix)]

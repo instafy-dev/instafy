@@ -4373,6 +4373,9 @@ impl JobProcessor {
         let project_context_cards = self
             .load_relevant_project_context_cards(job, project_id, prompt_text)
             .await;
+        // As in run_apply_job: a worker may run on another runtime than the
+        // turn that received the attachments, so it fetches its own.
+        chat_attachments::download_job_attachments(job.id, &job.payload, &workspace_dir).await;
         let (prompt, _loaded_learned_blocks, mut prompt_context) = self.build_prompt_with_text(
             &project_id,
             job,
@@ -8143,18 +8146,23 @@ Avoid creating dependency caches or stores in the canonical workspace root when 
             );
         }
 
-        let attachment_section =
-            format_image_attachment_section(job.payload.get("metadata"), workspace_dir, project_id)
-                .or_else(|| {
-                    let attachments = collect_image_attachments_from_history(
-                        job.payload.get("conversation_history"),
-                    );
-                    format_image_attachment_section_from_attachments(
-                        &attachments,
-                        workspace_dir,
-                        project_id,
-                    )
-                });
+        let leased_attachments = chat_attachments::leased_attachment_names(&job.payload);
+        let attachment_section = format_image_attachment_section(
+            job.payload.get("metadata"),
+            workspace_dir,
+            project_id,
+            &leased_attachments,
+        )
+        .or_else(|| {
+            let attachments =
+                collect_image_attachments_from_history(job.payload.get("conversation_history"));
+            format_image_attachment_section_from_attachments(
+                &attachments,
+                workspace_dir,
+                project_id,
+                &leased_attachments,
+            )
+        });
 
         if let Some(section) = attachment_section {
             append_prompt_section(
@@ -14486,15 +14494,31 @@ fn collect_job_context(payload: &JsonValue) -> Vec<String> {
         .collect()
 }
 
+/// The attachments of the conversation history, oldest first. A Storage
+/// attachment counts only from the user messages the controller signs for, so
+/// the prompt never names an older one as missing on every turn.
 fn collect_image_attachments_from_history(history: Option<&JsonValue>) -> Vec<JsonValue> {
     let Some(JsonValue::Array(entries)) = history else {
         return Vec::new();
     };
+    let recent_user_messages: HashSet<usize> = entries
+        .iter()
+        .enumerate()
+        .rev()
+        .filter(|(_, entry)| {
+            entry
+                .get("role")
+                .and_then(JsonValue::as_str)
+                .is_some_and(|role| role.eq_ignore_ascii_case("user"))
+        })
+        .take(chat_attachments::HISTORY_USER_MESSAGES)
+        .map(|(index, _)| index)
+        .collect();
 
     let mut unique_paths = HashSet::new();
     let mut attachments = Vec::new();
 
-    for entry in entries {
+    for (index, entry) in entries.iter().enumerate() {
         let Some(map) = entry.as_object() else {
             continue;
         };
@@ -14530,6 +14554,11 @@ fn collect_image_attachments_from_history(history: Option<&JsonValue>) -> Vec<Js
                 let Some(key) = attachment_identity(entry) else {
                     continue;
                 };
+                if attachment_text_field(entry, "storagePath", "storage_path").is_some()
+                    && !recent_user_messages.contains(&index)
+                {
+                    continue;
+                }
                 if !unique_paths.insert(key) {
                     continue;
                 }
@@ -14545,6 +14574,7 @@ fn format_image_attachment_section(
     metadata: Option<&JsonValue>,
     workspace_dir: &Path,
     project_id: &Uuid,
+    leased_attachments: &HashSet<String>,
 ) -> Option<String> {
     let Some(metadata) = metadata.and_then(JsonValue::as_object) else {
         return None;
@@ -14554,7 +14584,12 @@ fn format_image_attachment_section(
         return None;
     };
 
-    format_image_attachment_section_from_attachments(attachments, workspace_dir, project_id)
+    format_image_attachment_section_from_attachments(
+        attachments,
+        workspace_dir,
+        project_id,
+        leased_attachments,
+    )
 }
 
 /// How an attachment is told apart from the others: a legacy image by its
@@ -15345,13 +15380,14 @@ fn format_write_scope_guardrail_section(metadata: Option<&JsonValue>) -> Option<
 
 /// The prompt's attachments section. Legacy images name their workspace
 /// path. A Storage image or text file is listed at `.instafy/attachments/`
-/// only when the file is there, which the pre-turn download decides; the
-/// others are named as unavailable so the agent neither guesses a path nor
-/// pretends to have read them.
+/// only when this lease signed it and the pre-turn download left its file
+/// there; the others are named as unavailable so the agent neither guesses a
+/// path nor pretends to have read them.
 fn format_image_attachment_section_from_attachments(
     attachments: &[JsonValue],
     workspace_dir: &Path,
     project_id: &Uuid,
+    leased_attachments: &HashSet<String>,
 ) -> Option<String> {
     let mut lines = Vec::new();
     let mut unavailable = Vec::new();
@@ -15378,7 +15414,10 @@ fn format_image_attachment_section_from_attachments(
         let workspace_path = match attachment_text_field(entry, "storagePath", "storage_path") {
             Some(storage_path) => {
                 let downloaded = chat_attachments::storage_path_file_name(storage_path, project_id)
-                    .filter(|name| chat_attachments::attachment_is_available(workspace_dir, name));
+                    .filter(|name| {
+                        leased_attachments.contains(*name)
+                            && chat_attachments::attachment_is_available(workspace_dir, name)
+                    });
                 let Some(name) = downloaded else {
                     unavailable.push(describe_unavailable_attachment(
                         file_name, mime_type, size_bytes, is_image,
@@ -16787,6 +16826,98 @@ mod tests {
             Some(vec!["docs/**".to_string()])
         );
         assert!(processor.can_run_parallel_direct_write_scoped_worker(&registration, &job));
+    }
+
+    #[tokio::test]
+    async fn parallel_write_scoped_worker_downloads_signed_attachments_before_its_prompt() {
+        use axum::extract::State;
+        use axum::routing::{get, post};
+
+        type Captured = Arc<Mutex<Option<JsonValue>>>;
+        async fn completions(
+            State(captured): State<Captured>,
+            axum::Json(body): axum::Json<JsonValue>,
+        ) -> axum::Json<JsonValue> {
+            *captured.lock() = Some(body);
+            let plan = json!({
+                "summary": "Wrote the alpha file.",
+                "files": [{ "path": "tmp/alpha.txt", "content": "alpha\n" }],
+            });
+            axum::Json(json!({ "choices": [{ "message": { "content": plan.to_string() } }] }))
+        }
+        let captured: Captured = Arc::new(Mutex::new(None));
+        let app = axum::Router::new()
+            .route("/object/screenshot", get(|| async { "png bytes" }))
+            .route("/v1/chat/completions", post(completions))
+            .with_state(captured.clone());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind stub");
+        let base = format!("http://{}", listener.local_addr().expect("stub address"));
+        tokio::spawn(async move { axum::serve(listener, app).await.expect("serve stub") });
+
+        let tmp = tempdir().expect("temp dir");
+        let processor = test_job_processor(tmp.path());
+        let mut registration = test_registration_with_proxy();
+        registration.proxy = Some(ProxyEnvelopePayload {
+            url: base.clone(),
+            token: "proxy-token".to_string(),
+            expires_at: None,
+        });
+        let project_id = Uuid::new_v4();
+        let name = "6a000000-0000-4000-8000-000000000001.png";
+        // A worker's metadata carries no attachments, so its prompt takes them
+        // from the conversation history, as on a runtime spread.
+        let mut job = test_lease_job(
+            Some("feature"),
+            json!({
+                "prompt_text": "Write the alpha file from the screenshot.",
+                "metadata": {
+                    "multiAgentPlan": { "role": "worker", "groupId": "group-1" },
+                    "writeScope": { "mode": "owned", "ownedPaths": ["tmp/alpha.txt"] }
+                },
+                "conversation_history": [{
+                    "role": "user",
+                    "content": "Here is the screenshot.",
+                    "metadata": { "attachments": [{
+                        "kind": "image",
+                        "storagePath": format!("{project_id}/{name}"),
+                        "fileName": "screenshot.png",
+                        "mimeType": "image/png"
+                    }]}
+                }],
+                "attachment_downloads": [{
+                    "name": name,
+                    "url": format!("{base}/object/screenshot?token=signed"),
+                    "sizeBytes": 9
+                }]
+            }),
+        );
+        job.project_id = Some(project_id);
+        assert!(processor.can_run_parallel_direct_write_scoped_worker(&registration, &job));
+
+        processor
+            .run_parallel_direct_write_scoped_worker_job(&registration, &job, None, None)
+            .await
+            .expect("worker job runs");
+
+        let workspace = tmp.path().join(project_id.to_string());
+        assert_eq!(
+            fs::read(workspace.join(".instafy/attachments").join(name)).expect("downloaded"),
+            b"png bytes"
+        );
+        let request = captured.lock().clone().expect("worker called the proxy");
+        let worker_input = request["messages"][0]["content"]
+            .as_str()
+            .expect("worker input");
+        assert!(
+            worker_input.contains(&format!(
+                "- workspacePath: .instafy/attachments/{name} (fileName: screenshot.png, mimeType: image/png)"
+            )),
+            "{worker_input}"
+        );
+        assert!(!worker_input.contains("not available"), "{worker_input}");
+        assert!(!worker_input.contains("token=signed"), "{worker_input}");
     }
 
     #[test]
