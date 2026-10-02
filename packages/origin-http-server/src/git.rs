@@ -147,6 +147,25 @@ fn server_git_command() -> Command {
         .arg(format!("http.lowSpeedLimit={low_speed_limit}"))
         .arg("-c")
         .arg(format!("http.lowSpeedTime={low_speed_time}"));
+    // The stall tests talk to a loopback remote and check the request it
+    // received, so a proxy inherited from the test runner must not intercept
+    // it. Production commands keep the server's proxy settings.
+    #[cfg(test)]
+    if HTTP_LOW_SPEED_TIME_OVERRIDE
+        .with(std::cell::Cell::get)
+        .is_some()
+    {
+        for key in [
+            "http_proxy",
+            "HTTP_PROXY",
+            "https_proxy",
+            "HTTPS_PROXY",
+            "all_proxy",
+            "ALL_PROXY",
+        ] {
+            command.env_remove(key);
+        }
+    }
     command
 }
 
