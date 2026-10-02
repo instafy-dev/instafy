@@ -13,6 +13,7 @@ These docs reflect the current product scope: a chat-first filesystem workspace 
 - Runtime architecture: `docs/Architecture.md`
 - Runtime pooling plan (shared vs dedicated): `docs/runtime-plan-shared-vs-dedicated.md`
 - Git-canonical storage: `docs/Git-Service.md`
+- Chat attachments in private Storage and their delivery to runtimes: [Chat attachments](Chat-Attachments.md)
 - Sharing, invitations, roles, and device handoff: `docs/Sharing-Permissions.md`
 - Multi-human + Octo participation: `docs/Group-Conversation-Participation.md`
 - Chat-first onboarding + benchmarking: `docs/Onboarding-Benchmarking.md`
