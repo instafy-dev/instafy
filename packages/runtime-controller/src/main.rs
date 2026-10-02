@@ -83,6 +83,8 @@ mod tests_ai_metering_schema;
 #[cfg(test)]
 mod tests_chat_attachment_lease;
 #[cfg(test)]
+mod tests_chat_attachments_policies;
+#[cfg(test)]
 mod tests_managed_ai_refund;
 #[cfg(test)]
 mod tests_managed_credential;
