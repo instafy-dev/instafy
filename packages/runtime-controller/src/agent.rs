@@ -866,7 +866,10 @@ pub(crate) async fn agent_lease(
         .await
         .map_err(|error| internal_error(format!("failed to start transaction: {error}")))?;
 
-    let runtime_is_private_self_hosted = ensure_runtime_can_lease(
+    let LeasingRuntime {
+        is_private_self_hosted: runtime_is_private_self_hosted,
+        accepts_attachment_downloads,
+    } = ensure_runtime_can_lease(
         &state,
         &transaction,
         &project_id,
@@ -908,6 +911,7 @@ pub(crate) async fn agent_lease(
         .await?
         {
             Some(mut job) => {
+                crate::chat_attachments::strip_attachment_downloads(&mut job.payload);
                 let is_read_only_job = job_has_read_only_write_scope(&job);
                 let is_exact_write_scoped_job = job_has_exact_owned_write_scope(&job);
                 let is_runtime_spread_job = job_requests_runtime_spread(&job);
@@ -986,6 +990,25 @@ pub(crate) async fn agent_lease(
             supports_workspace_token,
             &mut jobs,
         );
+
+        // Signed after the commit, so no row lock waits on Storage. A runtime
+        // that does not download them gets no URLs; its prompt then names no
+        // attachment path it could not open.
+        if accepts_attachment_downloads {
+            let storage = crate::chat_attachments::StorageAccess::from_config(
+                &state.http_client,
+                &state.config,
+            );
+            let mut leased: Vec<crate::chat_attachments::LeasedPayload<'_>> = jobs
+                .iter_mut()
+                .map(|job| crate::chat_attachments::LeasedPayload {
+                    job_id: job.id,
+                    project_id: job.project_id,
+                    payload: &mut job.payload,
+                })
+                .collect();
+            crate::chat_attachments::add_attachment_downloads(storage.as_ref(), &mut leased).await;
+        }
 
         // UI relies on controller events for run status updates. When a runtime leases a queued job we
         // mark the run as in_progress (see `lease_next_agent_job`) and emit a `run.progress` event so
@@ -1093,8 +1116,15 @@ fn runtime_record_can_lease(
     provider_is_self_hosted && has_valid_owner
 }
 
+/// What the lease route needs to know about a runtime that may lease.
+struct LeasingRuntime {
+    is_private_self_hosted: bool,
+    /// The runtime downloads `attachment_downloads` before a turn.
+    accepts_attachment_downloads: bool,
+}
+
 /// Validate that the runtime may lease jobs, and return whether it is a
-/// private self-hosted runtime.
+/// private self-hosted runtime and whether it downloads chat attachments.
 async fn ensure_runtime_can_lease(
     state: &AppState,
     transaction: &tokio_postgres::Transaction<'_>,
@@ -1102,7 +1132,7 @@ async fn ensure_runtime_can_lease(
     runtime_id: &Uuid,
     token_lease_id: Option<Uuid>,
     token_runtime_generation: Option<Uuid>,
-) -> Result<bool, (StatusCode, Json<ApiError>)> {
+) -> Result<LeasingRuntime, (StatusCode, Json<ApiError>)> {
     let row = transaction
         .query_opt(
             "select provider, status, capabilities, active_lease_id
@@ -1134,7 +1164,12 @@ async fn ensure_runtime_can_lease(
     if !runtime_record_can_lease(&provider, &status, &capabilities, is_private_self_hosted) {
         return Err(forbidden("runtime is not eligible to lease jobs"));
     }
-    Ok(is_private_self_hosted)
+    Ok(LeasingRuntime {
+        is_private_self_hosted,
+        accepts_attachment_downloads: crate::chat_attachments::runtime_accepts_attachment_downloads(
+            &capabilities,
+        ),
+    })
 }
 
 fn runtime_status_can_heartbeat(status: &str) -> bool {
@@ -4133,8 +4168,12 @@ pub(crate) async fn load_conversation_history_for_agent(
 
             let mut map = JsonMap::new();
             if role.eq_ignore_ascii_case("user") {
-                if let Some(attachment_context) =
-                    format_image_attachment_context_for_agent(&metadata)
+                for attachment_context in [
+                    format_image_attachment_context_for_agent(&metadata),
+                    crate::chat_attachments::format_history_context(&metadata),
+                ]
+                .into_iter()
+                .flatten()
                 {
                     if !content.trim().is_empty() {
                         content.push_str("\n\n");

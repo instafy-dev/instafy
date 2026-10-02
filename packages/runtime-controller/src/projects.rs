@@ -717,6 +717,11 @@ struct ProjectSummary {
     /// endpoints compute it.
     #[serde(skip_serializing_if = "Option::is_none")]
     last_activity_at: Option<String>,
+    /// `storage` when chat attachments can be uploaded to the private bucket
+    /// and handed to runtimes, `none` on an install without Storage or a
+    /// service-role key. Only the single-space summary reports it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    attachments: Option<&'static str>,
 }
 
 impl ProjectSummary {
@@ -1847,7 +1852,15 @@ async fn get_project_summary(
         ))
     })?;
 
-    Ok(Json(map_project_summary(row).with_access(access)))
+    let storage =
+        crate::chat_attachments::StorageAccess::from_config(&state.http_client, &state.config);
+    let mut summary = map_project_summary(row).with_access(access);
+    summary.attachments = Some(
+        crate::chat_attachments::attachments_mode(storage.as_ref())
+            .await
+            .as_str(),
+    );
+    Ok(Json(summary))
 }
 
 #[derive(Debug, Deserialize)]
@@ -2062,6 +2075,13 @@ async fn delete_project(
             "failed to finalize project delete transaction: {error}"
         ))
     })?;
+
+    // Browsers already lost access with the status change; this frees the
+    // space's chat attachments and never fails the delete.
+    crate::chat_attachments::spawn_project_purge(
+        crate::chat_attachments::StorageAccess::from_config(&state.http_client, &state.config),
+        project_id,
+    );
 
     Ok(StatusCode::NO_CONTENT)
 }
@@ -5574,6 +5594,7 @@ fn map_project_summary(row: tokio_postgres::Row) -> ProjectSummary {
             .ok()
             .flatten()
             .map(|value| value.to_rfc3339()),
+        attachments: None,
     }
 }
 
