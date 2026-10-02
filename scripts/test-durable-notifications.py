@@ -91,8 +91,8 @@ def main():
             sql((ROOT/'supabase/tests/storage_stub.sql').read_text())
             for _ in range(2):
                 sql('begin;\n' + CHAT_ATTACHMENTS_MIGRATION.read_text() + '\ncommit;')
-            sql((ROOT/'supabase/tests/chat_attachments.sql').read_text())
-            print('PASS: chat attachments stay private to live spaces; uploaders delete only their own; nobody updates one')
+            sql('begin;\n' + (ROOT/'supabase/tests/chat_attachments.sql').read_text() + '\nrollback;')
+            print('PASS: chat attachments: members of a live space read them, its writers upload and delete their own, one spelling per space, nobody updates one')
             before = sql('select count(*) from notification_events;')
             sql('begin;\n' + MIGRATION.read_text() + '\ncommit;')
             assert before == sql('select count(*) from notification_events;'), 'migration replay emitted historical events'

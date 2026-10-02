@@ -67,12 +67,20 @@ The cluster has no Supabase Storage, so the replay also proves that
 `20261002140000_chat_attachments.sql` succeeds without it and only reports a notice. The
 run then installs `storage_stub.sql`, the buckets and objects columns the Storage policies
 read, and reruns that migration twice, as an install that adds Storage later does.
-`chat_attachments.sql` then checks the private `chat-attachments` bucket. As the signed-in
-and anonymous roles, through the `storage.objects` row-level security policies, it checks
-that a member of a live space uploads and reads `<projectId>/<uuid>.<ext>` objects, that a
-non-member, a deleted space, a free-form name, another extension or spelling, and anon are
-refused, that nobody updates or upserts an object, and that an uploader deletes only their
-own. It rolls back too.
+`chat_attachments.sql` then checks the private `chat-attachments` bucket, inside a transaction
+the run rolls back. It acts as the signed-in and anonymous roles, through the `storage.objects`
+row-level security policies, and checks these rules:
+
+- Every member of a live space reads its `<projectId>/<uuid>.<ext>` objects.
+- Only its owner, and owners, admins and builders of the space or its team, upload.
+- Non-members, a deleted space and anon are refused.
+- A free-form name, another extension, a malformed id and another spelling of the space id are
+  refused.
+- Nobody updates or upserts an object.
+- An uploader deletes only their own objects, and only while they can still write.
+
+The controller test `chat_attachments_sql_fixture_passes_on_storage` runs the same file against
+Storage's own schema on the local stack, so CI checks the policies against the real table.
 
 To also run the real controller HTTP and mocked transport tests against a clean,
 fully migrated database in that same disposable cluster:
