@@ -15,7 +15,9 @@
 //! one out of the workspace. Each body streams into a fresh temporary file
 //! that is renamed into place only once the whole download is in, so neither
 //! a large attachment nor several at once are held in memory, and a partial
-//! one never appears under its name.
+//! one never appears under its name. At most four downloads run at once, each
+//! within its own deadline, and all of them within one budget for the job, so
+//! a stalled Storage delays the turn by that budget at most.
 
 use std::collections::HashSet;
 use std::io::{self, Read};
@@ -34,6 +36,8 @@ const EXTENSIONS: [&str; 6] = ["png", "jpg", "webp", "gif", "txt", "md"];
 /// The bucket's own limit.
 const MAX_ATTACHMENT_BYTES: u64 = 20 * 1024 * 1024;
 const DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(30);
+/// Every download of one job, queued or running, ends within this.
+const JOB_DOWNLOAD_BUDGET: Duration = Duration::from_secs(60);
 const MAX_DOWNLOADS: usize = 20;
 /// Downloads in flight at once for one job.
 const MAX_CONCURRENT_DOWNLOADS: usize = 4;
@@ -47,7 +51,10 @@ pub(super) const HISTORY_USER_MESSAGES: usize = 10;
 #[derive(Clone, Copy, Debug)]
 pub(super) struct DownloadLimits {
     pub(super) max_bytes: u64,
+    /// One download, from its connection to the end of its body.
     pub(super) timeout: Duration,
+    /// All of a job's downloads, from the first one queued.
+    pub(super) job_budget: Duration,
 }
 
 impl Default for DownloadLimits {
@@ -55,6 +62,7 @@ impl Default for DownloadLimits {
         Self {
             max_bytes: MAX_ATTACHMENT_BYTES,
             timeout: DOWNLOAD_TIMEOUT,
+            job_budget: JOB_DOWNLOAD_BUDGET,
         }
     }
 }
@@ -238,6 +246,10 @@ pub(super) async fn download_attachments(
         }
     };
 
+    // Each download's own deadline starts once it has a slot, not while it
+    // waits for one. The job's budget covers the wait too, so a Storage that
+    // stalls every download cannot hold the turn for wave after wave of them.
+    let job_deadline = tokio::time::Instant::now() + limits.job_budget;
     let slots = Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT_DOWNLOADS));
     let mut tasks = tokio::task::JoinSet::new();
     for (index, download) in downloads.into_iter().enumerate() {
@@ -245,10 +257,13 @@ pub(super) async fn download_attachments(
         let workspace = workspace.clone();
         let slots = Arc::clone(&slots);
         tasks.spawn(async move {
-            // The semaphore is never closed. Each download's deadline starts
-            // once it has a slot, not while it waits for one.
-            let _slot = slots.acquire_owned().await.ok();
-            let outcome = download_one(&client, &workspace, &download, limits).await;
+            // The semaphore is never closed; the slot is held for the arm.
+            let outcome = match tokio::time::timeout_at(job_deadline, slots.acquire_owned()).await {
+                Ok(_slot) => {
+                    download_one(&client, &workspace, &download, limits, job_deadline).await
+                }
+                Err(_) => DownloadOutcome::Failed("timed out".to_string()),
+            };
             (index, download.name, outcome)
         });
     }
@@ -294,6 +309,7 @@ async fn download_one(
     workspace: &WorkspaceDir,
     download: &SignedDownload,
     limits: DownloadLimits,
+    job_deadline: tokio::time::Instant,
 ) -> DownloadOutcome {
     let relative = attachment_relative_path(&download.name);
     match workspace.entry_kind(&relative) {
@@ -306,8 +322,9 @@ async fn download_one(
         Err(_) => return DownloadOutcome::Rejected("the attachment's path is not a regular file"),
     }
 
-    // One deadline covers the connection, the headers and the whole body.
-    let deadline = tokio::time::Instant::now() + limits.timeout;
+    // One deadline covers the connection, the headers and the whole body,
+    // and never runs past the job's budget.
+    let deadline = (tokio::time::Instant::now() + limits.timeout).min(job_deadline);
     let response =
         match tokio::time::timeout_at(deadline, open_download(client, &download.url, limits)).await
         {
@@ -551,6 +568,7 @@ mod tests {
         DownloadLimits {
             max_bytes: 1024,
             timeout: Duration::from_millis(500),
+            job_budget: Duration::from_secs(10),
         }
     }
 
@@ -708,6 +726,7 @@ mod tests {
             DownloadLimits {
                 max_bytes: 1024,
                 timeout: Duration::from_secs(5),
+                job_budget: Duration::from_secs(30),
             },
         )
         .await;
@@ -720,6 +739,46 @@ mod tests {
         assert_eq!(in_flight.served.load(Ordering::SeqCst), 10);
         let most = in_flight.most.load(Ordering::SeqCst);
         assert!((2..=4).contains(&most), "{most} downloads ran at once");
+    }
+
+    #[tokio::test]
+    async fn a_stalled_storage_holds_the_turn_for_the_job_budget_at_most() {
+        let base = serve().await;
+        let workspace = tempfile::tempdir().unwrap();
+        // Twelve downloads that never finish, half before their headers and
+        // half after a first chunk: three waves of four would take 3 s.
+        let entries: Vec<JsonValue> = (1..=12)
+            .map(|n| {
+                let object = if n % 2 == 0 { "stalled" } else { "slow" };
+                entry(&name(n, "png"), &base, object)
+            })
+            .collect();
+        let started = tokio::time::Instant::now();
+        let outcomes = download_attachments(
+            &entries,
+            workspace.path(),
+            DownloadLimits {
+                max_bytes: 1024,
+                timeout: Duration::from_secs(1),
+                job_budget: Duration::from_millis(1500),
+            },
+        )
+        .await;
+        let elapsed = started.elapsed();
+        assert!(
+            elapsed < Duration::from_millis(2500),
+            "the downloads held the turn for {elapsed:?}"
+        );
+        assert_eq!(outcomes.len(), 12);
+        for (n, (name_seen, outcome)) in (1..=12).zip(&outcomes) {
+            assert_eq!(*name_seen, name(n, "png"));
+            assert_eq!(*outcome, DownloadOutcome::Failed("timed out".to_string()));
+        }
+        // Downloads cut off by the budget mid-body leave nothing behind.
+        assert_eq!(
+            attachment_dir_entries(workspace.path()),
+            vec![".gitignore".to_string()]
+        );
     }
 
     #[tokio::test]
