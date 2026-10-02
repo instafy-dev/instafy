@@ -25,7 +25,7 @@ enum PreferencesState {
 
 /// Loaded once per prompt so broad memory and the dedicated section cannot disagree.
 #[derive(Debug)]
-pub(super) struct ProjectPreferencesSnapshot {
+pub(crate) struct ProjectPreferencesSnapshot {
     state: PreferencesState,
     memory_without_preferences: Option<String>,
     source: Option<String>,
@@ -33,7 +33,7 @@ pub(super) struct ProjectPreferencesSnapshot {
 }
 
 impl ProjectPreferencesSnapshot {
-    pub(super) fn load(workspace_dir: &Path) -> Self {
+    pub(crate) fn load(workspace_dir: &Path) -> Self {
         match read_memory(workspace_dir) {
             Ok(Some(memory)) => Self::parse(memory),
             Ok(None) => Self {
@@ -145,7 +145,7 @@ impl ProjectPreferencesSnapshot {
         self.unavailable_reason().is_none() && Self::parse(candidate.to_owned()).state == self.state
     }
 
-    pub(super) fn render(&self, project_id: &Uuid) -> String {
+    pub(crate) fn render(&self, project_id: &Uuid) -> String {
         let mut rendered =
             format!("Project preferences snapshot\nProject: {project_id}\nSource: {SOURCE}\n");
         match &self.state {
@@ -171,7 +171,7 @@ impl ProjectPreferencesSnapshot {
         rendered
     }
 
-    pub(super) fn metrics(&self) -> Value {
+    pub(crate) fn metrics(&self) -> Value {
         match &self.state {
             PreferencesState::Loaded(content) => json!({
                 "state": "loaded", "source": SOURCE,

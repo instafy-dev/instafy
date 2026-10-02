@@ -68,7 +68,7 @@ use self::conversation_context::{
     build_prompt_conversation_context, enrich_prompt_context_metrics, estimate_prompt_token_count,
     format_conversation_history, parse_conversation_history, provider_state_claims_restored_thread,
 };
-use self::project_preferences::ProjectPreferencesSnapshot;
+pub(crate) use self::project_preferences::ProjectPreferencesSnapshot;
 use self::workspace_change_detection::GitStatusEntry;
 
 const PROJECT_MEMORY_MAX_TOTAL_BYTES: usize = 50_000;
@@ -3074,6 +3074,18 @@ fn with_project_preferences(
     prompt
 }
 
+// The native backend renders this same source through World State. Strip only
+// our captured prefix; marker-like text in the actual request remains untouched.
+fn without_project_preferences<'a>(
+    prompt: &'a str,
+    project_id: &Uuid,
+    preferences: &ProjectPreferencesSnapshot,
+) -> Result<&'a str> {
+    prompt
+        .strip_prefix(&preferences.render(project_id))
+        .context("runtime prompt missing its project preference prefix")
+}
+
 fn record_prompt_section_metric(
     section_metrics: &mut JsonMap<String, JsonValue>,
     name: &str,
@@ -6056,6 +6068,7 @@ impl JobProcessor {
         };
         let evidence_requirements = routing_evidence_requirements(job, runtime_expectations);
         let mut codex_run_options = CodexRunOptions {
+            project_id: Some(project_id),
             disable_shell_tool: explicit_personal_browser_execution
                 || explicit_shared_browser_execution,
             disable_final_output_json_schema: final_output_mode.disable_final_output_json_schema(),
@@ -6276,6 +6289,8 @@ impl JobProcessor {
         let runtime_id_for_messages = registration.runtime_id;
         let _client_timezone_guard =
             ClientTimezoneGuard::from_metadata(job.payload.get("metadata"));
+        let native_prompt =
+            without_project_preferences(&prompt, &project_id, &project_preferences)?;
         let output_result = if streaming_context.is_some() {
             let mut event_handler = |event: &JsonValue| -> Result<()> {
                 if let Some(ctx) = streaming_context.as_mut() {
@@ -6302,11 +6317,15 @@ impl JobProcessor {
                 Ok(())
             };
             codex
-                .execute_with_options(&prompt, Some(&mut event_handler), codex_run_options.clone())
+                .execute_with_options(
+                    native_prompt,
+                    Some(&mut event_handler),
+                    codex_run_options.clone(),
+                )
                 .await
         } else {
             codex
-                .execute_with_options(&prompt, None, codex_run_options.clone())
+                .execute_with_options(native_prompt, None, codex_run_options.clone())
                 .await
         };
         let output = match output_result {
@@ -6695,10 +6714,7 @@ impl JobProcessor {
                 );
             // Remove only the exact prefix we composed, never marker-like text
             // from a user's request. Every retry receives a fresh snapshot.
-            let preference_prefix = project_preferences.render(&project_id);
-            let prompt = prompt
-                .strip_prefix(&preference_prefix)
-                .context("runtime prompt missing its project preference prefix")?;
+            let prompt = without_project_preferences(&prompt, &project_id, &project_preferences)?;
             let mut retry_prompt = if personal_browser_execution_missing {
                 format!(
                     "{prompt}\n\nIMPORTANT PERSONAL BROWSER RETRY REQUIREMENT:\n\
@@ -6919,6 +6935,8 @@ impl JobProcessor {
             // Stream the retry like the first attempt: an invisible retry means
             // users watch a dead conversation while real work happens, and the
             // run trace loses the retry's interim evidence.
+            let native_retry_prompt =
+                without_project_preferences(&retry_prompt, &project_id, &retry_preferences)?;
             let retry_output = if let Some(progress) = progress_sender.as_ref() {
                 let retry_sender = progress.sender.clone();
                 let retry_status = progress.status.clone();
@@ -6949,14 +6967,14 @@ impl JobProcessor {
                 };
                 codex
                     .execute_with_options(
-                        &retry_prompt,
+                        native_retry_prompt,
                         Some(&mut retry_event_handler),
                         retry_codex_run_options,
                     )
                     .await?
             } else {
                 codex
-                    .execute_with_options(&retry_prompt, None, retry_codex_run_options)
+                    .execute_with_options(native_retry_prompt, None, retry_codex_run_options)
                     .await?
             };
             drop(codex_guard);
@@ -7220,10 +7238,11 @@ impl JobProcessor {
                     &mut finalization_prompt,
                     &mut finalization_prompt_context,
                 );
+                let finalization_preferences = ProjectPreferencesSnapshot::load(&workspace_dir);
                 let finalization_prompt = with_project_preferences(
                     finalization_prompt,
                     &project_id,
-                    &ProjectPreferencesSnapshot::load(&workspace_dir),
+                    &finalization_preferences,
                     &mut finalization_prompt_context,
                 );
                 let mut finalization_options = codex_run_options.clone();
@@ -7244,8 +7263,13 @@ impl JobProcessor {
                 let codex_guard = CODEX_EXECUTION_LOCK.lock().await;
                 let _client_timezone_guard =
                     ClientTimezoneGuard::from_metadata(job.payload.get("metadata"));
+                let native_finalization_prompt = without_project_preferences(
+                    &finalization_prompt,
+                    &project_id,
+                    &finalization_preferences,
+                )?;
                 let finalization_output = codex
-                    .execute_with_options(&finalization_prompt, None, finalization_options)
+                    .execute_with_options(native_finalization_prompt, None, finalization_options)
                     .await?;
                 drop(codex_guard);
 
@@ -17462,6 +17486,12 @@ mod tests {
         job.project_id = Some(project_id);
         job.conversation_id = Some(conversation_id);
         let workspace = processor.prepare_workspace(&project_id).expect("workspace");
+        fs::write(
+            workspace.join("INSTAFY.md"),
+            "## Project preferences\n\n- Describe photographs in plain language.\n",
+        )
+        .expect("shared preference");
+        let preferences = ProjectPreferencesSnapshot::load(&workspace);
 
         let (prompt, _, _, attachments) = processor
             .build_turn_prompt(
@@ -17473,10 +17503,20 @@ mod tests {
                 &[],
                 None,
                 None,
-                &ProjectPreferencesSnapshot::load(&workspace),
+                &preferences,
             )
             .await
             .expect("turn prompt");
+
+        // Attachment preparation must keep the same captured preference prefix
+        // that native context delivery removes before contributing its snapshot.
+        assert!(prompt.starts_with(&preferences.render(&project_id)));
+        assert_eq!(
+            prompt
+                .matches("Describe photographs in plain language.")
+                .count(),
+            1
+        );
 
         let folder = workspace
             .join(".instafy/attachments")

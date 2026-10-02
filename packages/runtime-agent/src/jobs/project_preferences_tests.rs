@@ -312,3 +312,25 @@ fn project_preferences_recovery_composition_keeps_user_text_and_uses_current_sna
         earlier.metrics()["revision"]
     );
 }
+
+#[test]
+fn native_prompt_removes_only_the_captured_host_projection() {
+    let workspace = tempdir().unwrap();
+    let project_id = Uuid::new_v4();
+    write_memory(workspace.path(), PREFERENCE);
+    let captured = ProjectPreferencesSnapshot::load(workspace.path());
+    let user_text = format!(
+        "Explain this quoted snapshot:\n{}",
+        captured.render(&Uuid::new_v4())
+    );
+    let prompt =
+        with_project_preferences(user_text.clone(), &project_id, &captured, &mut json!({}));
+    write_memory(workspace.path(), "Updated after prompt construction.");
+    let current = ProjectPreferencesSnapshot::load(workspace.path());
+    assert_eq!(
+        without_project_preferences(&prompt, &project_id, &captured).unwrap(),
+        user_text
+    );
+    assert!(without_project_preferences(&prompt, &project_id, &current).is_err());
+    assert!(without_project_preferences(&user_text, &project_id, &captured).is_err());
+}

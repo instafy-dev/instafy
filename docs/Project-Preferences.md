@@ -75,9 +75,19 @@ prove that a model will learn or edit the correct preferences.
 Each eligible execution prompt receives one scoped snapshot, including restored conversations,
 compact worker and lead-continuation prompts, MCP tasks, direct workers and recovery attempts.
 The normal workspace-memory projection omits the same section to avoid supplying it twice.
-Updates and removals are read at prompt-construction boundaries; this is not a promise of
-immediate refresh during an active model turn.
-Routing preflight and learning prompts are outside this delivery contract.
+Native Codex execution reloads the authorized project's source before each new model step,
+including continuation after compaction and restoration from a persisted rollout. An in-flight
+request keeps its captured context. Direct workers that do not use Codex still refresh at prompt
+construction. Routing preflight is outside this contract. `/learn apply` uses normal project
+execution and receives the same defaults; this does not validate what the learner infers.
+
+Codex delivery uses its supported World State extension. The runtime supplies the typed project
+scope and workspace root, removes only its own captured prompt prefix, and renders one native
+snapshot at user authority. It suppresses an unchanged snapshot only while its complete scoped
+fragment remains visible. The persisted comparison state contains scope, revision and source
+status, not a second authoritative copy of the preference text. The workspace remains the source.
+Older snapshots can remain in conversation history; the latest scoped update supersedes them,
+and an empty update explicitly withdraws only that project's defaults.
 
 Existing controller authorization continues to determine project access and permitted work.
 The preference snapshot grants no additional access or execution permission. Skills continue
@@ -85,6 +95,18 @@ to define semantic workflows; the runtime owns scoped delivery, source-state han
 bounds. See [the memory and learning guide](Learn-Benchmarking.md) for the separate `/learn`
 and learned-skill mechanisms.
 
-This first slice does not validate preference retention through native provider compaction and
-cold resume. Prompt-delivery checks also do not establish better model behavior, faster tasks,
-or reduced human correction effort.
+## Verified lifecycle and limits
+
+Local integration tests run the actual job processor, embedded Codex and Instafy proxy against
+an inert provider for both ChatGPT streaming and API-key Responses JSON. A real tool call plus
+synthetic high token usage forces native mid-turn compaction. The fixture changes the preference
+during compaction, verifies the current revision on the next sampling request, removes the
+section, then verifies withdrawal after a fresh job processor and Codex thread manager restore
+the saved rollout. The opaque compaction item is retained byte-for-byte, including when it
+arrives only as a completed stream item. Initial delivery is not duplicated, and defaults remain
+at user authority.
+
+These tests prove transport and source refresh on the pinned Codex integration. The fake provider
+does not interpret encrypted context or judge model behavior. They do not prove live-provider
+compatibility, semantic learning quality, faster tasks, or reduced human correction effort.
+They do not cover private account-wide preferences or automatic follow-up execution.
