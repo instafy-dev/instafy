@@ -14,6 +14,10 @@
 //!   lasts until curl's 300 second connect timeout (or the OS SYN retry limit,
 //!   if sooner), and a peer that keeps trickling bytes above the floor never
 //!   trips it.
+//!
+//! Both bounds apply per git command. A caller that runs several in a row
+//! under one lock (a sync fetches, pushes and may retry once) holds it for up
+//! to the sum of their bounds.
 
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
@@ -30,37 +34,59 @@ use anyhow::{Context, Result};
 const TERMINATION_GRACE: Duration = Duration::from_secs(2);
 const MAX_POLL_INTERVAL: Duration = Duration::from_millis(50);
 
+/// Environment variable that overrides [`NetworkGitLimits::DEFAULT`]'s
+/// deadline, in whole seconds; `0` turns the deadline off.
+pub(crate) const DEADLINE_ENV: &str = "ORIGIN_GIT_NETWORK_DEADLINE_SECONDS";
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct NetworkGitLimits {
     /// Transfer rate, in bytes per second, below which curl counts an HTTP
     /// transfer as stalled.
     pub low_speed_bytes_per_second: u32,
-    /// Seconds a transfer may stay below that rate before curl aborts it.
+    /// Seconds a fetch, ls-remote or other non-push transfer may stay below
+    /// that rate before curl aborts it.
     pub low_speed_seconds: u32,
+    /// The same window for `git push`, whose reply waits for the remote's
+    /// update hook as well as for indexing the pushed pack.
+    pub push_low_speed_seconds: u32,
     /// Upper bound on one network git command, including connection setup.
-    pub deadline: Duration,
+    /// `None` leaves only curl's own limits.
+    pub deadline: Option<Duration>,
 }
 
 impl NetworkGitLimits {
-    /// Production bounds.
+    /// Production bounds. Each one applies to a single git command; a sync
+    /// that fetches and pushes, with one retry, runs up to four in a row.
     ///
     /// The floor only has to separate "moving" from "stopped": curl compares a
     /// few-second moving average with it, and a healthy transfer across a
     /// private network moves megabytes per second, three orders of magnitude
     /// above 1000 B/s. The quiet phases of a healthy exchange are server
-    /// compute time (building the pack before its first byte, indexing a
-    /// pushed pack before the reply), during which the server sends at most a
-    /// few bytes of keep-alive every few seconds. Building a full pack of a
-    /// 142 MB, 122k-object repository takes about one second before the first
-    /// byte, so a 60 second window leaves wide headroom.
+    /// compute time, during which the server sends at most a few bytes of
+    /// keep-alive every few seconds:
     ///
-    /// The deadline sits above curl's 300 second connect timeout plus the
-    /// low-speed window, so it never cuts short a command that curl would end
-    /// on its own, and at 10 MB/s it still allows a 6 GB transfer.
+    /// * Fetch: building the pack before its first byte. A full pack of a
+    ///   142 MB, 122k-object repository starts after about one second, so a
+    ///   60 second window leaves wide headroom.
+    /// * Push: indexing the pushed pack and then the remote's update hook,
+    ///   which checks every changed path with a few git processes. That time
+    ///   grows with the number of changed paths: a 2,000-path commit kept a
+    ///   macOS test remote quiet for about 90 seconds (Linux process starts
+    ///   are cheaper), so pushes get a 300 second window. Cutting a push short
+    ///   is worse than cutting a fetch short: the remote can still accept it
+    ///   after the client has reported failure.
+    ///
+    /// The deadline is the backstop for what the floor does not police: an
+    /// unanswered connect (curl gives up after 300 seconds, or sooner at the
+    /// OS SYN retry limit) and a peer that keeps trickling bytes above the
+    /// floor. Ten minutes still allows a 6 GB transfer at 10 MB/s; deployments
+    /// with slower links or larger repositories can raise or disable it with
+    /// [`DEADLINE_ENV`].
     pub(crate) const DEFAULT: Self = Self {
         low_speed_bytes_per_second: 1_000,
         low_speed_seconds: 60,
-        deadline: Duration::from_secs(10 * 60),
+        push_low_speed_seconds: 300,
+        deadline: Some(Duration::from_secs(10 * 60)),
     };
 }
 
@@ -75,7 +101,29 @@ pub(crate) fn network_git_limits() -> NetworkGitLimits {
     if let Some(limits) = LIMITS_OVERRIDE.with(std::cell::Cell::get) {
         return limits;
     }
-    NetworkGitLimits::DEFAULT
+    static CONFIGURED: std::sync::OnceLock<NetworkGitLimits> = std::sync::OnceLock::new();
+    *CONFIGURED.get_or_init(|| NetworkGitLimits {
+        deadline: deadline_from_env(std::env::var(DEADLINE_ENV).ok().as_deref()),
+        ..NetworkGitLimits::DEFAULT
+    })
+}
+
+fn deadline_from_env(value: Option<&str>) -> Option<Duration> {
+    let Some(raw) = value.map(str::trim).filter(|raw| !raw.is_empty()) else {
+        return NetworkGitLimits::DEFAULT.deadline;
+    };
+    match raw.parse::<u64>() {
+        Ok(0) => None,
+        Ok(seconds) => Some(Duration::from_secs(seconds)),
+        Err(_) => {
+            tracing::warn!(
+                variable = DEADLINE_ENV,
+                value = raw,
+                "ignoring invalid network git deadline; expected whole seconds"
+            );
+            NetworkGitLimits::DEFAULT.deadline
+        }
+    }
 }
 
 /// Replaces the limits for git commands built on the current thread until the
@@ -100,15 +148,20 @@ impl Drop for NetworkGitLimitsOverride {
     }
 }
 
-/// Apply the low-speed bound to every git command the server builds.
+/// Apply a low-speed bound to a git command. Applying it again replaces the
+/// earlier values: the later `-c` wins and the environment is overwritten.
 ///
 /// Only the HTTP transport reads these settings, so local commands are
 /// unaffected. Git lets `GIT_HTTP_LOW_SPEED_*` override every config source,
 /// so the environment is pinned to the same values; otherwise an inherited
 /// value (for example a limit of 0) would silently remove the bound.
-pub(crate) fn bound_http_transfer_speed(command: &mut Command, limits: NetworkGitLimits) {
-    let bytes_per_second = limits.low_speed_bytes_per_second.to_string();
-    let seconds = limits.low_speed_seconds.to_string();
+pub(crate) fn bound_http_transfer_speed(
+    command: &mut Command,
+    bytes_per_second: u32,
+    seconds: u32,
+) {
+    let bytes_per_second = bytes_per_second.to_string();
+    let seconds = seconds.to_string();
     command
         .env("GIT_HTTP_LOW_SPEED_LIMIT", &bytes_per_second)
         .env("GIT_HTTP_LOW_SPEED_TIME", &seconds)
@@ -125,6 +178,10 @@ pub(crate) fn bound_http_transfer_speed(command: &mut Command, limits: NetworkGi
 /// The command runs in its own process group because git delegates the
 /// transfer to a transport helper (`git-remote-http`): stopping only the
 /// top-level process would leave the helper holding the stalled connection.
+/// One consequence is that a signal sent to the server's own process group
+/// (for example a supervisor stopping the runtime's process tree) does not
+/// reach an in-flight command; it ends on its own within the low-speed window
+/// or this deadline.
 /// Output goes to temporary files rather than pipes so that a descendant
 /// keeping an inherited descriptor open cannot block collection.
 ///
@@ -156,8 +213,15 @@ pub(crate) fn output_within_deadline(
     let started = Instant::now();
     let mut pause = Duration::from_millis(1);
     let (status, stopped) = loop {
-        if let Some(status) = child.try_wait().context("failed to wait for git")? {
-            break (status, false);
+        match child.try_wait() {
+            Ok(Some(status)) => break (status, false),
+            Ok(None) => {}
+            Err(error) => {
+                // Never return with the command still running: that would
+                // drop the bound this function exists to provide.
+                let _ = stop_process_group(&mut child);
+                return Err(error).context("failed to wait for git");
+            }
         }
         let elapsed = started.elapsed();
         if elapsed >= deadline {
@@ -202,11 +266,13 @@ fn stop_process_group(child: &mut Child) -> std::io::Result<ExitStatus> {
     let _ = kill_process_group(group, Signal::TERM);
     let grace_deadline = Instant::now() + TERMINATION_GRACE;
     while Instant::now() < grace_deadline {
+        // A failed check skips the rest of the grace period rather than
+        // returning early, so the SIGKILL sweep and the reap below still run.
         let leader_exited = waitid(
             WaitId::Pid(group),
             WaitIdOptions::EXITED | WaitIdOptions::NOHANG | WaitIdOptions::NOWAIT,
-        )?
-        .is_some();
+        )
+        .map_or(true, |status| status.is_some());
         if leader_exited {
             break;
         }
@@ -240,19 +306,38 @@ mod tests {
         // The shell and its child both ignore SIGTERM, so only the SIGKILL
         // sweep after the grace period can end them.
         command.args(["-c", "trap '' TERM; echo started; sleep 30 & wait"]);
+        // One second is ample for the shell to install its trap; a deadline
+        // that fired first would let SIGTERM end it and prove nothing.
+        let deadline = Duration::from_secs(1);
         let started = Instant::now();
-        let output = output_within_deadline(&mut command, "fetch", Duration::from_millis(100))?;
+        let output = output_within_deadline(&mut command, "fetch", deadline)?;
         let elapsed = started.elapsed();
 
         assert!(!output.status.success());
         assert!(
-            elapsed >= TERMINATION_GRACE && elapsed < TERMINATION_GRACE + Duration::from_secs(5),
+            elapsed >= deadline + TERMINATION_GRACE
+                && elapsed < deadline + TERMINATION_GRACE + Duration::from_secs(5),
             "stop took {elapsed:?}"
         );
         assert_eq!(String::from_utf8_lossy(&output.stdout), "started\n");
         assert!(String::from_utf8_lossy(&output.stderr)
-            .contains("git fetch did not finish within 100ms and was stopped"));
+            .contains("git fetch did not finish within 1s and was stopped"));
         Ok(())
+    }
+
+    #[test]
+    fn deadline_env_value_raises_disables_or_falls_back() {
+        let default = NetworkGitLimits::DEFAULT.deadline;
+        assert_eq!(deadline_from_env(None), default);
+        assert_eq!(deadline_from_env(Some("")), default);
+        assert_eq!(deadline_from_env(Some("  ")), default);
+        assert_eq!(deadline_from_env(Some("ten minutes")), default);
+        assert_eq!(deadline_from_env(Some("-5")), default);
+        assert_eq!(deadline_from_env(Some("0")), None);
+        assert_eq!(
+            deadline_from_env(Some(" 3600 ")),
+            Some(Duration::from_secs(3600))
+        );
     }
 
     #[test]

@@ -73,7 +73,7 @@ Payload schema is `instafy.git-service.event.v1` with `kind=git.push.received`, 
 Browsers should not speak git for normal editing. The “phone UI” flow is:
 - `Studio → Controller (auth/token) → Workspace Gateway (/entries,/files,/raw,/apply,/git/sync)`
 - Workspace Gateway uses git under the hood (fetch/checkout cache). File writes land via `POST /apply`; persisting them to the canonical remote is an explicit sync step via `POST /git/sync` so agents can choose commit boundaries/messages and handle conflicts intentionally.
-- Every git command the Workspace Gateway runs against the remote (fetch, push, ls-remote) is time-bounded, because it runs while the space's apply lock is held. A transfer that stays under 1000 bytes/s for 60 seconds fails with `Operation too slow`; this covers a remote that accepts the connection and never answers, or stops mid-transfer. The speed check does not run while curl is still connecting; curl gives up on an unanswered connect after at most 300 seconds, sooner where the OS stops retrying. As a final backstop, a command still running after 10 minutes is stopped together with its transport helper. A failed background refresh releases the lock and keeps the existing checkout until the next sync.
+- Every git command the Workspace Gateway runs against the remote (fetch, push, ls-remote) is time-bounded, because it runs while the space's apply lock is held. A fetch or ls-remote transfer that stays under 1000 bytes/s for 60 seconds fails with `Operation too slow`; this covers a remote that accepts the connection and never answers, or stops mid-transfer. A push gets a 300 second window, because the remote replies only after its update hook has checked every changed path, which takes longer for large commits. The speed check does not run while curl is still connecting; curl gives up on an unanswered connect after at most 300 seconds, sooner where the OS stops retrying. As a final backstop, a command still running after 10 minutes is stopped together with its transport helper; set `ORIGIN_GIT_NETWORK_DEADLINE_SECONDS` to change that (`0` turns it off) for slow links or very large repositories. These bounds apply per command: a sync fetches, pushes and may retry once, so it can hold the lock for up to four of them. A failed background refresh releases the lock and keeps the existing checkout until the next sync.
 
 Native environments can choose:
 - **FS API** (same as Studio) via `/apply` (write) + `/git/sync` (commit/push), or
@@ -102,7 +102,7 @@ Regression coverage:
 - `packages/runtime-agent/src/jobs/workspace_change_detection.rs` covers canonical `.instafy/.git`, already-dirty same-status rewrites, metadata preservation, and fingerprint budgets.
 - `packages/origin-http-server/src/untrusted_git.rs` covers configured process/filter isolation, `core.worktree` escape resistance, unusual filenames, and unsafe `.git` rejection.
 - `packages/origin-http-server/src/git.rs` verifies embedded `.git` restoration and canonical sync behavior.
-- `packages/origin-http-server/src/git.rs` also proves that fetch, push and ls-remote against a stalled remote fail within the bound, and that the deadline stops the transport helper holding the connection.
+- `packages/origin-http-server/src/git.rs` also proves that fetch, push and ls-remote against a stalled remote fail within the bound, that push gets its wider window, and that the deadline stops the transport helper holding the connection.
 
 Recommended (no token copy/paste):
 

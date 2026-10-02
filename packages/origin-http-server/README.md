@@ -22,13 +22,14 @@ Set `ORIGIN_GIT_REMOTE_URL` to enable git-backed persistence:
 - `ORIGIN_GIT_BRANCH`: branch to track/push (default: `main`)
 - `ORIGIN_GIT_REMOTE_NAME`: remote name (default: `origin`)
 - `ORIGIN_GIT_AUTHOR_NAME` / `ORIGIN_GIT_AUTHOR_EMAIL`: commit identity defaults
+- `ORIGIN_GIT_NETWORK_DEADLINE_SECONDS`: upper bound on one fetch or push, in seconds (default: `600`; `0` turns it off). Raise it for slow links or very large repositories.
 
 In this mode:
 - The origin bootstraps a checkout on start (`git clone`/`git fetch`).
 - `POST /apply` applies file changes to the workspace (no git operations).
 - `POST /git/sync` stages non-reserved dirty paths, creates a commit (caller-provided message), then pushes (fast-forward-only with a fetch/rebase retry loop).
 - Reserved paths like `.git/` and `.instafy/origin-staging/` are hidden from the filesystem API and rejected for applies.
-- Network git commands are bounded: a transfer below 1000 bytes/s for 60 seconds fails, and a command still running after 10 minutes is stopped with its whole process group (`src/network_git.rs`).
+- Network git commands are bounded: a transfer below 1000 bytes/s for 60 seconds (300 seconds for a push) fails, and a command still running after 10 minutes is stopped with its whole process group (`src/network_git.rs`).
 
 ## Follow-ups
 - Add integration tests that spin the server with a temporary workspace and hit each endpoint (especially multipart apply + delete scenarios).
