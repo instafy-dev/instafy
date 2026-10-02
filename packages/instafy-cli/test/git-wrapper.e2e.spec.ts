@@ -537,6 +537,129 @@ describe("instafy git", () => {
     20_000,
   );
 
+  it(
+    "names what was not saved, keeps the fields in --json and exits non-zero",
+    async () => {
+      const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "instafy-cli-git-sync-not-saved-"));
+      const runtimeId = randomUUID();
+      const requests: Array<{ url: string; body: unknown }> = [];
+      let syncResponse: { status: number; body: unknown } = { status: 200, body: {} };
+
+      const server = http.createServer(async (req, res) => {
+        const bodyRaw = await readAll(req);
+        requests.push({ url: req.url ?? "", body: bodyRaw.trim() ? JSON.parse(bodyRaw) : null });
+        res.setHeader("content-type", "application/json");
+        if ((req.url ?? "") === "/access_token") {
+          res.end(JSON.stringify({ token: "fresh-origin-token", endpoint: originEndpoint }));
+          return;
+        }
+        if ((req.url ?? "") === "/git/sync") {
+          res.statusCode = syncResponse.status;
+          res.end(JSON.stringify(syncResponse.body));
+          return;
+        }
+        res.statusCode = 404;
+        res.end("{}");
+      });
+      await new Promise<void>((resolve) => {
+        server.listen(0, "127.0.0.1", () => resolve());
+      });
+      const address = server.address();
+      const port = typeof address === "object" && address ? address.port : 0;
+      const originEndpoint = `http://127.0.0.1:${port}`;
+      const env = {
+        CONTROLLER_BASE_URL: originEndpoint,
+        ORIGIN_ENDPOINT: originEndpoint,
+        PROJECT_ID: "project-123",
+        RUNTIME_ID: runtimeId,
+        RUNTIME_ACCESS_TOKEN: "runtime-controller-token",
+        RUNTIME_LEASE_ID: "lease-123",
+      };
+
+      try {
+        // A partial save: the rest is on main, one file is kept on a recovery
+        // ref and one was ignored.
+        syncResponse = {
+          status: 200,
+          body: {
+            rev: "feedbeef",
+            baseRev: "cafecafe",
+            gitSyncStatus: "partial",
+            recoveryRef: "refs/instafy/recovery/origin-1/20261002T101010Z-conflict-abc",
+            conflictedPaths: ["src/app.ts"],
+            rejectedPaths: [{ path: ".env", reason: "ignored", keptSavedVersion: false }],
+            unpushedRefs: 0,
+          },
+        };
+        const partial = await execCli(["git", "sync", "-m", "save"], { cwd: tmpDir, env });
+        expect(partial.code).toBe(1);
+        expect(partial.stdout.trim()).toBe("feedbeef");
+        expect(partial.stderr).toContain(
+          "Not saved: src/app.ts (kept at refs/instafy/recovery/origin-1/20261002T101010Z-conflict-abc).",
+        );
+        expect(partial.stderr).toContain("Not saved: .env (ignored by .gitignore).");
+        const mint = requests.find((request) => request.url === "/access_token")?.body as {
+          preferRuntime?: string;
+        } | null;
+        expect(mint?.preferRuntime).toBe(runtimeId);
+
+        const json = await execCli(["git", "sync", "--json"], { cwd: tmpDir, env });
+        expect(json.code).toBe(1);
+        const payload = JSON.parse(json.stdout) as Record<string, unknown>;
+        expect(payload).toMatchObject({
+          rev: "feedbeef",
+          baseRev: "cafecafe",
+          gitSyncStatus: "partial",
+          recoveryRef: "refs/instafy/recovery/origin-1/20261002T101010Z-conflict-abc",
+          conflictedPaths: ["src/app.ts"],
+          rejectedPaths: [{ path: ".env", reason: "ignored", keptSavedVersion: false }],
+          unpushedRefs: 0,
+        });
+        expect(payload["notSaved"]).toHaveLength(2);
+
+        // Nothing saved: the origin answers 409 not_saved with the report.
+        syncResponse = {
+          status: 409,
+          body: {
+            error: "Not saved: the saved version kept changing (kept at refs/instafy/local-recovery/x-unpublished-1)",
+            code: "not_saved",
+            gitSyncStatus: "unpublished",
+            recoveryRef: "refs/instafy/local-recovery/x-unpublished-1",
+            conflictedPaths: [],
+            rejectedPaths: [],
+            unpushedRefs: 1,
+          },
+        };
+        const failed = await execCli(["git", "sync"], { cwd: tmpDir, env });
+        expect(failed.code).toBe(1);
+        expect(failed.stdout.trim()).toBe("");
+        expect(failed.stderr).toContain(
+          "Not saved: the saved version kept changing (kept at refs/instafy/local-recovery/x-unpublished-1).",
+        );
+        const failedJson = await execCli(["git", "sync", "--json"], { cwd: tmpDir, env });
+        expect(failedJson.code).toBe(1);
+        expect(JSON.parse(failedJson.stdout)).toMatchObject({
+          gitSyncStatus: "unpublished",
+          recoveryRef: "refs/instafy/local-recovery/x-unpublished-1",
+          unpushedRefs: 1,
+        });
+
+        // A complete save still prints only the rev and exits 0.
+        syncResponse = { status: 200, body: { rev: "abc123", gitSyncStatus: "published" } };
+        const clean = await execCli(["git", "sync"], { cwd: tmpDir, env });
+        expect(clean.code).toBe(0);
+        expect(clean.stdout.trim()).toBe("abc123");
+        expect(clean.stderr).not.toContain("Not saved");
+      } finally {
+        await new Promise<void>((resolve) => {
+          server.close(() => resolve());
+        });
+        fs.rmSync(tmpDir, { recursive: true, force: true });
+      }
+    },
+    30_000,
+  );
+
   it("does not send an environment Origin token to an overridden endpoint", async () => {
     const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "instafy-cli-git-sync-bound-origin-"));
     let requests = 0;
