@@ -273,6 +273,8 @@ async fn authorize_conversation_with_context(
     ensure_project_access(&transaction, &project, &context, conversation.session_id).await?;
     ensure_conversation_access(&transaction, &conversation, &context).await?;
     if require_prompt_access {
+        crate::conversations::ensure_not_internal_conversation(&transaction, &conversation_id)
+            .await?;
         // Queued messages become prompt dispatches later; enforce the same
         // read-only-member restriction the direct dispatch path applies.
         ensure_project_prompt_access(&transaction, &project, &context, conversation.session_id)

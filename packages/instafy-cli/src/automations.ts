@@ -13,6 +13,7 @@ import { findProjectManifest } from "./project-manifest.js";
 type AutomationRecord = {
   id: string;
   name: string;
+  mode: "prompt" | "space_review";
   scheduleKind: string;
   runAt: string | null;
   intervalHours: number | null;
@@ -42,7 +43,8 @@ type AutomationsCommonOptions = {
 
 export type AutomationsCreateOptions = AutomationsCommonOptions & {
   name: string;
-  prompt: string;
+  mode?: "prompt" | "space_review";
+  prompt?: string;
   scheduleKind?: "weekly" | "hourly" | "once";
   runAt?: string;
   intervalHours?: number;
@@ -220,6 +222,7 @@ function normalizeAutomationRecord(input: unknown): AutomationRecord | null {
   return {
     id,
     name,
+    mode: record.mode === "space_review" ? "space_review" : "prompt",
     scheduleKind: typeof record.scheduleKind === "string" ? record.scheduleKind : "",
     runAt: toMaybeString(record.runAt),
     intervalHours: toMaybeNumber(record.intervalHours),
@@ -344,6 +347,7 @@ export async function automationsList(options: AutomationsCommonOptions) {
     })();
     const status = record.status === "paused" ? kleur.gray("paused") : kleur.green("active");
     const next = record.nextRunAt ? kleur.cyan(record.nextRunAt) : kleur.gray("n/a");
+    const mode = record.mode === "space_review" ? " · space review" : "";
     const delivery = record.silentWhenNothingToReport ? " · findings only" : "";
     const sharing =
       record.resultVisibility === "team"
@@ -351,7 +355,7 @@ export async function automationsList(options: AutomationsCommonOptions) {
         : "";
     console.log(`${kleur.bold(record.name)}  ${kleur.gray(record.id)}`);
     console.log(
-      `  ${schedule} · ${record.runtimeMode}${delivery}${sharing} · ${status} · next ${next}`,
+      `  ${schedule} · ${record.runtimeMode}${mode}${delivery}${sharing} · ${status} · next ${next}`,
     );
     if (record.lastError) {
       console.log(`  ${kleur.red(record.lastError)}`);
@@ -367,9 +371,24 @@ export async function automationsCreate(options: AutomationsCreateOptions) {
   if (!name) {
     throw new Error("--name is required");
   }
-  const promptText = options.prompt.trim();
-  if (!promptText) {
-    throw new Error("--prompt is required");
+  const mode = options.mode ?? "prompt";
+  if (mode !== "prompt" && mode !== "space_review") {
+    throw new Error("--mode must be prompt or space_review");
+  }
+  const promptText = options.prompt?.trim();
+  if (mode === "prompt" && !promptText) {
+    throw new Error("--prompt is required for prompt mode");
+  }
+  if (mode === "space_review") {
+    if (options.prompt !== undefined) {
+      throw new Error("--mode space_review uses the built-in review instructions; omit --prompt");
+    }
+    if (options.resultVisibility === "team") {
+      throw new Error("--mode space_review requires private results; omit --share-results or team visibility");
+    }
+    if (options.silentWhenNothingToReport === false) {
+      throw new Error("--mode space_review requires quiet runs");
+    }
   }
 
   const scheduleKind = options.scheduleKind ?? "weekly";
@@ -377,13 +396,14 @@ export async function automationsCreate(options: AutomationsCreateOptions) {
 
   const body: Record<string, unknown> = {
     name,
-    promptText,
+    ...(options.mode !== undefined ? { mode } : {}),
+    ...(mode === "prompt" ? { promptText } : {}),
     scheduleKind,
     timezone,
     runtimeMode: options.runtimeMode ?? "auto",
     runtimeProvider: options.runtimeProvider?.trim() || undefined,
-    silentWhenNothingToReport: options.silentWhenNothingToReport ?? false,
-    resultVisibility: options.resultVisibility ?? undefined,
+    silentWhenNothingToReport: mode === "space_review" || (options.silentWhenNothingToReport ?? false),
+    resultVisibility: mode === "space_review" ? "private" : options.resultVisibility,
     status: options.paused ? "paused" : "active",
   };
 

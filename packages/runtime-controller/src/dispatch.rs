@@ -193,6 +193,7 @@ pub(crate) struct DispatchPromptNormalized {
     /// Trusted internal opt-in set only by the automation scheduler. This is
     /// deliberately absent from the public dispatch request shape.
     pub(crate) allow_silent_automation_decline: bool,
+    pub(crate) allow_internal_review: bool,
 }
 
 fn normalize_agent_handle(raw: &str) -> Option<String> {
@@ -1060,6 +1061,22 @@ pub(crate) async fn process_dispatch_prompt(
     let conversation =
         conversations::ensure_conversation_record(&transaction, &project, &mut request, context)
             .await?;
+
+    if request.allow_internal_review {
+        conversations::require_internal_review_anchor(&transaction, &conversation.id).await?;
+    } else {
+        conversations::ensure_not_internal_conversation(&transaction, &conversation.id).await?;
+    }
+    // Prevent public request metadata from impersonating a hidden execution.
+    if let Some(map) = request.metadata.as_object_mut() {
+        map.remove("internalPurpose");
+        if !request.allow_internal_review {
+            map.remove("spaceReview");
+        }
+    }
+    if request.allow_internal_review {
+        request.metadata["internalPurpose"] = json!("space_review");
+    }
 
     // Every dispatch that can create an agent job crosses this fence. Most
     // internal callers intentionally retain their existing overlap policy,
@@ -2926,6 +2943,7 @@ pub(crate) fn normalize_dispatch_request(
         expected_lane_idle: false,
         dispatch_queue_entry_id: None,
         allow_silent_automation_decline: false,
+        allow_internal_review: false,
     })
 }
 

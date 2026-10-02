@@ -104,6 +104,49 @@ describe("space recommendations", () => {
     expect(JSON.parse(result.stdout).prompt).toBe(input.prompt);
   });
 
+  it("submits one trimmed Octo opener as literal JSON and preserves scoped delivery redaction", async () => {
+    const message = "The guide draft is ready, but the pilot update still needs drafting. Shall I prepare it for your review? Literal notes: $(date) and `echo example`.";
+    const delivered = { ...record, message, delivered: true, deliveredConversationId: null };
+    const mock = await controller(delivered);
+    const result = await cli(workspace(), ["submit", "--file", "-", "--json"], {
+      RUNTIME_ID: randomUUID(), INSTAFY_CONVERSATION_ID: conversationId,
+      CONTROLLER_ACCESS_TOKEN: "scoped-job-token", CONTROLLER_BASE_URL: mock.url,
+    }, JSON.stringify({ ...proposal, message: `  ${message}\n` }));
+    expect(result.code, result.stderr).toBe(0);
+    expect(JSON.parse(result.stdout)).toEqual(delivered);
+    expect(mock.requests).toEqual([{ method: "POST", url: `/projects/${spaceId}/recommendations`, auth: "Bearer scoped-job-token", body: { ...proposal, message } }]);
+  });
+
+  it("lists delivered records without treating them as accepted or claiming a new chat on retry", async () => {
+    const delivered = { ...record, delivered: true, deliveredConversationId: randomUUID() };
+    const list = await controller({ recommendations: [delivered] });
+    const listed = await cli(workspace(), ["list", "--json", "--server-url", list.url, "--access-token", "user-token"]);
+    expect(JSON.parse(listed.stdout)).toEqual({ recommendations: [delivered] });
+    const submit = await controller(delivered);
+    const retried = await cli(workspace(), ["submit", "--file", "-", "--server-url", submit.url, "--access-token", "user-token"], {}, JSON.stringify({ ...proposal, message: "Shall I help settle the welcome wording?" }));
+    expect(retried.code, retried.stderr).toBe(0);
+    expect(retried.stdout).toContain(`Recommendation ${record.id} [delivered]`);
+    expect(retried.stdout).not.toMatch(/accepted|created|opened/i);
+    expect(submit.requests).toHaveLength(1);
+  });
+
+  it("accepts a 4000-character Unicode opener without counting encoded bytes as characters", async () => {
+    const message = "\u{1f642}".repeat(4000);
+    const mock = await controller({ ...record, message, delivered: true, deliveredConversationId: null });
+    const result = await cli(workspace(), ["submit", "--file", "-", "--json", "--server-url", mock.url, "--access-token", "user-token"], {}, JSON.stringify({ ...proposal, message }));
+    expect(result.code, result.stderr).toBe(0);
+    expect(mock.requests[0].body).toEqual({ ...proposal, message });
+  });
+
+  it("surfaces the delivery limit without retrying or falling back to proposal-only submission", async () => {
+    const mock = await controller({ message: "One delivery per run" }, 409);
+    const result = await cli(workspace(), ["submit", "--file", "-", "--json", "--server-url", mock.url, "--access-token", "user-token"], {}, JSON.stringify({ ...proposal, message: "Shall I help settle the welcome wording?" }));
+    expect(result.code).not.toBe(0);
+    expect(result.stderr).toContain("409");
+    expect(mock.requests).toHaveLength(1);
+    expect(mock.requests[0].body).toEqual({ ...proposal, message: "Shall I help settle the welcome wording?" });
+  });
+
   it.each(["", "{incomplete", " ".repeat(65_537)])("rejects empty, malformed or oversized stdin before a request", async (input) => {
     const mock = await controller(record);
     const result = await cli(workspace(), ["submit", "--file", "-", "--json", "--server-url", mock.url, "--access-token", "user-token"], {}, input);
@@ -119,6 +162,10 @@ describe("space recommendations", () => {
     { ...proposal, key: "a/path" },
     { ...proposal, title: "x".repeat(161) },
     { ...proposal, ownerUserId: randomUUID() },
+    { ...proposal, message: " " },
+    { ...proposal, message: null },
+    { ...proposal, message: 7 },
+    { ...proposal, message: "x".repeat(4001) },
   ])("rejects malformed or ungrounded submissions before contacting the controller", async (invalid) => {
     const cwd = workspace();
     fs.writeFileSync(path.join(cwd, "proposal.json"), JSON.stringify(invalid));

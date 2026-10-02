@@ -1,6 +1,6 @@
 /** @vitest-environment jsdom */
 
-import { act, useRef } from "react";
+import { act, useCallback, useRef } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ControllerProjectConversation } from "../../services/runtimeController/conversations";
@@ -63,6 +63,8 @@ function Harness({
   latestStateRef.current = state;
   const dispatch = useRef(vi.fn<(action: ConversationsAction) => void>()).current;
   const updateMetadata = useRef(vi.fn()).current;
+  const fetchConversations = useCallback((args: { projectId: string; limit: number; signal?: AbortSignal; internalOnly?: boolean }) =>
+    args.internalOnly ? Promise.resolve([]) : fetchProjectConversations(args), [fetchProjectConversations]);
   latestSyncState = useConversationControllerSync({
     state,
     currentUserId: userId,
@@ -73,7 +75,7 @@ function Harness({
     dispatch: suppliedDispatch ?? dispatch,
     controllerConversationSyncEpoch: epoch,
     bumpControllerConversationSyncEpoch: bump,
-    fetchProjectConversationsFromController: fetchProjectConversations,
+    fetchProjectConversationsFromController: fetchConversations,
     updateControllerConversationMetadata: updateMetadata,
   });
   renderedErrors.push(latestSyncState.remoteConversationHistoryError);

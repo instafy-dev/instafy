@@ -11,12 +11,14 @@ type CommonOptions = {
 };
 
 type Evidence = { conversationId: string; messageId?: string };
-type Proposal = { key: string; title: string; reason: string; prompt: string; evidence: Evidence[] };
+type Proposal = { key: string; title: string; reason: string; prompt: string; message?: string; evidence: Evidence[] };
 type Recommendation = Proposal & {
   id: string;
   projectId: string;
   status: "proposed" | "accepted" | "dismissed";
   acceptedConversationId: string | null;
+  delivered?: boolean;
+  deliveredConversationId?: string | null;
   createdAt: string;
   updatedAt: string;
 };
@@ -96,7 +98,7 @@ async function readProposal(file: string): Promise<Proposal> {
   }
   let parsed: unknown;
   try { parsed = JSON.parse(bytes.toString("utf8")); } catch { throw new Error("Recommendation file must contain valid JSON."); }
-  const input = object(parsed, ["key", "title", "reason", "prompt", "evidence"], "Recommendation");
+  const input = object(parsed, ["key", "title", "reason", "prompt", "message", "evidence"], "Recommendation");
   const key = text(input.key, "Recommendation key", 120);
   if (!/^[a-z0-9][a-z0-9_-]{0,119}$/.test(key)) throw new Error("Recommendation key must be a lowercase slug using letters, digits, hyphens or underscores.");
   if (!Array.isArray(input.evidence) || input.evidence.length < 1 || input.evidence.length > 8) {
@@ -107,6 +109,7 @@ async function readProposal(file: string): Promise<Proposal> {
     title: text(input.title, "Recommendation title", 160),
     reason: text(input.reason, "Recommendation reason", 2000),
     prompt: text(input.prompt, "Recommendation prompt", 4000),
+    ...(input.message === undefined ? {} : { message: text(input.message, "Recommendation message", 4000) }),
     evidence: input.evidence.map((value) => {
       const entry = object(value, ["conversationId", "messageId"], "Evidence");
       return {
@@ -128,7 +131,7 @@ export async function recommendationsList(options: CommonOptions & { limit?: num
   if (!Array.isArray(response?.recommendations)) throw new Error("Invalid recommendations response from controller.");
   if (options.json) console.log(JSON.stringify(response, null, 2));
   else if (!response.recommendations.length) console.log("No recommendations found.");
-  else for (const item of response.recommendations) console.log(`${item.id} [${item.status}] ${item.title}\n  ${item.reason}`);
+  else for (const item of response.recommendations) console.log(`${item.id} [${item.status}${item.delivered ? ", delivered" : ""}] ${item.title}\n  ${item.reason}`);
 }
 
 export async function recommendationsSubmit(options: CommonOptions & { file: string }): Promise<void> {
@@ -142,5 +145,6 @@ export async function recommendationsSubmit(options: CommonOptions & { file: str
     throw new Error("Invalid recommendation response from controller.");
   }
   if (options.json) console.log(JSON.stringify(response, null, 2));
+  else if (response.delivered) console.log(`Recommendation ${response.id} [delivered]: ${response.title}`);
   else console.log(`${response.status === "proposed" ? "Saved" : "Kept"} recommendation ${response.id} [${response.status}]: ${response.title}`);
 }

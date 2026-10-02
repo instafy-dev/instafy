@@ -169,48 +169,52 @@ A same-handle agent in a new chat should not assume it has global memory from ol
 
 ### Space reviews and recommendations
 
-Ask to review a space in a normal chat, or invoke `$instafy-space-review`. The bundled skill
-reads a bounded set of accessible recent conversations and prior recommendations, then proposes
-zero to three grounded next actions. It does not run automatically, create a schedule, or execute
-the suggested work. A runtime job can review shared space chats and its own private conversation
-tree; it cannot read unrelated private chats just because the person has access to them.
+Ask to review a space in a normal chat, invoke `$instafy-space-review`, or explicitly schedule
+`automations create --mode space_review`. The bundled skill reads bounded accessible context and
+prior recommendations, then starts at most one useful private Octo chat with a grounded question.
+It does not execute the suggested work or create a schedule itself. Runtime jobs can read shared
+space chats and their own private conversation tree, not unrelated private chats.
 
 ```bash
 instafy recommendations list --limit 200 --json
-instafy recommendations submit --file .instafy/space-review-proposal.json --json
+instafy recommendations submit --file - --json
 ```
 
-Both commands use the linked space or the runtime's space ID; pass `--space <uuid>` to select a
-space explicitly. Saved user login/profile credentials and active job-scoped controller
-credentials follow the existing CLI origin binding. The controller enforces access and ownership.
-`list` returns `{ "recommendations": [...] }`, including visible proposed, accepted and dismissed
-items, with a default limit of 100 and maximum of 200. It is a bounded recent list, not a complete
-history. Reviewers should read it before proposing work and avoid recreating an earlier decision
-under a different key.
+Both commands use the linked space or runtime space ID; `--space <uuid>` selects an explicit
+space. User and active scoped-job credentials retain the existing CLI origin binding and
+controller permissions. `list` returns `{ "recommendations": [...] }`, including visible proposed,
+accepted and dismissed items and their `delivered` state. `deliveredConversationId` is redacted
+as `null` for scoped jobs. The default limit is 100 and maximum 200; this is a bounded recent list.
+Read it before proposing work and do not recreate earlier deliveries or choices under new keys.
 
 `submit --file -` reads one JSON object from stdin without writing workspace files. A regular file
 inside the active workspace is also supported (maximum 64 KiB for either input; symlinks and
-escaping file paths are rejected). The object has this shape:
+escaping paths are rejected). For example:
 
 ```json
 {
   "key": "confirm-welcome-copy",
-  "title": "Confirm the welcome copy",
+  "title": "Welcome copy",
   "reason": "The onboarding discussion left the welcome wording undecided.",
   "prompt": "Use our onboarding discussion to propose the final welcome wording.",
+  "message": "The welcome wording is still undecided. Would you like me to draft two short options?",
   "evidence": [{ "conversationId": "<conversation UUID>", "messageId": "<message UUID>" }]
 }
 ```
 
-Use actual accessible conversation/message IDs; `messageId` is optional. Evidence must contain
-1–8 references. Keys use lowercase letters, digits, hyphens and underscores (up to 120 characters);
-title, reason and prompt limits are 160, 2,000 and 4,000 characters. The first key character must be
-a letter or digit. The controller validates evidence in the same space. Reusing a proposed key
-updates that proposal; reusing an accepted or dismissed key returns its existing outcome unchanged.
-JSON output is the stored recommendation, including its status. Choosing an action and dismissing
-one remain human actions in Studio; this command does neither. Empty spaces receive a conversational
-starter rather than a recommendation with invented evidence. An older controller without these
-APIs reports an error instead of silently saving a local substitute.
+Use actual accessible IDs; `messageId` is optional. Evidence contains 1–8 references. Keys use
+lowercase letters, digits, hyphens and underscores (maximum 120 characters, starting with a letter
+or digit). Title, reason and prompt limits are 160, 2,000 and 4,000 characters. Optional `message`
+is trimmed, nonblank and at most 4,000 characters. The controller validates sources in this space
+and appends their links to the delivered opener.
+
+Including `message` atomically delivers a normal private chat once, without starting its suggested
+work or changing status. Omitting it preserves legacy proposal-only behavior. Delivered, accepted
+and dismissed keys return unchanged, including after the delivered chat is archived or deleted.
+At most one delivery is allowed per active run. Retry uncertain results with the same key; do not
+work around a limit with a new key or by dropping `message`. JSON output is the stored record.
+The CLI cannot accept or dismiss a proposal. An older controller reports unsupported fields or
+routes instead of silently saving a local substitute. See [Space review](Space-Review.md).
 
 ### Provider bindings
 
@@ -612,7 +616,21 @@ Add `--json` to any of these commands for machine-readable output.
 Create and manage scheduled project prompts with `instafy automations`. When no local space
 manifest is available, pass `--space` to the project-scoped `list` and `create` commands.
 
-For checks that should report only findings, opt in at creation time:
+For a bounded review that starts at most one normal private Octo conversation per run:
+
+```bash
+instafy automations create --space "<Project ID>" --name "Octo check-in" \
+  --mode space_review --schedule-kind hourly --interval-hours 24
+```
+
+`--mode` is `prompt` (default) or `space_review`, and is immutable. Review mode uses fixed bundled
+instructions without `--prompt`, forces private/quiet delivery and permits one schedule per owner
+and space. It rejects `--share-results`, team visibility and a custom prompt. Pause, resume,
+manual run and schedule/runtime updates use the same commands; changing the managed prompt,
+private visibility or quiet setting is rejected. A pending review cannot be run again concurrently.
+See [Automations](Automations.md#space-review-mode) for internal audit history and delivery.
+
+For ordinary prompt checks that should report only findings, opt in at creation time:
 
 ```bash
 instafy automations create --json \

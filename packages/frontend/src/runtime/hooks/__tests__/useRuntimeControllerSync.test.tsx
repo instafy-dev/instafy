@@ -6,6 +6,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { RunRecord, RuntimeState } from "../../../types";
 import type { RuntimeAction } from "../../runtimeStore";
 import type {
+  ControllerEventPayload,
   FetchControllerRunsResult,
   SubscribeControllerRunsParams,
 } from "../../../services/runtimeController/runs";
@@ -94,9 +95,28 @@ function runRecord(overrides: Partial<RunRecord> = {}): RunRecord {
   };
 }
 
+function conversationEvent(
+  kind: string,
+  conversationId: string,
+  metadata: Record<string, unknown> | null = null,
+): ControllerEventPayload {
+  return {
+    kind,
+    project_id: "project-current",
+    conversation_id: conversationId,
+    data: {
+      id: `message-${conversationId}`,
+      role: "assistant",
+      content: "A useful next step",
+      metadata,
+    },
+  };
+}
+
 function projectDerivedClearActions(): RuntimeAction[] {
   return [
     { type: "setRunsState", runs: {}, latestRunIds: {} },
+    { type: "setInternalConversationIds", conversationIds: [] },
     { type: "setLocalWorkspace", workspace: null },
     {
       type: "applyOriginSummary",
@@ -199,6 +219,87 @@ describe("useRuntimeControllerSync controller access results", () => {
     container.remove();
     delete (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean })
       .IS_REACT_ACT_ENVIRONMENT;
+  });
+
+  it.each([
+    ["conversation.created", "pushConversationCreation"],
+    ["conversation.updated", "pushConversationUpdate"],
+    ["conversation.message_created", "pushConversationMessage"],
+  ])("keeps internal %s events out of chat hydration without hiding delivered chats", async (kind, actionType) => {
+    const dependencies = createHookDependencies();
+    controllerMocks.fetchRuns.mockResolvedValue(fetchResult());
+    controllerMocks.subscribeToRuns.mockReturnValue(() => {});
+    await act(async () => root.render(<Harness projectId="project-current" dependencies={dependencies} />));
+    const subscription = controllerMocks.subscribeToRuns.mock.calls[0][0] as SubscribeControllerRunsParams;
+    dependencies.dispatch.mockClear();
+
+    // A message can be the first event observed after reconnect: hiding only
+    // the anchor's creation would still let it claim an empty composer.
+    await act(async () => subscription.onEvent?.(conversationEvent(kind, "internal-review", {
+      internalPurpose: "space_review",
+    })));
+    expect(dependencies.dispatch).toHaveBeenCalledExactlyOnceWith({
+      type: "setInternalConversationIds", conversationIds: ["internal-review"],
+    });
+    dependencies.dispatch.mockClear();
+
+    await act(async () => subscription.onEvent?.(conversationEvent(kind, "delivered-chat", {
+      recommendationId: "12345678-1234-4234-8234-123456789012",
+    })));
+    expect(dependencies.dispatch).toHaveBeenCalledOnce();
+    expect(dependencies.dispatch.mock.calls[0][0].type).toBe(actionType);
+  });
+
+  it.each(["snapshot", "live", "patch"])("uses internal %s run markers to keep later messages out of automatic chat hydration", async (source) => {
+    const dependencies = createHookDependencies();
+    const internalRun = runRecord({
+      conversationId: "internal-review",
+      metadata: { spaceReview: { automationId: "automation-1", enforcedBy: "runtime-controller" } },
+    });
+    controllerMocks.fetchRuns.mockResolvedValue(fetchResult({ runs: source === "snapshot" ? [internalRun] : [] }));
+    controllerMocks.subscribeToRuns.mockReturnValue(() => {});
+    await act(async () => root.render(<Harness projectId="project-current" dependencies={dependencies} />));
+    const subscription = controllerMocks.subscribeToRuns.mock.calls[0][0] as SubscribeControllerRunsParams;
+    await act(async () => {
+      if (source === "live") subscription.onRun(internalRun, "INSERT");
+      if (source === "patch") subscription.onRunPatch(internalRun);
+    });
+    // Audit status still receives its authorized run; only automatic chat
+    // creation/message queues are suppressed.
+    if (source === "patch") {
+      expect(dependencies.dispatch).toHaveBeenCalledWith({ type: "patchRun", patch: internalRun });
+    } else {
+      expect(dependencies.upsertRun).toHaveBeenCalledWith(internalRun);
+    }
+    dependencies.dispatch.mockClear();
+    await act(async () => subscription.onEvent?.(conversationEvent("conversation.message_created", "internal-review")));
+    expect(dependencies.dispatch).not.toHaveBeenCalled();
+  });
+
+  it("remembers internal anchors across live events without carrying them into another project", async () => {
+    const dependencies = createHookDependencies();
+    controllerMocks.fetchRuns.mockResolvedValue(fetchResult());
+    controllerMocks.subscribeToRuns.mockReturnValue(() => {});
+    await act(async () => root.render(<Harness projectId="project-current" dependencies={dependencies} />));
+    const subscription = controllerMocks.subscribeToRuns.mock.calls[0][0] as SubscribeControllerRunsParams;
+    dependencies.dispatch.mockClear();
+    await act(async () => {
+      subscription.onEvent?.(conversationEvent("conversation.created", "internal-review", { internalPurpose: "space_review" }));
+      subscription.onEvent?.(conversationEvent("conversation.message_created", "internal-review"));
+      subscription.onEvent?.(conversationEvent("conversation.updated", "internal-review"));
+    });
+    expect(dependencies.dispatch).toHaveBeenCalledExactlyOnceWith({
+      type: "setInternalConversationIds", conversationIds: ["internal-review"],
+    });
+
+    await act(async () => root.render(<Harness projectId="another-project" dependencies={dependencies} />));
+    const nextSubscription = controllerMocks.subscribeToRuns.mock.calls[1][0] as SubscribeControllerRunsParams;
+    dependencies.dispatch.mockClear();
+    await act(async () => nextSubscription.onEvent?.({
+      ...conversationEvent("conversation.message_created", "internal-review"),
+      project_id: "another-project",
+    }));
+    expect(dependencies.dispatch).toHaveBeenCalledWith(expect.objectContaining({ type: "pushConversationMessage" }));
   });
 
   it("clears every project-derived runtime slice when there is no active project", async () => {

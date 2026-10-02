@@ -164,6 +164,7 @@ const AccountConversationsProvider = ({ children }: PropsWithChildren) => {
     pendingConversationCreations,
     ackConversationCreations,
     pendingConversationUpdates,
+    internalConversationIds,
     ackConversationUpdates
   } = runtimeContext;
   const controllerProjectMissing = runtimeContext.runtime.controllerProjectMissing;
@@ -288,6 +289,7 @@ const AccountConversationsProvider = ({ children }: PropsWithChildren) => {
     ackConversationCreations,
     pendingConversationUpdates,
     ackConversationUpdates,
+    internalConversationIds,
     pendingConversationMessages,
     ackConversationMessages,
     lastBackgroundAtRef,
