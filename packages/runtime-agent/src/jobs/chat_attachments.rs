@@ -12,11 +12,15 @@
 //! A signed URL is a bearer credential: it is never logged, and a failure is
 //! reported by attachment name only. Writes go through descriptor-relative,
 //! no-follow handles, so a symlink planted under `.instafy/` cannot redirect
-//! one out of the workspace.
+//! one out of the workspace. Each body streams into a fresh temporary file
+//! that is renamed into place only once the whole download is in, so neither
+//! a large attachment nor several at once are held in memory, and a partial
+//! one never appears under its name.
 
 use std::collections::HashSet;
-use std::io;
+use std::io::{self, Read};
 use std::path::Path;
+use std::sync::Arc;
 use std::time::Duration;
 
 use origin_http_server::workspace_fs::{WorkspaceDir, WorkspaceEntryKind};
@@ -31,6 +35,10 @@ const EXTENSIONS: [&str; 6] = ["png", "jpg", "webp", "gif", "txt", "md"];
 const MAX_ATTACHMENT_BYTES: u64 = 20 * 1024 * 1024;
 const DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(30);
 const MAX_DOWNLOADS: usize = 20;
+/// Downloads in flight at once for one job.
+const MAX_CONCURRENT_DOWNLOADS: usize = 4;
+/// Body chunks queued between a download and its file writer.
+const WRITE_QUEUE_CHUNKS: usize = 8;
 /// The controller signs the Storage attachments of the turn's message and of
 /// the conversation's last this-many user messages. Older ones are not offered
 /// to the agent at all.
@@ -212,8 +220,8 @@ pub(super) async fn download_attachments(
             return outcomes;
         }
     };
-    // One deadline per download, covering the connection, the headers and the
-    // body, is applied around `fetch`.
+    // No client-wide timeout: `download_one` gives each download one deadline
+    // covering the connection, the headers and the body.
     let client = match reqwest::Client::builder()
         .redirect(reqwest::redirect::Policy::none())
         .build()
@@ -230,11 +238,16 @@ pub(super) async fn download_attachments(
         }
     };
 
+    let slots = Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT_DOWNLOADS));
     let mut tasks = tokio::task::JoinSet::new();
     for (index, download) in downloads.into_iter().enumerate() {
         let client = client.clone();
         let workspace = workspace.clone();
+        let slots = Arc::clone(&slots);
         tasks.spawn(async move {
+            // The semaphore is never closed. Each download's deadline starts
+            // once it has a slot, not while it waits for one.
+            let _slot = slots.acquire_owned().await.ok();
             let outcome = download_one(&client, &workspace, &download, limits).await;
             (index, download.name, outcome)
         });
@@ -293,32 +306,55 @@ async fn download_one(
         Err(_) => return DownloadOutcome::Rejected("the attachment's path is not a regular file"),
     }
 
-    let bytes =
-        match tokio::time::timeout(limits.timeout, fetch(client, &download.url, limits)).await {
-            Ok(Ok(bytes)) => bytes,
+    // One deadline covers the connection, the headers and the whole body.
+    let deadline = tokio::time::Instant::now() + limits.timeout;
+    let response =
+        match tokio::time::timeout_at(deadline, open_download(client, &download.url, limits)).await
+        {
+            Ok(Ok(response)) => response,
             Ok(Err(outcome)) => return outcome,
             Err(_) => return DownloadOutcome::Failed("timed out".to_string()),
         };
 
-    let workspace = workspace.clone();
-    let written = tokio::task::spawn_blocking(move || {
-        workspace.replace_file(&relative, &mut bytes.as_slice(), false)
-    })
-    .await;
-    match written {
-        Ok(Ok(_)) => DownloadOutcome::Downloaded,
-        Ok(Err(error)) => DownloadOutcome::Failed(format!("write failed: {error}")),
-        Err(_) => DownloadOutcome::Failed("write task failed".to_string()),
+    // `replace_file` writes a fresh no-follow temporary file next to the
+    // attachment and renames it into place once its reader reaches the end.
+    // The reader is fed from this task, so the body is never held whole.
+    let (chunks, receiver) = tokio::sync::mpsc::channel(WRITE_QUEUE_CHUNKS);
+    let writer = {
+        let workspace = workspace.clone();
+        tokio::task::spawn_blocking(move || {
+            workspace.replace_file(&relative, &mut BodyReader::new(receiver), false)
+        })
+    };
+    let streamed =
+        tokio::time::timeout_at(deadline, stream_body(response, &chunks, limits.max_bytes))
+            .await
+            .unwrap_or_else(|_| {
+                Streamed::Stopped(DownloadOutcome::Failed("timed out".to_string()))
+            });
+    // Without `End`, the reader fails and `replace_file` removes its
+    // temporary file, so nothing partial is left behind.
+    drop(chunks);
+    let written = writer.await;
+    match (streamed, written) {
+        (Streamed::Stopped(outcome), _) => outcome,
+        (_, Ok(Err(error))) => DownloadOutcome::Failed(format!("write failed: {error}")),
+        (_, Err(_)) => DownloadOutcome::Failed("write task failed".to_string()),
+        (Streamed::Complete, Ok(Ok(_))) => DownloadOutcome::Downloaded,
+        // The writer stopped reading but reported no error.
+        (Streamed::WriterStopped, Ok(Ok(_))) => {
+            DownloadOutcome::Failed("write stopped early".to_string())
+        }
     }
 }
 
-async fn fetch(
+async fn open_download(
     client: &reqwest::Client,
     url: &reqwest::Url,
     limits: DownloadLimits,
-) -> Result<Vec<u8>, DownloadOutcome> {
+) -> Result<reqwest::Response, DownloadOutcome> {
     // `without_url` keeps the signed URL out of every error string.
-    let mut response = client
+    let response = client
         .get(url.clone())
         .send()
         .await
@@ -337,20 +373,104 @@ async fn fetch(
             "larger than the attachment limit",
         ));
     }
-    let mut bytes = Vec::new();
-    while let Some(chunk) = response
-        .chunk()
-        .await
-        .map_err(|error| DownloadOutcome::Failed(error.without_url().to_string()))?
-    {
-        if bytes.len() as u64 + chunk.len() as u64 > limits.max_bytes {
-            return Err(DownloadOutcome::Rejected(
+    Ok(response)
+}
+
+/// What a download's body did on its way to the file writer.
+enum Streamed {
+    /// Every chunk and the end marker were handed over.
+    Complete,
+    /// The writer stopped reading first; its own result says why.
+    WriterStopped,
+    /// The download failed or broke the cap; the writer is told nothing more.
+    Stopped(DownloadOutcome),
+}
+
+enum BodyChunk {
+    Bytes(Vec<u8>),
+    End,
+}
+
+async fn stream_body(
+    mut response: reqwest::Response,
+    chunks: &tokio::sync::mpsc::Sender<BodyChunk>,
+    max_bytes: u64,
+) -> Streamed {
+    let mut received: u64 = 0;
+    loop {
+        let chunk = match response.chunk().await {
+            Ok(Some(chunk)) => chunk,
+            Ok(None) => break,
+            Err(error) => {
+                return Streamed::Stopped(DownloadOutcome::Failed(error.without_url().to_string()));
+            }
+        };
+        received += chunk.len() as u64;
+        if received > max_bytes {
+            return Streamed::Stopped(DownloadOutcome::Rejected(
                 "larger than the attachment limit",
             ));
         }
-        bytes.extend_from_slice(&chunk);
+        if chunks.send(BodyChunk::Bytes(chunk.to_vec())).await.is_err() {
+            return Streamed::WriterStopped;
+        }
     }
-    Ok(bytes)
+    if chunks.send(BodyChunk::End).await.is_err() {
+        return Streamed::WriterStopped;
+    }
+    Streamed::Complete
+}
+
+/// The blocking side of a download: reads the chunks its task sends and ends
+/// only at the explicit end marker. A sender dropped without one, after a
+/// failure, a breach of the cap or a timeout, is an error, so `replace_file`
+/// discards the temporary file instead of renaming a truncated body into
+/// place.
+struct BodyReader {
+    receiver: tokio::sync::mpsc::Receiver<BodyChunk>,
+    current: Vec<u8>,
+    offset: usize,
+    ended: bool,
+}
+
+impl BodyReader {
+    fn new(receiver: tokio::sync::mpsc::Receiver<BodyChunk>) -> Self {
+        Self {
+            receiver,
+            current: Vec::new(),
+            offset: 0,
+            ended: false,
+        }
+    }
+}
+
+impl Read for BodyReader {
+    fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+        loop {
+            if self.offset < self.current.len() {
+                let count = buffer.len().min(self.current.len() - self.offset);
+                buffer[..count].copy_from_slice(&self.current[self.offset..self.offset + count]);
+                self.offset += count;
+                return Ok(count);
+            }
+            if self.ended {
+                return Ok(0);
+            }
+            match self.receiver.blocking_recv() {
+                Some(BodyChunk::Bytes(bytes)) => {
+                    self.current = bytes;
+                    self.offset = 0;
+                }
+                Some(BodyChunk::End) => self.ended = true,
+                None => {
+                    return Err(io::Error::new(
+                        io::ErrorKind::UnexpectedEof,
+                        "the download stopped before it completed",
+                    ));
+                }
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -380,6 +500,27 @@ mod tests {
                     let chunks = (0..4).map(|_| Ok::<_, std::io::Error>(vec![b'y'; 1024]));
                     Response::builder()
                         .body(Body::from_stream(futures_util::stream::iter(chunks)))
+                        .unwrap()
+                }
+                "chunked-ok" => {
+                    let chunks = (0..3).map(|n| Ok::<_, std::io::Error>(vec![b'a' + n; 300]));
+                    Response::builder()
+                        .body(Body::from_stream(futures_util::stream::iter(chunks)))
+                        .unwrap()
+                }
+                "stalled" => {
+                    // Headers and a first chunk, then nothing until the
+                    // download's deadline has passed.
+                    let first =
+                        futures_util::stream::iter([Ok::<_, std::io::Error>(vec![b'z'; 100])]);
+                    let rest = futures_util::stream::once(async {
+                        tokio::time::sleep(Duration::from_secs(5)).await;
+                        Ok::<_, std::io::Error>(vec![b'z'; 100])
+                    });
+                    Response::builder()
+                        .body(Body::from_stream(futures_util::StreamExt::chain(
+                            first, rest,
+                        )))
                         .unwrap()
                 }
                 "slow" => {
@@ -475,18 +616,110 @@ mod tests {
         assert!(attachment_is_available(workspace.path(), &name(1, "png")));
         assert!(!attachment_is_available(workspace.path(), &name(3, "png")));
 
+        // The runtime image always has git; so must this test.
         let git = std::process::Command::new("git")
             .args(["init", "-q"])
             .current_dir(workspace.path())
-            .status();
-        if git.is_ok_and(|status| status.success()) {
-            let status = std::process::Command::new("git")
-                .args(["status", "--porcelain", "--untracked-files=all"])
-                .current_dir(workspace.path())
-                .output()
-                .unwrap();
-            assert_eq!(String::from_utf8_lossy(&status.stdout), "");
+            .status()
+            .expect("git is required for this test");
+        assert!(git.success(), "git init failed");
+        let status = std::process::Command::new("git")
+            .args(["status", "--porcelain", "--untracked-files=all"])
+            .current_dir(workspace.path())
+            .output()
+            .unwrap();
+        assert!(status.status.success(), "git status failed");
+        assert_eq!(String::from_utf8_lossy(&status.stdout), "");
+    }
+
+    /// Only the attachments folder's own `.gitignore` and the named files:
+    /// no temporary file of a download that failed.
+    fn attachment_dir_entries(workspace: &Path) -> Vec<String> {
+        let mut entries: Vec<String> = std::fs::read_dir(workspace.join(ATTACHMENTS_DIR))
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        entries.sort();
+        entries
+    }
+
+    #[tokio::test]
+    async fn a_body_in_many_chunks_is_written_whole() {
+        let base = serve().await;
+        let workspace = tempfile::tempdir().unwrap();
+        let outcomes = download_attachments(
+            &[entry(&name(1, "txt"), &base, "chunked-ok")],
+            workspace.path(),
+            limits(),
+        )
+        .await;
+        assert_eq!(
+            outcomes,
+            vec![(name(1, "txt"), DownloadOutcome::Downloaded)]
+        );
+        let mut expected = vec![b'a'; 300];
+        expected.extend([b'b'; 300]);
+        expected.extend([b'c'; 300]);
+        assert_eq!(
+            std::fs::read(workspace.path().join(ATTACHMENTS_DIR).join(name(1, "txt"))).unwrap(),
+            expected
+        );
+        assert_eq!(
+            attachment_dir_entries(workspace.path()),
+            vec![".gitignore".to_string(), name(1, "txt")]
+        );
+    }
+
+    #[tokio::test]
+    async fn at_most_four_downloads_run_at_once() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        #[derive(Clone, Default)]
+        struct InFlight {
+            now: Arc<AtomicUsize>,
+            most: Arc<AtomicUsize>,
+            served: Arc<AtomicUsize>,
         }
+        async fn object(
+            axum::extract::State(in_flight): axum::extract::State<InFlight>,
+        ) -> &'static str {
+            let now = in_flight.now.fetch_add(1, Ordering::SeqCst) + 1;
+            in_flight.most.fetch_max(now, Ordering::SeqCst);
+            tokio::time::sleep(Duration::from_millis(150)).await;
+            in_flight.now.fetch_sub(1, Ordering::SeqCst);
+            in_flight.served.fetch_add(1, Ordering::SeqCst);
+            "bytes"
+        }
+        let in_flight = InFlight::default();
+        let app = Router::new()
+            .route("/object/:object", get(object))
+            .with_state(in_flight.clone());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+        let workspace = tempfile::tempdir().unwrap();
+        let entries: Vec<JsonValue> = (1..=10)
+            .map(|n| entry(&name(n, "png"), &base, "counted"))
+            .collect();
+        let outcomes = download_attachments(
+            &entries,
+            workspace.path(),
+            DownloadLimits {
+                max_bytes: 1024,
+                timeout: Duration::from_secs(5),
+            },
+        )
+        .await;
+        assert!(
+            outcomes
+                .iter()
+                .all(|(_, outcome)| *outcome == DownloadOutcome::Downloaded),
+            "{outcomes:?}"
+        );
+        assert_eq!(in_flight.served.load(Ordering::SeqCst), 10);
+        let most = in_flight.most.load(Ordering::SeqCst);
+        assert!((2..=4).contains(&most), "{most} downloads ran at once");
     }
 
     #[tokio::test]
@@ -560,6 +793,7 @@ mod tests {
             entry(&name(3, "png"), &base, "slow"),
             entry(&name(4, "png"), &base, "missing"),
             entry(&name(5, "png"), &base, "redirect"),
+            entry(&name(6, "png"), &base, "stalled"),
         ];
         let outcomes = download_attachments(&entries, workspace.path(), limits()).await;
         assert_eq!(
@@ -582,15 +816,26 @@ mod tests {
             outcomes[4].1,
             DownloadOutcome::Failed("download returned 302 Found".to_string())
         );
+        // The deadline covers the body too, not only the headers.
+        assert_eq!(
+            outcomes[5].1,
+            DownloadOutcome::Failed("timed out".to_string())
+        );
         for (_, outcome) in &outcomes {
             if let DownloadOutcome::Failed(error) = outcome {
                 assert!(!error.contains("token=secret"), "{error}");
                 assert!(!error.contains("/object/"), "{error}");
             }
         }
-        for n in 1..=5 {
+        for n in 1..=6 {
             assert!(!attachment_is_available(workspace.path(), &name(n, "png")));
         }
+        // The body that broke the cap and the one that stalled had started
+        // writing; neither left a partial or temporary file behind.
+        assert_eq!(
+            attachment_dir_entries(workspace.path()),
+            vec![".gitignore".to_string()]
+        );
     }
 
     fn prompt_section(
