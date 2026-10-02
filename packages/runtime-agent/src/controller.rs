@@ -587,10 +587,12 @@ impl ControllerClient {
             )));
         }
 
+        // A leased job carries tokens and signed attachment URLs, so the body
+        // of a successful lease never goes into an error or a log.
         let parsed: LeaseResponse = serde_json::from_str(&text).map_err(|error| {
             LeaseError::Other(anyhow!(
-                "failed to parse lease response: {error}; body={}",
-                text
+                "failed to parse lease response ({} bytes): {error}",
+                text.len()
             ))
         })?;
         Ok(parsed.jobs)

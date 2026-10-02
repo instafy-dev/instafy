@@ -38,6 +38,7 @@ use uuid::Uuid;
 
 mod browser_request;
 mod card_text;
+mod chat_attachments;
 mod conversation_context;
 mod git_sync;
 mod known_safe_command;
@@ -5795,6 +5796,12 @@ impl JobProcessor {
                 || expects_generic_mcp_tool_execution,
         );
 
+        // Storage attachments the controller signed for this turn. A failure
+        // only leaves that attachment out of the prompt's list.
+        if !expects_generic_mcp_tool_execution {
+            chat_attachments::download_job_attachments(job.id, &job.payload, &workspace_dir).await;
+        }
+
         let (mut prompt, loaded_learned_blocks, mut prompt_context) =
             if expects_generic_mcp_tool_execution {
                 (
@@ -8136,15 +8143,18 @@ Avoid creating dependency caches or stores in the canonical workspace root when 
             );
         }
 
-        let attachment_section = format_image_attachment_section(
-            job.payload.get("metadata"),
-            workspace_dir,
-        )
-        .or_else(|| {
-            let attachments =
-                collect_image_attachments_from_history(job.payload.get("conversation_history"));
-            format_image_attachment_section_from_attachments(&attachments, workspace_dir)
-        });
+        let attachment_section =
+            format_image_attachment_section(job.payload.get("metadata"), workspace_dir, project_id)
+                .or_else(|| {
+                    let attachments = collect_image_attachments_from_history(
+                        job.payload.get("conversation_history"),
+                    );
+                    format_image_attachment_section_from_attachments(
+                        &attachments,
+                        workspace_dir,
+                        project_id,
+                    )
+                });
 
         if let Some(section) = attachment_section {
             append_prompt_section(
@@ -14517,25 +14527,10 @@ fn collect_image_attachments_from_history(history: Option<&JsonValue>) -> Vec<Js
                 let Some(entry) = attachment.as_object() else {
                     continue;
                 };
-                let kind = entry
-                    .get("kind")
-                    .and_then(JsonValue::as_str)
-                    .unwrap_or_default()
-                    .trim()
-                    .to_ascii_lowercase();
-                if kind != "image" {
-                    continue;
-                }
-                let workspace_path = entry
-                    .get("workspacePath")
-                    .and_then(JsonValue::as_str)
-                    .or_else(|| entry.get("workspace_path").and_then(JsonValue::as_str))
-                    .map(|value| value.trim())
-                    .filter(|value| !value.is_empty());
-                let Some(workspace_path) = workspace_path else {
+                let Some(key) = attachment_identity(entry) else {
                     continue;
                 };
-                if !unique_paths.insert(workspace_path.to_string()) {
+                if !unique_paths.insert(key) {
                     continue;
                 }
                 attachments.push(attachment.clone());
@@ -14549,6 +14544,7 @@ fn collect_image_attachments_from_history(history: Option<&JsonValue>) -> Vec<Js
 fn format_image_attachment_section(
     metadata: Option<&JsonValue>,
     workspace_dir: &Path,
+    project_id: &Uuid,
 ) -> Option<String> {
     let Some(metadata) = metadata.and_then(JsonValue::as_object) else {
         return None;
@@ -14558,7 +14554,39 @@ fn format_image_attachment_section(
         return None;
     };
 
-    format_image_attachment_section_from_attachments(attachments, workspace_dir)
+    format_image_attachment_section_from_attachments(attachments, workspace_dir, project_id)
+}
+
+/// How an attachment is told apart from the others: a legacy image by its
+/// `workspacePath`, a Storage image or text file by its `storagePath`. Any
+/// other entry is not an attachment the prompt lists.
+fn attachment_identity(entry: &JsonMap<String, JsonValue>) -> Option<String> {
+    let kind = entry
+        .get("kind")
+        .and_then(JsonValue::as_str)
+        .unwrap_or_default()
+        .trim()
+        .to_ascii_lowercase();
+    if let Some(storage_path) = attachment_text_field(entry, "storagePath", "storage_path") {
+        return matches!(kind.as_str(), "image" | "file").then(|| storage_path.to_string());
+    }
+    if kind != "image" {
+        return None;
+    }
+    attachment_text_field(entry, "workspacePath", "workspace_path").map(str::to_string)
+}
+
+fn attachment_text_field<'a>(
+    entry: &'a JsonMap<String, JsonValue>,
+    key: &str,
+    snake_key: &str,
+) -> Option<&'a str> {
+    entry
+        .get(key)
+        .and_then(JsonValue::as_str)
+        .or_else(|| entry.get(snake_key).and_then(JsonValue::as_str))
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
 }
 
 fn client_metadata(metadata: Option<&JsonValue>) -> Option<&serde_json::Map<String, JsonValue>> {
@@ -15315,53 +15343,67 @@ fn format_write_scope_guardrail_section(metadata: Option<&JsonValue>) -> Option<
     Some(formatted)
 }
 
+/// The prompt's attachments section. Legacy images name their workspace
+/// path. A Storage image or text file is listed at `.instafy/attachments/`
+/// only when the file is there, which the pre-turn download decides; the
+/// others are named as unavailable so the agent neither guesses a path nor
+/// pretends to have read them.
 fn format_image_attachment_section_from_attachments(
     attachments: &[JsonValue],
     workspace_dir: &Path,
+    project_id: &Uuid,
 ) -> Option<String> {
     let mut lines = Vec::new();
+    let mut unavailable = Vec::new();
+    let mut lists_image = false;
+    let mut lists_text_file = false;
     for attachment in attachments {
         let Some(entry) = attachment.as_object() else {
             continue;
         };
-        let kind = entry
-            .get("kind")
-            .and_then(JsonValue::as_str)
-            .unwrap_or_default()
-            .trim()
-            .to_ascii_lowercase();
-        if kind != "image" {
+        if attachment_identity(entry).is_none() {
             continue;
         }
-        let workspace_path = entry
-            .get("workspacePath")
+        let is_image = entry
+            .get("kind")
             .and_then(JsonValue::as_str)
-            .or_else(|| entry.get("workspace_path").and_then(JsonValue::as_str))
-            .map(|value| value.trim())
-            .filter(|value| !value.is_empty());
-        let Some(workspace_path) = workspace_path else {
-            continue;
-        };
-        let file_name = entry
-            .get("fileName")
-            .and_then(JsonValue::as_str)
-            .or_else(|| entry.get("file_name").and_then(JsonValue::as_str))
-            .map(|value| value.trim())
-            .filter(|value| !value.is_empty());
-        let mime_type = entry
-            .get("mimeType")
-            .and_then(JsonValue::as_str)
-            .or_else(|| entry.get("mime_type").and_then(JsonValue::as_str))
-            .map(|value| value.trim())
-            .filter(|value| !value.is_empty());
+            .is_some_and(|kind| kind.trim().eq_ignore_ascii_case("image"));
+        let file_name = attachment_text_field(entry, "fileName", "file_name");
+        let mime_type = attachment_text_field(entry, "mimeType", "mime_type");
         let size_bytes = entry
             .get("sizeBytes")
             .and_then(JsonValue::as_u64)
             .or_else(|| entry.get("size_bytes").and_then(JsonValue::as_u64));
 
+        let workspace_path = match attachment_text_field(entry, "storagePath", "storage_path") {
+            Some(storage_path) => {
+                let downloaded = chat_attachments::storage_path_file_name(storage_path, project_id)
+                    .filter(|name| chat_attachments::attachment_is_available(workspace_dir, name));
+                let Some(name) = downloaded else {
+                    unavailable.push(describe_unavailable_attachment(
+                        file_name, mime_type, size_bytes, is_image,
+                    ));
+                    continue;
+                };
+                format!("{}/{name}", chat_attachments::ATTACHMENTS_DIR)
+            }
+            None => {
+                let Some(path) = attachment_text_field(entry, "workspacePath", "workspace_path")
+                else {
+                    continue;
+                };
+                path.to_string()
+            }
+        };
+        if is_image {
+            lists_image = true;
+        } else {
+            lists_text_file = true;
+        }
+
         let mut line = String::new();
         line.push_str("workspacePath: ");
-        line.push_str(workspace_path);
+        line.push_str(&workspace_path);
         if file_name.is_some() || mime_type.is_some() || size_bytes.is_some() {
             line.push_str(" (");
             let mut wrote_detail = false;
@@ -15389,27 +15431,97 @@ fn format_image_attachment_section_from_attachments(
         lines.push(line);
     }
 
-    if lines.is_empty() {
+    if lines.is_empty() && unavailable.is_empty() {
         return None;
     }
 
     let mut section = String::new();
-    section.push_str("\nUser attached image(s):\n");
-    for line in lines {
-        section.push_str("- ");
-        section.push_str(&line);
-        section.push('\n');
-    }
-    section.push_str(&format!(
-        "\nPaths above are relative to the workspace root \"{}\".\n",
-        workspace_dir.display()
-    ));
-    section.push_str(
-        "Before answering, call the `view_image` tool on the image path(s), then respond to the latest request.\n\
+    if !lines.is_empty() {
+        section.push_str(if lists_text_file {
+            "\nUser attached file(s):\n"
+        } else {
+            "\nUser attached image(s):\n"
+        });
+        for line in lines {
+            section.push_str("- ");
+            section.push_str(&line);
+            section.push('\n');
+        }
+        section.push_str(&format!(
+            "\nPaths above are relative to the workspace root \"{}\".\n",
+            workspace_dir.display()
+        ));
+        if lists_image {
+            section.push_str(
+                "Before answering, call the `view_image` tool on the image path(s), then respond to the latest request.\n\
 When calling `view_image`, use the `workspacePath` value (not the fileName).\n\
 If you cannot view the image for any reason, do your best using the filename/path context.\n",
-    );
+            );
+        }
+        if lists_text_file {
+            section.push_str(
+                "Read the attached text file(s) at their `workspacePath` before answering.\n",
+            );
+        }
+    }
+    if !unavailable.is_empty() {
+        section.push_str(
+            "\nThe user also attached file(s) that are not available in this workspace:\n",
+        );
+        let shown = unavailable.len().min(UNAVAILABLE_ATTACHMENTS_LISTED);
+        for description in &unavailable[..shown] {
+            section.push_str("- ");
+            section.push_str(description);
+            section.push('\n');
+        }
+        if unavailable.len() > shown {
+            section.push_str(&format!("- and {} more\n", unavailable.len() - shown));
+        }
+        section.push_str(
+            "You cannot open these. If the answer depends on one, say that it could not be loaded and ask the user to attach it again.\n",
+        );
+    }
     Some(section)
+}
+
+const UNAVAILABLE_ATTACHMENTS_LISTED: usize = 10;
+
+fn describe_unavailable_attachment(
+    file_name: Option<&str>,
+    mime_type: Option<&str>,
+    size_bytes: Option<u64>,
+    is_image: bool,
+) -> String {
+    // The client supplies the name and type, so each is kept to one bounded line.
+    let one_line = |value: &str| -> String {
+        value
+            .chars()
+            .map(|character| {
+                if character.is_control() {
+                    ' '
+                } else {
+                    character
+                }
+            })
+            .take(120)
+            .collect()
+    };
+    let name = file_name
+        .map(one_line)
+        .filter(|name| !name.trim().is_empty())
+        .unwrap_or_else(|| if is_image { "an image" } else { "a text file" }.to_string());
+    let mut details = Vec::new();
+    if let Some(mime_type) = mime_type {
+        details.push(format!("mimeType: {}", one_line(mime_type)));
+    }
+    if let Some(size) = size_bytes {
+        details.push(format!("sizeBytes: {size}"));
+    }
+    if details.is_empty() {
+        name
+    } else {
+        format!("{name} ({})", details.join(", "))
+    }
 }
 
 fn append_context_value(value: &JsonValue, output: &mut Vec<String>) {

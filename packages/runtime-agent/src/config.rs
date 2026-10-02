@@ -201,6 +201,9 @@ impl Config {
                 "supportsStatefulConversations".to_string(),
                 serde_json::json!(true),
             );
+            // This runtime downloads the chat attachments the controller signs
+            // into `.instafy/attachments/` before a turn (jobs/chat_attachments.rs).
+            map.insert("attachmentDownloads".to_string(), serde_json::json!(true));
             let conversations = map
                 .entry("conversations".to_string())
                 .or_insert_with(|| serde_json::json!({}));
