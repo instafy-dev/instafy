@@ -1,0 +1,120 @@
+{
+  "note": "The one list both provider rate-limit classifiers are pinned to: is_provider_rate_limited_failure in packages/runtime-controller/src/agent.rs, which labels a failed run in the agent's history, and the provider_rate_limited kind of classifyRunFailureText in packages/frontend/src/conversations/runFailurePresentation.ts, which picks the Studio's failure card. A pattern changed on one side and not the other fails a test on both. `providerRateLimited` is whether the text is that kind.",
+  "cases": [
+    {
+      "name": "codex gives up after the provider answered 429",
+      "text": "exceeded retry limit, last status: 429 Too Many Requests",
+      "providerRateLimited": true
+    },
+    {
+      "name": "case and spacing do not matter",
+      "text": "Exceeded retry limit, last status:   429 Too Many Requests",
+      "providerRateLimited": true
+    },
+    {
+      "name": "the 429 sits inside a longer error",
+      "text": "stream disconnected: exceeded retry limit, last status: 429 Too Many Requests\nrequest id: abc",
+      "providerRateLimited": true
+    },
+    {
+      "name": "codex gives up after a 500",
+      "text": "exceeded retry limit, last status: 500 Internal Server Error",
+      "providerRateLimited": false
+    },
+    {
+      "name": "a status that only starts with 429",
+      "text": "exceeded retry limit, last status: 4290",
+      "providerRateLimited": false
+    },
+    {
+      "name": "the backend answered 429",
+      "text": "stream error: backend responded with 429",
+      "providerRateLimited": true
+    },
+    {
+      "name": "the backend answered a status that only starts with 429",
+      "text": "stream error: backend responded with 4291",
+      "providerRateLimited": false
+    },
+    {
+      "name": "the proxy's rate limit code",
+      "text": "upstream_rate_limit: the upstream provider is throttling requests",
+      "providerRateLimited": true
+    },
+    {
+      "name": "the proxy's rate limit code inside a longer identifier",
+      "text": "metric upstream_rate_limited_total went up",
+      "providerRateLimited": false
+    },
+    {
+      "name": "the proxy's rate limit sentence",
+      "text": "The upstream provider rate limit was reached. Try again shortly.",
+      "providerRateLimited": true
+    },
+    {
+      "name": "a spent quota keeps its own reason",
+      "text": "exceeded retry limit, last status: 429 Too Many Requests: insufficient_quota",
+      "providerRateLimited": false
+    },
+    {
+      "name": "a reached usage limit keeps its own reason",
+      "text": "upstream_rate_limit (usage_limit_reached)",
+      "providerRateLimited": false
+    },
+    {
+      "name": "a plan without the usage keeps its own reason",
+      "text": "backend responded with 429: usage_not_included",
+      "providerRateLimited": false
+    },
+    {
+      "name": "a named quota keeps its own reason",
+      "text": "backend responded with 429: monthly quota spent",
+      "providerRateLimited": false
+    },
+    {
+      "name": "an exceeded quota keeps its own reason",
+      "text": "upstream_rate_limit quota_exceeded",
+      "providerRateLimited": false
+    },
+    {
+      "name": "the proxy's JSON error for a rate limit",
+      "text": "{\"error\":{\"message\":\"The upstream provider rate limit was reached.\",\"type\":\"upstream_error\",\"code\":\"upstream_rate_limit\",\"retryable\":true}}",
+      "providerRateLimited": true
+    },
+    {
+      "name": "the proxy's streamed rate limit after codex gave up",
+      "text": "stream disconnected before completion: The upstream provider rate limit was reached (upstream_rate_limit, 429). Please try again in 5.5s.",
+      "providerRateLimited": true
+    },
+    {
+      "name": "a quota in words keeps its own reason",
+      "text": "exceeded retry limit, last status: 429 Too Many Requests (quota exceeded)",
+      "providerRateLimited": false
+    },
+    {
+      "name": "a throttled skill download is not the AI provider",
+      "text": "https://raw.githubusercontent.com/instafy-dev/skills/main/SKILL.md returned 429 Too Many Requests",
+      "providerRateLimited": false
+    },
+    {
+      "name": "the scoped worker proxy is not the AI provider",
+      "text": "Scoped worker proxy request failed with status 429 Too Many Requests: slow down",
+      "providerRateLimited": false
+    },
+    {
+      "name": "a bare 429 is not the AI provider",
+      "text": "429 Too Many Requests",
+      "providerRateLimited": false
+    },
+    {
+      "name": "a throttled skill import is not the AI provider",
+      "text": "skill import failed: GitHub answered 429 Too Many Requests",
+      "providerRateLimited": false
+    },
+    {
+      "name": "an unrelated failure",
+      "text": "Workspace file bookkeeping/profile.json was not found",
+      "providerRateLimited": false
+    }
+  ]
+}

@@ -1,3 +1,6 @@
+import { readFileSync } from "node:fs";
+import { dirname, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import type { ChatMessage } from "../../screens/studio/types";
 import {
@@ -177,6 +180,35 @@ describe("classifyRunFailureText", () => {
     expect(classifyRunFailureText("Codex run timed out")).toBeNull();
     expect(classifyRunFailureText("All tests pass.")).toBeNull();
   });
+});
+
+// The controller labels a failed run in the agent's history with its own copy
+// of the rate limit patterns. Both sides read this one fixture list, so a
+// pattern changed on one side and not the other fails here and in the Rust
+// unit test at once.
+const here = dirname(fileURLToPath(import.meta.url));
+const repo = resolve(here, "../../../../..");
+const RUN_FAILURE_FIXTURES = resolve(
+  repo,
+  "packages/runtime-controller/src/run_failure_fixtures.json",
+);
+const runFailureFixtures = JSON.parse(readFileSync(RUN_FAILURE_FIXTURES, "utf8")) as {
+  cases: { name: string; text: string; providerRateLimited: boolean }[];
+};
+
+describe("provider rate limit fixtures shared with the controller", () => {
+  it("reads the shared fixture list", () => {
+    expect(runFailureFixtures.cases.length).toBeGreaterThanOrEqual(15);
+  });
+
+  it.each(runFailureFixtures.cases.map((fixture) => [fixture.name, fixture] as const))(
+    "%s",
+    (_name, fixture) => {
+      expect(classifyRunFailureText(fixture.text) === "provider_rate_limited").toBe(
+        fixture.providerRateLimited,
+      );
+    },
+  );
 });
 
 describe("hasFailedRunMetadata", () => {

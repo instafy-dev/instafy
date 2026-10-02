@@ -1099,6 +1099,7 @@ export function StudioSidebar({
       pendingOrgKey={pendingOrgSwitchKey}
       projectsError={mergedProjectsError}
       projectsRefreshing={mergedProjectsRefreshing}
+      projectsLoading={mergedProjectsLoading}
       onRetryProjects={retryWorkspaceProjects}
       onWorkspaceOrgChange={handleWorkspaceOrgChange}
       onCreateOrg={

@@ -4,6 +4,7 @@ import type {
   ChatMessageFileChange,
   ChatMessageFileChangeType,
   ChatMessageFileLineRange,
+  ChatMessageUnsavedReason,
 } from "../screens/studio/types";
 import type { ControllerConversationMessage } from "../sdk/instafy";
 
@@ -372,6 +373,8 @@ function mergeDuplicateMessage(existing: ChatMessage, incoming: ChatMessage): Ch
     // The commit range stays paired with whichever files list won: pinning one
     // run's files to another run's base..head would fetch wrong diffs.
     commitRange: (incoming.files ? incoming.commitRange : existing.commitRange) ?? null,
+    // So does the save outcome: it describes the run that produced those files.
+    unsavedReason: (incoming.files ? incoming.unsavedReason : existing.unsavedReason) ?? null,
     messageType: incoming.messageType ?? existing.messageType,
     metadata: mergeMessageMetadata(
       existingMetadata,
@@ -602,6 +605,108 @@ export function extractWorkspaceCommitRangeFromMetadata(
   return null;
 }
 
+const HISTORY_EXCLUSION_MARKER = "path is excluded from space history:";
+
+// The paths the origin refused to save, from a "skipped" save's gitSyncError.
+// The runtime stores the origin's 400 as `origin git sync failed (...):
+// {"error":"path is excluded from space history: tmp/a.txt, node_modules/x"}`,
+// so the list is the ", "-joined text after the marker.
+function parseHistoryExcludedPaths(error: unknown): string | null {
+  if (typeof error !== "string") {
+    return null;
+  }
+  let message = error;
+  const bodyStart = error.indexOf("{");
+  if (bodyStart >= 0) {
+    try {
+      const body: unknown = JSON.parse(error.slice(bodyStart));
+      if (isPlainObject(body) && typeof body["error"] === "string") {
+        message = body["error"];
+      }
+    } catch {
+      // Not a JSON body: read the marker from the raw text.
+    }
+  }
+  const markerIndex = message.toLowerCase().indexOf(HISTORY_EXCLUSION_MARKER);
+  if (markerIndex < 0) {
+    return null;
+  }
+  const detail = message.slice(markerIndex + HISTORY_EXCLUSION_MARKER.length).trim();
+  return detail || null;
+}
+
+// The origin rejects the whole /git/sync request when any path in it is
+// excluded from history (tmp/, node_modules, .pnpm-store), so nothing in the
+// request is committed, yet the runtime still labels that "skipped". It is
+// only harmless when every path the run tried to save was an excluded one.
+function skippedSaveLeftPathsUnsaved(artifactMetadata: Record<string, unknown>): boolean {
+  const excluded = parseHistoryExcludedPaths(artifactMetadata["gitSyncError"]);
+  if (!excluded) {
+    return false;
+  }
+  // "paths" is exactly what the runtime sent to /git/sync.
+  const requested = Array.isArray(artifactMetadata["paths"]) ? artifactMetadata["paths"] : [];
+  // Delimit both sides so "notes.md" never matches inside "tmp/notes.md".
+  const excludedList = `, ${excluded}, `;
+  return requested.some((path) => {
+    if (typeof path !== "string") {
+      return false;
+    }
+    const normalized = path.trim().replace(/^\/+|\/+$/g, "");
+    return normalized.length > 0 && !excludedList.includes(`, ${normalized}, `);
+  });
+}
+
+// Whether the run that produced this message's file changes failed to save
+// them, from the runtime's origin/apply artifact. The runtime records
+// gitSyncStatus "failed" when the save ran and errored, and "disabled" when
+// auto-save was off so no save ran (its status message reports these as
+// sync_failed and manual_required). "skipped" means the origin refused paths
+// that are kept out of history; that is only a failed save when the same
+// request also carried other paths, since the refusal saves none of them.
+// "synced" is saved, no artifact means no save was attempted, and Desktop
+// folders keep the files on the user's disk, so those return null.
+export function extractUnsavedReasonFromMetadata(
+  metadata: Record<string, unknown> | null | undefined
+): ChatMessageUnsavedReason | null {
+  if (!metadata) {
+    return null;
+  }
+  const artifacts = metadata["artifacts"];
+  if (!Array.isArray(artifacts)) {
+    return null;
+  }
+  // The newest apply artifact wins, like the commit range: retried runs append
+  // a fresh one.
+  for (let index = artifacts.length - 1; index >= 0; index -= 1) {
+    const artifact = artifacts[index];
+    if (!isPlainObject(artifact) || artifact.kind !== "origin/apply") {
+      continue;
+    }
+    const artifactMetadata = isPlainObject(artifact["metadata"]) ? artifact["metadata"] : null;
+    const gitSyncStatus = normalizeMessageTypeValue(artifactMetadata?.["gitSyncStatus"]);
+    if (!gitSyncStatus) {
+      continue;
+    }
+    // A Desktop origin writes into the user's own folder, so the files are on
+    // their disk either way; only machine-hosted copies can be lost.
+    if (normalizeMessageTypeValue(artifactMetadata?.["mode"]) === "desktop") {
+      return null;
+    }
+    if (gitSyncStatus === "failed") {
+      return "save_failed";
+    }
+    if (gitSyncStatus === "disabled") {
+      return "auto_save_off";
+    }
+    if (gitSyncStatus === "skipped" && artifactMetadata && skippedSaveLeftPathsUnsaved(artifactMetadata)) {
+      return "save_failed";
+    }
+    return null;
+  }
+  return null;
+}
+
 function serializeFileChanges(files: ChatMessage["files"]): string {
   if (!files || files.length === 0) {
     return "[]";
@@ -641,6 +746,7 @@ export function mapControllerMessageToChat(message: ControllerConversationMessag
   }
   const files = extractFileChangesFromMetadata(metadata);
   const commitRange = extractWorkspaceCommitRangeFromMetadata(metadata);
+  const unsavedReason = extractUnsavedReasonFromMetadata(metadata);
   const promptMetadata = resolvePromptMetadataRecord(metadata);
   const displayContent =
     message.role === "user"
@@ -659,6 +765,7 @@ export function mapControllerMessageToChat(message: ControllerConversationMessag
     timestamp: Number.isFinite(timestamp) ? timestamp : Date.now(),
     files: files.length > 0 ? files : null,
     commitRange,
+    unsavedReason,
     messageType: messageTypeRaw,
     metadata,
   };

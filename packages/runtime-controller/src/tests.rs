@@ -26876,6 +26876,167 @@ async fn load_skill_setup_openers_finds_openers_behind_the_history_window() -> a
     Ok(())
 }
 
+/// Oct 1: the agent read the controller's startup notice and an earlier run's
+/// raw 429 error as its own replies. Its leased history now leaves the
+/// dispatch notice out and reads the failed run as a label, while a scheduled
+/// run's launch failure stays and the stored rows, which the Studio and the
+/// CLI show, stay as they were.
+#[tokio::test]
+async fn load_conversation_history_for_agent_drops_dispatch_alerts_and_labels_failed_runs(
+) -> anyhow::Result<()> {
+    let Some((mut client, connection_handle)) = connect_test_db().await? else {
+        eprintln!("skipping agent history test: TEST_DATABASE_URL not set");
+        return Ok(());
+    };
+
+    client
+        .batch_execute(
+            "CREATE TEMP TABLE conversation_messages (
+                id uuid PRIMARY KEY,
+                conversation_id uuid not null,
+                prompt_id uuid,
+                role text not null,
+                content text not null,
+                metadata jsonb,
+                created_at timestamptz not null default now()
+            );",
+        )
+        .await?;
+
+    let conversation_id = Uuid::new_v4();
+    let question = "What's next in the setup?";
+    let rate_limited = "exceeded retry limit, last status: 429 Too Many Requests";
+    let startup_failed = "Workspace startup failed. Open Machines to reconnect Instafy Cloud.";
+    let canceled = "Stopped by the person. (pending work canceled.)";
+    let launch_failed =
+        "This scheduled run couldn't start: no self-hosted runtime was online for this space";
+    let rows = [
+        ("user", question, json!({})),
+        (
+            "assistant",
+            rate_limited,
+            json!({
+                "source": "agent",
+                "outcome": "failed",
+                "messageType": "error",
+                "jobId": Uuid::new_v4(),
+                "errorMessage": rate_limited,
+            }),
+        ),
+        ("user", question, json!({})),
+        (
+            "assistant",
+            startup_failed,
+            json!({
+                "source": "controller",
+                "kind": "runtime_alert",
+                "details": {
+                    "reason": "runtime_not_ready",
+                    "reconnect": {"status": "failed"},
+                },
+            }),
+        ),
+        (
+            "assistant",
+            canceled,
+            json!({"source": "controller", "kind": "run_cancellation"}),
+        ),
+        (
+            "assistant",
+            launch_failed,
+            json!({
+                "source": "controller",
+                "kind": "runtime_alert",
+                "messageType": "runtime_alert",
+                "details": {"reason": "automation_launch_failed"},
+            }),
+        ),
+    ];
+    for (minute, (role, content, metadata)) in rows.iter().enumerate() {
+        client
+            .execute(
+                "INSERT INTO conversation_messages
+                   (id, conversation_id, role, content, metadata, created_at)
+                 VALUES ($1, $2, $3, $4, $5::jsonb,
+                         '2026-01-01T00:00:00Z'::timestamptz + ($6::int * interval '1 minute'))",
+                &[
+                    &Uuid::new_v4(),
+                    &conversation_id,
+                    role,
+                    content,
+                    &PgJson(metadata),
+                    &(minute as i32),
+                ],
+            )
+            .await?;
+    }
+
+    let transaction = client.transaction().await?;
+    let history = crate::agent::load_conversation_history_for_agent(
+        &transaction,
+        &conversation_id,
+        None,
+        None,
+        80,
+    )
+    .await
+    .expect("load agent history");
+    let seen: Vec<(&str, &str)> = history
+        .iter()
+        .map(|entry| {
+            (
+                entry["role"].as_str().expect("role"),
+                entry["content"].as_str().expect("content"),
+            )
+        })
+        .collect();
+    assert_eq!(
+        seen,
+        vec![
+            ("user", question),
+            (
+                "assistant",
+                "(An earlier attempt stopped before finishing because the AI provider was \
+                 limiting requests. That was not a workspace problem, and it has passed.)",
+            ),
+            ("user", question),
+            ("assistant", canceled),
+            ("assistant", launch_failed),
+        ]
+    );
+    // The label replaces the raw error in the payload's metadata copy too.
+    let failed_run = &history[1]["metadata"];
+    assert_eq!(failed_run["outcome"], json!("failed"));
+    assert!(failed_run.get("errorMessage").is_none(), "{failed_run}");
+
+    let stored: Vec<String> = transaction
+        .query(
+            "select content from conversation_messages
+              where conversation_id = $1
+              order by created_at",
+            &[&conversation_id],
+        )
+        .await?
+        .iter()
+        .map(|row| row.get(0))
+        .collect();
+    assert_eq!(
+        stored,
+        vec![
+            question,
+            rate_limited,
+            question,
+            startup_failed,
+            canceled,
+            launch_failed
+        ]
+    );
+
+    transaction.rollback().await?;
+    connection_handle.abort();
+    Ok(())
+}
+
 #[tokio::test]
 async fn load_previous_provider_conversation_state_stays_within_agent_scope() -> anyhow::Result<()>
 {
