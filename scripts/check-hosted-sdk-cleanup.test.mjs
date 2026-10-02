@@ -24,6 +24,7 @@ test("system SDK cleanup is restricted to GitHub-hosted runners in every workflo
   assert.deepEqual(Object.fromEntries(inventory), {
     "browser-e2e.yml": 2,
     "build.yml": 5,
+    "image-scan.yml": 1,
     "publish-runtime-agent.yml": 1,
   });
 });

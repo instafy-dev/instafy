@@ -1,0 +1,499 @@
+name: Image scan
+
+# Builds and Trivy-scans every image the protected-main publishers release:
+# the four runtime flavor/architecture cells of publish-runtime-agent.yml and
+# the seven services of publish-production-services.yml, with the same
+# Dockerfiles, targets, platforms, build arguments, pinned Trivy and scan
+# flags. A broken package pin or a newly fixable HIGH/CRITICAL finding then
+# shows up here instead of in the middle of a release.
+#
+# Nothing here logs in to a registry, pushes, tags a registry reference or
+# writes a cache. The runtime build reads the publisher's layer cache
+# anonymously, and every image stays in the runner's local Docker engine.
+#
+# Nightly and manual runs on main report to one tracking issue. Pull requests
+# that change image inputs run the same cells with a read-only token and no
+# reporting. scripts/check-image-scan-workflow.test.mjs derives the cells, the
+# build inputs and the scan from the publishers, so this file cannot drift.
+
+on:
+  schedule:
+    - cron: "17 3 * * *"
+  workflow_dispatch: {}
+  pull_request:
+    paths:
+      - "docker/**"
+      - ".dockerignore"
+      - "packages/runtime-controller/Dockerfile"
+      - "packages/tunnel-broker/Dockerfile"
+      - "packages/runtime-agent/Cargo.lock"
+      - "packages/browser-egress-proxy/go.mod"
+      - "packages/browser-webrtc-sender/go.mod"
+      - "packages/browser-webrtc-sender/go.sum"
+      - "codex"
+      - "scripts/fetch-rusty-v8.sh"
+      - "scripts/runtime-image-browser-smoke.sh"
+      - "scripts/image-scan-report.mjs"
+      - "scripts/check-production-image-inputs.test.mjs"
+      - "scripts/check-image-scan-workflow.test.mjs"
+      - ".github/workflows/publish-runtime-agent.yml"
+      - ".github/workflows/publish-production-services.yml"
+      - ".github/workflows/image-scan.yml"
+
+permissions: {}
+
+concurrency:
+  group: image-scan-${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  runtime:
+    name: Scan ${{ matrix.flavor }} ${{ matrix.architecture }} runtime
+    if: github.event_name != 'schedule' || github.repository == 'instafy-dev/instafy'
+    runs-on: ${{ matrix.runner }}
+    # The publisher's 75-minute build, scan and Shared Browser bound, without
+    # the 16 minutes it adds for the layer cache export this job never runs.
+    timeout-minutes: 75
+    permissions:
+      contents: read
+    strategy:
+      # Every cell reports: one failing architecture must not hide another.
+      fail-fast: false
+      matrix:
+        include:
+          - flavor: base
+            target: runtime
+            architecture: amd64
+            platform: linux/amd64
+            runner: ubuntu-24.04
+            trivy_asset: Linux-64bit
+            trivy_sha256: "bbb64b9695866ce4a7a8f5c9592002c5961cab378577fa3f8a040df362b9b2ea"
+          - flavor: base
+            target: runtime
+            architecture: arm64
+            platform: linux/arm64
+            runner: ubuntu-24.04-arm
+            trivy_asset: Linux-ARM64
+            trivy_sha256: "2ca2c023109c2db6b2b77366b6717291452d4531167377d95c79547f0c8e3467"
+          - flavor: webdev
+            target: runtime-webdev
+            architecture: amd64
+            platform: linux/amd64
+            runner: ubuntu-24.04
+            trivy_asset: Linux-64bit
+            trivy_sha256: "bbb64b9695866ce4a7a8f5c9592002c5961cab378577fa3f8a040df362b9b2ea"
+          - flavor: webdev
+            target: runtime-webdev
+            architecture: arm64
+            platform: linux/arm64
+            runner: ubuntu-24.04-arm
+            trivy_asset: Linux-ARM64
+            trivy_sha256: "2ca2c023109c2db6b2b77366b6717291452d4531167377d95c79547f0c8e3467"
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+          ref: ${{ github.sha }}
+          submodules: recursive
+
+      - name: Reclaim hosted-runner disk for the audited image
+        if: runner.environment == 'github-hosted'
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Standard hosted runners expose limited free storage. These fixed
+          # preinstalled SDK paths are unrelated to this Docker-only job and
+          # otherwise crowd out the audited image; on runner images where a
+          # path does not exist the removal is a harmless no-op.
+          sudo rm -rf -- \
+            /opt/ghc \
+            /usr/local/lib/android \
+            /usr/share/dotnet
+
+      - name: Require sufficient free disk for the audited image
+        shell: bash
+        run: |
+          set -euo pipefail
+          available_kib="$(df -Pk / | awk 'NR == 2 { print $4 }')"
+          echo "Free disk for image build: ${available_kib} KiB"
+          # Canonical bounded decimal avoids Bash octal parsing and integer overflow.
+          if [[ ! "$available_kib" =~ ^(0|[1-9][0-9]{0,17})$ ]] ||
+            (( available_kib < 20 * 1024 * 1024 )); then
+            echo "::error::The runtime image build requires at least 20 GiB of free disk (have ${available_kib} KiB)."
+            exit 1
+          fi
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+        with:
+          version: v0.35.0
+
+      - name: Install pinned Trivy
+        env:
+          TRIVY_VERSION: "0.72.0"
+          TRIVY_ASSET: ${{ matrix.trivy_asset }}
+          TRIVY_SHA256: ${{ matrix.trivy_sha256 }}
+        run: |
+          set -euo pipefail
+          archive="$RUNNER_TEMP/trivy.tar.gz"
+          curl --proto '=https' --tlsv1.2 --fail --location --silent --show-error \
+            "https://github.com/aquasecurity/trivy/releases/download/v${TRIVY_VERSION}/trivy_${TRIVY_VERSION}_${TRIVY_ASSET}.tar.gz" \
+            --output "$archive"
+          printf '%s  %s\n' "$TRIVY_SHA256" "$archive" | sha256sum --check --status
+          tar -xzf "$archive" -C "$RUNNER_TEMP" trivy
+          sudo install -m 0755 "$RUNNER_TEMP/trivy" /usr/local/bin/trivy
+          test "$(trivy --version | awk 'NR == 1 { print $2 }')" = "$TRIVY_VERSION"
+
+      # The publisher's audit build: the layer cache is read anonymously and
+      # the final stage is always rebuilt, so the scan sees current OS and npm
+      # packages. The image is only loaded into the local engine.
+      - name: Build audit image
+        id: build
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        with:
+          context: .
+          file: docker/runtime/Dockerfile
+          target: ${{ matrix.target }}
+          platforms: ${{ matrix.platform }}
+          build-args: |
+            BUILD_PROFILE=release
+            BUILD_ARTIFACT_DIR=release
+          labels: |
+            org.opencontainers.image.source=https://github.com/instafy-dev/instafy
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.version=${{ github.sha }}
+          cache-from: type=registry,ref=ghcr.io/instafy-dev/instafy-build-cache:publish-runtime-agent-${{ matrix.flavor }}-${{ matrix.architecture }}
+          no-cache-filters: ${{ matrix.target }}
+          tags: instafy-image-scan:runtime-${{ matrix.flavor }}-${{ matrix.architecture }}
+          load: true
+          push: false
+          provenance: false
+          sbom: false
+
+      - name: Scan audit image
+        id: scan
+        env:
+          AUDIT_IMAGE: instafy-image-scan:runtime-${{ matrix.flavor }}-${{ matrix.architecture }}
+        run: |
+          set -euo pipefail
+          empty_config="$RUNNER_TEMP/trivy.empty.yaml"
+          empty_ignore="$RUNNER_TEMP/trivy.empty-ignore"
+          printf '{}\n' > "$empty_config"
+          : > "$empty_ignore"
+          trivy image \
+            --config "$empty_config" \
+            --scanners vuln,secret \
+            --severity HIGH,CRITICAL \
+            --ignore-unfixed \
+            --ignorefile "$empty_ignore" \
+            --exit-code 1 \
+            --skip-version-check \
+            --no-progress \
+            "$AUDIT_IMAGE"
+
+      # The gate above decides. This repeats its filters against the database
+      # it just downloaded, as JSON for the cell summary.
+      - name: List the findings that failed the scan
+        if: failure() && steps.scan.outcome == 'failure'
+        env:
+          AUDIT_IMAGE: instafy-image-scan:runtime-${{ matrix.flavor }}-${{ matrix.architecture }}
+        run: |
+          set -euo pipefail
+          trivy image \
+            --config "$RUNNER_TEMP/trivy.empty.yaml" \
+            --scanners vuln,secret \
+            --severity HIGH,CRITICAL \
+            --ignore-unfixed \
+            --ignorefile "$RUNNER_TEMP/trivy.empty-ignore" \
+            --skip-db-update \
+            --skip-java-db-update \
+            --skip-version-check \
+            --no-progress \
+            --format json \
+            --output "$RUNNER_TEMP/trivy-findings.json" \
+            "$AUDIT_IMAGE"
+
+      # Publication requires this for webdev images too. It runs whenever the
+      # image built, so a scan failure does not hide a broken browser.
+      - name: Prove the webdev image starts the Shared Browser
+        id: smoke
+        if: ${{ !cancelled() && matrix.flavor == 'webdev' && steps.build.outcome == 'success' }}
+        env:
+          BROWSER_SMOKE_IMAGE: instafy-image-scan:runtime-${{ matrix.flavor }}-${{ matrix.architecture }}
+        run: bash scripts/runtime-image-browser-smoke.sh "$BROWSER_SMOKE_IMAGE"
+
+      - name: Summarize this image
+        if: always()
+        env:
+          CELL_IMAGE: instafy-runtime-agent ${{ matrix.flavor }}
+          CELL_SOURCE: docker/runtime/Dockerfile
+          CELL_TARGET: ${{ matrix.target }}
+          CELL_PLATFORM: ${{ matrix.platform }}
+          BUILD_OUTCOME: ${{ steps.build.outcome }}
+          SCAN_OUTCOME: ${{ steps.scan.outcome }}
+          SMOKE_OUTCOME: ${{ steps.smoke.outcome }}
+          SMOKE_REQUIRED: ${{ matrix.flavor == 'webdev' }}
+          FINDINGS_FILE: ${{ runner.temp }}/trivy-findings.json
+          RESULT_FILE: ${{ runner.temp }}/image-scan-result/runtime-${{ matrix.flavor }}-${{ matrix.architecture }}.json
+        run: node scripts/image-scan-report.mjs cell
+
+      - name: Upload the failure record
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: image-scan-result-runtime-${{ matrix.flavor }}-${{ matrix.architecture }}
+          path: ${{ runner.temp }}/image-scan-result/
+          if-no-files-found: ignore
+          retention-days: 7
+
+  services:
+    name: Scan ${{ matrix.key }} service
+    if: github.event_name != 'schedule' || github.repository == 'instafy-dev/instafy'
+    runs-on: ubuntu-latest
+    # The publisher's bound for a service cell.
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - key: controller
+            repository: instafy-runtime-controller
+            context: .
+            dockerfile: packages/runtime-controller/Dockerfile
+          - key: proxy
+            repository: instafy-openai-proxy-server
+            context: .
+            dockerfile: docker/proxy/Dockerfile
+          - key: providerService
+            repository: instafy-runtime-provider-service
+            context: .
+            dockerfile: docker/provider-service/Dockerfile
+          - key: tunnelBroker
+            repository: instafy-tunnel-broker
+            context: packages/tunnel-broker
+            dockerfile: packages/tunnel-broker/Dockerfile
+          - key: gitEdge
+            repository: instafy-git-edge
+            context: .
+            dockerfile: docker/git-edge/Dockerfile
+          - key: gitShard
+            repository: instafy-git-shard
+            context: .
+            dockerfile: docker/git-shard/Dockerfile
+          - key: originGateway
+            repository: instafy-origin-gateway
+            context: .
+            dockerfile: docker/origin-gateway/Dockerfile
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+          ref: ${{ github.sha }}
+          submodules: recursive
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+        with:
+          version: v0.35.0
+
+      - name: Install pinned Trivy
+        env:
+          TRIVY_VERSION: "0.72.0"
+          TRIVY_LINUX_X64_SHA256: "bbb64b9695866ce4a7a8f5c9592002c5961cab378577fa3f8a040df362b9b2ea"
+        run: |
+          set -euo pipefail
+          archive="$RUNNER_TEMP/trivy.tar.gz"
+          curl --proto '=https' --tlsv1.2 --fail --location --silent --show-error \
+            "https://github.com/aquasecurity/trivy/releases/download/v${TRIVY_VERSION}/trivy_${TRIVY_VERSION}_Linux-64bit.tar.gz" \
+            --output "$archive"
+          printf '%s  %s\n' "$TRIVY_LINUX_X64_SHA256" "$archive" |
+            sha256sum --check --status
+          tar -xzf "$archive" -C "$RUNNER_TEMP" trivy
+          sudo install -m 0755 "$RUNNER_TEMP/trivy" /usr/local/bin/trivy
+          test "$(trivy --version | awk 'NR == 1 { print $2 }')" = "$TRIVY_VERSION"
+
+      # The publisher's build, loaded under a local-only name.
+      - name: Build amd64 image
+        id: build
+        shell: bash
+        env:
+          CONTEXT: ${{ matrix.context }}
+          DOCKERFILE: ${{ matrix.dockerfile }}
+          IMAGE_KEY: ${{ matrix.key }}
+          SOURCE_COMMIT: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          scan_tag="instafy-image-scan:service-${IMAGE_KEY}"
+          docker buildx build \
+            --platform linux/amd64 \
+            --file "$DOCKERFILE" \
+            --tag "$scan_tag" \
+            --label "org.opencontainers.image.source=https://github.com/instafy-dev/instafy" \
+            --label "org.opencontainers.image.revision=${SOURCE_COMMIT}" \
+            --load \
+            "$CONTEXT"
+          echo "SCAN_IMAGE=$scan_tag" >> "$GITHUB_ENV"
+
+      - name: Scan amd64 image
+        id: scan
+        shell: bash
+        run: |
+          set -euo pipefail
+          empty_config="$RUNNER_TEMP/trivy.empty.yaml"
+          empty_ignore="$RUNNER_TEMP/trivy.empty-ignore"
+          printf '{}\n' > "$empty_config"
+          : > "$empty_ignore"
+          trivy image \
+            --config "$empty_config" \
+            --scanners vuln,secret \
+            --severity HIGH,CRITICAL \
+            --ignore-unfixed \
+            --ignorefile "$empty_ignore" \
+            --exit-code 1 \
+            --skip-version-check \
+            --no-progress \
+            "$SCAN_IMAGE"
+
+      - name: List the findings that failed the scan
+        if: failure() && steps.scan.outcome == 'failure'
+        shell: bash
+        run: |
+          set -euo pipefail
+          trivy image \
+            --config "$RUNNER_TEMP/trivy.empty.yaml" \
+            --scanners vuln,secret \
+            --severity HIGH,CRITICAL \
+            --ignore-unfixed \
+            --ignorefile "$RUNNER_TEMP/trivy.empty-ignore" \
+            --skip-db-update \
+            --skip-java-db-update \
+            --skip-version-check \
+            --no-progress \
+            --format json \
+            --output "$RUNNER_TEMP/trivy-findings.json" \
+            "$SCAN_IMAGE"
+
+      - name: Summarize this image
+        if: always()
+        env:
+          CELL_IMAGE: ${{ matrix.repository }}
+          CELL_SOURCE: ${{ matrix.dockerfile }}
+          CELL_TARGET: ""
+          CELL_PLATFORM: linux/amd64
+          BUILD_OUTCOME: ${{ steps.build.outcome }}
+          SCAN_OUTCOME: ${{ steps.scan.outcome }}
+          SMOKE_OUTCOME: ""
+          SMOKE_REQUIRED: "false"
+          FINDINGS_FILE: ${{ runner.temp }}/trivy-findings.json
+          RESULT_FILE: ${{ runner.temp }}/image-scan-result/service-${{ matrix.key }}.json
+        run: node scripts/image-scan-report.mjs cell
+
+      - name: Upload the failure record
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: image-scan-result-service-${{ matrix.key }}
+          path: ${{ runner.temp }}/image-scan-result/
+          if-no-files-found: ignore
+          retention-days: 7
+
+  # The only job with a write permission, and only on main outside pull
+  # requests: it keeps one tracking issue in step with the latest result.
+  report:
+    name: Report to the tracking issue
+    needs:
+      - runtime
+      - services
+    if: >-
+      !cancelled()
+      && github.repository == 'instafy-dev/instafy'
+      && github.ref == 'refs/heads/main'
+      && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      actions: read
+      contents: read
+      issues: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+          ref: ${{ github.sha }}
+
+      - name: Download the failure records
+        uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
+        with:
+          pattern: image-scan-result-*
+          path: ${{ runner.temp }}/image-scan-results
+          merge-multiple: true
+
+      - name: Open, update or close the tracking issue
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUNTIME_RESULT: ${{ needs.runtime.result }}
+          SERVICES_RESULT: ${{ needs.services.result }}
+          RESULT_DIR: ${{ runner.temp }}/image-scan-results
+        run: |
+          set -euo pipefail
+          title="Nightly image scan failing"
+          export REPOSITORY_URL="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}"
+          export RUN_URL="${REPOSITORY_URL}/actions/runs/${GITHUB_RUN_ID}"
+          export SOURCE_SHA="$GITHUB_SHA"
+          # Only an issue this workflow opened is ever updated or closed.
+          issues="$(gh api --method GET "repos/${GITHUB_REPOSITORY}/issues" \
+            -f state=open -f creator='github-actions[bot]' -f per_page=100)"
+          existing="$(jq -r --arg title "$title" '
+            [.[] | select(.pull_request == null and .title == $title) | .number]
+            | sort | first // empty' <<<"$issues")"
+          if [[ -n "$existing" && ! "$existing" =~ ^[1-9][0-9]*$ ]]; then
+            echo "::error::Unexpected issue number."
+            exit 1
+          fi
+
+          if [[ "$RUNTIME_RESULT" == "success" && "$SERVICES_RESULT" == "success" ]]; then
+            if [[ -n "$existing" ]]; then
+              printf 'The image scan passed at `%s` in [this run](%s).\n' "$SOURCE_SHA" "$RUN_URL" > "$RUNNER_TEMP/passed.md"
+              gh api --method POST "repos/${GITHUB_REPOSITORY}/issues/${existing}/comments" \
+                -F body=@"$RUNNER_TEMP/passed.md" >/dev/null
+              gh api --method PATCH "repos/${GITHUB_REPOSITORY}/issues/${existing}" \
+                -f state=closed -f state_reason=completed >/dev/null
+              echo "Every image passed; closed #${existing}." >> "$GITHUB_STEP_SUMMARY"
+            else
+              echo "Every image passed; no tracking issue is open." >> "$GITHUB_STEP_SUMMARY"
+            fi
+            exit 0
+          fi
+
+          jobs="$RUNNER_TEMP/jobs.json"
+          if ! gh api --method GET \
+            "repos/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}/attempts/${GITHUB_RUN_ATTEMPT}/jobs" \
+            -f per_page=100 > "$jobs"; then
+            echo "::warning::The run's jobs could not be listed; the issue links the run instead."
+            printf '{"jobs":[]}\n' > "$jobs"
+          fi
+          node scripts/image-scan-report.mjs issue "$jobs" "$RESULT_DIR" > "$RUNNER_TEMP/issue.md"
+          if [[ -z "$existing" ]]; then
+            created="$(gh api --method POST "repos/${GITHUB_REPOSITORY}/issues" \
+              -f title="$title" -F body=@"$RUNNER_TEMP/issue.md")"
+            number="$(jq -er '.number' <<<"$created")"
+            echo "Images failed; opened #${number}." >> "$GITHUB_STEP_SUMMARY"
+          else
+            gh api --method PATCH "repos/${GITHUB_REPOSITORY}/issues/${existing}" \
+              -F body=@"$RUNNER_TEMP/issue.md" >/dev/null
+            node scripts/image-scan-report.mjs comment "$jobs" > "$RUNNER_TEMP/comment.md"
+            gh api --method POST "repos/${GITHUB_REPOSITORY}/issues/${existing}/comments" \
+              -F body=@"$RUNNER_TEMP/comment.md" >/dev/null
+            echo "Images failed; updated #${existing}." >> "$GITHUB_STEP_SUMMARY"
+          fi

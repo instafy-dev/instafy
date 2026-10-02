@@ -541,6 +541,65 @@ For the full-stack suites, run the local stack first:
 - `pnpm stack:up`
 - `pnpm stack:down` when finished.
 
+## Nightly image scan
+
+`.github/workflows/image-scan.yml` builds and scans every image the two
+protected-main publishers release, so a broken input surfaces before a release
+rather than during one. It covers the four runtime cells of
+`publish-runtime-agent.yml` (base and webdev, amd64 on `ubuntu-24.04` and arm64
+on `ubuntu-24.04-arm`) and the seven services of
+`publish-production-services.yml` (amd64). Each cell uses the publisher's
+Dockerfile, target, platform and build arguments, the same pinned Trivy binary
+and the same blocking scan: vulnerabilities and secrets, HIGH and CRITICAL,
+fixed versions only, no ignore file. Webdev cells also run the Shared Browser
+start check that publication requires. The runtime build reads the publisher's
+layer cache anonymously and always rebuilds the final stage, so OS and npm
+packages are as current as a release would get them.
+
+Nothing is published: no step logs in to a registry, pushes, tags a registry
+reference or writes a cache, and images stay in the runner's Docker engine.
+The workflow runs at 03:17 UTC every night, on manual dispatch, and on pull
+requests that change Dockerfiles, `docker/**`, `.dockerignore`, the files those
+builds pin (the runtime agent's `Cargo.lock`, the browser helpers' Go modules,
+the `codex` submodule, `scripts/fetch-rusty-v8.sh`), the Shared Browser smoke,
+either publisher, or this workflow and its tests. Pull request runs get a
+read-only token and report only in their checks. Every cell runs to the end
+(`fail-fast: false`), and each cell's job summary names its image and platform,
+the check that failed and, for a failed scan, every finding with its package,
+installed version and fixed version.
+
+Scheduled and manual runs on `main` keep one issue titled "Nightly image scan
+failing" up to date: the first failure opens it with the failing jobs, links and
+findings, later failures update its body and comment, and the next passing run
+closes it. Only that reporting job holds `issues: write`, and it never runs for
+pull requests. No other notification channel or secret is used.
+
+When it fails:
+
+1. Open the failing job from the issue and read its summary.
+2. A **scan failure** names packages with a fixed version available. Base-image
+   packages usually need a refreshed digest pin or a raised minimum-version
+   argument in the Dockerfile (the `*_MIN_VERSION` floors). npm's vendored
+   copies are patched by the `*_VERSION`/`*_SHA256` arguments in
+   `docker/runtime/Dockerfile`. Make the fix in a pull request; the path filter
+   runs these same cells on it before merge.
+3. A **build failure** often means an upstream repository stopped serving a
+   pinned package version, as when Alpine dropped an OpenSSL release. Update the
+   pin (and `scripts/check-production-image-inputs.test.mjs`) to a version the
+   repository serves.
+4. A failure on **one architecture only**, such as a Debian security update
+   that reached amd64 hours before arm64, usually clears on its own. Dispatch
+   the workflow again later; do not release that image until it passes.
+5. Never make the scan pass by weakening it. The flags, the empty ignore file
+   and the pinned Trivy must stay identical to the publishers';
+   `scripts/check-image-scan-workflow.test.mjs` derives them from the publisher
+   files and fails on any difference.
+
+`node --test scripts/check-image-scan-workflow.test.mjs` checks that the cells,
+build inputs, Trivy pin and scan flags match the publishers, that nothing writes
+to a registry, the permission and trigger rules, and the summary and issue
+reporting against a stub `gh`.
+
 ## Runtime image layer cache
 
 The runtime-agent publisher keeps one BuildKit layer cache per flavor and
