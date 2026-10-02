@@ -7,28 +7,55 @@ license = "AGPL-3.0-only"
 [[bin]]
 name = "git-edge"
 path = "src/bin/git-edge.rs"
+required-features = ["server"]
 
 [[bin]]
 name = "git-shard"
 path = "src/bin/git-shard.rs"
+required-features = ["server"]
+
+[features]
+default = ["server"]
+# The git-edge and git-shard services. Without it the crate is only the
+# repository push policy (`policy`), which origin-http-server shares.
+server = [
+  "dep:axum",
+  "dep:base64",
+  "dep:bytes",
+  "dep:futures-util",
+  "dep:jsonwebtoken",
+  "dep:reqwest",
+  "dep:runtime-contracts",
+  "dep:serde",
+  "dep:serde_json",
+  "dep:thiserror",
+  "dep:tokio",
+  "dep:tokio-stream",
+  "dep:tokio-util",
+  "dep:tower",
+  "dep:tower-http",
+  "dep:tracing",
+  "dep:tracing-subscriber",
+  "dep:uuid",
+]
 
 [dependencies]
 anyhow = "1"
-axum = { version = "0.7", features = ["json", "http1", "tokio", "macros"] }
-base64 = "0.21"
-bytes = "1"
-futures-util = "0.3"
-jsonwebtoken = { version = "9", default-features = false, features = ["use_pem"] }
-reqwest = { version = "0.11", features = ["json", "stream"] }
-runtime-contracts = { path = "../runtime-contracts" }
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
-thiserror = "2"
-tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal", "net", "process", "io-util", "fs", "time"] }
-tokio-stream = "0.1"
-tokio-util = { version = "0.7", features = ["io"] }
-tower = "0.4"
-tower-http = { version = "0.5", features = ["trace"] }
-tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter"] }
-uuid = { version = "1", features = ["v4"] }
+axum = { version = "0.7", features = ["json", "http1", "tokio", "macros"], optional = true }
+base64 = { version = "0.21", optional = true }
+bytes = { version = "1", optional = true }
+futures-util = { version = "0.3", optional = true }
+jsonwebtoken = { version = "9", default-features = false, features = ["use_pem"], optional = true }
+reqwest = { version = "0.11", features = ["json", "stream"], optional = true }
+runtime-contracts = { path = "../runtime-contracts", optional = true }
+serde = { version = "1", features = ["derive"], optional = true }
+serde_json = { version = "1", optional = true }
+thiserror = { version = "2", optional = true }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal", "net", "process", "io-util", "fs", "time"], optional = true }
+tokio-stream = { version = "0.1", optional = true }
+tokio-util = { version = "0.7", features = ["io"], optional = true }
+tower = { version = "0.4", optional = true }
+tower-http = { version = "0.5", features = ["trace"], optional = true }
+tracing = { version = "0.1", optional = true }
+tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter"], optional = true }
+uuid = { version = "1", features = ["v4"], optional = true }
