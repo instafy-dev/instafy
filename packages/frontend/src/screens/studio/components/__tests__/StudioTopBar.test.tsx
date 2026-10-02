@@ -224,6 +224,13 @@ describe("StudioTopBar navigation", () => {
     expect(team?.getAttribute("aria-label")).toBe("Open navigation: Research team");
   });
 
+  it.each(["Personal", "Personal team"])("shows the personal team chip as P when the team name is %s", async (name) => {
+    mocks.navigationPage = "home";
+    mocks.activeTeamName = name;
+    await act(async () => root.render(<StudioTopBar />));
+    expect(container.querySelector('[data-testid="topbar-team-avatar"]')?.textContent).toBe("P");
+  });
+
   it("goes back through the supplied navigation callback in a workspace", async () => {
     await act(async () => root.render(<StudioTopBar />));
     await act(async () => container.querySelector<HTMLButtonElement>('[data-testid="topbar-back-button"]')?.click());

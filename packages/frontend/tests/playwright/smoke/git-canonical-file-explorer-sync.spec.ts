@@ -24,7 +24,7 @@ async function ensureHostedRuntimeReady(page: Page, projectId: string): Promise<
 }
 
 async function waitForWorkspaceOriginConnected(page: Page, timeoutMs = 120_000) {
-  await expect(page.getByText("Connecting to workspace origin…")).toHaveCount(0, {
+  await expect(page.getByText(/Opening files…|Still opening files…|Reconnecting to your files…/)).toHaveCount(0, {
     timeout: timeoutMs,
   });
 }

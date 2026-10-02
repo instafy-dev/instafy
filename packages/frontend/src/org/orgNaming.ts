@@ -20,12 +20,18 @@ export function getOrgDisplayName(name: string | null | undefined): string {
   return (name ?? "").trim();
 }
 
-/** Compact 1–2 letter monogram for a team avatar chip. */
+/**
+ * Compact 1–2 letter monogram for every team avatar chip, taken from the
+ * team's display name: the first letter of the first two words, or one letter
+ * for a one-word name. The personal team reads "P" whether a caller holds the
+ * stored name ("Personal team") or the display name ("Personal").
+ */
 export function getOrgInitials(name: string): string {
-  const words = name.trim().split(/\s+/).filter(Boolean);
-  if (words.length === 0) {
+  const trimmed = name.trim();
+  if (!trimmed) {
     return "?";
   }
+  const words = getOrgDisplayName(trimmed).split(/\s+/).filter(Boolean);
   if (words.length === 1) {
     return words[0].slice(0, 1).toUpperCase();
   }
