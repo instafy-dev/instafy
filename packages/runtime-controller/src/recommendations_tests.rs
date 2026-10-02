@@ -65,6 +65,84 @@ fn recommendations_submission_is_bounded_and_requires_evidence() {
     .is_err());
 }
 
+#[test]
+fn recommendations_source_labels_are_plain_bounded_and_cannot_close_reference_tokens() {
+    assert_eq!(source_chat_label(None), "Source chat");
+    assert_eq!(source_chat_label(Some(&json!({"title":"Plan]"}))), "Plan] ");
+    assert_eq!(source_chat_label(Some(&json!({"title":"]]]"}))), "] ] ] ");
+    assert_eq!(
+        source_chat_label(Some(&json!({"title":" \n\t "}))),
+        "Source chat"
+    );
+    assert_eq!(
+        source_chat_label(Some(&json!({"title":"Pilot **draft** | next"}))),
+        "Pilot **draft** | next"
+    );
+    assert_eq!(
+        source_chat_label(Some(
+            &json!({"title":"Pilot ]]] [[message:fake/id|injected]]\nnext\u{0001}"})
+        )),
+        "Pilot ] ] ] [[message:fake/id|injected] ] next"
+    );
+    assert_eq!(
+        source_chat_label(Some(&json!({"title":"é".repeat(200)})))
+            .chars()
+            .count(),
+        160
+    );
+}
+
+#[tokio::test]
+async fn recommendations_delivery_groups_sources_by_authorized_chat_title() -> anyhow::Result<()> {
+    let f = Fixture::new().await?;
+    let extra_message = Uuid::new_v4();
+    {
+        let db = f.state.pool.get().await?;
+        db.execute(
+            "update conversations set metadata=jsonb_build_object('title',$2::text) where id=$1",
+            &[&f.public, &"Pilot follow-up"],
+        )
+        .await?;
+        db.execute(
+            "update conversations set metadata=jsonb_build_object('title',$2::text) where id=$1",
+            &[&f.private, &"Planning ]] notes\nnext"],
+        )
+        .await?;
+        db.execute("insert into conversation_messages(id,conversation_id,project_id,role,content,metadata) values($1,$2,$3,'user','A second source detail','{}')",&[&extra_message,&f.public,&f.project]).await?;
+    }
+    let mut body = proposal(f.public);
+    body["message"] = json!("The follow-up is still open. Shall I draft it?");
+    body["evidence"] = json!([
+        {"conversationId":f.public,"messageId":f.message},
+        {"conversationId":f.public},
+        {"conversationId":f.public,"messageId":extra_message},
+        {"conversationId":f.private},
+    ]);
+    let delivered = f.submit(0, body.clone()).await?;
+    assert_eq!(
+        delivered["evidence"], body["evidence"],
+        "source-chip deduplication must retain every evidence reference"
+    );
+    let chat = Uuid::parse_str(
+        delivered["deliveredConversationId"]
+            .as_str()
+            .context("delivery")?,
+    )?;
+    {
+        let db = f.state.pool.get().await?;
+        let content: String = db
+            .query_one(
+                "select content from conversation_messages where conversation_id=$1",
+                &[&chat],
+            )
+            .await?
+            .get(0);
+        assert_eq!(content,format!("{}\n\n[[conversation:{}|Pilot follow-up]] · [[conversation:{}|Planning ] ] notes next]]",body["message"].as_str().unwrap(),f.public,f.private));
+        assert_eq!(content.matches("[[conversation:").count(), 2);
+    }
+    f.cleanup().await
+}
+
 #[tokio::test]
 async fn recommendations_delivery_is_an_ordinary_private_chat_once() -> anyhow::Result<()> {
     let f = Fixture::new().await?;
@@ -124,10 +202,7 @@ async fn recommendations_delivery_is_an_ordinary_private_chat_once() -> anyhow::
         assert_eq!(messages[0].get::<_, Option<Uuid>>("run_id"), None);
         let content: String = messages[0].get("content");
         assert!(content.starts_with(body["message"].as_str().unwrap()));
-        assert!(content.contains(&format!(
-            "[[message:{}/{}|Source chat]]",
-            f.public, f.message
-        )));
+        assert!(content.contains(&format!("[[conversation:{}|Source chat]]", f.public)));
         let notifications = db.query("select e.event_name,r.user_id from notification_events e join notification_recipients r on r.event_id=e.id where e.conversation_id=$1", &[&id]).await?;
         assert_eq!(
             notifications.len(),

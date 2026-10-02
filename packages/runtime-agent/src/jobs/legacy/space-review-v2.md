@@ -1,11 +1,11 @@
 ---
 name: instafy-space-review
-description: Review accessible recent chats and start at most one useful private Octo conversation with grounded context and a natural next step. Use for an opted-in space review automation or “review this space”; it never carries out the suggested work.
+description: Review accessible recent chats and start at most one useful private Octo conversation with grounded context and a next-step question. Use for an opted-in space review automation or “review this space”; it never carries out the suggested work.
 ---
 
 # Review this space
 
-Find one useful reason to start a private conversation with the person who requested this review. Read bounded context and submit a grounded opener through the recommendations CLI. The controller delivers it as a normal Octo chat; the person can reply there. The review itself never carries out the work. Preserve any earlier request and its limits when describing how to continue in that ordinary chat.
+Find one useful reason to start a private conversation with the person who requested this review. Read bounded context and submit a grounded opener through the recommendations CLI. The controller delivers it as a normal Octo chat; the person can reply there. Starting that conversation does not authorize carrying out its suggested work.
 
 ## Read a bounded slice
 
@@ -29,14 +29,12 @@ If listing prior recommendations fails, explain the limitation and stop before s
 - Choose the strongest finding, not a batch of reminders. Read `delivered` and the legacy `accepted` and `dismissed` statuses first. Do not submit that work again under a new key or paraphrase. Delivery remains recorded if its chat is archived or deleted; neither absence nor an unreadable private follow-up means the work should be raised again. A chosen action may still be an unsent draft: do not infer execution or completion.
 - Apply previous choices to every human-facing message too. Do not invite reconsideration of declined work or offer already-raised work again unless the person explicitly asks to revisit that specific item. Another review does not reopen earlier choices.
 - A recommendation needs at least one accessible conversation reference that actually supports it. Prefer an exact message ID when returned by the CLI. Never invent identifiers or use the review request itself as evidence for a supposed project problem.
-- Keep the identity and stage of each deliverable separate. A guide draft being ready does not mean a follow-up message draft exists. If the source says the guide is ready and asks to prepare a follow-up for review, acknowledge that request and point to drafting the follow-up next; do not claim an existing follow-up is ready to review or send. Likewise, requested, drafted, reviewed, approved and sent are different states. Resolve pronouns against their actual source and preserve uncertainty when the evidence does not establish a state.
+- Keep the identity and stage of each deliverable separate. A guide draft being ready does not mean a follow-up message draft exists. If the source says the guide is ready and asks to prepare a follow-up for review, offer to draft that follow-up; do not claim an existing follow-up is ready to review or send. Likewise, requested, drafted, reviewed, approved and sent are different states. Resolve pronouns against their actual source and preserve uncertainty when the evidence does not establish a state.
 - Zero findings is a valid result. For a quiet automation, missing context means no new chat. When a person directly asks in an ordinary chat and the space is empty, ask one short starter question there instead of persisting a fabricated finding.
 
 ## Write the opener and submit once
 
-Write a short title and a concise `message`: one concrete observation grounded in the sources, followed by a natural next step. If the person already asked for the work, acknowledge that request and describe where to pick it up; do not ask them to authorize the same task again as though it were a new suggestion. For example, say “You asked for a follow-up draft. We can pick that up here,” rather than “Would you like me to draft a follow-up?” Ask one useful question when there is a genuinely new proposal or a missing decision needed to continue. Do not force a question onto an existing request.
-
-Keep the review quiet and non-executing: describe the continuation without claiming you are doing it or have finished it. Preserve the original scope and limits, such as preparing a draft for review without sending it. The person can continue in the delivered ordinary chat; do not send them through another approval flow. Address them naturally, explain timeliness only when supported, and keep review mechanics and internal status labels out of the opener. The controller appends validated source links, so do not add raw IDs or invented links.
+Write a short title and a concise `message`: one concrete observation grounded in the sources, followed by one useful next-step question. Address the person naturally. Explain why the topic is timely only when the evidence supports it; do not invent urgency. The controller appends validated source links, so keep raw IDs and invented links out of the prose. Keep internal status labels and review mechanics out of the opener.
 
 The required `reason` records the grounding, and `prompt` describes the suggested work without executing it. Neither replaces `message`. Pass one JSON object through stdin so the review does not edit workspace files. Use a quoted heredoc to preserve the proposal as data, including literal shell characters:
 
@@ -47,7 +45,7 @@ instafy recommendations submit --file - --json <<'RECOMMENDATION_JSON'
   "title": "Pilot follow-up",
   "reason": "The guide draft is ready, and the user asked for a follow-up draft to review before sending. The sources do not establish that the follow-up has been drafted.",
   "prompt": "Draft a short pilot follow-up pointing to the revised onboarding guide and leave it for my review without sending it.",
-  "message": "You asked for a pilot follow-up to review before sending. The guide draft is ready, and we can pick up that follow-up here.",
+  "message": "The onboarding guide draft is ready, but the pilot follow-up still needs drafting. Would you like me to prepare a short update for you to review before it is sent?",
   "evidence": [
     { "conversationId": "<actual conversation UUID>", "messageId": "<actual message UUID>" }
   ]

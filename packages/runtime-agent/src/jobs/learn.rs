@@ -150,7 +150,10 @@ const SPACE_REVIEW_TEMPLATE: &str = include_str!(concat!(
 ));
 // Frozen previous built-in content is an exact migration baseline, never projected as a skill.
 // Preserve user edits rather than treating a familiar name or partial match as managed content.
-const LEGACY_SPACE_REVIEW_TEMPLATE: &str = include_str!("legacy/space-review-v1.md");
+const LEGACY_SPACE_REVIEW_TEMPLATES: &[&str] = &[
+    include_str!("legacy/space-review-v1.md"),
+    include_str!("legacy/space-review-v2.md"),
+];
 const DIAGNOSTICS_OPENAI_TEMPLATE: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/assets/instafy/.agents/skills/instafy-diagnostics/agents/openai.yaml"
@@ -433,8 +436,9 @@ pub fn ensure_project_memory_scaffold(workspace_dir: &Path) {
         });
     if space_review_is_local
         && (!space_review_path.exists()
-            || fs::read_to_string(&space_review_path).ok().as_deref()
-                == Some(LEGACY_SPACE_REVIEW_TEMPLATE))
+            || fs::read_to_string(&space_review_path)
+                .ok()
+                .is_some_and(|content| LEGACY_SPACE_REVIEW_TEMPLATES.contains(&content.as_str())))
     {
         if let Some(parent) = space_review_path.parent() {
             let _ = fs::create_dir_all(parent);
@@ -1636,19 +1640,21 @@ mod tests {
         )
         .expect("space review memory snapshot");
         assert!(snapshot.text.contains(SPACE_REVIEW_TEMPLATE.trim()));
-        fs::write(&skill, LEGACY_SPACE_REVIEW_TEMPLATE).expect("previous bundled skill");
-        ensure_project_memory_scaffold(workspace.path());
-        assert_eq!(
-            fs::read_to_string(&skill).expect("upgraded built-in skill"),
-            SPACE_REVIEW_TEMPLATE
-        );
-        let customized_legacy = format!("{LEGACY_SPACE_REVIEW_TEMPLATE}\nProject-specific rule.\n");
-        fs::write(&skill, &customized_legacy).expect("customized previous skill");
-        ensure_project_memory_scaffold(workspace.path());
-        assert_eq!(
-            fs::read_to_string(&skill).expect("preserved previous customization"),
-            customized_legacy
-        );
+        for previous in LEGACY_SPACE_REVIEW_TEMPLATES {
+            fs::write(&skill, previous).expect("previous bundled skill");
+            ensure_project_memory_scaffold(workspace.path());
+            assert_eq!(
+                fs::read_to_string(&skill).expect("upgraded built-in skill"),
+                SPACE_REVIEW_TEMPLATE
+            );
+            let customized_legacy = format!("{previous}\nProject-specific rule.\n");
+            fs::write(&skill, &customized_legacy).expect("customized previous skill");
+            ensure_project_memory_scaffold(workspace.path());
+            assert_eq!(
+                fs::read_to_string(&skill).expect("preserved previous customization"),
+                customized_legacy
+            );
+        }
         fs::write(&skill, "project-specific review guidance").expect("customized review skill");
         ensure_project_memory_scaffold(workspace.path());
         assert_eq!(
@@ -1666,22 +1672,17 @@ mod tests {
         ensure_project_memory_scaffold(workspace.path());
         let skill = workspace.path().join(SPACE_REVIEW_RELATIVE_PATH);
         let external_skill = outside.path().join("SKILL.md");
-        fs::write(&external_skill, LEGACY_SPACE_REVIEW_TEMPLATE).expect("external skill");
+        let previous = LEGACY_SPACE_REVIEW_TEMPLATES.last().unwrap();
+        fs::write(&external_skill, previous).expect("external skill");
         fs::remove_file(&skill).expect("remove default");
         symlink(&external_skill, &skill).expect("skill symlink");
         ensure_project_memory_scaffold(workspace.path());
-        assert_eq!(
-            fs::read_to_string(&external_skill).unwrap(),
-            LEGACY_SPACE_REVIEW_TEMPLATE
-        );
+        assert_eq!(fs::read_to_string(&external_skill).unwrap(), *previous);
         fs::remove_file(&skill).expect("remove symlink");
         fs::remove_dir(skill.parent().unwrap()).expect("remove skill directory");
         symlink(outside.path(), skill.parent().unwrap()).expect("directory symlink");
         ensure_project_memory_scaffold(workspace.path());
-        assert_eq!(
-            fs::read_to_string(&external_skill).unwrap(),
-            LEGACY_SPACE_REVIEW_TEMPLATE
-        );
+        assert_eq!(fs::read_to_string(&external_skill).unwrap(), *previous);
     }
 
     #[test]

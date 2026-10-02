@@ -201,7 +201,7 @@ async fn validate_conversation(
     reader: &Reader,
     project_id: &Uuid,
     conversation_id: &Uuid,
-) -> ApiResult<()> {
+) -> ApiResult<ConversationRecord> {
     let conversation = load_conversation_record(transaction, conversation_id).await?;
     if conversation.project_id != *project_id {
         return Err(not_found("recommendation evidence is unavailable"));
@@ -212,7 +212,7 @@ async fn validate_conversation(
     } else {
         ensure_conversation_access(transaction, &conversation, &reader.context).await?;
     }
-    Ok(())
+    Ok(conversation)
 }
 
 async fn validate_evidence(
@@ -262,7 +262,7 @@ async fn redact_continuation(
     if let Some(conversation_id) = record.accepted_conversation_id {
         match validate_conversation(transaction, reader, &record.project_id, &conversation_id).await
         {
-            Ok(()) => {}
+            Ok(_) => {}
             Err((StatusCode::FORBIDDEN | StatusCode::NOT_FOUND, _)) => {
                 record.accepted_conversation_id = None
             }
@@ -272,7 +272,7 @@ async fn redact_continuation(
     if let Some(conversation_id) = record.delivered_conversation_id {
         match validate_conversation(transaction, reader, &record.project_id, &conversation_id).await
         {
-            Ok(()) => {}
+            Ok(_) => {}
             Err((StatusCode::FORBIDDEN | StatusCode::NOT_FOUND, _)) => {
                 record.delivered_conversation_id = None
             }
@@ -450,7 +450,14 @@ async fn submit_recommendation(
                 "update conversations set metadata=metadata || jsonb_build_object('recommendationId',$2::text) where id=$1",
                 &[&conversation_id,&record.id.to_string()],
             ).await.map_err(|e| internal_error(format!("failed to mark proactive conversation: {e}")))?;
-            let content = message_with_evidence(message, &record.evidence);
+            let content = message_with_evidence(
+                &transaction,
+                &reader,
+                &project_id,
+                message,
+                &record.evidence,
+            )
+            .await?;
             let message_row = crate::agent::record_agent_conversation_message(
                 &transaction,
                 &project_id,
@@ -495,28 +502,55 @@ async fn submit_recommendation(
     Ok(Json(record))
 }
 
-fn message_with_evidence(message: &str, evidence: &[Evidence]) -> String {
-    let sources = evidence
-        .iter()
-        .enumerate()
-        .map(|(index, entry)| {
-            let label = if evidence.len() == 1 {
-                "Source chat".to_owned()
-            } else {
-                format!("Source chat {}", index + 1)
-            };
-            // Use the normal chat-reference dialect so Studio can open the
-            // source chat in place on every app origin.
-            match entry.message_id {
-                Some(message_id) => {
-                    format!("[[message:{}/{message_id}|{label}]]", entry.conversation_id)
-                }
-                None => format!("[[conversation:{}|{label}]]", entry.conversation_id),
-            }
-        })
-        .collect::<Vec<_>>()
-        .join(" · ");
-    format!("{message}\n\n{sources}")
+fn source_chat_label(metadata: Option<&serde_json::Value>) -> String {
+    let title = metadata
+        .and_then(|value| value.get("title"))
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("");
+    let title = title.split_whitespace().collect::<Vec<_>>().join(" ");
+    let mut label = String::new();
+    for ch in title.chars().filter(|ch| !ch.is_control()).take(160) {
+        // The chat-reference dialect treats its label as plain text and has
+        // no escape/entity decoding. Break every closing delimiter, including
+        // overlapping runs such as ]]], so a title cannot inject another token.
+        if ch == ']' && label.ends_with(']') {
+            label.push(' ');
+        }
+        label.push(ch);
+    }
+    let label = label.trim();
+    if label.is_empty() {
+        "Source chat".to_owned()
+    } else if label.ends_with(']') {
+        // Separate a final title bracket from the token's closing brackets;
+        // the frontend trims this padding from the displayed label.
+        format!("{label} ")
+    } else {
+        label.to_owned()
+    }
+}
+
+async fn message_with_evidence(
+    transaction: &Transaction<'_>,
+    reader: &Reader,
+    project_id: &Uuid,
+    message: &str,
+    evidence: &[Evidence],
+) -> ApiResult<String> {
+    let mut seen = HashSet::new();
+    let mut sources = Vec::new();
+    for entry in evidence {
+        if !seen.insert(entry.conversation_id) {
+            continue;
+        }
+        // Resolve the label from the authorized source itself, never from the
+        // model's suggested title. Exact message evidence stays on the record.
+        let source =
+            validate_conversation(transaction, reader, project_id, &entry.conversation_id).await?;
+        let label = source_chat_label(source.metadata.as_ref());
+        sources.push(format!("[[conversation:{}|{label}]]", source.id));
+    }
+    Ok(format!("{message}\n\n{}", sources.join(" · ")))
 }
 
 #[derive(Serialize)]

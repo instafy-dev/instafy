@@ -1,8 +1,10 @@
 # Space review
 
 Octo can review recent accessible conversations and start one useful private chat with a grounded
-observation and a next-step question. The person replies in that ordinary chat to choose what
-happens next. Delivering the opener does not dispatch a model run or execute the suggested work.
+observation and a natural next step. The opener acknowledges existing requests and where to
+resume them; it asks a question for a new proposal or a missing decision, rather than repeatedly
+asking permission for work already requested. The person continues in that ordinary chat.
+Delivering the opener does not dispatch a model run or execute the suggested work.
 There is no separate review panel or recommendations inbox.
 
 ## Opt in and receive a conversation
@@ -15,7 +17,7 @@ behavior. No review schedule is created or enabled automatically.
 
 Each run reads previous recommendations, samples a bounded set of accessible chats and chooses
 zero or one useful topic. A finding arrives as a normal private Octo chat: a short opener with a
-useful question and validated links to its sources. An empty space or a run without a new finding
+natural continuation and validated links to its sources. An empty space or a run without a new finding
 creates no chat. Execution history remains available through Automations; the internal review
 anchor is excluded from ordinary chat discovery and activity.
 
@@ -38,8 +40,14 @@ also remain suppressed. Delivery or acceptance does not imply that work was exec
   review cannot become accessible through this API. Delivered conversation IDs are redacted from
   scoped jobs; delivery is not a grant to inspect the new private chat.
 - Sources are checked on submission and retrieval. Revoked access hides the finding.
+- Delivered openers show one source chip per distinct evidence conversation, labeled with its
+  accessible chat title at delivery time (or **Source chat** when untitled); labels do not update
+  after a rename. Chips open the source chat; all original message-level evidence remains stored.
 - The opener must distinguish each deliverable and its stage: a guide draft being ready does not
   establish that a requested follow-up message has been drafted, approved or sent.
+- Existing requests retain their original scope and limits. A request for a draft to review
+  should be acknowledged as unfinished drafting, without re-asking whether to draft it or
+  implying permission to send it. The review itself remains non-executing.
 - The skill may submit the opener, but cannot execute its suggestion, send external messages,
   modify the project, create schedules or dispatch follow-up jobs.
 
@@ -71,8 +79,9 @@ Apply the ordered additive migrations before the controller rollout, including
 `20261002120000_space_recommendations.sql` and
 `20261002121000_recommendation_conversation_delivery.sql`, followed by
 `20261002122000_quiet_space_review_automations.sql`. Deploy the matching bundled runtime
-skill and CLI for conversation delivery. Existing runtime workspaces upgrade the exact previous
-bundled review skill; customized copies are preserved and need a deliberate local update.
+skill and CLI for conversation delivery. Existing runtime workspaces upgrade exact recognized
+previous bundled review skills, including the prior quiet-review template; customized copies
+are preserved and need a deliberate local update.
 See [CLI](CLI.md#space-reviews-and-recommendations).
 Semantic deduplication and the usefulness of a question still require review; stable-key
 idempotency alone does not establish quality.
@@ -115,8 +124,9 @@ Code-mode-only models need the matching host described in [Developer setup](../D
 
 Check an empty space, active unfinished work beside completed distractions, and stale unresolved
 decisions. Include the grounding regression: a guide is ready, no pilot follow-up has been sent,
-and the person requests a follow-up draft for review. The opener should offer to draft the
-follow-up, without claiming that a follow-up draft already exists. Repeat a review after delivery,
+and the person requests a follow-up draft for review. The opener should acknowledge the request
+and a natural way to resume it, without re-asking permission or claiming that a follow-up draft
+already exists. Repeat a review after delivery,
 archive/deletion and legacy accepted/dismissed choices; none should resurface.
 
 The probe requires a completed model turn with positive token usage, checks count bounds, verifies
@@ -124,6 +134,10 @@ unchanged delivered and terminal records, rejects exposed private delivery IDs a
 suggested-reply chips. It calls the job processor directly and does not exercise the full lease
 completion path. A human-session readback or controller integration test must also verify the
 actual opener, source links, privacy, absence of follow-up jobs and normal chat reply behavior.
+Test a short reply such as “yes” both when the opener includes the task details and when needed
+details appear only in its linked source. Confirm that continuation uses those details without
+asking the person to repeat the request, and respects the original limits on actions such as
+sending a draft. A successful reply using a detailed opener alone does not prove source lookup.
 Manually inspect grounding, semantic duplicates and absence of unrequested actions; counts alone
 do not prove quality. Missing prerequisites fail an explicit live run; ordinary tests report it
 as ignored.
