@@ -818,16 +818,20 @@ test("CODEOWNERS requires existing trusted owners for all outside contributions"
   // approve itself. The catch-all covers root files, dotfiles, nested source,
   // newly added paths and deletions. Later rules must not un-own any path or
   // silently add another account that changes the bot-only ownership policy.
-  // Both are existing repository collaborators; preserving both prevents the
-  // new default rule from blocking the second bot's ordinary product PRs.
+  // CODEOWNERS uses the last matching rule. Every override must preserve both
+  // existing trusted owners so either bot can review the other bot's changes.
   assert.deepEqual(rules[0], ["*", "@instafy-bot", "@instafy-bot-2"]);
   for (const [pattern, ...owners] of rules.slice(1)) {
     assert.ok(pattern.startsWith("/"));
-    assert.deepEqual(owners, ["@instafy-bot"], `unexpected owners for ${pattern}`);
+    assert.deepEqual(
+      owners,
+      ["@instafy-bot", "@instafy-bot-2"],
+      `unexpected owners for ${pattern}`,
+    );
   }
 });
 
-test("CODEOWNERS binds every public-boundary control to the security maintainer", () => {
+test("CODEOWNERS binds every public-boundary control to both trusted owners", () => {
   const source = fs.readFileSync(
     path.join(repositoryRoot, ".github", "CODEOWNERS"),
     "utf8",
@@ -847,7 +851,7 @@ test("CODEOWNERS binds every public-boundary control to the security maintainer"
     assert.match(
       source,
       new RegExp(
-        `^${protectedPath.replaceAll(".", String.raw`\.`)} @instafy-bot$`,
+        `^${protectedPath.replaceAll(".", String.raw`\.`)} @instafy-bot @instafy-bot-2$`,
         "mu",
       ),
     );

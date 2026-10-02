@@ -63,6 +63,7 @@ mod provider_identifiers;
 mod provider_requests;
 mod providers;
 mod rate_limit;
+mod recommendations;
 mod redaction;
 mod redis_bus;
 mod runs;
@@ -449,6 +450,7 @@ async fn main() -> anyhow::Result<()> {
         .merge(bug_reports::router())
         .merge(dispatch::router())
         .merge(automations::router())
+        .merge(recommendations::router())
         .merge(projects::router())
         .merge(browser_shares::router())
         .merge(imports::router())

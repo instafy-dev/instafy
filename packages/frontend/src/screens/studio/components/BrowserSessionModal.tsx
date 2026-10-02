@@ -2635,6 +2635,8 @@ export function BrowserSessionModal({
       {!shouldCollapseDocked && fillContainer && sharedBrowserChrome ? (
         <SharedBrowserChrome
           {...sharedBrowserChrome}
+          historyUserId={currentUserId}
+          historyActive={isOpen && transportActive}
           controlOwner={effectiveAgentControlOwner ?? controlOwner}
           interactionEnabled={humanInputEnabled}
           toolbarActions={(compactNavigation) => (

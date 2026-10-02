@@ -1,4 +1,4 @@
-import { type CSSProperties, type ReactNode } from "react";
+import { type CSSProperties, type ReactNode, type Ref } from "react";
 import {
   Dialog,
   Modal,
@@ -35,6 +35,7 @@ interface StudioDialogModalProps extends ModalOverlayProps {
   modalClassName?: ModalOverlayProps["className"];
   modalStyle?: CSSProperties;
   dialogClassName?: string;
+  dialogRef?: Ref<HTMLElement>;
   dialogAriaLabel?: string;
   dialogAriaLabelledBy?: string;
 }
@@ -47,6 +48,7 @@ export function StudioDialogModal({
   modalClassName,
   modalStyle,
   dialogClassName,
+  dialogRef,
   dialogAriaLabel,
   dialogAriaLabelledBy,
   ...props
@@ -72,6 +74,7 @@ export function StudioDialogModal({
         )}
       >
         <Dialog
+          ref={dialogRef}
           className={`outline-none${dialogClassName ? ` ${dialogClassName}` : ""}`}
           aria-label={normalizedDialogLabel}
           aria-labelledby={normalizedDialogLabelledBy}

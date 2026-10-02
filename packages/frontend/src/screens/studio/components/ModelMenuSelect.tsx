@@ -1,9 +1,10 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { NavArrowDown } from "iconoir-react";
+import { Check, NavArrowDown } from "iconoir-react";
 import { MenuTrigger } from "react-aria-components";
 import { Button } from "../../../components/Button";
 import { Input } from "../../../components/Input";
 import { Text } from "../../../components/Text";
+import { StudioListBox, StudioListBoxItem } from "../../../components/aria/StudioListBox";
 import { StudioMenu, StudioMenuItem, StudioMenuSeparator } from "../../../components/aria/StudioMenu";
 import { StudioPopover } from "../../../components/aria/StudioPopover";
 import type { AiModelOption } from "../../../utils/aiProviderModels";
@@ -21,6 +22,7 @@ export interface ModelMenuSelectProps {
   menuTestId?: string;
   customPlaceholder?: string;
   customLabel?: string;
+  presentation?: "menu" | "inline";
 }
 
 export function ModelMenuSelect({
@@ -36,6 +38,7 @@ export function ModelMenuSelect({
   menuTestId,
   customPlaceholder = "e.g. gpt-5.5-mini",
   customLabel = "Custom model id",
+  presentation = "menu",
 }: ModelMenuSelectProps) {
   const triggerRef = useRef<HTMLButtonElement | null>(null);
   const [menuOpen, setMenuOpen] = useState(false);
@@ -69,6 +72,79 @@ export function ModelMenuSelect({
 
   const canUseCustom = !disabled && customDraft.trim().length > 0;
 
+  const selectModel = (model: string | null) => {
+    if (disabled) return;
+    onSelect(model);
+    setMenuOpen(false);
+  };
+  const customControls = (
+    <div className="space-y-1 px-1 pt-2">
+      <Text as="div" variant="caption" tone="muted" className="font-medium">
+        {customLabel}
+      </Text>
+      <Input
+        value={customDraft}
+        onChange={(event) => setCustomDraft(event.target.value)}
+        placeholder={customPlaceholder}
+        size="sm"
+        radius="xl"
+        disabled={disabled}
+        aria-label={`${ariaLabel}: custom model id`}
+        data-testid={triggerTestId ? `${triggerTestId}-custom-input` : undefined}
+        onKeyDown={(event) => {
+          if (event.key === "Enter" && !event.nativeEvent.isComposing && canUseCustom) {
+            event.preventDefault();
+            selectModel(customDraft.trim());
+          }
+        }}
+      />
+      <Button
+        variant="outline"
+        size="sm"
+        radius="full"
+        fullWidth
+        isDisabled={!canUseCustom}
+        onPress={() => { if (canUseCustom) selectModel(customDraft.trim()); }}
+        data-testid={triggerTestId ? `${triggerTestId}-custom-apply` : undefined}
+      >
+        Use custom model
+      </Button>
+    </div>
+  );
+
+  if (presentation === "inline") {
+    const choices = includeDefaultOption
+      ? [{ id: "__default__", label: defaultLabel }, ...options]
+      : options;
+    return (
+      <div data-testid={triggerTestId}>
+        {choices.length > 0 ? <StudioListBox
+          aria-label={ariaLabel}
+          selectionMode="single"
+          selectedKeys={selectedKeys}
+          disabledKeys={disabled ? choices.map((option) => option.id) : []}
+          onSelectionChange={(keys) => {
+            if (keys === "all") return;
+            const key = keys.values().next().value;
+            if (key !== undefined) selectModel(key === "__default__" ? null : String(key));
+          }}
+          className="space-y-1"
+          data-testid={menuTestId}
+        >
+          {choices.map((option) => (
+            <StudioListBoxItem key={option.id} id={option.id} textValue={option.label} className="min-h-11 gap-2">
+              {({ isSelected }) => <>
+                <span className="min-w-0 break-words">{option.label}</span>
+                {isSelected ? <Check aria-hidden="true" className="h-4 w-4 shrink-0" /> : null}
+              </>}
+            </StudioListBoxItem>
+          ))}
+        </StudioListBox> : null}
+        {customControls}
+      </div>
+    );
+  }
+
   return (
     <MenuTrigger isOpen={menuOpen} onOpenChange={setMenuOpen}>
       <Button
@@ -97,14 +173,6 @@ export function ModelMenuSelect({
         placement="bottom start"
         offset={6}
         className="min-w-[var(--trigger-width)] p-2"
-        shouldCloseOnInteractOutside={(element) => {
-          // When nested in the Runtime & AI popover, treat clicks within that surface as "inside"
-          // so the menu doesn't immediately close on the same click that opened it.
-          if (element.closest('[data-popover-scope="runtime-selector"]')) {
-            return false;
-          }
-          return true;
-        }}
         data-testid={menuTestId}
       >
         <StudioMenu
@@ -113,13 +181,7 @@ export function ModelMenuSelect({
           selectedKeys={selectedKeys}
           onAction={(key) => {
             const resolvedKey = String(key);
-            if (resolvedKey === "__default__") {
-              onSelect(null);
-              setMenuOpen(false);
-              return;
-            }
-            onSelect(resolvedKey);
-            setMenuOpen(false);
+            selectModel(resolvedKey === "__default__" ? null : resolvedKey);
           }}
           className="space-y-1"
         >
@@ -131,49 +193,7 @@ export function ModelMenuSelect({
           ))}
         </StudioMenu>
         <StudioMenuSeparator />
-        <div className="space-y-1 px-1 pt-2">
-          <Text as="div" variant="caption" tone="muted" className="font-medium">
-            {customLabel}
-          </Text>
-          <Input
-            value={customDraft}
-            onChange={(event) => setCustomDraft(event.target.value)}
-            placeholder={customPlaceholder}
-            size="sm"
-            radius="xl"
-            disabled={disabled}
-            aria-label={`${ariaLabel}: custom model id`}
-            data-testid={triggerTestId ? `${triggerTestId}-custom-input` : undefined}
-            onKeyDown={(event) => {
-              if (event.key !== "Enter") {
-                return;
-              }
-              if (!canUseCustom) {
-                return;
-              }
-              event.preventDefault();
-              onSelect(customDraft.trim());
-              setMenuOpen(false);
-            }}
-          />
-          <Button
-            variant="outline"
-            size="sm"
-            radius="full"
-            fullWidth
-            isDisabled={!canUseCustom}
-            onPress={() => {
-              if (!canUseCustom) {
-                return;
-              }
-              onSelect(customDraft.trim());
-              setMenuOpen(false);
-            }}
-            data-testid={triggerTestId ? `${triggerTestId}-custom-apply` : undefined}
-          >
-            Use custom model
-          </Button>
-        </div>
+        {customControls}
       </StudioPopover>
     </MenuTrigger>
   );

@@ -555,8 +555,9 @@ pub(super) async fn settle_failed_queued_jobs_with_message(
 
 /// Publish what [`settle_failed_queued_jobs_with_message`] left once its
 /// transaction has committed: input state, refunded credits, the conversation
-/// messages, each run's failure, and a send-queue drain per conversation,
-/// since whatever was queued behind a failed turn may go now.
+/// messages, each run's failure, the lead checkpoint of a plan whose last
+/// live worker failed, and a send-queue drain per conversation, since
+/// whatever was queued behind a failed turn may go now.
 pub(super) async fn publish_failed_queued_jobs(state: &AppState, failed: FailedQueuedJobs) {
     crate::send_intents::publish_job_input_state_updates(
         state,
@@ -572,7 +573,9 @@ pub(super) async fn publish_failed_queued_jobs(state: &AppState, failed: FailedQ
     }
 
     let mut conversations = std::collections::BTreeSet::new();
+    let mut job_ids = Vec::with_capacity(failed.jobs.len());
     for (project_id, job_id, run_id, conversation_id) in failed.jobs {
+        job_ids.push(job_id);
         if let Some(run_id) = run_id {
             publish_failed_run(
                 state,
@@ -588,6 +591,20 @@ pub(super) async fn publish_failed_queued_jobs(state: &AppState, failed: FailedQ
         if let Some(conversation_id) = conversation_id {
             conversations.insert(conversation_id);
         }
+    }
+    // A plan's worker failed here never reports a completion, so its plan
+    // would wait forever for the lead's checkpoint. Run the one a canceled
+    // worker gets: once the group has no live worker left, its lead is
+    // dispatched, at most once per group however many sweeps fail its
+    // workers. It runs before the drain, as a completed worker's does.
+    if let Err((status, Json(error))) =
+        crate::multi_agent_plan::checkpoint_plan_groups_for_jobs(state, &job_ids).await
+    {
+        warn!(
+            status = status.as_u16(),
+            error = %error.message,
+            "failed to checkpoint plan groups after failing queued jobs"
+        );
     }
     for conversation_id in conversations {
         crate::send_queue::spawn_send_queue_drain(state.clone(), conversation_id);

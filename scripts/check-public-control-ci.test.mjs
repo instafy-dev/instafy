@@ -6,17 +6,17 @@ import path from "node:path";
 import test from "node:test";
 import vm from "node:vm";
 import { spawnSync } from "node:child_process";
-import { withoutImageBuildRouting } from "./lib/imageBuildRoutingTestBaseline.mjs";
+import { withoutImageBuildDeltas } from "./lib/imageBuildRoutingTestBaseline.mjs";
 
 const root = path.resolve(import.meta.dirname, "..");
-const read = file => withoutImageBuildRouting(file, withoutManualCiRouting(file, fs.readFileSync(path.join(root, ".github/workflows", file), "utf8")));
+const read = file => withoutImageBuildDeltas(file, withoutManualCiRouting(file, fs.readFileSync(path.join(root, ".github/workflows", file), "utf8")));
 const jobs = [
   { file: "npm-release.yml", key: "select", label: "public-npm-select", name: "Select version or publish mode", minutes: 15,
     tools: ["bash", "git", "curl", "tar", "sha256sum", "unzip", "gh"],
     baseline: "cc6e1f9c78e8ce69b7d34a816d785c71c20febc1c7b7fbc92b95c440a6c78670" },
-  { file: "continuous-image-publication.yml", key: "publish", label: "public-image-coordinator", name: "Publish exact protected-main images after CI", minutes: 5,
+  { file: "continuous-image-publication.yml", key: "publish", label: "public-image-coordinator", name: "Publish exact protected-main images after CI", minutes: 7,
     tools: ["bash", "gh", "jq", "date"],
-    baseline: "befcf70020089626509f4ad54e291f84881a53cb5b44c6b8447e13506e6411ec" },
+    baseline: "fa065d6cb0771acfeadad89d363be6889619c70569205fb7d3ebe09ce6faaaa8" },
   { file: "npm-release.yml", key: "pack", label: "public-npm-pack", name: "Test and pack exact npm artifacts", minutes: 25,
     tools: ["bash", "git", "curl", "tar", "sha256sum", "unzip"],
     baseline: "cc6e1f9c78e8ce69b7d34a816d785c71c20febc1c7b7fbc92b95c440a6c78670" },

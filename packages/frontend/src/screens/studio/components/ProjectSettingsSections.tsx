@@ -167,6 +167,7 @@ export function ProjectSettingsSections({
             }}>
               <Field label="Name" htmlFor="project-settings-name">
                 <Input id="project-settings-name" value={projectNameDraft}
+                  placeholder="Name this space"
                   onChange={event => onProjectNameChange(event.target.value)}
                   onKeyDown={event => {
                     if (event.key === "Escape" && !projectNameSaving) {

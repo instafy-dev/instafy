@@ -1,5 +1,6 @@
 import { getOrgDisambiguator, getOrgDisplayName, isPersonalOrgName } from "../../org/orgNaming";
 import type { ConversationState } from "../../conversations/ConversationsProvider";
+import { spaceDisplayName } from "../../projects/spaceName";
 import { homeFailureStatusLabel, type HomeAttentionEntry, type HomeFailureStatusLabel } from "./homeAttention";
 import type { ActivityItem } from "../../services/runtimeController/activity";
 import type { ProductNotification } from "../../notifications/notificationContract";
@@ -146,8 +147,7 @@ export function teamKeyForOrgId(orgId: string | null | undefined): string {
 }
 
 export function getSpaceLabel(value: string | null | undefined): string {
-  const trimmed = value?.trim() ?? "";
-  return trimmed.length > 0 ? trimmed : "Untitled Space";
+  return spaceDisplayName(value);
 }
 
 export function formatRelativeTimestamp(at: number | null, now = Date.now()): string | null {

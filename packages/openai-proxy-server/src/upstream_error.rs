@@ -1,26 +1,41 @@
 //! Typed upstream failures. Public responses never echo provider bodies, URLs or credentials.
 
 use std::fmt;
+use std::time::{Duration, SystemTime};
 
 use reqwest::StatusCode;
 use reqwest::header::{HeaderMap, HeaderValue, RETRY_AFTER};
+use serde_json::{Value, json};
+use uuid::Uuid;
 
 /// Delay a rate-limited client is told to wait when the provider gave no usable hint. It keeps
-/// the client-side retry from landing in the same provider window without stalling a turn.
-/// Codex waits the same when a retryable 429 carries no Retry-After
-/// (`INSTAFY_RETRYABLE_429_DEFAULT_DELAY` in codex/codex-rs/codex-api/src/api_bridge.rs), and
-/// because this default always fills that gap, change both together.
+/// the client-side retry from landing in the same provider window without stalling a turn. It is
+/// the `Retry-After` of a retryable 429 that had none, and the base wait of a streamed rate limit
+/// without one (see [`stream_retry_delay`]).
 const DEFAULT_RATE_LIMIT_RETRY_AFTER_SECS: u64 = 5;
 /// Bounds for a delay the proxy derives from x-ratelimit-reset-* headers. Those headers report
 /// when a whole bucket refills, which can be minutes away, and the client sleeps for whatever
-/// it is given. A zero reset would send the retry straight back into the exhausted window.
+/// it is given. A zero reset would send the retry straight back into the exhausted window. A
+/// streamed rate limit keeps its wait within the same bounds.
 const MIN_DERIVED_RETRY_AFTER_SECS: u64 = 1;
 const MAX_DERIVED_RETRY_AFTER_SECS: u64 = 30;
+/// The provider's error code that codex reads, in a `response.failed` event, as a retryable rate
+/// limit. It waits the delay the message gives after "try again in" before it sends again.
+const STREAM_RATE_LIMIT_CODE: &str = "rate_limit_exceeded";
+/// Managed runtimes share one upstream key, so turns that hit the same limit get the same delay
+/// and would all retry at the same instant. A streamed rate limit asks each to wait up to this
+/// much longer, never shorter, within the 30 second bound.
+const STREAM_RATE_LIMIT_MAX_JITTER_PERCENT: u32 = 20;
 /// Reset beyond which the exhausted bucket is not worth waiting for. A per-minute bucket is
 /// completely full again within about a minute, while a daily requests or tokens limit reports
 /// hours. The client's retries within a turn cover roughly five 30 second waits, so a bucket that
 /// needs more than twice that to refill would only spend the turn's retries and then fail anyway.
 const LONG_RATE_LIMIT_WINDOW_SECS: u64 = 5 * 60;
+/// The OpenAI error `param` values that name a request's tool controls.
+const TOOL_CONTROL_PARAMS: [&str; 2] = ["tool_choice", "tools"];
+/// Most characters of a provider error code that a [`ToolControlRejection`] keeps, so a log
+/// line that names it stays bounded.
+const MAX_TOOL_CONTROL_ERROR_CODE_CHARS: usize = 64;
 
 #[derive(Debug)]
 pub(crate) enum UpstreamFailure {
@@ -28,6 +43,8 @@ pub(crate) enum UpstreamFailure {
         status: StatusCode,
         retry_after: Option<HeaderValue>,
         refreshable_auth: bool,
+        /// Set only for a 400 whose structured error blames the tool controls.
+        tool_control_rejection: Option<ToolControlRejection>,
     },
     CredentialRefresh,
     InvalidResponse,
@@ -74,6 +91,56 @@ impl PlanLimit {
     }
 }
 
+/// A 400 whose OpenAI error object blames the request's tool controls. It keeps only the
+/// structured fields that identify the error, never its message or any other body text.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ToolControlRejection {
+    /// `error.param` when it names `tool_choice` or `tools`; `None` when the error names no
+    /// param and its code and message name the tool choice instead.
+    pub(crate) param: Option<&'static str>,
+    /// `error.code`, or `error.type` when there is no code, cut to
+    /// [`MAX_TOOL_CONTROL_ERROR_CODE_CHARS`] characters.
+    pub(crate) code: Option<String>,
+}
+
+impl ToolControlRejection {
+    /// Reads a 400 body. It matches only the OpenAI error shape, `{"error": {...}}`, and only
+    /// when the error's `param` is exactly `tool_choice` or `tools`, or, with no `param` at
+    /// all, when it carries a code (`error.code` or `error.type`) and its `message` names the
+    /// tool choice. An error whose `param` names any other parameter never matches, whatever
+    /// its message says, and neither does a body without an error object.
+    fn from_body(status: StatusCode, body: &str) -> Option<Self> {
+        if status != StatusCode::BAD_REQUEST {
+            return None;
+        }
+        let body = serde_json::from_str::<serde_json::Value>(body).ok()?;
+        let error = body.get("error").filter(|error| error.is_object())?;
+        let text = |field: &str| error.get(field).and_then(serde_json::Value::as_str);
+        let code = text("code").or_else(|| text("type")).map(|code| {
+            code.chars()
+                .take(MAX_TOOL_CONTROL_ERROR_CODE_CHARS)
+                .collect::<String>()
+        });
+        match error.get("param") {
+            None | Some(serde_json::Value::Null) => {}
+            Some(param) => {
+                let param = TOOL_CONTROL_PARAMS
+                    .into_iter()
+                    .find(|name| param.as_str() == Some(*name))?;
+                return Some(Self {
+                    param: Some(param),
+                    code,
+                });
+            }
+        }
+        let names_tool_choice = text("message").is_some_and(|message| {
+            let message = message.to_ascii_lowercase();
+            message.contains("tool_choice") || message.contains("tool choice")
+        });
+        (code.is_some() && names_tool_choice).then_some(Self { param: None, code })
+    }
+}
+
 impl UpstreamFailure {
     pub(crate) fn http_body(status: StatusCode, headers: &HeaderMap, body: &str) -> Self {
         if status == StatusCode::TOO_MANY_REQUESTS
@@ -105,11 +172,19 @@ impl UpstreamFailure {
                 };
             }
         }
-        Self::http(
+        let mut failure = Self::http(
             status,
             headers,
             crate::auth::response_indicates_chatgpt_token_expired(status, body),
-        )
+        );
+        if let Self::Http {
+            tool_control_rejection,
+            ..
+        } = &mut failure
+        {
+            *tool_control_rejection = ToolControlRejection::from_body(status, body);
+        }
+        failure
     }
 
     pub(crate) fn http(status: StatusCode, headers: &HeaderMap, refreshable_auth: bool) -> Self {
@@ -140,6 +215,7 @@ impl UpstreamFailure {
             status,
             retry_after,
             refreshable_auth,
+            tool_control_rejection: None,
         }
     }
 }
@@ -180,6 +256,18 @@ pub(crate) fn refreshable_auth(error: &anyhow::Error) -> bool {
     )
 }
 
+/// The tool control rejection `error` carries, if it is a 400 whose structured error blames
+/// the tool controls; see [`ToolControlRejection::from_body`].
+pub(crate) fn tool_control_rejection(error: &anyhow::Error) -> Option<&ToolControlRejection> {
+    match error.downcast_ref::<UpstreamFailure>() {
+        Some(UpstreamFailure::Http {
+            tool_control_rejection,
+            ..
+        }) => tool_control_rejection.as_ref(),
+        _ => None,
+    }
+}
+
 #[derive(Debug)]
 pub(crate) struct ErrorResponse {
     pub status: StatusCode,
@@ -206,6 +294,101 @@ impl ErrorResponse {
             resets_at: None,
         }
     }
+
+    /// For a transient upstream rate limit, the `error` of the `response.failed` event a
+    /// streaming Responses request gets instead of an HTTP 429: code `rate_limit_exceeded`, and a
+    /// message that ends "Please try again in {d}s.", which codex retries after `d` seconds
+    /// within its stream retry budget. Codex does not retry an HTTP 429 by itself (its
+    /// `retry_429` is off for every provider), so the stream is what keeps a short rate limit from
+    /// ending the turn. `d` is the Retry-After this
+    /// response carries, the provider's own or the one the proxy derived, or 5 seconds, clamped
+    /// to 1-30 seconds and spread by up to 20% (see [`stream_retry_delay`]). The message keeps
+    /// this response's own words and code, which the Studio and the runtime match on.
+    ///
+    /// `None` for every other failure, a plan limit and a rate limit window too long to wait out
+    /// among them: those stay the HTTP error they are today.
+    pub(crate) fn stream_rate_limit_error(&self, now: SystemTime, jitter: f64) -> Option<Value> {
+        if self.status != StatusCode::TOO_MANY_REQUESTS
+            || self.code != "upstream_rate_limit"
+            || !self.retryable
+        {
+            return None;
+        }
+        let delay = stream_retry_delay(self.retry_after.as_ref(), now, jitter);
+        Some(json!({
+            "code": STREAM_RATE_LIMIT_CODE,
+            "message": format!(
+                "{} ({}, {}). Please try again in {}s.",
+                self.message.trim_end_matches('.'),
+                self.code,
+                self.status.as_u16(),
+                format_delay_seconds(delay),
+            ),
+        }))
+    }
+}
+
+/// The wait a streamed rate limit asks for. The Retry-After, whole seconds or an HTTP date, is
+/// clamped to 1-30 seconds; without a readable one the wait is 5 seconds. `jitter`, a sample
+/// from [0, 1], then spreads it by up to 20% so runtimes sharing a key do not all retry at once:
+/// below the 30 second bound the spread only lengthens the wait, into the room left under the
+/// bound; a Retry-After of 30 seconds or more is already cut short, so its spread goes below the
+/// bound instead of pinning every retry to exactly 30 seconds.
+fn stream_retry_delay(retry_after: Option<&HeaderValue>, now: SystemTime, jitter: f64) -> Duration {
+    let asked = retry_after
+        .and_then(|value| retry_after_delay(value, now))
+        .unwrap_or(Duration::from_secs(DEFAULT_RATE_LIMIT_RETRY_AFTER_SECS));
+    let max = Duration::from_secs(MAX_DERIVED_RETRY_AFTER_SECS);
+    let requested = asked.clamp(Duration::from_secs(MIN_DERIVED_RETRY_AFTER_SECS), max);
+    let jitter = if jitter.is_finite() {
+        jitter.clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
+    let max_spread = requested * STREAM_RATE_LIMIT_MAX_JITTER_PERCENT / 100;
+    if asked >= max {
+        return max - max_spread.mul_f64(jitter);
+    }
+    let room = max_spread.min(max - requested);
+    requested + room.mul_f64(jitter)
+}
+
+/// A Retry-After the proxy forwards or derives, whole seconds or an HTTP date, as a delay from
+/// `now`. A date already past is no delay, and a partial second rounds up.
+fn retry_after_delay(value: &HeaderValue, now: SystemTime) -> Option<Duration> {
+    let value = value.to_str().ok()?.trim();
+    if !value.is_empty() && value.bytes().all(|ch| ch.is_ascii_digit()) {
+        return value.parse::<u64>().ok().map(Duration::from_secs);
+    }
+    let delay = httpdate::parse_http_date(value)
+        .ok()?
+        .duration_since(now)
+        .unwrap_or(Duration::ZERO);
+    Some(Duration::from_secs(
+        delay.as_secs() + u64::from(delay.subsec_nanos() > 0),
+    ))
+}
+
+/// `delay` in seconds, to the millisecond, the way codex reads it back from "try again in
+/// {d}s" (a number of seconds with an optional fraction): whole seconds without a fraction, and
+/// a fraction without trailing zeros. Codex then waits exactly the delay the message states.
+fn format_delay_seconds(delay: Duration) -> String {
+    let millis = (delay.as_secs_f64() * 1000.0).round() as u64;
+    let (secs, millis) = (millis / 1000, millis % 1000);
+    if millis == 0 {
+        return secs.to_string();
+    }
+    format!("{secs}.{millis:03}")
+        .trim_end_matches('0')
+        .to_string()
+}
+
+/// A uniform sample from [0, 1] for spreading retries. The leading bytes of a v4 UUID are
+/// random, and the proxy already makes v4 UUIDs, so the spread needs no new dependency.
+pub(crate) fn retry_jitter_sample() -> f64 {
+    let bytes = Uuid::new_v4().into_bytes();
+    let sample = u32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
+    f64::from(sample) / f64::from(u32::MAX)
 }
 
 pub(crate) fn classify(error: &anyhow::Error) -> ErrorResponse {
@@ -782,6 +965,175 @@ mod tests {
         assert!(quota.retry_after.is_none());
     }
 
+    /// The delay a streamed rate limit's message states, as codex reads it back: the number
+    /// after "try again in", in seconds.
+    fn stated_delay(error: &Value) -> String {
+        let message = error["message"].as_str().expect("message");
+        let prefix = "The upstream provider rate limit was reached (upstream_rate_limit, 429). \
+                      Please try again in ";
+        message
+            .strip_prefix(prefix)
+            .and_then(|rest| rest.strip_suffix("s."))
+            .unwrap_or_else(|| panic!("unexpected message: {message}"))
+            .to_owned()
+    }
+
+    #[test]
+    fn a_transient_rate_limit_streams_as_rate_limit_exceeded_with_its_wait() {
+        let now = SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000);
+        let error = classify_headers(StatusCode::TOO_MANY_REQUESTS, &[("retry-after", "7")])
+            .stream_rate_limit_error(now, 0.0)
+            .expect("a transient rate limit streams");
+        assert_eq!(
+            error,
+            json!({
+                "code": "rate_limit_exceeded",
+                "message": "The upstream provider rate limit was reached (upstream_rate_limit, 429). Please try again in 7s.",
+            })
+        );
+        // The Studio and the runtime recognise the proxy's rate limit by these words.
+        let message = error["message"].as_str().unwrap();
+        assert!(message.contains("upstream_rate_limit"));
+        assert!(message.contains("rate limit was reached"));
+    }
+
+    #[test]
+    fn a_streamed_rate_limit_wait_is_clamped_defaulted_and_spread_upwards() {
+        let now = SystemTime::UNIX_EPOCH + Duration::from_millis(1_700_000_000_400);
+        let date =
+            |secs: u64| httpdate::fmt_http_date(SystemTime::UNIX_EPOCH + Duration::from_secs(secs));
+        let in_ten_seconds = date(1_700_000_010);
+        let passed = date(1_699_999_000);
+        let delay = |pairs: &[(&'static str, &str)], jitter: f64| {
+            let mut headers = HeaderMap::new();
+            for &(name, value) in pairs {
+                headers.insert(name, HeaderValue::from_str(value).unwrap());
+            }
+            let classified = classify(
+                &UpstreamFailure::http_body(StatusCode::TOO_MANY_REQUESTS, &headers, "{}").into(),
+            );
+            stated_delay(&classified.stream_rate_limit_error(now, jitter).unwrap())
+        };
+        for (pairs, jitter, expected) in [
+            // The provider's Retry-After, spread by up to 20%.
+            (&[("retry-after", "7")][..], 0.0, "7"),
+            (&[("retry-after", "7")], 0.5, "7.7"),
+            (&[("retry-after", "7")], 1.0, "8.4"),
+            // No usable hint: 5 seconds.
+            (&[], 0.0, "5"),
+            (&[], 1.0, "6"),
+            (&[("retry-after", "private-credential")], 1.0, "6"),
+            // A delay the proxy derived from the bucket that ran out.
+            (&[("x-ratelimit-reset-tokens", "6s")], 1.0, "7.2"),
+            // Clamped to at least a second.
+            (&[("retry-after", "0")], 0.0, "1"),
+            (&[("retry-after", "0")], 1.0, "1.2"),
+            (&[("retry-after", passed.as_str())], 0.25, "1.05"),
+            // An HTTP date is a wait from now, a partial second rounded up.
+            (&[("retry-after", in_ten_seconds.as_str())], 0.0, "10"),
+            // The spread never takes a wait past 30 seconds.
+            (&[("retry-after", "29")], 0.5, "29.5"),
+            (&[("retry-after", "29")], 1.0, "30"),
+            // A wait of 30 seconds or more is cut to 30 and spreads below it.
+            (&[("retry-after", "30")], 0.0, "30"),
+            (&[("retry-after", "120")], 0.0, "30"),
+            (&[("retry-after", "120")], 0.5, "27"),
+            (&[("retry-after", "120")], 1.0, "24"),
+            // A sample outside [0, 1] is held to it.
+            (&[("retry-after", "7")], -1.0, "7"),
+            (&[("retry-after", "7")], 2.0, "8.4"),
+            (&[("retry-after", "7")], f64::NAN, "7"),
+            // Rounded to the millisecond, as codex reads it back.
+            (&[("retry-after", "7")], 1.0 / 3.0, "7.467"),
+        ] {
+            assert_eq!(delay(pairs, jitter), expected, "{pairs:?} {jitter}");
+        }
+        // A rate limit reported inside the upstream stream carries no headers.
+        let stream = classify(
+            &UpstreamFailure::Stream {
+                code: Some("rate_limit_exceeded".into()),
+                message: "private-token".into(),
+            }
+            .into(),
+        );
+        let error = stream.stream_rate_limit_error(now, 0.0).unwrap();
+        assert_eq!(stated_delay(&error), "5");
+        assert!(!error.to_string().contains("private-token"), "{error}");
+    }
+
+    #[test]
+    fn a_streamed_rate_limit_wait_stays_within_its_spread_for_any_sample() {
+        let now = SystemTime::UNIX_EPOCH;
+        for (retry_after, low, high) in [
+            ("1", 1.0, 1.2),
+            ("5", 5.0, 6.0),
+            ("26", 26.0, 30.0),
+            ("600", 24.0, 30.0),
+        ] {
+            let classified = classify_headers(
+                StatusCode::TOO_MANY_REQUESTS,
+                &[("retry-after", retry_after)],
+            );
+            for _ in 0..500 {
+                let sample = retry_jitter_sample();
+                assert!((0.0..=1.0).contains(&sample), "{sample}");
+                let error = classified.stream_rate_limit_error(now, sample).unwrap();
+                let stated = stated_delay(&error);
+                // Codex parses the stated number back into the wait it sleeps.
+                let seconds = stated.parse::<f64>().expect("a number of seconds");
+                assert!(
+                    (low..=high).contains(&seconds),
+                    "{retry_after}: {stated} not within {low}..={high}"
+                );
+                let (_, fraction) = stated.split_once('.').unwrap_or((stated.as_str(), ""));
+                assert!(fraction.len() <= 3 && !fraction.ends_with('0'), "{stated}");
+            }
+        }
+    }
+
+    #[test]
+    fn only_a_transient_rate_limit_streams() {
+        let now = SystemTime::UNIX_EPOCH;
+        let mut plan_headers = HeaderMap::new();
+        plan_headers.insert(RETRY_AFTER, HeaderValue::from_static("7"));
+        for failure in [
+            // A plan limit stays the terminal HTTP 429 it is today.
+            UpstreamFailure::http_body(
+                StatusCode::TOO_MANY_REQUESTS,
+                &plan_headers,
+                r#"{"error":{"type":"usage_limit_reached","resets_at":1900000000}}"#,
+            ),
+            UpstreamFailure::http_body(
+                StatusCode::TOO_MANY_REQUESTS,
+                &plan_headers,
+                r#"{"error":{"type":"usage_not_included"}}"#,
+            ),
+            UpstreamFailure::Stream {
+                code: Some("usage_limit_reached".into()),
+                message: "private-token".into(),
+            },
+            // So does a window too long to wait out, and quota exhaustion.
+            UpstreamFailure::RateLimitWindow {
+                resets_in_secs: 3_600,
+            },
+            UpstreamFailure::http_body(
+                StatusCode::TOO_MANY_REQUESTS,
+                &HeaderMap::new(),
+                r#"{"error":{"code":"insufficient_quota"}}"#,
+            ),
+            UpstreamFailure::http(StatusCode::SERVICE_UNAVAILABLE, &plan_headers, false),
+            UpstreamFailure::http(StatusCode::UNAUTHORIZED, &HeaderMap::new(), false),
+            UpstreamFailure::InvalidResponse,
+        ] {
+            let classified = classify(&anyhow::Error::new(failure));
+            assert!(
+                classified.stream_rate_limit_error(now, 0.5).is_none(),
+                "{:?}",
+                classified.code
+            );
+        }
+    }
+
     #[test]
     fn plan_limit_is_a_terminal_rate_limit_with_the_provider_type() {
         let mut headers = HeaderMap::new();
@@ -868,6 +1220,103 @@ mod tests {
             assert!(stream.retry_after.is_none());
             assert!(stream.resets_at.is_none());
         }
+    }
+
+    #[test]
+    fn only_a_400_that_blames_the_tool_controls_is_a_tool_control_rejection() {
+        let rejection = |status: StatusCode, body: &str| {
+            let error =
+                anyhow::Error::new(UpstreamFailure::http_body(status, &HeaderMap::new(), body))
+                    .context("request context");
+            tool_control_rejection(&error).cloned()
+        };
+        let bad_request = |body: &str| rejection(StatusCode::BAD_REQUEST, body);
+        let long_code = "c".repeat(80);
+        for (body, param, code) in [
+            (
+                r#"{"error":{"message":"private-token","type":"invalid_request_error","param":"tool_choice","code":null}}"#.to_string(),
+                Some("tool_choice"),
+                Some("invalid_request_error".to_string()),
+            ),
+            (
+                r#"{"error":{"message":"private-token","type":"invalid_request_error","param":"tools","code":"missing_required_parameter"}}"#.to_string(),
+                Some("tools"),
+                Some("missing_required_parameter".to_string()),
+            ),
+            // With no param, a code and a message that names the tool choice.
+            (
+                r#"{"error":{"message":"Invalid value for 'tool_choice': private-token","param":null,"code":"invalid_value"}}"#.to_string(),
+                None,
+                Some("invalid_value".to_string()),
+            ),
+            (
+                r#"{"error":{"message":"Tool choice 'required' needs tools. private-token","type":"invalid_request_error"}}"#.to_string(),
+                None,
+                Some("invalid_request_error".to_string()),
+            ),
+            // The code is cut, so a log line that names it stays bounded.
+            (
+                format!(r#"{{"error":{{"param":"tool_choice","code":"{long_code}"}}}}"#),
+                Some("tool_choice"),
+                Some("c".repeat(64)),
+            ),
+        ] {
+            assert_eq!(
+                bad_request(&body),
+                Some(ToolControlRejection { param, code }),
+                "{body}"
+            );
+        }
+
+        for body in [
+            // Another parameter is to blame, whatever the message says.
+            r#"{"error":{"message":"tool_choice","type":"invalid_request_error","param":"input","code":"invalid_value"}}"#,
+            r#"{"error":{"message":"Invalid tools","type":"invalid_request_error","param":"tools[0].name"}}"#,
+            r#"{"error":{"message":"tool_choice","type":"invalid_request_error","param":"TOOL_CHOICE"}}"#,
+            r#"{"error":{"message":"tool_choice","type":"invalid_request_error","param":1}}"#,
+            // No param, and either no code or a message that names no tool choice.
+            r#"{"error":{"message":"Invalid value for 'tool_choice'.","param":null,"code":null}}"#,
+            r#"{"error":{"message":"Invalid value for 'tools'.","type":"invalid_request_error"}}"#,
+            r#"{"error":{"message":"The model does not exist.","code":"model_not_found"}}"#,
+            // Not the OpenAI error shape.
+            r#"{"detail":"Unsupported parameter: tool_choice"}"#,
+            r#"{"error":"tool_choice"}"#,
+            r#"{"message":"tool_choice","param":"tool_choice"}"#,
+            "tool_choice",
+            "",
+        ] {
+            assert_eq!(bad_request(body), None, "{body}");
+        }
+
+        // Only a 400: any other status is classified as before.
+        let blames_tool_choice = r#"{"error":{"message":"tool_choice","type":"invalid_request_error","param":"tool_choice"}}"#;
+        for status in [
+            StatusCode::UNAUTHORIZED,
+            StatusCode::NOT_FOUND,
+            StatusCode::UNPROCESSABLE_ENTITY,
+            StatusCode::TOO_MANY_REQUESTS,
+            StatusCode::INTERNAL_SERVER_ERROR,
+        ] {
+            assert_eq!(rejection(status, blames_tool_choice), None, "{status}");
+        }
+        assert_eq!(
+            tool_control_rejection(&anyhow::anyhow!("tool_choice")),
+            None,
+            "an error that is not an upstream HTTP failure"
+        );
+
+        // The 400 still reaches the client as the terminal rejection it was.
+        let classified = classify(
+            &UpstreamFailure::http_body(
+                StatusCode::BAD_REQUEST,
+                &HeaderMap::new(),
+                blames_tool_choice,
+            )
+            .into(),
+        );
+        assert_eq!(classified.status, StatusCode::BAD_REQUEST);
+        assert_eq!(classified.code, "upstream_http_error");
+        assert!(!classified.retryable);
     }
 
     #[test]

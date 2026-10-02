@@ -24,14 +24,15 @@ use uuid::Uuid;
 
 use crate::auth::{Credentials, response_indicates_chatgpt_token_expired};
 use crate::client::{
-    CodexClient, CodexCompletion, DEFAULT_INSTRUCTIONS, DEFAULT_MODEL, SendHook,
-    ServiceTierEndpoints, conversation_id_enabled, normalize_reasoning_effort, sends_service_tier,
-    sends_tool_controls,
+    CodexClient, CodexCompletion, DEFAULT_INSTRUCTIONS, DEFAULT_MODEL,
+    RequiredToolCallFallbackHook, SendHook, ServiceTierEndpoints, conversation_id_enabled,
+    is_additional_tools_item, normalize_reasoning_effort, sends_service_tier, sends_tool_controls,
 };
 use crate::controller_integration::ControllerIntegration;
 use crate::credential_lease::LeasedCredentials;
+use crate::incomplete_response;
 use crate::proxy_auth::ProxyClaims;
-use crate::upstream_error::{self, UpstreamFailure};
+use crate::upstream_error::{self, ToolControlRejection, UpstreamFailure};
 
 const MAX_PROXY_REQUEST_BYTES: usize = 25 * 1024 * 1024;
 const PUBLIC_PROXY_LANE_HEADER: &str = "x-instafy-proxy-lane";
@@ -128,6 +129,10 @@ struct ProxyState {
     /// `PROXY_PLATFORM_SERVICE_TIER_ENDPOINTS`: which upstream endpoints the
     /// platform lane's tier goes to.
     service_tier_endpoints: ServiceTierEndpoints,
+    /// Requests on any lane that the proxy sent upstream again without the
+    /// `tool_choice: "required"` it set, after upstream refused that choice,
+    /// since it started. Shared by every clone of the state, as above.
+    required_tool_call_fallbacks: Arc<AtomicU64>,
 }
 
 struct AuthenticatedProxyClaims(Option<ProxyClaims>);
@@ -561,8 +566,12 @@ fn require_tool_call_requested(payload: &Value) -> bool {
 /// tools, and leave the choice to the model, with `tool_choice` `"auto"` or
 /// absent. `tools` and `input_items` are the ones the request forwards, after
 /// a pinned lease filters them, so a request left with no tools is never
-/// told to call one. A request that did not ask keeps its tool controls as
-/// they are: a Responses Lite request's own `tool_choice` is not forwarded.
+/// told to call one. A remote compaction request, whose input carries a
+/// `compaction_trigger` item, never is either: codex sends it with the turn's
+/// tools while the thread's required tool call is still pending, but it must
+/// come back as a compaction item, and a tool call fails it. A request that did not
+/// ask keeps its tool controls as they are: a Responses Lite request's own
+/// `tool_choice` is not forwarded.
 fn required_tool_call_applies(
     requested: bool,
     credentials: &Credentials,
@@ -573,14 +582,26 @@ fn required_tool_call_applies(
 ) -> bool {
     let offers_tools = tools.is_some_and(|tools| !tools.is_empty())
         || input_items.iter().any(|item| {
-            item.get("type").and_then(Value::as_str) == Some("additional_tools")
+            is_additional_tools_item(item)
                 && item
                     .get("tools")
                     .and_then(Value::as_array)
                     .is_some_and(|tools| !tools.is_empty())
         });
     let model_chooses = tool_choice.is_none_or(|choice| choice.as_str() == Some("auto"));
-    requested && sends_tool_controls(credentials) && tools_enabled && offers_tools && model_chooses
+    let compaction = input_items.iter().any(is_compaction_trigger_item);
+    requested
+        && sends_tool_controls(credentials)
+        && tools_enabled
+        && offers_tools
+        && model_chooses
+        && !compaction
+}
+
+/// Whether `item` is the `compaction_trigger` input item that marks codex's
+/// remote compaction request.
+fn is_compaction_trigger_item(item: &Value) -> bool {
+    item.get("type").and_then(Value::as_str) == Some("compaction_trigger")
 }
 
 fn requested_tool_names(tools: &[Value]) -> Vec<String> {
@@ -1067,6 +1088,7 @@ where
         require_credential_claim,
         service_tier_overrides: Arc::new(AtomicU64::new(0)),
         service_tier_endpoints,
+        required_tool_call_fallbacks: Arc::new(AtomicU64::new(0)),
     };
 
     let app = Router::new()
@@ -1109,6 +1131,7 @@ async fn healthz(State(state): State<ProxyState>) -> impl IntoResponse {
         "authenticationRequired": state.controller.is_some(),
         "credentialClaimRequired": state.require_credential_claim,
         "platformLane": state.platform_lane_report(),
+        "requiredToolCallFallbacks": state.required_tool_call_fallbacks.load(Ordering::Relaxed),
     }))
 }
 
@@ -1141,6 +1164,7 @@ async fn readyz(State(state): State<ProxyState>) -> impl IntoResponse {
         "authenticationRequired": state.controller.is_some(),
         "credentialClaimRequired": state.require_credential_claim,
         "platformLane": state.platform_lane_report(),
+        "requiredToolCallFallbacks": state.required_tool_call_fallbacks.load(Ordering::Relaxed),
         })),
     )
 }
@@ -1418,23 +1442,67 @@ struct RemoteCompletionOptions<'a> {
     service_tier: Option<&'a Value>,
     /// Which upstream endpoints get `service_tier`, from [`ProxyState`].
     service_tier_endpoints: ServiceTierEndpoints,
+    /// `requiredToolCallFallbacks`, from [`ProxyState`].
+    required_tool_call_fallbacks: &'a Arc<AtomicU64>,
 }
 
 fn error_indicates_chatgpt_token_refreshable(error: &anyhow::Error) -> bool {
     upstream_error::refreshable_auth(error)
 }
 
+/// Which attempt at a request a client is built for, as far as its required
+/// tool call goes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RequiredToolCallAttempt {
+    /// The first attempt: it sends `tool_choice: "required"` where
+    /// [`required_tool_call_applies`] and logs that it does.
+    First,
+    /// A lease renewal's retry after an attempt that kept `required`: it
+    /// sends it again, and does not log it again.
+    Renewal,
+    /// A lease renewal's retry after upstream refused `required` and the
+    /// first attempt fell back: it sends the tool controls the request would
+    /// have without the key, as the fallback did.
+    RenewalAfterFallback,
+}
+
+/// What the client of a request that goes upstream with the
+/// `tool_choice: "required"` the proxy set runs if upstream refuses that
+/// choice and it falls back: one `requiredToolCallFallbacks` and one log line
+/// with the route, the run id, and the upstream error's code and `param`,
+/// never its message or the request body.
+fn required_tool_call_fallback_hook(
+    route: &str,
+    run_id: Option<&str>,
+    fallbacks: Arc<AtomicU64>,
+) -> RequiredToolCallFallbackHook {
+    let route = route.to_string();
+    let run_id = run_id.map(str::to_string);
+    Box::new(move |rejection: &ToolControlRejection| {
+        fallbacks.fetch_add(1, Ordering::Relaxed);
+        eprintln!(
+            "[proxy] required tool call falls back to the request's own tool choice {}",
+            json!({
+                "route": route,
+                "runId": run_id,
+                "upstreamErrorCode": rejection.code,
+                "upstreamErrorParam": rejection.param,
+            })
+        );
+    })
+}
+
 /// Also returns the input items to send, which a pinned lease may filter.
 /// `log_lease_policy` is false when a lease renewal rebuilds the client for a
 /// request that already logged what its pinned lease changed, and
-/// `log_required_tool_call` is false on every renewal, so a request logs its
-/// required tool call once.
+/// `required_tool_call_attempt` says whether the request may still send, and
+/// log, a required tool call.
 fn build_remote_completion_client<'i>(
     leased: LeasedCredentials,
     options: &RemoteCompletionOptions<'_>,
     input_items: &'i [Value],
     log_lease_policy: bool,
-    log_required_tool_call: bool,
+    required_tool_call_attempt: RequiredToolCallAttempt,
 ) -> Result<(CodexClient, String, String, Cow<'i, [Value]>)> {
     let endpoint_for_error = format_endpoint_for_error(leased.credentials.endpoint());
     let upstream_model = resolve_model_for_lease(options.requested_model, &leased);
@@ -1485,16 +1553,18 @@ fn build_remote_completion_client<'i>(
     }
     let creds = leased.credentials;
     // Decided before the client takes the credentials; logged once it exists.
-    let required_tool_call = options.response_controls.as_ref().is_some_and(|controls| {
-        required_tool_call_applies(
-            controls.require_tool_call,
-            &creds,
-            !options.plain_text_completion,
-            requested_tools.as_deref(),
-            &input_items,
-            controls.requested_tool_choice,
-        )
-    });
+    let required_tool_call = required_tool_call_attempt
+        != RequiredToolCallAttempt::RenewalAfterFallback
+        && options.response_controls.as_ref().is_some_and(|controls| {
+            required_tool_call_applies(
+                controls.require_tool_call,
+                &creds,
+                !options.plain_text_completion,
+                requested_tools.as_deref(),
+                &input_items,
+                controls.requested_tool_choice,
+            )
+        });
     let instructions = build_proxy_instructions(
         options.proxy_base_instructions,
         options.claims,
@@ -1515,8 +1585,9 @@ fn build_remote_completion_client<'i>(
     if pinned {
         // A ChatGPT login whose request keeps no tools gets the client's
         // default tools, web search among them with CODEX_ENABLE_WEB_SEARCH,
-        // after the filter above. The pin runs again on the list the request
-        // finally carries; tools it already kept pass unchanged.
+        // after the filter above, unless it is a Responses Lite request. The
+        // pin runs again on the list the request finally carries; tools it
+        // already kept pass unchanged.
         let run_id = run_id.map(str::to_string);
         client = client.with_tool_filter(move |tools| {
             let (kept, dropped) = tools_for_pinned_lease(tools, "tools");
@@ -1527,7 +1598,7 @@ fn build_remote_completion_client<'i>(
         });
     }
 
-    if required_tool_call && log_required_tool_call {
+    if required_tool_call && required_tool_call_attempt == RequiredToolCallAttempt::First {
         eprintln!(
             "[proxy] required tool call sends tool_choice required {}",
             json!({ "route": options.route, "runId": run_id })
@@ -1542,7 +1613,14 @@ fn build_remote_completion_client<'i>(
                 controls.requested_parallel_tool_calls,
                 controls.requested_text_controls.cloned(),
             )
-            .with_required_tool_call(required_tool_call);
+            .with_required_tool_call(required_tool_call)
+            .with_required_tool_call_fallback(required_tool_call.then(|| {
+                required_tool_call_fallback_hook(
+                    options.route,
+                    run_id,
+                    options.required_tool_call_fallbacks.clone(),
+                )
+            }));
     }
 
     if conversation_id_enabled() {
@@ -1569,7 +1647,10 @@ fn build_remote_completion_client<'i>(
 }
 
 /// `send_hook` runs when the first attempt goes upstream; a lease renewal's
-/// retry follows an upstream rejection, so it does not run it again.
+/// retry follows an upstream rejection, so it does not run it again. Nor
+/// does the client's own retry after upstream refused the required tool call
+/// it set, which also keeps the lease; a lease renewal after that retry
+/// sends no required tool call either.
 async fn complete_with_optional_controller_refresh(
     leased: LeasedCredentials,
     options: &RemoteCompletionOptions<'_>,
@@ -1579,8 +1660,13 @@ async fn complete_with_optional_controller_refresh(
     send_hook: Option<SendHook>,
 ) -> Result<(CodexCompletion, String)> {
     let first_lease_pinned = leased.pinned_model().is_some();
-    let (client, upstream_model, endpoint_for_error, first_input) =
-        build_remote_completion_client(leased, options, input_items, true, true)?;
+    let (client, upstream_model, endpoint_for_error, first_input) = build_remote_completion_client(
+        leased,
+        options,
+        input_items,
+        true,
+        RequiredToolCallAttempt::First,
+    )?;
     let mut client = client.with_send_hook(send_hook);
 
     match client.complete_with_input(&first_input).await {
@@ -1607,13 +1693,18 @@ async fn complete_with_optional_controller_refresh(
                 .context(UpstreamFailure::CredentialRefresh)?;
             // The renewed lease carries the controller's pin again; the first
             // attempt already logged it unless that lease had none.
+            let required_tool_call_attempt = if client.required_tool_call_refused() {
+                RequiredToolCallAttempt::RenewalAfterFallback
+            } else {
+                RequiredToolCallAttempt::Renewal
+            };
             let (mut retry_client, retry_model, retry_endpoint, retry_input) =
                 build_remote_completion_client(
                     refreshed,
                     options,
                     input_items,
                     !first_lease_pinned,
-                    false,
+                    required_tool_call_attempt,
                 )?;
 
             return retry_client
@@ -1739,7 +1830,13 @@ async fn create_response(
         }),
         service_tier: service_tier.upstream.as_ref(),
         service_tier_endpoints: state.service_tier_endpoints,
+        required_tool_call_fallbacks: &state.required_tool_call_fallbacks,
     };
+
+    let stream_requested = payload
+        .get("stream")
+        .and_then(Value::as_bool)
+        .unwrap_or(true);
 
     let LaneLease {
         leased,
@@ -1771,18 +1868,35 @@ async fn create_response(
             ProxyCompletion::Remote(response)
         }
         Err(error) => {
-            let error = error.context(format!(
+            let error = AppError::upstream(error.context(format!(
                 "upstream request failed (credential_source={}, requested_model={})",
                 credential_source, model,
-            ));
-            return Err(AppError::upstream(error));
+            )));
+            // Codex does not retry an HTTP 429 by itself (its `retry_429` is off for every
+            // provider), but it retries a stream that fails with `rate_limit_exceeded` after
+            // the wait the message names, within its stream retry budget. A transient rate limit
+            // on a streaming request is therefore answered that way; a plan limit, and a request
+            // that does not stream, keep the HTTP error.
+            if stream_requested
+                && let Some(rate_limit) = error.upstream.as_ref().and_then(|upstream| {
+                    upstream.stream_rate_limit_error(
+                        SystemTime::now(),
+                        upstream_error::retry_jitter_sample(),
+                    )
+                })
+            {
+                eprintln!(
+                    "[proxy] upstream rate limit streamed as response.failed {}",
+                    json!({
+                        "runId": run_id_from_claims(claims.as_ref()),
+                        "message": rate_limit["message"],
+                    })
+                );
+                return stream_failed_response(json!({"status": "failed", "error": rate_limit}));
+            }
+            return Err(error);
         }
     };
-
-    let stream_requested = payload
-        .get("stream")
-        .and_then(Value::as_bool)
-        .unwrap_or(true);
 
     if stream_requested {
         let ProxyCompletion::Remote(remote) = completion;
@@ -1836,6 +1950,7 @@ async fn create_chat_completion(
         }),
         service_tier: service_tier.upstream.as_ref(),
         service_tier_endpoints: state.service_tier_endpoints,
+        required_tool_call_fallbacks: &state.required_tool_call_fallbacks,
     };
 
     let LaneLease {
@@ -2390,7 +2505,7 @@ async fn build_remote_chat_response(
                         "role": "assistant",
                         "content": assistant_text
                     },
-                    "finish_reason": "stop"
+                    "finish_reason": chat_finish_reason(&completion.raw)
                 }
             ],
             "usage": usage
@@ -2406,10 +2521,30 @@ async fn build_remote_chat_response(
     stream_responses_from_value(completion.raw)
 }
 
-fn stream_responses_from_value(mut completed_response: Value) -> Result<Response, AppError> {
-    let debug_stream = std::env::var("PROXY_DEBUG_STREAM").as_deref() == Ok("1");
-    let mut debug_events = Vec::new();
+/// A Chat Completions `finish_reason` for an upstream Responses body. A response the upstream
+/// stopped early keeps the text it has, as Chat Completions does, and says why:
+/// `content_filter` for a filtered one and `length` for any other reason.
+fn chat_finish_reason(raw: &Value) -> &'static str {
+    if raw.get("status").and_then(Value::as_str) != Some("incomplete") {
+        return "stop";
+    }
+    match raw
+        .pointer("/incomplete_details/reason")
+        .and_then(Value::as_str)
+    {
+        Some("content_filter") => "content_filter",
+        _ => "length",
+    }
+}
 
+/// Streams an upstream Responses body to the client as the Responses events codex reads. A
+/// response the upstream stopped early is first reduced to what the client may see, see
+/// [`incomplete_response`].
+fn stream_responses_from_value(response: Value) -> Result<Response, AppError> {
+    stream_completed_response(incomplete_response::delivered_response(response))
+}
+
+fn stream_completed_response(mut completed_response: Value) -> Result<Response, AppError> {
     if let Value::Object(ref mut map) = completed_response {
         map.entry("status".to_string())
             .or_insert_with(|| Value::String("completed".to_string()));
@@ -2425,91 +2560,77 @@ fn stream_responses_from_value(mut completed_response: Value) -> Result<Response
         );
     }
 
-    let created_event = json!({
+    events.push(json!({
         "type": "response.created",
         "response": created_response,
-    });
-    if debug_stream {
-        debug_events.push(created_event.clone());
-    }
-    events.push(
-        Event::default()
-            .json_data(created_event)
-            .map_err(AppError::internal)?,
-    );
+    }));
 
     if let Some(output_items) = completed_response.get("output").cloned() {
         if let Value::Array(items) = output_items {
             for item in items {
-                let added_event = json!({
+                events.push(json!({
                     "type": "response.output_item.added",
                     "item": item,
-                });
-                if debug_stream {
-                    debug_events.push(added_event.clone());
-                }
-                events.push(
-                    Event::default()
-                        .json_data(added_event)
-                        .map_err(AppError::internal)?,
-                );
+                }));
 
                 if let Some(text) = collect_output_text_from_item(&item) {
-                    let delta_event = json!({
+                    events.push(json!({
                         "type": "response.output_text.delta",
                         "delta": text,
-                    });
-                    if debug_stream {
-                        debug_events.push(delta_event.clone());
-                    }
-                    events.push(
-                        Event::default()
-                            .json_data(delta_event)
-                            .map_err(AppError::internal)?,
-                    );
+                    }));
                 }
 
-                let done_event = json!({
+                events.push(json!({
                     "type": "response.output_item.done",
                     "item": item,
-                });
-                if debug_stream {
-                    debug_events.push(done_event.clone());
-                }
-                events.push(
-                    Event::default()
-                        .json_data(done_event)
-                        .map_err(AppError::internal)?,
-                );
+                }));
             }
         }
     }
 
-    let completed_event = json!({
+    events.push(json!({
         "type": "response.completed",
         "response": completed_response,
-    });
-    if debug_stream {
-        debug_events.push(completed_event.clone());
-    }
-    events.push(
-        Event::default()
-            .json_data(completed_event)
-            .map_err(AppError::internal)?,
-    );
+    }));
 
-    events.push(Event::default().data("[DONE]"));
-    if debug_stream {
-        debug_events.push(json!({"type": "done"}));
-        for event in debug_events {
+    sse_response(events)
+}
+
+/// Streams `failed_response`, which carries the `error`, as `response.failed`. It answers a
+/// request the upstream refused, which never created a response to announce first.
+fn stream_failed_response(failed_response: Value) -> Result<Response, AppError> {
+    sse_response(vec![json!({
+        "type": "response.failed",
+        "response": failed_response,
+    })])
+}
+
+/// Answers with `events` as server-sent events followed by `[DONE]`, and logs each one when
+/// `PROXY_DEBUG_STREAM=1`.
+fn sse_response(events: Vec<Value>) -> Result<Response, AppError> {
+    let mut sse_events = Vec::with_capacity(events.len() + 1);
+    for event in &events {
+        sse_events.push(
+            Event::default()
+                .json_data(event)
+                .map_err(AppError::internal)?,
+        );
+    }
+    sse_events.push(Event::default().data("[DONE]"));
+
+    if std::env::var("PROXY_DEBUG_STREAM").as_deref() == Ok("1") {
+        for event in events
+            .iter()
+            .chain(std::iter::once(&json!({"type": "done"})))
+        {
             eprintln!(
                 "[proxy] stream event: {}",
-                serde_json::to_string(&event).unwrap_or_else(|_| "<invalid>".into())
+                serde_json::to_string(event).unwrap_or_else(|_| "<invalid>".into())
             );
         }
     }
 
-    let stream = stream::iter(events.into_iter().map(Ok::<Event, Infallible>));
+    let stream = stream::iter(sse_events.into_iter().map(Ok::<Event, Infallible>));
     Ok(Sse::new(stream).into_response())
 }
 
@@ -3588,6 +3709,7 @@ mod tests {
             require_credential_claim: false,
             service_tier_overrides: Arc::new(AtomicU64::new(0)),
             service_tier_endpoints: ServiceTierEndpoints::default(),
+            required_tool_call_fallbacks: Arc::new(AtomicU64::new(0)),
         }
     }
 
@@ -4587,6 +4709,31 @@ mod tests {
             false,
             Some(&tools),
             &lite_input,
+            Some(&auto)
+        ));
+
+        // A remote compaction request, with its tools in either place.
+        let compaction_trigger = json!({ "type": "compaction_trigger" });
+        let lite_compaction = [
+            lite_input[0].clone(),
+            lite_input[1].clone(),
+            compaction_trigger.clone(),
+        ];
+        let plain_compaction = [plain_input[0].clone(), compaction_trigger];
+        assert!(!required_tool_call_applies(
+            true,
+            &responses,
+            true,
+            None,
+            &lite_compaction,
+            Some(&auto)
+        ));
+        assert!(!required_tool_call_applies(
+            true,
+            &responses,
+            true,
+            Some(&tools),
+            &plain_compaction,
             Some(&auto)
         ));
 

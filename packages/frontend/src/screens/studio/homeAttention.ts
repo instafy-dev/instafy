@@ -1,4 +1,5 @@
 import { getOrgDisplayName } from "../../org/orgNaming";
+import { spaceDisplayName } from "../../projects/spaceName";
 import type { ConversationState } from "../../conversations/ConversationsProvider";
 import type { NotificationInboxItem } from "../../sdk/instafy";
 
@@ -97,11 +98,6 @@ function getConversationPreview(conversation: ConversationState): string | null 
     .reverse()
     .find((message) => message.content.trim().length > 0);
   return candidate?.content.trim() ?? null;
-}
-
-function getSpaceLabel(value: string | null | undefined): string {
-  const trimmed = value?.trim() ?? "";
-  return trimmed.length > 0 ? trimmed : "Untitled Space";
 }
 
 function normalizeConversationIdentity(value: string | null | undefined): string {
@@ -261,7 +257,7 @@ export function buildHomeAttentionEntries({
     items.push({
       key: `inbox-${conversationId}`,
       title: item.conversationTitle?.trim() || "New reply",
-      subtitle: [getSpaceLabel(item.projectName), orgLabel].filter(Boolean).join(" · "),
+      subtitle: [spaceDisplayName(item.projectName), orgLabel].filter(Boolean).join(" · "),
       meta: formatRelativeTimestamp(item.lastMessageAt),
       preview: item.lastMessagePreview?.trim() || null,
       kind: "reply",

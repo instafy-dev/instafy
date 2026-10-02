@@ -11,6 +11,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import {
   Archery,
   Bookmark,
+  Collapse,
   Lock,
   Menu,
   Microphone,
@@ -24,6 +25,7 @@ import {
   Xmark,
 } from "iconoir-react";
 import { IconButton } from "../../../components/Button";
+import { useNativeBackButtonAction } from "../../../native/useNativeBackButtonAction";
 import { Surface } from "../../../components/Surface";
 import { Text } from "../../../components/Text";
 import { StudioPopover } from "../../../components/aria/StudioPopover";
@@ -268,6 +270,18 @@ export function ChatComposerSurface({
   accessChecking = false,
   silenceHintProps = null,
 }: ChatComposerSurfaceProps) {
+  const [draftExpanded, setDraftExpanded] = useState(false);
+  useEffect(() => setDraftExpanded(false), [chatInputProps.draftKey]);
+  // Dialogs and menus keep precedence over this in-pane layout change.
+  useNativeBackButtonAction(draftExpanded, () => setDraftExpanded(false), 90);
+  useEffect(() => {
+    if (!draftExpanded) return;
+    const frame = requestAnimationFrame(() => {
+      composerOverlayRef.current?.querySelector<HTMLElement>('[data-testid="chat-input"]')?.focus({ preventScroll: true });
+    });
+    return () => cancelAnimationFrame(frame);
+  }, [composerOverlayRef, draftExpanded]);
+  const composerHidden = composerAutoHidden && !draftExpanded && !viewNavigation;
   // A read-only composer swallows keystrokes at the Lexical layer; flash the
   // visible notice instead so a blocked attempt never feels like dead input.
   const [blockedInputFlash, setBlockedInputFlash] = useState(false);
@@ -459,7 +473,6 @@ export function ChatComposerSurface({
   const composerInlineControlsInTextRow = !showVoiceActiveStrip;
   const mobileChatsNavigation = showComposerNavigationButton && composerNavigationDestination === "chats";
   const compactNavigationLayout = showComposerNavigationButton && composerNavigationDestination !== "drawer";
-  const hideComposer = composerAutoHidden && !viewNavigation;
   const foldSuggestionIntoMenu = showMobileGhostSuggestionAcceptButton;
   const imageUploadDisabled = mutationDisabled || sendingAttachment || onboardingInputLocked;
 
@@ -846,6 +859,7 @@ export function ChatComposerSurface({
   const actionMenuNode = (
     <ComposerActionMenu
       {...composerActionMenuProps}
+      onExpandDraft={draftExpanded ? undefined : () => setDraftExpanded(true)}
       mutationDisabled={mutationDisabled}
       onUploadImage={onOpenImagePicker}
       uploadImageDisabled={imageUploadDisabled}
@@ -980,13 +994,14 @@ export function ChatComposerSurface({
       <div
         ref={composerOverlayRef}
         className={`pointer-events-none absolute inset-x-0 bottom-0 z-20 transition-transform duration-200 ease-out ${
-          hideComposer ? "translate-y-full" : "translate-y-0"
-        }`}
+          composerHidden ? "translate-y-full" : "translate-y-0"
+        } ${draftExpanded ? "top-0 pt-2" : ""}`}
         data-testid="chat-composer-overlay"
+        data-expanded={draftExpanded || undefined}
         data-browser-session-safe-zone="true"
         style={{
           width: overlayWidth,
-          ...(hideComposer && compactBrowserViewport ? {
+          ...(composerHidden && compactBrowserViewport ? {
             transform: "translateY(calc(100% - max(var(--instafy-safe-area-inset-bottom), 0.75rem)))",
           } : {}),
         }}
@@ -996,11 +1011,18 @@ export function ChatComposerSurface({
         </div> : null}
         <form
           onSubmit={onSubmit}
-          className={
+          onKeyDown={(event) => {
+            if (draftExpanded && event.key === "Escape" && !event.defaultPrevented && !event.nativeEvent.isComposing && !composerMenuIsOpen()) {
+              event.preventDefault();
+              event.stopPropagation();
+              setDraftExpanded(false);
+            }
+          }}
+          className={`${
             compactNavigationLayout
               ? `pointer-events-auto ${CHAT_COMPOSER_COLUMN_CLASS_NAME} px-3.5`
               : `pointer-events-auto ${CHAT_COMPOSER_COLUMN_CLASS_NAME} px-3 sm:px-4`
-          }
+          } ${draftExpanded ? "h-full min-h-0" : ""}`}
           style={{
             paddingInline: compactNavigationLayout
               ? "clamp(0.875rem, var(--instafy-safe-area-inset-bottom), 1.125rem)"
@@ -1010,8 +1032,8 @@ export function ChatComposerSurface({
               : "max(var(--instafy-safe-area-inset-bottom), 0.5rem)",
           }}
         >
-          <div className="space-y-2">
-            {showActiveGoal ? (
+          <div className={draftExpanded ? "flex h-full min-h-0 flex-col gap-2" : "space-y-2"}>
+            {showActiveGoal && !draftExpanded ? (
               <div
                 className={`pointer-events-auto flex min-w-0 flex-col gap-2 rounded-2xl border border-slate-200/70 bg-white/95 px-3 py-2 text-sm shadow-sm dark:border-[color:var(--color-studio-dark-panel-border)] dark:bg-[var(--color-studio-dark-panel-strong)] ${
                   compactBrowserViewport ? "mx-2" : "mx-1 sm:mx-2"
@@ -1317,9 +1339,18 @@ export function ChatComposerSurface({
               // The composer keeps the raised-control background but borrows the
               // panel border tier: raised-control (13%) is meant for small
               // controls, and reads too hard along a full-width composer edge.
-              className={`${compactNavigationLayout ? "rounded-[1.75rem] " : ""}flex flex-col overflow-hidden border-slate-200/70 bg-slate-50 p-1.5 ${DARK_RAISED_CONTROL_BG_CLASS} ${DARK_PANEL_BORDER_CLASS}`}
+              className={`${compactNavigationLayout ? "rounded-[1.75rem] " : ""}flex flex-col overflow-hidden border-slate-200/70 bg-slate-50 p-1.5 ${DARK_RAISED_CONTROL_BG_CLASS} ${DARK_PANEL_BORDER_CLASS} ${draftExpanded ? "min-h-0 flex-1" : ""}`}
               data-testid="chat-composer-surface"
             >
+              {draftExpanded ? (
+                <div className="flex shrink-0 items-center justify-between gap-2 px-2 pb-1">
+                  <span className="text-sm font-medium text-slate-600 dark:text-slate-300">Draft</span>
+                  <IconButton type="button" variant="ghost" radius="full" aria-label="Collapse draft"
+                    title="Collapse draft" preventFocusOnPress onPress={() => setDraftExpanded(false)}>
+                    <Collapse className="h-4 w-4" aria-hidden="true" />
+                  </IconButton>
+                </div>
+              ) : null}
               <span
                 role="status"
                 aria-atomic="true"
@@ -1336,14 +1367,14 @@ export function ChatComposerSurface({
               {/* The editor stays mounted while the primary slot switches from
                   mic to Send. Controls stay bottom-aligned as the text grows. */}
               <div
-                className={`relative flex items-end ${compactNavigationLayout ? "gap-1" : "gap-2"}`}
+                className={`relative ${draftExpanded ? "grid min-h-0 flex-1 grid-cols-[auto_minmax(0,1fr)_auto] grid-rows-[minmax(0,1fr)_auto] gap-1" : `flex items-end ${compactNavigationLayout ? "gap-1" : "gap-2"}`}`}
                 data-testid="chat-composer-text-row"
                 onDragOver={onDragOver}
                 onDrop={onDrop}
               >
                 {composerInlineControlsInTextRow ? (
                   <div
-                    className="flex flex-none items-center gap-0.5"
+                    className={`flex flex-none items-center gap-0.5 ${draftExpanded ? "col-start-1 row-start-2" : ""}`}
                     data-testid="chat-composer-leading-controls"
                   >
                     {navigationButtonNode}
@@ -1352,7 +1383,9 @@ export function ChatComposerSurface({
                 ) : null}
                 <div
                   className={
-                    composerInlineControlsInTextRow
+                    draftExpanded
+                      ? "col-span-3 row-start-1 h-full min-h-0 min-w-0 px-2"
+                      : composerInlineControlsInTextRow
                       ? COMPOSER_EDITOR_WRAPPER_CLASS
                       : "min-w-0 flex-1"
                   }
@@ -1362,13 +1395,14 @@ export function ChatComposerSurface({
                     {...chatInputProps}
                     compact={false}
                     compactViewport={compactBrowserViewport}
+                    expanded={draftExpanded}
                     readOnly={mutationDisabled || accessChecking}
                     onReadOnlyKeyDown={handleReadOnlyKeyDown}
                   />
                 </div>
                 {composerInlineControlsInTextRow ? (
                   <div
-                    className="flex flex-none items-center justify-end gap-0.5"
+                    className={`flex flex-none items-center justify-end gap-0.5 ${draftExpanded ? "col-start-3 row-start-2" : ""}`}
                     data-testid="chat-composer-trailing-controls"
                   >
                     {compactNavigationLayout ? actionMenuNode : null}
@@ -1388,7 +1422,7 @@ export function ChatComposerSurface({
               />
               {imageAttachments.length > 0 ? (
                 <div
-                  className={`mb-2 space-y-2 rounded-xl border border-slate-200 bg-slate-50 p-2 ${DARK_PANEL_SOFT_BG_CLASS} dark:border-[color:var(--color-studio-dark-raised-control-border)]`}
+                  className={`mb-2 space-y-2 rounded-xl border border-slate-200 bg-slate-50 p-2 ${DARK_PANEL_SOFT_BG_CLASS} dark:border-[color:var(--color-studio-dark-raised-control-border)] ${draftExpanded ? "max-h-24 shrink-0 overflow-y-auto" : ""}`}
                   data-testid="chat-image-upload-preview"
                 >
                   {imageAttachments.map((attachment, index) => (

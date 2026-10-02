@@ -7,6 +7,7 @@ import {
   buildHomeFeed,
   dayLabelFor,
   formatRelativeTimestamp,
+  getSpaceLabel,
   readHomeLastSeen,
   resolveConversationActor,
   writeHomeLastSeen,
@@ -733,6 +734,13 @@ describe("buildHomeFeed with ledger rows", () => {
 });
 
 describe("helpers", () => {
+  it("labels every unnamed space with the one spelling", () => {
+    for (const value of [null, undefined, "", "  ", "Untitled Space", "Untitled Instafy Project"]) {
+      expect(getSpaceLabel(value)).toBe("Untitled space");
+    }
+    expect(getSpaceLabel("  Books 2026 ")).toBe("Books 2026");
+  });
+
   it("formats compact relative times", () => {
     expect(formatRelativeTimestamp(NOW - 20 * 1000, NOW)).toBe("just now");
     expect(formatRelativeTimestamp(NOW - 12 * 60 * 1000, NOW)).toBe("12m");

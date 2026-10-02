@@ -9,6 +9,7 @@ import type {
   ChatMessage,
   ChatMessageCommitRange,
   ChatMessageFileChange,
+  ChatMessageUnsavedReason,
 } from "../types";
 import {
   parseCommandExecutionOutput,
@@ -40,6 +41,7 @@ type ChatFileChangeListProps = {
   files: ChatMessageFileChange[];
   projectId?: string | null;
   commitRange?: ChatMessageCommitRange | null;
+  unsavedReason?: ChatMessageUnsavedReason | null;
   messageId?: string | null;
   messageTimestamp?: number | null;
 };
@@ -327,7 +329,7 @@ export function TimelineEntry({
       ) : null}
       {message.files && message.files.length > 0 ? (
         <div className="mt-3">
-          <ChatFileChangeList files={message.files} projectId={projectId} commitRange={message.commitRange ?? null} messageId={message.id} messageTimestamp={message.timestamp} />
+          <ChatFileChangeList files={message.files} projectId={projectId} commitRange={message.commitRange ?? null} unsavedReason={message.unsavedReason ?? null} messageId={message.id} messageTimestamp={message.timestamp} />
         </div>
       ) : null}
     </Surface>

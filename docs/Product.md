@@ -173,6 +173,37 @@ chats with unread assistant replies for the signed-in user, excluding the visibl
 Zero is hidden and counts over nine display as **9+**. These badges describe personal unread
 activity, not all unfinished jobs or decisions needing approval.
 
+A space without a name is stored without one and reads **Untitled space** on every surface; its
+Settings name field opens empty with a hint instead of the placeholder text. Spaces are named
+automatically only after the tool or pack a `/skills import` line sets up (for example
+**FreeFinance** or **Bookkeeping**), never from a chat's own words, because everyone with access
+sees a space's name. A space made from such a `?prompt=` link takes that name when it is created.
+While a space is still untitled, a member who can edit it names it at most once per page load from
+its first shared chat: the tool or pack that chat's opening import set up. When that chat's
+messages are not loaded, only a title that names a built-in connector or pack counts, such as
+**Connect FreeFinance** or **Set up Bookkeeping**; any other title may be someone's own words and
+names nothing. A newer chat never stands in for the first one, and a space whose chat list is full
+(50 chats) is not named this way, because its first chat may not be loaded. Names picked this way
+are cut to 60 characters at a word. A name a person chose is never replaced, and a rename made on
+another device is read before writing.
+
+A chat that still has its numbered title and holds a `/skills import` line is titled after what
+it sets up: **Connect FreeFinance** for a built-in connector or **Set up Bookkeeping** for any
+other pack. Otherwise the controller's model titles the chat, but only when the person has a
+default AI credential of their own. Without one, the client of the person who wrote the chat's
+opening message titles it from that message: the first sentence that says something, without
+greetings or "can you help me" openers, links, email addresses, mentions, file paths or code, at
+most six words and 48 characters, and without a dangling small word such as "the" or "for" where
+it was cut. The title holds plain words only (letters in any script, apostrophes, hyphens and
+ending punctuation) and ends before the first word with a digit or any other character, or one
+longer than 20 characters. Other slash commands, messages that leave fewer than two such words,
+and messages that mention a password, PIN, login, secret, token or key, or hold a known key prefix
+or a long run of letters and digits, keep the numbered title.
+This fallback reads only the opening message, never a later reply, so a chat whose earlier
+messages are not loaded keeps its numbered title until they are. A chat this tab learns of from a
+single incoming message, or rebuilds from a saved draft, is not titled until the chat list has
+confirmed its title.
+
 ## Scoped search
 
 Focusing Search opens a temporary results page, keeping the workspace mounted so drafts,

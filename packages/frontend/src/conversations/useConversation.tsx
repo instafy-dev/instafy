@@ -14,6 +14,7 @@ import {
   useConversationSubmitFlow,
 } from "./useConversationSubmitFlow";
 import {
+  getFirstUserMessage,
   getStructuredConversationTitle,
   isDefaultConversationTitle,
 } from "./conversationAutoTitle";
@@ -172,9 +173,12 @@ export function useConversation(): UseConversationResult {
     if (!activeConversation) {
       return;
     }
+    // A chat rebuilt from a message or a draft may hide a real title behind
+    // its default one until the chat list confirms it.
     if (
       activeConversation.parentConversationId ||
       activeConversation.threadKind ||
+      activeConversation.remoteSummaryPending ||
       !isDefaultConversationTitle(activeConversation.title)
     ) {
       return;
@@ -199,13 +203,21 @@ export function useConversation(): UseConversationResult {
     if (!seed) {
       return;
     }
-    void maybeAutoTitleConversation(activeConversation.localId, seed);
+    // Once every history page is in, the merged list names the opening
+    // message, which a chat loaded from the controller lacks locally.
+    const openingMessage = hasResolvedHistory && !hasMoreHistory
+      ? getFirstUserMessage(messages) ?? undefined
+      : undefined;
+    void maybeAutoTitleConversation(activeConversation.localId, seed, openingMessage);
   }, [
     activeConversation,
     activeConversation?.localId,
     activeConversation?.parentConversationId,
+    activeConversation?.remoteSummaryPending,
     activeConversation?.threadKind,
     activeConversation?.title,
+    hasMoreHistory,
+    hasResolvedHistory,
     maybeAutoTitleConversation,
     messages,
     setConversationTitle,

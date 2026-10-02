@@ -43,6 +43,20 @@ export type SubmitMessageFn = (
     metadata?: Record<string, unknown> | null;
     intent?: "send" | "queue" | "steer";
     expectedActiveJobId?: string | null;
+    /**
+     * Sent by the app on the person's behalf (the automatic retry of a failed
+     * run), not by them. Such a send leaves the composer, its staged
+     * attachments, focus, the scroll position, the typing state and any
+     * browser targeting alone: the person may be writing their next message,
+     * reading further up, or using the browser for something else.
+     */
+    automatic?: boolean;
+    /**
+     * Called when the message was put in a send queue behind a busy agent
+     * instead of being sent. It goes out later, though the submit resolves
+     * `false`.
+     */
+    onQueued?: () => void;
   },
 ) => Promise<boolean>;
 
@@ -305,6 +319,7 @@ export function useChatSubmitFlow({
 
     const allowWhileBusy = options?.allowWhileBusy ?? false;
     const requestedIntent = options?.intent ?? "send";
+    const automatic = options?.automatic === true;
     const {
       agentSelection,
       browserLaunchMode,
@@ -320,7 +335,7 @@ export function useChatSubmitFlow({
       trimmed,
     } = buildChatSubmitPlan({
       activeConversationMessages,
-      browserTargetingEnabled: !personalBrowserActive,
+      browserTargetingEnabled: !personalBrowserActive && !automatic,
       browserSessionOpen,
       hasHiddenBrowserSession,
       imageAttachmentCount: imageFiles.length,
@@ -359,10 +374,11 @@ export function useChatSubmitFlow({
       agentSelection,
       hasTerminalCommand: Boolean(terminalRequest),
       hasBrowserTask:
-        personalBrowserActive ||
-        sharedBrowserActive ||
-        shouldApplyBrowserPageTarget ||
-        shouldApplyNewBrowserLaunch,
+        !automatic &&
+        (personalBrowserActive ||
+          sharedBrowserActive ||
+          shouldApplyBrowserPageTarget ||
+          shouldApplyNewBrowserLaunch),
       humanPeerContext,
     });
     const participationRecordOnly = participationPreflight.mode === "record_only";
@@ -391,13 +407,17 @@ export function useChatSubmitFlow({
       ? override.runtimeOverride
       : null;
     const personalBrowserRouting = resolvePersonalBrowserSubmitRouting({
-      active: !queuedRuntimeOverride && personalBrowserActive,
+      active: !queuedRuntimeOverride && !automatic && personalBrowserActive,
       messageRequiresAi: effectiveMessageRequiresAi,
       runtimeOverride: personalBrowserRuntimeOverride,
       terminalRequest,
     });
     const sharedBrowserRouting = resolveSharedBrowserSubmitRouting({
-      active: !queuedRuntimeOverride && sharedBrowserActive && browserLaunchMode !== "new_page",
+      active:
+        !queuedRuntimeOverride &&
+        !automatic &&
+        sharedBrowserActive &&
+        browserLaunchMode !== "new_page",
       messageRequiresAi: effectiveMessageRequiresAi,
       resolvedRuntimeId: sharedBrowserRuntimeId,
       terminalRequest,
@@ -597,6 +617,9 @@ export function useChatSubmitFlow({
     }
 
     const pinToBottom = () => {
+      if (automatic) {
+        return;
+      }
       shouldAutoScrollRef.current = true;
       scrollToBottom();
     };
@@ -671,7 +694,7 @@ export function useChatSubmitFlow({
       // else (a programmatic send like the conversational-undo request, whose
       // text never came from the composer).
       clearQueuedComposerDraft: () => {
-        if (activeConversationId) {
+        if (!automatic && activeConversationId) {
           clearComposerAfterQueue(activeConversationId, messageToSend);
         }
       },
@@ -685,7 +708,7 @@ export function useChatSubmitFlow({
       createOrgInvitation,
       credentialsReady,
       currentUserId,
-      focusInput,
+      focusInput: automatic ? () => {} : focusInput,
       handleOutOfCredits: () => {
         if (!(effectiveMessageRequiresAi && outOfCredits)) {
           return false;
@@ -719,17 +742,22 @@ export function useChatSubmitFlow({
       trimmed,
     });
     if (preflight.status === "handled") {
+      if (preflight.queued) {
+        options?.onQueued?.();
+      }
       return preflight.submitted;
     }
 
     const { editorState } = preflight;
     const controllerId = activeConversationEntry?.controllerId ?? null;
-    pendingTypingBroadcastRef.current = null;
-
-    if (localTypingStateRef.current.isTyping) {
-      localTypingStateRef.current.isTyping = false;
-      localTypingStateRef.current.lastSentAt = Date.now();
-      broadcastTyping(false, controllerId);
+    // The person may still be typing their next message during an automatic send.
+    if (!automatic) {
+      pendingTypingBroadcastRef.current = null;
+      if (localTypingStateRef.current.isTyping) {
+        localTypingStateRef.current.isTyping = false;
+        localTypingStateRef.current.lastSentAt = Date.now();
+        broadcastTyping(false, controllerId);
+      }
     }
 
     const submitImageFiles = override ? [] : imageFiles;
@@ -767,6 +795,7 @@ export function useChatSubmitFlow({
       metadata: submitMetadata,
       runtimeOverride: submitRuntimeOverride,
       expectedLaneIdle: !allowWhileBusy && !participationBypassesBusySerialization,
+      automatic,
     });
     consumeBrowserComposerTarget();
     return true;

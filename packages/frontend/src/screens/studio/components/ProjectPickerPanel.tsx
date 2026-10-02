@@ -6,6 +6,7 @@ import { DialogTrigger } from "react-aria-components";
 import { useProjects } from "../../../projects/useProjects";
 import { useMergedControllerProjects } from "../../../projects/useMergedControllerProjects";
 import { useProject } from "../../../projects/useProject";
+import { realSpaceName } from "../../../projects/spaceName";
 import { controllerClient } from "../../../sdk/instafy";
 import { useStatus } from "../../../status/useStatus";
 import { useWorkspaceTabs } from "../../../workspace/WorkspaceTabsProvider";
@@ -282,7 +283,7 @@ export function ProjectPickerPanel({ onCreateProject, searchTerm, onSearchTermCh
         const project = mergedProjects.find((entry) => entry.id === projectId);
         createProject({
           projectId,
-          projectName: project?.name ?? "Untitled space",
+          projectName: realSpaceName(project?.name) ?? undefined,
           orgId: project?.orgId ?? null,
           orgName: getOrgDisplayName(project?.orgName),
         });
@@ -308,8 +309,7 @@ export function ProjectPickerPanel({ onCreateProject, searchTerm, onSearchTermCh
       if (result.summary) {
         createProject({
           projectId: requestedProjectId,
-          projectName:
-            result.summary.projectName?.trim() || `Space ${requestedProjectId.slice(0, 8)}`,
+          projectName: realSpaceName(result.summary.projectName) ?? undefined,
           orgId: result.summary.orgId ?? null,
           orgName: getOrgDisplayName(result.summary.orgName),
         });
@@ -708,6 +708,13 @@ export function ProjectPickerPanel({ onCreateProject, searchTerm, onSearchTermCh
             );
           })
         )}
+        {remoteLoading && filteredProjects.length > 0 ? (
+          // Until the account's list arrives these rows are only the spaces
+          // this browser already knows; the list must not read as final.
+          <LoadingStatus size="xs" className="px-3 py-1" data-testid="project-picker-discovery-loading">
+            Loading spaces…
+          </LoadingStatus>
+        ) : null}
         {hiddenProjectCount > 0 ? (
           <Card
             tone="default"

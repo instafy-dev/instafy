@@ -4,7 +4,7 @@ import fs from "node:fs";
 import path from "node:path";
 import test from "node:test";
 import vm from "node:vm";
-import { coordinatorBuildPreflight, withoutImageBuildRouting } from "./lib/imageBuildRoutingTestBaseline.mjs";
+import { coordinatorBuildPreflight, withoutImageBuildDeltas as reconstruct } from "./lib/imageBuildRoutingTestBaseline.mjs";
 
 const root = path.resolve(import.meta.dirname, "..");
 const read = file => fs.readFileSync(path.join(root, ".github/workflows", file), "utf8");
@@ -31,12 +31,12 @@ function expression(source, values) {
 function select(job, github = context(job.file), mode = "self-hosted", extra = {}) {
   const source = job.source.match(/^    runs-on: >-\n((?:      .*\n)+)/mu)?.[1];
   assert.ok(source);
-  const value = expression(source, { github, inputs: { commit_sha: "a".repeat(40) }, matrix: { runner: "ubuntu-24.04-arm" },
+  const value = expression(source, { github, inputs: { commit_sha: "a".repeat(40) }, matrix: { runner: "ubuntu-24.04" },
     vars: { TRUSTED_AMD64_BUILD_RUNNER_MODE: mode, CI_PUBLIC_CONTROL_SELF_HOSTED: "false",
       TRUSTED_BUILD_RUNNER_MODE: "self-hosted", CI_RUNNER_MODE: "self-hosted" }, ...extra });
   return JSON.parse(JSON.stringify(value));
 }
-const hosted = job => job.file === files[2] ? "ubuntu-24.04" : job.key === "build-scan-push" ? "ubuntu-24.04-arm" : "ubuntu-latest";
+const hosted = job => job.file === files[2] || job.key === "build-scan-push" ? "ubuntu-24.04" : "ubuntu-latest";
 
 test("exactly nine image jobs use the independent trusted BUILD route", () => {
   assert.deepEqual(jobs.map(job => [job.file, job.key]), [
@@ -134,7 +134,7 @@ test("actual reconciliation preflight rejects incorrect source, runtime, UID and
   for (const value of ["", "1\n", "invalid date"]) assert.throws(() => runPreflight(undefined, undefined, value));
 });
 
-test("Trivy follows the actual BUILD runner while both hosted matrix binaries and target platforms remain intact", () => {
+test("Trivy follows the actual BUILD runner; amd64 publishes in production and arm64 only in the hosted multi-arch lane", () => {
   const source = read(files[1]);
   const env = source.slice(source.indexOf("      - name: Install pinned Trivy\n"));
   for (const [environment, architecture] of [["self-hosted", "amd64"], ["self-hosted", "arm64"], ["github-hosted", "amd64"], ["github-hosted", "arm64"]]) {
@@ -146,9 +146,18 @@ test("Trivy follows the actual BUILD runner while both hosted matrix binaries an
     assert.equal(expression(env.match(/^          TRIVY_SHA256: (.+)$/mu)[1], values), x64
       ? "bbb64b9695866ce4a7a8f5c9592002c5961cab378577fa3f8a040df362b9b2ea" : "2ca2c023109c2db6b2b77366b6717291452d4531167377d95c79547f0c8e3467");
   }
+  // The production publisher builds one amd64 cell per flavor; the arm64 cells
+  // live only in the hosted multi-arch lane, which has no BUILD route, so its
+  // Trivy binary always matches its native arm64 runner.
   assert.equal((source.match(/platform: linux\/amd64/gu) ?? []).length, 2);
-  assert.equal((source.match(/platform: linux\/arm64/gu) ?? []).length, 2);
+  assert.equal((source.match(/platform: linux\/arm64/gu) ?? []).length, 0);
   assert.match(source, /platforms: \$\{\{ matrix\.platform \}\}/u);
+  const multiarch = read("publish-runtime-agent-multiarch.yml");
+  assert.equal((multiarch.match(/platform: linux\/arm64/gu) ?? []).length, 2);
+  assert.equal((multiarch.match(/platform: linux\/amd64/gu) ?? []).length, 0);
+  assert.match(multiarch, /platforms: \$\{\{ matrix\.platform \}\}/u);
+  assert.match(multiarch, /^          TRIVY_ASSET: \$\{\{ matrix\.trivy_asset \}\}$/mu);
+  assert.doesNotMatch(multiarch, /TRUSTED_AMD64_BUILD_RUNNER_MODE|self-hosted|instafy-trusted-build|driver-opts|continue-on-error:/u);
 });
 
 test("only self-hosted x86 image builds select the pinned x86 BuildKit instead of the ARM daemon's QEMU fallback", () => {
@@ -165,34 +174,57 @@ test("only self-hosted x86 image builds select the pinned x86 BuildKit instead o
         assert.equal(value, environment === "self-hosted" && x86Build ? pinned : "");
       }
     }
-    assert.throws(() => withoutImageBuildRouting(file, read(file).replace(pinned, "image=moby/buildkit:latest")));
+    assert.throws(() => reconstruct(file, read(file).replace(pinned, "image=moby/buildkit:latest")));
   }
 });
 
-test("only self-hosted image cache exports are bounded and optional, without retaining builder volumes", () => {
+test("the runtime cache export is bounded and optional on every runner, without retaining builder volumes", () => {
   const services = read(files[0]);
   const runtime = read(files[1]);
-  const serviceExpression = services.match(/^          CACHE_EXPORT_OPTIONS: (.+)$/mu)[1];
-  const runtimeExpression = runtime.match(/^          cache-to: .*(\$\{\{ runner.environment .*\}\})$/mu)[1];
-  for (const environment of ["self-hosted", "SELF-HOSTED", "github-hosted", "", undefined]) {
-    const values = { runner: { environment } };
-    const expected = environment?.toLowerCase() === "self-hosted" ? ",timeout=2m,ignore-error=true" : "";
-    assert.equal(expression(serviceExpression, values), expected);
-    assert.equal(expression(runtimeExpression, values), expected);
-  }
-  assert.ok(services.includes('--cache-to "type=gha,scope=production-${CACHE_KEY},mode=max${CACHE_EXPORT_OPTIONS}"'));
+  // The services' Actions-cache flags sat in a plain run: step without the
+  // cache runtime token and never imported or exported anything; the
+  // self-hosted-only two-minute export bound went with them.
+  for (const source of [services, runtime]) assert.doesNotMatch(source, /type=gha|CACHE_EXPORT_OPTIONS|timeout=2m/u);
+  assert.doesNotMatch(services, /--cache-(?:from|to)|CACHE_KEY/u);
+  // The runtime export now runs on every runner, bounded by a shell timeout and
+  // tolerated on failure; no runner-dependent cache setting remains.
+  const exported = runtime.slice(runtime.indexOf("      - name: Export the scanned build's layer cache\n"));
+  assert.match(exported, /^          timeout --kill-after=1m 15m docker buildx build \\$/mu);
+  assert.match(exported, /ignore-error=true/u);
+  assert.match(exported, /\|\| status=\$\?\n          if \[\[ "\$status" != "0" \]\]; then\n            echo "::warning::/u);
+  assert.doesNotMatch(runtime.slice(runtime.indexOf("      - name: Build audit image\n")), /runner\.environment/u);
+  // The export runs after the cell has published, so its whole bound (timeout
+  // plus kill grace) is added to the job budget: a slow export must end in a
+  // warning, never in a job timeout that fails the release after the push.
+  const [, minutes, grace] = exported.match(/timeout --kill-after=(\d+)m (\d+)m docker buildx build/u).map(Number);
+  const job = runtime.slice(runtime.indexOf("\n  build-scan-push:\n"), runtime.indexOf("\n  assemble-release-manifest:\n"));
+  assert.deepEqual([...job.matchAll(/^    timeout-minutes: (\d+)$/gmu)].map((match) => Number(match[1])), [75 + minutes + grace]);
+  // The arm64 lane's cells carry the same bounded, warn-only export and budget.
+  const multiarch = read("publish-runtime-agent-multiarch.yml");
+  const arm64Export = multiarch.slice(multiarch.indexOf("      - name: Export the scanned build's layer cache\n"));
+  assert.equal(arm64Export.slice(0, arm64Export.indexOf("\n\n  assemble-multiarch:\n")), exported.slice(0, exported.indexOf("\n\n  assemble-release-manifest:\n")));
+  const arm64Job = multiarch.slice(multiarch.indexOf("\n  build-scan-push-arm64:\n"), multiarch.indexOf("\n  assemble-multiarch:\n"));
+  assert.deepEqual([...arm64Job.matchAll(/^    timeout-minutes: (\d+)$/gmu)].map((match) => Number(match[1])), [75 + minutes + grace]);
+  assert.doesNotMatch(multiarch, /keep-state:|cleanup: false|continue-on-error:/u);
+  assert.match(exported, /--progress=plain/u);
+  assert.match(exported, /2>&1 \| tee "\$log" \|\| status=\$\?\n/u);
+  assert.match(exported, /elif grep -Eq '\^#\[0-9\]\+ ERROR: ' "\$log"; then\n            echo "::warning::/u);
   for (const file of files.slice(0, 2)) {
     assert.doesNotMatch(read(file), /keep-state:|cleanup: false|continue-on-error:/u);
-    assert.throws(() => withoutImageBuildRouting(file, read(file).replace("timeout=2m", "timeout=20m")));
-    assert.notEqual(withoutImageBuildRouting(file, read(file).replace("--exit-code 1", "--exit-code 0")),
-      withoutImageBuildRouting(file, read(file)), "the inverse must not erase a weakened security scan");
+    assert.notEqual(reconstruct(file, read(file).replace("--exit-code 1", "--exit-code 0")),
+      reconstruct(file, read(file)), "the inverse must not erase a weakened security scan");
   }
+  assert.throws(() => reconstruct(files[1], runtime.replace("timeout --kill-after=1m 15m", "timeout --kill-after=1m 45m")));
+  assert.throws(() => reconstruct(files[0], services.replace("            --load \\\n",
+    '            --cache-from "type=gha,scope=production-api" \\\n            --load \\\n')));
 });
 
-test("removing only the finite routing, builder, cache and scanner-host delta reconstructs every original workflow byte", () => {
+test("removing only the finite routing, builder, cache, scanner-host and registry-cache delta reconstructs every original workflow byte", () => {
+  // Re-pinned for the amd64/arm64 lane split: the reconstructed baselines of
+  // the runtime publisher and the coordinator changed by exactly that diff.
   const pins = ["bf62fdc525afaa581c15984a6aa1f5c93376b3df7809fd33ce846230a82bf7a5",
-    "9ca3eee9fd87d3a2b03c8e060ff3aa92d3beca91ae7c6fd0df8e43ddb44885d0", "65bd984c0ce8b4fa7f9b7c4ce7cdc59b4bc46661bd14145b4f5f4585f4bce831"];
-  for (const [index, file] of files.entries()) assert.equal(createHash("sha256").update(withoutImageBuildRouting(file, read(file))).digest("hex"), pins[index]);
+    "522a9ed9cf2c905ec04302be496c72b6df3d8d8f715bd576721306a4d41addf9", "da2ba8af24f3102747c40ba157d91815bec587c5d690e6568b0282c5b7850f25"];
+  for (const [index, file] of files.entries()) assert.equal(createHash("sha256").update(reconstruct(file, read(file))).digest("hex"), pins[index]);
   const enrolled = fs.readFileSync(path.join(root, "scripts/check-public-release-workflows.test.mjs"), "utf8");
   assert.match(enrolled, /import "\.\/check-image-build-routing\.test\.mjs";/u);
   assert.match(read("build.yml"), /scripts\/check-public-release-workflows\.test\.mjs/u);

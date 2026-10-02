@@ -30,6 +30,7 @@ import type { StudioHistory } from "../../../navigation/useStudioHistory";
 import { useNativeBackButtonAction } from "../../../native/useNativeBackButtonAction";
 import { useProject } from "../../../projects/useProject";
 import { useProjects } from "../../../projects/useProjects";
+import { spaceDisplayName } from "../../../projects/spaceName";
 import { useRuntime } from "../../../runtime/useRuntime";
 import { ConversationQuickTabs } from "../../../workspace/ConversationQuickTabs";
 import { WorkspaceTabs } from "../../../workspace/WorkspaceTabs";
@@ -150,9 +151,10 @@ export function StudioTopBar({ mobileNavigation, mobilePageHeader, compactMobile
     }
     return conversations.find((conversation) => conversation.controllerId === parentId || conversation.localId === parentId) ?? null;
   }, [activeConversation?.parentConversationId, conversations]);
+  const resolvedProjectName = spaceDisplayName(activeProjectName);
   const workConversation = conversationWorkspace && activeWorkspaceTab?.workspaceOwner
     ? conversations.find(conversation => conversation.localId === activeWorkspaceTab.workspaceOwner?.conversationId) : null;
-  const topbarLocationTitle = topbarLocationOverride?.title ?? workConversation?.title ?? activeWorkspaceTab?.title ?? "Space";
+  const topbarLocationTitle = topbarLocationOverride?.title ?? workConversation?.title ?? activeWorkspaceTab?.title ?? resolvedProjectName;
   // ChatPanel owns the live roster. Do not briefly show the previous chat's
   // members while it publishes the newly selected conversation's snapshot.
   const headerParticipants = participantsSnapshot.conversationId === (activeConversation?.controllerId ?? null)
@@ -327,7 +329,6 @@ export function StudioTopBar({ mobileNavigation, mobilePageHeader, compactMobile
   // (a real notch on iOS) and the shell keeps owning the drag strip.
   const titleBarFree = useDesktopTabChrome && desktopTitleBarFree();
   const hasDesktopTabs = useDesktopTabChrome && workspaceTabs.length > 0;
-  const resolvedProjectName = activeProjectName || "Untitled Space";
   const resolvedTeamName = activeTeamName?.trim() || "Team & spaces";
   const openChatTabs = organizationChatTabs?.tabs ?? workspaceTabs.filter(tab => tab.kind === "conversation");
   const activeChatTabId = organizationChatTabs ? organizationChatTabs.activeId

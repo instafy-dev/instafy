@@ -80,6 +80,9 @@ describe("SharedBrowserChrome", () => {
 
   beforeEach(() => {
     (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
+    vi.stubGlobal("matchMedia", () => ({ matches: true, addEventListener: vi.fn(), removeEventListener: vi.fn() }));
+    window.localStorage.clear();
+    vi.stubGlobal("CSS", { escape: (value: string) => value.replace(/[^a-zA-Z0-9_-]/g, "\\$&") });
     container = document.createElement("div");
     document.body.appendChild(container);
     root = createRoot(container);
@@ -87,7 +90,9 @@ describe("SharedBrowserChrome", () => {
 
   afterEach(async () => {
     await act(async () => root.unmount());
+    vi.unstubAllGlobals();
     container.remove();
+    window.localStorage.clear();
     delete (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT;
   });
 
@@ -125,6 +130,8 @@ describe("SharedBrowserChrome", () => {
     await act(async () => root.render(<><SharedBrowserChrome {...first} /><SharedBrowserChrome {...second} /></>));
     const inputs = container.querySelectorAll<HTMLInputElement>('[data-testid="shared-browser-address"]');
     const labels = container.querySelectorAll<HTMLLabelElement>("label");
+    expect(inputs).toHaveLength(2);
+    expect(container.querySelectorAll('[data-testid="shared-browser-address-form"]')).toHaveLength(2);
     expect(inputs[0].id).not.toBe(inputs[1].id);
     expect(labels[0].control).toBe(inputs[0]);
     expect(labels[1].control).toBe(inputs[1]);
@@ -260,6 +267,77 @@ describe("SharedBrowserChrome", () => {
     expect(container.querySelector('[data-testid="shared-browser-error"]')?.textContent).toContain(
       "http:// or https://",
     );
+  });
+
+  it("opens a remembered address in the active page through the existing navigation callback", async () => {
+    localStorage.setItem("instafy:browser-address-history:v1:reader", JSON.stringify([
+      { url: "https://remembered.example/article", title: "Remembered article", lastVisitedAt: 1 },
+    ]));
+    const model = props({ historyUserId: "reader", error: "Previous navigation failed." });
+    await act(async () => root.render(<SharedBrowserChrome {...model} />));
+    const input = container.querySelector<HTMLInputElement>('[data-testid="shared-browser-address"]')!;
+    await act(async () => {
+      input.focus();
+      setInputValue(input, "remembered");
+    });
+    await act(async () => input.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true, cancelable: true })));
+    await act(async () => input.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true })));
+    expect(model.onNavigate).toHaveBeenCalledExactlyOnceWith("page-1", "https://remembered.example/article");
+    expect(model.onClearError).toHaveBeenCalled();
+    expect(input.value).toBe("https://remembered.example/article");
+  });
+
+  it("keeps the cleared address and full suggestion list while focusing Clear recent sites", async () => {
+    const historyKey = "instafy:browser-address-history:v1:reader";
+    localStorage.setItem(historyKey, JSON.stringify([
+      { url: "https://remembered.example/article", title: "Remembered article", lastVisitedAt: 1 },
+    ]));
+    const model = props({ historyUserId: "reader" });
+    await act(async () => root.render(<SharedBrowserChrome {...model} />));
+    const input = container.querySelector<HTMLInputElement>('[data-testid="shared-browser-address"]')!;
+    await act(async () => {
+      input.focus();
+      setInputValue(input, "");
+    });
+    expect(document.querySelectorAll('[role="option"]')).toHaveLength(2);
+    const clear = [...document.querySelectorAll<HTMLButtonElement>('button')]
+      .find(button => button.textContent === "Clear recent sites")!;
+    expect(clear).toBeDefined();
+    await act(async () => clear.focus());
+    expect(document.activeElement).toBe(clear);
+    expect(input.value).toBe("");
+    expect(document.querySelectorAll('[role="option"]')).toHaveLength(2);
+    expect(clear.isConnected).toBe(true);
+    await act(async () => clear.click());
+    expect(localStorage.getItem(historyKey)).toBeNull();
+    expect(document.querySelector('[role="listbox"]')).toBeNull();
+    expect(model.onNavigate).not.toHaveBeenCalled();
+  });
+
+  it("records resolved page metadata without remembering submitted or failed destinations", async () => {
+    const historyKey = "instafy:browser-address-history:v1:reader";
+    const model = props({ historyUserId: "reader" });
+    await act(async () => root.render(<SharedBrowserChrome {...model} resolved={false} />));
+    expect(localStorage.getItem(historyKey)).toBeNull();
+    await act(async () => root.render(<SharedBrowserChrome {...model} historyActive={false} />));
+    expect(localStorage.getItem(historyKey)).toBeNull();
+    await act(async () => root.render(<SharedBrowserChrome {...model} />));
+    const saved = JSON.parse(localStorage.getItem(historyKey)!);
+    expect(saved).toEqual([{ url: "https://example.com/", title: "Example site", lastVisitedAt: expect.any(Number) }]);
+    const input = container.querySelector<HTMLInputElement>('[data-testid="shared-browser-address"]')!;
+    await act(async () => {
+      input.focus();
+      setInputValue(input, "failed.example");
+    });
+    await act(async () => input.form!.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true })));
+    expect(model.onNavigate).toHaveBeenCalledExactlyOnceWith("page-1", "https://failed.example/");
+    await act(async () => root.render(<SharedBrowserChrome {...model} error="Navigation failed." />));
+    expect(JSON.parse(localStorage.getItem(historyKey)!)).toEqual(saved);
+    await act(async () => root.render(<SharedBrowserChrome {...model} pages={[page({ url: "https://redirected.example/", title: "Redirect destination" })]} />));
+    expect(JSON.parse(localStorage.getItem(historyKey)!)).toEqual([
+      { url: "https://redirected.example/", title: "Redirect destination", lastVisitedAt: expect.any(Number) },
+      saved[0],
+    ]);
   });
 
   it("restores the loaded page address when navigation fails", async () => {

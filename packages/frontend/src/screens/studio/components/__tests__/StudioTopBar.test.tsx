@@ -24,8 +24,8 @@ const mocks = vi.hoisted(() => ({
   focusTab: vi.fn(),
   closeTab: vi.fn(),
   navigationPage: "workspace" as "home" | "team" | "account" | "workspace",
-  activeTeamName: "My team",
   activeProjectName: "My space",
+  activeTeamName: "My team",
   activeTeamAvatarUrl: null as string | null,
   sidebarCollapsed: false,
   titleBarFree: false,
@@ -112,6 +112,7 @@ describe("StudioTopBar navigation", () => {
     mocks.controllerProjectMissing = false;
     mocks.projectAccessBlocked = false;
     mocks.navigationPage = "workspace";
+    mocks.activeProjectName = "My space";
     mocks.sidebarCollapsed = false;
     mocks.titleBarFree = false;
     mocks.activeTeamName = "My team";
@@ -397,6 +398,13 @@ describe("StudioTopBar navigation", () => {
     expect(team?.getAttribute("aria-label")).toBe("Open navigation: Research team");
   });
 
+  it.each(["Personal", "Personal team"])("shows the personal team chip as P when the team name is %s", async (name) => {
+    mocks.navigationPage = "home";
+    mocks.activeTeamName = name;
+    await act(async () => root.render(<StudioTopBar />));
+    expect(container.querySelector('[data-testid="topbar-team-avatar"]')?.textContent).toBe("P");
+  });
+
   it("goes back through the supplied navigation callback in a workspace", async () => {
     await act(async () => root.render(<StudioTopBar />));
     await act(async () => container.querySelector<HTMLButtonElement>('[data-testid="topbar-back-button"]')?.click());
@@ -417,6 +425,14 @@ describe("StudioTopBar navigation", () => {
     expect(mocks.requestUrlPush).toHaveBeenCalledOnce();
     expect(mocks.openConversationTab).toHaveBeenCalledWith("parent-local");
     expect(mocks.navigateBack).not.toHaveBeenCalled();
+  });
+
+  it.each(["", "  ", "Untitled Space"])("names an unnamed space %j the same way everywhere", async (name) => {
+    mocks.activeProjectName = name;
+    await act(async () => root.render(<StudioTopBar />));
+    expect(container.querySelector('[data-testid="topbar-project-name"]')?.textContent).toBe("Untitled space");
+    expect(container.querySelector('[data-testid="topbar-sidebar-toggle"]')?.getAttribute("aria-label"))
+      .toBe("Open space navigation: Untitled space");
   });
 
   it("keeps space navigation and Back reachable when project access is blocked", async () => {

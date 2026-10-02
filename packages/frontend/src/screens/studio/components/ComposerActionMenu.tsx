@@ -1,6 +1,7 @@
 import { useCallback, useMemo, useState, type KeyboardEvent, type ReactNode } from "react";
 import {
   Bookmark,
+  Expand,
   Github,
   Group,
   MagicWand,
@@ -23,6 +24,7 @@ import { Badge } from "../../../components/Badge";
 import { Button, IconButton } from "../../../components/Button";
 import { Text } from "../../../components/Text";
 import { StudioDialogPopover } from "../../../components/aria/StudioPopover";
+import { useNativeBackButtonAction } from "../../../native/useNativeBackButtonAction";
 import { CHAT_SLASH_COMMANDS } from "../../../conversations/slashCommands";
 import { AVAILABLE_FEATURED_CONNECTORS, type ProductConnector } from "./connectors";
 
@@ -142,11 +144,13 @@ export function ComposerActionMenu({
   onInsertCommand,
   onQueueMessage,
   onStashDraft,
+  onExpandDraft,
   queueDisabled = false,
   stashDisabled = false,
   onUploadImage,
   uploadImageDisabled = false,
   onInsertSuggestion,
+  onOpenSpaceReview,
   onStartVoiceInput,
   voiceInputDisabled = false,
   onToggleVoiceReplies,
@@ -178,6 +182,7 @@ export function ComposerActionMenu({
   onInsertCommand: (command: string) => void;
   onQueueMessage?: () => void;
   onStashDraft?: () => void;
+  onExpandDraft?: () => void;
   queueDisabled?: boolean;
   stashDisabled?: boolean;
   // Image upload and insert suggestion live in this menu on every viewport
@@ -186,6 +191,7 @@ export function ComposerActionMenu({
   onUploadImage?: () => void;
   uploadImageDisabled?: boolean;
   onInsertSuggestion?: () => void;
+  onOpenSpaceReview?: () => void;
   onStartVoiceInput?: () => void;
   voiceInputDisabled?: boolean;
   onToggleVoiceReplies?: () => void;
@@ -211,6 +217,10 @@ export function ComposerActionMenu({
     setOpen(false);
     setView("main");
   }, []);
+  useNativeBackButtonAction(open, () => {
+    if (view !== "main") setView("main");
+    else closeMenu();
+  });
 
   const visibleCommands = useMemo(
     () => CHAT_SLASH_COMMANDS.filter((command) => !command.hidden),
@@ -321,6 +331,22 @@ export function ComposerActionMenu({
           </div>
         ) : (
           <div className="space-y-1" onKeyDown={moveRowFocus}>
+            {onOpenSpaceReview ? (
+              <ActionRow
+                icon={<Search className="h-4 w-4" aria-hidden="true" />}
+                title="Space review"
+                onPress={() => { closeMenu(); onOpenSpaceReview(); }}
+                testId="composer-action-menu-space-review"
+              />
+            ) : null}
+            {onExpandDraft ? (
+              <ActionRow
+                icon={<Expand className="h-4 w-4" aria-hidden="true" />}
+                title="Expand draft"
+                onPress={() => { closeMenu(); onExpandDraft(); }}
+                testId="composer-action-menu-expand-draft"
+              />
+            ) : null}
             {onInsertSuggestion ? (
               <ActionRow
                 icon={<MagicWand className="h-4 w-4" aria-hidden="true" />}

@@ -17,16 +17,16 @@ function readWorkflow() {
   return fs.readFileSync(workflowPath, "utf8");
 }
 
-function readRuntimeWorkflow() {
+function readRuntimeWorkflow(name = "publish-runtime-agent.yml") {
   return fs.readFileSync(
-    path.join(
-      repositoryRoot,
-      ".github",
-      "workflows",
-      "publish-runtime-agent.yml",
-    ),
+    path.join(repositoryRoot, ".github", "workflows", name),
     "utf8",
   );
+}
+
+// The arm64 runtime cells and the multi-arch indexes publish here.
+function readMultiarchWorkflow() {
+  return readRuntimeWorkflow("publish-runtime-agent-multiarch.yml");
 }
 
 function assertOrdered(source, ...needles) {
@@ -134,11 +134,13 @@ test("image publication bounds every BuildKit matrix cell", () => {
 
   for (const [name, section, timeoutMinutes] of [
     ["production service", serviceSection, 30],
-    ["runtime agent", runtimeSection, 75],
+    // 75 minutes for build, scan and push plus the layer cache export's
+    // 16-minute bound (timeout and kill grace) after publication.
+    ["runtime agent", runtimeSection, 91],
   ]) {
     assert.match(
       section,
-      new RegExp(`timeout-minutes: ${timeoutMinutes}`, "u"),
+      new RegExp(`^    timeout-minutes: ${timeoutMinutes}$`, "mu"),
       `${name} build timeout`,
     );
     assert.equal(
@@ -196,7 +198,7 @@ test("both image workflows parse the tagged digest line emitted by docker push",
     /exactly one Docker push digest line/u,
   );
 
-  for (const source of [readWorkflow(), readRuntimeWorkflow()]) {
+  for (const source of [readWorkflow(), readRuntimeWorkflow(), readMultiarchWorkflow()]) {
     assert.match(
       source,
       /node scripts\/lib\/dockerPushDigest\.mjs "\$(?:push_log|log)"/u,
@@ -208,10 +210,12 @@ test("both image workflows parse the tagged digest line emitted by docker push",
 test("image publication retries only the same scanned bytes and waits for GHCR visibility", () => {
   const services = readWorkflow();
   const runtime = readRuntimeWorkflow();
+  const multiarch = readMultiarchWorkflow();
 
   for (const [name, source, tag] of [
     ["production services", services, "RELEASE_TAG"],
-    ["runtime architectures", runtime, "ARCH_TAG"],
+    ["runtime amd64 architectures", runtime, "ARCH_TAG"],
+    ["runtime arm64 architectures", multiarch, "ARCH_TAG"],
   ]) {
     assert.match(
       source,
@@ -239,11 +243,19 @@ test("image publication retries only the same scanned bytes and waits for GHCR v
     );
   }
 
-  const assembleStart = runtime.indexOf(
+  // Production seals amd64 images it verified are visible; the multi-arch
+  // indexes are assembled only by the arm64 lane.
+  assert.match(
+    runtime,
+    /for attempt in 1 2 3 4 5 6; do\n\s+if docker buildx imagetools inspect "\$immutable_image" --raw > "\$raw_manifest" &&/u,
+  );
+  assert.match(runtime, /GHCR did not expose the \$\{flavor\} release image within the bounded visibility window/u);
+  assert.doesNotMatch(runtime, /imagetools create/u);
+  const assembleStart = multiarch.indexOf(
     "- name: Assemble commit-SHA multiarch manifests from immutable digests",
   );
   assert.notEqual(assembleStart, -1);
-  const assemble = runtime.slice(assembleStart);
+  const assemble = multiarch.slice(assembleStart);
   assertOrdered(
     assemble,
     '--tag "$release_tag"',

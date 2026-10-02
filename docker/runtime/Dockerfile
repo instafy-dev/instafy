@@ -13,10 +13,13 @@ ARG PNPM_VERSION=11.24.0
 # checksums are committed here until npm ships the fixes itself.
 ARG NPM_TAR_VERSION=7.5.22
 ARG NPM_TAR_SHA256=b792c2d1c7fc770910522ca1ffc29eee02ee38de4fa3a01e7832eb705879c6c6
-ARG BRACE_EXPANSION_VERSION=5.0.9
-ARG BRACE_EXPANSION_SHA256=5d06001fddd25cbee90c96db4dc5b7b57711b984c3141e28d10f143deb52dbaf
+ARG BRACE_EXPANSION_VERSION=5.0.12
+ARG BRACE_EXPANSION_SHA256=ef8448ec78f20b692f04fa6d01f39b5ab34c66404bea3429f5a39c6c9e0be8b4
 ARG IP_ADDRESS_VERSION=10.3.1
 ARG IP_ADDRESS_SHA256=ad1790063beea11a312c801df30d58e147de762f4f77787552376eb7424623e5
+# npm and pnpm each vendor undici (6.27.0 and 6.28.0); 6.28.1 fixes CVE-2026-19534.
+ARG UNDICI_VERSION=6.28.1
+ARG UNDICI_SHA256=e18191aac9c0ff43dac7fe9b10b7041a22d07addb7b66a6e8ac14a52a5b69b74
 # Rathole is used for self-hosted tunnel ingress. The crates.io release currently
 # depends on older `time` versions that fail to compile on newer Rust toolchains,
 # so we install a prebuilt release binary instead of `cargo install`.
@@ -36,6 +39,8 @@ ARG GZIP_MIN_VERSION=1.13-1+deb13u1
 ARG PCRE2_MIN_VERSION=10.46-1~deb13u2
 ARG SQLITE3_MIN_VERSION=3.46.1-7+deb13u2
 ARG WEBDEV_BASE=mcr.microsoft.com/playwright:v1.61.1-noble@sha256:5b8f294aff9041b7191c34a4bab3ac270157a28774d4b0660e9743297b697e48
+# The pinned Playwright base ships OpenSSL 3.0.13-0ubuntu3.11; 3.0.13-0ubuntu3.16 fixes CVE-2026-84782.
+ARG WEBDEV_OPENSSL_MIN_VERSION=3.0.13-0ubuntu3.16
 
 ########################
 # Runtime Node distribution
@@ -118,6 +123,8 @@ COPY packages/runtime-contracts/ packages/runtime-contracts/
 COPY packages/openai-proxy-server/ packages/openai-proxy-server/
 COPY packages/origin-http-server/ packages/origin-http-server/
 COPY codex/codex-rs/ codex/codex-rs/
+# Checksums Codex pins for its sandboxed rusty_v8 builds (see scripts/fetch-rusty-v8.sh).
+COPY codex/third_party/v8/ codex/third_party/v8/
 COPY proto/ proto/
 WORKDIR /src/packages/runtime-agent
 RUN cargo chef prepare --recipe-path /src/recipe.json
@@ -128,8 +135,8 @@ RUN cargo chef prepare --recipe-path /src/recipe.json
 # The recipe stubs only runtime-agent itself: cargo-chef keeps the out-of-tree
 # path crates (runtime-contracts, origin-http-server, codex-rs) as real sources,
 # so this layer is keyed on them too. target/ is deliberately NOT a cache mount
-# here: exported layer caches (the publisher's type=gha, mode=max) keep image
-# layers but never cache mounts, so only a layer carries the compiled
+# here: exported layer caches (the publisher's registry cache, mode=max) keep
+# image layers but never cache mounts, so only a layer carries the compiled
 # dependencies to a fresh runner.
 FROM ${RUST_IMAGE} AS builder-deps
 ARG BUILD_PROFILE=dev
@@ -148,9 +155,16 @@ COPY --from=chef /src/packages/origin-http-server /src/packages/origin-http-serv
 COPY --from=chef /src/codex /src/codex
 COPY --from=chef /src/proto /src/proto
 COPY --from=chef /src/recipe.json /src/recipe.json
+# codex-code-mode-host links V8 with its sandbox enabled. denoland publishes no
+# such prebuilt, so fetch the one Codex publishes, checked against the checksums
+# pinned in the codex checkout, and point the v8 build script at it.
+COPY scripts/fetch-rusty-v8.sh /src/scripts/fetch-rusty-v8.sh
+RUN /src/scripts/fetch-rusty-v8.sh "$(rustc -vV | sed -n 's/^host: //p')" /opt/rusty_v8
+ENV RUSTY_V8_ARCHIVE=/opt/rusty_v8/rusty_v8_archive \
+    RUSTY_V8_SRC_BINDING_PATH=/opt/rusty_v8/src_binding.rs
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/usr/local/cargo/git \
-    cargo chef cook --profile ${BUILD_PROFILE} --recipe-path /src/recipe.json --locked
+    cargo chef cook --features code-mode-host --profile ${BUILD_PROFILE} --recipe-path /src/recipe.json --locked
 
 ########################
 # Application builder
@@ -173,11 +187,12 @@ COPY packages/runtime-agent/ packages/runtime-agent/
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/usr/local/cargo/git \
     --mount=type=cache,target=/src/packages/runtime-agent/target,from=builder-deps,source=/src/packages/runtime-agent/target \
-    cargo build --profile ${BUILD_PROFILE} --manifest-path packages/runtime-agent/Cargo.toml --locked \
+    cargo build --profile ${BUILD_PROFILE} --manifest-path packages/runtime-agent/Cargo.toml --features code-mode-host -p runtime-agent -p codex-code-mode-host --locked \
     && cargo build --profile ${BUILD_PROFILE} --manifest-path packages/runtime-agent/Cargo.toml -p codex-linux-sandbox --locked \
     && mkdir -p /src/build-artifacts/${BUILD_ARTIFACT_DIR} \
     && cp /src/packages/runtime-agent/target/${BUILD_ARTIFACT_DIR}/runtime-agent /src/build-artifacts/${BUILD_ARTIFACT_DIR}/runtime-agent \
-    && cp /src/packages/runtime-agent/target/${BUILD_ARTIFACT_DIR}/codex-linux-sandbox /src/build-artifacts/${BUILD_ARTIFACT_DIR}/codex-linux-sandbox
+    && cp /src/packages/runtime-agent/target/${BUILD_ARTIFACT_DIR}/codex-linux-sandbox /src/build-artifacts/${BUILD_ARTIFACT_DIR}/codex-linux-sandbox \
+    && cp /src/packages/runtime-agent/target/${BUILD_ARTIFACT_DIR}/codex-code-mode-host /src/build-artifacts/${BUILD_ARTIFACT_DIR}/codex-code-mode-host
 
 ########################
 # Binary-only export (dev fast loop): `--target binary-export --output type=local` yields just
@@ -188,10 +203,15 @@ FROM scratch AS binary-export
 ARG BUILD_ARTIFACT_DIR=debug
 COPY --from=builder /src/build-artifacts/${BUILD_ARTIFACT_DIR}/runtime-agent /runtime-agent
 COPY --from=builder /src/build-artifacts/${BUILD_ARTIFACT_DIR}/codex-linux-sandbox /codex-linux-sandbox
+COPY --from=builder /src/build-artifacts/${BUILD_ARTIFACT_DIR}/codex-code-mode-host /codex-code-mode-host
 
 ########################
 # Runtime image
 ########################
+# The runtime publisher rebuilds this stage and runtime-webdev on every release
+# instead of taking them from its layer cache, so the OS and npm packages they
+# install are current when the image is scanned. Keep compilation in the builder
+# stages, whose layers the cache keeps.
 FROM ${RUNTIME_BASE} AS runtime
 
 ARG CHROMIUM_MIN_VERSION
@@ -211,6 +231,8 @@ ARG BRACE_EXPANSION_VERSION
 ARG BRACE_EXPANSION_SHA256
 ARG IP_ADDRESS_VERSION
 ARG IP_ADDRESS_SHA256
+ARG UNDICI_VERSION
+ARG UNDICI_SHA256
 
 COPY --from=node-runtime /usr/local/ /usr/local/
 RUN test -n "${CHROMIUM_MIN_VERSION}" && \
@@ -282,16 +304,29 @@ RUN npm install -g "npm@${NPM_VERSION}" && \
     rm /tmp/ip-address.tgz && \
     unpatched="$(find /usr -type f -path '*/node_modules/npm/node_modules/ip-address/package.json' -exec grep -L "\"version\": \"${IP_ADDRESS_VERSION}\"" {} + 2>/dev/null || true)" && \
     if [ -n "$unpatched" ]; then echo "unpatched ip-address copies: $unpatched" >&2; exit 1; fi && \
+    curl --proto '=https' --tlsv1.2 --fail --location --silent --show-error \
+      "https://registry.npmjs.org/undici/-/undici-${UNDICI_VERSION}.tgz" \
+      --output /tmp/undici.tgz && \
+    printf '%s  %s\n' "${UNDICI_SHA256}" /tmp/undici.tgz | sha256sum --check --status && \
+    for un_dir in $(find /usr -type d \( -path '*/node_modules/npm/node_modules/undici' -o -path '*/node_modules/pnpm/dist/node_modules/undici' \) 2>/dev/null); do \
+      rm -rf "$un_dir" && mkdir -p "$un_dir" && \
+      tar -xzf /tmp/undici.tgz -C "$un_dir" --strip-components=1; \
+    done && \
+    rm /tmp/undici.tgz && \
+    unpatched="$(find /usr -type f \( -path '*/node_modules/npm/node_modules/undici/package.json' -o -path '*/node_modules/pnpm/dist/node_modules/undici/package.json' \) -exec grep -L "\"version\": \"${UNDICI_VERSION}\"" {} + 2>/dev/null || true)" && \
+    if [ -n "$unpatched" ]; then echo "unpatched undici copies: $unpatched" >&2; exit 1; fi && \
     rm -rf /root/.npm
 
 ARG BUILD_PROFILE=dev
 ARG BUILD_ARTIFACT_DIR=debug
 COPY --from=builder /src/build-artifacts/${BUILD_ARTIFACT_DIR}/runtime-agent /usr/local/bin/runtime-agent
 COPY --from=builder /src/build-artifacts/${BUILD_ARTIFACT_DIR}/codex-linux-sandbox /usr/local/bin/codex-linux-sandbox
+# Code-mode-only models run their tools in this host; runtime-agent looks for it beside itself.
+COPY --from=builder /src/build-artifacts/${BUILD_ARTIFACT_DIR}/codex-code-mode-host /usr/local/bin/codex-code-mode-host
 COPY --from=browser-egress-proxy-builder /out/browser-egress-proxy /usr/local/bin/browser-egress-proxy
 COPY --from=browser-webrtc-builder /out/browser-webrtc-sender /usr/local/bin/browser-webrtc-sender
 RUN set -eu; \
-    for binary in /usr/local/bin/browser-egress-proxy /usr/local/bin/browser-webrtc-sender; do \
+    for binary in /usr/local/bin/browser-egress-proxy /usr/local/bin/browser-webrtc-sender /usr/local/bin/codex-code-mode-host; do \
       magic="$(od -An -tx1 -N4 "${binary}" | tr -d ' \n')"; \
       [ "${magic}" = "7f454c46" ] || { echo "Invalid ELF helper binary: ${binary}" >&2; exit 1; }; \
     done
@@ -366,13 +401,17 @@ ARG BRACE_EXPANSION_VERSION
 ARG BRACE_EXPANSION_SHA256
 ARG IP_ADDRESS_VERSION
 ARG IP_ADDRESS_SHA256
+ARG UNDICI_VERSION
+ARG UNDICI_SHA256
 # uBlock Origin Lite (Manifest V3) provides ad blocking on modern Chromium builds.
 # uBlock Origin itself is Manifest V2 which may be blocked/disabled in newer releases.
 ARG UBOLITE_VERSION=2026.301.2014
 ARG UBOLITE_SHA256_AMD64
 ARG UBOLITE_SHA256_ARM64
+ARG WEBDEV_OPENSSL_MIN_VERSION
 
-RUN apt-get update && \
+RUN test -n "${WEBDEV_OPENSSL_MIN_VERSION}" && \
+    apt-get update && \
     apt-get install -y --no-install-recommends \
       bash \
       bsdutils \
@@ -395,6 +434,10 @@ RUN apt-get update && \
       python3 \
       python3-pip \
       util-linux \
+      libssl3t64 \
+      openssl \
+    && dpkg --compare-versions "$(dpkg-query -W -f='${Version}' libssl3t64)" ge "${WEBDEV_OPENSSL_MIN_VERSION}" \
+    && dpkg --compare-versions "$(dpkg-query -W -f='${Version}' openssl)" ge "${WEBDEV_OPENSSL_MIN_VERSION}" \
     && rm -rf /var/lib/apt/lists/*
 
 RUN npm install -g "npm@${NPM_VERSION}" && \
@@ -434,6 +477,17 @@ RUN npm install -g "npm@${NPM_VERSION}" && \
     rm /tmp/ip-address.tgz && \
     unpatched="$(find /usr -type f -path '*/node_modules/npm/node_modules/ip-address/package.json' -exec grep -L "\"version\": \"${IP_ADDRESS_VERSION}\"" {} + 2>/dev/null || true)" && \
     if [ -n "$unpatched" ]; then echo "unpatched ip-address copies: $unpatched" >&2; exit 1; fi && \
+    curl --proto '=https' --tlsv1.2 --fail --location --silent --show-error \
+      "https://registry.npmjs.org/undici/-/undici-${UNDICI_VERSION}.tgz" \
+      --output /tmp/undici.tgz && \
+    printf '%s  %s\n' "${UNDICI_SHA256}" /tmp/undici.tgz | sha256sum --check --status && \
+    for un_dir in $(find /usr -type d \( -path '*/node_modules/npm/node_modules/undici' -o -path '*/node_modules/pnpm/dist/node_modules/undici' \) 2>/dev/null); do \
+      rm -rf "$un_dir" && mkdir -p "$un_dir" && \
+      tar -xzf /tmp/undici.tgz -C "$un_dir" --strip-components=1; \
+    done && \
+    rm /tmp/undici.tgz && \
+    unpatched="$(find /usr -type f \( -path '*/node_modules/npm/node_modules/undici/package.json' -o -path '*/node_modules/pnpm/dist/node_modules/undici/package.json' \) -exec grep -L "\"version\": \"${UNDICI_VERSION}\"" {} + 2>/dev/null || true)" && \
+    if [ -n "$unpatched" ]; then echo "unpatched undici copies: $unpatched" >&2; exit 1; fi && \
     rm -rf /root/.npm
 
 # Keep the headed browser usable for humans by shipping an ad blocker extension.
@@ -466,10 +520,12 @@ ARG BUILD_PROFILE=dev
 ARG BUILD_ARTIFACT_DIR=debug
 COPY --from=builder /src/build-artifacts/${BUILD_ARTIFACT_DIR}/runtime-agent /usr/local/bin/runtime-agent
 COPY --from=builder /src/build-artifacts/${BUILD_ARTIFACT_DIR}/codex-linux-sandbox /usr/local/bin/codex-linux-sandbox
+# Code-mode-only models run their tools in this host; runtime-agent looks for it beside itself.
+COPY --from=builder /src/build-artifacts/${BUILD_ARTIFACT_DIR}/codex-code-mode-host /usr/local/bin/codex-code-mode-host
 COPY --from=browser-egress-proxy-builder /out/browser-egress-proxy /usr/local/bin/browser-egress-proxy
 COPY --from=browser-webrtc-builder /out/browser-webrtc-sender /usr/local/bin/browser-webrtc-sender
 RUN set -eu; \
-    for binary in /usr/local/bin/browser-egress-proxy /usr/local/bin/browser-webrtc-sender; do \
+    for binary in /usr/local/bin/browser-egress-proxy /usr/local/bin/browser-webrtc-sender /usr/local/bin/codex-code-mode-host; do \
       magic="$(od -An -tx1 -N4 "${binary}" | tr -d ' \n')"; \
       [ "${magic}" = "7f454c46" ] || { echo "Invalid ELF helper binary: ${binary}" >&2; exit 1; }; \
     done

@@ -298,3 +298,168 @@ describe("useChatSubmitFlow queued composer draft", () => {
     expect(composer.draft).toBe(TYPED_DRAFT);
   });
 });
+
+describe("useChatSubmitFlow sends made for the person", () => {
+  const RETRY_PROMPT = "Check https://example.com/pricing again";
+  const PRICING_PAGE = {
+    id: "page-1",
+    url: "https://example.com/pricing",
+    host: "example.com",
+    label: "Pricing",
+    title: null,
+    lastReferencedAt: 1,
+    isActive: true,
+  };
+
+  let container: HTMLDivElement;
+  let root: Root;
+
+  beforeEach(() => {
+    (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
+    container = document.createElement("div");
+    document.body.appendChild(container);
+    root = createRoot(container);
+  });
+
+  afterEach(async () => {
+    await act(async () => root.unmount());
+    container.remove();
+    delete (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT;
+  });
+
+  async function mount(options: HookOptions) {
+    const resultRef: MutableRefObject<HookResult | null> = { current: null };
+    await act(async () => {
+      root.render(<Harness options={options} resultRef={resultRef} />);
+    });
+    return resultRef;
+  }
+
+  it("tells the caller when the send was queued behind a busy agent", async () => {
+    // A queued message goes out later, so a "Try again" resend that was
+    // queued must count as done even though the submit resolves false.
+    const onQueued = vi.fn();
+    const resultRef = await mount(createOptions());
+
+    await act(async () => {
+      await expect(
+        resultRef.current?.submitMessage(
+          { message: RETRY_PROMPT, editorState: null },
+          { onQueued },
+        ),
+      ).resolves.toBe(false);
+    });
+
+    expect(onQueued).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not call onQueued for a send that went out or was refused", async () => {
+    const onQueued = vi.fn();
+    const idle = await mount(createOptions({ isAssistantTyping: false }));
+    await act(async () => {
+      await expect(
+        idle.current?.submitMessage({ message: RETRY_PROMPT, editorState: null }, { onQueued }),
+      ).resolves.toBe(true);
+    });
+
+    const outOfCredits = await mount(
+      createOptions({ isAssistantTyping: false, outOfCredits: true }),
+    );
+    await act(async () => {
+      await expect(
+        outOfCredits.current?.submitMessage(
+          { message: RETRY_PROMPT, editorState: null },
+          { onQueued },
+        ),
+      ).resolves.toBe(false);
+    });
+
+    expect(onQueued).not.toHaveBeenCalled();
+  });
+
+  it("aims a typed send at the open browser page", async () => {
+    // The control case for the next test: this message does target the page.
+    const options = createOptions({
+      isAssistantTyping: false,
+      browserSessionOpen: true,
+      preferredBrowserPage: PRICING_PAGE,
+    });
+    const resultRef = await mount(options);
+
+    await act(async () => {
+      await resultRef.current?.submitMessage({ message: RETRY_PROMPT, editorState: null });
+    });
+
+    const payload = vi.mocked(options.performSubmit).mock.calls[0]?.[0];
+    expect(payload?.message).not.toBe(RETRY_PROMPT);
+    expect(payload?.message).toContain('"Pricing" page');
+    expect(payload?.automatic).toBe(false);
+  });
+
+  it("leaves the composer, the typing state and the browser alone for an automatic send", async () => {
+    // A countdown can fire while the person writes their next message, reads
+    // further up, or uses the browser for something else.
+    const options = createOptions({
+      isAssistantTyping: false,
+      browserSessionOpen: true,
+      hasHiddenBrowserSession: true,
+      preferredBrowserPage: PRICING_PAGE,
+      pendingBrowserLaunchMode: "new_page",
+      sharedBrowserActive: true,
+      sharedBrowserRuntimeId: "runtime-shared",
+      localTypingStateRef: { current: { isTyping: true, lastSentAt: 0 } },
+      pendingTypingBroadcastRef: {
+        current: { conversationLocalId: "conversation-local", controllerId: null, at: 1 },
+      },
+    });
+    const resultRef = await mount(options);
+
+    await act(async () => {
+      await expect(
+        resultRef.current?.submitMessage(
+          { message: RETRY_PROMPT, editorState: null, metadata: { retryOfMessageId: "failure-1" } },
+          { automatic: true },
+        ),
+      ).resolves.toBe(true);
+    });
+
+    expect(options.performSubmit).toHaveBeenCalledTimes(1);
+    const payload = vi.mocked(options.performSubmit).mock.calls[0]?.[0];
+    expect(payload).toMatchObject({
+      message: RETRY_PROMPT,
+      composerMessage: RETRY_PROMPT,
+      imageFiles: [],
+      runtimeOverride: null,
+      automatic: true,
+    });
+    expect(payload?.metadata).toMatchObject({ retryOfMessageId: "failure-1" });
+    expect(payload?.metadata).not.toHaveProperty("browserTransport");
+    // The armed "new page" launch is still the person's to use.
+    expect(options.clearPendingBrowserLaunchMode).not.toHaveBeenCalled();
+    expect(options.broadcastTyping).not.toHaveBeenCalled();
+    expect(options.localTypingStateRef.current.isTyping).toBe(true);
+    expect(options.pendingTypingBroadcastRef.current).not.toBeNull();
+    expect(options.focusInput).not.toHaveBeenCalled();
+    expect(options.scrollToBottom).not.toHaveBeenCalled();
+  });
+
+  it("does not take focus or clear the composer when an automatic send is queued", async () => {
+    const { composer, clearComposerAfterQueue, clearComposerIfUnchanged } =
+      createComposer(RETRY_PROMPT);
+    const onQueued = vi.fn();
+    const options = createOptions({ clearComposerAfterQueue, clearComposerIfUnchanged });
+    const resultRef = await mount(options);
+
+    await act(async () => {
+      await resultRef.current?.submitMessage(
+        { message: RETRY_PROMPT, editorState: null },
+        { automatic: true, onQueued },
+      );
+    });
+
+    expect(options.enqueueServerSendQueueItem).toHaveBeenCalledTimes(1);
+    expect(onQueued).toHaveBeenCalledTimes(1);
+    expect(composer.draft).toBe(RETRY_PROMPT);
+    expect(options.focusInput).not.toHaveBeenCalled();
+  });
+});

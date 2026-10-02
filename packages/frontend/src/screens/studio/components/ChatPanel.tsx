@@ -29,6 +29,7 @@ import {
 } from "../../../utils/floatingSurfacePosition";
 import { ChatGettingStartedCard } from "./ChatGettingStartedCard";
 import { ConnectSheet } from "./ConnectSheet";
+import { SpaceReviewDialog } from "./SpaceReviewDialog";
 import { SkillsImportModal } from "./SkillsImportModal";
 import type { Connector, SkillConnector } from "./connectors";
 import { routeConnectorSelection } from "./connectorRouting";
@@ -66,7 +67,6 @@ import {
   isNonRecoverableRunErrorMessage,
   normalizeConversationGoalProgressSummaryForDisplay,
 } from "../../../conversations/conversationGoals";
-import { resolveRunFailureRetryPrompt } from "../../../conversations/runFailurePresentation";
 import { isRunActivelyProgressing } from "../../../conversations/runLiveness";
 import { useRuntimeMenuOptions, type RuntimeMenuOption } from "../../../runtime/useRuntimeMenu";
 import {
@@ -132,6 +132,7 @@ import {
   type StickyChatSpeaker,
 } from "./chatSpeakerMarker";
 import { ChatColumn } from "./ChatColumn";
+import { ChatLoadingPill } from "./ChatLoadingPill";
 import { ChatMessageContextToolbar } from "./ChatMessageContextToolbar";
 import { ChatMessageHistoryControls } from "./ChatMessageHistoryControls";
 import { useStudioSearchReturn } from "./StudioSearchReturnContext";
@@ -143,8 +144,8 @@ import {
   UserMessageBubble,
   ChatRuntimeActivityContext,
 } from "./ChatMessageEntries";
-import { RunFailureRetryProvider, type RunFailureRetryContextValue } from "./RunFailureNotice";
-import { useRunFailureAutoRetry } from "./useRunFailureAutoRetry";
+import { RunFailureRetryProvider } from "./RunFailureNotice";
+import { useRunFailureRetryActions } from "./useRunFailureRetryActions";
 import {
   buildTimedSyntheticChatRows,
   ChatPostTranscriptAuxiliaryRows,
@@ -546,6 +547,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     capturedAt: number;
   } | null>(null);
   const [composerInlineCompletion, setComposerInlineCompletion] = useState<string | null>(null);
+  const [spaceReviewOpen, setSpaceReviewOpen] = useState(false);
   useLayoutEffect(() => {
     latestInputValueRef.current = inputValue;
   }, [inputValue]);
@@ -2201,7 +2203,11 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
         : undefined;
     const pendingReplyContext = pendingReplyContextRef.current;
     const candidateMessage = baseOverride?.message ?? latestInputValueRef.current ?? "";
-    if (candidateMessage.length > 0 || imageAttachments.length > 0) {
+    // An automatic send (a failed run's retry) is not composer work: it neither
+    // pins the conversation tab nor uses up the reply context the person set
+    // for their draft.
+    const automatic = options?.automatic === true;
+    if (!automatic && (candidateMessage.length > 0 || imageAttachments.length > 0)) {
       keepComposerTabOpen();
     }
     const metadata =
@@ -2225,7 +2231,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
           }
         : options;
     const submitted = await submitMessageRef.current(nextOverride, nextOptions);
-    if (submitted && pendingReplyContextRef.current === pendingReplyContext) {
+    if (submitted && !automatic && pendingReplyContextRef.current === pendingReplyContext) {
       pendingReplyContextRef.current = null;
     }
     if (
@@ -2311,57 +2317,30 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     await invokeSubmitMessage();
   };
 
-  // "Try again" on a failed run re-submits the triggering user prompt through
-  // the normal submit flow, so a busy agent naturally routes the resend into
-  // the server send queue.
-  const [pendingRunFailureRetryKey, setPendingRunFailureRetryKey] = useState<string | null>(null);
-  const handleRunFailureRetry = useCallback(
-    async (failureMessage: ChatMessage) => {
-      const prompt = resolveRunFailureRetryPrompt({
-        conversationMessages: messages,
-        failureMessage,
-      });
-      if (!prompt) {
-        showStatus("Couldn't find the original message to send again.", "info", 4000);
-        return;
-      }
-      setPendingRunFailureRetryKey(failureMessage.id);
-      try {
-        await invokeSubmitMessage({ message: prompt, editorState: null });
-      } finally {
-        setPendingRunFailureRetryKey(null);
-      }
-    },
-    [invokeSubmitMessage, messages, showStatus],
-  );
-  // Automatic transient-failure re-dispatch mirrors handleRunFailureRetry but
-  // deliberately does NOT touch pendingRunFailureRetryKey; that state is the
-  // manual "Try again" in-flight signal, and the auto path presents its own calm
-  // "trying again automatically" state via autoRetryingKey instead.
-  const handleRunFailureAutoRetry = useCallback(
-    async ({ promptText }: { failureMessage: ChatMessage; promptText: string }) => {
-      await invokeSubmitMessage({ message: promptText, editorState: null });
-    },
-    [invokeSubmitMessage],
-  );
-  // Busy while the assistant is producing output or a manual retry resend is in
-  // flight; do not stack an automatic retry on top of an active run.
-  const runFailureAutoRetryBusy = isAssistantTyping || pendingRunFailureRetryKey !== null;
-  const { autoRetryingKey: runFailureAutoRetryingKey } = useRunFailureAutoRetry({
+  const normalizedJobThread = useMemo((): ChatPanelJobThread | null => {
+    const conversationId = jobThread?.conversationId?.trim() ?? "";
+    const jobId = jobThread?.jobId?.trim() ?? "";
+    if (!conversationId || !jobId) {
+      return null;
+    }
+    return { conversationId, jobId };
+  }, [jobThread?.conversationId, jobThread?.jobId]);
+
+  const runFailureRetryContextValue = useRunFailureRetryActions({
     messages,
+    queuedSends: combinedChatSendQueue,
     conversationKey: activeConversationId,
-    isBusy: runFailureAutoRetryBusy,
-    autoRetry: handleRunFailureAutoRetry,
+    currentUserId,
+    chatClientSessionId,
+    isAssistantTyping,
+    // The read-only run trace (rendered below whenever normalizedJobThread is
+    // set) has no RunFailureRetryProvider, so its cards cannot show a
+    // countdown or its Cancel: never resend automatically from it.
+    autoRetryEnabled: normalizedJobThread === null,
+    submit: invokeSubmitMessage,
+    showStatus,
+    onConnectAi: openAiManager,
   });
-  const runFailureRetryContextValue = useMemo<RunFailureRetryContextValue>(
-    () => ({
-      pendingRetryKey: pendingRunFailureRetryKey,
-      requestRetry: handleRunFailureRetry,
-      autoRetryingKey: runFailureAutoRetryingKey,
-      onConnectAi: openAiManager,
-    }),
-    [handleRunFailureRetry, openAiManager, pendingRunFailureRetryKey, runFailureAutoRetryingKey],
-  );
 
   const scheduleSubmitMessage = () => {
     if (typeof window !== "undefined" && typeof window.setTimeout === "function") {
@@ -5325,15 +5304,6 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     stickyMentionedAgentByConversationRef,
   ]);
 
-  const normalizedJobThread = useMemo((): ChatPanelJobThread | null => {
-    const conversationId = jobThread?.conversationId?.trim() ?? "";
-    const jobId = jobThread?.jobId?.trim() ?? "";
-    if (!conversationId || !jobId) {
-      return null;
-    }
-    return { conversationId, jobId };
-  }, [jobThread?.conversationId, jobThread?.jobId]);
-
   const jobThreadMessages = useMemo((): ChatMessage[] => {
     if (!normalizedJobThread) {
       return [];
@@ -5777,12 +5747,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
               </ChatBubbleRow>
             ) : null}
             {(messageTargetActive || !shouldShowGettingStarted) && isInitialHistoryLoading && !initialHistoryError && !remoteConversationHistoryError ? (
-              <div className="flex justify-center px-2 py-1" role="status">
-                <div className="inline-flex items-center gap-3 rounded-2xl border border-slate-200/70 bg-white/85 px-4 py-3 text-sm font-medium text-slate-600 shadow-sm dark:border-[color:var(--color-studio-dark-panel-border)] dark:bg-[var(--color-studio-dark-panel-soft)] dark:text-slate-300">
-                  <Spinner aria-hidden="true" tone="slate" size="sm" />
-                  <span>Loading messages…</span>
-                </div>
-              </div>
+              <ChatLoadingPill>Loading messages…</ChatLoadingPill>
             ) : null}
             {displayedHistoryError || remoteConversationHistoryError ? (
               <div className="flex justify-center px-2 py-1" role="alert" data-testid="chat-history-error">
@@ -5950,6 +5915,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
                   run.metadata?.browserTransport === "desktop-personal" &&
                   (run.status === "in_progress" || run.status === "queued"))}
                 compactChrome={compactBrowserBar}
+                historyUserId={currentUserId}
                 model={personalBrowser}
                 sharingControls={activeProjectId && currentUserId ? (
                   <LocalBrowserTabPublisher
@@ -6081,6 +6047,15 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
       />
 
       <CredentialsConnectModal {...gettingStartedConnectModalProps} />
+
+      {spaceReviewOpen && activeProjectId ? (
+        <SpaceReviewDialog
+          key={`${activeProjectId}:${currentUserId ?? "anonymous"}`}
+          projectId={activeProjectId}
+          canWrite={projectCapabilitiesResolved === true && canWriteProject === true}
+          onClose={() => setSpaceReviewOpen(false)}
+        />
+      ) : null}
 
       <ChatComposerSurface
         viewNavigation={hasComposerViewNavigation ? conversationWorkspace ? <ConversationWorkspaceViews placement="composer" /> : <ConversationSurfaceTabs
@@ -6217,6 +6192,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
           onBrowseConnectors: openConnectBrowse,
           installedSkillNames: installedSkills.names,
           onInsertCommand: handleInsertSlashCommand,
+          onOpenSpaceReview: activeProjectId ? () => setSpaceReviewOpen(true) : undefined,
           onQueueMessage: () => {
             void invokeSubmitMessage(undefined, { intent: "queue" });
           },

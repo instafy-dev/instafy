@@ -5,6 +5,7 @@ import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ComposerActionMenu } from "../ComposerActionMenu";
+import { registerNativeBackAction } from "../../../../native/nativeBackButtonCoordinator";
 import {
   AVAILABLE_FEATURED_CONNECTORS,
   CONNECTORS,
@@ -12,6 +13,10 @@ import {
   isConnectorAvailable,
   type ProductConnector,
 } from "../connectors";
+
+const native = vi.hoisted(() => ({ platform: vi.fn(() => "web"), listen: vi.fn() }));
+vi.mock("@capacitor/core", () => ({ Capacitor: { getPlatform: native.platform } }));
+vi.mock("@capacitor/app", () => ({ App: { addListener: native.listen } }));
 
 // The trigger is a pass-through so the popover content always renders. It
 // mirrors the menu's controlled open state so a test can observe closeMenu()
@@ -46,6 +51,7 @@ describe("ComposerActionMenu", () => {
   let root: Root;
 
   beforeEach(() => {
+    native.platform.mockReturnValue("web");
     (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
     container = document.createElement("div");
     document.body.appendChild(container);
@@ -66,9 +72,11 @@ describe("ComposerActionMenu", () => {
     sendActions: {
       onQueueMessage?: () => void;
       onStashDraft?: () => void;
+      onExpandDraft?: () => void;
       onUploadImage?: () => void;
       uploadImageDisabled?: boolean;
       onInsertSuggestion?: () => void;
+      onOpenSpaceReview?: () => void;
       onStartVoiceInput?: () => void;
       voiceInputDisabled?: boolean;
       onToggleVoiceReplies?: () => void;
@@ -106,6 +114,51 @@ describe("ComposerActionMenu", () => {
     expect(container.querySelector('[data-testid="composer-action-menu-insert-suggestion"]')).toBeNull();
     expect(container.querySelector('[data-testid="composer-action-menu-voice-input"]')).toBeNull();
     expect(container.querySelector('[data-testid="composer-action-menu-voice-replies"]')).toBeNull();
+  });
+
+  it("opens space review without starting a prompt or requiring write access", async () => {
+    const onOpenSpaceReview = vi.fn();
+    await renderMenu(true, true, { onOpenSpaceReview, mutationDisabled: true });
+    const button = container.querySelector<HTMLButtonElement>('[data-testid="composer-action-menu-space-review"]');
+    expect(button).not.toBeNull();
+    expect(button?.disabled).toBe(false);
+    await act(async () => button?.click());
+    expect(onOpenSpaceReview).toHaveBeenCalledOnce();
+  });
+
+  it("closes the menu before expanding the draft", async () => {
+    const onExpandDraft = vi.fn();
+    await renderMenu(true, true, { onExpandDraft });
+    await act(async () => container.querySelector<HTMLButtonElement>('[data-testid="mock-dialog-trigger-open"]')!.click());
+    await act(async () => container.querySelector<HTMLButtonElement>('[data-testid="composer-action-menu-expand-draft"]')!.click());
+    expect(onExpandDraft).toHaveBeenCalledTimes(1);
+    expect(container.querySelector('[data-testid="mock-dialog-trigger"]')?.getAttribute("data-open")).toBe("false");
+  });
+
+  it("handles Android Back through menu levels before the expanded draft", async () => {
+    native.platform.mockReturnValue("android");
+    let back: (() => void) | undefined;
+    native.listen.mockImplementation(async (_event: string, handler: () => void) => {
+      back = handler;
+      return { remove: async () => {} };
+    });
+    const collapseDraft = vi.fn();
+    const unregister = registerNativeBackAction(collapseDraft, 90);
+    try {
+      await renderMenu(true);
+      await act(async () => container.querySelector<HTMLButtonElement>('[data-testid="mock-dialog-trigger-open"]')!.click());
+      await act(async () => container.querySelector<HTMLButtonElement>('[data-testid="composer-action-menu-commands"]')!.click());
+      await act(async () => back!());
+      expect(container.querySelector('[data-testid="composer-action-menu-commands"]')).not.toBeNull();
+      expect(collapseDraft).not.toHaveBeenCalled();
+      await act(async () => back!());
+      expect(container.querySelector('[data-testid="mock-dialog-trigger"]')?.getAttribute("data-open")).toBe("false");
+      expect(collapseDraft).not.toHaveBeenCalled();
+      await act(async () => back!());
+      expect(collapseDraft).toHaveBeenCalledTimes(1);
+    } finally {
+      unregister();
+    }
   });
 
   it("offers Upload image and Insert suggestion from the composer actions", async () => {

@@ -8,6 +8,7 @@ import { SpaceIdentity } from "../../../components/SpaceIdentity";
 import { StudioDialogPopover } from "../../../components/aria/StudioPopover";
 import { DARK_FLOATING_SELECTION_CLASS } from "../../../theme/darkSurfaces";
 import type { ProjectRecencyMap } from "../../../projects/projectRecency";
+import { spaceDisplayName } from "../../../projects/spaceName";
 import { unreadUpdatesDescription as unreadDescription } from "../homeUpdateLabels";
 
 export const SIDEBAR_RECENT_SPACE_LIMIT = 6;
@@ -20,7 +21,7 @@ export interface RecentSpace {
   avatarUrl?: string | null;
 }
 
-const spaceName = (space: RecentSpace) => space.name.trim() || "Untitled space";
+const spaceName = (space: RecentSpace) => spaceDisplayName(space.name);
 const compareSpaceNames = (a: RecentSpace, b: RecentSpace) =>
   spaceName(a).localeCompare(spaceName(b)) || a.id.localeCompare(b.id);
 

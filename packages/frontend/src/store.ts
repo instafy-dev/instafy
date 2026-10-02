@@ -157,7 +157,8 @@ export interface SessionStore {
 
 const baseMetadata: ProjectMetadata = {
   projectType: "general",
-  projectName: "Untitled Instafy Project",
+  // An unnamed space stays unnamed here; spaceDisplayName supplies the words.
+  projectName: "",
   prompt: "",
   goal: "",
   targetAudience: "",
@@ -431,7 +432,7 @@ export const useWorkspaceStore = create<SessionStore>()(
     });
   },
   createProject: (options) => {
-    const projectName = options?.projectName ?? `Untitled Space`;
+    const projectName = options?.projectName?.trim() ?? "";
     const tags = options?.tags;
     const newState = createProjectState({
       projectName,

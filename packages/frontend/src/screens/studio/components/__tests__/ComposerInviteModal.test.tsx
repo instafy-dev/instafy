@@ -100,6 +100,17 @@ vi.mock("react-qr-code", () => ({
   ),
 }));
 
+function mockDesktopWidth(isDesktop: boolean) {
+  vi.stubGlobal("matchMedia", (query: string) => ({
+    matches: isDesktop && query === "(min-width: 640px)",
+    media: query,
+    addEventListener: vi.fn(),
+    removeEventListener: vi.fn(),
+    addListener: vi.fn(),
+    removeListener: vi.fn(),
+  }));
+}
+
 function createProps(
   overrides: Partial<ComponentProps<typeof ComposerInviteModal>> = {},
 ): ComponentProps<typeof ComposerInviteModal> {
@@ -135,6 +146,7 @@ describe("ComposerInviteModal", () => {
   let root: Root;
 
   beforeEach(() => {
+    mockDesktopWidth(true);
     (
       globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }
     ).IS_REACT_ACT_ENVIRONMENT = true;
@@ -182,9 +194,47 @@ describe("ComposerInviteModal", () => {
   afterEach(async () => {
     await act(async () => root.unmount());
     vi.restoreAllMocks();
+    vi.unstubAllGlobals();
     document.body.innerHTML = "";
     delete (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean })
       .IS_REACT_ACT_ENVIRONMENT;
+  });
+
+  it("keeps the phone email draft focused as the keyboard viewport shrinks and pans", async () => {
+    mockDesktopWidth(false);
+    const viewport = Object.assign(new EventTarget(), {
+      offsetTop: 0, offsetLeft: 0, width: 390, height: 844, scale: 1,
+    });
+    vi.stubGlobal("visualViewport", viewport);
+    const props = createProps();
+    await act(async () => root.render(<ComposerInviteModal {...props} />));
+    const input = document.querySelector<HTMLInputElement>('[data-testid="composer-invite-email-input"]')!;
+    input.scrollIntoView = vi.fn();
+    const modal = document.querySelector<HTMLElement>('[role="dialog"]')!.parentElement!;
+    expect(modal.classList.contains("dark")).toBe(true);
+    const setValue = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!;
+    await act(async () => {
+      input.focus();
+      setValue.call(input, "draft@example.com");
+      input.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    await act(async () => {
+      Object.assign(viewport, { height: 280, offsetTop: 20 });
+      viewport.dispatchEvent(new Event("resize"));
+      viewport.dispatchEvent(new Event("scroll"));
+      await new Promise(requestAnimationFrame);
+    });
+    expect(document.querySelector('[data-testid="composer-invite-email-input"]')).toBe(input);
+    expect(document.activeElement).toBe(input);
+    expect(input.value).toBe("draft@example.com");
+    expect(modal.style.height).toBe("280px");
+    expect(modal.style.top).toBe("20px");
+    expect(props.onOpenChange).not.toHaveBeenCalled();
+    expect(mocks.createInvitation).not.toHaveBeenCalled();
+    await act(async () => {
+      document.querySelector<HTMLButtonElement>('[aria-label="Close invite modal"]')!.click();
+    });
+    expect(props.onOpenChange).toHaveBeenCalledExactlyOnceWith(false);
   });
 
   it("keeps a viewer read-only while still offering a same-account device handoff", async () => {
@@ -408,7 +458,8 @@ describe("ComposerInviteModal", () => {
     );
   });
 
-  it("uses Android Back to close the QR layer before the parent invite", async () => {
+  it.each([true, false])("uses Android Back to close QR before Invite (desktop: %s)", async (isDesktop) => {
+    mockDesktopWidth(isDesktop);
     const onOpenChange = vi.fn();
     await act(async () => {
       root.render(<ComposerInviteModal {...createProps({ onOpenChange })} />);

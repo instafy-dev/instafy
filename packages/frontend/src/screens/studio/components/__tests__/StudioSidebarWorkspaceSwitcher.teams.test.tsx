@@ -187,6 +187,30 @@ describe("StudioSidebarWorkspaceSwitcher team rows", () => {
     }
   });
 
+  it("says the space list is still loading instead of letting the known spaces read as all of them", async () => {
+    const current = { id: "qa", name: "Frontend QA", orgId: "acme", orgName: "Acme Co", state: null, isRemoteOnly: false };
+    const loadingStatus = () => container.querySelector('[data-testid="sidebar-project-discovery-loading"]');
+    await render(root, { mode: "spaces", currentOrgProject: current, projectsLoading: true });
+    expect(container.querySelector('[data-testid="sidebar-project-current-qa"]')).not.toBeNull();
+    expect(loadingStatus()?.getAttribute("role")).toBe("status");
+    expect(loadingStatus()?.textContent).toBe("Loading spaces…");
+
+    // Nothing known yet is not the same as no spaces.
+    await render(root, { mode: "spaces", projectsLoading: true });
+    expect(loadingStatus()?.textContent).toBe("Loading spaces…");
+    expect(container.textContent).not.toContain("No spaces yet.");
+    await render(root, {
+      mode: "spaces", projectsLoading: true, canSearchSpaces: true, showProjectSearch: true, workspaceProjectQuery: "qa",
+    });
+    expect(container.textContent).not.toContain("No matching spaces.");
+
+    await render(root, { mode: "spaces", currentOrgProject: current });
+    expect(loadingStatus()).toBeNull();
+    await render(root, { mode: "spaces" });
+    expect(loadingStatus()).toBeNull();
+    expect(container.textContent).toContain("No spaces yet.");
+  });
+
   it("keeps Current on the active team while a requested team is waiting or failed", async () => {
     const onRetryProjects = vi.fn();
     await render(root, {

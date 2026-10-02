@@ -209,6 +209,34 @@ export function buildPersonalBrowserRuntimeEnv(options: {
   };
 }
 
+// Loopback hosts that must never be reached through a proxy. runtime-agent's HTTP
+// clients honor HTTP(S)_PROXY, ALL_PROXY and the system proxy, none of which exempts
+// loopback, and the Personal Browser broker on loopback receives a bearer token.
+export const LOOPBACK_NO_PROXY_HOSTS = ["localhost", "127.0.0.1", "::1"] as const;
+
+export function mergeLoopbackNoProxy(existing: string | undefined): string {
+  const entries = (existing ?? "")
+    .split(",")
+    .map((entry) => entry.trim())
+    .filter((entry) => entry.length > 0);
+  for (const host of LOOPBACK_NO_PROXY_HOSTS) {
+    if (!entries.some((entry) => entry.toLowerCase() === host)) {
+      entries.push(host);
+    }
+  }
+  return entries.join(",");
+}
+
+// Each key keeps what its readers saw before (reqwest reads NO_PROXY first, curl
+// reads no_proxy first, each falling back to the other) plus the loopback hosts.
+export function applyLoopbackNoProxy(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+  const upper = env.NO_PROXY;
+  const lower = env.no_proxy;
+  env.NO_PROXY = mergeLoopbackNoProxy(upper ?? lower);
+  env.no_proxy = mergeLoopbackNoProxy(lower ?? upper);
+  return env;
+}
+
 export function applyProtectedDesktopRuntimeEnv(
   env: NodeJS.ProcessEnv,
   options: {
@@ -250,6 +278,7 @@ export function applyProtectedDesktopRuntimeEnv(
       personalBrowser: options.personalBrowser,
     }),
   );
+  applyLoopbackNoProxy(env);
   return env;
 }
 

@@ -30,13 +30,13 @@ const fixture = vi.hoisted(() => ({
   onToggleSidebar: vi.fn(),
   switchProject: vi.fn(), createProject: vi.fn(), onSettings: vi.fn(), onNewSpace: vi.fn(),
   copyTunnelDetails: vi.fn(), showStatus: vi.fn(), refresh: vi.fn(), retry: vi.fn(),
-  discoveryError: null as string | null, discoveryResolved: true, discoveryRefreshing: false,
+  discoveryError: null as string | null, discoveryResolved: true, discoveryRefreshing: false, discoveryLoading: false,
 }));
 vi.mock("../../../../projects/useProjects", () => ({ useProjects: () => ({
   projectList: fixture.projects, activeProjectId: fixture.activeProjectId, switchProject: fixture.switchProject, createProject: fixture.createProject,
 }) }));
 vi.mock("../../../../projects/useMergedControllerProjects", () => ({ useMergedControllerProjects: ({ orgId }: { orgId: string | null }) => ({
-  mergedProjects: fixture.projects, remoteLoading: false, remoteLoadedScope: fixture.discoveryResolved ? orgId : null,
+  mergedProjects: fixture.projects, remoteLoading: fixture.discoveryLoading, remoteLoadedScope: fixture.discoveryResolved ? orgId : null,
   remoteDiscoveryResolved: fixture.discoveryResolved, remoteError: fixture.discoveryError,
   remoteRefreshing: fixture.discoveryRefreshing, retryRemoteProjects: fixture.retry,
 }) }));
@@ -176,6 +176,7 @@ describe("StudioSidebar organization navigation", () => {
     fixture.discoveryError = null;
     fixture.discoveryResolved = true;
     fixture.discoveryRefreshing = false;
+    fixture.discoveryLoading = false;
     container = document.createElement("div");
     portal = document.createElement("div");
     headerPortal = document.createElement("div");
@@ -1203,6 +1204,19 @@ describe("StudioSidebar organization navigation", () => {
     await click("sidebar-browse-teams");
     await render({ workspaceSwitcherOpen: true });
     expect(portal.querySelector('[data-testid="sidebar-org-selector"]')).not.toBeNull();
+  });
+
+  it("tells the spaces drawer while the account's space list is still loading", async () => {
+    const loadingStatus = () => portal.querySelector('[data-testid="sidebar-project-discovery-loading"]');
+    fixture.discoveryLoading = true;
+    await render({ workspaceSwitcherOpen: true, workspaceSwitcherInitialMode: "spaces" });
+    expect(portal.querySelector('[data-testid="sidebar-project-current-space-a"]')).not.toBeNull();
+    expect(loadingStatus()?.textContent).toBe("Loading spaces…");
+
+    fixture.discoveryLoading = false;
+    await render({ workspaceSwitcherOpen: true, workspaceSwitcherInitialMode: "spaces" });
+    expect(portal.querySelector('[data-testid="sidebar-project-current-space-a"]')).not.toBeNull();
+    expect(loadingStatus()).toBeNull();
   });
 
   it("keeps the current space above an inline grid and toggles it without navigating", async () => {

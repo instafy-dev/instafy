@@ -3,6 +3,9 @@
 Automations run project prompts in the background on a schedule. Each automation belongs to one
 user and project and writes its visible results to a private automation conversation.
 
+For an on-demand review that saves sourced next-step recommendations and remembers user choices,
+see [Space review](Space-Review.md). It uses a normal chat turn and does not create a schedule.
+
 ## Schedules and threads
 
 The controller supports three schedule kinds:

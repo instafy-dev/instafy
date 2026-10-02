@@ -2713,3 +2713,352 @@ async fn spread_plan_worker_with_only_private_runtimes_is_failed_by_the_idle_swe
     test_result?;
     cleanup
 }
+
+/// Insert a private conversation of the space.
+async fn insert_space_conversation(space: &ManagedSpace) -> anyhow::Result<Uuid> {
+    let conversation_id = Uuid::new_v4();
+    space
+        .pool
+        .get()
+        .await?
+        .execute(
+            "insert into conversations (id, project_id, created_by, metadata, visibility)
+             values ($1, $2, $3, '{}'::jsonb, 'private')",
+            &[&conversation_id, &space.project_id, &space.owner_user_id],
+        )
+        .await?;
+    Ok(conversation_id)
+}
+
+/// Queue in `conversation_id`, with its run, a credential-less job pinned to
+/// `runtime_id`: a worker of plan `group_id` whose lead is `@octo` and whose
+/// runtime preference is `runtime_id`, or a job of no plan without a group.
+async fn queue_pinned_platform_job(
+    space: &ManagedSpace,
+    conversation_id: Uuid,
+    runtime_id: Uuid,
+    group_id: Option<Uuid>,
+) -> anyhow::Result<Uuid> {
+    let run_id = Uuid::new_v4();
+    let job_id = Uuid::new_v4();
+    let mut metadata = json!({ "agent": { "handle": "scout" } });
+    if let Some(group_id) = group_id {
+        metadata["runtimePreference"] = json!({ "runtimeId": runtime_id });
+        metadata["multiAgentPlan"] = json!({
+            "groupId": group_id,
+            "role": "worker",
+            "lead": { "leadHandle": "octo" }
+        });
+    }
+    let payload = json!({
+        "project_id": space.project_id,
+        "conversation_id": conversation_id,
+        "user_id": space.owner_user_id,
+        "prompt_text": "Read the docs folder.",
+        "metadata": metadata,
+    });
+    let connection = space.pool.get().await?;
+    connection
+        .execute(
+            "insert into runs (id, project_id, conversation_id, run_type, status)
+             values ($1, $2, $3, 'prompt', 'queued')",
+            &[&run_id, &space.project_id, &conversation_id],
+        )
+        .await?;
+    connection
+        .execute(
+            "insert into agent_jobs (
+                 id, project_id, run_id, conversation_id, status, intent, target_runtime_id,
+                 payload
+             ) values ($1, $2, $3, $4, 'queued', 'feature', $5, $6)",
+            &[
+                &job_id,
+                &space.project_id,
+                &run_id,
+                &conversation_id,
+                &runtime_id,
+                &PgJson(payload),
+            ],
+        )
+        .await?;
+    Ok(job_id)
+}
+
+/// The lead continuation jobs of `conversation_id`, and the refused lead
+/// checkpoints written to it.
+async fn lead_checkpoints(pool: &PgPool, conversation_id: Uuid) -> anyhow::Result<(i64, i64)> {
+    let row = pool
+        .get()
+        .await?
+        .query_one(
+            "select
+                 (select count(*) from agent_jobs
+                  where conversation_id = $1
+                    and payload #>> '{metadata,multiAgentPlan,role}' = 'lead_continuation'
+                 )::bigint as lead_jobs,
+                 (select count(*) from conversation_messages
+                  where conversation_id = $1
+                    and metadata #>> '{multiAgentPlan,role}' = 'lead_continuation'
+                 )::bigint as refusals",
+            &[&conversation_id],
+        )
+        .await?;
+    Ok((row.get("lead_jobs"), row.get("refusals")))
+}
+
+/// Workers of a plan stranded on a private runtime never report a
+/// completion: the idle sweep fails them. Once it has failed the last live
+/// one, and not before, the plan's lead is woken the way a canceled plan's
+/// is. Pinned to the same desktop as its workers, the lead is refused, and
+/// the conversation says so once however many sweeps run, whether the
+/// workers failed in one sweep or across two. A stranded job of no plan
+/// fails the same way and wakes no lead.
+#[tokio::test]
+async fn plan_workers_failed_by_the_idle_sweep_wake_the_lead_once() -> anyhow::Result<()> {
+    let Some(pool) = setup_origin_test_pool().await? else {
+        eprintln!("skipping stranded plan lead wakeup test: TEST_DATABASE_URL not set");
+        return Ok(());
+    };
+    let space = ManagedSpace::seed(pool, "stranded-plan-lead").await?;
+    let test_result: anyhow::Result<()> = async {
+        let state = build_test_state(space.pool.clone(), space.config("stranded-plan-lead"));
+        let desktop = space.desktop_runtime_id;
+        let lead_refusal = format!("@octo could not continue the plan. {SELF_HOSTED_REFUSAL}");
+
+        let across_sweeps = insert_space_conversation(&space).await?;
+        let across_group = Uuid::new_v4();
+        let first =
+            queue_pinned_platform_job(&space, across_sweeps, desktop, Some(across_group)).await?;
+        let second =
+            queue_pinned_platform_job(&space, across_sweeps, desktop, Some(across_group)).await?;
+        let one_sweep = insert_space_conversation(&space).await?;
+        let one_sweep_group = Uuid::new_v4();
+        let together = [
+            queue_pinned_platform_job(&space, one_sweep, desktop, Some(one_sweep_group)).await?,
+            queue_pinned_platform_job(&space, one_sweep, desktop, Some(one_sweep_group)).await?,
+        ];
+        let no_plan = insert_space_conversation(&space).await?;
+        let no_plan_job = queue_pinned_platform_job(&space, no_plan, desktop, None).await?;
+
+        age_past_the_stranded_job_grace(&space.pool, &[first, no_plan_job]).await?;
+        runtime::sweep_idle_activity(&state).await?;
+        let failed = ("failed".to_string(), Some(SELF_HOSTED_REFUSAL.to_string()));
+        assert_eq!(job_status_and_error(&space.pool, first).await?, failed);
+        assert_eq!(
+            job_status_and_error(&space.pool, no_plan_job).await?,
+            failed
+        );
+        assert_eq!(
+            job_status_and_error(&space.pool, second).await?,
+            ("queued".to_string(), None)
+        );
+        assert_eq!(
+            lead_checkpoints(&space.pool, across_sweeps).await?,
+            (0, 0),
+            "the lead waits for the worker still queued"
+        );
+
+        age_past_the_stranded_job_grace(&space.pool, &[second]).await?;
+        age_past_the_stranded_job_grace(&space.pool, &together).await?;
+        for _ in 0..2 {
+            runtime::sweep_idle_activity(&state).await?;
+        }
+        for job_id in together.into_iter().chain([second]) {
+            assert_eq!(job_status_and_error(&space.pool, job_id).await?, failed);
+        }
+        for conversation_id in [across_sweeps, one_sweep] {
+            assert_eq!(
+                lead_checkpoints(&space.pool, conversation_id).await?,
+                (0, 1),
+                "one refused lead checkpoint in {conversation_id}"
+            );
+            let refusal: String = space
+                .pool
+                .get()
+                .await?
+                .query_one(
+                    "select content from conversation_messages
+                     where conversation_id = $1
+                       and metadata #>> '{multiAgentPlan,role}' = 'lead_continuation'",
+                    &[&conversation_id],
+                )
+                .await?
+                .get(0);
+            assert_eq!(refusal, lead_refusal);
+        }
+
+        assert_eq!(lead_checkpoints(&space.pool, no_plan).await?, (0, 0));
+        let no_plan_rows: (i64, i64) = {
+            let row = space
+                .pool
+                .get()
+                .await?
+                .query_one(
+                    "select
+                         (select count(*) from agent_jobs where conversation_id = $1)::bigint,
+                         (select count(*) from conversation_messages
+                          where conversation_id = $1)::bigint",
+                    &[&no_plan],
+                )
+                .await?;
+            (row.get(0), row.get(1))
+        };
+        assert_eq!(
+            no_plan_rows,
+            (1, 1),
+            "a job of no plan gets its failure message and nothing else"
+        );
+        Ok(())
+    }
+    .await;
+    let cleanup = space.cleanup().await;
+    test_result?;
+    cleanup
+}
+
+/// Mark the queued `job_id` leased by `runtime_id`, as a running worker is.
+async fn lease_job_to(pool: &PgPool, job_id: Uuid, runtime_id: Uuid) -> anyhow::Result<()> {
+    pool.get()
+        .await?
+        .execute(
+            "update agent_jobs
+             set status = 'leased', leased_by_runtime_id = $2, leased_at = now(),
+                 lease_expires_at = now() + interval '5 minutes', lease_attempts = 1
+             where id = $1",
+            &[&job_id, &runtime_id],
+        )
+        .await?;
+    Ok(())
+}
+
+/// Complete the leased `job_id` and report it as its runtime does, which
+/// runs the plan's lead checkpoint. Returns whether a lead was queued.
+async fn complete_plan_worker(
+    state: &AppState,
+    pool: &PgPool,
+    job_id: Uuid,
+) -> anyhow::Result<bool> {
+    let payload = pool
+        .get()
+        .await?
+        .query_one(
+            "update agent_jobs
+             set status = 'completed', outcome = 'succeeded', summary = 'Read it.',
+                 completed_at = now()
+             where id = $1
+             returning payload",
+            &[&job_id],
+        )
+        .await?
+        .get::<_, PgJson<serde_json::Value>>(0)
+        .0;
+    crate::multi_agent_plan::maybe_enqueue_lead_continuation_after_completion(
+        state, job_id, &payload,
+    )
+    .await
+    .map_err(|error| controller_error("completed plan worker checkpoint", error))
+}
+
+/// Unlike a worker that reports its own failure, a plan worker the idle sweep
+/// fails does not wake the lead early: while a sibling still runs on the
+/// hosted runtime, the lead waits, and the sibling's completion wakes it once.
+/// When the sibling finishes first, the sweep's failure of the last worker is
+/// what wakes the lead, here refused on the failed worker's desktop.
+#[tokio::test]
+async fn a_plan_worker_failed_by_the_idle_sweep_waits_for_its_running_sibling() -> anyhow::Result<()>
+{
+    let Some(pool) = setup_origin_test_pool().await? else {
+        eprintln!("skipping running sibling lead wakeup test: TEST_DATABASE_URL not set");
+        return Ok(());
+    };
+    let space = ManagedSpace::seed(pool, "stranded-plan-sibling").await?;
+    let test_result: anyhow::Result<()> = async {
+        let state = build_test_state(space.pool.clone(), space.config("stranded-plan-sibling"));
+        let desktop = space.desktop_runtime_id;
+        let hosted = space.hosted_runtime_id;
+
+        // The stranded worker fails first; its sibling is still running.
+        let conversation_id = insert_space_conversation(&space).await?;
+        let group_id = Uuid::new_v4();
+        let stranded =
+            queue_pinned_platform_job(&space, conversation_id, desktop, Some(group_id)).await?;
+        let running =
+            queue_pinned_platform_job(&space, conversation_id, hosted, Some(group_id)).await?;
+        lease_job_to(&space.pool, running, hosted).await?;
+        age_past_the_stranded_job_grace(&space.pool, &[stranded]).await?;
+        runtime::sweep_idle_activity(&state).await?;
+        assert_eq!(
+            job_status_and_error(&space.pool, stranded).await?.0,
+            "failed"
+        );
+        assert_eq!(
+            job_status_and_error(&space.pool, running).await?.0,
+            "leased"
+        );
+        assert_eq!(
+            lead_checkpoints(&space.pool, conversation_id).await?,
+            (0, 0),
+            "no lead while a worker still runs"
+        );
+        assert!(complete_plan_worker(&state, &space.pool, running).await?);
+        runtime::sweep_idle_activity(&state).await?;
+        assert_eq!(
+            lead_checkpoints(&space.pool, conversation_id).await?,
+            (1, 0)
+        );
+        let lead = space
+            .pool
+            .get()
+            .await?
+            .query_one(
+                "select target_runtime_id, payload #> '{metadata,multiAgentPlan}' as plan
+                 from agent_jobs
+                 where conversation_id = $1
+                   and payload #>> '{metadata,multiAgentPlan,role}' = 'lead_continuation'",
+                &[&conversation_id],
+            )
+            .await?;
+        assert_eq!(
+            lead.get::<_, Option<Uuid>>("target_runtime_id"),
+            Some(hosted)
+        );
+        let plan = lead.get::<_, serde_json::Value>("plan");
+        assert!(
+            plan.get("checkpointKind").is_none(),
+            "a final checkpoint: {plan}"
+        );
+
+        // The running sibling finishes first; the sweep then fails the last.
+        let conversation_id = insert_space_conversation(&space).await?;
+        let group_id = Uuid::new_v4();
+        let stranded =
+            queue_pinned_platform_job(&space, conversation_id, desktop, Some(group_id)).await?;
+        let running =
+            queue_pinned_platform_job(&space, conversation_id, hosted, Some(group_id)).await?;
+        lease_job_to(&space.pool, running, hosted).await?;
+        assert!(
+            !complete_plan_worker(&state, &space.pool, running).await?,
+            "the stranded worker is still queued"
+        );
+        assert_eq!(
+            lead_checkpoints(&space.pool, conversation_id).await?,
+            (0, 0)
+        );
+        age_past_the_stranded_job_grace(&space.pool, &[stranded]).await?;
+        runtime::sweep_idle_activity(&state).await?;
+        assert_eq!(
+            job_status_and_error(&space.pool, stranded).await?.0,
+            "failed"
+        );
+        assert_eq!(
+            lead_checkpoints(&space.pool, conversation_id).await?,
+            (0, 1),
+            "the sweep's failure of the last worker wakes the lead"
+        );
+        Ok(())
+    }
+    .await;
+    let cleanup = space.cleanup().await;
+    test_result?;
+    cleanup
+}

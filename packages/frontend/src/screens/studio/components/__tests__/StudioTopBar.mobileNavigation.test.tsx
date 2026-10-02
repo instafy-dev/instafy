@@ -160,6 +160,19 @@ describe("StudioTopBar mobile navigation integration", () => {
     expect(query("mobile-header-actions")).toBeNull();
   });
 
+  it("names the space when no tab is open, and a chat that is still loading through the override", async () => {
+    props.contextHeaderAbove = true;
+    mocks.tabs.mockReturnValue({ ...mocks.tabs(), activeTabId: null, tabs: [] });
+    await render();
+    expect(query("mobile-header-title")?.textContent).toBe("Alpha space");
+    expect(query("mobile-header-location-icon")).toBeNull();
+
+    mocks.controls.mockReturnValue({ ...mocks.controls(), topbarLocationOverride: { title: "Chat", icon: <svg data-testid="chat-icon" /> } });
+    await render();
+    expect(query("mobile-header-title")?.textContent).toBe("Chat");
+    expect(query("mobile-header-location-icon")?.contains(query("chat-icon"))).toBe(true);
+  });
+
   it.each([true, false])("omits the repeated space label beneath a context header while preserving navigation (touch=%s)", async touch => {
     props.contextHeaderAbove = true;
     props.mobileNavigation!.history.canGoBack = true;

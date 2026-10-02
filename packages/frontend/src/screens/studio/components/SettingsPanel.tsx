@@ -14,6 +14,7 @@ import { useAuth } from "../../../providers/AuthProvider";
 import { useProjects } from "../../../projects/useProjects";
 import { useProject } from "../../../projects/useProject";
 import { useProjectMembers } from "../../../projects/useProjectMembers";
+import { realSpaceName } from "../../../projects/spaceName";
 import { useOrgMembers } from "../../../org/useOrgMembers";
 import {
   isOrganizationInviteRole,
@@ -335,10 +336,13 @@ export function SettingsPanel({ activeTab: fallbackTab, organizationId, onOrgani
     canManageProject &&
     (!activeOrgId || isOrgMember);
   const canAttemptOrgDelete = runtimeControllerEnabled && Boolean(activeOrgId) && orgRole === "owner";
-  const [projectNameDraft, setProjectNameDraft] = useStudioDraftState(`space:${activeProjectId}:name`, activeProject?.name ?? "", Boolean(activeProject));
+  // An untitled space starts with an empty field and a hint, never with the
+  // placeholder as text to delete before typing.
+  const savedProjectName = realSpaceName(activeProject?.name) ?? "";
+  const [projectNameDraft, setProjectNameDraft] = useStudioDraftState(`space:${activeProjectId}:name`, savedProjectName, Boolean(activeProject));
   const projectNameDirty =
     Boolean(activeProjectId) &&
-    projectNameDraft.trim() !== (activeProject?.name ?? "").trim();
+    projectNameDraft.trim() !== savedProjectName;
   const projectNameInvalid = projectNameDraft.trim().length === 0;
 
   const showOrgMembers = activeTab === "org" && orgCategory === "members";
@@ -451,8 +455,8 @@ export function SettingsPanel({ activeTab: fallbackTab, organizationId, onOrgani
   };
 
   const handleCancelProjectName = useCallback(() => {
-    setProjectNameDraft(activeProject?.name ?? "");
-  }, [activeProject?.name, setProjectNameDraft]);
+    setProjectNameDraft(savedProjectName);
+  }, [savedProjectName, setProjectNameDraft]);
 
   const handleSaveProjectName = useCallback(async () => {
     if (!activeProjectId) {
@@ -470,7 +474,7 @@ export function SettingsPanel({ activeTab: fallbackTab, organizationId, onOrgani
       showStatus("Space name is required.", "error", 4000);
       return;
     }
-    if (trimmed === (activeProject?.name ?? "").trim()) {
+    if (trimmed === savedProjectName) {
       return;
     }
 
@@ -486,7 +490,7 @@ export function SettingsPanel({ activeTab: fallbackTab, organizationId, onOrgani
     } finally {
       setProjectNameSaving(false);
     }
-  }, [activeProject?.name, activeProjectId, canWriteProject, projectNameDraft, projectNameSaving, renameProject, setProjectNameDraft, showStatus]);
+  }, [activeProjectId, canWriteProject, projectNameDraft, projectNameSaving, renameProject, savedProjectName, setProjectNameDraft, showStatus]);
 
   const sortedInvitations = useMemo(() => {
     return [...invitations].sort((a, b) => {

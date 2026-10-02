@@ -47,6 +47,14 @@ describe("project metadata refreshes", () => {
     expect(write).toHaveBeenCalledTimes(2);
   });
 
+  it("stores an unnamed space without a placeholder name", () => {
+    const unnamedId = "22222222-2222-4222-8222-222222222222";
+    useWorkspaceStore.getState().createProject({ projectId: unnamedId });
+    const current = useWorkspaceStore.getState();
+    expect(current.projects[unnamedId].metadata.projectName).toBe("");
+    expect(JSON.stringify(current.projects[unnamedId])).not.toMatch(/untitled/i);
+  });
+
   it("persists appearance, preserves missing fields, and clears explicit nulls", () => {
     const store = useWorkspaceStore.getState();
     store.setProjectIdentity(projectId, { projectIcon: "🚀", projectColor: "blue" });

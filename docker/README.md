@@ -66,12 +66,20 @@ Stop everything with `pnpm runtime:down`, which tears down the controller stack.
 ## Deployment and self-hosting
 
 - `docker/runtime/Dockerfile` is the only runtime-agent image definition. The
-  `runtime` and `runtime-webdev` targets can be built for amd64 and arm64.
+  `runtime` and `runtime-webdev` targets can be built for amd64 and arm64. The
+  production release publishes amd64 images; arm64 images and the multi-arch
+  `<sha>`/`webdev-<sha>` tags come from a separate best-effort lane and can lag
+  or be missing for a commit (see
+  [GHCR publication](../packages/runtime-agent/README.md#ghcr-publication)).
 - Pin hosted/provider launches to an immutable OCI manifest reference, for example
   `RUNTIME_AGENT_IMAGE=<registry>/<organization>/instafy-runtime-agent@sha256:<digest>` and
   `RUNTIME_PROXY_IMAGE=<registry>/<organization>/instafy-openai-proxy-server@sha256:<digest>`.
   `docker/docker-compose.runtime.provider.yml` intentionally has no mutable
   fallback image for either service.
+- `docker/docker-compose.runtime.provider.yml` forwards `ORIGIN_GIT_REMOTE_URL` into the runtime.
+  When the controller sets `GIT_REMOTE_BASE_URL`, a runtime whose workspace already has files
+  but no `.instafy/.git` then fails to start. Roll the file out only to fresh nodes or empty
+  workspaces; see [Workspace durability](../docs/Runtime-Machines.md#workspace-durability).
 - Local development remains source-built through
   `docker/docker-compose.runtime.yml` and its
   `instafy-runtime-agent:webdev-local` tag.

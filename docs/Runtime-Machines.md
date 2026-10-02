@@ -182,7 +182,9 @@ for them (`runtime/limit_waits.rs`):
   operator detail, so it gets a plain "a cloud runtime could not be started
   for this space" reason and the refusal goes to the controller log. A
   recorded request that cannot be replayed at all fails its work the same
-  way. Conflicts, throttling and 5xx keep backing off.
+  way. When that fails the last waiting workers of a multi-agent plan, the
+  lead their failure queues fails with the same reason too, since the wait
+  that would start it is over. Conflicts, throttling and 5xx keep backing off.
 - Work that has waited on the limit for 30 minutes fails with a reason in
   the conversation ("every cloud runtime in this team stayed busy for 30
   minutes...") and a Try again, its run fails, and the managed-AI reserve of
@@ -193,7 +195,9 @@ for them (`runtime/limit_waits.rs`):
   began waiting, whichever is later: a job that sat behind its own busy
   machine gets the full window once it is refused a new one. The studio's
   waiting copy promises this bound. Queued follow-ups in that conversation
-  are then dispatched as after any finished turn.
+  are then dispatched as after any finished turn, and when the failed job was
+  the last live worker of a multi-agent plan, the plan's lead checkpoint runs
+  first, once per plan, as for a canceled worker.
 - The wait ends when a live runtime (an unreleased lease or a recent
   heartbeat) would run the waiting work: a hosted runtime of the space, the
   machine a job is pinned to (unless that machine is private and the job is a
@@ -277,25 +281,69 @@ uncertainty). Real per-org disk quotas remain future work.
 
 ## Workspace durability
 
-Hosted workspaces are **git-canonical working copies**, not primary storage:
-the durable copy is the bare repo on persistent git-shard storage plus encrypted
-offsite backups. A fresh controller node restores each working tree automatically —
-the origin server's `ensure_git_checkout` clones from
-`GIT_REMOTE_BASE_URL/<project>.git` on runtime start — so a blue-green
-controller replacement loses only work that never reached the remote:
+Hosted workspaces are meant to be **git-canonical working copies**, not primary
+storage: the durable copy is the bare repo on persistent git-shard storage plus
+encrypted offsite backups. That holds only when the runtime has a git remote,
+which needs both of these:
 
-- The agent pushes after **every run** (`auto_sync_after_apply`, default on).
-- On any **graceful stop** (idle pause, credit stop, container drain) the
-  origin server pushes a final `instafy: checkpoint before machine stop`
-  commit of any dirty files (`flush_workspace_before_shutdown`; compose
-  `stop_grace_period: 45s` gives it room).
-- Residual exposure: a hard node loss mid-run (the in-flight run's WIP) and
-  untracked/gitignored files. Accepted; both are bounded and disposable.
+- The controller has `GIT_REMOTE_BASE_URL` set. It then adds
+  `ORIGIN_GIT_REMOTE_URL=<base>/<project>.git` to each runtime's launch
+  metadata. Without it the controller logs an error at startup and keeps
+  serving.
+- The provider's compose file forwards `ORIGIN_GIT_REMOTE_URL` into the runtime
+  container. `docker/docker-compose.runtime.provider.yml` does, and
+  `scripts/check-self-host-compose.test.mjs` fails when that file drops a
+  launch variable the allocator allowlists, except the two documented WebRTC
+  variables (`INSTAFY_BROWSER_WEBRTC_SENDER_URL` and
+  `INSTAFY_BROWSER_WEBRTC_BIND`) that are not forwarded yet.
+
+If either is missing, the runtime writes files only to the node's disk
+(`RUNTIME_REPO_HOST`, which the Docker allocator sets to
+`DOCKER_REPO_HOST/<project>`). Each save after a turn is recorded as failed
+(`gitSyncStatus: "failed"`, "git remote is not configured for this project"),
+and the files are lost when the node is replaced, for example by a blue-green
+controller replacement.
+
+With a remote, the origin server's `ensure_git_checkout` clones from it on
+runtime start, so a fresh node restores each working tree and a replacement
+loses only work that never reached the remote:
+
+- After a model turn the agent pushes the files the model reported, or the
+  `git status` delta when a turn that was expected to change files reported
+  none (`auto_sync_after_apply`, default on). A file a turn changed but did not
+  report, and that no delta caught, stays unsaved until a later `/sync`.
+- `/skills import`, with or without `--start`, pushes the skill files it
+  installed through the same checkpoint. [Git Service](Git-Service.md#embedded-repositories-and-protected-checkpoints)
+  lists the import cases it does not save.
+- **Known gap: the shutdown flush cannot push today.** On a graceful stop (idle
+  pause, credit stop, container drain) `flush_workspace_before_shutdown` in the
+  origin server tries to commit dirty files as
+  `instafy: checkpoint before machine stop`. Minting `git.write` requires the
+  `fs.write` token of the caller, and the shutdown path has no caller, so it
+  logs `shutdown flush: failed to mint git token` and skips the flush. Dirty
+  files that no turn or `/sync` saved are lost when the node is replaced.
+  Compose's `stop_grace_period: 45s` is there for this flush once it works.
+- Residual exposure even with a working flush: a hard node loss mid-run (the
+  in-flight run's WIP) and untracked/gitignored files.
+
+**Compatibility: upgrading the provider compose file turns the remote on.**
+Before `docker/docker-compose.runtime.provider.yml` forwarded
+`ORIGIN_GIT_REMOTE_URL`, a provider runtime never received it, even when the
+controller set `GIT_REMOTE_BASE_URL`. With the current file it does, and the
+origin server runs `ensure_git_checkout` when the runtime starts. That does not
+adopt a tree that already lives on the node: a workspace that is not empty and
+has no `.instafy/.git` makes it fail with "workspace root is not empty but
+ORIGIN_GIT_REMOTE_URL is set", the runtime agent exits, and the runtime does
+not start. A workspace that has run a job usually has files in it. Until the origin
+can adopt an existing tree, roll the new compose file out only to fresh nodes or
+to runtimes whose workspace is empty. Do not upgrade it in place on a node that
+already holds workspaces, including a same-VM rollout.
 
 **Operational invariant:** `GIT_REMOTE_BASE_URL` must be configured for hosted
-deployments—without it, workspaces have no durable backing and the controller
-error-logs at startup. A dedicated single-attach workspace volume is structurally
-incompatible with controller replacement or multi-node controller pools.
+deployments, and `ORIGIN_GIT_REMOTE_URL` must reach the runtime container.
+Without them, workspaces have no durable backing. A dedicated single-attach
+workspace volume is structurally incompatible with controller replacement or
+multi-node controller pools.
 
 ## Import pre-flight
 

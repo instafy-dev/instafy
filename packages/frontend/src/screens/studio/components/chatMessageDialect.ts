@@ -212,7 +212,48 @@ function findUrlAt(text: string, index: number): { reference: UrlReferenceDescri
   return { reference: { url, label: url }, end: index + url.length };
 }
 
-function findMarkdownLinkAt(text: string, index: number): { reference: UrlReferenceDescriptor; end: number } | null {
+// Models write `[file](file)` or `[`file`](`file`)` for a workspace file.
+// Unwrap the destination to the bare path the other file rules already chip.
+function unwrapMarkdownLinkDestination(raw: string): string {
+  let value = raw.trim();
+  const codeMatch = value.match(/^(`+)([^`]+)\1$/);
+  if (codeMatch) {
+    value = (codeMatch[2] ?? "").trim();
+  }
+  if (value.startsWith("<") && value.endsWith(">")) {
+    value = value.slice(1, -1).trim();
+  }
+  if (value.startsWith("./")) {
+    value = value.slice(2);
+  }
+  return value;
+}
+
+// Link text keeps its brackets balanced, as in "[`arr[0]`](...)". An
+// unbalanced label means this '[' is not the link's own opener, as in
+// "[x] Created [notes.md](notes.md)", so the scan should reach the real one.
+function markdownLinkLabelHasBalancedBrackets(label: string): boolean {
+  let depth = 0;
+  for (const char of label) {
+    if (char === "[") {
+      depth += 1;
+    } else if (char === "]") {
+      depth -= 1;
+      if (depth < 0) {
+        return false;
+      }
+    }
+  }
+  return depth === 0;
+}
+
+function findMarkdownLinkAt(
+  text: string,
+  index: number,
+):
+  | { kind: "link"; reference: UrlReferenceDescriptor; end: number }
+  | { kind: "workspace-file"; reference: WorkspaceFileReferenceDescriptor; end: number }
+  | null {
   if (text[index] !== "[" || text[index + 1] === "[" || text[index - 1] === "!") {
     return null;
   }
@@ -221,7 +262,7 @@ function findMarkdownLinkAt(text: string, index: number): { reference: UrlRefere
     return null;
   }
   const label = text.slice(index + 1, labelEnd).trim();
-  if (!label || label.includes("\n")) {
+  if (!label || label.includes("\n") || !markdownLinkLabelHasBalancedBrackets(label)) {
     return null;
   }
   const urlStart = labelEnd + 2;
@@ -232,13 +273,20 @@ function findMarkdownLinkAt(text: string, index: number): { reference: UrlRefere
   const rawUrl = text.slice(urlStart, urlEnd).trim();
   const normalizedPrefix = rawUrl.slice(0, 8).toLowerCase();
   if (!normalizedPrefix.startsWith("http://") && !normalizedPrefix.startsWith("https://")) {
-    return null;
+    // The chip names the file from the destination, so a label cannot hide
+    // which file opens.
+    const destination = unwrapMarkdownLinkDestination(rawUrl);
+    const fileMatch = findWorkspaceFileReferenceAt(destination, 0);
+    if (!fileMatch || fileMatch.end !== destination.length) {
+      return null;
+    }
+    return { kind: "workspace-file", reference: fileMatch.reference, end: urlEnd + 1 };
   }
   const url = sanitizeUrlCandidate(rawUrl);
   if (!url) {
     return null;
   }
-  return { reference: { url, label }, end: urlEnd + 1 };
+  return { kind: "link", reference: { url, label }, end: urlEnd + 1 };
 }
 
 function findInlineCodeAt(text: string, index: number): { value: string; end: number } | null {
@@ -433,7 +481,11 @@ export function tokenizeChatLine(
       if (index > cursor) {
         tokens.push({ type: "text", value: text.slice(cursor, index) });
       }
-      tokens.push({ type: "link", value: markdownLinkMatch.reference });
+      if (markdownLinkMatch.kind === "workspace-file") {
+        tokens.push({ type: "workspace-file", value: markdownLinkMatch.reference });
+      } else {
+        tokens.push({ type: "link", value: markdownLinkMatch.reference });
+      }
       index = markdownLinkMatch.end;
       cursor = index;
       continue;

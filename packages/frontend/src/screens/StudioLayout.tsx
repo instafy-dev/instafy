@@ -68,6 +68,7 @@ import { StudioSidebar } from "./studio/components/StudioSidebar";
 import { StudioMobileSidebarOverlay } from "./studio/components/StudioMobileSidebarOverlay";
 import { OpenChatList } from "./studio/components/OpenChatList";
 import { StudioTopBar } from "./studio/components/StudioTopBar";
+import { WorkspaceHydratingFrame } from "./studio/components/WorkspaceHydratingFrame";
 import { MobileBottomDock } from "./studio/components/MobileBottomDock";
 import { ProjectLauncher } from "./studio/components/ProjectLauncher";
 import { ChatPanel } from "./studio/components/ChatPanel";
@@ -102,6 +103,8 @@ import { useWorkspaceUi } from "../workspace/useWorkspace";
 import { useStatus } from "../status/useStatus";
 import { useProject } from "../projects/useProject";
 import { useProjects } from "../projects/useProjects";
+import { useSpaceAutoName } from "../projects/useSpaceAutoName";
+import { createControllerSpace } from "../projects/createControllerSpace";
 import { useCredits } from "../credits/useCredits";
 import {
   clearControllerAccessTokenOverride,
@@ -121,7 +124,7 @@ import { useConversations } from "../conversations/ConversationsProvider";
 import { isUUID } from "../utils/uuid";
 import { writeClipboardText } from "../runtime/runtimeMenuShared";
 import { INSTAFY_CLI_URL } from "../config/externalLinks";
-import { resolveMobileOverviewSection, resolveWorkspaceEmptyState, useStudioNavigationPosture } from "./studio/useStudioNavigationPosture";
+import { isWorkspaceLoadingChats, resolveMobileOverviewSection, resolveTopbarLocation, resolveWorkspaceEmptyState, useStudioNavigationPosture, type TopbarLocation } from "./studio/useStudioNavigationPosture";
 import { WorkspaceTabsProvider, useWorkspaceTabs } from "../workspace/WorkspaceTabsProvider";
 import type { WorkspaceGitReviewSource } from "../workspace/gitReviewTypes";
 import { ConversationHistoryTab } from "../workspace/ConversationHistoryTab";
@@ -145,7 +148,7 @@ import { useAutoDesktopSpeechTunnel } from "../desktop/voiceTunnel/useAutoDeskto
 import { useStudioLayoutChromeState } from "./useStudioLayoutChromeState";
 import { useStudioLayoutWorkspaceRouting } from "./useStudioLayoutWorkspaceRouting";
 import { useStudioGitStatusBadge } from "./useStudioGitStatusBadge";
-import { canRememberTeamWorkspace, resolveStudioSearchContext, resolveTeamNavigationScope, usesGlobalNavigationContext } from "./studio/teamNavigation";
+import { canRememberTeamWorkspace, resolveActiveTeamName, resolveStudioSearchContext, resolveTeamNavigationScope, usesGlobalNavigationContext } from "./studio/teamNavigation";
 import { readCachedControllerOrgs } from "./studio/components/sidebarOrgSnapshot";
 import { StudioPanelPerformance } from "../telemetry/StudioPanelPerformance";
 
@@ -167,6 +170,14 @@ const navMoreItems: StudioNavItem[] = [
   { id: "machines", label: "Machines", icon: Cube, accent: sidebarPrimaryAccentClass },
   { id: "credits", label: "Credits", icon: Coins, accent: sidebarPrimaryAccentClass }
 ];
+
+/** The compact header's title and glyph for each {@link resolveTopbarLocation} result. */
+const topbarLocations: Record<TopbarLocation, { title: string; icon: ReactNode }> = {
+  files: { title: "Files", icon: <Page className="text-[16px]" aria-hidden="true" /> },
+  history: { title: "Chats", icon: <ChatsIcon className="text-[16px]" aria-hidden="true" /> },
+  sourceControl: { title: "Changes", icon: <GitBranch className="text-[16px]" aria-hidden="true" /> },
+  chat: { title: "Chat", icon: <ChatLines className="text-[16px]" aria-hidden="true" /> },
+};
 
 const HOME_ATTENTION_POLL_ACTIVE_MS = 20_000;
 const HOME_ATTENTION_POLL_IDLE_MS = 120_000;
@@ -318,9 +329,8 @@ function StudioLayoutInner() {
   }, [currentUserId]);
   const selectedTeamMetadata = navigationTeam?.userId === currentUserId && navigationTeam.key === navigationScope.orgKey
     ? navigationTeam : readCachedControllerOrgs(user?.email).find((org) => org.id === navigationScope.orgKey);
-  const activeTeamName = navigationScope.orgKey === "personal" ? "Personal"
-    : selectedTeamMetadata?.name
-      ?? (navigationScope.orgKey === activeProjectOrgKey ? activeProjectSummary?.orgName : null) ?? "Team";
+  const activeTeamName = resolveActiveTeamName(navigationScope.orgKey, selectedTeamMetadata?.name,
+    { orgKey: activeProjectOrgKey, orgName: activeProjectSummary?.orgName });
   const activeTeamAvatarUrl = navigationScope.orgKey === "personal" ? null : selectedTeamMetadata?.avatarUrl ?? null;
   const teamReturnRoutes = useRef<{ userId: string | null; routes: Map<string, string> }>({ userId: currentUserId, routes: new Map() });
   if (teamReturnRoutes.current.userId !== currentUserId) {
@@ -1415,6 +1425,7 @@ function StudioLayoutInner() {
   );
 
   usePromptBootstrap(handlePromptBootstrapResult);
+  useSpaceAutoName();
 
   const createFreshConversation = useCallback(() => {
     requestHistoryPush();
@@ -1496,17 +1507,7 @@ function StudioLayoutInner() {
       projectName?: string,
       org?: { orgId?: string | null; orgSlug?: string | null; orgName?: string | null }
     ) => {
-      const resolvedName =
-        typeof projectName === "string" && projectName.trim().length > 0
-          ? projectName.trim()
-          : "Untitled Space";
-      const projectInfo = await controllerClient.projects.create({
-        projectType: "customer",
-        projectName: resolvedName,
-        orgId: org?.orgId ?? null,
-        orgSlug: org?.orgSlug ?? null,
-        orgName: org?.orgName ?? null
-      }).catch(() => null);
+      const { projectInfo, projectName: resolvedName } = await createControllerSpace(projectName, org);
       if (!projectInfo?.projectId || !isUUID(projectInfo.projectId)) {
         showStatus("Unable to start a new space right now.", "error", 4000);
         throw new Error("project-create-failed");
@@ -1534,17 +1535,7 @@ function StudioLayoutInner() {
       org: { orgId?: string | null; orgSlug?: string | null; orgName?: string | null },
       github: { repo: string; ref?: string | null; githubDeviceAuthSessionId?: string | null },
     ): Promise<{ success: boolean; error?: string | null }> => {
-      const resolvedName =
-        typeof projectName === "string" && projectName.trim().length > 0
-          ? projectName.trim()
-          : "Untitled Space";
-      const projectInfo = await controllerClient.projects.create({
-        projectType: "customer",
-        projectName: resolvedName,
-        orgId: org?.orgId ?? null,
-        orgSlug: org?.orgSlug ?? null,
-        orgName: org?.orgName ?? null
-      }).catch(() => null);
+      const { projectInfo, projectName: resolvedName } = await createControllerSpace(projectName, org);
       if (!projectInfo?.projectId || !isUUID(projectInfo.projectId)) {
         return { success: false, error: "Unable to start a new space right now." };
       }
@@ -1744,21 +1735,24 @@ function StudioLayoutInner() {
     leftDrawer === "files" && !shouldShowFilesWorkspace;
   const showMobileLeftDrawerOverlay =
     !isLargeScreen && leftDrawer !== null && leftDrawer !== "workspaces" && !(leftDrawer === "files" && shouldShowFilesWorkspace);
-  const topbarLocationOverride = showMobileLeftDrawerOverlay
-    ? leftDrawer === "files"
-      ? { title: "Files", icon: <Page className="text-[16px]" aria-hidden="true" /> }
-      : leftDrawer === "history"
-        ? { title: "Chats", icon: <ChatsIcon className="text-[16px]" aria-hidden="true" /> }
-        : leftDrawer === "sourceControl"
-          ? { title: "Changes", icon: <GitBranch className="text-[16px]" aria-hidden="true" /> }
-          : null
-    : null;
+  const routeParams = new URLSearchParams(location.search);
+  const routedPanel = routeParams.get("panel") ?? "chat";
+  const workspaceEmptyState = shouldShowFilesWorkspace ? null : resolveWorkspaceEmptyState({
+    hasActiveTab: Boolean(activeWorkspaceTab),
+    conversationTabsReady,
+    historyError: Boolean(remoteConversationHistoryError),
+    projectAccessBlocked,
+  });
+  const workspaceLoadingChats = isWorkspaceLoadingChats(workspaceEmptyState, routedPanel);
+  const topbarLocation = resolveTopbarLocation({
+    drawerOverlay: showMobileLeftDrawerOverlay ? leftDrawer : null,
+    loadingChats: workspaceLoadingChats,
+  });
+  const topbarLocationOverride = topbarLocation ? topbarLocations[topbarLocation] : null;
 
   const showChatActions = !projectAccessBlocked;
 
   const workspaceTabsElement = null;
-  const routeParams = new URLSearchParams(location.search);
-  const routedPanel = routeParams.get("panel") ?? "chat";
   const panelScrollReady = projectReadyForWorkspace &&
     (!routeParams.get("projectId") || routeParams.get("projectId") === activeProjectId) &&
     routedPanel === activeWorkspaceTabPanel;
@@ -1811,17 +1805,11 @@ function StudioLayoutInner() {
       />
     );
   } else if (!activeWorkspaceTab) {
-    const emptyState = resolveWorkspaceEmptyState({
-      hasActiveTab: false,
-      conversationTabsReady,
-      historyError: Boolean(remoteConversationHistoryError),
-      projectAccessBlocked,
-    });
     // The retry line belongs to the failed-fetch path only; a refresh that
     // fails after the tabs were restored leaves the space usable as is.
     const showHistoryRetry = !conversationTabsReady && Boolean(remoteConversationHistoryError);
-    workspaceContent = emptyState === "hydrating" ? (
-      <div className="flex h-full" aria-busy="true" data-testid="workspace-tabs-hydrating" />
+    workspaceContent = workspaceEmptyState === "hydrating" ? (
+      <WorkspaceHydratingFrame loadingChats={workspaceLoadingChats} />
     ) : (
       <div className="flex h-full flex-col items-center justify-center gap-2 text-sm text-slate-500">
         <p>Open a panel to get started.</p>

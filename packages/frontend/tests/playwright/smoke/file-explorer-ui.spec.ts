@@ -3,7 +3,7 @@ import { test, expect, type Page } from "@playwright/test";
 import { prepareStudio, resetRuntimeUserState } from "../utils/harness.js";
 
 async function waitForWorkspaceOriginConnected(page: Page, timeoutMs = 120_000) {
-  await expect(page.getByText("Connecting to workspace origin…")).toHaveCount(0, {
+  await expect(page.getByText(/Opening files…|Still opening files…|Reconnecting to your files…/)).toHaveCount(0, {
     timeout: timeoutMs,
   });
 }

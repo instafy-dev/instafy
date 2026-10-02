@@ -2,6 +2,7 @@ import { useMemo } from "react";
 import { useProjectMetadata } from "./ProjectMetadataProvider";
 import { useProjectState } from "./ProjectStateProvider";
 import { useProjectAccess } from "./ProjectAccessProvider";
+import { spaceDisplayName } from "./spaceName";
 
 export function useProject() {
   const { projects, activeProjectId } = useProjectState();
@@ -9,10 +10,8 @@ export function useProject() {
   const projectAccess = useProjectAccess();
 
   const activeProjectName = useMemo(() => {
-    if (activeProjectId && projects[activeProjectId]?.metadata.projectName) {
-      return projects[activeProjectId]?.metadata.projectName ?? "Untitled Space";
-    }
-    return metadata.projectName ?? "Untitled Space";
+    const activeName = activeProjectId ? projects[activeProjectId]?.metadata.projectName : null;
+    return spaceDisplayName(activeName || metadata.projectName);
   }, [activeProjectId, metadata.projectName, projects]);
 
   return {

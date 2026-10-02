@@ -488,12 +488,13 @@ describe("HomePanel activity states", () => {
       }),
     ];
     await render();
-    expect(query("home-recent-item-20")?.textContent).toContain("Personal · Untitled Space");
-    expect(query("home-recent-item-10")?.textContent).toContain("Personal · Untitled Space");
+    // The controller's legacy placeholder reads with the one spelling.
+    expect(query("home-recent-item-20")?.textContent).toContain("Personal · Untitled space");
+    expect(query("home-recent-item-10")?.textContent).toContain("Personal · Untitled space");
     await click("home-team-chip-personal");
 
-    expect(query("home-recent-item-20")?.textContent).toContain("Untitled Space");
-    expect(query("home-recent-item-10")?.textContent).toContain("Untitled Space");
+    expect(query("home-recent-item-20")?.textContent).toContain("Untitled space");
+    expect(query("home-recent-item-10")?.textContent).toContain("Untitled space");
     expect(query("home-recent-item-20")?.textContent).not.toContain("Personal");
     expect(query("home-recent-item-10")?.textContent).not.toContain("Personal");
   });

@@ -24,6 +24,8 @@ test("system SDK cleanup is restricted to GitHub-hosted runners in every workflo
   assert.deepEqual(Object.fromEntries(inventory), {
     "browser-e2e.yml": 2,
     "build.yml": 5,
+    "image-scan.yml": 1,
+    "publish-runtime-agent-multiarch.yml": 1,
     "publish-runtime-agent.yml": 1,
   });
 });
@@ -39,21 +41,26 @@ test("cleanup detection covers continued commands but excludes owned fixtures", 
   assert.deepEqual(cleanupSteps(step('rm -rf "$fixture_root"')), []);
 });
 
-function diskStep() {
-  const found = steps(read("publish-runtime-agent.yml")).filter((step) =>
+// Both runtime publishers: the amd64 production release and the arm64 lane.
+const runtimePublishers = ["publish-runtime-agent.yml", "publish-runtime-agent-multiarch.yml"];
+function diskStep(name = runtimePublishers[0]) {
+  const found = steps(read(name)).filter((step) =>
     step.startsWith("      - name: Require sufficient free disk for the audited image\n"));
   assert.equal(found.length, 1);
   return found[0];
 }
 
 test("runtime minimum disk check cannot be skipped with hosted SDK cleanup", () => {
-  const source = read("publish-runtime-agent.yml");
-  const step = diskStep();
-  assert.ok(source.indexOf(step) > source.indexOf("      - name: Reclaim hosted-runner disk"));
-  assert.ok(source.indexOf(step) < source.indexOf("      - name: Set up Docker Buildx"));
-  assert.doesNotMatch(step, /^        if:|\brm\s/mu);
-  assert.match(step, /available_kib < 20 \* 1024 \* 1024/u);
-  assert.match(step, /df -Pk \//u);
+  for (const name of runtimePublishers) {
+    const source = read(name);
+    const step = diskStep(name);
+    assert.ok(source.indexOf(step) > source.indexOf("      - name: Reclaim hosted-runner disk"));
+    assert.ok(source.indexOf(step) < source.indexOf("      - name: Set up Docker Buildx"));
+    assert.doesNotMatch(step, /^        if:|\brm\s/mu);
+    assert.match(step, /available_kib < 20 \* 1024 \* 1024/u);
+    assert.match(step, /df -Pk \//u);
+  }
+  assert.equal(diskStep(runtimePublishers[1]), diskStep(runtimePublishers[0]));
 });
 
 test("actual workflow disk check accepts the threshold and rejects insufficient or invalid disk", () => {

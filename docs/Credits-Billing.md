@@ -156,7 +156,9 @@ one, or a spread plan worker whose parent runtime and plan runtimes are all priv
 before this refusal existed, or by any path around the refusal, is failed by the controller's
 idle sweep once it has been queued for 30 seconds, with the same reason in its run and
 conversation. A job unpinned between the sweep's check and its failure is left queued. A
-managed-AI reserve it never used is refunded, as for an expired requeued job.
+managed-AI reserve it never used is refunded, as for an expired requeued job. A plan worker
+failed this way runs its plan's lead checkpoint as a canceled worker does: once no worker of
+the plan is left live, the lead is queued, or refused as above, once per plan.
 
 The controller puts `CODEX_MODEL=MANAGED_AI_MODEL_ID` and `CODEX_MODEL_PROVIDER=openai` in the
 job secrets (`/agent/secrets`, `secrets.rs`) of every job on the platform lane: an AI job whose
@@ -226,6 +228,11 @@ turns, from the `platformLane` object on the proxy's `/healthz` (see the proxy R
 controller's lease or the proxy's static credentials, with their kind and pinned model.
 
 The controller now reserves units at prompt dispatch and then reconciles the final charge after completion from actual input/cached/output token usage. Cached tokens are a subset of the reported input tokens, so only the uncached remainder is billed at the input rate and the cached prefix is billed once at the cached rate. The shared ledger keeps both the usage metadata and any follow-up adjustment row when the final charge differs from the reserve.
+
+Known gap, recorded only: until the proxy metering cutover, this reconciliation charges the token
+counts codex reports, and codex multi-agent v2 subagent requests never get one, so legacy billing
+under-charges them. The proxy sees their upstream usage, so its meter charges them once metering
+moves there; nothing changes the legacy charge before then.
 
 Ambient multi-human evaluation turns defer the managed reserve and prompt count until
 the agent actually answers. Telemetry and explicitly hidden progress do not start a

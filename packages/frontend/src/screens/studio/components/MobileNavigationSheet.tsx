@@ -1,8 +1,9 @@
-import { type CSSProperties, useLayoutEffect, useMemo, useState } from "react";
+import { useMemo, useState } from "react";
 import { ChatLines, DotsGrid3x3, Page, Plus } from "iconoir-react";
 import { StudioDialogModal } from "../../../components/aria/StudioModal";
 import { Button } from "../../../components/Button";
 import { SearchInput } from "../../../components/SearchInput";
+import { useVisualViewportBounds } from "../../../hooks/useVisualViewportBounds";
 import { listRowSurfaceToneClassName, LIST_ROW_SURFACE_BASE } from "../../../components/listRowStyles";
 import { useConversations } from "../../../conversations/ConversationsProvider";
 import { useNativeBackButtonAction } from "../../../native/useNativeBackButtonAction";
@@ -29,49 +30,6 @@ export interface MobileNavigationSheetProps {
 // Shared compact controls have a coarse-pointer 44px minimum. The sheet's
 // explicit 48px contract must win over those responsive defaults too.
 const TARGET = "!min-h-12 !min-w-12";
-
-function visibleBounds() {
-  const viewport = window.visualViewport;
-  const top = Math.max(0, Number.isFinite(viewport?.offsetTop) ? viewport!.offsetTop : 0);
-  const height = typeof viewport?.height === "number" && Number.isFinite(viewport.height) && viewport.height > 0
-    ? viewport.height : window.innerHeight;
-  return { top, height };
-}
-
-/** Resize the sheet, not its full-screen backdrop. VisualViewport uses CSS
- * pixels already; its offset matters when Safari pans a focused search. */
-function useSheetViewportStyle(): CSSProperties {
-  const [bounds, setBounds] = useState(visibleBounds);
-  useLayoutEffect(() => {
-    const viewport = window.visualViewport;
-    let frame: number | null = null;
-    const update = () => { frame = null; setBounds(visibleBounds()); };
-    const schedule = () => {
-      if (frame === null) frame = window.requestAnimationFrame(update);
-    };
-    update();
-    viewport?.addEventListener("resize", schedule);
-    viewport?.addEventListener("scroll", schedule);
-    window.addEventListener("resize", schedule);
-    window.addEventListener("orientationchange", schedule);
-    return () => {
-      viewport?.removeEventListener("resize", schedule);
-      viewport?.removeEventListener("scroll", schedule);
-      window.removeEventListener("resize", schedule);
-      window.removeEventListener("orientationchange", schedule);
-      if (frame !== null) window.cancelAnimationFrame(frame);
-    };
-  }, []);
-  return {
-    position: "absolute",
-    left: "var(--instafy-safe-area-inset-left, 0px)",
-    right: "var(--instafy-safe-area-inset-right, 0px)",
-    width: "auto",
-    bottom: `max(0px, calc(100% - ${bounds.top + bounds.height}px))`,
-    height: "auto",
-    maxHeight: `min(40rem, max(0px, calc(${bounds.height}px - var(--instafy-safe-area-inset-top, 0px))))`,
-  };
-}
 
 function Chats({ query, onClose, onOpenAll }: { query: string; onClose: () => void; onOpenAll: () => void }) {
   const { activeProjectId, activeProjectName, projectAccessPending, projectAccessBlocked } = useProject();
@@ -176,7 +134,7 @@ function Spaces({ query, onClose, onOpenAll }: { query: string; onClose: () => v
 
 export function MobileNavigationSheet({ section, onSectionChange, onClose, history, keyboardOpen = false, onNewChat, onOpenFiles, onOpenAllChats, onOpenAllSpaces }: MobileNavigationSheetProps) {
   const [queries, setQueries] = useState({ chats: "", spaces: "" });
-  const modalStyle = useSheetViewportStyle();
+  const bounds = useVisualViewportBounds();
   useNativeBackButtonAction(true, onClose);
   const closeAndRun = (action: () => void) => { onClose(); action(); };
   return (
@@ -184,7 +142,15 @@ export function MobileNavigationSheet({ section, onSectionChange, onClose, histo
       isOpen isDismissable onOpenChange={(open) => { if (!open) onClose(); }}
       dialogAriaLabel="Navigation" data-testid="mobile-navigation-sheet"
       className="!p-0" modalClassName="flex flex-col !max-w-none !rounded-b-none overflow-hidden"
-      modalStyle={modalStyle} dialogClassName="flex min-h-0 flex-col [max-height:inherit]"
+      modalStyle={{
+        position: "absolute",
+        left: "var(--instafy-safe-area-inset-left, 0px)",
+        right: "var(--instafy-safe-area-inset-right, 0px)",
+        width: "auto",
+        bottom: `max(0px, calc(100% - ${bounds.top + bounds.height}px))`,
+        height: "auto",
+        maxHeight: `min(40rem, max(0px, calc(${bounds.height}px - var(--instafy-safe-area-inset-top, 0px))))`,
+      }} dialogClassName="flex min-h-0 flex-col [max-height:inherit]"
     >
       <div data-testid="mobile-navigation-results" className="min-h-0 flex-1 overflow-y-auto overscroll-contain p-3">
         {!queries[section].trim() ? <div className="mb-3 grid grid-cols-2 gap-2">

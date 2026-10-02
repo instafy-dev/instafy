@@ -18,6 +18,14 @@ This is **not GitHub**: we host the git servers and expose standard git remotes 
 - **Backups**: shard volume snapshots plus periodic encrypted copies to independent durable
   storage. Replication is a later upgrade.
 
+Hosted runtimes are git-canonical only when the remote reaches them. The controller needs
+`GIT_REMOTE_BASE_URL`; it then adds `ORIGIN_GIT_REMOTE_URL=<base>/<project_id>.git` to each
+runtime's launch metadata. The provider's Compose file must forward `ORIGIN_GIT_REMOTE_URL` into
+the runtime container, as `docker/docker-compose.runtime.provider.yml` does. If either is
+missing, the runtime's origin has no remote: files are written only to the node's disk, each save
+after a turn is recorded as failed ("git remote is not configured for this project"), and the
+files are lost when the node is replaced. See [Hosted Runtime Machines](Runtime-Machines.md#workspace-durability).
+
 ## What code a “git node” runs
 We implement git transport as **Git Smart HTTP** by wrapping git’s own backend (see `packages/git-service`):
 
@@ -65,6 +73,7 @@ Payload schema is `instafy.git-service.event.v1` with `kind=git.push.received`, 
 Browsers should not speak git for normal editing. The “phone UI” flow is:
 - `Studio → Controller (auth/token) → Workspace Gateway (/entries,/files,/raw,/apply,/git/sync)`
 - Workspace Gateway uses git under the hood (fetch/checkout cache). File writes land via `POST /apply`; persisting them to the canonical remote is an explicit sync step via `POST /git/sync` so agents can choose commit boundaries/messages and handle conflicts intentionally.
+- Every git command the Workspace Gateway runs against the remote (fetch, push, ls-remote) is bounded, because it runs while the space's apply lock is held. Each command carries curl's low-speed check: a transfer that stays under 1000 bytes/s for 300 seconds fails with `Operation too slow`. This covers a remote that accepts the connection and never answers, one that sends headers and then goes quiet, and one that stops mid-transfer. One 300 second window applies to every command because the longest quiet phase of a healthy exchange is a push waiting for the remote, which replies only after its update hook has checked every changed path; that takes longer for large commits. The speed check does not run while curl is still connecting; an unanswered connect ends at curl's default 300 second connect timeout, sooner where the OS stops retrying. A remote that stops responding fails the current command after one window (about five minutes) instead of holding the lock indefinitely, and the sync returns that error. The bound is on silence, not on total duration: a remote that keeps sending faster than 1000 bytes/s, or that goes quiet for less than 300 seconds at a time, is not cut off. A failed background refresh releases the lock and keeps the existing checkout until the next sync.
 
 Native environments can choose:
 - **FS API** (same as Studio) via `/apply` (write) + `/git/sync` (commit/push), or
@@ -72,7 +81,18 @@ Native environments can choose:
 
 ### Embedded repositories and protected checkpoints
 
-A model turn may edit a repository nested inside the canonical workspace. The model-facing job token must not mint origin write tokens or run `instafy git sync`; after the turn, the trusted runtime compares bounded pre/post workspace snapshots and hands only changed path descriptors to the protected checkpoint. The origin temporarily excludes nested `.git` metadata while staging those paths, restores it on every success/error path, then commits and pushes through the normal canonical credentials. An already-dirty tracked or untracked nested file still counts when its content changes during the turn.
+A model turn may edit a repository nested inside the canonical workspace. The model-facing job token must not mint origin write tokens or run `instafy git sync`. After the turn, the trusted runtime hands changed path descriptors to the protected checkpoint. The origin temporarily excludes nested `.git` metadata while staging those paths, restores it on every success/error path, then commits and pushes through the normal canonical credentials.
+
+Which paths the checkpoint receives:
+
+- **The files the model reported** in its final output. This is the normal source.
+- **The `git status` delta, as a fallback.** The runtime takes a bounded `git status` snapshot before and after the turn only when the turn was expected to change files (`runtimeExpectations.workspaceFileChanges`) or is read-only. It uses the delta as the path list only when a turn that was expected to change files reported none. In that delta, an already-dirty tracked or untracked nested file still counts when its content changes during the turn. The snapshot needs a git checkout of the workspace: the canonical `.instafy/.git`, which the origin creates only when the space has a git remote, or the workspace's own `.git`. Without either there is no delta.
+- **The files `/skills import` installed**, with or without `--start`, behind the gates a model turn's files pass: the job commits to the workspace, its write scope is not read-only, and it has a verified workspace token bound to its run. That token alone does not prove the run may write, because a job without the separate workspace token falls back to its controller token, so the controller checks write permission again when the checkpoint asks for a lease. The import records the checkpoint's outcome as an `origin/apply` artifact tagged `lane: "skills/import"`, or as `origin/apply-skipped` or `origin/apply-error`. A failed checkpoint does not fail the import.
+
+A file a turn changed but did not report, and that no delta caught, stays unsaved until a later `/sync`. Two `/skills import` cases are not saved by its checkpoint either:
+
+- `--overwrite` sends only the files the new copy wrote. Files that only the replaced copy had are removed from the node's disk but stay in the canonical repository, and a node replacement restores them into the skill folder. The import does not send deletions for them because it cannot tell which ones the repository tracks, and a deletion for an untracked path fails the whole save. A later `/sync` records the removals.
+- An import that fails while moving skills into place reports the skills it already installed, but does not checkpoint them. A later `/sync` saves them.
 
 Nested `.git` configuration is untrusted. Runtime and origin dirty-file discovery use an isolated temporary Git directory containing only a validated HEAD and copied index, pin the work tree inside the workspace, ignore system/global/repository configuration, reject gitfiles and symlink/out-of-workspace metadata, disable hooks/fsmonitor, and enforce bounded output and time. Fingerprints are private implementation data with file-count and byte budgets; they never appear in descriptors, messages, logs, or model context.
 
@@ -82,6 +102,7 @@ Regression coverage:
 - `packages/runtime-agent/src/jobs/workspace_change_detection.rs` covers canonical `.instafy/.git`, already-dirty same-status rewrites, metadata preservation, and fingerprint budgets.
 - `packages/origin-http-server/src/untrusted_git.rs` covers configured process/filter isolation, `core.worktree` escape resistance, unusual filenames, and unsafe `.git` rejection.
 - `packages/origin-http-server/src/git.rs` verifies embedded `.git` restoration and canonical sync behavior.
+- `packages/origin-http-server/src/git.rs` also pins the low-speed values on every server git command and proves that fetch, push and ls-remote against a remote that accepts the connection and then stalls (silent, or headers then silence) fail with `Operation too slow` within a test-shortened window.
 
 Recommended (no token copy/paste):
 

@@ -158,6 +158,8 @@ describe("ProjectSettingsSections", () => {
     await act(async () => root.render(<ProjectSettingsSections {...props} />));
     const input = container.querySelector<HTMLInputElement>('[data-testid="project-settings-name-input"]')!;
     expect(input.labels?.[0]?.textContent).toBe("Name");
+    // An untitled space arrives with an empty draft; the hint says what goes there.
+    expect(input.placeholder).toBe("Name this space");
     await act(async () => input.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true })));
     expect(props.onProjectNameCancel).toHaveBeenCalledOnce();
     await act(async () => input.form!.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true })));

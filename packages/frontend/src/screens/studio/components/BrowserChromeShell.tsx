@@ -1,9 +1,14 @@
-import type { ReactNode } from "react";
+import { createContext, useLayoutEffect, useRef, useState, type ReactNode, type RefObject } from "react";
 import { Pause, Play, Xmark } from "iconoir-react";
 import { Button, IconButton } from "../../../components/Button";
 import { Spinner } from "../../../components/Spinner";
 
 export type BrowserChromeState = "ready" | "starting" | "paused" | "unavailable";
+
+export const BrowserAddressMenuAnchorContext = createContext<{
+  ref: RefObject<HTMLDivElement | null>;
+  width: number;
+} | null>(null);
 
 const browserChromeStateLabel: Record<BrowserChromeState, string> = {
   ready: "Ready",
@@ -119,9 +124,27 @@ export function BrowserChromeShell({
   compact?: boolean;
   testId?: string;
 }) {
+  const toolbarRef = useRef<HTMLDivElement>(null);
+  const [toolbarWidth, setToolbarWidth] = useState(0);
+  useLayoutEffect(() => {
+    const toolbar = toolbarRef.current;
+    if (!compact || !toolbar) return;
+    const updateWidth = () => setToolbarWidth(toolbar.getBoundingClientRect().width);
+    updateWidth();
+    if (typeof ResizeObserver === "function") {
+      const observer = new ResizeObserver(updateWidth);
+      observer.observe(toolbar);
+      return () => observer.disconnect();
+    }
+    window.addEventListener("resize", updateWidth);
+    return () => window.removeEventListener("resize", updateWidth);
+  }, [compact]);
+
   return (
+    <BrowserAddressMenuAnchorContext.Provider value={compact ? { ref: toolbarRef, width: toolbarWidth } : null}>
     <div className="w-full min-w-0 shrink-0" data-browser-session-safe-zone="true">
       <div
+        ref={toolbarRef}
         aria-busy={busy || undefined}
         aria-label={label}
         className={`flex w-full min-w-0 flex-nowrap items-center gap-1 overflow-hidden border-b border-slate-200 bg-slate-50 px-2 max-[400px]:px-1 dark:border-[color:var(--color-studio-dark-divider)] dark:bg-[var(--color-studio-dark-panel-soft)] ${compact ? "h-12 pointer-coarse:h-13" : "h-11 max-[540px]:h-auto max-[540px]:flex-wrap max-[400px]:gap-0.5"}`}
@@ -182,5 +205,6 @@ export function BrowserChromeShell({
         </div>
       ) : null}
     </div>
+    </BrowserAddressMenuAnchorContext.Provider>
   );
 }

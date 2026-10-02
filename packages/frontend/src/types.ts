@@ -55,6 +55,8 @@ export interface RunRecord {
   updatedAt: string | null;
 }
 
+export type RunRecordPatch = Pick<RunRecord, "id"> & Partial<Omit<RunRecord, "id">>;
+
 export type NextStepSuggestionKind = "module" | "prompt" | "panel" | "resource" | "workflow" | "asset";
 
 export type NextStepSuggestionSource = "template" | "system" | "ai";

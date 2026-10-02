@@ -151,9 +151,11 @@ describe("chatSubmitPreflight", () => {
       runtimeControllerEnabled: false,
     });
 
+    // Queued, not refused: the message goes out once the agent is free.
     await expect(runChatSubmitPreflight(params)).resolves.toEqual({
       status: "handled",
       submitted: false,
+      queued: true,
     });
 
     expect(params.queueCurrentMessage).toHaveBeenCalledWith("editor-state");
@@ -165,6 +167,21 @@ describe("chatSubmitPreflight", () => {
     );
   });
 
+  it("does not report a programmatic send as queued when nothing was queued", async () => {
+    // Without runtime control an override (a "Try again" resend) is neither
+    // sent nor kept in the local queue, so its caller must offer it again.
+    const params = createParams({
+      runtimeControllerEnabled: false,
+      override: { message: "Build me a landing page", editorState: null },
+    });
+
+    await expect(runChatSubmitPreflight(params)).resolves.toEqual({
+      status: "handled",
+      submitted: false,
+    });
+    expect(params.queueCurrentMessage).not.toHaveBeenCalled();
+  });
+
   it("queues busy-target messages to the controller send queue when available", async () => {
     const params = createParams({
       isAssistantTyping: true,
@@ -173,9 +190,11 @@ describe("chatSubmitPreflight", () => {
       targetsOverlapActiveRuns: vi.fn(() => true),
     });
 
+    // Queued, not refused: the message goes out once the agent is free.
     await expect(runChatSubmitPreflight(params)).resolves.toEqual({
       status: "handled",
       submitted: false,
+      queued: true,
     });
 
     expect(params.queueMessageToServer).toHaveBeenCalledTimes(1);
@@ -193,9 +212,11 @@ describe("chatSubmitPreflight", () => {
       targetsOverlapActiveRuns: vi.fn(() => true),
     });
 
+    // Queued, not refused: the message goes out once the agent is free.
     await expect(runChatSubmitPreflight(params)).resolves.toEqual({
       status: "handled",
       submitted: false,
+      queued: true,
     });
 
     expect(params.queueMessageToServer).toHaveBeenCalledTimes(1);
@@ -210,9 +231,11 @@ describe("chatSubmitPreflight", () => {
       sendingAttachment: true,
     });
 
+    // Queued, not refused: the message goes out once the agent is free.
     await expect(runChatSubmitPreflight(params)).resolves.toEqual({
       status: "handled",
       submitted: false,
+      queued: true,
     });
 
     expect(params.queueMessageToServer).not.toHaveBeenCalled();

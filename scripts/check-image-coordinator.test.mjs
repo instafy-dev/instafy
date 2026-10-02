@@ -14,11 +14,15 @@ const ciPath = `${prefix}workflows/build.yml/runs?head_sha=${sha}&per_page=100`;
 const buildRunPath = `${prefix}runs/77`;
 const servicePath = `${prefix}workflows/publish-production-services.yml/runs`;
 const runtimePath = `${prefix}workflows/publish-runtime-agent.yml/runs`;
+const multiarchPath = `${prefix}workflows/publish-runtime-agent-multiarch.yml/runs`;
+const multiarchDispatchPath = `${prefix}workflows/publish-runtime-agent-multiarch.yml/dispatches`;
+const mainPath = `repos/${repo}/commits/main`;
 const steps = {
   source: "Authorize the exact current protected-main commit",
   ci: "Inspect exact protected-main CI without waiting",
   manifests: "Reconcile exact publishers and manifest freshness",
   dispatch: "Dispatch missing immutable image publishers without waiting",
+  multiarch: "Reconcile the best-effort arm64 lane without blocking production",
 };
 
 function body(name) {
@@ -30,7 +34,7 @@ function body(name) {
   return script.split("\n").map((line) => line.startsWith("          ") ? line.slice(10) : line).join("\n");
 }
 
-function run(name, responses, extraEnv = {}) {
+function run(name, responses, extraEnv = {}, { timeout = 10_000 } = {}) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "image-coordinator-test-"));
   try {
     const fixture = path.join(dir, "responses.json");
@@ -51,9 +55,13 @@ const method = args.includes('--method') ? args[args.indexOf('--method') + 1] : 
 const input = method === 'POST' ? fs.readFileSync(0, 'utf8') : '';
 fs.appendFileSync(process.env.CALLS, JSON.stringify({ method, endpoint, args, input }) + '\\n');
 const responses = JSON.parse(fs.readFileSync(process.env.FIXTURE, 'utf8'));
-if (!Object.hasOwn(responses, endpoint) || responses[endpoint]?.error) process.exit(19);
+// A stalled API call: it holds no pipe the harness waits on and gives up on its own.
+if (responses[endpoint]?.hang) { fs.closeSync(2); setTimeout(() => process.exit(19), 3000); }
+else if (!Object.hasOwn(responses, endpoint) || responses[endpoint]?.error) process.exit(19);
+else {
 const value = responses[endpoint];
 process.stdout.write(typeof value === 'string' ? value + '\\n' : JSON.stringify(value));
+}
 `, { mode: 0o700 });
     // GNU date's two used forms, implemented portably for this offline fixture.
     fs.writeFileSync(path.join(dir, "date"), `#!${process.execPath}
@@ -62,8 +70,9 @@ if (JSON.stringify(args) === JSON.stringify(['-u', '+%s'])) process.stdout.write
 else if (args.length === 4 && args[0] === '-u' && args[1] === '-d' && args[3] === '+%s' && Number.isFinite(Date.parse(args[2]))) process.stdout.write(String(Date.parse(args[2]) / 1000) + '\\n');
 else process.exit(17);
 `, { mode: 0o700 });
-    const result = spawnSync("/bin/bash", ["-c", body(name)], {
-      encoding: "utf8", timeout: 10_000,
+    // The shell Actions runs for `shell: bash`, errexit and pipefail included.
+    const result = spawnSync("/bin/bash", ["--noprofile", "--norc", "-eo", "pipefail", "-c", body(name)], {
+      encoding: "utf8", timeout, killSignal: "SIGKILL",
       env: {
         PATH: `${dir}:/opt/homebrew/bin:/usr/bin:/bin`, GH_TOKEN: "inert-fixture",
         FIXTURE: fixture, CALLS: calls, GITHUB_OUTPUT: output, GITHUB_STEP_SUMMARY: summary,
@@ -78,7 +87,7 @@ else process.exit(17);
 function workflowRun(id, workflow, status = "completed", conclusion = "success") {
   return { id, repository: { full_name: repo }, path: `.github/workflows/${workflow}`,
     event: workflow === "build.yml" ? "push" : "workflow_dispatch", head_sha: sha,
-    head_branch: "main", status, conclusion: status === "completed" ? conclusion : null };
+    head_branch: "main", status, conclusion: status === "completed" ? conclusion : null, run_attempt: 1 };
 }
 function inventory(...workflow_runs) { return { total_count: workflow_runs.length, workflow_runs }; }
 function manifests(overrides = {}) { return { [servicePath]: inventory(), [runtimePath]: inventory(), ...overrides }; }
@@ -247,7 +256,7 @@ test("Build API failure or incomplete inventory cannot dispatch", () => {
 });
 test("two missing publishers are eligible, with exactly two bounded history reads", () => {
   const result = run(steps.manifests, manifests()); passed(result);
-  assert.equal(result.output, "services_publish=true\nruntime_publish=true\npending=false\npublish=true\n");
+  assert.equal(result.output, "services_publish=true\nruntime_publish=true\nruntime_fresh=false\npending=false\npublish=true\n");
   assert.equal(result.calls.length, 2);
   assert.ok(result.calls.every(({ method, args }) => method === "GET" && !args.includes("status=success")));
 });
@@ -265,7 +274,7 @@ test("two fresh sealed exact manifests are verified without dispatch", () => {
     [`${prefix}runs/2/artifacts`]: artifacts(artifact("production-service-release-manifest")),
     [`${prefix}runs/3/artifacts`]: artifacts(artifact("runtime-agent-release-manifest")),
   })); passed(result);
-  assert.equal(result.output, "services_publish=false\nruntime_publish=false\npending=false\npublish=false\n");
+  assert.equal(result.output, "services_publish=false\nruntime_publish=false\nruntime_fresh=true\npending=false\npublish=false\n");
   assert.equal(result.calls.length, 4);
 });
 for (const value of [artifacts(), artifacts(artifact("production-service-release-manifest", { expires_at: "2020-01-01T00:00:00Z" })),
@@ -298,7 +307,10 @@ test("dispatch performs one source read and exactly two fixed requests, without 
   }, { PUBLISH_SERVICES: "true", PUBLISH_RUNTIME: "true" }); passed(result);
   assert.deepEqual(result.calls.map(({ method }) => method), ["GET", "POST", "POST"]);
   assert.deepEqual(JSON.parse(result.calls[1].input), { ref: "main", inputs: { commit_sha: sha } });
-  assert.deepEqual(JSON.parse(result.calls[2].input), { ref: "main", inputs: { commit_sha: sha, update_channel_tags: false } });
+  // The amd64 production publisher no longer moves channel tags, so its payload
+  // carries only the commit; the multi-arch lane is never dispatched here.
+  assert.deepEqual(JSON.parse(result.calls[2].input), { ref: "main", inputs: { commit_sha: sha } });
+  assert.ok(result.calls.every(({ endpoint }) => !endpoint.includes("multiarch")));
   assert.match(result.output, /dispatched=true/u);
   assert.doesNotMatch(result.output + result.summary, /images published/u);
 });
@@ -321,5 +333,333 @@ test("failed or ambiguous dispatch receipts never report dispatched", () => {
       [`${prefix}workflows/publish-runtime-agent.yml/dispatches`]: { workflow_run_id: 5, html_url: "https://github.com/instafy-dev/instafy/actions/runs/5" },
     }, { PUBLISH_SERVICES: "true", PUBLISH_RUNTIME: "true" });
     assert.notEqual(result.status, 0); assert.equal(result.output, "");
+  }
+});
+
+// The best-effort arm64 lane (publish-runtime-agent-multiarch.yml). It may only
+// warn: whatever its inventory, receipts or errors, the step exits 0, never
+// writes a production output and never dispatches a production publisher.
+const laneRun = (id, status = "completed", conclusion = "success") =>
+  workflowRun(id, "publish-runtime-agent-multiarch.yml", status, conclusion);
+const laneReceipt = (id) => ({ workflow_run_id: id, html_url: `https://github.com/instafy-dev/instafy/actions/runs/${id}` });
+function outputs(text) {
+  return Object.fromEntries(text.split("\n").filter(Boolean).map((line) => line.split(/=(.*)/su).slice(0, 2)));
+}
+const sealedProductionRun = (changes = {}) => ({ ...workflowRun(3, "publish-runtime-agent.yml"), ...changes });
+function lane(responses, extraEnv = {}) {
+  const result = run(steps.multiarch, { [mainPath]: sha, [multiarchDispatchPath]: laneReceipt(900),
+    [runtimePath]: inventory(sealedProductionRun()), ...responses }, extraEnv);
+  passed(result);
+  assert.doesNotMatch(result.output, /^(?:services_publish|runtime_publish|runtime_fresh|pending|publish|dispatched|services_run_id|runtime_run_id)=/mu);
+  // The lane may read the production runtime run listing, and nothing else of production.
+  assert.ok(result.calls.every(({ method, endpoint }) => !/publish-production-services|publish-runtime-agent\.yml/u.test(endpoint)
+    || (method === "GET" && endpoint === runtimePath)));
+  return { ...result, state: outputs(result.output).multiarch_state, posts: result.calls.filter(({ method }) => method === "POST") };
+}
+
+test("a missing arm64 lane is dispatched once, current-main only, with channel tags off", () => {
+  const result = lane({ [multiarchPath]: inventory() });
+  assert.equal(result.state, "dispatched");
+  assert.equal(outputs(result.output).multiarch_run_id, "900");
+  assert.deepEqual(result.calls.map(({ method, endpoint }) => `${method} ${endpoint}`),
+    [`GET ${multiarchPath}`, `GET ${runtimePath}`, `GET ${mainPath}`, `POST ${multiarchDispatchPath}`]);
+  assert.ok(!result.calls[0].args.includes("event=workflow_dispatch") && !result.calls[0].args.includes("status=success"));
+  assert.deepEqual(JSON.parse(result.posts[0].input), { ref: "main", inputs: { commit_sha: sha, update_channel_tags: false } });
+  assert.match(result.summary, /Dispatched attempt 1 of 4: \[run 900\]/u);
+  assert.doesNotMatch(result.stdout, /::warning::/u);
+  const moved = lane({ [multiarchPath]: inventory(), [mainPath]: "b".repeat(40) });
+  assert.equal(moved.state, "deferred"); assert.equal(moved.posts.length, 0);
+});
+for (const status of ["queued", "in_progress", "waiting", "pending", "requested"]) {
+  test(`an exact ${status} arm64 run defers the lane without a duplicate`, () => {
+    const result = lane({ [multiarchPath]: inventory(laneRun(7, "completed", "failure"), laneRun(8, status)) });
+    assert.equal(result.state, "pending"); assert.equal(result.calls.length, 1); assert.equal(result.posts.length, 0);
+  });
+}
+test("failed arm64 runs are dispatched again below the cap of four and never at or above it", () => {
+  for (const failures of [1, 2, 3]) {
+    const runs = Array.from({ length: failures }, (_, index) => laneRun(10 + index, "completed", index % 2 ? "cancelled" : "failure"));
+    const result = lane({ [multiarchPath]: inventory(...runs) });
+    assert.equal(result.state, "dispatched", `${failures} failures`);
+    assert.equal(result.posts.length, 1);
+    assert.match(result.summary, new RegExp(`Dispatched attempt ${failures + 1} of 4`, "u"));
+  }
+  for (const failures of [4, 5]) {
+    const runs = Array.from({ length: failures }, (_, index) => laneRun(10 + index, "completed", "failure"));
+    const result = lane({ [multiarchPath]: inventory(...runs) });
+    assert.equal(result.state, "exhausted", `${failures} failures`);
+    assert.equal(result.calls.length, 1, "no main read and no dispatch once exhausted");
+    assert.match(result.stdout, new RegExp(`^::warning::arm64 lane exhausted for ${sha} after ${failures} failed runs \\(cap 4\\); production unaffected; dispatch publish-runtime-agent-multiarch\\.yml manually`, "mu"));
+    assert.match(result.summary, new RegExp(`^- arm64 lane exhausted for \`${sha}\`; production unaffected; dispatch \`publish-runtime-agent-multiarch\\.yml\` manually\\.$`, "mu"));
+  }
+});
+test("a sealed arm64 lane is verified without dispatch, and a stale seal only warns", () => {
+  const fresh = lane({ [multiarchPath]: inventory(laneRun(10, "completed", "failure"), laneRun(11)),
+    [`${prefix}runs/11/artifacts`]: artifacts(artifact("runtime-agent-multiarch-manifest")) });
+  assert.equal(fresh.state, "fresh"); assert.equal(fresh.posts.length, 0);
+  assert.doesNotMatch(fresh.stdout, /::warning::/u);
+  for (const value of [artifacts(), artifacts(artifact("runtime-agent-release-manifest")),
+    artifacts(artifact("runtime-agent-multiarch-manifest", { expires_at: "2020-01-01T00:00:00Z" })),
+    artifacts(artifact("runtime-agent-multiarch-manifest", { expired: true })),
+    artifacts(artifact("runtime-agent-multiarch-manifest", { digest: "bad" })),
+    artifacts(artifact("runtime-agent-multiarch-manifest"), artifact("runtime-agent-multiarch-manifest"))]) {
+    const stale = lane({ [multiarchPath]: inventory(laneRun(11)), [`${prefix}runs/11/artifacts`]: value });
+    assert.equal(stale.state, "stale", JSON.stringify(value)); assert.equal(stale.posts.length, 0);
+    assert.match(stale.stdout, /^::warning::A sealed publish-runtime-agent-multiarch\.yml run .* Production publication is unaffected\.$/mu);
+  }
+});
+test("any broken arm64 inventory, read or receipt ends in a warning and status 0", () => {
+  const cases = {
+    "listing error": { [multiarchPath]: { error: true } },
+    "truncated listing": { [multiarchPath]: { total_count: 101, workflow_runs: [] } },
+    "incomplete listing": { [multiarchPath]: { total_count: 1, workflow_runs: [] } },
+    "foreign commit": { [multiarchPath]: inventory({ ...laneRun(10, "completed", "failure"), head_sha: "b".repeat(40) }) },
+    "foreign workflow": { [multiarchPath]: inventory({ ...laneRun(10, "completed", "failure"), path: ".github/workflows/publish-runtime-agent.yml" }) },
+    "duplicate IDs": { [multiarchPath]: inventory(laneRun(10, "completed", "failure"), laneRun(10, "completed", "failure")) },
+    "unknown status": { [multiarchPath]: inventory(laneRun(10, "unknown")) },
+    "artifact read error": { [multiarchPath]: inventory(laneRun(11)), [`${prefix}runs/11/artifacts`]: { error: true } },
+    "production listing error": { [multiarchPath]: inventory(), [runtimePath]: { error: true } },
+    "incomplete production listing": { [multiarchPath]: inventory(), [runtimePath]: { total_count: 2, workflow_runs: [sealedProductionRun()] } },
+    "main read error": { [multiarchPath]: inventory(), [mainPath]: { error: true } },
+    "dispatch rejected": { [multiarchPath]: inventory(), [multiarchDispatchPath]: { error: true } },
+    "ambiguous receipt": { [multiarchPath]: inventory(), [multiarchDispatchPath]: { workflow_run_id: "1; true", html_url: "x" } },
+  };
+  for (const [label, responses] of Object.entries(cases)) {
+    const result = lane(responses);
+    assert.equal(result.state, "error", label);
+    assert.match(result.stdout, /^::warning::The arm64 lane could not be reconciled in this pass \(status [1-9][0-9]*\)\. Production publication is unaffected/mu, label);
+    assert.match(result.summary, /production publication is unaffected/u, label);
+    assert.ok(result.posts.length <= 1, label);
+  }
+});
+test("a production seal that is not exactly one first-attempt run only warns and spends no attempt", () => {
+  // The arm64 workflow (and release consumers) bind only to exactly one
+  // successful first-attempt run; any other seal would fail every dispatch.
+  for (const [label, production] of Object.entries({
+    "sealed on a re-run attempt": inventory(sealedProductionRun({ run_attempt: 2 })),
+    "first attempt failed, re-run sealed": inventory(sealedProductionRun({ conclusion: "failure" }), sealedProductionRun({ id: 4, run_attempt: 2 })),
+    "two first-attempt seals": inventory(sealedProductionRun(), sealedProductionRun({ id: 4 })),
+    "a foreign seal": inventory(sealedProductionRun({ head_branch: "other" })),
+  })) {
+    const result = lane({ [multiarchPath]: inventory(laneRun(10, "completed", "failure")), [runtimePath]: production });
+    assert.equal(result.state, "unbindable", label);
+    assert.equal(result.posts.length, 0, label);
+    assert.ok(result.calls.every(({ endpoint }) => endpoint !== mainPath), label);
+    assert.match(result.stdout, /^::warning::The sealed publish-runtime-agent\.yml release for a{40} is not exactly one successful first-attempt run, so the arm64 lane cannot bind to it; none was dispatched\. Production publication is unaffected\.$/mu, label);
+    assert.match(result.summary, /^- Not dispatched: the production runtime release for `a{40}` is not exactly one successful first-attempt run\.$/mu, label);
+  }
+  // A first-attempt seal next to failed attempts still binds.
+  const bound = lane({ [multiarchPath]: inventory(),
+    [runtimePath]: inventory(sealedProductionRun({ id: 2, conclusion: "failure" }), sealedProductionRun()) });
+  assert.equal(bound.state, "dispatched");
+});
+test("an arm64 run active for six hours warns that it may be waiting for approval, still without a duplicate", () => {
+  const now = 1789012800;
+  const since = (seconds) => new Date((now - seconds) * 1000).toISOString();
+  const recent = lane({ [multiarchPath]: inventory({ ...laneRun(8, "waiting"), created_at: since(6 * 60 * 60 - 1) }) });
+  assert.equal(recent.state, "pending");
+  assert.doesNotMatch(recent.stdout, /::warning::/u);
+  for (const status of ["waiting", "queued"]) {
+    const stuck = lane({ [multiarchPath]: inventory(laneRun(7, "completed", "failure"),
+      { ...laneRun(8, status), created_at: since(6 * 60 * 60) }, { ...laneRun(9, "in_progress"), created_at: since(60) }) });
+    assert.equal(stuck.state, "pending", status);
+    assert.equal(stuck.posts.length, 0, status);
+    assert.match(stuck.stdout, new RegExp(`^::warning::A publish-runtime-agent-multiarch\\.yml run for ${sha} has been active since ${since(6 * 60 * 60).replaceAll(".", "\\.")}; it may be waiting for ghcr-release approval or queued behind another run\\. Production publication is unaffected\\.$`, "mu"), status);
+  }
+  const unreadable = lane({ [multiarchPath]: inventory({ ...laneRun(8, "waiting"), created_at: "not a time" }) });
+  assert.equal(unreadable.state, "error");
+});
+test("the arm64 lane runs last, only after a fresh production runtime manifest, and cannot exit non-zero", () => {
+  const names = [...source.matchAll(/^      - name: (.+)$/gmu)].map((match) => match[1]);
+  assert.equal(names.at(-1), steps.multiarch);
+  const step = source.slice(source.indexOf(`      - name: ${steps.multiarch}\n`));
+  assert.match(step, /^        if: >-\n          steps\.recheck\.outputs\.current == 'true' &&\n          steps\.freshness\.outputs\.runtime_fresh == 'true'\n        id: multiarch\n        timeout-minutes: 2\n        continue-on-error: true\n        shell: bash\n/mu);
+  // The runner bounds the lane and lets the job continue past it; no other
+  // step may continue on error, and the job keeps five minutes for production.
+  assert.equal([...source.matchAll(/continue-on-error/gu)].length, 1);
+  assert.deepEqual([...source.matchAll(/^ +timeout-minutes: (\d+)$/gmu)].map((match) => match[0].trim()),
+    ["timeout-minutes: 7", "timeout-minutes: 2"]);
+  // Nothing before it can read its outputs, and it writes only its own.
+  const before = source.slice(0, source.indexOf(step)).split("\n").filter((line) => !/^\s*#/u.test(line)).join("\n");
+  assert.doesNotMatch(before, /steps\.multiarch|multiarch_/u);
+  assert.deepEqual([...new Set([...step.matchAll(/echo "(\w+)=[^"]*" >> "\$GITHUB_OUTPUT"/gu)].map((match) => match[1]))].sort(),
+    ["multiarch_run_id", "multiarch_state"]);
+  // Only the subshell may fail fast; the outer shell disables errexit first,
+  // records the subshell's status and always ends with exit 0.
+  const script = body(steps.multiarch);
+  const start = script.indexOf("\n(\n  set -euo pipefail\n");
+  const end = script.indexOf("\n)\nstatus=$?\n");
+  assert.ok(start > 0 && end > start);
+  const outer = script.slice(0, start) + script.slice(end);
+  assert.match(outer.split("\n").filter((line) => line && !line.startsWith("#"))[0], /^set \+e$/u);
+  assert.match(outer, /\nexit 0\n?$/u);
+  assert.doesNotMatch(outer, /exit "\$|exit [1-9]|return [1-9]|\bset -[a-z]*e/u);
+  assert.equal([...script.matchAll(/^\(\n|^\)\n/gmu)].length, 2, "one subshell");
+  assert.equal([...script.matchAll(/--method POST/gu)].length, 1);
+  assert.match(script, /^retry_cap=4$/mu);
+});
+
+// Runs one coordinator pass from the freshness step onward exactly as Actions
+// would: each step's own `if:` is evaluated over the outputs earlier steps
+// wrote, its `env:` is resolved from them, and a failing step stops the pass.
+function stepSource(name) {
+  const start = source.indexOf(`      - name: ${name}\n`);
+  const next = source.indexOf("\n      - name:", start + 1);
+  return source.slice(start, next < 0 ? undefined : next + 1);
+}
+function stepCondition(step) {
+  const folded = step.match(/^        if: >-\n((?: {10}.*\n)+)/mu);
+  const expression = folded ? folded[1].split("\n").map((line) => line.trim()).join(" ") : step.match(/^        if: (.+)$/mu)?.[1];
+  return expression?.trim().replace(/^\$\{\{\s*|\s*\}\}$/gu, "");
+}
+function holds(expression, state) {
+  if (!expression) return true;
+  const js = expression.replace(/steps\.([\w-]+)\.outputs\.([\w-]+) (==|!=) '([^']*)'/gu, (_, id, key, operator, value) =>
+    `(${JSON.stringify(state[id]?.[key] ?? "")} ${operator === "==" ? "===" : "!=="} ${JSON.stringify(value)})`);
+  assert.doesNotMatch(js, /steps\.|github\.|runner\.|inputs\./u, expression);
+  return vm.runInNewContext(js, {}, { timeout: 1000 });
+}
+function pass(responses, { laneTimeout } = {}) {
+  const state = { source: { current: "true", commit_sha: sha }, ci: { ready: "true" }, recheck: { current: "true" } };
+  const names = [...source.matchAll(/^      - name: (.+)$/gmu)].map((match) => match[1]);
+  const ran = [], calls = [], productionCalls = [];
+  let summary = "", stdout = "";
+  for (const name of names.slice(names.indexOf(steps.manifests))) {
+    const step = stepSource(name);
+    if (!holds(stepCondition(step), state)) continue;
+    const env = {};
+    for (const [, key, value] of (step.match(/^        env:\n((?: {10}[A-Z_]+: .*\n)+)/mu)?.[1] ?? "").matchAll(/^ {10}([A-Z_]+): (.*)$/gmu)) {
+      env[key] = value === "${{ github.token }}" ? "inert-fixture"
+        : value.replace(/^\$\{\{ steps\.([\w-]+)\.outputs\.([\w-]+) \}\}$/u, (_, id, output) => state[id]?.[output] ?? "");
+      assert.doesNotMatch(env[key], /\$\{\{/u, `${name}: ${key}`);
+    }
+    const result = run(name, responses, env, name === steps.multiarch && laneTimeout ? { timeout: laneTimeout } : {});
+    ran.push(name); calls.push(...result.calls); summary += result.summary; stdout += result.stdout;
+    if (name !== steps.multiarch) productionCalls.push(...result.calls.map(({ method, endpoint, input }) => `${method} ${endpoint} ${input}`));
+    const id = step.match(/^        id: (\S+)$/mu)?.[1];
+    if (id) state[id] = outputs(result.output);
+    if (result.status !== 0 && !/^        continue-on-error: true$/mu.test(step)) {
+      return { state, ran, calls, productionCalls, summary, stdout, failed: name };
+    }
+    if (result.status !== 0) state.outcomes = { ...state.outcomes, [id]: "failure" };
+  }
+  return { state, ran, calls, productionCalls, summary, stdout };
+}
+const production = (state) => Object.fromEntries(["services_publish", "runtime_publish", "runtime_fresh", "pending", "publish"]
+  .map((key) => [key, state.freshness?.[key]]));
+function passFixture({ services = "sealed", runtime = "sealed", lane: runs = [], broken = false }) {
+  const responses = { [mainPath]: sha,
+    [`${prefix}workflows/publish-production-services.yml/dispatches`]: { workflow_run_id: 4, html_url: "https://github.com/instafy-dev/instafy/actions/runs/4" },
+    [`${prefix}workflows/publish-runtime-agent.yml/dispatches`]: { workflow_run_id: 5, html_url: "https://github.com/instafy-dev/instafy/actions/runs/5" },
+    [multiarchDispatchPath]: laneReceipt(900 + runs.length) };
+  for (const [path, workflow, id, name, phase] of [
+    [servicePath, "publish-production-services.yml", 2, "production-service-release-manifest", services],
+    [runtimePath, "publish-runtime-agent.yml", 3, "runtime-agent-release-manifest", runtime]]) {
+    responses[path] = phase === "missing" ? inventory() : inventory(workflowRun(id, workflow, phase === "running" ? "in_progress" : "completed"));
+    if (phase === "sealed") responses[`${prefix}runs/${id}/artifacts`] = artifacts(artifact(name));
+  }
+  responses[multiarchPath] = broken ? { error: true } : inventory(...runs.map(([id, conclusion]) =>
+    laneRun(id, conclusion === "running" ? "in_progress" : "completed", conclusion === "running" ? undefined : conclusion)));
+  for (const [id, conclusion] of runs) {
+    if (conclusion === "success") responses[`${prefix}runs/${id}/artifacts`] = artifacts(artifact("runtime-agent-multiarch-manifest"));
+  }
+  return responses;
+}
+
+test("Oct 1-2 replay: production seals and ships while arm64 fails three times, then the fourth arm64 run seals", () => {
+  // Each pass is one coordinator run (push, Build completion or schedule) on
+  // the same unchanged main. The base arm64 scan failed for hours on a Debian
+  // ports lag while both amd64 images and webdev arm64 passed.
+  const passes = [
+    { label: "Build completion", fixture: { services: "missing", runtime: "missing" },
+      production: { services_publish: "true", runtime_publish: "true", runtime_fresh: "false", pending: "false", publish: "true" }, lane: undefined },
+    { label: "publishers running", fixture: { services: "running", runtime: "running" },
+      production: { services_publish: "false", runtime_publish: "false", runtime_fresh: "false", pending: "true", publish: "false" }, lane: undefined },
+    { label: "production sealed", fixture: { lane: [] }, lane: "dispatched", attempt: 1 },
+    { label: "arm64 run 1 active", fixture: { lane: [[900, "running"]] }, lane: "pending" },
+    { label: "arm64 run 1 failed", fixture: { lane: [[900, "failure"]] }, lane: "dispatched", attempt: 2 },
+    { label: "arm64 run 2 failed", fixture: { lane: [[900, "failure"], [901, "failure"]] }, lane: "dispatched", attempt: 3 },
+    { label: "arm64 run 3 failed", fixture: { lane: [[900, "failure"], [901, "failure"], [902, "failure"]] }, lane: "dispatched", attempt: 4 },
+    { label: "arm64 run 4 sealed", fixture: { lane: [[900, "failure"], [901, "failure"], [902, "failure"], [903, "success"]] }, lane: "fresh" },
+  ];
+  const sealedProduction = { services_publish: "false", runtime_publish: "false", runtime_fresh: "true", pending: "false", publish: "false" };
+  for (const expected of passes) {
+    const result = pass(passFixture(expected.fixture));
+    assert.equal(result.failed, undefined, `${expected.label}: ${result.stdout}`);
+    assert.deepEqual(production(result.state), expected.production ?? sealedProduction, expected.label);
+    assert.equal(result.state.multiarch?.multiarch_state, expected.lane, expected.label);
+    const posts = result.calls.filter(({ method }) => method === "POST");
+    assert.ok(posts.length <= 3, expected.label);
+    // Production and arm64 publishers are never dispatched in the same pass.
+    assert.ok(!(posts.some(({ endpoint }) => endpoint.includes("publish-runtime-agent.yml"))
+      && posts.some(({ endpoint }) => endpoint.includes("multiarch"))), expected.label);
+    const lanePosts = posts.filter(({ endpoint }) => endpoint === multiarchDispatchPath);
+    assert.equal(lanePosts.length, expected.lane === "dispatched" ? 1 : 0, expected.label);
+    if (expected.attempt) {
+      assert.match(result.summary, new RegExp(`Dispatched attempt ${expected.attempt} of 4`, "u"), expected.label);
+      assert.deepEqual(JSON.parse(lanePosts[0].input), { ref: "main", inputs: { commit_sha: sha, update_channel_tags: false } });
+    }
+    if (!expected.production) assert.match(result.summary, /Immutable production images are fresh/u, expected.label);
+    assert.doesNotMatch(result.stdout, /::error::/u, expected.label);
+
+    // The same pass with the arm64 lane's API broken: production decides and
+    // dispatches exactly the same, and the pass still succeeds.
+    const broken = pass(passFixture({ ...expected.fixture, broken: true }));
+    assert.equal(broken.failed, undefined, expected.label);
+    assert.deepEqual(production(broken.state), production(result.state), expected.label);
+    assert.deepEqual(broken.productionCalls, result.productionCalls, expected.label);
+    assert.ok(result.productionCalls.every((call) => !call.includes("multiarch")), expected.label);
+    assert.deepEqual(broken.state.dispatch, result.state.dispatch, expected.label);
+    if (expected.lane) assert.equal(broken.state.multiarch.multiarch_state, "error", expected.label);
+  }
+});
+
+test("a fourth arm64 failure exhausts the lane: a warning and a summary line, production still fresh, no dispatch", () => {
+  const result = pass(passFixture({ lane: [[900, "failure"], [901, "failure"], [902, "failure"], [903, "failure"]] }));
+  assert.equal(result.failed, undefined);
+  assert.equal(result.state.multiarch.multiarch_state, "exhausted");
+  assert.deepEqual(production(result.state),
+    { services_publish: "false", runtime_publish: "false", runtime_fresh: "true", pending: "false", publish: "false" });
+  assert.equal(result.calls.filter(({ method }) => method === "POST").length, 0);
+  assert.match(result.stdout, /^::warning::arm64 lane exhausted for a{40}/mu);
+  assert.match(result.summary, /^- arm64 lane exhausted for `a{40}`; production unaffected; dispatch `publish-runtime-agent-multiarch\.yml` manually\.$/mu);
+  // Services missing in the same pass: production still dispatches exactly its lane.
+  const services = pass(passFixture({ services: "missing", lane: [[900, "failure"], [901, "failure"], [902, "failure"], [903, "failure"]] }));
+  assert.equal(services.failed, undefined);
+  assert.equal(services.state.freshness.services_publish, "true");
+  assert.deepEqual(services.calls.filter(({ method }) => method === "POST").map(({ endpoint }) => endpoint),
+    [`${prefix}workflows/publish-production-services.yml/dispatches`]);
+});
+
+test("a production runtime manifest that is missing, active or failed never starts the arm64 lane", () => {
+  for (const runtime of ["missing", "running"]) {
+    const result = pass(passFixture({ runtime }));
+    assert.equal(result.failed, undefined, runtime);
+    assert.ok(!result.ran.includes(steps.multiarch), runtime);
+    assert.ok(result.calls.every(({ endpoint }) => !endpoint.includes("multiarch")), runtime);
+  }
+  const failed = manifests({ [servicePath]: inventory(workflowRun(2, "publish-production-services.yml")),
+    [`${prefix}runs/2/artifacts`]: artifacts(artifact("production-service-release-manifest")),
+    [runtimePath]: inventory(workflowRun(3, "publish-runtime-agent.yml", "completed", "failure")) });
+  const result = pass({ ...failed, [mainPath]: sha, [`${prefix}workflows/publish-runtime-agent.yml/dispatches`]: { workflow_run_id: 5, html_url: "https://github.com/instafy-dev/instafy/actions/runs/5" } });
+  assert.equal(result.failed, undefined);
+  assert.equal(result.state.freshness.runtime_publish, "true");
+  assert.ok(!result.ran.includes(steps.multiarch));
+});
+
+test("a stalled arm64 API call is cut off by the lane's own step bound and the pass still succeeds", () => {
+  // Actions ends the step at its two-minute bound and, because the step
+  // continues on error, the job too; the harness models that bound by
+  // killing the step.
+  const reference = pass(passFixture({ lane: [] }));
+  assert.equal(reference.state.multiarch.multiarch_state, "dispatched");
+  for (const stalled of [multiarchPath, mainPath, multiarchDispatchPath]) {
+    const fixture = passFixture({ lane: [] });
+    fixture[stalled] = { hang: true };
+    const result = pass(fixture, { laneTimeout: 1500 });
+    assert.equal(result.failed, undefined, stalled);
+    assert.equal(result.state.outcomes?.multiarch, "failure", stalled);
+    assert.deepEqual(production(result.state), production(reference.state), stalled);
+    assert.deepEqual(result.productionCalls, reference.productionCalls, stalled);
   }
 });

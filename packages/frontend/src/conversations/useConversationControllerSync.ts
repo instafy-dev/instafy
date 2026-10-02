@@ -36,7 +36,10 @@ import {
   type ConversationsState,
 } from "./conversationState";
 import { isUuid } from "./conversationMessageUtils";
-import { controllerConversationHasRemoteMessages } from "./conversationRemoteHistory";
+import {
+  CONTROLLER_CONVERSATION_LIST_LIMIT,
+  controllerConversationHasRemoteMessages,
+} from "./conversationRemoteHistory";
 
 const CONTROLLER_CONVERSATION_BACKFILL_INTERVAL_MS = 30_000;
 // A hydration that fails outright (no session token yet, controller hiccup)
@@ -118,6 +121,33 @@ export function useConversationControllerSync({
     bumpControllerConversationSyncEpoch();
   }, [bumpControllerConversationSyncEpoch, hydrationScope]);
 
+  // The list is read while the space's access check is still running: the
+  // controller checks access on the list route itself, and waiting for the
+  // check first put both reads in series on every switch. A read that fails
+  // before the check answers may share its cause, so it stays quiet; once the
+  // check confirms the space, the read starts over at once instead of showing
+  // that failure or sitting out its backoff.
+  const projectAccessPendingRef = useRef(projectAccessPending);
+  const failedDuringAccessCheckRef = useRef<string | null>(null);
+  useEffect(() => {
+    projectAccessPendingRef.current = projectAccessPending;
+    if (projectAccessPending) {
+      return;
+    }
+    const failedScope = failedDuringAccessCheckRef.current;
+    failedDuringAccessCheckRef.current = null;
+    if (failedScope !== hydrationScope || controllerProjectMissing || projectAccessBlocked) {
+      return;
+    }
+    retryRemoteConversationHistory();
+  }, [
+    controllerProjectMissing,
+    hydrationScope,
+    projectAccessBlocked,
+    projectAccessPending,
+    retryRemoteConversationHistory,
+  ]);
+
   useEffect(() => {
     if (!runtimeControllerEnabled) {
       return;
@@ -187,7 +217,7 @@ export function useConversationControllerSync({
     if (!runtimeControllerEnabled) {
       return;
     }
-    if (controllerProjectMissing || projectAccessPending || projectAccessBlocked) {
+    if (controllerProjectMissing || projectAccessBlocked) {
       return;
     }
     if (!isUuid(state.projectKey)) {
@@ -224,7 +254,7 @@ export function useConversationControllerSync({
         try {
           remoteConversations = await fetchProjectConversationsFromController({
             projectId,
-            limit: 50,
+            limit: CONTROLLER_CONVERSATION_LIST_LIMIT,
             signal: abortController.signal,
           });
         } catch {
@@ -235,14 +265,18 @@ export function useConversationControllerSync({
         if (remoteConversations !== null) {
           break;
         }
-        // The first unavailable attempt is already actionable. Subsequent
-        // automatic retries must not keep a cold list looking perpetually busy.
-        setHistoryError((current) => current?.scope === hydrationScope ? current : {
-          scope: hydrationScope,
-          message: hydratedScopesRef.current.has(hydrationScope)
-            ? "Couldn't refresh conversations. Your saved chats are still shown."
-            : "Couldn't load conversations.",
-        });
+        if (projectAccessPendingRef.current) {
+          failedDuringAccessCheckRef.current = hydrationScope;
+        } else {
+          // The first unavailable attempt is already actionable. Subsequent
+          // automatic retries must not keep a cold list looking perpetually busy.
+          setHistoryError((current) => current?.scope === hydrationScope ? current : {
+            scope: hydrationScope,
+            message: hydratedScopesRef.current.has(hydrationScope)
+              ? "Couldn't refresh conversations. Your saved chats are still shown."
+              : "Couldn't load conversations.",
+          });
+        }
         await new Promise<void>((resolve) => {
           finishRetryDelay = resolve;
           retryDelayTimer = setTimeout(() => {
@@ -276,6 +310,9 @@ export function useConversationControllerSync({
         return;
       }
       hydrationFailuresRef.current.delete(hydrationScope);
+      if (failedDuringAccessCheckRef.current === hydrationScope) {
+        failedDuringAccessCheckRef.current = null;
+      }
       setHistoryError((current) => current?.scope === hydrationScope ? null : current);
 
       const latestState = latestStateRef.current;
@@ -375,6 +412,13 @@ export function useConversationControllerSync({
               type: "SET_TITLE",
               id: conversation.localId,
               title: titleFromMetadata,
+            });
+          }
+          if (conversation.remoteSummaryPending) {
+            dispatch({
+              type: "SET_REMOTE_SUMMARY_PENDING",
+              id: conversation.localId,
+              pending: false,
             });
           }
           if (conversation.visibility !== visibility) {
@@ -609,7 +653,6 @@ export function useConversationControllerSync({
     hydrationScope,
     latestStateRef,
     projectAccessBlocked,
-    projectAccessPending,
     state.projectKey,
     updateControllerConversationMetadata,
   ]);

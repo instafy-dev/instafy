@@ -22,6 +22,10 @@ their latest message time, falling back to the chat's update or creation time.
 Files, settings and actions keep their navigation order; there is no relevance
 ranking yet.
 
+Selecting a chat in the **Chats** explorer opens or focuses its conversation
+workspace, including after the last tab was closed. Closing a tab keeps the chat
+and its draft available for reopening.
+
 The **Chats** drawer is for browsing and managing chats in the current space.
 The team/space breadcrumb supplies the scope on every screen size.
 Its **Filter by name** field filters the loaded chat titles, retaining thread
@@ -56,27 +60,38 @@ composer or other control is preserved. The temporary tint fades after three
 seconds, while keyboard focus remains visible until it moves. The outline has
 space around the text, supports forced colors and respects reduced motion.
 **Back to results** restores the query, scope, loaded result pages and reading
-position. Below 900px, this appears as **Results** in the existing workspace
-header, replacing its Back action. Touch and compact mouse layouts keep Back and
-Forward together, dimming and disabling unavailable directions. The pair is hidden
-when neither history direction nor a saved search is available. Direct entries
-reach chats through the sidebar; history buttons never become chat shortcuts.
-Their accessible names describe the destination. The sidebar toggle stays at the
-far left, separate from the current tab's icon and title. The same history pair is
-used on Home, account settings and the search results screen.
-Tab switching and other secondary actions are available in **More**. Drawer dismissal and parent conversation navigation
-remain separate actions. Org and space transitions preserve the last resolved
-history controls while the route catches up, without accepting stale actions.
+position. Below 900px, this appears as **Results** beside Forward in the compact
+workspace header's **More** menu, replacing that pair's Back action. Touch and
+compact mouse layouts keep Back and Forward together, dimming and disabling
+unavailable directions. The pair is hidden when neither history direction nor a
+saved search is available. Direct entries reach chats through navigation; history
+buttons never become chat shortcuts. Their accessible names describe the
+destination. The sidebar toggle stays at the far left, separate from the
+conversation title and its team/space caption. The title opens a chat switcher;
+other secondary actions remain in **More**. Drawer dismissal and parent
+conversation navigation remain separate actions. Org and space transitions
+preserve the last resolved history controls while the route catches up, without
+accepting stale actions.
 
-On touch layouts the icon-only arrow in the composer returns directly to the
-originating Home, Chats or search-results visit. A direct chat entry falls back
-to that space's Chats list. Its accessible name describes the destination.
-This does not replace general history Back/Forward in More, or change the
-single-row composer. Home's team filter, expanded unread lane, loaded activity
-page count and visible-row count belong to the originating visit; Chats retains
-its name/status filters. Their scroll positions are restored on return. Saved
-list coordinates contain no fetched content, are isolated to the account, and
-are cleared on reload; returning refetches authorized content.
+In compact conversations, the composer's leading hamburger opens a bottom sheet
+on both touch devices and narrow browser windows. Its fixed toolbar contains
+Home, the team/space breadcrumb, Browse all chats, Search and New chat (+). The
+conversation list below it scrolls independently and uses the same team-scoped
+chat references as the desktop tabs and header title picker. Selecting another
+chat restores its remembered workspace; selecting the current chat dismisses the
+sheet. The top-left sidebar control opens the full navigation drawer with tools
+and account actions. Both presentations share navigation history and team/space
+drill-ins, and leave the current chat and draft underneath.
+
+**Home** always opens Home. When reached from elsewhere in the signed-in session,
+Home's return arrow goes back to that exact page and history visit, including
+after changing Home filters; a direct Home launch has no return arrow. General
+Back and Forward remain chronological history controls. Home's team filter,
+expanded unread lane, loaded activity page count and visible-row count belong to
+the originating visit; Chats retains its name/status filters. Their scroll
+positions are restored on return. Saved list coordinates contain no fetched
+content, are isolated to the account, and are cleared on reload; returning
+refetches authorized content.
 
 The mobile team avatar opens the team list directly. Current-team and unread
 indicators remain in the list, with team overview and settings beside its
@@ -97,11 +112,10 @@ actual end also resumes live chat and removes Latest automatically. Loading the
 last page alone does not skip the remaining messages. Latest stays available
 while reading history or if a request fails. Both ways of resuming live chat
 replace the older-message destination, so Back returns to the search and Forward
-opens latest messages. Results stays
-in the compact header; history controls stay with the transcript. Electron and
-native shells also expose app history controls on the search screen. Direct
-message links offer the same history controls without inventing a search to
-return to. These checkpoints live only in the current Studio session and are
+opens latest messages. Results remains available in the compact header's More
+menu. Electron and native shells also expose app history controls on the search
+screen. Direct message links offer the same history controls without inventing a
+search to return to. These checkpoints live only in the current Studio session and are
 cleared on reload or account change. Results are fetched again when returning,
 so a checkpoint does not bypass authorization.
 

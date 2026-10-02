@@ -10,6 +10,11 @@ export type ChatSubmitDispatchPayload = {
   metadata?: Record<string, unknown> | null;
   runtimeOverride?: SubmitConversationOptions["runtimeOverride"];
   expectedLaneIdle?: boolean;
+  /**
+   * Sent by the app on the person's behalf (an automatic retry): the composer,
+   * its staged attachments, focus and the scroll position are left as they are.
+   */
+  automatic?: boolean;
 };
 
 type UseChatSubmitDispatchOptions = {
@@ -72,20 +77,25 @@ export function useChatSubmitDispatch({
 
   const performSubmit = useCallback(
     async (payload: ChatSubmitDispatchPayload) => {
-      const shouldRefocus = isChatInputFocused();
-      shouldAutoScrollRef.current = true;
-      scrollToBottom();
-      if (typeof window !== "undefined" && typeof window.requestAnimationFrame === "function") {
-        window.requestAnimationFrame(() => {
-          shouldAutoScrollRef.current = true;
-          scrollToBottom();
-        });
-      }
+      // The person may be writing their next message or reading further up
+      // while an automatic send goes out, so it changes none of that.
+      const touchComposer = payload.automatic !== true;
+      const shouldRefocus = touchComposer && isChatInputFocused();
       const composerMessage = payload.composerMessage ?? payload.message;
-      if (activeConversationId && latestInputValueRef.current.trim() === composerMessage.trim()) {
-        latestInputValueRef.current = "";
-        onInputChange(activeConversationId, "", null);
-        clearInputEditor?.();
+      if (touchComposer) {
+        shouldAutoScrollRef.current = true;
+        scrollToBottom();
+        if (typeof window !== "undefined" && typeof window.requestAnimationFrame === "function") {
+          window.requestAnimationFrame(() => {
+            shouldAutoScrollRef.current = true;
+            scrollToBottom();
+          });
+        }
+        if (activeConversationId && latestInputValueRef.current.trim() === composerMessage.trim()) {
+          latestInputValueRef.current = "";
+          onInputChange(activeConversationId, "", null);
+          clearInputEditor?.();
+        }
       }
       setSendingAttachment(true);
       try {
@@ -98,12 +108,14 @@ export function useChatSubmitDispatch({
           runtimeOverride: payload.runtimeOverride ?? null,
           expectedLaneIdle: payload.expectedLaneIdle,
         });
-        clearImageAttachments();
-        if (shouldRefocus && !Capacitor.isNativePlatform()) {
-          focusInput({ force: true });
+        if (touchComposer) {
+          clearImageAttachments();
+          if (shouldRefocus && !Capacitor.isNativePlatform()) {
+            focusInput({ force: true });
+          }
+          shouldAutoScrollRef.current = true;
+          scrollToBottom();
         }
-        shouldAutoScrollRef.current = true;
-        scrollToBottom();
       } finally {
         setSendingAttachment(false);
       }

@@ -7,7 +7,7 @@ import { generateUUID } from "../utils/uuid";
 import { LOCAL_CAPABILITY_DEFINITIONS } from "../capabilities/localCapabilityCatalog";
 import { resolveSingleLocalCapabilityHandleForPrompt } from "../capabilities/localCapabilityRuntime";
 import { getChatClientSessionId } from "./chatClientIdentity";
-import { shouldAutoTitleConversation } from "./conversationAutoTitle";
+import { getOpeningUserMessage, shouldAutoTitleConversation } from "./conversationAutoTitle";
 import {
   resolvePromptAgentSelection,
   startsWithAssistantMention,
@@ -68,6 +68,11 @@ import type {
   SubmitConversationRuntimeOverride,
   UseConversationSubmitFlowArgs,
 } from "./conversationSubmitTypes";
+import {
+  recordRunsStartedByPromptSentFromThisPage,
+  recordSendFailedForPromptSentFromThisPage,
+  rememberPromptSentFromThisPage,
+} from "./sentPromptRegistry";
 import { useConversationAutoTitle } from "./useConversationAutoTitle";
 import { useConversationControllerDispatch } from "./useConversationControllerDispatch";
 import { withUserMentionMetadata } from "./userMentions";
@@ -173,6 +178,7 @@ export function useConversationSubmitFlow({
   const { maybeAutoTitleConversation, queueAutoTitleConversation } =
     useConversationAutoTitle({
       conversations,
+      currentUserId,
       resolveProjectId,
       ensureControllerConversationId,
       setConversationTitle,
@@ -347,7 +353,28 @@ export function useConversationSubmitFlow({
           if (result.ok) receipt.accepted = true;
           else receipt.errorMessage = result.errorMessage;
         }
+        if (result.ok) {
+          // The runs this prompt started, so an automatic retry resends it
+          // only for a failure of one of them (useRunFailureAutoRetry).
+          recordRunsStartedByPromptSentFromThisPage({ metadata: args[2] }, [
+            ...(result.runIds ?? []),
+            ...(result.jobIds ?? []),
+          ]);
+        } else {
+          // The prompt never went out: a resend of a failed run must not
+          // retire that run's Try again (useRunFailureRetryActions).
+          recordSendFailedForPromptSentFromThisPage({ metadata: args[2] });
+        }
         return result;
+      };
+      // Records the prompt without dispatching it. A recording that failed
+      // means the prompt never went out, as with a failed dispatch.
+      const recordPrompt = async (...args: Parameters<typeof recordMessageToController>) => {
+        const recorded = await recordMessageToController(...args);
+        if (!recorded) {
+          recordSendFailedForPromptSentFromThisPage({ metadata: args[2] });
+        }
+        return recorded;
       };
       const trimmed = rawInput.trim();
       const dispatchTrimmed =
@@ -424,6 +451,7 @@ export function useConversationSubmitFlow({
           }),
           messageType: "goal_update",
         };
+        rememberPromptSentFromThisPage(userMessage);
         appendMessages(sourceConversation.localId, [userMessage, assistantMessage]);
         void (async () => {
           try {
@@ -574,7 +602,15 @@ export function useConversationSubmitFlow({
         currentUserId,
         promptMetadata,
       );
+      // Only the page that sent a prompt may resend it automatically after a
+      // failed run, and only for a run it started (useRunFailureAutoRetry).
+      rememberPromptSentFromThisPage(userMessage);
       appendMessages(displayConversationId, [userMessage]);
+      // What the list will hold once this message lands; null for a chat whose
+      // history lives on the controller.
+      const autoTitleOpeningMessage = shouldAttemptAutoTitle
+        ? getOpeningUserMessage({ ...targetConversation, messages: [...targetConversation.messages, userMessage] })
+        : null;
 
       const imageFiles = resolveSubmittedImageFiles(options?.imageFile, options?.imageFiles);
 
@@ -776,7 +812,7 @@ export function useConversationSubmitFlow({
                 userMessage.id,
                 promptMetadata,
               );
-              await recordMessageToController(
+              await recordPrompt(
                 displayConversationId,
                 trimmed,
                 promptMetadata,
@@ -844,7 +880,7 @@ export function useConversationSubmitFlow({
               if (hasAuthoritativeCoverage) {
                 deferGroupParticipationToController = true;
               } else if (participationResult.decision === "silent") {
-                await recordMessageToController(
+                await recordPrompt(
                   displayConversationId,
                   trimmed,
                   promptMetadata,
@@ -858,7 +894,7 @@ export function useConversationSubmitFlow({
         }
 
         if (shouldAttemptAutoTitle && !deferGroupParticipationToController) {
-          queueAutoTitleConversation(targetConversationId, trimmed);
+          queueAutoTitleConversation(targetConversationId, trimmed, autoTitleOpeningMessage);
         }
       }
 
@@ -1249,7 +1285,7 @@ export function useConversationSubmitFlow({
           options?.expectedLaneIdle ?? false,
         );
       } else {
-        await recordMessageToController(
+        await recordPrompt(
           displayConversationId,
           trimmed,
           promptMetadata,

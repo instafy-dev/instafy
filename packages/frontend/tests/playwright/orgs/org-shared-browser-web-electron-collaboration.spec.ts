@@ -46,6 +46,7 @@ import { chooseOption } from "../utils/select.js";
 import {
   expectParticipantPointerAtNormalizedPoint,
   expectResponsiveSharedBrowserLayout,
+  expectSharedBrowserAddressValue,
   expectSharedBrowserContentGeometryConverged,
   hoverSharedSurfaceAtNormalizedPoint,
   sharedBrowserContentBox,
@@ -445,10 +446,7 @@ test.describe("Org Shared Browser web/Electron collaboration", () => {
         runtimeId: ownerBinding.runtimeId,
       });
       expect(memberBinding.browserSessionId).not.toBe(ownerBinding.browserSessionId);
-      const memberAddress = electronPage
-        .getByTestId("shared-browser-chrome")
-        .getByTestId("shared-browser-address");
-      await expect(memberAddress).toHaveValue("https://example.com/", { timeout: 60_000 });
+      await expectSharedBrowserAddressValue(electronPage, "https://example.com/");
       await expect
         .poll(() => remoteSurfaceHasRenderedFrame(sharedPixelSurface(electronPage)), {
           timeout: 60_000,
@@ -630,7 +628,7 @@ test.describe("Org Shared Browser web/Electron collaboration", () => {
         minStageHeight: 96,
       });
       await expect(collaborationState(electronPage)).toContainText("You control");
-      await expect(memberAddress).toHaveValue("https://example.com/");
+      await expectSharedBrowserAddressValue(electronPage, "https://example.com/");
       await expect
         .poll(async () => {
           const input = await latestOpenInputSocket(electronPage);

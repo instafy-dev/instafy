@@ -6,6 +6,7 @@ import {
   extractConversationTitleFromMetadata,
 } from "../../conversations/conversationMetadata";
 import { PROJECT_ACCESS_REFRESH_EVENT } from "../../projects/projectAccessEvents";
+import { spaceDisplayName } from "../../projects/spaceName";
 import type { ProjectListItem } from "../../projects/useProjects";
 import { controllerClient, type ControllerProjectConversation, type ControllerProjectSummary } from "../../sdk/instafy";
 import type { StudioSearchRecord, StudioSearchScope } from "./components/useStudioSearch";
@@ -172,7 +173,7 @@ export function useStudioSearchRecords({
       output.push({
         id: `message:${message.projectId}:${message.conversationId}:${message.messageId}`,
         title: message.conversationTitle.trim() || "Untitled chat",
-        description: `${message.orgName?.trim() || (message.orgId ? "Team" : "Personal")} / ${message.projectName.trim() || "Untitled space"}`,
+        description: `${message.orgName?.trim() || (message.orgId ? "Team" : "Personal")} / ${spaceDisplayName(message.projectName)}`,
         keywords: "", group: "Messages", orgId: message.orgId ?? "personal", spaceId: message.projectId,
         message: { excerpt: message.snippet, query: query.trim(), matchRanges: message.matchRanges,
           authorLabel: message.role === "assistant" ? "Assistant" : "User", createdAt: message.createdAt },
@@ -187,7 +188,7 @@ export function useStudioSearchRecords({
       const projectId = project.projectId;
       const projectOrgId = project.orgId ?? "personal";
       const orgName = project.orgName?.trim() || (project.orgId ? "Team" : "Personal");
-      const name = project.projectName?.trim() || "Untitled space";
+      const name = spaceDisplayName(project.projectName);
       const description = `${orgName} / ${name}`;
       const push = (record: Omit<StudioSearchRecord, "orgId" | "spaceId" | "description" | "activate">, target: StudioSearchTarget, activityAt = 0) => {
         output.push({ ...record, orgId: projectOrgId, spaceId: projectId, description, activate: () => onActivate(target) });

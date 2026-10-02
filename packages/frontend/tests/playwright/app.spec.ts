@@ -157,8 +157,10 @@ test.afterEach(async ({ page }) => {
     expect(projectSnapshot?.activeProjectId).toBeTruthy();
     expect(projectSnapshot?.projectCount ?? 0).toBeGreaterThan(0);
     expect(projectSnapshot?.prompt ?? "").toBe("");
-    expect(projectSnapshot?.projectName ?? "").not.toHaveLength(0);
+    // A space nobody named is stored without a name and shown as untitled.
+    expect(projectSnapshot?.projectName ?? "").toBe("");
     expect(projectSnapshot?.contentTagline ?? "").toBe("");
+    await expect(page.getByTestId("topbar-project-name")).toHaveText("Untitled space");
   });
 
   const loadsStudioTest = test;

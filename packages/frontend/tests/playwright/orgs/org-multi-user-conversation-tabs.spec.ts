@@ -93,11 +93,13 @@ test.describe("Org multi-user conversations", () => {
     await guestConversationRows.filter({ hasText: "Conversation 3" }).first().click();
     await waitForConversationControllerId(guestPage);
     await disableAssistantIfPossible(guestPage);
+    // Open the chat on the owner's side first: once the guest's message lands
+    // the chat is titled from it, and these rows are found by numbered titles.
+    await ownerConversationRows.filter({ hasText: "Conversation 3" }).first().click();
     const guestMessage = `hello from guest ${Date.now()}`;
     await guestPage.getByTestId("chat-input").fill(guestMessage);
     await guestPage.getByTestId("chat-send-button").click();
 
-    await ownerConversationRows.filter({ hasText: "Conversation 3" }).first().click();
     await expect(
       page.locator('[data-testid="chat-bubble-user"]').filter({ hasText: guestMessage }).first()
     ).toBeVisible({ timeout: 30_000 });

@@ -30,6 +30,9 @@ vi.mock("../ComposerActionMenu", () => ({
       data-trigger-icon-class={String(props.triggerIconClassName ?? "")}
     >
       <button type="button" aria-label="Open composer actions" className="mock-menu-trigger" />
+      {typeof props.onExpandDraft === "function" ? (
+        <button type="button" aria-label="Expand draft" onClick={props.onExpandDraft as () => void} />
+      ) : null}
       {typeof props.onUploadImage === "function" ? (
         <button type="button" aria-label="Upload image" data-testid="mock-menu-upload-image" disabled={props.uploadImageDisabled === true} onClick={props.onUploadImage as () => void} />
       ) : null}
@@ -80,6 +83,7 @@ vi.mock("../chat-input/ChatInput", () => ({
       <div
         data-compact={String(_props.compact === true)}
         data-compact-viewport={String(_props.compactViewport === true)}
+        data-expanded={String(_props.expanded === true)}
         data-read-only={String(_props.readOnly === true)}
         data-testid="chat-input"
       >
@@ -367,6 +371,30 @@ describe("ChatComposerSurface", () => {
     await act(async () => root.render(<ChatComposerSurface {...props} />));
     expect(container.querySelector('[role="tablist"]')).toBeNull();
     expect(overlay.className).toContain("translate-y-full");
+  });
+
+  it("expands in place and collapses with Escape without remounting the editor or attachments", async () => {
+    const props = createProps({ imageAttachments: [{ id: "image-1", previewUrl: "data:image/png;base64,AA==", file: new File(["image"], "photo.png") }] as never });
+    await act(async () => root.render(<ChatComposerSurface {...props} />));
+    const input = container.querySelector('[data-testid="chat-input"]');
+    const preview = container.querySelector('[data-testid="chat-image-upload-preview"]');
+    await act(async () => container.querySelector<HTMLButtonElement>('[aria-label="Expand draft"]')!.click());
+    expect(input?.getAttribute("data-expanded")).toBe("true");
+    expect(container.querySelector('[data-testid="chat-input"]')).toBe(input);
+    expect(container.querySelector('[data-testid="chat-image-upload-preview"]')).toBe(preview);
+    await act(async () => input!.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true })));
+    expect(input?.getAttribute("data-expanded")).toBe("false");
+    expect(container.querySelector('[data-testid="chat-input"]')).toBe(input);
+    expect(container.querySelector('[data-testid="chat-image-upload-preview"]')).toBe(preview);
+  });
+
+  it("keeps expansion scoped to the current draft", async () => {
+    const props = createProps();
+    await act(async () => root.render(<ChatComposerSurface {...props} />));
+    await act(async () => container.querySelector<HTMLButtonElement>('[aria-label="Expand draft"]')!.click());
+    expect(container.querySelector('[aria-label="Collapse draft"]')).not.toBeNull();
+    await act(async () => root.render(<ChatComposerSurface {...props} chatInputProps={{ ...props.chatInputProps, draftKey: "another-chat" }} />));
+    expect(container.querySelector('[aria-label="Collapse draft"]')).toBeNull();
   });
 
   // The voice flags come from the real view state so the layout tests run

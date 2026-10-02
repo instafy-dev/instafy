@@ -771,6 +771,7 @@ export function FilesPanel({
     setDirectoryStatus,
     expandedDirectories,
     setExpandedDirectories,
+    toggleDirectory,
     lastExplorerSelectionRef,
     loadDirectory,
     explorerMenu,
@@ -781,7 +782,7 @@ export function FilesPanel({
     handleDeleteExplorerEntry,
     refreshFromWorkspaceCommit,
     renderDirectoryStatus,
-    getDirectoryAttemptCount,
+    getDirectoryLoadingLabel,
     resolveCreateEntryParentPath,
   } = useFilesPanelWorkspaceTree({
     activeFilePath,
@@ -1267,38 +1268,6 @@ export function FilesPanel({
     ]
   );
 
-  const handleToggleDirectory = useCallback(
-    async (entry: ControllerWorkspaceEntry) => {
-      if (entry.kind !== "directory") {
-        return;
-      }
-      const normalized = normalizePath(entry.path);
-      const isExpanded = expandedDirectories.has(normalized);
-      if (isExpanded) {
-        setExpandedDirectories((prev) => {
-          const next = new Set(prev);
-          next.delete(normalized);
-          return next;
-        });
-      } else {
-        await loadDirectory(normalized);
-        setExpandedDirectories((prev) => {
-          const next = new Set(prev);
-          next.add(normalized);
-          return next;
-        });
-      }
-      setViewerState((current) => ({
-        ...current,
-        entry: entry,
-        mode: "directory",
-        error: null
-      }));
-      setActiveFile(null);
-    },
-    [expandedDirectories, loadDirectory, setActiveFile, setViewerState, setExpandedDirectories]
-  );
-
   const openChanges = useCallback(() => {
     if (typeof window === "undefined") {
       return;
@@ -1535,13 +1504,7 @@ export function FilesPanel({
   const rootDirectoryStatus = directoryStatus[normalizedRootPath];
   const showRootDirectoryErrorCard = workspaceBrowseReady && rootDirectoryStatus === "error";
   const rootEntries = directoryEntries[normalizedRootPath] ?? [];
-  const rootLoadingLabel = !workspaceBrowseReady
-    ? waitingForPreferredRuntime
-      ? "Waiting for preferred runtime…"
-      : "Connecting to workspace origin…"
-    : getDirectoryAttemptCount(normalizedRootPath) > 0
-      ? "Connecting to workspace origin…"
-      : "Loading files…";
+  const rootLoadingLabel = getDirectoryLoadingLabel(normalizedRootPath);
   const showCenteredRootLoading =
     !showRootDirectoryErrorCard &&
     !normalizedSearch &&
@@ -1749,7 +1712,8 @@ export function FilesPanel({
               isInstafyManagedPath={isInstafyManagedPath}
               isMarkdownWorkspacePath={isMarkdownWorkspacePath}
               onSelect={handleSelectEntry}
-              onToggle={handleToggleDirectory}
+              onToggle={toggleDirectory}
+              renderDirectoryStatus={renderDirectoryStatus}
               onToggleMarkdownOutline={handleToggleMarkdownOutline}
               onSelectMarkdownSection={handleSelectMarkdownSection}
               onToggleMarkdownSectionCollapse={handleToggleMarkdownSectionCollapse}

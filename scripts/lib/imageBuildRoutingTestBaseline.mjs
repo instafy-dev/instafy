@@ -55,6 +55,85 @@ export const coordinatorBuildPreflight = `      - name: Qualify trusted image re
 
 `;
 
+// Test-only inverse of the registry layer-cache change. It restores the exact
+// publisher bytes that withoutImageBuildRouting was pinned against, so those
+// pins still prove that nothing else in either publisher changed.
+const runtimeLayerCacheExport = `      # Write the layer cache only after this cell's image passed the gates and
+      # was pushed and recorded. This cache-only build repeats the audit build on
+      # the same builder with the same context, file, target, platform, build
+      # arguments and labels, so it resolves from this job's BuildKit state. It
+      # creates no image, tag or local copy and cannot change published bytes.
+      # A failed or slow export costs a later release a cold build, nothing more.
+      # ignore-error makes BuildKit report a failed cache write only in the
+      # progress log, so the step also warns when that log shows an error.
+      - name: Export the scanned build's layer cache
+        shell: bash
+        env:
+          BUILDER: \${{ steps.buildx.outputs.name }}
+          TARGET: \${{ matrix.target }}
+          PLATFORM: \${{ matrix.platform }}
+          RELEASE_COMMIT: \${{ needs.authorize.outputs.commit_sha }}
+          CACHE_REF: ghcr.io/instafy-dev/instafy-build-cache:publish-runtime-agent-\${{ matrix.flavor }}-\${{ matrix.architecture }}
+        run: |
+          set -euo pipefail
+          status=0
+          log="$(mktemp)"
+          trap 'rm -f "$log"' EXIT
+          timeout --kill-after=1m 15m docker buildx build \\
+            --builder "$BUILDER" \\
+            --progress=plain \\
+            --platform "$PLATFORM" \\
+            --file docker/runtime/Dockerfile \\
+            --target "$TARGET" \\
+            --build-arg BUILD_PROFILE=release \\
+            --build-arg BUILD_ARTIFACT_DIR=release \\
+            --label "org.opencontainers.image.source=https://github.com/instafy-dev/instafy" \\
+            --label "org.opencontainers.image.revision=\${RELEASE_COMMIT}" \\
+            --label "org.opencontainers.image.version=\${RELEASE_COMMIT}" \\
+            --provenance=false \\
+            --sbom=false \\
+            --output type=cacheonly \\
+            --cache-to "type=registry,ref=\${CACHE_REF},mode=max,oci-mediatypes=true,image-manifest=true,ignore-error=true" \\
+            . 2>&1 | tee "$log" || status=$?
+          if [[ "$status" != "0" ]]; then
+            echo "::warning::The layer cache export stopped with status \${status}. The published image is unaffected; the next release may build cold."
+          elif grep -Eq '^#[0-9]+ ERROR: ' "$log"; then
+            echo "::warning::The layer cache export reported an error (see the ERROR lines above). The published image is unaffected; the next release may build cold."
+          fi
+`;
+const registryLayerCacheDeltas = {
+  "publish-production-services.yml": [
+    ["          RELEASE_COMMIT: ${{ needs.authorize.outputs.commit_sha }}\n        run: |\n          set -euo pipefail\n          release_tag=",
+      "          RELEASE_COMMIT: ${{ needs.authorize.outputs.commit_sha }}\n          CACHE_KEY: ${{ matrix.key }}\n          CACHE_EXPORT_OPTIONS: ${{ runner.environment == 'self-hosted' && ',timeout=2m,ignore-error=true' || '' }}\n        run: |\n          set -euo pipefail\n          release_tag="],
+    ['            --label "org.opencontainers.image.revision=${RELEASE_COMMIT}" \\\n            --load \\\n',
+      '            --label "org.opencontainers.image.revision=${RELEASE_COMMIT}" \\\n            --cache-from "type=gha,scope=production-${CACHE_KEY}" \\\n            --cache-to "type=gha,scope=production-${CACHE_KEY},mode=max${CACHE_EXPORT_OPTIONS}" \\\n            --load \\\n'],
+  ],
+  "publish-runtime-agent.yml": [
+    ["    # still preventing a wedged BuildKit worker from consuming six hours. The\n    # extra 16 minutes cover the layer cache export's own bound, so a slow\n    # export cannot time out a cell that has already published its image.\n    timeout-minutes: 91\n",
+      "    # still preventing a wedged BuildKit worker from consuming six hours.\n    timeout-minutes: 75\n"],
+    ["      - name: Set up Docker Buildx\n        id: buildx\n", "      - name: Set up Docker Buildx\n"],
+    ["      # rebuild that could change bytes.\n      # The layer cache is only read here, anonymously, so this build needs no\n      # registry credentials; it is written after publication, below. The final\n      # stage (the matrix target) never comes from the cache, so its OS and npm\n      # packages are current when the scan runs.\n",
+      "      # rebuild that could change bytes.\n"],
+    ["          cache-from: type=registry,ref=ghcr.io/instafy-dev/instafy-build-cache:publish-runtime-agent-${{ matrix.flavor }}-${{ matrix.architecture }}\n          no-cache-filters: ${{ matrix.target }}\n",
+      "          cache-from: type=gha,scope=publish-runtime-agent-${{ matrix.flavor }}-${{ matrix.architecture }}\n          cache-to: type=gha,scope=publish-runtime-agent-${{ matrix.flavor }}-${{ matrix.architecture }},mode=max${{ runner.environment == 'self-hosted' && ',timeout=2m,ignore-error=true' || '' }}\n"],
+    [`          retention-days: 7\n\n${runtimeLayerCacheExport}\n  assemble-release-manifest:\n`,
+      "          retention-days: 7\n\n  assemble-release-manifest:\n"],
+  ],
+};
+
+export function withoutRegistryLayerCache(file, source) {
+  for (const [added, original] of registryLayerCacheDeltas[file] ?? []) {
+    assert.equal(source.split(added).length, 2);
+    source = source.replace(added, () => original);
+  }
+  return source;
+}
+
+// The reviewed baseline: undo the registry cache first, then the routing.
+export function withoutImageBuildDeltas(file, source) {
+  return withoutImageBuildRouting(file, withoutRegistryLayerCache(file, source));
+}
+
 export function withoutImageBuildRouting(file, source) {
   if (file === "continuous-image-publication.yml") {
     assert.equal(source.split(coordinatorBuildBranch).length, 2);
@@ -84,7 +163,7 @@ export function withoutImageBuildRouting(file, source) {
   assert.equal(source.split(ordinary).length, file === "publish-production-services.yml" ? 5 : 4);
   let normalized = source.replaceAll(ordinary, "    runs-on: ubuntu-latest\n");
   if (file === "publish-runtime-agent.yml") {
-    const comment = "      # Hosted cells build natively; the trusted BUILD daemon must support both\n      # target platforms. Scan each image before any registry login.\n";
+    const comment = "      # Hosted cells build natively; the trusted BUILD daemon must support the\n      # amd64 target platform. Scan each image before any registry login.\n";
     assert.equal(normalized.split(comment).length, 2);
     normalized = normalized.replace(comment, "      # Build and scan on the native architecture before any registry login.\n");
     const matrix = imageBuildSelector(file, "matrix.runner");

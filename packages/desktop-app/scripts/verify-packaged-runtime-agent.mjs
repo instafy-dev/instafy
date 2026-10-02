@@ -101,7 +101,10 @@ for (const manifestPath of manifests) {
     throw new Error("Packaged runtime-agent returned an unexpected Personal Browser capability contract.");
   }
   verified += 1;
-  console.log(`[instafy-desktop] Verified packaged runtime-agent at ${executablePath}.`);
+  // resolveVerifiedBundledRuntimeAgent has also checked the code-mode host beside it.
+  console.log(
+    `[instafy-desktop] Verified packaged runtime-agent and code-mode host at ${path.dirname(executablePath)}.`,
+  );
 }
 
 console.log(`[instafy-desktop] Verified ${verified} packaged runtime-agent bundle(s).`);

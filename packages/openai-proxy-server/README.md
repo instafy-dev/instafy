@@ -176,13 +176,20 @@ The proxy builds each upstream body itself. On the Responses wire API, to the Op
 OpenAI-compatible Responses endpoint) and to a ChatGPT login's Codex endpoint, a `/v1/responses`
 request that lists `tools` sends them with its `tool_choice` (`auto` when absent) and
 `parallel_tool_calls` (`false` when absent). A request without `tools` sends the OpenAI API no
-tool control, and a ChatGPT login gets the proxy's default tools with `tool_choice: "auto"`. Codex
-sends the tools of a Responses Lite model, such as gpt-6-luna or gpt-5.6-sol, in an
-`additional_tools` input item and omits `tools`, so the request's own `tool_choice` is not
-forwarded on either path. An explicit empty `tools` array, by contrast, asks for a plain text
-completion, as `tool_choice: "none"` does, and goes upstream with no tools at all. A Chat
-Completions or Gemini Code Assist upstream is sent no client tools and no tool control. The
-request's `client_metadata` is never copied upstream.
+tool control, and a ChatGPT login gets the proxy's default tools (`shell`, `apply_patch`,
+`update_plan` and `view_image`, which the `CODEX_*` tool flags can change) with
+`tool_choice: "auto"` and `parallel_tool_calls: false`. Codex sends the tools of a Responses Lite
+model, such as gpt-6-luna or gpt-5.6-sol, in an `additional_tools` input item and omits `tools`,
+so the request's own `tool_choice` is not forwarded on either path. The OpenAI API does get such a
+request's own `parallel_tool_calls` when the request sends a boolean, as codex does (`false` for
+these models), since the API's own default is `true`; a request that sends none, or a value that
+is not a boolean, gets none, as before. The runtime offers such a model only the tools in that
+item, so a ChatGPT login sends a request that carries the item none of the default tools: no
+`tools` at all, with `tool_choice: "auto"` and `parallel_tool_calls: false`, even when a pinned
+lease dropped every tool in the item. An explicit
+empty `tools` array, by contrast, asks for a plain text completion, as `tool_choice: "none"` does,
+and goes upstream with no tools at all. A Chat Completions or Gemini Code Assist upstream is sent
+no client tools and no tool control. The request's `client_metadata` is never copied upstream.
 
 **Required tool call.** While the runtime's required execution gate is armed, codex adds
 `client_metadata["instafy.require_tool_call"] = "1"` to its model request. The proxy sends such a
@@ -194,23 +201,55 @@ endpoint alike, when all of these hold:
   a Chat Completions or Gemini Code Assist endpoint;
 - the request offers tools: a non-empty `tools`, or an `additional_tools` input item with at least
   one tool, counted after a pinned lease drops the tools it does not forward;
-- its `tool_choice` is `"auto"` or absent.
+- its `tool_choice` is `"auto"` or absent;
+- it is not a remote compaction request, whose input carries a `compaction_trigger` item. Codex
+  sends that request with the turn's tools while a required tool call is still pending, but it
+  must come back as a compaction item, and a tool call would fail it.
 
-A Responses Lite request then carries `tool_choice: "required"` although it has no `tools` (on a
-ChatGPT login, next to the proxy's default tools), and nothing else in the upstream body
-changes. Any other request, one whose key has another value included, goes upstream exactly as it
-would without the key: a request that chose `none`, `required` or a named tool keeps the controls
-above, so a Responses Lite request's own `required` is still not forwarded. The key applies on
-every lane whose requests use the Responses wire API, the platform lane and bring-your-own
-credentials alike, since the gate is codex's behaviour and not a billing rule. Each request that
-goes upstream with `required` logs one `required tool call sends tool_choice required` line with
-the route and the run id, never the request body. A request to a Chat Completions or Gemini Code
-Assist endpoint logs none, since it carries no tool control. The key itself never goes upstream,
-since no `client_metadata` does.
+A Responses Lite request then carries `tool_choice: "required"` although it has no `tools`, on a
+ChatGPT login as well, and nothing else in the upstream body changes. Any other request, one
+whose key has another value included, goes upstream exactly as it would without the key: a
+request that chose `none`, `required` or a named tool keeps the controls above, so a Responses
+Lite request's own `required` is still not forwarded. The key applies on every lane whose
+requests use the Responses wire API, the platform lane and bring-your-own credentials alike,
+since the gate is codex's behaviour and not a billing rule. Each request that goes upstream with
+`required` logs one `required tool call sends tool_choice required` line with the route and the
+run id, never the request body. A request to a Chat Completions or Gemini Code Assist endpoint
+logs none, since it carries no tool control. The key itself never goes upstream, since no
+`client_metadata` does.
+
+**When upstream refuses `required`.** Whether OpenAI accepts `tool_choice: "required"` for a
+request whose tools arrive only in `additional_tools` is unverified, so the proxy falls back
+rather than fail every such turn. When a request goes upstream with the `required` the proxy set
+and the upstream, the OpenAI API or the ChatGPT Codex endpoint, answers 400 with an error that
+blames the tool controls, the proxy sends the same request once more, on the same lease and
+credential, exactly as it would have gone without the key: with `tool_choice: "auto"` when it
+lists `tools`, and, for a Responses Lite request, with no `tool_choice` to the OpenAI API and
+`auto` to a ChatGPT login. The error blames the tool controls when the body is an
+OpenAI error object whose `param` is `tool_choice` or `tools`, or, when it names no `param`, whose
+code (`error.code`, or `error.type` without one) is set and whose `message` names the tool choice
+(`tool_choice` or `tool choice`). Nothing else falls back: not a 400 whose `param` names another
+parameter, whatever its message says, nor one without an `error` object (such as a
+`{"detail": ...}` body), nor any other status, nor an error a stream reports after it has
+started, nor any request whose `required` the proxy did not set, one that chose `required` itself
+included. Those go back to the client after one attempt, as before. If the retry fails too, its
+failure goes back as any failure does.
+
+Each fallback logs one `required tool call falls back to the request's own tool choice` line with
+the route, the run id, the upstream error's code (at most 64 characters) and its `param`, never
+its message or the request body, and adds one to `requiredToolCallFallbacks` in the
+[health report](#platform-lane-health-report). The retry belongs to the same request: it counts
+no second service tier override, logs no second `required tool call sends tool_choice required`
+line, and a lease renewal that follows it sends no `required` either.
 
 The loopback tests prove only what the proxy sends. Whether OpenAI honours
 `tool_choice: "required"` when the tools arrive only in `additional_tools` cannot be shown with a
-mock upstream, so it is a staging check.
+mock upstream, so it is a staging check. So is whether the ChatGPT Codex endpoint serves a
+Responses Lite request that has no `tools` and `tool_choice: "auto"`: codex sends it that shape
+when codex itself holds the ChatGPT login, but the proxy's requests have not been tried there. On
+staging, a `requiredToolCallFallbacks` above `0`, with the log lines that name the error, shows
+that the upstream refuses `required`; a refusal in a shape the proxy does not match still fails
+the turn, as it did before the fallback.
 
 ### Service tier
 
@@ -292,6 +331,12 @@ and logs it.
 | `controllerMeteringProtocol` | The controller's usage metering protocol as the proxy last read it; `null` today |
 | `outputCeilingSource` | Where the output token ceiling sent upstream comes from; `null` today, no ceiling is sent |
 
+Next to `platformLane`, both endpoints carry one more top-level field:
+
+| Field | Meaning |
+| --- | --- |
+| `requiredToolCallFallbacks` | How many requests since the proxy started went upstream again without the `tool_choice: "required"` the proxy set, after the upstream refused it with a 400 that blames the tool controls (see [When upstream refuses `required`](#tool-controls)). It counts every lane, bring-your-own credentials included, since the required tool call applies on each, and a request counts once, when it falls back, however many attempts it takes. It only grows, and `0` is what a proxy whose upstream accepts `required` reports |
+
 ### Upstream failures and retries
 
 Responses, Chat Completions, speech and transcription preserve upstream HTTP error statuses. A rejected request or
@@ -312,9 +357,9 @@ whose `error.type` is the provider's `usage_limit_reached` or `usage_not_include
 reports it as a usage limit, with a positive integer `error.resets_at` (Unix seconds) when the
 provider gave one. Raw provider messages, response bodies, credentials, and endpoint URLs are
 not echoed. Valid `Retry-After` seconds or HTTP dates are forwarded for 429 and 503 with the
-provider's value and no bound of the proxy's own (Codex reads it only on a retryable 429 and
-clamps that wait to 1-30 seconds); other
-header values are discarded. Every retryable 429 carries a `Retry-After`. When the provider
+provider's value and no bound of the proxy's own (Codex itself does not retry an HTTP 429, so
+the header matters to other clients and to the streamed wait below); other header values are
+discarded. Every retryable 429 carries a `Retry-After`. When the provider
 sends no usable one, the proxy derives it from the rate-limit bucket that refused the request,
 using OpenAI's `x-ratelimit-remaining-*` and `x-ratelimit-reset-*` headers (reset durations such
 as `6s` or `1m2.5s` are rounded up to whole seconds):
@@ -326,8 +371,7 @@ as `6s` or `1m2.5s` are rounded up to whole seconds):
   the two resets.
 
 A derived delay is clamped to 1-30 seconds. With no usable reset, and for an in-stream
-`rate_limit_exceeded`, which carries no headers, the proxy uses 5 seconds, the same fallback
-Codex applies to a retryable 429 without `Retry-After`. Reset headers are time until a bucket
+`rate_limit_exceeded`, which carries no headers, the proxy uses 5 seconds. Reset headers are time until a bucket
 is completely full, and a per-minute bucket is full again within about a minute. When a bucket
 at 0 needs more than five minutes to refill, as with a daily requests or tokens limit, the
 turn's retries (roughly five waits of up to 30 seconds) cannot outlast it: the proxy answers a
@@ -335,6 +379,80 @@ terminal 429 (`upstream_rate_limit`, `retryable: false`) with no `Retry-After`, 
 the turn with a rate-limit error instead of waiting out its retry budget. When no bucket is at
 0, a long reset does not prove that the slower bucket is the one that refused, so that 429
 stays retryable.
+
+A streaming `/v1/responses` request, which is how Codex sends every request, gets a transient
+rate limit as a stream failure instead. Codex does not retry an HTTP 429 by itself (its
+`retry_429` is off for every provider), but it does retry a stream that fails with
+`rate_limit_exceeded`, after the wait the failure's message names and within its stream retry
+budget. The proxy therefore answers HTTP 200 with one server-sent `response.failed` event, then
+`[DONE]`:
+
+```json
+{"type":"response.failed","response":{"status":"failed","error":{"code":"rate_limit_exceeded",
+  "message":"The upstream provider rate limit was reached (upstream_rate_limit, 429). Please try again in 5.734s."}}}
+```
+
+The wait is the `Retry-After` the 429 would have carried (the provider's own, the derived one,
+or 5 seconds), clamped to 1-30 seconds and spread by up to 20% so that runtimes sharing one key
+do not all retry at the same instant. The spread only lengthens a wait and never past 30
+seconds; a `Retry-After` of 30 seconds or more spreads below 30 instead. The wait is stated to
+the millisecond, the precision Codex reads back. The message keeps the `upstream_rate_limit`
+code and the words the Studio and the runtime recognise. Only a transient rate limit changes: a
+plan limit, a rate limit window too long to wait out, quota exhaustion and every other failure
+keep their HTTP error, and a request that does not stream, every Chat Completions request
+included, keeps the HTTP 429.
+
+### Responses the upstream cuts short
+
+The upstream can stop a response before it finishes, at `max_output_tokens` or by a content
+filter for example. An API key's Responses upstream answers with `status: "incomplete"` and
+`incomplete_details.reason`, and a ChatGPT login's stream ends with `response.incomplete`
+instead of `response.completed`. The upstream has produced and billed that response by then.
+Codex treats an upstream `response.incomplete` as a retryable stream error: it sends the same
+request again, billed again to whoever owns the key and most likely stopped the same way, and
+it runs any tool call the response carried, truncated arguments included. The proxy buffers the
+whole upstream response before it answers, so on every lane, and on both routes that stream
+(`/v1/responses`, and `/v1/chat/completions`, which streams the same Responses events), a
+streaming client gets `response.completed` instead, never `response.failed`:
+
+- An output item is finished when its status is `completed`, or when it has no status and is
+  not the last item: the stop cuts off the last item, so that one is finished only when it says
+  so. Every other item was cut off, such as an answer or a tool call with truncated arguments
+  that the upstream finalized with status `incomplete`. On a ChatGPT stream, an item that was
+  only added, and text that only streamed as deltas, were cut off too and never reach the
+  output.
+- When a finished tool call that Codex runs remains (a `function_call`, a `custom_tool_call`,
+  or a `tool_search_call` with a `call_id` and `execution: "client"`), the response keeps only
+  the finished items. Codex runs the call and continues on its own follow-up request, which
+  hands the model the call's output.
+- Otherwise the response keeps the finished items and any assistant message the stop cut off
+  after some of its text arrived, with that text, and a notice the proxy adds,
+  `The response was cut off before it finished (reason: <reason>).` The reason is the
+  upstream's `incomplete_details.reason` when that is a reason code (1 to 64 lowercase letters,
+  digits and `_`), and `unknown` otherwise. Codex takes the turn's last assistant message with
+  text as the turn's answer, so the notice joins the last answer the response keeps, as an
+  `output_text` part of its own after that answer's text, and the turn's answer is the text that
+  arrived followed by the notice. Only when the response keeps no answer, or its last answer is
+  commentary, is the notice an assistant message of its own, with the id `proxy-notice-` and
+  the response id with each `_` written as `-`. Without a `_` it is not a prefixed item id, so
+  Codex drops the id before it sends the message back and the upstream never sees an id it did
+  not issue. Either way Codex records the output and ends the turn normally instead of sending
+  the request again.
+- A cut-off reasoning item or tool call never reaches the client.
+
+The response keeps the upstream's `usage` either way, so Codex reports the turn's tokens as for
+any completed turn and the controller reconciles the charge on them. A ChatGPT login's
+subscription-usage report is sent as for a completed response. Each cut-short response logs one
+`upstream response incomplete` line with its id, its reason as the notice gives it, what was
+delivered (`tool_call` or `notice`) and how many items were kept, never their content.
+
+A request that does not stream gets the response as the upstream reported it, with
+`status: "incomplete"` and its `incomplete_details`, as the Responses API answers without a
+stream; on a ChatGPT login its output holds the items the stream finished, including one the
+upstream finalized as `incomplete`. A non-streaming Chat Completions request gets the text the
+response has, with `finish_reason` `content_filter` for a filtered response and `length` for
+any other reason. Responses from a Chat Completions or Gemini Code Assist upstream are adapted
+as completed ones, as before.
 
 The proxy does not replay ordinary failed model requests. It retains one credential renewal
 and one resend after an eligible ChatGPT 401. Controller mode performs that renewal through
@@ -362,6 +480,8 @@ cargo test --lib --test proxy_upstream_failures
 This suite uses inert credentials and loopback HTTP mocks, covering terminal and transient
 statuses, recovery, one-shot refresh, malformed responses, safe diagnostics, and typed transport
 classification. It does not demonstrate live-provider availability or certificate repair.
+`cargo test --test proxy_cut_short` pins, the same way, the exact events a streaming client
+gets for a cut-short response and for a transient rate limit on each lane.
 
 ## Next steps
 

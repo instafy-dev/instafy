@@ -20,6 +20,17 @@ vi.mock("../../../../native/useNativeBackButtonAction", () => ({
   },
 }));
 
+function mockDesktopWidth(isDesktop: boolean) {
+  vi.stubGlobal("matchMedia", (query: string) => ({
+    matches: isDesktop && query === "(min-width: 640px)",
+    media: query,
+    addEventListener: vi.fn(),
+    removeEventListener: vi.fn(),
+    addListener: vi.fn(),
+    removeListener: vi.fn(),
+  }));
+}
+
 function createProps(
   overrides: Partial<CredentialsConnectModalProps> = {},
 ): CredentialsConnectModalProps {
@@ -77,6 +88,7 @@ describe("CredentialsConnectModal", () => {
   let root: Root;
 
   beforeEach(() => {
+    mockDesktopWidth(true);
     (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
     container = document.createElement("div");
     document.body.appendChild(container);
@@ -94,6 +106,72 @@ describe("CredentialsConnectModal", () => {
     delete (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT;
     vi.unstubAllGlobals();
     vi.clearAllMocks();
+  });
+
+  it("keeps the phone key field and selection mounted while its keyboard viewport changes", async () => {
+    mockDesktopWidth(false);
+    const viewport = Object.assign(new EventTarget(), {
+      offsetTop: 0, offsetLeft: 0, width: 390, height: 844, scale: 1,
+    });
+    vi.stubGlobal("visualViewport", viewport);
+    const props = createProps({ connectModalStep: "openai", openaiApiKeyDraft: "test-key-draft" });
+    await act(async () => root.render(<CredentialsConnectModal {...props} />));
+    const input = document.querySelector<HTMLInputElement>('[data-testid="credentials-openai-api-key-input"]')!;
+    const modal = document.querySelector<HTMLElement>('[role="dialog"]')!.parentElement!;
+    await act(async () => {
+      input.focus();
+      input.setSelectionRange(2, 5);
+      Object.assign(viewport, { height: 280, offsetTop: 20 });
+      viewport.dispatchEvent(new Event("resize"));
+      viewport.dispatchEvent(new Event("scroll"));
+      await new Promise(requestAnimationFrame);
+    });
+    expect(document.querySelector('[data-testid="credentials-openai-api-key-input"]')).toBe(input);
+    expect(document.activeElement).toBe(input);
+    expect(input.value).toBe("test-key-draft");
+    expect([input.selectionStart, input.selectionEnd]).toEqual([2, 5]);
+    expect(modal.style.height).toBe("280px");
+    expect(modal.style.top).toBe("20px");
+    expect(props.onClose).not.toHaveBeenCalled();
+    expect(props.onConnectApiKey).not.toHaveBeenCalled();
+  });
+
+  it.each(["button", "native", "escape"])("uses phone %s Back to leave a provider before closing the picker", async (action) => {
+    mockDesktopWidth(false);
+    const props = createProps({ connectModalStep: "openai" });
+    await act(async () => root.render(<CredentialsConnectModal {...props} />));
+    const dismiss = async () => act(async () => {
+      if (action === "native") nativeBackMock.handler?.();
+      else if (action === "button") document.querySelector<HTMLButtonElement>('button[aria-label="Back"], button[aria-label="Close"]')!.click();
+      else document.querySelector('[role="dialog"]')!.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true }));
+    });
+    await dismiss();
+    expect(props.onBack).toHaveBeenCalledOnce();
+    expect(props.onClose).not.toHaveBeenCalled();
+    await act(async () => root.render(<CredentialsConnectModal {...props} connectModalStep="picker" />));
+    await dismiss();
+    expect(props.onBack).toHaveBeenCalledOnce();
+    expect(props.onClose).toHaveBeenCalledOnce();
+  });
+
+  it("blocks every phone dismissal while verifying a key, then allows Back", async () => {
+    mockDesktopWidth(false);
+    const props = createProps({ connectModalStep: "openai", apiKeyPendingProvider: "openai" });
+    await act(async () => root.render(<CredentialsConnectModal {...props} />));
+    const back = document.querySelector<HTMLButtonElement>('button[aria-label="Back"]')!;
+    expect(back.disabled).toBe(true);
+    expect(nativeBackMock.enabled).toBe(true);
+    await act(async () => {
+      back.click();
+      nativeBackMock.handler?.();
+      document.querySelector('[role="dialog"]')!.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true }));
+    });
+    expect(props.onBack).not.toHaveBeenCalled();
+    expect(props.onClose).not.toHaveBeenCalled();
+    await act(async () => root.render(<CredentialsConnectModal {...props} apiKeyPendingProvider={null} />));
+    await act(async () => nativeBackMock.handler?.());
+    expect(props.onBack).toHaveBeenCalledOnce();
+    expect(props.onClose).not.toHaveBeenCalled();
   });
 
   it("presents the private Desktop Codex auth.json path as the preferred local connection", async () => {
@@ -344,10 +422,7 @@ describe("CredentialsConnectModal", () => {
   });
 
   it("guides phone users to Desktop instead of asking them to find auth.json", async () => {
-    vi.stubGlobal(
-      "matchMedia",
-      vi.fn().mockImplementation(() => ({ matches: false })),
-    );
+    mockDesktopWidth(false);
 
     await act(async () => {
       root.render(
