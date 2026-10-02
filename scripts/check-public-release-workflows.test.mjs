@@ -6,6 +6,7 @@ import "./check-hosted-sdk-cleanup.test.mjs";
 import "./check-image-coordinator.test.mjs";
 import "./check-public-control-ci.test.mjs";
 import "./check-image-build-routing.test.mjs";
+import "./check-image-scan-workflow.test.mjs";
 
 const repositoryRoot = path.resolve(import.meta.dirname, "..");
 const workflowRoot = path.join(repositoryRoot, ".github", "workflows");
