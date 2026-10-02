@@ -31,6 +31,11 @@ export type ChatSubmitPreflightResult =
   | {
       status: "handled";
       submitted: boolean;
+      /**
+       * The message was put in a send queue instead of being sent: it goes
+       * out once the busy agent is free. `submitted` stays false.
+       */
+      queued?: true;
     };
 
 type RunChatSubmitPreflightParams = {
@@ -469,7 +474,8 @@ export async function runChatSubmitPreflight(
         params.focusInput();
         return { status: "handled", submitted: false };
       }
-      if (!params.override) {
+      const queued = !params.override;
+      if (queued) {
         params.queueCurrentMessage(editorState);
         params.consumeBrowserComposerTarget();
         params.clearQueuedComposerDraft();
@@ -479,7 +485,9 @@ export async function runChatSubmitPreflight(
       } else {
         params.showStatus("Runtime control is unavailable right now.", "warning", 4000);
       }
-      return { status: "handled", submitted: false };
+      return queued
+        ? { status: "handled", submitted: false, queued: true }
+        : { status: "handled", submitted: false };
     }
   }
 
@@ -512,7 +520,7 @@ export async function runChatSubmitPreflight(
       params.consumeBrowserComposerTarget();
       params.clearQueuedComposerDraft();
       params.focusInput();
-      return { status: "handled", submitted: false };
+      return { status: "handled", submitted: false, queued: true };
     }
   }
 

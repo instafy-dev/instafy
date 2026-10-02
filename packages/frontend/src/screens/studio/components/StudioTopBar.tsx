@@ -136,7 +136,10 @@ export function StudioTopBar({ mobileNavigation, newChatInSidebar = false, conte
     }
     return conversations.find((conversation) => conversation.controllerId === parentId || conversation.localId === parentId) ?? null;
   }, [activeConversation?.parentConversationId, conversations]);
-  const topbarLocationTitle = topbarLocationOverride?.title ?? activeWorkspaceTab?.title ?? "Space";
+  const resolvedProjectName = spaceDisplayName(activeProjectName);
+  // With no tab open (a space whose chats are still loading names "Chat"
+  // through the override), the header names the space itself.
+  const topbarLocationTitle = topbarLocationOverride?.title ?? activeWorkspaceTab?.title ?? resolvedProjectName;
   const handleOpenParentConversation = useCallback(() => {
     if (!parentConversation) {
       return;
@@ -295,7 +298,6 @@ export function StudioTopBar({ mobileNavigation, newChatInSidebar = false, conte
   // (a real notch on iOS) and the shell keeps owning the drag strip.
   const titleBarFree = useDesktopTabChrome && desktopTitleBarFree();
   const hasDesktopTabs = useDesktopTabChrome && workspaceTabs.length > 0;
-  const resolvedProjectName = spaceDisplayName(activeProjectName);
   const resolvedTeamName = activeTeamName?.trim() || "Team & spaces";
   const projectNameText = (
     <Text as="span" variant="bodyStrong" tone="primary" className="truncate">

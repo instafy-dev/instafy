@@ -40,6 +40,7 @@ mod browser_request;
 mod card_text;
 mod conversation_context;
 mod git_sync;
+mod known_safe_command;
 mod routing_evidence;
 mod routing_recovery;
 
@@ -605,6 +606,65 @@ fn skills_kickoff_artifacts(kickoff: Option<&SkillsKickoff>) -> Vec<JsonValue> {
     kickoff
         .map(|kickoff| kickoff.artifacts.clone())
         .unwrap_or_default()
+}
+
+/// The lane name a skills lane checkpoint records on its `origin/apply` artifact.
+const SKILLS_IMPORT_LANE: &str = "skills/import";
+
+/// What the job does after the skills lane ran.
+enum SkillsLaneStep {
+    /// The lane finished the job.
+    Finished(JobExecution),
+    /// A model turn runs next with this prompt, and the kickoff joins its execution.
+    Kickoff {
+        prompt: String,
+        kickoff: SkillsKickoff,
+    },
+}
+
+/// Settle the skills lane's outcome. A kickoff's import report is streamed first. The files an
+/// import wrote, with or without `--start`, then go to the protected checkpoint, and its
+/// artifacts join the lane's own.
+async fn settle_skills_lane_outcome(
+    outcome: skills::SkillsLaneOutcome,
+    checkpoint: workspace_commit::LaneCheckpoint<'_>,
+) -> SkillsLaneStep {
+    match outcome {
+        skills::SkillsLaneOutcome::Execution(execution) => SkillsLaneStep::Finished(execution),
+        skills::SkillsLaneOutcome::Installed {
+            mut execution,
+            files,
+        } => {
+            execution
+                .artifacts
+                .extend(workspace_commit::checkpoint_lane_files(checkpoint, &files).await);
+            SkillsLaneStep::Finished(execution)
+        }
+        skills::SkillsLaneOutcome::Kickoff {
+            report,
+            mut artifacts,
+            names,
+            prompt,
+            files,
+        } => {
+            let mut messages = Vec::new();
+            if let Some(report) = report {
+                if let Some(sender) = checkpoint.progress_sender.as_ref() {
+                    let _ = sender.send(report.clone());
+                }
+                messages.push(report);
+            }
+            artifacts.extend(workspace_commit::checkpoint_lane_files(checkpoint, &files).await);
+            SkillsLaneStep::Kickoff {
+                prompt,
+                kickoff: SkillsKickoff {
+                    messages,
+                    artifacts,
+                    names,
+                },
+            }
+        }
+    }
 }
 
 async fn run_agents_memory_snapshot(
@@ -2743,6 +2803,28 @@ const SECRET_REJECTION_CONTRACT: &str = "\
 /// with the lane's contract, ahead of the latest request, so it cannot read as
 /// words the person typed.
 const SKILL_SETUP_CONTINUATION: &str = "\nSkill setup rule:\n- This conversation stays a skill setup until the skill's \"## Getting started\" is done. A saved file or a passed check is a step, not the end: in this same reply, ask its next unanswered question or offer its schedule, then take up anything new. Plain sentences: no \"please\", no em dashes, no exclamation marks, no jokes.\n";
+
+/// What the agent sees in the workspace now beats what earlier turns said.
+/// The full contract and the skill setup rule both carry it, so a setup
+/// follow-up has it whichever lane it takes.
+///
+/// On Oct 1 a backend release stopped a hosted runtime mid-setup. When the
+/// person tried again, the replayed history held a stored startup notice and
+/// an earlier run's raw 429 error, both as plain assistant turns, and a file
+/// the setup had saved was gone. The agent, running in a healthy workspace,
+/// put the two together, told the person the workspace had failed to start
+/// and to reconnect it, guessed that as the reason the file was gone, and
+/// never asked the lost step again.
+///
+/// The first bullet rides in every conversation's full contract, so it does
+/// not declare earlier failures over: a failing test or a rejected credential
+/// can still hold. It asks the agent to check before repeating one, and keeps
+/// workspace reconnect and restart advice for when the person asks how or
+/// this turn shows the workspace failing. The second bullet names its own
+/// scope, a skill setup.
+const WORKSPACE_IS_CURRENT_RULE: &str = "\
+- You are running in this space's workspace, so it is up. An earlier turn's failure or notice may be out of date: check what you see now before repeating it or its advice. Tell the person to reconnect or restart the workspace only if they ask how, or something you ran this turn shows it failing.\n\
+- In a skill setup, the workspace records its progress. If a file an earlier step saved is missing, say in one plain sentence that it is gone, without guessing why, then redo that step (ask its question again) and continue.\n";
 
 /// True when a person in this conversation opened a skill setup with
 /// `/skills import ... --start` or `/skills start <name>` and the setup began.
@@ -5413,27 +5495,33 @@ impl JobProcessor {
 
         let mut skills_kickoff: Option<SkillsKickoff> = None;
         if let Some(request) = skills_request {
-            match skills::resolve_skills_lane(request, &workspace_dir).await {
-                skills::SkillsLaneOutcome::Execution(execution) => return Ok(execution),
-                skills::SkillsLaneOutcome::Kickoff {
-                    report,
-                    artifacts,
-                    names,
-                    prompt,
-                } => {
-                    let mut lane_messages = Vec::new();
-                    if let Some(report) = report {
-                        if let Some(progress) = progress_sender.as_ref() {
-                            let _ = progress.sender.send(report.clone());
-                        }
-                        lane_messages.push(report);
-                    }
+            // An installed skill takes the protected checkpoint a model turn's files take,
+            // behind the same gates, so it reaches the canonical repository.
+            let lane_checkpoint = workspace_commit::LaneCheckpoint {
+                lane: SKILLS_IMPORT_LANE,
+                commit_to_workspace,
+                read_only_workspace: metadata_requests_read_only_workspace(
+                    job.payload.get("metadata"),
+                ),
+                controller_base_url: &self.config.controller_base_url,
+                workspace_token: workspace_token.as_deref(),
+                project_id,
+                runtime_id: registration.runtime_id,
+                job_id: job.id,
+                run_id: job.run_id,
+                workspace_dir: &workspace_dir,
+                auto_sync_after_apply_override,
+                progress_sender: progress_sender
+                    .as_ref()
+                    .map(|progress| progress.sender.clone()),
+                local_origin: self.local_origin_sync(),
+            };
+            let outcome = skills::resolve_skills_lane(request, &workspace_dir).await;
+            match settle_skills_lane_outcome(outcome, lane_checkpoint).await {
+                SkillsLaneStep::Finished(execution) => return Ok(execution),
+                SkillsLaneStep::Kickoff { prompt, kickoff } => {
                     prompt_override = Some(prompt);
-                    skills_kickoff = Some(SkillsKickoff {
-                        messages: lane_messages,
-                        artifacts,
-                        names,
-                    });
+                    skills_kickoff = Some(kickoff);
                 }
             }
         }
@@ -7799,7 +7887,7 @@ Avoid creating dependency caches or stores in the canonical workspace root when 
                 - Treat read-only as no workspace mutation. Safe inspection commands and CLI lookups are allowed when needed to answer.\n\
                 - Compact agent context cards are soft hints/cache for prior context, current work focus, and coordination direction. Use the relevant cards included in this prompt when present; otherwise query them with `instafy agents context list --json --query \"<topic>\"` when the latest request asks for prior project, coordination, audit, host, or hardware context.\n\
                 - Agent-to-agent conversations are first-class conversations. For unknown-focus follow-ups, lookup first, answer directly when evidence is sufficient, ask one clear prior thread when durable context matters, and do not poll all agents to discover soft focus.\n\
-                - For follow-ups about lanes, workers, files, or evidence, prefer the most recent matching user-visible evidence in this active conversation. Use older same-topic context cards or prior conversation search results only if current conversation evidence is absent or clearly not the target.\n\
+                - For follow-ups about lanes, workers, files, or evidence, prefer the most recent matching user-visible evidence in this active conversation, but what you see in the workspace now beats earlier failure notices. Use older same-topic context cards or prior conversation search results only if current conversation evidence is absent or clearly not the target.\n\
                 - For current-conversation evidence-only follow-ups, do not search workspace files, source trees, `.instafy`, `.codex-runtime*`, `.codex-runtime-fallback`, or runtime logs. If restored provider context is insufficient, inspect only the active conversation with `instafy conversation show --include-threads --json`, which reads this conversation's id from the environment. Only if an older CLI reports a missing conversation argument, add the Conversation ID from Runtime context.\n\
                 - Same agent handle does not imply global memory in a new chat. Recover cross-chat context explicitly with context cards and `instafy conversation search/show --include-threads` before relying on old thread knowledge.\n\
                 - Hardware/IO context card facts are not proof. Verify on the active runtime before claiming serial, BLE, USB, or flashing access.\n\
@@ -7931,8 +8019,11 @@ Avoid creating dependency caches or stores in the canonical workspace root when 
             "- The skill's own check rejects a held value when its token request answers 401 or its status says the credential is wrong. When the provider's answer does not say which value it rejected, ask again for all of them, so the person gets the fields back in the chat instead of a detour to settings. Say in one sentence that the provider did not accept the values, quote the provider's own reason when it gives one, and give the skill's copy hints for those values.\n\
             - Missing secret/env UX: emit the relevant `request_secret`/`request_integration` action immediately, then ask one short follow-up question: whether the user already has the credential and whether they want help finding/creating it.\n\
             - For auth/integration tasks, check which values the space already has before requesting a new secret. The inventory is already in your environment as `INSTAFY_PROJECT_SECRET_INVENTORY`; read that rather than shelling out for it, and never run a command to list secrets during first-run skill setup. When the person says they saved a value, the environment is the answer to what is present, not the wording of their message: check it, or run the skill's status check, before saying any value is still missing.\n\
-            - A conversation that began with a skill setup (`/skills import ... --start` or `/skills start`) stays that setup until the skill's \"## Getting started\" is done. On every later turn, including the one a saved card continues, first pick the setup up at its next unanswered step, re-reading that SKILL.md if you need to (confirm what it asks you to confirm, write the files it names, offer its schedule), and only then take up anything new. While the setup lasts, write to the person in plain sentences: no \"please\", no em dashes, no exclamation marks, no jokes.\n\
-            - Context you recovered from earlier turns, other conversations or context cards is for you: never say that you recovered it, where from, or any conversation, job, thread or context-card id.\n\
+            - A conversation that began with a skill setup (`/skills import ... --start` or `/skills start`) stays that setup until the skill's \"## Getting started\" is done. On every later turn, including the one a saved card continues, first pick the setup up at its next unanswered step, re-reading that SKILL.md if you need to (confirm what it asks you to confirm, write the files it names, offer its schedule), and only then take up anything new. While the setup lasts, write to the person in plain sentences: no \"please\", no em dashes, no exclamation marks, no jokes.\n",
+            );
+            prompt.push_str(WORKSPACE_IS_CURRENT_RULE);
+            prompt.push_str(
+            "- Context you recovered from earlier turns, other conversations or context cards is for you: never say that you recovered it, where from, or any conversation, job, thread or context-card id.\n\
               - Use `actions` to request interactive UI help when needed (e.g. secrets/integrations). Supported actions:\n\
               - { type: 'request_integration', provider: string, optional description: string, optional requiredScopes: string[], optional capabilities: string[], optional authMethods: string[], optional suggestedSecretNames: string[], optional suggestedSecrets: { name: string, optional description: string }[], optional agentHandles: string[] }\n\
               - { type: 'request_location', optional precision: 'approximate' | 'precise', optional description: string }\n\
@@ -7958,7 +8049,7 @@ Avoid creating dependency caches or stores in the canonical workspace root when 
               - For `multi_agent_plan.mode = 'write_scoped'`, every writing sibling must have disjoint `writeScope` metadata. Prefer exact `ownedPaths`; use broad `ownedPathGlobs` for unsafe one-runtime parallelism only with `advisoryLock` metadata and prompt instructions to `mkdir` the lock directory, write `owner.json`, and release/resolve it. Use `read_only` for broad audits and investigation-only work.\n\
               - For `multi_agent_plan.mode = 'read_only'`, include `writeScope.readOnlyPaths` when the worker should inspect specific files/globs, and repeat those exact paths in the worker prompt. For prepared source trees, prefer concrete implementation/test/config subpaths over the top-level checkout root. If exact paths are unknown, make the worker's prompt start with bounded discovery inside a narrow scope and require it to report the actual paths inspected.\n\
               - Agent-to-agent conversations are first-class conversations. For unknown-focus follow-ups, lookup first, answer directly when evidence is sufficient, ask one clear prior thread when durable context matters, and do not poll all agents to discover soft focus.\n\
-              - For follow-ups about lanes, workers, files, or evidence, prefer the most recent matching user-visible evidence in this active conversation. Use older same-topic context cards or prior conversation search results only if current conversation evidence is absent or clearly not the target.\n\
+              - For follow-ups about lanes, workers, files, or evidence, prefer the most recent matching user-visible evidence in this active conversation, but what you observe in the workspace during this turn beats what earlier turns or `instafy conversation show` say, including earlier failure notices. Use older same-topic context cards or prior conversation search results only if current conversation evidence is absent or clearly not the target.\n\
               - For current-conversation evidence-only follow-ups, do not search workspace files, source trees, `.instafy`, `.codex-runtime*`, `.codex-runtime-fallback`, or runtime logs. If restored provider context is insufficient, inspect only the active conversation with `instafy conversation show --include-threads --json`, which reads this conversation's id from the environment. Only if an older CLI reports a missing conversation argument, add the Conversation ID from Runtime context.\n\
               - Broad or cross-chat coordination should search compact context cards and prior conversations first. Save/update compact cards for durable work focus and open questions; do not invent a separate first-class topic-focus object.\n\
               - Same agent handle does not imply global memory in a new chat. Recover cross-chat context explicitly with context cards and `instafy conversation search/show --include-threads` before relying on old thread knowledge.\n\
@@ -8026,7 +8117,7 @@ Avoid creating dependency caches or stores in the canonical workspace root when 
                 &mut prompt,
                 &mut prompt_section_metrics,
                 "skillSetupContinuation",
-                SKILL_SETUP_CONTINUATION,
+                &[SKILL_SETUP_CONTINUATION, WORKSPACE_IS_CURRENT_RULE].concat(),
             );
         }
 
@@ -17283,6 +17374,14 @@ mod tests {
     const SKILL_SETUP_TEST_OPENER: &str =
         "/skills import https://github.com/instafy-dev/skills/tree/main/packs/bookkeeping --start";
     const SKILL_SETUP_TEST_QUESTION: &str = "FreeFinance lists one Mandant: Example GmbH (ID 41951). Is that the one this workspace keeps books for?";
+    /// The evidence rule's clause that puts what the agent sees now ahead of
+    /// what earlier turns say, the CLI's copy of them included.
+    const EARLIER_TURNS_DO_NOT_OUTRANK_THE_WORKSPACE: &str = "but what you observe in the workspace during this turn beats what earlier turns or `instafy conversation show` say, including earlier failure notices.";
+    /// The restored lane's shorter copy of that clause, sized to its budget.
+    const RESTORED_LANE_WORKSPACE_BEATS_NOTICES: &str = "prefer the most recent matching user-visible evidence in this active conversation, but what you see in the workspace now beats earlier failure notices.";
+    /// The two halves of `WORKSPACE_IS_CURRENT_RULE` a prompt must carry.
+    const WORKSPACE_IS_CURRENT_PROBE: &str = "You are running in this space's workspace, so it is up. An earlier turn's failure or notice may be out of date: check what you see now before repeating it or its advice. Tell the person to reconnect or restart the workspace only if they ask how, or something you ran this turn shows it failing.";
+    const SAVED_FILE_MISSING_PROBE: &str = "In a skill setup, the workspace records its progress. If a file an earlier step saved is missing, say in one plain sentence that it is gone, without guessing why, then redo that step";
 
     fn skill_setup_history_job(history: JsonValue) -> LeaseJob {
         test_lease_job(Some("feature"), json!({ "conversation_history": history }))
@@ -17555,11 +17654,19 @@ mod tests {
                         ),
                         "{label}"
                     );
+                    // The setup rule was about 90 tokens. The workspace rule
+                    // adds about 125, because a setup follow-up is where an
+                    // earlier failure gets replayed and a saved file can be
+                    // gone. Its first bullet rides in every full contract too,
+                    // so it is scoped to the workspace and asks for a check
+                    // rather than calling earlier failures over, and the
+                    // second says not to guess why a file is gone. Raise it
+                    // again only on purpose.
                     assert!(
                         sections["skillSetupContinuation"]["estimatedTokens"]
                             .as_u64()
                             .unwrap()
-                            <= 90,
+                            <= 220,
                         "{label}"
                     );
                     // The rule is the runtime's, not the person's. It has its
@@ -17578,6 +17685,17 @@ mod tests {
                     usize::from(mode == "full"),
                     "{label}"
                 );
+                // What the workspace shows now beats earlier failures. The full
+                // contract carries it for every conversation, and the setup
+                // rule carries it on every follow-up lane of a setup, once.
+                let expect_workspace_rule = expect_terse || mode == "full";
+                for rule in [WORKSPACE_IS_CURRENT_PROBE, SAVED_FILE_MISSING_PROBE] {
+                    assert_eq!(
+                        prompt.matches(rule).count(),
+                        usize::from(expect_workspace_rule),
+                        "{label}: {rule}"
+                    );
+                }
             }
         }
     }
@@ -17665,6 +17783,12 @@ mod tests {
                 assert_eq!(prompt.matches(full_rule).count(), 1, "{label}");
                 // The skills catalog and app instructions stay in the Codex context.
                 assert_eq!(suppression, None, "{label}");
+            }
+            // Oct 1 took the "lost" lane: whichever lane the follow-up takes,
+            // the agent is told the workspace it runs in is up and that a
+            // saved file it cannot find means asking that step again.
+            for rule in [WORKSPACE_IS_CURRENT_PROBE, SAVED_FILE_MISSING_PROBE] {
+                assert_eq!(prompt.matches(rule).count(), 1, "{label}: {rule}");
             }
             assert_eq!(marked, !restorable, "{label}");
         }
@@ -18884,6 +19008,11 @@ mod tests {
         assert!(prompt.contains("Same agent handle does not imply global memory"));
         assert!(prompt.contains("instafy conversation search/show --include-threads"));
         assert!(prompt.contains("Hardware/IO context card facts are not proof"));
+        // A restored thread outside a setup gets no workspace rule, and this
+        // lane sends the agent to `instafy conversation show`, which prints
+        // stored notices as they are. Its evidence rule says the workspace now
+        // beats them.
+        assert!(prompt.contains(RESTORED_LANE_WORKSPACE_BEATS_NOTICES));
         assert_prompt_carries_secret_rejection_contract(&prompt);
         assert!(prompt.contains("Latest user request:\nContinue one step. Stay read-only."));
         assert!(prompt.contains("Conversation state:"));
@@ -19186,6 +19315,16 @@ mod tests {
                 .contains("Emit `multi_agent_plan` only when the pinned collaboration skill says")
         );
         assert!(prompt.contains("prefer the most recent matching user-visible evidence"));
+        assert!(prompt.contains(EARLIER_TURNS_DO_NOT_OUTRANK_THE_WORKSPACE));
+        // Every conversation's full contract says the workspace it runs in is
+        // up, setup or not. It asks for a check before an earlier failure is
+        // repeated rather than calling every earlier failure over, and it does
+        // not teach the Studio's name for where runtimes live: that word only
+        // ever reached the agent through a stored startup notice.
+        assert_eq!(prompt.matches(WORKSPACE_IS_CURRENT_PROBE).count(), 1);
+        assert_eq!(prompt.matches(SAVED_FILE_MISSING_PROBE).count(), 1);
+        assert!(!prompt.contains("Failures in earlier turns are over"));
+        assert!(!prompt.contains("Machines"));
         assert!(prompt.contains("For current-conversation evidence-only follow-ups"));
         assert!(prompt.contains("instafy conversation show --include-threads --json"));
         assert!(!prompt.contains("show <conversation-id> --include-threads"));
@@ -25872,6 +26011,8 @@ mod tests {
                 message: "The page is updated.".to_string(),
                 phase: None,
                 memory_citation: None,
+                delivery: None,
+                questions: None,
             }),
         ]);
         assert!(
@@ -25939,6 +26080,8 @@ mod tests {
                 message: "The order form is filled in.".to_string(),
                 phase: None,
                 memory_citation: None,
+                delivery: None,
+                questions: None,
             }),
         ]
         .into_iter()
@@ -26180,6 +26323,7 @@ mod tests {
             output_tokens: output,
             reasoning_output_tokens: 0,
             total_tokens: input + output,
+            codex_rollout_budget_units: None,
         };
         let turn_start = TurnStartTokenUsage::default();
         start_test_turn(

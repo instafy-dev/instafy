@@ -267,13 +267,13 @@ with an actual target compiler build and execution before enrollment; a builder
 label or `buildx inspect` alone is insufficient. Do not restart the Docker VM or
 change system-wide emulation while image jobs are active.
 
-Self-hosted image jobs give the optional GitHub cache export two minutes and
-ignore cache-export errors only. Compilation, image loading, security scans,
-registry pushes and manifest checks still fail closed. Hosted jobs retain their
-existing cache settings. Builders remain ephemeral: retaining Docker volumes
-would violate the current BUILD runner's clean-daemon admission check. This
-bound limits upload delays; it does not establish a persistent local cache or
-guarantee a warm build after an interrupted export.
+Image builders remain ephemeral on every runner: retaining Docker volumes would
+violate the current BUILD runner's clean-daemon admission check. The runtime
+publisher keeps its layer cache in a registry package instead (see
+[Runtime image layer cache](#runtime-image-layer-cache)). Its export runs the same
+way on hosted and BUILD runners, is bounded by a shell timeout and only warns when
+it fails. Compilation, image loading, security scans, registry pushes and manifest
+checks still fail closed. The services publisher uses no layer cache.
 
 Before enabling this route, an operator must deliberately enroll this repository
 and these three exact `@refs/heads/main` workflow refs in the BUILD group's
@@ -421,7 +421,7 @@ pull requests and manual runs retain always-run, fail-closed aggregation.
 | Rust check runtime provider | Provider service `cargo check --locked --tests` | `public-rust-check-provider` |
 | Rust check tunnel broker | Tunnel workspace `cargo check --locked --tests` | `public-rust-check-tunnel` |
 | Rust test runtime contracts | Complete runtime-contracts suite | `public-rust-test-contracts` |
-| Rust test runtime agent | Agent `--no-run`, followed by `--lib --test controller_client -- --test-threads=1` | `public-rust-test-agent` |
+| Rust test runtime agent | Codex code-mode host build, then agent `--no-run`, `--lib --test controller_client --test proxy_retry_budget`, `proxy_retry_budget` again with `INSTAFY_TEST_CODEX_MODEL` set to `gpt-5.6-sol` and to `gpt-5.5`, and `proxy_integration codex_read_reference_`, each with `--test-threads=1` | `public-rust-test-agent` |
 | Rust test OpenAI proxy | Complete openai-proxy-server suite | `public-rust-test-proxy` |
 | Rust test origin server | Complete origin-http-server suite | `public-rust-test-origin` |
 | Rust test git service | Complete git-service suite | `public-rust-test-git` |
@@ -436,13 +436,23 @@ or old-lock fallback. Self-hosted Rust compile/test children restore these cache
 with the pinned restore-only action; they do not upload caches in a post-job step.
 This keeps an optional large cache save from exhausting the job after its Cargo
 checks pass. A cache miss still runs every command cold and must fit the same
-30-minute limit. GitHub-hosted children retain the original restore/save action,
-keys and paths. An uncanceled Build never ignores a test failure, child
-cancellation or aggregate failure.
+30-minute limit. GitHub-hosted children save only from `refs/heads/main` (pushes
+and manual dispatches); pull requests and other refs use the restore-only step
+and read main's entries, because PR-scoped entries would use the shared cache
+budget yet serve only that PR. Keys include every `packages/*/Cargo.lock` with
+no fallback, so a pull request that changes a lockfile compiles cold on each push
+until it merges. The contracts lane's migration-image cache is split by ref only:
+it saves from `refs/heads/main` on any runner, self-hosted included, and every
+other ref restores only. Cargo caches hold only `~/.cargo/registry/index`,
+`~/.cargo/registry/cache`, `~/.cargo/git/db` and the target directory; Cargo
+re-extracts crate sources and does not compare file times under `CARGO_HOME`,
+so cached registry and git dependencies stay fresh, while workspace and path
+crates still rebuild. An uncanceled Build never ignores a test
+failure, child cancellation or aggregate failure.
 The existing unused-toolchain disk cleanup runs only on
 GitHub-hosted images, never against a self-hosted host or guest image.
 
-Only the self-hosted Linux `Rust test runtime agent` Cargo step defaults unset
+Only the self-hosted Linux `Rust test runtime agent` Cargo test step defaults unset
 `RUSTFLAGS` to `-C link-arg=-fuse-ld=lld`; its scoped prerequisites already install
 and verify `lld`. Explicit flags, including an empty opt-out, are preserved.
 Hosted and non-Linux execution and other Rust children are unchanged. The default
@@ -490,10 +500,11 @@ is not that qualification; never reduce the test selection or ignore a timeout
 to make a job green. No database, provider, signing or release credentials are
 introduced by this lane.
 
-The same restore-only compiler-cache policy applies to the two self-hosted
-Shared Browser children and Controller database tests. Their hosted compiler
-caches and pnpm caches are unchanged. Shared Browser no longer restores the
-standalone migration-image cache (see below). Cache restoration
+The same compiler-cache policy applies to the Shared Browser children and
+Controller database tests: self-hosted runs and refs other than `main` restore
+only, and only hosted `main` runs save; the Shared Browser profile child never
+saves (see below). Their pnpm caches are unchanged. Shared Browser no longer
+restores the standalone migration-image cache (see below). Cache restoration
 is an optimization, not evidence that a cold workload has passed.
 
 Disable the Rust switch to restore hosted selection for new runs; already
@@ -529,6 +540,81 @@ Automation browser cleanup:
 For the full-stack suites, run the local stack first:
 - `pnpm stack:up`
 - `pnpm stack:down` when finished.
+
+## Runtime image layer cache
+
+The runtime-agent publisher keeps one BuildKit layer cache per flavor and
+architecture in a dedicated GHCR package, `ghcr.io/instafy-dev/instafy-build-cache`,
+tagged `publish-runtime-agent-<flavor>-<architecture>`. It is never written to the
+release package. It replaced the GitHub Actions cache: one release's `mode=max`
+export is about 10 GiB, more than the repository's Actions cache holds, so every
+release evicted its own entries along with the CI caches. This reverses the
+earlier rule that the publisher would never use a registry cache.
+
+- The audit build reads the cache (`cache-from: type=registry`) before any
+  registry login. The read is anonymous, so it only hits once the package is
+  public; until then the build runs cold and nothing fails. The final stage, the
+  matrix target, is always rebuilt (`no-cache-filters`), so the OS and npm
+  packages the scan sees are current; the builder stages, including the
+  cargo-chef dependency build, come from the cache.
+- Nothing writes the cache until the image has passed the scan and, for webdev,
+  the Shared Browser check, and has been pushed and recorded. A final step then
+  repeats the audit build on the same builder with `--output type=cacheonly` and
+  `--cache-to type=registry,...,mode=max,ignore-error=true`. It creates no image,
+  tag or local copy, so it cannot change the published bytes. A shell `timeout`
+  bounds it to 15 minutes (16 with the kill grace), and the job's
+  `timeout-minutes` includes that bound, so a slow export cannot time out a cell
+  that has already published. A failed or timed-out build only logs a warning.
+  With `ignore-error=true` a failed cache write does not fail the build; BuildKit
+  reports it as an `ERROR` line in the plain progress log, and the step also turns
+  that into a warning. Either way the next release may build cold.
+- The production services publisher uses no layer cache. Its former Actions-cache
+  flags never took effect (a plain `run:` step has no Actions cache token), and a
+  public cache would expose the layers of its private images.
+
+One-time setup: the first export creates the package with `GITHUB_TOKEN`. If it is
+not public, an organization owner sets its visibility to Public in the package
+settings. This is irreversible; the cached layers are built from public source. The
+owner also limits the package's Actions access to this repository and reviews who
+else has write or admin access to it. Check the package's "Inherit access from
+source repository" setting: while it is on, everyone with write access to this
+repository can also write the package. For Actions-only writes, turn it off and
+grant this repository's Actions write access explicitly.
+
+Trust boundary: an Actions cache scoped to `main` could only be written by runs on
+`main`. A registry tag can be overwritten by any workflow run of this repository,
+on any branch, that requests `packages: write`, and by anyone with write or admin
+access to the package (including repository writers while access is inherited).
+Fork pull request runs receive a read-only token and cannot write it. A
+`pull_request_target` workflow would run with this repository's token, so no
+workflow triggered by pull requests may request `packages: write`; a test in
+`scripts/check-production-image-inputs.test.mjs` enforces that. A release build
+reuses whatever cached layers match its build steps, and the image scan would not
+detect layers placed there by such a writer. Treat write access to this package
+like write access to the release workflow.
+
+To reset a suspect cache:
+
+1. First review the package's write and admin access and any workflow that holds
+   `packages: write`, and remove whatever allowed the suspect write, so the cache
+   cannot be written again before the reset.
+2. Delete the package's versions in its settings. GitHub refuses to delete a
+   version of a public package that has more than 5,000 downloads; in that case,
+   move the cache to a new tag in a reviewed pull request (updating the tests that
+   pin the reference), so the old tag is never read again.
+3. The next release builds cold and exports a fresh cache.
+4. The scan cannot clear a release built from a suspect cache, so rebuild and
+   republish every runtime release whose build read the cache after the suspect
+   write.
+
+A merely broken cache only needs step 2. Deleting the whole package also works,
+but the one-time setup must then be repeated. Each export leaves the previous
+cache manifest untagged, and deleting untagged versions is safe.
+
+`node --test scripts/check-production-image-inputs.test.mjs scripts/check-image-build-routing.test.mjs`
+covers the read-before-login and export-after-publication order, the exact
+cache-only command (run against a stub `docker`), the final-stage filter and the
+reconstruction of the previously reviewed workflow bytes.
 
 ## Supabase CI image mirror
 
@@ -778,18 +864,21 @@ stack teardown. The profile-only script still permits a separately provisioned
 migrated loopback database; the signed-in Studio journey needs real local
 GoTrue. No fixture command, scenario, receipt, cleanup or safety check is
 replaced by the aggregate. Only the same fixed credential-free receipt paths
-are uploaded, separately per child. Compiler cache keys include the
-operating system and architecture; compiler targets are child-specific with
-no old-lock or cross-architecture fallback.
+are uploaded, separately per child. Both children use one compiler cache key,
+which includes the operating system, architecture and every workspace Cargo
+lockfile, with no old-lock or cross-architecture fallback. Only the Studio child
+saves it, from hosted `main`; the profile child restores that entry and never
+saves.
 
-The two self-hosted compiler restores set `SEGMENT_DOWNLOAD_TIMEOUT_MINS=2`.
+The two restore-only compiler steps used by self-hosted runs set
+`SEGMENT_DOWNLOAD_TIMEOUT_MINS=2`; the Studio step also serves hosted runs
+outside `main`.
 For the pinned action's Azure SDK downloader, this limits each 128 MiB segment
 to two minutes of wall time, even if bytes are arriving. It is not a total
 restore/job or inactivity timeout; legacy/non-Azure download paths do not use
 this setting. A segment timeout aborts that download and continues as a cache
 miss; migrations, compilation and both full fixtures still run. The 30-minute
-job limit remains, so cold compilation must fit it. Hosted restores, cache keys
-and paths are unchanged. See the
+job limit remains, so cold compilation must fit it. See the
 [cache action's timeout guidance](https://github.com/actions/cache/blob/55cc8345863c7cc4c66a329aec7e433d2d1c52a9/tips-and-workarounds.md#cache-segment-restore-timeout).
 
 The children use `pnpm supabase:up` to prepare their actual CLI-selected images

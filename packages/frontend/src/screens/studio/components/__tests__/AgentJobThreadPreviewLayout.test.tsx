@@ -4,12 +4,16 @@ import { act, type CSSProperties } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, onTestFinished, vi } from "vitest";
 
-import { mergeAndSortMessages } from "../../../../conversations/conversationMessageUtils";
+import {
+  mapControllerMessageToChat,
+  mergeAndSortMessages,
+} from "../../../../conversations/conversationMessageUtils";
 import { cancelAgentJob } from "../../../../services/runtimeController/jobs";
 import type { ChatMessage } from "../../types";
 import {
   AgentJobThreadPreviewLayout,
   type AgentJobThreadPreviewLayoutProps,
+  type ChatFileChangeListProps,
 } from "../AgentJobThreadPreviewLayout";
 import { RunFailureRetryProvider } from "../RunFailureNotice";
 import { useAgentJobThreadPreviewState } from "../useAgentJobThreadPreviewState";
@@ -80,7 +84,13 @@ const CONTROLLER_CREDENTIAL_REFRESH_INVALID_ERROR =
 
 // Renders the layout from the live-state hook, the way ChatMessageEntries does,
 // so a test sees the status label the hook derives from thread messages.
-function LiveAgentJobThreadPreview({ message }: { message: ChatMessage }) {
+function LiveAgentJobThreadPreview({
+  message,
+  FileChangeList = ChatFileChangeList,
+}: {
+  message: ChatMessage;
+  FileChangeList?: AgentJobThreadPreviewLayoutProps["ChatFileChangeList"];
+}) {
   const previewState = useAgentJobThreadPreviewState({ message, projectId: "project-1" });
   if (!previewState) {
     return null;
@@ -91,7 +101,7 @@ function LiveAgentJobThreadPreview({ message }: { message: ChatMessage }) {
       branchThreads={[]}
       onOpenBranchThread={() => {}}
       MessageContent={MessageContent}
-      ChatFileChangeList={ChatFileChangeList}
+      ChatFileChangeList={FileChangeList}
     />
   );
 }
@@ -1854,7 +1864,7 @@ describe("AgentJobThreadPreviewLayout", () => {
     expect(container.querySelector('[data-testid="run-failure-details"]')).toBeNull();
   });
 
-  it("offers a quiet try-again pill that resends through the retry context", async () => {
+  it("offers a try-again button that resends through the retry context", async () => {
     const requestRetry = vi.fn();
     const failureMessage = createMessage({
       id: "error-summary",
@@ -1887,7 +1897,7 @@ describe("AgentJobThreadPreviewLayout", () => {
     expect(requestRetry).toHaveBeenCalledWith(failureMessage);
   });
 
-  it("disables try-again while a resend is in flight", async () => {
+  it("shows try-again as pending while its resend is in flight", async () => {
     const requestRetry = vi.fn();
     await act(async () => {
       root.render(
@@ -1909,7 +1919,9 @@ describe("AgentJobThreadPreviewLayout", () => {
     const retryButton = container.querySelector(
       '[data-testid="run-failure-retry"]',
     ) as HTMLButtonElement | null;
-    expect(retryButton?.disabled).toBe(true);
+    // The shared Button pending pattern: a spinner, aria-disabled, still focusable.
+    expect(retryButton?.getAttribute("aria-disabled")).toBe("true");
+    expect(retryButton?.querySelector('[role="progressbar"]')).not.toBeNull();
     await act(async () => {
       retryButton?.click();
     });
@@ -2253,6 +2265,129 @@ describe("AgentJobThreadPreviewLayout", () => {
     expect(container.querySelector('button[aria-label="Expand run updates"]')).toBeNull();
     expect(container.querySelector('[data-testid="agent-thread-preview-header"]')).toBeNull();
     expect(container.querySelector('[data-testid="thread-spine"]')).toBeNull();
+  });
+
+  it("passes the run's unsaved state to the file-change rail", async () => {
+    const received: ChatFileChangeListProps[] = [];
+    function RecordingFileChangeList(props: ChatFileChangeListProps) {
+      received.push(props);
+      return <div data-testid="mock-file-change-list" />;
+    }
+
+    await act(async () => {
+      root.render(
+        <AgentJobThreadPreviewLayout
+          {...createProps({
+            latestFiles: [
+              {
+                path: "bookkeeping/profile.json",
+                workspacePath: "bookkeeping/profile.json",
+                label: "bookkeeping/profile.json",
+                changeType: "changed",
+                lineRanges: [],
+              },
+            ],
+            latestUnsavedReason: "save_failed",
+            ChatFileChangeList: RecordingFileChangeList,
+          })}
+        />,
+      );
+    });
+
+    expect(container.querySelector('[data-testid="mock-file-change-list"]')).not.toBeNull();
+    expect(received.at(-1)?.unsavedReason).toBe("save_failed");
+  });
+
+  it("carries a thread result's unsaved state from the live hook to the file-change rail", async () => {
+    const received: ChatFileChangeListProps[] = [];
+    function RecordingFileChangeList(props: ChatFileChangeListProps) {
+      received.push(props);
+      return <div data-testid="mock-file-change-list" />;
+    }
+    // The run's final result, mapped the way the conversation provider maps
+    // controller messages: its files plus an origin/apply artifact whose save
+    // failed.
+    const result = mapControllerMessageToChat({
+      id: "33333333-3333-4333-8333-333333333333",
+      conversationId: "44444444-4444-4444-4444-444444444444",
+      projectId: "55555555-5555-5555-5555-555555555555",
+      sessionId: null,
+      createdBy: null,
+      promptId: null,
+      runId: null,
+      role: "assistant",
+      content: "Saved your profile.",
+      metadata: {
+        jobId: JOB_ID,
+        source: "agent",
+        outcome: "completed",
+        artifacts: [
+          {
+            kind: "apply/files",
+            files: [{ path: "bookkeeping/profile.json", change: { type: "changed" } }],
+          },
+          {
+            kind: "origin/apply",
+            metadata: {
+              mode: "hosted",
+              gitSyncStatus: "failed",
+              gitSyncAttempted: true,
+              gitSyncError: "origin git sync failed (503 Service Unavailable)",
+              paths: ["bookkeeping/profile.json"],
+            },
+          },
+        ],
+      },
+      createdAt: new Date().toISOString(),
+    });
+    expect(result.unsavedReason).toBe("save_failed");
+    const baseMessage = createMessage();
+    const message = createMessage({
+      metadata: { ...baseMessage.metadata, threadMessages: [result] },
+    });
+
+    await act(async () => {
+      root.render(<LiveAgentJobThreadPreview message={message} FileChangeList={RecordingFileChangeList} />);
+    });
+
+    expect(container.querySelector('[data-testid="mock-file-change-list"]')).not.toBeNull();
+    expect(received.at(-1)?.files.map((file) => file.path)).toEqual(["bookkeeping/profile.json"]);
+    expect(received.at(-1)?.unsavedReason).toBe("save_failed");
+  });
+
+  it("clips the thread bubble horizontally only, so edge focus rings stay visible", async () => {
+    // jsdom cannot measure paint clipping, so this pins the structural fix:
+    // overflow-hidden cut the 2px ring + 2px offset of the Review changes,
+    // Undo and file chips that sit on the bubble's bottom edge. Where
+    // overflow: clip is supported the bubble clips x and leaves y visible;
+    // older engines (iOS 15) keep the previous overflow-hidden.
+    await act(async () => {
+      root.render(
+        <AgentJobThreadPreviewLayout
+          {...createProps({
+            latestFiles: [
+              {
+                path: "notes.md",
+                workspacePath: "notes.md",
+                label: "notes.md",
+                changeType: "changed",
+                lineRanges: [],
+              },
+            ],
+          })}
+        />,
+      );
+    });
+
+    const bubble = container.querySelector<HTMLElement>('[data-testid="chat-bubble-assistant"]');
+    const classes = (bubble?.className ?? "").split(/\s+/);
+    expect(classes).toContain("supports-[overflow:clip]:overflow-x-clip");
+    expect(classes).toContain("supports-[overflow:clip]:overflow-y-visible");
+    // No unconditional vertical clip may come back alongside it.
+    expect(classes).not.toContain("overflow-y-hidden");
+    expect(classes).not.toContain("overflow-clip");
+    // The file rail is the bubble's last content, flush with its bottom edge.
+    expect(bubble?.querySelector('[data-testid="mock-file-change-list"]')).not.toBeNull();
   });
 
   it("hides stale or completed reasoning-only run chrome with no useful summary", async () => {

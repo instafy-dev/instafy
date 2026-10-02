@@ -708,6 +708,13 @@ export function ProjectPickerPanel({ onCreateProject, searchTerm, onSearchTermCh
             );
           })
         )}
+        {remoteLoading && filteredProjects.length > 0 ? (
+          // Until the account's list arrives these rows are only the spaces
+          // this browser already knows; the list must not read as final.
+          <LoadingStatus size="xs" className="px-3 py-1" data-testid="project-picker-discovery-loading">
+            Loading spaces…
+          </LoadingStatus>
+        ) : null}
         {hiddenProjectCount > 0 ? (
           <Card
             tone="default"

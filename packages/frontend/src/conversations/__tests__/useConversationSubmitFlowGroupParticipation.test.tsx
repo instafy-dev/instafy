@@ -4,6 +4,11 @@ import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi, type Mock } from "vitest";
 import { createInitialConversation, type ConversationState } from "../conversationState";
+import {
+  didSendFailForPromptSentFromThisPage,
+  forgetPromptsSentFromThisPageForTests,
+  wasRunStartedByPromptSentFromThisPage,
+} from "../sentPromptRegistry";
 
 const resolveParticipationMock = vi.hoisted(() => vi.fn());
 const ensureControllerConversationIdMock = vi.hoisted(() => vi.fn());
@@ -154,7 +159,7 @@ describe("useConversationSubmitFlow group participation", () => {
     controllerDispatchMock.ensureConversation.mockReturnValue(conversation);
     ensureControllerConversationIdMock.mockResolvedValue(CONTROLLER_ID);
     recordMessageToControllerMock.mockResolvedValue(null);
-    sendPromptToControllerMock.mockResolvedValue({ ok: true });
+    sendPromptToControllerMock.mockResolvedValue({ ok: true, runIds: [], jobIds: [] });
     resolveLocalCapabilityHandleMock.mockReturnValue(null);
     runLocalCapabilityConversationFlowMock.mockImplementation(async (input) => ({
       handled: true,
@@ -795,5 +800,114 @@ describe("useConversationSubmitFlow group participation", () => {
     });
     expect(resolveParticipationMock).not.toHaveBeenCalled();
     expect(sendPromptToControllerMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("remembers each prompt it sends with the runs it started, so only this page retries it automatically", async () => {
+    forgetPromptsSentFromThisPageForTests();
+    sendPromptToControllerMock.mockResolvedValue({ ok: true, runIds: ["run-1"], jobIds: ["job-1"] });
+
+    await act(async () => {
+      await flow!.handleSubmit("conversation-local", "@octo verify this answer");
+    });
+
+    const appendedMessage = appendMessages.mock.calls[0][1][0];
+    expect(wasRunStartedByPromptSentFromThisPage(appendedMessage, ["job-1"])).toBe(true);
+    expect(wasRunStartedByPromptSentFromThisPage(appendedMessage, ["run-1"])).toBe(true);
+    expect(wasRunStartedByPromptSentFromThisPage(appendedMessage, ["run-of-another-prompt"])).toBe(
+      false,
+    );
+    // The copy the controller stores has its own id and keeps the client
+    // message id under prompt_metadata.
+    const sentMetadata = sendPromptToControllerMock.mock.calls[0][2] as Record<string, unknown>;
+    expect(typeof sentMetadata.clientMessageId).toBe("string");
+    expect(
+      wasRunStartedByPromptSentFromThisPage(
+        {
+          id: "stored-prompt-id",
+          metadata: { prompt_metadata: { clientMessageId: sentMetadata.clientMessageId } },
+        },
+        ["run-1"],
+      ),
+    ).toBe(true);
+  });
+
+  it("records no run for a note group participation only recorded", async () => {
+    forgetPromptsSentFromThisPageForTests();
+
+    await act(async () => {
+      await flow!.handleSubmit("conversation-local", "Sam, the staging link is in the doc", {
+        metadata: {
+          groupParticipation: { decision: "silent" },
+          groupParticipationPreflight: { status: "resolved" },
+        },
+      });
+    });
+
+    expect(sendPromptToControllerMock).not.toHaveBeenCalled();
+    expect(recordMessageToControllerMock).toHaveBeenCalledTimes(1);
+    const appendedMessage = appendMessages.mock.calls[0][1][0];
+    // No failed run can be traced back to it, so it is never resent automatically.
+    expect(wasRunStartedByPromptSentFromThisPage(appendedMessage, ["run-1"])).toBe(false);
+    expect(wasRunStartedByPromptSentFromThisPage(appendedMessage, [])).toBe(false);
+  });
+
+  it("records a prompt whose dispatch failed, so a resend of a failed run keeps its Try again", async () => {
+    forgetPromptsSentFromThisPageForTests();
+    sendPromptToControllerMock.mockResolvedValue({
+      ok: false,
+      errorMessage: "Controller unavailable. Try again shortly.",
+    });
+
+    await act(async () => {
+      await flow!.handleSubmit("conversation-local", "@octo verify this answer", {
+        metadata: { retryOfMessageId: "failure-1" },
+      });
+    });
+
+    expect(sendPromptToControllerMock).toHaveBeenCalledTimes(1);
+    const appendedMessage = appendMessages.mock.calls[0][1][0];
+    expect(didSendFailForPromptSentFromThisPage(appendedMessage)).toBe(true);
+
+    // One that went out is not.
+    forgetPromptsSentFromThisPageForTests();
+    appendMessages.mockClear();
+    sendPromptToControllerMock.mockResolvedValue({ ok: true, runIds: ["run-1"], jobIds: [] });
+    await act(async () => {
+      await flow!.handleSubmit("conversation-local", "@octo verify this answer");
+    });
+    expect(didSendFailForPromptSentFromThisPage(appendedMessage)).toBe(false);
+    expect(didSendFailForPromptSentFromThisPage(appendMessages.mock.calls[0][1][0])).toBe(false);
+  });
+
+  it("records a prompt whose recording failed", async () => {
+    const silentNote = {
+      metadata: {
+        groupParticipation: { decision: "silent" },
+        groupParticipationPreflight: { status: "resolved" },
+      },
+    };
+    forgetPromptsSentFromThisPageForTests();
+    recordMessageToControllerMock.mockResolvedValue(null);
+    await act(async () => {
+      await flow!.handleSubmit("conversation-local", "Sam, the staging link is in the doc", silentNote);
+    });
+    expect(recordMessageToControllerMock).toHaveBeenCalledTimes(1);
+    expect(didSendFailForPromptSentFromThisPage(appendMessages.mock.calls[0][1][0])).toBe(true);
+
+    appendMessages.mockClear();
+    recordMessageToControllerMock.mockResolvedValue({
+      id: "stored-note",
+      role: "user",
+      authorId: "user-1",
+      content: "Sam, the staging link is in the doc",
+      timestamp: 1,
+      files: null,
+      messageType: null,
+      metadata: null,
+    });
+    await act(async () => {
+      await flow!.handleSubmit("conversation-local", "Sam, the staging link is in the doc", silentNote);
+    });
+    expect(didSendFailForPromptSentFromThisPage(appendMessages.mock.calls[0][1][0])).toBe(false);
   });
 });

@@ -123,6 +123,8 @@ COPY packages/runtime-contracts/ packages/runtime-contracts/
 COPY packages/openai-proxy-server/ packages/openai-proxy-server/
 COPY packages/origin-http-server/ packages/origin-http-server/
 COPY codex/codex-rs/ codex/codex-rs/
+# Checksums Codex pins for its sandboxed rusty_v8 builds (see scripts/fetch-rusty-v8.sh).
+COPY codex/third_party/v8/ codex/third_party/v8/
 COPY proto/ proto/
 WORKDIR /src/packages/runtime-agent
 RUN cargo chef prepare --recipe-path /src/recipe.json
@@ -133,8 +135,8 @@ RUN cargo chef prepare --recipe-path /src/recipe.json
 # The recipe stubs only runtime-agent itself: cargo-chef keeps the out-of-tree
 # path crates (runtime-contracts, origin-http-server, codex-rs) as real sources,
 # so this layer is keyed on them too. target/ is deliberately NOT a cache mount
-# here: exported layer caches (the publisher's type=gha, mode=max) keep image
-# layers but never cache mounts, so only a layer carries the compiled
+# here: exported layer caches (the publisher's registry cache, mode=max) keep
+# image layers but never cache mounts, so only a layer carries the compiled
 # dependencies to a fresh runner.
 FROM ${RUST_IMAGE} AS builder-deps
 ARG BUILD_PROFILE=dev
@@ -153,9 +155,16 @@ COPY --from=chef /src/packages/origin-http-server /src/packages/origin-http-serv
 COPY --from=chef /src/codex /src/codex
 COPY --from=chef /src/proto /src/proto
 COPY --from=chef /src/recipe.json /src/recipe.json
+# codex-code-mode-host links V8 with its sandbox enabled. denoland publishes no
+# such prebuilt, so fetch the one Codex publishes, checked against the checksums
+# pinned in the codex checkout, and point the v8 build script at it.
+COPY scripts/fetch-rusty-v8.sh /src/scripts/fetch-rusty-v8.sh
+RUN /src/scripts/fetch-rusty-v8.sh "$(rustc -vV | sed -n 's/^host: //p')" /opt/rusty_v8
+ENV RUSTY_V8_ARCHIVE=/opt/rusty_v8/rusty_v8_archive \
+    RUSTY_V8_SRC_BINDING_PATH=/opt/rusty_v8/src_binding.rs
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/usr/local/cargo/git \
-    cargo chef cook --profile ${BUILD_PROFILE} --recipe-path /src/recipe.json --locked
+    cargo chef cook --features code-mode-host --profile ${BUILD_PROFILE} --recipe-path /src/recipe.json --locked
 
 ########################
 # Application builder
@@ -178,11 +187,12 @@ COPY packages/runtime-agent/ packages/runtime-agent/
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/usr/local/cargo/git \
     --mount=type=cache,target=/src/packages/runtime-agent/target,from=builder-deps,source=/src/packages/runtime-agent/target \
-    cargo build --profile ${BUILD_PROFILE} --manifest-path packages/runtime-agent/Cargo.toml --locked \
+    cargo build --profile ${BUILD_PROFILE} --manifest-path packages/runtime-agent/Cargo.toml --features code-mode-host -p runtime-agent -p codex-code-mode-host --locked \
     && cargo build --profile ${BUILD_PROFILE} --manifest-path packages/runtime-agent/Cargo.toml -p codex-linux-sandbox --locked \
     && mkdir -p /src/build-artifacts/${BUILD_ARTIFACT_DIR} \
     && cp /src/packages/runtime-agent/target/${BUILD_ARTIFACT_DIR}/runtime-agent /src/build-artifacts/${BUILD_ARTIFACT_DIR}/runtime-agent \
-    && cp /src/packages/runtime-agent/target/${BUILD_ARTIFACT_DIR}/codex-linux-sandbox /src/build-artifacts/${BUILD_ARTIFACT_DIR}/codex-linux-sandbox
+    && cp /src/packages/runtime-agent/target/${BUILD_ARTIFACT_DIR}/codex-linux-sandbox /src/build-artifacts/${BUILD_ARTIFACT_DIR}/codex-linux-sandbox \
+    && cp /src/packages/runtime-agent/target/${BUILD_ARTIFACT_DIR}/codex-code-mode-host /src/build-artifacts/${BUILD_ARTIFACT_DIR}/codex-code-mode-host
 
 ########################
 # Binary-only export (dev fast loop): `--target binary-export --output type=local` yields just
@@ -193,10 +203,15 @@ FROM scratch AS binary-export
 ARG BUILD_ARTIFACT_DIR=debug
 COPY --from=builder /src/build-artifacts/${BUILD_ARTIFACT_DIR}/runtime-agent /runtime-agent
 COPY --from=builder /src/build-artifacts/${BUILD_ARTIFACT_DIR}/codex-linux-sandbox /codex-linux-sandbox
+COPY --from=builder /src/build-artifacts/${BUILD_ARTIFACT_DIR}/codex-code-mode-host /codex-code-mode-host
 
 ########################
 # Runtime image
 ########################
+# The runtime publisher rebuilds this stage and runtime-webdev on every release
+# instead of taking them from its layer cache, so the OS and npm packages they
+# install are current when the image is scanned. Keep compilation in the builder
+# stages, whose layers the cache keeps.
 FROM ${RUNTIME_BASE} AS runtime
 
 ARG CHROMIUM_MIN_VERSION
@@ -306,10 +321,12 @@ ARG BUILD_PROFILE=dev
 ARG BUILD_ARTIFACT_DIR=debug
 COPY --from=builder /src/build-artifacts/${BUILD_ARTIFACT_DIR}/runtime-agent /usr/local/bin/runtime-agent
 COPY --from=builder /src/build-artifacts/${BUILD_ARTIFACT_DIR}/codex-linux-sandbox /usr/local/bin/codex-linux-sandbox
+# Code-mode-only models run their tools in this host; runtime-agent looks for it beside itself.
+COPY --from=builder /src/build-artifacts/${BUILD_ARTIFACT_DIR}/codex-code-mode-host /usr/local/bin/codex-code-mode-host
 COPY --from=browser-egress-proxy-builder /out/browser-egress-proxy /usr/local/bin/browser-egress-proxy
 COPY --from=browser-webrtc-builder /out/browser-webrtc-sender /usr/local/bin/browser-webrtc-sender
 RUN set -eu; \
-    for binary in /usr/local/bin/browser-egress-proxy /usr/local/bin/browser-webrtc-sender; do \
+    for binary in /usr/local/bin/browser-egress-proxy /usr/local/bin/browser-webrtc-sender /usr/local/bin/codex-code-mode-host; do \
       magic="$(od -An -tx1 -N4 "${binary}" | tr -d ' \n')"; \
       [ "${magic}" = "7f454c46" ] || { echo "Invalid ELF helper binary: ${binary}" >&2; exit 1; }; \
     done
@@ -503,10 +520,12 @@ ARG BUILD_PROFILE=dev
 ARG BUILD_ARTIFACT_DIR=debug
 COPY --from=builder /src/build-artifacts/${BUILD_ARTIFACT_DIR}/runtime-agent /usr/local/bin/runtime-agent
 COPY --from=builder /src/build-artifacts/${BUILD_ARTIFACT_DIR}/codex-linux-sandbox /usr/local/bin/codex-linux-sandbox
+# Code-mode-only models run their tools in this host; runtime-agent looks for it beside itself.
+COPY --from=builder /src/build-artifacts/${BUILD_ARTIFACT_DIR}/codex-code-mode-host /usr/local/bin/codex-code-mode-host
 COPY --from=browser-egress-proxy-builder /out/browser-egress-proxy /usr/local/bin/browser-egress-proxy
 COPY --from=browser-webrtc-builder /out/browser-webrtc-sender /usr/local/bin/browser-webrtc-sender
 RUN set -eu; \
-    for binary in /usr/local/bin/browser-egress-proxy /usr/local/bin/browser-webrtc-sender; do \
+    for binary in /usr/local/bin/browser-egress-proxy /usr/local/bin/browser-webrtc-sender /usr/local/bin/codex-code-mode-host; do \
       magic="$(od -An -tx1 -N4 "${binary}" | tr -d ' \n')"; \
       [ "${magic}" = "7f454c46" ] || { echo "Invalid ELF helper binary: ${binary}" >&2; exit 1; }; \
     done

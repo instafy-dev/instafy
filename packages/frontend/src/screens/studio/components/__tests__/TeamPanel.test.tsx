@@ -137,6 +137,11 @@ describe("TeamPanel authorized work and navigation", () => {
     expect(mocks.newSpace).toHaveBeenCalledWith("team-b");
   });
 
+  it("marks the team with the same initials as its chips elsewhere in Studio", async () => {
+    await render("team-b");
+    expect(container.querySelector('[data-testid="team-panel-initials"]')?.textContent).toBe("TB");
+  });
+
   it("does not silently replace a revoked or unknown team with another accessible team", async () => {
     await render("revoked-team");
     expect(container.textContent).toContain("This team is not available to your account");

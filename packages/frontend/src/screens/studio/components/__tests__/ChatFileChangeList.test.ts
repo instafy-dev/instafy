@@ -537,6 +537,174 @@ describe("ChatFileChangeList", () => {
     expect(revertButton).not.toBeNull();
   });
 
+  it("says Not saved next to the file chips when the run's save failed", async () => {
+    // The runtime records a failed save as gitSyncStatus "failed" on the
+    // origin/apply artifact; the rail must not look like a normal change.
+    await act(async () => {
+      root.render(
+        createElement(ChatFileChangeList, {
+          files: [fileChange("bookkeeping/profile.json")],
+          projectId: "p1",
+          unsavedReason: "save_failed",
+          messageId: "msg-1",
+        }),
+      );
+    });
+
+    const state = container.querySelector<HTMLElement>('[data-testid="chat-file-change-unsaved"]');
+    expect(state).not.toBeNull();
+    // Visible label is the short state; the glyph is decorative.
+    expect(state?.querySelector('[aria-hidden="true"]')).not.toBeNull();
+    expect(state?.querySelector("span:not(.sr-only)")?.textContent).toBe("Not saved");
+
+    // It sits in the chip row, after the file chip and before the actions.
+    const row = state?.parentElement;
+    const rowChildren = Array.from(row?.querySelectorAll("[data-testid]") ?? []).map((node) =>
+      node.getAttribute("data-testid"),
+    );
+    expect(rowChildren.indexOf("chat-file-change-file-chip")).toBeLessThan(
+      rowChildren.indexOf("chat-file-change-unsaved"),
+    );
+    expect(rowChildren.indexOf("chat-file-change-unsaved")).toBeLessThan(
+      rowChildren.indexOf("chat-file-change-review"),
+    );
+
+    // The plain-words explanation reaches pointer users (tooltip) and
+    // assistive tech (described-by on the Review action).
+    const explanation =
+      "Saving failed when this turn ran. Until you save a version, these changes are only on this space's machine and could be lost when it restarts.";
+    expect(state?.getAttribute("title")).toBe(explanation);
+    const review = container.querySelector<HTMLButtonElement>('[data-testid="chat-file-change-review"]');
+    const describedBy = review?.getAttribute("aria-describedby") ?? "";
+    expect(describedBy).not.toBe("");
+    expect(document.getElementById(describedBy)?.textContent).toBe(explanation);
+    expect(container.textContent).not.toMatch(/\u2014/);
+  });
+
+  it("opens the reason under the row when Not saved is tapped, for touch and keyboard users", async () => {
+    // A title tooltip never shows on a phone and cannot be focused, so the
+    // state is a native button that reveals the same words in place.
+    await act(async () => {
+      root.render(
+        createElement(ChatFileChangeList, {
+          files: [fileChange("bookkeeping/profile.json")],
+          projectId: "p1",
+          unsavedReason: "save_failed",
+          messageId: "msg-1",
+        }),
+      );
+    });
+
+    const state = container.querySelector<HTMLButtonElement>('[data-testid="chat-file-change-unsaved"]');
+    const note = container.querySelector<HTMLElement>('[data-testid="chat-file-change-unsaved-note"]');
+    expect(state?.tagName).toBe("BUTTON");
+    expect(state?.type).toBe("button");
+    expect(state?.getAttribute("aria-controls")).toBe(note?.id);
+    expect(state?.getAttribute("aria-expanded")).toBe("false");
+    // Collapsed, the note stays in the tree for described-by but off screen.
+    expect(note?.classList.contains("sr-only")).toBe(true);
+
+    await act(async () => {
+      state?.click();
+    });
+    expect(state?.getAttribute("aria-expanded")).toBe("true");
+    expect(note?.classList.contains("sr-only")).toBe(false);
+    expect(note?.textContent).toBe(state?.getAttribute("title"));
+    // It sits under the chip row, not inside it.
+    expect(note?.parentElement?.getAttribute("data-testid")).toBe("chat-file-change-summary");
+
+    await act(async () => {
+      state?.click();
+    });
+    expect(state?.getAttribute("aria-expanded")).toBe("false");
+    expect(note?.classList.contains("sr-only")).toBe(true);
+  });
+
+  it("explains auto-save being off with its own words", async () => {
+    await act(async () => {
+      root.render(
+        createElement(ChatFileChangeList, {
+          files: [fileChange("notes.md")],
+          projectId: "p1",
+          unsavedReason: "auto_save_off",
+        }),
+      );
+    });
+
+    const state = container.querySelector<HTMLElement>('[data-testid="chat-file-change-unsaved"]');
+    expect(state?.textContent).toContain("Not saved");
+    expect(state?.getAttribute("title")).toBe(
+      "Auto-save was off when this turn ran. Until you save a version, these changes are only on this space's machine and could be lost when it restarts.",
+    );
+    expect(state?.getAttribute("title")).not.toMatch(/\u2014/);
+  });
+
+  it("shows no save state when the save worked or was never attempted", async () => {
+    await act(async () => {
+      root.render(
+        createElement(ChatFileChangeList, {
+          files: [fileChange("notes.md")],
+          projectId: "p1",
+          unsavedReason: null,
+        }),
+      );
+    });
+
+    expect(container.querySelector('[data-testid="chat-file-change-unsaved"]')).toBeNull();
+    expect(container.textContent).not.toContain("Not saved");
+    const review = container.querySelector<HTMLButtonElement>('[data-testid="chat-file-change-review"]');
+    expect(review?.hasAttribute("aria-describedby")).toBe(false);
+  });
+
+  it("keeps Not saved visible when a large change-set is tucked behind the summary chip", async () => {
+    const files = ["a", "b", "c", "d", "e"].map((name) => fileChange(`src/${name}.ts`));
+
+    await act(async () => {
+      root.render(
+        createElement(ChatFileChangeList, { files, projectId: null, unsavedReason: "save_failed" }),
+      );
+    });
+
+    expect(container.querySelector('[data-testid="chat-file-change-file-chip"]')).toBeNull();
+    expect(container.querySelector('[data-testid="chat-file-change-unsaved"]')?.textContent).toContain(
+      "Not saved",
+    );
+  });
+
+  it("drops Not saved once every file has been reverted", async () => {
+    runtimeState.runtimeReady = true;
+    runtimeState.effectiveRuntimeId = "runtime-1";
+    fetchWorkspaceGitDiff.mockResolvedValue({ supported: true, diff: "", truncated: false });
+    revertWorkspaceGitPaths.mockResolvedValue({ ok: true, removed: [] });
+    const confirmSpy = vi.spyOn(window, "confirm").mockReturnValue(true);
+
+    try {
+      await act(async () => {
+        root.render(
+          createElement(ChatFileChangeList, {
+            files: [fileChange("src/app.ts")],
+            projectId: "p1",
+            unsavedReason: "save_failed",
+          }),
+        );
+      });
+      await act(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      });
+      expect(container.querySelector('[data-testid="chat-file-change-unsaved"]')).not.toBeNull();
+
+      const undoButton = container.querySelector<HTMLButtonElement>('[data-testid="chat-file-change-undo"]');
+      await act(async () => {
+        undoButton?.click();
+      });
+
+      expect(revertWorkspaceGitPaths).toHaveBeenCalledTimes(1);
+      expect(container.querySelector('[data-testid="chat-file-change-unsaved"]')).toBeNull();
+    } finally {
+      confirmSpy.mockRestore();
+    }
+  });
+
   it("middle-truncates long chip labels so the extension stays visible", async () => {
     const files = [fileChange("src/components/ExtremelyLongComponentNameForInternationalizationSupport.tsx")];
 

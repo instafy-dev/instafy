@@ -56,4 +56,21 @@ describe("ProjectPickerPanel overview navigation", () => {
     expect(mocks.switchProject).not.toHaveBeenCalled();
     expect(mocks.openPanelTab).not.toHaveBeenCalled();
   });
+
+  it("says the list is still loading while only the spaces this browser knows are shown", async () => {
+    mocks.projects.mockReturnValue({ projectList: [alpha], activeProjectId: A,
+      createProject: mocks.createProject, switchProject: mocks.switchProject });
+    mocks.merged.mockReturnValue({ mergedProjects: [alpha], remoteLoading: true, remoteError: null, remoteRefreshing: false });
+    const render = () => act(async () => root.render(<BrowserRouter><ProjectPickerPanel onCreateProject={() => {}} searchTerm="" onSearchTermChange={() => {}} /></BrowserRouter>));
+    const loadingStatus = () => container.querySelector('[data-testid="project-picker-discovery-loading"]');
+    await render();
+    expect(container.querySelector(`[data-testid="project-picker-card-${A}"]`)).not.toBeNull();
+    expect(loadingStatus()?.getAttribute("role")).toBe("status");
+    expect(loadingStatus()?.textContent).toBe("Loading spaces…");
+
+    mocks.merged.mockReturnValue({ mergedProjects: [alpha, beta], remoteLoading: false, remoteError: null, remoteRefreshing: false });
+    await render();
+    expect(container.querySelector(`[data-testid="project-picker-card-${B}"]`)).not.toBeNull();
+    expect(loadingStatus()).toBeNull();
+  });
 });

@@ -37,6 +37,8 @@ type FilesExplorerTreeProps = {
   onSelectMarkdownSection: (entry: ControllerWorkspaceEntry, section: MarkdownOutlineItem) => void;
   onToggleMarkdownSectionCollapse: (entryPath: string, slug: string) => void;
   onFocus: (path: string) => void;
+  /** Loading or retry line for an expanded folder whose listing has not arrived. */
+  renderDirectoryStatus?: (path: string) => ReactNode;
   onEntryContextMenu: (entry: ControllerWorkspaceEntry, clientX: number, clientY: number) => void;
   createFile: CreateEntryDraftState | null;
   createFileInputRef: RefObject<HTMLInputElement | null>;
@@ -72,6 +74,7 @@ export function FilesExplorerTree({
   onSelectMarkdownSection,
   onToggleMarkdownSectionCollapse,
   onFocus,
+  renderDirectoryStatus,
   onEntryContextMenu,
   createFile,
   createFileInputRef,
@@ -128,6 +131,10 @@ export function FilesExplorerTree({
         const isActive = activePath === entry.path;
         const isDirty = dirtyFileIds.has(entry.path);
         const showFocusChip = entry.kind === "directory" && (isExpanded || isActive);
+        const childListingStatus =
+          entry.kind === "directory" && isExpanded && entriesMap[normalizedEntryPath] === undefined
+            ? renderDirectoryStatus?.(normalizedEntryPath) ?? null
+            : null;
 
         const renderMarkdownOutlineNodes = (
           nodes: MarkdownOutlineTreeItem[],
@@ -277,7 +284,17 @@ export function FilesExplorerTree({
                 ) : null}
               </div>
               {entry.kind === "directory" && isExpanded ? (
-                <div className={touchDensity ? "mt-1.5 pl-2" : "mt-2 pl-2"}>{renderNodes(normalizedEntryPath, nestingDepth + 1)}</div>
+                <div className={touchDensity ? "mt-1.5 pl-2" : "mt-2 pl-2"}>
+                  {childListingStatus ? (
+                    <div
+                      className={touchDensity ? "px-3.5 py-2" : "px-2.5 py-1"}
+                      data-testid={`files-directory-status-${entry.path.replace(/[^a-zA-Z0-9]/g, "-")}`}
+                    >
+                      {childListingStatus}
+                    </div>
+                  ) : null}
+                  {renderNodes(normalizedEntryPath, nestingDepth + 1)}
+                </div>
               ) : null}
               {isMarkdownEntry && isMarkdownExpanded ? (
                 <div className="mt-2">
@@ -472,6 +489,7 @@ export function FilesExplorerTree({
       onFocus,
       onSelect,
       onSelectMarkdownSection,
+      renderDirectoryStatus,
       onToggle,
       onToggleMarkdownOutline,
       onToggleMarkdownSectionCollapse,

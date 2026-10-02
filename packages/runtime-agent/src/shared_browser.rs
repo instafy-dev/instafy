@@ -813,6 +813,10 @@ pub async fn run_mcp_stdio() -> Result<()> {
     if !browser_session_enabled(std::env::var(BROWSER_SESSION_ENV).ok().as_deref()) {
         bail!("Shared Browser MCP is unavailable outside a browser-session runtime");
     }
+    // Before serving anything: runtime-agent releases browser authority only after it has
+    // killed and confirmed gone every process group recorded here.
+    crate::mcp_process_groups::register_current_process_group()
+        .context("Shared Browser MCP could not record its process group")?;
     let running = SharedBrowserMcpServer::new()
         .serve((tokio::io::stdin(), tokio::io::stdout()))
         .await

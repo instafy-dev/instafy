@@ -47,6 +47,45 @@ describe("chatContentHelpers", () => {
   });
 });
 
+describe("workspace search status", () => {
+  it.each([
+    ["a printf format with an escape", 'rg -n "%s\\n" src'],
+    ["a tab escape", 'grep -rn "\\tTODO" .'],
+    ["a regex alternation", 'rg "TODO|FIXME" packages'],
+    ["regex anchors and wildcards", "rg '^import .* from' src"],
+    ["a character class", 'grep -E "[0-9]+ items" notes.txt'],
+    ["a call pattern", 'rg -n "useState(" src'],
+    ["a numeric placeholder", 'rg "total: %d" src'],
+    ["a very long phrase", 'rg -n "the quick brown fox jumps over the lazy dog again and again" docs'],
+  ])("says plainly that it is searching when the pattern is %s", (_label, command) => {
+    expect(summarizeActiveCommandForPreview(command)).toBe("Searching the workspace…");
+  });
+
+  it.each([
+    ["a multi-line pattern", 'rg -U "first line\nsecond line" src'],
+    ["a multi-line pattern with Windows line endings", 'rg -U "first line\r\nsecond line" src'],
+    ["a multi-line pattern inside a shell wrapper", "bash -lc 'rg -U \"first line\n  second line\" src'"],
+  ])("does not join the lines of %s into one phrase", (_label, command) => {
+    expect(command).toMatch(/[\r\n]/);
+    expect(summarizeActiveCommandForPreview(command)).toBe("Searching the workspace…");
+  });
+
+  it("still names a one-line pattern when the command itself spans lines", () => {
+    expect(summarizeActiveCommandForPreview('cd packages &&\n  rg -n "invoice" src')).toBe('Searching workspace for "invoice"…');
+  });
+
+  it("uses the same plain status when the search has no quoted pattern", () => {
+    expect(summarizeActiveCommandForPreview("rg -n TODO src")).toBe("Searching the workspace…");
+  });
+
+  it.each(["invoice", "customer name", "overlap-goal", "INSTAFY.md", "user_id", "Café menu"])(
+    "keeps the readable pattern %s",
+    (topic) => {
+      expect(summarizeActiveCommandForPreview(`rg -n "${topic}" src`)).toBe(`Searching workspace for "${topic}"…`);
+    },
+  );
+});
+
 describe("command previews in the transcript", () => {
   it("never shows the raw secrets invocation, which carries the space id", () => {
     const raw = "instafy secrets list --space d6aaf12d-3d56-45da-90d3-4806e2e47c10 --json";

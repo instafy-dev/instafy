@@ -14,6 +14,7 @@ import type {
   ChatMessage,
   ChatMessageCommitRange,
   ChatMessageFileChange,
+  ChatMessageUnsavedReason,
 } from "../types";
 import { CHAT_BUBBLE_MAX_WIDTH } from "./chatBubbleWidth";
 import { extractMessageDetails } from "./chatMessageMetadata";
@@ -43,6 +44,7 @@ type ChatFileChangeListProps = {
   files: ChatMessageFileChange[];
   projectId?: string | null;
   commitRange?: ChatMessageCommitRange | null;
+  unsavedReason?: ChatMessageUnsavedReason | null;
   messageId?: string | null;
   messageTimestamp?: number | null;
 };
@@ -145,7 +147,7 @@ export function ReasoningEntry({
         {display}
       </Text>
       {message.files && message.files.length > 0 ? (
-        <ChatFileChangeList files={message.files} projectId={projectId} commitRange={message.commitRange ?? null} messageId={message.id} messageTimestamp={message.timestamp} />
+        <ChatFileChangeList files={message.files} projectId={projectId} commitRange={message.commitRange ?? null} unsavedReason={message.unsavedReason ?? null} messageId={message.id} messageTimestamp={message.timestamp} />
       ) : null}
     </div>
   );
@@ -239,7 +241,7 @@ export function LocalCapabilityInlineEntry({
           ) : null}
           {message.files && message.files.length > 0 ? (
             <div className="mt-2">
-              <ChatFileChangeList files={message.files} projectId={projectId} commitRange={message.commitRange ?? null} messageId={message.id} messageTimestamp={message.timestamp} />
+              <ChatFileChangeList files={message.files} projectId={projectId} commitRange={message.commitRange ?? null} unsavedReason={message.unsavedReason ?? null} messageId={message.id} messageTimestamp={message.timestamp} />
             </div>
           ) : null}
         </div>
@@ -448,7 +450,7 @@ export function StatusActivityEntry({
         ) : null}
         {message.files && message.files.length > 0 ? (
           <div className="mt-3">
-            <ChatFileChangeList files={message.files} projectId={projectId} commitRange={message.commitRange ?? null} messageId={message.id} messageTimestamp={message.timestamp} />
+            <ChatFileChangeList files={message.files} projectId={projectId} commitRange={message.commitRange ?? null} unsavedReason={message.unsavedReason ?? null} messageId={message.id} messageTimestamp={message.timestamp} />
           </div>
         ) : null}
       </Surface>
