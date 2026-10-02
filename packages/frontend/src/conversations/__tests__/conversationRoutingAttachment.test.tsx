@@ -206,6 +206,47 @@ describe("conversation routing during controller attachment", () => {
     expect(dispatch).not.toHaveBeenCalled();
   });
 
+  it.each(["history", "event"] as const)("retires the cached internal tree via %s, without requiring its root in cache", async (source) => {
+    const initialState = buildState();
+    initialState.conversations[0].draft = "Keep my unfinished draft";
+    const child = { ...createInitialConversation({ localId: "audit-child", controllerId: "bbbbbbbb-cccc-4ddd-8eee-ffffffffffff" }),
+      parentConversationId: CONTROLLER_ID, unreadCount: 2, pendingRunIds: ["child-run"],
+      awaitingLeaseRunIds: ["child-run"], pendingRunSubmittedAt: { "child-run": 1 } };
+    const grandchild = { ...createInitialConversation({ localId: "audit-grandchild", controllerId: "cccccccc-dddd-4eee-8fff-aaaaaaaaaaaa" }),
+      parentConversationId: child.controllerId, unreadCount: 3, pendingRunIds: ["grandchild-run"] };
+    // An unrelated malformed ancestry cycle must terminate without hiding it.
+    const otherA = { ...createInitialConversation({ localId: "other-a", controllerId: "dddddddd-eeee-4fff-8aaa-bbbbbbbbbbbb" }),
+      parentConversationId: "eeeeeeee-ffff-4aaa-8bbb-cccccccccccc", unreadCount: 1 };
+    const otherB = { ...createInitialConversation({ localId: "other-b", controllerId: "eeeeeeee-ffff-4aaa-8bbb-cccccccccccc" }),
+      parentConversationId: otherA.controllerId, unreadCount: 1 };
+    initialState.conversations.push(child, grandchild, otherA, otherB);
+    initialState.runMap = { "child-run": child.localId, "grandchild-run": grandchild.localId };
+    let nextState = initialState;
+    const dispatch = vi.fn<(action: ConversationsAction) => void>((action) => {
+      nextState = conversationsReducer(nextState, action);
+    });
+    await act(async () => root.render(source === "history"
+      ? <ControllerSyncHarness state={initialState} dispatch={dispatch}
+        fetchProjectConversations={async () => []}
+        fetchInternalConversations={async () => [{ ...buildRemoteConversation({}), internalPurpose: "space_review" }]} />
+      : <PendingCreationHarness state={initialState} dispatch={dispatch}
+        internalConversationIds={{ [CONTROLLER_ID]: true }}
+        messages={[child, grandchild].map((conversation, index) => ({
+          id: `late-child-${index}`, conversationId: conversation.controllerId!, projectId: PROJECT_ID,
+          sessionId: null, promptId: null, runId: null, role: "assistant", content: "Late audit message",
+          metadata: null, createdAt: "2026-10-02T12:00:00Z",
+        }))} />));
+    expect(nextState.activeId).toBe(initialState.activeId);
+    expect(nextState.conversations[0]).toEqual(initialState.conversations[0]);
+    expect(nextState.conversations.slice(3)).toEqual([otherA, otherB]);
+    expect(nextState.runMap).toEqual({});
+    for (const conversation of nextState.conversations.slice(1, 3)) {
+      expect(conversation).toMatchObject({ lifecycleStatus: "hidden", unreadCount: 0,
+        pendingRunIds: [], awaitingLeaseRunIds: [], pendingRunSubmittedAt: {}, messages: [] });
+    }
+    expect(dispatch.mock.calls.map(([action]) => action.type)).toEqual(["RETIRE_INTERNAL", "RETIRE_INTERNAL"]);
+  });
+
   it.each([false, true])("retires a cached internal anchor's attention while retaining its audit history (audit open: %s)", async (auditOpen) => {
     const initialState = buildState();
     initialState.conversations[0].draft = "Keep my unfinished draft";

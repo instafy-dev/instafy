@@ -1,4 +1,5 @@
-import { useEffect, useRef, type Dispatch, type MutableRefObject } from "react";
+import { useEffect, useMemo, useRef, type Dispatch, type MutableRefObject } from "react";
+import { collectInternalConversationIds } from "./internalConversations";
 import { isAppInForeground } from "../notifications/assistantMessageNotifications";
 import type {
   ControllerConversationCreated,
@@ -95,17 +96,20 @@ export function usePendingConversationEffects({
   // Creation and its first message may be flushed together before React has
   // applied CREATE. Share that identity between the ordered effects below.
   const createdRecommendationIdsRef = useRef(new Map<string, string>());
+  const internalIds = useMemo(() => collectInternalConversationIds(
+    state.conversations, Object.keys(internalConversationIds),
+  ), [internalConversationIds, state.conversations]);
   useEffect(() => {
     if (state.projectKey !== projectKey) return;
     state.conversations.forEach((conversation) => {
-      if (!conversation.controllerId || !internalConversationIds[conversation.controllerId]) return;
+      if (!internalIds.has(conversation.localId)) return;
       if (conversation.lifecycleStatus !== "hidden" || conversation.unreadCount > 0
         || conversation.pendingRunIds.length > 0 || conversation.awaitingLeaseRunIds.length > 0
         || Object.values(state.runMap).includes(conversation.localId)) {
         dispatch({ type: "RETIRE_INTERNAL", id: conversation.localId });
       }
     });
-  }, [dispatch, internalConversationIds, projectKey, state.conversations, state.projectKey, state.runMap]);
+  }, [dispatch, internalIds, projectKey, state.conversations, state.projectKey, state.runMap]);
   useEffect(() => {
     createdRecommendationIdsRef.current.clear();
     if (pendingConversationCreations.length === 0) {
@@ -132,7 +136,7 @@ export function usePendingConversationEffects({
       }
       const controllerId = creation.conversationId;
       ackConversationIds.push(controllerId);
-      if (internalConversationIds[controllerId]) return;
+      if (internalIds.has(controllerId)) return;
       if (!isUuid(controllerId)) {
         return;
       }
@@ -359,7 +363,7 @@ export function usePendingConversationEffects({
     ackConversationCreations,
     currentUserId,
     dispatch,
-    internalConversationIds,
+    internalIds,
     pendingConversationCreations,
     projectKey,
     state.activeId,
@@ -391,7 +395,7 @@ export function usePendingConversationEffects({
       }
       const controllerId = update.conversationId;
       ackConversationIds.push(controllerId);
-      if (internalConversationIds[controllerId]) return;
+      if (internalIds.has(controllerId)) return;
       if (!isUuid(controllerId)) {
         return;
       }
@@ -491,7 +495,7 @@ export function usePendingConversationEffects({
     ackConversationUpdates,
     currentUserId,
     dispatch,
-    internalConversationIds,
+    internalIds,
     pendingConversationUpdates,
     projectKey,
     state.conversations,
@@ -527,7 +531,7 @@ export function usePendingConversationEffects({
         return;
       }
       const controllerId = message.conversationId;
-      if (internalConversationIds[controllerId]) {
+      if (internalIds.has(controllerId)) {
         ackIds.push(message.id);
         return;
       }
@@ -711,7 +715,7 @@ export function usePendingConversationEffects({
     ackConversationMessages,
     currentUserId,
     dispatch,
-    internalConversationIds,
+    internalIds,
     lastBackgroundAtRef,
     notifiedMessageIdsRef,
     pendingConversationMessages,

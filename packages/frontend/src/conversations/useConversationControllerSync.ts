@@ -37,6 +37,7 @@ import {
   type ConversationsState,
 } from "./conversationState";
 import { isUuid } from "./conversationMessageUtils";
+import { collectInternalConversationIds } from "./internalConversations";
 import {
   CONTROLLER_CONVERSATION_LIST_LIMIT,
   controllerConversationHasRemoteMessages,
@@ -336,12 +337,12 @@ export function useConversationControllerSync({
       // Separate discovery is independent of the newest ordinary chats/runs.
       // Older controllers ignore internalOnly: trust only the new derived field,
       // never their returned ordinary rows or user-supplied metadata markers.
-      const internalIds = new Set((internalConversations ?? [])
+      const internalIds = collectInternalConversationIds(latestState.conversations, (internalConversations ?? [])
         .filter((conversation) => conversation.internalPurpose === "space_review"
           && conversation.projectId === projectId && isUuid(conversation.id))
         .map((conversation) => conversation.id));
       latestState.conversations.forEach((conversation) => {
-        if (conversation.controllerId && internalIds.has(conversation.controllerId)) {
+        if (internalIds.has(conversation.localId)) {
           dispatch({ type: "RETIRE_INTERNAL", id: conversation.localId });
         }
       });

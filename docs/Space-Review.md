@@ -26,6 +26,8 @@ Studio reconciles cached review anchors through a separate user-session-only con
 Only its controller-derived top-level `internalPurpose` identifies internal records; older servers
 that ignore this flag cannot cause ordinary chats to be hidden. This lookup does not depend on a
 recent run, so paused reviews and old anchors stay out of ordinary unread and recent-chat views.
+Studio also retires cached descendants by their parent relationships, including when the root
+itself is no longer cached, while preserving their history for an explicitly opened audit.
 Scoped runtime jobs cannot use this discovery flag.
 
 You can also ask for `$instafy-space-review` in an ordinary chat without creating a schedule.
