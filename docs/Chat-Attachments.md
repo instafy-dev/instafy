@@ -14,20 +14,30 @@ touches them, and publishing a turn never includes them.
   `{ kind: "image" | "file", storagePath, fileName, mimeType, sizeBytes }`.
 
 `supabase/migrations/20261002140000_chat_attachments.sql` creates the bucket and its policies.
-`public.can_access_chat_attachment(name)` decides access: the caller is signed in, the name
-has the shape above, and the space exists, is not deleted and is one the caller can access
-(`has_project_access`).
+Two functions decide access. Both require a signed-in caller, a name of the shape above with
+the space id in its one canonical spelling, and a space that exists and is not deleted.
 
-- Members of a live space upload and read its attachments with their own session.
-- An uploader may delete their own attachments while they can still read them.
+- `public.can_access_chat_attachment(name)` gates reading: any member of the space
+  (`has_project_access`), viewers included.
+- `public.can_write_chat_attachment(name)` gates uploading and deleting. It allows the members
+  the controller lets send a message (`ensure_project_write_access`): the space's owner, and an
+  owner, admin or builder of the space or of its team. Viewers can read attachments but cannot
+  add any.
+
+What each caller may do:
+
+- An uploader may delete their own attachments while they can still write to the space. Storage
+  names the uploader in `owner_id`. A member who is made a viewer can no longer delete what they
+  uploaded.
 - Nobody updates an object in place, and an upload that would overwrite one is refused. After
-  an uploader deletes an object, a member can upload new content under the same name.
+  an uploader deletes an object, a writer can upload new content under the same name.
 - Anonymous requests have no access, and nobody can reach another space's prefix.
 
 Deleting a space ends every session's access to its attachments at once. The controller then
-deletes the space's prefix in the background with the service role. A failure is logged and
-leaves the objects unreadable through a session. A signed URL that a member created before the
-delete keeps working until it expires or the purge removes its object.
+deletes the space's prefix in the background with the service role. Deleting a team does the
+same for each of its spaces, one at a time. A failure is logged and leaves the objects unreadable
+through a session. A signed URL that a member created before the delete keeps working until it
+expires or the purge removes its object.
 
 ## Delivery to the runtime
 
@@ -43,7 +53,9 @@ A runtime that downloads attachments advertises the `attachmentDownloads` capabi
    lane that builds a turn prompt does this, parallel write-scoped workers included.
    - The name must be `<uuid>.<ext>`.
    - A file already there is kept.
-   - Each download is capped at 20 MiB and 30 seconds.
+   - Each download is capped at 20 MiB and 30 seconds, and at most 4 run at once.
+   - The body streams into a temporary file that is renamed into place once it is complete,
+     so it is never held in memory and a partial download never appears under its name.
    - Writes never follow a symlink.
    - A failure is logged by name and the turn continues.
 5. The prompt lists an attachment only when this lease signed it and its file is present, with
@@ -81,12 +93,23 @@ wherever that file exists.
 
 ## Tests
 
-- `supabase/tests/chat_attachments.sql`, run by `scripts/test-durable-notifications.py`
-  (see `supabase/tests/README.md`), covers the bucket and its policies against a Storage stub.
-  That harness is run by hand, not in CI.
-- `cargo test chat_attachments` in `packages/runtime-controller` covers path filtering, batched
-  signing, the capability gate, the Storage probe and the space purge against stubs. With
-  `TEST_DATABASE_URL`, `tests_chat_attachment_lease` also covers the lease route and the purge
-  after `DELETE /projects/:projectId`.
-- `cargo test chat_attachments` in `packages/runtime-agent` covers the download path, name and
-  URL checks, the size cap and timeout, existing files, symlinks and the prompt section.
+- `supabase/tests/chat_attachments.sql` covers the bucket and its policies: who reads, uploads
+  and deletes, by space and team role, the name rules and immutability. Two places run it:
+  - The controller test `chat_attachments_sql_fixture_passes_on_storage` runs it against
+    Storage's own migrated schema on the local stack. The Controller DB Tests workflow runs it on
+    every pull request that touches the controller or `supabase/`.
+  - `scripts/test-durable-notifications.py` runs it by hand against a Storage stub, after
+    proving that the migration succeeds without Storage and can be rerun once Storage exists (see
+    `supabase/tests/README.md`).
+- `cargo test chat_attachments` in `packages/runtime-controller` runs the unit tests: path
+  filtering, batched signing, the capability check, the Storage probe and the space purge, all
+  against stubs.
+- `pnpm test:controller chat_attachment` adds the database tests, which need the local stack or
+  `TEST_DATABASE_URL`. They cover the lease route and its capability gate, the purge after
+  `DELETE /projects/:projectId` and `DELETE /orgs/:orgId`, and the policy fixture above.
+- `cargo test chat_attachments` in `packages/runtime-agent` covers:
+  - the download path, and the name and URL checks;
+  - the size cap and timeout, including a body that stalls;
+  - streaming, the concurrency limit, and that no partial file is left;
+  - existing files and symlinks;
+  - the prompt section.
