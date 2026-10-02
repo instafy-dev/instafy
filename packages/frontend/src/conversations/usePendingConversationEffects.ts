@@ -551,8 +551,11 @@ export function usePendingConversationEffects({
           }
         }
       }
+      // A chat this tab has not loaded: its title and history arrive with the
+      // next chat list, so mark it until then (see remoteSummaryPending).
       if (!conversationId && placeholderId) {
         dispatch({ type: "SET_CONTROLLER", id: placeholderId, controllerId });
+        dispatch({ type: "SET_REMOTE_SUMMARY_PENDING", id: placeholderId, pending: true });
         conversationId = placeholderId;
         controllerToLocal.set(controllerId, conversationId);
         placeholderId = null;
@@ -564,6 +567,7 @@ export function usePendingConversationEffects({
           visibility: "public",
           lifecycleStatus: "active",
           controllerId,
+          remoteSummaryPending: true,
           parentConversationId: null,
           threadKind: null,
           ownerAgent: null,

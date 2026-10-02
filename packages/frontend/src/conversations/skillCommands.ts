@@ -164,6 +164,33 @@ export function buildSkillImportMessage(params: BuildSkillImportMessageParams): 
   return parts.join(" ");
 }
 
+const SKILL_IMPORT_PREFIX = /^\s*\/skills\s+import(?:\s|$)/i;
+
+export type ParsedSkillImportMessage = {
+  source: string;
+  /** The normalized `--name` value, or null when the line has none. */
+  skillName: string | null;
+};
+
+/**
+ * Reads a line that buildSkillImportMessage wrote, or a person typed in the
+ * same shape: `/skills import <source>` with flags in any order after it.
+ */
+export function parseSkillImportMessage(text: string): ParsedSkillImportMessage | null {
+  // Checked before splitting, so an ordinary long message costs one match.
+  if (!SKILL_IMPORT_PREFIX.test(text)) {
+    return null;
+  }
+  const tokens = text.trim().split(/\s+/);
+  const source = tokens[2] ?? "";
+  if (!source || source.startsWith("--")) {
+    return null;
+  }
+  const nameIndex = tokens.indexOf("--name", 3);
+  const skillName = nameIndex > 0 ? normalizeSkillName(tokens[nameIndex + 1] ?? "") : "";
+  return { source, skillName: skillName || null };
+}
+
 export function buildSkillStartMessage(slug: string): string {
   return `/skills start ${slug.trim()}`;
 }

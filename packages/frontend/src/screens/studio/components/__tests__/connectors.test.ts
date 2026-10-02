@@ -13,6 +13,7 @@ import {
   connectorCategoryLabel,
   filterConnectors,
   findConnectorForSecret,
+  findConnectorForSkillImport,
   isConnectorAvailable,
   type SkillConnector,
 } from "../connectors";
@@ -95,6 +96,14 @@ describe("CONNECTORS", () => {
     expect(findConnectorForSecret("CLOUDFLARE_API_TOKEN", "notion")).toBeNull();
     expect(findConnectorForSecret("")).toBeNull();
     expect(findConnectorForSecret(null)).toBeNull();
+  });
+
+  it("resolves a skill import to a connector by its exact source only", () => {
+    const freefinance = CONNECTORS.find((entry): entry is SkillConnector => entry.id === "freefinance")!;
+    expect(findConnectorForSkillImport(freefinance.source)?.id).toBe("freefinance");
+    expect(findConnectorForSkillImport(` ${freefinance.source.toUpperCase()}/ `)?.id).toBe("freefinance");
+    expect(findConnectorForSkillImport("https://github.com/instafy-dev/skills/tree/main/packs/bookkeeping")).toBeNull();
+    expect(findConnectorForSkillImport("https://github.com/someone/pack/tree/main/freefinance")).toBeNull();
   });
 
   it("keeps the category labels exact and in order", () => {

@@ -93,11 +93,13 @@ test.describe("Org multi-user conversations", () => {
     await guestConversationTabs.nth(2).click();
     await waitForConversationControllerId(guestPage);
     await disableAssistantIfPossible(guestPage);
+    // Open the chat on the owner's side first: once the guest's message lands
+    // the chat is titled from it, and these tabs are found by numbered titles.
+    await ownerConversationTabs.nth(2).click();
     const guestMessage = `hello from guest ${Date.now()}`;
     await guestPage.getByTestId("chat-input").fill(guestMessage);
     await guestPage.getByTestId("chat-send-button").click();
 
-    await ownerConversationTabs.nth(2).click();
     await expect(
       page.locator('[data-testid="chat-bubble-user"]').filter({ hasText: guestMessage }).first()
     ).toBeVisible({ timeout: 30_000 });

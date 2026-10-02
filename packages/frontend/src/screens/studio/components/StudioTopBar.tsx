@@ -28,6 +28,7 @@ import type { StudioHistory } from "../../../navigation/useStudioHistory";
 import { useNativeBackButtonAction } from "../../../native/useNativeBackButtonAction";
 import { useProject } from "../../../projects/useProject";
 import { useProjects } from "../../../projects/useProjects";
+import { spaceDisplayName } from "../../../projects/spaceName";
 import { useRuntime } from "../../../runtime/useRuntime";
 import { WorkspaceTabs } from "../../../workspace/WorkspaceTabs";
 import { useWorkspaceTabs } from "../../../workspace/WorkspaceTabsProvider";
@@ -135,7 +136,7 @@ export function StudioTopBar({ mobileNavigation, newChatInSidebar = false, conte
     }
     return conversations.find((conversation) => conversation.controllerId === parentId || conversation.localId === parentId) ?? null;
   }, [activeConversation?.parentConversationId, conversations]);
-  const resolvedProjectName = activeProjectName || "Untitled Space";
+  const resolvedProjectName = spaceDisplayName(activeProjectName);
   // With no tab open (a space whose chats are still loading names "Chat"
   // through the override), the header names the space itself.
   const topbarLocationTitle = topbarLocationOverride?.title ?? activeWorkspaceTab?.title ?? resolvedProjectName;

@@ -383,6 +383,40 @@ describe("useConversationSubmitFlow group participation", () => {
     expect(queueAutoTitleConversationMock).toHaveBeenCalledTimes(1);
   });
 
+  it("hands the auto title the message it opens a chat with, before the list holds it", async () => {
+    await act(async () => {
+      await flow!.handleSubmit("conversation-local", "@octo draft the April newsletter");
+    });
+
+    expect(queueAutoTitleConversationMock).toHaveBeenCalledWith(
+      "conversation-local",
+      "@octo draft the April newsletter",
+      { content: "@octo draft the April newsletter", authorId: USER_ID },
+    );
+  });
+
+  it("does not call a message the opening one in a chat loaded from the controller", async () => {
+    // Its history lives in the message query, so an empty local list does not
+    // mean nobody has written in it.
+    await act(async () => {
+      root.render(
+        <HookHarness
+          conversation={{ ...conversation, hasRemoteMessages: true }}
+          appendMessages={appendMessages}
+          updateMessage={updateMessage}
+          onReady={(value) => {
+            flow = value;
+          }}
+        />,
+      );
+    });
+    await act(async () => {
+      await flow!.handleSubmit("conversation-local", "@octo yes, that one");
+    });
+
+    expect(queueAutoTitleConversationMock).toHaveBeenCalledWith("conversation-local", "@octo yes, that one", null);
+  });
+
   it("runs a local capability only after a responding participation decision", async () => {
     resolveLocalCapabilityHandleMock.mockReturnValue("octo");
     resolveParticipationMock.mockResolvedValue({

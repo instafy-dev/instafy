@@ -50,6 +50,9 @@ export function restoreConversationDrafts(userId: string, state: ConversationsSt
         createdAt: existing?.createdAt ?? (Number.isFinite(entry.createdAt) ? entry.createdAt : Date.now()),
         draft: entry.draft,
         draftEditorState: typeof entry.draftEditorState === "string" ? entry.draftEditorState : null,
+        // A saved controller chat may have been titled or written in since;
+        // the chat list confirms both (see remoteSummaryPending).
+        ...(!existing?.controllerId && controllerId ? { remoteSummaryPending: true } : {}),
       };
       if (index >= 0) conversations[index] = conversation;
       else conversations.push(conversation);

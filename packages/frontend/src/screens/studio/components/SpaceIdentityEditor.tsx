@@ -8,6 +8,7 @@ import { SpaceIdentity } from "../../../components/SpaceIdentity";
 import { controllerClient } from "../../../sdk/instafy";
 import { useWorkspaceStore } from "../../../store";
 import { PROJECT_ACCESS_REFRESH_EVENT } from "../../../projects/projectAccessEvents";
+import { spaceDisplayName } from "../../../projects/spaceName";
 import { SettingsSection } from "./SettingsSection";
 import { SettingsFormActions } from "../../../components/SettingsFormActions";
 
@@ -112,7 +113,7 @@ function SpaceIdentityForm({ projectId, name, canWrite, enabled }: SpaceIdentity
           <SpaceIdentity name={name} icon={icon} color={color} avatarUrl={previewUrl ?? avatarUrl} className="!h-16 !w-16 !text-2xl" />
         </IdentityPhotoButton> : <SpaceIdentity name={name} icon={icon} color={color} avatarUrl={avatarUrl} className="!h-16 !w-16 !text-2xl" />}
         <div className="min-w-0 space-y-1">
-          <p className="truncate text-sm font-medium">{name || "Untitled space"}</p>
+          <p className="truncate text-sm font-medium">{spaceDisplayName(name)}</p>
           <p className="text-xs text-slate-500 dark:text-slate-400">PNG, JPEG or WebP, up to 2 MB.</p>
           {canWrite && (imageFile || avatarUrl) ? <Button variant="ghost" size="sm" isDisabled={disabled}
             onPress={() => { setAvatarUrl(null); setImageFile(null); setNotice(null); }} data-testid="space-avatar-remove">Remove picture</Button> : null}

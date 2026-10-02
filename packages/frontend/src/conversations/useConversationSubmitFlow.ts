@@ -7,7 +7,7 @@ import { generateUUID } from "../utils/uuid";
 import { LOCAL_CAPABILITY_DEFINITIONS } from "../capabilities/localCapabilityCatalog";
 import { resolveSingleLocalCapabilityHandleForPrompt } from "../capabilities/localCapabilityRuntime";
 import { getChatClientSessionId } from "./chatClientIdentity";
-import { shouldAutoTitleConversation } from "./conversationAutoTitle";
+import { getOpeningUserMessage, shouldAutoTitleConversation } from "./conversationAutoTitle";
 import {
   resolvePromptAgentSelection,
   startsWithAssistantMention,
@@ -178,6 +178,7 @@ export function useConversationSubmitFlow({
   const { maybeAutoTitleConversation, queueAutoTitleConversation } =
     useConversationAutoTitle({
       conversations,
+      currentUserId,
       resolveProjectId,
       ensureControllerConversationId,
       setConversationTitle,
@@ -605,6 +606,11 @@ export function useConversationSubmitFlow({
       // failed run, and only for a run it started (useRunFailureAutoRetry).
       rememberPromptSentFromThisPage(userMessage);
       appendMessages(displayConversationId, [userMessage]);
+      // What the list will hold once this message lands; null for a chat whose
+      // history lives on the controller.
+      const autoTitleOpeningMessage = shouldAttemptAutoTitle
+        ? getOpeningUserMessage({ ...targetConversation, messages: [...targetConversation.messages, userMessage] })
+        : null;
 
       const imageFiles = resolveSubmittedImageFiles(options?.imageFile, options?.imageFiles);
 
@@ -888,7 +894,7 @@ export function useConversationSubmitFlow({
         }
 
         if (shouldAttemptAutoTitle && !deferGroupParticipationToController) {
-          queueAutoTitleConversation(targetConversationId, trimmed);
+          queueAutoTitleConversation(targetConversationId, trimmed, autoTitleOpeningMessage);
         }
       }
 

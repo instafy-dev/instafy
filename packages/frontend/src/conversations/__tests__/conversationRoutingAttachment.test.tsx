@@ -293,6 +293,38 @@ describe("conversation routing during controller attachment", () => {
     });
   });
 
+  it("confirms a chat rebuilt from one message once the chat list includes it", async () => {
+    const dispatch = vi.fn<(action: ConversationsAction) => void>();
+    const rebuilt: ConversationsState = {
+      ...buildState(),
+      conversations: [{
+        ...createInitialConversation({ localId: LOCAL_ID, controllerId: CONTROLLER_ID }),
+        title: "Conversation 7",
+        remoteSummaryPending: true,
+      }],
+    };
+    const fetchProjectConversations = vi.fn().mockResolvedValue([{
+      ...buildRemoteConversation({ localId: LOCAL_ID, title: "Quarterly VAT filing" }),
+      lastMessageAt: "2026-07-13T20:05:00.000Z",
+    }]);
+
+    await act(async () => {
+      root.render(
+        <ControllerSyncHarness
+          state={rebuilt}
+          dispatch={dispatch}
+          fetchProjectConversations={fetchProjectConversations}
+        />,
+      );
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+
+    const actions = dispatch.mock.calls.map(([action]) => action);
+    expect(actions).toContainEqual({ type: "SET_REMOTE_HISTORY", id: LOCAL_ID, hasMessages: true });
+    expect(actions).toContainEqual({ type: "SET_TITLE", id: LOCAL_ID, title: "Quarterly VAT filing" });
+    expect(actions).toContainEqual({ type: "SET_REMOTE_SUMMARY_PENDING", id: LOCAL_ID, pending: false });
+  });
+
   it("creates a separate tab when history backfills a teammate conversation", async () => {
     const dispatch = vi.fn<(action: ConversationsAction) => void>();
     const teammateId = "77777777-6666-4555-8444-333333333333";

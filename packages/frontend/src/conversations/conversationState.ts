@@ -29,6 +29,13 @@ export interface ConversationState {
   lifecycleStatus: ConversationLifecycleStatus;
   controllerId: string | null;
   hasRemoteMessages?: boolean;
+  /**
+   * True for a chat rebuilt here from partial data (a message that arrived for
+   * a chat this tab had not loaded, or a restored draft) until the controller's
+   * chat list confirms it. Until then its title and history are unknown: the
+   * default title may hide a real one, so nothing titles it automatically.
+   */
+  remoteSummaryPending?: boolean;
   parentConversationId: string | null;
   threadKind: string | null;
   ownerAgent: ConversationOwnerAgent | null;
@@ -105,6 +112,7 @@ export type ConversationsAction =
     }
   | { type: "SET_CONTROLLER"; id: string; controllerId: string | null }
   | { type: "SET_REMOTE_HISTORY"; id: string; hasMessages: boolean }
+  | { type: "SET_REMOTE_SUMMARY_PENDING"; id: string; pending: boolean }
   | { type: "SET_TITLE"; id: string; title: string }
   | { type: "SET_GOAL"; id: string; goal: ConversationGoal | null }
   | { type: "SET_VISIBILITY"; id: string; visibility: ConversationVisibility }
@@ -649,6 +657,16 @@ export function conversationsReducer(
         conversations: state.conversations.map((conversation) =>
           conversation.localId === action.id
             ? { ...conversation, hasRemoteMessages: action.hasMessages }
+            : conversation,
+        ),
+      };
+    }
+    case "SET_REMOTE_SUMMARY_PENDING": {
+      return {
+        ...state,
+        conversations: state.conversations.map((conversation) =>
+          conversation.localId === action.id
+            ? { ...conversation, remoteSummaryPending: action.pending }
             : conversation,
         ),
       };

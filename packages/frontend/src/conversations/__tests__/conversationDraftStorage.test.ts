@@ -28,6 +28,25 @@ describe("conversation draft reloads", () => {
     expect(sessionStorage.getItem(sessionStorage.key(0)!)).not.toMatch(/messages|runtime|runMap/);
   });
 
+  it("marks a controller chat rebuilt from a saved draft until the chat list confirms it", () => {
+    const original = state();
+    original.conversations[0].draft = "Never sent";
+    original.conversations.push({ ...createInitialConversation({ localId: "saved-chat",
+      controllerId: "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee" }), draft: "Next message" });
+    saveConversationDrafts("user-a", original);
+    const reloaded = restoreConversationDrafts("user-a", state());
+    expect(reloaded.conversations.map(c => [c.localId, c.remoteSummaryPending ?? false])).toEqual([
+      ["new-chat", false], ["saved-chat", true],
+    ]);
+    // A chat already loaded with its controller identity keeps what it has.
+    const loaded = state();
+    loaded.conversations.push({ ...createInitialConversation({ localId: "saved-chat",
+      controllerId: "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee" }), title: "Shopping" });
+    const merged = restoreConversationDrafts("user-a", loaded);
+    expect(merged.conversations[1]).toMatchObject({ draft: "Next message", title: "Shopping" });
+    expect(merged.conversations[1].remoteSummaryPending).toBeUndefined();
+  });
+
   it("isolates accounts and spaces, and removes a sent or cleared draft", () => {
     const original = state(); original.conversations[0].draft = "Private draft";
     saveConversationDrafts("user-a", original);

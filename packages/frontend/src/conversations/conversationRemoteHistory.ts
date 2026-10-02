@@ -1,3 +1,6 @@
+// How many conversations a space's chat list loads, most recently active first.
+export const CONTROLLER_CONVERSATION_LIST_LIMIT = 50;
+
 export function controllerConversationHasRemoteMessages(summary: {
   lastMessageId?: string | null;
   lastMessageAt?: string | null;

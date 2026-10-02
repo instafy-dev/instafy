@@ -15,6 +15,7 @@ import {
   pickerListRowTextClassName,
 } from "../../../components/listRowStyles";
 import type { MergedProjectListItem } from "../../../projects/useMergedControllerProjects";
+import { spaceDisplayName } from "../../../projects/spaceName";
 import { OrgIdentity } from "../../../components/OrgIdentity";
 import { AttentionBadge } from "../../../components/AttentionBadge";
 import { useStudioPerformanceContent } from "../../../telemetry/useStudioPerformanceContent";
@@ -214,7 +215,7 @@ export function StudioSidebarWorkspaceSwitcher({
     >
       <MenuItemContent>
         <span className="flex w-full items-center justify-between gap-2">
-          <span className="flex min-w-0 items-center gap-2"><SpaceIdentity name={project.name} icon={project.projectIcon} color={project.projectColor} avatarUrl={project.projectAvatarUrl} className="h-6 w-6 shrink-0" /><span className="truncate">{project.name || "Untitled space"}</span></span>
+          <span className="flex min-w-0 items-center gap-2"><SpaceIdentity name={project.name} icon={project.projectIcon} color={project.projectColor} avatarUrl={project.projectAvatarUrl} className="h-6 w-6 shrink-0" /><span className="truncate">{spaceDisplayName(project.name)}</span></span>
           <span className="flex shrink-0 items-center gap-1.5">
             {options.current ? (
               <span className="text-3xs font-medium uppercase tracking-[0.08em] text-slate-600 dark:text-slate-500">
