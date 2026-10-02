@@ -6,7 +6,7 @@ use axum::body::{to_bytes, Body};
 use axum::extract::{DefaultBodyLimit, Multipart, Path as AxumPath, Query, Request, State};
 use axum::http::{header, HeaderName, HeaderValue, Method};
 use axum::middleware::Next;
-use axum::response::{Json, Response};
+use axum::response::{IntoResponse, Json, Response};
 use axum::routing::{get, post};
 use axum::{Extension, Router};
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
@@ -38,7 +38,9 @@ use crate::error::OriginError;
 use crate::git;
 use crate::git_tokens;
 use crate::paths::is_reserved_path;
+use crate::publish::{self, PublishContext, PublishReport, PublishRequest, Selection, SyncStatus};
 use crate::workspace_fs::{WorkspaceDir, WorkspaceEntryKind};
+use crate::workspace_git::{blob_oid, workspace_file_blob_oid, GitIdentity, MAX_LISTED_BLOB_BYTES};
 use crate::workspace_lock::try_acquire_workspace_apply_lock;
 
 const GIT_WORKSPACE_SYNC_TTL_SECONDS: u64 = 120;
@@ -124,6 +126,10 @@ pub struct FileEntryResponse {
     pub has_children: bool,
     #[serde(rename = "mimeType", skip_serializing_if = "Option::is_none")]
     pub mime_type: Option<String>,
+    /// Git blob id of the file's current content (single-tenant origins),
+    /// for `expected` on a later `/apply`.
+    #[serde(rename = "blobOid", skip_serializing_if = "Option::is_none")]
+    pub blob_oid: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -182,6 +188,7 @@ pub fn router(state: AppState) -> Router {
         .route("/git/revert", post(handle_git_revert))
         .route("/git/revert-commit", post(handle_git_revert_commit))
         .route("/git/sync", post(handle_git_sync))
+        .route("/git/flush", post(handle_git_flush))
         .route_layer(axum::middleware::from_fn_with_state(
             state.clone(),
             require_write,
@@ -515,14 +522,20 @@ async fn handle_entries(
             .map_err(|_| OriginError::not_found("path not found"))?
         {
             WorkspaceEntryKind::File => {
-                let entry = build_file_entry(&workspace, relative)?;
+                let mut entry = build_file_entry(&workspace, relative)?;
+                if !state.config.multi_tenant {
+                    add_blob_oids(&workspace, &mut entry);
+                }
                 return Ok(Json(entry));
             }
             WorkspaceEntryKind::Directory => {}
         }
     }
 
-    let entries = list_directory(&workspace, normalized.as_deref())?;
+    let mut entries = list_directory(&workspace, normalized.as_deref())?;
+    if !state.config.multi_tenant {
+        add_blob_oids(&workspace, &mut entries);
+    }
     Ok(Json(entries))
 }
 
@@ -531,7 +544,7 @@ async fn handle_file(
     Extension(claims): Extension<OriginClaims>,
     Extension(access_token): Extension<OriginAccessToken>,
     AxumPath(path): AxumPath<String>,
-) -> Result<Json<FileContentResponse>, OriginError> {
+) -> Result<Response, OriginError> {
     let project_id = project_id_for_request(&state, &claims)?;
     ensure_workspace_ready(
         &state,
@@ -565,15 +578,43 @@ async fn handle_file(
     let base64 = BASE64_STANDARD.encode(&data);
     let mime = mime_type_for_path(&normalized);
     let modified = metadata.modified().ok().map(format_system_time);
+    // The id of exactly the bytes served, from the same no-follow read.
+    let blob = (!state.config.multi_tenant).then(|| blob_oid(&data));
 
-    Ok(Json(FileContentResponse {
+    let mut response = Json(FileContentResponse {
         path: normalized,
         encoding: "base64".to_string(),
         content_base64: base64,
         size: data.len() as u64,
         mime_type: mime,
         modified,
-    }))
+    })
+    .into_response();
+    if let Some(blob) = blob {
+        set_blob_header(&mut response, &blob);
+    }
+    Ok(response)
+}
+
+const INSTAFY_BLOB_HEADER: &str = "x-instafy-blob";
+/// `/raw` reads files up to this size into memory to send `X-Instafy-Blob`;
+/// larger files stream without it.
+const MAX_RAW_HASHED_BYTES: u64 = 32 * 1024 * 1024;
+
+fn set_blob_header(response: &mut Response, blob: &str) {
+    if let Ok(value) = HeaderValue::from_str(blob) {
+        response
+            .headers_mut()
+            .insert(HeaderName::from_static(INSTAFY_BLOB_HEADER), value);
+    }
+}
+
+fn add_blob_oids(workspace: &WorkspaceDir, entries: &mut [FileEntryResponse]) {
+    for entry in entries.iter_mut().filter(|entry| entry.kind == "file") {
+        entry.blob_oid = workspace_file_blob_oid(workspace, &entry.path, MAX_LISTED_BLOB_BYTES)
+            .ok()
+            .flatten();
+    }
 }
 
 async fn handle_raw(
@@ -603,12 +644,28 @@ async fn handle_raw(
     let file = workspace
         .open_file(&normalized)
         .map_err(|_| OriginError::not_found("file not found"))?;
-    let file = tokio::fs::File::from_std(file);
+    let size = file
+        .metadata()
+        .map_err(|_| OriginError::not_found("file not found"))?
+        .len();
+    let mut file = tokio::fs::File::from_std(file);
 
-    let stream = ReaderStream::new(file);
-    let body = Body::from_stream(stream);
+    let mut blob = None;
+    let body = if !state.config.multi_tenant && size <= MAX_RAW_HASHED_BYTES {
+        let mut data = Vec::with_capacity(size as usize);
+        file.read_to_end(&mut data)
+            .await
+            .map_err(|error| OriginError::internal(format!("failed to read file: {error}")))?;
+        blob = Some(blob_oid(&data));
+        Body::from(data)
+    } else {
+        Body::from_stream(ReaderStream::new(file))
+    };
 
     let mut response = Response::new(body);
+    if let Some(blob) = blob.as_deref() {
+        set_blob_header(&mut response, blob);
+    }
     let mime = mime_type_for_path(&normalized);
     if let Some(mime) = mime.as_deref() {
         if let Ok(value) = mime.parse() {
@@ -764,9 +821,15 @@ async fn handle_git_status(
     };
 
     let canonical_root = Arc::new(workspace_root);
+    let status_config = state.config.clone();
     let dirty = tokio::task::spawn_blocking(move || {
         let _workspace_guard = try_acquire_workspace_apply_lock(canonical_root.as_path())?
             .ok_or_else(|| OriginError::conflict("workspace is already mutating"))?;
+        if !status_config.multi_tenant {
+            // Count changes only after copies an older sync left behind
+            // have been put right.
+            publish::repair_stale_checkout(&status_config, canonical_root.as_path())?;
+        }
         git::list_dirty_files(canonical_root.as_path(), None)
     })
     .await
@@ -1428,6 +1491,14 @@ async fn apply_manifest_archive(
         None
     };
 
+    // Desktop and runtime origins check what each changed path held when the
+    // client read it; the gateway's conditional writes come with PR-5.
+    let expected = if config.multi_tenant {
+        None
+    } else {
+        manifest.expected.take()
+    };
+    let manifest_deletes = manifest.deletes.clone();
     let auto_commit_after_apply = manifest.auto_commit_after_apply;
     let commit_message = manifest
         .commit_message
@@ -1463,6 +1534,9 @@ async fn apply_manifest_archive(
                         return Err(error);
                     }
                 }
+            }
+            if let Some(expected) = expected.as_ref() {
+                check_expected_blobs(blocking_workspace.as_path(), expected, &manifest_deletes)?;
             }
             let (mut apply_result, mut apply_transaction) = match archive {
                 ApplyArchive::InMemory(archive_bytes) => apply_changes_transactional(
@@ -1571,6 +1645,93 @@ async fn apply_manifest_archive(
     })))
 }
 
+/// Refuse an apply when any path no longer holds the blob its client read.
+/// A deleted directory must list every file it holds, so a file someone else
+/// added under it is never removed unseen.
+fn check_expected_blobs(
+    workspace_root: &Path,
+    expected: &std::collections::BTreeMap<String, Option<String>>,
+    deletes: &[String],
+) -> Result<(), OriginError> {
+    let workspace = WorkspaceDir::open(workspace_root)
+        .map_err(|error| OriginError::internal(format!("failed to open workspace: {error}")))?;
+    let mut stale = Vec::new();
+    let mut normalized_expected = std::collections::BTreeMap::new();
+    for (path, oid) in expected {
+        let normalized = normalize_relative_path(path)
+            .ok_or_else(|| OriginError::bad_request("invalid path in expected"))?;
+        let wanted = oid
+            .as_deref()
+            .map(|oid| oid.trim().to_ascii_lowercase())
+            .filter(|oid| !oid.is_empty());
+        if let Some(oid) = wanted.as_deref() {
+            if !git::is_safe_git_rev(oid) {
+                return Err(OriginError::bad_request(
+                    "expected blob ids must be hexadecimal",
+                ));
+            }
+        }
+        let current = match workspace.entry_kind(&normalized) {
+            Ok(WorkspaceEntryKind::Directory) => Some("directory".to_string()),
+            // A link or special file never matches a blob a client read.
+            _ => workspace_file_blob_oid(&workspace, &normalized, u64::MAX)
+                .unwrap_or_else(|_| Some("unreadable".to_string())),
+        };
+        if current != wanted {
+            stale.push(normalized.clone());
+        }
+        normalized_expected.insert(normalized, wanted);
+    }
+    for delete in deletes {
+        let Some(normalized) = normalize_relative_path(delete) else {
+            continue;
+        };
+        if !matches!(
+            workspace.entry_kind(&normalized),
+            Ok(WorkspaceEntryKind::Directory)
+        ) {
+            continue;
+        }
+        for file in files_below(&workspace, &normalized) {
+            if !normalized_expected.contains_key(&file) {
+                stale.push(file);
+            }
+        }
+    }
+    if stale.is_empty() {
+        return Ok(());
+    }
+    stale.sort();
+    stale.dedup();
+    Err(OriginError::conflict_paths(
+        "head_moved",
+        "files changed since they were read",
+        stale,
+    ))
+}
+
+/// Regular files below a workspace directory (no links followed).
+fn files_below(workspace: &WorkspaceDir, directory: &str) -> Vec<String> {
+    let mut files = Vec::new();
+    let mut pending = vec![directory.to_string()];
+    while let Some(current) = pending.pop() {
+        let Ok(entries) = workspace.list(Some(&current)) else {
+            continue;
+        };
+        for entry in entries {
+            let path = format!("{current}/{}", entry.name.to_string_lossy());
+            if is_reserved_path(&path) {
+                continue;
+            }
+            match entry.kind {
+                WorkspaceEntryKind::Directory => pending.push(path),
+                WorkspaceEntryKind::File => files.push(path),
+            }
+        }
+    }
+    files
+}
+
 fn validate_apply_lease(
     manifest_lease_id: Option<&str>,
     claims_lease_id: Option<&str>,
@@ -1595,6 +1756,18 @@ struct GitSyncRequest {
     message: Option<String>,
     paths: Option<Vec<String>>,
     expected_rev: Option<String>,
+    /// `"refresh"`: publish nothing new; push parked work, publish commits
+    /// already on the local branch and move the checkout to `main`.
+    mode: Option<String>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct GitFlushRequest {
+    /// A turn was running (or was cancelled by this stop): its local commits
+    /// go to a recovery ref instead of `main`.
+    #[serde(default)]
+    turn_active: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1607,6 +1780,8 @@ struct GitRevertRequest {
 #[serde(rename_all = "camelCase")]
 struct GitRevertCommitRequest {
     commit: String,
+    /// The parent to revert against; required for merge and root commits.
+    base: Option<String>,
 }
 
 /// Check the controller for an active workspace lease held by someone other
@@ -1712,15 +1887,7 @@ async fn handle_git_revert_commit(
         return Err(OriginError::conflict(reason));
     }
 
-    let token = git_tokens::mint_git_access_token(
-        &state.http_client,
-        config.as_ref(),
-        project_id,
-        &["git.read", "git.write"],
-        (!access_token.token.trim().is_empty()).then_some(access_token.token.as_str()),
-    )
-    .await?
-    .map(|minted| minted.token);
+    let token = mint_git_write_token(&state, project_id, &access_token).await?;
 
     let mut config_clone = (*config).clone();
     config_clone.workspace_root = workspace_root.clone();
@@ -1728,6 +1895,31 @@ async fn handle_git_revert_commit(
 
     let canonical_root = Arc::new(workspace_root);
     let target_commit = payload.commit.clone();
+
+    if !config.multi_tenant {
+        let author = caller_identity(&config, &claims);
+        let base = payload.base.clone();
+        let report = tokio::task::spawn_blocking(move || {
+            let _apply_guard = apply_guard;
+            let _workspace_apply_guard = workspace_apply_guard;
+            git::ensure_git_checkout(&config_clone, token.as_deref())?;
+            publish::revert_commit(
+                &PublishContext {
+                    config: &config_clone,
+                    workspace_root: canonical_root.as_path(),
+                    token: token.as_deref(),
+                    can_write: token.is_some() || config_clone.skip_auth,
+                },
+                &target_commit,
+                base.as_deref(),
+                author,
+            )
+        })
+        .await
+        .map_err(|error| OriginError::internal(format!("git revert task failed: {error}")))??;
+        return publish_response(&state, &claims, project_id, origin_id, report, false);
+    }
+
     let commit_hash = tokio::task::spawn_blocking(move || {
         let _apply_guard = apply_guard;
         let _workspace_apply_guard = workspace_apply_guard;
@@ -1880,21 +2072,38 @@ async fn handle_git_sync(
         return Err(OriginError::conflict(reason));
     }
 
-    let token = git_tokens::mint_git_access_token(
-        &state.http_client,
-        config.as_ref(),
-        project_id,
-        &["git.read", "git.write"],
-        (!access_token.token.trim().is_empty()).then_some(access_token.token.as_str()),
-    )
-    .await?
-    .map(|minted| minted.token);
+    let token = mint_git_write_token(&state, project_id, &access_token).await?;
 
     let GitSyncRequest {
         message: message_override,
         paths,
         expected_rev,
+        mode,
     } = payload;
+
+    let refresh = match mode
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        None => false,
+        Some(value) if value.eq_ignore_ascii_case("refresh") => true,
+        Some(other) => {
+            return Err(OriginError::bad_request(format!(
+                "unknown git sync mode {other:?}"
+            )))
+        }
+    };
+    if refresh && (expected_rev.is_some() || paths.is_some()) {
+        return Err(OriginError::bad_request(
+            "refresh cannot be combined with paths or expectedRev",
+        ));
+    }
+    if refresh && config.multi_tenant {
+        return Err(OriginError::bad_request(
+            "refresh is only available on a workspace runtime",
+        ));
+    }
 
     if expected_rev.is_some() && paths.is_some() {
         return Err(OriginError::bad_request(
@@ -1913,7 +2122,9 @@ async fn handle_git_sync(
     } else {
         None
     };
-
+    // A publish without a message gets a plain subject; user ids stay out of
+    // permanent history.
+    let publish_message = message_override.clone().unwrap_or_default();
     let message =
         message_override.unwrap_or_else(|| format!("instafy: sync (user {})", claims.sub));
 
@@ -1922,6 +2133,52 @@ async fn handle_git_sync(
     config_clone.git_remote_url = Some(remote_url);
 
     let canonical_root = Arc::new(workspace_root);
+
+    if !config.multi_tenant && expected_rev.is_none() {
+        let selection = if refresh {
+            Selection::None
+        } else {
+            match selected_paths {
+                Some(paths) => Selection::Paths(paths),
+                None => Selection::AllDirty,
+            }
+        };
+        // A person saving everything from their own Desktop folder is the
+        // author of that save; agent turns carry a run id and keep the
+        // origin's identity.
+        let author = match selection {
+            Selection::AllDirty if !config.hosted_checkout => caller_identity(&config, &claims),
+            _ => None,
+        };
+        let report = tokio::task::spawn_blocking(move || {
+            let _apply_guard = apply_guard;
+            let _workspace_apply_guard = workspace_apply_guard;
+            git::ensure_git_checkout(&config_clone, token.as_deref())?;
+            let ctx = PublishContext {
+                config: &config_clone,
+                workspace_root: canonical_root.as_path(),
+                token: token.as_deref(),
+                can_write: token.is_some() || config_clone.skip_auth,
+            };
+            if refresh {
+                publish::refresh(&ctx)
+            } else {
+                publish::publish(
+                    &ctx,
+                    PublishRequest {
+                        selection,
+                        message: publish_message,
+                        author,
+                        budget: publish::DEFAULT_PUBLISH_BUDGET,
+                    },
+                )
+            }
+        })
+        .await
+        .map_err(|error| OriginError::internal(format!("git sync task failed: {error}")))??;
+        return publish_response(&state, &claims, project_id, origin_id, report, refresh);
+    }
+
     let (base_rev, commit_hash) = tokio::task::spawn_blocking(move || {
         let _apply_guard = apply_guard;
         let _workspace_apply_guard = workspace_apply_guard;
@@ -1987,6 +2244,183 @@ async fn handle_git_sync(
         "rev": commit_hash,
         "baseRev": base_rev,
     })))
+}
+
+/// Exchange the caller's `fs.write` token for a short-lived `git.write`
+/// token. With `ORIGIN_SKIP_AUTH` (local development without a controller)
+/// there is nothing to exchange, and git runs without a credential.
+async fn mint_git_write_token(
+    state: &AppState,
+    project_id: Uuid,
+    access_token: &OriginAccessToken,
+) -> Result<Option<String>, OriginError> {
+    if state.config.skip_auth && access_token.token.trim().is_empty() {
+        return Ok(None);
+    }
+    Ok(git_tokens::mint_git_access_token(
+        &state.http_client,
+        state.config.as_ref(),
+        project_id,
+        &["git.read", "git.write"],
+        (!access_token.token.trim().is_empty()).then_some(access_token.token.as_str()),
+    )
+    .await?
+    .map(|minted| minted.token))
+}
+
+/// The identity of the person behind a user token without a run id, used
+/// as the author of what they save; `None` for agent and service tokens.
+fn caller_identity(config: &ServerConfig, claims: &OriginClaims) -> Option<GitIdentity> {
+    if config.multi_tenant
+        || claims
+            .run_id
+            .as_deref()
+            .is_some_and(|run| !run.trim().is_empty())
+    {
+        return None;
+    }
+    let subject = Uuid::parse_str(claims.sub.trim()).ok()?;
+    let name = claims
+        .actor_label
+        .as_deref()
+        .map(|label| {
+            label
+                .replace(['<', '>', '\n', '\r'], " ")
+                .trim()
+                .to_string()
+        })
+        .filter(|label| !label.is_empty())
+        .unwrap_or_else(|| "Instafy user".to_string());
+    Some(GitIdentity::new(
+        name,
+        format!("{}@users.noreply.instafy.dev", subject.as_hyphenated()),
+    ))
+}
+
+/// Turn a publish report into the HTTP response: 200 with the report when
+/// anything was saved (or nothing needed saving), otherwise an error that
+/// still carries the report so the caller can say where the work is kept.
+fn publish_response(
+    state: &AppState,
+    claims: &OriginClaims,
+    project_id: Uuid,
+    origin_id: Option<Uuid>,
+    report: PublishReport,
+    refresh: bool,
+) -> Result<Json<serde_json::Value>, OriginError> {
+    let body = serde_json::to_value(&report)
+        .map_err(|error| OriginError::internal(format!("failed to encode the report: {error}")))?;
+    if report.git_sync_status == SyncStatus::Unpublished && !refresh {
+        let status = if report.retryable {
+            axum::http::StatusCode::SERVICE_UNAVAILABLE
+        } else {
+            axum::http::StatusCode::CONFLICT
+        };
+        let message = match (&report.failure, &report.recovery_ref) {
+            (Some(failure), Some(reference)) => {
+                format!("Not saved: {failure} (kept at {reference})")
+            }
+            (Some(failure), None) => format!("Not saved: {failure}"),
+            (None, Some(reference)) => format!("Not saved (kept at {reference})"),
+            (None, None) => "Not saved".to_string(),
+        };
+        return Err(OriginError::with_report(status, "not_saved", message, body));
+    }
+
+    let moved = report.rev.is_some() && report.rev != report.base_rev;
+    if let (true, Some(rev), Some(url), Some(origin_id)) = (
+        moved,
+        report.rev.clone(),
+        state.commit_receipt_url.clone(),
+        origin_id,
+    ) {
+        tokio::spawn(post_commit_receipt(
+            state.http_client.clone(),
+            url,
+            state.config.clone(),
+            project_id,
+            origin_id,
+            claims.lease_id.clone(),
+            Some(claims.sub.clone()),
+            ApplySummary {
+                rev,
+                bytes_written: 0,
+                file_count: 0,
+                lease_id: claims.lease_id.clone(),
+                applied_paths: Vec::new(),
+                deleted_paths: Vec::new(),
+            },
+        ));
+    }
+    Ok(Json(body))
+}
+
+/// Before the controller stops a workspace runtime: publish finished local
+/// commits, park unsaved and unfinished work on recovery refs, and push
+/// them. Never publishes dirty files to `main`.
+async fn handle_git_flush(
+    State(state): State<AppState>,
+    Extension(claims): Extension<OriginClaims>,
+    Extension(access_token): Extension<OriginAccessToken>,
+    payload: Option<Json<GitFlushRequest>>,
+) -> Result<Json<serde_json::Value>, OriginError> {
+    if state.config.multi_tenant {
+        return Err(OriginError::bad_request(
+            "flush is only available on a workspace runtime",
+        ));
+    }
+    let turn_active = payload
+        .map(|Json(request)| request.turn_active)
+        .unwrap_or(false);
+    let project_id = project_id_for_request(&state, &claims)?;
+    let apply_lock = project_apply_lock(&state, project_id).await;
+    let apply_guard = apply_lock.lock_owned().await;
+    let config = state.config.clone();
+    let workspace_root = workspace_root_for_project(&state, project_id);
+    let lock_workspace = workspace_root.clone();
+    let workspace_apply_guard =
+        tokio::task::spawn_blocking(move || try_acquire_workspace_apply_lock(&lock_workspace))
+            .await
+            .map_err(|error| {
+                OriginError::internal(format!("workspace lock task failed: {error}"))
+            })??
+            .ok_or_else(|| OriginError::conflict("workspace is already mutating"))?;
+    let remote_url = config
+        .git_remote_url_for_project(project_id)
+        .ok_or_else(|| OriginError::bad_request("git remote is not configured for this project"))?;
+
+    // Without write access the flush still parks everything locally.
+    let token = match mint_git_write_token(&state, project_id, &access_token).await {
+        Ok(token) => token,
+        Err(error) => {
+            warn!(
+                ?error,
+                "flush could not get write access; keeping work locally"
+            );
+            None
+        }
+    };
+    let mut config_clone = (*config).clone();
+    config_clone.workspace_root = workspace_root.clone();
+    config_clone.git_remote_url = Some(remote_url);
+    let report = tokio::task::spawn_blocking(move || {
+        let _apply_guard = apply_guard;
+        let _workspace_apply_guard = workspace_apply_guard;
+        publish::flush(
+            &PublishContext {
+                config: &config_clone,
+                workspace_root: workspace_root.as_path(),
+                token: token.as_deref(),
+                can_write: token.is_some() || config_clone.skip_auth,
+            },
+            turn_active,
+        )
+    })
+    .await
+    .map_err(|error| OriginError::internal(format!("git flush task failed: {error}")))??;
+    serde_json::to_value(&report)
+        .map(Json)
+        .map_err(|error| OriginError::internal(format!("failed to encode the report: {error}")))
 }
 
 async fn post_commit_receipt(
@@ -2300,6 +2734,7 @@ fn list_directory(
                 extension: None,
                 has_children: child.has_children,
                 mime_type: None,
+                blob_oid: None,
             });
         } else if let Some(metadata) = child.metadata {
             entries.push(file_entry_from_metadata(name_str, child_relative, metadata));
@@ -2351,6 +2786,7 @@ fn file_entry_from_metadata(
         extension: extension.clone(),
         has_children: false,
         mime_type: extension.and_then(|ext| mime_type_for_extension(&ext)),
+        blob_oid: None,
     }
 }
 
@@ -2581,6 +3017,7 @@ mod tests {
             max_archive_bytes: 1024,
             staging_base: None,
             multi_tenant: false,
+            hosted_checkout: false,
         });
         let client = reqwest::Client::new();
         let state = AppState::new(
@@ -2627,6 +3064,7 @@ mod tests {
                     commit_message: None,
                     idempotency_key: Some(key.to_string()),
                     request_fingerprint: Some(fingerprint.to_string()),
+                    expected: None,
                 },
                 super::ApplyArchive::InMemory(Vec::new()),
             ),
@@ -2723,6 +3161,7 @@ mod tests {
             max_archive_bytes: 16 * 1024 * 1024,
             staging_base: None,
             multi_tenant: false,
+            hosted_checkout: false,
         });
         let client = reqwest::Client::new();
         let state = AppState::new(
@@ -2970,6 +3409,7 @@ mod tests {
             max_archive_bytes: 16 * 1024 * 1024,
             staging_base: None,
             multi_tenant: false,
+            hosted_checkout: false,
         });
         let validator = TokenValidator::new(client.clone(), config.jwks_url.clone());
         AppState::new(
@@ -2980,6 +3420,137 @@ mod tests {
             None,
         )
         .expect("open workspace root")
+    }
+
+    const HELLO_BLOB: &str = "ce013625030ba8dba906f756967f9e9ca394464a";
+
+    #[tokio::test]
+    async fn single_tenant_reads_carry_the_blob_id_of_the_served_bytes() {
+        let workspace = TempDir::new().expect("workspace");
+        std::fs::create_dir_all(workspace.path().join("docs")).unwrap();
+        std::fs::write(workspace.path().join("docs/hello.txt"), b"hello\n").unwrap();
+        let state = test_app_state(
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            &workspace,
+            "http://127.0.0.1:1".parse().expect("controller url"),
+            true,
+        );
+        let app = super::router(state);
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind origin");
+        let address = listener.local_addr().expect("origin address");
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.expect("serve origin");
+        });
+        let client = reqwest::Client::new();
+        for path in ["/files/docs/hello.txt", "/raw/docs/hello.txt"] {
+            let response = client
+                .get(format!("http://{address}{path}"))
+                .send()
+                .await
+                .expect("origin request");
+            assert_eq!(response.status(), StatusCode::OK, "{path}");
+            assert_eq!(
+                response
+                    .headers()
+                    .get("x-instafy-blob")
+                    .and_then(|value| value.to_str().ok()),
+                Some(HELLO_BLOB),
+                "{path}"
+            );
+        }
+        let entries = client
+            .get(format!("http://{address}/entries?path=docs"))
+            .send()
+            .await
+            .expect("entries")
+            .json::<serde_json::Value>()
+            .await
+            .expect("entries json");
+        assert_eq!(entries[0]["blobOid"], HELLO_BLOB);
+        server.abort();
+    }
+
+    #[test]
+    fn stale_expected_blob_refuses_the_apply_and_keeps_the_edit() {
+        let workspace = TempDir::new().expect("workspace");
+        std::fs::write(
+            workspace.path().join("README.md"),
+            b"agent's unsaved edit\n",
+        )
+        .unwrap();
+        std::fs::create_dir_all(workspace.path().join("old")).unwrap();
+        std::fs::write(workspace.path().join("old/seen.txt"), b"hello\n").unwrap();
+        std::fs::write(workspace.path().join("old/added.txt"), b"added later\n").unwrap();
+
+        let mut expected = std::collections::BTreeMap::new();
+        expected.insert("README.md".to_string(), Some(HELLO_BLOB.to_string()));
+        expected.insert("new.txt".to_string(), None);
+        let error = super::check_expected_blobs(workspace.path(), &expected, &[])
+            .expect_err("a stale read must be refused");
+        match error {
+            crate::error::OriginError::ConflictPaths { code, paths, .. } => {
+                assert_eq!(code, "head_moved");
+                assert_eq!(paths, vec!["README.md".to_string()]);
+            }
+            other => panic!("unexpected error {other:?}"),
+        }
+        assert_eq!(
+            std::fs::read(workspace.path().join("README.md")).unwrap(),
+            b"agent's unsaved edit\n"
+        );
+
+        // A directory delete must have seen every file below it.
+        let mut expected = std::collections::BTreeMap::new();
+        expected.insert("old/seen.txt".to_string(), Some(HELLO_BLOB.to_string()));
+        let error = super::check_expected_blobs(workspace.path(), &expected, &["old".to_string()])
+            .expect_err("an unseen file must block the delete");
+        match error {
+            crate::error::OriginError::ConflictPaths { paths, .. } => {
+                assert_eq!(paths, vec!["old/added.txt".to_string()]);
+            }
+            other => panic!("unexpected error {other:?}"),
+        }
+        // Matching reads pass.
+        let mut expected = std::collections::BTreeMap::new();
+        expected.insert("old/seen.txt".to_string(), Some(HELLO_BLOB.to_string()));
+        expected.insert("missing.txt".to_string(), None);
+        super::check_expected_blobs(workspace.path(), &expected, &[]).expect("fresh reads pass");
+    }
+
+    #[test]
+    fn user_saves_are_authored_by_the_user_and_agent_saves_by_the_origin() {
+        let workspace = TempDir::new().expect("workspace");
+        let state = test_app_state(
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            &workspace,
+            "http://127.0.0.1:1".parse().expect("controller url"),
+            true,
+        );
+        let user = Uuid::new_v4();
+        let mut claims = OriginClaims {
+            aud: "origin".to_string(),
+            sub: user.to_string(),
+            project_id: Uuid::new_v4().to_string(),
+            origin_id: None,
+            runtime_id: None,
+            protocol: None,
+            scopes: vec!["fs.write".to_string()],
+            lease_id: None,
+            run_id: None,
+            prefer_runtime: None,
+            iat: None,
+            exp: None,
+            jti: None,
+            actor_label: Some("Grace <Hopper>".to_string()),
+            browser_session_id: None,
+        };
+        let identity = super::caller_identity(&state.config, &claims).expect("user identity");
+        assert_eq!(identity.name, "Grace  Hopper");
+        assert_eq!(identity.email, format!("{user}@users.noreply.instafy.dev"));
+        claims.run_id = Some("run-1".to_string());
+        assert!(super::caller_identity(&state.config, &claims).is_none());
     }
 
     #[cfg(unix)]
@@ -3244,6 +3815,7 @@ mod tests {
             max_archive_bytes: 16 * 1024 * 1024,
             staging_base: None,
             multi_tenant: false,
+            hosted_checkout: false,
         });
         let validator = TokenValidator::new(client.clone(), config.jwks_url.clone());
         let app = super::router(
@@ -3383,6 +3955,7 @@ mod tests {
             max_archive_bytes: 16 * 1024 * 1024,
             staging_base: None,
             multi_tenant: false,
+            hosted_checkout: false,
         });
         let validator = TokenValidator::new(client.clone(), config.jwks_url.clone());
         let status_key = "github-import-v1:status-route";

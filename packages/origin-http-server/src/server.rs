@@ -189,14 +189,18 @@ impl OriginHttpServer {
         })
     }
 
-    /// Final WIP checkpoint. Workspaces are git-canonical working copies on an
-    /// ephemeral node disk: after-run syncs cover finished work, but a graceful
-    /// stop (idle pause, credit stop, node drain) may hold uncommitted changes
-    /// from an in-flight session. Push them before the container dies so a
-    /// later node replacement cannot lose them. Best-effort and time-boxed —
-    /// shutdown must never hang past the container's stop grace period.
-    async fn flush_workspace_before_shutdown(&self) {
-        if self.config.multi_tenant {
+    /// Last chance to keep work when the process stops. Hosted runtime
+    /// checkouts only: a Desktop folder belongs to the user and keeps its
+    /// files. Nothing reaches `main` from here. Finished local commits stay
+    /// on the branch for the next refresh to publish, and unsaved edits (or
+    /// the whole turn, when `turn_active`) are parked on local recovery refs
+    /// before any network call. A machine credential cannot mint `git.write`,
+    /// so those refs are pushed by the next publish or refresh. The controller
+    /// calls `POST /git/flush` with a write credential before it stops a
+    /// runtime; this is the fallback for stops it did not drive. Best-effort
+    /// and time-boxed, so shutdown never outlasts the stop grace period.
+    async fn flush_workspace_before_shutdown(&self, turn_active: bool) {
+        if self.config.multi_tenant || !self.config.hosted_checkout {
             return;
         }
         let Some(remote_url) = self
@@ -205,65 +209,34 @@ impl OriginHttpServer {
         else {
             return;
         };
-
-        // Only flush when there is genuinely something to save: a clean tree
-        // must not touch git at all (no alignment, no push) — a machine that
-        // was merely behind the remote would otherwise checkpoint stale
-        // contents over externally pushed commits.
-        let dirty_check_root = self.config.workspace_root.clone();
-        let dirty = tokio::task::spawn_blocking(move || {
-            git::list_dirty_files(dirty_check_root.as_path(), None)
-        })
-        .await;
-        match dirty {
-            Ok(Ok(entries)) if entries.is_empty() => return,
-            Ok(Ok(_)) => {}
-            Ok(Err(error)) => {
-                warn!(?error, "shutdown flush: dirty check failed; skipping flush");
-                return;
-            }
-            Err(join_error) => {
-                warn!(?join_error, "shutdown flush: dirty check task failed");
-                return;
-            }
-        }
-
-        let token = match git_tokens::mint_git_access_token(
-            &self.http_client,
-            self.config.as_ref(),
-            self.config.project_id,
-            &["git.read", "git.write"],
-            None,
-        )
-        .await
-        {
-            Ok(Some(minted)) => minted.token,
-            Ok(None) => {
-                warn!("shutdown flush: no caller-bound git write credential; skipping flush");
-                return;
-            }
-            Err(error) => {
-                warn!(?error, "shutdown flush: failed to mint git token");
-                return;
-            }
-        };
         let mut config = (*self.config).clone();
         config.git_remote_url = Some(remote_url);
         let flush = tokio::task::spawn_blocking(move || {
             let workspace_root = config.workspace_root.clone();
-            // No pre-alignment: WIP is committed on the local HEAD and the
-            // push loop rebases onto the remote tip if it moved, preserving
-            // external commits instead of reverting them.
-            git::commit_and_push_dirty_without_align(
-                &config,
-                workspace_root.as_path(),
-                "instafy: checkpoint before machine stop",
-                Some(token.as_str()),
+            let Some(_lock) =
+                crate::workspace_lock::try_acquire_workspace_apply_lock(&workspace_root)?
+            else {
+                return Err(crate::error::OriginError::conflict(
+                    "the workspace is busy; skipping the shutdown flush",
+                ));
+            };
+            crate::publish::flush(
+                &crate::publish::PublishContext {
+                    config: &config,
+                    workspace_root: workspace_root.as_path(),
+                    token: None,
+                    can_write: false,
+                },
+                turn_active,
             )
         });
         match tokio::time::timeout(std::time::Duration::from_secs(25), flush).await {
-            Ok(Ok(Ok(commit))) => {
-                info!(commit = %commit, "flushed workspace changes before shutdown");
+            Ok(Ok(Ok(report))) => {
+                info!(
+                    parked = report.recovery_refs.len(),
+                    unpushed = report.unpushed_refs,
+                    "kept workspace changes before shutdown"
+                );
             }
             Ok(Ok(Err(error))) => warn!(?error, "shutdown workspace flush failed"),
             Ok(Err(join_error)) => warn!(?join_error, "shutdown workspace flush task failed"),
@@ -275,18 +248,24 @@ impl OriginHttpServer {
     /// failure) where the controller may be unreachable and no user work is
     /// at stake.
     pub async fn stop(&mut self) -> Result<()> {
-        self.stop_inner(false).await
+        self.stop_inner(None).await
     }
 
-    /// Graceful machine shutdown: checkpoint uncommitted workspace changes to
-    /// the canonical git remote, then stop.
+    /// Graceful machine shutdown: keep unsaved workspace changes on local
+    /// recovery refs, then stop.
     pub async fn stop_flushing_workspace(&mut self) -> Result<()> {
-        self.stop_inner(true).await
+        self.stop_inner(Some(false)).await
     }
 
-    async fn stop_inner(&mut self, flush: bool) -> Result<()> {
-        if flush {
-            self.flush_workspace_before_shutdown().await;
+    /// Like [`Self::stop_flushing_workspace`], for a stop that interrupted a
+    /// turn: the turn's local commits are parked instead of published later.
+    pub async fn stop_flushing_workspace_during_turn(&mut self, turn_active: bool) -> Result<()> {
+        self.stop_inner(Some(turn_active)).await
+    }
+
+    async fn stop_inner(&mut self, flush: Option<bool>) -> Result<()> {
+        if let Some(turn_active) = flush {
+            self.flush_workspace_before_shutdown(turn_active).await;
         }
         if let Some(tx) = self.shutdown_tx.take() {
             let _ = tx.send(());
@@ -641,6 +620,7 @@ mod presence_tests {
             max_archive_bytes: 1024,
             staging_base: None,
             multi_tenant: false,
+            hosted_checkout: false,
         }
     }
 

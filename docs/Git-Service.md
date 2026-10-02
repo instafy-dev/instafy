@@ -227,8 +227,10 @@ bare Git repository; and never auto-initializes a repository while handling `DEL
 
 ## Concurrency (human-style)
 - Agents/runtimes work on branches or local commits.
-- To update `main`, they: `fetch main → rebase/merge → push` (FF-only).
-- If push is rejected, they retry; on conflicts they resolve (AI) or ask the user.
+- To update `main`, they: `fetch main → merge → push` (FF-only). The local commits keep their ids
+  under at most one merge commit; nothing is rebased or forced.
+- If push is rejected, they fetch and retry; on conflicts `main` keeps its copy and the local copy
+  goes to a recovery ref (`refs/instafy/recovery/<origin id>/<name>`) for the user or the agent.
 - No global merge queue service; the git ref update is the serialization point.
 
 ## Local dev (what we should wire into `pnpm stack:up`)

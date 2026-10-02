@@ -315,16 +315,22 @@ loses only work that never reached the remote:
 - `/skills import`, with or without `--start`, pushes the skill files it
   installed through the same checkpoint. [Git Service](Git-Service.md#embedded-repositories-and-protected-checkpoints)
   lists the import cases it does not save.
-- **Known gap: the shutdown flush cannot push today.** On a graceful stop (idle
-  pause, credit stop, container drain) `flush_workspace_before_shutdown` in the
-  origin server tries to commit dirty files as
-  `instafy: checkpoint before machine stop`. Minting `git.write` requires the
-  `fs.write` token of the caller, and the shutdown path has no caller, so it
-  logs `shutdown flush: failed to mint git token` and skips the flush. Dirty
-  files that no turn or `/sync` saved are lost when the node is replaced.
-  Compose's `stop_grace_period: 45s` is there for this flush once it works.
-- Residual exposure even with a working flush: a hard node loss mid-run (the
-  in-flight run's WIP) and untracked/gitignored files.
+- A save publishes by merging: the checkout's commits reach `main` unchanged,
+  as a fast-forward or under one merge commit on the current tip. Files that
+  `main` changed too keep `main`'s copy, and the agent's copy goes to a
+  recovery ref (`refs/instafy/recovery/<origin id>/<name>`); work that cannot
+  be pushed at all goes to one as well. See
+  [the origin server](../packages/origin-http-server/README.md#publishing-workspace-runtimes-and-desktop).
+- **A stop never publishes dirty files.** On a graceful stop of a hosted
+  runtime, `flush_workspace_before_shutdown` parks files no turn saved on a
+  local recovery ref (`refs/instafy/local-recovery/<name>`), without network
+  or credentials, and leaves finished local commits on the branch. The next
+  publish or pre-turn refresh with `git.write` pushes the ref and publishes the
+  commits. `POST /git/flush` does the same with the caller's write access and
+  pushes the refs at once. Work parked only locally is lost if the node is
+  replaced before that push. Desktop folders are left as they are.
+- Residual exposure: a hard node loss mid-run (the in-flight run's work), work
+  parked locally whose push has not happened yet, and gitignored files.
 
 **Compatibility: upgrading the provider compose file turns the remote on.**
 Before `docker/docker-compose.runtime.provider.yml` forwarded

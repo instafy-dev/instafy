@@ -116,6 +116,10 @@ impl OriginService {
             max_archive_bytes: settings.max_archive_bytes,
             staging_base: settings.staging_root.clone(),
             multi_tenant: false,
+            // A desktop origin serves a folder the user owns. Only the modes
+            // registered as service-owned below count as hosted; anything
+            // unrecognised falls back to desktop there too.
+            hosted_checkout: matches!(settings.mode.as_str(), "efs" | "hosted"),
         };
 
         let register_token_source = server_config.controller_token_source.clone();
