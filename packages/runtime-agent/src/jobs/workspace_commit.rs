@@ -3,7 +3,7 @@ use std::io::{Cursor, Write};
 use std::path::Path;
 use std::time::Duration;
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result, anyhow, bail};
 use chrono::{SecondsFormat, Utc};
 use origin_http_server::apply::normalize_relative_path;
 use origin_http_server::paths::is_reserved_path;
@@ -17,6 +17,7 @@ use uuid::Uuid;
 use zip::CompressionMethod;
 use zip::write::{FileOptions, ZipWriter};
 
+use super::save_report::{OriginSaveResponse, SaveReport};
 use super::{CodexFileDescriptor, FileChangeKind, JobMessage, JobMessageSender};
 use crate::origin::LocalOriginSync;
 
@@ -34,7 +35,30 @@ pub(crate) struct CommitToOriginResult {
     pub(crate) git_base_rev: Option<String>,
     pub(crate) git_sync_attempted: bool,
     pub(crate) git_sync_error: Option<String>,
+    /// What did not reach canonical `main`, and where it is kept.
+    pub(crate) save: SaveReport,
     pub(crate) paths: Vec<String>,
+}
+
+impl CommitToOriginResult {
+    /// The "Not saved: ..." sentences for this checkpoint: paths the origin
+    /// left out, and every path when the save failed as a whole.
+    pub(crate) fn not_saved_sentences(&self) -> Vec<String> {
+        if !self.git_sync_attempted {
+            return Vec::new();
+        }
+        let failed_whole = self
+            .git_sync_error
+            .as_deref()
+            .is_some_and(|error| !super::git_sync_error_is_history_exclusion(error));
+        let unsaved = if failed_whole {
+            self.paths.as_slice()
+        } else {
+            &[]
+        };
+        self.save
+            .not_saved_sentences(unsaved, self.git_sync_error.as_deref())
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -116,31 +140,51 @@ struct OriginApplyResponse {
     base_rev: Option<String>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Default, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct OriginGitSyncRequest {
+    #[serde(skip_serializing_if = "Option::is_none")]
     message: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     paths: Option<Vec<String>>,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct OriginGitSyncResponse {
-    #[serde(default)]
-    rev: Option<String>,
-    #[serde(default)]
-    base_rev: Option<String>,
+    /// `"refresh"`: publish nothing new, push parked work, publish commits
+    /// already on the local branch and move the checkout to `main`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    mode: Option<String>,
 }
 
 const ORIGIN_APPLY_MAX_ATTEMPTS: usize = 3;
 const ORIGIN_APPLY_RETRY_DELAY: Duration = Duration::from_millis(250);
+/// Another writer (a parallel worker's checkpoint, a person saving in Files)
+/// may hold the workspace lease for a moment; wait this long between tries.
+const LEASE_CONFLICT_RETRY_DELAYS: [Duration; 3] = [
+    Duration::from_millis(250),
+    Duration::from_millis(750),
+    Duration::from_millis(1500),
+];
+/// How long the refresh before a turn may take before the turn goes ahead
+/// without it.
+const PRE_TURN_REFRESH_TIMEOUT: Duration = Duration::from_secs(45);
 
 #[derive(Debug, Clone)]
 pub(crate) enum GitSyncOutcome {
     NotConfigured,
-    Synced { rev: Option<String> },
-    Conflict { message: String },
-    Failed { message: String },
+    Synced {
+        rev: Option<String>,
+        report: SaveReport,
+    },
+    /// Nothing reached canonical `main`; the report says where it is kept.
+    NotSaved {
+        message: String,
+        report: SaveReport,
+    },
+    /// A 409 from an origin that does not report where the work is kept.
+    Conflict {
+        message: String,
+    },
+    Failed {
+        message: String,
+    },
 }
 
 fn parse_env_bool(key: &str) -> Option<bool> {
@@ -519,20 +563,35 @@ pub(crate) async fn checkpoint_lane_files(
     checkpoint: LaneCheckpoint<'_>,
     files: &[CodexFileDescriptor],
 ) -> Vec<JsonValue> {
+    checkpoint_lane_files_with_report(checkpoint, files).await.0
+}
+
+/// [`checkpoint_lane_files`], also returning the "Not saved: ..." sentences
+/// for the paths that did not reach canonical `main`.
+pub(crate) async fn checkpoint_lane_files_with_report(
+    checkpoint: LaneCheckpoint<'_>,
+    files: &[CodexFileDescriptor],
+) -> (Vec<JsonValue>, Vec<String>) {
     if !checkpoint.commit_to_workspace || files.is_empty() {
-        return Vec::new();
+        return (Vec::new(), Vec::new());
     }
     if checkpoint.read_only_workspace {
-        return vec![json!({
-            "kind": "origin/apply-skipped",
-            "metadata": { "reason": "read_only_workspace" }
-        })];
+        return (
+            vec![json!({
+                "kind": "origin/apply-skipped",
+                "metadata": { "reason": "read_only_workspace" }
+            })],
+            Vec::new(),
+        );
     }
     let Some(token) = checkpoint.workspace_token else {
-        return vec![json!({
-            "kind": "origin/apply-skipped",
-            "metadata": { "reason": "missing_controller_token" }
-        })];
+        return (
+            vec![json!({
+                "kind": "origin/apply-skipped",
+                "metadata": { "reason": "missing_controller_token" }
+            })],
+            Vec::new(),
+        );
     };
 
     if let Some(sender) = checkpoint.progress_sender.as_ref() {
@@ -562,41 +621,15 @@ pub(crate) async fn checkpoint_lane_files(
     .await
     {
         Ok(Some(result)) => {
-            let (status_message, status_code) = super::workspace_commit_status(&result);
-            let git_sync_status = super::workspace_commit_git_sync_status(&result);
             if let Some(sender) = checkpoint.progress_sender.as_ref() {
-                let _ = sender.send(JobMessage {
-                    content: status_message.to_string(),
-                    message_type: Some("status".to_string()),
-                    metadata: Some(json!({
-                        "kind": "workspace_commit",
-                        "status": status_code,
-                        "gitSyncStatus": git_sync_status,
-                        "gitSyncAttempted": result.git_sync_attempted,
-                        "gitSyncError": result.git_sync_error,
-                    })),
-                });
+                let _ = sender.send(super::workspace_commit_progress_message(&result));
             }
-            vec![json!({
-                "kind": "origin/apply",
-                "metadata": {
-                    "originId": result.origin_id.to_string(),
-                    "endpoint": result.origin_endpoint,
-                    "mode": result.origin_mode,
-                    "leaseId": result.lease_id.to_string(),
-                    "rev": result.apply_rev,
-                    "baseRev": result.apply_base_rev,
-                    "gitRev": result.git_rev,
-                    "gitBaseRev": result.git_base_rev,
-                    "gitSyncStatus": git_sync_status,
-                    "gitSyncAttempted": result.git_sync_attempted,
-                    "gitSyncError": result.git_sync_error,
-                    "paths": result.paths,
-                    "lane": checkpoint.lane,
-                }
-            })]
+            (
+                vec![super::origin_apply_artifact(&result, Some(checkpoint.lane))],
+                result.not_saved_sentences(),
+            )
         }
-        Ok(None) => Vec::new(),
+        Ok(None) => (Vec::new(), Vec::new()),
         Err(error) => {
             warn!(
                 ?error,
@@ -604,14 +637,24 @@ pub(crate) async fn checkpoint_lane_files(
                 job_id = %checkpoint.job_id,
                 "command lane workspace checkpoint failed; the files stay on this machine"
             );
-            vec![json!({
-                "kind": "origin/apply-error",
-                "metadata": { "error": error.to_string() }
-            })]
+            let paths = files
+                .iter()
+                .filter(|file| !file.is_read_reference())
+                .map(|file| file.workspace_path.clone())
+                .collect::<Vec<_>>();
+            (
+                vec![json!({
+                    "kind": "origin/apply-error",
+                    "metadata": { "error": error.to_string() }
+                })],
+                SaveReport::default().not_saved_sentences(&paths, Some(&error.to_string())),
+            )
         }
     }
 }
 
+/// Acquire the workspace lease for a checkpoint, waiting briefly while
+/// another writer holds it.
 async fn acquire_workspace_lease(
     client: &reqwest::Client,
     controller_base_url: &Url,
@@ -621,6 +664,46 @@ async fn acquire_workspace_lease(
     job_id: Uuid,
     run_id: Option<Uuid>,
 ) -> Result<Uuid> {
+    let mut delays = LEASE_CONFLICT_RETRY_DELAYS.iter();
+    loop {
+        match acquire_workspace_lease_once(
+            client,
+            controller_base_url,
+            controller_token,
+            project_id,
+            runtime_id,
+            job_id,
+            run_id,
+        )
+        .await
+        {
+            Ok(lease_id) => return Ok(lease_id),
+            Err(error @ LeaseAcquireError::Conflict(_)) => match delays.next() {
+                Some(delay) => tokio::time::sleep(*delay).await,
+                None => return Err(error.into()),
+            },
+            Err(error) => return Err(error.into()),
+        }
+    }
+}
+
+#[derive(Debug, thiserror::Error)]
+enum LeaseAcquireError {
+    #[error("workspace lease conflict: {0}")]
+    Conflict(String),
+    #[error(transparent)]
+    Other(#[from] anyhow::Error),
+}
+
+async fn acquire_workspace_lease_once(
+    client: &reqwest::Client,
+    controller_base_url: &Url,
+    controller_token: &str,
+    project_id: Uuid,
+    runtime_id: Uuid,
+    job_id: Uuid,
+    run_id: Option<Uuid>,
+) -> std::result::Result<Uuid, LeaseAcquireError> {
     let url = controller_base_url
         .join("/lease/acquire")
         .context("controller base URL invalid for lease acquire")?;
@@ -651,10 +734,10 @@ async fn acquire_workspace_lease(
     let text = response.text().await.unwrap_or_default();
 
     if status == StatusCode::CONFLICT {
-        bail!("workspace lease conflict: {}", text);
+        return Err(LeaseAcquireError::Conflict(text));
     }
     if !status.is_success() {
-        bail!("workspace lease acquire failed ({}): {}", status, text);
+        return Err(anyhow!("workspace lease acquire failed ({}): {}", status, text).into());
     }
 
     let parsed: LeaseResponse =
@@ -698,17 +781,27 @@ async fn release_workspace_lease(
     Ok(())
 }
 
+/// An `fs.write` origin token for the leased workspace and the endpoint to
+/// use it on.
+struct OriginWriteAccess {
+    token: OriginAccessTokenResponse,
+    endpoint: String,
+}
+
+/// Mint an `fs.write` origin token under `lease_id` and pick the endpoint:
+/// this process's own listener when the controller selected the origin it
+/// hosts, otherwise the controller-provided endpoint.
 #[allow(clippy::too_many_arguments)]
-async fn git_sync_with_lease(
+async fn origin_write_access(
     client: &reqwest::Client,
     controller_base_url: &Url,
     controller_token: &str,
     project_id: Uuid,
     runtime_id: Uuid,
     lease_id: Uuid,
-    message: &str,
     local_origin: Option<&LocalOriginSync>,
-) -> Result<GitSyncOutcome> {
+    purpose: &'static str,
+) -> Result<OriginWriteAccess> {
     let access_token_url = controller_base_url
         .join("/access_token")
         .context("controller base URL invalid for origin access token")?;
@@ -746,19 +839,45 @@ async fn git_sync_with_lease(
         info!(
             origin_id = %token.origin_id,
             endpoint = %endpoint,
-            "git sync targeting the origin hosted by this runtime; using the local listener instead of the tunnel"
+            purpose,
+            "targeting the origin hosted by this runtime; using the local listener instead of the tunnel"
         );
     }
+    Ok(OriginWriteAccess { token, endpoint })
+}
 
-    let url = format!("{}/git/sync", endpoint);
+#[allow(clippy::too_many_arguments)]
+async fn git_sync_with_lease(
+    client: &reqwest::Client,
+    controller_base_url: &Url,
+    controller_token: &str,
+    project_id: Uuid,
+    runtime_id: Uuid,
+    lease_id: Uuid,
+    message: &str,
+    local_origin: Option<&LocalOriginSync>,
+) -> Result<GitSyncOutcome> {
+    let access = origin_write_access(
+        client,
+        controller_base_url,
+        controller_token,
+        project_id,
+        runtime_id,
+        lease_id,
+        local_origin,
+        "git sync",
+    )
+    .await?;
+
+    let url = format!("{}/git/sync", access.endpoint);
     let body = OriginGitSyncRequest {
         message: Some(message.to_string()),
-        paths: None,
+        ..OriginGitSyncRequest::default()
     };
 
     let response = client
         .post(url)
-        .bearer_auth(&token.token)
+        .bearer_auth(&access.token.token)
         .json(&body)
         .send()
         .await
@@ -766,6 +885,18 @@ async fn git_sync_with_lease(
 
     let status = response.status();
     let text = response.text().await.unwrap_or_default();
+    let parsed = OriginSaveResponse::parse(&text);
+
+    if parsed.is_not_saved() {
+        let message = parsed
+            .error
+            .clone()
+            .unwrap_or_else(|| format!("{}: {}", status, text.trim()));
+        return Ok(GitSyncOutcome::NotSaved {
+            message,
+            report: parsed.save_report(),
+        });
+    }
 
     if status == StatusCode::CONFLICT {
         return Ok(GitSyncOutcome::Conflict { message: text });
@@ -777,13 +908,10 @@ async fn git_sync_with_lease(
         });
     }
 
-    let parsed: OriginGitSyncResponse =
-        serde_json::from_str(&text).unwrap_or(OriginGitSyncResponse {
-            rev: None,
-            base_rev: None,
-        });
-
-    Ok(GitSyncOutcome::Synced { rev: parsed.rev })
+    Ok(GitSyncOutcome::Synced {
+        rev: parsed.rev.clone(),
+        report: parsed.save_report(),
+    })
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -801,46 +929,17 @@ async fn commit_with_lease(
     progress_sender: Option<JobMessageSender>,
     local_origin: Option<&LocalOriginSync>,
 ) -> Result<CommitToOriginResult> {
-    let access_token_url = controller_base_url
-        .join("/access_token")
-        .context("controller base URL invalid for origin access token")?;
-    let access_body = OriginAccessTokenRequest {
-        project_id: project_id.to_string(),
-        protocol: "http".to_string(),
-        scopes: vec!["fs.write".to_string()],
-        lease_id: lease_id.to_string(),
-        prefer_runtime: runtime_id.to_string(),
-    };
-
-    let response = client
-        .post(access_token_url)
-        .bearer_auth(controller_token)
-        .json(&access_body)
-        .send()
-        .await
-        .context("origin access token request failed")?;
-
-    let status = response.status();
-    let text = response.text().await.unwrap_or_default();
-    if !status.is_success() {
-        bail!("origin access token failed ({}): {}", status, text);
-    }
-
-    let token: OriginAccessTokenResponse =
-        serde_json::from_str(&text).context("failed to parse origin access token response")?;
-
-    let (endpoint, endpoint_is_local) =
-        resolve_origin_sync_endpoint(token.origin_id, token.endpoint.as_str(), local_origin);
-    if endpoint.is_empty() {
-        bail!("origin access token response missing endpoint");
-    }
-    if endpoint_is_local {
-        info!(
-            origin_id = %token.origin_id,
-            endpoint = %endpoint,
-            "workspace apply targeting the origin hosted by this runtime; using the local listener instead of the tunnel"
-        );
-    }
+    let OriginWriteAccess { token, endpoint } = origin_write_access(
+        client,
+        controller_base_url,
+        controller_token,
+        project_id,
+        runtime_id,
+        lease_id,
+        local_origin,
+        "workspace apply",
+    )
+    .await?;
 
     if let Some(sender) = progress_sender.as_ref() {
         let _ = sender.send(JobMessage {
@@ -895,10 +994,24 @@ async fn commit_with_lease(
     let mut git_base_rev = None;
     let mut git_sync_attempted = false;
     let mut git_sync_error = None;
+    let mut save = SaveReport::default();
     if auto_sync_after_apply {
         git_sync_attempted = true;
         match try_git_sync(client, &endpoint, &token.token, project_id, paths).await {
+            Ok(synced) if synced.is_not_saved() => {
+                // Nothing reached `main`; the report says where it is kept.
+                git_base_rev = synced.base_rev.clone();
+                save = synced.save_report();
+                let error = synced
+                    .error
+                    .clone()
+                    .or_else(|| synced.failure.clone())
+                    .unwrap_or_else(|| "Not saved".to_string());
+                warn!(error = %error, project_id = %project_id, "git sync after apply saved nothing");
+                git_sync_error = Some(error);
+            }
             Ok(synced) => {
+                save = synced.save_report();
                 git_rev = synced.rev;
                 git_base_rev = synced.base_rev;
             }
@@ -920,8 +1033,233 @@ async fn commit_with_lease(
         git_base_rev,
         git_sync_attempted,
         git_sync_error,
+        save,
         paths: Vec::new(),
     })
+}
+
+/// Where the refresh before a turn goes and with what credential.
+pub(crate) struct PreTurnRefresh<'a> {
+    pub(crate) controller_base_url: &'a Url,
+    /// The job's verified workspace token. Without it (or without a lease)
+    /// only the read-only refresh can run.
+    pub(crate) workspace_token: Option<&'a str>,
+    pub(crate) project_id: Uuid,
+    pub(crate) runtime_id: Uuid,
+    pub(crate) job_id: Uuid,
+    pub(crate) run_id: Option<Uuid>,
+    /// The origin this process hosts. The refresh only ever moves this
+    /// runtime's own checkout.
+    pub(crate) local_origin: Option<LocalOriginSync>,
+    /// The workspace has a canonical remote to refresh from.
+    pub(crate) has_git_remote: bool,
+}
+
+/// What the refresh before a turn did. It never fails the turn.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct PreTurnRefreshOutcome {
+    /// `refresh` (under a workspace lease), `read_only` (no lease: fetch and
+    /// follow `main` only when nothing local is unpublished), `skipped` or
+    /// `failed`.
+    pub(crate) mode: &'static str,
+    pub(crate) response: Option<OriginSaveResponse>,
+    pub(crate) error: Option<String>,
+    /// Why no workspace lease was used, when the read-only refresh ran.
+    pub(crate) lease_error: Option<String>,
+    pub(crate) skipped_reason: Option<&'static str>,
+}
+
+impl PreTurnRefreshOutcome {
+    fn skipped(reason: &'static str, lease_error: Option<String>) -> Self {
+        Self {
+            mode: "skipped",
+            skipped_reason: Some(reason),
+            lease_error,
+            ..Self::default()
+        }
+    }
+
+    fn failed(error: String, lease_error: Option<String>) -> Self {
+        Self {
+            mode: "failed",
+            error: Some(error),
+            lease_error,
+            ..Self::default()
+        }
+    }
+
+    /// The `origin/refresh` artifact recorded on the turn.
+    pub(crate) fn artifact(&self) -> JsonValue {
+        let response = self.response.clone().unwrap_or_default();
+        json!({
+            "kind": "origin/refresh",
+            "metadata": {
+                "mode": self.mode,
+                "skippedReason": self.skipped_reason,
+                "rev": response.rev,
+                "baseRev": response.base_rev,
+                "gitSyncStatus": response.git_sync_status,
+                "checkoutMoved": response.checkout_moved,
+                "recoveryRef": response.recovery_ref,
+                "conflictedPaths": response.conflicted_paths,
+                "rejectedPaths": response.rejected_paths,
+                "unpushedRefs": response.unpushed_refs,
+                "failure": response.failure,
+                "error": self.error,
+                "leaseError": self.lease_error,
+            }
+        })
+    }
+
+    /// Work from an earlier turn the refresh could not bring onto `main`.
+    pub(crate) fn not_saved_sentences(&self) -> Vec<String> {
+        self.response
+            .as_ref()
+            .map(|response| response.save_report().not_saved_sentences(&[], None))
+            .unwrap_or_default()
+    }
+}
+
+/// Before a turn, bring this runtime's checkout up to date with canonical
+/// `main`: under a workspace lease, `POST /git/sync {mode: "refresh"}` pushes
+/// parked work, publishes commits left on the local branch and moves the
+/// checkout to `main`. When no lease can be had (a read-only run, or someone
+/// else holds it), the origin hosted by this process fetches with its own
+/// read credential and moves the checkout only when nothing local is
+/// unpublished. Failures are recorded, never fatal.
+pub(crate) async fn refresh_before_turn(params: PreTurnRefresh<'_>) -> PreTurnRefreshOutcome {
+    if !params.has_git_remote {
+        return PreTurnRefreshOutcome::skipped("no_git_remote", None);
+    }
+    let Some(local_origin) = params.local_origin.as_ref() else {
+        return PreTurnRefreshOutcome::skipped("no_local_origin", None);
+    };
+
+    let lease_error = match params.workspace_token {
+        None => Some("missing workspace token".to_string()),
+        Some(token) => {
+            let client = match reqwest::Client::builder()
+                .timeout(PRE_TURN_REFRESH_TIMEOUT)
+                .build()
+            {
+                Ok(client) => client,
+                Err(error) => {
+                    return PreTurnRefreshOutcome::failed(error.to_string(), None);
+                }
+            };
+            match acquire_workspace_lease_once(
+                &client,
+                params.controller_base_url,
+                token,
+                params.project_id,
+                params.runtime_id,
+                params.job_id,
+                params.run_id,
+            )
+            .await
+            {
+                Ok(lease_id) => {
+                    let result = refresh_with_lease(
+                        &client,
+                        params.controller_base_url,
+                        token,
+                        params.project_id,
+                        params.runtime_id,
+                        lease_id,
+                        local_origin,
+                    )
+                    .await;
+                    if let Err(error) = release_workspace_lease(
+                        &client,
+                        params.controller_base_url,
+                        token,
+                        params.project_id,
+                        params.runtime_id,
+                        lease_id,
+                    )
+                    .await
+                    {
+                        warn!(?error, lease_id = %lease_id, "failed to release workspace lease after the pre-turn refresh");
+                    }
+                    return match result {
+                        Ok(Some(response)) => PreTurnRefreshOutcome {
+                            mode: "refresh",
+                            response: Some(response),
+                            ..PreTurnRefreshOutcome::default()
+                        },
+                        Ok(None) => PreTurnRefreshOutcome::skipped("origin_not_local", None),
+                        Err(error) => PreTurnRefreshOutcome::failed(format!("{error:#}"), None),
+                    };
+                }
+                Err(error) => Some(error.to_string()),
+            }
+        }
+    };
+
+    let Some(refresh) = local_origin.read_only_refresh.as_ref() else {
+        return PreTurnRefreshOutcome::skipped("no_read_only_refresh", lease_error);
+    };
+    match tokio::time::timeout(PRE_TURN_REFRESH_TIMEOUT, refresh.run()).await {
+        Ok(Ok(report)) => PreTurnRefreshOutcome {
+            mode: "read_only",
+            response: Some(OriginSaveResponse::from_value(report)),
+            lease_error,
+            ..PreTurnRefreshOutcome::default()
+        },
+        Ok(Err(error)) => PreTurnRefreshOutcome::failed(format!("{error:#}"), lease_error),
+        Err(_) => PreTurnRefreshOutcome::failed(
+            "the read-only refresh timed out".to_string(),
+            lease_error,
+        ),
+    }
+}
+
+/// `POST /git/sync {mode: "refresh"}` on this runtime's own origin. `None`
+/// when the controller selected another origin: the refresh never moves a
+/// checkout this runtime does not host.
+async fn refresh_with_lease(
+    client: &reqwest::Client,
+    controller_base_url: &Url,
+    controller_token: &str,
+    project_id: Uuid,
+    runtime_id: Uuid,
+    lease_id: Uuid,
+    local_origin: &LocalOriginSync,
+) -> Result<Option<OriginSaveResponse>> {
+    let access = origin_write_access(
+        client,
+        controller_base_url,
+        controller_token,
+        project_id,
+        runtime_id,
+        lease_id,
+        Some(local_origin),
+        "pre-turn refresh",
+    )
+    .await?;
+    if access.token.origin_id != local_origin.origin_id {
+        return Ok(None);
+    }
+    let response = client
+        .post(format!("{}/git/sync", access.endpoint))
+        .bearer_auth(&access.token.token)
+        .json(&OriginGitSyncRequest {
+            mode: Some("refresh".to_string()),
+            ..OriginGitSyncRequest::default()
+        })
+        .send()
+        .await
+        .context("origin refresh request failed")?;
+    let status = response.status();
+    let text = response.text().await.unwrap_or_default();
+    if !status.is_success() {
+        let details = text.trim();
+        if details.is_empty() {
+            bail!("origin refresh failed ({status})");
+        }
+        bail!("origin refresh failed ({status}): {details}");
+    }
+    Ok(Some(OriginSaveResponse::parse(&text)))
 }
 
 async fn send_origin_apply_with_retry(
@@ -1009,18 +1347,22 @@ fn normalize_upload_archive_path(path: &str) -> Result<String> {
     Ok(normalized)
 }
 
+/// `POST /git/sync {paths}`. A `not_saved` answer (409 or 503 with the
+/// report) is returned as a response, not an error, so the caller can say
+/// where the work is kept.
 async fn try_git_sync(
     client: &reqwest::Client,
     endpoint: &str,
     origin_token: &str,
     project_id: Uuid,
     paths: &[String],
-) -> Result<OriginGitSyncResponse> {
+) -> Result<OriginSaveResponse> {
     let url = format!("{}/git/sync", endpoint.trim_end_matches('/'));
     let message = format!("instafy: agent sync (project {} )", project_id);
     let body = OriginGitSyncRequest {
         message: Some(message),
         paths: Some(paths.to_vec()),
+        mode: None,
     };
 
     let response = client
@@ -1033,19 +1375,17 @@ async fn try_git_sync(
 
     let status = response.status();
     let text = response.text().await.unwrap_or_default();
+    let parsed = OriginSaveResponse::parse(&text);
     if !status.is_success() {
+        if parsed.is_not_saved() {
+            return Ok(parsed);
+        }
         let details = text.trim();
         if details.is_empty() {
             bail!("origin git sync failed ({status})");
         }
         bail!("origin git sync failed ({status}): {details}");
     }
-
-    let parsed: OriginGitSyncResponse =
-        serde_json::from_str(&text).unwrap_or(OriginGitSyncResponse {
-            rev: None,
-            base_rev: None,
-        });
     Ok(parsed)
 }
 
@@ -1081,10 +1421,11 @@ mod tests {
         settle_skills_lane_outcome,
     };
     use super::{
-        LaneCheckpoint, checkpoint_lane_files, commit_to_hosted_origin,
-        resolve_origin_sync_endpoint,
+        LaneCheckpoint, PreTurnRefresh, checkpoint_lane_files, checkpoint_lane_files_with_report,
+        commit_to_hosted_origin, refresh_before_turn, resolve_origin_sync_endpoint,
     };
-    use crate::origin::LocalOriginSync;
+    use crate::origin::{LocalOriginSync, ReadOnlyRefresh};
+    use std::time::Duration;
 
     fn changed_file_descriptor(path: &str) -> CodexFileDescriptor {
         CodexFileDescriptor {
@@ -1208,6 +1549,7 @@ mod tests {
         let local = LocalOriginSync {
             origin_id,
             endpoint: "http://127.0.0.1:54332/".to_string(),
+            read_only_refresh: None,
         };
 
         let (endpoint, is_local) =
@@ -1221,6 +1563,7 @@ mod tests {
         let local = LocalOriginSync {
             origin_id: Uuid::new_v4(),
             endpoint: "http://127.0.0.1:54332".to_string(),
+            read_only_refresh: None,
         };
 
         let (endpoint, is_local) = resolve_origin_sync_endpoint(
@@ -1243,6 +1586,7 @@ mod tests {
         let local = LocalOriginSync {
             origin_id,
             endpoint: "   ".to_string(),
+            read_only_refresh: None,
         };
 
         let (endpoint, is_local) =
@@ -1387,6 +1731,7 @@ mod tests {
             Some(LocalOriginSync {
                 origin_id,
                 endpoint: format!("http://{local_origin_address}"),
+                read_only_refresh: None,
             }),
         )
         .await?
@@ -1438,6 +1783,7 @@ mod tests {
             Some(LocalOriginSync {
                 origin_id: Uuid::new_v4(),
                 endpoint: format!("http://{local_origin_address}"),
+                read_only_refresh: None,
             }),
         )
         .await?
@@ -1896,5 +2242,592 @@ mod tests {
         assert!(message.contains("failed to package workspace file ../README.md"));
         assert!(message.contains("invalid workspace file path"));
         assert!(!message.contains("zip entry"));
+    }
+
+    /// Origin stand-in answering `/apply` and `/git/sync` with `sync_status`
+    /// and `sync_body`, recording every `/git/sync` request body.
+    async fn spawn_reporting_origin(
+        sync_status: AxumStatusCode,
+        sync_body: &'static str,
+    ) -> (SocketAddr, Arc<std::sync::Mutex<Vec<serde_json::Value>>>) {
+        let bodies = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let recorded = Arc::clone(&bodies);
+        let app = Router::new()
+            .route(
+                "/apply",
+                post(|| async { (AxumStatusCode::OK, r#"{"rev":"applyrev"}"#) }),
+            )
+            .route(
+                "/git/sync",
+                post(move |body: axum::body::Bytes| {
+                    let recorded = Arc::clone(&recorded);
+                    async move {
+                        recorded
+                            .lock()
+                            .unwrap()
+                            .push(serde_json::from_slice(&body).unwrap_or_default());
+                        (sync_status, sync_body)
+                    }
+                }),
+            );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        (address, bodies)
+    }
+
+    /// A read-only refresh stand-in that counts its calls.
+    fn counting_read_only_refresh() -> (ReadOnlyRefresh, Arc<AtomicUsize>) {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let counter = Arc::clone(&calls);
+        let refresh = ReadOnlyRefresh::new(move || {
+            let counter = Arc::clone(&counter);
+            async move {
+                counter.fetch_add(1, Ordering::SeqCst);
+                Ok(serde_json::json!({
+                    "rev": "mainrev",
+                    "baseRev": "mainrev",
+                    "gitSyncStatus": "unchanged",
+                    "checkoutMoved": true,
+                    "conflictedPaths": [],
+                    "rejectedPaths": [],
+                    "unpushedRefs": 0
+                }))
+            }
+        });
+        (refresh, calls)
+    }
+
+    fn pre_turn_refresh<'a>(
+        controller: &'a reqwest::Url,
+        workspace_token: Option<&'a str>,
+        local_origin: Option<LocalOriginSync>,
+    ) -> PreTurnRefresh<'a> {
+        PreTurnRefresh {
+            controller_base_url: controller,
+            workspace_token,
+            project_id: Uuid::new_v4(),
+            runtime_id: Uuid::new_v4(),
+            job_id: Uuid::new_v4(),
+            run_id: Some(Uuid::new_v4()),
+            local_origin,
+            has_git_remote: true,
+        }
+    }
+
+    #[tokio::test]
+    async fn pre_turn_refresh_runs_under_a_lease_on_this_runtimes_origin() -> Result<()> {
+        let origin_id = Uuid::new_v4();
+        let (origin_address, bodies) = spawn_reporting_origin(
+            AxumStatusCode::OK,
+            r#"{"rev":"mainrev","baseRev":"mainrev","gitSyncStatus":"published",
+                "checkoutMoved":true,"conflictedPaths":["src/a.rs"],
+                "recoveryRef":"refs/instafy/recovery/o/x-conflict-1",
+                "rejectedPaths":[],"unpushedRefs":0}"#,
+        )
+        .await;
+        let (controller_address, token_mints) =
+            spawn_stub_controller(origin_id, format!("http://{origin_address}")).await;
+        let controller = reqwest::Url::parse(&format!("http://{controller_address}/"))?;
+        let (read_only, read_only_calls) = counting_read_only_refresh();
+
+        let outcome = refresh_before_turn(pre_turn_refresh(
+            &controller,
+            Some("workspace-token"),
+            Some(LocalOriginSync {
+                origin_id,
+                endpoint: format!("http://{origin_address}"),
+                read_only_refresh: Some(read_only),
+            }),
+        ))
+        .await;
+
+        ensure!(outcome.mode == "refresh", "{outcome:?}");
+        ensure!(token_mints.load(Ordering::SeqCst) == 1);
+        ensure!(read_only_calls.load(Ordering::SeqCst) == 0);
+        let bodies = bodies.lock().unwrap().clone();
+        ensure!(
+            bodies == vec![serde_json::json!({ "mode": "refresh" })],
+            "{bodies:?}"
+        );
+        let artifact = outcome.artifact();
+        ensure!(artifact["kind"] == "origin/refresh");
+        ensure!(artifact["metadata"]["mode"] == "refresh");
+        ensure!(artifact["metadata"]["checkoutMoved"] == true);
+        // Work an earlier turn could not bring onto main is named in this turn.
+        ensure!(
+            outcome.not_saved_sentences()
+                == vec!["Not saved: src/a.rs (kept at refs/instafy/recovery/o/x-conflict-1)"]
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn pre_turn_refresh_falls_back_to_read_only_without_a_lease() -> Result<()> {
+        let (controller, requests) = spawn_refusing_controller().await;
+        let (read_only, read_only_calls) = counting_read_only_refresh();
+
+        let outcome = refresh_before_turn(pre_turn_refresh(
+            &controller,
+            Some("workspace-token"),
+            Some(LocalOriginSync {
+                origin_id: Uuid::new_v4(),
+                endpoint: "http://127.0.0.1:9".to_string(),
+                read_only_refresh: Some(read_only.clone()),
+            }),
+        ))
+        .await;
+        ensure!(outcome.mode == "read_only", "{outcome:?}");
+        ensure!(read_only_calls.load(Ordering::SeqCst) == 1);
+        ensure!(
+            requests.load(Ordering::SeqCst) == 1,
+            "one lease attempt, no retry"
+        );
+        ensure!(outcome.lease_error.is_some());
+        ensure!(outcome.artifact()["metadata"]["checkoutMoved"] == true);
+
+        // No workspace token at all: straight to the read-only refresh.
+        let outcome = refresh_before_turn(pre_turn_refresh(
+            &controller,
+            None,
+            Some(LocalOriginSync {
+                origin_id: Uuid::new_v4(),
+                endpoint: "http://127.0.0.1:9".to_string(),
+                read_only_refresh: Some(read_only),
+            }),
+        ))
+        .await;
+        ensure!(outcome.mode == "read_only", "{outcome:?}");
+        ensure!(read_only_calls.load(Ordering::SeqCst) == 2);
+        ensure!(requests.load(Ordering::SeqCst) == 1);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn pre_turn_refresh_only_moves_this_runtimes_own_checkout() -> Result<()> {
+        let (origin_address, bodies) =
+            spawn_reporting_origin(AxumStatusCode::OK, r#"{"rev":"x"}"#).await;
+        // The controller selects some other origin.
+        let (controller_address, _) =
+            spawn_stub_controller(Uuid::new_v4(), format!("http://{origin_address}")).await;
+        let controller = reqwest::Url::parse(&format!("http://{controller_address}/"))?;
+        let (read_only, read_only_calls) = counting_read_only_refresh();
+        let local = LocalOriginSync {
+            origin_id: Uuid::new_v4(),
+            endpoint: "http://127.0.0.1:9".to_string(),
+            read_only_refresh: Some(read_only),
+        };
+
+        let outcome = refresh_before_turn(pre_turn_refresh(
+            &controller,
+            Some("workspace-token"),
+            Some(local.clone()),
+        ))
+        .await;
+        ensure!(outcome.mode == "skipped", "{outcome:?}");
+        ensure!(outcome.skipped_reason == Some("origin_not_local"));
+        ensure!(bodies.lock().unwrap().is_empty());
+
+        // Nothing to refresh from, or no origin in this process: no calls.
+        let mut no_remote = pre_turn_refresh(&controller, Some("workspace-token"), Some(local));
+        no_remote.has_git_remote = false;
+        ensure!(refresh_before_turn(no_remote).await.skipped_reason == Some("no_git_remote"));
+        let outcome =
+            refresh_before_turn(pre_turn_refresh(&controller, Some("workspace-token"), None)).await;
+        ensure!(outcome.skipped_reason == Some("no_local_origin"));
+        ensure!(read_only_calls.load(Ordering::SeqCst) == 0);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn a_partial_save_records_each_path_and_says_what_was_not_saved() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        std::fs::create_dir_all(temp.path().join("src"))?;
+        std::fs::write(temp.path().join("src/a.rs"), "fn a() {}\n")?;
+        std::fs::write(temp.path().join(".env"), "TOKEN=1\n")?;
+        let (origin_address, bodies) = spawn_reporting_origin(
+            AxumStatusCode::OK,
+            r#"{"rev":"p","baseRev":"r","gitSyncStatus":"partial",
+                "recoveryRef":"refs/instafy/recovery/o/x-conflict-1",
+                "conflictedPaths":["src/a.rs"],
+                "rejectedPaths":[{"path":".env","reason":"ignored","keptSavedVersion":false}],
+                "unpushedRefs":0,"checkoutMoved":true}"#,
+        )
+        .await;
+        let (controller_address, _) =
+            spawn_stub_controller(Uuid::new_v4(), format!("http://{origin_address}")).await;
+        let controller = reqwest::Url::parse(&format!("http://{controller_address}/"))?;
+
+        let (artifacts, not_saved) = checkpoint_lane_files_with_report(
+            lane_checkpoint(&controller, Some("workspace-token"), temp.path()),
+            &[
+                changed_file_descriptor("src/a.rs"),
+                changed_file_descriptor(".env"),
+            ],
+        )
+        .await;
+
+        let sent = bodies.lock().unwrap().clone();
+        ensure!(sent.len() == 1);
+        ensure!(
+            sent[0]["paths"] == serde_json::json!([".env", "src/a.rs"]),
+            "{sent:?}"
+        );
+        ensure!(artifacts.len() == 1, "{artifacts:?}");
+        let metadata = &artifacts[0]["metadata"];
+        ensure!(metadata["gitSyncStatus"] == "partial", "{metadata}");
+        ensure!(metadata["conflictedPaths"] == serde_json::json!(["src/a.rs"]));
+        ensure!(
+            metadata["rejectedPaths"]
+                == serde_json::json!([{"path": ".env", "reason": "ignored", "keptSavedVersion": false}])
+        );
+        ensure!(metadata["recoveryRef"] == "refs/instafy/recovery/o/x-conflict-1");
+        ensure!(metadata["gitRev"] == "p");
+        ensure!(
+            not_saved
+                == vec![
+                    "Not saved: src/a.rs (kept at refs/instafy/recovery/o/x-conflict-1)",
+                    "Not saved: .env (ignored by .gitignore)",
+                ],
+            "{not_saved:?}"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn a_save_that_kept_nothing_on_main_names_where_the_work_is() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        std::fs::write(temp.path().join("notes.md"), "hello\n")?;
+        let (origin_address, _) = spawn_reporting_origin(
+            AxumStatusCode::SERVICE_UNAVAILABLE,
+            r#"{"error":"Not saved: could not reach the saved history (kept at refs/instafy/local-recovery/x-unpublished-2)",
+                "code":"not_saved","gitSyncStatus":"unpublished","retryable":true,
+                "recoveryRef":"refs/instafy/local-recovery/x-unpublished-2",
+                "conflictedPaths":[],"rejectedPaths":[],"unpushedRefs":1}"#,
+        )
+        .await;
+        let (controller_address, _) =
+            spawn_stub_controller(Uuid::new_v4(), format!("http://{origin_address}")).await;
+        let controller = reqwest::Url::parse(&format!("http://{controller_address}/"))?;
+
+        let (artifacts, not_saved) = checkpoint_lane_files_with_report(
+            lane_checkpoint(&controller, Some("workspace-token"), temp.path()),
+            &[changed_file_descriptor("notes.md")],
+        )
+        .await;
+        let metadata = &artifacts[0]["metadata"];
+        ensure!(metadata["gitSyncStatus"] == "failed", "{metadata}");
+        ensure!(
+            metadata["recoveryRef"] == "refs/instafy/local-recovery/x-unpublished-2",
+            "{metadata}"
+        );
+        ensure!(
+            metadata["gitSyncError"]
+                .as_str()
+                .is_some_and(|error| error.starts_with("Not saved:")),
+            "{metadata}"
+        );
+        ensure!(
+            not_saved
+                == vec![
+                    "Not saved: notes.md (kept at refs/instafy/local-recovery/x-unpublished-2)"
+                ],
+            "{not_saved:?}"
+        );
+        Ok(())
+    }
+
+    /// Controller stand-in for a real origin: publishes a JWKS, grants
+    /// `lease_id`, mints a signed `fs.write` origin token for it (for
+    /// `origin_endpoint`), answers the origin's lease check and its
+    /// `git.write` exchange.
+    async fn spawn_controller_for_real_origin(
+        project_id: Uuid,
+        origin_id: Uuid,
+        origin_endpoint: String,
+    ) -> SocketAddr {
+        use axum::Json;
+        use axum::routing::get;
+        use base64::Engine as _;
+        use base64::engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD};
+        use ring::rand::SystemRandom;
+        use ring::signature::{Ed25519KeyPair, KeyPair as _};
+
+        let pkcs8 = Ed25519KeyPair::generate_pkcs8(&SystemRandom::new()).unwrap();
+        let key_pair = Ed25519KeyPair::from_pkcs8(pkcs8.as_ref()).unwrap();
+        let jwks = serde_json::json!({
+            "keys": [{
+                "kty": "OKP", "crv": "Ed25519", "alg": "EdDSA", "use": "sig",
+                "kid": "stub-key",
+                "x": URL_SAFE_NO_PAD.encode(key_pair.public_key().as_ref()),
+            }]
+        });
+        let pem = format!(
+            "-----BEGIN PRIVATE KEY-----\n{}\n-----END PRIVATE KEY-----\n",
+            STANDARD.encode(pkcs8.as_ref())
+        );
+        let encoding_key = jsonwebtoken::EncodingKey::from_ed_pem(pem.as_bytes()).unwrap();
+        let lease_id = Uuid::new_v4();
+        let user_id = Uuid::new_v4();
+        let runtime_id = Uuid::new_v4();
+        let now = chrono::Utc::now().timestamp();
+        let origin_token = jsonwebtoken::encode(
+            &jsonwebtoken::Header {
+                kid: Some("stub-key".to_string()),
+                ..jsonwebtoken::Header::new(jsonwebtoken::Algorithm::EdDSA)
+            },
+            &serde_json::json!({
+                "aud": origin_id.to_string(),
+                "sub": user_id.to_string(),
+                "project_id": project_id.to_string(),
+                "origin_id": origin_id.to_string(),
+                "runtime_id": runtime_id.to_string(),
+                "protocol": "http",
+                "scopes": ["fs.write"],
+                "lease_id": lease_id.to_string(),
+                "iat": now,
+                "exp": now + 300,
+            }),
+            &encoding_key,
+        )
+        .unwrap();
+        let lease = serde_json::json!({
+            "lease": {
+                "leaseId": lease_id,
+                "projectId": project_id,
+                "userId": user_id,
+                "runtimeId": runtime_id,
+                "expiresAt": (chrono::Utc::now() + chrono::Duration::minutes(5)).to_rfc3339(),
+            }
+        });
+        let access = serde_json::json!({
+            "originId": origin_id,
+            "endpoint": origin_endpoint,
+            "mode": "hosted",
+            "token": origin_token,
+            "leaseId": lease_id,
+        });
+        let app = Router::new()
+            .route(
+                "/.well-known/jwks.json",
+                get(move || {
+                    let jwks = jwks.clone();
+                    async move { Json(jwks) }
+                }),
+            )
+            .route(
+                "/lease/acquire",
+                post(move || async move { Json(serde_json::json!({ "leaseId": lease_id })) }),
+            )
+            .route(
+                "/lease/release",
+                post(|| async { (AxumStatusCode::OK, "{}") }),
+            )
+            .route(
+                "/access_token",
+                post(move || {
+                    let access = access.clone();
+                    async move { Json(access) }
+                }),
+            )
+            .route(
+                "/projects/:project/lease",
+                get(move || {
+                    let lease = lease.clone();
+                    async move { Json(lease) }
+                }),
+            )
+            .route(
+                "/projects/:project/git/access_token",
+                post(|| async {
+                    Json(serde_json::json!({ "token": "git-token", "expiresIn": 60 }))
+                }),
+            );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        address
+    }
+
+    fn git(dir: &std::path::Path, args: &[&str]) -> String {
+        let output = std::process::Command::new("git")
+            .args(args)
+            .current_dir(dir)
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_AUTHOR_NAME", "Seed")
+            .env("GIT_AUTHOR_EMAIL", "seed@example.com")
+            .env("GIT_COMMITTER_NAME", "Seed")
+            .env("GIT_COMMITTER_EMAIL", "seed@example.com")
+            .output()
+            .expect("git runs");
+        assert!(
+            output.status.success(),
+            "git {args:?}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8_lossy(&output.stdout).trim().to_string()
+    }
+
+    /// Selection (a), end to end against a real single-tenant origin: an
+    /// ignored path in the checkpoint is reported, never published, and the
+    /// rest of the turn reaches canonical `main`.
+    #[tokio::test]
+    async fn an_ignored_path_in_a_checkpoint_is_reported_by_a_real_origin() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let root = temp.path().canonicalize()?;
+        let remote = root.join("remote.git");
+        let seed = root.join("seed");
+        std::fs::create_dir_all(&seed)?;
+        git(
+            &root,
+            &[
+                "init",
+                "-q",
+                "--bare",
+                "-b",
+                "main",
+                remote.to_str().unwrap(),
+            ],
+        );
+        git(&seed, &["init", "-q", "-b", "main"]);
+        std::fs::write(seed.join(".gitignore"), ".env\n")?;
+        std::fs::write(seed.join("README.md"), "seed\n")?;
+        git(&seed, &["add", "-A"]);
+        git(&seed, &["commit", "-q", "-m", "seed"]);
+        git(&seed, &["push", "-q", remote.to_str().unwrap(), "main"]);
+
+        let workspace = root.join("ws");
+        std::fs::create_dir_all(&workspace)?;
+        let origin_id = Uuid::new_v4();
+        let listener = std::net::TcpListener::bind("127.0.0.1:0")?;
+        let origin_port = listener.local_addr()?.port();
+        drop(listener);
+        let project_id = Uuid::new_v4();
+        let controller_address = spawn_controller_for_real_origin(
+            project_id,
+            origin_id,
+            format!("http://127.0.0.1:{origin_port}"),
+        )
+        .await;
+        let controller = reqwest::Url::parse(&format!("http://{controller_address}/"))?;
+        let mut checkpoint = lane_checkpoint(&controller, Some("workspace-token"), &workspace);
+        checkpoint.project_id = project_id;
+        let mut server = origin_http_server::server::OriginHttpServer::new(
+            origin_http_server::config::ServerConfig {
+                project_id: checkpoint.project_id,
+                origin_id,
+                workspace_root: workspace.clone(),
+                git_remote_url: Some(format!("file://{}", remote.display())),
+                git_remote_base_url: None,
+                git_branch: "main".to_string(),
+                git_remote_name: "origin".to_string(),
+                git_author_name: "Instafy Origin".to_string(),
+                git_author_email: "origin@instafy.dev".to_string(),
+                bind_host: "127.0.0.1".to_string(),
+                bind_port: origin_port,
+                controller_base_url: controller.clone(),
+                controller_internal_token: None,
+                controller_token_source: None,
+                jwks_url: controller.join("/.well-known/jwks.json")?,
+                skip_auth: false,
+                enable_presence_heartbeat: false,
+                presence_interval: Duration::from_secs(60),
+                max_archive_bytes: 1024 * 1024,
+                staging_base: None,
+                multi_tenant: false,
+                hosted_checkout: true,
+            },
+        )?;
+        server.start().await?;
+
+        std::fs::create_dir_all(workspace.join("src"))?;
+        std::fs::write(workspace.join("src/a.rs"), "fn a() {}\n")?;
+        std::fs::write(workspace.join(".env"), "TOKEN=secret\n")?;
+        let (artifacts, not_saved) = checkpoint_lane_files_with_report(
+            checkpoint,
+            &[
+                changed_file_descriptor("src/a.rs"),
+                changed_file_descriptor(".env"),
+            ],
+        )
+        .await;
+        server.stop().await?;
+
+        let metadata = &artifacts[0]["metadata"];
+        ensure!(metadata["gitSyncStatus"] == "partial", "{metadata}");
+        ensure!(
+            metadata["rejectedPaths"][0]["path"] == ".env"
+                && metadata["rejectedPaths"][0]["reason"] == "ignored",
+            "{metadata}"
+        );
+        ensure!(
+            not_saved == vec!["Not saved: .env (ignored by .gitignore)"],
+            "{not_saved:?}"
+        );
+        ensure!(git(&remote, &["show", "main:src/a.rs"]) == "fn a() {}");
+        let tree = git(&remote, &["ls-tree", "-r", "--name-only", "main"]);
+        ensure!(!tree.lines().any(|path| path == ".env"), "{tree}");
+        ensure!(metadata["gitRev"] == git(&remote, &["rev-parse", "main"]));
+        Ok(())
+    }
+
+    /// Selection (b): a write-scoped worker's files go through the turn
+    /// checkpoint, and what did not reach `main` is named in its reply.
+    #[tokio::test]
+    async fn a_write_scoped_workers_files_go_through_the_checkpoint() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        std::fs::create_dir_all(temp.path().join("web"))?;
+        std::fs::write(temp.path().join("web/page.html"), "<p>hi</p>\n")?;
+        let (origin_address, bodies) = spawn_reporting_origin(
+            AxumStatusCode::OK,
+            r#"{"rev":"p","baseRev":"r","gitSyncStatus":"partial",
+                "recoveryRef":"refs/instafy/recovery/o/x-conflict-9",
+                "conflictedPaths":["web/page.html"],"rejectedPaths":[]}"#,
+        )
+        .await;
+        let (controller_address, _) =
+            spawn_stub_controller(Uuid::new_v4(), format!("http://{origin_address}")).await;
+        let controller = reqwest::Url::parse(&format!("http://{controller_address}/"))?;
+        let mut checkpoint = lane_checkpoint(&controller, Some("workspace-token"), temp.path());
+        checkpoint.lane = super::super::WRITE_SCOPED_WORKER_LANE;
+        let execution = super::super::JobExecution {
+            summary: "Wrote the page.".to_string(),
+            suggested_replies: Vec::new(),
+            provider: "openai-proxy-write-scoped-worker".to_string(),
+            artifacts: Vec::new(),
+            credit_snapshot: None,
+            provider_conversation_state: None,
+            messages: Vec::new(),
+            messages_streamed: false,
+            final_messages: Vec::new(),
+        };
+
+        let execution = super::super::checkpoint_write_scoped_worker(
+            execution,
+            checkpoint,
+            &[changed_file_descriptor("web/page.html")],
+        )
+        .await;
+
+        ensure!(bodies.lock().unwrap().len() == 1);
+        ensure!(execution.artifacts.len() == 1, "{:?}", execution.artifacts);
+        let metadata = &execution.artifacts[0]["metadata"];
+        ensure!(
+            metadata["lane"] == "multi-agent/write-scoped-worker",
+            "{metadata}"
+        );
+        ensure!(metadata["gitSyncStatus"] == "partial");
+        ensure!(
+            execution.summary
+                == "Wrote the page.\n\nNot saved: web/page.html (kept at refs/instafy/recovery/o/x-conflict-9).",
+            "{}",
+            execution.summary
+        );
+        Ok(())
     }
 }

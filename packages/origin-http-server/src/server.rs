@@ -33,10 +33,29 @@ pub struct OriginHttpServer {
     address: Option<SocketAddr>,
     presence_url: Option<Url>,
     presence_metadata: Arc<RwLock<JsonValue>>,
+    state: Option<AppState>,
 }
 
 pub struct ServerStart {
     pub address: SocketAddr,
+}
+
+/// Lets the process hosting a single-tenant origin bring the checkout up to
+/// date without a write credential, under the same locks the routes take.
+#[derive(Clone)]
+pub struct CheckoutRefresher {
+    state: AppState,
+}
+
+impl CheckoutRefresher {
+    /// Fetch canonical `main` with the origin's own read credential and move
+    /// the checkout to it when the checkout holds nothing unpublished.
+    /// Nothing is pushed.
+    pub async fn refresh_read_only(
+        &self,
+    ) -> Result<crate::publish::PublishReport, crate::error::OriginError> {
+        routes::refresh_checkout_read_only(&self.state).await
+    }
 }
 
 impl OriginHttpServer {
@@ -64,7 +83,18 @@ impl OriginHttpServer {
             address: None,
             presence_url: None,
             presence_metadata: Arc::new(RwLock::new(default_metadata)),
+            state: None,
         })
+    }
+
+    /// The read-only checkout refresh for this origin, once it has started.
+    /// `None` for a multi-tenant gateway, whose checkouts are not this
+    /// process's to move.
+    pub fn checkout_refresher(&self) -> Option<CheckoutRefresher> {
+        if self.config.multi_tenant {
+            return None;
+        }
+        self.state.clone().map(|state| CheckoutRefresher { state })
     }
 
     pub async fn start(&mut self) -> Result<ServerStart> {
@@ -134,6 +164,7 @@ impl OriginHttpServer {
             commit_url,
         )
         .context("failed to open workspace root capability")?;
+        self.state = Some(state.clone());
 
         let router = routes::router(state).layer(
             ServiceBuilder::new()
@@ -267,6 +298,7 @@ impl OriginHttpServer {
         if let Some(turn_active) = flush {
             self.flush_workspace_before_shutdown(turn_active).await;
         }
+        self.state = None;
         if let Some(tx) = self.shutdown_tx.take() {
             let _ = tx.send(());
         }

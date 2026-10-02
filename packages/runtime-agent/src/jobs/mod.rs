@@ -45,6 +45,7 @@ mod git_sync;
 mod known_safe_command;
 mod routing_evidence;
 mod routing_recovery;
+mod save_report;
 
 mod handoff;
 mod learn;
@@ -612,6 +613,26 @@ fn skills_kickoff_artifacts(kickoff: Option<&SkillsKickoff>) -> Vec<JsonValue> {
 
 /// The lane name a skills lane checkpoint records on its `origin/apply` artifact.
 const SKILLS_IMPORT_LANE: &str = "skills/import";
+
+/// The lane name a write-scoped worker's checkpoint records on its
+/// `origin/apply` artifact.
+const WRITE_SCOPED_WORKER_LANE: &str = "multi-agent/write-scoped-worker";
+
+/// Save the files a write-scoped worker wrote through the same protected
+/// checkpoint a model turn's files take. The worker returns before any turn
+/// checkpoint runs, so without this its files would reach canonical history
+/// only through a stop's flush, as unsaved work.
+async fn checkpoint_write_scoped_worker(
+    mut execution: JobExecution,
+    checkpoint: workspace_commit::LaneCheckpoint<'_>,
+    files: &[CodexFileDescriptor],
+) -> JobExecution {
+    let (artifacts, not_saved) =
+        workspace_commit::checkpoint_lane_files_with_report(checkpoint, files).await;
+    execution.artifacts.extend(artifacts);
+    save_report::append_not_saved(&mut execution.summary, &not_saved);
+    execution
+}
 
 /// What the job does after the skills lane ran.
 enum SkillsLaneStep {
@@ -2210,6 +2231,12 @@ fn line_prefix_negates_command(prefix: &str) -> bool {
         || normalized.contains("without")
 }
 
+/// Whether this turn's checkpoint saves to the workspace's history. A
+/// client's `autoSyncAfterApply: false` used to leave a turn's changes
+/// unsaved until someone saved a version by hand. Work outside canonical
+/// history is lost with the machine, so that preference is ignored: every
+/// turn saves. Only the runtime-wide `RUNTIME_GIT_SYNC_AFTER_APPLY` setting
+/// can still turn saving off.
 fn resolve_auto_sync_after_apply_override(
     metadata: Option<&JsonValue>,
     prompt_text: &str,
@@ -2217,7 +2244,7 @@ fn resolve_auto_sync_after_apply_override(
     if prompt_requests_explicit_instafy_git_sync(prompt_text) {
         return Some(true);
     }
-    extract_auto_sync_after_apply_override(metadata)
+    extract_auto_sync_after_apply_override(metadata).filter(|enabled| *enabled)
 }
 
 fn workspace_commit_status(
@@ -2240,9 +2267,21 @@ fn workspace_commit_status(
         );
     }
     if result.git_sync_error.is_some() {
+        if result.save.recovery_ref.is_some() {
+            return (
+                "Workspace updated, but it could not be saved. The changes are kept as unsaved work.",
+                "sync_failed",
+            );
+        }
         return (
             "Workspace updated, but auto-save failed. Open Changes and click Save version.",
             "sync_failed",
+        );
+    }
+    if result.save.is_partial() {
+        return (
+            "Workspace saved, except the files named at the end of the reply.",
+            "partial",
         );
     }
     ("Workspace sync complete.", "completed")
@@ -2261,8 +2300,61 @@ fn workspace_commit_git_sync_status(
         "skipped"
     } else if result.git_sync_error.is_some() {
         "failed"
+    } else if result.save.is_partial() {
+        "partial"
     } else {
         "synced"
+    }
+}
+
+/// The `origin/apply` artifact recording a checkpoint: where the files went,
+/// what reached canonical `main`, and, per path, what did not
+/// (`conflictedPaths`, `rejectedPaths`) and where it is kept (`recoveryRef`).
+fn origin_apply_artifact(
+    result: &workspace_commit::CommitToOriginResult,
+    lane: Option<&str>,
+) -> JsonValue {
+    let mut metadata = json!({
+        "originId": result.origin_id.to_string(),
+        "endpoint": result.origin_endpoint,
+        "mode": result.origin_mode,
+        "leaseId": result.lease_id.to_string(),
+        "rev": result.apply_rev,
+        "baseRev": result.apply_base_rev,
+        "gitRev": result.git_rev,
+        "gitBaseRev": result.git_base_rev,
+        "gitSyncStatus": workspace_commit_git_sync_status(result),
+        "gitSyncAttempted": result.git_sync_attempted,
+        "gitSyncError": result.git_sync_error,
+        "paths": result.paths,
+        "conflictedPaths": result.save.conflicted_paths,
+        "rejectedPaths": result.save.rejected_paths,
+        "recoveryRef": result.save.recovery_ref,
+    });
+    if let Some(lane) = lane {
+        metadata["lane"] = json!(lane);
+    }
+    json!({
+        "kind": "origin/apply",
+        "metadata": metadata,
+    })
+}
+
+/// The progress line that reports a checkpoint's outcome.
+fn workspace_commit_progress_message(
+    result: &workspace_commit::CommitToOriginResult,
+) -> JobMessage {
+    let (status_message, status_code) = workspace_commit_status(result);
+    JobMessage {
+        content: status_message.to_string(),
+        message_type: Some("status".to_string()),
+        metadata: Some(json!({
+            "kind": "workspace_commit",
+            "status": status_code,
+            "gitSyncStatus": workspace_commit_git_sync_status(result),
+            "gitSyncAttempted": result.git_sync_attempted,
+            "gitSyncError": result.git_sync_error,
+        })),
     }
 }
 
@@ -4379,7 +4471,7 @@ impl JobProcessor {
         &self,
         registration: &Registration,
         job: &LeaseJob,
-        _progress: Option<JobProgress>,
+        progress: Option<JobProgress>,
         cancel_signal: Option<JobCancelSignal>,
     ) -> Result<JobExecution> {
         if let Some(signal) = cancel_signal.as_ref()
@@ -4422,7 +4514,7 @@ impl JobProcessor {
         let owned_paths = direct_owned_write_scopes(&workspace_dir, job)
             .ok_or_else(|| anyhow!("parallel write-scoped worker is missing owned paths"))?;
 
-        execute_write_scoped_worker_direct(
+        let (execution, files) = execute_write_scoped_worker_direct(
             &workspace_dir,
             &prompt,
             &prompt_context,
@@ -4430,7 +4522,33 @@ impl JobProcessor {
             registration.runtime_id,
             &proxy_config,
         )
-        .await
+        .await?;
+        // A worker running beside others saves its own files: nothing else
+        // would publish them before the runtime stops. Its files are written
+        // already, so a token that does not verify only skips the save.
+        let workspace_token = self
+            .verified_workspace_token(registration, job)
+            .await
+            .unwrap_or_else(|error| {
+                warn!(?error, job_id = %job.id, "write-scoped worker cannot save its files: the workspace token did not verify");
+                None
+            });
+        let checkpoint = workspace_commit::LaneCheckpoint {
+            lane: WRITE_SCOPED_WORKER_LANE,
+            commit_to_workspace: true,
+            read_only_workspace: metadata_requests_read_only_workspace(job.payload.get("metadata")),
+            controller_base_url: &self.config.controller_base_url,
+            workspace_token: workspace_token.as_deref(),
+            project_id,
+            runtime_id: registration.runtime_id,
+            job_id: job.id,
+            run_id: job.run_id,
+            workspace_dir: &workspace_dir,
+            auto_sync_after_apply_override: None,
+            progress_sender: progress.as_ref().map(|progress| progress.sender.clone()),
+            local_origin: self.local_origin_sync(),
+        };
+        Ok(checkpoint_write_scoped_worker(execution, checkpoint, &files).await)
     }
 
     async fn guard_controller_token(
@@ -4643,11 +4761,68 @@ impl JobProcessor {
     }
 
     fn prepare_workspace(&self, project_id: &Uuid) -> Result<PathBuf> {
+        let path = self.prepare_workspace_dir(project_id)?;
+        learn::ensure_project_memory_scaffold(&path);
+        Ok(path)
+    }
+
+    /// The workspace directory, created if missing, without the project
+    /// memory scaffold. A turn refreshes the checkout before writing the
+    /// scaffold, because untracked scaffold copies of files `main` already
+    /// has would stop the checkout from moving to `main`.
+    fn prepare_workspace_dir(&self, project_id: &Uuid) -> Result<PathBuf> {
         let path = self.config.project_workspace_dir(project_id);
         fs::create_dir_all(&path)
             .with_context(|| format!("failed to prepare workspace directory {:?}", path))?;
-        learn::ensure_project_memory_scaffold(&path);
         Ok(path)
+    }
+
+    /// Before a turn, bring this runtime's checkout up to date with
+    /// canonical `main` (see [`workspace_commit::refresh_before_turn`]). A
+    /// failure is recorded on the turn and never fails it.
+    async fn refresh_workspace_before_turn(
+        &self,
+        registration: &Registration,
+        job: &LeaseJob,
+        project_id: Uuid,
+        workspace_token: Option<&str>,
+    ) -> workspace_commit::PreTurnRefreshOutcome {
+        let has_git_remote = self
+            .config
+            .origin
+            .as_ref()
+            .and_then(|origin| origin.git_remote_url.as_deref())
+            .is_some_and(|url| !url.trim().is_empty());
+        let outcome = workspace_commit::refresh_before_turn(workspace_commit::PreTurnRefresh {
+            controller_base_url: &self.config.controller_base_url,
+            workspace_token,
+            project_id,
+            runtime_id: registration.runtime_id,
+            job_id: job.id,
+            run_id: job.run_id,
+            local_origin: self.local_origin_sync(),
+            has_git_remote,
+        })
+        .await;
+        match outcome.mode {
+            "failed" => warn!(
+                job_id = %job.id,
+                project_id = %project_id,
+                error = outcome.error.as_deref().unwrap_or_default(),
+                lease_error = outcome.lease_error.as_deref().unwrap_or_default(),
+                "could not bring the workspace up to date before the turn; continuing"
+            ),
+            mode => tracing::info!(
+                job_id = %job.id,
+                project_id = %project_id,
+                mode,
+                skipped = outcome.skipped_reason.unwrap_or_default(),
+                checkout_moved = ?outcome.response.as_ref().and_then(|response| response.checkout_moved),
+                unpushed_refs = ?outcome.response.as_ref().and_then(|response| response.unpushed_refs),
+                "workspace refreshed before the turn"
+            ),
+        }
+        outcome
     }
 
     fn codex_for_project(&self, project_id: &Uuid, workspace: &Path) -> Result<CodexClient> {
@@ -5373,7 +5548,32 @@ impl JobProcessor {
         let workspace_token = self.verified_workspace_token(registration, job).await?;
 
         let project_id = self.project_id_for_job(job)?;
-        let workspace_dir = self.prepare_workspace(&project_id)?;
+        let workspace_dir = self.prepare_workspace_dir(&project_id)?;
+        // Bring the checkout up to date before anything writes into it. The
+        // `/sync` lane publishes on its own.
+        let pre_turn_refresh = if commit_to_workspace
+            && git_sync::parse_git_sync_request(
+                job.payload
+                    .get("prompt_text")
+                    .and_then(JsonValue::as_str)
+                    .unwrap_or_default(),
+            )
+            .is_none()
+        {
+            // Boxed: this function's future is already large.
+            Some(
+                Box::pin(self.refresh_workspace_before_turn(
+                    registration,
+                    job,
+                    project_id,
+                    workspace_token.as_deref(),
+                ))
+                .await,
+            )
+        } else {
+            None
+        };
+        learn::ensure_project_memory_scaffold(&workspace_dir);
         let explicit_personal_browser_execution =
             crate::personal_browser::payload_requests_personal_browser(&job.payload);
         let explicit_shared_browser_execution =
@@ -5935,7 +6135,7 @@ impl JobProcessor {
             && let Some(owned_paths) = direct_owned_write_scopes(&workspace_dir, job)
         {
             let proxy_config = direct_worker_proxy_config(proxy_envelope)?;
-            return execute_write_scoped_worker_direct(
+            let (execution, files) = execute_write_scoped_worker_direct(
                 &workspace_dir,
                 &prompt,
                 &prompt_context,
@@ -5943,14 +6143,33 @@ impl JobProcessor {
                 registration.runtime_id,
                 &proxy_config,
             )
-            .await;
+            .await?;
+            let checkpoint = workspace_commit::LaneCheckpoint {
+                lane: WRITE_SCOPED_WORKER_LANE,
+                commit_to_workspace,
+                read_only_workspace,
+                controller_base_url: &self.config.controller_base_url,
+                workspace_token: workspace_token.as_deref(),
+                project_id,
+                runtime_id: registration.runtime_id,
+                job_id: job.id,
+                run_id: job.run_id,
+                workspace_dir: &workspace_dir,
+                auto_sync_after_apply_override,
+                progress_sender: progress_sender
+                    .as_ref()
+                    .map(|progress| progress.sender.clone()),
+                local_origin: self.local_origin_sync(),
+            };
+            return Ok(Box::pin(checkpoint_write_scoped_worker(
+                execution, checkpoint, &files,
+            ))
+            .await);
         }
 
-        let git_status_before = if expects_workspace_file_changes || read_only_workspace {
-            collect_git_status_porcelain(&workspace_dir).await
-        } else {
-            None
-        };
+        // Always taken, so the checkpoint can save files the turn changed
+        // without reporting them.
+        let git_status_before = collect_git_status_porcelain(&workspace_dir).await;
         let codex_guard = CODEX_EXECUTION_LOCK.lock().await;
         let shared_browser_action_log_before =
             explicit_shared_browser_execution.then(crate::shared_browser::action_log_len);
@@ -6210,6 +6429,9 @@ impl JobProcessor {
             outcome.summary = format!("{base}. See `{}`.", learn::INSTAFY_FILENAME);
         }
         let mut artifacts = skills_kickoff_artifacts(skills_kickoff.as_ref());
+        if let Some(refresh) = pre_turn_refresh.as_ref() {
+            artifacts.push(refresh.artifact());
+        }
         artifacts.extend(build_codex_artifacts(&output, &outcome));
         if let Some(observation) = scoped_worker_path_observation.as_ref() {
             artifacts.push(observation.artifact.clone());
@@ -6799,6 +7021,9 @@ impl JobProcessor {
                 && retry_normalized_files_len == 0;
 
             let mut retry_artifacts = skills_kickoff_artifacts(skills_kickoff.as_ref());
+            if let Some(refresh) = pre_turn_refresh.as_ref() {
+                retry_artifacts.push(refresh.artifact());
+            }
             retry_artifacts.extend(build_codex_artifacts(&retry_output, &retry_outcome));
             if evidence_requirements.requires_any() {
                 retry_artifacts.push(json!({
@@ -7122,9 +7347,23 @@ impl JobProcessor {
                 }
             }
 
+            let mut retry_not_saved = pre_turn_refresh
+                .as_ref()
+                .map(workspace_commit::PreTurnRefreshOutcome::not_saved_sentences)
+                .unwrap_or_default();
             if commit_to_workspace {
+                let retry_commit_files = if read_only_workspace {
+                    retry_outcome.files.clone()
+                } else {
+                    Box::pin(checkpoint_files_with_status_delta(
+                        &workspace_dir,
+                        git_status_before.as_ref(),
+                        &retry_outcome.files,
+                    ))
+                    .await
+                };
                 if let Some(token) = workspace_token.as_deref() {
-                    if !retry_outcome.files.is_empty() {
+                    if !retry_commit_files.is_empty() {
                         if let Some(sender) = progress_sender
                             .as_ref()
                             .map(|progress| progress.sender.clone())
@@ -7147,7 +7386,7 @@ impl JobProcessor {
                             job.id,
                             job.run_id,
                             &workspace_dir,
-                            &retry_outcome.files,
+                            &retry_commit_files,
                             auto_sync_after_apply_override,
                             progress_sender
                                 .as_ref()
@@ -7157,52 +7396,13 @@ impl JobProcessor {
                         .await
                         {
                             Ok(Some(result)) => {
-                                let (status_message, status_code) =
-                                    workspace_commit_status(&result);
-                                let origin_id = result.origin_id.to_string();
-                                let lease_id = result.lease_id.to_string();
-                                let origin_endpoint = result.origin_endpoint.clone();
-                                let origin_mode = result.origin_mode.clone();
-                                let apply_rev = result.apply_rev.clone();
-                                let apply_base_rev = result.apply_base_rev.clone();
-                                let git_rev = result.git_rev.clone();
-                                let git_base_rev = result.git_base_rev.clone();
-                                let paths = result.paths.clone();
-                                let git_sync_attempted = result.git_sync_attempted;
-                                let git_sync_error = result.git_sync_error.clone();
-                                let git_sync_status = workspace_commit_git_sync_status(&result);
-                                retry_artifacts.push(json!({
-                                    "kind": "origin/apply",
-                                    "metadata": {
-                                        "originId": origin_id,
-                                        "endpoint": origin_endpoint,
-                                        "mode": origin_mode,
-                                        "leaseId": lease_id,
-                                        "rev": apply_rev,
-                                        "baseRev": apply_base_rev,
-                                        "gitRev": git_rev,
-                                        "gitBaseRev": git_base_rev,
-                                        "gitSyncStatus": git_sync_status,
-                                        "gitSyncAttempted": git_sync_attempted,
-                                        "gitSyncError": git_sync_error.clone(),
-                                        "paths": paths,
-                                    }
-                                }));
+                                retry_artifacts.push(origin_apply_artifact(&result, None));
+                                retry_not_saved.extend(result.not_saved_sentences());
                                 if let Some(sender) = progress_sender
                                     .as_ref()
                                     .map(|progress| progress.sender.clone())
                                 {
-                                    let _ = sender.send(JobMessage {
-                                        content: status_message.to_string(),
-                                        message_type: Some("status".to_string()),
-                                        metadata: Some(json!({
-                                            "kind": "workspace_commit",
-                                            "status": status_code,
-                                            "gitSyncStatus": git_sync_status,
-                                            "gitSyncAttempted": git_sync_attempted,
-                                            "gitSyncError": git_sync_error,
-                                        })),
-                                    });
+                                    let _ = sender.send(workspace_commit_progress_message(&result));
                                 }
                             }
                             Ok(None) => {}
@@ -7220,7 +7420,7 @@ impl JobProcessor {
                             }
                         }
                     }
-                } else if !retry_outcome.files.is_empty() {
+                } else if !retry_commit_files.is_empty() {
                     retry_artifacts.push(json!({
                         "kind": "origin/apply-skipped",
                         "metadata": { "reason": "missing_controller_token" }
@@ -7244,6 +7444,7 @@ impl JobProcessor {
                 streaming_active,
                 retry_messages,
             );
+            save_report::append_not_saved(&mut retry_outcome.summary, &retry_not_saved);
             return Ok(JobExecution {
                 summary: retry_outcome.summary,
                 suggested_replies: retry_outcome.suggested_replies,
@@ -7318,9 +7519,23 @@ impl JobProcessor {
             }
         }
 
+        let mut not_saved = pre_turn_refresh
+            .as_ref()
+            .map(workspace_commit::PreTurnRefreshOutcome::not_saved_sentences)
+            .unwrap_or_default();
         if commit_to_workspace {
+            let commit_files = if read_only_workspace {
+                outcome.files.clone()
+            } else {
+                Box::pin(checkpoint_files_with_status_delta(
+                    &workspace_dir,
+                    git_status_before.as_ref(),
+                    &outcome.files,
+                ))
+                .await
+            };
             if let Some(token) = workspace_token.as_deref() {
-                if !outcome.files.is_empty() {
+                if !commit_files.is_empty() {
                     if let Some(sender) = progress_sender
                         .as_ref()
                         .map(|progress| progress.sender.clone())
@@ -7343,7 +7558,7 @@ impl JobProcessor {
                         job.id,
                         job.run_id,
                         &workspace_dir,
-                        &outcome.files,
+                        &commit_files,
                         auto_sync_after_apply_override,
                         progress_sender
                             .as_ref()
@@ -7353,51 +7568,13 @@ impl JobProcessor {
                     .await
                     {
                         Ok(Some(result)) => {
-                            let (status_message, status_code) = workspace_commit_status(&result);
-                            let origin_id = result.origin_id.to_string();
-                            let lease_id = result.lease_id.to_string();
-                            let origin_endpoint = result.origin_endpoint.clone();
-                            let origin_mode = result.origin_mode.clone();
-                            let apply_rev = result.apply_rev.clone();
-                            let apply_base_rev = result.apply_base_rev.clone();
-                            let git_rev = result.git_rev.clone();
-                            let git_base_rev = result.git_base_rev.clone();
-                            let paths = result.paths.clone();
-                            let git_sync_attempted = result.git_sync_attempted;
-                            let git_sync_error = result.git_sync_error.clone();
-                            let git_sync_status = workspace_commit_git_sync_status(&result);
-                            artifacts.push(json!({
-                                "kind": "origin/apply",
-                                "metadata": {
-                                    "originId": origin_id,
-                                    "endpoint": origin_endpoint,
-                                    "mode": origin_mode,
-                                    "leaseId": lease_id,
-                                    "rev": apply_rev,
-                                    "baseRev": apply_base_rev,
-                                    "gitRev": git_rev,
-                                    "gitBaseRev": git_base_rev,
-                                    "gitSyncStatus": git_sync_status,
-                                    "gitSyncAttempted": git_sync_attempted,
-                                    "gitSyncError": git_sync_error.clone(),
-                                    "paths": paths,
-                                }
-                            }));
+                            artifacts.push(origin_apply_artifact(&result, None));
+                            not_saved.extend(result.not_saved_sentences());
                             if let Some(sender) = progress_sender
                                 .as_ref()
                                 .map(|progress| progress.sender.clone())
                             {
-                                let _ = sender.send(JobMessage {
-                                    content: status_message.to_string(),
-                                    message_type: Some("status".to_string()),
-                                    metadata: Some(json!({
-                                        "kind": "workspace_commit",
-                                        "status": status_code,
-                                        "gitSyncStatus": git_sync_status,
-                                        "gitSyncAttempted": git_sync_attempted,
-                                        "gitSyncError": git_sync_error,
-                                    })),
-                                });
+                                let _ = sender.send(workspace_commit_progress_message(&result));
                             }
                         }
                         Ok(None) => {}
@@ -7415,7 +7592,7 @@ impl JobProcessor {
                         }
                     }
                 }
-            } else if !outcome.files.is_empty() {
+            } else if !commit_files.is_empty() {
                 artifacts.push(json!({
                     "kind": "origin/apply-skipped",
                     "metadata": { "reason": "missing_controller_token" }
@@ -7437,6 +7614,7 @@ impl JobProcessor {
             streaming_active,
             interim_messages,
         );
+        save_report::append_not_saved(&mut outcome.summary, &not_saved);
         Ok(JobExecution {
             summary: outcome.summary,
             suggested_replies: outcome.suggested_replies,
@@ -12418,6 +12596,8 @@ impl DirectOwnedWriteScope {
     }
 }
 
+/// Run a write-scoped worker and write its files. Returns the execution and
+/// the files it wrote, for the checkpoint.
 async fn execute_write_scoped_worker_direct(
     workspace_dir: &Path,
     prompt: &str,
@@ -12425,7 +12605,7 @@ async fn execute_write_scoped_worker_direct(
     owned_paths: &[DirectOwnedWriteScope],
     runtime_id: Uuid,
     proxy_config: &DirectWorkerProxyConfig,
-) -> Result<JobExecution> {
+) -> Result<(JobExecution, Vec<CodexFileDescriptor>)> {
     let allowed_paths = owned_paths
         .iter()
         .map(|path| path.display_path.as_str())
@@ -12489,6 +12669,7 @@ async fn execute_write_scoped_worker_direct(
         .and_then(JsonValue::as_array)
         .ok_or_else(|| anyhow!("write-scoped worker JSON is missing files[]"))?;
     let mut applied_files = Vec::new();
+    let mut written = Vec::new();
     for file in files {
         let Some(path) = file.get("path").and_then(JsonValue::as_str).map(str::trim) else {
             continue;
@@ -12518,6 +12699,7 @@ async fn execute_write_scoped_worker_direct(
             "path": owned.display_path,
             "change": "modified",
         }));
+        written.push(descriptor);
     }
     if applied_files.is_empty() {
         bail!("write-scoped worker returned no owned file changes");
@@ -12546,17 +12728,20 @@ async fn execute_write_scoped_worker_direct(
         artifacts.push(build_codex_prompt_context_artifact(prompt_context, None));
     }
 
-    Ok(JobExecution {
-        summary,
-        suggested_replies: Vec::new(),
-        provider: "openai-proxy-write-scoped-worker".to_string(),
-        artifacts,
-        credit_snapshot: None,
-        provider_conversation_state: None,
-        messages: Vec::new(),
-        messages_streamed: false,
-        final_messages: Vec::new(),
-    })
+    Ok((
+        JobExecution {
+            summary,
+            suggested_replies: Vec::new(),
+            provider: "openai-proxy-write-scoped-worker".to_string(),
+            artifacts,
+            credit_snapshot: None,
+            provider_conversation_state: None,
+            messages: Vec::new(),
+            messages_streamed: false,
+            final_messages: Vec::new(),
+        },
+        written,
+    ))
 }
 
 async fn post_scoped_worker_json(
@@ -14394,6 +14579,52 @@ async fn restore_clean_baseline_git_status_delta_excluding(
     restored.sort();
     restored.dedup();
     restored
+}
+
+/// The files a turn's checkpoint saves: what the turn reported, plus every
+/// path whose `git status` changed during the turn (tools, generators and
+/// installs write files nobody reports). Changed paths that may never be
+/// published are left out here rather than reported as "Not saved": nobody
+/// asked for them, and they stay on this machine.
+async fn checkpoint_files_with_status_delta(
+    workspace_dir: &Path,
+    before: Option<&HashMap<String, GitStatusEntry>>,
+    reported: &[CodexFileDescriptor],
+) -> Vec<CodexFileDescriptor> {
+    let mut files = reported.to_vec();
+    let Some(before) = before else {
+        return files;
+    };
+    let Some(after) = collect_git_status_porcelain(workspace_dir).await else {
+        return files;
+    };
+    files.extend(status_delta_files_for_checkpoint(before, &after, reported));
+    files
+}
+
+fn status_delta_files_for_checkpoint(
+    before: &HashMap<String, GitStatusEntry>,
+    after: &HashMap<String, GitStatusEntry>,
+    reported: &[CodexFileDescriptor],
+) -> Vec<CodexFileDescriptor> {
+    let reported_paths = reported
+        .iter()
+        .filter(|file| !file.is_read_reference())
+        .flat_map(|file| [file.workspace_path.clone(), file.path.clone()])
+        .collect::<HashSet<_>>();
+    infer_codex_files_from_git_status_delta(before, after)
+        .into_iter()
+        .filter(|file| {
+            let Some(sanitized) = sanitize_relative_workspace_path(&file.workspace_path) else {
+                return false;
+            };
+            let path = sanitized.to_string_lossy().replace('\\', "/");
+            !path.is_empty()
+                && !reported_paths.contains(&path)
+                && !origin_http_server::paths::is_reserved_path(&path)
+                && !origin_http_server::publish_policy::is_unpublishable(&path)
+        })
+        .collect()
 }
 
 fn infer_codex_files_from_git_status_delta(
@@ -16814,6 +17045,7 @@ mod tests {
                 "origin git sync failed (400 Bad Request): {\"error\":\"path is excluded from space history: tmp/example.txt\"}"
                     .to_string(),
             ),
+            save: Default::default(),
             paths: vec!["tmp/example.txt".to_string()],
         };
 
@@ -17491,7 +17723,7 @@ mod tests {
     }
 
     #[test]
-    fn negated_instafy_git_sync_command_does_not_override_preference() {
+    fn a_disabled_auto_save_preference_is_ignored() {
         let value = json!({
             "git": {
                 "autoSyncAfterApply": false
@@ -17499,10 +17731,211 @@ mod tests {
         });
         let prompt = "Do NOT use `instafy git sync` for this conflict-resolution path.";
 
+        // `false` no longer keeps a turn's changes out of saved history: the
+        // runtime default (save) applies.
         assert_eq!(
             resolve_auto_sync_after_apply_override(Some(&value), prompt),
-            Some(false)
+            None
         );
+        assert_eq!(
+            resolve_auto_sync_after_apply_override(Some(&value), ""),
+            None
+        );
+        let nested = json!({
+            "promptMetadata": { "git": { "auto_sync_after_apply": "0" } }
+        });
+        assert_eq!(
+            resolve_auto_sync_after_apply_override(Some(&nested), ""),
+            None
+        );
+        let enabled = json!({ "git": { "autoSyncAfterApply": true } });
+        assert_eq!(
+            resolve_auto_sync_after_apply_override(Some(&enabled), ""),
+            Some(true)
+        );
+    }
+
+    #[test]
+    fn the_checkpoint_saves_reported_paths_plus_the_turns_status_delta() {
+        use workspace_change_detection::GitStatusEntry;
+        let entry = |code: &str, fingerprint: &str| {
+            GitStatusEntry::new(code, Some(fingerprint.to_string()))
+        };
+        let before = HashMap::from([
+            ("dirty-before.md".to_string(), entry(" M", "a")),
+            ("touched-again.md".to_string(), entry(" M", "a")),
+        ]);
+        let after = HashMap::from([
+            ("dirty-before.md".to_string(), entry(" M", "a")),
+            ("touched-again.md".to_string(), entry(" M", "b")),
+            ("reported.rs".to_string(), entry("??", "c")),
+            ("package-lock.json".to_string(), entry(" M", "d")),
+            ("removed.txt".to_string(), entry(" D", "")),
+            (".env".to_string(), entry("??", "e")),
+            ("id_rsa".to_string(), entry("??", "f")),
+            ("node_modules/x/index.js".to_string(), entry("??", "g")),
+            (".instafy/state.json".to_string(), entry("??", "h")),
+            ("chat-upload-1.png".to_string(), entry("??", "i")),
+        ]);
+        let reported = vec![CodexFileDescriptor {
+            path: "reported.rs".to_string(),
+            workspace_path: "reported.rs".to_string(),
+            label: None,
+            description: None,
+            mime_type: None,
+            content: None,
+            content_base64: None,
+            change: FileChangeDescriptor::parse(json!({ "type": "created" })),
+        }];
+
+        let extra = status_delta_files_for_checkpoint(&before, &after, &reported);
+        let mut paths = extra
+            .iter()
+            .map(|file| file.workspace_path.as_str())
+            .collect::<Vec<_>>();
+        paths.sort();
+        assert_eq!(
+            paths,
+            vec!["package-lock.json", "removed.txt", "touched-again.md"]
+        );
+        let removed = extra
+            .iter()
+            .find(|file| file.workspace_path == "removed.txt")
+            .unwrap();
+        assert!(matches!(
+            removed.change.as_ref().map(|change| &change.kind),
+            Some(FileChangeKind::Deleted)
+        ));
+    }
+
+    fn test_origin_settings(git_remote_url: Option<&str>) -> crate::config::OriginSettings {
+        crate::config::OriginSettings {
+            origin_id: Uuid::new_v4(),
+            bind_host: "127.0.0.1".to_string(),
+            bind_port: 0,
+            git_remote_url: git_remote_url.map(str::to_string),
+            git_branch: "main".to_string(),
+            git_remote_name: "origin".to_string(),
+            git_author_name: "Instafy Origin".to_string(),
+            git_author_email: "origin@instafy.dev".to_string(),
+            rathole_bin: "rathole".to_string(),
+            rathole_state_dir: PathBuf::from("/nonexistent"),
+            rathole_use_subcommands: false,
+            tunnel_refresh_margin: Duration::from_secs(60),
+            controller_internal_token: None,
+            skip_auth: false,
+            enable_presence_heartbeat: false,
+            presence_interval: Duration::from_secs(60),
+            jwks_url: reqwest::Url::parse("http://127.0.0.1:9/.well-known/jwks.json").unwrap(),
+            max_archive_bytes: 1024,
+            staging_root: None,
+            endpoint: None,
+            protocols: vec!["http".to_string()],
+            region: None,
+            device_id: None,
+            metadata: None,
+            mode: "hosted".to_string(),
+            tunnel_enabled: false,
+            tunnel_provider: None,
+            tunnel_hostname: None,
+            tunnel_url: None,
+            tunnel_id: None,
+            tunnel_status: None,
+            tunnel_expires_at: None,
+            tunnel_last_rotation_at: None,
+        }
+    }
+
+    /// The refresh runs before a turn, before the scaffold writes anything
+    /// into the checkout, and without a workspace lease it falls back to the
+    /// origin's read-only refresh.
+    #[test]
+    fn a_turn_refreshes_the_checkout_before_the_scaffold_with_a_read_only_fallback() {
+        // `run_apply_job` needs a runtime-sized stack, as in production.
+        const STACK_SIZE: usize = 32 * 1024 * 1024;
+        std::thread::Builder::new()
+            .stack_size(STACK_SIZE)
+            .spawn(|| {
+                tokio::runtime::Builder::new_multi_thread()
+                    .enable_all()
+                    .worker_threads(2)
+                    .thread_stack_size(STACK_SIZE)
+                    .build()
+                    .unwrap()
+                    .block_on(turn_refreshes_before_the_scaffold())
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+
+    async fn turn_refreshes_before_the_scaffold() {
+        let tmp = tempdir().expect("temp dir");
+        let base = test_job_processor(tmp.path());
+        let mut config = (*base.config).clone();
+        config.origin = Some(test_origin_settings(Some("http://127.0.0.1:9/project.git")));
+        let processor = JobProcessor::new(Arc::new(config.clone()));
+        let job = test_lease_job(None, json!({ "prompt_text": "/mcp list" }));
+        let workspace = config.project_workspace_dir(&job.project_id.unwrap());
+
+        let calls = Arc::new(std::sync::Mutex::new(Vec::<bool>::new()));
+        let observed = Arc::clone(&calls);
+        let scaffold = workspace.join(learn::INSTAFY_FILENAME);
+        processor.set_local_origin_sync(Some(LocalOriginSync {
+            origin_id: Uuid::new_v4(),
+            endpoint: "http://127.0.0.1:9".to_string(),
+            read_only_refresh: Some(crate::origin::ReadOnlyRefresh::new(move || {
+                let observed = Arc::clone(&observed);
+                let scaffold = scaffold.clone();
+                async move {
+                    observed.lock().unwrap().push(scaffold.exists());
+                    Ok(json!({ "rev": "main", "checkoutMoved": true }))
+                }
+            })),
+        }));
+
+        let execution = processor
+            .run_apply_job(
+                &test_registration_with_proxy(),
+                &job,
+                true,
+                None,
+                None,
+                None,
+            )
+            .await
+            .expect("the mcp lane finishes");
+        assert_eq!(execution.provider, "mcp");
+        assert_eq!(
+            *calls.lock().unwrap(),
+            vec![false],
+            "refreshed once, before the scaffold existed"
+        );
+        assert!(workspace.join(learn::INSTAFY_FILENAME).exists());
+
+        // `/sync` publishes on its own; jobs that do not commit never refresh.
+        let sync = test_lease_job(None, json!({ "prompt_text": "/sync" }));
+        let _ = processor
+            .run_apply_job(
+                &test_registration_with_proxy(),
+                &sync,
+                true,
+                None,
+                None,
+                None,
+            )
+            .await;
+        let _ = processor
+            .run_apply_job(
+                &test_registration_with_proxy(),
+                &job,
+                false,
+                None,
+                None,
+                None,
+            )
+            .await;
+        assert_eq!(calls.lock().unwrap().len(), 1);
     }
 
     #[test]

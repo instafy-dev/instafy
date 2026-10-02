@@ -2262,3 +2262,48 @@ async fn flush_route_gets_git_write_only_through_the_callers_token() {
     server.abort();
     controller.server.abort();
 }
+
+/// The read-only refresh a runtime runs before a turn it could not lease:
+/// the checkout follows `main` while it holds nothing unpublished, keeps
+/// unsaved edits, and never pushes.
+#[test]
+fn read_only_refresh_follows_main_and_never_pushes() {
+    let sc = Scenario::new(Options::default());
+    sc.push_other(
+        &[("doc.md", Some(b"alpha\nbeta\ngamma\ndelta\nweb\n"))],
+        "web edit",
+    );
+    sc.write("notes.md", b"unsaved\n");
+
+    let report = refresh(&sc.ctx(false)).unwrap();
+    assert_eq!(
+        report.rev.as_deref(),
+        Some(sc.main().as_str()),
+        "{report:?}"
+    );
+    assert!(report.checkout_moved, "{report:?}");
+    assert_eq!(sc.head(), sc.main());
+    assert_eq!(
+        sc.disk("doc.md").as_deref(),
+        Some("alpha\nbeta\ngamma\ndelta\nweb\n")
+    );
+    assert_eq!(sc.disk("notes.md").as_deref(), Some("unsaved\n"));
+    assert!(sc.remote_file("notes.md").is_none());
+
+    // A local commit that is not on main stays put, and nothing is pushed.
+    let before = sc.main();
+    sc.agent_commit(&["notes.md"], "agent: notes");
+    let local = sc.head();
+    sc.push_other(&[("README.md", Some(b"web readme\n"))], "web readme");
+    let report = refresh(&sc.ctx(false)).unwrap();
+    assert_eq!(
+        report.git_sync_status,
+        SyncStatus::Unpublished,
+        "{report:?}"
+    );
+    assert!(!report.checkout_moved);
+    assert_eq!(sc.head(), local);
+    assert_ne!(sc.main(), before);
+    assert!(sc.remote_file("notes.md").is_none());
+    assert!(sc.remote_refs("refs/instafy/").is_empty());
+}

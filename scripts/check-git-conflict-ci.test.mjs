@@ -174,11 +174,13 @@ test("the workflow retains its identity, bounds, triggers and read-only exact ch
   assert.doesNotMatch(source, /secrets\.|environment:|continue-on-error:|permissions:\s*write-all|npm install|pnpm install|allow-unsafe-pr-checkout/u);
 });
 
-test("the complete original fixture step remains byte-identical", () => {
-  assert.equal(createHash("sha256").update(fixture).digest("hex"), "9b9a7d197913ad5da9bc1f90690da38627d2d6b05a3ddd1debd36c4678bab3e5");
+test("the complete reviewed fixture step remains byte-identical", () => {
+  // The merge procedure of publish-by-merge: main keeps its copy, the local
+  // version is read back from a recovery ref, merged and saved by a plain push.
+  assert.equal(createHash("sha256").update(fixture).digest("hex"), "0bda30b917ce0227f6b4e8678d22b2e00bd5b41792e3b5fb306832bcb0d538a6");
 });
 
-test("the real fixture resolves a local conflict, rebases and pushes without network credentials", () => {
+test("the real fixture merges work kept on a recovery ref and pushes without force or network credentials", () => {
   const temporary = fs.mkdtempSync(path.join(os.tmpdir(), "instafy-git-conflict-test-"));
   try {
     const home = path.join(temporary, "home");

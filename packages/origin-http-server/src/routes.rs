@@ -2424,6 +2424,55 @@ async fn handle_git_flush(
         .map_err(|error| OriginError::internal(format!("failed to encode the report: {error}")))
 }
 
+/// Bring a single-tenant checkout up to date without write access: fetch
+/// canonical `main` with the origin's own read credential and move the
+/// checkout only when everything it holds is already on `main`. Nothing is
+/// pushed. The process that hosts the origin calls this before a turn that
+/// could not get a workspace lease, such as a read-only run. Not reachable
+/// over HTTP.
+pub(crate) async fn refresh_checkout_read_only(
+    state: &AppState,
+) -> Result<PublishReport, OriginError> {
+    if state.config.multi_tenant {
+        return Err(OriginError::bad_request(
+            "refresh is only available on a workspace runtime",
+        ));
+    }
+    let project_id = state.config.project_id;
+    let Some(remote_url) = state.config.git_remote_url_for_project(project_id) else {
+        return Ok(PublishReport::default());
+    };
+    let apply_lock = project_apply_lock(state, project_id).await;
+    let apply_guard = apply_lock.lock_owned().await;
+    let token = git_tokens::mint_git_access_token(
+        &state.http_client,
+        state.config.as_ref(),
+        project_id,
+        &["git.read"],
+        None,
+    )
+    .await?
+    .map(|minted| minted.token);
+    let workspace_root = workspace_root_for_project(state, project_id);
+    let mut config = (*state.config).clone();
+    config.workspace_root = workspace_root.clone();
+    config.git_remote_url = Some(remote_url);
+    tokio::task::spawn_blocking(move || {
+        let _apply_guard = apply_guard;
+        let _workspace_apply_guard = try_acquire_workspace_apply_lock(&workspace_root)?
+            .ok_or_else(|| OriginError::conflict("workspace is already mutating"))?;
+        git::ensure_git_checkout(&config, token.as_deref())?;
+        publish::refresh(&PublishContext {
+            config: &config,
+            workspace_root: workspace_root.as_path(),
+            token: token.as_deref(),
+            can_write: false,
+        })
+    })
+    .await
+    .map_err(|error| OriginError::internal(format!("git refresh task failed: {error}")))?
+}
+
 async fn post_commit_receipt(
     client: reqwest::Client,
     url: reqwest::Url,
