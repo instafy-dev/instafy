@@ -4,12 +4,14 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use uuid::Uuid;
 
+mod checkout_eviction;
 mod docker;
 mod docker_pool;
 mod external_http;
 mod hetzner;
 mod noop;
 
+pub use checkout_eviction::{CheckoutEvictionPolicy, CheckoutSweepReport};
 pub use docker::DockerRuntimeAllocator;
 pub use docker_pool::DockerPoolRuntimeAllocator;
 pub use hetzner::HetznerRuntimeAllocator;
@@ -241,6 +243,14 @@ pub trait RuntimeAllocator: Send + Sync {
     ) -> anyhow::Result<Option<bool>> {
         let _ = (project_id, runtime_id);
         Ok(None)
+    }
+
+    /// Evict stopped workspace checkouts this allocator keeps on its node's
+    /// disk, as its eviction policy allows (idle TTL or disk budget; never a
+    /// checkout with a runtime, a start in progress or unpushed work).
+    /// Allocators without node-local checkouts do nothing.
+    async fn evict_idle_checkouts(&self) -> anyhow::Result<CheckoutSweepReport> {
+        Ok(CheckoutSweepReport::default())
     }
 }
 

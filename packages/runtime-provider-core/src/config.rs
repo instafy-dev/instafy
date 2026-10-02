@@ -50,6 +50,11 @@ pub struct ProviderConfig {
     pub hetzner_firewall_id: Option<u64>,
     pub hetzner_runtime_user_data: Option<String>,
     pub runtime_providers: Vec<RuntimeProviderConfig>,
+    /// When the Docker allocator evicts stopped workspace checkouts from the
+    /// node's disk (`RUNTIME_CHECKOUT_TTL_DAYS`, default 7, 0 turns idle
+    /// eviction off; `RUNTIME_CHECKOUT_DISK_BUDGET_GIB`, unset or 0 for no
+    /// budget).
+    pub runtime_checkout_eviction: crate::allocator::CheckoutEvictionPolicy,
 }
 
 impl ProviderConfig {
@@ -74,6 +79,7 @@ impl ProviderConfig {
             hetzner_firewall_id: None,
             hetzner_runtime_user_data: None,
             runtime_providers: vec![],
+            runtime_checkout_eviction: crate::allocator::CheckoutEvictionPolicy::default(),
         }
     }
 
@@ -155,6 +161,19 @@ impl ProviderConfig {
             .ok()
             .and_then(|raw| raw.parse().ok());
         config.hetzner_runtime_user_data = std::env::var("HETZNER_USER_DATA").ok();
+
+        if let Ok(raw) = std::env::var("RUNTIME_CHECKOUT_TTL_DAYS") {
+            if let Ok(days) = raw.trim().parse::<u64>() {
+                config.runtime_checkout_eviction.idle_ttl =
+                    (days > 0).then(|| std::time::Duration::from_secs(days * 24 * 60 * 60));
+            }
+        }
+        if let Ok(raw) = std::env::var("RUNTIME_CHECKOUT_DISK_BUDGET_GIB") {
+            if let Ok(gib) = raw.trim().parse::<u64>() {
+                config.runtime_checkout_eviction.disk_budget_bytes =
+                    (gib > 0).then(|| gib.saturating_mul(1024 * 1024 * 1024));
+            }
+        }
 
         config
     }

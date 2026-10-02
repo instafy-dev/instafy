@@ -257,6 +257,42 @@ async fn inspect_runtime(
     Ok(Json(InspectResponse { oom_killed }))
 }
 
+/// Evicts stopped workspace checkouts from this node's disk on a schedule:
+/// after `RUNTIME_CHECKOUT_TTL_DAYS` (default 7) idle, or oldest first while
+/// they exceed `RUNTIME_CHECKOUT_DISK_BUDGET_GIB`. The allocator never evicts
+/// a checkout with a runtime container, a start in progress, or unpushed
+/// local recovery refs, and a stop never evicts. Canonical `main` and the
+/// space's recovery refs are the durable copy; the next start clones again.
+fn spawn_checkout_eviction(allocator: runtime_provider_core::allocator::DynRuntimeAllocator) {
+    let interval = env::var("RUNTIME_CHECKOUT_SWEEP_INTERVAL_SECS")
+        .ok()
+        .and_then(|raw| raw.trim().parse::<u64>().ok())
+        .unwrap_or(6 * 60 * 60);
+    if interval == 0 {
+        return;
+    }
+    tokio::spawn(async move {
+        // Let runtimes that were running before a restart be ensured again
+        // before the first sweep looks at their checkouts.
+        time::sleep(Duration::from_secs(10 * 60)).await;
+        loop {
+            match allocator.evict_idle_checkouts().await {
+                Ok(report) => {
+                    if !report.evicted.is_empty() || !report.kept_unpushed.is_empty() {
+                        info!(
+                            evicted = ?report.evicted,
+                            kept_unpushed = ?report.kept_unpushed,
+                            "workspace checkout sweep finished"
+                        );
+                    }
+                }
+                Err(error) => error!(%error, "workspace checkout sweep failed"),
+            }
+            time::sleep(Duration::from_secs(interval)).await;
+        }
+    });
+}
+
 /// Bounds the per-project toolchain caches (/workspace/.cache mounts): they
 /// live on the shared host disk with no quota, so caches for projects nobody
 /// has touched in RUNTIME_CACHE_TTL_DAYS (default 30, 0 disables) are removed.
@@ -1025,6 +1061,7 @@ async fn main() -> anyhow::Result<()> {
     });
 
     spawn_workspace_cache_cleanup();
+    spawn_checkout_eviction(state.allocator.clone());
 
     let app = Router::new()
         .route("/runtime/ensure", post(ensure_runtime))
