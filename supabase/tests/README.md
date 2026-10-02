@@ -63,6 +63,17 @@ credential its owner does not hold, on insert, on update and when the agent move
 another user, while owners still pin, switch and clear their own credentials and
 deleting a credential still clears pins to it. It also rolls back.
 
+The cluster has no Supabase Storage, so the replay also proves that
+`20261002140000_chat_attachments.sql` succeeds without it and only reports a notice. The
+run then installs `storage_stub.sql`, the buckets and objects columns the Storage policies
+read, and reruns that migration twice, as an install that adds Storage later does.
+`chat_attachments.sql` then checks the private `chat-attachments` bucket. As the signed-in
+and anonymous roles, through the `storage.objects` row-level security policies, it checks
+that a member of a live space uploads and reads `<projectId>/<uuid>.<ext>` objects, that a
+non-member, a deleted space, a free-form name, another extension or spelling, and anon are
+refused, that nobody updates or upserts an object, and that an uploader deletes only their
+own. It rolls back too.
+
 To also run the real controller HTTP and mocked transport tests against a clean,
 fully migrated database in that same disposable cluster:
 
