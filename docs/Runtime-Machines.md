@@ -308,13 +308,31 @@ With a remote, the origin server's `ensure_git_checkout` clones from it on
 runtime start, so a fresh node restores each working tree and a replacement
 loses only work that never reached the remote:
 
-- After a model turn the agent pushes the files the model reported, or the
-  `git status` delta when a turn that was expected to change files reported
-  none (`auto_sync_after_apply`, default on). A file a turn changed but did not
-  report, and that no delta caught, stays unsaved until a later `/sync`.
+- Before each turn the runtime agent brings its checkout up to date: under a
+  workspace lease it calls its own origin's `POST /git/sync {"mode":"refresh"}`,
+  which pushes parked recovery refs, publishes commits a previous turn left on
+  the local branch and moves the checkout to `main`. This runs before the
+  project memory scaffold is written, so scaffold copies of files `main`
+  already has cannot block the move. A run that cannot get a lease (a
+  read-only run, or someone else holds it) refreshes read-only instead: the
+  origin fetches with its own `git.read` credential and moves the checkout
+  only when it holds nothing unpublished. The outcome is recorded on the turn
+  as an `origin/refresh` artifact; a failure never fails the turn.
+- After a model turn the agent saves the files the model reported plus every
+  file whose `git status` changed during the turn, minus paths that are never
+  published. A client's `autoSyncAfterApply: false` is ignored: every turn
+  saves (only the runtime-wide `RUNTIME_GIT_SYNC_AFTER_APPLY=0` turns saving
+  off). Multi-agent write-scoped workers save their files through the same
+  checkpoint.
 - `/skills import`, with or without `--start`, pushes the skill files it
   installed through the same checkpoint. [Git Service](Git-Service.md#embedded-repositories-and-protected-checkpoints)
   lists the import cases it does not save.
+- Paths a save leaves out are reported per file: the `origin/apply` artifact
+  carries `conflictedPaths`, `rejectedPaths` (each with a `reason`:
+  `ignored`, `secret`, `excluded`, `too_large`, ...), `recoveryRef` and
+  `gitSyncStatus: "partial"`, and the turn's reply ends with one
+  `Not saved: <paths> (kept at <ref>)` sentence per group. `instafy git sync`
+  prints the same lines and exits 1.
 - A save publishes by merging: the checkout's commits reach `main` unchanged,
   as a fast-forward or under one merge commit on the current tip. Files that
   `main` changed too keep `main`'s copy, and the agent's copy goes to a
@@ -345,6 +363,38 @@ loses only work that never reached the remote:
   that push. Desktop folders are never flushed.
 - Residual exposure: a hard node loss mid-run (the in-flight run's work), work
   parked locally whose push has not happened yet, and gitignored files.
+
+**Recovery refs.** Work that cannot reach `main` is never dropped. It is
+committed first to a local ref, `refs/instafy/local-recovery/<name>`, without
+any network call, then pushed to `refs/instafy/recovery/<origin id>/<name>` by
+the next save, refresh or controller flush that holds `git.write`. A local ref
+moves to `refs/instafy/local-recovery-pushed/<name>` only after the push is
+confirmed. Each refresh mirrors the space's `refs/instafy/recovery/*` into the
+checkout, so an agent can read kept work on any machine with
+`instafy git show <ref>:<path>` and merge it
+(`.agents/skills/instafy-git-canonical-conflicts/SKILL.md`). Kept work stays
+until someone restores or dismisses it.
+
+**Checkout lifetime.** The hosted checkout is a bind mount of the node's disk,
+`DOCKER_REPO_HOST/<project>`. It survives container stops and re-provisioning
+on that node and is lost when the node is replaced; correctness does not
+depend on it, because the next start clones `main` again. The provider service
+evicts stopped checkouts:
+
+- after `RUNTIME_CHECKOUT_TTL_DAYS` without a start or stop (default 7, 0
+  turns idle eviction off), and, oldest first, while the node's checkouts
+  together exceed `RUNTIME_CHECKOUT_DISK_BUDGET_GIB` (unset or 0: no budget),
+  skipping any used in the last hour;
+- never on stop (a stop only starts the idle clock), never while any runtime
+  container of the project exists on the node or a start is in progress, and
+  never for a workspace without a canonical remote;
+- never while the checkout holds a `refs/instafy/local-recovery/*` ref: that
+  work is not pushed yet. The sweep logs the project and keeps the checkout;
+  the next start pushes the refs, and a later sweep evicts.
+
+The sweep runs every `RUNTIME_CHECKOUT_SWEEP_INTERVAL_SECS` (default six
+hours, 0 turns it off). It reads refs from the repository files without
+running git, and keeps any checkout whose state it cannot read with certainty.
 
 **Compatibility: upgrading the provider compose file turns the remote on.**
 Before `docker/docker-compose.runtime.provider.yml` forwarded
