@@ -325,6 +325,7 @@ async fn resolve_thread_columns(
         ));
     }
     ensure_conversation_access(transaction, &parent, context).await?;
+    ensure_not_internal_conversation(transaction, &parent.id).await?;
 
     let root_conversation_id = parent.root_conversation_id.unwrap_or(parent.id);
     Ok((
@@ -332,6 +333,65 @@ async fn resolve_thread_columns(
         root_conversation_id,
         thread_kind,
     ))
+}
+
+fn strip_client_internal_metadata(metadata: &mut JsonValue) {
+    if let Some(map) = metadata.as_object_mut() {
+        map.remove("internalPurpose");
+        map.remove("spaceReview");
+    }
+}
+
+pub(crate) async fn is_internal_conversation(
+    transaction: &tokio_postgres::Transaction<'_>,
+    conversation_id: &Uuid,
+) -> Result<bool, (StatusCode, Json<ApiError>)> {
+    transaction
+        .query_one(
+            "select public.is_internal_conversation($1)",
+            &[conversation_id],
+        )
+        .await
+        .map(|row| row.get(0))
+        .map_err(|e| internal_error(format!("failed to check execution anchor: {e}")))
+}
+
+pub(crate) async fn ensure_not_internal_conversation(
+    transaction: &tokio_postgres::Transaction<'_>,
+    conversation_id: &Uuid,
+) -> Result<(), (StatusCode, Json<ApiError>)> {
+    if is_internal_conversation(transaction, conversation_id).await? {
+        return Err(crate::forbidden(
+            "Review execution is managed through its automation.",
+        ));
+    }
+    Ok(())
+}
+
+pub(crate) async fn require_internal_review_anchor(
+    transaction: &tokio_postgres::Transaction<'_>,
+    conversation_id: &Uuid,
+) -> Result<(), (StatusCode, Json<ApiError>)> {
+    if !is_internal_conversation(transaction, conversation_id).await? {
+        return Err(crate::forbidden("review execution anchor is unavailable"));
+    }
+    Ok(())
+}
+
+pub(crate) async fn stamp_internal_conversation_metadata(
+    transaction: &tokio_postgres::Transaction<'_>,
+    conversation_id: &Uuid,
+    metadata: &mut JsonValue,
+) -> Result<(), (StatusCode, Json<ApiError>)> {
+    // The runtime cannot hide an ordinary message by claiming internal origin.
+    strip_client_internal_metadata(metadata);
+    if is_internal_conversation(transaction, conversation_id).await? {
+        if !metadata.is_object() {
+            *metadata = serde_json::json!({});
+        }
+        metadata["internalPurpose"] = serde_json::json!("space_review");
+    }
+    Ok(())
 }
 
 pub(crate) async fn ensure_conversation_access(
@@ -542,6 +602,7 @@ pub(crate) async fn list_project_conversations(
 
     let mut where_clauses: Vec<String> = Vec::new();
     where_clauses.push("c.project_id = $1".to_string());
+    where_clauses.push("not public.is_internal_conversation(c.id)".to_string());
 
     let user_id = access_context.user_id;
     if !access_context.is_service_role {
@@ -711,6 +772,7 @@ pub(crate) async fn create_blank_project_conversation(
         Some(JsonValue::Object(map)) => JsonValue::Object(map),
         _ => json!({}),
     };
+    strip_client_internal_metadata(&mut metadata_value);
     let thread_parent_id = match body.parent_conversation_id.as_ref() {
         Some(raw) if !raw.trim().is_empty() => Some(
             Uuid::from_str(raw.trim())
@@ -928,12 +990,13 @@ pub(crate) async fn update_conversation_metadata(
     let conversation_id = Uuid::from_str(conversation_id_raw.trim())
         .map_err(|_| bad_request("conversationId must be a valid UUID"))?;
 
-    let metadata_value = match body.metadata {
+    let mut metadata_value = match body.metadata {
         Some(JsonValue::Object(map)) => JsonValue::Object(map),
         Some(_) => return Err(bad_request("metadata must be a JSON object")),
         None => return Err(bad_request("metadata is required")),
     };
 
+    strip_client_internal_metadata(&mut metadata_value);
     let metadata_param = PgJson(&metadata_value);
 
     let mut connection = state
@@ -978,6 +1041,7 @@ pub(crate) async fn update_conversation_metadata(
     let project = crate::load_project_record(&transaction, &existing.project_id).await?;
     ensure_project_write_access(&transaction, &project, &context, existing.session_id).await?;
     ensure_conversation_access(&transaction, &existing, &context).await?;
+    ensure_not_internal_conversation(&transaction, &conversation_id).await?;
 
     if let Some(map) = metadata_value.as_object() {
         if let Some(raw) = map.get("visibility").and_then(|value| value.as_str()) {
@@ -1261,6 +1325,7 @@ pub(crate) async fn record_conversation_message_only(
     let mut metadata_value =
         sanitize_client_recorded_message_metadata(metadata_value, context.is_service_role);
     normalize_human_mention_metadata(&mut metadata_value)?;
+    strip_client_internal_metadata(&mut metadata_value);
     let client_message_id = body
         .client_message_id
         .as_deref()
@@ -1286,6 +1351,7 @@ pub(crate) async fn record_conversation_message_only(
     let project = crate::load_project_record(&transaction, &conversation.project_id).await?;
     ensure_project_write_access(&transaction, &project, &context, conversation.session_id).await?;
     ensure_conversation_access(&transaction, &conversation, &context).await?;
+    ensure_not_internal_conversation(&transaction, &conversation_id).await?;
     if body
         .project_id
         .is_some_and(|expected_project_id| expected_project_id != conversation.project_id)
@@ -2764,6 +2830,9 @@ pub(crate) async fn ensure_conversation_record(
         .await
         .map_err(|error| internal_error(format!("failed to load conversation: {error}")))?;
 
+    if let Some(metadata) = request.conversation_metadata.as_mut() {
+        strip_client_internal_metadata(metadata);
+    }
     let metadata_param = request.conversation_metadata.as_ref().map(PgJson);
 
     if let Some(row) = existing {
@@ -3239,8 +3308,10 @@ pub(crate) async fn record_controller_assistant_message(
     content: &str,
     metadata: &JsonValue,
 ) -> Result<ConversationMessageRow, (StatusCode, Json<ApiError>)> {
+    let mut metadata = metadata.clone();
+    stamp_internal_conversation_metadata(transaction, conversation_id, &mut metadata).await?;
     let message_id = Uuid::new_v4();
-    let metadata_param = PgJson(metadata);
+    let metadata_param = PgJson(&metadata);
     let content_string = content.to_string();
 
     let row = transaction
@@ -3531,6 +3602,7 @@ async fn add_conversation_participant(
     let project = crate::load_project_record(&transaction, &conversation.project_id).await?;
     ensure_project_write_access(&transaction, &project, &context, conversation.session_id).await?;
     ensure_conversation_access(&transaction, &conversation, &context).await?;
+    ensure_not_internal_conversation(&transaction, &conversation_id).await?;
 
     if conversation.visibility != CONVERSATION_VISIBILITY_PRIVATE {
         return Err(bad_request("conversation is not private"));

@@ -1,4 +1,4 @@
-import { useEffect, type Dispatch, type MutableRefObject } from "react";
+import { useEffect, useRef, type Dispatch, type MutableRefObject } from "react";
 import { isAppInForeground } from "../notifications/assistantMessageNotifications";
 import type {
   ControllerConversationCreated,
@@ -27,6 +27,7 @@ import {
   extractConversationOriginMessageIdFromMetadata,
   extractConversationOwnerAgentFromMetadata,
   extractConversationTitleFromMetadata,
+  hasRecommendationOrigin,
   parseTimestamp,
   resolveConversationVisibility,
   resolveConversationVisibilityCandidate,
@@ -47,6 +48,7 @@ interface PendingConversationEffectsArgs {
   pendingConversationCreations: ControllerConversationCreated[];
   ackConversationCreations: (conversationIds: string[]) => void;
   pendingConversationUpdates: ControllerConversationUpdated[];
+  internalConversationIds?: Readonly<Record<string, true>>;
   ackConversationUpdates: (conversationIds: string[]) => void;
   pendingConversationMessages: ControllerConversationMessage[];
   ackConversationMessages: (messageIds: string[]) => void;
@@ -58,6 +60,8 @@ interface PendingConversationEffectsArgs {
     metadata: Record<string, unknown>;
   }) => Promise<unknown>;
 }
+
+const NO_INTERNAL_CONVERSATIONS: Readonly<Record<string, true>> = {};
 
 function conversationsRoutingPreferencesChanged(
   conversation: ConversationState,
@@ -79,6 +83,7 @@ export function usePendingConversationEffects({
   pendingConversationCreations,
   ackConversationCreations,
   pendingConversationUpdates,
+  internalConversationIds = NO_INTERNAL_CONVERSATIONS,
   ackConversationUpdates,
   pendingConversationMessages,
   ackConversationMessages,
@@ -87,7 +92,22 @@ export function usePendingConversationEffects({
   dispatch,
   updateControllerConversationMetadata,
 }: PendingConversationEffectsArgs) {
+  // Creation and its first message may be flushed together before React has
+  // applied CREATE. Share that identity between the ordered effects below.
+  const createdRecommendationIdsRef = useRef(new Map<string, string>());
   useEffect(() => {
+    if (state.projectKey !== projectKey) return;
+    state.conversations.forEach((conversation) => {
+      if (!conversation.controllerId || !internalConversationIds[conversation.controllerId]) return;
+      if (conversation.lifecycleStatus !== "hidden" || conversation.unreadCount > 0
+        || conversation.pendingRunIds.length > 0 || conversation.awaitingLeaseRunIds.length > 0
+        || Object.values(state.runMap).includes(conversation.localId)) {
+        dispatch({ type: "RETIRE_INTERNAL", id: conversation.localId });
+      }
+    });
+  }, [dispatch, internalConversationIds, projectKey, state.conversations, state.projectKey, state.runMap]);
+  useEffect(() => {
+    createdRecommendationIdsRef.current.clear();
     if (pendingConversationCreations.length === 0) {
       return;
     }
@@ -112,6 +132,7 @@ export function usePendingConversationEffects({
       }
       const controllerId = creation.conversationId;
       ackConversationIds.push(controllerId);
+      if (internalConversationIds[controllerId]) return;
       if (!isUuid(controllerId)) {
         return;
       }
@@ -147,7 +168,9 @@ export function usePendingConversationEffects({
       );
       const routingPreferences =
         routingPreferencesFromMetadata ?? DEFAULT_CONVERSATION_ROUTING_PREFERENCES;
-      const createdByIsSelf = currentUserId !== null && creation.createdBy === currentUserId;
+      const recommendationDelivery = hasRecommendationOrigin(creation.metadata);
+      const createdByIsSelf = currentUserId !== null && creation.createdBy === currentUserId
+        && !recommendationDelivery;
       if (createdByIsSelf) {
         if (localIdFromMetadata) {
           const explicit =
@@ -324,6 +347,9 @@ export function usePendingConversationEffects({
       };
       dispatch({ type: "CREATE", conversation, select: false });
       controllerToLocal.set(controllerId, conversation.localId);
+      if (recommendationDelivery) {
+        createdRecommendationIdsRef.current.set(controllerId, conversation.localId);
+      }
     });
 
     if (ackConversationIds.length > 0) {
@@ -333,6 +359,7 @@ export function usePendingConversationEffects({
     ackConversationCreations,
     currentUserId,
     dispatch,
+    internalConversationIds,
     pendingConversationCreations,
     projectKey,
     state.activeId,
@@ -364,6 +391,7 @@ export function usePendingConversationEffects({
       }
       const controllerId = update.conversationId;
       ackConversationIds.push(controllerId);
+      if (internalConversationIds[controllerId]) return;
       if (!isUuid(controllerId)) {
         return;
       }
@@ -463,6 +491,7 @@ export function usePendingConversationEffects({
     ackConversationUpdates,
     currentUserId,
     dispatch,
+    internalConversationIds,
     pendingConversationUpdates,
     projectKey,
     state.conversations,
@@ -485,6 +514,9 @@ export function usePendingConversationEffects({
     const activeConversation =
       state.conversations.find((conversation) => conversation.localId === state.activeId) ??
       null;
+    createdRecommendationIdsRef.current.forEach((localId, controllerId) => {
+      controllerToLocal.set(controllerId, localId);
+    });
     let placeholderId =
       activeConversation && isEmptyConversationPlaceholder(activeConversation)
         ? activeConversation.localId
@@ -495,8 +527,13 @@ export function usePendingConversationEffects({
         return;
       }
       const controllerId = message.conversationId;
+      if (internalConversationIds[controllerId]) {
+        ackIds.push(message.id);
+        return;
+      }
+      const recommendationDelivery = hasRecommendationOrigin(message.metadata);
       let conversationId = controllerToLocal.get(controllerId) ?? null;
-      if (!conversationId) {
+      if (!conversationId && !recommendationDelivery) {
         const metadataLocalId = extractConversationLocalIdFromMessageMetadata(message.metadata);
         if (metadataLocalId) {
           const conversationMatch =
@@ -519,7 +556,7 @@ export function usePendingConversationEffects({
           }
         }
       }
-      if (!conversationId && message.role === "user") {
+      if (!conversationId && !recommendationDelivery && message.role === "user") {
         const normalizedContent = message.content.trim();
         if (activeConversation && !activeConversation.controllerId) {
           const activeMatch = extractLastUserMessageContent(activeConversation);
@@ -553,7 +590,7 @@ export function usePendingConversationEffects({
       }
       // A chat this tab has not loaded: its title and history arrive with the
       // next chat list, so mark it until then (see remoteSummaryPending).
-      if (!conversationId && placeholderId) {
+      if (!conversationId && !recommendationDelivery && placeholderId) {
         dispatch({ type: "SET_CONTROLLER", id: placeholderId, controllerId });
         dispatch({ type: "SET_REMOTE_SUMMARY_PENDING", id: placeholderId, pending: true });
         conversationId = placeholderId;
@@ -564,7 +601,7 @@ export function usePendingConversationEffects({
         const conversation: ConversationState = {
           localId: makeConversationId(),
           title: `Conversation ${state.sequence}`,
-          visibility: "public",
+          visibility: recommendationDelivery ? "private" : "public",
           lifecycleStatus: "active",
           controllerId,
           remoteSummaryPending: true,
@@ -674,6 +711,7 @@ export function usePendingConversationEffects({
     ackConversationMessages,
     currentUserId,
     dispatch,
+    internalConversationIds,
     lastBackgroundAtRef,
     notifiedMessageIdsRef,
     pendingConversationMessages,

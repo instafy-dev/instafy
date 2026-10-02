@@ -1,5 +1,5 @@
-//! Owner-private recommendations, separate from executing their proposed work.
-//! Skills may submit findings; only an interactive user records a decision.
+//! Owner-private findings delivered as ordinary chats without executing proposed work.
+//! Skills may submit one opener per run; only a user records acceptance or dismissal.
 use std::collections::HashSet;
 
 use axum::extract::{Path, Query, State};
@@ -38,6 +38,8 @@ struct SubmitRecommendation {
     title: String,
     reason: String,
     prompt: String,
+    #[serde(default)]
+    message: Option<String>,
     evidence: Vec<Evidence>,
 }
 
@@ -78,6 +80,8 @@ struct Recommendation {
     evidence: Vec<Evidence>,
     status: RecommendationStatus,
     accepted_conversation_id: Option<Uuid>,
+    delivered: bool,
+    delivered_conversation_id: Option<Uuid>,
     created_at: String,
     updated_at: String,
     #[serde(skip)]
@@ -147,6 +151,11 @@ fn normalize_submission(mut body: SubmitRecommendation) -> ApiResult<SubmitRecom
     body.title = normalize_text(&body.title, "title", 160)?;
     body.reason = normalize_text(&body.reason, "reason", 2000)?;
     body.prompt = normalize_text(&body.prompt, "prompt", 4000)?;
+    body.message = body
+        .message
+        .as_deref()
+        .map(|value| normalize_text(value, "message", 4000))
+        .transpose()?;
     if body.evidence.is_empty() || body.evidence.len() > 8 {
         return Err(bad_request(
             "evidence must contain 1-8 conversation or message references",
@@ -260,6 +269,16 @@ async fn redact_continuation(
             Err(error) => return Err(error),
         }
     }
+    if let Some(conversation_id) = record.delivered_conversation_id {
+        match validate_conversation(transaction, reader, &record.project_id, &conversation_id).await
+        {
+            Ok(()) => {}
+            Err((StatusCode::FORBIDDEN | StatusCode::NOT_FOUND, _)) => {
+                record.delivered_conversation_id = None
+            }
+            Err(error) => return Err(error),
+        }
+    }
     Ok(())
 }
 
@@ -282,6 +301,10 @@ fn map_record(row: Row) -> ApiResult<Recommendation> {
         evidence,
         status,
         accepted_conversation_id: row.get("accepted_conversation_id"),
+        delivered: row
+            .get::<_, Option<Uuid>>("delivered_conversation_id")
+            .is_some(),
+        delivered_conversation_id: row.get("delivered_conversation_id"),
         created_at: row.get::<_, DateTime<Utc>>("created_at").to_rfc3339(),
         updated_at: row.get::<_, DateTime<Utc>>("updated_at").to_rfc3339(),
         source_conversation_id: row.get("source_conversation_id"),
@@ -385,19 +408,115 @@ async fn submit_recommendation(
     ).await.map_err(|e| internal_error(format!("failed to load recommendation: {e}")))?;
     let mut record = map_record(row)?;
     validate_record(&transaction, &reader, &record).await?;
-    if record.status == RecommendationStatus::Proposed {
+    let mut delivery = None;
+    if record.status == RecommendationStatus::Proposed && !record.delivered {
         let row = transaction.query_one(
             "update space_recommendations set title=$2,reason=$3,prompt=$4,evidence=$5,source_conversation_id=$6,updated_at=now() where id=$1 returning *",
             &[&record.id,&body.title,&body.reason,&body.prompt,&evidence,&source_conversation_id],
         ).await.map_err(|e| internal_error(format!("failed to refresh recommendation: {e}")))?;
         record = map_record(row)?;
+        if let Some(message) = body.message.as_deref() {
+            // Serialize different keys from the same run too. Retries of an
+            // already-delivered key return its existing receipt above.
+            let run_id: Option<Uuid> = if let Some(job) = reader.active_job.as_ref() {
+                let run_id: Uuid = transaction
+                    .query_one("select run_id from agent_jobs where id=$1", &[&job.job_id])
+                    .await
+                    .map_err(|e| internal_error(format!("failed to find review run: {e}")))?
+                    .get(0);
+                transaction
+                    .query_one(
+                        "select pg_advisory_xact_lock(hashtextextended($1, 0))",
+                        &[&format!("recommendation-delivery:{run_id}")],
+                    )
+                    .await
+                    .map_err(|e| internal_error(format!("failed to lock review delivery: {e}")))?;
+                let already_delivered: bool = transaction.query_one(
+                    "select exists(select 1 from space_recommendations where delivered_run_id=$1)", &[&run_id],
+                ).await.map_err(|e| internal_error(format!("failed to check review delivery: {e}")))?.get(0);
+                if already_delivered {
+                    return Err((StatusCode::CONFLICT, Json(ApiError::new("This review run has already opened a conversation. Save other findings for a later review."))));
+                }
+                Some(run_id)
+            } else {
+                None
+            };
+            let conversation_id =
+                create_private_root(&transaction, &project_id, &reader.user_id, &record.title)
+                    .await?;
+            // Owner-private storage still uses the owner's created_by. Mark
+            // unsolicited delivery so clients never attach it to a local draft.
+            transaction.execute(
+                "update conversations set metadata=metadata || jsonb_build_object('recommendationId',$2::text) where id=$1",
+                &[&conversation_id,&record.id.to_string()],
+            ).await.map_err(|e| internal_error(format!("failed to mark proactive conversation: {e}")))?;
+            let content = message_with_evidence(message, &record.evidence);
+            let message_row = crate::agent::record_agent_conversation_message(
+                &transaction,
+                &project_id,
+                &conversation_id,
+                None,
+                None,
+                None,
+                content,
+                serde_json::json!({"source":"agent", "agent":{"handle":"octo","displayName":"Octo"}, "recommendationId":record.id}),
+            )
+            .await?;
+            let row = transaction.query_one(
+                "update space_recommendations set delivered_conversation_id=$2, delivered_message_id=$3, delivered_run_id=$4, delivered_at=now(), updated_at=now() where id=$1 returning *",
+                &[&record.id,&conversation_id,&message_row.id,&run_id],
+            ).await.map_err(|e| internal_error(format!("failed to record recommendation delivery: {e}")))?;
+            record = map_record(row)?;
+            delivery = Some((
+                conversation_id,
+                conversation_event_payload(&transaction, &conversation_id).await?,
+                message_row,
+            ));
+        }
     }
     redact_continuation(&transaction, &reader, &mut record).await?;
     transaction
         .commit()
         .await
         .map_err(|e| internal_error(format!("failed to commit recommendation: {e}")))?;
+    if let Some((conversation_id, payload, message)) = delivery {
+        crate::publish_controller_event_with_conversation(
+            &state.events,
+            "conversation.created",
+            Some(project_id),
+            None,
+            Some(conversation_id),
+            None,
+            None,
+            payload,
+        );
+        crate::conversations::publish_conversation_message_event(&state.events, &message);
+    }
     Ok(Json(record))
+}
+
+fn message_with_evidence(message: &str, evidence: &[Evidence]) -> String {
+    let sources = evidence
+        .iter()
+        .enumerate()
+        .map(|(index, entry)| {
+            let label = if evidence.len() == 1 {
+                "Source chat".to_owned()
+            } else {
+                format!("Source chat {}", index + 1)
+            };
+            // Use the normal chat-reference dialect so Studio can open the
+            // source chat in place on every app origin.
+            match entry.message_id {
+                Some(message_id) => {
+                    format!("[[message:{}/{message_id}|{label}]]", entry.conversation_id)
+                }
+                None => format!("[[conversation:{}|{label}]]", entry.conversation_id),
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" · ");
+    format!("{message}\n\n{sources}")
 }
 
 #[derive(Serialize)]
@@ -415,7 +534,7 @@ fn unavailable_prepared_chat() -> (StatusCode, Json<ApiError>) {
     )
 }
 
-async fn validate_private_root(
+pub(crate) async fn validate_private_root(
     transaction: &Transaction<'_>,
     project_id: &Uuid,
     user_id: &Uuid,
@@ -451,7 +570,7 @@ async fn validate_private_root(
     Ok(conversation)
 }
 
-async fn create_private_root(
+pub(crate) async fn create_private_root(
     transaction: &Transaction<'_>,
     project_id: &Uuid,
     user_id: &Uuid,
@@ -534,7 +653,10 @@ async fn prepare_action_conversation(
             Json(ApiError::new("This recommendation already has a decision.")),
         ));
     }
-    let (conversation_id, event) = if let Some(conversation_id) = record.prepared_conversation_id {
+    let (conversation_id, event) = if let Some(conversation_id) = record
+        .delivered_conversation_id
+        .or(record.prepared_conversation_id)
+    {
         let conversation =
             validate_private_root(&transaction, &project_id, &reader.user_id, &conversation_id)
                 .await

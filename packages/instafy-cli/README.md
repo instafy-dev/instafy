@@ -41,8 +41,9 @@ Run Instafy spaces locally and connect them back to Instafy Studio — from any 
 - `instafy agents list` — list available top-level agents.
 - `instafy agents context list --query "<topic>"` — inspect optional compact scoped context-card hints for cross-agent coordination.
 - `instafy agents context put --agent @octo "<summary>"` — save/update a compact context card for the current conversation when `INSTAFY_CONVERSATION_ID` is set.
-- `instafy recommendations list --limit 200 --json` — inspect the linked space's recommendations, including accepted and dismissed outcomes visible to this session.
-- `instafy recommendations submit --file - --json` — read one JSON proposal from stdin and save a next action with supporting conversation/message references. A workspace file can replace `-`. It does not start the action or create a schedule; an accepted or dismissed key keeps its existing outcome.
+- `instafy automations create --name "Octo check-in" --mode space_review --schedule-kind hourly --interval-hours 24` — explicitly opt in to private, quiet space reviews; no custom prompt is needed.
+- `instafy recommendations list --limit 200 --json` — inspect the linked space's recommendations, including delivery state and accepted or dismissed outcomes visible to this session.
+- `instafy recommendations submit --file - --json` — read one JSON recommendation from stdin. Add an optional `message` to deliver a normal private Octo chat with source links; omit it for legacy proposal-only behavior. A workspace file can replace `-`. Delivery does not start the suggested work. Delivered, accepted and dismissed keys keep their existing outcome.
 - Context cards are a bounded cache, not the primary collaboration path: the controller keeps the newest 200 cards per user/project/agent.
 - Use context cards for soft work focus and overlap hints, not hard locks: note the agent/thread, topic/path/domain, open questions, and where follow-up should go. Structured `writeScope` metadata remains the safety mechanism for concurrent file edits.
 - `instafy git <args...>` — run git commands against an Instafy canonical checkout (`.instafy/.git`) when present.

@@ -7344,6 +7344,13 @@ pub(crate) async fn record_agent_conversation_message(
     content: String,
     metadata: JsonValue,
 ) -> Result<ConversationMessageRow, (StatusCode, Json<ApiError>)> {
+    let mut metadata = metadata;
+    crate::conversations::stamp_internal_conversation_metadata(
+        transaction,
+        conversation_id,
+        &mut metadata,
+    )
+    .await?;
     let message_id = Uuid::new_v4();
     let metadata_param = PgJson(&metadata);
 

@@ -38,6 +38,9 @@ fn recommendations_submission_is_bounded_and_requires_evidence() {
         ("title", json!("a".repeat(161))),
         ("reason", json!("a".repeat(2001))),
         ("prompt", json!("a".repeat(4001))),
+        ("message", json!("a".repeat(4001))),
+        ("message", json!("  ")),
+        ("message", json!("\0")),
         ("reason", json!("\0")),
         ("evidence", json!([])),
         (
@@ -60,6 +63,235 @@ fn recommendations_submission_is_bounded_and_requires_evidence() {
         json!({"conversationId":Uuid::new_v4(),"url":"https://example.invalid"})
     )
     .is_err());
+}
+
+#[tokio::test]
+async fn recommendations_delivery_is_an_ordinary_private_chat_once() -> anyhow::Result<()> {
+    let f = Fixture::new().await?;
+    let mut body = proposal(f.public);
+    body["message"] = json!("Desktop signup passed, but mobile is still unchecked. Shall we check the narrow layout next?");
+    body["evidence"] = json!([{"conversationId":f.public,"messageId":f.message}]);
+    let (first, retry) = tokio::join!(f.submit(0, body.clone()), f.submit(0, body.clone()));
+    let first = first?;
+    assert_eq!(
+        first, retry?,
+        "concurrent retries must return the same delivery receipt"
+    );
+    assert_eq!(
+        first["status"], "proposed",
+        "delivery is not user acceptance"
+    );
+    assert_eq!(first["delivered"], true);
+    let id = Uuid::parse_str(
+        first["deliveredConversationId"]
+            .as_str()
+            .context("delivery id")?,
+    )?;
+    let prepared_path = format!(
+        "{}/{}/prepare-conversation",
+        f.path(),
+        first["id"].as_str().unwrap()
+    );
+    let (status, prepared) = f
+        .request(&f.tokens[0], "POST", &prepared_path, Value::Null)
+        .await?;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(prepared["conversationId"], first["deliveredConversationId"]);
+    {
+        let db = f.state.pool.get().await?;
+        let metadata: PgJson<Value> = db
+            .query_one("select metadata from conversations where id=$1", &[&id])
+            .await?
+            .get(0);
+        assert_eq!(metadata.0["recommendationId"], first["id"]);
+        let chat = db.query_one("select created_by,visibility,parent_conversation_id,root_conversation_id from conversations where id=$1", &[&id]).await?;
+        assert_eq!(chat.get::<_, Uuid>("created_by"), f.users[0]);
+        assert_eq!(chat.get::<_, String>("visibility"), "private");
+        assert_eq!(chat.get::<_, Option<Uuid>>("parent_conversation_id"), None);
+        assert_eq!(chat.get::<_, Uuid>("root_conversation_id"), id);
+        let participants = db
+            .query(
+                "select user_id from conversation_participants where conversation_id=$1",
+                &[&id],
+            )
+            .await?;
+        assert_eq!(participants.len(), 1);
+        assert_eq!(participants[0].get::<_, Uuid>(0), f.users[0]);
+        let messages = db.query("select role,content,created_by,run_id from conversation_messages where conversation_id=$1", &[&id]).await?;
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].get::<_, String>("role"), "assistant");
+        assert_eq!(messages[0].get::<_, Option<Uuid>>("created_by"), None);
+        assert_eq!(messages[0].get::<_, Option<Uuid>>("run_id"), None);
+        let content: String = messages[0].get("content");
+        assert!(content.starts_with(body["message"].as_str().unwrap()));
+        assert!(content.contains(&format!(
+            "[[message:{}/{}|Source chat]]",
+            f.public, f.message
+        )));
+        let notifications = db.query("select e.event_name,r.user_id from notification_events e join notification_recipients r on r.event_id=e.id where e.conversation_id=$1", &[&id]).await?;
+        assert_eq!(
+            notifications.len(),
+            1,
+            "one ordinary reply notification, without a second automation notice"
+        );
+        assert_eq!(
+            notifications[0].get::<_, String>("event_name"),
+            "conversation.reply"
+        );
+        assert_eq!(notifications[0].get::<_, Uuid>("user_id"), f.users[0]);
+        assert_eq!(
+            db.query_one(
+                "select count(*) from agent_jobs where conversation_id=$1",
+                &[&id]
+            )
+            .await?
+            .get::<_, i64>(0),
+            0
+        );
+        // Replying and archiving do not turn delivery back into pending work.
+        db.execute("insert into conversation_messages(id,conversation_id,project_id,role,content,created_by,metadata) values($1,$2,$3,'user','I will check it tomorrow.',$4,'{}'::jsonb)", &[&Uuid::new_v4(),&id,&f.project,&f.users[0]]).await?;
+        let key = format!("instafy_conversation_lifecycle_v1_{}", f.users[0]);
+        db.execute("update conversations set metadata=metadata || jsonb_build_object($2::text,'archived') where id=$1", &[&id,&key]).await?;
+    }
+    body["message"] = json!("Changed wording must not reopen this topic.");
+    assert_eq!(f.submit(0, body.clone()).await?, first);
+    {
+        let db = f.state.pool.get().await?;
+        assert_eq!(
+            db.query_one(
+                "select count(*) from conversation_messages where conversation_id=$1",
+                &[&id]
+            )
+            .await?
+            .get::<_, i64>(0),
+            2
+        );
+        db.execute("delete from conversations where id=$1", &[&id])
+            .await?;
+    }
+    let deleted = f.submit(0, body).await?;
+    assert_eq!(deleted["delivered"], true);
+    assert!(
+        deleted["deliveredConversationId"].is_null(),
+        "deleted identity is a tombstone, not a new conversation"
+    );
+    f.cleanup().await
+}
+
+#[tokio::test]
+async fn recommendations_delivery_is_bounded_by_run_and_does_not_expand_private_access(
+) -> anyhow::Result<()> {
+    let f = Fixture::new().await?;
+    let (token, _) = f
+        .job(
+            f.public,
+            vec![
+                "prompt.execute".into(),
+                "job.token.workspace-separated".into(),
+            ],
+        )
+        .await?;
+    let mut body = proposal(f.public);
+    body["message"] = json!("Mobile signup still needs a check. Shall we do that next?");
+    let mut second = body.clone();
+    second["key"] = json!("a-different-finding");
+    let path = f.path();
+    let (left, right) = tokio::join!(
+        f.request(&token, "POST", &path, body.clone()),
+        f.request(&token, "POST", &path, second)
+    );
+    let (left, right) = (left?, right?);
+    assert!(
+        matches!(
+            (left.0, right.0),
+            (StatusCode::OK, StatusCode::CONFLICT) | (StatusCode::CONFLICT, StatusCode::OK)
+        ),
+        "{left:?} {right:?}"
+    );
+    let delivered = if left.0 == StatusCode::OK {
+        left.1
+    } else {
+        right.1
+    };
+    assert_eq!(delivered["delivered"], true);
+    assert!(
+        delivered["deliveredConversationId"].is_null(),
+        "review job does not gain another private root"
+    );
+    assert_eq!(
+        f.list(&token).await?.len(),
+        1,
+        "over-quota insert rolls back entirely"
+    );
+    let human = f.list(&f.tokens[0]).await?;
+    assert!(human[0]["deliveredConversationId"].is_string());
+    body["key"] = json!("private-evidence");
+    body["evidence"] = json!([{"conversationId":f.private}]);
+    assert_eq!(
+        f.request(&token, "POST", &f.path(), body).await?.0,
+        StatusCode::FORBIDDEN
+    );
+    let db = f.state.pool.get().await?;
+    assert_eq!(
+        db.query_one(
+            "select count(*) from space_recommendations where project_id=$1",
+            &[&f.project]
+        )
+        .await?
+        .get::<_, i64>(0),
+        1
+    );
+    assert_eq!(
+        db.query_one(
+            "select count(*) from agent_jobs where project_id=$1",
+            &[&f.project]
+        )
+        .await?
+        .get::<_, i64>(0),
+        1,
+        "delivery dispatches no work"
+    );
+    drop(db);
+    f.cleanup().await
+}
+
+#[tokio::test]
+async fn recommendations_delivery_respects_previous_decisions_and_revoked_evidence(
+) -> anyhow::Result<()> {
+    let f = Fixture::new().await?;
+    let mut body = proposal(f.public);
+    let proposed = f.submit(0, body.clone()).await?;
+    let endpoint = format!("{}/{}", f.path(), proposed["id"].as_str().unwrap());
+    assert_eq!(
+        f.request(
+            &f.tokens[0],
+            "PATCH",
+            &endpoint,
+            json!({"status":"dismissed"})
+        )
+        .await?
+        .0,
+        StatusCode::OK
+    );
+    body["message"] = json!("This should never be sent.");
+    assert_eq!(f.submit(0, body.clone()).await?["delivered"], false);
+    body["key"] = json!("revoked-evidence");
+    body["evidence"] = json!([{"conversationId":f.private}]);
+    let db = f.state.pool.get().await?;
+    db.execute(
+        "delete from conversation_participants where conversation_id=$1 and user_id=$2",
+        &[&f.private, &f.users[0]],
+    )
+    .await?;
+    drop(db);
+    assert_eq!(
+        f.request(&f.tokens[0], "POST", &f.path(), body).await?.0,
+        StatusCode::FORBIDDEN
+    );
+    let db = f.state.pool.get().await?;
+    assert_eq!(db.query_one("select count(*) from space_recommendations where project_id=$1 and delivered_at is not null", &[&f.project]).await?.get::<_,i64>(0),0);
+    drop(db);
+    f.cleanup().await
 }
 
 struct Fixture {

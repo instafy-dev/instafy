@@ -116,6 +116,17 @@ export function useRuntimeControllerSync({
       string,
       { updatedAt: string | null | undefined; sequence: number }
     >();
+    // Run snapshots can arrive before conversation events, including after a
+    // reconnect. Keep their internal chat identity out of automatic hydration;
+    // the run itself remains available to the explicit Automations audit view.
+    const internalConversationIds = new Set<string>();
+    const rememberInternalConversation = (conversationId: unknown, metadata: unknown) => {
+      if (typeof conversationId === "string" && isInternalSpaceReviewMetadata(metadata)
+        && !internalConversationIds.has(conversationId)) {
+        internalConversationIds.add(conversationId);
+        dispatch({ type: "setInternalConversationIds", conversationIds: [...internalConversationIds] });
+      }
+    };
     streamOpenedRef.current = false;
     initialStreamErrorNotifiedRef.current = false;
     lastStreamErrorRef.current = 0;
@@ -129,6 +140,7 @@ export function useRuntimeControllerSync({
 
     const clearProjectDerivedRuntimeState = () => {
       resetRuns();
+      dispatch({ type: "setInternalConversationIds", conversationIds: [] });
       dispatch({ type: "setLocalWorkspace", workspace: null });
       dispatch({
         type: "applyOriginSummary",
@@ -315,6 +327,7 @@ export function useRuntimeControllerSync({
           return;
         }
         result.runs.forEach((run) => {
+          rememberInternalConversation(run.conversationId, run.metadata);
           const latestRunEvent = latestRunEvents.get(run.id);
           const snapshotUpdatedAt = Date.parse(run.updatedAt ?? "");
           const eventUpdatedAt = Date.parse(latestRunEvent?.updatedAt ?? "");
@@ -351,6 +364,7 @@ export function useRuntimeControllerSync({
         projectId,
         quietErrors: true,
         onRun: (run) => {
+          rememberInternalConversation(run.conversationId, run.metadata);
           logRunEvent("controller:onRun", run);
           receivedRunEventRef.current = true;
           runEventSequence += 1;
@@ -361,6 +375,7 @@ export function useRuntimeControllerSync({
           upsertRun(run);
         },
         onRunPatch: (patch) => {
+          rememberInternalConversation(patch.conversationId, patch.metadata);
           receivedRunEventRef.current = true;
           runEventSequence += 1;
           latestRunEvents.set(patch.id, {
@@ -412,6 +427,17 @@ export function useRuntimeControllerSync({
             }
           }
           handleRuntimeTelemetryEvent(event);
+          if (event.kind.startsWith("conversation.")) {
+            const conversationId = sanitizeString(event.data?.conversationId)
+              ?? sanitizeString(event.conversation_id);
+            rememberInternalConversation(conversationId, event.data?.metadata);
+            if (conversationId && internalConversationIds.has(conversationId)) {
+              // Internal review messages must never claim an empty composer or
+              // create a chat placeholder. Explicit audit reads use the normal
+              // authorized conversation API and do not enter this event queue.
+              return;
+            }
+          }
           if (
             event.kind === "project.access_changed" &&
             typeof window !== "undefined"
@@ -628,6 +654,9 @@ export function useRuntimeControllerSync({
           handleControllerProjectMissing();
           return;
         }
+        result.runs.forEach((run) => {
+          rememberInternalConversation(run.conversationId, run.metadata);
+        });
         connectControllerStream();
         const shouldReset = !receivedRunEventRef.current;
         if (shouldReset) {
@@ -746,6 +775,15 @@ export function useRuntimeControllerSync({
     upsertRun,
     logRunEvent,
   ]);
+}
+
+function isInternalSpaceReviewMetadata(metadata: unknown): boolean {
+  if (!metadata || typeof metadata !== "object" || Array.isArray(metadata)) return false;
+  const record = metadata as Record<string, unknown>;
+  if (record.internalPurpose === "space_review") return true;
+  const review = record.spaceReview;
+  return Boolean(review && typeof review === "object" && !Array.isArray(review)
+    && (review as Record<string, unknown>).enforcedBy === "runtime-controller");
 }
 
 function parseConversationEvent(

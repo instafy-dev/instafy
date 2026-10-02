@@ -152,6 +152,7 @@ const AUTHORIZED_MATCHES: &str = r#"
   join projects p on p.id = c.project_id
   left join organizations o on o.id = p.org_id
   where lower(coalesce(p.status, '')) <> 'deleted'
+    and not public.is_internal_conversation(c.id)
     and (p.owner_user_id = $1
       or exists (select 1 from project_memberships pm where pm.project_id = p.id and pm.user_id = $1 and lower(btrim(pm.role)) in ('viewer','builder','admin','owner'))
       or exists (select 1 from org_memberships om where om.org_id = p.org_id and om.user_id = $1 and lower(btrim(om.role)) in ('viewer','builder','admin','owner')))

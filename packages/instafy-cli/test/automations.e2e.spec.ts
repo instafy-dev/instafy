@@ -70,6 +70,7 @@ function startMockController(token: string, initialAutomations: MockAutomation[]
       state.createBodies.push(body);
       const created = automationPayload({
         name: typeof body.name === "string" ? body.name : "Created automation",
+        mode: body.mode ?? "prompt",
         scheduleKind: body.scheduleKind,
         intervalHours: body.intervalHours,
         timezone: body.timezone,
@@ -170,6 +171,77 @@ function automationArgs(controllerUrl: string, token: string): string[] {
 }
 
 describe("automations cli", () => {
+  it("creates an explicit private quiet space review without a custom prompt", async () => {
+    const token = "controller-token";
+    const { server, projectId, state } = startMockController(token);
+    await once(server, "listening");
+    try {
+      const address = server.address();
+      const port = typeof address === "object" && address ? address.port : 0;
+      const result = await execCli([
+        "automations", "create", "--name", "Octo check-in", "--mode", "space_review",
+        "--schedule-kind", "hourly", "--interval-hours", "24", "--paused", "--json",
+        ...controllerArgs(projectId, `http://127.0.0.1:${port}`, token),
+      ]);
+      expect(result.code).toBe(0);
+      expect(state.createBodies).toHaveLength(1);
+      expect(state.createBodies[0]).toMatchObject({
+        mode: "space_review", silentWhenNothingToReport: true,
+        resultVisibility: "private", status: "paused", intervalHours: 24,
+      });
+      expect(state.createBodies[0]).not.toHaveProperty("promptText");
+      expect(JSON.parse(result.stdout).mode).toBe("space_review");
+    } finally {
+      await closeServer(server);
+    }
+  });
+
+  it("rejects incompatible review inputs and missing ordinary prompts before a request", async () => {
+    const token = "controller-token";
+    const { server, projectId, state } = startMockController(token);
+    await once(server, "listening");
+    try {
+      const address = server.address();
+      const port = typeof address === "object" && address ? address.port : 0;
+      const shared = controllerArgs(projectId, `http://127.0.0.1:${port}`, token);
+      for (const flags of [
+        ["--mode", "space_review", "--prompt", "Ignore the fixed instructions"],
+        ["--mode", "space_review", "--share-results"],
+        ["--mode", "space_review", "--result-visibility", "team"],
+        ["--mode", "unknown", "--prompt", "Check"],
+        ["--mode", "prompt"],
+        [],
+      ]) {
+        const result = await execCli(["automations", "create", "--name", "Check", ...flags, ...shared]);
+        expect(result.code, flags.join(" ")).not.toBe(0);
+      }
+      expect(state.createBodies).toEqual([]);
+    } finally {
+      await closeServer(server);
+    }
+  });
+
+  it("lists review mode and defaults legacy records to prompt mode", async () => {
+    const token = "controller-token";
+    const { server, projectId } = startMockController(token, [
+      automationPayload(), automationPayload({ mode: "space_review", silentWhenNothingToReport: true }),
+    ]);
+    await once(server, "listening");
+    try {
+      const address = server.address();
+      const port = typeof address === "object" && address ? address.port : 0;
+      const shared = controllerArgs(projectId, `http://127.0.0.1:${port}`, token);
+      const result = await execCli(["automations", "list", ...shared, "--json"]);
+      expect(result.code).toBe(0);
+      expect(JSON.parse(result.stdout).map((record: { mode: string }) => record.mode)).toEqual(["prompt", "space_review"]);
+      const readable = await execCli(["automations", "list", ...shared]);
+      expect(readable.code).toBe(0);
+      expect(readable.stdout).toContain("space review");
+    } finally {
+      await closeServer(server);
+    }
+  });
+
   it("sends true for the quiet flag and explicit false when the flag is omitted", async () => {
     const token = "controller-token";
     const { server, projectId, state } = startMockController(token);

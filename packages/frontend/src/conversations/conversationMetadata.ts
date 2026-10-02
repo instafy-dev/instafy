@@ -38,6 +38,11 @@ export function isPlainObject(
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
+/** A delivered finding starts a separate chat; it is not the user's local send. */
+export function hasRecommendationOrigin(metadata: Record<string, unknown> | null | undefined): boolean {
+  return typeof metadata?.recommendationId === "string" && metadata.recommendationId.trim().length > 0;
+}
+
 export function extractConversationTitleFromMetadata(
   metadata: Record<string, unknown> | null | undefined,
 ): string | null {

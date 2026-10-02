@@ -24,6 +24,7 @@ import {
   extractConversationOriginMessageIdFromMetadata,
   extractConversationOwnerAgentFromMetadata,
   extractConversationTitleFromMetadata,
+  hasRecommendationOrigin,
   isPlainObject,
   parseTimestamp,
   resolveConversationVisibility,
@@ -395,7 +396,8 @@ export function useConversationControllerSync({
         );
         const routingPreferences =
           routingPreferencesFromMetadata ?? DEFAULT_CONVERSATION_ROUTING_PREFERENCES;
-        const createdByIsSelf = currentUserId !== null && remote.createdBy === currentUserId;
+        const createdByIsSelf = currentUserId !== null && remote.createdBy === currentUserId
+          && !hasRecommendationOrigin(metadata);
 
         const syncExistingConversationFromRemote = (
           conversation: ConversationState,
@@ -607,6 +609,7 @@ export function useConversationControllerSync({
       if (shouldAutoSelectControllerConversation) {
         const latestRemote = [...remoteConversations]
           .filter((remote) => isUuid(typeof remote?.id === "string" ? remote.id : ""))
+          .filter((remote) => !hasRecommendationOrigin(remote.metadata))
           .map((remote) => ({
             controllerId: remote.id as string,
             createdAt: parseTimestamp(remote.createdAt ?? null),

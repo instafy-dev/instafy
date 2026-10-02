@@ -5,6 +5,7 @@ import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type {
   ControllerConversationCreated,
+  ControllerConversationMessage,
   ControllerProjectConversation,
 } from "../../services/runtimeController/conversations";
 import {
@@ -14,6 +15,7 @@ import {
   type ConversationsState,
 } from "../conversationState";
 import { createConversationRoutingMetadataPatch } from "../conversationRoutingMetadata";
+import { buildHomeAttentionEntries } from "../../screens/studio/homeAttention";
 
 vi.mock("../../sdk/instafy", async () => {
   const actual = await vi.importActual<typeof import("../../sdk/instafy")>("../../sdk/instafy");
@@ -116,10 +118,16 @@ function PendingCreationHarness({
   state,
   dispatch,
   creation,
+  messages = [],
+  internalConversationIds,
+  updateMetadata = vi.fn(),
 }: {
   state: ConversationsState;
   dispatch: (action: ConversationsAction) => void;
-  creation: ControllerConversationCreated;
+  creation?: ControllerConversationCreated;
+  messages?: ControllerConversationMessage[];
+  internalConversationIds?: Readonly<Record<string, true>>;
+  updateMetadata?: (args: { conversationId: string; metadata: Record<string, unknown> }) => Promise<unknown>;
 }) {
   const lastBackgroundAtRef = useRef(0);
   const notifiedMessageIdsRef = useRef(new Set<string>());
@@ -127,16 +135,17 @@ function PendingCreationHarness({
     state,
     projectKey: PROJECT_ID,
     currentUserId: USER_ID,
-    pendingConversationCreations: [creation],
+    pendingConversationCreations: creation ? [creation] : [],
     ackConversationCreations: vi.fn(),
     pendingConversationUpdates: [],
     ackConversationUpdates: vi.fn(),
-    pendingConversationMessages: [],
+    pendingConversationMessages: messages,
+    internalConversationIds,
     ackConversationMessages: vi.fn(),
     lastBackgroundAtRef,
     notifiedMessageIdsRef,
     dispatch,
-    updateControllerConversationMetadata: vi.fn(),
+    updateControllerConversationMetadata: updateMetadata,
   });
   return null;
 }
@@ -158,6 +167,118 @@ describe("conversation routing during controller attachment", () => {
     });
     container.remove();
     delete (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT;
+  });
+
+  it.each([false, true])("retires a cached internal anchor's attention while retaining its audit history (audit open: %s)", async (auditOpen) => {
+    const initialState = buildState();
+    initialState.conversations[0].draft = "Keep my unfinished draft";
+    const audit = {
+      ...createInitialConversation({ localId: "cached-audit", controllerId: CONTROLLER_ID }),
+      title: "Space review", unreadCount: 1, pendingRunIds: ["internal-run"],
+      awaitingLeaseRunIds: ["queued-internal-run"], pendingRunSubmittedAt: { "internal-run": 1 },
+      messages: [{ id: "audit-message", role: "assistant" as const, content: "Earlier audit evidence", timestamp: 1 }],
+    };
+    const normal = {
+      ...createInitialConversation({ localId: "normal-delivery", controllerId: "bbbbbbbb-cccc-4ddd-8eee-ffffffffffff" }),
+      title: "Useful finding", unreadCount: 1,
+    };
+    initialState.conversations.push(audit, normal);
+    initialState.runMap = { "internal-run": audit.localId, "queued-internal-run": audit.localId };
+    if (auditOpen) initialState.activeId = audit.localId;
+    const attention = (state: ConversationsState) => buildHomeAttentionEntries({
+      conversations: state.conversations, inboxItems: [], currentSpaceName: "Space",
+    });
+    expect(attention(initialState)).toHaveLength(2);
+    let nextState = initialState;
+    const dispatch = vi.fn<(action: ConversationsAction) => void>((action) => {
+      nextState = conversationsReducer(nextState, action);
+    });
+    const updateMetadata = vi.fn();
+    await act(async () => root.render(<PendingCreationHarness state={initialState} dispatch={dispatch}
+      internalConversationIds={{ [CONTROLLER_ID]: true }} updateMetadata={updateMetadata}
+      creation={buildConversationCreated({ title: "Space review" })}
+      messages={[{
+        id: "late-internal-message", conversationId: CONTROLLER_ID, projectId: PROJECT_ID,
+        sessionId: null, promptId: null, runId: null, role: "assistant", content: "Late queued audit event",
+        metadata: null, createdAt: "2026-10-02T12:00:00Z",
+      }]} />));
+
+    expect(nextState.conversations).toHaveLength(3);
+    expect(nextState.activeId).toBe(initialState.activeId);
+    expect(nextState.conversations[0]).toEqual(initialState.conversations[0]);
+    expect(nextState.conversations[1]).toMatchObject({
+      lifecycleStatus: "hidden", unreadCount: 0, pendingRunIds: [], awaitingLeaseRunIds: [],
+      pendingRunSubmittedAt: {}, messages: audit.messages,
+    });
+    expect(nextState.conversations[2]).toEqual(normal);
+    expect(nextState.runMap).toEqual({});
+    expect(attention(nextState).map((entry) => entry.title)).toEqual(["Useful finding"]);
+    expect(dispatch.mock.calls.map(([action]) => action.type)).toEqual(["RETIRE_INTERNAL"]);
+    expect(updateMetadata).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["history", ""], ["history", "My unsent work"],
+    ["creation", ""], ["creation", "My unsent work"],
+    ["message", ""], ["message", "My unsent work"],
+    ["batched creation/message", ""], ["batched creation/message", "My unsent work"],
+  ])("keeps a proactive %s separate without claiming or focusing the draft '%s'", async (source, draft) => {
+    const initialState = buildState();
+    initialState.conversations[0].draft = draft;
+    initialState.conversations[0].draftEditorState = draft ? '{"draft":"editor-state"}' : null;
+    let nextState = initialState;
+    const dispatch = vi.fn<(action: ConversationsAction) => void>((action) => {
+      nextState = conversationsReducer(nextState, action);
+    });
+    const metadata = {
+      recommendationId: "12345678-1234-4234-8234-123456789012",
+      title: "Check mobile signup",
+      visibility: "private",
+    };
+    const updateMetadata = vi.fn();
+    const message: ControllerConversationMessage = {
+      id: "12345678-1234-4234-8234-123456789013",
+      conversationId: CONTROLLER_ID, projectId: PROJECT_ID, sessionId: null,
+      createdBy: null, promptId: null, runId: null, role: "assistant",
+      content: "Mobile signup is still unchecked. Shall we try it next?", metadata,
+      createdAt: "2026-10-02T12:00:00.000Z",
+    };
+    await act(async () => {
+      root.render(source === "history" ? (
+        <ControllerSyncHarness state={initialState} dispatch={dispatch}
+          fetchProjectConversations={async () => [buildRemoteConversation(metadata)]}
+          updateMetadata={updateMetadata} />
+      ) : (
+        <PendingCreationHarness state={initialState} dispatch={dispatch}
+          creation={source === "message" ? undefined : buildConversationCreated(metadata)}
+          messages={source === "creation" ? [] : [message]} />
+      ));
+    });
+
+    expect(nextState.conversations).toHaveLength(2);
+    expect(nextState.activeId).toBe(LOCAL_ID);
+    expect(nextState.conversations[0]).toEqual(initialState.conversations[0]);
+    const delivered = nextState.conversations[1];
+    expect(delivered).toMatchObject({
+      controllerId: CONTROLLER_ID, visibility: "private", draft: "", draftEditorState: null,
+      assistantEnabled: true, extraAgentHandles: [], runtimePreference: null,
+    });
+    expect(delivered.localId).not.toBe(LOCAL_ID);
+    expect(updateMetadata).not.toHaveBeenCalled();
+    expect(dispatch.mock.calls.map(([action]) => action.type)).not.toContain("SET_CONTROLLER");
+    expect(dispatch.mock.calls.map(([action]) => action.type)).not.toContain("SELECT");
+    expect(dispatch.mock.calls.map(([action]) => action.type)).not.toContain("CLOSE");
+    if (source === "message" || source === "batched creation/message") {
+      expect(delivered.messages.map((entry) => entry.content)).toEqual([message.content]);
+      expect(delivered.unreadCount).toBe(1);
+    }
+    if (source === "message") {
+      // A delayed creation event must not add another chat or steal focus.
+      await act(async () => root.render(<PendingCreationHarness state={nextState} dispatch={dispatch}
+        creation={buildConversationCreated(metadata)} />));
+      expect(nextState.conversations).toHaveLength(2);
+      expect(nextState.activeId).toBe(LOCAL_ID);
+    }
   });
 
   it("preserves local routing when history attaches a remote conversation without routing metadata", async () => {

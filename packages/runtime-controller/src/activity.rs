@@ -237,7 +237,7 @@ pub(crate) fn is_visible_reply(
 async fn conversation_is_root(client: &impl GenericClient, conversation_id: &Uuid) -> bool {
     match client
         .query_opt(
-            "select parent_conversation_id is null as is_root from conversations where id = $1",
+            "select parent_conversation_id is null and not public.is_internal_conversation(id) as is_root from conversations where id = $1",
             &[conversation_id],
         )
         .await
@@ -258,6 +258,37 @@ pub(crate) async fn append(client: &impl GenericClient, row: &ActivityRow) -> Op
         .execute("savepoint activity_append", &[])
         .await
         .is_ok();
+    if let Some(conversation_id) = row.conversation_id {
+        let internal = client
+            .query_one(
+                "select public.is_internal_conversation($1)",
+                &[&conversation_id],
+            )
+            .await;
+        match internal {
+            Ok(record) if record.get::<_, bool>(0) => {
+                if savepoint_created {
+                    let _ = client
+                        .execute("release savepoint activity_append", &[])
+                        .await;
+                }
+                return None;
+            }
+            Ok(_) => {}
+            Err(error) => {
+                if savepoint_created {
+                    let _ = client
+                        .execute("rollback to savepoint activity_append", &[])
+                        .await;
+                    let _ = client
+                        .execute("release savepoint activity_append", &[])
+                        .await;
+                }
+                tracing::warn!(%error, "activity: failed to check internal conversation");
+                return None;
+            }
+        }
+    }
     let actor_agent = row.actor.agent.as_ref().map(PgJson);
     let data = PgJson(&row.data);
     let result = client
@@ -698,6 +729,7 @@ const VISIBLE_WHERE: &str = "(
           and (c.visibility <> 'private' or c.created_by = $1 or cp.user_id is not null)
         )
       )
+      and not public.is_internal_conversation(e.conversation_id)
       and (e.visibility <> 'owner' or e.owner_user_id = $1 or e.target_user_id = $1)
       and not (
         e.kind = 'run.started'
