@@ -1,16 +1,16 @@
 # Outside contributions require review from an existing trusted code owner.
-# Keep the branch's blanket approval count at zero: the owners' own bot PRs
-# retain their existing automation. Do not replace this with bot auto-approval.
+# Both trusted bots may review every path, but neither may approve its own PR.
+# Trusted bot merges still require exact-head CI; see docs/Testing.md.
 * @instafy-bot @instafy-bot-2
 
-# Explicitly retain ownership of the public-boundary controls, including this file.
-/.github/ @instafy-bot
-/scripts/check-public-boundary.mjs @instafy-bot
-/scripts/check-public-boundary.test.mjs @instafy-bot
-/scripts/check-public-boundary-workflow.test.mjs @instafy-bot
-/scripts/public-boundary-gitleaks.toml @instafy-bot
-/scripts/public-boundary-gitleaks-stream.toml @instafy-bot
-/scripts/public-boundary-policy.json @instafy-bot
-/.gitattributes @instafy-bot
-/.gitmodules @instafy-bot
-/codex @instafy-bot
+# Keep both owners on later rules: CODEOWNERS uses the last matching rule.
+/.github/ @instafy-bot @instafy-bot-2
+/scripts/check-public-boundary.mjs @instafy-bot @instafy-bot-2
+/scripts/check-public-boundary.test.mjs @instafy-bot @instafy-bot-2
+/scripts/check-public-boundary-workflow.test.mjs @instafy-bot @instafy-bot-2
+/scripts/public-boundary-gitleaks.toml @instafy-bot @instafy-bot-2
+/scripts/public-boundary-gitleaks-stream.toml @instafy-bot @instafy-bot-2
+/scripts/public-boundary-policy.json @instafy-bot @instafy-bot-2
+/.gitattributes @instafy-bot @instafy-bot-2
+/.gitmodules @instafy-bot @instafy-bot-2
+/codex @instafy-bot @instafy-bot-2
