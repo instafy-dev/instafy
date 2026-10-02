@@ -2,9 +2,14 @@
 -- per-space objects in Supabase Storage, never files in the space's git history.
 -- Objects are named '<projectId>/<uuid>.<ext>'. Members of a live space upload
 -- and read them with their own session, and an uploader may delete their own
--- while they can still read them. Nobody may update one: objects are immutable.
+-- while they can still read them. Nobody may update one in place.
 -- The controller signs short-lived downloads for runtimes and purges a space's
 -- prefix when the space is deleted, both with the service role.
+
+-- The policy statements lock storage.objects. Fail fast and retry rather than
+-- queue every Storage request behind a long transaction.
+set local lock_timeout = '5s';
+
 create or replace function public.can_access_chat_attachment(object_name text)
 returns boolean language plpgsql stable security definer
 set search_path = public, pg_temp
