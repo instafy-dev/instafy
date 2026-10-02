@@ -1864,7 +1864,7 @@ describe("AgentJobThreadPreviewLayout", () => {
     expect(container.querySelector('[data-testid="run-failure-details"]')).toBeNull();
   });
 
-  it("offers a quiet try-again pill that resends through the retry context", async () => {
+  it("offers a try-again button that resends through the retry context", async () => {
     const requestRetry = vi.fn();
     const failureMessage = createMessage({
       id: "error-summary",
@@ -1897,7 +1897,7 @@ describe("AgentJobThreadPreviewLayout", () => {
     expect(requestRetry).toHaveBeenCalledWith(failureMessage);
   });
 
-  it("disables try-again while a resend is in flight", async () => {
+  it("shows try-again as pending while its resend is in flight", async () => {
     const requestRetry = vi.fn();
     await act(async () => {
       root.render(
@@ -1919,7 +1919,9 @@ describe("AgentJobThreadPreviewLayout", () => {
     const retryButton = container.querySelector(
       '[data-testid="run-failure-retry"]',
     ) as HTMLButtonElement | null;
-    expect(retryButton?.disabled).toBe(true);
+    // The shared Button pending pattern: a spinner, aria-disabled, still focusable.
+    expect(retryButton?.getAttribute("aria-disabled")).toBe("true");
+    expect(retryButton?.querySelector('[role="progressbar"]')).not.toBeNull();
     await act(async () => {
       retryButton?.click();
     });

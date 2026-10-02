@@ -4,13 +4,32 @@ import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import type { ChatMessage } from "../../screens/studio/types";
 import {
+  RATE_LIMIT_AUTO_RETRY_DEFAULT_DELAY_MS,
+  RATE_LIMIT_AUTO_RETRY_MAX_DELAY_MS,
+  RATE_LIMIT_AUTO_RETRY_MIN_DELAY_MS,
   RETRYING_STATUS_DISPLAY_TEXT,
+  RUN_FAILURE_AUTO_RETRY_MAX_AGE_MS,
+  RUN_FAILURE_RETRY_OF_METADATA_KEY,
+  buildRunFailureRetryMetadata,
   classifyRunFailureText,
   hasFailedRunMetadata,
   isAutoRetryEligibleFailureKind,
+  isBrowserRoutedPromptMetadata,
+  isRunFailurePromptAutoResendable,
+  isRunFailurePromptFromThisClient,
+  isRunFailurePromptSharedWithOtherRuns,
+  isRunFailureRecentForAutoRetry,
+  isRunFailureRetryQueued,
+  isRunFailureRetrySuperseded,
+  isRunFailureRunSteered,
+  parseRunFailureRetryAfterMs,
   resolveRetryingStatusPresentation,
+  resolveRunFailureAutoRetryDelayMs,
   resolveRunFailurePresentation,
   resolveRunFailureRetryPrompt,
+  readRunFailureRetryOf,
+  readRunFailureRunIds,
+  resolveRunFailureRetrySource,
   runFailureOriginKey,
 } from "../runFailurePresentation";
 
@@ -244,16 +263,17 @@ describe("hasFailedRunMetadata", () => {
 });
 
 describe("isAutoRetryEligibleFailureKind", () => {
-  it("is true for the two transient kinds", () => {
+  it("is true for the transient kinds", () => {
     expect(isAutoRetryEligibleFailureKind("missing_final_message")).toBe(true);
     expect(isAutoRetryEligibleFailureKind("no_workspace_changes")).toBe(true);
+    // Codex already retried the 429 inside the turn; one more resend after a
+    // visible countdown usually gets through (see resolveRunFailureAutoRetryDelayMs).
+    expect(isAutoRetryEligibleFailureKind("provider_rate_limited")).toBe(true);
   });
 
   it("is false for deterministic/unhelpful kinds and nullish input", () => {
     expect(isAutoRetryEligibleFailureKind("missing_verification")).toBe(false);
     expect(isAutoRetryEligibleFailureKind("needs_ai")).toBe(false);
-    // Resending at once would hit the same provider limit again.
-    expect(isAutoRetryEligibleFailureKind("provider_rate_limited")).toBe(false);
     // The provider billed the cut-short answer; the same request would stop the same way.
     expect(isAutoRetryEligibleFailureKind("response_incomplete")).toBe(false);
     // Nothing changes until the person opens a page or resends from Chat.
@@ -261,6 +281,520 @@ describe("isAutoRetryEligibleFailureKind", () => {
     expect(isAutoRetryEligibleFailureKind("generic")).toBe(false);
     expect(isAutoRetryEligibleFailureKind(null)).toBe(false);
     expect(isAutoRetryEligibleFailureKind(undefined)).toBe(false);
+  });
+});
+
+describe("parseRunFailureRetryAfterMs", () => {
+  it("reads the wait a rate limit names", () => {
+    expect(parseRunFailureRetryAfterMs(PROXY_STREAMED_RATE_LIMIT)).toBe(5_500);
+    expect(parseRunFailureRetryAfterMs("Rate limit reached. Please try again in 12s.")).toBe(12_000);
+    expect(parseRunFailureRetryAfterMs("Please try again in 30 seconds")).toBe(30_000);
+    expect(parseRunFailureRetryAfterMs("Please try again in 750ms.")).toBe(750);
+  });
+
+  it("is null when the text names no wait", () => {
+    expect(parseRunFailureRetryAfterMs(PROVIDER_RATE_LIMITED)).toBeNull();
+    expect(parseRunFailureRetryAfterMs("Workspace is busy. Try again in a moment.")).toBeNull();
+  });
+});
+
+describe("resolveRunFailureAutoRetryDelayMs", () => {
+  const presentationFor = (rawText: string) => {
+    const presentation = resolveRunFailurePresentation({
+      metadata: { source: "agent", outcome: "failed", messageType: "error", jobId: "job-1" },
+      content: rawText,
+    });
+    if (!presentation) {
+      throw new Error(`no presentation for ${rawText}`);
+    }
+    return presentation;
+  };
+
+  it("resends the hiccup kinds at once", () => {
+    expect(resolveRunFailureAutoRetryDelayMs({ presentation: presentationFor(MISSING_FINAL_MESSAGE) })).toBe(0);
+    expect(resolveRunFailureAutoRetryDelayMs({ presentation: presentationFor(NO_WORKSPACE_CHANGES) })).toBe(0);
+  });
+
+  it("keeps Codex's bare 429 manual, because a spent plan window reads the same", () => {
+    // Nothing in this text says the limit is short, and a usage limit must
+    // never be retried automatically.
+    expect(
+      resolveRunFailureAutoRetryDelayMs({ presentation: presentationFor(PROVIDER_RATE_LIMITED) }),
+    ).toBeNull();
+    expect(
+      resolveRunFailureAutoRetryDelayMs({
+        presentation: presentationFor("backend responded with 429 Too Many Requests"),
+      }),
+    ).toBeNull();
+  });
+
+  it("waits 20 seconds before resending a retryable rate limit that names no wait", () => {
+    expect(RATE_LIMIT_AUTO_RETRY_DEFAULT_DELAY_MS).toBe(20_000);
+    expect(
+      resolveRunFailureAutoRetryDelayMs({
+        presentation: presentationFor(
+          'exceeded retry limit, last status: 429 Too Many Requests, body: {"error":{"code":"upstream_rate_limit","retryable":true}}',
+        ),
+      }),
+    ).toBe(RATE_LIMIT_AUTO_RETRY_DEFAULT_DELAY_MS);
+  });
+
+  it("uses the wait the rate limit names, within 5 to 60 seconds", () => {
+    expect(
+      resolveRunFailureAutoRetryDelayMs({
+        presentation: presentationFor(
+          "stream disconnected before completion: The upstream provider rate limit was reached (upstream_rate_limit, 429). Please try again in 28.5s.",
+        ),
+      }),
+    ).toBe(28_500);
+    expect(
+      resolveRunFailureAutoRetryDelayMs({ presentation: presentationFor(PROXY_STREAMED_RATE_LIMIT) }),
+    ).toBe(5_500);
+    // Too short to read or cancel: raised to the floor.
+    expect(RATE_LIMIT_AUTO_RETRY_MIN_DELAY_MS).toBe(5_000);
+    expect(
+      resolveRunFailureAutoRetryDelayMs({
+        presentation: presentationFor(
+          "Codex stream aborted after 1 retries (limit 1): stream disconnected before completion: The upstream provider rate limit was reached (upstream_rate_limit, 429). Please try again in 1s.",
+        ),
+      }),
+    ).toBe(RATE_LIMIT_AUTO_RETRY_MIN_DELAY_MS);
+    // Longer than anyone should watch a countdown: capped.
+    expect(RATE_LIMIT_AUTO_RETRY_MAX_DELAY_MS).toBe(60_000);
+    expect(
+      resolveRunFailureAutoRetryDelayMs({
+        presentation: presentationFor(
+          "exceeded retry limit, last status: 429 Too Many Requests. Please try again in 600s.",
+        ),
+      }),
+    ).toBe(RATE_LIMIT_AUTO_RETRY_MAX_DELAY_MS);
+  });
+
+  it("keeps a rate limit the proxy marked not retryable manual", () => {
+    // A window that reopens in hours: any resend soon would fail the same way.
+    expect(
+      resolveRunFailureAutoRetryDelayMs({
+        presentation: presentationFor(
+          '{"error":{"message":"The upstream provider rate limit was reached.","type":"upstream_error","code":"upstream_rate_limit","retryable":false}}',
+        ),
+      }),
+    ).toBeNull();
+    expect(
+      resolveRunFailureAutoRetryDelayMs({
+        presentation: presentationFor(
+          '{"error":{"message":"The upstream provider rate limit was reached.","type":"upstream_error","code":"upstream_rate_limit","retryable":true}}',
+        ),
+      }),
+    ).toBe(RATE_LIMIT_AUTO_RETRY_DEFAULT_DELAY_MS);
+  });
+
+  it("never resends a spent quota or plan limit, a missing credential or the other manual kinds", () => {
+    for (const rawText of [
+      PROVIDER_INSUFFICIENT_QUOTA,
+      PROVIDER_USAGE_LIMIT_REACHED,
+      "credential not found",
+      MISSING_COMMAND_OBSERVATION,
+      RESPONSE_INCOMPLETE("max_output_tokens"),
+      "Codex run timed out",
+    ]) {
+      expect(
+        resolveRunFailureAutoRetryDelayMs({ presentation: presentationFor(rawText) }),
+        rawText,
+      ).toBeNull();
+    }
+  });
+
+  it("never resends a prompt that drove a browser page, whatever the failure", () => {
+    const content = "Click the sign up button";
+    for (const rawText of [PROXY_STREAMED_RATE_LIMIT, MISSING_FINAL_MESSAGE, NO_WORKSPACE_CHANGES]) {
+      const presentation = presentationFor(rawText);
+      for (const metadata of [
+        { browserTransport: "shared", browserRuntimeId: "runtime-1" },
+        { browserTransport: "desktop-personal" },
+        { browserPageId: "page-1" },
+        { runtimeExpectations: { browserExecution: true } },
+      ]) {
+        expect(
+          resolveRunFailureAutoRetryDelayMs({ presentation, promptMessage: { content, metadata } }),
+          `${rawText} ${JSON.stringify(metadata)}`,
+        ).toBeNull();
+      }
+    }
+    expect(
+      resolveRunFailureAutoRetryDelayMs({
+        presentation: presentationFor(PROXY_STREAMED_RATE_LIMIT),
+        promptMessage: { content, metadata: { runtimeExpectations: { browserExecution: false } } },
+      }),
+    ).toBe(5_500);
+  });
+
+  it("never resends a prompt whose dispatched text differs from what it shows", () => {
+    // Targeting an open browser page stores only the wrapped text it sent; a
+    // resend would carry the plain text and miss that page.
+    const metadata = {
+      prompt_metadata: {
+        displayContent: "Check the pricing page",
+        dispatchContent:
+          'Use the existing "Pricing" page in the current shared browser session for this request.\n\nCheck the pricing page',
+      },
+    };
+    for (const rawText of [PROXY_STREAMED_RATE_LIMIT, MISSING_FINAL_MESSAGE]) {
+      expect(
+        resolveRunFailureAutoRetryDelayMs({
+          presentation: presentationFor(rawText),
+          promptMessage: { content: "Check the pricing page", metadata },
+        }),
+        rawText,
+      ).toBeNull();
+    }
+    expect(
+      resolveRunFailureAutoRetryDelayMs({
+        presentation: presentationFor(MISSING_FINAL_MESSAGE),
+        promptMessage: {
+          content: "Check the pricing page",
+          metadata: { dispatchContent: "  Check the pricing page " },
+        },
+      }),
+    ).toBe(0);
+  });
+
+  it("never resends a prompt that was itself a retry, so a retry never retries itself", () => {
+    const content = "Build me a landing page";
+    for (const rawText of [PROXY_STREAMED_RATE_LIMIT, MISSING_FINAL_MESSAGE, NO_WORKSPACE_CHANGES]) {
+      for (const metadata of [
+        { retryOfMessageId: "failure-1" },
+        { prompt_metadata: { retryOfMessageId: "failure-1" } },
+      ]) {
+        expect(
+          resolveRunFailureAutoRetryDelayMs({
+            presentation: presentationFor(rawText),
+            promptMessage: { content, metadata },
+          }),
+          `${rawText} ${JSON.stringify(metadata)}`,
+        ).toBeNull();
+      }
+    }
+  });
+
+  it("never resends a prompt with attachments or a reply context as bare text", () => {
+    const content = "What is wrong in this screenshot?";
+    for (const metadata of [
+      { prompt_metadata: { attachments: [{ path: ".instafy/uploads/shot.png", mimeType: "image/png" }] } },
+      { replyContext: { messageId: "a-0", selectedText: "the red banner" } },
+    ]) {
+      expect(
+        resolveRunFailureAutoRetryDelayMs({
+          presentation: presentationFor(PROXY_STREAMED_RATE_LIMIT),
+          promptMessage: { content, metadata },
+        }),
+        JSON.stringify(metadata),
+      ).toBeNull();
+    }
+  });
+});
+
+describe("isRunFailurePromptAutoResendable", () => {
+  it("is true for a plain prompt", () => {
+    expect(isRunFailurePromptAutoResendable({ content: "Build me a landing page", metadata: null })).toBe(
+      true,
+    );
+    expect(
+      isRunFailurePromptAutoResendable({
+        content: "Build me a landing page",
+        metadata: { prompt_metadata: { attachments: [], replyContext: null } },
+      }),
+    ).toBe(true);
+  });
+
+  it("is false for a prompt that acts on another message, such as an undo request", () => {
+    expect(
+      isRunFailurePromptAutoResendable({
+        content: "Undo the changes from message (id 1a2b3c4d)",
+        metadata: { undoTargetMessageId: "1a2b3c4d-0000-4000-8000-000000000000" },
+      }),
+    ).toBe(false);
+    expect(
+      isRunFailurePromptAutoResendable({
+        content: "Undo the changes from message (id 1a2b3c4d)",
+        metadata: { prompt_metadata: { undoTargetMessageId: "1a2b3c4d-0000-4000-8000-000000000000" } },
+      }),
+    ).toBe(false);
+    expect(
+      isRunFailurePromptAutoResendable({
+        content: "Build me a landing page",
+        metadata: { undoTargetMessageId: "  " },
+      }),
+    ).toBe(true);
+  });
+
+  it("is false for a prompt with attachments, which a text-only resend would drop", () => {
+    expect(
+      isRunFailurePromptAutoResendable({
+        content: "What is wrong in this screenshot?",
+        metadata: { attachments: [{ path: ".instafy/uploads/shot.png", mimeType: "image/png" }] },
+      }),
+    ).toBe(false);
+    expect(
+      isRunFailurePromptAutoResendable({
+        content: "What is wrong in this screenshot?",
+        metadata: {
+          prompt_metadata: { attachments: [{ path: ".instafy/uploads/shot.png", mimeType: "image/png" }] },
+        },
+      }),
+    ).toBe(false);
+  });
+
+  it("is false for a reply to a selected part of a message, which a resend would drop", () => {
+    expect(
+      isRunFailurePromptAutoResendable({
+        content: "Make this shorter",
+        metadata: { replyContext: { messageId: "m-1", selectedText: "the red banner" } },
+      }),
+    ).toBe(false);
+    expect(
+      isRunFailurePromptAutoResendable({
+        content: "Make this shorter",
+        metadata: { prompt_metadata: { reply_context: { message_id: "m-1" } } },
+      }),
+    ).toBe(false);
+  });
+
+  it("is false for a browser-routed or rewritten prompt", () => {
+    expect(
+      isRunFailurePromptAutoResendable({
+        content: "Open the site",
+        metadata: { prompt_metadata: { browserTransport: "shared" } },
+      }),
+    ).toBe(false);
+    expect(
+      isRunFailurePromptAutoResendable({
+        content: "Open the site",
+        metadata: { dispatchContent: "Open this request in a fresh browser page.\n\nOpen the site" },
+      }),
+    ).toBe(false);
+  });
+});
+
+describe("isRunFailureRecentForAutoRetry", () => {
+  const now = Date.parse("2026-10-01T12:00:00Z");
+
+  it("is true within ten minutes of now, on either side for a skewed clock", () => {
+    expect(isRunFailureRecentForAutoRetry({ timestamp: now - 5_000 }, now)).toBe(true);
+    expect(isRunFailureRecentForAutoRetry({ timestamp: now - RUN_FAILURE_AUTO_RETRY_MAX_AGE_MS }, now)).toBe(
+      true,
+    );
+    expect(isRunFailureRecentForAutoRetry({ timestamp: now + 30_000 }, now)).toBe(true);
+  });
+
+  it("is false for an older failure, or one from far ahead", () => {
+    expect(
+      isRunFailureRecentForAutoRetry({ timestamp: now - RUN_FAILURE_AUTO_RETRY_MAX_AGE_MS - 1 }, now),
+    ).toBe(false);
+    expect(isRunFailureRecentForAutoRetry({ timestamp: now - 26 * 60 * 60 * 1000 }, now)).toBe(false);
+    expect(isRunFailureRecentForAutoRetry({ timestamp: now + 11 * 60_000 }, now)).toBe(false);
+  });
+
+  it("is false without a usable timestamp", () => {
+    expect(isRunFailureRecentForAutoRetry({ timestamp: 0 }, now)).toBe(false);
+    expect(isRunFailureRecentForAutoRetry({ timestamp: Number.NaN }, now)).toBe(false);
+    expect(isRunFailureRecentForAutoRetry({ timestamp: undefined as unknown as number }, now)).toBe(false);
+  });
+});
+
+describe("isRunFailurePromptSharedWithOtherRuns", () => {
+  const prompt = (metadata: Record<string, unknown> | null = null) =>
+    createMessage({ id: "prompt", role: "user", content: "Update the copy and the styles", metadata });
+  const failed = (metadata: Record<string, unknown>) =>
+    createMessage({
+      id: "failure",
+      content: MISSING_FINAL_MESSAGE,
+      metadata: { source: "agent", outcome: "failed", ...metadata },
+    });
+
+  it("is true for a prompt sent to several agents", () => {
+    const source = prompt({ prompt_metadata: { agentSelection: { active: ["octo", "writer"], mentions: [] } } });
+    const failure = failed({ jobId: "job-1" });
+    expect(
+      isRunFailurePromptSharedWithOtherRuns({
+        conversationMessages: [source, failure],
+        promptMessage: source,
+        failureMessage: failure,
+      }),
+    ).toBe(true);
+  });
+
+  it("follows the mentions over the active agents, as the submit path does", () => {
+    const source = prompt({ agentSelection: { active: ["octo", "writer"], mentions: ["@writer"] } });
+    const failure = failed({ jobId: "job-1" });
+    expect(
+      isRunFailurePromptSharedWithOtherRuns({
+        conversationMessages: [source, failure],
+        promptMessage: source,
+        failureMessage: failure,
+      }),
+    ).toBe(false);
+  });
+
+  it("is true when another run for the same prompt succeeded", () => {
+    const source = prompt();
+    const writerDone = createMessage({
+      id: "writer-done",
+      content: "Updated the copy.",
+      metadata: { source: "agent", outcome: "succeeded", jobId: "job-a" },
+    });
+    const failure = failed({ jobId: "job-b" });
+    expect(
+      isRunFailurePromptSharedWithOtherRuns({
+        conversationMessages: [source, writerDone, failure],
+        promptMessage: source,
+        failureMessage: failure,
+      }),
+    ).toBe(true);
+  });
+
+  it("is true when replies to the prompt came from more than one agent", () => {
+    const source = prompt();
+    const writerUpdate = createMessage({
+      id: "writer-update",
+      content: "Working on it.",
+      metadata: { agent: { handle: "@Writer" } },
+    });
+    const failure = failed({ jobId: "job-b", agent_handle: "octo" });
+    expect(
+      isRunFailurePromptSharedWithOtherRuns({
+        conversationMessages: [source, writerUpdate, failure],
+        promptMessage: source,
+        failureMessage: failure,
+      }),
+    ).toBe(true);
+  });
+
+  it("is false for one agent's run, and ignores replies to later prompts", () => {
+    const source = prompt({ agentSelection: { active: ["octo"], mentions: [] } });
+    const command = createMessage({
+      id: "command",
+      content: "npm run build",
+      messageType: "command_execution",
+      metadata: { status: "completed", outcome: "succeeded", jobId: "job-1", agentHandle: "octo" },
+    });
+    const failure = failed({ jobId: "job-1", agentHandle: "@octo" });
+    const later = createMessage({ id: "later", role: "user", content: "Something else" });
+    const laterDone = createMessage({
+      id: "later-done",
+      content: "Done.",
+      metadata: { source: "agent", outcome: "succeeded", jobId: "job-2", agentHandle: "writer" },
+    });
+    expect(
+      isRunFailurePromptSharedWithOtherRuns({
+        conversationMessages: [source, command, failure, later, laterDone],
+        promptMessage: source,
+        failureMessage: failure,
+      }),
+    ).toBe(false);
+  });
+});
+
+describe("readRunFailureRetryOf", () => {
+  it("reads the retry link from the local or the stored prompt", () => {
+    expect(readRunFailureRetryOf({ metadata: { retryOfMessageId: "failure-1" } })).toBe("failure-1");
+    expect(readRunFailureRetryOf({ metadata: { prompt_metadata: { retryOfMessageId: "failure-2" } } })).toBe(
+      "failure-2",
+    );
+    expect(readRunFailureRetryOf({ metadata: { clientMessageId: "c-1" } })).toBeNull();
+    expect(readRunFailureRetryOf({ metadata: null })).toBeNull();
+  });
+});
+
+describe("isRunFailureRetryQueued", () => {
+  it("is true while a resend of the failure waits in a send queue", () => {
+    const failureMessage = { id: "failure-1" };
+    expect(
+      isRunFailureRetryQueued({
+        queuedSends: [{ metadata: null }, { metadata: { retryOfMessageId: "failure-1", agentSelection: {} } }],
+        failureMessage,
+      }),
+    ).toBe(true);
+    expect(
+      isRunFailureRetryQueued({
+        queuedSends: [{ metadata: { retryOfMessageId: "failure-0" } }, {}],
+        failureMessage,
+      }),
+    ).toBe(false);
+    expect(isRunFailureRetryQueued({ queuedSends: [], failureMessage })).toBe(false);
+  });
+});
+
+describe("isRunFailurePromptFromThisClient", () => {
+  const client = { sessionId: "session-1", userId: "user-1" };
+
+  it("is true for a prompt this person sent from this tab", () => {
+    expect(
+      isRunFailurePromptFromThisClient({
+        promptMessage: { authorId: "user-1", metadata: { prompt_metadata: { client } } },
+        currentUserId: "user-1",
+        chatClientSessionId: "session-1",
+      }),
+    ).toBe(true);
+    // The local copy keeps the client at the top level until the controller stores it.
+    expect(
+      isRunFailurePromptFromThisClient({
+        promptMessage: { authorId: null, metadata: { client } },
+        currentUserId: "user-1",
+        chatClientSessionId: "session-1",
+      }),
+    ).toBe(true);
+  });
+
+  it("is false for another person's prompt, another tab's, or one with no client session", () => {
+    const fromThisTab = { prompt_metadata: { client } };
+    expect(
+      isRunFailurePromptFromThisClient({
+        promptMessage: { authorId: "user-2", metadata: fromThisTab },
+        currentUserId: "user-1",
+        chatClientSessionId: "session-1",
+      }),
+    ).toBe(false);
+    expect(
+      isRunFailurePromptFromThisClient({
+        promptMessage: { authorId: "user-1", metadata: fromThisTab },
+        currentUserId: "user-1",
+        chatClientSessionId: "session-2",
+      }),
+    ).toBe(false);
+    expect(
+      isRunFailurePromptFromThisClient({
+        promptMessage: { authorId: "user-1", metadata: { prompt_metadata: { intent: "chat" } } },
+        currentUserId: "user-1",
+        chatClientSessionId: "session-1",
+      }),
+    ).toBe(false);
+    expect(
+      isRunFailurePromptFromThisClient({
+        promptMessage: { authorId: "user-1", metadata: fromThisTab },
+        currentUserId: null,
+        chatClientSessionId: "session-1",
+      }),
+    ).toBe(false);
+  });
+});
+
+describe("isBrowserRoutedPromptMetadata", () => {
+  it("reads browser routing where the controller stores a dispatched prompt's metadata", () => {
+    expect(
+      isBrowserRoutedPromptMetadata({
+        intent: "chat",
+        prompt_metadata: { browserTransport: "shared", browserPageId: "page-1" },
+      }),
+    ).toBe(true);
+    expect(
+      isBrowserRoutedPromptMetadata({ promptMetadata: { runtimeExpectations: { browserExecution: true } } }),
+    ).toBe(true);
+  });
+
+  it("ignores prompts without browser routing", () => {
+    expect(isBrowserRoutedPromptMetadata(null)).toBe(false);
+    expect(isBrowserRoutedPromptMetadata({ replyContext: { messageId: "m-1" } })).toBe(false);
+    expect(isBrowserRoutedPromptMetadata({ browserTransport: "  " })).toBe(false);
   });
 });
 
@@ -590,5 +1124,335 @@ describe("resolveRunFailureRetryPrompt", () => {
         failureMessage: { id: "assistant-only", timestamp: 0 },
       }),
     ).toBeNull();
+  });
+});
+
+describe("resolveRunFailureRetrySource", () => {
+  it("returns the user message that started the failed run", () => {
+    const prompt = createMessage({
+      id: "user-1",
+      role: "user",
+      content: "Open the pricing page",
+      timestamp: 10,
+      metadata: { browserTransport: "shared" },
+    });
+    const failure = createMessage({ id: "failure-1", content: PROVIDER_RATE_LIMITED, timestamp: 20 });
+    expect(
+      resolveRunFailureRetrySource({ conversationMessages: [prompt, failure], failureMessage: failure }),
+    ).toBe(prompt);
+  });
+
+  // The pricing page started run-1. While it ran, someone wrote a note to a
+  // teammate that group participation only recorded (no run), then run-1 failed.
+  const pricing = createMessage({
+    id: "user-1",
+    role: "user",
+    content: "Build the pricing page",
+    timestamp: 10,
+    metadata: { runId: "run-1", prompt_metadata: { clientMessageId: "client-1" } },
+  });
+  const note = createMessage({
+    id: "user-2",
+    role: "user",
+    content: "Sam, the staging link is in the doc",
+    timestamp: 20,
+    metadata: { prompt_metadata: { groupParticipation: { decision: "silent" } } },
+  });
+
+  it("returns the prompt whose stored copy names the failed run, not a note sent while it ran", () => {
+    for (const failureMetadata of [
+      { source: "agent", outcome: "failed", jobId: "job-1", runId: "run-1" },
+      { source: "agent", outcome: "failed", run_id: "run-1" },
+    ]) {
+      const failure = createMessage({
+        id: "failure-1",
+        content: PROXY_STREAMED_RATE_LIMIT,
+        timestamp: 30,
+        metadata: failureMetadata,
+      });
+      const conversationMessages = [pricing, note, failure];
+      expect(resolveRunFailureRetrySource({ conversationMessages, failureMessage: failure })).toBe(pricing);
+      expect(resolveRunFailureRetryPrompt({ conversationMessages, failureMessage: failure })).toBe(
+        "Build the pricing page",
+      );
+      // A run-record card that is not in the list is placed by its timestamp.
+      expect(
+        resolveRunFailureRetrySource({
+          conversationMessages: [pricing, note],
+          failureMessage: { id: "thread-preview-terminal:run-1", timestamp: 30, metadata: failureMetadata },
+        }),
+      ).toBe(pricing);
+    }
+  });
+
+  it("falls back to the nearest prompt when no prompt names the failed run", () => {
+    const failure = createMessage({
+      id: "failure-1",
+      content: PROXY_STREAMED_RATE_LIMIT,
+      timestamp: 30,
+      metadata: { source: "agent", outcome: "failed", jobId: "job-9", runId: "run-9" },
+    });
+    const localPricing = createMessage({ ...pricing, metadata: { clientMessageId: "client-1" } });
+    for (const conversationMessages of [
+      [pricing, note, failure],
+      [localPricing, note, failure],
+    ]) {
+      expect(resolveRunFailureRetrySource({ conversationMessages, failureMessage: failure })).toBe(note);
+    }
+  });
+
+  // The controller stores a steer sent into run-1 with run-1's id and the
+  // steered job in its send intent.
+  const steer = createMessage({
+    id: "user-steer",
+    role: "user",
+    content: "Also make the header blue",
+    timestamp: 20,
+    metadata: {
+      runId: "run-1",
+      clientMessageId: "client-steer",
+      sendIntent: { mode: "steer", jobId: "job-1", state: "applied" },
+    },
+  });
+  const runOneFailure = createMessage({
+    id: "failure-1",
+    content: PROXY_STREAMED_RATE_LIMIT,
+    timestamp: 30,
+    metadata: { source: "agent", outcome: "failed", jobId: "job-1", runId: "run-1" },
+  });
+
+  it("returns the prompt that started a steered run, not the steer sent into it", () => {
+    const conversationMessages = [pricing, steer, runOneFailure];
+    expect(resolveRunFailureRetrySource({ conversationMessages, failureMessage: runOneFailure })).toBe(
+      pricing,
+    );
+    expect(resolveRunFailureRetryPrompt({ conversationMessages, failureMessage: runOneFailure })).toBe(
+      "Build the pricing page",
+    );
+  });
+
+  it("skips a steer when the prompt's stored copy has not arrived", () => {
+    const localPricing = createMessage({ ...pricing, metadata: { clientMessageId: "client-1" } });
+    expect(
+      resolveRunFailureRetrySource({
+        conversationMessages: [localPricing, steer, runOneFailure],
+        failureMessage: runOneFailure,
+      }),
+    ).toBe(localPricing);
+  });
+
+  it("takes the first prompt that names the run, which is the one that started it", () => {
+    // A later row naming the same run without a send intent.
+    const laterRow = createMessage({ ...note, id: "user-3", timestamp: 25, metadata: { runId: "run-1" } });
+    expect(
+      resolveRunFailureRetrySource({
+        conversationMessages: [pricing, laterRow, runOneFailure],
+        failureMessage: runOneFailure,
+      }),
+    ).toBe(pricing);
+  });
+
+  it("knows a run someone steered, by its run or its job", () => {
+    expect(
+      isRunFailureRunSteered({
+        conversationMessages: [pricing, steer, runOneFailure],
+        failureMessage: runOneFailure,
+      }),
+    ).toBe(true);
+    const steerByJobOnly = createMessage({
+      ...steer,
+      metadata: { sendIntent: { mode: "steer", jobId: "job-1" } },
+    });
+    expect(
+      isRunFailureRunSteered({
+        conversationMessages: [pricing, steerByJobOnly, runOneFailure],
+        failureMessage: runOneFailure,
+      }),
+    ).toBe(true);
+    // No steer, or a steer into another run.
+    expect(
+      isRunFailureRunSteered({ conversationMessages: [pricing, note, runOneFailure], failureMessage: runOneFailure }),
+    ).toBe(false);
+    const otherRunFailure = createMessage({
+      ...runOneFailure,
+      metadata: { source: "agent", outcome: "failed", jobId: "job-2", runId: "run-2" },
+    });
+    expect(
+      isRunFailureRunSteered({
+        conversationMessages: [pricing, steer, otherRunFailure],
+        failureMessage: otherRunFailure,
+      }),
+    ).toBe(false);
+  });
+
+  it("never matches a prompt by a run it names after the failure", () => {
+    const failure = createMessage({
+      id: "failure-1",
+      content: PROXY_STREAMED_RATE_LIMIT,
+      timestamp: 15,
+      metadata: { source: "agent", outcome: "failed", runId: "run-2" },
+    });
+    const later = createMessage({ ...note, id: "user-3", timestamp: 40, metadata: { runId: "run-2" } });
+    expect(
+      resolveRunFailureRetrySource({ conversationMessages: [pricing, failure, later], failureMessage: failure }),
+    ).toBe(pricing);
+  });
+});
+
+describe("readRunFailureRunIds", () => {
+  it("reads the job and run a failed run's message names", () => {
+    expect(readRunFailureRunIds({ metadata: { jobId: "job-1", runId: "run-1" } })).toEqual([
+      "job-1",
+      "run-1",
+    ]);
+    expect(readRunFailureRunIds({ metadata: { job_id: " job-2 ", run_id: "" } })).toEqual(["job-2"]);
+    expect(readRunFailureRunIds({ metadata: null })).toEqual([]);
+    expect(readRunFailureRunIds({})).toEqual([]);
+  });
+});
+
+describe("isRunFailureRetrySuperseded", () => {
+  const prompt = createMessage({ id: "user-1", role: "user", content: "Build me a landing page", timestamp: 10 });
+  const failure = createMessage({
+    id: "failure-1",
+    content: PROVIDER_RATE_LIMITED,
+    timestamp: 20,
+    metadata: { source: "agent", outcome: "failed", jobId: "job-1" },
+  });
+
+  it("is false while nothing was sent after the failure", () => {
+    expect(
+      isRunFailureRetrySuperseded({ conversationMessages: [prompt, failure], failureMessage: failure }),
+    ).toBe(false);
+  });
+
+  it("is true once a resend names the failure in its metadata", () => {
+    expect(buildRunFailureRetryMetadata(failure)).toEqual({
+      [RUN_FAILURE_RETRY_OF_METADATA_KEY]: "failure-1",
+    });
+    const resend = createMessage({
+      id: "user-2",
+      role: "user",
+      content: "Build me a landing page",
+      timestamp: 30,
+      metadata: buildRunFailureRetryMetadata(failure),
+    });
+    expect(
+      isRunFailureRetrySuperseded({
+        conversationMessages: [prompt, failure, resend],
+        failureMessage: failure,
+      }),
+    ).toBe(true);
+  });
+
+  it("finds the link where the controller stores a dispatched prompt's metadata", () => {
+    // Loaded after a reload, with text the fallback below would not match.
+    const stored = createMessage({
+      id: "user-2",
+      role: "user",
+      content: "Build me a landing page, please",
+      timestamp: 30,
+      metadata: {
+        intent: "chat",
+        prompt_metadata: { retryOfMessageId: "failure-1", writeIntent: true },
+      },
+    });
+    expect(
+      isRunFailureRetrySuperseded({
+        conversationMessages: [prompt, failure, stored],
+        failureMessage: failure,
+      }),
+    ).toBe(true);
+    const otherFailure = { id: "failure-other", timestamp: 25 };
+    expect(
+      isRunFailureRetrySuperseded({
+        conversationMessages: [prompt, failure, stored],
+        failureMessage: otherFailure,
+      }),
+    ).toBe(false);
+  });
+
+  it("recognizes an older resend without the link by its text after the failure", () => {
+    // Retries sent before the metadata link existed resent the same text.
+    const resend = createMessage({
+      id: "user-2",
+      role: "user",
+      content: "  build me a   landing page ",
+      timestamp: 30,
+    });
+    expect(
+      isRunFailureRetrySuperseded({
+        conversationMessages: [prompt, failure, resend],
+        failureMessage: failure,
+      }),
+    ).toBe(true);
+    // A different follow-up does not retire the card.
+    const followUp = createMessage({ id: "user-3", role: "user", content: "Try a darker theme", timestamp: 30 });
+    expect(
+      isRunFailureRetrySuperseded({
+        conversationMessages: [prompt, failure, followUp],
+        failureMessage: failure,
+      }),
+    ).toBe(false);
+  });
+
+  it("does not count a resend that never went out", () => {
+    // Its dispatch failed: the local copy keeps the link and the text.
+    const unsent = createMessage({
+      id: "user-2",
+      role: "user",
+      content: "Build me a landing page",
+      timestamp: 30,
+      metadata: buildRunFailureRetryMetadata(failure),
+    });
+    const conversationMessages = [prompt, failure, unsent];
+    expect(isRunFailureRetrySuperseded({ conversationMessages, failureMessage: failure })).toBe(true);
+    expect(
+      isRunFailureRetrySuperseded({
+        conversationMessages,
+        failureMessage: failure,
+        isUnsent: (message) => message.id === "user-2",
+      }),
+    ).toBe(false);
+  });
+
+  it("leaves the failure of the resend itself retryable", () => {
+    const resend = createMessage({
+      id: "user-2",
+      role: "user",
+      content: "Build me a landing page",
+      timestamp: 30,
+      metadata: buildRunFailureRetryMetadata(failure),
+    });
+    const secondFailure = createMessage({
+      id: "failure-2",
+      content: PROVIDER_RATE_LIMITED,
+      timestamp: 40,
+      metadata: { source: "agent", outcome: "failed", jobId: "job-2" },
+    });
+    expect(
+      isRunFailureRetrySuperseded({
+        conversationMessages: [prompt, failure, resend, secondFailure],
+        failureMessage: secondFailure,
+      }),
+    ).toBe(false);
+  });
+
+  it("places a synthesized terminal failure by its timestamp", () => {
+    const resend = createMessage({ id: "user-2", role: "user", content: "Build me a landing page", timestamp: 30 });
+    const synthesized = { id: "thread-preview-terminal:run-1", timestamp: 20 };
+    expect(
+      isRunFailureRetrySuperseded({
+        conversationMessages: [prompt, resend],
+        failureMessage: synthesized,
+      }),
+    ).toBe(true);
+    // A failure that cannot be placed has nothing after it.
+    expect(
+      isRunFailureRetrySuperseded({
+        conversationMessages: [prompt, resend],
+        failureMessage: { id: "unknown", timestamp: Number.NaN },
+      }),
+    ).toBe(false);
   });
 });
