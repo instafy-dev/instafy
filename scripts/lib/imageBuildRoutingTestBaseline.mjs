@@ -163,7 +163,7 @@ export function withoutImageBuildRouting(file, source) {
   assert.equal(source.split(ordinary).length, file === "publish-production-services.yml" ? 5 : 4);
   let normalized = source.replaceAll(ordinary, "    runs-on: ubuntu-latest\n");
   if (file === "publish-runtime-agent.yml") {
-    const comment = "      # Hosted cells build natively; the trusted BUILD daemon must support both\n      # target platforms. Scan each image before any registry login.\n";
+    const comment = "      # Hosted cells build natively; the trusted BUILD daemon must support the\n      # amd64 target platform. Scan each image before any registry login.\n";
     assert.equal(normalized.split(comment).length, 2);
     normalized = normalized.replace(comment, "      # Build and scan on the native architecture before any registry login.\n");
     const matrix = imageBuildSelector(file, "matrix.runner");

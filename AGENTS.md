@@ -134,6 +134,13 @@ child publishers and their sealed exact-commit manifests. Fresh manifests must r
 closed rather than attempting to overwrite an immutable release. Mutable tags are not release
 authority. Image publication makes an artifact deployable but does not deploy the hosted product.
 
+Runtime images publish in two lanes. `publish-runtime-agent.yml` releases amd64 only and seals
+the production runtime manifest; arm64 never gates a backend release.
+`publish-runtime-agent-multiarch.yml` then adds the arm64 images and the multi-arch tags, bound to
+that sealed manifest. The coordinator runs it as a third, best-effort lane: it dispatches only after
+the production runtime manifest is sealed, retries a failed commit up to four times, and can only
+warn, never fail a pass or change the production lanes.
+
 Hosted rollout authority lives in the private operations repository. Public CI must not receive
 its credentials, decide production rollout policy or bypass the exact-commit manifest boundary.
 

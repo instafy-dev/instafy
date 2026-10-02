@@ -229,7 +229,9 @@ node --test scripts/check-public-release-workflows.test.mjs scripts/check-expand
 `TRUSTED_AMD64_BUILD_RUNNER_MODE=self-hosted` independently selects the
 organization group `instafy-trusted-build` and static labels
 `self-hosted`, `Linux`, `X64`, `instafy-build` for all four jobs in each exact-main
-image publisher, plus scheduled/manual image reconciliation. The canonical
+production image publisher, plus scheduled/manual image reconciliation. The
+arm64 runtime lane, `publish-runtime-agent-multiarch.yml`, has no such route and
+always runs on GitHub-hosted runners. The canonical
 repository ID must still be private; main must be protected and the workflow
 ref and source SHA must match. Manual requests must name that same source SHA.
 PRs, forks, public visibility, other refs and a disabled/unset switch retain
@@ -238,12 +240,13 @@ route takes precedence and is unchanged. This BUILD route uses trusted,
 ephemeral jobs with the existing Docker-capable build profile; its static labels
 are placement, not a claim of VM or network isolation.
 
-The seven service cells, four runtime flavor/architecture cells, original
-30/75-minute limits, approval, scan-before-login gates, immutable manifests,
-GitHub-token permissions and provenance settings are unchanged. Runtime builds
-still produce both amd64 and ARM64 images; on BUILD the scanner uses the existing
-pinned x64 Trivy binary rather than the target image's architecture. Hosted
-runner matrix selections and scanner pins are unchanged. The five-minute
+The seven service cells, the two amd64 runtime cells, original 30/75-minute
+limits, approval, scan-before-login gates, immutable manifests, GitHub-token
+permissions and provenance settings are unchanged. The production runtime
+publisher builds amd64 only; on BUILD its scanner uses the pinned x64 Trivy
+binary. The arm64 cells run in the hosted multi-arch lane (see
+[Runtime image release lanes](#runtime-image-release-lanes)). Hosted runner
+matrix selections and scanner pins are unchanged. The five-minute
 coordinator never waits for child publishers, so it releases a shared BUILD
 runner before those jobs need it.
 
@@ -278,7 +281,7 @@ checks still fail closed. The services publisher uses no layer cache.
 Before enabling this route, an operator must deliberately enroll this repository
 and these three exact `@refs/heads/main` workflow refs in the BUILD group's
 protected workflow allowlist and its existing registration policy. Qualify actual
-Buildx builds and Trivy scans for both platforms, at least 20 GiB free disk,
+Buildx builds and Trivy scans for the amd64 platform, at least 20 GiB free disk,
 artifact commands and ephemeral cleanup on that profile. Source tests do not
 prove physical capacity or successful image publication. Disable the switch to
 restore hosted selection for new runs; queued jobs do not move automatically.
@@ -541,13 +544,75 @@ For the full-stack suites, run the local stack first:
 - `pnpm stack:up`
 - `pnpm stack:down` when finished.
 
+## Runtime image release lanes
+
+The runtime-agent image is published in two lanes, so an arm64-only problem
+(such as a Debian security update that reaches arm64 hours after amd64) can no
+longer hold a backend release.
+
+- **Production, amd64.** `publish-runtime-agent.yml` builds, scans and pushes
+  the base and webdev images for `linux/amd64` only, then seals
+  `runtime-agent-release-manifest` with those scanned single-platform digests
+  (schema v1, unchanged keys). Every production host is amd64, and release
+  consumers read only this workflow's artifact. The run pushes only the
+  `<sha>-linux-amd64` architecture tags; it creates no multi-arch index and
+  refuses `update_channel_tags=true`.
+- **Best effort, arm64.** `publish-runtime-agent-multiarch.yml` binds to the one
+  sealed first-attempt production run for the exact current main and checks
+  that its manifest archive matches the recorded artifact digest. It then builds,
+  scans and smokes the base and webdev images natively on `ubuntu-24.04-arm`,
+  re-scans the two reused amd64 digests straight from the registry
+  (anonymously, same pinned Trivy and flags), and only then creates the `<sha>`
+  and `webdev-<sha>` indexes. Each index must hold exactly the sealed amd64 image
+  and this run's arm64 image. It seals `runtime-agent-multiarch-manifest`
+  (`kind: runtime-agent-multiarch`, with the production run ID, its manifest
+  digest and every index and child reference) and, like production, refuses a
+  second successful publication for the same commit. It never rebuilds amd64.
+
+`continuous-image-publication.yml` runs the arm64 lane as a third lane, after
+the two production lanes and in the same pass. It dispatches only when that
+pass found the production runtime manifest sealed, no arm64 run for the commit
+is active or sealed, fewer than four arm64 runs have failed for it, and main
+still equals the commit. A sealed but expiring multi-arch manifest, an exhausted
+retry cap or any API error ends in a `::warning::` and a summary line, never a
+failed pass: the step writes only its own `multiarch_*` outputs and always ends
+with status 0. Once four runs have failed, the summary reads "arm64 lane
+exhausted for `<sha>`; production unaffected; dispatch
+`publish-runtime-agent-multiarch.yml` manually". A manual dispatch, after fixing
+the cause, is the only further attempt for that commit. The lane serves only current main: a commit that main
+moved past before its arm64 lane succeeded keeps amd64-only tags.
+
+Consequences for consumers:
+
+- `<sha>-linux-amd64` and `webdev-<sha>-linux-amd64` exist for every published
+  commit; the multi-arch `<sha>` and `webdev-<sha>` tags may lag or be missing.
+  The pull-request runtime browser smoke therefore pulls
+  `webdev-<sha>-linux-amd64`.
+- The two halves of an index are scanned at different times; the amd64 re-scan
+  before assembly keeps both at the same database standard.
+- The `latest`/`webdev` channel tags still move only on an explicit
+  `update_channel_tags=true` dispatch, now of the multi-arch workflow. The
+  coordinator always dispatches it with `false`, and its once-per-commit seal
+  then blocks a later dispatch for that commit. A separate path that promotes
+  channel tags from a sealed multi-arch manifest without rebuilding is a
+  follow-up.
+
+`node --test scripts/check-image-coordinator.test.mjs` runs the coordinator's
+real step Bash against inert fixtures, including a replay of an arm64-only scan
+lag (production seals and ships while arm64 fails three times, then the fourth
+arm64 run seals) and the retry cap.
+`node --test scripts/check-runtime-multiarch-workflow.test.mjs` runs both
+runtime publishers' binding, verification, assembly and re-scan steps against
+stub `gh`, `docker` and `trivy`.
+
 ## Nightly image scan
 
-`.github/workflows/image-scan.yml` builds and scans every image the two
+`.github/workflows/image-scan.yml` builds and scans every image the
 protected-main publishers release, so a broken input surfaces before a release
-rather than during one. It covers the four runtime cells of
-`publish-runtime-agent.yml` (base and webdev, amd64 on `ubuntu-24.04` and arm64
-on `ubuntu-24.04-arm`) and the seven services of
+rather than during one. It covers the two amd64 runtime cells of
+`publish-runtime-agent.yml` (base and webdev on `ubuntu-24.04`), the two arm64
+runtime cells of `publish-runtime-agent-multiarch.yml` (base and webdev on
+`ubuntu-24.04-arm`) and the seven services of
 `publish-production-services.yml` (amd64, two at a time as the publisher
 builds them). Each cell uses the publisher's
 Dockerfile, target, platform and build arguments, the same pinned Trivy binary
@@ -561,14 +626,15 @@ Nothing is published: no step logs in to a registry, pushes, tags a registry
 reference or writes a cache, and images stay in the runner's Docker engine.
 The workflow runs at 03:17 UTC every night, on manual dispatch, and on pull
 requests that change Dockerfiles, `docker/**`, `.dockerignore`, the files those
-builds pin, the Shared Browser smoke, either publisher, or this workflow and its
-tests. The pinned files are every dependency manifest and lockfile a Dockerfile
-copies (the root `package.json`, `pnpm-lock.yaml` and `pnpm-workspace.yaml` and
-the CLI package manifests, whose production dependencies ship in the runtime
-image; the Rust `Cargo.toml`/`Cargo.lock` files; the browser helpers' Go
-modules), the `codex` submodule and `scripts/fetch-rusty-v8.sh`. Other source
-changes to the copied packages are left to the nightly run. Pull request runs get a
-read-only token and report only in their checks. Every cell runs to the end
+builds pin, the Shared Browser smoke, any of the three publishers, or this
+workflow and its tests. The pinned files are every dependency manifest and
+lockfile a Dockerfile copies (the root `package.json`, `pnpm-lock.yaml` and
+`pnpm-workspace.yaml` and the CLI package manifests, whose production
+dependencies ship in the runtime image; the Rust `Cargo.toml`/`Cargo.lock`
+files; the browser helpers' Go modules), the `codex` submodule and
+`scripts/fetch-rusty-v8.sh`. Other source changes to the copied packages are
+left to the nightly run. Pull request runs get a read-only token and report
+only in their checks. Every cell runs to the end
 (`fail-fast: false`), and each cell's job summary names its image and platform,
 the check that failed and, for a failed scan, every finding with its package,
 installed version and fixed version.
@@ -595,11 +661,13 @@ When it fails:
 4. A failure on **one architecture only**, such as a Debian security update
    that reached amd64 hours before arm64, usually clears on its own. Dispatch
    the workflow again later, or re-run its failed jobs; the issue then lists
-   only that attempt's failures. Do not release that image until it passes.
+   only that attempt's failures. An arm64-only failure does not hold a
+   production release, which is amd64 only, but the arm64 lane's own scan keeps
+   the arm64 images and multi-arch tags back until it passes.
 5. Never make the scan pass by weakening it. The flags, the empty ignore file
    and the pinned Trivy must stay identical to the publishers';
-   `scripts/check-image-scan-workflow.test.mjs` derives them from the publisher
-   files and fails on any difference.
+   `scripts/check-image-scan-workflow.test.mjs` derives them from all three
+   publisher files and fails on any difference.
 
 `node --test scripts/check-image-scan-workflow.test.mjs` checks that the cells,
 build inputs, Trivy pin and scan flags match the publishers, that nothing writes
@@ -608,12 +676,14 @@ reporting against a stub `gh`.
 
 ## Runtime image layer cache
 
-The runtime-agent publisher keeps one BuildKit layer cache per flavor and
+The runtime-agent publishers keep one BuildKit layer cache per flavor and
 architecture in a dedicated GHCR package, `ghcr.io/instafy-dev/instafy-build-cache`,
-tagged `publish-runtime-agent-<flavor>-<architecture>`. It is never written to the
-release package. It replaced the GitHub Actions cache: one release's `mode=max`
-export is about 10 GiB, more than the repository's Actions cache holds, so every
-release evicted its own entries along with the CI caches. This reverses the
+tagged `publish-runtime-agent-<flavor>-<architecture>`. The production release
+writes the amd64 tags and the multi-arch lane writes the arm64 tags, by the same
+rules. It is never written to the release package. It replaced the GitHub
+Actions cache: one release's `mode=max` export is about 10 GiB, more than the
+repository's Actions cache holds, so every release evicted its own entries
+along with the CI caches. This reverses the
 earlier rule that the publisher would never use a registry cache.
 
 - The audit build reads the cache (`cache-from: type=registry`) before any

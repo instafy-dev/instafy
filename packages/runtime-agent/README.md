@@ -39,11 +39,29 @@ version-floor checks are not a substitute for scanning.
 
 ## GHCR publication
 
-The manual publication workflow builds both targets for `linux/amd64` and
-`linux/arm64`. Deployments and hosted compose consumers must use the
-`ghcr.io/instafy-dev/instafy-runtime-agent@sha256:...` reference reported in
-the workflow summary. The `latest` and `webdev` convenience tags are only
-updated when the human running the workflow explicitly requests it.
+Each protected-main commit is published in two lanes:
+
+- `publish-runtime-agent.yml` is the production release. It builds, scans and
+  pushes both targets for `linux/amd64` only, and seals the
+  `runtime-agent-release-manifest` artifact with those scanned single-platform
+  digests. Every production host is amd64, so arm64 never gates a release.
+- `publish-runtime-agent-multiarch.yml` is a best-effort lane that starts once
+  the production manifest is sealed. It builds and scans both targets natively
+  for `linux/arm64`, re-scans the reused amd64 images, and only then creates
+  the multi-arch `<sha>` and `webdev-<sha>` tags and seals the
+  `runtime-agent-multiarch-manifest` artifact. The publication coordinator
+  retries a failed commit up to four times. This lane can lag the production
+  release by hours, and it skips a commit once main has moved on.
+
+Deployments and hosted compose consumers must use an immutable
+`ghcr.io/instafy-dev/instafy-runtime-agent@sha256:...` reference from a
+workflow summary or a sealed manifest. The `<sha>-linux-amd64` and
+`webdev-<sha>-linux-amd64` tags exist for every published commit; the
+multi-arch `<sha>` and `webdev-<sha>` tags exist only once the arm64 lane has
+succeeded for it. On an arm64 host, pin the index digest from the multi-arch
+manifest. The `latest` and `webdev` convenience tags move only when someone
+dispatches the multi-arch workflow with `update_channel_tags` set; the
+coordinator never does, and the production release refuses that input.
 
 ## Environment knobs
 
