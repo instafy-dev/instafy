@@ -33,6 +33,14 @@ What each caller may do:
   an uploader deletes an object, a writer can upload new content under the same name.
 - Anonymous requests have no access, and nobody can reach another space's prefix.
 
+Attachments belong to the space, not to a conversation. This is a known limit. The messages of
+a private conversation are visible only to its creator and participants
+(`20260000000054_project_permissions_and_private_conversation_rls.sql`), but its attachments
+are not covered by that rule. Any member of the space, a viewer or a member outside the
+conversation included, can list the space's prefix and read every attachment sent in it. The
+runtime also keeps its downloads in the space's shared `.instafy/attachments/`. Do not rely on a
+private conversation to keep an attachment from the rest of the space.
+
 Deleting a space ends every session's access to its attachments at once. The controller then
 deletes the space's prefix in the background with the service role. Deleting a team does the
 same for each of its spaces, one at a time. A failure is logged and leaves the objects unreadable
@@ -48,12 +56,17 @@ A runtime that downloads attachments advertises the `attachmentDownloads` capabi
 2. It keeps only names in the leased job's own space. A name from another space is never
    signed; it is logged, and the prompt reports it as unavailable.
 3. It signs the rest in one request with the service-role key, for 10 minutes, and adds
-   `attachment_downloads: [{ name, url, sizeBytes }]` to the leased payload.
+   `attachment_downloads: [{ name, url, sizeBytes }]` to the leased payload. It signs only
+   after the lease has committed and returned its database connection, so a slow Storage
+   holds neither a row lock nor a pool slot.
 4. Before the turn, the runtime downloads each entry to `.instafy/attachments/<name>`. Every
    lane that builds a turn prompt does this, parallel write-scoped workers included.
    - The name must be `<uuid>.<ext>`.
    - A file already there is kept.
    - Each download is capped at 20 MiB and 30 seconds, and at most 4 run at once.
+   - All of a turn's downloads share a budget of 60 seconds. A download still waiting or running
+     when it runs out fails as timed out, so a stalled Storage delays a turn by at most a
+     minute.
    - The body streams into a temporary file that is renamed into place once it is complete,
      so it is never held in memory and a partial download never appears under its name.
    - Writes never follow a symlink.
@@ -95,21 +108,25 @@ wherever that file exists.
 
 - `supabase/tests/chat_attachments.sql` covers the bucket and its policies: who reads, uploads
   and deletes, by space and team role, the name rules and immutability. Two places run it:
-  - The controller test `chat_attachments_sql_fixture_passes_on_storage` runs it against
+  - The controller test `chat_attachment_sql_fixture_passes_on_storage` runs it against
     Storage's own migrated schema on the local stack. The Controller DB Tests workflow runs it on
     every pull request that touches the controller or `supabase/`.
   - `scripts/test-durable-notifications.py` runs it by hand against a Storage stub, after
     proving that the migration succeeds without Storage and can be rerun once Storage exists (see
     `supabase/tests/README.md`).
-- `cargo test chat_attachments` in `packages/runtime-controller` runs the unit tests: path
+- `cargo test chat_attachments::` in `packages/runtime-controller` runs the unit tests: path
   filtering, batched signing, the capability check, the Storage probe and the space purge, all
-  against stubs.
-- `pnpm test:controller chat_attachment` adds the database tests, which need the local stack or
-  `TEST_DATABASE_URL`. They cover the lease route and its capability gate, the purge after
-  `DELETE /projects/:projectId` and `DELETE /orgs/:orgId`, and the policy fixture above.
+  against stubs. They need no database.
+- `pnpm test:controller chat_attachment` adds the database tests. They cover the lease route and
+  its capability gate, that the lease returns its pool slot before Storage signs, the purge after
+  `DELETE /projects/:projectId` and `DELETE /orgs/:orgId`, and the policy fixture above. They
+  need the local stack, or a `TEST_DATABASE_URL` whose database has Supabase Storage's own
+  migrations applied. The policy fixture fails on purpose against a database without them, such
+  as plain PostgreSQL or the one `scripts/test-durable-notifications.py --controller-test`
+  prepares.
 - `cargo test chat_attachments` in `packages/runtime-agent` covers:
   - the download path, and the name and URL checks;
-  - the size cap and timeout, including a body that stalls;
+  - the size cap and timeout, including a body that stalls, and the per-turn budget;
   - streaming, the concurrency limit, and that no partial file is left;
   - existing files and symlinks;
   - the prompt section.
