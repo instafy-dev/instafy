@@ -14,11 +14,19 @@ local-only `git-services:local` image so their overlapping Rust dependencies
 compile once. Production continues to build and deploy three separate minimal
 images from their dedicated Dockerfiles.
 
-## Repo hygiene (git-shard)
-`git-shard` installs a server-side `hooks/update` policy for:
+## Repository policy (git-shard)
+`git-shard` writes one shared `update` hook to `<GIT_REPO_ROOT>/.instafy-hooks/` at startup and runs
+every `git http-backend` with `core.hooksPath` pointing there, so requests never write hook files
+or repository config, and hooks inside a repository are ignored. The policy covers:
 - Fast-forward-only `main`
-- Deny common churn paths (like `node_modules/`)
-- Per-blob size caps (see `GIT_MAX_BLOB_BYTES`, `GIT_DENY_PATHS`, `GIT_POLICY_DISABLED` in `docs/Git-Service.md`)
+- Deny common churn paths (like `node_modules/`, from `REPO_POLICY_DENY_PATTERNS` in `src/policy.rs`)
+- Per-blob size caps, checked against the full change for merges and new branches
+- Object checks (`receive.fsckObjects`) and a push size bound (`GIT_MAX_PUSH_BYTES`)
+- Salvage refs (`refs/instafy/salvage/**`) that no push can change
+
+See `GIT_MAX_BLOB_BYTES`, `GIT_DENY_PATHS`, `GIT_MAX_PUSH_BYTES` and `GIT_POLICY_DISABLED` in
+`docs/Git-Service.md`. `tests/shard_push_policy.rs` runs the real `git-shard` binary against a git
+client to cover the policy end to end.
 
 Trusted backend cleanup may mint a 60-second, service-only `git.delete` token and send exact
 `DELETE /<uuid>.git` through Git Edge. Shards must remain private; the full fail-closed contract is
