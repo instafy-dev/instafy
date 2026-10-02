@@ -3,9 +3,11 @@
 //! `<projectId>/<uuid>.<ext>` (supabase/migrations/20261002140000_chat_attachments.sql)
 //! and never in a space's git history.
 //!
-//! Browsers upload and read them with the user's own session. The controller
+//! Browsers upload and read them with the user's own session: every member
+//! reads, and only members who may write to the space upload. The controller
 //! holds the service role, so it signs short-lived downloads for the runtime
-//! that leases a turn and purges a deleted space's prefix. A signed URL is a
+//! that leases a turn and purges the prefix of a deleted space, or of every
+//! space of a deleted team. A signed URL is a
 //! bearer credential for one object: it goes only into the leased payload of a
 //! runtime that advertises `attachmentDownloads`, and never into history text,
 //! events or logs.
@@ -529,22 +531,31 @@ pub(crate) async fn purge_project_attachments(
     ))
 }
 
-/// Purges a deleted space's attachments in the background. The access
-/// function already refuses a deleted space, so this only frees the storage;
-/// a failure is logged and leaves the objects unreadable to browsers.
-pub(crate) fn spawn_project_purge(access: Option<StorageAccess>, project_id: Uuid) {
+/// Purges deleted spaces' attachments in the background, one space at a time
+/// so a large team never sends Storage more than one request at once. The
+/// access functions already refuse a space that is deleted or gone, so this
+/// only frees the storage; a failure is logged and leaves the objects
+/// unreadable to browsers.
+pub(crate) fn spawn_projects_purge(access: Option<StorageAccess>, project_ids: Vec<Uuid>) {
     let Some(access) = access else {
         return;
     };
+    if project_ids.is_empty() {
+        return;
+    }
     tokio::spawn(async move {
-        match purge_project_attachments(&access, &project_id).await {
-            Ok(0) => {}
-            Ok(removed) => info!(%project_id, removed, "purged chat attachments of deleted space"),
-            Err(error) => warn!(
-                %project_id,
-                %error,
-                "failed to purge chat attachments of deleted space"
-            ),
+        for project_id in project_ids {
+            match purge_project_attachments(&access, &project_id).await {
+                Ok(0) => {}
+                Ok(removed) => {
+                    info!(%project_id, removed, "purged chat attachments of deleted space")
+                }
+                Err(error) => warn!(
+                    %project_id,
+                    %error,
+                    "failed to purge chat attachments of deleted space"
+                ),
+            }
         }
     });
 }
@@ -851,6 +862,13 @@ mod tests {
 
     fn access(server: &MockServer) -> StorageAccess {
         StorageAccess::new(reqwest::Client::new(), &server.base_url(), KEY)
+    }
+
+    /// The probe cache is process-wide and keyed by URL, and httpmock hands
+    /// a dropped server's port to the next test. A test that reads the mode
+    /// through the cache starts from a cold entry for its own server.
+    fn forget_mode(storage: &StorageAccess) {
+        MODE_CACHE.lock().unwrap().remove(&storage.base_url);
     }
 
     #[test]
@@ -1193,6 +1211,7 @@ mod tests {
                     .json_body(json!({ "id": "chat-attachments", "public": false }));
             })
             .await;
+        forget_mode(&access(&present));
         assert_eq!(
             attachments_mode(Some(&access(&present))).await,
             AttachmentsMode::Storage
@@ -1211,6 +1230,7 @@ mod tests {
                 then.status(404).body("not found");
             })
             .await;
+        forget_mode(&access(&absent));
         assert_eq!(
             attachments_mode(Some(&access(&absent))).await,
             AttachmentsMode::None

@@ -1,7 +1,7 @@
 //! Chat attachments through the controller's routes, on the migrated
 //! database: which runtimes the agent lease route gives signed URLs, for which
 //! objects, that a job row cannot supply URLs of its own, and that deleting a
-//! space purges its prefix.
+//! space, or the team with all its spaces, purges their prefixes.
 
 use axum::body::{to_bytes, Body};
 use axum::http::{Request, StatusCode};
@@ -383,6 +383,123 @@ async fn delete_project_purges_the_space_prefix_after_the_delete_commits() -> an
             "listed another prefix: {:?}",
             bucket.listed_prefixes()
         );
+        anyhow::ensure!(bucket.deletes() == 2, "deletes: {}", bucket.deletes());
+        Ok(())
+    })
+    .await;
+    storage_server.abort();
+    let user_cleanup = pool
+        .get()
+        .await?
+        .execute(
+            "delete from auth.users where id = $1",
+            &[&space.owner_user_id],
+        )
+        .await;
+    result.and(user_cleanup.map(|_| ()).map_err(anyhow::Error::from))
+}
+
+/// Deleting a team removes its spaces through the projects foreign key, so the
+/// route collects them first and purges each prefix once the delete commits.
+#[tokio::test]
+async fn delete_organization_purges_every_space_prefix_after_the_delete_commits(
+) -> anyhow::Result<()> {
+    let pool = require_origin_test_pool("delete_organization_purges_every_space_prefix").await?;
+    let space = Space {
+        org_id: Uuid::new_v4(),
+        project_id: Uuid::new_v4(),
+        owner_user_id: Uuid::new_v4(),
+        conversation_id: Uuid::new_v4(),
+    };
+    let second_project_id = Uuid::new_v4();
+    let object =
+        |project_id: &Uuid, n: u32| format!("{project_id}/6a000000-0000-4000-8000-{n:012}.png");
+    let other_space = object(&Uuid::new_v4(), 9);
+    let bucket = FakeBucket::new(
+        SERVICE_ROLE_KEY,
+        vec![
+            object(&space.project_id, 1),
+            other_space.clone(),
+            object(&second_project_id, 2),
+            object(&space.project_id, 3),
+            object(&second_project_id, 4),
+        ],
+    );
+    let (storage_url, storage_server) = bucket.serve().await;
+
+    let mut config = build_app_config(
+        test_origin_private_key(),
+        test_origin_public_key(),
+        "chat-attachment-org-purge",
+    );
+    config._supabase_project_url = storage_url;
+    config.supabase_service_role_key = Some(SERVICE_ROLE_KEY.to_string());
+    let state = build_test_state(pool.clone(), config);
+
+    let fixture = SharedDbFixture {
+        organizations: vec![space.org_id],
+        projects: vec![space.project_id, second_project_id],
+    };
+    let body_pool = pool.clone();
+    let result = with_shared_db_fixture(fixture, async {
+        let pool = body_pool;
+        seed_space(&pool, &space, json!([])).await?;
+        pool.get()
+            .await?
+            .execute(
+                "insert into projects (id, org_id, name, owner_user_id, project_type, status)
+                 values ($1, $2, 'chat attachments two', $3, 'customer', 'active')",
+                &[&second_project_id, &space.org_id, &space.owner_user_id],
+            )
+            .await?;
+        let response = crate::projects::router()
+            .with_state(state.clone())
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri(format!("/orgs/{}", space.org_id))
+                    .header(
+                        axum::http::header::AUTHORIZATION,
+                        format!("Bearer {SERVICE_ROLE_KEY}"),
+                    )
+                    .body(Body::empty())?,
+            )
+            .await?;
+        anyhow::ensure!(
+            response.status() == StatusCode::NO_CONTENT,
+            "delete returned {}",
+            response.status()
+        );
+        let remaining: i64 = pool
+            .get()
+            .await?
+            .query_one(
+                "select count(*) from projects where id = any($1)",
+                &[&vec![space.project_id, second_project_id]],
+            )
+            .await?
+            .get(0);
+        anyhow::ensure!(remaining == 0, "{remaining} spaces outlived their team");
+
+        // The purge runs in the background after the response.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while bucket.objects() != vec![other_space.clone()] {
+            anyhow::ensure!(
+                std::time::Instant::now() < deadline,
+                "the team's attachments were not purged: {:?}",
+                bucket.objects()
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+        let mut listed = bucket.listed_prefixes();
+        listed.sort();
+        listed.dedup();
+        let mut expected = vec![
+            format!("{}/", space.project_id),
+            format!("{second_project_id}/"),
+        ];
+        expected.sort();
+        anyhow::ensure!(listed == expected, "listed prefixes: {listed:?}");
         anyhow::ensure!(bucket.deletes() == 2, "deletes: {}", bucket.deletes());
         Ok(())
     })

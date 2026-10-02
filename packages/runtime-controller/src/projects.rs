@@ -2081,9 +2081,9 @@ async fn delete_project(
 
     // Browsers already lost access with the status change; this frees the
     // space's chat attachments and never fails the delete.
-    crate::chat_attachments::spawn_project_purge(
+    crate::chat_attachments::spawn_projects_purge(
         crate::chat_attachments::StorageAccess::from_config(&state.http_client, &state.config),
-        project_id,
+        vec![project_id],
     );
 
     Ok(StatusCode::NO_CONTENT)
@@ -4540,6 +4540,25 @@ async fn delete_organization(
             ))
         })?;
 
+    // Every space of the team goes with it through the projects foreign key.
+    // Their chat attachments are purged after the commit, so remember the
+    // spaces first. The team's row lock keeps a space from being added between
+    // this read and the delete.
+    transaction
+        .execute(
+            "select 1 from organizations where id = $1 for update",
+            &[&org_id],
+        )
+        .await
+        .map_err(|error| internal_error(format!("failed to lock organization: {error}")))?;
+    let project_ids: Vec<Uuid> = transaction
+        .query("select id from projects where org_id = $1", &[&org_id])
+        .await
+        .map_err(|error| internal_error(format!("failed to list organization spaces: {error}")))?
+        .iter()
+        .map(|row| row.get(0))
+        .collect();
+
     transaction
         .execute("delete from organizations where id = $1", &[&org_id])
         .await
@@ -4550,6 +4569,13 @@ async fn delete_organization(
             "failed to finalize organization delete transaction: {error}"
         ))
     })?;
+
+    // Browsers lost access with the spaces' rows; this frees their chat
+    // attachments and never fails the delete.
+    crate::chat_attachments::spawn_projects_purge(
+        crate::chat_attachments::StorageAccess::from_config(&state.http_client, &state.config),
+        project_ids,
+    );
 
     Ok(StatusCode::NO_CONTENT)
 }
