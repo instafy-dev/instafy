@@ -183,12 +183,12 @@ impl Shard {
             .join(format!("{}.git", self.project_id))
     }
 
-    fn shared_hook(&self) -> PathBuf {
-        self.root
-            .path()
-            .join("repos")
-            .join(".instafy-hooks")
-            .join("update")
+    fn shared_hooks_dir(&self) -> PathBuf {
+        self.root.path().join("repos").join(".instafy-hooks")
+    }
+
+    fn push_reports_dir(&self) -> PathBuf {
+        self.root.path().join("repos").join(".instafy-push-reports")
     }
 
     /// Run git directly against the shard's bare repository.
@@ -365,17 +365,43 @@ fn noise(len: usize) -> Vec<u8> {
         .collect()
 }
 
+fn dir_entries(dir: &Path) -> Vec<String> {
+    let mut entries = std::fs::read_dir(dir)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().to_string_lossy().to_string())
+        .collect::<Vec<_>>();
+    entries.sort();
+    entries
+}
+
+fn hook_files(shard: &Shard) -> Vec<(String, Vec<u8>, SystemTime)> {
+    dir_entries(&shard.shared_hooks_dir())
+        .into_iter()
+        .map(|name| {
+            let path = shard.shared_hooks_dir().join(&name);
+            let modified = std::fs::metadata(&path).unwrap().modified().unwrap();
+            (name, std::fs::read(&path).unwrap(), modified)
+        })
+        .collect()
+}
+
 #[test]
 fn requests_never_write_hook_files_or_run_git_config() {
-    let shard = Shard::start("spawns", &[]);
+    // Push events are on, so the event path is counted too.
+    let sink = WebhookSink::start();
+    let webhook = sink.url();
+    let shard = Shard::start("spawns", &[("GIT_EVENTS_WEBHOOK_URL", webhook.as_str())]);
     let client = Client::clone_from(&shard);
     let repo = shard.repo();
 
-    let hook_bytes = std::fs::read(shard.shared_hook()).unwrap();
-    let hook_modified = std::fs::metadata(shard.shared_hook())
-        .unwrap()
-        .modified()
-        .unwrap();
+    let hooks_before = hook_files(&shard);
+    assert_eq!(
+        hooks_before
+            .iter()
+            .map(|(name, _, _)| name.as_str())
+            .collect::<Vec<_>>(),
+        ["post-receive", "update"]
+    );
     let config_before = std::fs::read(repo.join("config")).unwrap();
     // No request may recreate a per-repository hooks directory.
     std::fs::remove_dir_all(repo.join("hooks")).unwrap();
@@ -387,6 +413,7 @@ fn requests_never_write_hook_files_or_run_git_config() {
     client.git_ok(&["ls-remote", "origin"]);
     client.commit_file("notes/two.txt", b"two\n", "two");
     client.push_ok("main");
+    sink.wait_for(2);
 
     let spawns = shard.spawns();
     assert!(
@@ -398,19 +425,9 @@ fn requests_never_write_hook_files_or_run_git_config() {
     }
     assert!(!repo.join("hooks").exists());
     assert_eq!(std::fs::read(repo.join("config")).unwrap(), config_before);
-    assert_eq!(std::fs::read(shard.shared_hook()).unwrap(), hook_bytes);
-    assert_eq!(
-        std::fs::metadata(shard.shared_hook())
-            .unwrap()
-            .modified()
-            .unwrap(),
-        hook_modified
-    );
-    let shared_dir_entries = std::fs::read_dir(shard.shared_hook().parent().unwrap())
-        .unwrap()
-        .map(|entry| entry.unwrap().file_name())
-        .collect::<Vec<_>>();
-    assert_eq!(shared_dir_entries, vec![std::ffi::OsString::from("update")]);
+    assert_eq!(hook_files(&shard), hooks_before);
+    // Each push's report file is removed once its event is built.
+    assert!(dir_entries(&shard.push_reports_dir()).is_empty());
 }
 
 #[test]
@@ -601,7 +618,15 @@ fn push_events_carry_each_refs_old_and_new_revision() {
     client.push_ok("main");
     let output = client.git(&["push", "origin", "refs/tags/v1", ":refs/heads/feature"]);
     assert!(output.status.success());
-    let events = sink.wait_for(5);
+    // Refs outside branches and tags are not reported.
+    let third = client.commit_file("c.txt", b"c\n", "c");
+    let recovery = format!(
+        "refs/instafy/recovery/{}/20261002T120000Z-unpublished",
+        uuid::Uuid::new_v4()
+    );
+    let output = client.git(&["push", "origin", "main", &format!("HEAD:{recovery}")]);
+    assert!(output.status.success());
+    let events = sink.wait_for(6);
     assert_eq!(
         updates(&events[3]),
         &json!([{
@@ -626,6 +651,16 @@ fn push_events_carry_each_refs_old_and_new_revision() {
             },
         ])
     );
+    assert_eq!(
+        updates(&events[5]),
+        &json!([{
+            "refName": "refs/heads/main",
+            "oldRev": second,
+            "newRev": third,
+            "deleted": false,
+        }])
+    );
+    assert_eq!(shard.repo_rev(&recovery).unwrap(), third);
 }
 
 #[test]
@@ -664,7 +699,8 @@ fn merges_and_multi_commit_branches_get_path_and_size_checks() {
         "{stderr}"
     );
 
-    // A new branch whose tip is clean but whose earlier commit is not.
+    // A new branch whose last commit changes only a clean path, while an
+    // earlier new commit added a denied path that the tip still contains.
     client.git_ok(&["checkout", "-q", "-B", "chain", &initial]);
     client.commit_file("coverage/report.html", b"x\n", "coverage");
     let chain_tip = client.commit_file("notes.txt", b"later\n", "later");
@@ -754,6 +790,20 @@ fn salvage_refs_cannot_be_changed_by_a_push() {
         assert!(shard.repo_rev(target).is_none());
     }
 
+    // Letter-case variants are refused by name, whatever the filesystem.
+    for target in [
+        "refs/instafy/SALVAGE/gateway/node-1-abcdef12",
+        "refs/INSTAFY/salvage/gateway/node-1-abcdef12",
+    ] {
+        let stderr = client.push_refused(&format!("{work}:{target}"));
+        assert!(
+            stderr.contains(&format!(
+                "instafy: '{target}' holds salvaged work and cannot be changed by a push"
+            )),
+            "{stderr}"
+        );
+    }
+
     let existing = "refs/instafy/salvage/gateway/node-2-12345678";
     assert!(shard
         .repo_git(&["update-ref", existing, &initial])
@@ -777,6 +827,47 @@ fn salvage_refs_cannot_be_changed_by_a_push() {
     // The policy switch itself is on for this shard.
     client.commit_file("node_modules/x.js", b"x\n", "vendor");
     client.push_ok("main");
+}
+
+#[test]
+fn refs_instafy_holds_only_recovery_refs_and_main_has_no_aliases() {
+    let shard = Shard::start("ref-names", &[]);
+    let client = Client::clone_from(&shard);
+    let initial = client.head();
+    let work = client.commit_file("work.txt", b"work\n", "work");
+
+    // A name that differs from main only in letter case is the same file on a
+    // case-insensitive filesystem. The hook refuses it by name everywhere.
+    for target in ["refs/heads/MAIN", "refs/Heads/main"] {
+        let stderr = client.push_refused(&format!("+{work}:{target}"));
+        assert!(
+            stderr.contains(&format!(
+                "instafy: '{target}' differs from refs/heads/main only in letter case"
+            )),
+            "{stderr}"
+        );
+    }
+    assert_eq!(shard.repo_rev("refs/heads/main").unwrap(), initial);
+
+    // A leaf at refs/instafy/recovery would block every recovery ref.
+    let origin = uuid::Uuid::new_v4();
+    for target in [
+        "refs/instafy/recovery".to_string(),
+        format!("refs/instafy/recovery/{origin}"),
+        "refs/instafy/notes/x".to_string(),
+    ] {
+        let stderr = client.push_refused(&format!("{work}:{target}"));
+        assert!(
+            stderr.contains(&format!("instafy: '{target}' is not a recovery ref")),
+            "{stderr}"
+        );
+        assert!(shard.repo_rev(&target).is_none());
+    }
+    let recovery = format!("refs/instafy/recovery/{origin}/20261002T120000Z-unpublished");
+    client.push_ok(&format!("{work}:{recovery}"));
+    assert_eq!(shard.repo_rev(&recovery).unwrap(), work);
+    client.push_ok(&format!(":{recovery}"));
+    assert!(shard.repo_rev(&recovery).is_none());
 }
 
 fn hex_to_bytes(hex: &str) -> Vec<u8> {
