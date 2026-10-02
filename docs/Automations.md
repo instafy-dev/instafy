@@ -31,7 +31,7 @@ reuses its private execution anchor so prior delivery memory remains accessible.
 
 The private execution anchor is internal audit history and is excluded from ordinary chat lists,
 search, unread activity and result notifications. A useful finding is delivered separately as one
-normal private Octo chat with a grounded opener, source links and a next-step question. This does
+normal private Octo chat with a grounded opener, source links and a natural next step. This does
 not dispatch suggested work; the person can reply normally. A successful run with no new finding
 creates no chat. Delivered topics and legacy accepted/dismissed choices are retained to prevent
 repetition, including when a delivered chat is archived or deleted. Runs and errors remain

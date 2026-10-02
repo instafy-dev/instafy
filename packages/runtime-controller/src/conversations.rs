@@ -119,6 +119,8 @@ pub(crate) struct ConversationRunsQuery {
 pub(crate) struct ProjectConversationsQuery {
     #[serde(default)]
     pub(crate) limit: Option<i64>,
+    #[serde(default)]
+    pub(crate) internal_only: bool,
     #[serde(default, alias = "rootOnly")]
     pub(crate) roots_only: Option<bool>,
     #[serde(default, alias = "parent_conversation_id")]
@@ -133,6 +135,8 @@ pub(crate) struct ProjectConversationsQuery {
 #[serde(rename_all = "camelCase")]
 pub(crate) struct ProjectConversationPayload {
     pub(crate) id: Uuid,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) internal_purpose: Option<&'static str>,
     pub(crate) project_id: Uuid,
     pub(crate) session_id: Option<Uuid>,
     pub(crate) created_by: Option<Uuid>,
@@ -489,6 +493,11 @@ pub(crate) async fn list_project_conversations(
     Query(params): Query<ProjectConversationsQuery>,
 ) -> Result<Json<Vec<ProjectConversationPayload>>, (StatusCode, Json<ApiError>)> {
     let context = authenticate_request(&state.config, &headers).await?;
+    // Cache reconciliation is an interactive-user read, not broader discovery
+    // for scoped runtimes. Existing project and conversation checks still apply.
+    if params.internal_only {
+        crate::auth::require_user_session(&context)?;
+    }
 
     let project_id = Uuid::from_str(project_id_raw.trim())
         .map_err(|_| bad_request("projectId must be a valid UUID"))?;
@@ -602,7 +611,11 @@ pub(crate) async fn list_project_conversations(
 
     let mut where_clauses: Vec<String> = Vec::new();
     where_clauses.push("c.project_id = $1".to_string());
-    where_clauses.push("not public.is_internal_conversation(c.id)".to_string());
+    where_clauses.push(if params.internal_only {
+        "public.is_internal_conversation(c.id)".to_string()
+    } else {
+        "not public.is_internal_conversation(c.id)".to_string()
+    });
 
     let user_id = access_context.user_id;
     if !access_context.is_service_role {
@@ -685,6 +698,8 @@ pub(crate) async fn list_project_conversations(
         })
         .map(|conversation| ProjectConversationPayload {
             id: conversation.id,
+            // Derived from the authoritative SQL filter, never client metadata.
+            internal_purpose: params.internal_only.then_some("space_review"),
             project_id: conversation.project_id,
             session_id: conversation.session_id,
             created_by: conversation.created_by,
@@ -1112,6 +1127,7 @@ pub(crate) async fn update_conversation_metadata(
 
     Ok(Json(ProjectConversationPayload {
         id: updated.id,
+        internal_purpose: None,
         project_id: updated.project_id,
         session_id: updated.session_id,
         created_by: updated.created_by,

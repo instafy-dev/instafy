@@ -632,7 +632,7 @@ pub(crate) async fn create_private_root(
     Ok(conversation_id)
 }
 
-async fn conversation_event_payload(
+pub(crate) async fn conversation_event_payload(
     transaction: &Transaction<'_>,
     conversation_id: &Uuid,
 ) -> ApiResult<serde_json::Value> {

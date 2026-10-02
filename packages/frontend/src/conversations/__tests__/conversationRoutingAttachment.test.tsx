@@ -1,6 +1,6 @@
 /** @vitest-environment jsdom */
 
-import { act, useRef } from "react";
+import { act, useCallback, useRef } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type {
@@ -85,6 +85,7 @@ function ControllerSyncHarness({
   state,
   dispatch,
   fetchProjectConversations,
+  fetchInternalConversations,
   currentUserId = USER_ID,
   syncEpoch = 0,
   updateMetadata = vi.fn(),
@@ -92,12 +93,16 @@ function ControllerSyncHarness({
   state: ConversationsState;
   dispatch: (action: ConversationsAction) => void;
   fetchProjectConversations: () => Promise<ControllerProjectConversation[] | null>;
+  fetchInternalConversations?: () => Promise<ControllerProjectConversation[] | null>;
   currentUserId?: string | null;
   syncEpoch?: number;
   updateMetadata?: (args: { conversationId: string; metadata: Record<string, unknown> }) => Promise<unknown>;
 }) {
   const latestStateRef = useRef(state);
   latestStateRef.current = state;
+  const fetchConversations = useCallback((args: { internalOnly?: boolean }) => args.internalOnly
+    ? fetchInternalConversations?.() ?? Promise.resolve([])
+    : fetchProjectConversations(), [fetchInternalConversations, fetchProjectConversations]);
   useConversationControllerSync({
     state,
     currentUserId,
@@ -108,7 +113,7 @@ function ControllerSyncHarness({
     dispatch,
     controllerConversationSyncEpoch: syncEpoch,
     bumpControllerConversationSyncEpoch: vi.fn(),
-    fetchProjectConversationsFromController: fetchProjectConversations,
+    fetchProjectConversationsFromController: fetchConversations,
     updateControllerConversationMetadata: updateMetadata,
   });
   return null;
@@ -167,6 +172,38 @@ describe("conversation routing during controller attachment", () => {
     });
     container.remove();
     delete (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT;
+  });
+
+  it("retires a reused paused review anchor without a recent run, while preserving the current draft", async () => {
+    const initialState = buildState();
+    initialState.conversations[0].draft = "Keep my unfinished draft";
+    const audit = { ...createInitialConversation({ localId: "cached-audit", controllerId: CONTROLLER_ID }),
+      unreadCount: 1, title: "Old review", pendingRunIds: ["old-run"] };
+    initialState.conversations.push(audit);
+    initialState.runMap = { "old-run": audit.localId };
+    let nextState = initialState;
+    const dispatch = vi.fn<(action: ConversationsAction) => void>((action) => {
+      nextState = conversationsReducer(nextState, action);
+    });
+    await act(async () => root.render(<ControllerSyncHarness state={initialState} dispatch={dispatch}
+      fetchProjectConversations={async () => []}
+      fetchInternalConversations={async () => [{ ...buildRemoteConversation({ title: "Old review" }), internalPurpose: "space_review" }]} />));
+    expect(nextState.conversations).toHaveLength(2);
+    expect(nextState.conversations[1]).toMatchObject({ lifecycleStatus: "hidden", unreadCount: 0, pendingRunIds: [] });
+    expect(nextState.runMap).toEqual({});
+    expect(nextState.activeId).toBe(initialState.activeId);
+    expect(nextState.conversations[0]).toEqual(initialState.conversations[0]);
+    expect(dispatch.mock.calls.some(([action]) => action.type === "CREATE" || action.type === "SELECT")).toBe(false);
+  });
+
+  it("ignores ordinary rows from an older controller that ignores internalOnly, even with forged metadata", async () => {
+    const initialState = buildState();
+    initialState.conversations[0].controllerId = CONTROLLER_ID;
+    const dispatch = vi.fn();
+    await act(async () => root.render(<ControllerSyncHarness state={initialState} dispatch={dispatch}
+      fetchProjectConversations={async () => []}
+      fetchInternalConversations={async () => [buildRemoteConversation({ internalPurpose: "space_review" })]} />));
+    expect(dispatch).not.toHaveBeenCalled();
   });
 
   it.each([false, true])("retires a cached internal anchor's attention while retaining its audit history (audit open: %s)", async (auditOpen) => {

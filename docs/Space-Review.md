@@ -21,6 +21,13 @@ natural continuation and validated links to its sources. An empty space or a run
 creates no chat. Execution history remains available through Automations; the internal review
 anchor is excluded from ordinary chat discovery and activity.
 
+Studio reconciles cached review anchors through a separate user-session-only conversation list
+(`internalOnly=true`, with `rootsOnly=true`), which retains project and private-chat access checks.
+Only its controller-derived top-level `internalPurpose` identifies internal records; older servers
+that ignore this flag cannot cause ordinary chats to be hidden. This lookup does not depend on a
+recent run, so paused reviews and old anchors stay out of ordinary unread and recent-chat views.
+Scoped runtime jobs cannot use this discovery flag.
+
 You can also ask for `$instafy-space-review` in an ordinary chat without creating a schedule.
 For a direct request with insufficient context, the skill asks a short starter question in that
 chat instead of storing an invented finding.
@@ -137,7 +144,11 @@ actual opener, source links, privacy, absence of follow-up jobs and normal chat 
 Test a short reply such as “yes” both when the opener includes the task details and when needed
 details appear only in its linked source. Confirm that continuation uses those details without
 asking the person to repeat the request, and respects the original limits on actions such as
-sending a draft. A successful reply using a detailed opener alone does not prove source lookup.
+sending a draft. Ordinary replies use observed chat titles and native source links; the shared
+runtime response contract keeps raw source UUIDs out of visible prose unless the person requests
+technical identifiers. This guidance also reaches existing provider threads on their next turn,
+without changing workspace skills. A successful reply using a detailed opener alone does not
+prove source lookup.
 Manually inspect grounding, semantic duplicates and absence of unrequested actions; counts alone
 do not prove quality. Missing prerequisites fail an explicit live run; ordinary tests report it
 as ignored.

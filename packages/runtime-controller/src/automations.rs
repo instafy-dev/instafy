@@ -1916,10 +1916,31 @@ async fn create_project_automation(
         .await
         .map_err(|error| internal_error(format!("failed to insert automation: {error}")))?;
 
+    let internal_event = if is_review {
+        Some(
+            crate::recommendations::conversation_event_payload(&transaction, &conversation_id)
+                .await?,
+        )
+    } else {
+        None
+    };
     transaction
         .commit()
         .await
         .map_err(|error| internal_error(format!("failed to commit automation create: {error}")))?;
+
+    if let Some(payload) = internal_event {
+        crate::publish_controller_event_with_conversation(
+            &state.events,
+            "conversation.updated",
+            Some(project_id),
+            None,
+            Some(conversation_id),
+            None,
+            None,
+            payload,
+        );
+    }
 
     Ok(Json(record_to_payload(row_to_record(&inserted))))
 }

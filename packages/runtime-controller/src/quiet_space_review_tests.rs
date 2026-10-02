@@ -114,6 +114,109 @@ fn api<T>(result: Result<T, (StatusCode, Json<ApiError>)>) -> anyhow::Result<T> 
 }
 
 #[tokio::test]
+async fn quiet_space_review_reconciliation_finds_a_paused_reused_anchor_without_recent_runs(
+) -> anyhow::Result<()> {
+    let mut f = Fixture::new().await?;
+    let mut db = f.state.pool.get().await?;
+    let tx = db.transaction().await?;
+    let anchor = api(crate::recommendations::create_private_root(
+        &tx,
+        &f.project,
+        &f.user,
+        "Legacy review",
+    )
+    .await)?;
+    tx.execute("insert into space_review_conversations(user_id,project_id,conversation_id) values($1,$2,$3)", &[&f.user,&f.project,&anchor]).await?;
+    tx.commit().await?;
+    drop(db);
+    let mut events = f.state.events.subscribe();
+    let review = f.create("space_review").await?;
+    assert_eq!(id(&review, "conversationId"), anchor);
+    assert_eq!(review["status"], "paused");
+    let converted = events.try_recv()?;
+    assert_eq!(converted.kind, "conversation.updated");
+    assert_eq!(
+        converted.data["metadata"]["internalPurpose"],
+        "space_review"
+    );
+
+    // More than one normal discovery page, all newer than the legacy anchor.
+    let db = f.state.pool.get().await?;
+    for _ in 0..51 {
+        let conversation = Uuid::new_v4();
+        db.execute("insert into conversations(id,project_id,created_by,root_conversation_id,metadata) values($1,$2,$3,$1,'{}')", &[&conversation,&f.project,&f.user]).await?;
+        db.execute("insert into runs(id,project_id,conversation_id,run_type,status) values($1,$2,$3,'prompt','success')", &[&Uuid::new_v4(),&f.project,&conversation]).await?;
+    }
+    drop(db);
+    let path = format!("/projects/{}/conversations", f.project);
+    let (status, ordinary) = f.request("GET", &path, JsonValue::Null).await?;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(ordinary.as_array().unwrap().len(), 50);
+    assert!(ordinary
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|row| row["id"] != anchor.to_string() && row.get("internalPurpose").is_none()));
+    let internal_path = format!("{path}?internalOnly=true&rootsOnly=true&limit=200");
+    let (status, internal) = f.request("GET", &internal_path, JsonValue::Null).await?;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(internal.as_array().unwrap().len(), 1);
+    assert_eq!(internal[0]["id"], anchor.to_string());
+    assert_eq!(internal[0]["internalPurpose"], "space_review");
+
+    // An interactive teammate still cannot discover the owner's private anchor.
+    let teammate = Uuid::new_v4();
+    ensure_test_user(&f.state.pool, &teammate).await?;
+    f.state
+        .pool
+        .get()
+        .await?
+        .execute(
+            "insert into project_memberships(project_id,user_id,role) values($1,$2,'builder')",
+            &[&f.project, &teammate],
+        )
+        .await?;
+    f.token = api(crate::auth::issue_controller_token(
+        &f.state.config,
+        &teammate,
+    ))?
+    .token;
+    let (status, internal) = f.request("GET", &internal_path, JsonValue::Null).await?;
+    assert_eq!(status, StatusCode::OK);
+    assert!(internal.as_array().unwrap().is_empty());
+
+    // Any scoped token is refused before active-job discovery can widen access.
+    f.token = api(crate::tokens::mint_scoped_token(
+        &f.state.config,
+        crate::tokens::ScopedTokenRequest {
+            audience: Uuid::new_v4().to_string(),
+            subject: f.user.to_string(),
+            project_id: f.project.to_string(),
+            origin_id: None,
+            runtime_id: None,
+            protocol: None,
+            scopes: vec!["prompt.execute".into()],
+            lease_id: None,
+            run_id: None,
+            prefer_runtime: None,
+            ttl_seconds: Some(300),
+        },
+    ))?
+    .token;
+    assert_eq!(
+        f.request("GET", &internal_path, JsonValue::Null).await?.0,
+        StatusCode::UNAUTHORIZED
+    );
+    f.state
+        .pool
+        .get()
+        .await?
+        .execute("delete from auth.users where id=$1", &[&teammate])
+        .await?;
+    f.cleanup().await
+}
+
+#[tokio::test]
 async fn quiet_space_review_is_opt_in_private_unique_and_immutable() -> anyhow::Result<()> {
     let f = Fixture::new().await?;
     let ordinary = f.create("prompt").await?;

@@ -2791,6 +2791,13 @@ const SECRET_REJECTION_CONTRACT: &str = "\
 - When the service or the skill's check rejects a value the space already holds (not a permission error on one resource), emit `request_secret` again for every value that rejection could be about, even if the person says they already replaced them in Secrets.\n\
 - `request_secret`: { type, name, optional valueLabel, description, whereToGet, skill, sensitive, agentHandles }\n";
 
+/// Native reference syntax is a Studio output contract, independent of which
+/// skill or response lane supplies the work. Include it on restored turns too:
+/// an existing provider thread may predate this guidance.
+const CHAT_REFERENCE_CONTRACT: &str = "\nChat references in replies:\n\
+- Use the source's observed title in prose. With its accessible ID, write `[[conversation:<id>|<actual chat title>]]` outside code formatting. Use `Source chat` when untitled; never invent titles or links.\n\
+- Show raw conversation, message or run UUIDs in prose or labels only when the user explicitly asks for technical identifiers. Keep IDs in link targets, tool arguments and API fields. If title or link is unavailable, describe the source.\n";
+
 /// Keeps a skill setup going on follow-up turns. The full Studio contract
 /// states this rule, but only the first turn of a thread gets that contract.
 /// Later turns get the compact reminder of a restored thread, the direct
@@ -8105,6 +8112,13 @@ Avoid creating dependency caches or stores in the canonical workspace root when 
                 &prompt[response_contract_start..],
             );
         }
+
+        append_prompt_section(
+            &mut prompt,
+            &mut prompt_section_metrics,
+            "chatReferences",
+            CHAT_REFERENCE_CONTRACT,
+        );
 
         // Workers, lead checkpoints and planning turns act on work already
         // handed to them, so they do not carry the setup on to its next step.
@@ -19052,9 +19066,11 @@ mod tests {
         let prompt_tokens = estimate_prompt_token_count(&prompt_text);
         // The budget was 1,350 with the path included. The secret-rejection
         // block added about 100 tokens, because follow-up turns are where a
-        // rejected value gets reported. Raise it again only on purpose.
+        // rejected value gets reported. The shared chat-reference contract adds
+        // up to 125 tokens, including for threads begun before a runtime upgrade.
+        // Raise it again only on purpose.
         assert!(
-            prompt_tokens < 1_425,
+            prompt_tokens < 1_550,
             "compact restored prompt was unexpectedly large: {prompt_tokens} estimated tokens, {} chars without the workspace path",
             prompt_text.len()
         );
@@ -19266,6 +19282,103 @@ mod tests {
             response_contract_tokens < 650,
             "planning response contract should stay compact, got {response_contract_tokens}"
         );
+    }
+
+    #[test]
+    fn ordinary_reply_prompts_share_readable_chat_references_across_lanes() {
+        // A short reply to an ordinary chat must get the format contract even
+        // without a review skill in the workspace or in the selected skills.
+        // Restored provider threads must receive it again after a runtime upgrade.
+        for lane in ["full", "restored", "cross_chat", "write"] {
+            let tmp = tempdir().expect("temp dir");
+            let processor = test_job_processor(tmp.path());
+            let project_id = Uuid::new_v4();
+            let mut job = test_lease_job(
+                Some("feature"),
+                json!({
+                    "metadata": {},
+                    "conversation_history": [{
+                        "role": "assistant",
+                        "content": "We can resume the workshop invitation draft using [[conversation:00000000-0000-4000-8000-000000000001|Workshop planning]]."
+                    }]
+                }),
+            );
+            job.project_id = Some(project_id);
+            if lane == "cross_chat" {
+                job = job_with_agent_routing_preflight(
+                    &job,
+                    &test_agent_routing_preflight(
+                        AgentRoutingPreflightRoute::CrossChatLookup,
+                        true,
+                        false,
+                    ),
+                );
+            } else if lane == "write" {
+                job.payload["metadata"]["runtimeExpectations"] =
+                    json!({"workspaceFileChanges": true});
+            }
+            let provider_state = json!({
+                "defaultThreadId": "existing-thread-before-upgrade",
+                "historyReplayRequired": false
+            });
+            let (prompt, _, metrics) = processor
+                .build_prompt_with_text(
+                    &project_id,
+                    &job,
+                    tmp.path(),
+                    "yes",
+                    true,
+                    (lane == "restored").then_some(&provider_state),
+                    &[],
+                    None,
+                    None,
+                )
+                .expect("prompt should build");
+
+            assert_eq!(
+                prompt.matches("Chat references in replies:").count(),
+                1,
+                "{lane}"
+            );
+            assert!(prompt.contains("source's observed title"), "{lane}");
+            assert!(
+                prompt.contains("[[conversation:<id>|<actual chat title>]]"),
+                "{lane}"
+            );
+            assert!(prompt.contains("outside code formatting"), "{lane}");
+            assert!(
+                prompt.contains("only when the user explicitly asks for technical identifiers"),
+                "{lane}"
+            );
+            assert!(
+                prompt.contains("Keep IDs in link targets, tool arguments and API fields"),
+                "{lane}"
+            );
+            assert!(prompt.contains("Latest user request:\nyes"), "{lane}");
+            assert!(
+                metrics["promptSections"]["chatReferences"]["chars"]
+                    .as_u64()
+                    .unwrap()
+                    > 0,
+                "{lane}"
+            );
+            assert!(
+                metrics["promptSections"]["chatReferences"]["estimatedTokens"]
+                    .as_u64()
+                    .unwrap()
+                    <= 125,
+                "{lane}"
+            );
+            assert!(!prompt.contains("# Space review"), "{lane}");
+            match lane {
+                "restored" => assert_eq!(metrics["promptMode"], "stateful_compact"),
+                "cross_chat" => {
+                    assert!(prompt.contains("Cross-chat context recovery response contract"))
+                }
+                "write" => assert!(prompt.contains("Direct workspace-change response contract")),
+                _ => assert!(prompt.contains("Please follow these constraints")),
+            }
+        }
     }
 
     #[test]
