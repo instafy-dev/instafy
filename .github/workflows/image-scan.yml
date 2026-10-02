@@ -1,11 +1,12 @@
 name: Image scan
 
 # Builds and Trivy-scans every image the protected-main publishers release:
-# the four runtime flavor/architecture cells of publish-runtime-agent.yml and
-# the seven services of publish-production-services.yml, with the same
-# Dockerfiles, targets, platforms, build arguments, pinned Trivy and scan
-# flags. A broken package pin or a newly fixable HIGH/CRITICAL finding then
-# shows up here instead of in the middle of a release.
+# the two amd64 runtime cells of publish-runtime-agent.yml, the two arm64
+# runtime cells of publish-runtime-agent-multiarch.yml and the seven services
+# of publish-production-services.yml, with the same Dockerfiles, targets,
+# platforms, build arguments, pinned Trivy and scan flags. A broken package pin
+# or a newly fixable HIGH/CRITICAL finding then shows up here instead of in the
+# middle of a release.
 #
 # Nothing here logs in to a registry, pushes, tags a registry reference or
 # writes a cache. The runtime build reads the publisher's layer cache
@@ -14,7 +15,8 @@ name: Image scan
 # Nightly and manual runs on main report to one tracking issue. Pull requests
 # that change image inputs run the same cells with a read-only token and no
 # reporting. scripts/check-image-scan-workflow.test.mjs derives the cells, the
-# build inputs and the scan from the publishers, so this file cannot drift.
+# build inputs and the scan from all three publishers, so this file cannot
+# drift.
 
 on:
   schedule:
@@ -55,6 +57,7 @@ on:
       - "scripts/check-production-image-inputs.test.mjs"
       - "scripts/check-image-scan-workflow.test.mjs"
       - ".github/workflows/publish-runtime-agent.yml"
+      - ".github/workflows/publish-runtime-agent-multiarch.yml"
       - ".github/workflows/publish-production-services.yml"
       - ".github/workflows/image-scan.yml"
 
@@ -76,6 +79,8 @@ jobs:
       contents: read
     strategy:
       # Every cell reports: one failing architecture must not hide another.
+      # The amd64 cells mirror publish-runtime-agent.yml and the arm64 cells
+      # mirror publish-runtime-agent-multiarch.yml.
       fail-fast: false
       matrix:
         include:

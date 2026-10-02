@@ -120,6 +120,8 @@ This boundary is fail-closed for existing unattested self-hosted rows. Before th
 
 No schema reset is required. The attestation lives in the existing protected runtime capabilities, while the controller's live authorization paths quarantine anything without a valid owner. Additive migration `20260000000057` removes project-member reads from raw runtime/origin operational tables so those checks cannot be bypassed through Supabase.
 
+Published runtime images are scanned before they are pushed, separately for each architecture: the production release scans its amd64 images, and the arm64 lane scans its arm64 images and re-scans the reused amd64 images before it creates a multi-arch tag. See [GHCR publication](../packages/runtime-agent/README.md#ghcr-publication) for which tags exist for a commit.
+
 ## Focused validation
 
 ```bash
