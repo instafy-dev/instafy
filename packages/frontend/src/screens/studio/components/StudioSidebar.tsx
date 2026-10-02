@@ -86,6 +86,11 @@ export interface StudioSidebarProps {
   workspaceSwitcherHeaderPortalTarget?: HTMLElement | null;
   onRequestClose?: () => void;
   mobileOverlay?: boolean;
+  mobileSheet?: boolean;
+  /** Bottom navigation can replace tools/account with a focused chat switcher. */
+  mobileSheetContent?: ReactNode;
+  /** The sheet shell places the shared New chat control after Search. */
+  navigationActionsPortalTarget?: HTMLElement | null;
   selectedOrgKey?: string;
   onOpenTeam?: (orgKey: string) => void;
   onReturnToTeam?: (orgKey: string) => void;
@@ -99,6 +104,8 @@ export interface StudioSidebarProps {
   navigationHeaderPortalTarget?: HTMLElement | null;
   /** The surrounding shell provides the team and space context header. */
   navigationHeaderExternal?: boolean;
+  /** The mobile shell owns the close button at the same position as its opener. */
+  navigationToggleExternal?: boolean;
   compactContextHeader?: boolean;
   renderNavigationHeader?: (context: StudioNavigationContext) => ReactNode;
   onNavigationHeaderAction?: () => void;
@@ -120,6 +127,9 @@ export function StudioSidebar({
   workspaceSwitcherHeaderPortalTarget,
   onRequestClose,
   mobileOverlay = false,
+  mobileSheet = false,
+  mobileSheetContent,
+  navigationActionsPortalTarget,
   selectedOrgKey,
   onOpenTeam,
   onReturnToTeam,
@@ -131,6 +141,7 @@ export function StudioSidebar({
   navigationPresentation = "tiles",
   navigationHeaderPortalTarget = null,
   navigationHeaderExternal = false,
+  navigationToggleExternal = false,
   compactContextHeader = false,
   renderNavigationHeader,
   onNavigationHeaderAction,
@@ -288,7 +299,7 @@ export function StudioSidebar({
   );
   const showInlineMoreItems = inlineMoreItems.length > 0;
   const sidebarMobileDrillInOpen = workspaceSwitcherOpen || moreMobileViewOpen;
-  const mobileExpandedWidthClass = externalHeader
+  const mobileExpandedWidthClass = mobileSheet ? "w-full" : externalHeader
     ? "w-[min(22rem,calc(100vw-2rem))]"
     : sidebarMobileDrillInOpen
     ? "w-[clamp(18rem,65vw,24rem)]"
@@ -1015,11 +1026,11 @@ export function StudioSidebar({
   };
   const headerNewChat = canStartHeaderChat ? <StudioNewChatButton
     testId="sidebar-new-chat" size="sm" radius="lg"
-    label={desktopRail && !showLabels ? undefined : "New chat"}
+    label={mobileSheet || desktopRail && !showLabels ? undefined : "New chat"}
     isDisabled={mobileDrillInOpen}
     dismissalKey={JSON.stringify([activeOrgKey, activeProjectId, activePanel, navigationPage, mobileDrillInOpen])}
     runAction={runHeaderChatAction}
-    className={desktopRail && !showLabels
+    className={mobileSheet ? "!h-12 !w-11 !min-h-12 !min-w-11 shrink-0" : desktopRail && !showLabels
       ? "!h-11 !w-11 !min-h-11 !min-w-11 shrink-0"
       : "!h-11 !w-auto !min-h-11 min-w-0 flex-1 justify-start gap-2 px-3"}
   /> : null;
@@ -1054,10 +1065,11 @@ export function StudioSidebar({
       }}
       onBrowseAll={() => { onNavigationHeaderAction?.(); openWorkspaceSwitcher("spaces"); }}
       presentation={pathControls ? "path" : "inline"}
+      compactPath={mobileSheet}
       collapsed={!externalHeader && !showLabels}
       expanded={recentSpacesExpanded}
       onExpandedChange={setRecentSpacesExpanded}
-      rowClassName={pathControls ? desktopRail ? `gap-1 ${compactContextHeader ? "!px-2" : "!px-1"} min-h-9` : "!px-2 !min-h-12" : `${sidebarRowLayoutClass} ${getSidebarRowToneClass(workspaceSwitcherOpen && workspaceSwitcherMode === "spaces")}`}
+      rowClassName={pathControls ? desktopRail ? `gap-1 ${compactContextHeader ? "!px-2" : "!px-1"} min-h-9` : `${mobileSheet ? "!px-1" : "!px-2"} !min-h-12` : `${sidebarRowLayoutClass} ${getSidebarRowToneClass(workspaceSwitcherOpen && workspaceSwitcherMode === "spaces")}`}
       iconClassName={pathControls ? "flex h-5 w-5 shrink-0 items-center justify-center" : getSidebarNavIconClass(workspaceSwitcherOpen && workspaceSwitcherMode === "spaces")}
       triggerRef={spaceTriggerRef}
     />
@@ -1165,6 +1177,7 @@ export function StudioSidebar({
   return (
     <>
       {navigationHeaderPortalTarget ? createPortal(renderNavigationHeader ? renderNavigationHeader({ team: teamMenu, space: spaceControl, teamName: activeOrgName, accentColor: activeOrgAccentColor, onBrowseTeams: () => { onNavigationHeaderAction?.(); openWorkspaceSwitcher(); } }) : navigationPath, navigationHeaderPortalTarget) : null}
+      {mobileSheet && navigationActionsPortalTarget ? createPortal(headerNewChat, navigationActionsPortalTarget) : null}
       {desktopRail ? <StudioOrganizationRail
         organizations={orgDeckTeams} selectedOrgKey={activeOrgKey}
         pendingOrgKey={mergedProjectsError ? null : pendingOrgSwitchKey}
@@ -1236,10 +1249,24 @@ export function StudioSidebar({
           {!externalHeader && showLabels ? pathHeader ? navigationPath : teamMenu : null}
         </div> : null}
         {desktopRail && !showLabels && headerNewChat ? <div className="flex shrink-0 justify-center">{headerNewChat}</div> : null}
-        {!desktopRail ? <div
-          className={`shrink-0 gap-x-1 px-1 py-1 ${pathHeader ? "flex items-center border-b border-slate-200/70 dark:border-[color:var(--color-studio-dark-divider)]" : "flex items-center gap-y-1"} ${showLabels ? "min-h-14" : "flex-col"} ${externalHeader ? "flex-row-reverse" : ""}`}
+        {!desktopRail && !mobileSheet ? <div
+          className={`shrink-0 gap-x-1 px-1 py-1 ${pathHeader ? "flex items-center border-b border-slate-200/70 dark:border-[color:var(--color-studio-dark-divider)]" : "flex items-center gap-y-1"} ${showLabels ? "min-h-14" : "flex-col"} ${externalHeader && !navigationToggleExternal ? "flex-row-reverse" : ""}`}
           inert={mobileDrillInOpen || undefined} aria-hidden={mobileDrillInOpen || undefined}
           data-testid="sidebar-team-header">
+          {externalHeader && navigationToggleExternal ? <Button variant="ghost" size="sm" radius="lg"
+            onPress={() => {
+              resetWorkspaceSwitcher();
+              closeMoreMenu();
+              runDestination(() => onSelect("home"));
+            }}
+            data-testid="sidebar-home-button"
+            aria-current={activePanel === "home" ? "page" : undefined}
+            aria-label="Home — all teams" title="Home — all teams"
+            className="!min-h-12 shrink-0 gap-2 px-3 aria-[current=page]:bg-primary-50 dark:aria-[current=page]:bg-primary-500/10">
+            <span aria-hidden="true"><OctoMark className="h-6 w-6 text-brand-ink dark:text-brand-paper" /></span>
+            <span>Home</span>
+            <AttentionBadge count={homeAttentionCount} testId="sidebar-home-badge" aria-hidden />
+          </Button> : null}
           {externalHeader ? headerNewChat ?? <span className="min-w-0 flex-1" aria-hidden="true" /> : <>
           <IconButton variant="ghost" size="sm" radius="lg"
             onPress={() => {
@@ -1257,15 +1284,18 @@ export function StudioSidebar({
           </IconButton>
           {pathHeader ? navigationPath : teamMenu}
           </>}
-          <IconButton variant="ghost" size="sm"
+          {!navigationToggleExternal ? <IconButton variant="ghost" size="sm"
             aria-label={onRequestClose ? "Close navigation" : showLabels ? "Collapse sidebar" : "Expand sidebar"}
             title={onRequestClose ? "Close navigation" : showLabels ? "Collapse sidebar" : "Expand sidebar"}
             data-testid="sidebar-drawer-toggle" onPress={onRequestClose ?? onToggleSidebar}
             isDisabled={!onRequestClose && !onToggleSidebar} className="!min-h-12 !min-w-12 shrink-0">
             {onRequestClose || showLabels ? <SidebarCollapse className="h-[18px] w-[18px]" aria-hidden="true" /> : <SidebarExpand className="h-[18px] w-[18px]" aria-hidden="true" />}
-          </IconButton>
+          </IconButton> : null}
         </div> : null}
-        <ul className="min-h-0 flex-1 space-y-1 overflow-y-auto overflow-x-hidden pb-2" data-testid="sidebar-context-scroll"
+        {mobileSheet && mobileSheetContent ? <div className="min-h-0 flex-1 overflow-y-auto overflow-x-hidden p-2" data-testid="sidebar-chat-switcher"
+          inert={mobileDrillInOpen || undefined} aria-hidden={mobileDrillInOpen || undefined}>
+          {mobileSheetContent}
+        </div> : <ul className="min-h-0 flex-1 space-y-1 overflow-y-auto overflow-x-hidden pb-2" data-testid="sidebar-context-scroll"
           inert={mobileDrillInOpen || undefined} aria-hidden={mobileDrillInOpen || undefined}>
           {desktopRail && !showLabels && !externalHeader ? <li>{teamMenu}</li> : null}
           {!pathControls ? <li className="border-t border-slate-200/70 pt-1 dark:border-[color:var(--color-studio-dark-divider)]">
@@ -1392,9 +1422,9 @@ export function StudioSidebar({
               {showLabels ? "New space" : <span className={getSidebarNavIconClass(false)}><Plus className="h-5 w-5" aria-hidden="true" /></span>}
             </Button> : null}
           </li>}
-      </ul>
+      </ul>}
 
-      {!desktopRail ? <div className="shrink-0" data-testid="sidebar-account-navigation"
+      {!desktopRail && !(mobileSheet && mobileSheetContent) ? <div className="shrink-0" data-testid="sidebar-account-navigation"
         inert={mobileDrillInOpen || undefined} aria-hidden={mobileDrillInOpen || undefined}>
         {accountSection}
       </div> : null}

@@ -28,7 +28,6 @@
 .studio-desktop-context-column { width: calc(var(--studio-context-column-width) - var(--studio-context-inset) - 8px); min-width: 0; flex: none; display: flex; align-items: center; gap: 4px; }
 .studio-context-slot { min-width: 0; flex: 0 1 auto; }
 .studio-desktop-context { display: flex; align-items: center; gap: 4px; min-width: 0; }
-.studio-desktop-context-separator { flex: none; color: var(--color-slate-400); }
 /* Keep spare column width outside the control; long names can still shrink. */
 .studio-desktop-context [data-testid="sidebar-space-button"] { flex: 0 1 auto; }
 /* The middle header ends exactly where its docked pane ends. When navigation
@@ -82,4 +81,129 @@
   .studio-context-slot .studio-search-field { min-height: 48px; }
   .studio-context-header .studio-desktop-search-trigger { min-height: 44px; min-width: 44px; }
   .studio-desktop-context .studio-breadcrumb-trigger { min-height: 44px; }
+}
+
+.studio-org-context-name { flex: none; max-width: 180px; padding: 0 8px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; font-weight: 600; color: var(--org-ink); }
+.studio-context-header[data-org-accent] .studio-desktop-tabbar { border-bottom-color: transparent; }
+.studio-context-header[data-org-accent] .studio-desktop-drawer-header { background: transparent; }
+@media (max-width: 1279px) { .studio-org-context-name { display: none; } }
+
+/* The header and inner rail share one flat surface. The working area's
+   outline turns through the inside corner without cutting across navigation. */
+.studio-context-layout[data-linked-navigation="true"] {
+  --studio-navigation-bend: 14px;
+  --studio-navigation-divider: var(--color-slate-200);
+  --studio-navigation-surface: var(--color-slate-50);
+  --studio-organization-surface: var(--color-slate-100);
+  --studio-working-surface: white;
+}
+.dark .studio-context-layout[data-linked-navigation="true"] {
+  --studio-navigation-divider: var(--color-studio-dark-divider);
+  --studio-navigation-surface: var(--color-studio-dark-rail);
+  --studio-organization-surface: var(--color-studio-dark-canvas);
+  --studio-working-surface: var(--color-studio-dark-panel);
+}
+.studio-context-layout[data-linked-navigation="true"] .studio-context-header.org-context-tint {
+  --studio-header-navigation-width: var(--studio-context-column-width);
+  border-bottom: 0;
+  border-bottom-left-radius: var(--studio-navigation-bend);
+  background: var(--studio-navigation-surface);
+}
+.studio-context-layout[data-linked-navigation="true"] .studio-context-header[data-navigation-collapsed="true"] {
+  --studio-header-navigation-width: 4rem;
+}
+.studio-context-layout[data-linked-navigation="true"] .studio-context-header::before {
+  content: "";
+  position: absolute;
+  pointer-events: none;
+  z-index: -1;
+  left: calc(var(--studio-header-navigation-width) + var(--studio-navigation-bend));
+  right: 0;
+  bottom: -1px;
+  height: 1px;
+  background: var(--studio-navigation-divider);
+}
+/* Continue the rail's right edge into the underside of the header with an
+   inside curve. Anchor it to the header so the rail's overflow cannot clip it. */
+.studio-context-layout[data-linked-navigation="true"] .studio-context-header::after {
+  content: "";
+  position: absolute;
+  pointer-events: none;
+  left: calc(var(--studio-header-navigation-width) - 1px);
+  top: 100%;
+  width: calc(var(--studio-navigation-bend) + 1px);
+  height: calc(var(--studio-navigation-bend) + 1px);
+  background: radial-gradient(circle at bottom right,
+    transparent calc(var(--studio-navigation-bend) - 0.5px),
+    var(--studio-navigation-divider) var(--studio-navigation-bend),
+    var(--studio-navigation-divider) calc(var(--studio-navigation-bend) + 0.5px),
+    var(--studio-navigation-surface) calc(var(--studio-navigation-bend) + 1px));
+}
+.studio-context-layout[data-linked-navigation="true"] [data-testid="sidebar-organization-rail"],
+.studio-context-layout[data-linked-navigation="true"] [data-testid="sidebar-organization-rail"] > [data-rail-surface],
+.studio-context-layout[data-linked-navigation="true"] [data-testid="sidebar-context-navigation"] > [data-rail-surface] {
+  border-right: 0;
+}
+.studio-context-layout[data-linked-navigation="true"] [data-testid="sidebar-context-navigation"] {
+  isolation: isolate;
+  border-right: 0;
+  background: var(--studio-working-surface);
+}
+.studio-context-layout[data-linked-navigation="true"] [data-testid="sidebar-context-navigation"] > [data-rail-surface] {
+  background: transparent;
+}
+.studio-context-layout[data-linked-navigation="true"] [data-testid="sidebar-context-navigation"]::before,
+.studio-context-layout[data-linked-navigation="true"] [data-testid="sidebar-context-navigation"]::after {
+  content: "";
+  position: absolute;
+  pointer-events: none;
+  z-index: -1;
+  inset: 0;
+}
+.studio-context-layout[data-linked-navigation="true"] [data-testid="sidebar-context-navigation"]::before {
+  background: var(--studio-navigation-surface);
+}
+.studio-context-layout[data-linked-navigation="true"] [data-testid="sidebar-context-navigation"]::after {
+  top: var(--studio-navigation-bend);
+  border-right: 1px solid var(--studio-navigation-divider);
+}
+
+/* A flat neutral bridge connects the selected team to its controls. The
+   wider, eased shoulders flow into the 64px rail edge instead of ending as
+   a colored button. Keep the actual logo's identity color and focus ring. */
+.studio-context-layout[data-linked-navigation="true"] [data-testid="sidebar-organization-rail"],
+.studio-context-layout[data-linked-navigation="true"] [data-testid="sidebar-organization-rail"] > [data-rail-surface] {
+  background: var(--studio-organization-surface);
+}
+.studio-context-layout[data-linked-navigation="true"] [data-testid="sidebar-team-rail-list"] {
+  padding-block: 16px;
+}
+.studio-context-layout[data-linked-navigation="true"] [data-testid="sidebar-organization-rail"] .org-accent-selection[aria-current="page"] {
+  isolation: isolate;
+  background: transparent;
+}
+.studio-context-layout[data-linked-navigation="true"] [data-testid="sidebar-organization-rail"] .org-accent-selection[aria-current="page"] > .org-accent-marker {
+  background: var(--color-slate-500);
+}
+.studio-context-layout[data-linked-navigation="true"] [data-testid="sidebar-organization-rail"] .org-accent-selection[aria-current="page"]::after {
+  content: "";
+  position: absolute;
+  pointer-events: none;
+  z-index: -1;
+  left: -10px;
+  top: -14px;
+  width: 64px;
+  height: 72px;
+  clip-path: path("M 64 0 C 64 11 58 14 44 14 H 20 C 10 14 6 20 6 30 V 42 C 6 52 10 58 20 58 H 44 C 58 58 64 61 64 72 Z");
+  background: var(--studio-navigation-surface);
+}
+@media (forced-colors: active) {
+  .studio-context-layout[data-linked-navigation="true"],
+  .dark .studio-context-layout[data-linked-navigation="true"] {
+    --studio-navigation-surface: Canvas;
+    --studio-organization-surface: Canvas;
+  }
+  .studio-context-layout[data-linked-navigation="true"] [data-testid="sidebar-organization-rail"] .org-accent-selection[aria-current="page"]::after {
+    display: none;
+  }
 }

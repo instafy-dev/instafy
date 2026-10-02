@@ -67,10 +67,10 @@ describe("production Shared modal resume selection", () => {
     window.matchMedia = vi.fn().mockReturnValue({ matches: false, addEventListener: vi.fn(), removeEventListener: vi.fn(), addListener: vi.fn(), removeListener: vi.fn() });
   });
   afterEach(async () => { await act(async () => root.unmount()); await finishFocusRestoration(); container.remove(); vi.restoreAllMocks(); vi.unstubAllGlobals(); delete (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT; });
-  async function render(resumeRuntimeId: string | null, canControlBrowser = true, canClearBrowserData = false) {
+  async function render(resumeRuntimeId: string | null, canControlBrowser = true, canClearBrowserData = false, transportActive = true) {
     await act(async () => { root.render(<BrowserSessionModal isOpen onOpenChange={vi.fn()} projectId={projectId}
       currentUserId="user-1" preferRuntimeId={null} resumeRuntimeId={resumeRuntimeId} onRuntimeIdResolved={onResolved}
-      presentation="docked" fillContainer canControlBrowser={canControlBrowser} canClearBrowserData={canClearBrowserData}
+      presentation="docked" fillContainer transportActive={transportActive} canControlBrowser={canControlBrowser} canClearBrowserData={canClearBrowserData}
       sharedBrowserCapabilitiesResolved={false} />); });
   }
   async function finishFocusRestoration() {
@@ -96,6 +96,29 @@ describe("production Shared modal resume selection", () => {
     expect(document.activeElement).toBe(trigger);
     expect(trigger.getAttribute("aria-expanded")).toBe("false");
   });
+  it("dismisses a portalled options menu when its retained Browser view becomes hidden", async () => {
+    mocks.fetchStatus.mockResolvedValue({ runtimes: [entry(firstId)] });
+    await render(firstId);
+    await act(async () => document.querySelector<HTMLButtonElement>('[data-testid="shared-browser-sessions-toggle"]')!.click());
+    expect(document.querySelector('[role="dialog"][aria-label="Browser options"]')).not.toBeNull();
+    await render(firstId, true, false, false);
+    expect(document.querySelector('[role="dialog"][aria-label="Browser options"]')).toBeNull();
+    await render(firstId);
+    expect(document.querySelector('[role="dialog"][aria-label="Browser options"]')).toBeNull();
+  });
+
+  it("does not open options when background session discovery completes after hiding Browser", async () => {
+    let resolveStatus!: (value: { runtimes: ReturnType<typeof entry>[] }) => void;
+    mocks.fetchStatus.mockReturnValue(new Promise(resolve => { resolveStatus = resolve; }));
+    await render(null);
+    await render(null, true, false, false);
+    await act(async () => resolveStatus({ runtimes: [entry(firstId), entry(secondId)] }));
+    expect(document.querySelector('[role="dialog"][aria-label="Browser options"]')).toBeNull();
+    await render(null);
+    expect(document.querySelector('[role="dialog"][aria-label="Browser options"]')).toBeNull();
+    expect(mocks.ensure).not.toHaveBeenCalled();
+  });
+
   it("reveals and focuses the resume link when clipboard copying fails", async () => {
     mocks.fetchStatus.mockResolvedValue({ runtimes: [entry(firstId)] });
     mocks.writeClipboardText.mockRejectedValue(new Error("Clipboard unavailable"));

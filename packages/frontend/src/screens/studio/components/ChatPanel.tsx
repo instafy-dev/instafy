@@ -340,7 +340,8 @@ import { LazyBrowserSessionModal } from "./LazyBrowserSessionModal";
 import type { SharedBrowserChromeProps } from "./SharedBrowserChrome";
 import { resolveSharedBrowserViewerKind } from "./sharedBrowserViewer";
 import { LocalBrowserSharing, LocalBrowserTabPublisher } from "./LocalBrowserSharing";
-import { ConversationSurfaceLayout, type ConversationSurface } from "../../../workspace/ConversationSurfaceLayout";
+import { ConversationSurfaceLayout, ConversationSurfaceTabs, type ConversationSurface } from "../../../workspace/ConversationSurfaceLayout";
+import { ConversationWorkspaceViews } from "../../../workspace/ConversationWorkspaceViews";
 import { ConversationFileContext } from "../../../workspace/ConversationFileContext";
 import { conversationSurfaceScope, closeConversationFile, conversationFileLabel, openConversationFile, selectConversationView } from "../../../workspace/conversationSurfaces";
 import type { OpenWorkspaceFileEventDetail } from "./useFilesPanelViewerState";
@@ -779,7 +780,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
   const handleBackToChat = useCallback(() => {
     setBrowserSubtab("chat");
   }, [setBrowserSubtab]);
-  const { onOpenProjectSettings, onOpenChatNavigation, chatNavigationLabel, homeAttentionCount = 0 } = useWorkspaceControls();
+  const { onOpenProjectSettings, onOpenChatNavigation, homeAttentionCount = 0 } = useWorkspaceControls();
   const activeConversationEntry = useMemo(() => {
     if (!activeConversationId) {
       return null;
@@ -1124,6 +1125,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     setPreparedEmailInviteFromCommand(null);
   }, []);
   const { tabs: workspaceTabs, keepTabOpen, openPanelTab, openConversationTab, openJobThreadTab, requestUrlPush } = useWorkspaceTabs();
+  const hasComposerViewNavigation = showComposerNavigationButton && (hasResources || (conversationWorkspace && workspaceTabs.some(tab => tab.workspaceOwner?.conversationId === activeConversationId)));
   const { keepComposerTabOpen, keepComposerTabOpenForEdit } = useChatComposerPreviewTab({
     conversationId: activeConversationId,
     inputValue,
@@ -6031,7 +6033,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
       data-testid="chat-panel-root"
     >
       <ConversationSurfaceLayout
-        showTabs={!conversationWorkspace}
+        showTabs={!conversationWorkspace && !showComposerNavigationButton}
         chatPanelId={chatPanelId}
         activeId={activeSurfaceId} resourceId={resourceId}
         split={splitSurfaces} wide={wideSurfaces} ratio={surfaces.ratio}
@@ -6081,6 +6083,11 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
       <CredentialsConnectModal {...gettingStartedConnectModalProps} />
 
       <ChatComposerSurface
+        viewNavigation={hasComposerViewNavigation ? conversationWorkspace ? <ConversationWorkspaceViews placement="composer" /> : <ConversationSurfaceTabs
+          presentation="composer" chatPanelId={chatPanelId} resources={resourceTabs}
+          activeId={activeSurfaceId} resourceId={resourceId} split={false} wide={false} ratio={surfaces.ratio}
+          onSelect={handleBrowserSubtabChange} onSplitChange={split => updateSurfaces(surfaceScope, state => ({ ...state, split }))}
+        /> : null}
         overlayWidth={splitSurfaces ? `calc((1 - var(--conversation-resource-ratio, ${surfaces.ratio})) * 100%)` : undefined}
         aboveComposer={hasNewMessages ? <ChatNewMessagesButton onPress={jumpToNewMessages} /> : null}
         mutationDisabled={projectWriteDisabled}
@@ -6186,8 +6193,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
         voiceStatusMessage={voiceStatusMessage}
         providerTriggerNoticeProps={providerTriggerNoticeProps}
         showComposerNavigationButton={showComposerNavigationButton && Boolean(onOpenChatNavigation)}
-        composerNavigationDestination={touchLikeInput ? "chats" : "drawer"}
-        composerNavigationLabel={chatNavigationLabel}
+        composerNavigationDestination="sheet"
         onOpenNavigation={() => onOpenChatNavigation?.()}
         homeAttentionCount={homeAttentionCount}
         homeAttentionBadge={homeAttentionBadge}

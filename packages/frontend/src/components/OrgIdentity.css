@@ -33,3 +33,15 @@
   .org-accent-choice:has(:focus-visible) { outline-color: Highlight; }
   .org-accent-swatch { forced-color-adjust: none; }
 }
+
+/* The organization colors only navigation chrome; working surfaces stay neutral. */
+.org-context-tint[data-org-accent], .dark .org-context-tint[data-org-accent] {
+  background: var(--org-tint);
+  border-bottom-color: var(--org-avatar);
+}
+@media (forced-colors: active) {
+  .org-context-tint[data-org-accent], .dark .org-context-tint[data-org-accent] {
+    background: Canvas;
+    border-bottom-color: CanvasText;
+  }
+}

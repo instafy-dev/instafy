@@ -2,6 +2,7 @@ import { useCallback, useEffect, useLayoutEffect, useRef, useState, type SetStat
 import { useLocation, useNavigate } from "react-router-dom";
 import { getStudioVisitKey } from "../navigation/studioVisit";
 
+export type MobileSidebarPresentation = "side" | "bottom";
 export type MobileSidebarView = "sidebar" | "workspace" | "more";
 interface SidebarEntry {
   version: 1;
@@ -10,6 +11,7 @@ interface SidebarEntry {
   baseIndex: number;
   depth: 1 | 2;
   view: MobileSidebarView;
+  presentation?: MobileSidebarPresentation;
 }
 export const MOBILE_SIDEBAR_STATE_KEY = "instafySidebar";
 const TRANSITION_TIMEOUT_MS = 2_000;
@@ -32,7 +34,8 @@ export function readMobileSidebarEntry(
   historyIndex: unknown,
 ): SidebarEntry | null {
   const value = record(record(state)[MOBILE_SIDEBAR_STATE_KEY]);
-  if (!scopeKey || value.version !== 1 || value.scopeKey !== scopeKey ||
+  if ((value.presentation !== undefined && value.presentation !== "side" && value.presentation !== "bottom") ||
+      !scopeKey || value.version !== 1 || value.scopeKey !== scopeKey ||
       typeof value.baseKey !== "string" || !value.baseKey || value.baseKey.length > 128 ||
       !Number.isSafeInteger(value.baseIndex) || (value.baseIndex as number) < 0 ||
       (value.depth !== 1 && value.depth !== 2) ||
@@ -45,7 +48,8 @@ export interface MobileSidebarNavigation {
   view: MobileSidebarView | null;
   pending: boolean;
   error: string | null;
-  openView: (view: MobileSidebarView) => void;
+  presentation?: MobileSidebarPresentation;
+  openView: (view: MobileSidebarView, presentation?: MobileSidebarPresentation) => void;
   back: () => void;
 }
 
@@ -146,7 +150,7 @@ export function useMobileSidebarHistory({ enabled, scopeKey }: { enabled: boolea
     transition.current = null;
   }, []);
 
-  const openView = useCallback((view: MobileSidebarView) => {
+  const openView = useCallback((view: MobileSidebarView, presentation: MobileSidebarPresentation = "side") => {
     const state = current.current;
     if (!state.enabled || !state.scopeKey || transition.current || state.entry?.view === view) return;
     if ((window.history.state?.key ?? "default") !== state.location.key) return;
@@ -169,6 +173,7 @@ export function useMobileSidebarHistory({ enabled, scopeKey }: { enabled: boolea
       baseIndex: state.entry?.baseIndex ?? index,
       depth: state.entry ? 2 : 1,
       view,
+      presentation: state.entry?.presentation ?? presentation,
     };
     setError(null);
     navigate({ pathname: state.location.pathname, search: state.location.search, hash: state.location.hash }, {
@@ -196,7 +201,7 @@ export function useMobileSidebarHistory({ enabled, scopeKey }: { enabled: boolea
   return {
     mobileSidebarOpen: enabled && entry !== null,
     setMobileSidebarOpen: setOpen,
-    mobileSidebarNavigation: { view: enabled ? entry?.view ?? null : null, pending, error, openView, back } satisfies MobileSidebarNavigation,
+    mobileSidebarNavigation: { view: enabled ? entry?.view ?? null : null, presentation: entry?.presentation ?? "side", pending, error, openView, back } satisfies MobileSidebarNavigation,
     runAfterSidebarClose: collapse,
   };
 }

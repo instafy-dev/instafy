@@ -73,6 +73,7 @@ vi.mock("../../../../updates/useAppUpdateMetadata", () => ({ useAppUpdateMetadat
 vi.mock("../../../../updates/useDesktopReleaseLookup", () => ({ useDesktopReleaseLookup: () => ({ lookup: { status: "unavailable" } }) }));
 
 import { StudioSidebar } from "../StudioSidebar";
+import { OpenChatList } from "../OpenChatList";
 import { StudioSearchContext } from "../StudioSearchContext";
 import { useStudioSearch } from "../useStudioSearch";
 import { recordProjectOpened } from "../../../../projects/projectRecency";
@@ -864,6 +865,68 @@ describe("StudioSidebar organization navigation", () => {
     onRequestClose.mockClear();
     await click("sidebar-drawer-toggle");
     expect(onRequestClose).toHaveBeenCalledOnce();
+    expect(fixture.onToggleSidebar).not.toHaveBeenCalled();
+  });
+
+  it("keeps sheet New chat in the external toolbar and only conversations in its scrolling body", async () => {
+    fixture.desktop = false;
+    const selectChat = vi.fn();
+    const props = {
+      ...secondaryNavigationProps(), navigationPresentation: "path" as const,
+      navigationToggleExternal: true, navigationHeaderPortalTarget: headerPortal,
+      navigationActionsPortalTarget: headerPortal, mobileSheet: true,
+      mobileSheetContent: <OpenChatList tabs={[
+        { id: "current", title: "Current chat", spaceName: "Core" },
+        { id: "other", title: "Other chat", spaceName: "Design", badge: "2" },
+      ]} activeId="current" spaceName="Core" testIdPrefix="sheet" onSelect={selectChat} />,
+    };
+    await render(props);
+    expect(container.querySelector('[data-testid="sidebar-team-header"]')).toBeNull();
+    expect(container.querySelector('[data-testid="sidebar-new-chat"]')).toBeNull();
+    const newChat = headerPortal.querySelector<HTMLButtonElement>('[data-testid="sidebar-new-chat"]')!;
+    expect(newChat.getAttribute("aria-label")).toBe("New chat");
+    expect(headerPortal.querySelector('[data-testid="sidebar-team-menu-trigger"]')).not.toBeNull();
+    expect(headerPortal.querySelector('[data-testid="sidebar-space-button"]')).not.toBeNull();
+    expect(container.querySelector('[data-testid="sidebar-context-scroll"]')).toBeNull();
+    expect(container.querySelector('[data-testid="sidebar-account-navigation"]')).toBeNull();
+    const chatList = container.querySelector('[data-testid="sidebar-chat-switcher"]')!;
+    expect(chatList.querySelectorAll("button")).toHaveLength(2);
+    expect(container.querySelector('[data-testid="sheet-tab-current"]')?.getAttribute("aria-current")).toBe("page");
+    expect(container.querySelector('[data-testid="sheet-tab-other"]')?.textContent).toContain("Design");
+    expect(container.querySelector('[aria-label="2 unread messages"]')).not.toBeNull();
+    await click("sheet-tab-other");
+    expect(selectChat).toHaveBeenCalledExactlyOnceWith("other");
+    await click("sidebar-new-chat");
+    await click("chat-new-chat-public");
+    expect(fixture.onStartNewConversation).toHaveBeenCalledOnce();
+    expect(onRequestClose.mock.invocationCallOrder[0]).toBeLessThan(fixture.onStartNewConversation.mock.invocationCallOrder[0]);
+    await click("sidebar-team-menu-trigger");
+    expect(newChat.disabled).toBe(true);
+    expect(container.querySelector('[data-testid="sidebar-chat-switcher"]')?.getAttribute("aria-hidden")).toBe("true");
+    await render({ ...props, mobileSheet: false });
+    expect(headerPortal.querySelector('[data-testid="sidebar-new-chat"]')).toBeNull();
+    expect(container.querySelector('[data-testid="sidebar-team-header"]')).not.toBeNull();
+    expect(container.querySelector('[data-testid="sidebar-chat-switcher"]')).toBeNull();
+    expect(container.querySelector('[data-testid="sidebar-context-scroll"]')).not.toBeNull();
+    expect(container.querySelector('[data-testid="sidebar-account-navigation"]')).not.toBeNull();
+  });
+
+  it("leaves closing to the mobile header while keeping labeled Home and New chat actions", async () => {
+    fixture.desktop = false;
+    fixture.homeAttentionCount = 3;
+    await render({ mobileOverlay: true, navigationHeaderExternal: true, navigationToggleExternal: true });
+    const header = container.querySelector('[data-testid="sidebar-team-header"]')!;
+    const home = header.querySelector<HTMLButtonElement>('[data-testid="sidebar-home-button"]')!;
+    expect(header.firstElementChild).toBe(home);
+    expect(home.textContent).toContain("Home");
+    expect(home.getAttribute("aria-label")).toBe("Home — all teams");
+    expect(home.querySelector('[data-testid="sidebar-home-badge"]')?.textContent).toBe("3");
+    expect(header.querySelector('[data-testid="sidebar-new-chat"]')).not.toBeNull();
+    expect(container.querySelector('[data-testid="sidebar-drawer-toggle"]')).toBeNull();
+    await click("sidebar-home-button");
+    expect(onRequestClose).toHaveBeenCalledOnce();
+    expect(onSelect).toHaveBeenCalledWith("home");
+    expect(onRequestClose.mock.invocationCallOrder[0]).toBeLessThan(onSelect.mock.invocationCallOrder[0]);
     expect(fixture.onToggleSidebar).not.toHaveBeenCalled();
   });
 

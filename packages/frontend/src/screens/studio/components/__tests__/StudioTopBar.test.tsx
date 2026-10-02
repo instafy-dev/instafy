@@ -1,14 +1,18 @@
 // @vitest-environment jsdom
 
-import { act } from "react";
+import { act, createRef, type ReactNode } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import type { WorkspaceControlsContextValue } from "../../workspaceControls";
 import type { WorkspaceTabsProps } from "../../../../workspace/WorkspaceTabs";
 import { StudioTopBar } from "../StudioTopBar";
 import { EMPTY_CHAT_PARTICIPANTS_SNAPSHOT, publishChatParticipants, setParticipantsDrawerOpen } from "../chatParticipantsStore";
 
 const mocks = vi.hoisted(() => ({
   toggleSidebar: vi.fn(),
+  browseChats: vi.fn(),
+  organizationChatTabs: undefined as WorkspaceControlsContextValue["organizationChatTabs"],
+  extraTabs: [] as Record<string, string | boolean | undefined>[],
   keepTabOpen: vi.fn(),
   startNewConversation: vi.fn(),
   openHome: vi.fn(),
@@ -21,6 +25,7 @@ const mocks = vi.hoisted(() => ({
   closeTab: vi.fn(),
   navigationPage: "workspace" as "home" | "team" | "account" | "workspace",
   activeTeamName: "My team",
+  activeProjectName: "My space",
   activeTeamAvatarUrl: null as string | null,
   sidebarCollapsed: false,
   titleBarFree: false,
@@ -36,8 +41,10 @@ const mocks = vi.hoisted(() => ({
 }));
 vi.mock("../../workspaceControls", () => ({
   useWorkspaceControls: () => ({
-    activeProjectName: "My space",
+    activeProjectName: mocks.activeProjectName,
     onToggleSidebar: mocks.toggleSidebar,
+    onBrowseChats: mocks.browseChats,
+    organizationChatTabs: mocks.organizationChatTabs,
     sidebarOpen: false,
     sidebarCollapsed: mocks.sidebarCollapsed,
     onStartNewConversation: mocks.startNewConversation,
@@ -64,7 +71,7 @@ vi.mock("../../../../runtime/useRuntime", () => ({ useRuntime: () => ({ runtime:
 vi.mock("../../../../workspace/WorkspaceTabsProvider", () => ({
   useWorkspaceTabs: () => ({
     conversationWorkspace: mocks.conversationWorkspace,
-    tabs: mocks.hasTabs ? [mocks.tab] : [],
+    tabs: mocks.hasTabs ? [mocks.tab, ...mocks.extraTabs] : [],
     activeTabId: mocks.hasTabs ? mocks.tab.id : null,
     focusTab: mocks.focusTab,
     closeTab: mocks.closeTab,
@@ -77,7 +84,7 @@ vi.mock("../../../../conversations/ConversationsProvider", () => ({
   useConversations: () => ({ conversations: mocks.conversations, activeConversationId: "conversation-1" }),
 }));
 vi.mock("../StudioNewChatButton", () => ({
-  StudioNewChatButton: ({ testId }: { testId?: string }) => <button data-testid={testId} aria-label="New chat" />,
+  StudioNewChatButton: ({ testId, renderTrigger }: { testId?: string; renderTrigger?: (actions: Record<string, never>) => ReactNode }) => renderTrigger ? renderTrigger({}) : <button data-testid={testId} aria-label="New chat" />,
 }));
 vi.mock("../../../../workspace/WorkspaceTabs", () => ({
   WorkspaceTabs: ({ leading, emptyStateContent, tabStripActions, actions, titleBarInset, flushStart }: WorkspaceTabsProps) => (
@@ -96,6 +103,8 @@ describe("StudioTopBar navigation", () => {
   beforeEach(() => {
     publishChatParticipants(EMPTY_CHAT_PARTICIPANTS_SNAPSHOT);
     setParticipantsDrawerOpen(false);
+    mocks.organizationChatTabs = undefined;
+    mocks.extraTabs = [];
     mocks.isLargeScreen = false;
     mocks.showChatActions = false;
     mocks.hasTabs = true;
@@ -106,6 +115,7 @@ describe("StudioTopBar navigation", () => {
     mocks.sidebarCollapsed = false;
     mocks.titleBarFree = false;
     mocks.activeTeamName = "My team";
+    mocks.activeProjectName = "My space";
     mocks.activeTeamAvatarUrl = null;
     mocks.profile = { fullName: "Alex Morgan", avatarUrl: null };
     mocks.tab = { id: "conversation-1", kind: "conversation", conversationId: "conversation-1", title: "Draft chat" };
@@ -125,17 +135,55 @@ describe("StudioTopBar navigation", () => {
     delete (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT;
   });
 
-  it("uses a task title and removes conversation tab controls in the prototype", async () => {
+  it("shows open-chat shortcuts on desktop without mixing artifact tabs into them", async () => {
     mocks.isLargeScreen = true;
     mocks.conversationWorkspace = true;
     await act(async () => root.render(<StudioTopBar inlineDesktop newChatInSidebar />));
     expect(container.querySelector('[data-testid="conversation-workspace-title"]')?.textContent).toBe("Draft chat");
     expect(container.querySelector('[data-testid="workspace-tabs"]')).toBeNull();
+    expect(container.querySelector('[data-testid="conversation-quick-tabs"]')).not.toBeNull();
+    expect(container.querySelector('[data-testid="conversation-roster"]')).toBeNull();
     expect(container.querySelector('[data-testid="topbar-tab-overflow"]')).toBeNull();
+    await act(async () => container.querySelector<HTMLButtonElement>('[data-testid="conversation-quick-tabs"] [aria-current="page"]')!.click());
+    expect(mocks.requestUrlPush).not.toHaveBeenCalled();
+    expect(mocks.openConversationTab).not.toHaveBeenCalled();
   });
 
-  it("opens participants from the conversation header and never carries members into another chat or tool", async () => {
+  it.each([true, false])("starts a chat from the tab strip in the current space (sidebar action=%s)", async newChatInSidebar => {
     mocks.isLargeScreen = true;
+    mocks.conversationWorkspace = true;
+    mocks.showChatActions = true;
+    const render = () => root.render(<StudioTopBar inlineDesktop newChatInSidebar={newChatInSidebar} />);
+    await act(async () => render());
+    const create = container.querySelector<HTMLButtonElement>('[data-testid="conversation-quick-tabs-new-chat"]')!;
+    expect(create.closest('[data-testid="conversation-quick-tabs"]')).not.toBeNull();
+    expect(create.getAttribute("aria-label")).toBe("New chat in My space");
+    expect(create.getAttribute("title")).toBe("New chat in My space");
+    expect(container.querySelectorAll('[aria-label^="New chat"]')).toHaveLength(1);
+    await act(async () => create.click());
+    expect(mocks.startNewConversation).toHaveBeenCalledOnce();
+    expect(mocks.openConversationTab).not.toHaveBeenCalled();
+
+    mocks.activeProjectName = "Another space";
+    await act(async () => render());
+    expect(create.getAttribute("title")).toBe("New chat in Another space");
+    expect(create.getAttribute("aria-label")).toBe("New chat in Another space");
+  });
+
+  it.each([
+    { isLargeScreen: false },
+    { showChatActions: false },
+    { projectAccessBlocked: true },
+    { controllerProjectMissing: true },
+    { navigationPage: "home" as const },
+  ])("omits the desktop new-chat shortcut when unavailable: %j", async state => {
+    Object.assign(mocks, { isLargeScreen: true, conversationWorkspace: true, showChatActions: true }, state);
+    await act(async () => root.render(<StudioTopBar inlineDesktop newChatInSidebar />));
+    expect(container.querySelector('[data-testid="conversation-quick-tabs-new-chat"]')).toBeNull();
+  });
+
+  it("keeps mobile participants in the conversation header and never carries members into another chat or tool", async () => {
+    mocks.isLargeScreen = false;
     mocks.conversationWorkspace = true;
     mocks.conversations = [{ localId: "conversation-1", controllerId: "controller-1", title: "Draft chat" }];
     publishChatParticipants({ ...EMPTY_CHAT_PARTICIPANTS_SNAPSHOT, conversationId: "controller-1",
@@ -143,7 +191,7 @@ describe("StudioTopBar navigation", () => {
     await act(async () => root.render(<StudioTopBar inlineDesktop newChatInSidebar />));
     const trigger = container.querySelector<HTMLButtonElement>('[data-testid="conversation-roster"]')!;
     expect(trigger.getAttribute("aria-label")).toBe("Conversation members (1)");
-    expect(trigger.closest('[role="navigation"]')).not.toBeNull();
+    expect(trigger.closest("header")).not.toBeNull();
     await act(async () => trigger.click());
     expect(trigger.getAttribute("aria-expanded")).toBe("true");
 
@@ -155,6 +203,79 @@ describe("StudioTopBar navigation", () => {
     mocks.tab = { id: "settings", kind: "panel", panel: "settings", title: "Settings" };
     await act(async () => root.render(<StudioTopBar inlineDesktop newChatInSidebar />));
     expect(container.querySelector('[data-testid="conversation-roster"]')).toBeNull();
+  });
+
+  it("uses the same organization chat selection for the mobile title and the desktop tabs", async () => {
+    mocks.conversationWorkspace = true;
+    mocks.organizationChatTabs = {
+      tabs: [
+        { id: "a", conversationId: "conversation-1", projectId: "project-1", orgKey: "org", title: "Draft chat", spaceName: "My space", preview: false },
+        { id: "b", conversationId: "conversation-2", projectId: "project-2", orgKey: "org", title: "Design chat", spaceName: "Design", preview: false },
+      ], activeId: "a", onSelect: vi.fn(), onClose: vi.fn(), onKeep: vi.fn(),
+    };
+    const mobileNavigation = { history: { canGoBack: false, canGoForward: false, goBack: vi.fn(), goForward: vi.fn() }, visitKey: "a", onOpenPicker: mocks.toggleSidebar };
+    await act(async () => root.render(<StudioTopBar mobileNavigation={mobileNavigation} />));
+    await act(async () => document.querySelector<HTMLButtonElement>('[data-testid="mobile-chat-switcher-trigger"]')!.click());
+    await act(async () => document.querySelector<HTMLButtonElement>('[data-testid="mobile-chat-switcher-tab-b"]')!.click());
+    expect(mocks.organizationChatTabs.onSelect).toHaveBeenCalledExactlyOnceWith("b");
+    expect(mocks.openConversationTab).not.toHaveBeenCalled();
+    expect(mocks.focusTab).not.toHaveBeenCalled();
+    await act(async () => document.querySelector<HTMLButtonElement>('[data-testid="mobile-chat-switcher-trigger"]')!.click());
+    await act(async () => document.querySelector<HTMLButtonElement>('[data-testid="mobile-chat-switcher-browse"]')!.click());
+    expect(mocks.browseChats).toHaveBeenCalledOnce();
+    expect(mocks.toggleSidebar).not.toHaveBeenCalled();
+
+    await act(async () => root.render(<StudioTopBar mobileNavigation={mobileNavigation} mobilePageHeader={{ title: "Chats", actions: null }} />));
+    expect(container.querySelector('[data-testid="mobile-chat-switcher-trigger"]')).toBeNull();
+    expect(container.querySelector('[data-testid="mobile-header-title"]')?.textContent).toBe("Chats");
+  });
+
+  it("restores the remembered workspace for a local open chat, without reopening the current one", async () => {
+    mocks.conversationWorkspace = true;
+    mocks.extraTabs = [{ id: "second", kind: "conversation", conversationId: "conversation-2", title: "Second chat" }];
+    const mobileNavigation = { history: { canGoBack: false, canGoForward: false, goBack: vi.fn(), goForward: vi.fn() }, visitKey: "a", onOpenPicker: mocks.toggleSidebar };
+    await act(async () => root.render(<StudioTopBar mobileNavigation={mobileNavigation} />));
+    await act(async () => document.querySelector<HTMLButtonElement>('[data-testid="mobile-chat-switcher-trigger"]')!.click());
+    await act(async () => document.querySelector<HTMLButtonElement>('[data-testid="mobile-chat-switcher-tab-conversation-1"]')!.click());
+    expect(mocks.requestUrlPush).not.toHaveBeenCalled();
+    expect(mocks.openConversationTab).not.toHaveBeenCalled();
+    await act(async () => document.querySelector<HTMLButtonElement>('[data-testid="mobile-chat-switcher-trigger"]')!.click());
+    await act(async () => document.querySelector<HTMLButtonElement>('[data-testid="mobile-chat-switcher-tab-second"]')!.click());
+    expect(mocks.requestUrlPush).toHaveBeenCalledOnce();
+    expect(mocks.openConversationTab).toHaveBeenCalledExactlyOnceWith("conversation-2", { restoreWorkspace: true, preview: true });
+  });
+
+  it("keeps team/space context and Search/Home reachable in the single mobile workspace header", async () => {
+    mocks.conversationWorkspace = true;
+    const search = vi.fn();
+    const searchTriggerRef = createRef<HTMLButtonElement>();
+    const history = { canGoBack: true, canGoForward: false, goBack: vi.fn(), goForward: vi.fn() };
+    const render = () => root.render(<StudioTopBar
+      compactMobileContext={{ onSearch: search, searchTriggerRef }}
+      mobileNavigation={{ history, visitKey: "chat-1", onOpenPicker: mocks.toggleSidebar }}
+    />);
+    await act(async () => render());
+    expect(container.querySelector("header")?.classList.contains("pt-[var(--instafy-safe-area-inset-top)]")).toBe(true);
+    expect(container.querySelector('[data-testid="mobile-header-title"]')?.textContent).toBe("Draft chat");
+    expect(container.querySelector('[data-testid="mobile-header-team"]')?.textContent).toBe("My team");
+    expect(container.querySelector('[data-testid="mobile-header-space"]')?.textContent).toBe("My space");
+    expect(container.querySelector('[data-testid="mobile-history-controls"]')).toBeNull();
+    expect(searchTriggerRef.current).toBe(container.querySelector('[data-testid="mobile-header-more"]'));
+    await act(async () => searchTriggerRef.current!.click());
+    expect(document.querySelector('[data-testid="mobile-header-actions"] [data-testid="mobile-history-controls"]')).not.toBeNull();
+    await act(async () => document.querySelector<HTMLButtonElement>('[data-testid="mobile-header-search"]')!.click());
+    expect(search).toHaveBeenCalledOnce();
+    expect(searchTriggerRef.current?.getAttribute("aria-expanded")).toBe("false");
+    await act(async () => searchTriggerRef.current!.click());
+    const home = [...document.querySelectorAll<HTMLButtonElement>("button")].find(button => button.textContent === "Home — all teams");
+    await act(async () => home!.click());
+    expect(mocks.openHome).toHaveBeenCalledOnce();
+
+    mocks.activeTeamName = "Another team";
+    mocks.activeProjectName = "Another space";
+    await act(async () => render());
+    expect(container.querySelector('[data-testid="mobile-header-team"]')?.textContent).toBe("Another team");
+    expect(container.querySelector('[data-testid="mobile-header-space"]')?.textContent).toBe("Another space");
   });
 
   it("returns from a shared tool to the selected task", async () => {

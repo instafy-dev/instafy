@@ -67,6 +67,7 @@ function commandTestId(command: string): string {
 function ActionRow({
   icon,
   title,
+  description,
   onPress,
   end,
   testId,
@@ -75,6 +76,7 @@ function ActionRow({
 }: {
   icon: ReactNode;
   title: string;
+  description?: string;
   onPress: () => void;
   end?: ReactNode;
   testId?: string;
@@ -94,7 +96,7 @@ function ActionRow({
       radius="xl"
       onPress={onPress}
       isDisabled={disabled}
-      className="h-11 w-full justify-start px-2.5 text-left"
+      className={`${description ? "h-auto min-h-11 py-2" : "h-11"} w-full justify-start px-2.5 text-left`}
       data-testid={testId}
     >
       <span className="flex w-full items-center gap-3">
@@ -102,9 +104,20 @@ function ActionRow({
           {icon}
         </span>
         <span className="flex min-w-0 flex-1 items-center justify-between gap-2">
-          <Text as="span" variant="bodyStrong" tone="primary" className="truncate text-sm">
-            {title}
-          </Text>
+          {description ? (
+            <span className="flex min-w-0 flex-1 flex-col gap-0.5">
+              <Text as="span" variant="bodyStrong" tone="primary" className="text-sm">
+                {title}
+              </Text>
+              <span className="whitespace-normal text-xs font-normal text-slate-500 dark:text-slate-400">
+                {description}
+              </span>
+            </span>
+          ) : (
+            <Text as="span" variant="bodyStrong" tone="primary" className="truncate text-sm">
+              {title}
+            </Text>
+          )}
           {end ? <span className="flex-none text-slate-400 dark:text-slate-500">{end}</span> : null}
         </span>
       </span>
@@ -448,7 +461,8 @@ export function ComposerActionMenu({
             {!mutationDisabled && showNewBrowserAction ? (
               <ActionRow
                 icon={<OpenNewWindow className="h-4 w-4" aria-hidden="true" />}
-                title="New shared site"
+                title="Ask AI for a new tab"
+                description="Uses your next message to request another tab."
                 onPress={() => {
                   closeMenu();
                   onOpenNewBrowser();

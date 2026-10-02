@@ -32,6 +32,8 @@ export type StudioDestination =
       conversationControllerId?: string | null;
       jobId?: string | null;
       messageId?: string | null;
+      /** Session-local resource view, validated against the destination chat owner. */
+      viewTabId?: string | null;
     }
   | {
       kind: "panel";
@@ -65,7 +67,7 @@ export function buildStudioDestinationSearch(search: string, destination: Studio
     return next ? `?${next}` : "";
   }
   const currentTeam = params.get("teamId") ?? params.get("settingsOrgId");
-  for (const key of ["jobId", "messageId", "reviewTab", "workspaceTab", "settingsTab", "settingsCategory", "settingsItem", "settingsOrgId", "teamId", "view"]) {
+  for (const key of ["chatView", "jobId", "messageId", "reviewTab", "workspaceTab", "settingsTab", "settingsCategory", "settingsItem", "settingsOrgId", "teamId", "view"]) {
     params.delete(key);
   }
   if (destination.kind === "conversation") {
@@ -76,6 +78,7 @@ export function buildStudioDestinationSearch(search: string, destination: Studio
       if (value) params.set(key, value);
       else params.delete(key);
     }
+    if (destination.viewTabId) params.set("chatView", destination.viewTabId);
     // A browser-session resume target belongs to its original space.
     if (new URLSearchParams(search).get("projectId") !== destination.projectId) {
       params.delete("browserRuntimeId");

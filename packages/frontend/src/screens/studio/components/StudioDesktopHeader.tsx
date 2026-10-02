@@ -1,15 +1,20 @@
 import { useEffect, type ReactNode, type Ref } from "react";
 import { HomeSimple, NavArrowLeft, Search } from "iconoir-react";
+import { normalizeOrgAccent } from "../../../org/orgAccent";
+import "../../../components/OrgIdentity.css";
 import { Button, IconButton } from "../../../components/Button";
 
 /** Desktop navigation shares one row. Search temporarily expands into that row. */
-export function StudioDesktopHeader({ contextRef, drawerHeaderRef, drawerWidth = 0, navigationCollapsed = false, navigationHidden = false, homeOverview = false, onHomeReturn, searchTriggerRef, searchOpen, onSearch, children }: {
+export function StudioDesktopHeader({ contextRef, drawerHeaderRef, drawerWidth = 0, navigationCollapsed = false, navigationHidden = false, homeOverview = false, orgContext = true, orgName, accentColor, onHomeReturn, searchTriggerRef, searchOpen, onSearch, children }: {
   contextRef: Ref<HTMLDivElement>;
   drawerHeaderRef?: Ref<HTMLDivElement>;
   drawerWidth?: number;
   navigationCollapsed?: boolean;
   navigationHidden?: boolean;
   homeOverview?: boolean;
+  orgContext?: boolean;
+  orgName?: string;
+  accentColor?: string | null;
   onHomeReturn?: () => void;
   searchTriggerRef: Ref<HTMLButtonElement>;
   searchOpen: boolean;
@@ -28,7 +33,8 @@ export function StudioDesktopHeader({ contextRef, drawerHeaderRef, drawerWidth =
     return () => document.removeEventListener("keydown", onKeyDown);
   }, [onSearch]);
 
-  return <header className="studio-context-header instafy-titlebar-drag" aria-label={homeOverview ? "Home" : "Working context"} data-home-overview={homeOverview} data-search-open={searchOpen}
+  return <header className="studio-context-header org-context-tint instafy-titlebar-drag"
+    data-org-accent={!homeOverview && orgContext && !searchOpen ? normalizeOrgAccent(accentColor) ?? "slate" : undefined} aria-label={homeOverview ? "Home" : "Working context"} data-home-overview={homeOverview} data-search-open={searchOpen}
     data-navigation-collapsed={navigationCollapsed} data-navigation-hidden={navigationHidden}
     style={{ "--studio-drawer-width": `${drawerWidth}px` } as React.CSSProperties}>
     <div className="studio-desktop-context-column">
@@ -53,5 +59,6 @@ export function StudioDesktopHeader({ contextRef, drawerHeaderRef, drawerWidth =
     {!homeOverview ? <div className="studio-desktop-tabs" hidden={searchOpen} inert={searchOpen || undefined}>
       {children}
     </div> : null}
+    {!homeOverview && orgContext && !searchOpen && orgName ? <span className="studio-org-context-name" title={orgName}>{orgName}</span> : null}
   </header>;
 }

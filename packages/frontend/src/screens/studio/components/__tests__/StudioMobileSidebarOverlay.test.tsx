@@ -150,6 +150,13 @@ describe("mobile sidebar status-bar coverage", () => {
     await vi.waitFor(() => expect(setOverlaysWebView).toHaveBeenCalledWith({ overlay: true }));
   });
 
+  it("leaves iOS system chrome unchanged for a bottom navigation sheet", async () => {
+    await act(async () => root.render(<StudioMobileSidebarOverlay presentation="bottom" onClose={() => {}}>Navigation</StudioMobileSidebarOverlay>));
+    expect(setOverlaysWebView).not.toHaveBeenCalled();
+    expect(getInfo).not.toHaveBeenCalled();
+    expect(addListener).not.toHaveBeenCalled();
+  });
+
   it.each(["web", "android"])("does not change native chrome on %s", async (platform) => {
     getPlatform.mockReturnValue(platform);
     await renderOverlay();

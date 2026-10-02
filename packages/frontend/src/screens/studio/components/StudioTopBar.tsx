@@ -1,5 +1,5 @@
 import { isWorkspacePreviewTab } from "../../../workspace/workspacePreviewTabs";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState, type RefObject } from "react";
 import { desktopTitleBarFree } from "../../../lib/desktopShell";
 import { DialogTrigger } from "react-aria-components";
 import {
@@ -11,6 +11,7 @@ import {
   NavArrowRight,
   NavArrowUp,
   Pin,
+  Search,
   SidebarExpand,
   Xmark
 } from "iconoir-react";
@@ -30,6 +31,7 @@ import { useNativeBackButtonAction } from "../../../native/useNativeBackButtonAc
 import { useProject } from "../../../projects/useProject";
 import { useProjects } from "../../../projects/useProjects";
 import { useRuntime } from "../../../runtime/useRuntime";
+import { ConversationQuickTabs } from "../../../workspace/ConversationQuickTabs";
 import { WorkspaceTabs } from "../../../workspace/WorkspaceTabs";
 import { useWorkspaceTabs } from "../../../workspace/WorkspaceTabsProvider";
 import { useConversations } from "../../../conversations/ConversationsProvider";
@@ -67,6 +69,10 @@ export interface StudioTopBarProps {
   contextHeaderAbove?: boolean;
   inlineDesktop?: boolean;
   mobilePageHeader?: MobilePageHeader;
+  compactMobileContext?: {
+    onSearch: () => void;
+    searchTriggerRef: RefObject<HTMLButtonElement | null>;
+  };
   mobileNavigation?: {
     history: StudioHistory;
     visitKey: string;
@@ -74,7 +80,7 @@ export interface StudioTopBarProps {
   };
 }
 
-export function StudioTopBar({ mobileNavigation, mobilePageHeader, newChatInSidebar = false, contextHeaderAbove = false, inlineDesktop = false }: StudioTopBarProps = {}) {
+export function StudioTopBar({ mobileNavigation, mobilePageHeader, compactMobileContext, newChatInSidebar = false, contextHeaderAbove = false, inlineDesktop = false }: StudioTopBarProps = {}) {
   const {
     activeProjectName,
     onStartNewConversation,
@@ -89,6 +95,8 @@ export function StudioTopBar({ mobileNavigation, mobilePageHeader, newChatInSide
     navigationPage = "workspace",
     activeTeamName,
     activeTeamAvatarUrl,
+    organizationChatTabs,
+    onBrowseChats,
     topbarLocationOverride,
   } = useWorkspaceControls();
   const { activeProjectId } = useProjects();
@@ -150,7 +158,7 @@ export function StudioTopBar({ mobileNavigation, mobilePageHeader, newChatInSide
   const headerParticipants = participantsSnapshot.conversationId === (activeConversation?.controllerId ?? null)
     ? participantsSnapshot : EMPTY_CHAT_PARTICIPANTS_SNAPSHOT;
   const participantsControl = conversationWorkspace && activeConversation && !controllerProjectMissing && !isGlobalPage &&
-    (isLargeScreen || (!mobilePageHeader && !topbarLocationOverride)) ? (
+    (!isLargeScreen && !mobilePageHeader && !topbarLocationOverride) ? (
       <ConversationRoster
         humans={headerParticipants.humans}
         agents={headerParticipants.agents}
@@ -314,12 +322,27 @@ export function StudioTopBar({ mobileNavigation, mobilePageHeader, newChatInSide
   );
 
   const useDesktopTabChrome = isLargeScreen && !controllerProjectMissing && !conversationWorkspace;
+  const showConversationQuickTabs = conversationWorkspace && Boolean(activeConversation || workConversation || (!activeWorkspaceTab && organizationChatTabs?.tabs.length));
   // Only the integrated macOS layout: elsewhere the header keeps the inset
   // (a real notch on iOS) and the shell keeps owning the drag strip.
   const titleBarFree = useDesktopTabChrome && desktopTitleBarFree();
   const hasDesktopTabs = useDesktopTabChrome && workspaceTabs.length > 0;
   const resolvedProjectName = activeProjectName || "Untitled Space";
   const resolvedTeamName = activeTeamName?.trim() || "Team & spaces";
+  const openChatTabs = organizationChatTabs?.tabs ?? workspaceTabs.filter(tab => tab.kind === "conversation");
+  const activeChatTabId = organizationChatTabs ? organizationChatTabs.activeId
+    : openChatTabs.find(tab => tab.conversationId === (activeConversation ?? workConversation)?.localId)?.id ?? null;
+  const selectOpenChat = (id: string) => {
+    if (id === activeChatTabId) return;
+    if (organizationChatTabs) {
+      organizationChatTabs.onSelect(id);
+      return;
+    }
+    const tab = openChatTabs.find(item => item.id === id);
+    if (!tab) return;
+    requestUrlPush();
+    openConversationTab(tab.conversationId, { restoreWorkspace: true, preview: true });
+  };
   const projectNameText = (
     <Text as="span" variant="bodyStrong" tone="primary" className="truncate">
       {resolvedProjectName}
@@ -425,7 +448,7 @@ export function StudioTopBar({ mobileNavigation, mobilePageHeader, newChatInSide
             ? useDesktopTabChrome
               ? `bg-white ${DARK_CANVAS_CLASS}`
               : `bg-white/95 ${DARK_RAIL_MUTED_BG_CLASS}`
-            : contextHeaderAbove
+            : contextHeaderAbove || compactMobileContext
               ? `bg-slate-50 ${DARK_RAIL_BG_CLASS}`
               : `bg-white/70 backdrop-blur-md ${DARK_RAIL_BLUR_BG_CLASS}`,
           isLargeScreen
@@ -496,7 +519,18 @@ export function StudioTopBar({ mobileNavigation, mobilePageHeader, newChatInSide
         <div className={`flex items-center gap-2 px-4 sm:px-5 ${inlineDesktop ? "h-12" : "py-2"}`}>
           <StudioHistoryControls />
           {parentConversationButton}
-          <div className="min-w-0 flex-1">{conversationWorkspace ? (
+          <div className="min-w-0 flex-1">{showConversationQuickTabs ? (
+            <>
+              <h1 className="sr-only" data-testid="conversation-workspace-title">{topbarLocationTitle}</h1>
+              <ConversationQuickTabs tabs={openChatTabs}
+                activeId={activeChatTabId}
+                scopeName={organizationChatTabs ? resolvedTeamName : resolvedProjectName}
+                newChat={showChatActions && !isGlobalPage && !controllerProjectMissing && activeProjectId && onStartNewConversation
+                  ? { spaceName: resolvedProjectName, onCreate: onStartNewConversation } : undefined}
+                onSelect={selectOpenChat}
+                onClose={organizationChatTabs?.onClose ?? closeTab} onKeep={organizationChatTabs?.onKeep ?? keepTabOpen} />
+            </>
+          ) : conversationWorkspace ? (
             <h1 className="flex min-w-0 items-center gap-2 text-sm font-semibold text-slate-900 dark:text-slate-100" data-testid="conversation-workspace-title">
               <span aria-hidden="true">{workConversation ? <ChatLines className="h-5 w-5" /> : activeWorkspaceTab?.icon}</span><span className="truncate">{topbarLocationTitle}</span>
             </h1>
@@ -506,7 +540,7 @@ export function StudioTopBar({ mobileNavigation, mobilePageHeader, newChatInSide
             aria-label={`Return to ${returnConversation.title}`} onPress={() => { requestUrlPush(); openConversationTab(returnConversation.localId, { restoreWorkspace: true }); }}>
             <NavArrowLeft className="h-4 w-4 shrink-0" aria-hidden="true" /><span className="truncate">{returnConversation.title}</span>
           </Button> : null}
-          {shouldShowNewChat ? <StudioNewChatButton /> : null}
+          {shouldShowNewChat && !showConversationQuickTabs ? <StudioNewChatButton /> : null}
         </div>
       ) : isGlobalPage ? (
         <div className="flex items-center gap-2 px-4 py-2 max-[375px]:gap-1 max-[375px]:px-3" data-testid="topbar-global-navigation">
@@ -593,18 +627,32 @@ export function StudioTopBar({ mobileNavigation, mobilePageHeader, newChatInSide
             <MobileStudioNavigationHeader
               key={JSON.stringify([currentUserId, activeProjectId, mobileNavigation.visitKey])}
               {...mobileNavigation}
-              historyInMenu={showTouchBottomDock && !topbarLocationOverride && (
+              historyInMenu={Boolean(compactMobileContext) || showTouchBottomDock && !topbarLocationOverride && (
                 activeWorkspaceTab?.kind === "conversation" ||
                 activeWorkspaceTab?.kind === "jobThread" ||
                 (activeWorkspaceTab?.kind === "panel" && activeWorkspaceTab.panel === "chat")
               )}
               onOpenPicker={onToggleSidebar ?? mobileNavigation.onOpenPicker}
               title={mobilePageHeader?.title ?? topbarLocationTitle}
-              titleIcon={mobilePageHeader ? undefined : topbarLocationOverride ? topbarLocationOverride.icon : activeWorkspaceTab?.icon}
+              conversationSwitcher={showConversationQuickTabs && !mobilePageHeader && !topbarLocationOverride && !controllerProjectMissing ? {
+                tabs: openChatTabs.map(tab => ({ ...tab, spaceName: "spaceName" in tab ? tab.spaceName : resolvedProjectName })),
+                activeId: activeChatTabId,
+                onSelect: selectOpenChat,
+                onBrowseChats,
+              } : undefined}
+              titleIcon={mobilePageHeader || compactMobileContext ? undefined : topbarLocationOverride ? topbarLocationOverride.icon : activeWorkspaceTab?.icon}
               primaryActions={mobilePageHeader?.actions ?? participantsControl}
-              pageMenuActions={mobilePageHeader?.menuActions}
+              pageMenuActions={[
+                ...(compactMobileContext ? [
+                  ...(onOpenHome ? [{ label: "Home — all teams", icon: <span aria-hidden="true"><OctoMark className="h-5 w-5" /></span>, onPress: onOpenHome }] : []),
+                  { label: "Search", icon: <Search className="h-5 w-5" aria-hidden="true" />, onPress: compactMobileContext.onSearch, testId: "mobile-header-search" },
+                ] : []),
+                ...(mobilePageHeader?.menuActions ?? []),
+              ]}
               spaceName={resolvedProjectName}
+              teamName={compactMobileContext ? resolvedTeamName : undefined}
               showSpaceName={!contextHeaderAbove}
+              moreButtonRef={compactMobileContext?.searchTriggerRef}
               sidebarOpen={sidebarOpen}
               onOpenSettings={onOpenProjectSettings}
               onNewChat={onNewChat}

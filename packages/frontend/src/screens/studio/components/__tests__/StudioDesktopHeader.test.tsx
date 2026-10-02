@@ -6,7 +6,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { StudioDesktopHeader } from "../StudioDesktopHeader";
 import { useStudioSearch } from "../useStudioSearch";
 
-function Harness({ docked = false, homeOverview = false, onHomeReturn }: { docked?: boolean; homeOverview?: boolean; onHomeReturn?: () => void }) {
+function Harness({ docked = false, homeOverview = false, onHomeReturn, orgContext = true }: { orgContext?: boolean; docked?: boolean; homeOverview?: boolean; onHomeReturn?: () => void }) {
   const [drawerHeader, setDrawerHeader] = useState<HTMLDivElement | null>(null);
   const [context, setContext] = useState<HTMLDivElement | null>(null);
   const trigger = useRef<HTMLButtonElement>(null);
@@ -15,7 +15,7 @@ function Harness({ docked = false, homeOverview = false, onHomeReturn }: { docke
     space: homeOverview ? null : { id: "space", name: "Space" }, records: [], returnFocusRef: trigger,
   });
   return <>
-    <StudioDesktopHeader homeOverview={homeOverview} onHomeReturn={onHomeReturn} contextRef={setContext} drawerWidth={docked ? 280 : 0} drawerHeaderRef={setDrawerHeader} searchTriggerRef={trigger} searchOpen={search.open} onSearch={search.openSearch}>
+    <StudioDesktopHeader orgContext={orgContext} orgName="Workshop" accentColor="violet" homeOverview={homeOverview} onHomeReturn={onHomeReturn} contextRef={setContext} drawerWidth={docked ? 280 : 0} drawerHeaderRef={setDrawerHeader} searchTriggerRef={trigger} searchOpen={search.open} onSearch={search.openSearch}>
       <button data-testid="workspace-tab">Conversation</button>
     </StudioDesktopHeader>
     {context ? createPortal(search.open ? search.renderControl() : homeOverview ? null : <button>Choose space</button>, context) : null}
@@ -50,6 +50,17 @@ describe("Single-row desktop search", () => {
     return event;
   }
 
+  it("colors organization context while leaving global Home neutral", async () => {
+    await act(async () => root.render(<Harness />));
+    expect(container.querySelector("header")?.getAttribute("data-org-accent")).toBe("violet");
+    expect(container.textContent).toContain("Workshop");
+    await act(async () => root.render(<Harness homeOverview />));
+    expect(container.querySelector("header")?.hasAttribute("data-org-accent")).toBe(false);
+    expect(container.textContent).not.toContain("Workshop");
+    await act(async () => root.render(<Harness orgContext={false} />));
+    expect(container.querySelector("header")?.hasAttribute("data-org-accent")).toBe(false);
+  });
+
   it("expands search in place and returns focus to Search without remounting the tabs", async () => {
     await act(async () => root.render(<Harness />));
     const tab = container.querySelector('[data-testid="workspace-tab"]');
@@ -59,6 +70,7 @@ describe("Single-row desktop search", () => {
     expect(input()).toBeNull();
     await act(async () => trigger().click());
     expect(document.activeElement).toBe(input());
+    expect(container.querySelector("header")?.hasAttribute("data-org-accent")).toBe(false);
     expect(input().getAttribute("aria-label")).toContain("Space");
     expect(tab?.closest("[hidden][inert]")).not.toBeNull();
     await key({ key: "Escape" });

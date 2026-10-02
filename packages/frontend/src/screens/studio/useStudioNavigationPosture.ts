@@ -39,8 +39,8 @@ export function useStudioNavigationPosture() {
   const isLargeScreen = useStudioDesktopLayout();
   const touchLikeInput = useTouchLikeInput();
 
-  // Compact touch chats return to the Chats overview from the composer.
-  // Fine-pointer windows retain their existing navigation drawer shortcut.
+  // Compact conversations open navigation from the composer at either input posture.
+  // Only touch-like overview screens also use the bottom destination dock.
   const showComposerNavigationButton = !isLargeScreen;
   const showTouchBottomDock = touchLikeInput && !isLargeScreen;
   // This is layout eligibility, not dock visibility: only overview surfaces

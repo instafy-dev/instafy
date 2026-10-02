@@ -1,4 +1,5 @@
 import { createContext, useContext, type ReactNode } from "react";
+import type { OrganizationChatTab } from "../../workspace/useOrganizationChatTabs";
 import type { BuildLogEntry } from "../../types";
 
 export type PrivateChatTarget = {
@@ -22,6 +23,7 @@ export interface WorkspaceControlsContextValue {
   sidebarOpen?: boolean;
   onToggleSidebar?: () => void;
   onOpenChatNavigation?: () => void;
+  onBrowseChats?: () => void;
   chatNavigationLabel?: string;
   onStartNewProject?: (preferredOrgId?: string | null) => void;
   onStartNewConversation?: () => void;
@@ -31,6 +33,13 @@ export interface WorkspaceControlsContextValue {
   navigationPage?: "home" | "team" | "account" | "workspace";
   activeTeamName?: string;
   activeTeamAvatarUrl?: string | null;
+  organizationChatTabs?: {
+    tabs: OrganizationChatTab[];
+    activeId: string | null;
+    onSelect: (id: string) => void;
+    onClose: (id: string) => void;
+    onKeep: (id: string) => void;
+  };
   onOpenHome?: () => void;
   onOpenTeamSwitcher?: () => void;
   onNavigateBack?: () => void;

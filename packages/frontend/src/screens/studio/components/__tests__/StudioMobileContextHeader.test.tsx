@@ -79,6 +79,15 @@ describe("StudioMobileContextHeader", () => {
     await act(async () => button(testId).click());
   }
 
+  it("uses the current organization's tint and clears it on global pages", async () => {
+    await render({ ...props, accentColor: "teal" });
+    expect(container.querySelector("header")?.getAttribute("data-org-accent")).toBe("teal");
+    await render({ ...props, homeOverview: true });
+    expect(container.querySelector("header")?.hasAttribute("data-org-accent")).toBe(false);
+    await render({ ...props, homeOverview: false, orgContext: false });
+    expect(container.querySelector("header")?.hasAttribute("data-org-accent")).toBe(false);
+  });
+
   it("opens the shared account sheet without navigating and keeps Home and search separate", async () => {
     await render();
     expect(document.querySelectorAll('[aria-label="Home — all teams"]')).toHaveLength(1);

@@ -190,7 +190,7 @@ async function browserChromeGeometry(page: Page) {
       chrome: bounds("shared-browser-chrome"),
       chromeFits: chromeElement ? chromeElement.scrollWidth <= chromeElement.clientWidth : false,
       documentWidth: document.documentElement.scrollWidth,
-      reload: bounds("shared-browser-reload"),
+      tabPicker: bounds("shared-browser-tabs-picker"),
       locationMenu: bounds("browser-location-menu"),
       options: bounds("shared-browser-sessions-toggle"),
     };
@@ -218,7 +218,12 @@ for (const width of [320, 360, 390]) {
     await expect(collaboration).toHaveAccessibleName(/A teammate with an exceptionally long display name controls/);
     await expect(controlState).toHaveCount(0);
     await expect(action).toHaveCount(0);
-    await expect(pageSelect).toHaveCount(0);
+    await expect(chrome.getByTestId("shared-browser-tabs-picker")).toBeVisible();
+    await expect(chrome.getByTestId("shared-browser-page-select")).toHaveCount(1);
+    await expect(pageSelect).toHaveAccessibleName("Shared browser tab");
+    await expect(pageSelect.locator("option")).toHaveCount(3);
+    await expect(pageSelect).toBeDisabled();
+    await expect(page.getByTestId("shared-browser-reload")).toHaveCount(0);
     await expect(page.getByTestId("browser-session-fullscreen-toggle")).toHaveCount(0);
     await expect(address).toBeVisible();
     await expect(page.getByTestId("conversation-subtab-browser")).toHaveAccessibleName("Browser, approval needed");
@@ -233,17 +238,24 @@ for (const width of [320, 360, 390]) {
     expect(geometry.address?.width ?? 0).toBeGreaterThanOrEqual(96);
     expect(geometry.collaboration!.left - geometry.address!.right).toBeCloseTo(4, 1);
     expect(geometry.options!.left - geometry.collaboration!.right).toBeCloseTo(4, 1);
-    for (const target of [geometry.address, geometry.collaboration, geometry.reload, geometry.locationMenu, geometry.options]) {
+    for (const target of [geometry.address, geometry.collaboration, geometry.locationMenu, geometry.options]) {
       expect(Math.abs(target!.top - geometry.chrome!.top - 4)).toBeLessThanOrEqual(1);
       expect(Math.abs(geometry.chrome!.bottom - target!.bottom - 4)).toBeLessThanOrEqual(1);
     }
     expect(Math.abs(geometry.collaboration!.top - geometry.address!.top)).toBeLessThanOrEqual(2);
-    for (const target of [geometry.collaboration, geometry.browserTab, geometry.reload, geometry.locationMenu, geometry.options]) {
+    for (const target of [geometry.collaboration, geometry.browserTab, geometry.locationMenu, geometry.options]) {
       expect(target).not.toBeNull();
       expect(target!.height).toBeGreaterThanOrEqual(40);
       expect(target!.left).toBeGreaterThanOrEqual(0);
       expect(target!.right).toBeLessThanOrEqual(width);
     }
+    expect(geometry.tabPicker).not.toBeNull();
+    expect(geometry.tabPicker!.height).toBeGreaterThanOrEqual(44);
+    expect(geometry.tabPicker!.width).toBeGreaterThanOrEqual(44);
+    expect(geometry.tabPicker!.left).toBeGreaterThanOrEqual(0);
+    expect(geometry.tabPicker!.right).toBeLessThanOrEqual(width);
+    expect(geometry.tabPicker!.top).toBeGreaterThanOrEqual(geometry.chrome!.top);
+    expect(geometry.tabPicker!.bottom).toBeLessThanOrEqual(geometry.chrome!.bottom);
 
     await collaboration.click();
     const participantsDialog = page.getByRole("dialog", { name: "Browser participants and control" });
@@ -278,9 +290,10 @@ for (const width of [320, 360, 390]) {
     await expect(page.getByTestId("shared-browser-forward")).toBeVisible();
     await expect(page.getByTestId("shared-browser-back")).toBeDisabled();
     await expect(page.getByTestId("shared-browser-forward")).toBeDisabled();
-    await expect(pageSelect).toBeVisible();
-    await expect(pageSelect.locator("option")).toHaveCount(3);
-    await expect(pageSelect).toBeDisabled();
+    await expect(optionsDialog.getByTestId("shared-browser-reload")).toBeVisible();
+    await expect(optionsDialog.getByTestId("shared-browser-reload")).toBeDisabled();
+    await expect(optionsDialog.getByTestId("shared-browser-page-select")).toHaveCount(0);
+    await expect(chrome.getByTestId("shared-browser-page-select")).toHaveCount(1);
     const expand = page.getByTestId("browser-session-fullscreen-toggle");
     await expect(expand).toBeVisible();
     await expect(expand).toHaveAccessibleName("Expand browser");
@@ -335,7 +348,7 @@ test("keeps comfortable touch targets and spacing in the 320px browser toolbar",
     expect(geometry.address?.width ?? 0).toBeGreaterThanOrEqual(96);
     expect(geometry.collaboration!.left - geometry.address!.right).toBeCloseTo(4, 1);
     expect(geometry.options!.left - geometry.collaboration!.right).toBeCloseTo(4, 1);
-    for (const target of [geometry.address, geometry.collaboration, geometry.reload, geometry.locationMenu, geometry.options]) {
+    for (const target of [geometry.address, geometry.collaboration, geometry.tabPicker, geometry.locationMenu, geometry.options]) {
       expect(target).not.toBeNull();
       expect(target!.height).toBeGreaterThanOrEqual(44);
       expect(target!.width).toBeGreaterThanOrEqual(44);

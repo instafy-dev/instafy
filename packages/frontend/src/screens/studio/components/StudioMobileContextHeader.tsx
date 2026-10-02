@@ -1,5 +1,6 @@
 import { type RefObject, useId } from "react";
 import { NavArrowLeft, Search, ViewGrid } from "iconoir-react";
+import { normalizeOrgAccent } from "../../../org/orgAccent";
 import { AttentionBadge } from "../../../components/AttentionBadge";
 import { IconButton } from "../../../components/Button";
 import { OctoMark } from "../../../components/OctoMark";
@@ -23,6 +24,7 @@ export interface StudioMobileContextHeaderProps {
   attentionCounts: Record<string, number>;
   homeActive: boolean;
   homeOverview?: boolean;
+  orgContext?: boolean;
   onHomeReturn?: () => void;
   homeAttentionCount: number;
   searchRef: RefObject<HTMLButtonElement | null>;
@@ -49,6 +51,7 @@ export function StudioMobileContextHeader({
   attentionCounts,
   homeActive,
   homeOverview = false,
+  orgContext = true,
   onHomeReturn,
   homeAttentionCount,
   searchRef,
@@ -74,7 +77,8 @@ export function StudioMobileContextHeader({
 
   return (
     <header
-      className={`studio-mobile-context-header border-b border-transparent bg-slate-50 text-slate-900 dark:text-slate-100 ${DARK_RAIL_BG_CLASS}`}
+      data-org-accent={!homeOverview && orgContext ? normalizeOrgAccent(accentColor) ?? "slate" : undefined}
+      className={`studio-mobile-context-header org-context-tint border-b border-transparent bg-slate-50 text-slate-900 dark:text-slate-100 ${DARK_RAIL_BG_CLASS}`}
       style={{
         paddingTop: "calc(var(--instafy-safe-area-inset-top, env(safe-area-inset-top, 0px)) + 4px)",
       }}

@@ -58,6 +58,8 @@ interface WorkspaceTabsContextValue {
   activeTabId: string | null;
   /** The tab owner can materialize this space's conversation tabs. */
   conversationTabsReady: boolean;
+  conversationTabsRestored: boolean;
+  updateInactiveConversationTab: (projectId: string, conversationId: string, action: "close" | "keep") => void;
   openPanelTab: (panel: StudioPanel, options?: { activate?: boolean }) => void;
   openConversationTab: (
     conversationId: string,
@@ -928,6 +930,27 @@ export function WorkspaceTabsProvider({ children, locationSearch, onRestorePanel
     };
   }, [activeTabId, openConversationTab, openPanelTab, tabs]);
 
+  const conversationTabsRestored = conversationTabsReady && canRestoreSavedTabs && appliedProjectRef.current === workspaceProjectId
+    && tabsProjectRef.current === workspaceProjectId && tabsUserRef.current === conversationWorkspaceUserId;
+  const updateInactiveConversationTab = useCallback((projectId: string, conversationId: string, action: "close" | "keep") => {
+    if (!conversationWorkspaceUserId || projectId === workspaceProjectId) return;
+    const current = persistedStateRef.current;
+    const project = current?.projects[projectId];
+    if (!current || !project) return;
+    const conversations = action === "close" ? project.conversations.filter(id => id !== conversationId) : project.conversations;
+    const next = { projects: { ...current.projects, [projectId]: { ...project, conversations,
+      activeConversationId: conversations.includes(project.activeConversationId ?? "") ? project.activeConversationId : conversations[0],
+      previewConversationId: project.previewConversationId === conversationId ? undefined : project.previewConversationId,
+    } } };
+    persistedStateRef.current = next;
+    persistWorkspaceTabsState(next);
+    if (action === "close") {
+      const scope = JSON.stringify([conversationWorkspaceUserId, projectId]);
+      const parked = parkedViews.current.get(scope);
+      if (parked) parkedViews.current.set(scope, parked.filter(tab => tab.kind !== "jobThread" || tab.conversationId !== conversationId));
+    }
+  }, [conversationWorkspaceUserId, workspaceProjectId]);
+
   const value = useMemo<WorkspaceTabsContextValue>(
     () => ({
       conversationWorkspace,
@@ -939,6 +962,8 @@ export function WorkspaceTabsProvider({ children, locationSearch, onRestorePanel
       activeTab,
       activeTabId,
       conversationTabsReady,
+      conversationTabsRestored,
+      updateInactiveConversationTab,
       requestUrlNavigation,
       peekUrlNavigation,
       consumeUrlNavigation,
@@ -961,6 +986,8 @@ export function WorkspaceTabsProvider({ children, locationSearch, onRestorePanel
       activeTab,
       activeTabId,
       conversationTabsReady,
+      conversationTabsRestored,
+      updateInactiveConversationTab,
       guardedActions,
       peekUrlNavigation,
       consumeUrlNavigation,

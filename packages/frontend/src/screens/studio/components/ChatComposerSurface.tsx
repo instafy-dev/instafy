@@ -75,6 +75,8 @@ type ChatComposerSurfaceProps = {
   composerOverlayRef: RefObject<HTMLDivElement | null>;
   composerAutoHidden: boolean;
   aboveComposer?: ReactNode;
+  /** Compact conversation views stay in the measured overlay above the input. */
+  viewNavigation?: ReactNode;
   compactBrowserViewport: boolean;
   onSubmit: FormEventHandler<HTMLFormElement>;
   queueSurfaceProps: ComponentProps<typeof ChatSendQueueSurface>;
@@ -101,7 +103,7 @@ type ChatComposerSurfaceProps = {
   voiceStatusMessage: string;
   providerTriggerNoticeProps: ComponentProps<typeof ProviderTriggerNotice> | null;
   showComposerNavigationButton: boolean;
-  composerNavigationDestination?: "drawer" | "chats";
+  composerNavigationDestination?: "drawer" | "chats" | "sheet";
   composerNavigationLabel?: string;
   onOpenNavigation: () => void;
   homeAttentionCount: number;
@@ -213,6 +215,7 @@ export function ChatComposerSurface({
   composerOverlayRef,
   composerAutoHidden,
   aboveComposer,
+  viewNavigation,
   compactBrowserViewport,
   onSubmit,
   queueSurfaceProps,
@@ -455,6 +458,8 @@ export function ChatComposerSurface({
   // Chat and Browser keep the editor and controls in the same positions.
   const composerInlineControlsInTextRow = !showVoiceActiveStrip;
   const mobileChatsNavigation = showComposerNavigationButton && composerNavigationDestination === "chats";
+  const compactNavigationLayout = showComposerNavigationButton && composerNavigationDestination !== "drawer";
+  const hideComposer = composerAutoHidden && !viewNavigation;
   const foldSuggestionIntoMenu = showMobileGhostSuggestionAcceptButton;
   const imageUploadDisabled = mutationDisabled || sendingAttachment || onboardingInputLocked;
 
@@ -975,13 +980,13 @@ export function ChatComposerSurface({
       <div
         ref={composerOverlayRef}
         className={`pointer-events-none absolute inset-x-0 bottom-0 z-20 transition-transform duration-200 ease-out ${
-          composerAutoHidden ? "translate-y-full" : "translate-y-0"
+          hideComposer ? "translate-y-full" : "translate-y-0"
         }`}
         data-testid="chat-composer-overlay"
         data-browser-session-safe-zone="true"
         style={{
           width: overlayWidth,
-          ...(composerAutoHidden && compactBrowserViewport ? {
+          ...(hideComposer && compactBrowserViewport ? {
             transform: "translateY(calc(100% - max(var(--instafy-safe-area-inset-bottom), 0.75rem)))",
           } : {}),
         }}
@@ -992,12 +997,12 @@ export function ChatComposerSurface({
         <form
           onSubmit={onSubmit}
           className={
-            mobileChatsNavigation
+            compactNavigationLayout
               ? `pointer-events-auto ${CHAT_COMPOSER_COLUMN_CLASS_NAME} px-3.5`
               : `pointer-events-auto ${CHAT_COMPOSER_COLUMN_CLASS_NAME} px-3 sm:px-4`
           }
           style={{
-            paddingInline: mobileChatsNavigation
+            paddingInline: compactNavigationLayout
               ? "clamp(0.875rem, var(--instafy-safe-area-inset-bottom), 1.125rem)"
               : undefined,
             paddingBottom: nativeKeyboardOpen
@@ -1304,14 +1309,15 @@ export function ChatComposerSurface({
                 ) : null}
               </div>
             ) : null}
+            {viewNavigation}
             <Surface
               tone="default"
-              radius={mobileChatsNavigation ? "none" : "3xl"}
+              radius={compactNavigationLayout ? "none" : "3xl"}
               shadow="none"
               // The composer keeps the raised-control background but borrows the
               // panel border tier: raised-control (13%) is meant for small
               // controls, and reads too hard along a full-width composer edge.
-              className={`${mobileChatsNavigation ? "rounded-[1.75rem] " : ""}flex flex-col overflow-hidden border-slate-200/70 bg-slate-50 p-1.5 ${DARK_RAISED_CONTROL_BG_CLASS} ${DARK_PANEL_BORDER_CLASS}`}
+              className={`${compactNavigationLayout ? "rounded-[1.75rem] " : ""}flex flex-col overflow-hidden border-slate-200/70 bg-slate-50 p-1.5 ${DARK_RAISED_CONTROL_BG_CLASS} ${DARK_PANEL_BORDER_CLASS}`}
               data-testid="chat-composer-surface"
             >
               <span
@@ -1330,7 +1336,7 @@ export function ChatComposerSurface({
               {/* The editor stays mounted while the primary slot switches from
                   mic to Send. Controls stay bottom-aligned as the text grows. */}
               <div
-                className={`relative flex items-end ${mobileChatsNavigation ? "gap-1" : "gap-2"}`}
+                className={`relative flex items-end ${compactNavigationLayout ? "gap-1" : "gap-2"}`}
                 data-testid="chat-composer-text-row"
                 onDragOver={onDragOver}
                 onDrop={onDrop}
@@ -1341,7 +1347,7 @@ export function ChatComposerSurface({
                     data-testid="chat-composer-leading-controls"
                   >
                     {navigationButtonNode}
-                    {!mobileChatsNavigation ? actionMenuNode : null}
+                    {!compactNavigationLayout ? actionMenuNode : null}
                   </div>
                 ) : null}
                 <div
@@ -1365,7 +1371,7 @@ export function ChatComposerSurface({
                     className="flex flex-none items-center justify-end gap-0.5"
                     data-testid="chat-composer-trailing-controls"
                   >
-                    {mobileChatsNavigation ? actionMenuNode : null}
+                    {compactNavigationLayout ? actionMenuNode : null}
                     {voiceStripNode}
                     {renderSendButton()}
                   </div>
