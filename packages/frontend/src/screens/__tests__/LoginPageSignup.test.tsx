@@ -37,6 +37,8 @@ function Destination() {
 
 const friendlyCredentialsError =
   "That email and password don't match. New here, or no password yet? We'll email you a code.";
+const friendlyCodeError =
+  "That code has expired or isn't valid. Select Resend email to get a new one.";
 
 describe("LoginPage sign-up and password alternatives", () => {
   let container: HTMLDivElement;
@@ -280,18 +282,82 @@ describe("LoginPage sign-up and password alternatives", () => {
     expect(auth.updatePassword).not.toHaveBeenCalled();
   });
 
-  it("keeps verification errors on the code step for retry", async () => {
-    auth.verifyEmailOtp.mockRejectedValueOnce(new Error("Code expired. Request a new one."));
+  it.each([
+    { intent: "signup", reason: "structured", error: { code: "otp_expired", message: "Server wording can change" } },
+    { intent: "signup", reason: "legacy", error: new Error("Token has expired or is invalid") },
+    { intent: "login", reason: "structured", error: { code: "otp_expired", message: "Server wording can change" } },
+    { intent: "login", reason: "legacy", error: new Error("Token has expired or is invalid") },
+  ])("keeps $intent code feedback beside its controls for $reason errors", async ({ intent, error }) => {
+    auth.verifyEmailOtp.mockRejectedValue(error);
+    await render();
+    if (intent === "signup") {
+      await enterSignupEmail();
+      await click("Send verification code");
+    } else {
+      await enterPassword();
+      await click("Email me a code instead");
+    }
+    await type("otp", "12345678");
+    await click("Continue");
+
+    const input = container.querySelector("#otp") as HTMLInputElement;
+    const alert = container.querySelector('[data-testid="login-error"]');
+    expect(container.querySelectorAll('[data-testid="login-error"]')).toHaveLength(1);
+    expect(alert?.getAttribute("role")).toBe("alert");
+    expect(alert?.textContent).toBe(friendlyCodeError);
+    expect(alert?.childElementCount).toBe(0);
+    expect(alert?.id).toBe("login-otp-error");
+    expect(input.nextElementSibling).toBe(alert);
+    expect(alert?.closest("form")).toBe(input.form);
+    expect(input.getAttribute("aria-describedby")).toBe(alert?.id);
+    expect(input.getAttribute("aria-invalid")).toBe("true");
+    expect(alert!.compareDocumentPosition(button("Continue")) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(container.querySelector('[data-testid="destination"]')).toBeNull();
+
+    await type("otp", "87654321");
+    expect(container.querySelector('[data-testid="login-error"]')).toBeNull();
+    expect(input.hasAttribute("aria-describedby")).toBe(false);
+    expect(input.getAttribute("aria-invalid")).not.toBe("true");
+    await click("Continue");
+    expect(input.getAttribute("aria-invalid")).toBe("true");
+
+    await click("Resend email");
+    expect(container.querySelector('[role="alert"]')).toBeNull();
+    expect(input.value).toBe("");
+    expect(input.hasAttribute("aria-describedby")).toBe(false);
+    expect(input.getAttribute("aria-invalid")).not.toBe("true");
+    const resend = button("Resend email");
+    const message = container.querySelector('[data-testid="login-message"]');
+    expect(container.querySelectorAll('[data-testid="login-message"]')).toHaveLength(1);
+    expect(message?.getAttribute("role")).toBe("status");
+    expect(message?.textContent).toBe("New code sent. Use the latest email.");
+    expect(message?.childElementCount).toBe(0);
+    expect(resend.nextElementSibling).toBe(message);
+    const alternative = button(intent === "signup" ? "Use a different email" : "Continue with password");
+    expect(message!.compareDocumentPosition(alternative) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  });
+
+  it.each([
+    { error: new Error("The auth service is unavailable."), message: "The auth service is unavailable." },
+    { error: { code: "unexpected_failure", message: "Token has expired or is invalid" }, message: "Unable to verify code." },
+    {
+      error: Object.assign(new Error("Token has expired or is invalid"), { code: "unexpected_failure" }),
+      message: "Token has expired or is invalid",
+    },
+  ])("preserves other verification failures without marking the code invalid: $message", async ({ error, message }) => {
+    auth.verifyEmailOtp.mockRejectedValue(error);
     await render();
     await enterSignupEmail();
     await click("Send verification code");
     await type("otp", "12345678");
     await click("Continue");
-    expect(container.querySelector('[role="alert"]')?.textContent).toContain("Code expired");
-    expect(container.querySelector('[data-testid="destination"]')).toBeNull();
-    await click("Resend email");
-    expect(container.querySelector('[role="alert"]')).toBeNull();
-    expect((container.querySelector("#otp") as HTMLInputElement).value).toBe("");
+
+    const input = container.querySelector("#otp") as HTMLInputElement;
+    const alert = container.querySelector('[data-testid="login-error"]');
+    expect(alert?.textContent).toBe(message);
+    expect(input.nextElementSibling).toBe(alert);
+    expect(input.getAttribute("aria-describedby")).toBe("login-otp-error");
+    expect(input.getAttribute("aria-invalid")).not.toBe("true");
   });
 
   it("can switch back to the existing password login path", async () => {

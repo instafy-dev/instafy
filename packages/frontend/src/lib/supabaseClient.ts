@@ -1,5 +1,5 @@
 import { createClient, type SupabaseClient } from "@supabase/supabase-js";
-import { resolveSupabaseFlowType } from "../auth/pkce";
+import { passwordRecoveryCallbackUrl, resolveSupabaseFlowType } from "../auth/pkce";
 
 export const supabaseUrl = import.meta.env.VITE_SUPABASE_URL as string | undefined;
 export const supabaseAnonKey = import.meta.env.VITE_SUPABASE_ANON_KEY as string | undefined;
@@ -29,6 +29,15 @@ const noopClient = {
     invoke: async () => ({ data: null, error: { message: "Supabase env not configured" } })
   }
 };
+
+// The SDK can consume the hash and emit PASSWORD_RECOVERY before React mounts.
+// Preserve that intent in the route first, including callbacks sent to site_url.
+if (typeof window !== "undefined" && hasSupabaseConfig) {
+  const recoveryUrl = passwordRecoveryCallbackUrl(window.location.href);
+  if (recoveryUrl && recoveryUrl !== window.location.href) {
+    window.history.replaceState(window.history.state, "", recoveryUrl);
+  }
+}
 
 // PKCE by default; implicit ONLY for a load whose URL already carries a
 // legacy hash-token callback. auth-js wipes the stored session when a
