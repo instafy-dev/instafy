@@ -50,18 +50,27 @@ Each protected-main commit is published in two lanes:
   for `linux/arm64`, re-scans the reused amd64 images, and only then creates
   the multi-arch `<sha>` and `webdev-<sha>` tags and seals the
   `runtime-agent-multiarch-manifest` artifact. The publication coordinator
-  retries a failed commit up to four times. This lane can lag the production
-  release by hours, and it skips a commit once main has moved on.
+  runs it at most four times per commit (three retries after the first
+  failure). The first dispatch and each retry wait for the coordinator's next
+  pass (a push, a Build completion or the six-hourly schedule), so this lane
+  can lag the production release by hours, and it skips a commit once main has
+  moved on.
 
 Deployments and hosted compose consumers must use an immutable
 `ghcr.io/instafy-dev/instafy-runtime-agent@sha256:...` reference from a
-workflow summary or a sealed manifest. The `<sha>-linux-amd64` and
-`webdev-<sha>-linux-amd64` tags exist for every published commit; the
-multi-arch `<sha>` and `webdev-<sha>` tags exist only once the arm64 lane has
-succeeded for it. On an arm64 host, pin the index digest from the multi-arch
-manifest. The `latest` and `webdev` convenience tags move only when someone
-dispatches the multi-arch workflow with `update_channel_tags` set; the
-coordinator never does, and the production release refuses that input.
+workflow summary or a sealed manifest. Tags are conveniences, not release
+authority: a run pushes them before it seals, so an attempt that later fails
+can leave a tag behind or re-point it. The `<sha>-linux-amd64` and
+`webdev-<sha>-linux-amd64` tags exist for every published commit. The
+multi-arch `<sha>` and `webdev-<sha>` tags can lag or be missing, and are
+backed by a sealed manifest only once the arm64 lane has succeeded for the
+commit. On an arm64 host, pin the index digest from the multi-arch manifest.
+The `latest` and `webdev` convenience tags move only when someone dispatches
+the multi-arch workflow with `update_channel_tags` set; the coordinator never
+does, the production release refuses that input, and once the coordinator's
+run has sealed a commit a later dispatch for it is refused. Promoting channel
+tags from a sealed manifest is a follow-up (see
+[Runtime image release lanes](../../docs/Testing.md#runtime-image-release-lanes)).
 
 ## Environment knobs
 

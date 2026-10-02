@@ -567,27 +567,50 @@ longer hold a backend release.
   and this run's arm64 image. It seals `runtime-agent-multiarch-manifest`
   (`kind: runtime-agent-multiarch`, with the production run ID, its manifest
   digest and every index and child reference) and, like production, refuses a
-  second successful publication for the same commit. It never rebuilds amd64.
+  second successful publication for the same commit. Its arm64 and assemble
+  jobs refuse a re-run attempt before anything is pushed, so "Re-run failed
+  jobs" cannot reuse an earlier approval; a fresh dispatch is the only retry.
+  It never rebuilds amd64.
 
-`continuous-image-publication.yml` runs the arm64 lane as a third lane, after
-the two production lanes and in the same pass. It dispatches only when that
-pass found the production runtime manifest sealed, no arm64 run for the commit
-is active or sealed, fewer than four arm64 runs have failed for it, and main
-still equals the commit. A sealed but expiring multi-arch manifest, an exhausted
-retry cap or any API error ends in a `::warning::` and a summary line, never a
-failed pass: the step writes only its own `multiarch_*` outputs and always ends
-with status 0. Once four runs have failed, the summary reads "arm64 lane
-exhausted for `<sha>`; production unaffected; dispatch
+`continuous-image-publication.yml` runs the arm64 lane as a third lane, as the
+last step of a pass. It dispatches only when that pass found the production
+runtime manifest sealed, no arm64 run for the commit is active or sealed, fewer
+than four arm64 runs have failed for it, the production release is exactly one
+successful first-attempt run (the only kind the arm64 workflow can bind to),
+and main still equals the commit. So a commit gets at most four arm64 runs:
+the first attempt and three retries. Any unsuccessful run counts, including a
+cancelled one or a rejected `ghcr-release` approval; each run needs its own
+approval. Because the coordinator does not wait, the first dispatch comes in the
+pass after production seals, and each retry in a later pass (a push, a Build
+completion or the six-hourly schedule), so four attempts on a quiet main can
+span about a day.
+
+A sealed but expiring multi-arch manifest, an exhausted retry cap, a production
+release the lane cannot bind to, an arm64 run active for more than six hours
+(usually an approval nobody gave) or any API error ends in a `::warning::` and a
+summary line, never a failed pass. The step writes only its own `multiarch_*`
+outputs and its script always ends with status 0; the runner also bounds the
+step to two minutes with `continue-on-error`, so even a stalled API call cannot
+fail the pass. The job's timeout is the production steps' five minutes plus
+those two. Once four runs have failed, the summary reads "arm64 lane exhausted
+for `<sha>`; production unaffected; dispatch
 `publish-runtime-agent-multiarch.yml` manually". A manual dispatch, after fixing
-the cause, is the only further attempt for that commit. The lane serves only current main: a commit that main
-moved past before its arm64 lane succeeded keeps amd64-only tags.
+the cause, is the only further attempt for that commit. The lane serves only
+current main: a commit that main moved past before its arm64 lane succeeded
+keeps amd64-only tags.
 
 Consequences for consumers:
 
+- Only the digests in a sealed manifest are release authority. Every tag is
+  pushed before its run seals, so a failed attempt can leave a `-linux-<arch>`
+  tag behind, and a failed multi-arch attempt can leave `<sha>` or
+  `webdev-<sha>` pointing at an unsealed index until a later attempt re-points
+  it.
 - `<sha>-linux-amd64` and `webdev-<sha>-linux-amd64` exist for every published
   commit; the multi-arch `<sha>` and `webdev-<sha>` tags may lag or be missing.
   The pull-request runtime browser smoke therefore pulls
-  `webdev-<sha>-linux-amd64`.
+  `webdev-<sha>-linux-amd64`, which may come from an attempt that scanned and
+  smoked the image but did not seal.
 - The two halves of an index are scanned at different times; the amd64 re-scan
   before assembly keeps both at the same database standard.
 - The `latest`/`webdev` channel tags still move only on an explicit

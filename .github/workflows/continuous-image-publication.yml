@@ -88,7 +88,9 @@ jobs:
           && (github.event_name == 'schedule' || inputs.commit_sha == github.sha)
           && fromJSON('{"group":"org/instafy-trusted-build","labels":["self-hosted","Linux","X64","instafy-build"]}')
           || 'ubuntu-24.04' }}
-    timeout-minutes: 5
+    # Five minutes for the production steps, plus the arm64 lane's own
+    # two-minute step bound.
+    timeout-minutes: 7
 
     steps:
       - name: Qualify isolated protected-main control runner
@@ -514,8 +516,10 @@ jobs:
 
       # The best-effort arm64 lane. Every production decision above is final
       # before this step starts, and nothing here feeds back into it: the lane
-      # writes only multiarch_* outputs, runs in a subshell, and this step always
-      # ends with status 0, so arm64 can warn but never fail a pass or block a
+      # writes only multiarch_* outputs and runs in a subshell, and its script
+      # always ends with status 0. The runner also bounds the step to two
+      # minutes and lets the job continue past it, so a stalled API call cannot
+      # fail a pass either: arm64 can warn but never fail a pass or block a
       # release. It acts only in a pass that found the production runtime
       # manifest sealed for this exact current main, and dispatches again after
       # a failure until the commit has reached the retry cap.
@@ -524,6 +528,8 @@ jobs:
           steps.recheck.outputs.current == 'true' &&
           steps.freshness.outputs.runtime_fresh == 'true'
         id: multiarch
+        timeout-minutes: 2
+        continue-on-error: true
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
@@ -535,7 +541,9 @@ jobs:
           set -o pipefail
           lane_workflow=publish-runtime-agent-multiarch.yml
           lane_artifact=runtime-agent-multiarch-manifest
+          production_workflow=publish-runtime-agent.yml
           retry_cap=4
+          stuck_after_seconds=$(( 6 * 60 * 60 ))
           {
             echo "### Best-effort arm64 lane"
             echo
@@ -547,7 +555,8 @@ jobs:
               echo "- $2" >> "$GITHUB_STEP_SUMMARY"
               exit 0
             }
-            minimum_expiry_epoch="$(( $(date -u +%s) + 14 * 24 * 60 * 60 ))"
+            now_epoch="$(date -u +%s)"
+            minimum_expiry_epoch="$(( now_epoch + 14 * 24 * 60 * 60 ))"
             runs="$(gh api --method GET \
               -H 'Accept: application/vnd.github+json' \
               -H 'X-GitHub-Api-Version: 2026-03-10' \
@@ -565,6 +574,18 @@ jobs:
                 (.status | IN("completed", "queued", "in_progress", "waiting", "pending", "requested")))
             ' <<<"$runs" >/dev/null
             if jq -e 'any(.workflow_runs[]; .status != "completed")' <<<"$runs" >/dev/null; then
+              # An approval that nobody gives, or a queue behind another
+              # commit's run, would otherwise stay silent for days.
+              oldest_active="$(jq -r '
+                [.workflow_runs[] | select(.status != "completed") | .created_at | strings] |
+                sort | first // empty
+              ' <<<"$runs")"
+              if [[ -n "$oldest_active" ]]; then
+                active_since="$(date -u -d "$oldest_active" +%s)"
+                if (( now_epoch - active_since >= stuck_after_seconds )); then
+                  echo "::warning::A ${lane_workflow} run for ${RELEASE_COMMIT} has been active since ${oldest_active}; it may be waiting for ghcr-release approval or queued behind another run. Production publication is unaffected."
+                fi
+              fi
               finish pending "A ${lane_workflow} run for \`${RELEASE_COMMIT}\` is still active; none was dispatched."
             fi
             sealed_runs="$(jq -r '.workflow_runs[] | select(.conclusion == "success") | .id' <<<"$runs")"
@@ -596,6 +617,29 @@ jobs:
             if (( failed >= retry_cap )); then
               echo "::warning::arm64 lane exhausted for ${RELEASE_COMMIT} after ${failed} failed runs (cap ${retry_cap}); production unaffected; dispatch ${lane_workflow} manually once the cause is fixed."
               finish exhausted "arm64 lane exhausted for \`${RELEASE_COMMIT}\`; production unaffected; dispatch \`${lane_workflow}\` manually."
+            fi
+            # The arm64 workflow binds only to exactly one successful
+            # first-attempt production run, as release consumers do. A seal
+            # from any other attempt (for example after re-running failed jobs)
+            # can never bind, so it is reported instead of spending the cap.
+            production_runs="$(gh api --method GET \
+              -H 'Accept: application/vnd.github+json' \
+              -H 'X-GitHub-Api-Version: 2026-03-10' \
+              "repos/${GITHUB_REPOSITORY}/actions/workflows/${production_workflow}/runs" \
+              -f head_sha="$RELEASE_COMMIT" \
+              -f per_page=100)"
+            jq -e '(.total_count | type) == "number" and
+              .total_count == (.workflow_runs | length) and .total_count <= 100' <<<"$production_runs" >/dev/null
+            bindable="$(jq -er --arg sha "$RELEASE_COMMIT" --arg path ".github/workflows/${production_workflow}" '
+              [.workflow_runs[] | select(
+                .repository.full_name == "instafy-dev/instafy" and .path == $path and
+                .event == "workflow_dispatch" and .head_branch == "main" and .head_sha == $sha and
+                .status == "completed" and .conclusion == "success" and .run_attempt == 1
+              )] | length
+            ' <<<"$production_runs")"
+            if [[ "$bindable" != "1" ]]; then
+              echo "::warning::The sealed ${production_workflow} release for ${RELEASE_COMMIT} is not exactly one successful first-attempt run, so the arm64 lane cannot bind to it; none was dispatched. Production publication is unaffected."
+              finish unbindable "Not dispatched: the production runtime release for \`${RELEASE_COMMIT}\` is not exactly one successful first-attempt run."
             fi
             current_main="$(gh api -H 'X-GitHub-Api-Version: 2026-03-10' \
               "repos/${GITHUB_REPOSITORY}/commits/main" --jq .sha)"

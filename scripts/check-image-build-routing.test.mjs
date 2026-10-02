@@ -223,7 +223,7 @@ test("removing only the finite routing, builder, cache, scanner-host and registr
   // Re-pinned for the amd64/arm64 lane split: the reconstructed baselines of
   // the runtime publisher and the coordinator changed by exactly that diff.
   const pins = ["bf62fdc525afaa581c15984a6aa1f5c93376b3df7809fd33ce846230a82bf7a5",
-    "522a9ed9cf2c905ec04302be496c72b6df3d8d8f715bd576721306a4d41addf9", "791310db30f236f73c7178e0d8ee9bf7f428f382431cdbeb55a3742352d301c1"];
+    "522a9ed9cf2c905ec04302be496c72b6df3d8d8f715bd576721306a4d41addf9", "da2ba8af24f3102747c40ba157d91815bec587c5d690e6568b0282c5b7850f25"];
   for (const [index, file] of files.entries()) assert.equal(createHash("sha256").update(reconstruct(file, read(file))).digest("hex"), pins[index]);
   const enrolled = fs.readFileSync(path.join(root, "scripts/check-public-release-workflows.test.mjs"), "utf8");
   assert.match(enrolled, /import "\.\/check-image-build-routing\.test\.mjs";/u);

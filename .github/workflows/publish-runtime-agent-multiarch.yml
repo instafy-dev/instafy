@@ -338,6 +338,18 @@ jobs:
             trivy_sha256: "2ca2c023109c2db6b2b77366b6717291452d4531167377d95c79547f0c8e3467"
 
     steps:
+      # "Re-run failed jobs" reuses the first attempt's successful authorize and
+      # approval jobs, so the attempt rule is enforced again before anything
+      # is pushed: a release run is immutable.
+      - name: Refuse a re-run before publishing arm64 images
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "$GITHUB_RUN_ATTEMPT" != "1" ]]; then
+            echo "::error::Release runs are immutable; use a fresh dispatch after a failed attempt."
+            exit 1
+          fi
+
       - name: Checkout exact protected-main commit
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
@@ -666,6 +678,18 @@ jobs:
       packages: write
 
     steps:
+      # "Re-run failed jobs" reuses the first attempt's successful authorize and
+      # approval jobs, so the attempt rule is enforced again before anything
+      # is pushed: a release run is immutable.
+      - name: Refuse a re-run before assembling the multi-arch indexes
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "$GITHUB_RUN_ATTEMPT" != "1" ]]; then
+            echo "::error::Release runs are immutable; use a fresh dispatch after a failed attempt."
+            exit 1
+          fi
+
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
         with:

@@ -72,7 +72,8 @@ test("protected main reconciles exact image publication without occupying a wait
   assert.match(source, /actions: write/u);
   assert.match(source, /contents: read/u);
   assert.match(source, /cancel-in-progress: false/u);
-  assert.match(source, /timeout-minutes: 5/u);
+  // Five minutes for the production steps plus the arm64 lane's own two-minute step bound.
+  assert.match(source, /^    timeout-minutes: 7$/mu);
   assert.doesNotMatch(source, /\bsleep\b|\bdeadline\b|wait_for_run/u);
   assert.match(source, /steps\.ci\.outputs\.ready == 'true'/u);
   assert.match(source, /steps\.freshness\.outputs\.pending == 'false'/u);
@@ -152,10 +153,21 @@ test("protected main reconciles exact image publication without occupying a wait
     [...source.matchAll(/publish-production-services\.yml/gu)].length,
     2,
   );
+  // The freshness read, the dispatch, and the arm64 lane's read-only check of
+  // the production run it must bind to.
   assert.equal(
     [...source.matchAll(/publish-runtime-agent\.yml/gu)].length,
-    2,
+    3,
   );
+  const laneStep = source.slice(source.indexOf(
+    "      - name: Reconcile the best-effort arm64 lane without blocking production\n",
+  ));
+  assert.match(laneStep, /^          production_workflow=publish-runtime-agent\.yml$/mu);
+  assert.deepEqual([...laneStep.matchAll(/^.*\$\{production_workflow\}.*$/gmu)].map((match) => match[0].trim()), [
+    '"repos/${GITHUB_REPOSITORY}/actions/workflows/${production_workflow}/runs" \\',
+    'bindable="$(jq -er --arg sha "$RELEASE_COMMIT" --arg path ".github/workflows/${production_workflow}" \'',
+    'echo "::warning::The sealed ${production_workflow} release for ${RELEASE_COMMIT} is not exactly one successful first-attempt run, so the arm64 lane cannot bind to it; none was dispatched. Production publication is unaffected."',
+  ]);
   assertOrdered(
     source,
     "Authorize the exact current protected-main commit",

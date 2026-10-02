@@ -138,8 +138,8 @@ Runtime images publish in two lanes. `publish-runtime-agent.yml` releases amd64 
 the production runtime manifest; arm64 never gates a backend release.
 `publish-runtime-agent-multiarch.yml` then adds the arm64 images and the multi-arch tags, bound to
 that sealed manifest. The coordinator runs it as a third, best-effort lane: it dispatches only after
-the production runtime manifest is sealed, retries a failed commit up to four times, and can only
-warn, never fail a pass or change the production lanes.
+the production runtime manifest is sealed, runs a commit at most four times (three retries after
+the first failure), and can only warn, never fail a pass or change the production lanes.
 
 Hosted rollout authority lives in the private operations repository. Public CI must not receive
 its credentials, decide production rollout policy or bypass the exact-commit manifest boundary.

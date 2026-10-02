@@ -453,3 +453,77 @@ test("the reused amd64 images are re-scanned anonymously with the production gat
   fails(tag, /not an exact production digest/u);
   fails(run({ BASE_AMD64_IMAGE: "" }), /not an exact production digest/u);
 });
+
+// Job and step structure, read from the workflow text.
+function jobOf(source, name) {
+  const start = source.indexOf(`\n  ${name}:\n`);
+  assert.ok(start >= 0, `missing job ${name}`);
+  const rest = source.slice(start + 1);
+  const next = rest.slice(1).search(/\n  [\w-]+:\n/u);
+  return next < 0 ? rest : rest.slice(0, next + 2);
+}
+const stepBlocks = (job) => job.split(/\n(?=      - name: )/u).slice(1);
+const stepName = (step) => step.match(/^      - name: (.+)$/mu)[1];
+const conditional = (job) => stepBlocks(job).filter((step) => /^        if:/mu.test(step)).map(stepName);
+
+test("no build, scan or re-scan step in either runtime publisher can be skipped", () => {
+  // Only the hosted-disk reclaim and the webdev-only smoke are conditional; a
+  // condition on any scan would let an image be published unscanned.
+  const cellConditions = ["Reclaim hosted-runner disk for the audited image", "Prove the webdev image starts the Shared Browser"];
+  assert.deepEqual(conditional(jobOf(production, "build-scan-push")), cellConditions);
+  assert.deepEqual(conditional(jobOf(multiarch, "build-scan-push-arm64")), cellConditions);
+  for (const job of ["authorize", "release-approval", "assemble-release-manifest"]) {
+    assert.deepEqual(conditional(jobOf(production, job)), [], job);
+  }
+  for (const job of ["authorize", "bind-production-manifest", "release-approval", "assemble-multiarch"]) {
+    assert.deepEqual(conditional(jobOf(multiarch, job)), [], job);
+  }
+  assert.doesNotMatch(production + multiarch, /^    if:/mu, "no job-level condition");
+  for (const [source, job, name] of [
+    [production, "build-scan-push", "Scan audit image"],
+    [multiarch, "build-scan-push-arm64", "Scan audit image"],
+    [multiarch, "assemble-multiarch", "Re-scan the sealed amd64 images from the registry"],
+  ]) {
+    assert.equal(stepBlocks(jobOf(source, job)).filter((step) => stepName(step) === name).length, 1, `${job}: ${name}`);
+  }
+});
+
+test("the sealed amd64 references flow unchanged from the binding into every assemble step", () => {
+  assert.match(jobOf(multiarch, "bind-production-manifest"),
+    /^    outputs:\n      production_run_id: \$\{\{ steps\.production\.outputs\.run_id \}\}\n      production_manifest_digest: \$\{\{ steps\.production\.outputs\.artifact_digest \}\}\n      base_amd64: \$\{\{ steps\.production\.outputs\.base \}\}\n      webdev_amd64: \$\{\{ steps\.production\.outputs\.webdev \}\}\n\n/mu);
+  const readers = stepBlocks(jobOf(multiarch, "assemble-multiarch")).filter((step) => /AMD64_IMAGE/u.test(step));
+  assert.deepEqual(readers.map(stepName), [
+    "Re-scan the sealed amd64 images from the registry",
+    "Validate exactly one arm64 record per flavor",
+    "Assemble commit-SHA multiarch manifests from immutable digests",
+    "Aggregate exact multi-arch manifest",
+  ]);
+  for (const step of readers) {
+    assert.deepEqual([...step.matchAll(/^ {10}(\w*AMD64\w*): (.*)$/gmu)].map((match) => [match[1], match[2]]), [
+      ["BASE_AMD64_IMAGE", "${{ needs.bind-production-manifest.outputs.base_amd64 }}"],
+      ["WEBDEV_AMD64_IMAGE", "${{ needs.bind-production-manifest.outputs.webdev_amd64 }}"],
+    ], stepName(step));
+  }
+  const aggregate = readers.at(-1);
+  assert.match(aggregate, /^ {10}PRODUCTION_RUN_ID: \$\{\{ needs\.bind-production-manifest\.outputs\.production_run_id \}\}$/mu);
+  assert.match(aggregate, /^ {10}PRODUCTION_MANIFEST_DIGEST: \$\{\{ needs\.bind-production-manifest\.outputs\.production_manifest_digest \}\}$/mu);
+  // No other line anywhere reads the bound references.
+  const uses = [...multiarch.matchAll(/^.*needs\.bind-production-manifest\.outputs\.(\w+).*$/gmu)].map((match) => match[1]);
+  assert.deepEqual([...new Set(uses)].sort(), ["base_amd64", "production_manifest_digest", "production_run_id", "webdev_amd64"]);
+  assert.equal(uses.length, 2 * readers.length + 2);
+});
+
+test("re-running failed jobs cannot push or assemble again without a fresh dispatch", () => {
+  for (const [job, name] of [
+    ["build-scan-push-arm64", "Refuse a re-run before publishing arm64 images"],
+    ["assemble-multiarch", "Refuse a re-run before assembling the multi-arch indexes"],
+  ]) {
+    const first = stepBlocks(jobOf(multiarch, job))[0];
+    assert.equal(stepName(first), name, job);
+    assert.doesNotMatch(first, /^        (?:if|continue-on-error):/mu, job);
+    ok(runStep(multiarch, name, { env: { GITHUB_RUN_ATTEMPT: "1" } }));
+    for (const attempt of ["2", "", "1 "]) {
+      fails(runStep(multiarch, name, { env: { GITHUB_RUN_ATTEMPT: attempt } }), /Release runs are immutable/u, `${job} attempt ${JSON.stringify(attempt)}`);
+    }
+  }
+});

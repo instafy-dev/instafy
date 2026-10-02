@@ -34,7 +34,7 @@ function body(name) {
   return script.split("\n").map((line) => line.startsWith("          ") ? line.slice(10) : line).join("\n");
 }
 
-function run(name, responses, extraEnv = {}) {
+function run(name, responses, extraEnv = {}, { timeout = 10_000 } = {}) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "image-coordinator-test-"));
   try {
     const fixture = path.join(dir, "responses.json");
@@ -55,9 +55,13 @@ const method = args.includes('--method') ? args[args.indexOf('--method') + 1] : 
 const input = method === 'POST' ? fs.readFileSync(0, 'utf8') : '';
 fs.appendFileSync(process.env.CALLS, JSON.stringify({ method, endpoint, args, input }) + '\\n');
 const responses = JSON.parse(fs.readFileSync(process.env.FIXTURE, 'utf8'));
-if (!Object.hasOwn(responses, endpoint) || responses[endpoint]?.error) process.exit(19);
+// A stalled API call: it holds no pipe the harness waits on and gives up on its own.
+if (responses[endpoint]?.hang) { fs.closeSync(2); setTimeout(() => process.exit(19), 3000); }
+else if (!Object.hasOwn(responses, endpoint) || responses[endpoint]?.error) process.exit(19);
+else {
 const value = responses[endpoint];
 process.stdout.write(typeof value === 'string' ? value + '\\n' : JSON.stringify(value));
+}
 `, { mode: 0o700 });
     // GNU date's two used forms, implemented portably for this offline fixture.
     fs.writeFileSync(path.join(dir, "date"), `#!${process.execPath}
@@ -66,8 +70,9 @@ if (JSON.stringify(args) === JSON.stringify(['-u', '+%s'])) process.stdout.write
 else if (args.length === 4 && args[0] === '-u' && args[1] === '-d' && args[3] === '+%s' && Number.isFinite(Date.parse(args[2]))) process.stdout.write(String(Date.parse(args[2]) / 1000) + '\\n');
 else process.exit(17);
 `, { mode: 0o700 });
-    const result = spawnSync("/bin/bash", ["-c", body(name)], {
-      encoding: "utf8", timeout: 10_000,
+    // The shell Actions runs for `shell: bash`, errexit and pipefail included.
+    const result = spawnSync("/bin/bash", ["--noprofile", "--norc", "-eo", "pipefail", "-c", body(name)], {
+      encoding: "utf8", timeout, killSignal: "SIGKILL",
       env: {
         PATH: `${dir}:/opt/homebrew/bin:/usr/bin:/bin`, GH_TOKEN: "inert-fixture",
         FIXTURE: fixture, CALLS: calls, GITHUB_OUTPUT: output, GITHUB_STEP_SUMMARY: summary,
@@ -82,7 +87,7 @@ else process.exit(17);
 function workflowRun(id, workflow, status = "completed", conclusion = "success") {
   return { id, repository: { full_name: repo }, path: `.github/workflows/${workflow}`,
     event: workflow === "build.yml" ? "push" : "workflow_dispatch", head_sha: sha,
-    head_branch: "main", status, conclusion: status === "completed" ? conclusion : null };
+    head_branch: "main", status, conclusion: status === "completed" ? conclusion : null, run_attempt: 1 };
 }
 function inventory(...workflow_runs) { return { total_count: workflow_runs.length, workflow_runs }; }
 function manifests(overrides = {}) { return { [servicePath]: inventory(), [runtimePath]: inventory(), ...overrides }; }
@@ -340,11 +345,15 @@ const laneReceipt = (id) => ({ workflow_run_id: id, html_url: `https://github.co
 function outputs(text) {
   return Object.fromEntries(text.split("\n").filter(Boolean).map((line) => line.split(/=(.*)/su).slice(0, 2)));
 }
+const sealedProductionRun = (changes = {}) => ({ ...workflowRun(3, "publish-runtime-agent.yml"), ...changes });
 function lane(responses, extraEnv = {}) {
-  const result = run(steps.multiarch, { [mainPath]: sha, [multiarchDispatchPath]: laneReceipt(900), ...responses }, extraEnv);
+  const result = run(steps.multiarch, { [mainPath]: sha, [multiarchDispatchPath]: laneReceipt(900),
+    [runtimePath]: inventory(sealedProductionRun()), ...responses }, extraEnv);
   passed(result);
   assert.doesNotMatch(result.output, /^(?:services_publish|runtime_publish|runtime_fresh|pending|publish|dispatched|services_run_id|runtime_run_id)=/mu);
-  assert.ok(result.calls.every(({ endpoint }) => !/publish-production-services|publish-runtime-agent\.yml/u.test(endpoint)));
+  // The lane may read the production runtime run listing, and nothing else of production.
+  assert.ok(result.calls.every(({ method, endpoint }) => !/publish-production-services|publish-runtime-agent\.yml/u.test(endpoint)
+    || (method === "GET" && endpoint === runtimePath)));
   return { ...result, state: outputs(result.output).multiarch_state, posts: result.calls.filter(({ method }) => method === "POST") };
 }
 
@@ -353,7 +362,7 @@ test("a missing arm64 lane is dispatched once, current-main only, with channel t
   assert.equal(result.state, "dispatched");
   assert.equal(outputs(result.output).multiarch_run_id, "900");
   assert.deepEqual(result.calls.map(({ method, endpoint }) => `${method} ${endpoint}`),
-    [`GET ${multiarchPath}`, `GET ${mainPath}`, `POST ${multiarchDispatchPath}`]);
+    [`GET ${multiarchPath}`, `GET ${runtimePath}`, `GET ${mainPath}`, `POST ${multiarchDispatchPath}`]);
   assert.ok(!result.calls[0].args.includes("event=workflow_dispatch") && !result.calls[0].args.includes("status=success"));
   assert.deepEqual(JSON.parse(result.posts[0].input), { ref: "main", inputs: { commit_sha: sha, update_channel_tags: false } });
   assert.match(result.summary, /Dispatched attempt 1 of 4: \[run 900\]/u);
@@ -409,6 +418,8 @@ test("any broken arm64 inventory, read or receipt ends in a warning and status 0
     "duplicate IDs": { [multiarchPath]: inventory(laneRun(10, "completed", "failure"), laneRun(10, "completed", "failure")) },
     "unknown status": { [multiarchPath]: inventory(laneRun(10, "unknown")) },
     "artifact read error": { [multiarchPath]: inventory(laneRun(11)), [`${prefix}runs/11/artifacts`]: { error: true } },
+    "production listing error": { [multiarchPath]: inventory(), [runtimePath]: { error: true } },
+    "incomplete production listing": { [multiarchPath]: inventory(), [runtimePath]: { total_count: 2, workflow_runs: [sealedProductionRun()] } },
     "main read error": { [multiarchPath]: inventory(), [mainPath]: { error: true } },
     "dispatch rejected": { [multiarchPath]: inventory(), [multiarchDispatchPath]: { error: true } },
     "ambiguous receipt": { [multiarchPath]: inventory(), [multiarchDispatchPath]: { workflow_run_id: "1; true", html_url: "x" } },
@@ -421,11 +432,53 @@ test("any broken arm64 inventory, read or receipt ends in a warning and status 0
     assert.ok(result.posts.length <= 1, label);
   }
 });
+test("a production seal that is not exactly one first-attempt run only warns and spends no attempt", () => {
+  // The arm64 workflow (and release consumers) bind only to exactly one
+  // successful first-attempt run; any other seal would fail every dispatch.
+  for (const [label, production] of Object.entries({
+    "sealed on a re-run attempt": inventory(sealedProductionRun({ run_attempt: 2 })),
+    "first attempt failed, re-run sealed": inventory(sealedProductionRun({ conclusion: "failure" }), sealedProductionRun({ id: 4, run_attempt: 2 })),
+    "two first-attempt seals": inventory(sealedProductionRun(), sealedProductionRun({ id: 4 })),
+    "a foreign seal": inventory(sealedProductionRun({ head_branch: "other" })),
+  })) {
+    const result = lane({ [multiarchPath]: inventory(laneRun(10, "completed", "failure")), [runtimePath]: production });
+    assert.equal(result.state, "unbindable", label);
+    assert.equal(result.posts.length, 0, label);
+    assert.ok(result.calls.every(({ endpoint }) => endpoint !== mainPath), label);
+    assert.match(result.stdout, /^::warning::The sealed publish-runtime-agent\.yml release for a{40} is not exactly one successful first-attempt run, so the arm64 lane cannot bind to it; none was dispatched\. Production publication is unaffected\.$/mu, label);
+    assert.match(result.summary, /^- Not dispatched: the production runtime release for `a{40}` is not exactly one successful first-attempt run\.$/mu, label);
+  }
+  // A first-attempt seal next to failed attempts still binds.
+  const bound = lane({ [multiarchPath]: inventory(),
+    [runtimePath]: inventory(sealedProductionRun({ id: 2, conclusion: "failure" }), sealedProductionRun()) });
+  assert.equal(bound.state, "dispatched");
+});
+test("an arm64 run active for six hours warns that it may be waiting for approval, still without a duplicate", () => {
+  const now = 1789012800;
+  const since = (seconds) => new Date((now - seconds) * 1000).toISOString();
+  const recent = lane({ [multiarchPath]: inventory({ ...laneRun(8, "waiting"), created_at: since(6 * 60 * 60 - 1) }) });
+  assert.equal(recent.state, "pending");
+  assert.doesNotMatch(recent.stdout, /::warning::/u);
+  for (const status of ["waiting", "queued"]) {
+    const stuck = lane({ [multiarchPath]: inventory(laneRun(7, "completed", "failure"),
+      { ...laneRun(8, status), created_at: since(6 * 60 * 60) }, { ...laneRun(9, "in_progress"), created_at: since(60) }) });
+    assert.equal(stuck.state, "pending", status);
+    assert.equal(stuck.posts.length, 0, status);
+    assert.match(stuck.stdout, new RegExp(`^::warning::A publish-runtime-agent-multiarch\\.yml run for ${sha} has been active since ${since(6 * 60 * 60).replaceAll(".", "\\.")}; it may be waiting for ghcr-release approval or queued behind another run\\. Production publication is unaffected\\.$`, "mu"), status);
+  }
+  const unreadable = lane({ [multiarchPath]: inventory({ ...laneRun(8, "waiting"), created_at: "not a time" }) });
+  assert.equal(unreadable.state, "error");
+});
 test("the arm64 lane runs last, only after a fresh production runtime manifest, and cannot exit non-zero", () => {
   const names = [...source.matchAll(/^      - name: (.+)$/gmu)].map((match) => match[1]);
   assert.equal(names.at(-1), steps.multiarch);
   const step = source.slice(source.indexOf(`      - name: ${steps.multiarch}\n`));
-  assert.match(step, /^        if: >-\n          steps\.recheck\.outputs\.current == 'true' &&\n          steps\.freshness\.outputs\.runtime_fresh == 'true'\n        id: multiarch\n/mu);
+  assert.match(step, /^        if: >-\n          steps\.recheck\.outputs\.current == 'true' &&\n          steps\.freshness\.outputs\.runtime_fresh == 'true'\n        id: multiarch\n        timeout-minutes: 2\n        continue-on-error: true\n        shell: bash\n/mu);
+  // The runner bounds the lane and lets the job continue past it; no other
+  // step may continue on error, and the job keeps five minutes for production.
+  assert.equal([...source.matchAll(/continue-on-error/gu)].length, 1);
+  assert.deepEqual([...source.matchAll(/^ +timeout-minutes: (\d+)$/gmu)].map((match) => match[0].trim()),
+    ["timeout-minutes: 7", "timeout-minutes: 2"]);
   // Nothing before it can read its outputs, and it writes only its own.
   const before = source.slice(0, source.indexOf(step)).split("\n").filter((line) => !/^\s*#/u.test(line)).join("\n");
   assert.doesNotMatch(before, /steps\.multiarch|multiarch_/u);
@@ -444,7 +497,6 @@ test("the arm64 lane runs last, only after a fresh production runtime manifest, 
   assert.equal([...script.matchAll(/^\(\n|^\)\n/gmu)].length, 2, "one subshell");
   assert.equal([...script.matchAll(/--method POST/gu)].length, 1);
   assert.match(script, /^retry_cap=4$/mu);
-  assert.doesNotMatch(source, /continue-on-error/u);
 });
 
 // Runs one coordinator pass from the freshness step onward exactly as Actions
@@ -467,7 +519,7 @@ function holds(expression, state) {
   assert.doesNotMatch(js, /steps\.|github\.|runner\.|inputs\./u, expression);
   return vm.runInNewContext(js, {}, { timeout: 1000 });
 }
-function pass(responses) {
+function pass(responses, { laneTimeout } = {}) {
   const state = { source: { current: "true", commit_sha: sha }, ci: { ready: "true" }, recheck: { current: "true" } };
   const names = [...source.matchAll(/^      - name: (.+)$/gmu)].map((match) => match[1]);
   const ran = [], calls = [], productionCalls = [];
@@ -481,12 +533,15 @@ function pass(responses) {
         : value.replace(/^\$\{\{ steps\.([\w-]+)\.outputs\.([\w-]+) \}\}$/u, (_, id, output) => state[id]?.[output] ?? "");
       assert.doesNotMatch(env[key], /\$\{\{/u, `${name}: ${key}`);
     }
-    const result = run(name, responses, env);
+    const result = run(name, responses, env, name === steps.multiarch && laneTimeout ? { timeout: laneTimeout } : {});
     ran.push(name); calls.push(...result.calls); summary += result.summary; stdout += result.stdout;
     if (name !== steps.multiarch) productionCalls.push(...result.calls.map(({ method, endpoint, input }) => `${method} ${endpoint} ${input}`));
     const id = step.match(/^        id: (\S+)$/mu)?.[1];
     if (id) state[id] = outputs(result.output);
-    if (result.status !== 0) return { state, ran, calls, productionCalls, summary, stdout, failed: name };
+    if (result.status !== 0 && !/^        continue-on-error: true$/mu.test(step)) {
+      return { state, ran, calls, productionCalls, summary, stdout, failed: name };
+    }
+    if (result.status !== 0) state.outcomes = { ...state.outcomes, [id]: "failure" };
   }
   return { state, ran, calls, productionCalls, summary, stdout };
 }
@@ -590,4 +645,21 @@ test("a production runtime manifest that is missing, active or failed never star
   assert.equal(result.failed, undefined);
   assert.equal(result.state.freshness.runtime_publish, "true");
   assert.ok(!result.ran.includes(steps.multiarch));
+});
+
+test("a stalled arm64 API call is cut off by the lane's own step bound and the pass still succeeds", () => {
+  // Actions ends the step at its two-minute bound and, because the step
+  // continues on error, the job too; the harness models that bound by
+  // killing the step.
+  const reference = pass(passFixture({ lane: [] }));
+  assert.equal(reference.state.multiarch.multiarch_state, "dispatched");
+  for (const stalled of [multiarchPath, mainPath, multiarchDispatchPath]) {
+    const fixture = passFixture({ lane: [] });
+    fixture[stalled] = { hang: true };
+    const result = pass(fixture, { laneTimeout: 1500 });
+    assert.equal(result.failed, undefined, stalled);
+    assert.equal(result.state.outcomes?.multiarch, "failure", stalled);
+    assert.deepEqual(production(result.state), production(reference.state), stalled);
+    assert.deepEqual(result.productionCalls, reference.productionCalls, stalled);
+  }
 });
