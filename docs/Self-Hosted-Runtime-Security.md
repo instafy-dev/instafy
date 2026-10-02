@@ -67,6 +67,14 @@ generation. The requested job must belong to that exact runtime, remain leased, 
 future expiry before granted secrets can be decrypted. Missing runtime ownership or expiry
 fails closed regardless of `STRICT_MODE`.
 
+Conversation-authorized viewers still receive basic run lifecycle status when work runs on
+another participant's private runtime. If a lifecycle event contains private runtime details,
+the controller sends only the run identity, current database status, numeric progress and
+update timestamp after rechecking project and conversation access. Runtime identifiers,
+lease metrics, messages, metadata, previews and routing fields remain omitted; the runtime
+owner receives the original event. This keeps shared chats up to date without granting
+runtime discovery or control.
+
 Raw runtime routing state is controller-only. Authenticated project members have
 no direct database privileges on runtimes, runtime leases/events, tunnel grants,
 origins, presence, origin instances, or workspace commit receipts; otherwise a

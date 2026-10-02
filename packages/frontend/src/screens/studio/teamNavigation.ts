@@ -1,3 +1,4 @@
+import { getOrgDisplayName } from "../../org/orgNaming";
 import { isUUID } from "../../utils/uuid";
 
 export type StudioNavigationPage = "home" | "team" | "account" | "workspace";
@@ -22,6 +23,21 @@ export function resolveTeamNavigationScope(search: string, activeOrgKey: string)
   const requestedKey = teamSettings ? readTeamNavigationKey(params.get("settingsOrgId"))
     : page !== "workspace" ? readTeamNavigationKey(params.get("teamId")) : null;
   return { page, orgKey: requestedKey ?? activeOrgKey };
+}
+
+/**
+ * The team name shown beside the team chip, in the mobile header and in search.
+ * A cached or project name is the stored one ("Personal team"), so it goes
+ * through the same display name as the sidebar ("Personal").
+ */
+export function resolveActiveTeamName(
+  orgKey: string,
+  knownTeamName: string | null | undefined,
+  activeProject: { orgKey: string; orgName: string | null | undefined } | null,
+) {
+  if (orgKey === "personal") return getOrgDisplayName(null);
+  const name = knownTeamName ?? (activeProject?.orgKey === orgKey ? activeProject.orgName : null);
+  return name == null ? "Team" : getOrgDisplayName(name);
 }
 
 /** Search follows the visible working context, including on Home and account pages. */

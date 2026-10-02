@@ -24,13 +24,29 @@ function resolvePackagedRuntimeBundle(context) {
         )
       : path.join(context.appOutDir, "resources");
   const directory = path.join(resourcesPath, "runtime-agent");
-  const filename = platform === "win32" ? "runtime-agent.exe" : "runtime-agent";
+  const suffix = platform === "win32" ? ".exe" : "";
+  const filename = `runtime-agent${suffix}`;
+  const codeModeHostFilename = `codex-code-mode-host${suffix}`;
   return {
     directory,
     executablePath: path.join(directory, filename),
     filename,
+    codeModeHostPath: path.join(directory, codeModeHostFilename),
+    codeModeHostFilename,
     manifestPath: path.join(directory, MANIFEST_FILENAME),
     platform,
+  };
+}
+
+// Size and checksum of a packaged binary, refusing anything but a regular file.
+function describeBinary(filePath, label) {
+  const stats = fs.lstatSync(filePath);
+  if (!stats.isFile() || stats.isSymbolicLink()) {
+    throw new Error(`Unsafe packaged ${label}: ${filePath}`);
+  }
+  return {
+    sizeBytes: stats.size,
+    sha256: createHash("sha256").update(fs.readFileSync(filePath)).digest("hex"),
   };
 }
 
@@ -42,8 +58,9 @@ function requireStagedManifest(manifestPath, expected) {
   const manifest = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
   if (
     !manifest ||
-    manifest.schemaVersion !== 2 ||
+    manifest.schemaVersion !== 3 ||
     manifest.filename !== expected.filename ||
+    manifest.codeModeHost?.filename !== expected.codeModeHostFilename ||
     manifest.platform !== expected.platform ||
     typeof manifest.arch !== "string" ||
     !SOURCE_SHA_PATTERN.test(manifest.sourceSha || "")
@@ -56,17 +73,16 @@ function requireStagedManifest(manifestPath, expected) {
 function finalizeRuntimeAgentManifest(context) {
   const bundle = resolvePackagedRuntimeBundle(context);
   const staged = requireStagedManifest(bundle.manifestPath, bundle);
-  const executableStats = fs.lstatSync(bundle.executablePath);
-  if (!executableStats.isFile() || executableStats.isSymbolicLink()) {
-    throw new Error(`Unsafe packaged runtime-agent executable: ${bundle.executablePath}`);
-  }
   const manifest = {
-    schemaVersion: 2,
+    schemaVersion: 3,
     filename: bundle.filename,
     platform: bundle.platform,
     arch: staged.arch,
-    sizeBytes: executableStats.size,
-    sha256: createHash("sha256").update(fs.readFileSync(bundle.executablePath)).digest("hex"),
+    ...describeBinary(bundle.executablePath, "runtime-agent executable"),
+    codeModeHost: {
+      filename: bundle.codeModeHostFilename,
+      ...describeBinary(bundle.codeModeHostPath, "code-mode host"),
+    },
     sourceSha: staged.sourceSha,
   };
   const temporaryPath = `${bundle.manifestPath}.tmp-${process.pid}`;

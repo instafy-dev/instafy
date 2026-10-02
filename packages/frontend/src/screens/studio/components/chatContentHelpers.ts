@@ -147,8 +147,17 @@ export function summarizeCommandExecutionResultForPreview(
   return outputPreview && !looksLikeTrivialCommandOutputPreview(outputPreview) ? outputPreview : "";
 }
 
-function unwrapCommandInvocation(value: string): string {
-  let command = value.replace(/\s+/g, " ").trim();
+/**
+ * Collapses whitespace runs to one character. With `keepLineBreaks`, a run
+ * that holds a line break becomes "\n" instead of " ", so the result lines up
+ * character for character with the collapsed command.
+ */
+function collapseWhitespace(value: string, keepLineBreaks: boolean): string {
+  return value.replace(/\s+/g, (run) => (keepLineBreaks && /[\r\n]/.test(run) ? "\n" : " ")).trim();
+}
+
+function unwrapCommandInvocation(value: string, keepLineBreaks = false): string {
+  let command = collapseWhitespace(value, keepLineBreaks);
   if (!command) {
     return "";
   }
@@ -156,14 +165,14 @@ function unwrapCommandInvocation(value: string): string {
     command = command.replace(/\\(['"])/g, "$1");
     const quotedShellWrapped = command.match(/^(?:\/[\w./-]+\/)?(?:bash|zsh|sh)\s+-lc\s+(['"])([\s\S]*)\1$/i);
     if (quotedShellWrapped?.[2]) {
-      command = quotedShellWrapped[2].replace(/\s+/g, " ").trim();
+      command = collapseWhitespace(quotedShellWrapped[2], keepLineBreaks);
       continue;
     }
     const flattenedShellWrapped = command.match(/^(?:\/[\w./-]+\/)?(?:bash|zsh|sh)\s+-lc\s+([\s\S]+)$/i);
     if (!flattenedShellWrapped?.[1]) {
       break;
     }
-    command = flattenedShellWrapped[1].replace(/\s+/g, " ").trim();
+    command = collapseWhitespace(flattenedShellWrapped[1], keepLineBreaks);
   }
   return command;
 }
@@ -174,6 +183,21 @@ function extractQuotedCommandTopic(command: string): string | null {
     return truncate(stripWorkspacePrefixForPreview(quoted[2].trim()), 64);
   }
   return null;
+}
+
+const WORKSPACE_SEARCH_STATUS = "Searching the workspace…";
+const READABLE_SEARCH_TOPIC_MAX_LENGTH = 40;
+// Letters, digits, spaces and the punctuation found inside names and paths.
+// Anything else (backslash escapes, %s placeholders, regex operators such as
+// | * + ? ^ $ ( ) [ ] { }) means the pattern is code, not words.
+const READABLE_SEARCH_TOPIC_PATTERN = /^[\p{L}\p{N} '’.,:@#&/_-]+$/u;
+
+/** A grep pattern reaches the live status only when it reads as plain words. */
+function readableSearchTopic(topic: string | null): string | null {
+  if (!topic || topic.length > READABLE_SEARCH_TOPIC_MAX_LENGTH) {
+    return null;
+  }
+  return READABLE_SEARCH_TOPIC_PATTERN.test(topic) && /[\p{L}\p{N}]/u.test(topic) ? topic : null;
 }
 
 export function summarizeActiveCommandForPreview(value: string, maxLength = 120): string {
@@ -206,7 +230,10 @@ export function summarizeActiveCommandForPreview(value: string, maxLength = 120)
     return "Checking prior context…";
   }
   if (/(^|[;&|]\s*)(rg|grep)\b/.test(normalized)) {
-    return topic ? `Searching workspace for "${topic}"…` : "Searching workspace…";
+    // The topic is read again with its line breaks kept: a multi-line pattern
+    // is code, even though the collapsed command shows it as one phrase.
+    const searchTopic = readableSearchTopic(extractQuotedCommandTopic(unwrapCommandInvocation(value, true)));
+    return searchTopic ? `Searching workspace for "${searchTopic}"…` : WORKSPACE_SEARCH_STATUS;
   }
   if (/\bgit\s+clone\b/.test(normalized)) {
     return "Cloning source repo…";

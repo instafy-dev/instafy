@@ -1,3 +1,6 @@
+import { readFileSync } from "node:fs";
+import { dirname, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import type { ChatMessage } from "../../screens/studio/types";
 import {
@@ -56,6 +59,15 @@ const PROXY_STREAMED_RATE_LIMIT =
 // Codex's own message when the provider stopped the answer early and the
 // response did not come through the Instafy proxy, which completes it instead.
 const RESPONSE_INCOMPLETE = (reason: string) => `Incomplete response returned, reason: ${reason}`;
+// The runtime agent's refusals of a browser task that names no usable page
+// (shared_browser.rs and codex.rs). Older Studio tabs could send one without a
+// page, and a page inferred from chat history has its URL as the id.
+const BROWSER_PAGE_MISSING = "Shared Browser job is missing its UI-selected browserPageId";
+const BROWSER_PAGE_MISSING_FOR_MCP =
+  "Shared Browser MCP requires the job's UI-selected browserPageId";
+const BROWSER_PAGE_INVALID = "Shared Browser browserPageId must be one bounded CDP target id";
+const BROWSER_PAGE_MISSING_TEXT =
+  "This was sent as a browser task without a page to work on, so nothing ran. Try again from Chat, or open a page in the browser first.";
 
 function createMessage(overrides: Partial<ChatMessage>): ChatMessage {
   return {
@@ -176,10 +188,46 @@ describe("classifyRunFailureText", () => {
     expect(classifyRunFailureText("The response was incomplete.")).toBeNull();
   });
 
+  it("classifies a browser task that named no usable page", () => {
+    for (const rawText of [BROWSER_PAGE_MISSING, BROWSER_PAGE_MISSING_FOR_MCP, BROWSER_PAGE_INVALID]) {
+      expect(classifyRunFailureText(rawText)).toBe("browser_page_missing");
+    }
+    expect(classifyRunFailureText("Open the browser page and check the title.")).toBeNull();
+  });
+
   it("returns null for unrelated text", () => {
     expect(classifyRunFailureText("Codex run timed out")).toBeNull();
     expect(classifyRunFailureText("All tests pass.")).toBeNull();
   });
+});
+
+// The controller labels a failed run in the agent's history with its own copy
+// of the rate limit patterns. Both sides read this one fixture list, so a
+// pattern changed on one side and not the other fails here and in the Rust
+// unit test at once.
+const here = dirname(fileURLToPath(import.meta.url));
+const repo = resolve(here, "../../../../..");
+const RUN_FAILURE_FIXTURES = resolve(
+  repo,
+  "packages/runtime-controller/src/run_failure_fixtures.json",
+);
+const runFailureFixtures = JSON.parse(readFileSync(RUN_FAILURE_FIXTURES, "utf8")) as {
+  cases: { name: string; text: string; providerRateLimited: boolean }[];
+};
+
+describe("provider rate limit fixtures shared with the controller", () => {
+  it("reads the shared fixture list", () => {
+    expect(runFailureFixtures.cases.length).toBeGreaterThanOrEqual(15);
+  });
+
+  it.each(runFailureFixtures.cases.map((fixture) => [fixture.name, fixture] as const))(
+    "%s",
+    (_name, fixture) => {
+      expect(classifyRunFailureText(fixture.text) === "provider_rate_limited").toBe(
+        fixture.providerRateLimited,
+      );
+    },
+  );
 });
 
 describe("hasFailedRunMetadata", () => {
@@ -228,6 +276,8 @@ describe("isAutoRetryEligibleFailureKind", () => {
     expect(isAutoRetryEligibleFailureKind("needs_ai")).toBe(false);
     // The provider billed the cut-short answer; the same request would stop the same way.
     expect(isAutoRetryEligibleFailureKind("response_incomplete")).toBe(false);
+    // Nothing changes until the person opens a page or resends from Chat.
+    expect(isAutoRetryEligibleFailureKind("browser_page_missing")).toBe(false);
     expect(isAutoRetryEligibleFailureKind("generic")).toBe(false);
     expect(isAutoRetryEligibleFailureKind(null)).toBe(false);
     expect(isAutoRetryEligibleFailureKind(undefined)).toBe(false);
@@ -922,6 +972,28 @@ describe("resolveRunFailurePresentation", () => {
         assumeFailed: true,
       })?.kind,
     ).toBe("response_incomplete");
+  });
+
+  it("explains a browser task without a page in plain words instead of the runtime text", () => {
+    for (const rawText of [BROWSER_PAGE_MISSING, BROWSER_PAGE_MISSING_FOR_MCP, BROWSER_PAGE_INVALID]) {
+      const presentation = resolveRunFailurePresentation({
+        metadata: { source: "agent", outcome: "failed", messageType: "error", jobId: "job-1" },
+        content: rawText,
+      });
+      // The raw text stays available behind Details.
+      expect(presentation).toEqual({
+        kind: "browser_page_missing",
+        friendlyText: BROWSER_PAGE_MISSING_TEXT,
+        rawText,
+      });
+      expect(presentation?.friendlyText).not.toMatch(/browserPageId|Shared Browser|UI-selected|CDP/);
+      expect(presentation?.friendlyText).not.toContain("\u2014");
+      expect(isAutoRetryEligibleFailureKind(presentation?.kind)).toBe(false);
+    }
+    // The error bubble opts in with assumeFailed when the metadata lacks an outcome.
+    expect(
+      resolveRunFailurePresentation({ content: BROWSER_PAGE_MISSING, assumeFailed: true })?.kind,
+    ).toBe("browser_page_missing");
   });
 
   it("keeps the raw quota reason for a 429 that names an exhausted quota or plan limit", () => {

@@ -114,7 +114,7 @@ export function useRuntimeControllerSync({
     let runReconciliationGeneration = 0;
     const latestRunEvents = new Map<
       string,
-      { run: RunRecord; sequence: number }
+      { updatedAt: string | null | undefined; sequence: number }
     >();
     streamOpenedRef.current = false;
     initialStreamErrorNotifiedRef.current = false;
@@ -317,7 +317,7 @@ export function useRuntimeControllerSync({
         result.runs.forEach((run) => {
           const latestRunEvent = latestRunEvents.get(run.id);
           const snapshotUpdatedAt = Date.parse(run.updatedAt ?? "");
-          const eventUpdatedAt = Date.parse(latestRunEvent?.run.updatedAt ?? "");
+          const eventUpdatedAt = Date.parse(latestRunEvent?.updatedAt ?? "");
           // Prefer an SSE update received while this request was in flight
           // unless the authoritative snapshot proves it is at least as new.
           if (
@@ -355,10 +355,19 @@ export function useRuntimeControllerSync({
           receivedRunEventRef.current = true;
           runEventSequence += 1;
           latestRunEvents.set(run.id, {
-            run,
+            updatedAt: run.updatedAt,
             sequence: runEventSequence,
           });
           upsertRun(run);
+        },
+        onRunPatch: (patch) => {
+          receivedRunEventRef.current = true;
+          runEventSequence += 1;
+          latestRunEvents.set(patch.id, {
+            updatedAt: patch.updatedAt,
+            sequence: runEventSequence,
+          });
+          dispatch({ type: "patchRun", patch });
         },
         onAccessDenied: ({ status }) => {
           handleControllerAccessDenied(status);

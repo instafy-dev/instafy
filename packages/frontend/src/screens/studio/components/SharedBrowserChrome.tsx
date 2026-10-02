@@ -1,6 +1,6 @@
 import {
-  type FormEvent,
   type ReactNode,
+  useCallback,
   useEffect,
   useId,
   useMemo,
@@ -20,6 +20,8 @@ import {
 
 export type SharedBrowserChromeProps = {
   compact?: boolean;
+  historyUserId?: string | null;
+  historyActive?: boolean;
   pages: BrowserSessionPage[];
   resolved: boolean;
   pendingAction: string | null;
@@ -90,6 +92,8 @@ function ChromeButton({
 
 export function SharedBrowserChrome({
   compact = false,
+  historyUserId,
+  historyActive = true,
   pages,
   resolved,
   pendingAction,
@@ -138,15 +142,14 @@ export function SharedBrowserChrome({
     }
   }, [activePage?.url, error]);
 
-  const handleSubmit = (event: FormEvent<HTMLFormElement>) => {
-    event.preventDefault();
+  const navigateToAddress = useCallback((nextAddress: string) => {
     if (!activePage || controlsDisabled || !controls.navigate) {
-      return;
+      return false;
     }
-    const normalizedAddress = normalizeSharedBrowserAddress(addressDraft);
+    const normalizedAddress = normalizeSharedBrowserAddress(nextAddress);
     if (!normalizedAddress) {
       setAddressError("Enter an http:// or https:// address.");
-      return;
+      return false;
     }
     setAddressError(null);
     if (error) {
@@ -156,7 +159,8 @@ export function SharedBrowserChrome({
     submittedAddressRef.current = normalizedAddress;
     onNavigate(activePage.id, normalizedAddress);
     addressInputRef.current?.blur();
-  };
+    return true;
+  }, [activePage, controlsDisabled, controls.navigate, error, onClearError, onNavigate]);
 
   const clearDisplayedError = () => {
     setAddressError(null);
@@ -246,10 +250,13 @@ export function SharedBrowserChrome({
                 testIdPrefix="shared-browser"
                 errorId={displayedError ? `${errorId}-error` : undefined}
                 invalid={Boolean(displayedError)}
-                disabled={controlsDisabled || !controls.navigate}
+                disabled={!historyActive || controlsDisabled || !controls.navigate}
                 value={addressDraft}
+                historyUserId={historyUserId}
+                currentPage={resolved && historyActive ? activePage : null}
+                onNavigate={navigateToAddress}
+                errorMessage={displayedError}
                 placeholder={resolved ? "Enter an address" : "Connecting to Shared Browser…"}
-                onSubmit={handleSubmit}
                 onBlur={(event) => {
                   const nextFocus = event.relatedTarget;
                   if (
@@ -262,8 +269,8 @@ export function SharedBrowserChrome({
                   submittedAddressRef.current = null;
                   setAddressDraft(submittedAddress ?? activePage?.url ?? "");
                 }}
-                onChange={(event) => {
-                  setAddressDraft(event.target.value);
+                onValueChange={(value) => {
+                  setAddressDraft(value);
                   setAddressError(null);
                   if (error) {
                     onClearError();

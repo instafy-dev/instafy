@@ -56,7 +56,7 @@ updated when the human running the workflow explicitly requests it.
 - Runtime configuration is loaded from `CODEX_HOME` when explicitly configured, otherwise from the workspace's `.codex` directory. Desktop jobs do not implicitly load the computer owner's Codex configuration, plugins, or MCP connections. Configure runtime integrations in that runtime home.
 - `CODEX_SANDBOX_MODE` — choose `read-only`, `workspace-write` (default), or `danger-full-access` when overriding the sandbox.
 - `CODEX_LINUX_SANDBOX_EXE` — optional path to the hardened sandbox binary (mirrors the CLI flag).
-- `CODEX_BASE_INSTRUCTIONS` — inline override for Codex base instructions.
+- `CODEX_BASE_INSTRUCTIONS` — inline override for the runtime's own base instructions, which ordinary runs and team plan workers send instead of the model prompt. MCP, Shared Browser and Personal Browser runs send the model's Codex prompt without its `# Apps (Connectors)`, `# Plugins` and `# Using skills` sections. Every run's prompt carries Instafy's `# Destructive Actions` section exactly once (it is appended unless the prompt already has a section with that title), because runtime agents run without approval prompts and with full filesystem access.
 - `CODEX_INCLUDE_PLAN_TOOL`, `CODEX_INCLUDE_APPLY_PATCH_TOOL`, `CODEX_INCLUDE_VIEW_IMAGE_TOOL`, `CODEX_SHOW_RAW_AGENT_REASONING`, `CODEX_ENABLE_WEB_SEARCH` — boolean toggles (`true`/`false`). Plan/apply_patch/view_image default to `true` when unset so the runtime exposes the full toolbelt out of the box.
 - `ORIGIN_ID`, `ORIGIN_LEASE_ID`, `RUNTIME_ACCESS_TOKEN` (also exported as `ORIGIN_INTERNAL_TOKEN` for compatibility), `ORIGIN_MODE`, `ORIGIN_PROTOCOLS`, `ORIGIN_METADATA` — supplied by the controller so the agent can register the filesystem origin via `/origin/register`. These are required for every runtime launch.
 - `ORIGIN_MODE`, `ORIGIN_PROTOCOLS`, `ORIGIN_ENDPOINT`, `ORIGIN_DEVICE_ID`, `ORIGIN_METADATA` — optional hints forwarded to the controller when registering the origin instance. Defaults mirror the desktop runtime (`mode=desktop`, `protocols=http`).
@@ -80,10 +80,11 @@ and the runtime's legacy `CODEX_MAX_STREAM_RETRIES` observer do not expand this 
 The bound applies per failed sampling step, not to the total requests in a successful tool
 conversation. Browser execution retains its existing retry and shutdown policy, except that its
 `CODEX_MAX_STREAM_RETRIES` observer counts only stream errors since the last completed response,
-so a long turn that recovers from occasional rate limits is not aborted. A retryable proxy 429
-waits for its `Retry-After` and is retried inside the turn; when those retries run out, the run
-is not restarted. A proxy 429 marked not retryable, such as a plan limit or a rate-limit window
-measured in hours, ends the turn without waiting. A retry in progress is reported as a
+so a long turn that recovers from occasional rate limits is not aborted. A transient upstream
+rate limit reaches Codex as a streamed `rate_limit_exceeded` failure, which Codex waits out and
+retries inside the turn; when those retries run out, the run is not restarted. Codex does not
+retry an HTTP 429 at all, so a proxy 429, such as a plan limit, a rate-limit window measured in
+hours or a rate limit on a request that does not stream, ends the turn without waiting. A retry in progress is reported as a
 `Retrying:` status message (kind `codex_stream_retry`), which the Studio shows as calm progress
 while the message keeps the cause, and only a failure that ends the turn is reported as an error.
 

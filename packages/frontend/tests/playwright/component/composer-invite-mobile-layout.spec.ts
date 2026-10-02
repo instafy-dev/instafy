@@ -188,6 +188,12 @@ test("keeps a tall invite and its device handoff actions reachable inside phone 
         bottom: Number.parseFloat(getComputedStyle(overlayElement).paddingBottom),
         left: Number.parseFloat(getComputedStyle(overlayElement).paddingLeft),
       },
+      panelPadding: {
+        top: Number.parseFloat(getComputedStyle(panelElement).paddingTop),
+        right: Number.parseFloat(getComputedStyle(panelElement).paddingRight),
+        bottom: Number.parseFloat(getComputedStyle(panelElement).paddingBottom),
+        left: Number.parseFloat(getComputedStyle(panelElement).paddingLeft),
+      },
       panel: rect(panelElement),
       dialog: rect(dialogElement),
       scrollBody: {
@@ -200,13 +206,15 @@ test("keeps a tall invite and its device handoff actions reachable inside phone 
   });
 
   expect(geometry).not.toBeNull();
-  expect(geometry!.overlayPadding).toEqual({ top: 31, right: 20, bottom: 27, left: 16 });
-  for (const bounds of [geometry!.panel, geometry!.dialog]) {
-    expect(bounds.top).toBeGreaterThanOrEqual(31);
-    expect(bounds.bottom).toBeLessThanOrEqual(520 - 27);
-    expect(bounds.left).toBeGreaterThanOrEqual(16);
-    expect(bounds.right).toBeLessThanOrEqual(360 - 20);
-  }
+  // The focused phone surface fills the screen; its controls, rather than
+  // the outer panel, stay inside the native safe areas.
+  expect(geometry!.overlayPadding).toEqual({ top: 0, right: 0, bottom: 0, left: 0 });
+  expect(geometry!.panelPadding).toEqual({ top: 31, right: 20, bottom: 27, left: 12 });
+  expect(geometry!.panel).toEqual({ top: 0, bottom: 520, left: 0, right: 360, width: 360, height: 520 });
+  expect(geometry!.dialog.top).toBeGreaterThanOrEqual(31);
+  expect(geometry!.dialog.bottom).toBeLessThanOrEqual(520 - 27);
+  expect(geometry!.dialog.left).toBeGreaterThanOrEqual(12);
+  expect(geometry!.dialog.right).toBeLessThanOrEqual(360 - 20);
   expect(geometry!.scrollBody.scrollHeight).toBeGreaterThan(
     geometry!.scrollBody.clientHeight,
   );
@@ -221,6 +229,14 @@ test("keeps a tall invite and its device handoff actions reachable inside phone 
   expect(geometry!.actions[1].width).toBeGreaterThanOrEqual(44);
   expect(geometry!.actions[2].width).toBeGreaterThanOrEqual(44);
 
+  const close = dialog.getByRole("button", { name: "Close invite modal" });
+  const closeBounds = await close.boundingBox();
+  const settings = page.getByTestId("composer-invite-open-settings");
+  await settings.scrollIntoViewIfNeeded();
+  await expect(settings).toBeInViewport({ ratio: 1 });
+  await expect(close).toBeInViewport({ ratio: 1 });
+  expect(await close.boundingBox()).toEqual(closeBounds);
+  await qrButton.scrollIntoViewIfNeeded();
   await qrButton.click();
   const qrOverlay = page.getByTestId("composer-invite-nearby-qr-modal");
   await expect(qrOverlay).toBeVisible();
@@ -242,12 +258,22 @@ test("keeps access controls and prepared email actions reachable when a phone ke
   await expect(readRole).toHaveText("Read");
   await expect(editRole).toHaveText("Edit");
   await emailInput.scrollIntoViewIfNeeded();
-  await emailInput.focus();
+  await emailInput.fill("draft@example.com");
   await expect(emailInput).toBeFocused();
+  const inputNode = await emailInput.elementHandle();
 
   // A reduced viewport approximates the visualViewport resize emitted by a
   // mobile keyboard without coupling this component test to an OS keyboard.
   await page.setViewportSize({ width: 360, height: 360 });
+  await expect.poll(() => page.getByRole("dialog", { name: "Invite" }).evaluate((dialog) =>
+    dialog.parentElement!.getBoundingClientRect().height,
+  )).toBe(360);
+  await expect(emailInput).toBeFocused();
+  await expect(emailInput).toHaveValue("draft@example.com");
+  await expect(emailInput).toBeInViewport({ ratio: 1 });
+  expect(await inputNode!.evaluate((node) =>
+    node === document.querySelector('[data-testid="composer-invite-email-input"]'),
+  )).toBe(true);
   await page.evaluate(() => {
     const prepare = (window as Window & { __prepareEmailInvite?: () => void })
       .__prepareEmailInvite;

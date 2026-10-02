@@ -9115,6 +9115,12 @@ async fn event_stream_hides_private_runtime_lifecycle_from_project_teammates() -
         return Ok(());
     };
 
+    ensure_conversation_event_test_tables(&pool).await?;
+
+    let conversation_id = Uuid::new_v4();
+    let private_conversation_id = Uuid::new_v4();
+    let run_id = Uuid::new_v4();
+    let private_run_id = Uuid::new_v4();
     let owner_user_id = Uuid::new_v4();
     let teammate_user_id = Uuid::new_v4();
     let org_id = Uuid::new_v4();
@@ -9160,6 +9166,34 @@ async fn event_stream_hides_private_runtime_lifecycle_from_project_teammates() -
                 "insert into project_memberships (project_id, user_id, role)
                  values ($1, $2, 'builder')",
                 &[&project_id, &teammate_user_id],
+            )
+            .await?;
+        connection
+            .execute(
+                "insert into conversations (id, project_id, created_by, metadata, visibility)
+                 values ($1, $3, $4, '{}'::jsonb, 'public'),
+                        ($2, $3, $4, '{}'::jsonb, 'private')",
+                &[
+                    &conversation_id,
+                    &private_conversation_id,
+                    &project_id,
+                    &owner_user_id,
+                ],
+            )
+            .await?;
+        connection
+            .execute(
+                "insert into runs (id, project_id, conversation_id, run_type, status, metadata)
+                 values ($1, $3, $4, 'prompt', 'queued', $6),
+                        ($2, $3, $5, 'prompt', 'queued', $6)",
+                &[
+                    &run_id,
+                    &private_run_id,
+                    &project_id,
+                    &conversation_id,
+                    &private_conversation_id,
+                    &PgJson(json!({ "runtimeId": private_runtime_id, "private": "private-run-metadata" })),
+                ],
             )
             .await?;
         connection
@@ -9440,7 +9474,127 @@ async fn event_stream_hides_private_runtime_lifecycle_from_project_teammates() -
     assert!(!owner_payload.contains("forged-tunnel-reference"));
     assert!(!owner_payload.contains("unbound-spoofed-hosted-origin"));
 
+    // A shared conversation keeps its lifecycle even when the worker belongs
+    // only to its sender. The authoritative run, not arbitrary event data,
+    // determines the projected status (including a late progress event).
+    for (kind, status, progress) in [
+        ("run.queued", "queued", 0.0),
+        ("run.progress", "in_progress", 20.0),
+        ("run.completed", "success", 100.0),
+        ("run.progress", "success", 100.0),
+    ] {
+        pool.get()
+            .await?
+            .execute(
+                "update runs set status = $2, progress = $3,
+             progress_stage = 'private-stage', last_message = 'private-message',
+             preview_url = 'https://private-preview.invalid' where id = $1",
+                &[&run_id, &status, &progress],
+            )
+            .await?;
+        let event = crate::state::ControllerEvent {
+            kind: kind.to_string(),
+            project_id: Some(project_id),
+            session_id: Some(Uuid::new_v4()),
+            conversation_id: Some(conversation_id),
+            run_id: Some(run_id),
+            job_id: Some(Uuid::new_v4()),
+            channel: Some("private-route".to_string()),
+            channels: vec!["private-route".to_string()],
+            target_user_id: None,
+            data: json!({
+                "status": "queued",
+                "percent": { "secret": "private-nested-progress" },
+                "stage": "private-stage",
+                "message": "private-message",
+                "leaseMetrics": { "leasedByRuntimeId": private_runtime_id },
+                "run": { "metadata": { "secret": "private-metadata" } },
+            }),
+            timestamp: Utc::now(),
+        };
+        state.events.publish(event.clone());
+        publish_controller_event(
+            &state.events,
+            "runtime.login",
+            Some(project_id),
+            None,
+            None,
+            None,
+            json!({ "runtimeId": managed_runtime_id, "marker": "lifecycle-sentinel" }),
+        );
+        for (is_owner, stream) in [(true, &mut owner_events), (false, &mut teammate_events)] {
+            let chunk = timeout(std::time::Duration::from_secs(10), stream.next())
+                .await?
+                .ok_or_else(|| anyhow::anyhow!("lifecycle stream ended"))??;
+            let text = std::str::from_utf8(&chunk)?;
+            let payload: serde_json::Value = serde_json::from_str(
+                text.lines()
+                    .find_map(|line| line.strip_prefix("data:"))
+                    .unwrap_or(""),
+            )?;
+            assert_eq!(
+                payload["kind"], kind,
+                "missing lifecycle status for owner={is_owner}"
+            );
+            if is_owner {
+                assert_eq!(payload, serde_json::to_value(&event)?);
+            } else {
+                assert_eq!(payload["run_id"], json!(run_id));
+                assert_eq!(payload["project_id"], json!(project_id));
+                assert_eq!(payload["conversation_id"], json!(conversation_id));
+                assert_eq!(payload["data"]["status"], status);
+                assert_eq!(payload["data"]["percent"], progress);
+                assert_eq!(payload["data"].as_object().unwrap().len(), 2);
+                assert!(payload["session_id"].is_null());
+                assert!(payload["job_id"].is_null());
+                assert!(payload["channel"].is_null());
+                assert!(payload["channels"].is_null());
+                assert!(!text.contains("private-"));
+                assert!(!text.contains(&private_runtime_id.to_string()));
+            }
+            let sentinel = timeout(std::time::Duration::from_secs(10), stream.next())
+                .await?
+                .ok_or_else(|| anyhow::anyhow!("sentinel stream ended"))??;
+            assert!(std::str::from_utf8(&sentinel)?.contains("lifecycle-sentinel"));
+        }
+    }
     drop(owner_events);
+
+    // The projection cannot bypass a private conversation, substitute a run
+    // from that conversation, manufacture a run, or broaden a targeted event.
+    for (event_conversation, event_run, target_user) in [
+        (private_conversation_id, private_run_id, None),
+        (conversation_id, private_run_id, None),
+        (conversation_id, Uuid::new_v4(), None),
+        (conversation_id, run_id, Some(owner_user_id)),
+    ] {
+        state.events.publish(crate::state::ControllerEvent {
+            kind: "run.completed".to_string(),
+            project_id: Some(project_id),
+            session_id: None,
+            conversation_id: Some(event_conversation),
+            run_id: Some(event_run),
+            job_id: None,
+            channel: None,
+            channels: Vec::new(),
+            target_user_id: target_user,
+            data: json!({ "runtimeId": private_runtime_id, "marker": "private-forbidden-run" }),
+            timestamp: Utc::now(),
+        });
+    }
+    publish_controller_event(
+        &state.events,
+        "runtime.login",
+        Some(project_id),
+        None,
+        None,
+        None,
+        json!({ "runtimeId": managed_runtime_id, "marker": "negative-controls-sentinel" }),
+    );
+    let sentinel = timeout(std::time::Duration::from_secs(10), teammate_events.next())
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("negative controls stream ended"))??;
+    assert!(std::str::from_utf8(&sentinel)?.contains("negative-controls-sentinel"));
     drop(teammate_events);
     cleanup_origin_project(&pool, &project_id).await?;
     cleanup_org(&pool, &org_id).await?;
@@ -13178,8 +13332,7 @@ async fn lease_next_agent_job_can_lease_runtime_spread_jobs_when_preference_pinn
 }
 
 #[tokio::test]
-async fn lease_next_agent_job_never_spreads_personal_browser_work_off_target() -> anyhow::Result<()>
-{
+async fn lease_next_agent_job_isolates_personal_browser_runtimes_and_jobs() -> anyhow::Result<()> {
     let Some((mut client, connection_handle)) = connect_test_db().await? else {
         eprintln!("skipping Personal Browser lease test: TEST_DATABASE_URL not set");
         return Ok(());
@@ -13219,6 +13372,7 @@ async fn lease_next_agent_job_never_spreads_personal_browser_work_off_target() -
     let project_id = Uuid::new_v4();
     let personal_runtime_id = Uuid::new_v4();
     let other_runtime_id = Uuid::new_v4();
+    let general_runtime_id = Uuid::new_v4();
     let owner_user_id = Uuid::new_v4();
     let teammate_user_id = Uuid::new_v4();
     let job_id = Uuid::new_v4();
@@ -13253,10 +13407,145 @@ async fn lease_next_agent_job_never_spreads_personal_browser_work_off_target() -
 
     client
         .execute(
+            "INSERT INTO runtimes (id, project_id, provider, status, capabilities)
+             VALUES ($1, $2, 'self-hosted', 'ready', $3)",
+            &[
+                &general_runtime_id,
+                &project_id,
+                &PgJson(json!({
+                    "_instafySelfHostedAccess": { "ownerUserId": owner_user_id.to_string() },
+                    "agent": true,
+                })),
+            ],
+        )
+        .await?;
+
+    // Starting a browser-only runtime must not consume an older ordinary job
+    // from its owner, even with an exact legacy target or spread metadata.
+    // Use BYO credentials so the private-runtime platform-lane filter cannot
+    // accidentally make this capability regression pass.
+    let credential_id = Uuid::new_v4();
+    for capability in [
+        json!({ "personalBrowser": { "enabled": true, "ownerUserId": owner_user_id.to_string() } }),
+        json!({ "personal_browser": { "enabled": true, "owner_user_id": owner_user_id.to_string() } }),
+    ] {
+        client
+            .execute(
+                "UPDATE runtimes SET capabilities = $2 WHERE id = $1",
+                &[&personal_runtime_id, &PgJson(capability)],
+            )
+            .await?;
+        for (name, metadata, target, intent, general_can_lease) in [
+            ("ordinary untargeted", json!({}), None, "prompt", true),
+            (
+                "ordinary targeted",
+                json!({}),
+                Some(personal_runtime_id),
+                "prompt",
+                false,
+            ),
+            (
+                "ordinary spread",
+                json!({ "runtimeRouting": { "strategy": "spread" } }),
+                Some(personal_runtime_id),
+                "prompt",
+                true,
+            ),
+            (
+                "wrong browser transport",
+                json!({ "browserTransport": "shared" }),
+                Some(personal_runtime_id),
+                "prompt",
+                false,
+            ),
+            (
+                "terminal command",
+                json!({}),
+                None,
+                "terminal_command",
+                true,
+            ),
+        ] {
+            let ordinary_job_id = Uuid::new_v4();
+            let ordinary_payload = PgJson(json!({
+                "prompt_text": name,
+                "user_id": owner_user_id.to_string(),
+                "metadata": metadata,
+            }));
+            client
+                .execute(
+                    "INSERT INTO agent_jobs (
+                         id, project_id, status, payload, target_runtime_id, credential_id, intent
+                     ) VALUES ($1, $2, 'queued', $3, $4, $5, $6)",
+                    &[
+                        &ordinary_job_id,
+                        &project_id,
+                        &ordinary_payload,
+                        &target,
+                        &credential_id,
+                        &intent,
+                    ],
+                )
+                .await?;
+
+            let transaction = client.transaction().await?;
+            let leased = agent::lease_next_agent_job(
+                &transaction,
+                &project_id,
+                Some(&personal_runtime_id),
+                120,
+                true,
+                false,
+                false,
+                false,
+                None,
+                None,
+                true,
+            )
+            .await
+            .map_err(|error| controller_error("lease incompatible Personal Browser job", error))?;
+            assert!(leased.is_none(), "Personal Browser must not lease {name}");
+            let row = transaction
+                .query_one(
+                    "SELECT status, lease_attempts FROM agent_jobs WHERE id = $1",
+                    &[&ordinary_job_id],
+                )
+                .await?;
+            assert_eq!(row.get::<_, String>("status"), "queued");
+            assert_eq!(row.get::<_, i32>("lease_attempts"), 0);
+            let general_lease = agent::lease_next_agent_job(
+                &transaction,
+                &project_id,
+                Some(&general_runtime_id),
+                120,
+                true,
+                false,
+                false,
+                false,
+                None,
+                None,
+                true,
+            )
+            .await
+            .map_err(|error| controller_error("lease ordinary job on general runtime", error))?;
+            assert_eq!(
+                general_lease.map(|job| job.id),
+                general_can_lease.then_some(ordinary_job_id),
+                "{name}"
+            );
+            transaction.commit().await?;
+            client
+                .execute("DELETE FROM agent_jobs WHERE id = $1", &[&ordinary_job_id])
+                .await?;
+        }
+    }
+
+    client
+        .execute(
             "INSERT INTO agent_jobs (
-                 id, project_id, conversation_id, status, payload, priority, target_runtime_id
-             ) VALUES ($1, $2, NULL, 'queued', $3, 10, $4)",
-            &[&job_id, &project_id, &payload, &personal_runtime_id],
+                 id, project_id, conversation_id, status, payload, priority, target_runtime_id, credential_id
+             ) VALUES ($1, $2, NULL, 'queued', $3, 10, $4, $5)",
+            &[&job_id, &project_id, &payload, &personal_runtime_id, &credential_id],
         )
         .await?;
 
@@ -13272,7 +13561,7 @@ async fn lease_next_agent_job_never_spreads_personal_browser_work_off_target() -
         false,
         None,
         None,
-        false,
+        true,
     )
     .await
     .map_err(|error| controller_error("lease Personal Browser job off target", error))?;
@@ -13291,7 +13580,7 @@ async fn lease_next_agent_job_never_spreads_personal_browser_work_off_target() -
         false,
         None,
         None,
-        false,
+        true,
     )
     .await
     .map_err(|error| controller_error("lease Personal Browser job for wrong owner", error))?;
@@ -13317,7 +13606,7 @@ async fn lease_next_agent_job_never_spreads_personal_browser_work_off_target() -
         false,
         None,
         None,
-        false,
+        true,
     )
     .await
     .map_err(|error| controller_error("lease Personal Browser job on target", error))?;
@@ -21422,6 +21711,7 @@ async fn dispatch_prompt_persists_canonical_shared_browser_authority() -> anyhow
             "browserTransport": "shared",
             "browserConsentVersion": 1,
             "browserRuntimeId": runtime_id,
+            "browserPageId": "PAGE_target-1",
             "runtimeExpectations": {
                 "workspaceFileChanges": false,
                 "commandExecution": false,
@@ -21535,6 +21825,7 @@ async fn dispatch_prompt_persists_canonical_shared_browser_authority() -> anyhow
     assert_eq!(metadata["browserTransport"], "shared");
     assert_eq!(metadata["browserConsentVersion"], 1);
     assert_eq!(metadata["browserRuntimeId"], runtime_id.to_string());
+    assert_eq!(metadata["browserPageId"], "PAGE_target-1");
     assert_eq!(metadata["writeIntent"], false);
     assert_eq!(metadata["writeScope"]["mode"], "read_only");
     assert_eq!(metadata["writeScope"]["ownedPaths"], json!([]));
@@ -26578,6 +26869,167 @@ async fn load_skill_setup_openers_finds_openers_behind_the_history_window() -> a
     assert_eq!(
         newest_only,
         vec![json!({"content": import_opener, "replyProvider": "codex-embedded"})]
+    );
+
+    transaction.rollback().await?;
+    connection_handle.abort();
+    Ok(())
+}
+
+/// Oct 1: the agent read the controller's startup notice and an earlier run's
+/// raw 429 error as its own replies. Its leased history now leaves the
+/// dispatch notice out and reads the failed run as a label, while a scheduled
+/// run's launch failure stays and the stored rows, which the Studio and the
+/// CLI show, stay as they were.
+#[tokio::test]
+async fn load_conversation_history_for_agent_drops_dispatch_alerts_and_labels_failed_runs(
+) -> anyhow::Result<()> {
+    let Some((mut client, connection_handle)) = connect_test_db().await? else {
+        eprintln!("skipping agent history test: TEST_DATABASE_URL not set");
+        return Ok(());
+    };
+
+    client
+        .batch_execute(
+            "CREATE TEMP TABLE conversation_messages (
+                id uuid PRIMARY KEY,
+                conversation_id uuid not null,
+                prompt_id uuid,
+                role text not null,
+                content text not null,
+                metadata jsonb,
+                created_at timestamptz not null default now()
+            );",
+        )
+        .await?;
+
+    let conversation_id = Uuid::new_v4();
+    let question = "What's next in the setup?";
+    let rate_limited = "exceeded retry limit, last status: 429 Too Many Requests";
+    let startup_failed = "Workspace startup failed. Open Machines to reconnect Instafy Cloud.";
+    let canceled = "Stopped by the person. (pending work canceled.)";
+    let launch_failed =
+        "This scheduled run couldn't start: no self-hosted runtime was online for this space";
+    let rows = [
+        ("user", question, json!({})),
+        (
+            "assistant",
+            rate_limited,
+            json!({
+                "source": "agent",
+                "outcome": "failed",
+                "messageType": "error",
+                "jobId": Uuid::new_v4(),
+                "errorMessage": rate_limited,
+            }),
+        ),
+        ("user", question, json!({})),
+        (
+            "assistant",
+            startup_failed,
+            json!({
+                "source": "controller",
+                "kind": "runtime_alert",
+                "details": {
+                    "reason": "runtime_not_ready",
+                    "reconnect": {"status": "failed"},
+                },
+            }),
+        ),
+        (
+            "assistant",
+            canceled,
+            json!({"source": "controller", "kind": "run_cancellation"}),
+        ),
+        (
+            "assistant",
+            launch_failed,
+            json!({
+                "source": "controller",
+                "kind": "runtime_alert",
+                "messageType": "runtime_alert",
+                "details": {"reason": "automation_launch_failed"},
+            }),
+        ),
+    ];
+    for (minute, (role, content, metadata)) in rows.iter().enumerate() {
+        client
+            .execute(
+                "INSERT INTO conversation_messages
+                   (id, conversation_id, role, content, metadata, created_at)
+                 VALUES ($1, $2, $3, $4, $5::jsonb,
+                         '2026-01-01T00:00:00Z'::timestamptz + ($6::int * interval '1 minute'))",
+                &[
+                    &Uuid::new_v4(),
+                    &conversation_id,
+                    role,
+                    content,
+                    &PgJson(metadata),
+                    &(minute as i32),
+                ],
+            )
+            .await?;
+    }
+
+    let transaction = client.transaction().await?;
+    let history = crate::agent::load_conversation_history_for_agent(
+        &transaction,
+        &conversation_id,
+        None,
+        None,
+        80,
+    )
+    .await
+    .expect("load agent history");
+    let seen: Vec<(&str, &str)> = history
+        .iter()
+        .map(|entry| {
+            (
+                entry["role"].as_str().expect("role"),
+                entry["content"].as_str().expect("content"),
+            )
+        })
+        .collect();
+    assert_eq!(
+        seen,
+        vec![
+            ("user", question),
+            (
+                "assistant",
+                "(An earlier attempt stopped before finishing because the AI provider was \
+                 limiting requests. That was not a workspace problem, and it has passed.)",
+            ),
+            ("user", question),
+            ("assistant", canceled),
+            ("assistant", launch_failed),
+        ]
+    );
+    // The label replaces the raw error in the payload's metadata copy too.
+    let failed_run = &history[1]["metadata"];
+    assert_eq!(failed_run["outcome"], json!("failed"));
+    assert!(failed_run.get("errorMessage").is_none(), "{failed_run}");
+
+    let stored: Vec<String> = transaction
+        .query(
+            "select content from conversation_messages
+              where conversation_id = $1
+              order by created_at",
+            &[&conversation_id],
+        )
+        .await?
+        .iter()
+        .map(|row| row.get(0))
+        .collect();
+    assert_eq!(
+        stored,
+        vec![
+            question,
+            rate_limited,
+            question,
+            startup_failed,
+            canceled,
+            launch_failed
+        ]
     );
 
     transaction.rollback().await?;

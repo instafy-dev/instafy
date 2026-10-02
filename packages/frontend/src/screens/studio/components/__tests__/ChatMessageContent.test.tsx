@@ -653,6 +653,30 @@ describe("ChatMessageContent", () => {
     expect(container.querySelector('[data-testid="chat-message-link"]')).toBeNull();
   });
 
+  it("renders a markdown link to a workspace file as one file chip without leaking link syntax", async () => {
+    await act(async () => {
+      root.render(<MessageContent content={"Created [`qa-notes.md`](`qa-notes.md`)."} projectId="project-1" />);
+    });
+
+    const fileRefs = Array.from(
+      container.querySelectorAll('[data-testid="chat-message-file-reference-inline"]'),
+    ) as HTMLButtonElement[];
+    expect(fileRefs).toHaveLength(1);
+    expect(fileRefs[0]?.getAttribute("aria-label")).toBe("Open workspace file: qa-notes.md");
+    expect(container.textContent).not.toContain("[");
+    expect(container.textContent).not.toContain("](");
+    expect(container.textContent).not.toContain("`");
+
+    fileRefs[0]?.click();
+
+    expect(openPanelTab).toHaveBeenCalledWith("code");
+    expect((window as typeof window & { __INSTAFY_PENDING_OPEN_WORKSPACE_FILE__?: unknown }).__INSTAFY_PENDING_OPEN_WORKSPACE_FILE__).toEqual({
+      path: "qa-notes.md",
+      projectId: "project-1",
+      returnTarget: "assistant",
+    });
+  });
+
   it("renders GitHub PR and issue URLs as compact chips while other URLs stay plain links", async () => {
     await act(async () => {
       root.render(

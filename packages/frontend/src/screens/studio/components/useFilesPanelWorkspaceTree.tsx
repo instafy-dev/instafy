@@ -808,54 +808,87 @@ export function useFilesPanelWorkspaceTree({
     ],
   );
 
+  // Pressing a folder row flips its disclosure at once and its listing
+  // follows. A folder that was never listed is loaded even before the
+  // workspace reports ready (as Focus does), so an expanded folder never
+  // waits silently on a listing that was skipped or is still retrying.
+  const toggleDirectory = useCallback(
+    (entry: ControllerWorkspaceEntry) => {
+      if (entry.kind !== "directory") {
+        return;
+      }
+      const normalized = normalizePath(entry.path);
+      const expanding = !expandedDirectories.has(normalized);
+      setExpandedDirectories((prev) => {
+        const next = new Set(prev);
+        if (expanding) {
+          next.add(normalized);
+        } else {
+          next.delete(normalized);
+        }
+        return next;
+      });
+      if (expanding && !directoryEntriesRef.current[normalized]) {
+        void loadDirectory(normalized, { force: true, syncMode: "background" });
+      }
+      setViewerStateRef.current((current) => ({ ...current, entry, mode: "directory", error: null }));
+      setActiveFile(null);
+    },
+    [expandedDirectories, loadDirectory, normalizePath, setActiveFile, setViewerStateRef],
+  );
+
+  // One source for the explorer's loading copy, in words a non-technical
+  // person can read: the connection details stay in logs.
+  const getDirectoryLoadingLabel = useCallback(
+    (path: string): string => {
+      if (!workspaceBrowseReady) {
+        if (waitingForPreferredRuntime) {
+          return "Waiting for your chosen machine…";
+        }
+        return (directoryEntries[path] ?? []).length > 0 ? "Reconnecting to your files…" : "Opening files…";
+      }
+      return (directoryAttemptsRef.current[path] ?? 0) > 0 ? "Still opening files…" : "Loading files…";
+    },
+    [directoryEntries, waitingForPreferredRuntime, workspaceBrowseReady],
+  );
+
+  // A folder's own state comes first: a listing that gave up says so even
+  // while the workspace is still connecting. Without a load in flight, only
+  // the root waits on the connection, because it is listed again once the
+  // workspace is ready; any other folder would wait on nothing.
   const renderDirectoryStatus = useCallback(
     (path: string): ReactNode => {
-      if (!workspaceBrowseReady) {
-        const hasCachedEntries = (directoryEntries[path] ?? []).length > 0;
-        const waitingLabel = waitingForPreferredRuntime
-          ? "Waiting for preferred runtime…"
-          : hasCachedEntries
-            ? "Reconnecting to workspace origin…"
-            : "Connecting to workspace origin…";
-        return (
-          <span className="inline-flex items-center gap-1.5 text-xs text-slate-500 dark:text-slate-400">
-            <Spinner aria-hidden="true" size="xs" tone="slate" />
-            {waitingLabel}
-          </span>
-        );
-      }
       const status = directoryStatus[path];
-      if (status === "loading") {
-        const attempts = directoryAttemptsRef.current[path] ?? 0;
-        const label = attempts > 0 ? "Connecting to workspace origin…" : "Loading files…";
+      if (status === "error") {
+        const isRoot = path === normalizedRootPath;
+        const folderName = path.split("/").filter(Boolean).pop() ?? path;
         return (
-          <span className="inline-flex items-center gap-1.5 text-xs text-slate-500 dark:text-slate-400">
-            <Spinner aria-hidden="true" size="xs" tone="slate" />
-            {label}
+          <span className="inline-flex flex-wrap items-center gap-x-1.5 text-xs text-slate-500 dark:text-slate-400">
+            {isRoot ? "Couldn't open your files." : "Couldn't open this folder."}
+            <Button
+              onPress={() => void loadDirectory(path, { force: true })}
+              aria-label={isRoot ? "Retry opening your files" : `Retry opening ${folderName}`}
+              variant="ghost"
+              size="xs"
+              radius="full"
+              className="px-0 text-rose-500 hover:bg-transparent hover:underline data-[hovered]:bg-transparent"
+            >
+              Retry
+            </Button>
           </span>
         );
       }
-      if (status === "error") {
+      if (status === "loading" || (!workspaceBrowseReady && path === normalizedRootPath)) {
         return (
-          <Button
-            onPress={() => void loadDirectory(path, { force: true })}
-            variant="ghost"
-            size="xs"
-            radius="full"
-            className="px-0 text-rose-500 hover:bg-transparent hover:underline data-[hovered]:bg-transparent"
-          >
-            Retry
-          </Button>
+          <span className="inline-flex items-center gap-1.5 text-xs text-slate-500 dark:text-slate-400">
+            <Spinner aria-hidden="true" size="xs" tone="slate" />
+            {getDirectoryLoadingLabel(path)}
+          </span>
         );
       }
       return null;
     },
-    [directoryEntries, directoryStatus, loadDirectory, waitingForPreferredRuntime, workspaceBrowseReady],
-  );
-
-  const getDirectoryAttemptCount = useCallback(
-    (path: string) => directoryAttemptsRef.current[path] ?? 0,
-    [],
+    [directoryStatus, getDirectoryLoadingLabel, loadDirectory, normalizedRootPath, workspaceBrowseReady],
   );
 
   const resolveCreateEntryParentPath = useCallback(() => {
@@ -888,6 +921,7 @@ export function useFilesPanelWorkspaceTree({
     setDirectoryStatus,
     expandedDirectories,
     setExpandedDirectories,
+    toggleDirectory,
     lastExplorerSelectionRef,
     loadDirectory,
     explorerMenu,
@@ -898,7 +932,7 @@ export function useFilesPanelWorkspaceTree({
     handleDeleteExplorerEntry,
     refreshFromWorkspaceCommit,
     renderDirectoryStatus,
-    getDirectoryAttemptCount,
+    getDirectoryLoadingLabel,
     resolveCreateEntryParentPath,
   };
 }

@@ -4,7 +4,7 @@ import { resolveViteReactDependencies } from "./viteComponentDependencies.js";
 
 const FIXTURE_PATH = "/__browser-chrome-mobile-layout-fixture__";
 
-async function mountCompactBrowserChrome(page: Page): Promise<void> {
+async function mountCompactBrowserChrome(page: Page, interactive = false): Promise<void> {
   const deps = await resolveViteReactDependencies(page);
   const main = `
     import "/src/styles/tailwind.css";
@@ -39,13 +39,14 @@ async function mountCompactBrowserChrome(page: Page): Promise<void> {
       },
       error: null,
     };
-    const pages = [
+    const initialPages = [
       { id: "page-1", url: "https://example.com/with/a/long/path", host: "example.com", label: "Example", title: "An exceptionally long active browser tab title", lastReferencedAt: 3, isActive: true },
       { id: "page-2", url: "https://two.example/", host: "two.example", label: "Second", title: "A second long browser tab title", lastReferencedAt: 2, isActive: false },
       { id: "page-3", url: "https://three.example/", host: "three.example", label: "Third", title: "A third long browser tab title", lastReferencedAt: 1, isActive: false },
     ];
 
     function Fixture() {
+      const [pages, setPages] = React.useState(initialPages);
       const [agentControls, setAgentControls] = React.useState(false);
       const [optionsOpen, setOptionsOpen] = React.useState(false);
       const [expanded, setExpanded] = React.useState(false);
@@ -57,6 +58,7 @@ async function mountCompactBrowserChrome(page: Page): Promise<void> {
       React.useEffect(() => {
         window.__setAgentControls = setAgentControls;
         window.__remoteKeyboardMessages = [];
+        window.__browserNavigations = [];
         return () => { delete window.__setAgentControls; };
       }, []);
       const localControlOwner = agentControls
@@ -92,7 +94,10 @@ async function mountCompactBrowserChrome(page: Page): Promise<void> {
           resolved: true,
           pendingAction: null,
           error: null,
-          onNavigate: () => {},
+          onNavigate: (pageId, url) => {
+            window.__browserNavigations.push({ pageId, url });
+            setPages(current => current.map(item => item.id === pageId ? { ...item, url } : item));
+          },
           onBack: () => {},
           onForward: () => {},
           onReload: () => {},
@@ -111,7 +116,8 @@ async function mountCompactBrowserChrome(page: Page): Promise<void> {
             actions: compact ? h(React.Fragment, null, compactNavigation,
               h(BrowserExpandButton, { expanded, showLabel: true, onPress: () => setExpanded(!expanded) })) : null,
           }), compact ? null : h(BrowserExpandButton, { expanded, onPress: () => setExpanded(!expanded) })),
-          interactionEnabled: false,
+          interactionEnabled: ${interactive},
+          historyUserId: "component-browser-user",
         }),
         h("div", { "data-testid": "keyboard-layout-stage", style: { position: "relative", height: 240 } },
           h("div", { "data-testid": "keyboard-layout-viewer", style: { position: "absolute", inset: 0, bottom: keyboardHeight } }),
@@ -184,7 +190,7 @@ async function browserChromeGeometry(page: Page) {
     const chromeElement = document.querySelector<HTMLElement>('[data-testid="shared-browser-chrome"]');
     return {
       coarse: window.matchMedia("(pointer: coarse)").matches,
-      address: bounds("shared-browser-address"),
+      address: bounds("shared-browser-address-trigger") ?? bounds("shared-browser-address"),
       collaboration: bounds("shared-browser-collaboration-toggle"),
       browserTab: bounds("conversation-subtab-browser"),
       chrome: bounds("shared-browser-chrome"),
@@ -207,7 +213,7 @@ for (const width of [320, 360, 390]) {
     const collaboration = page.getByTestId("shared-browser-collaboration-toggle");
     const controlState = page.getByTestId("shared-browser-collaboration-control-state");
     const action = page.getByTestId("shared-browser-collaboration-control-action");
-    const address = page.getByTestId("shared-browser-address");
+    const address = page.getByTestId("shared-browser-address-trigger");
     const options = page.getByTestId("shared-browser-sessions-toggle");
     const pageSelect = page.getByTestId("shared-browser-page-select");
 
@@ -347,6 +353,50 @@ test("keeps comfortable touch targets and spacing in the 320px browser toolbar",
   } finally {
     await context.close();
   }
+});
+
+test("edits the phone address in one full-screen surface with cancel, history and navigation", async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.addInitScript(() => {
+    localStorage.setItem("instafy:browser-address-history:v1:component-browser-user", JSON.stringify([
+      { url: "https://en.wikipedia.org/", title: "Wikipedia", lastVisitedAt: Date.now() },
+    ]));
+  });
+  await mountCompactBrowserChrome(page, true);
+
+  const trigger = page.getByTestId("shared-browser-address-trigger");
+  const address = page.getByTestId("shared-browser-address");
+  const editor = page.getByRole("dialog", { name: "Enter an address" });
+  await expect(address).toHaveCount(0);
+  await trigger.click();
+  await expect(editor).toBeVisible();
+  await expect(address).toBeFocused();
+  const bounds = await editor.boundingBox();
+  expect(bounds).toMatchObject({ x: 0, y: 0, width: 390, height: 844 });
+  await address.fill("unfinished.example");
+  await editor.getByRole("button", { name: "Back", exact: true }).click();
+  await expect(editor).toHaveCount(0);
+  await expect(trigger).toHaveText("https://example.com/with/a/long/path");
+  await expect(trigger).toBeFocused();
+
+  await trigger.click();
+  await editor.getByRole("button", { name: "Clear address", exact: true }).click();
+  await expect(address).toBeFocused();
+  await editor.getByRole("option", { name: /Wikipedia/ }).click();
+  await expect(editor).toHaveCount(0);
+  await expect(trigger).toHaveText("https://en.wikipedia.org/");
+
+  await trigger.click();
+  await address.fill("new.example/path");
+  await address.press("Enter");
+  await expect(editor).toHaveCount(0);
+  await expect(trigger).toHaveText("https://new.example/path");
+  expect(await page.evaluate(() => (window as Window & {
+    __browserNavigations?: Array<{ pageId: string; url: string }>;
+  }).__browserNavigations)).toEqual([
+    { pageId: "page-1", url: "https://en.wikipedia.org/" },
+    { pageId: "page-1", url: "https://new.example/path" },
+  ]);
 });
 
 test("keeps the unified browser address usable at tablet portrait width", async ({ page }) => {

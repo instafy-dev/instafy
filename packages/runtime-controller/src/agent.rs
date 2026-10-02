@@ -3677,7 +3677,8 @@ pub(crate) async fn lease_next_agent_job(
     let batch_conversation_uuid: Option<Uuid> = batch_conversation_id.cloned();
     let batch_multi_agent_group: Option<String> = batch_multi_agent_group_id.map(str::to_string);
     // Personal Browser jobs may carry inherited spread metadata, but their
-    // explicit desktop runtime remains an exact device boundary.
+    // explicit desktop runtime remains an exact device boundary. Conversely,
+    // a browser-only runtime must leave ordinary queued jobs for general workers.
     //
     // `exclude_platform_ai_jobs` ($10) skips the platform lane: an AI job whose
     // target has no credential. BYO jobs and terminal commands stay leasable.
@@ -3772,6 +3773,19 @@ pub(crate) async fn lease_next_agent_job(
                                       and rl.metadata #>> '{groupId}' = multi_agent_group_id
                                 )
                             )
+                        )
+                      )
+                  and (
+                        browser_transport = 'desktop-personal'
+                        or not exists (
+                            select 1
+                            from runtimes browser_runtime
+                            where browser_runtime.id = $2
+                              and browser_runtime.project_id = $1
+                              and (
+                                  browser_runtime.capabilities ? 'personalBrowser'
+                                  or browser_runtime.capabilities ? 'personal_browser'
+                              )
                         )
                       )
                   and not exists (
@@ -4067,7 +4081,7 @@ pub(crate) async fn lease_next_agent_job(
     Ok(Some(job))
 }
 
-async fn load_conversation_history_for_agent(
+pub(crate) async fn load_conversation_history_for_agent(
     transaction: &tokio_postgres::Transaction<'_>,
     conversation_id: &Uuid,
     agent_id: Option<&Uuid>,
@@ -4093,7 +4107,7 @@ async fn load_conversation_history_for_agent(
             let message_id: Uuid = row.get("id");
             let role: String = row.get("role");
             let mut content: String = row.get("content");
-            let metadata: JsonValue = row.get("metadata");
+            let mut metadata: JsonValue = row.get("metadata");
             let created_at: DateTime<Utc> = row.get("created_at");
 
             let message_type = metadata
@@ -4109,6 +4123,13 @@ async fn load_conversation_history_for_agent(
             {
                 return None;
             }
+            // Only the agent's copy changes; the stored row keeps the raw error.
+            relabel_failed_run_for_agent_history(
+                &role,
+                message_type.as_deref(),
+                &mut content,
+                &mut metadata,
+            );
 
             let mut map = JsonMap::new();
             if role.eq_ignore_ascii_case("user") {
@@ -4255,7 +4276,192 @@ fn should_include_message_in_agent_history(
         return false;
     }
 
+    // A dispatch runtime alert is the controller telling the person that no
+    // runtime could take the request, such as "Workspace startup failed. Open
+    // Machines to reconnect Instafy Cloud." It is stored as an assistant row,
+    // so the agent read it as its own earlier reply. But the jobs it held back
+    // run only once a runtime leases them, so by the time an agent reads the
+    // alert a runtime is up, and the Studio hides the alert once its run
+    // produces output. On Oct 1 the agent, running in a healthy workspace,
+    // told the person the workspace had failed to start and to reconnect it in
+    // Machines.
+    //
+    // A scheduled run's launch failure wears the same kind but stays: no job
+    // ran, the Studio keeps showing it, and its cause (access denied, a
+    // self-hosted machine that is off) can still hold. Cancellation notices
+    // stay too: they record what the person stopped.
+    if source.as_deref() == Some("controller")
+        && kind.as_deref() == Some("runtime_alert")
+        && !is_automation_launch_failure_notice(metadata)
+    {
+        return false;
+    }
+
     true
+}
+
+/// Whether a controller `runtime_alert` row is a scheduled run's launch
+/// failure (automations.rs, `build_launch_failure_details`) rather than a
+/// dispatch alert. The Studio's `resolveRuntimeAlertContent` reads the reason
+/// the same way: every other reason, or none, is a runtime start notice.
+fn is_automation_launch_failure_notice(metadata: Option<&JsonMap<String, JsonValue>>) -> bool {
+    let reason = metadata.and_then(|map| {
+        map.get("details")
+            .and_then(|details| details.get("reason"))
+            .or_else(|| map.get("reason"))
+            .and_then(JsonValue::as_str)
+    });
+    reason.is_some_and(|value| {
+        value
+            .trim()
+            .eq_ignore_ascii_case("automation_launch_failed")
+    })
+}
+
+/// Puts the label from `failed_run_label_for_agent_history` in place of a
+/// failed run's content in the agent's copy of the row, and takes the same raw
+/// text out of that copy's `metadata.errorMessage`, so nothing that reads the
+/// payload's metadata later brings it back. Any other row is left alone.
+fn relabel_failed_run_for_agent_history(
+    role: &str,
+    message_type: Option<&str>,
+    content: &mut String,
+    metadata: &mut JsonValue,
+) {
+    let Some(label) = failed_run_label_for_agent_history(role, metadata, message_type, content)
+    else {
+        return;
+    };
+    *content = label;
+    if let Some(map) = metadata.as_object_mut() {
+        map.remove("errorMessage");
+    }
+}
+
+/// What the agent reads in place of a failed run's stored text, or `None` for
+/// any other row. The stored row keeps the raw error, because the Studio and
+/// the CLI show it. Replayed as is, it read as the agent's own earlier answer:
+/// after a 429 the agent saw "exceeded retry limit, last status: 429 Too Many
+/// Requests" with nothing tying it to the AI provider, and told the person
+/// their workspace had a problem. The label says what is known: the attempt
+/// stopped, and why. It does not say whether the attempt changed files or
+/// answered in part, because a run can fail after its earlier tool calls wrote
+/// to the workspace; what is there now is for the agent to look at.
+fn failed_run_label_for_agent_history(
+    role: &str,
+    metadata: &JsonValue,
+    message_type: Option<&str>,
+    content: &str,
+) -> Option<String> {
+    (role.eq_ignore_ascii_case("assistant") && is_failed_agent_run_message(metadata, message_type))
+        .then(|| failed_run_history_label(content))
+}
+
+/// Whether an assistant row is the terminal message of a failed agent run.
+/// `build_agent_message_metadata` stamps those with `source: "agent"`,
+/// `outcome: "failed"` and `messageType: "error"`, and the row's content is the
+/// runtime's raw error text.
+fn is_failed_agent_run_message(metadata: &JsonValue, message_type: Option<&str>) -> bool {
+    let metadata = metadata.as_object();
+    let field = |key: &str| {
+        metadata
+            .and_then(|map| map.get(key))
+            .and_then(JsonValue::as_str)
+            .map(|value| value.trim().to_ascii_lowercase())
+    };
+    if field("source").as_deref() != Some("agent") {
+        return false;
+    }
+    field("outcome").as_deref() == Some("failed")
+        || message_type
+            .map(|value| value.trim().eq_ignore_ascii_case("error"))
+            .unwrap_or(false)
+}
+
+/// Longest failure reason the agent reads for an earlier failed run.
+const FAILED_RUN_REASON_MAX_CHARS: usize = 200;
+
+const PROVIDER_RATE_LIMITED_HISTORY_LABEL: &str = "(An earlier attempt stopped before finishing because the AI provider was limiting requests. That was not a workspace problem, and it has passed.)";
+
+/// A provider rate limit gets a fixed label. Any other failure keeps the first
+/// line of its reason, bounded, so the agent can still answer a question about
+/// why the earlier attempt stopped.
+fn failed_run_history_label(content: &str) -> String {
+    if is_provider_rate_limited_failure(content) {
+        return PROVIDER_RATE_LIMITED_HISTORY_LABEL.to_string();
+    }
+    let first_line = content
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .unwrap_or_default();
+    if first_line.is_empty() {
+        return "(An earlier attempt stopped before finishing.)".to_string();
+    }
+    let reason = if first_line.chars().count() > FAILED_RUN_REASON_MAX_CHARS {
+        let cut: String = first_line
+            .chars()
+            .take(FAILED_RUN_REASON_MAX_CHARS - 1)
+            .collect();
+        format!("{}\u{2026}", cut.trim_end())
+    } else {
+        first_line.to_string()
+    };
+    format!("(An earlier attempt stopped before finishing. Reason: {reason})")
+}
+
+/// The Studio's provider rate-limit failure kind, for labelling a failed run in
+/// the agent's history. It mirrors `PROVIDER_RATE_LIMITED_PATTERNS` and
+/// `PROVIDER_QUOTA_EXHAUSTED_PATTERN` in
+/// packages/frontend/src/conversations/runFailurePresentation.ts, and both
+/// sides are pinned to `run_failure_fixtures.json` next to this file, so a
+/// pattern changed on one side and not the other fails a test on both.
+///
+/// A 429 that names a spent quota or plan limit will not clear after a short
+/// wait, so it keeps its own reason rather than a label that says it passed.
+fn is_provider_rate_limited_failure(text: &str) -> bool {
+    let lower = text.to_ascii_lowercase();
+    let rate_limited = retry_limit_ended_on_429(&lower)
+        || contains_word(&lower, "backend responded with 429")
+        || contains_word(&lower, "upstream_rate_limit")
+        || lower.contains("upstream provider rate limit was reached");
+    if !rate_limited {
+        return false;
+    }
+    let quota_exhausted = [
+        "insufficient_quota",
+        "quota_exceeded",
+        "usage_limit_reached",
+        "usage_not_included",
+    ]
+    .iter()
+    .any(|needle| lower.contains(needle))
+        || contains_word(&lower, "quota");
+    !quota_exhausted
+}
+
+/// `/exceeded retry limit, last status:\s*429\b/` on lowercased text.
+fn retry_limit_ended_on_429(lower: &str) -> bool {
+    const PREFIX: &str = "exceeded retry limit, last status:";
+    lower.match_indices(PREFIX).any(|(at, _)| {
+        let rest = lower[at + PREFIX.len()..].trim_start();
+        rest.strip_prefix("429")
+            .is_some_and(|after| !after.starts_with(is_regex_word_char))
+    })
+}
+
+/// A substring match with a regex `\b` on both ends, for needles that start
+/// and end with a word character.
+fn contains_word(haystack: &str, needle: &str) -> bool {
+    haystack.match_indices(needle).any(|(at, _)| {
+        let before = haystack[..at].chars().next_back();
+        let after = haystack[at + needle.len()..].chars().next();
+        !before.is_some_and(is_regex_word_char) && !after.is_some_and(is_regex_word_char)
+    })
+}
+
+fn is_regex_word_char(value: char) -> bool {
+    value.is_ascii_alphanumeric() || value == '_'
 }
 
 fn assistant_message_belongs_to_agent_scope(
@@ -5833,6 +6039,353 @@ mod tests {
             &secret_card,
             Some("secret_request"),
         ));
+    }
+
+    /// Oct 1: a backend release stopped the hosted runtime, the person pressed
+    /// Try again, and dispatch stored "Workspace startup failed. Open Machines
+    /// to reconnect Instafy Cloud." as an assistant row. The job ran once the
+    /// runtime was back, read that row as its own last reply, and told the
+    /// person to reconnect a workspace it was running in.
+    #[test]
+    fn agent_history_leaves_out_dispatch_runtime_alerts() {
+        let startup_failed = crate::dispatch::build_runtime_alert_conversation_metadata(
+            json!({
+                "reason": "runtime_not_ready",
+                "detail": "status=stopped",
+                "reconnect": { "status": "failed", "error": "no capacity" },
+            }),
+            Some(json!({ "id": "11111111-1111-1111-1111-111111111111", "handle": "octo" })),
+        );
+        assert!(!should_include_message_in_agent_history(
+            "assistant",
+            &startup_failed,
+            None,
+        ));
+        // Every other dispatch reason, and an older alert with none, which the
+        // Studio also words as a runtime start notice.
+        for details in [
+            json!({ "reason": "runtime_unavailable" }),
+            json!({ "reason": "runtime_inspection_failed", "detail": "status=500" }),
+            json!({ "reason": "runtime_not_ready", "detail": "status=starting" }),
+            json!({}),
+            JsonValue::Null,
+        ] {
+            let alert = crate::dispatch::build_runtime_alert_conversation_metadata(details, None);
+            assert!(
+                !should_include_message_in_agent_history("assistant", &alert, None),
+                "{alert}"
+            );
+        }
+
+        // A scheduled run that could not start wears the same kind, but no job
+        // ran, the Studio keeps showing it, and its cause can still hold: the
+        // agent has to be able to see it when the person asks why the run did
+        // not happen.
+        let launch_failed = json!({
+            "source": "controller",
+            "kind": "runtime_alert",
+            "messageType": "runtime_alert",
+            "details": {
+                "reason": "automation_launch_failed",
+                "automationId": "22222222-2222-2222-2222-222222222222",
+                "automationName": "Morning books",
+                "failureCode": "automation_access_denied",
+            },
+        });
+        assert!(should_include_message_in_agent_history(
+            "assistant",
+            &launch_failed,
+            Some("runtime_alert"),
+        ));
+        // Read the way the Studio reads it: trimmed, any case, or at the top
+        // level of an older notice.
+        assert!(should_include_message_in_agent_history(
+            "assistant",
+            &json!({
+                "source": "controller",
+                "kind": "runtime_alert",
+                "details": { "reason": " Automation_Launch_Failed " },
+            }),
+            None,
+        ));
+        assert!(should_include_message_in_agent_history(
+            "assistant",
+            &json!({
+                "source": "controller",
+                "kind": "runtime_alert",
+                "reason": "automation_launch_failed",
+            }),
+            None,
+        ));
+
+        // What the person stopped, a run's own failure and a standing secret
+        // card all stay.
+        assert!(should_include_message_in_agent_history(
+            "assistant",
+            &json!({
+                "source": "controller",
+                "kind": "run_cancellation",
+                "details": { "reason": "Stopped by the person." },
+            }),
+            None,
+        ));
+        let job_id = Uuid::parse_str("00000000-0000-0000-0000-000000000000").unwrap();
+        let failed_run = build_agent_message_metadata(
+            "failed",
+            Some("codex-embedded"),
+            None,
+            &JsonValue::Null,
+            None,
+            Some("exceeded retry limit, last status: 429 Too Many Requests"),
+            &job_id,
+            &[],
+        );
+        assert!(should_include_message_in_agent_history(
+            "assistant",
+            &failed_run,
+            Some("error"),
+        ));
+        let secret_card = build_agent_update_metadata(
+            &job_id,
+            Some("secret_request"),
+            Some(json!({ "name": "FREEFINANCE_CLIENT_ID" })),
+        );
+        assert!(should_include_message_in_agent_history(
+            "assistant",
+            &secret_card,
+            Some("secret_request"),
+        ));
+        // A person cannot hide their own words by claiming the kind.
+        assert!(should_include_message_in_agent_history(
+            "user",
+            &json!({ "source": "controller", "kind": "runtime_alert" }),
+            None,
+        ));
+    }
+
+    /// Sep 26: a run failed on a provider 429 and its stored text, "exceeded
+    /// retry limit, last status: 429 Too Many Requests", was replayed as an
+    /// ordinary assistant turn. Next to a startup notice it read as a workspace
+    /// failure, and the agent repeated "the last status was 429" to the person.
+    #[test]
+    fn agent_history_labels_failed_runs_for_the_agent() {
+        let job_id = Uuid::parse_str("00000000-0000-0000-0000-000000000000").unwrap();
+        let failed_metadata = |error: &str| {
+            build_agent_message_metadata(
+                "failed",
+                Some("codex-embedded"),
+                None,
+                &JsonValue::Null,
+                None,
+                Some(error),
+                &job_id,
+                &[],
+            )
+        };
+
+        let rate_limited = "exceeded retry limit, last status: 429 Too Many Requests";
+        assert_eq!(
+            failed_run_label_for_agent_history(
+                "assistant",
+                &failed_metadata(rate_limited),
+                Some("error"),
+                rate_limited,
+            )
+            .as_deref(),
+            Some(
+                "(An earlier attempt stopped before finishing because the AI provider was \
+                 limiting requests. That was not a workspace problem, and it has passed.)"
+            ),
+        );
+
+        // Any other failure keeps the first line of its reason.
+        let missing_final = "Codex completed without returning a final assistant message after retry.\nThe run trace contains the raw Codex events.";
+        assert_eq!(
+            failed_run_label_for_agent_history(
+                "assistant",
+                &failed_metadata(missing_final),
+                Some("error"),
+                missing_final,
+            )
+            .as_deref(),
+            Some(
+                "(An earlier attempt stopped before finishing. Reason: Codex completed \
+                 without returning a final assistant message after retry.)"
+            ),
+        );
+
+        // A quota that is spent does not pass, so it is not called a rate limit.
+        let quota = "exceeded retry limit, last status: 429 Too Many Requests: insufficient_quota";
+        assert_eq!(
+            failed_run_label_for_agent_history(
+                "assistant",
+                &failed_metadata(quota),
+                Some("error"),
+                quota,
+            )
+            .as_deref(),
+            Some(
+                "(An earlier attempt stopped before finishing. Reason: exceeded retry \
+                 limit, last status: 429 Too Many Requests: insufficient_quota)"
+            ),
+        );
+
+        // A long reason is cut to 200 characters.
+        let long_reason = format!("  \n{}", "x".repeat(500));
+        let label = failed_run_label_for_agent_history(
+            "assistant",
+            &failed_metadata(&long_reason),
+            Some("error"),
+            &long_reason,
+        )
+        .expect("failed run label");
+        let reason = label
+            .strip_prefix("(An earlier attempt stopped before finishing. Reason: ")
+            .and_then(|rest| rest.strip_suffix(')'))
+            .expect("reason inside the label");
+        assert_eq!(reason.chars().count(), FAILED_RUN_REASON_MAX_CHARS);
+        assert!(reason.ends_with('\u{2026}'));
+
+        // A failure with no text at all still says the attempt stopped.
+        assert_eq!(
+            failed_run_label_for_agent_history(
+                "assistant",
+                &failed_metadata(""),
+                Some("error"),
+                " \n ",
+            )
+            .as_deref(),
+            Some("(An earlier attempt stopped before finishing.)"),
+        );
+
+        // Either stamp is enough on an agent row.
+        assert!(failed_run_label_for_agent_history(
+            "assistant",
+            &json!({ "source": "agent", "outcome": "failed" }),
+            None,
+            rate_limited,
+        )
+        .is_some());
+        assert!(failed_run_label_for_agent_history(
+            "assistant",
+            &json!({ "source": "agent", "outcome": "succeeded" }),
+            Some("error"),
+            rate_limited,
+        )
+        .is_some());
+
+        // Everything else passes through as stored: answers, the person's own
+        // words, and the controller's failure notices, which already speak
+        // for themselves.
+        let succeeded = build_agent_message_metadata(
+            "succeeded",
+            Some("codex-embedded"),
+            None,
+            &JsonValue::Null,
+            None,
+            None,
+            &job_id,
+            &[],
+        );
+        assert_eq!(
+            failed_run_label_for_agent_history("assistant", &succeeded, None, rate_limited),
+            None
+        );
+        assert_eq!(
+            failed_run_label_for_agent_history(
+                "user",
+                &failed_metadata(rate_limited),
+                Some("error"),
+                rate_limited,
+            ),
+            None
+        );
+        assert_eq!(
+            failed_run_label_for_agent_history(
+                "assistant",
+                &json!({
+                    "source": "controller",
+                    "kind": "managed_ai_hosted_runtime_required",
+                    "outcome": "failed",
+                    "messageType": "error",
+                }),
+                Some("error"),
+                "Managed AI runs only on Instafy Cloud.",
+            ),
+            None
+        );
+    }
+
+    /// The payload carries each row's metadata next to its content, and a
+    /// failed run's metadata repeats the raw error as `errorMessage`. A label
+    /// on the content alone would leave the raw text one field away.
+    #[test]
+    fn agent_history_relabel_takes_the_raw_error_out_of_the_metadata_too() {
+        let job_id = Uuid::parse_str("00000000-0000-0000-0000-000000000000").unwrap();
+        let rate_limited = "exceeded retry limit, last status: 429 Too Many Requests";
+        let mut metadata = build_agent_message_metadata(
+            "failed",
+            Some("codex-embedded"),
+            None,
+            &JsonValue::Null,
+            None,
+            Some(rate_limited),
+            &job_id,
+            &[],
+        );
+        assert_eq!(metadata["errorMessage"], json!(rate_limited));
+        let mut content = rate_limited.to_string();
+        relabel_failed_run_for_agent_history(
+            "assistant",
+            Some("error"),
+            &mut content,
+            &mut metadata,
+        );
+        assert_eq!(content, PROVIDER_RATE_LIMITED_HISTORY_LABEL);
+        assert!(metadata.get("errorMessage").is_none(), "{metadata}");
+        // The rest of the metadata still tells the runtime whose row it is.
+        assert_eq!(metadata["source"], json!("agent"));
+        assert_eq!(metadata["outcome"], json!("failed"));
+        assert_eq!(metadata["jobId"], json!(job_id.to_string()));
+
+        // A row that gets no label keeps its content and metadata as stored.
+        let mut answer_metadata = json!({
+            "source": "agent",
+            "outcome": "succeeded",
+            "errorMessage": "kept",
+        });
+        let before = answer_metadata.clone();
+        let mut answer = "Done.".to_string();
+        relabel_failed_run_for_agent_history("assistant", None, &mut answer, &mut answer_metadata);
+        assert_eq!(answer, "Done.");
+        assert_eq!(answer_metadata, before);
+    }
+
+    #[test]
+    fn provider_rate_limit_matches_the_studio_failure_card() {
+        // The same list the frontend's runFailurePresentation test reads. A
+        // pattern changed on one side and not the other fails here first.
+        let parsed: JsonValue =
+            serde_json::from_str(include_str!("run_failure_fixtures.json")).expect("fixtures");
+        let cases = parsed["cases"].as_array().expect("cases array");
+        assert!(cases.len() >= 15, "fixtures got thin: {}", cases.len());
+        for case in cases {
+            let text = case["text"].as_str().expect("text");
+            let expected = case["providerRateLimited"].as_bool().expect("expected");
+            assert_eq!(
+                is_provider_rate_limited_failure(text),
+                expected,
+                "fixture {:?}",
+                case["name"]
+            );
+            let label = failed_run_history_label(text);
+            assert_eq!(
+                label == PROVIDER_RATE_LIMITED_HISTORY_LABEL,
+                expected,
+                "fixture {:?}",
+                case["name"]
+            );
+        }
     }
 
     #[test]

@@ -26,7 +26,7 @@ import {
   resolveAgentAvatarText,
 } from "../../../utils/agentAvatar";
 import type { ChatMessage, ChatMessageCommitRange,
-  ChatMessageFileChange } from "../types";
+  ChatMessageFileChange, ChatMessageUnsavedReason } from "../types";
 import { ActionRequestEntry } from "./ActionRequestEntry";
 import { ChatMessageAvatar } from "./ChatMessageAvatar";
 import type { AssistantAvatarMotion } from "./chatAssistantIdentity";
@@ -337,6 +337,7 @@ export type ChatFileChangeListProps = {
   files: ChatMessageFileChange[];
   projectId?: string | null;
   commitRange?: ChatMessageCommitRange | null;
+  unsavedReason?: ChatMessageUnsavedReason | null;
   messageId?: string | null;
   messageTimestamp?: number | null;
 };
@@ -405,6 +406,7 @@ export type AgentJobThreadPreviewLayoutProps = {
   runningPreviewHasOverflow: boolean;
   latestFiles: ChatMessageFileChange[] | null;
   latestCommitRange?: ChatMessageCommitRange | null;
+  latestUnsavedReason?: ChatMessageUnsavedReason | null;
   latestFilesMessageId?: string | null;
   latestFilesMessageTimestamp?: number | null;
   isRunning: boolean;
@@ -478,6 +480,7 @@ export function AgentJobThreadPreviewLayout({
   runningPreviewHasOverflow,
   latestFiles,
   latestCommitRange,
+  latestUnsavedReason,
   latestFilesMessageId,
   latestFilesMessageTimestamp,
   isRunning,
@@ -1298,12 +1301,17 @@ export function AgentJobThreadPreviewLayout({
   );
 
   return (
+    // Clip only the horizontal axis: wide previews must not widen the chat,
+    // but a vertical clip cut off the focus rings of the file chips, Review
+    // changes and Undo that sit on this bubble's bottom edge. One axis clip
+    // with the other visible is valid (hidden would turn visible into auto).
+    // Browsers without overflow: clip (iOS 15) keep plain overflow-hidden.
     <div
       ref={threadPreviewRootRef}
       data-chat-message-id={message.id}
       data-testid="chat-bubble-assistant"
       data-message-type="agent_job_thread"
-      className="w-full min-w-0 max-w-2xl overflow-hidden text-sm text-slate-700 dark:text-slate-200"
+      className="w-full min-w-0 max-w-2xl overflow-hidden supports-[overflow:clip]:overflow-x-clip supports-[overflow:clip]:overflow-y-visible text-sm text-slate-700 dark:text-slate-200"
       style={threadPreviewRootStyle}
       onContextMenu={
         onMessageContextMenu
@@ -1736,6 +1744,7 @@ export function AgentJobThreadPreviewLayout({
                 files={latestFiles}
                 projectId={projectId}
                 commitRange={latestCommitRange ?? null}
+                unsavedReason={latestUnsavedReason ?? null}
                 messageId={latestFilesMessageId ?? null}
                 messageTimestamp={latestFilesMessageTimestamp ?? null}
               />

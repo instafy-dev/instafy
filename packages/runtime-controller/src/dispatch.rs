@@ -43,6 +43,10 @@ const WORKSPACE_MODE_SHARED_READ: &str = "shared_read";
 const WORKSPACE_MODE_SHARED_WRITE: &str = "shared_write";
 const WORKSPACE_MODE_ISOLATED_WRITE: &str = "isolated_write";
 const SHARED_BROWSER_CONSENT_VERSION: u64 = 1;
+/// Same bound as the runtime agent's Shared Browser `MAX_PAGE_ID_BYTES`.
+const SHARED_BROWSER_MAX_PAGE_ID_BYTES: usize = 256;
+/// Error code of a Shared Browser dispatch without a usable page id.
+const SHARED_BROWSER_PAGE_REQUIRED_CODE: &str = "shared_browser_page_required";
 /// A dispatch sends work straight to a ready runtime only when its last
 /// heartbeat is at most this old.
 const DISPATCHABLE_RUNTIME_HEARTBEAT_MAX_AGE_SECONDS: i64 = 90;
@@ -3541,6 +3545,59 @@ fn validate_shared_browser_consent_version(
     Ok(())
 }
 
+/// The UI-selected CDP target the runtime agent pins the browser job to.
+///
+/// The runtime fails a Shared Browser job without one only after the run, job
+/// and credit exist, and reports its internal error text as the run failure.
+/// Current Studio keeps a browser task unsent when no page is targeted, so this
+/// refusal reaches an older open tab, a send-queue entry one created, or a
+/// target Studio inferred from chat history before the live pages loaded (its
+/// id is the page URL). A refresh reloads the live pages. The copy asks for the
+/// message to be written again because "Send now" on a failed queue entry
+/// resends the same stored request.
+fn shared_browser_page_id(
+    metadata: &JsonMap<String, JsonValue>,
+) -> Result<String, (StatusCode, Json<ApiError>)> {
+    let mut observed: Option<&str> = None;
+    for key in ["browserPageId", "browser_page_id"] {
+        let Some(value) = metadata.get(key) else {
+            continue;
+        };
+        let page_id = value
+            .as_str()
+            .map(str::trim)
+            .filter(|page_id| is_shared_browser_page_id(page_id))
+            .ok_or_else(shared_browser_page_required)?;
+        if observed.is_some_and(|seen| seen != page_id) {
+            return Err(shared_browser_page_required());
+        }
+        observed = Some(page_id);
+    }
+    observed
+        .map(str::to_string)
+        .ok_or_else(shared_browser_page_required)
+}
+
+/// Mirrors the runtime agent's `validate_page_id`: one bounded CDP target id.
+fn is_shared_browser_page_id(page_id: &str) -> bool {
+    !page_id.is_empty()
+        && page_id.len() <= SHARED_BROWSER_MAX_PAGE_ID_BYTES
+        && page_id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+}
+
+fn shared_browser_page_required() -> (StatusCode, Json<ApiError>) {
+    (
+        StatusCode::BAD_REQUEST,
+        Json(ApiError::with_details(
+            "This browser task has no open page selected, so it was not sent. Refresh Studio, then write the message again.",
+            SHARED_BROWSER_PAGE_REQUIRED_CODE,
+            json!({}),
+        )),
+    )
+}
+
 fn personal_browser_runtime_id(
     metadata: &JsonValue,
     explicit_runtime_id: Option<Uuid>,
@@ -3624,6 +3681,7 @@ fn canonicalize_shared_browser_request(
         .as_object_mut()
         .ok_or_else(|| bad_request("Shared Browser metadata must be an object"))?;
     validate_shared_browser_consent_version(metadata)?;
+    let page_id = shared_browser_page_id(metadata)?;
 
     for key in ["writeIntent", "write_intent"] {
         if let Some(value) = metadata.get(key) {
@@ -3769,6 +3827,7 @@ fn canonicalize_shared_browser_request(
         "browser_transport",
         "browser_consent_version",
         "browser_runtime_id",
+        "browser_page_id",
         "write_intent",
         "write_scope",
         "runtime_expectations",
@@ -3799,6 +3858,7 @@ fn canonicalize_shared_browser_request(
                 .to_string(),
         ),
     );
+    metadata.insert("browserPageId".to_string(), JsonValue::String(page_id));
     metadata.insert("writeIntent".to_string(), JsonValue::Bool(false));
     metadata.insert(
         "writeScope".to_string(),
@@ -4216,8 +4276,12 @@ fn should_persist_runtime_alert_conversation_message(
 /// A reconnect refused by the team's hosted runtime limit is a wait, not a
 /// failed startup: the queued request sends by itself once one of the team's
 /// runtimes stops. The Studio already words it this way from the reconnect
-/// code, but the stored content is what the CLI, history and the agent's own
-/// context read, so it has to say the same thing.
+/// code, but the stored content is what the CLI and the conversation history
+/// read, so it has to say the same thing. The agent's leased history leaves
+/// these dispatch alerts out (`should_include_message_in_agent_history`): the
+/// jobs they held back run only once a runtime leases them, so the alert is
+/// stale by the time an agent could read it. A scheduled run's launch failure
+/// is not one of them and stays.
 fn runtime_alert_message(
     reason: &str,
     terminal_alert: bool,
@@ -4268,7 +4332,7 @@ fn runtime_alert_fallback_message(reason: &str, terminal_alert: bool) -> &'stati
     }
 }
 
-fn build_runtime_alert_conversation_metadata(
+pub(crate) fn build_runtime_alert_conversation_metadata(
     details: JsonValue,
     primary_agent_metadata: Option<JsonValue>,
 ) -> JsonValue {
@@ -6194,6 +6258,11 @@ mod tests {
             metadata
                 .entry("browserConsentVersion".to_string())
                 .or_insert_with(|| json!(SHARED_BROWSER_CONSENT_VERSION));
+            if !metadata.contains_key("browser_page_id") {
+                metadata
+                    .entry("browserPageId".to_string())
+                    .or_insert_with(|| json!("page-1"));
+            }
         }
         normalize_dispatch_request(DispatchPromptRequest {
             project_id: Some(Uuid::new_v4().to_string()),
@@ -6249,6 +6318,7 @@ mod tests {
             request.metadata["browserConsentVersion"],
             SHARED_BROWSER_CONSENT_VERSION
         );
+        assert_eq!(request.metadata["browserPageId"], "page-1");
         assert_eq!(request.metadata["writeScope"]["mode"], "read_only");
         assert_eq!(
             request.metadata["runtimeExpectations"],
@@ -6301,6 +6371,109 @@ mod tests {
             .expect_err("conflicting consent versions must fail closed");
         assert_eq!(status, StatusCode::BAD_REQUEST);
         assert!(error.message.contains("current Studio client"));
+    }
+
+    #[test]
+    fn shared_browser_dispatch_requires_a_ui_selected_page() {
+        let too_long = "x".repeat(SHARED_BROWSER_MAX_PAGE_ID_BYTES + 1);
+        for invalid in [
+            None,
+            Some(json!("")),
+            Some(json!("   ")),
+            Some(json!(too_long)),
+            Some(json!("page/other")),
+            Some(json!("https://example.com/")),
+            Some(json!(7)),
+            Some(JsonValue::Null),
+        ] {
+            let mut request = normalized_shared_browser_request(json!({
+                "browserTransport": "shared",
+            }));
+            let metadata = request
+                .metadata
+                .as_object_mut()
+                .expect("Shared Browser metadata object");
+            metadata.remove("browserPageId");
+            if let Some(invalid) = invalid.clone() {
+                metadata.insert("browserPageId".to_string(), invalid);
+            }
+
+            let (status, Json(error)) = canonicalize_shared_browser_request(&mut request)
+                .expect_err("a browser task without one usable page must fail closed");
+            assert_eq!(status, StatusCode::BAD_REQUEST, "page id {invalid:?}");
+            assert_eq!(
+                error.code.as_deref(),
+                Some(SHARED_BROWSER_PAGE_REQUIRED_CODE),
+                "page id {invalid:?}"
+            );
+            assert!(error.message.contains("no open page selected"));
+            // A failed send-queue row shows this next to "Send now", which
+            // resends the same stored request, so it must not say "send it again".
+            assert!(error.message.contains("write the message again"));
+            assert!(!error.message.contains("browserPageId"));
+        }
+
+        let mut conflicting = normalized_shared_browser_request(json!({
+            "browserTransport": "shared",
+            "browserPageId": "page-1",
+            "browser_page_id": "page-2",
+        }));
+        let (status, Json(error)) = canonicalize_shared_browser_request(&mut conflicting)
+            .expect_err("conflicting page ids must fail closed");
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(
+            error.code.as_deref(),
+            Some(SHARED_BROWSER_PAGE_REQUIRED_CODE)
+        );
+
+        let mut longest = normalized_shared_browser_request(json!({
+            "browserTransport": "shared",
+            "browserPageId": "A".repeat(SHARED_BROWSER_MAX_PAGE_ID_BYTES),
+        }));
+        canonicalize_shared_browser_request(&mut longest)
+            .expect("a page id at the runtime bound is accepted");
+    }
+
+    #[test]
+    fn shared_browser_dispatch_normalizes_the_page_id_alias() {
+        let mut request = normalized_shared_browser_request(json!({
+            "browserTransport": "shared",
+            "browser_page_id": " PAGE_target-1 ",
+        }));
+
+        canonicalize_shared_browser_request(&mut request).expect("valid Shared Browser page");
+
+        assert_eq!(request.metadata["browserPageId"], "PAGE_target-1");
+        assert!(request.metadata.get("browser_page_id").is_none());
+
+        let mut agreeing = normalized_shared_browser_request(json!({
+            "browserTransport": "shared",
+            "browserPageId": "PAGE_target-1",
+            "browser_page_id": " PAGE_target-1",
+        }));
+        canonicalize_shared_browser_request(&mut agreeing)
+            .expect("matching page id aliases are accepted");
+        assert_eq!(agreeing.metadata["browserPageId"], "PAGE_target-1");
+        assert!(agreeing.metadata.get("browser_page_id").is_none());
+    }
+
+    #[test]
+    fn shared_browser_dispatch_reports_an_old_client_before_a_missing_page() {
+        let mut request = normalized_shared_browser_request(json!({
+            "browserTransport": "shared",
+        }));
+        let metadata = request
+            .metadata
+            .as_object_mut()
+            .expect("Shared Browser metadata object");
+        metadata.remove("browserConsentVersion");
+        metadata.remove("browserPageId");
+
+        let (status, Json(error)) = canonicalize_shared_browser_request(&mut request)
+            .expect_err("an old client must fail closed");
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(error.message.contains("current Studio client"));
+        assert!(error.code.is_none());
     }
 
     #[test]

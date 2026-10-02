@@ -16,6 +16,7 @@ export type RunFailureKind =
   | "needs_ai"
   | "provider_rate_limited"
   | "response_incomplete"
+  | "browser_page_missing"
   | "generic";
 
 export type RunFailurePresentation = {
@@ -39,6 +40,8 @@ const RUN_FAILURE_FRIENDLY_TEXT: Record<RunFailureKind, string> = {
   // INCOMPLETE_RESPONSE_FRIENDLY_TEXT for the ones it does.
   response_incomplete:
     "The AI provider stopped the answer before it was finished, so this turn stopped. Try again, or ask for less at once.",
+  browser_page_missing:
+    "This was sent as a browser task without a page to work on, so nothing ran. Try again from Chat, or open a page in the browser first.",
   // Only used as a last-resort fallback now: an unclassified failure surfaces
   // its real reason inline (see inlineGenericFailureText) rather than this
   // uninformative sentence.
@@ -129,6 +132,18 @@ const MISSING_VERIFICATION_PATTERNS = [
   /requires mcp tool usage, but the codex reply did not execute/i,
 ];
 
+// A browser task the runtime refused before doing anything because it named no
+// usable browser page. Studio from before the composer's open-page guard (or a
+// send-queue entry such a tab created) could dispatch one without a page, and
+// current Studio can still target a page inferred from chat history, whose id
+// is its URL. The controller now refuses both at send time, so this covers runs
+// that failed before that.
+const BROWSER_PAGE_MISSING_PATTERNS = [
+  /missing its UI-selected browserPageId/i,
+  /requires the job's UI-selected browserPageId/i,
+  /browserPageId must be one bounded CDP target id/i,
+];
+
 // Failures whose real cause is a missing/removed AI credential (e.g. the
 // controller can't resolve the credential the run was dispatched with). These
 // are surfaced with a "Connect AI" action rather than a retry, which won't help.
@@ -147,6 +162,11 @@ const NEEDS_AI_PATTERNS = [
 // A bare "429 Too Many Requests" is not enough: a throttled skill import or the
 // scoped worker proxy fail with that same phrase, and neither is the AI
 // provider.
+// The controller keeps a copy of these and of PROVIDER_QUOTA_EXHAUSTED_PATTERN
+// (is_provider_rate_limited_failure in packages/runtime-controller/src/agent.rs)
+// to label a failed run in the agent's history. Both are pinned to
+// packages/runtime-controller/src/run_failure_fixtures.json, so edit them
+// together.
 const PROVIDER_RATE_LIMITED_PATTERNS = [
   /exceeded retry limit, last status:\s*429\b/i,
   /\bbackend responded with 429\b/i,
@@ -197,6 +217,10 @@ const PROVIDER_QUOTA_EXHAUSTED_PATTERN =
  * never classifies as `provider_rate_limited` (it stays `generic`).
  * `response_incomplete` is excluded because the provider already billed the
  * cut-short answer, and the same request would most likely stop the same way.
+ * `browser_page_missing` is excluded because the person has to open a page or
+ * resend from Chat first; the manual "Try again" resends through the current
+ * routing, which keeps a browser task unsent without a targeted page, and the
+ * controller refuses one whose page is not open before anything runs.
  */
 export const AUTO_RETRY_ELIGIBLE_KINDS = [
   "missing_final_message",
@@ -575,6 +599,9 @@ export function runFailureOriginKey(promptText: string): string {
 }
 
 export function classifyRunFailureText(rawText: string): Exclude<RunFailureKind, "generic"> | null {
+  if (BROWSER_PAGE_MISSING_PATTERNS.some((pattern) => pattern.test(rawText))) {
+    return "browser_page_missing";
+  }
   if (MISSING_FINAL_MESSAGE_PATTERNS.some((pattern) => pattern.test(rawText))) {
     return "missing_final_message";
   }
