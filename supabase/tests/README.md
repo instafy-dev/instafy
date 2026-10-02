@@ -79,7 +79,7 @@ row-level security policies, and checks these rules:
 - Nobody updates or upserts an object.
 - An uploader deletes only their own objects, and only while they can still write.
 
-The controller test `chat_attachments_sql_fixture_passes_on_storage` runs the same file against
+The controller test `chat_attachment_sql_fixture_passes_on_storage` runs the same file against
 Storage's own schema on the local stack, so CI checks the policies against the real table.
 
 To also run the real controller HTTP and mocked transport tests against a clean,

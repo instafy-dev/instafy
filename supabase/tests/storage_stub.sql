@@ -1,7 +1,7 @@
 -- The parts of the Supabase Storage schema that the public migrations' Storage
 -- policies use, for scripts/test-durable-notifications.py's disposable cluster,
 -- which has no Storage. The Storage service owns and migrates these tables in a
--- real project, and the controller test chat_attachments_sql_fixture_passes_on_storage
+-- real project, and the controller test chat_attachment_sql_fixture_passes_on_storage
 -- runs the same fixture against them. This stub keeps only the columns and
 -- constraints the policies and their fixtures read: buckets, and objects with RLS
 -- on, the uploader in owner_id and the deprecated owner, and unique names per

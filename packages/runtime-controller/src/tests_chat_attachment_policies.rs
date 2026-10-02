@@ -12,8 +12,8 @@
 use crate::tests::require_origin_test_pool;
 
 #[tokio::test]
-async fn chat_attachments_sql_fixture_passes_on_storage() -> anyhow::Result<()> {
-    let pool = require_origin_test_pool("chat attachments SQL fixture").await?;
+async fn chat_attachment_sql_fixture_passes_on_storage() -> anyhow::Result<()> {
+    let pool = require_origin_test_pool("chat attachment SQL fixture").await?;
     let fixture = std::fs::read_to_string(
         std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../../supabase/tests/chat_attachments.sql"),

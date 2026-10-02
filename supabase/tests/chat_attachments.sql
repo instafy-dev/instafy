@@ -2,7 +2,7 @@
 -- signed-in and anonymous roles, it checks who may upload, read and delete an
 -- attachment, that names are restricted to one spelling per space, and that
 -- nobody may update one.
--- Executed by the controller test chat_attachments_sql_fixture_passes_on_storage
+-- Executed by the controller test chat_attachment_sql_fixture_passes_on_storage
 -- against Supabase Storage's own migrated schema, and by
 -- scripts/test-durable-notifications.py in its disposable cluster after
 -- storage_stub.sql. Both run it inside a transaction they roll back, so this
