@@ -6,6 +6,7 @@ import path from "node:path";
 import test from "node:test";
 import vm from "node:vm";
 import {
+
   ISSUE_BODY_LIMIT,
   ISSUE_ROW_LIMIT,
   ISSUE_TITLE,
@@ -16,6 +17,8 @@ import {
   readResults,
   scanFindings,
 } from "./image-scan-report.mjs";
+
+const escapeRegExp = (value) => value.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&");
 
 // The nightly image scan must build and scan exactly what the publishers
 // release, and must never write to a registry. Everything it shares with the
@@ -193,7 +196,7 @@ test("no step logs in, pushes, tags a registry reference, writes a cache or hold
     /docker\/login-action|docker login|docker push|--push\b|push: true|cache-to|type=gha|imagetools|docker tag\b|--output[= ]type=(?:registry|image)|registry-auth|DOCKER_AUTH_CONFIG|packages:|write-all|secrets\./u);
   // The only registry reference is the anonymous read of the publisher's layer cache.
   const cacheFrom = withInputs(step(publisher.runtime, "Build audit image"))["cache-from"];
-  assert.deepEqual(scanSource.split("\n").filter((line) => line.includes("ghcr.io")),
+  assert.deepEqual(scanSource.split("\n").filter((line) => /(?:^|[\s=:,"'])ghcr\.io\//u.test(line)),
     [`          cache-from: ${cacheFrom}`]);
   // Images exist only in the runner's engine, under a local name with no registry or namespace.
   const build = withInputs(step(scan.runtime, "Build audit image"));
@@ -297,7 +300,7 @@ test("cells equal the publishers' matrices and run on the same hosted runners", 
   assert.match(publisher.runtime, /\|\| matrix\.runner \}\}\n/u);
   const serviceFallback = publisher.services.match(/\|\| '([\w.-]+)' \}\}\n/u)?.[1];
   assert.ok(serviceFallback);
-  assert.match(scan.services, new RegExp(`^ {4}runs-on: ${serviceFallback.replace(/\./gu, "\\.")}$`, "mu"));
+  assert.match(scan.services, new RegExp(`^ {4}runs-on: ${escapeRegExp(serviceFallback)}$`, "mu"));
   assert.match(scan.report, /^ {4}runs-on: ubuntu-24\.04$/mu);
   assert.doesNotMatch(scanSource, /self-hosted|vars\.|instafy-trusted-build|instafy-ci-/u);
   for (const cell of matrix(scan.runtime)) assert.match(cell.runner, /^ubuntu-24\.04(?:-arm)?$/u);

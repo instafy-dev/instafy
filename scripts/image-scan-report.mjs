@@ -32,6 +32,7 @@ const severityRank = { CRITICAL: 0, HIGH: 1 };
 function tableCell(value) {
   const text = String(value ?? "")
     .replace(/[\r\n]+/gu, " ")
+    .replace(/\\/gu, "\\\\")
     .replace(/\|/gu, "\\|")
     .replace(/`/gu, "'")
     .trim();
