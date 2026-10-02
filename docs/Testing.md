@@ -320,24 +320,58 @@ fails on timeout. Protected `main` repeats the current-tree and introduced
 history scans as defense in depth.
 
 `.github/CODEOWNERS` assigns **all paths** to the existing trusted code owners,
-`@instafy-bot` and `@instafy-bot-2`, and retains the narrower workflow/action and
-boundary-control entries under `@instafy-bot`. Outside contributions, including
+`@instafy-bot` and `@instafy-bot-2`, including every explicit workflow/action and
+boundary-control entry. CODEOWNERS uses the last matching rule, so those entries
+must retain both owners. Outside contributions, including
 ordinary product changes and edits to CODEOWNERS itself, need an applicable
-owner's review. GitHub uses CODEOWNERS from the
-target branch, so a PR cannot remove its own review requirement. Keep the
-blanket required-approval count at **zero** and code-owner review **enabled**:
-the code owners' own bot-authored PRs retain their existing review behavior and
-must still pass all protected CI checks. Do not introduce an auto-approve Action,
-a bot bypass, or a new release gate to implement this policy. A new trusted bot
-identity requires an explicit ownership-policy review; a name ending in `[bot]`
-does not confer trust.
+owner's review. GitHub uses CODEOWNERS from the target branch, so a PR cannot
+remove its own review requirement. Either trusted bot can approve the other's
+PR or an outside contribution after reviewing it; GitHub does not allow a PR
+author to approve their own PR.
+
+Keep the blanket required-approval count at **zero**, code-owner review
+**enabled**, and all required CI checks intact. Zero blanket approvals and
+CODEOWNERS membership do not by themselves exempt a bot-authored PR from review.
+The public repository's review-only ruleset grants both existing trusted bots
+the same **pull-request-only** exception. This permits an explicitly authorized
+merge of a trusted bot's own changes after review and exact-head CI, without
+fabricating an approving review. Keep required CI outside that exception and
+do not extend it to direct pushes, release tags or deployment. GitHub grants the
+exception to the merging account, not to a PR author: operators must still
+require a trusted owner's approval for outside-authored changes. Never re-author
+outsider changes as a bot PR or add an auto-approve Action to evade review. A new
+trusted bot identity requires an explicit ownership-policy review; a name ending
+in `[bot]` does not confer trust.
+
+If `gh pr merge` reports a branch-policy block despite passing CI, do not assume
+that the bot lacks its configured exception. The CLI can reject a `BLOCKED`
+merge state before asking GitHub to evaluate the merging account; enabling
+auto-merge may also leave that PR waiting for review. For an already authorized
+trusted-bot merge, verify the exact repository, PR author, head SHA, applicable
+review-only exception, and every required check on that SHA. The current base
+must satisfy branch-update requirements. Do not ignore an outstanding request
+for changes, an unresolved required review thread, or another protection. Then
+use GitHub's normal merge endpoint with the reviewed head pinned:
+
+```bash
+gh api --method PUT "repos/instafy-dev/instafy/pulls/$REVIEWED_PR/merge" \
+  -f sha="$REVIEWED_HEAD" -f merge_method=squash
+```
+
+Set `REVIEWED_PR` and `REVIEWED_HEAD` from the reviewed PR, using the full commit
+SHA; do not resolve a moving branch name at merge time. The request lets GitHub
+evaluate the existing exception and remaining protections. It does not request
+a blanket `--admin` override. Never use it to ignore failed, pending or unknown
+required CI, waive an outside contribution's review, or change protection just
+to clear a merge block. If GitHub rejects the request, diagnose that rejection.
 
 Before making the repository public, verify the live branch settings (source
 tests do not configure GitHub): code-owner review enabled, blanket approvals
-zero, stale approvals dismissed after code changes, and existing required checks
-unchanged. Confirm an unapproved non-owner PR needs review and an existing
-owner-authored bot PR gains no extra review requirement. Do not bypass a merge
-block merely to test it. Retain the self-hosted runner groups' server-side
+zero, stale approvals dismissed after code changes, both trusted bots granted
+the same review-only PR exception, and existing required checks unchanged.
+Confirm an unapproved outside contribution still needs review and both bots can
+review all protected paths. Inspect these settings without merging a PR merely
+to test them. Retain the self-hosted runner groups' server-side
 exclusion of public repositories; YAML runner selection alone is not isolation.
 After the visibility change, select **Require approval for all external
 contributors** in this repository's Actions settings before approving any fork
@@ -350,6 +384,8 @@ Do not use a push-path ruleset as the permanent trust anchor: GitHub disables
 all push rulesets when an internal repository becomes public. See GitHub's
 [code-owner rules](https://docs.github.com/en/repositories/managing-your-repositorys-settings-and-features/customizing-your-repository/about-code-owners)
 and [repository Actions settings](https://docs.github.com/en/repositories/managing-your-repositorys-settings-and-features/enabling-features-for-your-repository/managing-github-actions-settings-for-a-repository).
+GitHub also documents the [self-approval restriction](https://docs.github.com/en/pull-requests/how-tos/review-pull-requests/reviewing-proposed-changes-in-a-pull-request)
+and the merge endpoint's [expected-head `sha` parameter](https://docs.github.com/en/rest/pulls/pulls#merge-a-pull-request).
 
 The trusted policy intentionally makes a binary addition/removal, approved
 environment-path addition, or Codex repin fail its own PR. Those rare changes
