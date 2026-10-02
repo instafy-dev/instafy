@@ -2357,16 +2357,17 @@ fn publish_response(
 
 /// Before the controller stops a workspace runtime: publish finished local
 /// commits, park unsaved and unfinished work on recovery refs, and push
-/// them. Never publishes dirty files to `main`.
+/// them. Never publishes dirty files to `main`. Hosted checkouts only: a
+/// Desktop folder belongs to the user and is never flushed.
 async fn handle_git_flush(
     State(state): State<AppState>,
     Extension(claims): Extension<OriginClaims>,
     Extension(access_token): Extension<OriginAccessToken>,
     payload: Option<Json<GitFlushRequest>>,
 ) -> Result<Json<serde_json::Value>, OriginError> {
-    if state.config.multi_tenant {
+    if state.config.multi_tenant || !state.config.hosted_checkout {
         return Err(OriginError::bad_request(
-            "flush is only available on a workspace runtime",
+            "flush is only available on a hosted workspace runtime",
         ));
     }
     let turn_active = payload

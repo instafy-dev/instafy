@@ -1727,10 +1727,17 @@ fn publish_modules_use_only_git_2_34_and_never_force() {
 // ---------------------------------------------------------------------------
 
 async fn serve(sc: &Scenario) -> (String, tokio::task::JoinHandle<()>) {
+    serve_config(sc.config.clone(), sc.ws.clone()).await
+}
+
+async fn serve_config(
+    config: ServerConfig,
+    workspace: PathBuf,
+) -> (String, tokio::task::JoinHandle<()>) {
     let client = reqwest::Client::new();
-    let config = std::sync::Arc::new(sc.config.clone());
+    let config = std::sync::Arc::new(config);
     let validator = crate::auth::TokenValidator::new(client.clone(), config.jwks_url.clone());
-    let state = crate::routes::AppState::new(config, validator, client, sc.ws.clone(), None)
+    let state = crate::routes::AppState::new(config, validator, client, workspace, None)
         .expect("app state");
     let app = crate::routes::router(state);
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -1872,4 +1879,386 @@ fn policy_refused_path_in_parked_work_is_left_out_and_the_rest_pushed() {
         "the refused copy stays local"
     );
     assert!(sc.ws.join("bundle.zip").exists());
+}
+
+/// r4.1: a flush with a clean tree still pushes every never-pushed local
+/// recovery ref, here the one a stop without network left behind.
+#[test]
+fn flush_with_a_clean_tree_pushes_a_never_pushed_local_ref() {
+    let sc = Scenario::new(Options::default());
+    sc.write("doc.md", b"alpha\nbeta\ngamma\ndelta\nleft over\n");
+    let offline = flush(&sc.ctx(false), false).unwrap();
+    assert_eq!(offline.unpushed_refs, 1, "{offline:?}");
+    let name = offline.recovery_refs[0].name.clone();
+    assert_eq!(offline.unpushed_ref_names, vec![name.clone()]);
+
+    ig(&sc.ws, &["checkout", "--", "doc.md"]);
+    assert!(sc.status().is_empty(), "{}", sc.status());
+    let report = flush(&sc.ctx(true), false).unwrap();
+    assert!(report.recovery_refs.is_empty(), "{report:?}");
+    assert!(report.publish.is_none(), "{report:?}");
+    assert_eq!(report.unpushed_refs, 0);
+    assert!(report.unpushed_ref_names.is_empty());
+    let canonical = format!("refs/instafy/recovery/{}/{name}", sc.config.origin_id);
+    assert_eq!(sc.remote_refs(&canonical).len(), 1);
+    assert!(sc
+        .recovery_file(&canonical, "doc.md")
+        .unwrap()
+        .contains("left over"));
+    assert_eq!(
+        sc.remote_file("doc.md").as_deref(),
+        Some("alpha\nbeta\ngamma\ndelta\n"),
+        "parked work never reaches main"
+    );
+}
+
+/// A Desktop folder belongs to the user: the flush route refuses it and
+/// leaves the folder exactly as it is.
+#[tokio::test(flavor = "multi_thread")]
+async fn flush_route_refuses_a_desktop_folder() {
+    let sc = Scenario::new(Options {
+        desktop: true,
+        ..Options::default()
+    });
+    sc.write("doc.md", b"alpha\nbeta\ngamma\ndelta\nunsaved\n");
+    let (base, server) = serve(&sc).await;
+    let response = reqwest::Client::new()
+        .post(format!("{base}/git/flush"))
+        .json(&serde_json::json!({ "turnActive": true }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), reqwest::StatusCode::BAD_REQUEST);
+    assert!(sc.local_refs("refs/instafy/").is_empty());
+    assert!(sc.remote_refs("refs/instafy/").is_empty());
+    assert_eq!(
+        sc.disk("doc.md").as_deref(),
+        Some("alpha\nbeta\ngamma\ndelta\nunsaved\n")
+    );
+    server.abort();
+}
+
+/// What the stand-in controller saw from the origin.
+#[derive(Default)]
+struct ControllerCalls {
+    /// (bearer, requested scopes) of every git token request.
+    git_tokens: Vec<(String, Vec<String>)>,
+    lease_checks: Vec<String>,
+}
+
+struct StubController {
+    base: String,
+    calls: std::sync::Arc<std::sync::Mutex<ControllerCalls>>,
+    refuse_git_write: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    encoding_key: jsonwebtoken::EncodingKey,
+    server: tokio::task::JoinHandle<()>,
+}
+
+const MACHINE_TOKEN: &str = "runtime-machine-token";
+
+impl StubController {
+    /// A controller that publishes a JWKS, answers the origin's workspace
+    /// lease check for `lease`, and mints git.write only for the exact
+    /// fs.write bearer `bearer()` returns; a machine credential never gets
+    /// git.write, as on the real controller.
+    async fn start(project_id: Uuid, lease_id: Uuid, user_id: Uuid, runtime_id: Uuid) -> Self {
+        use axum::extract::{Json as AxumJson, State};
+        use axum::http::{HeaderMap, StatusCode};
+        use axum::routing::{get, post};
+        use base64::engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD};
+        use base64::Engine as _;
+        use ring::rand::SystemRandom;
+        use ring::signature::{Ed25519KeyPair, KeyPair as _};
+
+        let pkcs8 = Ed25519KeyPair::generate_pkcs8(&SystemRandom::new()).unwrap();
+        let key_pair = Ed25519KeyPair::from_pkcs8(pkcs8.as_ref()).unwrap();
+        let jwks = serde_json::json!({
+            "keys": [{
+                "kty": "OKP",
+                "crv": "Ed25519",
+                "alg": "EdDSA",
+                "use": "sig",
+                "kid": "stub-key",
+                "x": URL_SAFE_NO_PAD.encode(key_pair.public_key().as_ref()),
+            }]
+        });
+        let pem = format!(
+            "-----BEGIN PRIVATE KEY-----\n{}\n-----END PRIVATE KEY-----\n",
+            STANDARD.encode(pkcs8.as_ref())
+        );
+        let encoding_key = jsonwebtoken::EncodingKey::from_ed_pem(pem.as_bytes()).unwrap();
+
+        #[derive(Clone)]
+        struct Stub {
+            jwks: serde_json::Value,
+            lease: serde_json::Value,
+            calls: std::sync::Arc<std::sync::Mutex<ControllerCalls>>,
+            refuse_git_write: std::sync::Arc<std::sync::atomic::AtomicBool>,
+        }
+        fn bearer(headers: &HeaderMap) -> String {
+            headers
+                .get("authorization")
+                .and_then(|value| value.to_str().ok())
+                .and_then(|value| value.strip_prefix("Bearer "))
+                .unwrap_or_default()
+                .to_string()
+        }
+
+        let calls = std::sync::Arc::new(std::sync::Mutex::new(ControllerCalls::default()));
+        let refuse_git_write = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let stub = Stub {
+            jwks,
+            lease: serde_json::json!({
+                "lease": {
+                    "leaseId": lease_id,
+                    "projectId": project_id,
+                    "userId": user_id,
+                    "runtimeId": runtime_id,
+                    "expiresAt": (chrono::Utc::now() + chrono::Duration::minutes(5)).to_rfc3339(),
+                }
+            }),
+            calls: calls.clone(),
+            refuse_git_write: refuse_git_write.clone(),
+        };
+        let app = axum::Router::new()
+            .route(
+                "/.well-known/jwks.json",
+                get(|State(stub): State<Stub>| async move { AxumJson(stub.jwks) }),
+            )
+            .route(
+                "/projects/:project_id/lease",
+                get(|State(stub): State<Stub>, headers: HeaderMap| async move {
+                    let bearer = bearer(&headers);
+                    stub.calls.lock().unwrap().lease_checks.push(bearer.clone());
+                    if bearer == MACHINE_TOKEN || bearer.is_empty() {
+                        return Err(StatusCode::UNAUTHORIZED);
+                    }
+                    Ok(AxumJson(stub.lease))
+                }),
+            )
+            .route(
+                "/projects/:project_id/git/access_token",
+                post(
+                    |State(stub): State<Stub>,
+                     headers: HeaderMap,
+                     AxumJson(body): AxumJson<serde_json::Value>| async move {
+                        let bearer = bearer(&headers);
+                        let scopes: Vec<String> = body["scopes"]
+                            .as_array()
+                            .map(|scopes| {
+                                scopes
+                                    .iter()
+                                    .filter_map(|scope| scope.as_str().map(str::to_string))
+                                    .collect()
+                            })
+                            .unwrap_or_default();
+                        let write = scopes.iter().any(|scope| scope == "git.write");
+                        stub.calls
+                            .lock()
+                            .unwrap()
+                            .git_tokens
+                            .push((bearer.clone(), scopes));
+                        if write && bearer == MACHINE_TOKEN {
+                            return Err(StatusCode::FORBIDDEN);
+                        }
+                        if write
+                            && stub
+                                .refuse_git_write
+                                .load(std::sync::atomic::Ordering::SeqCst)
+                        {
+                            return Err(StatusCode::UNAUTHORIZED);
+                        }
+                        Ok(AxumJson(serde_json::json!({
+                            "token": "minted-git-token",
+                            "expiresIn": 60,
+                        })))
+                    },
+                ),
+            )
+            .with_state(stub);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        StubController {
+            base,
+            calls,
+            refuse_git_write,
+            encoding_key,
+            server,
+        }
+    }
+
+    /// The short-lived fs.write origin token the controller mints for the
+    /// workspace lease holder before a stop.
+    fn origin_token(
+        &self,
+        config: &ServerConfig,
+        lease_id: Uuid,
+        user_id: Uuid,
+        runtime_id: Uuid,
+    ) -> String {
+        let now = chrono::Utc::now().timestamp();
+        let header = jsonwebtoken::Header {
+            kid: Some("stub-key".to_string()),
+            ..jsonwebtoken::Header::new(jsonwebtoken::Algorithm::EdDSA)
+        };
+        jsonwebtoken::encode(
+            &header,
+            &serde_json::json!({
+                "aud": config.origin_id.to_string(),
+                "sub": user_id.to_string(),
+                "project_id": config.project_id.to_string(),
+                "origin_id": config.origin_id.to_string(),
+                "runtime_id": runtime_id.to_string(),
+                "protocol": "http",
+                "scopes": ["fs.write"],
+                "lease_id": lease_id.to_string(),
+                "iat": now,
+                "exp": now + 60,
+            }),
+            &self.encoding_key,
+        )
+        .unwrap()
+    }
+}
+
+/// r3 test 8 in its r4.1 form: the controller's pre-stop flush through the
+/// origin's real mint path. The origin checks the caller's workspace lease,
+/// exchanges that exact fs.write token for git.write (its machine credential
+/// is never offered, and the controller would refuse it), parks the
+/// unfinished turn instead of publishing it, and pushes the parked ref. When
+/// the controller refuses git.write, the work stays on a local ref that the
+/// next refresh pushes.
+#[tokio::test(flavor = "multi_thread")]
+async fn flush_route_gets_git_write_only_through_the_callers_token() {
+    let sc = Scenario::new(Options::default());
+    let lease_id = Uuid::new_v4();
+    let user_id = Uuid::new_v4();
+    let runtime_id = Uuid::new_v4();
+    let controller =
+        StubController::start(sc.config.project_id, lease_id, user_id, runtime_id).await;
+    let mut config = sc.config.clone();
+    config.skip_auth = false;
+    config.controller_base_url = Url::parse(&controller.base).unwrap();
+    config.jwks_url = Url::parse(&format!("{}/.well-known/jwks.json", controller.base)).unwrap();
+    config.controller_internal_token = Some(MACHINE_TOKEN.to_string());
+    let token = controller.origin_token(&config, lease_id, user_id, runtime_id);
+    let (base, server) = serve_config(config, sc.ws.clone()).await;
+    let client = reqwest::Client::new();
+
+    let unauthenticated = client
+        .post(format!("{base}/git/flush"))
+        .json(&serde_json::json!({ "turnActive": false }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(unauthenticated.status(), reqwest::StatusCode::UNAUTHORIZED);
+    let machine = client
+        .post(format!("{base}/git/flush"))
+        .bearer_auth(MACHINE_TOKEN)
+        .json(&serde_json::json!({ "turnActive": false }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(machine.status(), reqwest::StatusCode::UNAUTHORIZED);
+    assert!(sc.local_refs("refs/instafy/").is_empty());
+
+    // Mid-turn: the turn's commit and its unsaved edit go to a recovery ref.
+    sc.write("half.rs", b"fn half() {\n");
+    let half = sc.agent_commit(&["half.rs"], "half done");
+    sc.write("notes.md", b"scratch\n");
+    let main_before = sc.main();
+    let response = client
+        .post(format!("{base}/git/flush"))
+        .bearer_auth(&token)
+        .json(&serde_json::json!({ "turnActive": true }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), reqwest::StatusCode::OK);
+    let body: serde_json::Value = response.json().await.unwrap();
+    assert_eq!(body["unpushedRefs"], 0, "{body}");
+    assert_eq!(body["unpushedRefNames"], serde_json::json!([]), "{body}");
+    assert_eq!(body["parkedCommits"], 1, "{body}");
+    assert_eq!(sc.main(), main_before, "nothing of the turn reached main");
+    assert!(!git_output(
+        &sc.remote,
+        &["merge-base", "--is-ancestor", &half, "main"],
+        None
+    )
+    .status
+    .success());
+    let parked = body["recoveryRefs"][0]["reference"].as_str().unwrap();
+    assert!(parked.starts_with(&format!("refs/instafy/recovery/{}/", sc.config.origin_id)));
+    assert_eq!(
+        sc.recovery_file(parked, "half.rs").as_deref(),
+        Some("fn half() {\n")
+    );
+    assert_eq!(
+        sc.recovery_file(parked, "notes.md").as_deref(),
+        Some("scratch\n")
+    );
+    {
+        let calls = controller.calls.lock().unwrap();
+        assert!(calls.lease_checks.iter().all(|bearer| bearer == &token));
+        let writes: Vec<&String> = calls
+            .git_tokens
+            .iter()
+            .filter(|(_, scopes)| scopes.iter().any(|scope| scope == "git.write"))
+            .map(|(bearer, _)| bearer)
+            .collect();
+        assert_eq!(
+            writes,
+            vec![&token],
+            "git.write is minted only with the caller's token"
+        );
+    }
+
+    // The controller refuses git.write (the holder lost access): the work
+    // stays on a local ref, and the next refresh with access pushes it.
+    controller
+        .refuse_git_write
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    sc.write("later.md", b"written after the turn\n");
+    let response = client
+        .post(format!("{base}/git/flush"))
+        .bearer_auth(&token)
+        .json(&serde_json::json!({ "turnActive": false }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), reqwest::StatusCode::OK);
+    let body: serde_json::Value = response.json().await.unwrap();
+    assert_eq!(body["unpushedRefs"], 1, "{body}");
+    let name = body["unpushedRefNames"][0].as_str().unwrap().to_string();
+    let canonical = format!("refs/instafy/recovery/{}/{name}", sc.config.origin_id);
+    assert!(sc.remote_refs(&canonical).is_empty());
+    assert_eq!(
+        sc.local_refs(&format!("{LOCAL_RECOVERY_ROOT}/{name}"))
+            .len(),
+        1
+    );
+    let refreshed = refresh(&sc.ctx(true)).unwrap();
+    assert_eq!(refreshed.unpushed_refs, 0, "{refreshed:?}");
+    assert_eq!(sc.remote_refs(&canonical).len(), 1);
+    assert_eq!(
+        sc.recovery_file(&canonical, "later.md").as_deref(),
+        Some("written after the turn\n")
+    );
+    assert!(sc.remote_file("later.md").is_none());
+    {
+        let calls = controller.calls.lock().unwrap();
+        assert!(
+            calls
+                .git_tokens
+                .iter()
+                .all(|(bearer, scopes)| bearer != MACHINE_TOKEN
+                    || !scopes.iter().any(|scope| scope == "git.write")),
+            "the machine credential was offered for git.write"
+        );
+    }
+    server.abort();
+    controller.server.abort();
 }

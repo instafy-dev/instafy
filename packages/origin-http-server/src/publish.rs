@@ -197,8 +197,11 @@ pub fn refresh(ctx: &PublishContext<'_>) -> Result<PublishReport, OriginError> {
 pub struct FlushReport {
     /// Recovery refs this flush created or reused.
     pub recovery_refs: Vec<RecoveryRefReport>,
-    /// Local recovery refs still waiting for a push.
+    /// Local recovery refs still waiting for a push. Zero means everything
+    /// this checkout holds is on canonical; a drain treats more as a failure.
     pub unpushed_refs: usize,
+    /// The names of those refs (under `refs/instafy/local-recovery/`).
+    pub unpushed_ref_names: Vec<String>,
     /// The publish of finished local commits, when one ran.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub publish: Option<PublishReport>,
@@ -1588,7 +1591,9 @@ impl<'a> Publisher<'a> {
                 }
             }
         }
-        flush.unpushed_refs = recovery::pending(&self.git)?.len();
+        let pending = recovery::pending(&self.git)?;
+        flush.unpushed_refs = pending.len();
+        flush.unpushed_ref_names = pending.into_iter().map(|(name, _)| name).collect();
         Ok(flush)
     }
 
