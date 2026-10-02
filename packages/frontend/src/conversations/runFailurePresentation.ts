@@ -162,6 +162,11 @@ const NEEDS_AI_PATTERNS = [
 // A bare "429 Too Many Requests" is not enough: a throttled skill import or the
 // scoped worker proxy fail with that same phrase, and neither is the AI
 // provider.
+// The controller keeps a copy of these and of PROVIDER_QUOTA_EXHAUSTED_PATTERN
+// (is_provider_rate_limited_failure in packages/runtime-controller/src/agent.rs)
+// to label a failed run in the agent's history. Both are pinned to
+// packages/runtime-controller/src/run_failure_fixtures.json, so edit them
+// together.
 const PROVIDER_RATE_LIMITED_PATTERNS = [
   /exceeded retry limit, last status:\s*429\b/i,
   /\bbackend responded with 429\b/i,
