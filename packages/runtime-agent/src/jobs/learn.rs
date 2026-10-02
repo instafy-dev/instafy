@@ -37,6 +37,7 @@ pub const GROUP_PARTICIPATION_RELATIVE_PATH: &str =
 pub const CONVERSATION_HISTORY_RELATIVE_PATH: &str =
     ".agents/skills/instafy-conversation-history/SKILL.md";
 pub const DIAGNOSTICS_RELATIVE_PATH: &str = ".agents/skills/instafy-diagnostics/SKILL.md";
+pub const SPACE_REVIEW_RELATIVE_PATH: &str = ".agents/skills/instafy-space-review/SKILL.md";
 pub const DIAGNOSTICS_OPENAI_RELATIVE_PATH: &str =
     ".agents/skills/instafy-diagnostics/agents/openai.yaml";
 pub const LOCATION_SHARING_RELATIVE_PATH: &str = ".agents/skills/instafy-location-sharing/SKILL.md";
@@ -143,6 +144,10 @@ const DIAGNOSTICS_TEMPLATE: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/assets/instafy/.agents/skills/instafy-diagnostics/SKILL.md"
 ));
+const SPACE_REVIEW_TEMPLATE: &str = include_str!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/assets/instafy/.agents/skills/instafy-space-review/SKILL.md"
+));
 const DIAGNOSTICS_OPENAI_TEMPLATE: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/assets/instafy/.agents/skills/instafy-diagnostics/agents/openai.yaml"
@@ -248,6 +253,7 @@ pub fn ensure_project_memory_scaffold(workspace_dir: &Path) {
     let group_participation_path = workspace_dir.join(GROUP_PARTICIPATION_RELATIVE_PATH);
     let conversation_history_path = workspace_dir.join(CONVERSATION_HISTORY_RELATIVE_PATH);
     let diagnostics_path = workspace_dir.join(DIAGNOSTICS_RELATIVE_PATH);
+    let space_review_path = workspace_dir.join(SPACE_REVIEW_RELATIVE_PATH);
     let diagnostics_openai_path = workspace_dir.join(DIAGNOSTICS_OPENAI_RELATIVE_PATH);
     let location_sharing_path = workspace_dir.join(LOCATION_SHARING_RELATIVE_PATH);
     let automations_path = workspace_dir.join(AUTOMATIONS_RELATIVE_PATH);
@@ -414,6 +420,15 @@ pub fn ensure_project_memory_scaffold(workspace_dir: &Path) {
         }
     }
 
+    if !space_review_path.exists() {
+        if let Some(parent) = space_review_path.parent() {
+            let _ = fs::create_dir_all(parent);
+        }
+        if fs::write(&space_review_path, SPACE_REVIEW_TEMPLATE).is_ok() {
+            wrote_any = true;
+        }
+    }
+
     if !diagnostics_path.exists() {
         if let Some(parent) = diagnostics_path.parent() {
             let _ = fs::create_dir_all(parent);
@@ -565,6 +580,7 @@ fn maybe_commit_project_memory_scaffold(workspace_dir: &Path, _wrote_any: bool) 
         GROUP_PARTICIPATION_RELATIVE_PATH,
         CONVERSATION_HISTORY_RELATIVE_PATH,
         DIAGNOSTICS_RELATIVE_PATH,
+        SPACE_REVIEW_RELATIVE_PATH,
         DIAGNOSTICS_OPENAI_RELATIVE_PATH,
         LOCATION_SHARING_RELATIVE_PATH,
         AUTOMATIONS_RELATIVE_PATH,
@@ -1588,6 +1604,29 @@ mod tests {
             1
         );
         assert!(!refreshed.text.contains("obsolete participation policy"));
+    }
+
+    #[test]
+    fn scaffold_adds_space_review_without_overwriting_workspace_customization() {
+        let workspace = tempdir().expect("workspace tempdir");
+        ensure_project_memory_scaffold(workspace.path());
+        let skill = workspace.path().join(SPACE_REVIEW_RELATIVE_PATH);
+        assert_eq!(
+            fs::read_to_string(&skill).expect("review skill"),
+            SPACE_REVIEW_TEMPLATE
+        );
+        let snapshot = super::super::format_project_memory_snapshot(
+            workspace.path(),
+            "$instafy-space-review Review this space and recommend useful next actions.",
+        )
+        .expect("space review memory snapshot");
+        assert!(snapshot.text.contains(SPACE_REVIEW_TEMPLATE.trim()));
+        fs::write(&skill, "project-specific review guidance").expect("customized review skill");
+        ensure_project_memory_scaffold(workspace.path());
+        assert_eq!(
+            fs::read_to_string(&skill).expect("preserved skill"),
+            "project-specific review guidance"
+        );
     }
 
     #[test]

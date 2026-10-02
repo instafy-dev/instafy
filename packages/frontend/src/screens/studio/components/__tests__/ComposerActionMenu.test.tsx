@@ -76,6 +76,7 @@ describe("ComposerActionMenu", () => {
       onUploadImage?: () => void;
       uploadImageDisabled?: boolean;
       onInsertSuggestion?: () => void;
+      onOpenSpaceReview?: () => void;
       onStartVoiceInput?: () => void;
       voiceInputDisabled?: boolean;
       onToggleVoiceReplies?: () => void;
@@ -112,6 +113,16 @@ describe("ComposerActionMenu", () => {
     expect(container.querySelector('[data-testid="composer-action-menu-insert-suggestion"]')).toBeNull();
     expect(container.querySelector('[data-testid="composer-action-menu-voice-input"]')).toBeNull();
     expect(container.querySelector('[data-testid="composer-action-menu-voice-replies"]')).toBeNull();
+  });
+
+  it("opens space review without starting a prompt or requiring write access", async () => {
+    const onOpenSpaceReview = vi.fn();
+    await renderMenu(true, true, { onOpenSpaceReview, mutationDisabled: true });
+    const button = container.querySelector<HTMLButtonElement>('[data-testid="composer-action-menu-space-review"]');
+    expect(button).not.toBeNull();
+    expect(button?.disabled).toBe(false);
+    await act(async () => button?.click());
+    expect(onOpenSpaceReview).toHaveBeenCalledOnce();
   });
 
   it("closes the menu before expanding the draft", async () => {

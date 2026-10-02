@@ -919,6 +919,7 @@ fn default_skill_metadata_for_dir(dir_name: &str) -> SkillMetadata {
                 "instafy-runtime-flavors".to_string(),
                 "instafy-secrets".to_string(),
                 "instafy-skill-import-compat".to_string(),
+                "instafy-space-review".to_string(),
             ],
             always_include: true,
             max_children: Some(3),

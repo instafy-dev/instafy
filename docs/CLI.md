@@ -167,6 +167,51 @@ instafy conversation context <conversationId> <messageId> --json
 
 A same-handle agent in a new chat should not assume it has global memory from old threads. Reuse or message the old thread when that thread should keep owning the topic; otherwise answer from recovered evidence and cite the conversation, thread, message, or context card.
 
+### Space reviews and recommendations
+
+Ask to review a space in a normal chat, or invoke `$instafy-space-review`. The bundled skill
+reads a bounded set of accessible recent conversations and prior recommendations, then proposes
+zero to three grounded next actions. It does not run automatically, create a schedule, or execute
+the suggested work. A runtime job can review shared space chats and its own private conversation
+tree; it cannot read unrelated private chats just because the person has access to them.
+
+```bash
+instafy recommendations list --limit 200 --json
+instafy recommendations submit --file .instafy/space-review-proposal.json --json
+```
+
+Both commands use the linked space or the runtime's space ID; pass `--space <uuid>` to select a
+space explicitly. Saved user login/profile credentials and active job-scoped controller
+credentials follow the existing CLI origin binding. The controller enforces access and ownership.
+`list` returns `{ "recommendations": [...] }`, including visible proposed, accepted and dismissed
+items, with a default limit of 100 and maximum of 200. It is a bounded recent list, not a complete
+history. Reviewers should read it before proposing work and avoid recreating an earlier decision
+under a different key.
+
+`submit --file -` reads one JSON object from stdin without writing workspace files. A regular file
+inside the active workspace is also supported (maximum 64 KiB for either input; symlinks and
+escaping file paths are rejected). The object has this shape:
+
+```json
+{
+  "key": "confirm-welcome-copy",
+  "title": "Confirm the welcome copy",
+  "reason": "The onboarding discussion left the welcome wording undecided.",
+  "prompt": "Use our onboarding discussion to propose the final welcome wording.",
+  "evidence": [{ "conversationId": "<conversation UUID>", "messageId": "<message UUID>" }]
+}
+```
+
+Use actual accessible conversation/message IDs; `messageId` is optional. Evidence must contain
+1–8 references. Keys use lowercase letters, digits, hyphens and underscores (up to 120 characters);
+title, reason and prompt limits are 160, 2,000 and 4,000 characters. The first key character must be
+a letter or digit. The controller validates evidence in the same space. Reusing a proposed key
+updates that proposal; reusing an accepted or dismissed key returns its existing outcome unchanged.
+JSON output is the stored recommendation, including its status. Choosing an action and dismissing
+one remain human actions in Studio; this command does neither. Empty spaces receive a conversational
+starter rather than a recommendation with invented evidence. An older controller without these
+APIs reports an error instead of silently saving a local substitute.
+
 ### Provider bindings
 
 Project-scoped provider access is stored next to the linked space manifest at `.instafy/provider-bindings.json`.

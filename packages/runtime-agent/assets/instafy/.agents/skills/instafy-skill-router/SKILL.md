@@ -3,7 +3,7 @@ name: instafy-skill-router
 description: Decide which Instafy skill(s) to apply for a user request (browsing vs previews vs secrets, etc).
 context_kind: meta
 context_parent: instafy-persistent-contexts
-context_children: instafy-automations, instafy-browser-automation, instafy-byoc-ai-credentials, instafy-collaboration, instafy-conversation-history, instafy-diagnostics, instafy-frontend-previews, instafy-git-canonical-conflicts, instafy-git-canonical-sync, instafy-integration-onboarding, instafy-learning-policy, instafy-location-sharing, instafy-runtime-flavors, instafy-secrets, instafy-skill-import-compat
+context_children: instafy-automations, instafy-browser-automation, instafy-byoc-ai-credentials, instafy-collaboration, instafy-conversation-history, instafy-diagnostics, instafy-frontend-previews, instafy-git-canonical-conflicts, instafy-git-canonical-sync, instafy-integration-onboarding, instafy-learning-policy, instafy-location-sharing, instafy-runtime-flavors, instafy-secrets, instafy-skill-import-compat, instafy-space-review
 always_include: true
 max_children: 3
 ---
@@ -84,6 +84,10 @@ Use these mappings unless a project-specific skill overrides them.
   - Use `instafy-conversation-history`.
   - Prefer normal-language lookup over teaching special composer syntax.
   - Search first with `instafy conversation search "<keywords>"`, then inspect with `instafy conversation show <id>`.
+
+- **Review this space / useful next actions / “what should I do next here?”**
+  - Use `instafy-space-review` for a bounded, on-demand review in the current chat.
+  - Read prior recommendations and accessible conversation evidence before proposing up to three actions. Respect accepted and dismissed decisions; do not schedule reviews or execute the suggestions.
 
 - **Failed run / runtime error / diagnose / investigate / support report**
   - Use `instafy-diagnostics`.
