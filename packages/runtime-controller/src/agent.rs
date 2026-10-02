@@ -991,25 +991,6 @@ pub(crate) async fn agent_lease(
             &mut jobs,
         );
 
-        // Signed after the commit, so no row lock waits on Storage. A runtime
-        // that does not download them gets no URLs; its prompt then names no
-        // attachment path it could not open.
-        if accepts_attachment_downloads {
-            let storage = crate::chat_attachments::StorageAccess::from_config(
-                &state.http_client,
-                &state.config,
-            );
-            let mut leased: Vec<crate::chat_attachments::LeasedPayload<'_>> = jobs
-                .iter_mut()
-                .map(|job| crate::chat_attachments::LeasedPayload {
-                    job_id: job.id,
-                    project_id: job.project_id,
-                    payload: &mut job.payload,
-                })
-                .collect();
-            crate::chat_attachments::add_attachment_downloads(storage.as_ref(), &mut leased).await;
-        }
-
         // UI relies on controller events for run status updates. When a runtime leases a queued job we
         // mark the run as in_progress (see `lease_next_agent_job`) and emit a `run.progress` event so
         // Studio can switch from "Starting…" to "Thinking…" without waiting for the first agent update.
@@ -1059,6 +1040,28 @@ pub(crate) async fn agent_lease(
                     "run": run_payload,
                 }),
             );
+        }
+
+        // Signed last, after the commit and with the pool slot returned, so
+        // neither a row lock nor a database connection waits on Storage. The
+        // events above never carry the URLs. A runtime that does not download
+        // attachments gets no URLs; its prompt then names no attachment path
+        // it could not open.
+        drop(connection);
+        if accepts_attachment_downloads {
+            let storage = crate::chat_attachments::StorageAccess::from_config(
+                &state.http_client,
+                &state.config,
+            );
+            let mut leased: Vec<crate::chat_attachments::LeasedPayload<'_>> = jobs
+                .iter_mut()
+                .map(|job| crate::chat_attachments::LeasedPayload {
+                    job_id: job.id,
+                    project_id: job.project_id,
+                    payload: &mut job.payload,
+                })
+                .collect();
+            crate::chat_attachments::add_attachment_downloads(storage.as_ref(), &mut leased).await;
         }
     }
 

@@ -1,7 +1,11 @@
 //! Chat attachments through the controller's routes, on the migrated
 //! database: which runtimes the agent lease route gives signed URLs, for which
-//! objects, that a job row cannot supply URLs of its own, and that deleting a
+//! objects, that a job row cannot supply URLs of its own, that the route
+//! returns its pool slot before it waits on Storage, and that deleting a
 //! space, or the team with all its spaces, purges their prefixes.
+
+use std::sync::Arc;
+use std::time::Duration;
 
 use axum::body::{to_bytes, Body};
 use axum::http::{Request, StatusCode};
@@ -13,16 +17,18 @@ use tower::ServiceExt;
 use uuid::Uuid;
 
 use crate::chat_attachments::fake_storage::FakeBucket;
-use crate::config::{PgPool, RuntimeProviderConfig};
+use crate::config::{AppConfig, PgPool, RuntimeProviderConfig};
 use crate::tests::{
     build_app_config, build_test_state, ensure_test_user, require_origin_test_pool,
-    test_origin_private_key, test_origin_public_key, with_shared_db_fixture, SharedDbFixture,
+    require_origin_test_pool_with_max_size, spawn_aborting, test_origin_private_key,
+    test_origin_public_key, with_shared_db_fixture, SharedDbFixture,
 };
 use crate::{agent, AppState};
 
 const HOSTED_PROVIDER: &str = "instafy-cloud";
 const SERVICE_ROLE_KEY: &str = "chat-attachment-lease-test-key";
 
+#[derive(Clone, Copy)]
 struct Space {
     org_id: Uuid,
     project_id: Uuid,
@@ -138,6 +144,26 @@ async fn queue_job(
     Ok(job_id)
 }
 
+/// A controller that signs with `SERVICE_ROLE_KEY` on the Storage at
+/// `storage_url` and runs hosted runtimes, which may lease every job.
+fn hosted_lease_config(key_id: &str, storage_url: String) -> AppConfig {
+    let mut config = build_app_config(test_origin_private_key(), test_origin_public_key(), key_id);
+    config.strict_mode = false;
+    config._supabase_project_url = storage_url;
+    config.supabase_service_role_key = Some(SERVICE_ROLE_KEY.to_string());
+    config.runtime_providers = vec![RuntimeProviderConfig {
+        id: HOSTED_PROVIDER.to_string(),
+        display_name: "Instafy Cloud".to_string(),
+        kind: "noop".to_string(),
+        owner_org_id: None,
+        allowed_org_ids: vec![],
+        endpoint: None,
+        auth_token: None,
+        metadata: None,
+    }];
+    config
+}
+
 async fn lease(state: &AppState, space: &Space, runtime_id: &Uuid) -> anyhow::Result<JsonValue> {
     let token =
         crate::auth::issue_agent_token(&state.config, &space.project_id, runtime_id, None, None)
@@ -205,25 +231,10 @@ async fn lease_signs_own_space_attachments_only_for_runtimes_that_download_them(
         })
         .await;
 
-    let mut config = build_app_config(
-        test_origin_private_key(),
-        test_origin_public_key(),
-        "chat-attachment-lease",
+    let state = build_test_state(
+        pool.clone(),
+        hosted_lease_config("chat-attachment-lease", storage.base_url()),
     );
-    config.strict_mode = false;
-    config._supabase_project_url = storage.base_url();
-    config.supabase_service_role_key = Some(SERVICE_ROLE_KEY.to_string());
-    config.runtime_providers = vec![RuntimeProviderConfig {
-        id: HOSTED_PROVIDER.to_string(),
-        display_name: "Instafy Cloud".to_string(),
-        kind: "noop".to_string(),
-        owner_org_id: None,
-        allowed_org_ids: vec![],
-        endpoint: None,
-        auth_token: None,
-        metadata: None,
-    }];
-    let state = build_test_state(pool.clone(), config);
 
     let fixture = SharedDbFixture {
         organizations: vec![space.org_id],
@@ -284,6 +295,142 @@ async fn lease_signs_own_space_attachments_only_for_runtimes_that_download_them(
             "a runtime without attachmentDownloads received downloads: {payload}"
         );
         sign.assert_hits_async(1).await;
+        Ok(())
+    })
+    .await;
+    let user_cleanup = pool
+        .get()
+        .await?
+        .execute(
+            "delete from auth.users where id = $1",
+            &[&space.owner_user_id],
+        )
+        .await;
+    result.and(user_cleanup.map(|_| ()).map_err(anyhow::Error::from))
+}
+
+/// Storage that is slow to sign must not hold a database connection: on a pool
+/// of one, the lease route has to give its slot back before it asks Storage,
+/// or every other request waits behind the signing.
+#[tokio::test]
+async fn lease_returns_its_pool_slot_before_storage_signs() -> anyhow::Result<()> {
+    let pool = require_origin_test_pool_with_max_size(
+        "lease_returns_its_pool_slot_before_storage_signs",
+        1,
+    )
+    .await?;
+    let space = Space {
+        org_id: Uuid::new_v4(),
+        project_id: Uuid::new_v4(),
+        owner_user_id: Uuid::new_v4(),
+        conversation_id: Uuid::new_v4(),
+    };
+    let own = format!(
+        "{}/6a000000-0000-4000-8000-000000000001.png",
+        space.project_id
+    );
+    let attachments = json!([
+        { "kind": "image", "storagePath": own, "fileName": "photo.png",
+          "mimeType": "image/png", "sizeBytes": 2048 },
+    ]);
+
+    // Storage that answers a sign request only when the test lets it.
+    #[derive(Clone)]
+    struct SlowSigner {
+        reached: Arc<tokio::sync::Notify>,
+        respond: Arc<tokio::sync::Notify>,
+    }
+    async fn sign(
+        axum::extract::State(signer): axum::extract::State<SlowSigner>,
+        axum::Json(body): axum::Json<JsonValue>,
+    ) -> axum::Json<JsonValue> {
+        signer.reached.notify_one();
+        signer.respond.notified().await;
+        let path = body["paths"][0].as_str().unwrap_or_default().to_string();
+        axum::Json(json!([{
+            "error": null,
+            "path": path,
+            "signedURL": format!("/object/sign/chat-attachments/{path}?token=signed"),
+        }]))
+    }
+    let signer = SlowSigner {
+        reached: Arc::new(tokio::sync::Notify::new()),
+        respond: Arc::new(tokio::sync::Notify::new()),
+    };
+    let storage_app = axum::Router::new()
+        .route(
+            "/storage/v1/object/sign/chat-attachments",
+            axum::routing::post(sign),
+        )
+        .with_state(signer.clone());
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+    let storage_url = format!("http://{}", listener.local_addr()?);
+    let _storage_server = spawn_aborting(async move {
+        axum::serve(listener, storage_app)
+            .await
+            .expect("serve slow Storage");
+    });
+
+    let state = build_test_state(
+        pool.clone(),
+        hosted_lease_config("chat-attachment-lease-pool", storage_url.clone()),
+    );
+    let fixture = SharedDbFixture {
+        organizations: vec![space.org_id],
+        projects: vec![space.project_id],
+    };
+    let body_pool = pool.clone();
+    let result = with_shared_db_fixture(fixture, async {
+        let pool = body_pool;
+        seed_space(&pool, &space, attachments.clone()).await?;
+        let runtime_id = add_runtime(
+            &pool,
+            &space,
+            json!({ "agent": true, "attachmentDownloads": true }),
+        )
+        .await?;
+        queue_job(
+            &pool,
+            &space,
+            &runtime_id,
+            json!({
+                "user_id": space.owner_user_id,
+                "prompt_text": "what is in this picture?",
+                "metadata": { "attachments": attachments },
+            }),
+        )
+        .await?;
+
+        let leasing = spawn_aborting({
+            let state = state.clone();
+            async move { lease(&state, &space, &runtime_id).await }
+        });
+        tokio::time::timeout(Duration::from_secs(10), signer.reached.notified())
+            .await
+            .expect("the lease never asked Storage to sign");
+
+        let probe = tokio::time::timeout(Duration::from_secs(2), pool.get())
+            .await
+            .expect("the lease kept its pool connection checked out while Storage signed")?;
+        probe.query_one("select 1", &[]).await?;
+        drop(probe);
+
+        signer.respond.notify_one();
+        let leased = tokio::time::timeout(Duration::from_secs(10), leasing)
+            .await
+            .expect("the lease did not finish after Storage signed")??;
+        let payload = &leased["jobs"][0]["payload"];
+        anyhow::ensure!(
+            payload["attachment_downloads"]
+                == json!([{
+                    "name": "6a000000-0000-4000-8000-000000000001.png",
+                    "url": format!(
+                        "{storage_url}/storage/v1/object/sign/chat-attachments/{own}?token=signed"
+                    ),
+                    "sizeBytes": 2048,
+                }]),
+            "unexpected downloads: {payload}"
+        );
         Ok(())
     })
     .await;
