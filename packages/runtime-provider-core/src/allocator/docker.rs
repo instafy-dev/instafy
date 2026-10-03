@@ -13,6 +13,9 @@ use tokio::task;
 use tracing::{info, warn};
 use uuid::Uuid;
 
+use super::census::{
+    census_checkouts, group_containers, ContainerFacts, RuntimeCensus, MAX_CENSUS_CONTAINERS,
+};
 use super::checkout_eviction::{
     sweep_checkouts, touch_checkout, CheckoutEvictionPolicy, CheckoutHost, CheckoutSweepReport,
 };
@@ -1043,6 +1046,72 @@ fn normalize_runtime_agent_image(raw: &str) -> Option<String> {
     Some(trimmed.to_string())
 }
 
+/// Every compose container under `prefix`, running or stopped, with its
+/// environment. Returns them and whether the list reached its bound.
+fn list_runtime_containers(prefix: &str) -> anyhow::Result<(Vec<ContainerFacts>, bool)> {
+    let output = Command::new("docker")
+        .arg("ps")
+        .arg("-a")
+        .arg("--filter")
+        .arg("label=com.docker.compose.project")
+        .arg("--format")
+        .arg("{{.ID}}\t{{.Label \"com.docker.compose.project\"}}\t{{.State}}")
+        .output()?;
+    anyhow::ensure!(
+        output.status.success(),
+        "docker ps failed: {}",
+        summarize_command_output(&output)
+    );
+    let mut facts = Vec::new();
+    let mut truncated = false;
+    for line in String::from_utf8_lossy(&output.stdout).lines() {
+        let mut fields = line.split('\t');
+        let (Some(id), Some(project), Some(state)) = (fields.next(), fields.next(), fields.next())
+        else {
+            continue;
+        };
+        if !project.starts_with(prefix) {
+            continue;
+        }
+        if facts.len() >= MAX_CENSUS_CONTAINERS {
+            truncated = true;
+            break;
+        }
+        let inspect = Command::new("docker")
+            .arg("inspect")
+            .arg("--format")
+            .arg("{{range .Config.Env}}{{println .}}{{end}}")
+            .arg(id.trim())
+            .output()?;
+        // A container removed since the listing has nothing left to report.
+        let env = if inspect.status.success() {
+            String::from_utf8_lossy(&inspect.stdout)
+                .lines()
+                .filter(|line| {
+                    [
+                        "SPACE_ID=",
+                        "PROJECT_ID=",
+                        "RUNTIME_ID=",
+                        "RUNTIME_LEASE_ID=",
+                        "ORIGIN_LEASE_ID=",
+                    ]
+                    .iter()
+                    .any(|key| line.trim().starts_with(key))
+                })
+                .map(str::to_string)
+                .collect()
+        } else {
+            Vec::new()
+        };
+        facts.push(ContainerFacts {
+            compose_project: project.trim().to_string(),
+            running: state.trim().eq_ignore_ascii_case("running"),
+            env,
+        });
+    }
+    Ok((facts, truncated))
+}
+
 fn summarize_command_output(output: &Output) -> String {
     let code = output
         .status
@@ -1230,6 +1299,29 @@ impl RuntimeAllocator for DockerRuntimeAllocator {
     ) -> anyhow::Result<()> {
         self.stop_runtime_generation(project_id, runtime_id, lease_id)
             .await
+    }
+
+    async fn census(&self) -> anyhow::Result<RuntimeCensus> {
+        let prefix = self.project_prefix.clone();
+        let (facts, truncated) =
+            task::spawn_blocking(move || list_runtime_containers(&prefix)).await??;
+        let containers = group_containers(&self.project_prefix, facts);
+        let present: HashSet<Uuid> = containers
+            .iter()
+            .filter_map(|container| container.project_id)
+            .collect();
+        let (checkouts, checkouts_truncated) = match self.repo_base.clone() {
+            Some(repo_base) => {
+                task::spawn_blocking(move || census_checkouts(&repo_base, &present)).await?
+            }
+            None => (Vec::new(), false),
+        };
+        Ok(RuntimeCensus {
+            supported: true,
+            containers,
+            checkouts,
+            truncated: truncated || checkouts_truncated,
+        })
     }
 
     async fn evict_idle_checkouts(&self) -> anyhow::Result<CheckoutSweepReport> {

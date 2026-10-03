@@ -4,6 +4,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use uuid::Uuid;
 
+mod census;
 mod checkout_eviction;
 mod docker;
 mod docker_pool;
@@ -11,6 +12,7 @@ mod external_http;
 mod hetzner;
 mod noop;
 
+pub use census::{CensusCheckout, CensusContainer, RuntimeCensus};
 pub use checkout_eviction::{CheckoutEvictionPolicy, CheckoutSweepReport};
 pub use docker::DockerRuntimeAllocator;
 pub use docker_pool::DockerPoolRuntimeAllocator;
@@ -251,6 +253,13 @@ pub trait RuntimeAllocator: Send + Sync {
     /// Allocators without node-local checkouts do nothing.
     async fn evict_idle_checkouts(&self) -> anyhow::Result<CheckoutSweepReport> {
         Ok(CheckoutSweepReport::default())
+    }
+
+    /// The runtimes and workspace checkouts this allocator keeps on its
+    /// node, for a drain before the node is retired. Read-only. Allocators
+    /// that cannot list a node answer `supported: false`.
+    async fn census(&self) -> anyhow::Result<RuntimeCensus> {
+        Ok(RuntimeCensus::default())
     }
 }
 
