@@ -32,6 +32,18 @@
 //! recovery refs, the checkout is kept on the node while they exist, and the
 //! next start pushes them.
 //!
+//! A runtime registers its own origin endpoint with its machine credential,
+//! so the controller sends either credential only to an endpoint on the
+//! runtime's node or its private network ([`endpoint_is_node_local`]), as
+//! the node-local provider assigns them. Any other endpoint (a public host,
+//! a tunnel) could be anyone's: the stop mints nothing for it and reports
+//! `no_writer` with the reason `origin_endpoint_not_node_local`.
+//!
+//! A successful flush fences the origin's saves until the runtime stops. When
+//! the stop does not happen after all (it is skipped, or someone opened the
+//! space during an idle stop's flush), the controller lifts that fence again
+//! with the same credential ([`resume`]).
+//!
 //! Best effort and bounded by [`PRE_STOP_FLUSH_TIMEOUT`]: a failure is logged,
 //! recorded as a `workspace_flush` runtime event, and the stop goes on. Work
 //! the flush could not push stays on the runtime's local recovery refs.
@@ -50,7 +62,9 @@ use uuid::Uuid;
 use crate::auth::RequestContext;
 use crate::origins::{resolve_origin_proxy_upstream_endpoint, WorkspaceLeaseRecord};
 use crate::projects::ensure_scoped_project_match;
-use crate::tokens::{mint_scoped_token, ScopedTokenRequest};
+use crate::tokens::{
+    mint_scoped_token, mint_scoped_token_expires_no_later_than, ScopedTokenRequest,
+};
 use crate::{
     ensure_project_write_access, forbidden, internal_error, load_project_record, unauthorized,
     ApiError, AppState,
@@ -64,8 +78,15 @@ const PRE_STOP_FLUSH_TIMEOUT: Duration = Duration::from_secs(25);
 /// The mint happens at the start of the flush, so the token never needs to
 /// outlive [`PRE_STOP_FLUSH_TIMEOUT`] by much.
 const PRE_STOP_FLUSH_TOKEN_TTL_SECONDS: i64 = 60;
-/// Lifetime of the owner's save-only permission (at most 120 s).
-const PRE_STOP_SAVE_GRANT_TTL_SECONDS: i64 = 60;
+/// Lifetime of the owner's save-only permission (at most 120 s): the
+/// flush, the git token minted from it and the resume after a skipped stop
+/// all fit in [`PRE_STOP_FLUSH_TIMEOUT`] plus a few seconds.
+const PRE_STOP_SAVE_GRANT_TTL_SECONDS: i64 = 30;
+/// The longest a skipped stop waits for the origin to lift its fence.
+const RESUME_TIMEOUT: Duration = Duration::from_secs(10);
+/// The `reason` of a `no_writer` flush whose origin endpoint the controller
+/// cannot vouch for.
+pub(crate) const UNTRUSTED_ENDPOINT_REASON: &str = "origin_endpoint_not_node_local";
 /// The scope of the save-only permission the controller's own stop path
 /// issues in the space owner's name when nobody holds a workspace lease. It
 /// opens the runtime origin's `/git/flush` (the origin's
@@ -84,6 +105,58 @@ pub(super) struct PreStopFlushTarget {
     /// this stop: its local commits are unfinished and must not reach `main`.
     turn_active: bool,
     writer: FlushWriter,
+    /// The origin endpoint is not one the controller vouches for: nothing is
+    /// minted or sent.
+    untrusted_endpoint: bool,
+}
+
+/// How a stop path may flush: whether the space owner's save-only
+/// permission may stand in for a missing lease holder (only the
+/// controller's own stops), and whether the stop interrupts a turn the
+/// database no longer shows as leased (the idle release requeued it).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct FlushPolicy {
+    pub(crate) owner_grant: bool,
+    pub(crate) turn_interrupted: bool,
+}
+
+impl FlushPolicy {
+    /// A stop the controller makes on its own.
+    pub(crate) const CONTROLLER: Self = Self {
+        owner_grant: true,
+        turn_interrupted: false,
+    };
+    /// A stop a user, an operator or a runtime asked for.
+    pub(crate) const REQUESTED: Self = Self {
+        owner_grant: false,
+        turn_interrupted: false,
+    };
+}
+
+/// Whether the controller may send a flush credential to `endpoint`: an
+/// http(s) URL without credentials whose host is on the runtime's node or
+/// its private network: `localhost`, `host.docker.internal` (what the
+/// node-local provider assigns a hosted origin), a loopback, private,
+/// link-local or shared-address IP. Public hosts and tunnel hosts are not.
+pub(crate) fn endpoint_is_node_local(endpoint: &str) -> bool {
+    let Ok(url) = url::Url::parse(endpoint.trim()) else {
+        return false;
+    };
+    if !matches!(url.scheme(), "http" | "https")
+        || !url.username().is_empty()
+        || url.password().is_some()
+    {
+        return false;
+    }
+    match url.host() {
+        Some(url::Host::Domain(host)) => {
+            host.eq_ignore_ascii_case("localhost")
+                || host.eq_ignore_ascii_case("host.docker.internal")
+        }
+        Some(url::Host::Ipv4(ip)) => crate::origins::is_private_or_local_ip_host(&ip.to_string()),
+        Some(url::Host::Ipv6(ip)) => crate::origins::is_private_or_local_ip_host(&ip.to_string()),
+        None => false,
+    }
 }
 
 /// Whose name the flush saves under.
@@ -154,7 +227,11 @@ impl WorkspaceLeaseState {
 /// `failed` (the origin could not be reached or refused), `skipped` (the stop
 /// itself is skipped) or `not_running` (no live hosted origin to flush).
 /// `unpushedRefs` counts the local recovery refs still only on the runtime's
-/// disk; `null` when unknown.
+/// disk; `null` when unknown. `error` is a fixed code (`origin_unreachable`,
+/// `origin_timeout`, `origin_refused:<status>`, `origin_response_invalid`,
+/// `credential_mint_failed`, `flush_planning_failed`); the details stay in
+/// the controller's log. `reason` says why a `no_writer` flush minted
+/// nothing when that is not just a missing writer.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct FlushSummary {
@@ -163,6 +240,8 @@ pub(crate) struct FlushSummary {
     pub(crate) unpushed_ref_names: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) error: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) reason: Option<&'static str>,
 }
 
 impl FlushSummary {
@@ -172,6 +251,7 @@ impl FlushSummary {
             unpushed_refs: None,
             unpushed_ref_names: Vec::new(),
             error: None,
+            reason: None,
         }
     }
 
@@ -183,16 +263,13 @@ impl FlushSummary {
         Self::with_status("not_running")
     }
 
-    pub(crate) fn failed(error: impl Into<String>) -> Self {
+    /// A failed flush, with one of the fixed codes above.
+    pub(crate) fn failed(code: impl Into<String>) -> Self {
         Self {
-            error: Some(truncate(&error.into())),
+            error: Some(code.into()),
             ..Self::with_status("failed")
         }
     }
-}
-
-fn truncate(text: &str) -> String {
-    text.chars().take(300).collect()
 }
 
 /// What a pre-stop flush did.
@@ -207,12 +284,14 @@ pub(super) enum PreStopFlushOutcome {
         parked_commits: usize,
         git_sync_status: Option<String>,
     },
-    /// Nobody may save this runtime's work (see [`FlushWriter::Nobody`]), so
-    /// no token was minted and the origin was not asked; the runtime's own
-    /// shutdown flush keeps the work on local recovery refs.
-    NoWriter,
-    /// The origin was unreachable, refused, timed out or has no flush route.
-    Failed(String),
+    /// Nobody may save this runtime's work (see [`FlushWriter::Nobody`]), or
+    /// its origin endpoint is not one the controller vouches for (the
+    /// reason), so no token was minted and the origin was not asked; the
+    /// runtime's own shutdown flush keeps the work on local recovery refs.
+    NoWriter(Option<&'static str>),
+    /// The origin was unreachable, refused, timed out or has no flush route:
+    /// a fixed code for the response, and the details for the log.
+    Failed { code: String, detail: String },
 }
 
 impl PreStopFlushOutcome {
@@ -227,9 +306,20 @@ impl PreStopFlushOutcome {
                 unpushed_refs: Some(*unpushed_refs),
                 unpushed_ref_names: unpushed_ref_names.clone(),
                 error: None,
+                reason: None,
             },
-            Self::NoWriter => FlushSummary::with_status("no_writer"),
-            Self::Failed(error) => FlushSummary::failed(error.clone()),
+            Self::NoWriter(reason) => FlushSummary {
+                reason: *reason,
+                ..FlushSummary::with_status("no_writer")
+            },
+            Self::Failed { code, .. } => FlushSummary::failed(code.clone()),
+        }
+    }
+
+    fn failed(code: impl Into<String>, detail: impl Into<String>) -> Self {
+        Self::Failed {
+            code: code.into(),
+            detail: detail.into(),
         }
     }
 
@@ -239,8 +329,8 @@ impl PreStopFlushOutcome {
                 unpushed_refs: 0, ..
             } => "saved",
             Self::Flushed { .. } => "kept_locally",
-            Self::NoWriter => "no_writer",
-            Self::Failed(_) => "failed",
+            Self::NoWriter(_) => "no_writer",
+            Self::Failed { .. } => "failed",
         }
     }
 }
@@ -271,18 +361,19 @@ struct OriginFlushPublish {
 /// read inside the caller's stop-planning transaction. `None` when the
 /// runtime has no online hosted (or EFS) origin for its current generation:
 /// Desktop folders and self-hosted machines are never flushed.
-/// `owner_grant`: the controller stops this runtime on its own (never for a
-/// user or runtime request), so without a lease holder the space owner's
-/// save-only permission may be used.
+/// `policy.owner_grant`: the controller stops this runtime on its own (never
+/// for a user or runtime request), so without a lease holder the space
+/// owner's save-only permission may be used. `policy.turn_interrupted`: the
+/// stop interrupts a turn whatever the jobs table shows now.
 pub(super) async fn find_target(
     transaction: &Transaction<'_>,
     runtime: &RuntimeDetails,
     runtime_lease_id: &Uuid,
-    owner_grant: bool,
+    policy: FlushPolicy,
 ) -> Result<Option<PreStopFlushTarget>, (StatusCode, Json<ApiError>)> {
     let Some(origin) = transaction
         .query_opt(
-            "select o.id, o.endpoint
+            "select o.id, o.endpoint, oi.endpoint as instance_endpoint
              from origin_instances oi
              join workspace_origins o
                on o.id = oi.origin_id
@@ -302,10 +393,16 @@ pub(super) async fn find_target(
     else {
         return Ok(None);
     };
-    let origin_endpoint: String = origin.get("endpoint");
+    // The generation's own instance endpoint first; both are written by the
+    // same registration.
+    let origin_endpoint: String = origin
+        .get::<_, Option<String>>("instance_endpoint")
+        .filter(|endpoint| !endpoint.trim().is_empty())
+        .unwrap_or_else(|| origin.get("endpoint"));
     if origin_endpoint.trim().is_empty() {
         return Ok(None);
     }
+    let untrusted_endpoint = !endpoint_is_node_local(&origin_endpoint);
 
     // A turn the stop interrupts: a job still leased by this runtime, or one
     // cancelled in the last minute (a user Stop or a cancel the stop follows).
@@ -343,10 +440,12 @@ pub(super) async fn find_target(
         .map(|row| crate::origins::lease_from_row(&row));
 
     let writer = match WorkspaceLeaseState::of(lease.as_ref(), &runtime.id) {
+        // Nothing is minted for an endpoint the controller cannot vouch for.
+        _ if untrusted_endpoint => FlushWriter::Nobody,
         WorkspaceLeaseState::Held(holder) => FlushWriter::LeaseHolder(holder),
         // A lease bound to another runtime (after a pool cutover, usually the
         // new node's) is not this runtime's writer either.
-        WorkspaceLeaseState::Unusable | WorkspaceLeaseState::Free if owner_grant => {
+        WorkspaceLeaseState::Unusable | WorkspaceLeaseState::Free if policy.owner_grant => {
             owner_writer(transaction, runtime, runtime_lease_id).await?
         }
         WorkspaceLeaseState::Unusable | WorkspaceLeaseState::Free => FlushWriter::Nobody,
@@ -357,9 +456,18 @@ pub(super) async fn find_target(
         project_id: runtime.project_id,
         origin_id: origin.get("id"),
         origin_endpoint,
-        turn_active,
+        turn_active: turn_active || policy.turn_interrupted,
         writer,
+        untrusted_endpoint,
     }))
+}
+
+impl PreStopFlushTarget {
+    /// The flush will ask the origin (a writer was found for a vouched-for
+    /// endpoint), so it may take up to [`PRE_STOP_FLUSH_TIMEOUT`].
+    pub(super) fn calls_origin(&self) -> bool {
+        !matches!(self.writer, FlushWriter::Nobody)
+    }
 }
 
 /// The space owner, when they may still write to it.
@@ -402,11 +510,28 @@ fn owner_context(owner_user_id: Uuid) -> RequestContext {
     }
 }
 
+/// What [`flush`] did, and what lifts the origin's save fence again when
+/// the stop does not happen after all.
+pub(super) struct PreStopFlush {
+    pub(super) outcome: PreStopFlushOutcome,
+    pub(super) resume: Option<FlushResume>,
+}
+
+/// The credential and endpoint of a flush the origin answered: the origin
+/// refuses saves after it until the runtime stops, unless [`resume`] lifts
+/// that fence.
+pub(super) struct FlushResume {
+    runtime_id: Uuid,
+    project_id: Uuid,
+    origin_endpoint: String,
+    token: String,
+}
+
 /// Ask the origin to flush, holding no database connection while it works.
 /// Never fails: the outcome is logged and recorded as a runtime event.
 /// Only the writer [`find_target`] chose gets a credential, and it goes to
-/// this runtime's own origin and nowhere else.
-pub(super) async fn flush(state: &AppState, target: PreStopFlushTarget) -> PreStopFlushOutcome {
+/// this runtime's own origin, at an endpoint on its node, and nowhere else.
+pub(super) async fn flush(state: &AppState, target: PreStopFlushTarget) -> PreStopFlush {
     let token = match target.writer {
         FlushWriter::LeaseHolder(holder) => Some(mint_flush_token(state, &target, &holder)),
         FlushWriter::OwnerGrant {
@@ -428,14 +553,78 @@ pub(super) async fn flush(state: &AppState, target: PreStopFlushTarget) -> PreSt
         }
         FlushWriter::Nobody => None,
     };
-    let outcome = match token {
-        Some(Ok(token)) => call_origin_flush(state, &target, &token).await,
-        Some(Err((_, body))) => PreStopFlushOutcome::Failed(body.0.message),
-        None => PreStopFlushOutcome::NoWriter,
+    let (outcome, resume) = match token {
+        Some(Ok(token)) => {
+            let outcome = call_origin_flush(state, &target, &token).await;
+            let resume =
+                matches!(outcome, PreStopFlushOutcome::Flushed { .. }).then(|| FlushResume {
+                    runtime_id: target.runtime_id,
+                    project_id: target.project_id,
+                    origin_endpoint: target.origin_endpoint.clone(),
+                    token,
+                });
+            (outcome, resume)
+        }
+        Some(Err((_, body))) => (
+            PreStopFlushOutcome::failed("credential_mint_failed", body.0.message),
+            None,
+        ),
+        None => (
+            PreStopFlushOutcome::NoWriter(
+                target
+                    .untrusted_endpoint
+                    .then_some(UNTRUSTED_ENDPOINT_REASON),
+            ),
+            None,
+        ),
     };
     log_outcome(&target, &outcome);
     record_outcome(state, &target, &outcome).await;
-    outcome
+    PreStopFlush { outcome, resume }
+}
+
+/// The stop that flushed did not happen: let the origin accept saves again.
+/// Best effort and bounded by [`RESUME_TIMEOUT`]; the origin's fence also
+/// lapses on its own.
+pub(super) async fn resume(state: &AppState, resume: FlushResume) {
+    let (origin_base, host_override) =
+        resolve_origin_proxy_upstream_endpoint(&resume.origin_endpoint);
+    let mut request = state
+        .origin_proxy_client
+        .post(format!(
+            "{}/git/flush/resume",
+            origin_base.trim_end_matches('/')
+        ))
+        .bearer_auth(&resume.token)
+        .timeout(RESUME_TIMEOUT)
+        .json(&json!({}));
+    if let Some(host) = host_override.filter(|host| !host.trim().is_empty()) {
+        request = request.header("host", host);
+    }
+    match tokio::time::timeout(RESUME_TIMEOUT, request.send()).await {
+        Ok(Ok(response)) if response.status().is_success() => info!(
+            runtime_id = %resume.runtime_id,
+            project_id = %resume.project_id,
+            "the stop did not happen; the origin accepts saves again"
+        ),
+        Ok(Ok(response)) => warn!(
+            runtime_id = %resume.runtime_id,
+            project_id = %resume.project_id,
+            status = response.status().as_u16(),
+            "the origin did not lift its stop fence; it lapses on its own"
+        ),
+        Ok(Err(error)) => warn!(
+            runtime_id = %resume.runtime_id,
+            project_id = %resume.project_id,
+            %error,
+            "could not ask the origin to lift its stop fence; it lapses on its own"
+        ),
+        Err(_) => warn!(
+            runtime_id = %resume.runtime_id,
+            project_id = %resume.project_id,
+            "asking the origin to lift its stop fence timed out; it lapses on its own"
+        ),
+    }
 }
 
 /// The owner's save-only permission: scope [`PRE_STOP_SAVE_SCOPE`] for this
@@ -447,7 +636,9 @@ fn mint_save_grant(
     owner_user_id: Uuid,
     runtime_lease_id: Uuid,
 ) -> Result<String, (StatusCode, Json<ApiError>)> {
-    mint_scoped_token(
+    // Ordinary scoped tokens live at least 60 s; this one is cut to its own
+    // lifetime.
+    mint_scoped_token_expires_no_later_than(
         &state.config,
         ScopedTokenRequest {
             audience: target.origin_id.to_string(),
@@ -462,6 +653,7 @@ fn mint_save_grant(
             prefer_runtime: None,
             ttl_seconds: Some(PRE_STOP_SAVE_GRANT_TTL_SECONDS),
         },
+        Utc::now() + chrono::Duration::seconds(PRE_STOP_SAVE_GRANT_TTL_SECONDS),
     )
     .map(|token| token.token)
 }
@@ -635,23 +827,29 @@ async fn call_origin_flush(
     .await;
     let (status, body) = match response {
         Ok(Ok(response)) => response,
+        Ok(Err(error)) if error.is_timeout() => {
+            return PreStopFlushOutcome::failed("origin_timeout", error.to_string())
+        }
         Ok(Err(error)) => {
-            return PreStopFlushOutcome::Failed(format!("origin flush request failed: {error}"))
+            return PreStopFlushOutcome::failed("origin_unreachable", error.to_string())
         }
         Err(_) => {
-            return PreStopFlushOutcome::Failed(format!(
-                "origin flush timed out after {}s",
-                PRE_STOP_FLUSH_TIMEOUT.as_secs()
-            ))
+            return PreStopFlushOutcome::failed(
+                "origin_timeout",
+                format!(
+                    "origin flush timed out after {}s",
+                    PRE_STOP_FLUSH_TIMEOUT.as_secs()
+                ),
+            )
         }
     };
     if !status.is_success() {
         let text = String::from_utf8_lossy(&body);
         let text: String = text.chars().take(300).collect();
-        return PreStopFlushOutcome::Failed(format!(
-            "origin flush answered {}: {text}",
-            status.as_u16()
-        ));
+        return PreStopFlushOutcome::failed(
+            format!("origin_refused:{}", status.as_u16()),
+            format!("origin flush answered {}: {text}", status.as_u16()),
+        );
     }
     match serde_json::from_slice::<OriginFlushReport>(&body) {
         Ok(report) => PreStopFlushOutcome::Flushed {
@@ -661,9 +859,10 @@ async fn call_origin_flush(
             parked_commits: report.parked_commits,
             git_sync_status: report.publish.and_then(|publish| publish.git_sync_status),
         },
-        Err(error) => {
-            PreStopFlushOutcome::Failed(format!("origin flush response is invalid: {error}"))
-        }
+        Err(error) => PreStopFlushOutcome::failed(
+            "origin_response_invalid",
+            format!("origin flush response is invalid: {error}"),
+        ),
     }
 }
 
@@ -704,21 +903,23 @@ fn log_outcome(target: &PreStopFlushTarget, outcome: &PreStopFlushOutcome) {
             parked_commits,
             "workspace work is still only on the runtime's disk after the pre-stop flush"
         ),
-        PreStopFlushOutcome::NoWriter => warn!(
+        PreStopFlushOutcome::NoWriter(reason) => warn!(
             runtime_id = %target.runtime_id,
             project_id = %target.project_id,
             origin_id = %target.origin_id,
             writer = target.writer.label(),
             turn_active = target.turn_active,
+            reason = reason.unwrap_or("no_writer"),
             "nobody may save before the stop; the runtime keeps its work on local recovery refs"
         ),
-        PreStopFlushOutcome::Failed(error) => warn!(
+        PreStopFlushOutcome::Failed { code, detail } => warn!(
             runtime_id = %target.runtime_id,
             project_id = %target.project_id,
             origin_id = %target.origin_id,
             writer = target.writer.label(),
             turn_active = target.turn_active,
-            error = %error,
+            code = %code,
+            error = %detail,
             "pre-stop workspace flush failed; the runtime keeps its work locally"
         ),
     }
@@ -744,7 +945,7 @@ async fn record_outcome(
         ),
         _ => (None, None, None, None),
     };
-    let data = json!({
+    let mut data = json!({
         "status": outcome.status(),
         "writer": target.writer.label(),
         "turnActive": target.turn_active,
@@ -753,6 +954,9 @@ async fn record_outcome(
         "parkedCommits": parked_commits,
         "gitSyncStatus": git_sync_status,
     });
+    if let PreStopFlushOutcome::NoWriter(Some(reason)) = outcome {
+        data["reason"] = json!(reason);
+    }
     let result =
         async {
             let mut connection =
@@ -791,7 +995,7 @@ mod db_tests;
 
 #[cfg(test)]
 mod tests {
-    use super::{WorkspaceLeaseHolder, WorkspaceLeaseState};
+    use super::{endpoint_is_node_local, WorkspaceLeaseHolder, WorkspaceLeaseState};
     use crate::origins::WorkspaceLeaseRecord;
     use uuid::Uuid;
 
@@ -852,6 +1056,36 @@ mod tests {
                 WorkspaceLeaseState::of(Some(&unusable), &runtime_id),
                 WorkspaceLeaseState::Unusable
             ));
+        }
+    }
+
+    #[test]
+    fn only_endpoints_on_the_runtimes_node_get_a_flush_credential() {
+        for endpoint in [
+            "http://host.docker.internal:49153",
+            "http://127.0.0.1:49153",
+            "http://localhost:8080",
+            "http://10.99.0.7:54332",
+            "http://172.18.0.4:54332",
+            "http://192.168.5.10:54332",
+            "http://100.64.1.2:54332",
+            "http://[::1]:54332",
+            "https://[fd00::1]:54332",
+        ] {
+            assert!(endpoint_is_node_local(endpoint), "{endpoint}");
+        }
+        for endpoint in [
+            "https://attacker.example",
+            "http://8.8.8.8:54332",
+            "https://abc.rt.instafy.dev",
+            "http://abc.rt.test",
+            "http://user:secret@127.0.0.1:54332",
+            "ftp://127.0.0.1/",
+            "http://[2001:db8::1]:54332",
+            "not a url",
+            "",
+        ] {
+            assert!(!endpoint_is_node_local(endpoint), "{endpoint}");
         }
     }
 }

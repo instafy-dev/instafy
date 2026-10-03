@@ -19,7 +19,7 @@ use super::provider::{
     call_provider_endpoint, select_provider_config, ProviderReleaseRequest,
     RUNTIME_PROVIDER_INSPECT_TIMEOUT,
 };
-use super::status::release_leases_for_project;
+use super::status::{release_leases_for_project, IdleRelease};
 use super::stop::{stop_runtime_safely, SafeRuntimeStop, StopOptions};
 
 const TERMINAL_RUNTIME_RETENTION_SECONDS: i64 = 10 * 60;
@@ -105,6 +105,7 @@ pub(crate) async fn sweep_idle_activity(state: &AppState) -> AnyResult<()> {
             &project_id,
             entry.idle_ttl_seconds,
             "background_idle_sweep",
+            IdleRelease::Sweep,
         )
         .await?;
         if released > 0 {

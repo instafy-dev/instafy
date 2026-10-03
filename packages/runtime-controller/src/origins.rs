@@ -3397,7 +3397,7 @@ fn origin_endpoint_is_proxyable(endpoint: &str) -> bool {
         || is_private_or_local_ip_host(host)
 }
 
-fn is_private_or_local_ip_host(host: &str) -> bool {
+pub(crate) fn is_private_or_local_ip_host(host: &str) -> bool {
     let ip = match host.parse::<IpAddr>() {
         Ok(value) => value,
         Err(_) => return false,

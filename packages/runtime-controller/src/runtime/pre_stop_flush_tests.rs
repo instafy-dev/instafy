@@ -2,9 +2,11 @@
 //! the shared test database, a stand-in runtime origin and a stand-in
 //! provider. The stand-in origin does what the real one does with the
 //! controller's token: it checks the workspace lease and mints `git.write`
-//! through the controller's own routes. It can also take a collaborator's
-//! workspace lease while the flush runs, as someone opening the space at
-//! that moment would.
+//! through the controller's own routes. While the flush runs it can also do
+//! what the rest of the world might do at that moment: a collaborator takes
+//! a workspace lease or pings activity, or a job is leased to the runtime.
+//! It records every `/git/flush/resume` the controller sends after a stop
+//! that did not happen.
 
 use std::sync::{Arc, Mutex};
 
@@ -44,6 +46,15 @@ struct FlushCall {
     collaborator_lease: Option<bool>,
 }
 
+/// What happens elsewhere while the stand-in origin flushes.
+#[derive(Debug, Clone, Copy, Default)]
+struct DuringFlush {
+    /// A user's activity ping for the space.
+    activity: bool,
+    /// A job leased to the runtime.
+    lease_job: bool,
+}
+
 #[derive(Clone)]
 struct OriginStub {
     state: AppState,
@@ -56,6 +67,8 @@ struct OriginStub {
     calls: Arc<Mutex<Vec<FlushCall>>>,
     order: Arc<Mutex<Vec<&'static str>>>,
     collaborator: Arc<Mutex<Option<Uuid>>>,
+    during: Arc<Mutex<DuringFlush>>,
+    resumes: Arc<Mutex<Vec<String>>>,
 }
 
 async fn send(state: &AppState, request: Request<Body>) -> (StatusCode, JsonValue) {
@@ -159,6 +172,34 @@ async fn handle_flush(
         )),
         None => None,
     };
+    let during = *stub.during.lock().unwrap();
+    if during.activity || during.lease_job {
+        let connection = stub.pool.get().await.expect("stub connection");
+        if during.activity {
+            connection
+                .execute(
+                    "insert into project_user_activity (project_id, last_active_at)
+                     values ($1, now())
+                     on conflict (project_id) do update set last_active_at = now()",
+                    &[&stub.project_id],
+                )
+                .await
+                .expect("activity ping");
+        }
+        if during.lease_job {
+            connection
+                .execute(
+                    "insert into agent_jobs
+                        (id, project_id, status, payload, leased_by_runtime_id,
+                         leased_at, lease_expires_at)
+                     values ($1, $2, 'leased', '{}'::jsonb, $3, now(),
+                             now() + interval '5 minutes')",
+                    &[&Uuid::new_v4(), &stub.project_id, &stub.runtime_id],
+                )
+                .await
+                .expect("job leased during the flush");
+        }
+    }
     stub.calls.lock().unwrap().push(FlushCall {
         bearer,
         body,
@@ -175,6 +216,18 @@ async fn handle_flush(
     Json(stub.response.clone())
 }
 
+async fn handle_resume(State(stub): State<OriginStub>, headers: HeaderMap) -> StatusCode {
+    stub.order.lock().unwrap().push("resume");
+    let bearer = headers
+        .get("authorization")
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.strip_prefix("Bearer "))
+        .unwrap_or_default()
+        .to_string();
+    stub.resumes.lock().unwrap().push(bearer);
+    StatusCode::OK
+}
+
 struct Fixture {
     pool: PgPool,
     state: AppState,
@@ -186,6 +239,8 @@ struct Fixture {
     calls: Arc<Mutex<Vec<FlushCall>>>,
     order: Arc<Mutex<Vec<&'static str>>>,
     collaborator: Arc<Mutex<Option<Uuid>>>,
+    during: Arc<Mutex<DuringFlush>>,
+    resumes: Arc<Mutex<Vec<String>>>,
     _provider: AbortingTask<()>,
     _origin: AbortingTask<()>,
 }
@@ -267,8 +322,11 @@ impl Fixture {
 
         let calls = Arc::new(Mutex::new(Vec::new()));
         let collaborator = Arc::new(Mutex::new(None));
+        let during = Arc::new(Mutex::new(DuringFlush::default()));
+        let resumes = Arc::new(Mutex::new(Vec::new()));
         let origin_app = axum::Router::new()
             .route("/git/flush", axum::routing::post(handle_flush))
+            .route("/git/flush/resume", axum::routing::post(handle_resume))
             .with_state(OriginStub {
                 state: state.clone(),
                 pool: pool.clone(),
@@ -280,6 +338,8 @@ impl Fixture {
                 calls: calls.clone(),
                 order: order.clone(),
                 collaborator: collaborator.clone(),
+                during: during.clone(),
+                resumes: resumes.clone(),
             });
         let origin_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
         let origin_endpoint = format!("http://{}", origin_listener.local_addr()?);
@@ -357,9 +417,34 @@ impl Fixture {
             calls,
             order,
             collaborator,
+            during,
+            resumes,
             _provider: provider,
             _origin: origin,
         })
+    }
+
+    fn resumes(&self) -> Vec<String> {
+        self.resumes.lock().unwrap().clone()
+    }
+
+    /// Point the origin's registration (instance and workspace origin) at
+    /// `endpoint`.
+    async fn move_origin_to(&self, endpoint: &str) -> anyhow::Result<()> {
+        let connection = self.pool.get().await?;
+        connection
+            .execute(
+                "update workspace_origins set endpoint = $2 where id = $1",
+                &[&self.origin_id, &endpoint],
+            )
+            .await?;
+        connection
+            .execute(
+                "update origin_instances set endpoint = $2 where origin_id = $1",
+                &[&self.origin_id, &endpoint],
+            )
+            .await?;
+        Ok(())
     }
 
     fn flush_calls(&self) -> Vec<FlushCall> {
@@ -830,14 +915,17 @@ async fn a_failed_flush_does_not_hold_up_the_stop() -> anyhow::Result<()> {
         let fx = Fixture::new(pool.clone(), project_id, owner_user_id, json!({})).await?;
         let held = fx.hold_owner_lease().await?;
         // Point the origin at a path without the route.
-        fx.pool
+        let endpoint: String = fx
+            .pool
             .get()
             .await?
-            .execute(
-                "update workspace_origins set endpoint = endpoint || '/legacy' where id = $1",
+            .query_one(
+                "select endpoint from workspace_origins where id = $1",
                 &[&fx.origin_id],
             )
-            .await?;
+            .await?
+            .get(0);
+        fx.move_origin_to(&format!("{endpoint}/legacy")).await?;
         let stopped = super::super::stop::stop_runtime_safely(
             &fx.state,
             &fx.runtime_id,
@@ -860,7 +948,11 @@ async fn a_failed_flush_does_not_hold_up_the_stop() -> anyhow::Result<()> {
             vec![json!({ "status": "failed", "writer": "lease_holder", "turnActive": false })]
         );
         assert_eq!(stopped.flush.status, "failed");
-        assert!(stopped.flush.error.is_some());
+        assert_eq!(
+            stopped.flush.error.as_deref(),
+            Some("origin_refused:404"),
+            "a fixed code, never the origin's own text"
+        );
         let leases = fx.workspace_leases().await?;
         assert_eq!(leases.len(), 1, "{leases:?}");
         assert_eq!(leases[0].0, held);
@@ -899,8 +991,8 @@ fn save_grant(fx: &Fixture, owner: Uuid, runtime_lease_id: Uuid, ttl: i64) -> St
 /// all, or one bound to another runtime), saves under the space owner's
 /// save-only permission: scope `workspace.flush` only, at most 120 s, bound
 /// to the project, runtime generation and origin. The origin exchanges it
-/// for git.write; it opens nothing else, takes no workspace lease, and a
-/// collaborator who opens the space during the flush gets their lease.
+/// for git.write, which never outlives it; it opens nothing else and takes
+/// no workspace lease.
 #[tokio::test]
 async fn an_idle_stop_saves_under_the_owners_save_only_permission() -> anyhow::Result<()> {
     let pool = crate::tests::require_origin_test_pool("pre-stop flush owner grant test").await?;
@@ -956,8 +1048,6 @@ async fn an_idle_stop_saves_under_the_owners_save_only_permission() -> anyhow::R
                     crate::origins::LeaseAcquireOutcome::Granted(_) => {}
                     other => anyhow::bail!("expected a lease, got {other:?}"),
                 }
-            } else {
-                *fx.collaborator.lock().unwrap() = Some(collaborator);
             }
 
             let stopped = super::super::stop::stop_runtime_safely(
@@ -997,7 +1087,7 @@ async fn an_idle_stop_saves_under_the_owners_save_only_permission() -> anyhow::R
                 Some(fx.runtime_lease_id.to_string()),
                 "{case}: bound to the runtime generation"
             );
-            assert!(claims.exp - claims.iat <= 120, "{claims:?}");
+            assert!(claims.exp - claims.iat <= 30, "{claims:?}");
             assert_ne!(
                 call.lease_check,
                 StatusCode::OK,
@@ -1013,18 +1103,13 @@ async fn an_idle_stop_saves_under_the_owners_save_only_permission() -> anyhow::R
                 .map_err(|(_, body)| anyhow::anyhow!("decode git token: {}", body.0.message))?;
             assert!(git_claims.scopes.contains(&"git.write".to_string()));
             assert_eq!(git_claims.sub, fx.owner_user_id.to_string());
+            // The origin asked for 60 s; the permission lives 30 s.
             assert!(
                 git_claims.exp <= claims.exp,
                 "the git token outlives the permission"
             );
             assert_eq!(call.machine_git_write, StatusCode::FORBIDDEN, "{case}");
-            if case == "no_lease" {
-                assert_eq!(
-                    call.collaborator_lease,
-                    Some(true),
-                    "someone opening the space during the flush gets their lease"
-                );
-            }
+            assert!(fx.resumes().is_empty(), "{case}: the stop happened");
 
             let leases = fx.workspace_leases().await?;
             assert!(
@@ -1055,14 +1140,15 @@ async fn an_idle_stop_saves_under_the_owners_save_only_permission() -> anyhow::R
     Ok(())
 }
 
-/// A stop a user or a runtime asked for never uses the owner's permission:
-/// with nobody holding a workspace lease it mints nothing and does not call
-/// the origin, and says so (`no_writer`). A space without an owner gets
-/// nothing on the controller's own path either.
+/// A stop a user, an operator or a runtime asked for never uses the owner's
+/// permission: with nobody holding a workspace lease it mints nothing and
+/// does not call the origin, and says so (`no_writer`). That holds for
+/// `/runtime/stop`, `/runtime/remove` and a project's own stop alike. A
+/// space without an owner gets nothing on the controller's own path either.
 #[tokio::test]
 async fn requested_stops_and_ownerless_spaces_mint_nothing() -> anyhow::Result<()> {
     let pool = crate::tests::require_origin_test_pool("pre-stop flush no-writer test").await?;
-    for case in ["user_stop", "ownerless"] {
+    for case in ["user_stop", "remove", "project_stop", "ownerless"] {
         let project_id = Uuid::new_v4();
         let owner_user_id = Uuid::new_v4();
         let fixture = SharedDbFixture {
@@ -1077,7 +1163,7 @@ async fn requested_stops_and_ownerless_spaces_mint_nothing() -> anyhow::Result<(
                 json!({ "unpushedRefs": 0 }),
             )
             .await?;
-            let flush = if case == "user_stop" {
+            let user_headers = || -> anyhow::Result<HeaderMap> {
                 let user_token =
                     crate::auth::issue_controller_token(&fx.state.config, &fx.owner_user_id)
                         .map_err(|(_, body)| {
@@ -1089,47 +1175,81 @@ async fn requested_stops_and_ownerless_spaces_mint_nothing() -> anyhow::Result<(
                     axum::http::header::AUTHORIZATION,
                     HeaderValue::from_str(&format!("Bearer {user_token}"))?,
                 );
-                let payload: super::super::stop::RuntimeStopPayload =
-                    serde_json::from_value(json!({
-                        "runtime_id": fx.runtime_id,
-                        "reason": "user_stop",
-                    }))?;
-                let (status, Json(response)) = super::super::stop::runtime_stop(
-                    State(fx.state.clone()),
-                    headers,
-                    axum::Json(payload),
-                )
-                .await
-                .map_err(|(status, body)| anyhow::anyhow!("{status}: {}", body.0.message))?;
-                assert_eq!(status, StatusCode::OK);
-                response.flush.expect("the stop reports its flush")
-            } else {
-                fx.pool
-                    .get()
-                    .await?
-                    .execute(
-                        "update projects set owner_user_id = null where id = $1",
-                        &[&fx.project_id],
+                Ok(headers)
+            };
+            let flush = match case {
+                "user_stop" => {
+                    let payload: super::super::stop::RuntimeStopPayload =
+                        serde_json::from_value(json!({
+                            "runtime_id": fx.runtime_id,
+                            "reason": "user_stop",
+                        }))?;
+                    let (status, Json(response)) = super::super::stop::runtime_stop(
+                        State(fx.state.clone()),
+                        user_headers()?,
+                        axum::Json(payload),
                     )
-                    .await?;
-                super::super::stop::stop_runtime_safely(
+                    .await
+                    .map_err(|(status, body)| anyhow::anyhow!("{status}: {}", body.0.message))?;
+                    assert_eq!(status, StatusCode::OK);
+                    response.flush.expect("the stop reports its flush")
+                }
+                "remove" => {
+                    let payload: super::super::stop::RuntimeRemovePayload =
+                        serde_json::from_value(json!({
+                            "runtimeId": fx.runtime_id,
+                            "reason": "user_remove",
+                        }))?;
+                    let Json(removed) = super::super::stop::runtime_remove(
+                        State(fx.state.clone()),
+                        user_headers()?,
+                        axum::Json(payload),
+                    )
+                    .await
+                    .map_err(|(status, body)| anyhow::anyhow!("{status}: {}", body.0.message))?;
+                    assert!(removed.ok);
+                    removed.flush.expect("the removal reports its flush")
+                }
+                "project_stop" => super::super::stop::stop_runtime_for_project(
                     &fx.state,
+                    &fx.project_id,
                     &fx.runtime_id,
-                    super::super::stop::StopOptions {
-                        source: "idle_reaper",
-                        reason: Some("idle_timeout".to_string()),
-                        skip_if_active_jobs: true,
-                        require_idle_timeout: false,
-                        allow_cleanup_pending_release: false,
-                        expected_identity: None,
-                    },
+                    Some("operator_stop".to_string()),
+                    "pre_stop_flush_test",
                 )
                 .await
                 .map_err(|(status, body)| anyhow::anyhow!("{status}: {}", body.0.message))?
                 .flush
+                .expect("the stop reports its flush"),
+                _ => {
+                    fx.pool
+                        .get()
+                        .await?
+                        .execute(
+                            "update projects set owner_user_id = null where id = $1",
+                            &[&fx.project_id],
+                        )
+                        .await?;
+                    super::super::stop::stop_runtime_safely(
+                        &fx.state,
+                        &fx.runtime_id,
+                        super::super::stop::StopOptions {
+                            source: "idle_reaper",
+                            reason: Some("idle_timeout".to_string()),
+                            skip_if_active_jobs: true,
+                            require_idle_timeout: false,
+                            allow_cleanup_pending_release: false,
+                            expected_identity: None,
+                        },
+                    )
+                    .await
+                    .map_err(|(status, body)| anyhow::anyhow!("{status}: {}", body.0.message))?
+                    .flush
+                }
             };
             assert_eq!(flush.status, "no_writer", "{case}");
             assert_eq!(flush.unpushed_refs, None, "{case}: unknown");
+            assert_eq!(flush.reason, None, "{case}");
             assert!(
                 fx.flush_calls().is_empty(),
                 "{case}: {:?}",
@@ -1142,7 +1262,15 @@ async fn requested_stops_and_ownerless_spaces_mint_nothing() -> anyhow::Result<(
                 vec![json!({ "status": "no_writer", "writer": "none", "turnActive": false })],
                 "{case}"
             );
-            assert_eq!(fx.runtime_state().await?.0, "stopped", "{case}");
+            assert_eq!(
+                fx.runtime_state().await?.0,
+                if case == "remove" {
+                    "removed"
+                } else {
+                    "stopped"
+                },
+                "{case}"
+            );
             Ok(())
         })
         .await;
@@ -1485,6 +1613,373 @@ async fn remove_and_project_stops_flush_before_the_release() -> anyhow::Result<(
             assert_eq!(calls.len(), 1, "{path}: {calls:?}");
             assert_eq!(calls[0].runtime_status, "ready", "{path}");
             assert_eq!(calls[0].runtime_lease_status, "active", "{path}");
+            Ok(())
+        })
+        .await;
+        delete_users(&[owner_user_id]).await?;
+        result?;
+    }
+    Ok(())
+}
+
+fn idle_reaper_stop() -> super::super::stop::StopOptions {
+    super::super::stop::StopOptions {
+        source: "idle_reaper",
+        reason: Some("idle_timeout".to_string()),
+        skip_if_active_jobs: true,
+        require_idle_timeout: false,
+        allow_cleanup_pending_release: false,
+        expected_identity: None,
+    }
+}
+
+/// A runtime registers its own origin endpoint with its machine token, so a
+/// leaked machine token could point the origin anywhere. The controller
+/// sends neither flush credential to an endpoint off the runtime's node: an
+/// idle stop (which would use the owner's permission) and a stop under a
+/// lease holder both mint nothing, call nothing and say why.
+#[tokio::test]
+async fn a_flush_credential_goes_only_to_an_origin_on_the_runtimes_node() -> anyhow::Result<()> {
+    let pool = crate::tests::require_origin_test_pool("pre-stop flush endpoint test").await?;
+    for case in ["owner_grant", "lease_holder"] {
+        let project_id = Uuid::new_v4();
+        let owner_user_id = Uuid::new_v4();
+        let fixture = SharedDbFixture {
+            projects: vec![project_id],
+            ..Default::default()
+        };
+        let result = with_shared_db_fixture(fixture, async {
+            let fx = Fixture::new(
+                pool.clone(),
+                project_id,
+                owner_user_id,
+                json!({ "unpushedRefs": 0 }),
+            )
+            .await?;
+            // The runtime's machine token re-registers its own origin at a
+            // public host, as anyone holding that token could.
+            let machine_token = mint_scoped_token(
+                &fx.state.config,
+                ScopedTokenRequest {
+                    audience: fx.project_id.to_string(),
+                    subject: fx.owner_user_id.to_string(),
+                    project_id: fx.project_id.to_string(),
+                    origin_id: None,
+                    runtime_id: Some(fx.runtime_id.to_string()),
+                    protocol: None,
+                    scopes: vec!["origin.register".to_string()],
+                    lease_id: Some(fx.runtime_lease_id.to_string()),
+                    run_id: None,
+                    prefer_runtime: None,
+                    ttl_seconds: Some(300),
+                },
+            )
+            .map_err(|(_, body)| anyhow::anyhow!("mint machine token: {}", body.0.message))?
+            .token;
+            let (status, body) = send(
+                &fx.state,
+                Request::builder()
+                    .method("POST")
+                    .uri("/origin/register")
+                    .header("authorization", format!("Bearer {machine_token}"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        json!({
+                            "projectId": fx.project_id,
+                            "originId": fx.origin_id,
+                            "mode": "hosted",
+                            "endpoint": "https://attacker.example",
+                        })
+                        .to_string(),
+                    ))?,
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK, "{case}: {body}");
+            if case == "lease_holder" {
+                fx.hold_owner_lease().await?;
+            }
+
+            let stopped = super::super::stop::stop_runtime_safely(
+                &fx.state,
+                &fx.runtime_id,
+                idle_reaper_stop(),
+            )
+            .await
+            .map_err(|(status, body)| anyhow::anyhow!("{status}: {}", body.0.message))?;
+            assert!(stopped.outcome.status_changed, "{case}");
+            assert_eq!(stopped.flush.status, "no_writer", "{case}");
+            assert_eq!(
+                stopped.flush.reason,
+                Some(super::UNTRUSTED_ENDPOINT_REASON),
+                "{case}"
+            );
+            assert!(fx.flush_calls().is_empty(), "{case}");
+            assert_eq!(fx.order(), vec!["release"], "{case}");
+            assert_eq!(
+                fx.flush_events().await?,
+                vec![json!({
+                    "status": "no_writer",
+                    "writer": "none",
+                    "turnActive": false,
+                    "reason": "origin_endpoint_not_node_local",
+                })],
+                "{case}"
+            );
+            Ok(())
+        })
+        .await;
+        delete_users(&[owner_user_id]).await?;
+        result?;
+    }
+    Ok(())
+}
+
+/// An idle stop gives way to someone who comes back while it flushes: a
+/// collaborator who takes the workspace lease or pings activity keeps the
+/// runtime, and the origin is told to take saves again. A drain never gives
+/// way: releases do not wait on a space.
+#[tokio::test]
+async fn an_idle_stop_gives_way_to_someone_who_opens_the_space_during_its_flush(
+) -> anyhow::Result<()> {
+    let pool = crate::tests::require_origin_test_pool("pre-stop flush reopened test").await?;
+    for case in ["lease", "activity", "drain"] {
+        let project_id = Uuid::new_v4();
+        let owner_user_id = Uuid::new_v4();
+        let collaborator = Uuid::new_v4();
+        let fixture = SharedDbFixture {
+            projects: vec![project_id],
+            ..Default::default()
+        };
+        let result = with_shared_db_fixture(fixture, async {
+            let fx = Fixture::new(
+                pool.clone(),
+                project_id,
+                owner_user_id,
+                json!({ "unpushedRefs": 0, "unpushedRefNames": [] }),
+            )
+            .await?;
+            ensure_test_user(&fx.pool, &collaborator).await?;
+            fx.pool
+                .get()
+                .await?
+                .execute(
+                    "insert into project_memberships (project_id, user_id, role)
+                     values ($1, $2, 'builder')",
+                    &[&fx.project_id, &collaborator],
+                )
+                .await?;
+            match case {
+                "activity" => fx.during.lock().unwrap().activity = true,
+                _ => *fx.collaborator.lock().unwrap() = Some(collaborator),
+            }
+            let options = if case == "drain" {
+                super::super::stop::StopOptions {
+                    source: "pool_retirement_drain",
+                    reason: Some("pool_retirement".to_string()),
+                    skip_if_active_jobs: false,
+                    require_idle_timeout: false,
+                    allow_cleanup_pending_release: false,
+                    expected_identity: None,
+                }
+            } else {
+                idle_reaper_stop()
+            };
+            let stopped =
+                super::super::stop::stop_runtime_safely(&fx.state, &fx.runtime_id, options)
+                    .await
+                    .map_err(|(status, body)| anyhow::anyhow!("{status}: {}", body.0.message))?;
+            assert_eq!(stopped.flush.status, "flushed", "{case}");
+            let calls = fx.flush_calls();
+            assert_eq!(calls.len(), 1, "{case}: {calls:?}");
+            if case != "activity" {
+                assert_eq!(
+                    calls[0].collaborator_lease,
+                    Some(true),
+                    "{case}: the collaborator gets their lease during the flush"
+                );
+            }
+            if case == "drain" {
+                assert!(stopped.outcome.status_changed, "a drain never waits");
+                assert_eq!(fx.order(), vec!["flush", "release"]);
+                assert!(fx.resumes().is_empty());
+                assert_eq!(fx.runtime_state().await?.0, "stopped");
+            } else {
+                assert!(!stopped.outcome.status_changed, "{case}");
+                assert_eq!(
+                    stopped.outcome.skip_reason.as_deref(),
+                    Some("workspace_reopened"),
+                    "{case}"
+                );
+                assert_eq!(fx.order(), vec!["flush", "resume"], "{case}");
+                assert_eq!(
+                    fx.resumes(),
+                    vec![calls[0].bearer.clone()],
+                    "{case}: lifted with the flush's own credential"
+                );
+                let (runtime_status, active_lease, lease_status) = fx.runtime_state().await?;
+                assert_eq!(runtime_status, "ready", "{case}");
+                assert_eq!(active_lease, Some(fx.runtime_lease_id), "{case}");
+                assert_eq!(lease_status, "active", "{case}: never quarantined");
+            }
+            Ok(())
+        })
+        .await;
+        delete_users(&[owner_user_id, collaborator]).await?;
+        result?;
+    }
+    Ok(())
+}
+
+/// A stop that its own checks skip after the flush ran (a job was leased
+/// meanwhile) leaves the runtime running, so the origin is told to take
+/// saves again: on the controller's own path and on `/runtime/stop`.
+#[tokio::test]
+async fn a_stop_skipped_after_its_flush_lifts_the_origins_save_fence() -> anyhow::Result<()> {
+    let pool = crate::tests::require_origin_test_pool("pre-stop flush resume test").await?;
+    for case in ["safe_stop", "runtime_stop"] {
+        let project_id = Uuid::new_v4();
+        let owner_user_id = Uuid::new_v4();
+        let fixture = SharedDbFixture {
+            projects: vec![project_id],
+            ..Default::default()
+        };
+        let result = with_shared_db_fixture(fixture, async {
+            let fx = Fixture::new(
+                pool.clone(),
+                project_id,
+                owner_user_id,
+                json!({ "unpushedRefs": 0, "unpushedRefNames": [] }),
+            )
+            .await?;
+            fx.hold_owner_lease().await?;
+            fx.during.lock().unwrap().lease_job = true;
+            let (skip_reason, flush) = if case == "safe_stop" {
+                let stopped = super::super::stop::stop_runtime_safely(
+                    &fx.state,
+                    &fx.runtime_id,
+                    idle_reaper_stop(),
+                )
+                .await
+                .map_err(|(status, body)| anyhow::anyhow!("{status}: {}", body.0.message))?;
+                assert!(!stopped.outcome.status_changed);
+                (stopped.outcome.skip_reason, stopped.flush)
+            } else {
+                let user_token =
+                    crate::auth::issue_controller_token(&fx.state.config, &fx.owner_user_id)
+                        .map_err(|(_, body)| {
+                            anyhow::anyhow!("issue user token: {}", body.0.message)
+                        })?
+                        .token;
+                let mut headers = HeaderMap::new();
+                headers.insert(
+                    axum::http::header::AUTHORIZATION,
+                    HeaderValue::from_str(&format!("Bearer {user_token}"))?,
+                );
+                let payload: super::super::stop::RuntimeStopPayload =
+                    serde_json::from_value(json!({
+                        "runtime_id": fx.runtime_id,
+                        "reason": "user_stop",
+                        "skip_if_active_jobs": true,
+                    }))?;
+                let (_, Json(response)) = super::super::stop::runtime_stop(
+                    State(fx.state.clone()),
+                    headers,
+                    axum::Json(payload),
+                )
+                .await
+                .map_err(|(status, body)| anyhow::anyhow!("{status}: {}", body.0.message))?;
+                assert!(!response.status_changed);
+                (
+                    response.skip_reason,
+                    response.flush.expect("the stop reports its flush"),
+                )
+            };
+            assert_eq!(skip_reason.as_deref(), Some("active_jobs"), "{case}");
+            assert_eq!(flush.status, "flushed", "{case}");
+            assert_eq!(fx.order(), vec!["flush", "resume"], "{case}");
+            let calls = fx.flush_calls();
+            assert_eq!(fx.resumes(), vec![calls[0].bearer.clone()], "{case}");
+            assert_eq!(fx.runtime_state().await?.0, "ready", "{case}");
+            Ok(())
+        })
+        .await;
+        delete_users(&[owner_user_id]).await?;
+        result?;
+    }
+    Ok(())
+}
+
+/// The idle release requeues a job whose lease ran out mid-turn and then
+/// stops the runtime that held it. That turn is interrupted, whatever the
+/// jobs table shows by then, so the flush sets its commits aside
+/// (`turnActive`). Only the controller's own sweep saves under the owner's
+/// permission; a client's idle signal saves only under a lease holder.
+#[tokio::test]
+async fn an_idle_release_flushes_its_requeued_turn_as_interrupted() -> anyhow::Result<()> {
+    let pool = crate::tests::require_origin_test_pool("pre-stop flush idle release test").await?;
+    for released_by in [
+        super::super::status::IdleRelease::Sweep,
+        super::super::status::IdleRelease::Requested,
+    ] {
+        let project_id = Uuid::new_v4();
+        let owner_user_id = Uuid::new_v4();
+        let fixture = SharedDbFixture {
+            projects: vec![project_id],
+            ..Default::default()
+        };
+        let result = with_shared_db_fixture(fixture, async {
+            let fx = Fixture::new(
+                pool.clone(),
+                project_id,
+                owner_user_id,
+                json!({ "unpushedRefs": 0, "unpushedRefNames": [] }),
+            )
+            .await?;
+            let job_id = Uuid::new_v4();
+            fx.pool
+                .get()
+                .await?
+                .execute(
+                    "insert into agent_jobs
+                        (id, project_id, status, payload, leased_by_runtime_id,
+                         leased_at, lease_expires_at)
+                     values ($1, $2, 'leased', '{}'::jsonb, $3,
+                             now() - interval '10 minutes', now() - interval '1 minute')",
+                    &[&job_id, &fx.project_id, &fx.runtime_id],
+                )
+                .await?;
+            let released = super::super::status::release_leases_for_project(
+                &fx.state,
+                &fx.project_id,
+                600,
+                "pre_stop_flush_test",
+                released_by,
+            )
+            .await?;
+            assert_eq!(released, 1, "{released_by:?}");
+            assert_eq!(fx.runtime_state().await?.0, "stopped", "{released_by:?}");
+            let calls = fx.flush_calls();
+            match released_by {
+                super::super::status::IdleRelease::Sweep => {
+                    assert_eq!(calls.len(), 1, "{calls:?}");
+                    assert_eq!(calls[0].body, json!({ "turnActive": true }));
+                    assert_eq!(
+                        calls[0].job_statuses,
+                        vec!["queued".to_string()],
+                        "the job was already requeued"
+                    );
+                    assert_eq!(fx.flush_events().await?[0]["writer"], "owner_grant");
+                }
+                super::super::status::IdleRelease::Requested => {
+                    assert!(calls.is_empty(), "{calls:?}");
+                    assert_eq!(
+                        fx.flush_events().await?,
+                        vec![
+                            json!({ "status": "no_writer", "writer": "none", "turnActive": true })
+                        ]
+                    );
+                }
+            }
             Ok(())
         })
         .await;

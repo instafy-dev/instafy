@@ -883,9 +883,10 @@ pub(crate) fn sanitize_runtime_event_data(kind: &str, data: JsonValue) -> JsonVa
         "dispatch_reconnect_released_stale_lease" => {
             copy_runtime_event_fields(&data, &["source", "leaseId", "runtimeStatus", "lastSeenAt"])
         }
-        // The pre-stop flush outcome: counts, status and whose name it saved
-        // under (`lease_holder`, `owner_grant` or `none`) only, never ref
-        // names, paths, tokens or the origin's error text.
+        // The pre-stop flush outcome: counts, status, whose name it saved
+        // under (`lease_holder`, `owner_grant` or `none`) and a fixed reason
+        // code only, never ref names, paths, tokens or the origin's error
+        // text.
         "workspace_flush" => copy_runtime_event_fields(
             &data,
             &[
@@ -896,6 +897,7 @@ pub(crate) fn sanitize_runtime_event_data(kind: &str, data: JsonValue) -> JsonVa
                 "recoveryRefs",
                 "parkedCommits",
                 "gitSyncStatus",
+                "reason",
             ],
         ),
         // A pool-retirement drain's own actions and the generation it woke
@@ -913,6 +915,7 @@ pub(crate) fn sanitize_runtime_event_data(kind: &str, data: JsonValue) -> JsonVa
                 "skipReason",
                 "flushStatus",
                 "unpushedRefs",
+                "checkoutKnown",
             ],
         ),
         // Tenant metadata can describe another project. The event kind itself
