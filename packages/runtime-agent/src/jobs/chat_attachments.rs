@@ -5,10 +5,19 @@
 //! `attachmentDownloads`, the controller signs the ones of the leased
 //! conversation and puts `attachment_downloads: [{name, url, sizeBytes}]` in
 //! the job payload, `name` being the object's `<uuid>.<ext>`. Before the turn
-//! each one is downloaded to `.instafy/attachments/<name>`,
+//! each one is downloaded to `.instafy/attachments/<conversationId>/<name>`,
 //! which is reserved: it is never published, and a `.gitignore` keeps it out
 //! of every git status. The prompt then lists only the attachments this lease
 //! signed whose file is there, and says the others are unavailable.
+//!
+//! The downloads last only as long as the turn. Each conversation has its own
+//! folder, and a turn holds its conversation's folder while it runs, as does
+//! a leased batch of that conversation's jobs until its last job is done.
+//! When the last hold drops, the folder is removed. A turn that starts also
+//! removes whatever nothing holds: leftovers of a turn that never finished, or
+//! of a runtime that stopped. A later turn of another conversation therefore
+//! finds no file of this one, and a file is never taken for another
+//! conversation's attachment of the same name.
 //!
 //! A signed URL is a bearer credential: it is never logged, and a failure is
 //! reported by attachment name only. Writes go through descriptor-relative,
@@ -20,10 +29,10 @@
 //! within its own deadline, and all of them within one budget for the job, so
 //! a stalled Storage delays the turn by that budget at most.
 
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 use std::io::{self, Read};
-use std::path::Path;
-use std::sync::Arc;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
 use origin_http_server::workspace_fs::{WorkspaceDir, WorkspaceEntryKind};
@@ -31,7 +40,7 @@ use serde_json::Value as JsonValue;
 use tracing::{debug, warn};
 use uuid::Uuid;
 
-pub(super) const ATTACHMENTS_DIR: &str = ".instafy/attachments";
+const ATTACHMENTS_DIR: &str = ".instafy/attachments";
 const DOWNLOADS_PAYLOAD_KEY: &str = "attachment_downloads";
 const EXTENSIONS: [&str; 6] = ["png", "jpg", "webp", "gif", "txt", "md"];
 /// The bucket's own limit.
@@ -107,24 +116,146 @@ fn is_canonical_uuid(value: &str) -> bool {
         })
 }
 
-fn attachment_relative_path(name: &str) -> String {
-    format!("{ATTACHMENTS_DIR}/{name}")
+/// `.instafy/attachments/<conversationId>`, one conversation's downloads.
+fn conversation_folder(conversation_id: &Uuid) -> String {
+    format!("{ATTACHMENTS_DIR}/{conversation_id}")
 }
 
-/// Whether `.instafy/attachments/<name>` is a regular file, reached without
-/// following a symlink.
-pub(super) fn attachment_is_available(workspace_dir: &Path, name: &str) -> bool {
+/// Where a conversation's downloaded attachment sits, relative to the
+/// workspace root: the path the prompt names.
+pub(super) fn attachment_workspace_path(conversation_id: &Uuid, name: &str) -> String {
+    format!("{}/{name}", conversation_folder(conversation_id))
+}
+
+/// Whether `.instafy/attachments/<conversationId>/<name>` is a regular file,
+/// reached without following a symlink.
+pub(super) fn attachment_is_available(
+    workspace_dir: &Path,
+    conversation_id: &Uuid,
+    name: &str,
+) -> bool {
     file_name_is_valid(name)
         && WorkspaceDir::open(workspace_dir)
-            .and_then(|workspace| workspace.entry_kind(&attachment_relative_path(name)))
+            .and_then(|workspace| {
+                workspace.entry_kind(&attachment_workspace_path(conversation_id, name))
+            })
             .is_ok_and(|kind| kind == WorkspaceEntryKind::File)
+}
+
+/// How many holds each conversation's folder has in this process, by
+/// workspace: one per running turn and per leased batch. One runtime process
+/// serves a workspace, so these are all the users of its attachments. Every change to the folders themselves (a
+/// sweep, creating one, removing one) happens under this lock; a download into
+/// a folder that its turn holds does not need it.
+static FOLDERS_IN_USE: Mutex<BTreeMap<(PathBuf, Uuid), usize>> = Mutex::new(BTreeMap::new());
+
+fn folders_in_use() -> MutexGuard<'static, BTreeMap<(PathBuf, Uuid), usize>> {
+    FOLDERS_IN_USE
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+}
+
+/// A hold on a conversation's attachments folder, by a running turn or by a
+/// leased batch of that conversation's jobs. While anything holds it, no turn
+/// removes it. When the last hold drops, the folder and its downloads are
+/// removed.
+#[must_use = "the turn's downloads are removed when this drops"]
+pub(crate) struct TurnAttachments {
+    held: Option<(PathBuf, Uuid)>,
+}
+
+impl TurnAttachments {
+    /// Starts a turn, or a batch. Everything under `.instafy/attachments/`
+    /// that nothing else holds is removed first, this conversation's own
+    /// leftovers included, so a turn sees only what its lease downloads. A job
+    /// without a conversation holds nothing.
+    pub(super) fn begin(workspace_dir: &Path, conversation_id: Option<&Uuid>) -> Self {
+        let mut in_use = folders_in_use();
+        sweep_unheld(workspace_dir, &in_use);
+        let Some(conversation_id) = conversation_id else {
+            return Self { held: None };
+        };
+        let key = (workspace_dir.to_path_buf(), *conversation_id);
+        if !in_use.contains_key(&key) {
+            // The sweep lists only real folders and files; this also clears a
+            // link or special file left in the folder's place.
+            remove_from_workspace(workspace_dir, &conversation_folder(conversation_id));
+        }
+        *in_use.entry(key.clone()).or_insert(0) += 1;
+        Self { held: Some(key) }
+    }
+}
+
+impl Drop for TurnAttachments {
+    fn drop(&mut self) {
+        let Some(key) = self.held.take() else {
+            return;
+        };
+        let mut in_use = folders_in_use();
+        let Some(holds) = in_use.get_mut(&key) else {
+            return;
+        };
+        *holds = holds.saturating_sub(1);
+        if *holds > 0 {
+            return;
+        }
+        in_use.remove(&key);
+        let (workspace_dir, conversation_id) = key;
+        remove_from_workspace(&workspace_dir, &conversation_folder(&conversation_id));
+    }
+}
+
+/// Removes every entry of `.instafy/attachments/` except its `.gitignore` and
+/// the folders of conversations that something holds.
+fn sweep_unheld(workspace_dir: &Path, in_use: &BTreeMap<(PathBuf, Uuid), usize>) {
+    let Ok(workspace) = WorkspaceDir::open(workspace_dir) else {
+        return;
+    };
+    let entries = match workspace.list(Some(ATTACHMENTS_DIR)) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return,
+        Err(error) => {
+            warn!(%error, "could not list the chat attachments folder");
+            return;
+        }
+    };
+    for entry in entries {
+        // Every name this module writes is UTF-8.
+        let Some(name) = entry.name.to_str() else {
+            continue;
+        };
+        let keep = match entry.kind {
+            WorkspaceEntryKind::File => name == ".gitignore",
+            WorkspaceEntryKind::Directory => {
+                is_canonical_uuid(name)
+                    && Uuid::parse_str(name).is_ok_and(|conversation_id| {
+                        in_use.contains_key(&(workspace_dir.to_path_buf(), conversation_id))
+                    })
+            }
+        };
+        if !keep {
+            remove_from_workspace(workspace_dir, &format!("{ATTACHMENTS_DIR}/{name}"));
+        }
+    }
+}
+
+/// Removes one entry, a folder with its contents included, without following
+/// a symlink. A missing entry is already gone; any other failure is logged.
+fn remove_from_workspace(workspace_dir: &Path, relative: &str) {
+    let removed =
+        WorkspaceDir::open(workspace_dir).and_then(|workspace| workspace.remove(relative));
+    match removed {
+        Ok(()) => {}
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(error) => warn!(%error, path = relative, "could not remove chat attachments"),
+    }
 }
 
 /// The attachment names this lease signed. After the pre-turn download, a
 /// signed name whose file is on disk is exactly a download that succeeded or
 /// a file that was already there. One the controller did not sign this time
 /// (deleted by its uploader, outside the recent turns, or no Storage) is
-/// unavailable, even when an earlier turn left its file behind.
+/// unavailable, even when another turn of the conversation downloaded it.
 pub(super) fn leased_attachment_names(payload: &JsonValue) -> HashSet<String> {
     payload
         .get(DOWNLOADS_PAYLOAD_KEY)
@@ -152,21 +283,37 @@ pub(super) enum DownloadOutcome {
     Failed(String),
 }
 
-/// Downloads the job's `attachment_downloads` into the workspace. Every
-/// failure is logged by name and the turn goes on; the prompt then reports
-/// that attachment as unavailable.
+/// Starts the job's turn ([`TurnAttachments::begin`]) and downloads its
+/// `attachment_downloads` into its conversation's folder. Every failure is
+/// logged by name and the turn goes on; the prompt then reports that
+/// attachment as unavailable. The downloads stay until the returned hold
+/// drops at the end of the turn.
 pub(super) async fn download_job_attachments(
     job_id: Uuid,
+    conversation_id: Option<&Uuid>,
     payload: &JsonValue,
     workspace_dir: &Path,
-) -> Vec<(String, DownloadOutcome)> {
+) -> TurnAttachments {
+    let turn = TurnAttachments::begin(workspace_dir, conversation_id);
     let Some(entries) = payload
         .get(DOWNLOADS_PAYLOAD_KEY)
         .and_then(JsonValue::as_array)
+        .filter(|entries| !entries.is_empty())
     else {
-        return Vec::new();
+        return turn;
     };
-    let outcomes = download_attachments(entries, workspace_dir, DownloadLimits::default()).await;
+    let Some(conversation_id) = conversation_id else {
+        // The controller signs only a conversation's attachments.
+        warn!(%job_id, attachments = entries.len(), "chat attachments of a job without a conversation were not downloaded");
+        return turn;
+    };
+    let outcomes = download_attachments(
+        entries,
+        workspace_dir,
+        conversation_id,
+        DownloadLimits::default(),
+    )
+    .await;
     for (name, outcome) in &outcomes {
         match outcome {
             DownloadOutcome::Downloaded | DownloadOutcome::AlreadyPresent => {
@@ -180,12 +327,14 @@ pub(super) async fn download_job_attachments(
             }
         }
     }
-    outcomes
+    turn
 }
 
+/// Downloads `entries` into `.instafy/attachments/<conversationId>/`.
 pub(super) async fn download_attachments(
     entries: &[JsonValue],
     workspace_dir: &Path,
+    conversation_id: &Uuid,
     limits: DownloadLimits,
 ) -> Vec<(String, DownloadOutcome)> {
     let mut outcomes = Vec::new();
@@ -228,8 +377,8 @@ pub(super) async fn download_attachments(
         return outcomes;
     }
 
-    let workspace = match prepare_attachments_dir(workspace_dir) {
-        Ok(workspace) => workspace,
+    let folder = match prepare_conversation_folder(workspace_dir, conversation_id) {
+        Ok(folder) => folder,
         Err(error) => {
             let reason = format!("attachments folder unavailable: {error}");
             outcomes.extend(
@@ -266,14 +415,12 @@ pub(super) async fn download_attachments(
     let mut tasks = tokio::task::JoinSet::new();
     for (index, download) in downloads.into_iter().enumerate() {
         let client = client.clone();
-        let workspace = workspace.clone();
+        let folder = folder.clone();
         let slots = Arc::clone(&slots);
         tasks.spawn(async move {
             // The semaphore is never closed; the slot is held for the arm.
             let outcome = match tokio::time::timeout_at(job_deadline, slots.acquire_owned()).await {
-                Ok(_slot) => {
-                    download_one(&client, &workspace, &download, limits, job_deadline).await
-                }
+                Ok(_slot) => download_one(&client, &folder, &download, limits, job_deadline).await,
                 Err(_) => DownloadOutcome::Failed("timed out".to_string()),
             };
             (index, download.name, outcome)
@@ -294,9 +441,15 @@ pub(super) async fn download_attachments(
     outcomes
 }
 
-/// Creates `.instafy/attachments` without following symlinks, with a
-/// `.gitignore` of `*` so no repository lists the downloads.
-fn prepare_attachments_dir(workspace_dir: &Path) -> io::Result<WorkspaceDir> {
+/// Creates `.instafy/attachments/<conversationId>` without following
+/// symlinks, with a `.gitignore` of `*` in `.instafy/attachments` so no
+/// repository lists the downloads, and opens the conversation's folder.
+fn prepare_conversation_folder(
+    workspace_dir: &Path,
+    conversation_id: &Uuid,
+) -> io::Result<WorkspaceDir> {
+    // A sweep never runs halfway through this.
+    let _folders = folders_in_use();
     let workspace = WorkspaceDir::open(workspace_dir)?;
     workspace.create_dir_all(ATTACHMENTS_DIR)?;
     let ignore = format!("{ATTACHMENTS_DIR}/.gitignore");
@@ -313,18 +466,20 @@ fn prepare_attachments_dir(workspace_dir: &Path) -> io::Result<WorkspaceDir> {
         }
         Err(error) => return Err(error),
     }
-    Ok(workspace)
+    workspace.create_dir_all(&conversation_folder(conversation_id))
 }
 
+/// Downloads one attachment into its conversation's `folder`. A file already
+/// there came from a turn of the same conversation that is still running.
 async fn download_one(
     client: &reqwest::Client,
-    workspace: &WorkspaceDir,
+    folder: &WorkspaceDir,
     download: &SignedDownload,
     limits: DownloadLimits,
     job_deadline: tokio::time::Instant,
 ) -> DownloadOutcome {
-    let relative = attachment_relative_path(&download.name);
-    match workspace.entry_kind(&relative) {
+    let relative = download.name.clone();
+    match folder.entry_kind(&relative) {
         Ok(WorkspaceEntryKind::File) => return DownloadOutcome::AlreadyPresent,
         Ok(WorkspaceEntryKind::Directory) => {
             return DownloadOutcome::Rejected("a directory has the attachment's name");
@@ -350,9 +505,9 @@ async fn download_one(
     // The reader is fed from this task, so the body is never held whole.
     let (chunks, receiver) = tokio::sync::mpsc::channel(WRITE_QUEUE_CHUNKS);
     let writer = {
-        let workspace = workspace.clone();
+        let folder = folder.clone();
         tokio::task::spawn_blocking(move || {
-            workspace.replace_file(&relative, &mut BodyReader::new(receiver), false)
+            folder.replace_file(&relative, &mut BodyReader::new(receiver), false)
         })
     };
     let streamed =
@@ -578,6 +733,29 @@ mod tests {
         json!({ "name": name, "url": format!("{base}/object/{object}?token=secret"), "sizeBytes": 10 })
     }
 
+    fn conversation() -> Uuid {
+        Uuid::parse_str(CONVERSATION).unwrap()
+    }
+
+    fn other_conversation() -> Uuid {
+        Uuid::parse_str(OTHER_CONVERSATION).unwrap()
+    }
+
+    /// `.instafy/attachments/<conversation>/` of the test workspace.
+    fn folder(workspace: &Path, conversation_id: &Uuid) -> PathBuf {
+        workspace
+            .join(ATTACHMENTS_DIR)
+            .join(conversation_id.to_string())
+    }
+
+    async fn download(
+        entries: &[JsonValue],
+        workspace: &Path,
+        limits: DownloadLimits,
+    ) -> Vec<(String, DownloadOutcome)> {
+        download_attachments(entries, workspace, &conversation(), limits).await
+    }
+
     fn limits() -> DownloadLimits {
         DownloadLimits {
             max_bytes: 1024,
@@ -636,14 +814,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn downloads_land_at_the_derived_path_and_are_ignored_by_git() {
+    async fn downloads_land_in_the_conversations_folder_and_are_ignored_by_git() {
         let base = serve().await;
         let workspace = tempfile::tempdir().unwrap();
         let entries = vec![
             entry(&name(1, "png"), &base, "first"),
             entry(&name(2, "md"), &base, "second"),
         ];
-        let outcomes = download_attachments(&entries, workspace.path(), limits()).await;
+        let outcomes = download(&entries, workspace.path(), limits()).await;
         assert_eq!(
             outcomes,
             vec![
@@ -651,7 +829,7 @@ mod tests {
                 (name(2, "md"), DownloadOutcome::Downloaded),
             ]
         );
-        let dir = workspace.path().join(ATTACHMENTS_DIR);
+        let dir = folder(workspace.path(), &conversation());
         assert_eq!(
             std::fs::read(dir.join(name(1, "png"))).unwrap(),
             b"bytes of first"
@@ -660,9 +838,29 @@ mod tests {
             std::fs::read(dir.join(name(2, "md"))).unwrap(),
             b"bytes of second"
         );
-        assert_eq!(std::fs::read(dir.join(".gitignore")).unwrap(), b"*\n");
-        assert!(attachment_is_available(workspace.path(), &name(1, "png")));
-        assert!(!attachment_is_available(workspace.path(), &name(3, "png")));
+        assert_eq!(
+            std::fs::read(workspace.path().join(ATTACHMENTS_DIR).join(".gitignore")).unwrap(),
+            b"*\n"
+        );
+        assert_eq!(
+            attachment_workspace_path(&conversation(), &name(1, "png")),
+            format!(".instafy/attachments/{CONVERSATION}/{}", name(1, "png"))
+        );
+        assert!(attachment_is_available(
+            workspace.path(),
+            &conversation(),
+            &name(1, "png")
+        ));
+        assert!(!attachment_is_available(
+            workspace.path(),
+            &other_conversation(),
+            &name(1, "png")
+        ));
+        assert!(!attachment_is_available(
+            workspace.path(),
+            &conversation(),
+            &name(3, "png")
+        ));
 
         // The runtime image always has git; so must this test.
         let git = std::process::Command::new("git")
@@ -680,10 +878,10 @@ mod tests {
         assert_eq!(String::from_utf8_lossy(&status.stdout), "");
     }
 
-    /// Only the attachments folder's own `.gitignore` and the named files:
-    /// no temporary file of a download that failed.
-    fn attachment_dir_entries(workspace: &Path) -> Vec<String> {
-        let mut entries: Vec<String> = std::fs::read_dir(workspace.join(ATTACHMENTS_DIR))
+    /// Only the named files in the conversation's folder: no temporary file
+    /// of a download that failed.
+    fn folder_entries(workspace: &Path) -> Vec<String> {
+        let mut entries: Vec<String> = std::fs::read_dir(folder(workspace, &conversation()))
             .unwrap()
             .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
             .collect();
@@ -695,7 +893,7 @@ mod tests {
     async fn a_body_in_many_chunks_is_written_whole() {
         let base = serve().await;
         let workspace = tempfile::tempdir().unwrap();
-        let outcomes = download_attachments(
+        let outcomes = download(
             &[entry(&name(1, "txt"), &base, "chunked-ok")],
             workspace.path(),
             limits(),
@@ -709,13 +907,10 @@ mod tests {
         expected.extend([b'b'; 300]);
         expected.extend([b'c'; 300]);
         assert_eq!(
-            std::fs::read(workspace.path().join(ATTACHMENTS_DIR).join(name(1, "txt"))).unwrap(),
+            std::fs::read(folder(workspace.path(), &conversation()).join(name(1, "txt"))).unwrap(),
             expected
         );
-        assert_eq!(
-            attachment_dir_entries(workspace.path()),
-            vec![".gitignore".to_string(), name(1, "txt")]
-        );
+        assert_eq!(folder_entries(workspace.path()), vec![name(1, "txt")]);
     }
 
     #[tokio::test]
@@ -750,7 +945,7 @@ mod tests {
         let entries: Vec<JsonValue> = (1..=10)
             .map(|n| entry(&name(n, "png"), &base, "counted"))
             .collect();
-        let outcomes = download_attachments(
+        let outcomes = download(
             &entries,
             workspace.path(),
             DownloadLimits {
@@ -784,7 +979,7 @@ mod tests {
             })
             .collect();
         let started = tokio::time::Instant::now();
-        let outcomes = download_attachments(
+        let outcomes = download(
             &entries,
             workspace.path(),
             DownloadLimits {
@@ -805,30 +1000,210 @@ mod tests {
             assert_eq!(*outcome, DownloadOutcome::Failed("timed out".to_string()));
         }
         // Downloads cut off by the budget mid-body leave nothing behind.
-        assert_eq!(
-            attachment_dir_entries(workspace.path()),
-            vec![".gitignore".to_string()]
-        );
+        assert_eq!(folder_entries(workspace.path()), Vec::<String>::new());
     }
 
     #[tokio::test]
-    async fn existing_files_are_kept_and_not_downloaded_again() {
+    async fn only_the_same_conversations_file_counts_as_already_present() {
         let base = serve().await;
         let workspace = tempfile::tempdir().unwrap();
-        let dir = workspace.path().join(ATTACHMENTS_DIR);
-        std::fs::create_dir_all(&dir).unwrap();
-        std::fs::write(dir.join(name(1, "png")), b"kept").unwrap();
-        let outcomes = download_attachments(
-            &[entry(&name(1, "png"), &base, "first")],
+        // A running turn of this conversation already downloaded name(1).
+        let own = folder(workspace.path(), &conversation());
+        std::fs::create_dir_all(&own).unwrap();
+        std::fs::write(own.join(name(1, "png")), b"kept").unwrap();
+        // Another conversation's file under the name this one signs next.
+        let other = folder(workspace.path(), &other_conversation());
+        std::fs::create_dir_all(&other).unwrap();
+        std::fs::write(other.join(name(2, "png")), b"other conversation").unwrap();
+
+        let outcomes = download(
+            &[
+                entry(&name(1, "png"), &base, "first"),
+                entry(&name(2, "png"), &base, "second"),
+            ],
             workspace.path(),
             limits(),
         )
         .await;
         assert_eq!(
             outcomes,
-            vec![(name(1, "png"), DownloadOutcome::AlreadyPresent)]
+            vec![
+                (name(1, "png"), DownloadOutcome::AlreadyPresent),
+                (name(2, "png"), DownloadOutcome::Downloaded),
+            ]
         );
-        assert_eq!(std::fs::read(dir.join(name(1, "png"))).unwrap(), b"kept");
+        assert_eq!(std::fs::read(own.join(name(1, "png"))).unwrap(), b"kept");
+        assert_eq!(
+            std::fs::read(own.join(name(2, "png"))).unwrap(),
+            b"bytes of second"
+        );
+        assert_eq!(
+            std::fs::read(other.join(name(2, "png"))).unwrap(),
+            b"other conversation"
+        );
+    }
+
+    fn job_payload(entries: Vec<JsonValue>) -> JsonValue {
+        json!({ DOWNLOADS_PAYLOAD_KEY: entries })
+    }
+
+    #[tokio::test]
+    async fn a_turns_downloads_end_with_it_and_never_serve_another_conversation() {
+        let base = serve().await;
+        let workspace = tempfile::tempdir().unwrap();
+        let file = name(1, "png");
+
+        // Conversation X's turn downloads its attachment and lists it.
+        let turn_x = download_job_attachments(
+            Uuid::new_v4(),
+            Some(&other_conversation()),
+            &job_payload(vec![entry(&file, &base, "first")]),
+            workspace.path(),
+        )
+        .await;
+        let x_folder = folder(workspace.path(), &other_conversation());
+        assert_eq!(
+            std::fs::read(x_folder.join(&file)).unwrap(),
+            b"bytes of first"
+        );
+        drop(turn_x);
+        assert!(!x_folder.exists(), "X's downloads outlived its turn");
+        assert_eq!(
+            std::fs::read(workspace.path().join(ATTACHMENTS_DIR).join(".gitignore")).unwrap(),
+            b"*\n"
+        );
+
+        // Conversation Y's turn signs an object with the same file name. It
+        // gets its own download, and its prompt lists only that.
+        let turn_y = download_job_attachments(
+            Uuid::new_v4(),
+            Some(&conversation()),
+            &job_payload(vec![entry(&file, &base, "second")]),
+            workspace.path(),
+        )
+        .await;
+        assert_eq!(
+            std::fs::read(folder(workspace.path(), &conversation()).join(&file)).unwrap(),
+            b"bytes of second"
+        );
+        assert!(!x_folder.exists());
+        let section = prompt_section(
+            json!([
+                { "kind": "image", "storagePath": format!("{PROJECT}/{CONVERSATION}/{file}"),
+                  "fileName": "mine.png" },
+                { "kind": "image", "storagePath": format!("{PROJECT}/{OTHER_CONVERSATION}/{file}"),
+                  "fileName": "theirs.png" },
+            ]),
+            workspace.path(),
+            std::slice::from_ref(&file),
+        )
+        .unwrap();
+        assert!(
+            section.contains(&format!(
+                "- workspacePath: .instafy/attachments/{CONVERSATION}/{file} (fileName: mine.png)\n"
+            )),
+            "{section}"
+        );
+        assert!(
+            section.contains("not available in this workspace:\n- theirs.png\n"),
+            "{section}"
+        );
+        drop(turn_y);
+        assert!(!folder(workspace.path(), &conversation()).exists());
+    }
+
+    #[test]
+    fn a_turn_start_removes_whatever_no_running_turn_holds() {
+        let workspace = tempfile::tempdir().unwrap();
+        let root = workspace.path().join(ATTACHMENTS_DIR);
+        let held = Uuid::new_v4();
+        let stopped = Uuid::new_v4();
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join(".gitignore"), b"*\n").unwrap();
+        // A file outside any conversation's folder, and a folder that names
+        // no conversation.
+        std::fs::write(root.join(name(7, "png")), b"stray").unwrap();
+        std::fs::create_dir_all(root.join("notes")).unwrap();
+        std::fs::write(root.join("notes").join("a.txt"), b"stray").unwrap();
+        // Leftovers of a turn that never finished, and of this conversation's
+        // own earlier turn.
+        std::fs::create_dir_all(folder(workspace.path(), &stopped)).unwrap();
+        std::fs::write(
+            folder(workspace.path(), &stopped).join(name(1, "png")),
+            b"x",
+        )
+        .unwrap();
+        std::fs::create_dir_all(folder(workspace.path(), &conversation())).unwrap();
+        std::fs::write(
+            folder(workspace.path(), &conversation()).join(name(2, "png")),
+            b"old",
+        )
+        .unwrap();
+        // Another conversation's turn is still running.
+        let running = TurnAttachments::begin(workspace.path(), Some(&held));
+        std::fs::create_dir_all(folder(workspace.path(), &held)).unwrap();
+        std::fs::write(
+            folder(workspace.path(), &held).join(name(3, "png")),
+            b"in use",
+        )
+        .unwrap();
+
+        let turn = TurnAttachments::begin(workspace.path(), Some(&conversation()));
+        let mut left: Vec<String> = std::fs::read_dir(&root)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        left.sort();
+        assert_eq!(left, vec![".gitignore".to_string(), held.to_string()]);
+        assert_eq!(
+            std::fs::read(folder(workspace.path(), &held).join(name(3, "png"))).unwrap(),
+            b"in use"
+        );
+
+        drop(running);
+        assert!(!folder(workspace.path(), &held).exists());
+        drop(turn);
+        // A job without a conversation holds nothing but still sweeps.
+        std::fs::write(root.join(name(8, "png")), b"stray").unwrap();
+        let _none = TurnAttachments::begin(workspace.path(), None);
+        assert!(!root.join(name(8, "png")).exists());
+    }
+
+    #[test]
+    fn turns_of_one_conversation_share_its_folder_until_the_last_ends() {
+        let workspace = tempfile::tempdir().unwrap();
+        let first = TurnAttachments::begin(workspace.path(), Some(&conversation()));
+        let second = TurnAttachments::begin(workspace.path(), Some(&conversation()));
+        let dir = folder(workspace.path(), &conversation());
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join(name(1, "png")), b"shared").unwrap();
+
+        drop(first);
+        assert!(
+            dir.join(name(1, "png")).exists(),
+            "the second turn lost its file"
+        );
+        // A turn of another conversation leaves a held folder alone.
+        let other = TurnAttachments::begin(workspace.path(), Some(&other_conversation()));
+        assert!(dir.join(name(1, "png")).exists());
+        drop(second);
+        assert!(!dir.exists());
+        drop(other);
+    }
+
+    #[tokio::test]
+    async fn a_job_without_a_conversation_downloads_nothing() {
+        let base = serve().await;
+        let workspace = tempfile::tempdir().unwrap();
+        let turn = download_job_attachments(
+            Uuid::new_v4(),
+            None,
+            &job_payload(vec![entry(&name(1, "png"), &base, "first")]),
+            workspace.path(),
+        )
+        .await;
+        assert!(!workspace.path().join(ATTACHMENTS_DIR).exists());
+        drop(turn);
     }
 
     #[tokio::test]
@@ -842,7 +1217,7 @@ mod tests {
             json!({ "name": name(4, "png"), "url": "file:///etc/passwd" }),
             json!({ "name": name(5, "png") }),
         ];
-        let outcomes = download_attachments(&entries, workspace.path(), limits()).await;
+        let outcomes = download(&entries, workspace.path(), limits()).await;
         assert_eq!(
             outcomes,
             vec![
@@ -884,7 +1259,7 @@ mod tests {
             entry(&name(5, "png"), &base, "redirect"),
             entry(&name(6, "png"), &base, "stalled"),
         ];
-        let outcomes = download_attachments(&entries, workspace.path(), limits()).await;
+        let outcomes = download(&entries, workspace.path(), limits()).await;
         assert_eq!(
             outcomes[0].1,
             DownloadOutcome::Rejected("larger than the attachment limit")
@@ -917,14 +1292,15 @@ mod tests {
             }
         }
         for n in 1..=6 {
-            assert!(!attachment_is_available(workspace.path(), &name(n, "png")));
+            assert!(!attachment_is_available(
+                workspace.path(),
+                &conversation(),
+                &name(n, "png")
+            ));
         }
         // The body that broke the cap and the one that stalled had started
         // writing; neither left a partial or temporary file behind.
-        assert_eq!(
-            attachment_dir_entries(workspace.path()),
-            vec![".gitignore".to_string()]
-        );
+        assert_eq!(folder_entries(workspace.path()), Vec::<String>::new());
     }
 
     fn prompt_section(
@@ -968,13 +1344,13 @@ mod tests {
     #[test]
     fn storage_attachments_are_listed_only_once_downloaded() {
         let workspace = tempfile::tempdir().unwrap();
-        let dir = workspace.path().join(ATTACHMENTS_DIR);
+        let dir = folder(workspace.path(), &conversation());
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join(name(1, "png")), b"png").unwrap();
         std::fs::write(dir.join(name(2, "md")), b"# notes").unwrap();
-        // A file name of another space: present on disk, but the controller
-        // never signs it for this job, so it is not this conversation's
-        // attachment.
+        // A file name of another space: present in this conversation's
+        // folder, but the controller never signs another space's object for
+        // this job, so it is not this conversation's attachment.
         std::fs::write(dir.join(name(3, "png")), b"png").unwrap();
         // Signed, but its download failed: name(4) is not on disk.
         let leased = [name(1, "png"), name(2, "md"), name(4, "png")];
@@ -989,8 +1365,9 @@ mod tests {
                 { "kind": "image",
                   "storagePath": format!("22222222-2222-4222-8222-222222222222/{CONVERSATION}/{}", name(3, "png")),
                   "fileName": "other-space.png" },
-                // Signed and on disk under the same file name, but as another
-                // conversation's object it is not this one's to offer.
+                // Signed and on disk under the same file name in this
+                // conversation's folder, but as another conversation's object
+                // it is not this one's to offer.
                 { "kind": "image",
                   "storagePath": format!("{PROJECT}/{OTHER_CONVERSATION}/{}", name(1, "png")),
                   "fileName": "other-conversation.png" },
@@ -1005,11 +1382,11 @@ mod tests {
             "{section}"
         );
         assert!(section.contains(&format!(
-            "- workspacePath: .instafy/attachments/{} (fileName: photo.png, mimeType: image/png, sizeBytes: 3)\n",
+            "- workspacePath: .instafy/attachments/{CONVERSATION}/{} (fileName: photo.png, mimeType: image/png, sizeBytes: 3)\n",
             name(1, "png")
         )));
         assert!(section.contains(&format!(
-            "- workspacePath: .instafy/attachments/{} (fileName: notes.md, mimeType: text/markdown)\n",
+            "- workspacePath: .instafy/attachments/{CONVERSATION}/{} (fileName: notes.md, mimeType: text/markdown)\n",
             name(2, "md")
         )));
         assert!(section.contains("call the `view_image` tool"));
@@ -1029,7 +1406,7 @@ mod tests {
         // The uploader deleted the object, or the controller has no Storage:
         // nothing was signed, so the copy on disk is not offered to the agent.
         let workspace = tempfile::tempdir().unwrap();
-        let dir = workspace.path().join(ATTACHMENTS_DIR);
+        let dir = folder(workspace.path(), &conversation());
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join(name(1, "png")), b"png").unwrap();
         let attachments = json!([{ "kind": "image",
@@ -1045,7 +1422,7 @@ mod tests {
 
         let section = prompt_section(attachments, workspace.path(), &[name(1, "png")]).unwrap();
         assert!(section.contains(&format!(
-            "- workspacePath: .instafy/attachments/{} (fileName: deleted.png)\n",
+            "- workspacePath: .instafy/attachments/{CONVERSATION}/{} (fileName: deleted.png)\n",
             name(1, "png")
         )));
     }
@@ -1146,7 +1523,7 @@ mod tests {
 
         // `.instafy` itself points outside the workspace.
         std::os::unix::fs::symlink(outside.path(), workspace.path().join(".instafy")).unwrap();
-        let outcomes = download_attachments(
+        let outcomes = download(
             &[entry(&name(1, "png"), &base, "first")],
             workspace.path(),
             limits(),
@@ -1154,15 +1531,26 @@ mod tests {
         .await;
         assert!(matches!(outcomes[0].1, DownloadOutcome::Failed(_)));
         assert_eq!(std::fs::read_dir(outside.path()).unwrap().count(), 0);
+        // Starting a turn neither follows nor removes it.
+        drop(TurnAttachments::begin(
+            workspace.path(),
+            Some(&conversation()),
+        ));
+        assert!(
+            std::fs::symlink_metadata(workspace.path().join(".instafy"))
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
         std::fs::remove_file(workspace.path().join(".instafy")).unwrap();
 
         // A planted link in the attachment's place is refused and left alone.
-        let dir = workspace.path().join(ATTACHMENTS_DIR);
+        let dir = folder(workspace.path(), &conversation());
         std::fs::create_dir_all(&dir).unwrap();
         let target = outside.path().join("target.png");
         std::fs::write(&target, b"outside").unwrap();
         std::os::unix::fs::symlink(&target, dir.join(name(2, "png"))).unwrap();
-        let outcomes = download_attachments(
+        let outcomes = download(
             &[entry(&name(2, "png"), &base, "second")],
             workspace.path(),
             limits(),
@@ -1176,6 +1564,34 @@ mod tests {
             )]
         );
         assert_eq!(std::fs::read(&target).unwrap(), b"outside");
-        assert!(!attachment_is_available(workspace.path(), &name(2, "png")));
+        assert!(!attachment_is_available(
+            workspace.path(),
+            &conversation(),
+            &name(2, "png")
+        ));
+
+        // A link in the conversation folder's place is removed when a turn of
+        // that conversation starts, without touching its target.
+        std::fs::remove_dir_all(&dir).unwrap();
+        std::os::unix::fs::symlink(outside.path(), &dir).unwrap();
+        let turn = download_job_attachments(
+            Uuid::new_v4(),
+            Some(&conversation()),
+            &job_payload(vec![entry(&name(3, "png"), &base, "third")]),
+            workspace.path(),
+        )
+        .await;
+        assert!(
+            !std::fs::symlink_metadata(&dir)
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+        assert_eq!(
+            std::fs::read(dir.join(name(3, "png"))).unwrap(),
+            b"bytes of third"
+        );
+        assert_eq!(std::fs::read(&target).unwrap(), b"outside");
+        drop(turn);
     }
 }
