@@ -71,16 +71,26 @@ read, and reruns that migration twice, as an install that adds Storage later doe
 the run rolls back. It acts as the signed-in and anonymous roles, through the `storage.objects`
 row-level security policies, and checks these rules:
 
-- Every member of a live space reads its `<projectId>/<uuid>.<ext>` objects.
-- Only its owner, and owners, admins and builders of the space or its team, upload.
+- `<projectId>/<conversationId>/<uuid>.<ext>` objects are read and listed by whoever reads the
+  conversation's messages (`has_conversation_access`). That is any member of a live space for a
+  public conversation, and only the creator and participants for a private one.
+- A member of the space who is not in a private conversation neither reads, lists nor uploads
+  there, even when they know a name. A participant who is no longer a member of the space reads
+  nothing.
+- Only those readers who also write to the space upload: its owner, and owners, admins and
+  builders of the space or its team.
 - Non-members, a deleted space and anon are refused.
-- A free-form name, another extension, a malformed id and another spelling of the space id are
-  refused.
+- These names are refused: a free-form name, another extension, a name without a conversation,
+  a malformed id, any spelling of an id other than the canonical one, and a conversation that
+  is missing or belongs to another space.
 - Nobody updates or upserts an object.
-- An uploader deletes only their own objects, and only while they can still write.
+- An uploader deletes only their own objects, and only while they can still write to the space
+  and read the conversation.
 
 The controller test `chat_attachment_sql_fixture_passes_on_storage` runs the same file against
-Storage's own schema on the local stack, so CI checks the policies against the real table.
+Storage's own schema on the local stack, so CI checks the policies against the real table. There
+the fixture lists folders through Storage's own `storage.search`. The stub has no such function,
+so in this harness it derives them from the objects the caller can read.
 
 To also run the real controller HTTP and mocked transport tests against a clean,
 fully migrated database in that same disposable cluster:

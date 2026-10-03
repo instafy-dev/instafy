@@ -92,7 +92,7 @@ def main():
             for _ in range(2):
                 sql('begin;\n' + CHAT_ATTACHMENTS_MIGRATION.read_text() + '\ncommit;')
             sql('begin;\n' + (ROOT/'supabase/tests/chat_attachments.sql').read_text() + '\nrollback;')
-            print('PASS: chat attachments: members of a live space read them, its writers upload and delete their own, one spelling per space, nobody updates one')
+            print('PASS: chat attachments: whoever reads a conversation reads its attachments, writers among them upload and delete their own, one spelling per name, nobody updates one')
             before = sql('select count(*) from notification_events;')
             sql('begin;\n' + MIGRATION.read_text() + '\ncommit;')
             assert before == sql('select count(*) from notification_events;'), 'migration replay emitted historical events'

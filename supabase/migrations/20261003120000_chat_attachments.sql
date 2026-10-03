@@ -1,75 +1,85 @@
 -- Chat attachments (images and text files sent with a message) are private
--- per-space objects in Supabase Storage, never files in the space's git history.
--- Objects are named '<projectId>/<uuid>.<ext>'. Every member of a live space
--- reads them with their own session. Only members who may write to the space,
--- the same ones the controller lets send a message, upload them, and they may
--- delete their own while they can still write. Nobody may update one in place.
--- The controller signs short-lived downloads for runtimes and purges a space's
--- prefix when the space or its team is deleted, both with the service role.
+-- per-conversation objects in Supabase Storage, never files in the space's git
+-- history. Objects are named '<projectId>/<conversationId>/<uuid>.<ext>'. A
+-- signed-in user reads them by the rule the conversation's messages follow
+-- (has_conversation_access): any member of the space for a public
+-- conversation, only its creator and participants for a private one. Those
+-- readers who may also write to the space (the members the controller lets
+-- send a message) upload, and may delete their own uploads while both still
+-- hold. Nobody may update one in place. The controller signs short-lived
+-- downloads for runtimes and purges a space's prefix when the space or its team
+-- is deleted, both with the service role.
 
 -- The policy statements lock storage.objects. Fail fast and retry rather than
 -- queue every Storage request behind a long transaction.
 set local lock_timeout = '5s';
 
--- The space of a well-formed attachment name, or null. One spelling per space,
--- so the purge of '<projectId>/' finds every object.
-create or replace function public.chat_attachment_space(object_name text)
-returns uuid language plpgsql immutable
+-- The space and conversation of a well-formed attachment name, or nulls. Each
+-- segment is a uuid in its one canonical spelling (lower case, hyphenated), so
+-- the purge of '<projectId>/' finds every object of a space.
+create or replace function public.chat_attachment_scope(
+  object_name text, out space_id uuid, out conversation_id uuid)
+language plpgsql immutable
 set search_path = public, pg_temp
 as $$
-declare
-  first_segment text := split_part(object_name, '/', 1);
-  space_id uuid;
 begin
-  if object_name is null
-    or object_name !~ '^[0-9a-f-]{36}/[0-9a-f-]{36}\.(png|jpg|webp|gif|txt|md)$' then
-    return null;
+  if object_name is null or object_name !~ ('^'
+      || '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/'
+      || '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/'
+      || '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}'
+      || '\.(png|jpg|webp|gif|txt|md)$') then
+    return;
   end if;
-  begin space_id := first_segment::uuid;
-  exception when invalid_text_representation then return null; end;
-  if space_id::text <> first_segment then
-    return null;
-  end if;
-  return space_id;
+  space_id := split_part(object_name, '/', 1)::uuid;
+  conversation_id := split_part(object_name, '/', 2)::uuid;
 end;
 $$;
-revoke all on function public.chat_attachment_space(text) from public, anon, authenticated;
+revoke all on function public.chat_attachment_scope(text) from public, anon, authenticated;
 
--- Reading: any member of the live space (has_project_access).
+-- Reading: whoever may read the conversation's messages, in a live space that
+-- the conversation belongs to. The two checks are the ones the messages' own
+-- read policy makes ("conversation messages project read").
 create or replace function public.can_access_chat_attachment(object_name text)
 returns boolean language plpgsql stable security definer
 set search_path = public, pg_temp
 as $$
 declare
-  space_id uuid := public.chat_attachment_space(object_name);
+  target_space uuid;
+  target_conversation uuid;
 begin
-  if auth.uid() is null or space_id is null then
+  select scope.space_id, scope.conversation_id into target_space, target_conversation
+    from public.chat_attachment_scope(object_name) scope;
+  if auth.uid() is null or target_space is null then
     return false;
   end if;
-  return exists (select 1 from public.projects p
-      where p.id = space_id and p.status <> 'deleted')
-    and public.has_project_access(space_id);
+  return exists (select 1 from public.conversations c
+      join public.projects p on p.id = c.project_id
+      where c.id = target_conversation and p.id = target_space and p.status <> 'deleted')
+    and public.has_project_access(target_space)
+    and public.has_conversation_access(target_conversation);
 end;
 $$;
 revoke all on function public.can_access_chat_attachment(text) from public, anon;
 grant execute on function public.can_access_chat_attachment(text) to authenticated;
 
--- Uploading, and deleting one's own: the members who may write to the live
--- space, as the controller decides for chat (ensure_project_write_access). That
--- is its owner, or an owner, admin or builder of the space or of its team.
+-- Uploading, and deleting one's own: a reader of the conversation who may also
+-- write to the space, as the controller decides for chat
+-- (ensure_project_write_access). That is the space's owner, or an owner, admin
+-- or builder of the space or of its team.
 create or replace function public.can_write_chat_attachment(object_name text)
 returns boolean language plpgsql stable security definer
 set search_path = public, pg_temp
 as $$
 declare
   requester uuid := auth.uid();
-  space_id uuid := public.chat_attachment_space(object_name);
+  target_space uuid := (public.chat_attachment_scope(object_name)).space_id;
 begin
-  if requester is null or space_id is null then
+  if requester is null or target_space is null
+    or not public.can_access_chat_attachment(object_name) then
     return false;
   end if;
   return exists (select 1 from public.projects p
-    where p.id = space_id and p.status <> 'deleted' and (
+    where p.id = target_space and (
       p.owner_user_id = requester
       or exists (select 1 from public.project_memberships pm where pm.project_id = p.id
         and pm.user_id = requester and pm.role in ('owner', 'admin', 'builder'))
